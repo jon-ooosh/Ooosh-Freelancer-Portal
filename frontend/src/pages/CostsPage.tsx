@@ -50,7 +50,7 @@ const APPROVAL_COLOURS: Record<string, string> = {
 };
 
 export default function CostsPage() {
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { user } = useAuthStore();
   const role = user?.role || '';
   const isManager = role === 'admin' || role === 'manager';
@@ -66,6 +66,7 @@ export default function CostsPage() {
   const [showCapture, setShowCapture] = useState(false);
   const [editing, setEditing] = useState<CostRow | null>(null);
   const [payTarget, setPayTarget] = useState<CostRow | null>(null);
+  const [preview, setPreview] = useState<CostRow | null>(null);
   const [actionBusy, setActionBusy] = useState<string | null>(null);
 
   useEffect(() => {
@@ -73,8 +74,10 @@ export default function CostsPage() {
     return () => clearTimeout(t);
   }, [search]);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  // `quiet` refreshes (after row actions) skip the page-level loading flag so the
+  // table doesn't unmount → remount, which made the page jump on Approve/Push Now.
+  const load = useCallback(async (quiet = false) => {
+    if (!quiet) setLoading(true);
     try {
       const params = new URLSearchParams();
       if (view !== 'all') params.set('view', view);
@@ -86,17 +89,27 @@ export default function CostsPage() {
     } catch (err) {
       console.error('Failed to load costs:', err);
     } finally {
-      setLoading(false);
+      if (!quiet) setLoading(false);
     }
   }, [view, typeFilter, searchDebounced]);
 
   useEffect(() => { load(); }, [load]);
 
+  // Deep-link from /quick "Upload receipt" → open the capture modal directly.
+  useEffect(() => {
+    if (searchParams.get('capture') === '1') {
+      setShowCapture(true);
+      searchParams.delete('capture');
+      setSearchParams(searchParams, { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   async function runAction(id: string, action: 'verify' | 'approve') {
     setActionBusy(id + action);
     try {
       await api.post(`/costs/${id}/${action}`, {});
-      await load();
+      await load(true);
     } catch (err) {
       alert(err instanceof Error ? err.message : `Failed to ${action}`);
     } finally {
@@ -112,7 +125,7 @@ export default function CostsPage() {
     try {
       await api.post(`/costs/${id}/pay`, { paid_date: paidDate, paid_method: paidMethod });
       setPayTarget(null);
-      await load();
+      await load(true);
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to mark paid');
     } finally {
@@ -129,7 +142,7 @@ export default function CostsPage() {
     setActionBusy(c.id + 'delete');
     try {
       await api.delete(`/costs/${c.id}`);
-      await load();
+      await load(true);
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to delete');
     } finally {
@@ -143,7 +156,7 @@ export default function CostsPage() {
       const r = await api.post<{ result: { error?: string; skipped?: string } }>(`/costs/${c.id}/sync-xero`, {});
       if (r.result?.error) alert(`Xero push failed: ${r.result.error}`);
       else if (r.result?.skipped) alert(`Skipped: ${r.result.skipped}`);
-      await load();
+      await load(true);
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to retry sync');
     } finally {
@@ -155,7 +168,7 @@ export default function CostsPage() {
     setActionBusy(c.id + 'recharge');
     try {
       await api.post(`/costs/${c.id}/recharge`, { recharge_mode: c.recharge_mode, recharge_amount: c.recharge_amount });
-      await load();
+      await load(true);
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to confirm recharge');
     } finally {
@@ -227,32 +240,40 @@ export default function CostsPage() {
           <table className="min-w-full text-sm">
             <thead className="bg-gray-50 text-gray-600">
               <tr>
-                <th className="px-3 py-2 text-left font-medium">Date</th>
-                <th className="px-3 py-2 text-left font-medium">Supplier</th>
-                <th className="px-3 py-2 text-left font-medium">Description</th>
-                <th className="px-3 py-2 text-right font-medium">Gross</th>
-                <th className="px-3 py-2 text-left font-medium">Type</th>
-                <th className="px-3 py-2 text-left font-medium">Linked</th>
-                <th className="px-3 py-2 text-left font-medium">Uploaded by</th>
-                <th className="px-3 py-2 text-left font-medium">Status</th>
-                <th className="px-3 py-2 text-left font-medium">Xero</th>
-                <th className="px-3 py-2 text-right font-medium">Actions</th>
+                <th className="px-2.5 py-2 text-left font-medium">Date</th>
+                <th className="px-2.5 py-2 text-left font-medium">Supplier</th>
+                <th className="px-2.5 py-2 text-left font-medium">Description</th>
+                <th className="px-2.5 py-2 text-right font-medium">Gross</th>
+                <th className="px-2.5 py-2 text-left font-medium">Type</th>
+                <th className="px-2.5 py-2 text-left font-medium">Linked</th>
+                <th className="px-2.5 py-2 text-left font-medium">Uploaded by</th>
+                <th className="px-2.5 py-2 text-left font-medium">Status</th>
+                <th className="px-2.5 py-2 text-left font-medium">Xero</th>
+                <th className="px-2.5 py-2 text-right font-medium">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {rows.map((c) => (
                 <tr key={c.id} className="hover:bg-gray-50">
-                  <td className="px-3 py-2 whitespace-nowrap text-gray-700">{fmtDate(c.cost_date)}</td>
-                  <td className="px-3 py-2 text-gray-900">{c.supplier_name || '—'}</td>
-                  <td className="px-3 py-2 text-gray-600 max-w-xs truncate">{c.description || '—'}</td>
-                  <td className="px-3 py-2 text-right font-medium text-gray-900">{gbp(c.amount_gross)}</td>
-                  <td className="px-3 py-2 text-gray-600">{c.category || c.cost_type.replace('_', ' ')}</td>
-                  <td className="px-3 py-2 text-gray-600">
+                  <td className="px-2.5 py-2 whitespace-nowrap text-gray-700">{fmtDate(c.cost_date)}</td>
+                  <td className="px-2.5 py-2 text-gray-900">
+                    <div className="flex items-center gap-2">
+                      {c.receipt_r2_key && <ReceiptThumb cost={c} onOpen={() => setPreview(c)} />}
+                      <div className="min-w-0">
+                        <div className="truncate max-w-[160px]">{c.supplier_name || '—'}</div>
+                        {c.invoice_number && <div className="text-xs text-gray-400 truncate max-w-[160px]">#{c.invoice_number}</div>}
+                      </div>
+                    </div>
+                  </td>
+                  <td className="px-2.5 py-2 text-gray-600 max-w-[180px] truncate">{c.description || '—'}</td>
+                  <td className="px-2.5 py-2 text-right font-medium text-gray-900">{gbp(c.amount_gross)}</td>
+                  <td className="px-2.5 py-2 text-gray-600">{c.category || c.cost_type.replace('_', ' ')}</td>
+                  <td className="px-2.5 py-2 text-gray-600">
                     {c.hh_job_number ? <span className="text-purple-700">#{c.hh_job_number}</span>
                       : c.vehicle_reg ? <span className="text-purple-700">{c.vehicle_reg}</span> : '—'}
                   </td>
-                  <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{c.uploaded_by_name || '—'}</td>
-                  <td className="px-3 py-2">
+                  <td className="px-2.5 py-2 text-gray-600 whitespace-nowrap">{c.uploaded_by_name || '—'}</td>
+                  <td className="px-2.5 py-2">
                     {c.approval_state ? (
                       <span className={`px-2 py-0.5 text-xs rounded-full ${APPROVAL_COLOURS[c.approval_state] || 'bg-gray-100 text-gray-700'}`}>
                         {c.approval_state}
@@ -266,10 +287,10 @@ export default function CostsPage() {
                       </span>
                     )}
                   </td>
-                  <td className="px-3 py-2">
+                  <td className="px-2.5 py-2">
                     <XeroCell cost={c} busy={actionBusy === c.id + 'sync'} onRetry={() => retrySync(c)} />
                   </td>
-                  <td className="px-3 py-2 text-right whitespace-nowrap">
+                  <td className="px-2.5 py-2 text-right whitespace-nowrap">
                     <div className="flex items-center justify-end gap-2">
                       {view === 'payable' && (
                         <PayableActions cost={c} isManager={isManager} isAdmin={isAdmin} busy={actionBusy} onAction={runAction} onPay={() => setPayTarget(c)} />
@@ -319,6 +340,81 @@ export default function CostsPage() {
           onSubmit={(date, method) => payCost(payTarget.id, date, method)}
         />
       )}
+      {preview && <ReceiptPreview cost={preview} onClose={() => setPreview(null)} />}
+    </div>
+  );
+}
+
+// Small receipt thumbnail in the Supplier cell — authenticated blob fetch (the
+// JWT isn't sent on a plain <img src> to /files/download). Image → thumbnail,
+// PDF/other → 📎 icon. Click opens the lightbox.
+function ReceiptThumb({ cost, onOpen }: { cost: CostRow; onOpen: () => void }) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [isImage, setIsImage] = useState(false);
+  useEffect(() => {
+    if (!cost.receipt_r2_key) return;
+    let objUrl = ''; let cancelled = false;
+    api.blob(`/files/download?key=${encodeURIComponent(cost.receipt_r2_key)}`)
+      .then(({ blob, contentType }) => {
+        if (cancelled) return;
+        if (contentType.startsWith('image/')) {
+          setIsImage(true);
+          objUrl = URL.createObjectURL(blob);
+          setUrl(objUrl);
+        }
+      })
+      .catch(() => {});
+    return () => { cancelled = true; if (objUrl) URL.revokeObjectURL(objUrl); };
+  }, [cost.receipt_r2_key]);
+  return (
+    <button onClick={onOpen} title="View receipt"
+      className="shrink-0 w-8 h-8 rounded border border-gray-200 overflow-hidden bg-gray-50 flex items-center justify-center hover:border-purple-400">
+      {isImage && url ? <img src={url} alt="receipt" className="w-full h-full object-cover" /> : <span className="text-sm">📎</span>}
+    </button>
+  );
+}
+
+// Lightbox — fetches the receipt blob and shows it large (image inline, PDF in
+// an iframe). Backdrop / ✕ / Escape to close.
+function ReceiptPreview({ cost, onClose }: { cost: CostRow; onClose: () => void }) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [type, setType] = useState('');
+  const [err, setErr] = useState('');
+  useEffect(() => {
+    if (!cost.receipt_r2_key) { setErr('No receipt on file'); return; }
+    let objUrl = ''; let cancelled = false;
+    api.blob(`/files/download?key=${encodeURIComponent(cost.receipt_r2_key)}`)
+      .then(({ blob, contentType }) => {
+        if (cancelled) return;
+        setType(contentType);
+        objUrl = URL.createObjectURL(blob);
+        setUrl(objUrl);
+      })
+      .catch(() => { if (!cancelled) setErr('Failed to load receipt'); });
+    return () => { cancelled = true; if (objUrl) URL.revokeObjectURL(objUrl); };
+  }, [cost.receipt_r2_key]);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+  return (
+    <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-white rounded-lg shadow-xl max-w-3xl w-full max-h-[90vh] overflow-hidden flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <div className="px-4 py-2.5 border-b border-gray-200 flex items-center justify-between">
+          <span className="text-sm font-medium text-gray-700 truncate">{cost.receipt_filename || cost.supplier_name || 'Receipt'}</span>
+          <div className="flex items-center gap-3">
+            {url && <a href={url} target="_blank" rel="noreferrer" className="text-xs text-purple-600 hover:underline">Open full</a>}
+            <button onClick={onClose} className="text-gray-400 hover:text-gray-700">✕</button>
+          </div>
+        </div>
+        <div className="flex-1 overflow-auto bg-gray-100 flex items-center justify-center min-h-[300px]">
+          {err ? <p className="text-sm text-gray-500 p-6">{err}</p>
+            : !url ? <p className="text-sm text-gray-400 p-6">Loading…</p>
+            : type.includes('pdf') ? <iframe src={url} title="receipt" className="w-full h-[75vh]" />
+            : <img src={url} alt="receipt" className="max-w-full max-h-[80vh] object-contain" />}
+        </div>
+      </div>
     </div>
   );
 }

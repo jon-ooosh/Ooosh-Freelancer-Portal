@@ -66,7 +66,10 @@ const PAYMENT_METHOD_GROUPS = Array.from(new Set(PAYMENT_METHODS.map((m) => m.gr
 // Keep in step with BILL_METHODS in backend routes/costs.ts + cost-xero-push.ts.
 const BILL_METHODS: CostPaymentMethod[] = ['not_yet_paid', 'reimburse_me'];
 
-type VatMode = 'vat20' | 'none' | 'manual';
+// 'reclaim' = non-standard "VAT-only" invoice (insurance claim): enter the
+// No-VAT amount (the excess) as Net + the reclaimable VAT; gross = net + vat.
+// Pushed to Xero as the 3-line VAT-only structure (vat_treatment='reclaim_split').
+type VatMode = 'vat20' | 'none' | 'manual' | 'reclaim';
 
 const PAYMENT_STATUSES: { value: CostPaymentStatus; label: string }[] = [
   { value: 'paid', label: 'Paid' },
@@ -89,6 +92,9 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
   // ── Form state ───────────────────────────────────────────────────────────
   const [supplierName, setSupplierName] = useState(existing?.supplier_name || '');
   const [costDate, setCostDate] = useState(() => (existing?.cost_date ? existing.cost_date.slice(0, 10) : new Date().toISOString().slice(0, 10)));
+  const [invoiceNumber, setInvoiceNumber] = useState(existing?.invoice_number || '');
+  // De-dup: warn if this supplier+invoice number was already captured.
+  const [invoiceDup, setInvoiceDup] = useState<{ id: string; cost_date: string | null; amount_gross: number | null; payment_status: string } | null>(null);
   const [amountGross, setAmountGross] = useState(existing?.amount_gross != null ? String(existing.amount_gross) : '');
   const [amountVat, setAmountVat] = useState(existing?.amount_vat != null ? String(existing.amount_vat) : '');
   const [amountNet, setAmountNet] = useState(existing?.amount_net != null ? String(existing.amount_net) : '');
@@ -96,6 +102,7 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
   // (edit all three). Default driven by category / AI; never assume 20% silently.
   const inferVatMode = (): VatMode => {
     if (!isEdit) return 'vat20';
+    if (existing?.vat_treatment === 'reclaim_split') return 'reclaim';
     const g = Number(existing?.amount_gross || 0);
     const v = Number(existing?.amount_vat || 0);
     const n = Number(existing?.amount_net || 0);
@@ -159,6 +166,22 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
     }, 300);
     return () => clearTimeout(t);
   }, [supplierName]);
+
+  // Invoice-number de-dup — debounced; warns if this supplier+invoice number was
+  // already captured (non-blocking). Skips while editing the same cost.
+  useEffect(() => {
+    const num = invoiceNumber.trim();
+    if (!num) { setInvoiceDup(null); return; }
+    const t = setTimeout(async () => {
+      try {
+        const params = new URLSearchParams({ invoice_number: num, supplier_name: supplierName.trim() });
+        if (existing?.id) params.set('exclude_id', existing.id);
+        const r = await api.get<{ data: { duplicate: boolean; match: typeof invoiceDup } }>(`/costs/check-invoice?${params}`);
+        setInvoiceDup(r.data.duplicate ? r.data.match : null);
+      } catch { setInvoiceDup(null); }
+    }, 400);
+    return () => clearTimeout(t);
+  }, [invoiceNumber, supplierName, existing?.id]);
 
   // Job picker — debounced search against the global /api/search, filtered to type='job'.
   useEffect(() => {
@@ -324,7 +347,18 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
     } else if (vatMode === 'none') {
       setAmountVat('0.00');
       setAmountGross(net.toFixed(2));
+    } else if (vatMode === 'reclaim') {
+      const vat = parseFloat(amountVat);
+      if (!isNaN(vat)) setAmountGross(round2(net + vat).toFixed(2));
     }
+  };
+  // In reclaim mode, VAT is entered directly and gross = net + vat.
+  const onVatChange = (v: string) => {
+    setAmountVat(v);
+    if (vatMode !== 'reclaim') return;
+    const vat = parseFloat(v);
+    const net = parseFloat(amountNet);
+    if (!isNaN(vat) && !isNaN(net)) setAmountGross(round2(net + vat).toFixed(2));
   };
 
   // Recompute amounts when the VAT mode changes (keep gross fixed as the anchor).
@@ -340,6 +374,12 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
     } else if (mode === 'none') {
       setAmountNet(gross.toFixed(2));
       setAmountVat('0.00');
+    } else if (mode === 'reclaim') {
+      // Switching in: keep whatever net/vat are set; recompute gross from them
+      // if both present, else leave the user to enter net + vat.
+      const net = parseFloat(amountNet);
+      const vat = parseFloat(amountVat);
+      if (!isNaN(net) && !isNaN(vat)) setAmountGross(round2(net + vat).toFixed(2));
     }
   };
 
@@ -423,7 +463,12 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
 
   async function handleSave() {
     setError('');
-    if (!amountGross || Number(amountGross) <= 0) { setError('Gross amount is required.'); return; }
+    if (vatMode === 'reclaim') {
+      if (!amountNet || Number(amountNet) <= 0) { setError('Enter the No-VAT (net) amount, e.g. the excess.'); return; }
+      if (!amountVat || Number(amountVat) <= 0) { setError('Enter the reclaimable VAT amount.'); return; }
+    } else if (!amountGross || Number(amountGross) <= 0) {
+      setError('Gross amount is required.'); return;
+    }
     setSaving(true);
     try {
       let receiptKey = existing?.receipt_r2_key ?? null;
@@ -446,6 +491,8 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
         amount_gross: amountGross ? Number(amountGross) : null,
         amount_vat: amountVat ? Number(amountVat) : null,
         amount_net: amountNet ? Number(amountNet) : null,
+        vat_treatment: vatMode === 'reclaim' ? 'reclaim_split' : 'standard',
+        invoice_number: invoiceNumber.trim() || null,
         description: description || null,
         category: cat?.label || null,
         xero_account_code: cat?.xeroCode || null,
@@ -598,6 +645,19 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
             </div>
 
             <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Invoice number <span className="text-gray-400 font-normal">(optional — de-dup key)</span>
+              </label>
+              <input className={inputCls} value={invoiceNumber} onChange={(e) => setInvoiceNumber(e.target.value)} placeholder="e.g. INV-10472 (leave blank for fuel/till receipts)" />
+              {invoiceDup && (
+                <p className="text-xs text-amber-600 mt-1">
+                  ⚠ Already captured: a cost with this invoice number{supplierName.trim() ? ` for ${supplierName.trim()}` : ''} exists
+                  {invoiceDup.amount_gross != null ? ` (£${Number(invoiceDup.amount_gross).toFixed(2)}` : ''}{invoiceDup.cost_date ? `, ${new Date(invoiceDup.cost_date).toLocaleDateString('en-GB')}` : ''}{invoiceDup.amount_gross != null ? ', ' + invoiceDup.payment_status.replace(/_/g, ' ') + ')' : ''}. Check you're not submitting it twice.
+                </p>
+              )}
+            </div>
+
+            <div>
               <div className="flex items-center justify-between mb-1 flex-wrap gap-2">
                 <span className="text-sm font-medium text-gray-700">Amounts</span>
                 <div className="inline-flex rounded-md border border-gray-300 overflow-hidden text-xs">
@@ -605,6 +665,7 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
                     { v: 'vat20' as VatMode, label: '20% VAT' },
                     { v: 'none' as VatMode, label: 'No VAT' },
                     { v: 'manual' as VatMode, label: 'Manual' },
+                    { v: 'reclaim' as VatMode, label: 'VAT reclaim' },
                   ]).map((o, i) => (
                     <button key={o.v} type="button" onClick={() => applyVatMode(o.v)}
                       className={`px-2.5 py-1 ${i > 0 ? 'border-l border-gray-300' : ''} ${
@@ -617,23 +678,35 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div>
-                  <label className="block text-xs text-gray-500 mb-1">Gross (£) *</label>
-                  <input type="number" step="0.01" min="0" className={inputCls} value={amountGross} onChange={(e) => onGrossChange(e.target.value)} />
+                  <label className="block text-xs text-gray-500 mb-1">{vatMode === 'reclaim' ? 'Net — No VAT (£) *' : 'Gross (£) *'}</label>
+                  {vatMode === 'reclaim' ? (
+                    <input type="number" step="0.01" min="0" className={inputCls} value={amountNet} onChange={(e) => onNetChange(e.target.value)} placeholder="e.g. 750.00 (excess)" />
+                  ) : (
+                    <input type="number" step="0.01" min="0" className={inputCls} value={amountGross} onChange={(e) => onGrossChange(e.target.value)} />
+                  )}
                 </div>
                 <div>
-                  <label className="block text-xs text-gray-500 mb-1">VAT (£)</label>
-                  <input type="number" step="0.01" min="0" className={`${inputCls} ${vatMode !== 'manual' ? 'bg-gray-100' : ''}`}
-                    value={amountVat} onChange={(e) => setAmountVat(e.target.value)} disabled={vatMode !== 'manual'} />
+                  <label className="block text-xs text-gray-500 mb-1">{vatMode === 'reclaim' ? 'Reclaimable VAT (£) *' : 'VAT (£)'}</label>
+                  <input type="number" step="0.01" min="0"
+                    className={`${inputCls} ${vatMode !== 'manual' && vatMode !== 'reclaim' ? 'bg-gray-100' : ''}`}
+                    value={amountVat} onChange={(e) => onVatChange(e.target.value)}
+                    disabled={vatMode !== 'manual' && vatMode !== 'reclaim'}
+                    placeholder={vatMode === 'reclaim' ? 'e.g. 702.68' : undefined} />
                 </div>
                 <div>
-                  <label className="block text-xs text-gray-500 mb-1">Net (£)</label>
-                  <input type="number" step="0.01" min="0" className={`${inputCls} ${vatMode === 'none' ? 'bg-gray-100' : ''}`}
-                    value={amountNet} onChange={(e) => onNetChange(e.target.value)} disabled={vatMode === 'none'} />
+                  <label className="block text-xs text-gray-500 mb-1">{vatMode === 'reclaim' ? 'Total (£)' : 'Net (£)'}</label>
+                  {vatMode === 'reclaim' ? (
+                    <input type="number" className={`${inputCls} bg-gray-100`} value={amountGross} disabled />
+                  ) : (
+                    <input type="number" step="0.01" min="0" className={`${inputCls} ${vatMode === 'none' ? 'bg-gray-100' : ''}`}
+                      value={amountNet} onChange={(e) => onNetChange(e.target.value)} disabled={vatMode === 'none'} />
+                  )}
                 </div>
               </div>
               {vatMode === 'vat20' && <p className="text-xs text-gray-400 mt-1">20% VAT — enter gross or net, the other two fill in.</p>}
               {vatMode === 'none' && <p className="text-xs text-gray-400 mt-1">No VAT (e.g. a non-VAT-registered freelancer) — gross = net, no VAT reclaimed.</p>}
               {vatMode === 'manual' && <p className="text-xs text-gray-400 mt-1">Manual — enter all three figures exactly as shown on the receipt.</p>}
+              {vatMode === 'reclaim' && <p className="text-xs text-amber-600 mt-1">Insurance-claim / VAT-only invoice: enter the No-VAT amount (the excess) + the reclaimable VAT. Pushed to Xero as a 3-line VAT-only entry (net @ No VAT, VAT base @ 20%, adjustment), so exactly £{amountVat || '0.00'} VAT is reclaimed.</p>}
             </div>
 
             <div>

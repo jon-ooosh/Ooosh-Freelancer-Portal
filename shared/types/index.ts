@@ -1008,6 +1008,8 @@ export interface Cost {
   amount_gross: number | null;
   amount_vat: number | null;
   amount_net: number | null;
+  vat_treatment?: 'standard' | 'reclaim_split';
+  invoice_number?: string | null;
   currency: string;
   description: string | null;
   category: string | null;
