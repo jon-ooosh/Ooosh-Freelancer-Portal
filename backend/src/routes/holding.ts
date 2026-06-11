@@ -227,6 +227,27 @@ router.get('/job-lookup/:hhJobNumber', async (req: AuthRequest, res: Response) =
   } });
 });
 
+// Jobs linked to an organisation (as client OR via job_organisations), for the
+// reverse-link flow: staff know the band but not the job number, so we surface
+// the org's jobs to pick from. Upcoming/recent first, dead jobs excluded.
+router.get('/org-jobs/:orgId', async (req: AuthRequest, res: Response) => {
+  const r = await query(
+    `SELECT j.id AS job_id, j.hh_job_number, j.job_name, j.out_date, j.job_date, j.pipeline_status
+     FROM jobs j
+     WHERE j.is_deleted = false
+       AND COALESCE(j.pipeline_status, '') NOT IN ('lost', 'cancelled')
+       AND (j.client_id = $1 OR j.id IN (SELECT jo.job_id FROM job_organisations jo WHERE jo.organisation_id = $1))
+     ORDER BY
+       CASE WHEN COALESCE(j.out_date, j.job_date) >= CURRENT_DATE - INTERVAL '14 days' THEN 0 ELSE 1 END,
+       CASE WHEN COALESCE(j.out_date, j.job_date) >= CURRENT_DATE - INTERVAL '14 days'
+            THEN COALESCE(j.out_date, j.job_date) END ASC,
+       COALESCE(j.out_date, j.job_date) DESC NULLS LAST
+     LIMIT 12`,
+    [req.params.orgId]
+  );
+  res.json({ data: r.rows });
+});
+
 // ════════════════════════ CHASE REVIEW (lost property) ════════════════════════
 // The human-gated escalation queue — items due a chase, NOT auto-sent.
 
@@ -663,19 +684,20 @@ router.post('/:id/notify', validate(notifySchema), async (req: AuthRequest, res:
   const clientName = h.owner_person_name || h.client_name_text || 'there';
   const jobNumber = String(h.hh_job_number || '');
 
-  // Lost property: attach the item photos so the client sees what we found.
+  // Attach the item photos so the client sees what we found / received.
   let attachments: { filename: string; content: Buffer; contentType: string }[] | undefined;
-  if (isLost && Array.isArray(h.photos) && h.photos.length > 0) {
+  if (Array.isArray(h.photos) && h.photos.length > 0) {
     attachments = [];
     for (const [idx, p] of (h.photos as { name?: string; url: string }[]).slice(0, 5).entries()) {
       try {
         const obj = await getFromR2(p.url);
         const buf = await streamToBuffer(obj.Body as Readable);
         const ext = (p.name || p.url).split('.').pop()?.toLowerCase() || 'jpg';
-        attachments.push({ filename: p.name || `lost-property-${idx + 1}.${ext}`, content: buf, contentType: ext === 'png' ? 'image/png' : 'image/jpeg' });
+        attachments.push({ filename: p.name || `${isLost ? 'lost-property' : 'delivery'}-${idx + 1}.${ext}`, content: buf, contentType: ext === 'png' ? 'image/png' : 'image/jpeg' });
       } catch (err) { console.warn('[holding] notify photo attach failed:', err); }
     }
   }
+  const hasPhotos = !!(attachments && attachments.length > 0);
 
   const results = await Promise.all(recipients.map(async (r) => {
     try {
@@ -701,7 +723,11 @@ router.post('/:id/notify', validate(notifySchema), async (req: AuthRequest, res:
             jobName: h.job_name || h.client_name_text || 'your hire',
             jobNumber,
             receivedSummary: received,
+            itemDescription: h.description || '',
+            photoNote: hasPhotos ? 'yes' : '',
+            message: body.message || '',
           },
+          attachments,
         });
       }
       return { email: r.email, success: true };

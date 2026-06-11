@@ -28,9 +28,11 @@ const templates: Record<string, EmailTemplate> = {
       <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Hi {{clientName}},</p>
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
         Just to let you know your delivery for <strong>{{jobName}}</strong>
-        (job <strong>#{{jobNumber}}</strong>) has arrived safely with us{{receivedSummary}}.
+        (job <strong>#{{jobNumber}}</strong>) has arrived safely with us{{receivedSummary}}.{{#if photoNote}} See the attached photo(s) for details.{{/if}}
         We'll have it ready for your hire.
       </p>
+      {{#if itemDescription}}<p style="margin:0 0 16px;padding:12px 14px;background-color:#f8fafc;border-radius:8px;font-size:15px;color:#1e293b;line-height:1.6;"><strong>{{itemDescription}}</strong></p>{{/if}}
+      {{#if message}}<p style="margin:0 0 16px;font-size:14px;color:#475569;line-height:1.6;">{{message}}</p>{{/if}}
       <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">Any questions, just reply to this email.</p>
     `,
   },

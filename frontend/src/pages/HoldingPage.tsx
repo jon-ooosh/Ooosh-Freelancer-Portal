@@ -5,6 +5,8 @@ import { useAuthStore } from '../hooks/useAuthStore';
 import { EntitySearch } from '../components/holding/EntitySearch';
 import { JobNumberField } from '../components/holding/JobNumberField';
 import { NotifyClientModal } from '../components/holding/NotifyClientModal';
+import { OrgJobSuggestions } from '../components/holding/OrgJobSuggestions';
+import { compressImage } from '../components/holding/compress';
 import type { HeldItem, HeldItemKind, HeldItemLocation } from '../../../shared/types';
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -78,7 +80,8 @@ async function uploadPhotos(files: FileList | null, onDone: (atts: { name: strin
   setBusy(true);
   try {
     const out: { name: string; url: string; type: string }[] = [];
-    for (const file of Array.from(files)) {
+    for (const original of Array.from(files)) {
+      const file = await compressImage(original);
       const fd = new FormData();
       fd.append('file', file);
       fd.append('attachment_only', 'true');
@@ -286,6 +289,7 @@ function CreateModal({ view, locations, onClose, onSaved }: { view: View; locati
             <>
               <JobNumberField value={f.hh_job_number} onChange={(v) => setF({ ...f, hh_job_number: v })} />
               <EntitySearch kind="organisations" label="Client / band (organisation)" value={f.org_name} onPick={(id, name) => setF({ ...f, owner_organisation_id: id, org_name: name })} />
+              <OrgJobSuggestions orgId={f.owner_organisation_id} hasNumber={!!f.hh_job_number} onPick={(n) => setF({ ...f, hh_job_number: n })} />
               <EntitySearch kind="people" label="Or a person" value={f.person_name} onPick={(id, name) => setF({ ...f, owner_person_id: id, person_name: name })} />
               <div><label className="block text-xs text-slate-500 mb-1">Or just a name (free text)</label><input className={inputCls} value={f.client_name_text} onChange={(e) => setF({ ...f, client_name_text: e.target.value })} /></div>
             </>

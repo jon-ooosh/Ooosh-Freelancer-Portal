@@ -14,6 +14,8 @@ import { useAuthStore } from '../hooks/useAuthStore';
 import { EntitySearch } from '../components/holding/EntitySearch';
 import { JobNumberField } from '../components/holding/JobNumberField';
 import { NotifyClientModal } from '../components/holding/NotifyClientModal';
+import { OrgJobSuggestions } from '../components/holding/OrgJobSuggestions';
+import { compressImage } from '../components/holding/compress';
 import type { HeldItem, HeldItemLocation } from '../../../shared/types';
 
 const PURPLE = '#7B5EA7';
@@ -99,7 +101,8 @@ async function uploadPhotos(files: FileList | null, onDone: (a: { name: string; 
   setBusy(true);
   try {
     const out: { name: string; url: string; type: string }[] = [];
-    for (const file of Array.from(files)) {
+    for (const original of Array.from(files)) {
+      const file = await compressImage(original);
       const fd = new FormData();
       fd.append('file', file);
       fd.append('attachment_only', 'true');
@@ -209,8 +212,9 @@ function QuickLogSheet({ kind, locations, onClose, onSaved }: { kind: 'incoming'
         notes: f.notes || null,
         photos,
       });
-      // Lost property (not given straight back) → offer to notify the client now.
-      if (kind === 'lost_property' && !givenStraight && r.data) { setSavedItem(r.data); setSaving(false); return; }
+      // Not handed straight over → offer to notify the client now (works for
+      // both "package arrived" and "lost property" - picker + photos attached).
+      if (!givenStraight && r.data) { setSavedItem(r.data); setSaving(false); return; }
       onSaved();
     } catch (e) { setErr(e instanceof Error ? e.message : 'Save failed'); } finally { setSaving(false); }
   }
@@ -256,6 +260,7 @@ function QuickLogSheet({ kind, locations, onClose, onSaved }: { kind: 'incoming'
             <>
               <JobNumberField value={f.hh_job_number} onChange={(v) => setF({ ...f, hh_job_number: v })} compact />
               <EntitySearch kind="organisations" label="Client / band" value={f.org_name} compact onPick={(id, name) => setF({ ...f, owner_organisation_id: id, org_name: name })} />
+              <OrgJobSuggestions orgId={f.owner_organisation_id} hasNumber={!!f.hh_job_number} onPick={(n) => setF({ ...f, hh_job_number: n })} compact />
               <EntitySearch kind="people" label="Or a person" value={f.person_name} compact onPick={(id, name) => setF({ ...f, owner_person_id: id, person_name: name })} />
               <input className={inputCls} value={f.client_name_text} onChange={(e) => setF({ ...f, client_name_text: e.target.value })} placeholder="…or just a name (free text)" />
             </>
