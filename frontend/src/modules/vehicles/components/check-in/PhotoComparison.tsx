@@ -339,15 +339,23 @@ function ComparisonCard({
                 className="h-full w-full cursor-pointer object-cover"
                 onClick={() => onLightbox({ src: captured.blobUrl, alt: `Check-in ${label}` })}
               />
-              <div className="absolute inset-0 flex items-center justify-center gap-2 bg-black/0 opacity-0 transition-all group-active:bg-black/40 group-active:opacity-100">
+              {/* The Retake/Remove overlay covers the whole image even when
+                  invisible (opacity-0 still captures pointer events), which
+                  swallowed taps meant for the lightbox — the img onClick
+                  above never fired. Clicking the overlay itself now opens
+                  the lightbox; the buttons stopPropagation. */}
+              <div
+                className="absolute inset-0 flex cursor-pointer items-center justify-center gap-2 bg-black/0 opacity-0 transition-all group-active:bg-black/40 group-active:opacity-100"
+                onClick={() => onLightbox({ src: captured.blobUrl, alt: `Check-in ${label}` })}
+              >
                 <button
-                  onClick={() => onCapture(angle)}
+                  onClick={(e) => { e.stopPropagation(); onCapture(angle) }}
                   className="rounded bg-white/90 px-2.5 py-1 text-xs font-medium text-gray-700"
                 >
                   Retake
                 </button>
                 <button
-                  onClick={() => onRemove(String(angle))}
+                  onClick={(e) => { e.stopPropagation(); onRemove(String(angle)) }}
                   className="rounded bg-white/90 px-2.5 py-1 text-xs font-medium text-red-600"
                 >
                   Remove

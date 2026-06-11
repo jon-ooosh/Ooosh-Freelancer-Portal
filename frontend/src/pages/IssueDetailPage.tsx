@@ -13,6 +13,7 @@ import { api } from '../services/api';
 import ThreadView from '../components/messaging/ThreadView';
 import { useAttachments, type InteractionAttachment } from '../components/messaging/Attachments';
 import { MentionComposer } from '../components/messaging/MentionComposer';
+import ImageLightbox from '../components/ImageLightbox';
 
 type IssueStatus = 'open' | 'investigating' | 'awaiting_quote' | 'quoted' | 'actioned' | 'resolved' | 'written_off' | 'cancelled';
 type IssueCategory = 'damaged' | 'missing' | 'broken' | 'dispute' | 'breakdown' | 'other';
@@ -55,7 +56,7 @@ interface IssueComment {
 
 interface Issue {
   id: string;
-  job_id: string;
+  job_id: string | null;
   vehicle_id: string | null;
   vehicle_reg: string | null;
   vehicle_type: string | null;
@@ -88,7 +89,7 @@ interface Issue {
   created_at: string;
   updated_at: string;
   resolved_at: string | null;
-  hh_job_number: number;
+  hh_job_number: number | null;
   job_name: string | null;
   client_name: string | null;
   events: IssueEvent[];
@@ -250,10 +251,14 @@ export default function IssueDetailPage() {
       {/* ── Header ── */}
       <div className="mb-3 text-xs">
         <Link to="/operations/problems" className="text-ooosh-600 hover:underline">← Problems</Link>
-        {' · '}
-        <Link to={`/jobs/${issue.job_id}`} className="text-ooosh-600 hover:underline">
-          Back to job J-{issue.hh_job_number}
-        </Link>
+        {issue.job_id && (
+          <>
+            {' · '}
+            <Link to={`/jobs/${issue.job_id}`} className="text-ooosh-600 hover:underline">
+              Back to job {issue.hh_job_number ? `#${issue.hh_job_number}` : ''}
+            </Link>
+          </>
+        )}
       </div>
 
       <div className={`rounded-xl border p-4 mb-4 ${
@@ -291,12 +296,14 @@ export default function IssueDetailPage() {
 
         {/* Subject chips — what the issue is anchored to */}
         <div className="flex flex-wrap gap-2 mt-3">
-          <Link
-            to={`/jobs/${issue.job_id}`}
-            className="text-xs px-2 py-1 rounded bg-blue-50 border border-blue-200 text-blue-700 hover:bg-blue-100"
-          >
-            📋 J-{issue.hh_job_number} {issue.job_name && `— ${issue.job_name}`}
-          </Link>
+          {issue.job_id && (
+            <Link
+              to={`/jobs/${issue.job_id}`}
+              className="text-xs px-2 py-1 rounded bg-blue-50 border border-blue-200 text-blue-700 hover:bg-blue-100"
+            >
+              📋 {issue.hh_job_number ? `#${issue.hh_job_number}` : 'Job'} {issue.job_name && `— ${issue.job_name}`}
+            </Link>
+          )}
           {issue.vehicle_id && issue.vehicle_reg && (
             <Link
               to={`/vehicles/fleet/${issue.vehicle_id}`}
@@ -691,13 +698,73 @@ function EventRow({ e }: { e: IssueEvent }) {
 }
 
 /**
- * Issue-level files: documents and photos attached to the issue itself
- * (e.g. contractor quote PDF, insurer letter, photos taken outside a
- * comment). DISTINCT from interaction attachments — those live with the
- * specific comment they were posted with and render via <ThreadView>.
+ * Fetch an issue file as a blob via the correct authenticated proxy.
  *
- * The download link routes through /api/files/download with the R2 key so
- * the JWT travels with the request — direct R2 URLs would 401.
+ * Files uploaded through the issue's own upload form live in the PRIVATE
+ * bucket under `files/...` and are served by /api/files/download. Damage
+ * photos attached by the check-in flow live in the PUBLIC vehicle-photos
+ * bucket under `events/...` — /api/files/download rejects those keys
+ * (prefix allowlist + wrong bucket), so they route via the vehicles photo
+ * proxy which reads the public bucket for `events/` keys.
+ */
+async function fetchIssueFileBlob(r2Key: string): Promise<Blob> {
+  const path = r2Key.startsWith('events/')
+    ? `/vehicles/photo/${encodeURIComponent(r2Key)}`
+    : `/files/download?key=${encodeURIComponent(r2Key)}`;
+  const { blob } = await api.blob(path);
+  return blob;
+}
+
+/**
+ * Authenticated thumbnail for issue photos. Fetches via the bucket-aware
+ * proxy and renders from an object URL (a plain <img src> can't carry the
+ * JWT). Click-through is handled by the parent.
+ */
+function IssuePhotoThumb({ r2Key, alt, onClick }: { r2Key: string; alt: string; onClick: () => void }) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let revoked: string | null = null;
+    let cancelled = false;
+    fetchIssueFileBlob(r2Key)
+      .then(blob => {
+        if (cancelled) return;
+        revoked = URL.createObjectURL(blob);
+        setUrl(revoked);
+      })
+      .catch(() => { if (!cancelled) setFailed(true); });
+    return () => {
+      cancelled = true;
+      if (revoked) URL.revokeObjectURL(revoked);
+    };
+  }, [r2Key]);
+
+  if (failed) {
+    return (
+      <div className="flex h-16 w-20 flex-shrink-0 items-center justify-center rounded border border-dashed border-gray-200 bg-gray-50 text-[10px] text-gray-300">
+        unavailable
+      </div>
+    );
+  }
+  if (!url) {
+    return <div className="h-16 w-20 flex-shrink-0 animate-pulse rounded border border-gray-100 bg-gray-100" />;
+  }
+  return (
+    <button type="button" onClick={onClick} className="h-16 w-20 flex-shrink-0 overflow-hidden rounded border border-gray-200 hover:ring-2 hover:ring-ooosh-300" title="Click to view full size">
+      <img src={url} alt={alt} className="h-full w-full object-cover" loading="lazy" />
+    </button>
+  );
+}
+
+/**
+ * Issue-level files: documents and photos attached to the issue itself
+ * (e.g. contractor quote PDF, insurer letter, check-in damage photos).
+ * DISTINCT from interaction attachments — those live with the specific
+ * comment they were posted with and render via <ThreadView>.
+ *
+ * Photos render as thumbnails and open in a zoom/pan lightbox (staff need
+ * to magnify into a specific dent). Other file types open in a new tab.
  */
 function IssueFilesCard({
   issueId, files, onChange,
@@ -708,6 +775,13 @@ function IssueFilesCard({
 }) {
   const [uploading, setUploading] = useState(false);
   const [comment, setComment] = useState('');
+  const [lightbox, setLightbox] = useState<{ src: string; filename: string } | null>(null);
+
+  // Revoke the lightbox object URL when it closes / swaps.
+  useEffect(() => {
+    const current = lightbox?.src;
+    return () => { if (current) URL.revokeObjectURL(current); };
+  }, [lightbox]);
 
   async function handleUpload(file: File) {
     setUploading(true);
@@ -736,18 +810,23 @@ function IssueFilesCard({
     }
   }
 
-  async function viewFile(r2Key: string, filename: string | null) {
-    // Fetch the file as a blob via the authenticated download endpoint, then
-    // open it via a generated object URL — same pattern as the messaging
-    // image lightbox. Plain <a href=/api/files/download> 401s because the
-    // browser doesn't carry the JWT on direct navigation.
+  function isPhoto(f: IssueFile): boolean {
+    if (f.file_type === 'photo') return true;
+    return /\.(jpe?g|png|gif|webp|heic)$/i.test(f.filename || f.r2_key);
+  }
+
+  async function viewFile(f: IssueFile) {
     try {
-      const { blob } = await api.blob(`/files/download?key=${encodeURIComponent(r2Key)}`);
-      void filename;
+      const blob = await fetchIssueFileBlob(f.r2_key);
       const url = URL.createObjectURL(blob);
-      window.open(url, '_blank');
-      // Revoke after a delay so the new tab has time to load.
-      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      if (isPhoto(f)) {
+        // Zoomable in-page lightbox — staff need to magnify damage detail.
+        setLightbox({ src: url, filename: f.filename || 'photo.jpg' });
+      } else {
+        window.open(url, '_blank');
+        // Revoke after a delay so the new tab has time to load.
+        setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      }
     } catch (err) {
       console.error('File view failed:', err);
     }
@@ -763,12 +842,16 @@ function IssueFilesCard({
         <div className="space-y-1.5 mb-3">
           {files.map(f => (
             <div key={f.id} className="flex items-center gap-2 text-xs p-2 bg-gray-50 rounded border border-gray-100">
-              <span className="flex-shrink-0">
-                {f.file_type === 'photo' ? '🖼️' : f.file_type === 'pdf' ? '📄' : '📎'}
-              </span>
+              {isPhoto(f) ? (
+                <IssuePhotoThumb r2Key={f.r2_key} alt={f.filename || 'Photo'} onClick={() => viewFile(f)} />
+              ) : (
+                <span className="flex-shrink-0">
+                  {f.file_type === 'pdf' ? '📄' : '📎'}
+                </span>
+              )}
               <div className="min-w-0 flex-1">
                 <button
-                  onClick={() => viewFile(f.r2_key, f.filename)}
+                  onClick={() => viewFile(f)}
                   className="font-medium text-gray-900 hover:text-ooosh-700 hover:underline truncate block w-full text-left"
                 >
                   {f.filename || 'Untitled'}
@@ -790,6 +873,14 @@ function IssueFilesCard({
             </div>
           ))}
         </div>
+      )}
+
+      {lightbox && (
+        <ImageLightbox
+          src={lightbox.src}
+          filename={lightbox.filename}
+          onClose={() => setLightbox(null)}
+        />
       )}
 
       <div className="pt-3 border-t border-gray-100 space-y-2">

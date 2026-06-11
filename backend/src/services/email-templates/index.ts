@@ -1352,6 +1352,33 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  vehicle_damage_logged: {
+    variant: 'internal',
+    subject: '🚐 Vehicle issue logged: {{vehicleReg}} — {{summary}}',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#991b1b;">⚠️ Vehicle issue logged</h2>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.6;">
+        A <strong>{{category}}</strong> issue ({{severity}}) has been {{eventVerb}} on
+        <strong>{{vehicleReg}}</strong>{{#if jobRef}} during job <strong>{{jobRef}}</strong>{{/if}}.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#fef2f2;border-radius:8px;border:1px solid #fecaca;">
+            <p style="margin:0 0 4px;font-size:13px;color:#64748b;">Issue</p>
+            <p style="margin:0 0 8px;font-size:14px;color:#1e293b;font-weight:600;">{{summary}}</p>
+            {{#if description}}<p style="margin:0 0 8px;font-size:13px;color:#334155;line-height:1.5;">{{description}}</p>{{/if}}
+            <p style="margin:0 0 4px;font-size:13px;color:#64748b;">Reported by</p>
+            <p style="margin:0 0 8px;font-size:14px;color:#1e293b;">{{reportedBy}}</p>
+            {{#if photoLine}}<p style="margin:0;font-size:13px;color:#334155;">{{photoLine}}</p>{{/if}}
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0;font-size:14px;color:#334155;">
+        <a href="{{issueUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Open issue in Ooosh →</a>
+      </p>
+    `,
+  },
+
   ooh_return_received_internal: {
     variant: 'internal',
     subject: 'OOH return logged: {{vehicleReg}} — job #{{jobNumber}}',
