@@ -38,6 +38,7 @@ export async function queueSubmission(data: QueuedFormData): Promise<PendingSubm
       label: p.label,
       blob: p.blob,
       timestamp: p.timestamp,
+      pdfBase64: p.pdfBase64,
     })),
     signatureBlob: data.signatureBlob,
     vehicleReg: data.vehicleReg,
