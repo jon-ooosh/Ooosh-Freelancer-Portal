@@ -32,7 +32,7 @@
  * `accounting.transactions` Xero scope not yet granted.
  */
 import { Readable } from 'stream';
-import { query } from '../config/database';
+import { query, getClient } from '../config/database';
 import { getFromR2, isR2Configured } from '../config/r2';
 import { isXeroConfigured } from '../config/xero';
 import { xeroBroker, XeroApiError, XeroLineItem } from './xero-broker';
@@ -423,6 +423,29 @@ async function recordBillPayment(cost: CostRow): Promise<{ paymentID?: string; s
 export async function pushCostToXero(costId: string): Promise<PushResult> {
   if (!isXeroConfigured()) return { pushed: false, skipped: 'Xero not configured' };
 
+  // Serialize all pushes for THIS cost behind a Postgres advisory lock. The push
+  // is triggered from five places (create / update / approve / pay / Push-Now),
+  // most fire-and-forget, so two can overlap — e.g. approve's background push
+  // racing the Push-Now button. Each reads xero_object_id as null, passes the
+  // billExists guard, and creates its own Xero bill → DUPLICATE BILLS (seen live
+  // on T.Reeve repair invoices). The lock makes the second push wait for the
+  // first to commit xero_object_id, after which loadCost + the billExists /
+  // PUSHED_STATES guard short-circuit it. Different costs hash to different keys
+  // so unrelated pushes never contend.
+  const client = await getClient();
+  const lockSql = 'pg_advisory_lock(hashtext($1)::bigint)';
+  const key = `cost-push:${costId}`;
+  try {
+    await client.query(`SELECT ${lockSql}`, [key]);
+    return await pushCostToXeroLocked(costId);
+  } finally {
+    try { await client.query('SELECT pg_advisory_unlock(hashtext($1)::bigint)', [key]); }
+    catch (err) { console.error('[cost-xero-push] advisory unlock failed:', costId, err); }
+    client.release();
+  }
+}
+
+async function pushCostToXeroLocked(costId: string): Promise<PushResult> {
   const cost = await loadCost(costId);
   if (!cost) return { pushed: false, skipped: 'Cost not found' };
 
