@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, ReactNode } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { EntitySearch } from '../components/holding/EntitySearch';
@@ -8,6 +8,7 @@ import { NotifyClientModal } from '../components/holding/NotifyClientModal';
 import { OrgJobSuggestions } from '../components/holding/OrgJobSuggestions';
 import { compressImage } from '../components/holding/compress';
 import { locationLabelOrDash } from '../components/holding/format';
+import { ChaseReviewPanel } from '../components/holding/ChaseReviewPanel';
 import type { HeldItem, HeldItemKind, HeldItemLocation } from '../../../shared/types';
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -121,6 +122,7 @@ export default function HoldingPage({ view }: { view: View }) {
   useEffect(() => { load(); }, [load]);
   useEffect(() => { api.get<{ data: HeldItemLocation[] }>('/holding/locations').then((r) => setLocations(r.data)).catch(() => {}); }, []);
 
+  const [searchParams] = useSearchParams();
   const kinds = VIEW_KINDS[view];
   const rows = items.filter((i) => kinds.includes(i.kind) && (!unknownOnly || i.owner_unknown));
   const openCount = items.filter((i) => kinds.includes(i.kind) && !['collected', 'given_to_client', 'shipped_back', 'disposed', 'cancelled'].includes(i.status)).length;
@@ -134,8 +136,10 @@ export default function HoldingPage({ view }: { view: View }) {
         </button>
       </div>
 
+      {view === 'lost_property' && <ChaseReviewPanel defaultOpen={searchParams.get('review') === '1'} onChanged={load} />}
+
       <div className="flex flex-wrap items-center gap-3 mb-4">
-        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search description / client / notes…"
+        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search description / client / job # / notes…"
           className="border border-slate-300 rounded-lg px-3 py-2 text-sm flex-1 min-w-[200px]" />
         <label className="text-sm text-slate-600 flex items-center gap-2"><input type="checkbox" checked={unknownOnly} onChange={(e) => setUnknownOnly(e.target.checked)} /> Unknown owner</label>
         <label className="text-sm text-slate-600 flex items-center gap-2"><input type="checkbox" checked={showDone} onChange={(e) => setShowDone(e.target.checked)} /> Show done</label>
@@ -205,7 +209,7 @@ function CreateModal({ view, locations, onClose, onSaved }: { view: View; locati
     client_name_text: '', hh_job_number: '',
     found_in: 'van', found_location_text: '',
     storage_location_id: '', storage_location_text: '',
-    expected_date: '', import_charge_flag: '', notes: '',
+    expected_date: '', import_charge_flag: '', hold_until: '', notes: '',
   });
   const [photos, setPhotos] = useState<{ name: string; url: string; type: string }[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -238,6 +242,7 @@ function CreateModal({ view, locations, onClose, onSaved }: { view: View; locati
         status: givenStraight ? 'given_to_client' : undefined,
         expected_date: f.kind === 'incoming' && f.expected_date ? f.expected_date : null,
         import_charge_flag: f.kind === 'incoming' && f.import_charge_flag ? f.import_charge_flag : null,
+        hold_until: f.kind === 'temp_storage' && f.hold_until ? f.hold_until : null,
         notes: f.notes || null,
         photos,
       });
@@ -313,6 +318,12 @@ function CreateModal({ view, locations, onClose, onSaved }: { view: View; locati
             <select className={inputCls} value={f.import_charge_flag} onChange={(e) => setF({ ...f, import_charge_flag: e.target.value })}>
               <option value="">—</option><option value="no">No</option><option value="yes">Yes</option><option value="unknown">Don't know</option>
             </select></div>
+        )}
+
+        {f.kind === 'temp_storage' && (
+          <div><label className="block text-xs text-slate-500 mb-1">Hold until (optional)</label>
+            <input className={inputCls} type="date" value={f.hold_until} onChange={(e) => setF({ ...f, hold_until: e.target.value })} />
+            <p className="text-[11px] text-slate-400 mt-1">We'll remind the team 3 days before this date.</p></div>
         )}
 
         {/* Photos */}
@@ -413,6 +424,12 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
 
         {msg && <p className="text-red-600">{msg}</p>}
 
+        {/* Chase & collection (lost property) */}
+        {h.kind === 'lost_property' && isOpen && <ChaseCollectionSection item={h} onChange={() => { load(); onChange(); }} />}
+
+        {/* Hold until (temp storage) */}
+        {h.kind === 'temp_storage' && isOpen && <HoldUntilSection item={h} onChange={() => { load(); onChange(); }} />}
+
         {/* Link / backfill owner */}
         {isOpen && (
           <div>
@@ -464,6 +481,68 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
 
 function Field({ label, value }: { label: string; value: string }) {
   return <div><p className="text-xs text-slate-400">{label}</p><p className="text-slate-800 capitalize">{value}</p></div>;
+}
+
+const dstr = (d: string | null | undefined) => (d ? new Date(d).toLocaleDateString('en-GB') : null);
+function addDays(d: string, n: number): string {
+  const x = new Date(d); x.setDate(x.getDate() + n); return x.toLocaleDateString('en-GB');
+}
+
+// Lost property: two timers (last contacted / next chase due) + defer control.
+function ChaseCollectionSection({ item, onChange }: { item: HeldItem; onChange: () => void }) {
+  const [date, setDate] = useState(item.expected_collection_date ? item.expected_collection_date.slice(0, 10) : '');
+  const [saving, setSaving] = useState(false);
+  const paused = item.expected_collection_date && new Date(item.expected_collection_date) >= new Date();
+  const nextDue = paused
+    ? `Paused until ${dstr(item.expected_collection_date)}`
+    : item.last_chased_at ? addDays(item.last_chased_at, 7)
+    : item.found_date ? addDays(item.found_date, 7) : '—';
+
+  async function save(val: string | null) {
+    setSaving(true);
+    try { await api.put(`/holding/${item.id}`, { expected_collection_date: val }); onChange(); }
+    finally { setSaving(false); }
+  }
+
+  return (
+    <div className="border border-slate-200 rounded-lg p-3 space-y-2 bg-slate-50/50">
+      <div className="grid grid-cols-3 gap-2 text-xs">
+        <div><p className="text-slate-400">Last contacted</p><p className="text-slate-700">{dstr(item.last_chased_at) || 'Not yet'}</p></div>
+        <div><p className="text-slate-400">Next chase due</p><p className={paused ? 'text-blue-600' : 'text-slate-700'}>{nextDue}</p></div>
+        <div><p className="text-slate-400">Chases sent</p><p className="text-slate-700">{item.escalation_level || 0}</p></div>
+      </div>
+      <div className="flex flex-wrap items-center gap-2 pt-1 border-t">
+        <label className="text-xs text-slate-500">Expected collection date:</label>
+        <input type="date" className="border border-slate-300 rounded px-2 py-1 text-xs" value={date} onChange={(e) => setDate(e.target.value)} />
+        <button disabled={saving || !date} onClick={() => save(date)} className="text-xs bg-[#7B5EA7] text-white px-3 py-1 rounded disabled:opacity-40">Save (pause chases)</button>
+        {item.expected_collection_date && <button disabled={saving} onClick={() => { setDate(''); save(null); }} className="text-xs text-slate-500">clear</button>}
+      </div>
+      <p className="text-[11px] text-slate-400">Set a date the client's said they'll collect — chases pause until it passes.</p>
+    </div>
+  );
+}
+
+// Temp storage: hold-until date (staff reminded 3 days before).
+function HoldUntilSection({ item, onChange }: { item: HeldItem; onChange: () => void }) {
+  const [date, setDate] = useState(item.hold_until ? item.hold_until.slice(0, 10) : '');
+  const [saving, setSaving] = useState(false);
+  async function save(val: string | null) {
+    setSaving(true);
+    try { await api.put(`/holding/${item.id}`, { hold_until: val }); onChange(); }
+    finally { setSaving(false); }
+  }
+  return (
+    <div className="border border-slate-200 rounded-lg p-3 space-y-2 bg-slate-50/50">
+      <div className="flex flex-wrap items-center gap-2">
+        <label className="text-xs text-slate-500">Hold until:</label>
+        <input type="date" className="border border-slate-300 rounded px-2 py-1 text-xs" value={date} onChange={(e) => setDate(e.target.value)} />
+        <button disabled={saving || !date} onClick={() => save(date)} className="text-xs bg-[#7B5EA7] text-white px-3 py-1 rounded disabled:opacity-40">Save</button>
+        {item.hold_until && <button disabled={saving} onClick={() => { setDate(''); save(null); }} className="text-xs text-slate-500">clear</button>}
+        {item.hold_until && <span className="text-xs text-slate-500">currently {dstr(item.hold_until)}</span>}
+      </div>
+      <p className="text-[11px] text-slate-400">We'll remind the team 3 days before this date.</p>
+    </div>
+  );
 }
 
 function LinkForm({ item, onDone }: { item: HeldItem; onDone: () => void }) {

@@ -759,6 +759,24 @@ export function startScheduler() {
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: Client Storage reminders scheduled daily at 09:20 Europe/London');
 
+  // ── Holding reminders (lost-property chase digest + temp hold-until) ──────
+  // Daily at 09:25 Europe/London. Assembles a staff nudge for chases due (the
+  // review queue — client emails are sent by a human from there, never here),
+  // and reminds staff when a temp-storage hold_until is within 3 days.
+  // See services/holding-reminders.ts + docs/HOLDING-MODULE-SPEC.md §7.
+  cron.schedule('25 9 * * *', async () => {
+    try {
+      const { runHoldingReminders } = await import('../services/holding-reminders');
+      const r = await runHoldingReminders();
+      if (r.chaseDigest || r.holdUntil) {
+        console.log(`Scheduler: Holding reminders — ${r.chaseDigest} chases ready, ${r.holdUntil} hold-until nudges`);
+      }
+    } catch (err) {
+      console.error('Scheduler: Holding reminders failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: Holding reminders scheduled daily at 09:25 Europe/London');
+
   // ── Pre-auth expiry reconciliation (silent housekeeping) ─────────────────
   // Daily at 09:40 Europe/London. Closes out held pre-auths past their window.
   // NO emails / bell nudges — the dashboard "Pre-auth Holds Expiring" bucket is
