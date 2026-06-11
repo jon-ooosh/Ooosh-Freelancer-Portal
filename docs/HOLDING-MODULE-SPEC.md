@@ -374,9 +374,10 @@ for linked items; for unknown/unlinked items, capture a recipient at notify time
 ## 13. Build status (Jun 2026)
 
 ✅ **Done + deployed:**
-1. Migrations 113 (held_items + held_item_locations), 115 (contact_email/phone), 116 (received_by).
+1. Migrations 113 (held_items + held_item_locations), 115 (contact_email/phone), 116 (received_by),
+   **119 (expected_collection_date + hold_until + hold_until_reminder_sent_for)**.
 2. Backend `routes/holding.ts`: CRUD, link cascade, notify (real email), collected/ship-back/dispose,
-   chase endpoint (email TODO), by-person/org/job reads, job-number search, label re-download.
+   by-person/org/job reads, job-number search, label re-download.
    **NB: staff names join `people` via `users.person_id` — `users` has no name columns.**
 3. Module pages "Held for Clients" + "Lost Property" (`/holding`, `/holding/lost-property`).
 4. Mobile quick-action page `/quick` (PWA-installable). "Package arrived" is search-first
@@ -385,26 +386,46 @@ for linked items; for unknown/unlinked items, capture a recipient at notify time
    acknowledge-receipt page `/holding/receipt/:id` + client-picker "Send merch form" on Job View.
 6. Address-book "Held Items" tab (Person + Org). Job Overview "Held for Clients" panel (incoming).
 7. **Derived merch pip** (`services/holding-requirement-sync.ts`, status-reactive — see §5) +
-   "Won't arrive" cancel action + temp/lost FYI in Job View right sidebar.
+   "Won't arrive" cancel action + temp/lost FYI in Job View right sidebar. The pip is **read-only**
+   (like the Vehicle card) — `merch` is in `RequirementCard`'s `isContextualStatus`; never hand-set.
+8. **Smart linking (PRs #690/#692/#695):** HH job number is the primary capture field —
+   `POST /holding` + `/link` derive `job_id` + client org from it (`resolveJobContext`); live
+   `GET /holding/job-lookup/:n` confirms the client in the form; `GET /holding/org-jobs/:orgId`
+   reverse-links when staff know the band but not the job. Shared FE components under
+   `components/holding/`: EntitySearch, JobNumberField, OrgJobSuggestions, NotifyClientModal,
+   ChaseReviewPanel, DuplicateNudge, compress, photo-upload, format (`locationLabel` surfaces the
+   "Somewhere else" typed text).
+9. **Notify (multi-recipient picker)** — `/:id/notify` takes `recipients[]`, branches template by
+   kind, **attaches item photos** (both kinds), enriches the incoming email with the description.
+   `GET /:id/notify-contacts` gathers job + owner + record candidates. Photos compressed client-side
+   (~1600px) before upload so emails stay small. Fires post-save on the Quick Log for incoming + lost.
+10. **Ship-back** forwards the postage method + tracking to the client (`holding_shipped_back`).
+11. **Lost-property chase ladder (Stage 8, PR #698)** — human-gated, NEVER auto-fires to clients.
+    `POST /:id/chase` sends the gradient email for the current tier (`holding_chase_1/2/3`, wk1
+    friendly → wk2 firm → wk3 final; job # in subject, staff signature) then bumps the level — only
+    if the send succeeded (422 no email / 502 send-fail, record untouched). `ChaseReviewPanel` on the
+    Lost Property page (Send / Snooze / Skip), opened from the digest deep-link `?review=1`. Two
+    timers (Last contacted / Next chase due) + chases-sent on the detail card.
+12. **Defer + temp hold-until (PR #698)** — `expected_collection_date` (future = chases paused;
+    doubles as the snooze; excluded from the review queue + scan). `hold_until` on temp storage, staff
+    reminded 3 days before. `services/holding-reminders.ts` runs daily **09:25 Europe/London** —
+    assembles the chase digest (staff bell + info@ email to the review queue, no client emails fired
+    here) + the hold-until reminders. Per-cycle dedup via `hold_until_reminder_sent_for`.
+13. **Pre-hire briefing heads-up (PR #700)** — `buildBriefing` computes a `holding` summary (incoming
+    here-to-give vs awaited on this job + client-wide temp/lost aide-mémoire); rendered as a "Things
+    we're holding for this client" block. try/catch-guarded (degrades to no block).
+14. **Stage 9 — Storage "Packages held" (PR #701)** — tenancy detail modal shows the client's held
+    items via `HeldItemsSection entityType=organisation`.
+15. **Merch dashboard strip slot (PR #701)** — `merch` category in `job-progress-strip.ts` (+ FE
+    mirror + briefing strip), so the pip shows on the dashboard Today strip + briefing.
 
-🔲 **Remaining (for a fresh chat):**
-- **Pre-hire review email heads-up** — add a Holding summary to `services/pre-hire-briefing.ts`
-  (`buildBriefing` → new `holding` field on `JobBriefing`; render block in
-  `email-templates/pre-hire-briefing.ts`). Phrasings agreed: "2 packages here to give to the client",
-  "3 boxes were expected, nothing marked as arrived yet", + temp-storage/lost-property aide-mémoire
-  lines. Big email-critical file — integrate carefully, can't easily smoke-test.
-- **Stage 8 — lost-property chase**: the `/:id/chase` endpoint exists but only bumps the level
-  (email is a TODO). Build: chase review page (human-gated queue — `GET /holding/chases/review`
-  already returns the due list), daily scan (assembles the review, does NOT auto-send), gradient
-  wk1/wk2/wk3 client email templates (`holding_chase`). Per spec §7B — a human approves the batch,
-  never auto-fire. `escalation_level` + `last_chased_at` columns already exist.
-- **Stage 9 — Storage-client "Packages held" cross-link**: a tab/section on the Storage module
-  showing held_items for a storage client (the Amazon-deluge case).
-- **Dedupe nudge on desktop create** — the mobile flow is search-first; the desktop HoldingPage
-  CreateModal isn't. Low priority.
-- **`merch` → dashboard progress strip** — add a slot in `job-progress-strip.ts` if the pip should
-  show on the dashboard "Today" strip (currently only on the Job Detail checklist).
-- **Shared-UI refactor** — 3 copies of the location/photo capture block (QuickLogSheet, CreateModal,
-  HoldingReceiptPage). Tidy-only.
+🔲 **Remaining / open:**
+- **Combine the Merch Receiving card + "Held for Clients" panel** (raised Jun 2026) — they're
+  duplicated on the Overview tab (the panel's detail sits inches above an inert checklist pip). Unlike
+  vehicle/excess (detail on other tabs), merch's detail is on the same tab, so the pip is redundant.
+  Proposed: render the rich panel *in place of* the merch card inside `JobPrepChecklist` (keeping the
+  requirement row so the prep counter / dashboard strip / briefing roll-ups still work) and drop the
+  standalone panel. Pending jon's nod on approach.
+- IRL feedback from the chase + hold-until flows (staff trialling over the following weeks).
 
 Streams independent.
