@@ -263,6 +263,8 @@ router.get('/chases/review', async (_req: AuthRequest, res: Response) => {
        )
        AND h.found_date IS NOT NULL
        AND h.found_date <= CURRENT_DATE - INTERVAL '7 days'
+       -- deferred: client gave an expected collection date in the future → pause chases
+       AND (h.expected_collection_date IS NULL OR h.expected_collection_date < CURRENT_DATE)
      ORDER BY h.found_date ASC`
   );
   res.json({ data: result.rows });
@@ -369,6 +371,8 @@ const createSchema = z.object({
   storage_started_at: z.string().optional().nullable(),
   charge_notes: z.string().optional().nullable(),
   dispose_after: z.string().optional().nullable(),
+  expected_collection_date: z.string().optional().nullable(),  // lost property — pauses chases until passed
+  hold_until: z.string().optional().nullable(),                // temp storage — staff reminded 3 days before
   notes: z.string().optional().nullable(),
 });
 
@@ -755,18 +759,56 @@ router.post('/:id/notify', validate(notifySchema), async (req: AuthRequest, res:
   res.json({ data: result.rows[0], emailed, sent: sent.length, failed: results.length - sent.length, results });
 });
 
-// Send a chase (from the human-gated review queue). Bumps the escalation level.
+// Send a chase (from the human-gated review queue). Sends the gradient client
+// email for the current tier (wk1 friendly → wk2 firm → wk3 final), then bumps
+// the escalation level. Only bumps if the email actually went — a chase that
+// didn't reach the client shouldn't advance the ladder.
 router.post('/:id/chase', async (req: AuthRequest, res: Response) => {
+  const cur = await query(`${SELECT_WITH_JOINS} WHERE h.id = $1 AND h.kind = 'lost_property'`, [req.params.id]);
+  if (cur.rows.length === 0) { res.status(404).json({ error: 'Lost property item not found' }); return; }
+  const h = cur.rows[0];
+
+  const tier = Math.min((h.escalation_level || 0) + 1, 3) as 1 | 2 | 3;
+  const recipient = await resolveHeldItemRecipient(req.params.id as string);
+  if (!recipient.to) {
+    res.status(422).json({ error: 'No client email on file — link the owner or add a contact before chasing.' });
+    return;
+  }
+
+  const staffName = await resolveStaffName(req.user!.id);
+  const template = tier === 1 ? 'holding_chase_1' : tier === 2 ? 'holding_chase_2' : 'holding_chase_3';
+  let emailed = false;
+  try {
+    await emailService.send(template, {
+      to: recipient.to,
+      variables: {
+        clientName: recipient.clientName,
+        itemDescription: h.description || 'lost property',
+        foundPlace: buildFoundPlace(h),
+        foundDate: h.found_date ? new Date(h.found_date).toLocaleDateString('en-GB') : '',
+        disposeAfterDate: formatDisposeDate(h),
+        jobNumber: String(h.hh_job_number || ''),
+        staffName: staffName || 'The Ooosh Team',
+      },
+    });
+    emailed = true;
+  } catch (err) { console.warn('[holding] chase email failed:', err); }
+
+  if (!emailed) {
+    res.status(502).json({ error: 'Could not send the chase email — nothing changed.' });
+    return;
+  }
+
   const result = await query(
     `UPDATE held_items SET escalation_level = LEAST(escalation_level + 1, 3),
-        last_chased_at = NOW(), updated_at = NOW()
-     WHERE id = $1 AND kind = 'lost_property' RETURNING *`,
+        last_chased_at = NOW(), status = CASE WHEN status IN ('stored','arrived') THEN 'client_notified' ELSE status END,
+        updated_at = NOW()
+     WHERE id = $1 RETURNING *`,
     [req.params.id]
   );
-  if (result.rows.length === 0) { res.status(404).json({ error: 'Lost property item not found' }); return; }
   await logAudit(req.user!.id, 'held_items', req.params.id as string, 'update', null, result.rows[0]);
-  // TODO (Stage 8): send the gradient chase email (wk1/wk2/wk3) to the client.
-  res.json({ data: result.rows[0] });
+  if (result.rows[0].job_id) await logToJobTimeline(result.rows[0], req.user!.id, `chase ${tier} sent (${recipient.to})`);
+  res.json({ data: result.rows[0], emailed: true, tier, notified_to: recipient.to });
 });
 
 // ════════════════════════ helpers ════════════════════════
@@ -808,6 +850,32 @@ function buildFoundContext(h: Record<string, unknown>): string {
     case 'backline': return 'checking your backline back in';
     default: return 'finishing up after your recent hire';
   }
+}
+
+/**
+ * Noun-phrase place for the chase emails ("left {foundPlace}") — distinct from
+ * buildFoundContext's verb phrase used in the initial found email.
+ */
+function buildFoundPlace(h: Record<string, unknown>): string {
+  const reg = (h.found_vehicle_reg as string) || (h.found_location_text as string) || '';
+  switch (h.found_in) {
+    case 'van': return reg ? `in van ${reg}` : 'in one of our vans';
+    case 'rehearsal': return 'in a rehearsal room';
+    case 'backline': return 'with the backline';
+    default: return 'after your hire';
+  }
+}
+
+/** Staff display name for an email signature — users have no name columns, so join people. */
+async function resolveStaffName(userId: string): Promise<string | null> {
+  try {
+    const r = await query(
+      `SELECT (p.first_name || ' ' || p.last_name) AS name
+       FROM users u JOIN people p ON p.id = u.person_id WHERE u.id = $1`,
+      [userId]
+    );
+    return r.rows[0]?.name?.trim() || null;
+  } catch { return null; }
 }
 
 /** dd/mm/yyyy disposal date — explicit dispose_after, else found_date + 14 days. */

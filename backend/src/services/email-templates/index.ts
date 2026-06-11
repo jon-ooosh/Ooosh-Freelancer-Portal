@@ -61,6 +61,67 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  // ── Lost-property chase ladder (only ever sent via the human-gated review queue) ──
+  holding_chase_1: {
+    variant: 'client',
+    preheader: "We've still got your lost property",
+    subject: "We've still got your {{itemDescription}}{{#if jobNumber}} (#{{jobNumber}}){{/if}}",
+    body: `
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Hi {{clientName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Just a reminder that we've still got your <strong>{{itemDescription}}</strong> left {{foundPlace}}.
+      </p>
+      {{#if jobNumber}}<p style="margin:0 0 16px;font-size:14px;color:#64748b;line-height:1.6;">This is re job #{{jobNumber}}.</p>{{/if}}
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        We've held the item(s){{#if foundDate}} since {{foundDate}}{{/if}}. Please make arrangements to come and collect as soon as you can, or they may be disposed of{{#if disposeAfterDate}} after <strong>{{disposeAfterDate}}</strong>{{else}} in about a week's time{{/if}}.
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        If you'd rather we disposed of them on your behalf, just let us know. If you'd like us to arrange a delivery, that may be possible - please get in touch.
+      </p>
+      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">Thanks,<br>{{staffName}}<br>Ooosh! Tours Ltd</p>
+    `,
+  },
+
+  holding_chase_2: {
+    variant: 'client',
+    preheader: 'Second reminder - please collect your lost property',
+    subject: 'Reminder: please collect your {{itemDescription}}{{#if jobNumber}} (#{{jobNumber}}){{/if}}',
+    body: `
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Hi {{clientName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        This is a second reminder that we've still got your <strong>{{itemDescription}}</strong> left {{foundPlace}}{{#if foundDate}} on {{foundDate}}{{/if}}.
+      </p>
+      {{#if jobNumber}}<p style="margin:0 0 16px;font-size:14px;color:#64748b;line-height:1.6;">This is re job #{{jobNumber}}.</p>{{/if}}
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        We've already held the item(s) for around 14 days, which is the maximum we can usually hold lost property for. Please make arrangements to collect as soon as you can, or they may be disposed of.
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        If you'd rather we disposed of them on your behalf, just let us know. If you'd like us to arrange a delivery, that may be possible - please get in touch.
+      </p>
+      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">Thanks,<br>{{staffName}}<br>Ooosh! Tours Ltd</p>
+    `,
+  },
+
+  holding_chase_3: {
+    variant: 'client',
+    preheader: "Final notice - we're going to dispose of your lost property",
+    subject: "We're going to dispose of your {{itemDescription}}{{#if jobNumber}} (#{{jobNumber}}){{/if}}",
+    body: `
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Hi {{clientName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Despite previous emails, we've still got your <strong>{{itemDescription}}</strong> from {{foundPlace}}.
+      </p>
+      {{#if jobNumber}}<p style="margin:0 0 16px;font-size:14px;color:#64748b;line-height:1.6;">This is re job #{{jobNumber}}.</p>{{/if}}
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        We've now held the item(s){{#if foundDate}} since {{foundDate}}{{/if}}, which is more than the maximum we can usually hold lost property for. Please <strong>urgently</strong> make arrangements to collect, or they will be disposed of in the next few days.
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        If you'd rather we disposed of them on your behalf, just let us know. If you'd like us to arrange a delivery, that may still be possible - please contact us as soon as you can.
+      </p>
+      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">Thanks,<br>{{staffName}}<br>Ooosh! Tours Ltd</p>
+    `,
+  },
+
   holding_shipped_back: {
     variant: 'client',
     preheader: 'Your items are on their way back to you',
