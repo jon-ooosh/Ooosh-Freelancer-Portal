@@ -19,7 +19,8 @@ import type { Cost, CostType, CostPaymentMethod, CostPaymentStatus, CostRecharge
 
 interface Props {
   onClose: () => void;
-  onSaved: (cost: Cost) => void;
+  // null when a vehicle service record was saved with no cost (service-only).
+  onSaved: (cost: Cost | null) => void;
   existing?: Cost | null;
   presetJobId?: string | null;
   presetVehicleId?: string | null;
@@ -501,13 +502,18 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
   // quote_actual cost is already billed via its quote.
   const canRecharge = Boolean(linkedJobId) && costIntent === 'extra';
 
+  // A vehicle service record can be logged with no cost (e.g. a £0 MOT pass, or
+  // a future service that's only "Booked"). When that's the case the cost is
+  // optional — we create the service record alone.
+  const wantsService = !isEdit && logService && Boolean(vehicleId);
+
   async function handleSave() {
     setError('');
     if (vatMode === 'reclaim') {
       if (!amountNet || Number(amountNet) <= 0) { setError('Enter the No-VAT (net) amount, e.g. the excess.'); return; }
       if (!amountVat || Number(amountVat) <= 0) { setError('Enter the reclaimable VAT amount.'); return; }
     } else if (!amountGross || Number(amountGross) <= 0) {
-      setError('Gross amount is required.'); return;
+      if (!wantsService) { setError('Gross amount is required.'); return; }
     }
     setSaving(true);
     try {
@@ -525,6 +531,32 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
       // uploader's user record — staff don't enter them on the modal.
 
       const cat = COST_CATEGORIES.find((c) => c.xeroCode === categoryCode);
+
+      // Builds the vehicle_service_log payload. Reused by the service-only path
+      // and the cost+service path. costless = no cost row to attach to.
+      const serviceLogBody = (costless: boolean) => ({
+        name: description.trim() || cat?.label || (costless ? 'Vehicle service' : 'Vehicle cost'),
+        service_type: serviceType,
+        service_date: costDate || null,
+        mileage: serviceMileage ? Number(serviceMileage) : null,
+        cost: costless ? null : amountNet ? Number(amountNet) : amountGross ? Number(amountGross) : null,
+        status: serviceStatus,
+        garage: serviceGarage.trim() || supplierName || null,
+        notes: notes || null,
+        next_due_date: serviceNextDueDate || null,
+        next_due_mileage: serviceNextDueMileage ? Number(serviceNextDueMileage) : null,
+        apply_to_vehicle: applyToVehicle,
+        files: receiptKey ? [{ name: receiptName || 'Receipt', url: receiptKey, type: receiptFile?.type || '', size: receiptFile?.size || 0 }] : [],
+      });
+
+      // Service-only: no cost amount entered → create just the service record.
+      const noAmount = vatMode === 'reclaim' ? Number(amountNet) <= 0 : Number(amountGross) <= 0;
+      if (wantsService && noAmount) {
+        await api.post(`/vehicles/fleet/${vehicleId}/service-log`, serviceLogBody(true));
+        onSaved(null);
+        return;
+      }
+
       const payload: Record<string, unknown> = {
         supplier_name: supplierName || null,
         cost_date: costDate || null,
@@ -563,20 +595,7 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
       // cost is already saved — we surface a warning rather than lose it).
       if (!isEdit && logService && vehicleId) {
         try {
-          const sl = await api.post<{ id: string }>(`/vehicles/fleet/${vehicleId}/service-log`, {
-            name: description.trim() || (cat?.label ? `${cat.label}` : 'Vehicle cost'),
-            service_type: serviceType,
-            service_date: costDate || null,
-            mileage: serviceMileage ? Number(serviceMileage) : null,
-            cost: amountNet ? Number(amountNet) : amountGross ? Number(amountGross) : null,
-            status: serviceStatus,
-            garage: serviceGarage.trim() || supplierName || null,
-            notes: notes || null,
-            next_due_date: serviceNextDueDate || null,
-            next_due_mileage: serviceNextDueMileage ? Number(serviceNextDueMileage) : null,
-            apply_to_vehicle: applyToVehicle,
-            files: receiptKey ? [{ name: receiptName || 'Receipt', url: receiptKey, type: receiptFile?.type || '', size: receiptFile?.size || 0 }] : [],
-          });
+          const sl = await api.post<{ id: string }>(`/vehicles/fleet/${vehicleId}/service-log`, serviceLogBody(false));
           await api.patch(`/costs/${res.data.id}`, { vehicle_service_log_id: sl.id });
         } catch (slErr) {
           console.error('[cost] service-log link failed:', slErr);
@@ -746,11 +765,11 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div>
-                  <label className="block text-xs text-gray-500 mb-1">{vatMode === 'reclaim' ? 'Net — No VAT (£) *' : 'Gross (£) *'}</label>
+                  <label className="block text-xs text-gray-500 mb-1">{vatMode === 'reclaim' ? 'Net — No VAT (£) *' : `Gross (£)${wantsService ? '' : ' *'}`}</label>
                   {vatMode === 'reclaim' ? (
                     <input type="number" step="0.01" min="0" className={inputCls} value={amountNet} onChange={(e) => onNetChange(e.target.value)} placeholder="e.g. 750.00 (excess)" />
                   ) : (
-                    <input type="number" step="0.01" min="0" className={inputCls} value={amountGross} onChange={(e) => onGrossChange(e.target.value)} />
+                    <input type="number" step="0.01" min="0" className={inputCls} value={amountGross} onChange={(e) => onGrossChange(e.target.value)} placeholder={wantsService ? 'Leave blank if no cost' : undefined} />
                   )}
                 </div>
                 <div>
@@ -1032,7 +1051,7 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
           <button onClick={onClose} className="px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded-md">Cancel</button>
           <button onClick={handleSave} disabled={saving}
             className="px-4 py-2 text-sm text-white bg-purple-600 hover:bg-purple-700 rounded-md disabled:opacity-50">
-            {saving ? 'Saving…' : isEdit ? 'Save changes' : 'Save cost'}
+            {saving ? 'Saving…' : isEdit ? 'Save changes' : wantsService && (vatMode === 'reclaim' ? Number(amountNet) <= 0 : Number(amountGross) <= 0) ? 'Save service record' : wantsService ? 'Save cost + service record' : 'Save cost'}
           </button>
         </div>
       </div>
