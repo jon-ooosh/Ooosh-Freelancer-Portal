@@ -27,10 +27,11 @@ const STRIP_CAT_LABELS: Record<ProgressStripCategory, string> = {
   invoicing: 'Invoicing',
   payment: 'Payment',
   vehicle: 'Vehicle',
+  merch: 'Merch',
 };
 
 const STRIP_CAT_ORDER: ProgressStripCategory[] = [
-  'vehicle', 'client', 'excess', 'deprep', 'freelancer', 'payment', 'invoicing',
+  'vehicle', 'client', 'excess', 'deprep', 'merch', 'freelancer', 'payment', 'invoicing',
 ];
 
 const STATUS_HEX: Record<ProgressStripStatus, { bg: string; fg: string }> = {
