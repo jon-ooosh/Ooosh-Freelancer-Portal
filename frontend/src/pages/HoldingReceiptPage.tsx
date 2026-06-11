@@ -8,7 +8,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
-import { useAuthStore } from '../hooks/useAuthStore';
+import { uploadHeldItemPhotos } from '../components/holding/photo-upload';
 import { locationLabel } from '../components/holding/format';
 import type { HeldItem, HeldItemLocation } from '../../../shared/types';
 
@@ -51,15 +51,8 @@ export default function HoldingReceiptPage() {
     if (!files || files.length === 0) return;
     setUploading(true); setErr('');
     try {
-      for (const file of Array.from(files)) {
-        const fd = new FormData();
-        fd.append('file', file); fd.append('attachment_only', 'true');
-        const token = useAuthStore.getState().accessToken;
-        const res = await fetch('/api/files/upload', { method: 'POST', headers: token ? { Authorization: `Bearer ${token}` } : {}, body: fd });
-        if (!res.ok) throw new Error('Upload failed');
-        const j = await res.json();
-        setPhotos((p) => [...p, { name: j.filename || file.name, url: j.r2_key, type: 'image' }]);
-      }
+      const uploaded = await uploadHeldItemPhotos(files);
+      setPhotos((p) => [...p, ...uploaded]);
     } catch (e) { setErr(e instanceof Error ? e.message : 'Upload failed'); } finally { setUploading(false); }
   }
 

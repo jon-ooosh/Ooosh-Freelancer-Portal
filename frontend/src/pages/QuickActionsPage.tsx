@@ -15,7 +15,7 @@ import { EntitySearch } from '../components/holding/EntitySearch';
 import { JobNumberField } from '../components/holding/JobNumberField';
 import { NotifyClientModal } from '../components/holding/NotifyClientModal';
 import { OrgJobSuggestions } from '../components/holding/OrgJobSuggestions';
-import { compressImage } from '../components/holding/compress';
+import { uploadHeldItemPhotos } from '../components/holding/photo-upload';
 import { locationLabel } from '../components/holding/format';
 import type { HeldItem, HeldItemLocation } from '../../../shared/types';
 
@@ -100,21 +100,8 @@ function Sheet({ title, onClose, children }: { title: string; onClose: () => voi
 async function uploadPhotos(files: FileList | null, onDone: (a: { name: string; url: string; type: string }[]) => void, onErr: (m: string) => void, setBusy: (b: boolean) => void) {
   if (!files || files.length === 0) return;
   setBusy(true);
-  try {
-    const out: { name: string; url: string; type: string }[] = [];
-    for (const original of Array.from(files)) {
-      const file = await compressImage(original);
-      const fd = new FormData();
-      fd.append('file', file);
-      fd.append('attachment_only', 'true');
-      const token = useAuthStore.getState().accessToken;
-      const res = await fetch('/api/files/upload', { method: 'POST', headers: token ? { Authorization: `Bearer ${token}` } : {}, body: fd });
-      if (!res.ok) throw new Error('Upload failed');
-      const j = await res.json();
-      out.push({ name: j.filename || file.name, url: j.r2_key, type: 'image' });
-    }
-    onDone(out);
-  } catch (e) { onErr(e instanceof Error ? e.message : 'Upload failed'); } finally { setBusy(false); }
+  try { onDone(await uploadHeldItemPhotos(files)); }
+  catch (e) { onErr(e instanceof Error ? e.message : 'Upload failed'); } finally { setBusy(false); }
 }
 
 // ── Package arrived — search FIRST (receive an expected/known one), then create ──

@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback, ReactNode } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
+import { HeldItemsSection } from '../components/HeldItemsSection';
 
 // ── Types ───────────────────────────────────────────────────────────────
 type SizeCat = 'small' | 'medium' | 'large' | 'xl';
@@ -476,6 +477,12 @@ function TenancyDetailModal({ id, isAdminManager, onClose, onChange }: { id: str
           ))}
           <AddAccessPerson tenancyId={id} onAdded={() => load()} />
         </div>
+
+        {/* Packages held for this storage client (Stage 9 cross-link) */}
+        {t.organisation_id && (
+          <HeldItemsSection entityType="organisation" entityId={t.organisation_id}
+            heading="Packages held" openOnly hideWhenEmpty bare />
+        )}
 
         {/* Rate history */}
         {(t.rate_history || []).length > 0 && (

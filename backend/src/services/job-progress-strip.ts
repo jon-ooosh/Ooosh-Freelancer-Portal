@@ -41,7 +41,8 @@ export type ProgressStripCategory =
   | 'freelancer'
   | 'invoicing'
   | 'payment'
-  | 'vehicle';
+  | 'vehicle'
+  | 'merch';
 
 /**
  * Per-job strip is a partial map. A category is present iff the job has at
@@ -66,6 +67,7 @@ export const STRIP_CATEGORY_LABELS: Record<StripPhase, Record<ProgressStripCateg
     invoicing: 'Invoicing',
     payment: 'Payment',
     vehicle: 'Vehicle',
+    merch: 'Merch',
   },
   post_hire: {
     deprep: 'De-prep',
@@ -75,6 +77,7 @@ export const STRIP_CATEGORY_LABELS: Record<StripPhase, Record<ProgressStripCateg
     invoicing: 'Invoicing',
     payment: 'Payment',
     vehicle: 'Vehicle',
+    merch: 'Merch',
   },
 };
 
@@ -91,6 +94,7 @@ export const STRIP_MAPPING: Record<StripPhase, Record<ProgressStripCategory, str
     invoicing: [],                 // n/a pre-hire (invoice fires post-hire)
     payment: [],                   // n/a pre-hire (deposit lives on Money tab)
     vehicle: ['vehicle'],          // van allocated + prepped
+    merch: ['merch'],              // incoming packages to give the client (derived pip)
   },
   post_hire: {
     deprep: ['backline'],
@@ -100,6 +104,7 @@ export const STRIP_MAPPING: Record<StripPhase, Record<ProgressStripCategory, str
     invoicing: ['invoice'],
     payment: ['payment_reconcile'],
     vehicle: ['vehicle'],
+    merch: ['merch'],              // anything still to hand back post-hire
   },
 };
 
@@ -188,7 +193,7 @@ export function buildProgressStrips(
   }
 
   const allCats: ProgressStripCategory[] = [
-    'deprep', 'client', 'excess', 'freelancer', 'invoicing', 'payment', 'vehicle',
+    'deprep', 'client', 'excess', 'freelancer', 'invoicing', 'payment', 'vehicle', 'merch',
   ];
 
   for (const [jobId, phase] of Object.entries(phases)) {
