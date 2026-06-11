@@ -2676,6 +2676,73 @@ Singleton Stripe SDK client for OP's direct Stripe operations (pre-auth capture,
 
 **Webhook handles both excess and hire payment refunds (Jun 2026 hotfix):** the `charge.refunded` handler first tries `findExcessByPaymentIntent` (existing excess flow via `unwindRefundOnExcess`). If no excess match, it looks up `job_payments` by the original PI for hire payment refunds. For hire payments: dedups on `payment_reference = stripe_refund_id` (OP-initiated path stores the refund id there); if no existing refund row, auto-INSERTs one with `source='stripe_webhook'`. Email subject differentiates: *Stripe excess refund recorded* / *Stripe hire payment refund recorded* / *...already on OP*. The webhook deliberately does NOT push HH paperwork (no auth context + risk of double-push) — surfaces the gap in the email for staff to verify HH manually. Note for `job_payments` refund rows: `stripe_payment_intent` holds the ORIGINAL PI (for cross-reference + webhook lookup), and `payment_reference` holds the Stripe refund id (for dedup). Don't conflate them.
 
+### Cost Capture & Xero Push ✅ (Jun 2026)
+
+Staff capture supplier costs (`costs` table, migration 092) on `/money/costs`
+via `CostCaptureModal`, categorise them to a Xero account, and push them to Xero
+as either **Spend Money** (paid-now methods) or an **AUTHORISED Bill** (pay-later
+methods). Engine: `services/cost-xero-push.ts`; routes: `routes/costs.ts`; UI:
+`components/CostCaptureModal.tsx` + `pages/CostsPage.tsx`.
+
+**Push concurrency — per-cost advisory lock (DO NOT REMOVE).** The push is
+triggered from FIVE sites — create / update / approve / pay / the Push-Now
+button — and four are fire-and-forget (`pushCostToXeroBackground` → `setImmediate`).
+With no guard, two overlapping triggers each loaded the cost with
+`xero_object_id` still null, both passed the `billExists` check, and each created
+its own Xero bill → **duplicate AUTHORISED bills** (live incident: T.Reeve repair
+invoices — one OP cost row, two identical Xero bills; the VAT calc was correct on
+both, it was just billed twice). Fix: `pushCostToXero` wraps its whole body in a
+Postgres advisory lock (`pg_advisory_lock(hashtext('cost-push:'||id)::bigint)`)
+on a dedicated client. The second push waits for the first to commit
+`xero_object_id`, then `loadCost` + the `billExists` / `PUSHED_STATES` guard
+short-circuit it. **Never push a cost to Xero outside `pushCostToXero`** — that's
+how the guard is inherited. Any NEW trigger site just calls
+`pushCostToXeroBackground(costId)` and is automatically serialised.
+
+**VAT treatment — `vat_treatment` (migration 118).** Two ways a cost's VAT is
+pushed, chosen explicitly in the modal (the `buildCostLineItems` helper drives
+the line structure):
+- `'standard'` (default) — a single INCLUSIVE line; Xero derives the VAT from the
+  account / tax type. Correct whenever the VAT is a clean standard rate of net.
+- `'reclaim_split'` — insurance-claim / "VAT-only" invoices where the VAT is
+  non-standard relative to net (e.g. £750 excess + £702.68 reclaimable VAT, total
+  £1,452.68). Pushed as the 3-line EXCLUSIVE structure an accountant enters by
+  hand: `net @ No VAT` / `vat÷0.20 @ 20% VAT` / `−vat÷0.20 @ No VAT`. Lines 2+3
+  net to zero, so subtotal=net, VAT=vat, total=gross for ANY net/vat pair.
+  **Assumes the underlying VAT was charged at the 20% standard rate** (the only
+  realistic case for these UK invoices). It's an explicit opt-in ("VAT reclaim"
+  mode in the modal) so a normal-VAT data-entry slip can't silently trigger it.
+
+**Invoice de-dup (migration 118).** Optional `costs.invoice_number` (fuel/till
+receipts won't have one). `GET /costs/check-invoice?invoice_number=&supplier_name=&exclude_id=`
+returns a non-blocking warning if the same supplier+number already exists; the
+modal surfaces it but never blocks the save. Partial case-insensitive index
+`idx_costs_invoice_dedup`.
+
+**Cost ↔ vehicle service-log unification (Jun 2026).** `CostCaptureModal` is
+dual-purpose — it captures a cost AND/OR a `vehicle_service_log` record in one
+entry, so a garage invoice is entered once:
+- Pick a van → an "Also add to <REG>'s service history" toggle appears,
+  **defaulted ON** ("ask per cost, default yes"), revealing the service fields
+  (type / mileage / garage→defaults to supplier / status / next-due /
+  apply-to-vehicle).
+- On save it creates the cost, then POSTs to the existing
+  `POST /vehicles/fleet/:id/service-log` endpoint (reusing ALL its side-effects —
+  mileage-log, fleet live-figure updates, upward-only mileage ratchet), attaches
+  the receipt to the service record, and links them via
+  `costs.vehicle_service_log_id`. Service-log creation is non-fatal: if it fails
+  the cost is still saved and the modal warns.
+- **Cost optional:** when a van is linked + the toggle is on, the gross amount is
+  no longer required. Blank → service-record-only (handles a £0 MOT pass or a
+  future "Booked" service, no cost row). `onSaved` may therefore receive `null`.
+- The **vehicle page Service History "+ Add Record"** opens this same modal
+  (`presetVehicleId`). **Editing** an existing service record still uses the
+  dedicated `ServiceRecordForm` — so multi-file-with-comments edits and existing
+  £0/Booked records are untouched. Known trade-off: adding via the unified modal
+  carries a single receipt (multi-file-at-add deferred).
+
+Migration 118 (`invoice_number` + `vat_treatment`) is in `run.ts`.
+
 ### PII Encryption ✅ COMPLETE (PR 3, May 2026)
 
 **File:** `backend/src/services/encryption.ts`
