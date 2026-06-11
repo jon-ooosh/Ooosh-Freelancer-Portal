@@ -149,6 +149,26 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
   // Compact quote-vs-actuals summary shown when a job is linked.
   const [jobSummary, setJobSummary] = useState<{ quotedCost: number; clientQuoted: number; actuals: number; extra: number } | null>(null);
 
+  // ── Vehicle link + optional "also log to service history" ────────────────
+  // Forward unification: a garage/vehicle cost can ALSO create a vehicle_service_log
+  // record in one go (no double entry). Service-record creation is offered on NEW
+  // costs only; editing the cost doesn't re-touch the linked service record.
+  type FleetLite = { id: string; reg: string; make?: string | null; model?: string | null; simple_type?: string | null };
+  const [vehicleId, setVehicleId] = useState<string | null>(existing?.vehicle_id || presetVehicleId || null);
+  const [fleet, setFleet] = useState<FleetLite[]>([]);
+  const [vehicleSearch, setVehicleSearch] = useState('');
+  const [vehicleFocused, setVehicleFocused] = useState(false);
+  // Default ON once a vehicle is in play (preset or picked) — "ask per cost,
+  // defaulted to yes". Never offered in edit mode.
+  const [logService, setLogService] = useState<boolean>(!isEdit && Boolean(existing?.vehicle_id || presetVehicleId));
+  const [serviceType, setServiceType] = useState<'service' | 'repair' | 'mot' | 'insurance' | 'tax' | 'tyre' | 'other'>('repair');
+  const [serviceMileage, setServiceMileage] = useState('');
+  const [serviceGarage, setServiceGarage] = useState('');
+  const [serviceStatus, setServiceStatus] = useState('Done');
+  const [serviceNextDueDate, setServiceNextDueDate] = useState('');
+  const [serviceNextDueMileage, setServiceNextDueMileage] = useState('');
+  const [applyToVehicle, setApplyToVehicle] = useState(true);
+
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
@@ -182,6 +202,26 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
     }, 400);
     return () => clearTimeout(t);
   }, [invoiceNumber, supplierName, existing?.id]);
+
+  // Fleet list (small, ~20 vans) — fetched once for the vehicle picker, filtered
+  // client-side. Active vehicles only.
+  useEffect(() => {
+    api.get<{ data: FleetLite[] }>('/vehicles/fleet')
+      .then((r) => setFleet(r.data || []))
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const vehicleLabel = (v: FleetLite | undefined) =>
+    v ? `${v.reg}${v.make || v.model ? ` — ${[v.make, v.model].filter(Boolean).join(' ')}` : v.simple_type ? ` — ${v.simple_type}` : ''}` : '';
+  const selectedVehicle = fleet.find((v) => v.id === vehicleId);
+  const vehFiltered = (() => {
+    const q = vehicleSearch.trim().toLowerCase();
+    const list = q
+      ? fleet.filter((v) => v.reg.toLowerCase().includes(q) || `${v.make || ''} ${v.model || ''} ${v.simple_type || ''}`.toLowerCase().includes(q))
+      : fleet;
+    return list.slice(0, 12);
+  })();
 
   // Job picker — debounced search against the global /api/search, filtered to type='job'.
   useEffect(() => {
@@ -505,11 +545,11 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
         receipt_r2_key: receiptKey,
         receipt_filename: receiptName,
         notes: notes || null,
-        // Always send job_id so edit-mode can change/clear the link.
+        // Always send job_id + vehicle_id so edit-mode can change/clear the links.
         job_id: linkedJobId || null,
+        vehicle_id: vehicleId || null,
       };
       if (!isEdit) {
-        payload.vehicle_id = presetVehicleId || null;
         payload.platform_issue_id = presetIssueId || null;
         payload.status = 'confirmed';
       }
@@ -517,6 +557,34 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
       const res = isEdit
         ? await api.patch<{ data: Cost }>(`/costs/${existing!.id}`, payload)
         : await api.post<{ data: Cost }>('/costs', payload);
+
+      // Forward unification: optionally create a vehicle service-history record
+      // and link it back to the cost. New costs only; non-fatal if it fails (the
+      // cost is already saved — we surface a warning rather than lose it).
+      if (!isEdit && logService && vehicleId) {
+        try {
+          const sl = await api.post<{ id: string }>(`/vehicles/fleet/${vehicleId}/service-log`, {
+            name: description.trim() || (cat?.label ? `${cat.label}` : 'Vehicle cost'),
+            service_type: serviceType,
+            service_date: costDate || null,
+            mileage: serviceMileage ? Number(serviceMileage) : null,
+            cost: amountNet ? Number(amountNet) : amountGross ? Number(amountGross) : null,
+            status: serviceStatus,
+            garage: serviceGarage.trim() || supplierName || null,
+            notes: notes || null,
+            next_due_date: serviceNextDueDate || null,
+            next_due_mileage: serviceNextDueMileage ? Number(serviceNextDueMileage) : null,
+            apply_to_vehicle: applyToVehicle,
+            files: receiptKey ? [{ name: receiptName || 'Receipt', url: receiptKey, type: receiptFile?.type || '', size: receiptFile?.size || 0 }] : [],
+          });
+          await api.patch(`/costs/${res.data.id}`, { vehicle_service_log_id: sl.id });
+        } catch (slErr) {
+          console.error('[cost] service-log link failed:', slErr);
+          setError('Cost saved, but adding it to the vehicle service history failed — add it manually from the vehicle page.');
+          setSaving(false);
+          return;
+        }
+      }
       onSaved(res.data);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save cost');
@@ -763,6 +831,105 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
                 {jobSummary.clientQuoted > 0 && <div>Quoted to client: <strong>£{jobSummary.clientQuoted.toFixed(2)}</strong>{jobSummary.quotedCost > 0 && <span className="text-gray-400"> (our cost est. £{jobSummary.quotedCost.toFixed(2)})</span>}</div>}
                 <div>Costs logged against the quote: <strong>£{jobSummary.actuals.toFixed(2)}</strong>{jobSummary.extra > 0 && <span> · extras: <strong>£{jobSummary.extra.toFixed(2)}</strong></span>}</div>
                 <div className="text-gray-400">Use this to decide if this cost is covered by the quote (Part of the quote) or above-and-beyond (Extra).</div>
+              </div>
+            )}
+
+            {/* Vehicle link — optional. Picking a van offers a one-step service-history record. */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Vehicle <span className="text-gray-400 font-normal">(optional — link this cost to a van)</span>
+              </label>
+              {vehicleId ? (
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="px-3 py-1.5 text-sm bg-purple-50 text-purple-700 rounded-md border border-purple-200">
+                    {vehicleLabel(selectedVehicle) || '(linked vehicle)'}
+                  </span>
+                  <button type="button"
+                    onClick={() => { setVehicleId(null); setVehicleSearch(''); setLogService(false); }}
+                    className="text-xs text-red-600 hover:underline">
+                    Remove link
+                  </button>
+                </div>
+              ) : (
+                <div className="relative">
+                  <input className={inputCls} value={vehicleSearch}
+                    onChange={(e) => setVehicleSearch(e.target.value)}
+                    onFocus={() => setVehicleFocused(true)}
+                    onBlur={() => setTimeout(() => setVehicleFocused(false), 150)}
+                    placeholder="Search by reg" autoComplete="off" />
+                  {vehicleFocused && (
+                    <div className="absolute z-10 mt-1 w-full max-h-48 overflow-y-auto bg-white border border-gray-200 rounded-md shadow-lg">
+                      {fleet.length === 0 ? (
+                        <div className="px-3 py-2 text-sm text-gray-400">Loading vehicles…</div>
+                      ) : vehFiltered.length === 0 ? (
+                        <div className="px-3 py-2 text-sm text-gray-400">No match</div>
+                      ) : vehFiltered.map((v) => (
+                        <button key={v.id} type="button"
+                          onMouseDown={(e) => { e.preventDefault(); setVehicleId(v.id); setVehicleSearch(''); if (!isEdit) setLogService(true); }}
+                          className="block w-full text-left px-3 py-1.5 text-sm hover:bg-purple-50">
+                          {vehicleLabel(v)}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Service-history record — new costs only. "Ask per cost, default yes." */}
+            {vehicleId && !isEdit && (
+              <div className="rounded-md border border-gray-200 bg-gray-50 p-3 space-y-3">
+                <label className="flex items-center gap-2 text-sm font-medium text-gray-800">
+                  <input type="checkbox" checked={logService} onChange={(e) => setLogService(e.target.checked)} className="rounded" />
+                  Also add to {selectedVehicle?.reg || 'this vehicle'}&apos;s service history
+                </label>
+                {logService && (
+                  <div className="space-y-3">
+                    <div className="flex flex-wrap gap-1.5">
+                      {(['service', 'repair', 'mot', 'insurance', 'tax', 'tyre', 'other'] as const).map((t) => (
+                        <button key={t} type="button" onClick={() => setServiceType(t)}
+                          className={`px-2.5 py-1 text-xs rounded-md border capitalize ${serviceType === t ? 'bg-purple-600 text-white border-purple-600' : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-100'}`}>
+                          {t}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs text-gray-500 mb-1">Mileage</label>
+                        <input type="number" min="0" className={inputCls} value={serviceMileage} onChange={(e) => setServiceMileage(e.target.value)} placeholder="Odometer reading" />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-gray-500 mb-1">Garage / workshop</label>
+                        <input className={inputCls} value={serviceGarage} onChange={(e) => setServiceGarage(e.target.value)} placeholder={supplierName || 'Garage name'} />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-gray-500 mb-1">Status</label>
+                        <select className={inputCls} value={serviceStatus} onChange={(e) => setServiceStatus(e.target.value)}>
+                          {['Done', 'Pending', 'Booked', 'Cancelled'].map((s) => <option key={s} value={s}>{s}</option>)}
+                        </select>
+                      </div>
+                      {(serviceType === 'mot' || serviceType === 'insurance' || serviceType === 'tax' || serviceType === 'service' || serviceType === 'repair') && (
+                        <div>
+                          <label className="block text-xs text-gray-500 mb-1">Next due date</label>
+                          <input type="date" className={inputCls} value={serviceNextDueDate} onChange={(e) => setServiceNextDueDate(e.target.value)} />
+                        </div>
+                      )}
+                      {(serviceType === 'service' || serviceType === 'repair') && (
+                        <div>
+                          <label className="block text-xs text-gray-500 mb-1">Next service mileage</label>
+                          <input type="number" min="0" className={inputCls} value={serviceNextDueMileage} onChange={(e) => setServiceNextDueMileage(e.target.value)} placeholder="e.g. 90000" />
+                        </div>
+                      )}
+                    </div>
+                    <label className="flex items-start gap-2 text-xs text-gray-600">
+                      <input type="checkbox" checked={applyToVehicle} onChange={(e) => setApplyToVehicle(e.target.checked)} className="rounded mt-0.5" />
+                      <span>Update the vehicle&apos;s live figures (mileage, last/next service, due dates). Untick for a historical backfill.</span>
+                    </label>
+                    <p className="text-xs text-gray-400">
+                      Records cost as net (ex VAT) £{amountNet || '0.00'}{receiptFile || existing?.receipt_r2_key ? ' · receipt attached to the service record too' : ''}.
+                    </p>
+                  </div>
+                )}
               </div>
             )}
 
