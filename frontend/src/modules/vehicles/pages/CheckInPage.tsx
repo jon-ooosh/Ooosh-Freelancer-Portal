@@ -587,6 +587,13 @@ export function CheckInPage() {
               severity: mapSeverityToOpSeverity(damage.severity),
               summary: `${damage.location}: ${damage.description}`.slice(0, 250),
               description: locationNote,
+              // Link the issue to the job — resolved to the OP UUID
+              // server-side. Without this, check-in damage issues were
+              // vehicle-only: invisible on the Job Detail issues panel
+              // and the "Has issues" filter.
+              hirehop_job_number: form.bookOutHireHopJob
+                ? (parseInt(form.bookOutHireHopJob, 10) || null)
+                : null,
               r2_photo_keys: damagePhotoKeys.length > 0 ? damagePhotoKeys : undefined,
               reflag_context: {
                 source: 'checkin',

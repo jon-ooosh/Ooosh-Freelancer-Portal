@@ -32,6 +32,7 @@ import {
   logIssueEvent as logEvent,
   getDefaultVehicleIssueWatchers,
   notifyIssueRecipients,
+  sendVehicleIssueAlertEmail,
 } from '../services/job-issues';
 
 const router = Router();
@@ -365,6 +366,10 @@ router.post('/', validate(createSchema), async (req: AuthRequest, res: Response)
       `${body.category} — ${body.severity}`,
     );
 
+    // Direct email for vehicle damage/breakdown (gated internally on
+    // vehicle anchor + category) — see sendVehicleIssueAlertEmail.
+    await sendVehicleIssueAlertEmail(issueId, 'logged');
+
     // Activity Timeline echo so the issue shows on the job's timeline.
     // Skipped for vehicle-only issues (no job to anchor against).
     if (body.job_id) {
@@ -520,6 +525,10 @@ const autoCreateSchema = z.object({
   description: z.string().trim().max(10000).optional().nullable(),
   // Optional anchor extras
   job_id: z.string().uuid().optional().nullable(),
+  // HH job number alternative for callers that don't know the OP UUID
+  // (the check-in flow carries the HireHop number from book-out). Resolved
+  // to job_id server-side; ignored when job_id is supplied directly.
+  hirehop_job_number: z.number().int().optional().nullable(),
   driver_id: z.string().uuid().optional().nullable(),
   hh_stock_item_id: z.number().int().optional().nullable(),
   hh_stock_item_name: z.string().max(255).optional().nullable(),
@@ -544,11 +553,34 @@ router.post('/auto-create', validate(autoCreateSchema), async (req: AuthRequest,
   try {
     const body = req.body as z.infer<typeof autoCreateSchema>;
 
+    // Resolve job linkage. Callers can pass the OP UUID directly, or the
+    // HH job number (the check-in flow only knows the HireHop number from
+    // book-out). Without this, check-in damage issues were vehicle-only —
+    // invisible on the Job Detail issues panel and the "has issues" filter.
+    let jobId: string | null = body.job_id ?? null;
+    let jobClientOrgId: string | null = null;
+    if (!jobId && body.hirehop_job_number) {
+      const jobLookup = await query(
+        `SELECT id, client_id FROM jobs WHERE hh_job_number = $1 AND is_deleted = false LIMIT 1`,
+        [body.hirehop_job_number]
+      );
+      if (jobLookup.rowCount && jobLookup.rowCount > 0) {
+        jobId = jobLookup.rows[0].id;
+        jobClientOrgId = jobLookup.rows[0].client_id ?? null;
+      }
+    } else if (jobId) {
+      const jobLookup = await query(
+        `SELECT client_id FROM jobs WHERE id = $1 AND is_deleted = false`,
+        [jobId]
+      );
+      jobClientOrgId = jobLookup.rows[0]?.client_id ?? null;
+    }
+
     // Look for an open issue matching (vehicle, component). Pick the most
     // recently updated if somehow more than one exists (shouldn't, but the
     // dedup index is partial not unique — favour latest).
     const existing = await query(
-      `SELECT id FROM job_issues
+      `SELECT id, job_id FROM job_issues
        WHERE vehicle_id = $1
          AND component_key = $2
          AND status NOT IN ('resolved', 'written_off', 'cancelled')
@@ -569,7 +601,19 @@ router.post('/auto-create', validate(autoCreateSchema), async (req: AuthRequest,
         reflag_context: ctx,
         new_summary: body.summary,
       });
-      await query(`UPDATE job_issues SET updated_at = NOW() WHERE id = $1`, [issueId]);
+      // Backfill job linkage if the original issue pre-dates it (or was
+      // created from a context that didn't know the job).
+      if (jobId && !existing.rows[0].job_id) {
+        await query(
+          `UPDATE job_issues SET job_id = $2,
+                  client_organisation_id = COALESCE(client_organisation_id, $3),
+                  updated_at = NOW()
+           WHERE id = $1`,
+          [issueId, jobId, jobClientOrgId]
+        );
+      } else {
+        await query(`UPDATE job_issues SET updated_at = NOW() WHERE id = $1`, [issueId]);
+      }
 
       // Reflag pings watchers + assignee + reporter — the original
       // reporter cares that "their" issue is still happening.
@@ -585,6 +629,11 @@ router.post('/auto-create', validate(autoCreateSchema), async (req: AuthRequest,
       if (body.r2_photo_keys?.length) {
         await attachExternalIssuePhotos(issueId, req.user!.id, body.r2_photo_keys);
       }
+
+      // Direct email for vehicle damage/breakdown (gated internally on
+      // vehicle anchor + category). After photo attach so the photo count
+      // in the email is accurate.
+      await sendVehicleIssueAlertEmail(issueId, 're-flagged');
 
       const full = await query(`SELECT ${ISSUE_SELECT} ${ISSUE_JOIN} WHERE ji.id = $1`, [issueId]);
       return res.status(200).json({ data: full.rows[0], was_existing: true });
@@ -609,7 +658,7 @@ router.post('/auto-create', validate(autoCreateSchema), async (req: AuthRequest,
        )
        RETURNING id`,
       [
-        body.job_id ?? null, body.vehicle_id, body.driver_id ?? null, null,
+        jobId, body.vehicle_id, body.driver_id ?? null, jobClientOrgId,
         body.hh_stock_item_id ?? null, body.hh_stock_item_name ?? null, body.barcode ?? null, body.component_key,
         body.category, body.source_module, body.severity, body.summary, body.description ?? null,
         req.user!.id, defaultWatchers,
@@ -630,6 +679,24 @@ router.post('/auto-create', validate(autoCreateSchema), async (req: AuthRequest,
 
     if (body.r2_photo_keys?.length) {
       await attachExternalIssuePhotos(issueId, req.user!.id, body.r2_photo_keys);
+    }
+
+    // Direct email for vehicle damage/breakdown (gated internally on
+    // vehicle anchor + category). After photo attach so the photo count
+    // in the email is accurate.
+    await sendVehicleIssueAlertEmail(issueId, 'logged');
+
+    // Activity Timeline echo so the issue shows on the job's timeline —
+    // matches the manual POST / behaviour.
+    if (jobId) {
+      await query(
+        `INSERT INTO interactions (type, content, job_id, created_by)
+         VALUES ('note', $1, $2, $3)`,
+        [
+          `⚠️ Issue logged (${body.category}${body.severity === 'urgent' ? ', urgent' : ''}): ${body.summary}`,
+          jobId, req.user!.id,
+        ]
+      );
     }
 
     const full = await query(`SELECT ${ISSUE_SELECT} ${ISSUE_JOIN} WHERE ji.id = $1`, [issueId]);

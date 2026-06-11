@@ -5,6 +5,7 @@ import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware
 import { validate } from '../middleware/validate';
 import { hhBroker } from '../services/hirehop-broker';
 import { writeBackStatusToHireHop } from '../services/hirehop-writeback';
+import { ensureBacklineProblemIssue } from '../services/job-issues';
 
 const router = Router();
 router.use(authenticate);
@@ -404,6 +405,21 @@ router.patch('/:id', validate(updateRequirementSchema), async (req: AuthRequest,
           [updated.job_id]
         );
       }
+    }
+
+    // ── Backline flagged as Problem → register issue ────────────────────────
+    // A backline requirement in "Problem" (blocked) status is a real
+    // operational issue (damaged/missing kit) — make sure it exists in the
+    // problems register so it surfaces on the "Has issues" filter and gets
+    // worked through. Deduped per job inside the helper. Best-effort.
+    if (updated.requirement_type === 'backline' && updates.status === 'blocked' && updated.job_id) {
+      ensureBacklineProblemIssue({
+        jobId: updated.job_id,
+        requirementId: updated.id,
+        phase: updated.phase,
+        notes: updated.notes,
+        actorUserId: req.user!.id,
+      }).catch((err) => console.warn('[requirements] backline issue hook failed:', err));
     }
 
     // ── Auto-transition confirmed → prepping ────────────────────────────────

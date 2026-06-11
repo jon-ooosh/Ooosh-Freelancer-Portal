@@ -171,15 +171,27 @@ router.get('/jobs', async (req: AuthRequest, res: Response) => {
       whereClause += ` AND (jobs.manager1_person_id = $${params.length} OR jobs.manager2_person_id = $${params.length})`;
     }
 
-    // Has-issues filter — only jobs with at least one OPEN issue (problem
-    // register row). Drives the "Issues" filter pill on the Jobs and Returns
-    // pages. NULL has_issues param = no filter.
+    // Has-issues filter — jobs with at least one OPEN problem-register row
+    // (job_issues — Stage 2 storage, migration 075) OR any requirement
+    // stuck in "Problem" (blocked) status, e.g. backline flagged at
+    // de-prep before the register hook existed. The old query checked
+    // requirement_type='issue' which migration 075 retired (all rows
+    // soft-cancelled), so it could never match anything.
+    // V&D-suspended requirements carry status='blocked' but are "not
+    // required", not problems — excluded per the suspension convention.
     if (has_issues === 'true' || has_issues === '1') {
-      whereClause += ` AND EXISTS (
-        SELECT 1 FROM job_requirements jr
-        WHERE jr.job_id = jobs.id
-          AND jr.requirement_type = 'issue'
-          AND jr.status NOT IN ('done', 'cancelled')
+      whereClause += ` AND (
+        EXISTS (
+          SELECT 1 FROM job_issues ji
+          WHERE ji.job_id = jobs.id
+            AND ji.status NOT IN ('resolved', 'written_off', 'cancelled')
+        )
+        OR EXISTS (
+          SELECT 1 FROM job_requirements jr
+          WHERE jr.job_id = jobs.id
+            AND jr.status = 'blocked'
+            AND (jr.notes IS NULL OR jr.notes NOT LIKE '%[Suspended: Van & Driver]%')
+        )
       )`;
     }
 
