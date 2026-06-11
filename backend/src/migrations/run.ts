@@ -152,6 +152,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '115_holding_contact_fields.sql',
         '116_holding_received_by.sql',
         '117_job_balance_overrides.sql',
+        '118_cost_invoice_number_and_vat.sql',
       ];
 
       for (const migration of migrations) {

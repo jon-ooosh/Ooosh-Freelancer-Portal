@@ -71,6 +71,8 @@ const createSchema = z.object({
   amount_gross: money.optional().nullable(),
   amount_vat: money.optional().nullable(),
   amount_net: money.optional().nullable(),
+  vat_treatment: z.enum(['standard', 'reclaim_split']).optional(),
+  invoice_number: z.string().trim().max(100).optional().nullable(),
   currency: z.string().trim().length(3).optional(),
   description: z.string().trim().max(10000).optional().nullable(),
   category: z.string().trim().max(100).optional().nullable(),
@@ -116,7 +118,8 @@ const allocationSchema = z.object({
 // Columns a staff member may set directly via create/update (whitelist —
 // workflow timestamps + Xero state are server-controlled).
 const WRITABLE = [
-  'supplier_name', 'cost_date', 'amount_gross', 'amount_vat', 'amount_net', 'currency',
+  'supplier_name', 'cost_date', 'amount_gross', 'amount_vat', 'amount_net', 'vat_treatment',
+  'invoice_number', 'currency',
   'description', 'category', 'xero_account_code', 'cost_type', 'payment_method',
   'cot_card_holder', 'cot_card_last4', 'payment_status', 'job_id', 'vehicle_id',
   'quote_assignment_id', 'platform_issue_id', 'vehicle_service_log_id', 'vehicle_fuel_log_id',
@@ -256,6 +259,32 @@ router.get('/by-vehicle/:vehicleId', async (req: AuthRequest, res: Response) => 
 router.get('/by-issue/:issueId', async (req: AuthRequest, res: Response) => {
   try { await listBy('platform_issue_id', req.params.issueId as string, res); }
   catch (err) { console.error('[costs] by-issue error:', err); res.status(500).json({ error: 'Internal server error' }); }
+});
+
+// De-dup check: has this supplier + invoice number already been captured?
+// Non-blocking — the modal warns, staff decides. Excludes a given cost id (so
+// editing a cost doesn't flag itself). Multi-segment so it doesn't hit /:id.
+router.get('/check-invoice', async (req: AuthRequest, res: Response) => {
+  try {
+    const invoiceNumber = String(req.query.invoice_number || '').trim();
+    const supplier = String(req.query.supplier_name || '').trim();
+    const excludeId = req.query.exclude_id ? String(req.query.exclude_id) : null;
+    if (!invoiceNumber) { res.json({ data: { duplicate: false } }); return; }
+    const r = await query(
+      `SELECT id, supplier_name, amount_gross, cost_date, payment_status
+       FROM costs
+       WHERE invoice_number = $1
+         AND ($2 = '' OR LOWER(COALESCE(supplier_name, '')) = LOWER($2))
+         AND ($3::uuid IS NULL OR id <> $3::uuid)
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [invoiceNumber, supplier, excludeId]
+    );
+    res.json({ data: { duplicate: r.rows.length > 0, match: r.rows[0] || null } });
+  } catch (err) {
+    console.error('[costs] check-invoice error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // ── Xero diagnostics (Custom Connection) ─────────────────────────────────────
