@@ -2283,13 +2283,15 @@ for this client" block (`JobBriefing.holding`, try/catch-guarded). Storage tenan
 client's held items (`HeldItemsSection entityType=organisation`). `merch` is now a slot in
 `job-progress-strip.ts` (+ FE mirror + briefing strip) so the pip shows on the dashboard Today strip.
 
+**Merch card + panel combined (PR #703):** the standalone Overview "Held for Clients" panel was
+duplicating the inert merch checklist pip. Now ONE surface — the merch requirement card in
+`JobPrepChecklist` carries its incoming-items detail + Send Merch Form nested beneath it (same pattern
+as the vehicle card nesting hire_forms/excess); the requirement row is untouched so the prep counter /
+dashboard strip / briefing roll-ups keep working. Merch is item-gated (no items → no requirement), so
+when nothing's logged a plain "Held for Clients" entry card renders instead (preserving the Send-Merch-
+Form entry point + empty state). Pre-hire only; standalone Overview panel removed.
+
 **Remaining / open:**
-- **Combine Merch Receiving card + "Held for Clients" panel** (raised Jun 2026) — duplicated on the
-  Overview tab (panel detail inches above an inert checklist pip). Unlike vehicle/excess (detail on
-  other tabs), merch's detail is on the same tab, so the pip is redundant. Proposed: render the rich
-  panel *in place of* the merch card inside `JobPrepChecklist` (keep the requirement row so the prep
-  counter / dashboard strip / briefing roll-ups still work) + drop the standalone panel. Pending jon's
-  nod on approach.
 - IRL feedback from the chase + hold-until flows (staff trialling over the following weeks).
 
 **Migrations:** 113/115/116 (initial) + 119 (chase/hold). `qrcode` dep added at the initial build.
