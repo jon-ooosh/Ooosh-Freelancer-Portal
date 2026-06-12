@@ -152,6 +152,11 @@ export default function OrganisationDetailPage() {
   const [editPersonRole, setEditPersonRole] = useState('');
   const [editPersonRoleSaving, setEditPersonRoleSaving] = useState(false);
 
+  // End a person's role at this org (soft — marks historical with end_date)
+  const [endingPersonRole, setEndingPersonRole] = useState<{ roleId: string; personId: string; personName: string; role: string } | null>(null);
+  const [endPersonReason, setEndPersonReason] = useState('');
+  const [endingPersonSaving, setEndingPersonSaving] = useState(false);
+
   // Add person — search-first; if no match (or coincidental match) we let
   // the user fall through to a "create new" inline form.
   const [showAddPerson, setShowAddPerson] = useState(false);
@@ -438,6 +443,35 @@ export default function OrganisationDetailPage() {
       alert(err?.response?.data?.error || err?.message || 'Failed to update role');
     } finally {
       setEditPersonRoleSaving(false);
+    }
+  }
+
+  // End a person's role at this org. Soft only — the backend sets
+  // status='historical', stamps end_date and clears primary (the row moves to
+  // the Historical section, preserving the "who used to be involved" audit
+  // trail rather than vanishing). Optional reason is logged as an interaction.
+  async function handleEndPersonRoleConfirmed() {
+    if (!endingPersonRole || endingPersonSaving) return;
+    setEndingPersonSaving(true);
+    try {
+      await api.put(`/people/${endingPersonRole.personId}/roles/${endingPersonRole.roleId}/end`, {});
+      if (endPersonReason.trim()) {
+        try {
+          await api.post('/interactions', {
+            type: 'note',
+            content: `Role ended at ${org?.name || 'organisation'}: ${endPersonReason.trim()}`,
+            person_id: endingPersonRole.personId,
+            organisation_id: id,
+          });
+        } catch { /* non-critical — the role still ended */ }
+      }
+      setEndingPersonRole(null);
+      setEndPersonReason('');
+      loadOrg();
+    } catch (err: any) {
+      alert(err?.response?.data?.error || err?.message || 'Failed to end role');
+    } finally {
+      setEndingPersonSaving(false);
     }
   }
 
@@ -948,6 +982,14 @@ export default function OrganisationDetailPage() {
                               Make primary
                             </button>
                           )}
+                          <button
+                            type="button"
+                            onClick={() => setEndingPersonRole({ roleId: p.id, personId: p.person_id, personName: p.person_name, role: p.role })}
+                            className="ml-2 text-xs text-red-600 hover:text-red-700 underline"
+                            title="End this person's role at the organisation (kept as historical for the audit trail)"
+                          >
+                            End role
+                          </button>
                           </>
                           )}
                         </td>
@@ -1011,6 +1053,46 @@ export default function OrganisationDetailPage() {
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* End person role confirmation modal */}
+      {endingPersonRole && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4 p-6">
+            <h3 className="text-lg font-semibold text-gray-900 mb-2">End Role</h3>
+            <p className="text-sm text-gray-600 mb-4">
+              End <strong>{endingPersonRole.personName}'s</strong> role as <strong>{endingPersonRole.role}</strong> at <strong>{org.name}</strong>?
+              This is marked as historical with today's date — the person stays on record under "Historical", not deleted.
+            </p>
+
+            <div className="mb-4">
+              <label className="block text-xs font-medium text-gray-500 uppercase mb-1">Reason (optional)</label>
+              <input
+                type="text"
+                value={endPersonReason}
+                onChange={(e) => setEndPersonReason(e.target.value)}
+                placeholder="e.g. No longer manages the band, left the company..."
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-ooosh-500 focus:border-ooosh-500"
+              />
+            </div>
+
+            <div className="flex justify-end gap-2 pt-4 border-t mt-4">
+              <button
+                onClick={() => { setEndingPersonRole(null); setEndPersonReason(''); }}
+                className="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleEndPersonRoleConfirmed}
+                disabled={endingPersonSaving}
+                className="px-4 py-2 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50"
+              >
+                {endingPersonSaving ? 'Saving...' : 'End Role'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
