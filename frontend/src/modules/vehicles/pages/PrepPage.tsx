@@ -11,6 +11,7 @@ import type { ChecklistItem, DetailPrompt } from '../lib/settings-api'
 import { DEFAULT_CHECKLIST_SETTINGS } from '../config/default-checklist-settings'
 import { createVehicleEvent } from '../lib/events-api'
 import { fetchLastEventForVehicle } from '../lib/events-query'
+import { checkMileagePlausibility, resolveMileageFloor } from '../lib/mileage-sanity'
 import { fetchLastPrepSession, extractTyreValues } from '../lib/prep-history'
 import { updateFleetHireStatus } from '../lib/fleet-status'
 import { uploadAllPhotos } from '../lib/photo-upload'
@@ -145,9 +146,27 @@ export function PrepPage() {
   const totalCount = prepItems.length
   const allAnswered = totalCount > 0 && completedCount === totalCount
 
-  // Mileage validation
+  // Mileage validation.
+  // Floor against the canonical fleet current_mileage (correctable down by a
+  // manager) rather than the last raw event, so a corrected van isn't left
+  // stuck behind a bad high reading still sitting in event history.
   const mileageNum = parseInt(mileage, 10)
-  const mileageTooLow = previousMileage != null && !isNaN(mileageNum) && mileageNum < previousMileage
+  const mileageFloor = resolveMileageFloor({
+    currentMileage: selectedVehicle?.currentMileage,
+    lastEventMileage: previousMileage,
+  })
+  const mileageTooLow = mileageFloor != null && !isNaN(mileageNum) && mileageNum < mileageFloor
+  // Non-blocking high-jump (typo) warning — the missing guard that let the
+  // 179,283 fat-finger through on prep in the first place. Date-aware allowance
+  // off the canonical figure's last-update timestamp.
+  const mileageHighJump = !mileageTooLow
+    ? checkMileagePlausibility({
+        newReading: mileageNum,
+        lastReading: mileageFloor,
+        lastReadingDate: selectedVehicle?.lastMileageUpdate ?? null,
+        newReadingDate: new Date().toISOString(),
+      })
+    : { level: 'ok' as const, message: null }
 
   // Can submit: (all answered OR testing mode) + overall status + name + mileage valid
   const canSubmit = (testingMode || allAnswered) && overallStatus !== '' && preparedBy.trim() !== '' && !mileageTooLow
@@ -794,21 +813,30 @@ export function PrepPage() {
                   inputMode="numeric"
                   value={mileage}
                   onChange={e => setMileage(e.target.value)}
-                  placeholder={previousMileage != null ? `Prev: ${previousMileage.toLocaleString()}` : 'Current miles'}
+                  placeholder={mileageFloor != null ? `Recorded: ${mileageFloor.toLocaleString()}` : 'Current miles'}
                   className={`w-full rounded-lg border px-3 py-2 text-sm text-gray-700 placeholder:text-gray-400 focus:outline-none focus:ring-1 ${
                     mileageTooLow
                       ? 'border-red-300 focus:border-red-300 focus:ring-red-300'
-                      : 'border-gray-200 focus:border-blue-300 focus:ring-blue-300'
+                      : mileageHighJump.level === 'high'
+                        ? 'border-amber-300 focus:border-amber-300 focus:ring-amber-300'
+                        : 'border-gray-200 focus:border-blue-300 focus:ring-blue-300'
                   }`}
                 />
                 {mileageTooLow && (
                   <p className="mt-1 text-xs text-red-500">
-                    Cannot be lower than previous ({previousMileage!.toLocaleString()} mi)
+                    That's below the recorded mileage ({mileageFloor!.toLocaleString()} mi). If the
+                    odometer really reads this, a manager can correct the vehicle's recorded mileage on
+                    the vehicle page, then this will save.
                   </p>
                 )}
-                {previousMileage != null && !mileageTooLow && (
+                {!mileageTooLow && mileageHighJump.level === 'high' && (
+                  <p className="mt-1 text-xs text-amber-600">
+                    {mileageHighJump.message}
+                  </p>
+                )}
+                {mileageFloor != null && !mileageTooLow && mileageHighJump.level !== 'high' && (
                   <p className="mt-1 text-xs text-gray-400">
-                    Previous: {previousMileage.toLocaleString()} mi
+                    Recorded: {mileageFloor.toLocaleString()} mi
                   </p>
                 )}
               </div>
