@@ -10,7 +10,7 @@
  * Capture is manual (CostCaptureModal); AI extraction is a fast-follow.
  */
 import { useState, useEffect, useCallback } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import CostCaptureModal from '../components/CostCaptureModal';
@@ -110,6 +110,10 @@ export default function CostsPage() {
     try {
       await api.post(`/costs/${id}/${action}`, {});
       await load(true);
+      // Approving a bill pushes it to Xero in the background (takes a second
+      // or two) — refresh again shortly so the "Bill created" pill appears
+      // without a manual reload.
+      if (action === 'approve') setTimeout(() => load(true), 3500);
     } catch (err) {
       alert(err instanceof Error ? err.message : `Failed to ${action}`);
     } finally {
@@ -246,7 +250,7 @@ export default function CostsPage() {
                 <th className="px-2.5 py-2 text-right font-medium">Gross</th>
                 <th className="px-2.5 py-2 text-left font-medium">Type</th>
                 <th className="px-2.5 py-2 text-left font-medium">Linked</th>
-                <th className="px-2.5 py-2 text-left font-medium">Uploaded by</th>
+                {view === 'all' && <th className="px-2.5 py-2 text-left font-medium">Uploaded by</th>}
                 <th className="px-2.5 py-2 text-left font-medium">Status</th>
                 <th className="px-2.5 py-2 text-left font-medium">Xero</th>
                 <th className="px-2.5 py-2 text-right font-medium">Actions</th>
@@ -265,14 +269,20 @@ export default function CostsPage() {
                       </div>
                     </div>
                   </td>
-                  <td className="px-2.5 py-2 text-gray-600 max-w-[180px] truncate">{c.description || '—'}</td>
+                  <td className="px-2.5 py-2 text-gray-600 max-w-[180px] truncate" title={c.description || undefined}>{c.description || '—'}</td>
                   <td className="px-2.5 py-2 text-right font-medium text-gray-900">{gbp(c.amount_gross)}</td>
-                  <td className="px-2.5 py-2 text-gray-600">{c.category || c.cost_type.replace('_', ' ')}</td>
-                  <td className="px-2.5 py-2 text-gray-600">
-                    {c.hh_job_number ? <span className="text-purple-700">#{c.hh_job_number}</span>
-                      : c.vehicle_reg ? <span className="text-purple-700">{c.vehicle_reg}</span> : '—'}
+                  <td className="px-2.5 py-2 text-gray-600 max-w-[110px] truncate whitespace-nowrap" title={`${c.category || c.cost_type.replace('_', ' ')}${view !== 'all' && c.uploaded_by_name ? ` · uploaded by ${c.uploaded_by_name}` : ''}`}>
+                    {c.category || c.cost_type.replace('_', ' ')}
                   </td>
-                  <td className="px-2.5 py-2 text-gray-600 whitespace-nowrap">{c.uploaded_by_name || '—'}</td>
+                  <td className="px-2.5 py-2 text-gray-600 whitespace-nowrap">
+                    {c.hh_job_number && c.job_id ? (
+                      <Link to={`/jobs/${c.job_id}`} title={c.job_name || undefined} className="text-purple-700 hover:underline">#{c.hh_job_number}</Link>
+                    ) : c.hh_job_number ? <span className="text-purple-700">#{c.hh_job_number}</span>
+                      : c.vehicle_reg && c.vehicle_id ? (
+                        <Link to={`/vehicles/fleet/${c.vehicle_id}`} className="text-purple-700 hover:underline">{c.vehicle_reg}</Link>
+                      ) : c.vehicle_reg ? <span className="text-purple-700">{c.vehicle_reg}</span> : '—'}
+                  </td>
+                  {view === 'all' && <td className="px-2.5 py-2 text-gray-600 whitespace-nowrap">{c.uploaded_by_name || '—'}</td>}
                   <td className="px-2.5 py-2">
                     {c.approval_state ? (
                       <span className={`px-2 py-0.5 text-xs rounded-full ${APPROVAL_COLOURS[c.approval_state] || 'bg-gray-100 text-gray-700'}`}>
@@ -301,13 +311,14 @@ export default function CostsPage() {
                           Confirm recharge
                         </button>
                       )}
-                      <button onClick={() => setEditing(c)} className="px-2 py-1 text-xs text-gray-600 hover:bg-gray-100 rounded">
-                        Edit
+                      <button onClick={() => setEditing(c)} title="Edit"
+                        className="px-1.5 py-1 text-sm text-gray-500 hover:text-gray-800 hover:bg-gray-100 rounded">
+                        ✎
                       </button>
                       {isManager && (
-                        <button disabled={actionBusy === c.id + 'delete'} onClick={() => deleteCost(c)}
-                          className="px-2 py-1 text-xs text-red-600 hover:bg-red-50 rounded disabled:opacity-50">
-                          Delete
+                        <button disabled={actionBusy === c.id + 'delete'} onClick={() => deleteCost(c)} title="Delete"
+                          className="px-1.5 py-1 text-sm text-red-500 hover:text-red-700 hover:bg-red-50 rounded disabled:opacity-50">
+                          🗑
                         </button>
                       )}
                     </div>
@@ -423,8 +434,8 @@ function ReceiptPreview({ cost, onClose }: { cost: CostRow; onClose: () => void 
 // a bill payment posts to. Keep in step with the paid-now methods in
 // CostCaptureModal + backend SPEND_MONEY_METHODS.
 const PAID_NOW_METHODS = [
-  { value: 'wise', label: 'Wise bank transfer' },
   { value: 'lloyds_transfer', label: 'Lloyds bank transfer' },
+  { value: 'wise', label: 'Wise bank transfer' },
   { value: 'cot_card', label: 'Company card (COT)' },
   { value: 'amex', label: 'Amex card' },
   { value: 'lloyds_cc', label: 'Lloyds credit card' },
@@ -439,8 +450,16 @@ function PayModal({ cost, busy, onClose, onSubmit }: {
   onSubmit: (paidDate: string, paidMethod: string) => void;
 }) {
   const [paidDate, setPaidDate] = useState(() => new Date().toISOString().slice(0, 10));
-  const [paidMethod, setPaidMethod] = useState('wise');
+  const [paidMethod, setPaidMethod] = useState('lloyds_transfer');
   const isReimburse = cost.payment_method === 'reimburse_me';
+  // Due date mirrors the Xero bill: invoice date + 30 days (no per-supplier
+  // terms tracked) — keep in step with addDaysISO in cost-xero-push.ts.
+  const dueDate = (() => {
+    if (!cost.cost_date) return null;
+    const d = new Date(`${cost.cost_date.slice(0, 10)}T00:00:00Z`);
+    d.setUTCDate(d.getUTCDate() + 30);
+    return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+  })();
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
@@ -459,7 +478,9 @@ function PayModal({ cost, busy, onClose, onSubmit }: {
           <p className="text-sm text-gray-600">
             {isReimburse ? 'Reimbursement to ' : 'Payment to '}
             <strong>{isReimburse ? (cost.uploaded_by_name || 'staff') : (cost.supplier_name || 'supplier')}</strong>
-            {' '}of <strong>{gbp(cost.amount_gross)}</strong>.
+            {' '}of <strong>{gbp(cost.amount_gross)}</strong>
+            {cost.invoice_number ? <> for invoice <strong>{cost.invoice_number}</strong></> : null}
+            {dueDate ? <>, due <strong>{dueDate}</strong></> : null}.
           </p>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Payment date</label>
@@ -525,6 +546,13 @@ function XeroCell({ cost, busy, onRetry }: { cost: Cost; busy: boolean; onRetry:
   // approval, so show their state regardless of payment status.
   if (!isBill && cost.payment_status !== 'paid') {
     return <span className="text-xs text-gray-400">—</span>;
+  }
+  // A bill awaiting approval syncs AUTOMATICALLY the moment it's approved —
+  // a "Push now" button here just looks like a chore (and would no-op anyway).
+  if (isBill && !cost.xero_object_id
+    && cost.approval_state !== 'approved' && cost.approval_state !== 'paid'
+    && cost.xero_sync_state !== 'error') {
+    return <span className="text-xs text-gray-400 whitespace-nowrap" title="The Xero bill is created automatically when this cost is approved">Syncs on approval</span>;
   }
   if (cost.xero_sync_state === 'reconciled') {
     return <span className="px-2 py-0.5 text-xs rounded-full bg-emerald-100 text-emerald-800">Reconciled</span>;

@@ -442,6 +442,7 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
           amount_vat: number | null;
           amount_net: number | null;
           vat_treatment: 'standard' | 'no_vat';
+          invoice_number: string | null;
           job_number: string | null;
           description: string | null;
           category_code: string | null;
@@ -452,26 +453,39 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
       const ex = res.data;
       if (ex.supplier) setSupplierName(ex.supplier);
       if (ex.cost_date) setCostDate(ex.cost_date);
+      if (ex.invoice_number) setInvoiceNumber(ex.invoice_number);
       if (ex.description) setDescription(ex.description);
       if (ex.category_code) setCategoryCode(ex.category_code);
       // The document is authoritative on VAT: no VAT shown → No VAT, never an
-      // assumed 20%. Drive the VAT mode from the extraction, then fill amounts.
-      const mode: VatMode = ex.vat_treatment === 'standard' ? 'vat20' : 'none';
-      setVatMode(mode);
+      // assumed 20%. When VAT IS shown, use the document's actual figures —
+      // only snap to the 20%-auto mode when the VAT really is 20% of net;
+      // otherwise keep all three figures verbatim in Manual mode (recomputing
+      // at a forced 20% was mangling correct extractions on non-20% docs).
       setVatTouched(true);
       const gross = ex.amount_gross;
-      if (gross != null) {
+      const vat = ex.amount_vat;
+      const net = ex.amount_net;
+      if (ex.vat_treatment === 'standard' && vat != null && vat > 0 && net != null && gross != null) {
+        const is20 = Math.abs(vat - round2(net * 0.2)) <= 0.02;
+        setVatMode(is20 ? 'vat20' : 'manual');
+        setAmountGross(gross.toFixed(2));
+        setAmountVat(vat.toFixed(2));
+        setAmountNet(net.toFixed(2));
+      } else if (ex.vat_treatment === 'standard' && gross != null) {
+        // VAT-bearing but incomplete figures — derive at 20% from gross.
+        setVatMode('vat20');
         setAmountGross(String(gross));
-        if (mode === 'vat20') {
-          const net = round2(gross / 1.2);
-          setAmountNet(net.toFixed(2));
-          setAmountVat(round2(gross - net).toFixed(2));
-        } else {
-          setAmountNet(gross.toFixed(2));
+        const derivedNet = round2(gross / 1.2);
+        setAmountNet(derivedNet.toFixed(2));
+        setAmountVat(round2(gross - derivedNet).toFixed(2));
+      } else {
+        setVatMode('none');
+        const total = gross ?? net;
+        if (total != null) {
+          setAmountGross(total.toFixed(2));
+          setAmountNet(total.toFixed(2));
           setAmountVat('0.00');
         }
-      } else if (ex.amount_net != null) {
-        setAmountNet(String(ex.amount_net));
       }
       // Job number is a suggestion only — staff confirm before it links.
       setSuggestedJobNumber(!linkedJobId && ex.job_number ? ex.job_number.replace(/\D/g, '') || null : null);
@@ -514,6 +528,14 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
       if (!amountVat || Number(amountVat) <= 0) { setError('Enter the reclaimable VAT amount.'); return; }
     } else if (!amountGross || Number(amountGross) <= 0) {
       if (!wantsService) { setError('Gross amount is required.'); return; }
+    }
+    // A cost row needs a category — it's the Xero account code, and the push
+    // fails without it. Service-record-only saves (no cost amount) are exempt.
+    const savingServiceOnly = wantsService
+      && (vatMode === 'reclaim' ? !(Number(amountNet) > 0) : !(Number(amountGross) > 0));
+    if (!savingServiceOnly && !categoryCode) {
+      setError('Pick "What\'s this cost for?" — it sets the Xero category, and the push to Xero fails without it.');
+      return;
     }
     setSaving(true);
     try {
