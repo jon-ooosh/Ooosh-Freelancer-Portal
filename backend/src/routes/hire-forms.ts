@@ -977,17 +977,33 @@ router.post('/quick-assign', authenticate, validate(quickAssignSchema), async (r
     // back to 1 if the derivation engine hasn't run yet for this job
     // (e.g. freshly-created OP-native job).
     const flagsResult = await query(
-      `SELECT hh_derived_flags FROM jobs WHERE id = $1`,
+      `SELECT hh_derived_flags, is_internal FROM jobs WHERE id = $1`,
       [f.job_id]
     );
     const flags = flagsResult.rows[0]?.hh_derived_flags as { self_drive_count?: number } | null;
     const vanCount = Math.max(flags?.self_drive_count || 1, 1);
+    const isInternalJob = flagsResult.rows[0]?.is_internal === true;
+
+    // Internal jobs (garage visits / our own vehicle movements) never charge
+    // excess — record the assignment as not_required (£0) for audit and skip
+    // the orphan/top-N logic entirely. Without this gate, quick-assign would
+    // create (or un-waive) a £1,200 record on a job with no client to charge.
+    if (isInternalJob) {
+      await query(
+        `INSERT INTO job_excess (assignment_id, job_id, hirehop_job_id, excess_amount_required, excess_calculation_basis, excess_status, created_by)
+         VALUES ($1, $2, $3, 0, 'Internal job — excess not applicable', 'not_required', $4)`,
+        [assignment.id, f.job_id, hhJobId, req.user!.id]
+      );
+      console.log(`[hire-forms] Quick-assign on internal job: assignment ${assignment.id} recorded with not_required excess`);
+    } else {
 
     // Try to absorb an orphan record created by the derivation engine.
+    // 'waived' is excluded — a waived record (staff decision, V&D cascade or
+    // internal-job cascade) must never be silently flipped back to 'pending'.
     const orphanExcess = await query(
       `SELECT id FROM job_excess
        WHERE job_id = $1 AND assignment_id IS NULL
-         AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required')
+         AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required', 'waived')
        ORDER BY created_at ASC LIMIT 1`,
       [f.job_id]
     );
@@ -1040,6 +1056,7 @@ router.post('/quick-assign', authenticate, validate(quickAssignSchema), async (r
         console.log(`[hire-forms] Quick-assign additional driver: assignment ${assignment.id} (driver ${activeCount + 1} on ${vanCount}-van job, not_required)`);
       }
     }
+    } // end !isInternalJob
 
     console.log(`[hire-forms] Quick assignment created: ${assignment.id} (driver ${f.driver_id} → vehicle ${f.vehicle_id || 'unassigned'} on job ${f.job_id}, van_count=${vanCount})`);
 

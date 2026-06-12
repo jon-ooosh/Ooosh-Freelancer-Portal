@@ -556,11 +556,14 @@ export async function sendExcessEmail(opts: {
 /** Send last-minute booking alert to info@ */
 export async function sendLastMinuteAlert(jobId: string) {
   const jobResult = await query(
-    `SELECT job_name, hh_job_number, client_name, company_name, job_date, out_date FROM jobs WHERE id = $1`,
+    `SELECT job_name, hh_job_number, client_name, company_name, job_date, out_date, is_internal FROM jobs WHERE id = $1`,
     [jobId]
   );
   if (jobResult.rows.length === 0) return;
   const job = jobResult.rows[0];
+
+  // Internal jobs (garage visits etc.) aren't bookings — no alert
+  if (job.is_internal === true) return;
 
   const startDate = job.job_date || job.out_date;
   if (!startDate) return;

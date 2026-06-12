@@ -25,6 +25,7 @@ import { getFrontendUrl } from '../config/app-urls';
 export type HireFormTriggerReason =
   | 'sent'
   | 'van_and_driver'
+  | 'internal'
   | 'no_hh_job'
   | 'no_job_date'
   | 'too_far_out'
@@ -51,15 +52,17 @@ export async function triggerHireFormEmailOnConfirmation(
   jobId: string
 ): Promise<HireFormTriggerResult> {
   const jobData = await query(
-    `SELECT job_date, is_van_and_driver, hh_job_number FROM jobs WHERE id = $1`,
+    `SELECT job_date, is_van_and_driver, is_internal, hh_job_number FROM jobs WHERE id = $1`,
     [jobId]
   );
   if (jobData.rows.length === 0) {
     return { sent: 0, reason: 'error', context: 'job row not found' };
   }
-  const { job_date, is_van_and_driver, hh_job_number } = jobData.rows[0];
+  const { job_date, is_van_and_driver, is_internal, hh_job_number } = jobData.rows[0];
 
   if (is_van_and_driver) return { sent: 0, reason: 'van_and_driver' };
+  // Internal jobs (garage / our own vehicle movements) never get hire forms
+  if (is_internal) return { sent: 0, reason: 'internal' };
   if (!hh_job_number) return { sent: 0, reason: 'no_hh_job' };
   if (!job_date) return { sent: 0, reason: 'no_job_date' };
 

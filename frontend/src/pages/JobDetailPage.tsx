@@ -1414,6 +1414,7 @@ export default function JobDetailPage() {
   const [hhStatusMismatch, setHhStatusMismatch] = useState<{ op_status: string; hh_status: number; hh_status_name: string } | null>(null);
   const [pushingStatusToHH, setPushingStatusToHH] = useState(false);
   const [prepChecklistKey, setPrepChecklistKey] = useState(0);
+  const [internalToggling, setInternalToggling] = useState(false);
   const editNameRef = useRef<HTMLInputElement>(null);
   const editHHRef = useRef<HTMLInputElement>(null);
   const clientSearchRef = useRef<HTMLDivElement>(null);
@@ -2088,6 +2089,36 @@ export default function JobDetailPage() {
     }
   }
 
+  /** Toggle the Internal flag — mutes hire forms / excess / money tracking
+   *  for garage visits, MOTs and our own vehicle movements booked in HH.
+   *  Crew & Transport and vehicle allocation are unaffected. */
+  async function toggleInternal() {
+    if (!job || !id) return;
+    const turningOn = !job.is_internal;
+    if (turningOn) {
+      const ok = window.confirm(
+        'Mark this job as Internal?\n\n' +
+        'Use for garage visits, MOTs and our own vehicle movements. This mutes:\n' +
+        '• Hire form requirements + auto-emails\n' +
+        '• Insurance excess tracking\n' +
+        '• Money overview (no "balance outstanding" for this job)\n\n' +
+        'Crew & Transport and vehicle allocation stay active. You can revert at any time.'
+      );
+      if (!ok) return;
+    }
+    setInternalToggling(true);
+    try {
+      await api.patch(`/hirehop/jobs/${id}/internal`, { isInternal: turningOn });
+      await loadJob();
+      // Re-fetch the prep checklist so suspended/restored cards show immediately
+      setPrepChecklistKey(k => k + 1);
+    } catch (err: any) {
+      alert(err?.message || 'Failed to update internal flag');
+    } finally {
+      setInternalToggling(false);
+    }
+  }
+
   /** Push OP pipeline status to HireHop to resolve a mismatch */
   async function pushStatusToHH() {
     if (!job) return;
@@ -2686,8 +2717,10 @@ export default function JobDetailPage() {
         </div>
       )}
 
-      {/* No client email warning — automated emails for this job will be redirected to info@ */}
-      {job.has_client_email === false && (
+      {/* No client email warning — automated emails for this job will be
+          redirected to info@. Suppressed on internal jobs (garage visits etc.)
+          where there's deliberately no client to email. */}
+      {job.has_client_email === false && !job.is_internal && (
         <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-4">
           <div className="flex items-start gap-3">
             <div className="flex-1">
@@ -3403,6 +3436,28 @@ export default function JobDetailPage() {
           </div>
           <div className="flex flex-col items-end gap-2 flex-shrink-0 max-w-full">
             <div className="flex items-center gap-2">
+              {/* Internal job toggle — mutes hire forms / excess / money
+                  tracking for garage visits, MOTs and our own vehicle
+                  movements. Crew & Transport stays live. */}
+              <button
+                onClick={toggleInternal}
+                disabled={internalToggling}
+                className={
+                  job.is_internal
+                    ? 'inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-slate-400 bg-slate-100 rounded-lg hover:bg-slate-200 text-slate-700 font-medium disabled:opacity-50 transition-colors'
+                    : 'inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-500 disabled:opacity-50 transition-colors'
+                }
+                title={
+                  job.is_internal
+                    ? 'Internal job — hire forms, excess and money tracking are muted (crew & transport unaffected). Click to revert to a normal client job.'
+                    : 'Mark as internal (garage visit, MOT, our own vehicle movement) — mutes hire form emails, excess and money tracking'
+                }
+              >
+                <span>🔧</span>
+                <span className="hidden sm:inline">
+                  {internalToggling ? 'Saving…' : job.is_internal ? 'Internal Job ✓' : 'Mark Internal'}
+                </span>
+              </button>
               {job.hh_job_number && (
                 <button
                   onClick={() => syncFromHireHop(true)}
@@ -6037,7 +6092,7 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
   // van slot is Van & Driver) are listed below as greyed "Not required" stubs
   // but shouldn't move the progress meter or count as "blocked" — they're
   // not a problem, they just don't apply on this job.
-  const isVdSuspended = (r: JobRequirement) => r.notes?.includes('[Suspended: Van & Driver]') === true;
+  const isVdSuspended = (r: JobRequirement) => r.notes?.includes('[Suspended:') === true;
   const countableReqs = requirements.filter(r => !isVdSuspended(r));
   const doneCount = countableReqs.filter(r => r.status === 'done').length;
   const blockedCount = countableReqs.filter(r => r.status === 'blocked').length;

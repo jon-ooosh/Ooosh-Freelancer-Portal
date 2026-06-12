@@ -65,7 +65,7 @@ router.post('/bulk', async (req: AuthRequest, res: Response) => {
       `SELECT jr.job_id, jr.status, jr.requirement_type
        FROM job_requirements jr
        WHERE jr.job_id = ANY($1) ${phaseFilter}
-         AND (jr.notes IS NULL OR jr.notes NOT LIKE '%[Suspended: Van & Driver]%')`,
+         AND (jr.notes IS NULL OR jr.notes NOT LIKE '%[Suspended:%')`,
       [ids]
     );
     // Group by job_id for easy lookup
@@ -104,7 +104,7 @@ router.post('/closeout-progress', async (req: AuthRequest, res: Response) => {
        FROM job_requirements jr
        JOIN requirement_type_definitions rtd ON rtd.type = jr.requirement_type
        WHERE jr.job_id = ANY($1) AND jr.phase = 'post_hire'
-         AND (jr.notes IS NULL OR jr.notes NOT LIKE '%[Suspended: Van & Driver]%')
+         AND (jr.notes IS NULL OR jr.notes NOT LIKE '%[Suspended:%')
        ORDER BY rtd.sort_order`,
       [ids]
     );

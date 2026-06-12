@@ -129,6 +129,7 @@ router.get('/overview', authorize('admin', 'manager'), async (req: AuthRequest, 
        ) ch ON TRUE
        WHERE jf.balance_outstanding > 0.01
          AND COALESCE(j.pipeline_status, '') NOT IN ('lost', 'cancelled')
+         AND COALESCE(j.is_internal, false) = false
          ${speculativeFilter}`;
     const balances = await query(
       `${balanceSelect} AND o.job_id IS NULL
@@ -152,6 +153,7 @@ router.get('/overview', authorize('admin', 'manager'), async (req: AuthRequest, 
        WHERE COALESCE(jf.total_hire_deposits, 0) <= 0.01
          AND jf.hire_value_inc_vat > 0.01
          AND COALESCE(j.pipeline_status, '') IN ('confirmed', 'prepping', 'prepped')
+         AND COALESCE(j.is_internal, false) = false
        ORDER BY j.out_date ASC NULLS LAST
        LIMIT 200`
     );
@@ -172,6 +174,7 @@ router.get('/overview', authorize('admin', 'manager'), async (req: AuthRequest, 
        JOIN job_excess je ON je.id = h.excess_id
        LEFT JOIN jobs j ON j.id = je.job_id
        WHERE h.held_amount > 0.01
+         AND (j.id IS NULL OR COALESCE(j.is_internal, false) = false)
        ORDER BY COALESCE(j.return_date, j.job_end) ASC NULLS LAST
        LIMIT 200`
     );
