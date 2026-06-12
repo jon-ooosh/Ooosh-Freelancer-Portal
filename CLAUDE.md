@@ -1537,6 +1537,7 @@ What `is_internal = true` mutes:
 - **Last-minute booking alert** (`money-emails.ts` `sendLastMinuteAlert`).
 - **Stale-enquiry auto-loser** (`config/scheduler.ts`).
 - **"No client email" amber banner** on Job Detail (frontend gate).
+- **Quick-assign excess** (`routes/hire-forms.ts` `/quick-assign`): on internal jobs the per-driver record is created as `not_required` £0 — no orphan absorption, no top-N charge. (Same fix also added `'waived'` to the orphan-absorption exclusion list so quick-assign can never silently un-waive a staff-waived / V&D-waived / internal-waived record on ANY job.)
 
 What it deliberately KEEPS (jon's call, Jun 2026): **Crew & Transport — everything** (quotes, arranging chaser, freelancer assignments, completion chasers — getting the van to the garage is often a local D&C run); vehicle requirement card + allocation + Turnaround Schedule; post-hire vehicle check-in / backline de-prep / `freelancer_followup` / `damage_review` cards; Going Out / Returning Today dashboard visibility; org hire history; the HH booking itself (stock accuracy). Grey "Internal" badge renders next to the status pill on Job Detail.
 
