@@ -57,6 +57,56 @@ interface OverviewData {
 const gbp = (n: number | string | null) =>
   '£' + (parseFloat(String(n ?? 0))).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
+// Filter prefs persist across navigation (localStorage) — staff set their view
+// once and it holds when they come back.
+type Timing = 'all' | 'finished' | 'upcoming';
+type Tab = 'balances' | 'deposits' | 'excess' | 'refunds';
+const PREFS_KEY = 'ooosh_money_overview_prefs';
+interface OverviewPrefs { tab: Tab; includeSpeculative: boolean; balancesTiming: Timing; excessTiming: Timing }
+const DEFAULT_PREFS: OverviewPrefs = { tab: 'balances', includeSpeculative: false, balancesTiming: 'all', excessTiming: 'all' };
+function loadPrefs(): OverviewPrefs {
+  try {
+    const raw = localStorage.getItem(PREFS_KEY);
+    if (raw) {
+      const p = { ...DEFAULT_PREFS, ...JSON.parse(raw) } as OverviewPrefs;
+      // Guard against stale/garbage values from older builds.
+      if (!['balances', 'deposits', 'excess', 'refunds'].includes(p.tab)) p.tab = DEFAULT_PREFS.tab;
+      if (!['all', 'finished', 'upcoming'].includes(p.balancesTiming)) p.balancesTiming = 'all';
+      if (!['all', 'finished', 'upcoming'].includes(p.excessTiming)) p.excessTiming = 'all';
+      return p;
+    }
+  } catch { /* corrupted/blocked storage — fall through to defaults */ }
+  return DEFAULT_PREFS;
+}
+
+// A date-only "is this in the past?" check — finished means the hire end date
+// is before today (today itself still counts as upcoming/live).
+function isPastDate(d: string | null): boolean {
+  if (!d) return false;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  return new Date(d).getTime() < today.getTime();
+}
+
+function TimingPills({ value, onChange }: { value: Timing; onChange: (t: Timing) => void }) {
+  const opts: { v: Timing; label: string }[] = [
+    { v: 'all', label: 'All' },
+    { v: 'finished', label: 'Finished' },
+    { v: 'upcoming', label: 'Upcoming' },
+  ];
+  return (
+    <div className="inline-flex rounded-md border border-gray-300 overflow-hidden text-xs">
+      {opts.map((o, i) => (
+        <button key={o.v} type="button" onClick={() => onChange(o.v)}
+          className={`px-2.5 py-1 ${i > 0 ? 'border-l border-gray-300' : ''} ${
+            value === o.v ? 'bg-ooosh-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'
+          }`}>
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 const fmtDate = (d: string | null) =>
   d ? new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
 
@@ -275,14 +325,25 @@ export default function MoneyOverviewPage() {
   const [data, setData] = useState<OverviewData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [tab, setTab] = useState<'balances' | 'deposits' | 'excess' | 'refunds'>('balances');
   const isAdmin = useAuthStore((s) => s.user?.role) === 'admin';
   const [resolveTarget, setResolveTarget] = useState<BalanceRow | 'bulk' | null>(null);
   const [showResolved, setShowResolved] = useState(false);
   const [toast, setToast] = useState('');
+  // Filters initialise from the last-used prefs and persist on every change.
+  const [prefs] = useState(loadPrefs);
+  const [tab, setTab] = useState<Tab>(prefs.tab);
   // Default view = confirmed-onwards (real money owed / upcoming). Toggle to
   // include speculative enquiry-stage jobs (new enquiry / quoting / provisional).
-  const [includeSpeculative, setIncludeSpeculative] = useState(false);
+  const [includeSpeculative, setIncludeSpeculative] = useState(prefs.includeSpeculative);
+  // Historic vs upcoming split — finished = hire end date already past.
+  const [balancesTiming, setBalancesTiming] = useState<Timing>(prefs.balancesTiming);
+  const [excessTiming, setExcessTiming] = useState<Timing>(prefs.excessTiming);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(PREFS_KEY, JSON.stringify({ tab, includeSpeculative, balancesTiming, excessTiming } satisfies OverviewPrefs));
+    } catch { /* storage blocked — prefs just won't persist */ }
+  }, [tab, includeSpeculative, balancesTiming, excessTiming]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -333,7 +394,12 @@ export default function MoneyOverviewPage() {
   ];
 
   // Build rows per tab (cells + parallel sort values + search blob).
-  const balanceRows: Row[] = data.balances_outstanding.map((r) => ({
+  const balancesFiltered = data.balances_outstanding.filter((r) => {
+    if (balancesTiming === 'all') return true;
+    const finished = isPastDate(r.job_end || r.return_date);
+    return balancesTiming === 'finished' ? finished : !finished;
+  });
+  const balanceRows: Row[] = balancesFiltered.map((r) => ({
     key: r.job_id, href: jobHref(r),
     search: `${r.hh_job_number ?? ''} ${r.client_name ?? ''} ${r.job_name ?? ''} ${r.pipeline_status ?? ''}`,
     sort: [r.hh_job_number ?? 0, r.client_name ?? '', r.pipeline_status ?? '', dateMs(r.job_end || r.return_date), parseFloat(r.hire_value_inc_vat), parseFloat(r.balance_outstanding)],
@@ -374,7 +440,9 @@ export default function MoneyOverviewPage() {
     ],
   }));
 
-  const excessRows: Row[] = data.excess_held.map((r) => ({
+  const excessFiltered = data.excess_held.filter((r) =>
+    excessTiming === 'all' ? true : excessTiming === 'finished' ? r.hire_finished : !r.hire_finished);
+  const excessRows: Row[] = excessFiltered.map((r) => ({
     key: r.excess_id, href: jobHref(r),
     search: `${r.hh_job_number ?? ''} ${r.client_name ?? ''} ${r.excess_status}`,
     sort: [r.hh_job_number ?? 0, r.client_name ?? '', r.excess_status, dateMs(r.finished_on), parseFloat(r.held_amount)],
@@ -430,15 +498,18 @@ export default function MoneyOverviewPage() {
       <div className="bg-white rounded-xl shadow-sm border border-gray-200">
         {tab === 'balances' && (
           <>
-            <div className="flex items-center justify-between px-4 pt-3">
-              <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={includeSpeculative}
-                  onChange={(e) => setIncludeSpeculative(e.target.checked)}
-                />
-                Show enquiries / provisional
-              </label>
+            <div className="flex items-center justify-between gap-3 flex-wrap px-4 pt-3">
+              <div className="flex items-center gap-3 flex-wrap">
+                <TimingPills value={balancesTiming} onChange={setBalancesTiming} />
+                <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={includeSpeculative}
+                    onChange={(e) => setIncludeSpeculative(e.target.checked)}
+                  />
+                  Show enquiries / provisional
+                </label>
+              </div>
               {isAdmin && (
                 <button
                   onClick={() => setResolveTarget('bulk')}
@@ -516,15 +587,21 @@ export default function MoneyOverviewPage() {
           />
         )}
         {tab === 'excess' && (
-          <Table
-            columns={[
-              { label: 'Job', sortable: true }, { label: 'Client', sortable: true },
-              { label: 'Status', sortable: true }, { label: 'Finished', sortable: true },
-              { label: 'Held', sortable: true, align: 'right' },
-            ]}
-            empty="No excess currently held."
-            rows={excessRows}
-          />
+          <>
+            <div className="px-4 pt-3">
+              <TimingPills value={excessTiming} onChange={setExcessTiming} />
+              <span className="ml-2 text-[11px] text-gray-400">Finished = hire over, excess to return</span>
+            </div>
+            <Table
+              columns={[
+                { label: 'Job', sortable: true }, { label: 'Client', sortable: true },
+                { label: 'Status', sortable: true }, { label: 'Finished', sortable: true },
+                { label: 'Held', sortable: true, align: 'right' },
+              ]}
+              empty="No excess currently held."
+              rows={excessRows}
+            />
+          </>
         )}
         {tab === 'refunds' && (
           <Table

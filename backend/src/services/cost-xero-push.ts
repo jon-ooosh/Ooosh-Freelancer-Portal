@@ -95,6 +95,9 @@ function isScopeError(err: unknown): boolean {
 const SCOPE_ADVISORY =
   'Xero bills not enabled yet — grant the "accounting.invoices" + "accounting.payments" scopes on the Custom Connection (re-authorise it), then Push now';
 
+const MISSING_CATEGORY_MSG =
+  'No category on this cost — open Edit, pick "What\'s this cost for?" and save (the push then retries automatically)';
+
 interface PushResult {
   pushed: boolean;
   skipped?: string;
@@ -118,6 +121,7 @@ interface CostRow {
   xero_payment_id: string | null;
   xero_sync_state: string;
   supplier_name: string | null;
+  invoice_number: string | null;
   description: string | null;
   category: string | null;
   cost_date: string | null;
@@ -167,6 +171,14 @@ async function resolveLineTaxType(cost: CostRow): Promise<string | undefined> {
 }
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
+
+// Xero Reference field: the supplier's invoice number when we have one (so the
+// bill/transaction is findable by the number printed on the paperwork),
+// falling back to the supplier name. Max 255 chars per Xero.
+function xeroReference(cost: CostRow): string | undefined {
+  const ref = (cost.invoice_number || cost.supplier_name || '').toString().trim().slice(0, 255);
+  return ref || undefined;
+}
 
 // Build the Xero line items + lineAmountTypes for a cost.
 //
@@ -241,8 +253,8 @@ async function pushSpendMoney(cost: CostRow): Promise<PushResult> {
     return { pushed: false, error: 'Gross amount required' };
   }
   if (!cost.xero_account_code) {
-    await recordError(cost.id, 'No Xero account code on the cost — pick a category and retry');
-    return { pushed: false, error: 'Missing xero_account_code' };
+    await recordError(cost.id, MISSING_CATEGORY_MSG);
+    return { pushed: false, error: MISSING_CATEGORY_MSG };
   }
 
   const bankAccountId = await getSystemSetting(`xero_bank_${cost.payment_method}`);
@@ -261,7 +273,7 @@ async function pushSpendMoney(cost: CostRow): Promise<PushResult> {
       bankAccountId,
       contactName: supplier,
       date: dateOnly(cost.cost_date),
-      reference: (cost.supplier_name || '').toString().slice(0, 255) || undefined,
+      reference: xeroReference(cost),
       lineItems,
       lineAmountTypes,
     });
@@ -309,8 +321,8 @@ async function pushBill(cost: CostRow): Promise<PushResult> {
       return { pushed: false, error: 'Gross amount required' };
     }
     if (!cost.xero_account_code) {
-      await recordError(cost.id, 'No Xero account code on the cost — pick a category and retry');
-      return { pushed: false, error: 'Missing xero_account_code' };
+      await recordError(cost.id, MISSING_CATEGORY_MSG);
+      return { pushed: false, error: MISSING_CATEGORY_MSG };
     }
 
     // reimburse_me: the company owes the STAFF MEMBER, not the receipt vendor.
@@ -330,7 +342,7 @@ async function pushBill(cost: CostRow): Promise<PushResult> {
         contactName,
         date: dateOnly(cost.cost_date),
         dueDate: addDaysISO(dateOnly(cost.cost_date), 30),
-        reference: (cost.supplier_name || '').toString().slice(0, 255) || undefined,
+        reference: xeroReference(cost),
         status: 'AUTHORISED',
         lineAmountTypes,
         lineItems,
@@ -400,7 +412,7 @@ async function recordBillPayment(cost: CostRow): Promise<{ paymentID?: string; s
       accountId: bankAccountId,
       amount: Number(cost.amount_gross),
       date: dateOnly(cost.paid_value_date) || dateOnly(cost.paid_at) || undefined,
-      reference: (cost.supplier_name || '').toString().slice(0, 255) || undefined,
+      reference: xeroReference(cost),
     });
     await query(`UPDATE costs SET xero_payment_id=$1, xero_synced_at=NOW(), xero_error=NULL WHERE id=$2`, [payment.PaymentID, cost.id]);
     return { paymentID: payment.PaymentID };
