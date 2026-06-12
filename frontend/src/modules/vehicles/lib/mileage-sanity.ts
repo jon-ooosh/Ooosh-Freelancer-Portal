@@ -25,6 +25,30 @@ export interface MileageCheckResult {
   message: string | null
 }
 
+/**
+ * Resolve the floor a new odometer reading is checked against.
+ *
+ * Prefer the canonical fleet `current_mileage` over the last raw event reading.
+ * `current_mileage` is the ONLY figure a manager can correct DOWN (via the
+ * audited correction endpoint) to undo a fat-fingered high entry — every event
+ * write only ever ratchets up. If prep/book-out kept blocking against the last
+ * raw event instead, a corrected van would stay stuck because the bad event
+ * still sits in history (the RX21UOB incident, Jun 2026: mileage corrected to
+ * 170,915 on the fleet board, but prep + book-out still floored at the bad
+ * 179,902 check-in event). Falls back to the last event reading when no
+ * canonical figure exists yet.
+ */
+export function resolveMileageFloor(opts: {
+  currentMileage: number | null | undefined
+  lastEventMileage: number | null | undefined
+}): number | null {
+  const current = Number(opts.currentMileage)
+  if (Number.isFinite(current) && current > 0) return current
+  const last = Number(opts.lastEventMileage)
+  if (Number.isFinite(last) && last > 0) return last
+  return null
+}
+
 function toTime(d: string | Date | null | undefined): number | null {
   if (!d) return null
   const t = new Date(d).getTime()

@@ -33,6 +33,8 @@ export interface FormDraft {
     label: string
     blob: Blob
     timestamp: number
+    /** Capture-time PDF thumbnail (data URI) — optional, survives draft resume */
+    pdfBase64?: string
   }>
   signatureBlob: Blob | null
   savedAt: string
@@ -50,6 +52,8 @@ export interface PendingSubmission {
     label: string
     blob: Blob
     timestamp: number
+    /** Capture-time PDF thumbnail (data URI) — optional, survives draft resume */
+    pdfBase64?: string
   }>
   signatureBlob: Blob | null
   createdAt: string

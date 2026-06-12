@@ -12,6 +12,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
+import { locationLabel } from './holding/format';
 import type { HeldItem, HeldItemKind } from '../../../shared/types';
 
 const TERMINAL = new Set(['collected', 'given_to_client', 'shipped_back', 'disposed', 'cancelled']);
@@ -125,7 +126,7 @@ function Row({ h, context }: { h: HeldItem; context: string }) {
   const sub = isTerminal
     ? outcome
     : [
-        h.storage_location_name || h.storage_location_text,
+        locationLabel(h),
         context !== 'job' && h.hh_job_number ? `J-${h.hh_job_number}` : null,
         context === 'job' && client ? client : null,
         h.kind === 'lost_property' ? `found ${fmtDate(h.found_date)}` : (h.needed_by ? `needed ${fmtDate(h.needed_by)}` : null),

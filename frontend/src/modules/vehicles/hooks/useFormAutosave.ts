@@ -58,6 +58,7 @@ export function useFormAutosave({ flowType, disabled }: AutosaveOptions) {
             blob: p.blob,
             blobUrl: URL.createObjectURL(p.blob),
             timestamp: p.timestamp,
+            pdfBase64: p.pdfBase64,
           }))
 
           setDraftLoaded({
@@ -116,6 +117,7 @@ export function useFormAutosave({ flowType, disabled }: AutosaveOptions) {
             label: p.label,
             blob: p.blob,
             timestamp: p.timestamp,
+            pdfBase64: p.pdfBase64,
           })),
           signatureBlob: data.signatureBlob,
           savedAt: new Date().toISOString(),

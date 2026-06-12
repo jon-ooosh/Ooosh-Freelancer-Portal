@@ -1,5 +1,6 @@
 import { query } from '../config/database';
 import { getSystemSetting } from '../routes/system-settings';
+import { frontendLink } from '../config/app-urls';
 
 type DbClient = {
   query: (text: string, params?: unknown[]) => Promise<{ rows: any[]; rowCount?: number | null }>;
@@ -114,6 +115,148 @@ export async function notifyIssueRecipients(
   }
 }
 
+/** Categories that mean "the van itself has a problem" — drive the direct email. */
+const VEHICLE_ALERT_CATEGORIES = new Set(['damaged', 'broken', 'breakdown']);
+
+/**
+ * Direct email alert for vehicle-anchored issues (any severity).
+ *
+ * Closes the "van returned damaged and nobody was told" gap: the bell
+ * notifications from notifyIssueRecipients depend on watcher config,
+ * severity-driven escalation, and working hours — a Low-severity scratch
+ * never reached anyone's inbox. This fires an immediate email via the
+ * vehicle-notify convention (info@ + will@) whenever a vehicle issue in a
+ * damage-shaped category is created or re-flagged, regardless of severity.
+ *
+ * Also stamps `email_sent_at` on the just-created bell notifications for
+ * the vehicle manager so the escalation scheduler doesn't double-fire.
+ *
+ * Best-effort: failures are logged, never thrown.
+ */
+export async function sendVehicleIssueAlertEmail(
+  issueId: string,
+  eventVerb: 'logged' | 're-flagged' = 'logged',
+): Promise<void> {
+  try {
+    const result = await query(
+      `SELECT ji.id, ji.category, ji.severity, ji.summary, ji.description, ji.vehicle_id,
+              fv.reg AS vehicle_reg,
+              j.hh_job_number, j.job_name,
+              COALESCE(NULLIF(TRIM(CONCAT(p.first_name, ' ', p.last_name)), ''), u.email) AS reporter_name,
+              (SELECT COUNT(*) FROM job_issue_files jif WHERE jif.issue_id = ji.id AND jif.file_type = 'photo') AS photo_count
+       FROM job_issues ji
+       LEFT JOIN fleet_vehicles fv ON fv.id = ji.vehicle_id
+       LEFT JOIN jobs j ON j.id = ji.job_id
+       LEFT JOIN users u ON u.id = ji.reported_by
+       LEFT JOIN people p ON p.id = u.person_id
+       WHERE ji.id = $1`,
+      [issueId],
+    );
+    if (result.rowCount === 0) return;
+    const issue = result.rows[0];
+
+    // Only vehicle-anchored issues in damage-shaped categories.
+    if (!issue.vehicle_id || !VEHICLE_ALERT_CATEGORIES.has(issue.category)) return;
+
+    const { getVehicleNotificationTargets } = await import('./vehicle-notify');
+    const targets = await getVehicleNotificationTargets();
+
+    const emailService = (await import('./email-service')).default;
+    await emailService.send('vehicle_damage_logged', {
+      to: targets.to,
+      cc: targets.cc,
+      variables: {
+        vehicleReg: issue.vehicle_reg || 'Unknown reg',
+        category: issue.category,
+        severity: issue.severity,
+        eventVerb,
+        summary: issue.summary || '',
+        description: issue.description || '',
+        jobRef: issue.hh_job_number
+          ? `#${issue.hh_job_number}${issue.job_name ? ` (${issue.job_name})` : ''}`
+          : '',
+        reportedBy: issue.reporter_name || 'Unknown',
+        photoLine: Number(issue.photo_count) > 0 ? `📷 ${issue.photo_count} photo(s) attached` : '',
+        issueUrl: frontendLink(`/operations/problems/${issueId}`),
+      },
+    });
+
+    // Direct email sent — stop the escalation scheduler re-emailing the
+    // vehicle manager's bell for the same event.
+    if (targets.bellUserIds.length > 0) {
+      await query(
+        `UPDATE notifications SET email_sent_at = NOW()
+         WHERE entity_type = 'job_issues' AND entity_id = $1
+           AND user_id = ANY($2) AND email_sent_at IS NULL`,
+        [issueId, targets.bellUserIds],
+      );
+    }
+  } catch (err) {
+    console.error('[job-issues] Vehicle issue alert email failed (non-fatal):', err);
+  }
+}
+
+/**
+ * Backline requirement flagged as Problem (`status='blocked'`) → make sure
+ * an open register issue exists for the job. Called from the two backline
+ * status writers (requirements PATCH + backline overview PATCH).
+ *
+ * Dedup: one open backline-sourced issue per job. A second Problem flag
+ * (e.g. status toggled away and back) appends a `reflagged` event to the
+ * existing issue instead of breeding duplicates.
+ *
+ * Best-effort: failures are logged, never thrown — a notification hiccup
+ * must not block the status change itself.
+ */
+export async function ensureBacklineProblemIssue(opts: {
+  jobId: string;
+  requirementId: string;
+  phase: string | null;
+  notes: string | null;
+  actorUserId: string;
+}): Promise<void> {
+  try {
+    const job = await query(
+      `SELECT id, job_name, hh_job_number FROM jobs WHERE id = $1 AND is_deleted = false`,
+      [opts.jobId],
+    );
+    if (job.rowCount === 0) return;
+    const { job_name, hh_job_number } = job.rows[0];
+
+    const phaseLabel = opts.phase === 'post_hire' ? 'de-prep' : 'prep';
+    const existing = await query(
+      `SELECT id FROM job_issues
+       WHERE job_id = $1 AND source_module = 'backline'
+         AND status NOT IN ('resolved', 'written_off', 'cancelled')
+       ORDER BY updated_at DESC LIMIT 1`,
+      [opts.jobId],
+    );
+
+    if (existing.rowCount && existing.rowCount > 0) {
+      const issueId = existing.rows[0].id;
+      await logIssueEvent(issueId, opts.actorUserId, 'reflagged',
+        `Backline ${phaseLabel} flagged as Problem again${opts.notes ? `: ${opts.notes.slice(0, 500)}` : ''}`,
+        { source: 'backline_status', requirement_id: opts.requirementId },
+      );
+      await query(`UPDATE job_issues SET updated_at = NOW() WHERE id = $1`, [issueId]);
+      return;
+    }
+
+    await createJobIssue({
+      reportedByUserId: opts.actorUserId,
+      category: 'other',
+      severity: 'normal',
+      summary: `Backline problem flagged on ${job_name || 'job'}${hh_job_number ? ` (#${hh_job_number})` : ''}`,
+      description: `Backline ${phaseLabel} requirement marked as Problem.${opts.notes ? `\n\nRequirement notes: ${opts.notes}` : ''}`,
+      sourceModule: 'backline',
+      jobId: opts.jobId,
+      echoToJobTimeline: true,
+    });
+  } catch (err) {
+    console.error('[job-issues] Backline problem issue creation failed (non-fatal):', err);
+  }
+}
+
 /**
  * Programmatically create a job issue (insert + 'created' event + watcher
  * seeding + notification + optional job-timeline echo). Mirrors the
@@ -183,6 +326,14 @@ export async function createJobIssue(opts: {
     `New issue: ${opts.summary.slice(0, 80)}`,
     `${opts.category} — ${severity}`,
   );
+
+  // Direct email for vehicle damage/breakdown — gated internally on
+  // vehicle anchor + category. No-op inside a caller's transaction window
+  // only if the row isn't committed yet; callers passing `client` should
+  // be aware the email read uses the default pool.
+  if (!opts.client) {
+    await sendVehicleIssueAlertEmail(issueId, 'logged');
+  }
 
   if (opts.echoToJobTimeline && opts.jobId) {
     await run(

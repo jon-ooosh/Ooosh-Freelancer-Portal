@@ -74,6 +74,7 @@ export function useSyncQueue() {
         blob: p.blob,
         blobUrl: URL.createObjectURL(p.blob),
         timestamp: p.timestamp,
+        pdfBase64: p.pdfBase64,
       }))
 
       let success = false

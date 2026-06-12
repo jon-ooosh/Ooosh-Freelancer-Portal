@@ -27,10 +27,11 @@ const STRIP_CAT_LABELS: Record<ProgressStripCategory, string> = {
   invoicing: 'Invoicing',
   payment: 'Payment',
   vehicle: 'Vehicle',
+  merch: 'Merch',
 };
 
 const STRIP_CAT_ORDER: ProgressStripCategory[] = [
-  'vehicle', 'client', 'excess', 'deprep', 'freelancer', 'payment', 'invoicing',
+  'vehicle', 'client', 'excess', 'deprep', 'merch', 'freelancer', 'payment', 'invoicing',
 ];
 
 const STATUS_HEX: Record<ProgressStripStatus, { bg: string; fg: string }> = {
@@ -390,6 +391,23 @@ function renderCrew(c: BriefingCrew): string {
   return `<div>${escapeHtml(tag)} ${escapeHtml(c.name)} — ${escapeHtml(c.role)} — <span style="color:${statusColor};font-weight:600;">${escapeHtml(c.status)}</span></div>`;
 }
 
+function renderHolding(b: JobBriefing): string {
+  if (!b.holding || b.holding.lines.length === 0) return '';
+  const items = b.holding.lines.map(l => `<li style="margin:0 0 4px;">${escapeHtml(l)}</li>`).join('');
+  return `
+    <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="margin:0 0 20px;">
+      <tr><td style="background:#f5f3ff;border:1px solid #ddd6fe;border-radius:8px;padding:12px 14px;">
+        <p style="margin:0 0 8px;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:#6d28d9;font-weight:600;">
+          📦 Things we're holding for this client
+        </p>
+        <ul style="margin:0;padding-left:20px;font-size:14px;color:#334155;line-height:1.6;">
+          ${items}
+        </ul>
+      </td></tr>
+    </table>
+  `;
+}
+
 function renderDiscussionPoints(b: JobBriefing): string {
   if (b.discussion_points.length === 0) return '';
   const items = b.discussion_points.map(p => `<li style="margin:0 0 4px;">${escapeHtml(p)}</li>`).join('');
@@ -663,6 +681,7 @@ export function renderBriefingHtml(b: JobBriefing): string {
     ${renderOutstanding(b)}
     ${renderTransportSummary(b)}
     ${renderMoneyAndPeople(b)}
+    ${renderHolding(b)}
     ${renderLastInteraction(b)}
     ${renderDiscussionPoints(b)}
     ${renderContacts(b)}

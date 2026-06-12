@@ -32,14 +32,15 @@
  * `accounting.transactions` Xero scope not yet granted.
  */
 import { Readable } from 'stream';
-import { query } from '../config/database';
+import { query, getClient } from '../config/database';
 import { getFromR2, isR2Configured } from '../config/r2';
 import { isXeroConfigured } from '../config/xero';
-import { xeroBroker, XeroApiError } from './xero-broker';
+import { xeroBroker, XeroApiError, XeroLineItem } from './xero-broker';
 import { getSystemSetting } from '../routes/system-settings';
 
 // Paid-now methods → Spend Money on the mapped bank/card account.
-const SPEND_MONEY_METHODS = ['cot_card', 'amex', 'lloyds_cc', 'petty_cash', 'paypal', 'wise', 'lloyds_transfer'] as const;
+// (Exported for the reconcile sync — cost-xero-reconcile-sync.ts.)
+export const SPEND_MONEY_METHODS = ['cot_card', 'amex', 'lloyds_cc', 'petty_cash', 'paypal', 'wise', 'lloyds_transfer'] as const;
 // Pay-later methods → authorised ACCPAY bill on approval, payment recorded when paid.
 const BILL_METHODS = ['not_yet_paid', 'reimburse_me'] as const;
 
@@ -95,6 +96,9 @@ function isScopeError(err: unknown): boolean {
 const SCOPE_ADVISORY =
   'Xero bills not enabled yet — grant the "accounting.invoices" + "accounting.payments" scopes on the Custom Connection (re-authorise it), then Push now';
 
+const MISSING_CATEGORY_MSG =
+  'No category on this cost — open Edit, pick "What\'s this cost for?" and save (the push then retries automatically)';
+
 interface PushResult {
   pushed: boolean;
   skipped?: string;
@@ -112,11 +116,13 @@ interface CostRow {
   amount_gross: string | number | null;
   amount_vat: string | number | null;
   amount_net: string | number | null;
+  vat_treatment: string | null;
   xero_account_code: string | null;
   xero_object_id: string | null;
   xero_payment_id: string | null;
   xero_sync_state: string;
   supplier_name: string | null;
+  invoice_number: string | null;
   description: string | null;
   category: string | null;
   cost_date: string | null;
@@ -165,6 +171,61 @@ async function resolveLineTaxType(cost: CostRow): Promise<string | undefined> {
   return (await xeroBroker.getPurchaseTaxType(rate)) || undefined;
 }
 
+const round2 = (n: number) => Math.round(n * 100) / 100;
+
+// Xero Reference field: the supplier's invoice number when we have one (so the
+// bill/transaction is findable by the number printed on the paperwork),
+// falling back to the supplier name. Max 255 chars per Xero.
+function xeroReference(cost: CostRow): string | undefined {
+  const ref = (cost.invoice_number || cost.supplier_name || '').toString().trim().slice(0, 255);
+  return ref || undefined;
+}
+
+// Build the Xero line items + lineAmountTypes for a cost.
+//
+// Standard costs → a single INCLUSIVE line; Xero derives the VAT from the
+// account / tax type. Works whenever the VAT is a clean standard rate of net.
+//
+// Costs flagged vat_treatment='reclaim_split' (insurance-claim / "VAT-only"
+// invoices, where the VAT is non-standard relative to net — e.g. £750 excess +
+// £702.68 reclaimable VAT) push the 3-line EXCLUSIVE structure exactly as an
+// accountant enters it by hand:
+//   1. net          @ No VAT   — the real net cost (the excess)
+//   2. vat / 0.20   @ 20% VAT  — the VAT base, so Xero computes exactly the VAT
+//   3. -(vat/0.20)  @ No VAT   — cancels the phantom net
+// Lines 2+3 net to zero, so subtotal=net, VAT=vat, total=gross — for ANY
+// net/vat pair. (Assumes the underlying VAT was charged at the 20% standard
+// rate, which is the only realistic case for these UK invoices.)
+async function buildCostLineItems(
+  cost: CostRow,
+  description: string,
+): Promise<{ lineItems: XeroLineItem[]; lineAmountTypes: 'Inclusive' | 'Exclusive' }> {
+  const account = String(cost.xero_account_code);
+
+  if (cost.vat_treatment === 'reclaim_split') {
+    const net = round2(Number(cost.amount_net || 0));
+    const vat = round2(Number(cost.amount_vat || 0));
+    const vatBase = round2(vat / 0.20);
+    const std = await xeroBroker.getPurchaseTaxType(20);
+    return {
+      lineAmountTypes: 'Exclusive',
+      lineItems: [
+        { Description: description, Quantity: 1, UnitAmount: net, AccountCode: account, TaxType: 'NONE' },
+        { Description: 'VAT', Quantity: 1, UnitAmount: vatBase, AccountCode: account, ...(std ? { TaxType: std } : {}) },
+        { Description: 'VAT adjustment', Quantity: 1, UnitAmount: -vatBase, AccountCode: account, TaxType: 'NONE' },
+      ],
+    };
+  }
+
+  const taxType = await resolveLineTaxType(cost);
+  return {
+    lineAmountTypes: 'Inclusive',
+    lineItems: [
+      { Description: description, Quantity: 1, UnitAmount: Number(cost.amount_gross), AccountCode: account, ...(taxType ? { TaxType: taxType } : {}) },
+    ],
+  };
+}
+
 async function attachReceipt(
   cost: CostRow,
   entity: 'Invoices' | 'BankTransactions',
@@ -193,8 +254,8 @@ async function pushSpendMoney(cost: CostRow): Promise<PushResult> {
     return { pushed: false, error: 'Gross amount required' };
   }
   if (!cost.xero_account_code) {
-    await recordError(cost.id, 'No Xero account code on the cost — pick a category and retry');
-    return { pushed: false, error: 'Missing xero_account_code' };
+    await recordError(cost.id, MISSING_CATEGORY_MSG);
+    return { pushed: false, error: MISSING_CATEGORY_MSG };
   }
 
   const bankAccountId = await getSystemSetting(`xero_bank_${cost.payment_method}`);
@@ -204,8 +265,7 @@ async function pushSpendMoney(cost: CostRow): Promise<PushResult> {
   }
 
   const description = (cost.description || cost.category || cost.supplier_name || 'Cost').toString().slice(0, 4000);
-  const taxType = await resolveLineTaxType(cost);
-  const lineItem = { Description: description, Quantity: 1, UnitAmount: Number(cost.amount_gross), AccountCode: String(cost.xero_account_code), ...(taxType ? { TaxType: taxType } : {}) };
+  const { lineItems, lineAmountTypes } = await buildCostLineItems(cost, description);
 
   let bankTransactionID: string;
   try {
@@ -214,9 +274,9 @@ async function pushSpendMoney(cost: CostRow): Promise<PushResult> {
       bankAccountId,
       contactName: supplier,
       date: dateOnly(cost.cost_date),
-      reference: (cost.supplier_name || '').toString().slice(0, 255) || undefined,
-      lineItems: [lineItem],
-      lineAmountTypes: 'Inclusive',
+      reference: xeroReference(cost),
+      lineItems,
+      lineAmountTypes,
     });
     bankTransactionID = txn.BankTransactionID;
   } catch (err) {
@@ -262,8 +322,8 @@ async function pushBill(cost: CostRow): Promise<PushResult> {
       return { pushed: false, error: 'Gross amount required' };
     }
     if (!cost.xero_account_code) {
-      await recordError(cost.id, 'No Xero account code on the cost — pick a category and retry');
-      return { pushed: false, error: 'Missing xero_account_code' };
+      await recordError(cost.id, MISSING_CATEGORY_MSG);
+      return { pushed: false, error: MISSING_CATEGORY_MSG };
     }
 
     // reimburse_me: the company owes the STAFF MEMBER, not the receipt vendor.
@@ -276,17 +336,17 @@ async function pushBill(cost: CostRow): Promise<PushResult> {
     const baseDesc = (cost.description || cost.category || 'Cost').toString();
     const description = (isReimburse && cost.supplier_name ? `${cost.supplier_name} — ${baseDesc}` : baseDesc).slice(0, 4000);
 
-    const taxType = await resolveLineTaxType(cost);
+    const { lineItems, lineAmountTypes } = await buildCostLineItems(cost, description);
     let invoiceID: string;
     try {
       const bill = await xeroBroker.createBill({
         contactName,
         date: dateOnly(cost.cost_date),
         dueDate: addDaysISO(dateOnly(cost.cost_date), 30),
-        reference: (cost.supplier_name || '').toString().slice(0, 255) || undefined,
+        reference: xeroReference(cost),
         status: 'AUTHORISED',
-        lineAmountTypes: 'Inclusive',
-        lineItems: [{ Description: description, Quantity: 1, UnitAmount: Number(cost.amount_gross), AccountCode: String(cost.xero_account_code), ...(taxType ? { TaxType: taxType } : {}) }],
+        lineAmountTypes,
+        lineItems,
       });
       invoiceID = bill.InvoiceID;
     } catch (err) {
@@ -353,7 +413,7 @@ async function recordBillPayment(cost: CostRow): Promise<{ paymentID?: string; s
       accountId: bankAccountId,
       amount: Number(cost.amount_gross),
       date: dateOnly(cost.paid_value_date) || dateOnly(cost.paid_at) || undefined,
-      reference: (cost.supplier_name || '').toString().slice(0, 255) || undefined,
+      reference: xeroReference(cost),
     });
     await query(`UPDATE costs SET xero_payment_id=$1, xero_synced_at=NOW(), xero_error=NULL WHERE id=$2`, [payment.PaymentID, cost.id]);
     return { paymentID: payment.PaymentID };
@@ -376,6 +436,29 @@ async function recordBillPayment(cost: CostRow): Promise<{ paymentID?: string; s
 export async function pushCostToXero(costId: string): Promise<PushResult> {
   if (!isXeroConfigured()) return { pushed: false, skipped: 'Xero not configured' };
 
+  // Serialize all pushes for THIS cost behind a Postgres advisory lock. The push
+  // is triggered from five places (create / update / approve / pay / Push-Now),
+  // most fire-and-forget, so two can overlap — e.g. approve's background push
+  // racing the Push-Now button. Each reads xero_object_id as null, passes the
+  // billExists guard, and creates its own Xero bill → DUPLICATE BILLS (seen live
+  // on T.Reeve repair invoices). The lock makes the second push wait for the
+  // first to commit xero_object_id, after which loadCost + the billExists /
+  // PUSHED_STATES guard short-circuit it. Different costs hash to different keys
+  // so unrelated pushes never contend.
+  const client = await getClient();
+  const lockSql = 'pg_advisory_lock(hashtext($1)::bigint)';
+  const key = `cost-push:${costId}`;
+  try {
+    await client.query(`SELECT ${lockSql}`, [key]);
+    return await pushCostToXeroLocked(costId);
+  } finally {
+    try { await client.query('SELECT pg_advisory_unlock(hashtext($1)::bigint)', [key]); }
+    catch (err) { console.error('[cost-xero-push] advisory unlock failed:', costId, err); }
+    client.release();
+  }
+}
+
+async function pushCostToXeroLocked(costId: string): Promise<PushResult> {
   const cost = await loadCost(costId);
   if (!cost) return { pushed: false, skipped: 'Cost not found' };
 

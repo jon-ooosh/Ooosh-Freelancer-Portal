@@ -1,9 +1,14 @@
 import { useEffect, useState, useCallback, ReactNode } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
-import { useAuthStore } from '../hooks/useAuthStore';
 import { EntitySearch } from '../components/holding/EntitySearch';
+import { JobNumberField } from '../components/holding/JobNumberField';
 import { NotifyClientModal } from '../components/holding/NotifyClientModal';
+import { OrgJobSuggestions } from '../components/holding/OrgJobSuggestions';
+import { DuplicateNudge } from '../components/holding/DuplicateNudge';
+import { uploadHeldItemPhotos } from '../components/holding/photo-upload';
+import { locationLabelOrDash } from '../components/holding/format';
+import { ChaseReviewPanel } from '../components/holding/ChaseReviewPanel';
 import type { HeldItem, HeldItemKind, HeldItemLocation } from '../../../shared/types';
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -75,20 +80,8 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
 async function uploadPhotos(files: FileList | null, onDone: (atts: { name: string; url: string; type: string }[]) => void, onErr: (m: string) => void, setBusy: (b: boolean) => void) {
   if (!files || files.length === 0) return;
   setBusy(true);
-  try {
-    const out: { name: string; url: string; type: string }[] = [];
-    for (const file of Array.from(files)) {
-      const fd = new FormData();
-      fd.append('file', file);
-      fd.append('attachment_only', 'true');
-      const token = useAuthStore.getState().accessToken;
-      const res = await fetch('/api/files/upload', { method: 'POST', headers: token ? { Authorization: `Bearer ${token}` } : {}, body: fd });
-      if (!res.ok) throw new Error('Upload failed');
-      const j = await res.json();
-      out.push({ name: j.filename || file.name, url: j.r2_key, type: 'image' });
-    }
-    onDone(out);
-  } catch (e) { onErr(e instanceof Error ? e.message : 'Upload failed'); } finally { setBusy(false); }
+  try { onDone(await uploadHeldItemPhotos(files)); }
+  catch (e) { onErr(e instanceof Error ? e.message : 'Upload failed'); } finally { setBusy(false); }
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -116,6 +109,7 @@ export default function HoldingPage({ view }: { view: View }) {
   useEffect(() => { load(); }, [load]);
   useEffect(() => { api.get<{ data: HeldItemLocation[] }>('/holding/locations').then((r) => setLocations(r.data)).catch(() => {}); }, []);
 
+  const [searchParams] = useSearchParams();
   const kinds = VIEW_KINDS[view];
   const rows = items.filter((i) => kinds.includes(i.kind) && (!unknownOnly || i.owner_unknown));
   const openCount = items.filter((i) => kinds.includes(i.kind) && !['collected', 'given_to_client', 'shipped_back', 'disposed', 'cancelled'].includes(i.status)).length;
@@ -129,8 +123,10 @@ export default function HoldingPage({ view }: { view: View }) {
         </button>
       </div>
 
+      {view === 'lost_property' && <ChaseReviewPanel defaultOpen={searchParams.get('review') === '1'} onChanged={load} />}
+
       <div className="flex flex-wrap items-center gap-3 mb-4">
-        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search description / client / notes…"
+        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search description / client / job # / notes…"
           className="border border-slate-300 rounded-lg px-3 py-2 text-sm flex-1 min-w-[200px]" />
         <label className="text-sm text-slate-600 flex items-center gap-2"><input type="checkbox" checked={unknownOnly} onChange={(e) => setUnknownOnly(e.target.checked)} /> Unknown owner</label>
         <label className="text-sm text-slate-600 flex items-center gap-2"><input type="checkbox" checked={showDone} onChange={(e) => setShowDone(e.target.checked)} /> Show done</label>
@@ -173,7 +169,7 @@ export default function HoldingPage({ view }: { view: View }) {
                         <td className="px-3 py-2">{h.found_in ? FOUND_IN_LABEL[h.found_in] : '—'}{h.found_vehicle_reg ? ` (${h.found_vehicle_reg})` : ''}</td>
                         <td className="px-3 py-2">{fmtDate(h.found_date)}</td>
                       </>}
-                  <td className="px-3 py-2">{h.storage_location_name || h.storage_location_text || '—'}</td>
+                  <td className="px-3 py-2">{locationLabelOrDash(h)}</td>
                   <td className="px-3 py-2"><span className={`px-2 py-0.5 rounded text-xs font-medium capitalize ${STATUS_COLOUR[h.status] || 'bg-slate-100'}`}>{statusLabel(h.status)}</span></td>
                 </tr>
               );
@@ -200,7 +196,7 @@ function CreateModal({ view, locations, onClose, onSaved }: { view: View; locati
     client_name_text: '', hh_job_number: '',
     found_in: 'van', found_location_text: '',
     storage_location_id: '', storage_location_text: '',
-    expected_date: '', import_charge_flag: '', notes: '',
+    expected_date: '', import_charge_flag: '', hold_until: '', notes: '',
   });
   const [photos, setPhotos] = useState<{ name: string; url: string; type: string }[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -233,6 +229,7 @@ function CreateModal({ view, locations, onClose, onSaved }: { view: View; locati
         status: givenStraight ? 'given_to_client' : undefined,
         expected_date: f.kind === 'incoming' && f.expected_date ? f.expected_date : null,
         import_charge_flag: f.kind === 'incoming' && f.import_charge_flag ? f.import_charge_flag : null,
+        hold_until: f.kind === 'temp_storage' && f.hold_until ? f.hold_until : null,
         notes: f.notes || null,
         photos,
       });
@@ -283,11 +280,10 @@ function CreateModal({ view, locations, onClose, onSaved }: { view: View; locati
           </label>
           {!f.owner_unknown && (
             <>
-              <div><label className="block text-xs text-slate-500 mb-1">HireHop job #</label>
-                <input className={inputCls} type="number" value={f.hh_job_number} onChange={(e) => setF({ ...f, hh_job_number: e.target.value })} placeholder="e.g. 15816" />
-                <p className="text-[11px] text-slate-400 mt-1">Enter the job number and we'll link the job &amp; client automatically — no need to fill the boxes below unless there's no job (or you want to override).</p>
-              </div>
+              <JobNumberField value={f.hh_job_number} onChange={(v) => setF({ ...f, hh_job_number: v })} />
+              <DuplicateNudge hhJobNumber={f.hh_job_number} />
               <EntitySearch kind="organisations" label="Client / band (organisation)" value={f.org_name} onPick={(id, name) => setF({ ...f, owner_organisation_id: id, org_name: name })} />
+              <OrgJobSuggestions orgId={f.owner_organisation_id} hasNumber={!!f.hh_job_number} onPick={(n) => setF({ ...f, hh_job_number: n })} />
               <EntitySearch kind="people" label="Or a person" value={f.person_name} onPick={(id, name) => setF({ ...f, owner_person_id: id, person_name: name })} />
               <div><label className="block text-xs text-slate-500 mb-1">Or just a name (free text)</label><input className={inputCls} value={f.client_name_text} onChange={(e) => setF({ ...f, client_name_text: e.target.value })} /></div>
             </>
@@ -310,6 +306,12 @@ function CreateModal({ view, locations, onClose, onSaved }: { view: View; locati
             <select className={inputCls} value={f.import_charge_flag} onChange={(e) => setF({ ...f, import_charge_flag: e.target.value })}>
               <option value="">—</option><option value="no">No</option><option value="yes">Yes</option><option value="unknown">Don't know</option>
             </select></div>
+        )}
+
+        {f.kind === 'temp_storage' && (
+          <div><label className="block text-xs text-slate-500 mb-1">Hold until (optional)</label>
+            <input className={inputCls} type="date" value={f.hold_until} onChange={(e) => setF({ ...f, hold_until: e.target.value })} />
+            <p className="text-[11px] text-slate-400 mt-1">We'll remind the team 3 days before this date.</p></div>
         )}
 
         {/* Photos */}
@@ -343,6 +345,7 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
   const [msg, setMsg] = useState('');
   const [linkOpen, setLinkOpen] = useState(false);
   const [notifyOpen, setNotifyOpen] = useState(false);
+  const [openAction, setOpenAction] = useState<null | 'collect' | 'ship' | 'location'>(null);
 
   const load = useCallback(async () => { setH((await api.get<{ data: HeldItem }>(`/holding/${id}`)).data); }, [id]);
   useEffect(() => { load(); }, [load]);
@@ -375,9 +378,11 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
         <div className="grid grid-cols-2 gap-3">
           <Field label="Client" value={client || (h.owner_unknown ? 'Unknown' : '—')} />
           <div>
-            <p className="text-xs text-slate-400">HireHop job</p>
+            <p className="text-xs text-slate-400">Job (HH #)</p>
             {h.hh_job_number
-              ? (h.job_id ? <Link to={`/jobs/${h.job_id}`} className="text-ooosh-600 hover:underline">#{h.hh_job_number} →</Link> : <p className="text-slate-800">#{h.hh_job_number}</p>)
+              ? (h.job_id
+                  ? <Link to={`/jobs/${h.job_id}`} title="Opens the job in the operations portal" className="text-ooosh-600 hover:underline">#{h.hh_job_number} · open job in OP →</Link>
+                  : <p className="text-slate-800">#{h.hh_job_number} <span className="text-xs text-slate-400">(not linked in OP)</span></p>)
               : <p className="text-slate-800">—</p>}
           </div>
           {h.kind !== 'lost_property' && <Field label="Boxes" value={h.received_count != null && h.box_count != null ? `${h.received_count}/${h.box_count}` : (h.box_count != null ? String(h.box_count) : '—')} />}
@@ -390,7 +395,7 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
             <Field label="Arrived" value={`${fmtDate(h.arrived_at)}${h.received_by_name ? ` by ${h.received_by_name}` : ''}`} />}
           {h.kind === 'lost_property' && <Field label="Found in" value={h.found_in ? `${FOUND_IN_LABEL[h.found_in]}${h.found_vehicle_reg ? ` (${h.found_vehicle_reg})` : (h.found_location_text ? ` (${h.found_location_text})` : '')}` : '—'} />}
           {h.kind === 'lost_property' && <Field label="Found date" value={fmtDate(h.found_date)} />}
-          <Field label="Location" value={h.storage_location_name || h.storage_location_text || '—'} />
+          <Field label="Location" value={locationLabelOrDash(h)} />
           {h.import_charge_flag && <Field label="Import charge" value={h.import_charge_flag} />}
           {h.collected_at && <Field label="Collected" value={`${fmtDate(h.collected_at)}${h.collected_by ? ` by ${h.collected_by}` : ''}`} />}
           {h.return_method && <Field label="Shipped back" value={`${h.return_method}${h.tracking_number ? ` · ${h.tracking_number}` : ''}`} />}
@@ -407,6 +412,12 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
 
         {msg && <p className="text-red-600">{msg}</p>}
 
+        {/* Chase & collection (lost property) */}
+        {h.kind === 'lost_property' && isOpen && <ChaseCollectionSection item={h} onChange={() => { load(); onChange(); }} />}
+
+        {/* Hold until (temp storage) */}
+        {h.kind === 'temp_storage' && isOpen && <HoldUntilSection item={h} onChange={() => { load(); onChange(); }} />}
+
         {/* Link / backfill owner */}
         {isOpen && (
           <div>
@@ -417,26 +428,34 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
           </div>
         )}
 
-        {/* Actions */}
+        {/* Actions — when one inline action is open, the rest hide so the
+            "next step" isn't surrounded by unrelated buttons. */}
         {isOpen && (
           <div className="flex flex-wrap gap-2 pt-2 border-t">
-            {(h.status === 'expected' || h.status === 'arrived' || h.status === 'stored' || h.status === 'client_notified') && (
-              <button disabled={!!busy} onClick={() => setNotifyOpen(true)}
-                className="px-3 py-1.5 bg-slate-700 text-white rounded-lg text-xs">✉ Notify client</button>
+            {openAction === 'collect' && <CollectButton id={id} kind={h.kind} busy={busy} open onClose={() => setOpenAction(null)} onAction={action} />}
+            {openAction === 'ship' && <ShipBackButton id={id} busy={busy} open onClose={() => setOpenAction(null)} onAction={action} />}
+            {openAction === 'location' && <LocationButton id={id} locations={locations} current={h.storage_location_id} open onClose={() => setOpenAction(null)} onDone={() => { load(); onChange(); }} />}
+            {openAction === null && (
+              <>
+                {(h.status === 'expected' || h.status === 'arrived' || h.status === 'stored' || h.status === 'client_notified') && (
+                  <button disabled={!!busy} onClick={() => setNotifyOpen(true)}
+                    className="px-3 py-1.5 bg-slate-700 text-white rounded-lg text-xs">✉ Notify client</button>
+                )}
+                <CollectButton id={id} kind={h.kind} busy={busy} onOpen={() => setOpenAction('collect')} onAction={action} />
+                <ShipBackButton id={id} busy={busy} onOpen={() => setOpenAction('ship')} onAction={action} />
+                {h.kind === 'incoming' && h.status === 'expected' && (
+                  <button disabled={!!busy} onClick={() => { if (confirm("Mark this as not arriving? It'll drop off the prep checklist.")) action('cancel', async () => { await api.put(`/holding/${id}`, { status: 'cancelled' }); onClose(); }); }}
+                    className="px-3 py-1.5 bg-white border border-slate-300 text-slate-600 rounded-lg text-xs">✕ Won't arrive</button>
+                )}
+                {h.kind === 'lost_property' && (
+                  <button disabled={!!busy} onClick={() => action('chase', async () => { await api.post(`/holding/${id}/chase`, {}); setMsg('Chase logged (escalation bumped).'); })}
+                    className="px-3 py-1.5 bg-amber-600 text-white rounded-lg text-xs">📨 Log chase (lvl {h.escalation_level})</button>
+                )}
+                <button disabled={!!busy} onClick={() => { if (confirm('Mark as disposed?')) action('dispose', async () => { await api.post(`/holding/${id}/dispose`, {}); onClose(); }); }}
+                  className="px-3 py-1.5 bg-red-600 text-white rounded-lg text-xs">🗑 Dispose</button>
+                <LocationButton id={id} locations={locations} current={h.storage_location_id} onOpen={() => setOpenAction('location')} onDone={() => { load(); onChange(); }} />
+              </>
             )}
-            <CollectButton id={id} kind={h.kind} busy={busy} onAction={action} />
-            <ShipBackButton id={id} busy={busy} onAction={action} />
-            {h.kind === 'incoming' && h.status === 'expected' && (
-              <button disabled={!!busy} onClick={() => { if (confirm("Mark this as not arriving? It'll drop off the prep checklist.")) action('cancel', async () => { await api.put(`/holding/${id}`, { status: 'cancelled' }); onClose(); }); }}
-                className="px-3 py-1.5 bg-white border border-slate-300 text-slate-600 rounded-lg text-xs">✕ Won't arrive</button>
-            )}
-            {h.kind === 'lost_property' && (
-              <button disabled={!!busy} onClick={() => action('chase', async () => { await api.post(`/holding/${id}/chase`, {}); setMsg('Chase logged (escalation bumped).'); })}
-                className="px-3 py-1.5 bg-amber-600 text-white rounded-lg text-xs">📨 Log chase (lvl {h.escalation_level})</button>
-            )}
-            <button disabled={!!busy} onClick={() => { if (confirm('Mark as disposed?')) action('dispose', async () => { await api.post(`/holding/${id}/dispose`, {}); onClose(); }); }}
-              className="px-3 py-1.5 bg-red-600 text-white rounded-lg text-xs">🗑 Dispose</button>
-            <LocationButton id={id} locations={locations} current={h.storage_location_id} onDone={() => { load(); onChange(); }} />
           </div>
         )}
       </div>
@@ -450,6 +469,68 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
 
 function Field({ label, value }: { label: string; value: string }) {
   return <div><p className="text-xs text-slate-400">{label}</p><p className="text-slate-800 capitalize">{value}</p></div>;
+}
+
+const dstr = (d: string | null | undefined) => (d ? new Date(d).toLocaleDateString('en-GB') : null);
+function addDays(d: string, n: number): string {
+  const x = new Date(d); x.setDate(x.getDate() + n); return x.toLocaleDateString('en-GB');
+}
+
+// Lost property: two timers (last contacted / next chase due) + defer control.
+function ChaseCollectionSection({ item, onChange }: { item: HeldItem; onChange: () => void }) {
+  const [date, setDate] = useState(item.expected_collection_date ? item.expected_collection_date.slice(0, 10) : '');
+  const [saving, setSaving] = useState(false);
+  const paused = item.expected_collection_date && new Date(item.expected_collection_date) >= new Date();
+  const nextDue = paused
+    ? `Paused until ${dstr(item.expected_collection_date)}`
+    : item.last_chased_at ? addDays(item.last_chased_at, 7)
+    : item.found_date ? addDays(item.found_date, 7) : '—';
+
+  async function save(val: string | null) {
+    setSaving(true);
+    try { await api.put(`/holding/${item.id}`, { expected_collection_date: val }); onChange(); }
+    finally { setSaving(false); }
+  }
+
+  return (
+    <div className="border border-slate-200 rounded-lg p-3 space-y-2 bg-slate-50/50">
+      <div className="grid grid-cols-3 gap-2 text-xs">
+        <div><p className="text-slate-400">Last contacted</p><p className="text-slate-700">{dstr(item.last_chased_at) || 'Not yet'}</p></div>
+        <div><p className="text-slate-400">Next chase due</p><p className={paused ? 'text-blue-600' : 'text-slate-700'}>{nextDue}</p></div>
+        <div><p className="text-slate-400">Chases sent</p><p className="text-slate-700">{item.escalation_level || 0}</p></div>
+      </div>
+      <div className="flex flex-wrap items-center gap-2 pt-1 border-t">
+        <label className="text-xs text-slate-500">Expected collection date:</label>
+        <input type="date" className="border border-slate-300 rounded px-2 py-1 text-xs" value={date} onChange={(e) => setDate(e.target.value)} />
+        <button disabled={saving || !date} onClick={() => save(date)} className="text-xs bg-[#7B5EA7] text-white px-3 py-1 rounded disabled:opacity-40">Save (pause chases)</button>
+        {item.expected_collection_date && <button disabled={saving} onClick={() => { setDate(''); save(null); }} className="text-xs text-slate-500">clear</button>}
+      </div>
+      <p className="text-[11px] text-slate-400">Set a date the client's said they'll collect — chases pause until it passes.</p>
+    </div>
+  );
+}
+
+// Temp storage: hold-until date (staff reminded 3 days before).
+function HoldUntilSection({ item, onChange }: { item: HeldItem; onChange: () => void }) {
+  const [date, setDate] = useState(item.hold_until ? item.hold_until.slice(0, 10) : '');
+  const [saving, setSaving] = useState(false);
+  async function save(val: string | null) {
+    setSaving(true);
+    try { await api.put(`/holding/${item.id}`, { hold_until: val }); onChange(); }
+    finally { setSaving(false); }
+  }
+  return (
+    <div className="border border-slate-200 rounded-lg p-3 space-y-2 bg-slate-50/50">
+      <div className="flex flex-wrap items-center gap-2">
+        <label className="text-xs text-slate-500">Hold until:</label>
+        <input type="date" className="border border-slate-300 rounded px-2 py-1 text-xs" value={date} onChange={(e) => setDate(e.target.value)} />
+        <button disabled={saving || !date} onClick={() => save(date)} className="text-xs bg-[#7B5EA7] text-white px-3 py-1 rounded disabled:opacity-40">Save</button>
+        {item.hold_until && <button disabled={saving} onClick={() => { setDate(''); save(null); }} className="text-xs text-slate-500">clear</button>}
+        {item.hold_until && <span className="text-xs text-slate-500">currently {dstr(item.hold_until)}</span>}
+      </div>
+      <p className="text-[11px] text-slate-400">We'll remind the team 3 days before this date.</p>
+    </div>
+  );
 }
 
 function LinkForm({ item, onDone }: { item: HeldItem; onDone: () => void }) {
@@ -480,49 +561,48 @@ function LinkForm({ item, onDone }: { item: HeldItem; onDone: () => void }) {
   );
 }
 
-function CollectButton({ id, kind, busy, onAction }: { id: string; kind: HeldItemKind; busy: string; onAction: (l: string, fn: () => Promise<void>) => void }) {
-  const [open, setOpen] = useState(false);
+function CollectButton({ id, kind, busy, open, onOpen, onClose, onAction }: { id: string; kind: HeldItemKind; busy: string; open?: boolean; onOpen?: () => void; onClose?: () => void; onAction: (l: string, fn: () => Promise<void>) => void }) {
   const [who, setWho] = useState('');
   const label = kind === 'incoming' ? '✅ Given to client' : '✅ Collected';
-  if (!open) return <button disabled={!!busy} onClick={() => setOpen(true)} className="px-3 py-1.5 bg-green-600 text-white rounded-lg text-xs">{label}</button>;
+  if (!open) return <button disabled={!!busy} onClick={onOpen} className="px-3 py-1.5 bg-green-600 text-white rounded-lg text-xs">{label}</button>;
   return (
     <div className="w-full border border-slate-200 rounded-lg p-2 flex flex-wrap items-center gap-2">
-      <input className="border border-slate-300 rounded px-2 py-1 text-xs flex-1 min-w-[140px]" placeholder="Collected/received by (name)" value={who} onChange={(e) => setWho(e.target.value)} />
-      <button className="text-xs text-slate-500" onClick={() => setOpen(false)}>cancel</button>
+      <input autoFocus className="border border-slate-300 rounded px-2 py-1 text-xs flex-1 min-w-[140px]" placeholder="Collected/received by (name)" value={who} onChange={(e) => setWho(e.target.value)} />
+      <button className="text-xs text-slate-500" onClick={onClose}>cancel</button>
       <button className="text-xs bg-green-600 text-white px-3 py-1 rounded" onClick={() => onAction('collected', async () => { await api.post(`/holding/${id}/collected`, { collected_by: who || null }); })}>Confirm</button>
     </div>
   );
 }
 
-function ShipBackButton({ id, busy, onAction }: { id: string; busy: string; onAction: (l: string, fn: () => Promise<void>) => void }) {
-  const [open, setOpen] = useState(false);
+function ShipBackButton({ id, busy, open, onOpen, onClose, onAction }: { id: string; busy: string; open?: boolean; onOpen?: () => void; onClose?: () => void; onAction: (l: string, fn: () => Promise<void>) => void }) {
   const [method, setMethod] = useState('');
   const [tracking, setTracking] = useState('');
-  if (!open) return <button disabled={!!busy} onClick={() => setOpen(true)} className="px-3 py-1.5 bg-slate-700 text-white rounded-lg text-xs">📮 Ship back</button>;
+  const [notify, setNotify] = useState(true);
+  if (!open) return <button disabled={!!busy} onClick={onOpen} className="px-3 py-1.5 bg-slate-700 text-white rounded-lg text-xs">📮 Ship back</button>;
   return (
     <div className="w-full border border-slate-200 rounded-lg p-2 flex flex-wrap items-center gap-2">
-      <input className="border border-slate-300 rounded px-2 py-1 text-xs" placeholder="Postage method" value={method} onChange={(e) => setMethod(e.target.value)} />
+      <input autoFocus className="border border-slate-300 rounded px-2 py-1 text-xs" placeholder="Postage method" value={method} onChange={(e) => setMethod(e.target.value)} />
       <input className="border border-slate-300 rounded px-2 py-1 text-xs" placeholder="Tracking #" value={tracking} onChange={(e) => setTracking(e.target.value)} />
-      <button className="text-xs text-slate-500" onClick={() => setOpen(false)}>cancel</button>
-      <button disabled={!method.trim()} className="text-xs bg-slate-700 text-white px-3 py-1 rounded disabled:opacity-40" onClick={() => onAction('ship', async () => { await api.post(`/holding/${id}/ship-back`, { return_method: method, tracking_number: tracking || null }); })}>Confirm</button>
+      <label className="flex items-center gap-1 text-xs text-slate-600"><input type="checkbox" checked={notify} onChange={(e) => setNotify(e.target.checked)} /> email client</label>
+      <button className="text-xs text-slate-500" onClick={onClose}>cancel</button>
+      <button disabled={!method.trim()} className="text-xs bg-slate-700 text-white px-3 py-1 rounded disabled:opacity-40" onClick={() => onAction('ship', async () => { await api.post(`/holding/${id}/ship-back`, { return_method: method, tracking_number: tracking || null, notify }); })}>Confirm</button>
     </div>
   );
 }
 
-function LocationButton({ id, locations, current, onDone }: { id: string; locations: HeldItemLocation[]; current: string | null; onDone: () => void }) {
-  const [open, setOpen] = useState(false);
+function LocationButton({ id, locations, current, open, onOpen, onClose, onDone }: { id: string; locations: HeldItemLocation[]; current: string | null; open?: boolean; onOpen?: () => void; onClose?: () => void; onDone: () => void }) {
   const [loc, setLoc] = useState(current || '');
   const [text, setText] = useState('');
   const somewhereElse = locations.find((l) => l.id === loc)?.name === 'Somewhere else';
-  if (!open) return <button onClick={() => setOpen(true)} className="px-3 py-1.5 bg-white border border-slate-300 text-slate-600 rounded-lg text-xs">📍 Move</button>;
+  if (!open) return <button onClick={onOpen} className="px-3 py-1.5 bg-white border border-slate-300 text-slate-600 rounded-lg text-xs">📍 Move</button>;
   return (
     <div className="w-full border border-slate-200 rounded-lg p-2 flex flex-wrap items-center gap-2">
       <select className="border border-slate-300 rounded px-2 py-1 text-xs" value={loc} onChange={(e) => setLoc(e.target.value)}>
         <option value="">—</option>{locations.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
       </select>
       {somewhereElse && <input className="border border-slate-300 rounded px-2 py-1 text-xs" placeholder="Where?" value={text} onChange={(e) => setText(e.target.value)} />}
-      <button className="text-xs text-slate-500" onClick={() => setOpen(false)}>cancel</button>
-      <button className="text-xs bg-[#7B5EA7] text-white px-3 py-1 rounded" onClick={async () => { await api.put(`/holding/${id}`, { storage_location_id: loc || null, storage_location_text: somewhereElse ? (text || null) : null }); setOpen(false); onDone(); }}>Save</button>
+      <button className="text-xs text-slate-500" onClick={onClose}>cancel</button>
+      <button className="text-xs bg-[#7B5EA7] text-white px-3 py-1 rounded" onClick={async () => { await api.put(`/holding/${id}`, { storage_location_id: loc || null, storage_location_text: somewhereElse ? (text || null) : null }); onClose?.(); onDone(); }}>Save</button>
     </div>
   );
 }

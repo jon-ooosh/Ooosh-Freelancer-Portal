@@ -20,7 +20,7 @@ import type { IssueLocation } from '../types/issue'
 import { withRetry } from '../lib/retry'
 import { mapSeverityToOpSeverity } from '../lib/op-issue-mapping'
 import { VehicleIssuesSurfaceBanner } from '../components/issues/VehicleIssuesSurfaceBanner'
-import { generateConditionReportPdf, sendConditionReportEmail, blobToBase64, resizeImageForPdf } from '../lib/pdf-email'
+import { sendConditionReport, blobToBase64, resizeImageForPdf } from '../lib/pdf-email'
 import { PhotoComparison } from '../components/check-in/PhotoComparison'
 import { PhotoLightbox } from '../components/shared/PhotoLightbox'
 import { AuthImage } from '../components/shared/AuthImage'
@@ -587,6 +587,13 @@ export function CheckInPage() {
               severity: mapSeverityToOpSeverity(damage.severity),
               summary: `${damage.location}: ${damage.description}`.slice(0, 250),
               description: locationNote,
+              // Link the issue to the job — resolved to the OP UUID
+              // server-side. Without this, check-in damage issues were
+              // vehicle-only: invisible on the Job Detail issues panel
+              // and the "Has issues" filter.
+              hirehop_job_number: form.bookOutHireHopJob
+                ? (parseInt(form.bookOutHireHopJob, 10) || null)
+                : null,
               r2_photo_keys: damagePhotoKeys.length > 0 ? damagePhotoKeys : undefined,
               reflag_context: {
                 source: 'checkin',
@@ -672,13 +679,15 @@ export function CheckInPage() {
     const r2PublicBase = import.meta.env.VITE_R2_PUBLIC_URL || ''
     const safeReg = form.vehicleReg.replace(/\s+/g, '-').toUpperCase()
     setUploadProgress('Preparing photos for PDF...')
-    // Resize one photo at a time — parallel resizing (Promise.all) spiked
-    // memory and could OOM the browser tab on phones with lots of high-res
-    // photos. Sequential keeps only one decoded bitmap alive at a time.
+    // Photos captured since Jun 2026 carry a capture-time PDF thumbnail
+    // (CapturedPhoto.pdfBase64) — using it skips re-decoding every blob,
+    // which was the dominant cost of the old submit. The resize fallback
+    // covers photos restored from pre-thumbnail drafts; when falling back,
+    // resize one photo at a time (parallel resizing spiked memory / OOM).
     const photoBase64s: Array<{ angle: string; label: string; base64: string; r2Url?: string }> = []
     for (const p of form.photos) {
       try {
-        const base64 = await resizeImageForPdf(p.blob)
+        const base64 = p.pdfBase64 || (await resizeImageForPdf(p.blob))
         const photoKey = `events/${eventId}/${safeReg}/${p.angle}.jpg`
         const r2Url = r2PublicBase ? `${r2PublicBase}/${photoKey}` : undefined
         photoBase64s.push({ angle: p.angle, label: p.label, base64, r2Url })
@@ -707,7 +716,7 @@ export function CheckInPage() {
       const dmgPhotos: Array<{ base64: string; r2Url?: string }> = []
       for (const dp of d.photos) {
         try {
-          const b64 = await resizeImageForPdf(dp.blob)
+          const b64 = dp.pdfBase64 || (await resizeImageForPdf(dp.blob))
           dmgPhotos.push({ base64: b64 })
         } catch {
           console.warn('Failed to resize damage photo for PDF')
@@ -725,90 +734,99 @@ export function CheckInPage() {
       damageItemsWithBase64.push(await buildDamageItem(d))
     }
 
-    const pdfResult = await withRetry(
-      () =>
-        generateConditionReportPdf({
-          vehicleReg: form.vehicleReg,
-          vehicleType: form.vehicleType,
-          vehicleMake: selectedVehicle?.make,
-          vehicleModel: selectedVehicle?.model,
-          vehicleColour: selectedVehicle?.colour,
-          driverName: form.bookOutDriverName || 'Unknown',
-          clientEmail: form.bookOutClientEmail || undefined,
-          hireHopJob: form.bookOutHireHopJob || undefined,
-          mileage: isNaN(mileageNum) ? null : mileageNum,
-          fuelLevel: form.fuelLevel,
-          eventDate,
-          eventDateTime,
-          photos: photoBase64s,
-          briefingItems: [],
-          signatureBase64,
-          // Hire form data
-          hireStartDate: hireForms?.[0]?.hireStart || undefined,
-          hireEndDate: hireForms?.[0]?.hireEnd || undefined,
-          allDrivers: hireForms?.map(hf => hf.driverName).filter(Boolean),
-          // Check-in specific fields
-          isCheckIn: true,
-          bookOutMileage: form.bookOutMileage,
-          bookOutFuelLevel: form.bookOutFuelLevel,
-          bookOutDate: form.bookOutDate,
-          driverPresent: form.driverPresent,
-          damageItems: damageItemsWithBase64,
-        }),
-      'PDF generation',
-    )
+    // ── Steps 4+5: Generate check-in PDF + email — ONE server-side call.
+    // The server builds the PDF and emails it directly; the multi-MB base64
+    // PDF never round-trips through the phone (legacy flow downloaded it
+    // from /generate-pdf then re-uploaded it to /send-email). When no client
+    // email is on file the backend resolves a job-level recipient via the
+    // address book and falls back to info@ with an amber banner + timeline
+    // interaction (same safety net as book-out).
+    setUploadProgress('Generating PDF & sending email...')
+    const emailTo = form.bookOutClientEmail
+    // Calculate fuel difference for email alert.
+    // When collection data exists, use collection fuel for client charge comparison
+    // (the drive from collection point to base uses fuel that's not the client's responsibility)
+    const clientFuelRef = collectionData?.fuelLevel || form.bookOutFuelLevel
+    const clientFuelLabel = collectionData ? 'collection' : 'book-out'
+    const fuelDiff = clientFuelRef && form.fuelLevel && clientFuelRef !== form.fuelLevel
+      ? `${clientFuelRef} (${clientFuelLabel}) -> ${form.fuelLevel} (base)`
+      : null
 
-    if (pdfResult.success && pdfResult.data) {
+    if (!emailTo && !form.bookOutHireHopJob) {
+      // No client email and no job to resolve a fallback recipient from —
+      // nothing sensible to send. Same net behaviour as the legacy flow
+      // (which silently skipped the email), but surfaced in the results.
       results.push({
-        label: 'PDF report',
+        label: 'Check-in report',
         success: true,
-        detail: `${pdfResult.data.filename} (${Math.round(pdfResult.data.size / 1024)}KB)`,
+        detail: 'Email skipped — no client email or job on file',
       })
     } else {
-      results.push({
-        label: 'PDF report',
-        success: false,
-        detail: pdfResult.error || 'Generation failed',
-      })
-    }
-
-    // ── Step 5: Send email ──
-    const emailTo = form.bookOutClientEmail
-    if (emailTo && pdfResult.success && pdfResult.data) {
-      setUploadProgress('Sending email...')
-      // Calculate fuel difference for email alert
-      // When collection data exists, use collection fuel for client charge comparison
-      // (the drive from collection point to base uses fuel that's not the client's responsibility)
-      const clientFuelRef = collectionData?.fuelLevel || form.bookOutFuelLevel
-      const clientFuelLabel = collectionData ? 'collection' : 'book-out'
-      const fuelDiff = clientFuelRef && form.fuelLevel && clientFuelRef !== form.fuelLevel
-        ? `${clientFuelRef} (${clientFuelLabel}) -> ${form.fuelLevel} (base)`
-        : null
-
-      const emailResult = await withRetry(
-        () =>
-          sendConditionReportEmail({
-            to: emailTo,
+    const reportResult = await withRetry(
+      () =>
+        sendConditionReport(
+          {
             vehicleReg: form.vehicleReg,
-            driverName: form.bookOutDriverName || 'Driver',
+            vehicleType: form.vehicleType,
+            vehicleMake: selectedVehicle?.make,
+            vehicleModel: selectedVehicle?.model,
+            vehicleColour: selectedVehicle?.colour,
+            driverName: form.bookOutDriverName || 'Unknown',
+            clientEmail: form.bookOutClientEmail || undefined,
+            hireHopJob: form.bookOutHireHopJob || undefined,
+            mileage: isNaN(mileageNum) ? null : mileageNum,
+            fuelLevel: form.fuelLevel,
             eventDate,
-            pdfBase64: pdfResult.data!.pdf,
-            pdfFilename: pdfResult.data!.filename,
+            eventDateTime,
+            photos: photoBase64s,
+            briefingItems: [],
+            signatureBase64,
+            // Hire form data
+            hireStartDate: hireForms?.[0]?.hireStart || undefined,
+            hireEndDate: hireForms?.[0]?.hireEnd || undefined,
+            allDrivers: hireForms?.map(hf => hf.driverName).filter(Boolean),
+            // Check-in specific fields
             isCheckIn: true,
+            bookOutMileage: form.bookOutMileage,
+            bookOutFuelLevel: form.bookOutFuelLevel,
+            bookOutDate: form.bookOutDate,
+            driverPresent: form.driverPresent,
+            damageItems: damageItemsWithBase64,
+          },
+          [{ driverName: form.bookOutDriverName || 'Driver', email: emailTo || null }],
+          {
             driverPresent: form.driverPresent,
             damageCount: form.damageItems.length,
             fuelDifference: fuelDiff,
             milesDriven: clientMilesDriven,
-            hireHopJob: form.bookOutHireHopJob || null,
-          }),
-        'Email sending',
-      )
+          },
+        ),
+      'Check-in report PDF + email',
+    )
 
-      if (emailResult.success) {
-        results.push({ label: 'Email sent', success: true, detail: `Sent to ${emailTo}` })
-      } else {
-        results.push({ label: 'Email sent', success: false, detail: emailResult.error || 'Failed' })
+    if (reportResult.success && reportResult.data) {
+      for (const r of reportResult.data) {
+        if (r.success) {
+          const sizeNote = r.size ? ` (${Math.round(r.size / 1024)}KB)` : ''
+          const recipientNote = r.isFallback
+            ? 'info@oooshtours.co.uk (no client email on file)'
+            : r.emailedTo || 'recipient resolved by backend'
+          results.push({
+            label: 'Check-in report',
+            success: true,
+            detail: `${r.filename || 'PDF'}${sizeNote} sent to ${recipientNote}`,
+          })
+        } else {
+          results.push({ label: 'Check-in report', success: false, detail: r.error || 'PDF/email failed' })
+        }
       }
+    } else {
+      results.push({
+        label: 'Check-in report',
+        success: false,
+        detail: reportResult.error || 'Failed after retries',
+      })
+    }
     }
 
     // ── Step 6: Remove allocation from R2 (non-blocking) ──
@@ -1661,8 +1679,10 @@ function StepDamageReport({
   }
 
   const handleDamagePhotoCapture = async (damageId: string, file: File) => {
-    const { compressImage } = await import('../lib/image-utils')
-    const compressed = await compressImage(file, 1024, 0.7)
+    const { compressImageWithThumb } = await import('../lib/image-utils')
+    // Single decode pass produces both the stored blob and the PDF thumbnail
+    // (submit no longer re-decodes damage photos for the report).
+    const { blob: compressed, pdfBase64 } = await compressImageWithThumb(file, 1024, 0.7)
     const blobUrl = URL.createObjectURL(compressed)
     const newPhoto: CapturedPhoto = {
       angle: 'damage',
@@ -1670,6 +1690,7 @@ function StepDamageReport({
       blobUrl,
       blob: compressed,
       timestamp: Date.now(),
+      pdfBase64,
     }
     onChange(items.map(item =>
       item.id === damageId

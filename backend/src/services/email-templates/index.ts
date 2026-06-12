@@ -28,9 +28,11 @@ const templates: Record<string, EmailTemplate> = {
       <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Hi {{clientName}},</p>
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
         Just to let you know your delivery for <strong>{{jobName}}</strong>
-        (job <strong>#{{jobNumber}}</strong>) has arrived safely with us{{receivedSummary}}.
+        (job <strong>#{{jobNumber}}</strong>) has arrived safely with us{{receivedSummary}}.{{#if photoNote}} See the attached photo(s) for details.{{/if}}
         We'll have it ready for your hire.
       </p>
+      {{#if itemDescription}}<p style="margin:0 0 16px;padding:12px 14px;background-color:#f8fafc;border-radius:8px;font-size:15px;color:#1e293b;line-height:1.6;"><strong>{{itemDescription}}</strong></p>{{/if}}
+      {{#if message}}<p style="margin:0 0 16px;font-size:14px;color:#475569;line-height:1.6;">{{message}}</p>{{/if}}
       <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">Any questions, just reply to this email.</p>
     `,
   },
@@ -56,6 +58,84 @@ const templates: Record<string, EmailTemplate> = {
         &nbsp;&nbsp;☎ +44 1273 911382
       </p>
       {{#if message}}<p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">{{message}}</p>{{/if}}
+    `,
+  },
+
+  // ── Lost-property chase ladder (only ever sent via the human-gated review queue) ──
+  holding_chase_1: {
+    variant: 'client',
+    preheader: "We've still got your lost property",
+    subject: "We've still got your {{itemDescription}}{{#if jobNumber}} (#{{jobNumber}}){{/if}}",
+    body: `
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Hi {{clientName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Just a reminder that we've still got your <strong>{{itemDescription}}</strong> left {{foundPlace}}.
+      </p>
+      {{#if jobNumber}}<p style="margin:0 0 16px;font-size:14px;color:#64748b;line-height:1.6;">This is re job #{{jobNumber}}.</p>{{/if}}
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        We've held the item(s){{#if foundDate}} since {{foundDate}}{{/if}}. Please make arrangements to come and collect as soon as you can, or they may be disposed of{{#if disposeAfterDate}} after <strong>{{disposeAfterDate}}</strong>{{else}} in about a week's time{{/if}}.
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        If you'd rather we disposed of them on your behalf, just let us know. If you'd like us to arrange a delivery, that may be possible - please get in touch.
+      </p>
+      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">Thanks,<br>{{staffName}}<br>Ooosh! Tours Ltd</p>
+    `,
+  },
+
+  holding_chase_2: {
+    variant: 'client',
+    preheader: 'Second reminder - please collect your lost property',
+    subject: 'Reminder: please collect your {{itemDescription}}{{#if jobNumber}} (#{{jobNumber}}){{/if}}',
+    body: `
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Hi {{clientName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        This is a second reminder that we've still got your <strong>{{itemDescription}}</strong> left {{foundPlace}}{{#if foundDate}} on {{foundDate}}{{/if}}.
+      </p>
+      {{#if jobNumber}}<p style="margin:0 0 16px;font-size:14px;color:#64748b;line-height:1.6;">This is re job #{{jobNumber}}.</p>{{/if}}
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        We've already held the item(s) for around 14 days, which is the maximum we can usually hold lost property for. Please make arrangements to collect as soon as you can, or they may be disposed of.
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        If you'd rather we disposed of them on your behalf, just let us know. If you'd like us to arrange a delivery, that may be possible - please get in touch.
+      </p>
+      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">Thanks,<br>{{staffName}}<br>Ooosh! Tours Ltd</p>
+    `,
+  },
+
+  holding_chase_3: {
+    variant: 'client',
+    preheader: "Final notice - we're going to dispose of your lost property",
+    subject: "We're going to dispose of your {{itemDescription}}{{#if jobNumber}} (#{{jobNumber}}){{/if}}",
+    body: `
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Hi {{clientName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Despite previous emails, we've still got your <strong>{{itemDescription}}</strong> from {{foundPlace}}.
+      </p>
+      {{#if jobNumber}}<p style="margin:0 0 16px;font-size:14px;color:#64748b;line-height:1.6;">This is re job #{{jobNumber}}.</p>{{/if}}
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        We've now held the item(s){{#if foundDate}} since {{foundDate}}{{/if}}, which is more than the maximum we can usually hold lost property for. Please <strong>urgently</strong> make arrangements to collect, or they will be disposed of in the next few days.
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        If you'd rather we disposed of them on your behalf, just let us know. If you'd like us to arrange a delivery, that may still be possible - please contact us as soon as you can.
+      </p>
+      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">Thanks,<br>{{staffName}}<br>Ooosh! Tours Ltd</p>
+    `,
+  },
+
+  holding_shipped_back: {
+    variant: 'client',
+    preheader: 'Your items are on their way back to you',
+    subject: 'Your items have been sent back{{#if jobNumber}} (#{{jobNumber}}){{/if}}',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Your items are on their way</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Hi {{clientName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        We've sent your items back to you{{#if itemDescription}} ({{itemDescription}}){{/if}}.
+      </p>
+      <p style="margin:0 0 16px;padding:12px 14px;background-color:#f8fafc;border-radius:8px;font-size:15px;color:#1e293b;line-height:1.6;">
+        <strong>Sent via:</strong> {{returnMethod}}{{#if trackingNumber}}<br><strong>Tracking #:</strong> {{trackingNumber}}{{/if}}
+      </p>
+      <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">Any questions, just reply to this email.</p>
     `,
   },
 
@@ -1332,6 +1412,33 @@ const templates: Record<string, EmailTemplate> = {
           </td>
         </tr>
       </table>
+    `,
+  },
+
+  vehicle_damage_logged: {
+    variant: 'internal',
+    subject: '🚐 Vehicle issue logged: {{vehicleReg}} — {{summary}}',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#991b1b;">⚠️ Vehicle issue logged</h2>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.6;">
+        A <strong>{{category}}</strong> issue ({{severity}}) has been {{eventVerb}} on
+        <strong>{{vehicleReg}}</strong>{{#if jobRef}} during job <strong>{{jobRef}}</strong>{{/if}}.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#fef2f2;border-radius:8px;border:1px solid #fecaca;">
+            <p style="margin:0 0 4px;font-size:13px;color:#64748b;">Issue</p>
+            <p style="margin:0 0 8px;font-size:14px;color:#1e293b;font-weight:600;">{{summary}}</p>
+            {{#if description}}<p style="margin:0 0 8px;font-size:13px;color:#334155;line-height:1.5;">{{description}}</p>{{/if}}
+            <p style="margin:0 0 4px;font-size:13px;color:#64748b;">Reported by</p>
+            <p style="margin:0 0 8px;font-size:14px;color:#1e293b;">{{reportedBy}}</p>
+            {{#if photoLine}}<p style="margin:0;font-size:13px;color:#334155;">{{photoLine}}</p>{{/if}}
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0;font-size:14px;color:#334155;">
+        <a href="{{issueUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Open issue in Ooosh →</a>
+      </p>
     `,
   },
 

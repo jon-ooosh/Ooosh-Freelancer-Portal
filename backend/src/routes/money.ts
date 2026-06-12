@@ -75,16 +75,32 @@ router.use(authenticateFlexible as any);
 //
 // Staff-only (admin/manager) — read of cross-job financials. Registered before
 // the parametrised /:jobId routes (single-segment path, no collision anyway).
-router.get('/overview', authorize('admin', 'manager'), async (_req: AuthRequest, res: Response) => {
+router.get('/overview', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {
   try {
+    // By default the Balances Outstanding list shows only confirmed-onwards jobs
+    // (what we're actually owed / have upcoming). Speculative enquiry-stage jobs
+    // (new_enquiry / quoting / paused / provisional) have a "balance" that isn't
+    // real money owed — excluded unless ?include_speculative=1 (UI toggle).
+    const includeSpeculative = req.query.include_speculative === '1' || req.query.include_speculative === 'true';
+    const speculativeFilter = includeSpeculative
+      ? ''
+      : `AND COALESCE(j.pipeline_status, '') NOT IN ('new_enquiry', 'quoting', 'paused', 'provisional')`;
     // Balances outstanding — anything still owed on a non-dead job, biggest
     // first. Jobs with a business-level balance override (admin flagged the HH
     // balance as settled in Xero / written off / etc.) are split into a separate
     // `resolved` list and excluded from the active list + headline total — see
     // migration 117. The override carries reason/notes/who/when for the
     // collapsible "Resolved" section.
-    const balancesAll = await query(
-      `SELECT jf.job_id, j.hh_job_number, j.job_name,
+    //
+    // Active and resolved are SEPARATE queries: filtering resolved rows
+    // client-side after a shared LIMIT let hundreds of resolved rows crowd
+    // small genuine balances out of the active list entirely (job 15758's
+    // £14.40 vanished once 293 resolved rows + 107 active hit the 400 cap).
+    //
+    // Each active row also carries its debt-chase history (migration 120) —
+    // count + last chased, for the overview's chase tracker.
+    const balanceSelect = `
+       SELECT jf.job_id, j.hh_job_number, j.job_name,
               COALESCE(j.client_name, j.company_name) AS client_name,
               j.pipeline_status, j.job_date, j.job_end, j.return_date,
               jf.hire_value_inc_vat, jf.total_hire_deposits, jf.balance_outstanding,
@@ -92,24 +108,39 @@ router.get('/overview', authorize('admin', 'manager'), async (_req: AuthRequest,
               o.reason       AS override_reason,
               o.notes        AS override_notes,
               o.resolved_at  AS override_resolved_at,
-              COALESCE(NULLIF(TRIM(pu.first_name || ' ' || pu.last_name), ''), u.email) AS override_resolved_by_name
+              COALESCE(NULLIF(TRIM(pu.first_name || ' ' || pu.last_name), ''), u.email) AS override_resolved_by_name,
+              ch.chase_count, ch.last_chased_at, ch.last_chased_by_name
        FROM job_financials jf
        JOIN jobs j ON j.id = jf.job_id
        LEFT JOIN job_balance_overrides o ON o.job_id = jf.job_id
        LEFT JOIN users u ON u.id = o.resolved_by
        LEFT JOIN people pu ON pu.id = u.person_id
+       LEFT JOIN LATERAL (
+         SELECT COUNT(*)::int AS chase_count,
+                MAX(c.chased_at) AS last_chased_at,
+                (SELECT COALESCE(NULLIF(TRIM(cp.first_name || ' ' || cp.last_name), ''), cu.email)
+                 FROM job_balance_chases c2
+                 LEFT JOIN users cu ON cu.id = c2.chased_by
+                 LEFT JOIN people cp ON cp.id = cu.person_id
+                 WHERE c2.job_id = jf.job_id
+                 ORDER BY c2.chased_at DESC LIMIT 1) AS last_chased_by_name
+         FROM job_balance_chases c
+         WHERE c.job_id = jf.job_id
+       ) ch ON TRUE
        WHERE jf.balance_outstanding > 0.01
          AND COALESCE(j.pipeline_status, '') NOT IN ('lost', 'cancelled')
          AND COALESCE(j.is_internal, false) = false
+         ${speculativeFilter}`;
+    const balances = await query(
+      `${balanceSelect} AND o.job_id IS NULL
        ORDER BY jf.balance_outstanding DESC
        LIMIT 400`
     );
-    const balances = {
-      rows: balancesAll.rows.filter((r: Record<string, unknown>) => !r.override_reason),
-    };
-    const balancesResolved = {
-      rows: balancesAll.rows.filter((r: Record<string, unknown>) => !!r.override_reason),
-    };
+    const balancesResolved = await query(
+      `${balanceSelect} AND o.job_id IS NOT NULL
+       ORDER BY o.resolved_at DESC
+       LIMIT 400`
+    );
 
     // Deposits pending — confirmed-ish jobs with no hire deposit recorded yet.
     const depositsPending = await query(
@@ -286,6 +317,60 @@ router.delete('/:jobId/resolve-balance', authorize('admin'), async (req: AuthReq
     const msg = error instanceof Error ? error.message : String(error);
     console.error('[money] unresolve-balance error:', msg);
     res.status(500).json({ error: 'Failed to remove balance override', detail: msg });
+  }
+});
+
+// ── Balance chase log (migration 120) ──
+// "When did we last do something about this debt?" — one row per chase event.
+// POST logs a chase (count +1); DELETE removes the most recent one (undo for
+// accidental clicks). Distinct from pipeline enquiry-chasing — no pipeline
+// state is touched.
+
+// POST /api/money/:jobId/chase — log a debt chase against the job.
+router.post('/:jobId/chase', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {
+  try {
+    const jobUuid = await resolveJobUuid(String(req.params.jobId));
+    if (!jobUuid) { res.status(404).json({ error: 'Job not found' }); return; }
+    const note = typeof req.body?.note === 'string' ? req.body.note.slice(0, 1000) : null;
+    await query(
+      `INSERT INTO job_balance_chases (job_id, chased_by, note) VALUES ($1, $2, $3)`,
+      [jobUuid, req.user!.id, note]
+    );
+    const counts = await query(
+      `SELECT COUNT(*)::int AS chase_count, MAX(chased_at) AS last_chased_at
+       FROM job_balance_chases WHERE job_id = $1`,
+      [jobUuid]
+    );
+    res.json({ data: counts.rows[0], message: 'Chase logged' });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error('[money] chase error:', msg);
+    res.status(500).json({ error: 'Failed to log chase', detail: msg });
+  }
+});
+
+// DELETE /api/money/:jobId/chase — undo the most recent chase on the job.
+router.delete('/:jobId/chase', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {
+  try {
+    const jobUuid = await resolveJobUuid(String(req.params.jobId));
+    if (!jobUuid) { res.status(404).json({ error: 'Job not found' }); return; }
+    const del = await query(
+      `DELETE FROM job_balance_chases
+       WHERE id = (SELECT id FROM job_balance_chases WHERE job_id = $1 ORDER BY chased_at DESC LIMIT 1)
+       RETURNING id`,
+      [jobUuid]
+    );
+    if (del.rows.length === 0) { res.status(404).json({ error: 'No chases logged on this job' }); return; }
+    const counts = await query(
+      `SELECT COUNT(*)::int AS chase_count, MAX(chased_at) AS last_chased_at
+       FROM job_balance_chases WHERE job_id = $1`,
+      [jobUuid]
+    );
+    res.json({ data: counts.rows[0], message: 'Chase removed' });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error('[money] chase undo error:', msg);
+    res.status(500).json({ error: 'Failed to undo chase', detail: msg });
   }
 });
 
@@ -1188,8 +1273,30 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     const vatAmount = hireValueExVat * vatRate;
     const hireValueIncVat = hireValueExVat + vatAmount;
     const totalDeposits = totalHireDeposits + totalExcessDeposits;
-    // Balance = hire value inc VAT minus hire deposits only (excess deposits are separate)
-    const balanceOutstanding = hireValueIncVat - totalHireDeposits;
+
+    // Credit notes come in two shapes, and only one reduces the balance:
+    //   • Offsetting invoicing issued ABOVE the job's accrued value (billing
+    //     correction — accrued already reflects reality, so reducing the
+    //     balance again would double-count. The job-15627 shape.)
+    //   • Writing off part of the accrued value itself (e.g. OT-CRE-1204 on
+    //     job 15516: £32.40 of a fully-invoiced job written off — HH nets it
+    //     into the invoice's `owing` and Xero considers the job settled, but
+    //     kind=0 accrued never moves, so the accrued-based balance here showed
+    //     a phantom £32.40 owing forever).
+    // Distinguish by how much approved invoicing exceeds accrued: only credit
+    // value beyond that overage is a genuine write-off of accrued value.
+    // Clamped to the remaining balance so a mis-shaped credit note can't flip
+    // the job to phantom-overpaid (the pre-15627 symptom).
+    const approvedInvoiceTotal = approvedInvoices.reduce((s, inv) => s + inv.amount, 0);
+    const invoicedOverage = Math.max(approvedInvoiceTotal - hireValueIncVat, 0);
+    const creditNoteWriteOff = Math.min(
+      Math.max(totalCreditNotesApplied - invoicedOverage, 0),
+      Math.max(hireValueIncVat - totalHireDeposits, 0)
+    );
+
+    // Balance = hire value inc VAT minus hire deposits only (excess deposits
+    // are separate), minus any genuine credit-note write-off
+    const balanceOutstanding = hireValueIncVat - totalHireDeposits - creditNoteWriteOff;
 
     // Side-effect: update cached job_value on jobs table so pipeline/jobs pages show correct value
     if (hireValueExVat > 0 && job.id) {
@@ -1259,14 +1366,19 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     // If VAT adjustment applies, override the VAT figures
     const effectiveVatAmount = vatAdjustment ? vatAdjustment.adjustedVat : vatAmount;
     const effectiveHireValueIncVat = hireValueExVat + effectiveVatAmount;
-    const effectiveBalanceOutstanding = effectiveHireValueIncVat - totalHireDeposits;
+    const effectiveBalanceOutstanding = effectiveHireValueIncVat - totalHireDeposits - creditNoteWriteOff;
 
     // Calculate deposit requirements using effective (VAT-adjusted) total
     let requiredDeposit = Math.max(effectiveHireValueIncVat * 0.25, 100);
     if (effectiveHireValueIncVat < 400) requiredDeposit = effectiveHireValueIncVat;
     if (effectiveHireValueIncVat === 0) requiredDeposit = 0;
     const depositPaid = totalHireDeposits >= (requiredDeposit - 5); // £5 tolerance
-    const depositPercent = effectiveHireValueIncVat > 0 ? Math.min(100, (totalHireDeposits / effectiveHireValueIncVat) * 100) : 0;
+    // Credit-note write-offs count toward payment progress (the written-off
+    // portion is settled, just not by cash) so the bar/label agree with the
+    // £0 balance instead of sitting at 99% forever.
+    const depositPercent = effectiveHireValueIncVat > 0
+      ? Math.min(100, ((totalHireDeposits + creditNoteWriteOff) / effectiveHireValueIncVat) * 100)
+      : 0;
 
     // Build list of unmatched HH excess deposits (not linked to any OP record)
     // These can be manually linked by staff via the UI
@@ -1404,6 +1516,8 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
           total_deposits: totalDeposits,
           total_hire_deposits: totalHireDeposits,
           total_excess_deposits: totalExcessDeposits,
+          total_credit_notes: totalCreditNotesApplied,
+          credit_note_write_off: creditNoteWriteOff,
           balance_outstanding: effectiveBalanceOutstanding,
           required_deposit: requiredDeposit,
           deposit_paid: depositPaid,

@@ -12,7 +12,11 @@ import { useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { EntitySearch } from '../components/holding/EntitySearch';
+import { JobNumberField } from '../components/holding/JobNumberField';
 import { NotifyClientModal } from '../components/holding/NotifyClientModal';
+import { OrgJobSuggestions } from '../components/holding/OrgJobSuggestions';
+import { uploadHeldItemPhotos } from '../components/holding/photo-upload';
+import { locationLabel } from '../components/holding/format';
 import type { HeldItem, HeldItemLocation } from '../../../shared/types';
 
 const PURPLE = '#7B5EA7';
@@ -35,7 +39,7 @@ export default function QuickActionsPage() {
     { id: 'package', emoji: '📦', label: 'Package arrived', onClick: () => setActive('package'), tone: 'bg-[#7B5EA7]' },
     { id: 'lost', emoji: '🔍', label: 'Lost property', onClick: () => setActive('lost'), tone: 'bg-amber-600' },
     { id: 'handover', emoji: '✅', label: 'Handover / collected', onClick: () => setActive('handover'), tone: 'bg-green-600' },
-    { id: 'receipt', emoji: '🧾', label: 'Upload receipt', onClick: () => navigate('/money/costs'), tone: 'bg-slate-700' },
+    { id: 'receipt', emoji: '🧾', label: 'Upload receipt', onClick: () => navigate('/money/costs?capture=1'), tone: 'bg-slate-700' },
     { id: 'checkin', emoji: '↩️', label: 'Check vehicle in', onClick: () => navigate('/vehicles/check-in'), tone: 'bg-blue-700' },
   ];
 
@@ -96,20 +100,8 @@ function Sheet({ title, onClose, children }: { title: string; onClose: () => voi
 async function uploadPhotos(files: FileList | null, onDone: (a: { name: string; url: string; type: string }[]) => void, onErr: (m: string) => void, setBusy: (b: boolean) => void) {
   if (!files || files.length === 0) return;
   setBusy(true);
-  try {
-    const out: { name: string; url: string; type: string }[] = [];
-    for (const file of Array.from(files)) {
-      const fd = new FormData();
-      fd.append('file', file);
-      fd.append('attachment_only', 'true');
-      const token = useAuthStore.getState().accessToken;
-      const res = await fetch('/api/files/upload', { method: 'POST', headers: token ? { Authorization: `Bearer ${token}` } : {}, body: fd });
-      if (!res.ok) throw new Error('Upload failed');
-      const j = await res.json();
-      out.push({ name: j.filename || file.name, url: j.r2_key, type: 'image' });
-    }
-    onDone(out);
-  } catch (e) { onErr(e instanceof Error ? e.message : 'Upload failed'); } finally { setBusy(false); }
+  try { onDone(await uploadHeldItemPhotos(files)); }
+  catch (e) { onErr(e instanceof Error ? e.message : 'Upload failed'); } finally { setBusy(false); }
 }
 
 // ── Package arrived — search FIRST (receive an expected/known one), then create ──
@@ -208,8 +200,9 @@ function QuickLogSheet({ kind, locations, onClose, onSaved }: { kind: 'incoming'
         notes: f.notes || null,
         photos,
       });
-      // Lost property (not given straight back) → offer to notify the client now.
-      if (kind === 'lost_property' && !givenStraight && r.data) { setSavedItem(r.data); setSaving(false); return; }
+      // Not handed straight over → offer to notify the client now (works for
+      // both "package arrived" and "lost property" - picker + photos attached).
+      if (!givenStraight && r.data) { setSavedItem(r.data); setSaving(false); return; }
       onSaved();
     } catch (e) { setErr(e instanceof Error ? e.message : 'Save failed'); } finally { setSaving(false); }
   }
@@ -253,11 +246,9 @@ function QuickLogSheet({ kind, locations, onClose, onSaved }: { kind: 'incoming'
           </label>
           {!f.owner_unknown && (
             <>
-              <div><label className="block text-sm text-slate-500 mb-1">HireHop job #</label>
-                <input className={inputCls} type="number" inputMode="numeric" value={f.hh_job_number} onChange={(e) => setF({ ...f, hh_job_number: e.target.value })} placeholder="e.g. 15816" />
-                <p className="text-[11px] text-slate-400 mt-1">Enter the job # and we link the job &amp; client for you. Only fill the boxes below if there's no job.</p>
-              </div>
+              <JobNumberField value={f.hh_job_number} onChange={(v) => setF({ ...f, hh_job_number: v })} compact />
               <EntitySearch kind="organisations" label="Client / band" value={f.org_name} compact onPick={(id, name) => setF({ ...f, owner_organisation_id: id, org_name: name })} />
+              <OrgJobSuggestions orgId={f.owner_organisation_id} hasNumber={!!f.hh_job_number} onPick={(n) => setF({ ...f, hh_job_number: n })} compact />
               <EntitySearch kind="people" label="Or a person" value={f.person_name} compact onPick={(id, name) => setF({ ...f, owner_person_id: id, person_name: name })} />
               <input className={inputCls} value={f.client_name_text} onChange={(e) => setF({ ...f, client_name_text: e.target.value })} placeholder="…or just a name (free text)" />
             </>
@@ -333,7 +324,7 @@ function HandoverSheet({ onClose, onSaved }: { onClose: () => void; onSaved: () 
           <div className="bg-slate-50 rounded-xl p-4">
             <p className="font-semibold text-slate-800">{picked.description || 'Item'}</p>
             <p className="text-sm text-slate-500">{picked.owner_person_name || picked.owner_organisation_name || picked.client_name_text || 'Unknown owner'}
-              {picked.storage_location_name ? ` · ${picked.storage_location_name}` : ''}</p>
+              {locationLabel(picked) ? ` · ${locationLabel(picked)}` : ''}</p>
           </div>
           <div><label className="block text-sm text-slate-500 mb-1">Collected / received by (optional)</label>
             <input autoFocus className={inputCls} value={who} onChange={(e) => setWho(e.target.value)} placeholder="Name" /></div>
@@ -357,7 +348,7 @@ function HandoverSheet({ onClose, onSaved }: { onClose: () => void; onSaved: () 
               <p className="font-medium text-slate-800">{h.description || 'Item'}</p>
               <p className="text-xs text-slate-500">
                 {h.owner_person_name || h.owner_organisation_name || h.client_name_text || (h.owner_unknown ? '❓ Unknown' : '—')}
-                {h.storage_location_name ? ` · ${h.storage_location_name}` : ''}
+                {locationLabel(h) ? ` · ${locationLabel(h)}` : ''}
                 {h.hh_job_number ? ` · #${h.hh_job_number}` : ''}
               </p>
             </button>

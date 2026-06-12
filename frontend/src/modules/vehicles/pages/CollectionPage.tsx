@@ -12,7 +12,7 @@ import { fetchBookOutForVehicle } from '../lib/events-query'
 import { uploadAllPhotos } from '../lib/photo-upload'
 import { updateFleetHireStatus } from '../lib/fleet-status'
 import { saveCollection } from '../lib/collection-api'
-import { generateConditionReportPdf, sendConditionReportEmail, blobToBase64, resizeImageForPdf } from '../lib/pdf-email'
+import { sendConditionReport, blobToBase64, resizeImageForPdf } from '../lib/pdf-email'
 import { withRetry } from '../lib/retry'
 import { PhotoCapture } from '../components/book-out/PhotoCapture'
 import { SignatureCapture } from '../components/book-out/SignatureCapture'
@@ -390,13 +390,14 @@ export function CollectionPage() {
     const r2PublicBase = import.meta.env.VITE_R2_PUBLIC_URL || ''
     const safeReg = form.vehicleReg.replace(/\s+/g, '-').toUpperCase()
     setUploadProgress('Preparing photos for PDF...')
-    // Resize one photo at a time — parallel resizing (Promise.all) spiked
-    // memory and could OOM the browser tab on phones with lots of high-res
-    // photos. Sequential keeps only one decoded bitmap alive at a time.
+    // Capture-time PDF thumbnail when present (CapturedPhoto.pdfBase64);
+    // resize fallback for photos restored from pre-thumbnail drafts. When
+    // falling back, resize one photo at a time — parallel resizing spiked
+    // memory and could OOM the browser tab.
     const photoBase64s: Array<{ angle: string; label: string; base64: string; r2Url?: string }> = []
     for (const p of form.photos) {
       try {
-        const base64 = await resizeImageForPdf(p.blob)
+        const base64 = p.pdfBase64 || (await resizeImageForPdf(p.blob))
         const photoKey = `events/${eventId}/${safeReg}/${p.angle}.jpg`
         const r2Url = r2PublicBase ? `${r2PublicBase}/${photoKey}` : undefined
         photoBase64s.push({ angle: p.angle, label: p.label, base64, r2Url })
@@ -416,92 +417,75 @@ export function CollectionPage() {
       console.warn('Failed to convert signature to base64')
     }
 
-    const pdfResult = await withRetry(
-      () =>
-        generateConditionReportPdf({
-          vehicleReg: form.vehicleReg,
-          vehicleType: form.vehicleType,
-          vehicleMake: selectedVehicle?.make,
-          vehicleModel: selectedVehicle?.model,
-          vehicleColour: selectedVehicle?.colour,
-          driverName: form.driverName,
-          clientEmail: form.clientEmail || undefined,
-          hireHopJob: form.hireHopJob || undefined,
-          mileage: isNaN(mileageNum) ? null : mileageNum,
-          fuelLevel: form.fuelLevel,
-          eventDate,
-          eventDateTime,
-          photos: photoBase64s,
-          briefingItems: [],
-          signatureBase64,
-          isCheckIn: false,
-        }),
-      'PDF generation',
-    )
-
-    if (pdfResult.success && pdfResult.data) {
-      results.push({
-        label: 'PDF report',
-        success: true,
-        detail: `${pdfResult.data.filename} (${Math.round(pdfResult.data.size / 1024)}KB)`,
-      })
-    } else {
-      results.push({
-        label: 'PDF report',
-        success: false,
-        detail: pdfResult.error || 'Generation failed',
-      })
+    // ── Steps 4+5: PDF + emails — ONE server-side call. The server builds
+    // the report and emails each recipient directly; the multi-MB base64 PDF
+    // never round-trips through the phone. Recipients: the customer (with
+    // the job-level address-book fallback when no email is on file) and the
+    // collecting freelancer (their own copy, when their email differs).
+    setUploadProgress('Generating PDF & sending emails...')
+    const freelancerEmail = freelancerContext?.driverEmail
+    const recipients: Array<{ driverName: string; email: string | null }> = []
+    if (form.clientEmail || form.hireHopJob) {
+      recipients.push({ driverName: form.driverName, email: form.clientEmail || null })
+    }
+    if (freelancerEmail && freelancerEmail !== form.clientEmail) {
+      recipients.push({ driverName: form.driverName, email: freelancerEmail })
     }
 
-    // ── Step 5: Send email to client + freelancer ──
-    if (pdfResult.success && pdfResult.data) {
-      // Send to client
-      if (form.clientEmail) {
-        setUploadProgress('Sending email to client...')
-        const clientEmailResult = await withRetry(
-          () =>
-            sendConditionReportEmail({
-              to: form.clientEmail,
+    if (recipients.length === 0) {
+      results.push({
+        label: 'Collection report',
+        success: true,
+        detail: 'Email skipped — no client email or job on file',
+      })
+    } else {
+      const reportResult = await withRetry(
+        () =>
+          sendConditionReport(
+            {
               vehicleReg: form.vehicleReg,
+              vehicleType: form.vehicleType,
+              vehicleMake: selectedVehicle?.make,
+              vehicleModel: selectedVehicle?.model,
+              vehicleColour: selectedVehicle?.colour,
               driverName: form.driverName,
+              clientEmail: form.clientEmail || undefined,
+              hireHopJob: form.hireHopJob || undefined,
+              mileage: isNaN(mileageNum) ? null : mileageNum,
+              fuelLevel: form.fuelLevel,
               eventDate,
-              pdfBase64: pdfResult.data!.pdf,
-              pdfFilename: pdfResult.data!.filename,
-              hireHopJob: form.hireHopJob || null,
-            }),
-          'Client email',
-        )
+              eventDateTime,
+              photos: photoBase64s,
+              briefingItems: [],
+              signatureBase64,
+              isCheckIn: false,
+            },
+            recipients,
+          ),
+        'Collection PDF + emails',
+      )
 
-        if (clientEmailResult.success) {
-          results.push({ label: 'Client email', success: true, detail: `Sent to ${form.clientEmail}` })
-        } else {
-          results.push({ label: 'Client email', success: false, detail: clientEmailResult.error || 'Failed' })
+      if (reportResult.success && reportResult.data) {
+        for (const r of reportResult.data) {
+          if (r.success) {
+            const recipientNote = r.isFallback
+              ? 'info@oooshtours.co.uk (no client email on file)'
+              : r.emailedTo || 'recipient resolved by backend'
+            results.push({
+              label: 'Collection report',
+              success: true,
+              detail: `${r.filename || 'PDF'} sent to ${recipientNote}`,
+            })
+          } else {
+            results.push({ label: 'Collection report', success: false, detail: r.error || 'PDF/email failed' })
+          }
         }
-      }
-
-      // Send to freelancer (if they have an email)
-      const freelancerEmail = freelancerContext?.driverEmail
-      if (freelancerEmail && freelancerEmail !== form.clientEmail) {
-        setUploadProgress('Sending email to driver...')
-        const driverEmailResult = await withRetry(
-          () =>
-            sendConditionReportEmail({
-              to: freelancerEmail,
-              vehicleReg: form.vehicleReg,
-              driverName: form.driverName,
-              eventDate,
-              pdfBase64: pdfResult.data!.pdf,
-              pdfFilename: pdfResult.data!.filename,
-              hireHopJob: form.hireHopJob || null,
-            }),
-          'Driver email',
-        )
-
-        if (driverEmailResult.success) {
-          results.push({ label: 'Driver email', success: true, detail: `Sent to ${freelancerEmail}` })
-        } else {
-          results.push({ label: 'Driver email', success: false, detail: driverEmailResult.error || 'Failed' })
-        }
+      } else {
+        results.push({
+          label: 'Collection report',
+          success: false,
+          detail: reportResult.error || 'Failed after retries',
+        })
       }
     }
 

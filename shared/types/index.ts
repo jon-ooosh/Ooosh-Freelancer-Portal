@@ -1008,6 +1008,8 @@ export interface Cost {
   amount_gross: number | null;
   amount_vat: number | null;
   amount_net: number | null;
+  vat_treatment?: 'standard' | 'reclaim_split';
+  invoice_number?: string | null;
   currency: string;
   description: string | null;
   category: string | null;
@@ -1145,6 +1147,10 @@ export interface HeldItem {
   escalation_level: number;
   last_chased_at: string | null;
   dispose_after: string | null;
+  expected_collection_date: string | null;  // future = chases paused until then
+
+  // Temp storage
+  hold_until: string | null;                 // staff reminded 3 days before
 
   // Meta
   arrived_at: string | null;

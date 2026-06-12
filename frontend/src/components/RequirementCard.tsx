@@ -136,6 +136,7 @@ const TYPE_STATUS_LABELS: Record<string, Record<string, string>> = {
   client_followup: { not_started: 'Not Contacted', in_progress: 'In Progress', done: 'Done', blocked: 'No Response' },
   reminder: { not_started: 'To Do', in_progress: 'In Progress', done: 'Done', blocked: 'Blocked' },
   damage_review: { not_started: 'Open', in_progress: 'Awaiting Quote', done: 'Resolved', blocked: 'Stalled' },
+  merch: { not_started: 'None inbound', in_progress: 'To hand over', done: 'All handed over', blocked: 'Problem' },
 };
 
 const EXCESS_STATUS_LABELS: Record<string, { label: string; colour: string }> = {
@@ -339,8 +340,11 @@ export default function RequirementCard({
   }
 
   // Hide status dropdown for contextual cards (hire_forms, excess, vehicle with nested children)
+  // Merch is a derived pip (auto-computed from logged held items), so its status
+  // is read-only like the vehicle card — hand-setting it would just be overwritten.
   const isContextualStatus = (isNested && (req.requirement_type === 'hire_forms' || req.requirement_type === 'excess'))
-    || req.requirement_type === 'vehicle';
+    || req.requirement_type === 'vehicle'
+    || req.requirement_type === 'merch';
 
   // Click outside to dismiss status dropdown
   const statusMenuRef = useRef<HTMLDivElement>(null);
@@ -765,7 +769,7 @@ export default function RequirementCard({
 
         <div className="flex items-center gap-2 flex-shrink-0">
           {/* Step progress */}
-          {req.type_steps && req.current_step && (
+          {req.type_steps && req.current_step && req.requirement_type !== 'merch' && (
             <div className="flex items-center gap-1 mr-2">
               <span className="text-xs text-gray-500">{req.current_step}</span>
               {req.type_steps.indexOf(req.current_step) < req.type_steps.length - 1 && (
@@ -817,6 +821,14 @@ export default function RequirementCard({
             </div>
           )}
 
+          {/* Merch — read-only derived status badge (auto-updates from logged items) */}
+          {req.requirement_type === 'merch' && (
+            <span title="Auto-updated from logged held items"
+              className={`inline-flex px-3 py-1 rounded text-xs font-medium ${statusConfig.bg} ${statusConfig.colour}`}>
+              {typeLabels?.[req.status] || statusConfig.label}
+            </span>
+          )}
+
           {/* Remove button */}
           <button
             onClick={() => setShowDeleteConfirm(true)}
@@ -830,8 +842,8 @@ export default function RequirementCard({
         </div>
       </div>
 
-      {/* Multi-step progress bar */}
-      {req.type_steps && (
+      {/* Multi-step progress bar — not for merch (derived pip, never advances steps) */}
+      {req.type_steps && req.requirement_type !== 'merch' && (
         <div className="mt-3 flex gap-1">
           {req.type_steps.map((step: string, i: number) => {
             const currentIdx = req.current_step ? req.type_steps!.indexOf(req.current_step) : -1;

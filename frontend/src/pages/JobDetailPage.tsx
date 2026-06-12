@@ -3751,17 +3751,10 @@ export default function JobDetailPage() {
               doesn't clutter clean jobs; "+ Log Problem" button sits inside. */}
           {id && <JobProblemsPanel jobId={id} />}
 
-          {/* Holding — incoming deliveries to give this client (the actionable
-              list). Temp storage + lost property are FYI in the right sidebar. */}
-          {id && (
-            <div className="bg-white rounded-xl border border-gray-200 p-4 space-y-3">
-              <div className="flex items-center justify-between gap-3">
-                <h3 className="text-sm font-semibold text-gray-800">📦 Held for Clients</h3>
-                {job.hh_job_number && <SendMerchFormButton jobId={id} hhJobNumber={job.hh_job_number} />}
-              </div>
-              <HeldItemsSection entityType="job" entityId={id} kinds={['incoming']} bare emptyHint="Nothing held for this job yet." />
-            </div>
-          )}
+          {/* Holding for this client (incoming deliveries) now lives inside the
+              prep checklist's "Held for Clients" block — rolled in with the merch
+              requirement so there's one surface. Temp storage + lost property
+              stay as FYI in the right sidebar. */}
 
           <JobPrepChecklist
             key={prepChecklistKey}
@@ -6231,6 +6224,9 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
             for (const req of requirements) {
               // Skip nested types — they'll be rendered after the vehicle card
               if (hasVehicle && nestedTypes.has(req.requirement_type)) continue;
+              // Merch renders in the dedicated Held-for-Clients block below (card
+              // + nested items panel), not as a plain inline card.
+              if (req.requirement_type === 'merch') continue;
 
               cards.push(
                 <RequirementCard
@@ -6281,6 +6277,39 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
           })()}
         </div>
       )}
+
+      {/* Held for Clients — the merch requirement card (derived status) with its
+          incoming-items detail + Send Merch Form rolled in. Pre-hire only. When
+          nothing's logged yet there's no merch requirement, so we show a plain
+          entry card so staff can still send the form / see the empty state. */}
+      {phase === 'pre_hire' && (() => {
+        const merchReq = requirements.find(r => r.requirement_type === 'merch');
+        const panel = (
+          <div className="bg-white rounded-xl border border-gray-200 p-4 space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <h3 className="text-sm font-semibold text-gray-800">📦 Held for Clients</h3>
+              {hhJobNumber && <SendMerchFormButton jobId={jobId} hhJobNumber={hhJobNumber} />}
+            </div>
+            <HeldItemsSection entityType="job" entityId={jobId} kinds={['incoming']} bare emptyHint="Nothing held for this job yet." />
+          </div>
+        );
+        if (!merchReq) return <div className="mt-2">{panel}</div>;
+        return (
+          <div className="space-y-2 mt-2">
+            <RequirementCard
+              req={merchReq}
+              derivedFlags={effectiveFlags}
+              jobId={jobId}
+              hhJobNumber={hhJobNumber}
+              onStatusChange={changeStatus}
+              onAdvanceStep={advanceStep}
+              onRemove={removeRequirement}
+              onReload={loadAll}
+            />
+            <div className="ml-8 border-l-4 border-gray-100 pl-3">{panel}</div>
+          </div>
+        );
+      })()}
 
       {/* Reminder creation form modal */}
       {showReminderForm && (

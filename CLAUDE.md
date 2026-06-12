@@ -901,6 +901,7 @@ The hire form process calculates excess. The principle: charge the excess of the
 - [x] Email recipient: excess emails now fall back to client organisation email when no people contacts found (FIXED 3 Apr)
 - [ ] Excess email: "finishes" vs "finished" tense depends on context (payment received = future, reimbursement = past) — FIXED 1 Apr
 - [x] **Excess Manage modal silent-failure + idempotency (FIXED May 2026)** — `POST /api/excess/:id/payment` had two distinct gaps: (a) it never pushed to HireHop and never inserted a `job_payments` row, so excesses recorded via Manage > Record Payment never appeared in HH billing or in Money tab payment history; (b) it used additive `excess_amount_taken = previous + amount` semantics, so clicking Save twice doubled the collected amount. Job 15624 incident: £1200 worldpay was saved twice via Manage modal, ending up at £2400 collected against £1200 required, while HireHop showed nothing for the excess. Fix: shared `services/hh-deposit.ts` helper called by both `/excess/:id/payment` and `/money/:jobId/record-payment`. Both endpoints now (a) push to HH and surface `hh_push_error: string | null` in the response (frontend renders amber "Saved in OP — HireHop push failed" banner when set), (b) accept `total_collected` (absolute new total) for idempotent re-submits, (c) auto-find existing excess records on the job when `excess_id` isn't passed (preferring pre-collection records, falling back to most recent for top-ups). The Money tab Record Payment > Excess form also dropped its status filter so `taken` records are visible (previously hidden, leading to a misleading "no excess record exists" banner that promised auto-creation the backend never implemented). See "HireHop Deposit Push" under Shared Utilities for the failure-surfacing contract.
+- [x] **Credit-note write-offs leaving a phantom outstanding balance (FIXED Jun 2026)** — two credit-note shapes exist and the reader must treat them differently. (a) **Billing-correction shape** (job 15627, May 2026): invoice issued above the job's accrued value, credit note offsets the difference — accrued already reflects reality, so the credit must NOT reduce the balance (counting it as cash produced the phantom-overpayment bug the original kind=2 fix addressed). (b) **Write-off shape** (job 15516, OT-CRE-1204, £32.40): part of a fully-invoiced job written off — HH nets it into the invoice's `owing` and Xero considers it settled, but kind=0 accrued never moves, so the accrued-based `balance = hireValueIncVat − totalHireDeposits` showed a phantom balance forever. Fix in `routes/money.ts`: `creditNoteWriteOff = clamp(totalCreditNotesApplied − max(approvedInvoiceTotal − hireValueIncVat, 0), 0, remainingBalance)` — only credit value beyond the invoiced-above-accrued overage is a genuine write-off; subtracted from `balance_outstanding` and counted toward `deposit_percent` (so the Paid-in-full label agrees). Payload exposes `total_credit_notes` + `credit_note_write_off`; MoneyTab shows a transparency line under the balance. **The Payment Portal computes its balance independently from the same `billing_list.php` response and needs the same two-shape fix on its side** (same situation as the kind=3 dual-publishing fix below — a fix on either side alone doesn't close the other).
 - [x] **HireHop kind=3 dual-publishing — direct invoice payments showing as outstanding (FIXED May 2026)** — HireHop's `billing_list.php` publishes every deposit-applied-to-invoice record as TWO `kind=3` rows: once as a child of the deposit (`parent_is="deposit"`, negative credit) and once as a child of the invoice (`parent_is="invoice"`, positive credit). Both rows carry the same `data.ID`. Our `kind=3` handler in `routes/money.ts` was processing both, doubling `hireDepositAppliedToInvoices`. The reconciliation step `directInvoicePayments = max(totalPaidOnApprovedInvoices − hireDepositAppliedToInvoices, 0)` then clamped to zero, swallowing legitimate direct-to-invoice payments. **Latent on every job**, but only visibly broken on jobs with a side invoice paid directly (shop sales, additional driver fees added post-deposit, ad-hoc damage charges). Skindred job 15577 incident: £23.40 fluoro-tape invoice paid £23.40 by worldpay; HH showed £0 owing on the invoice; OP showed £23.40 outstanding because the £1,710 deposit-applied-to-balance-invoice was being counted twice in the subtraction. Fix: `Set<number>` of seen application IDs scoped per-summary-call; the `kind=3` handler skips any row whose `data.ID` has already been processed and emits a `console.warn` for telemetry. Falls through when `data.ID` is missing so we never lose data. Affects only the deposit-applied-to-invoice case (direct invoice payments and refunds publish as a single row, no dedup fires). The Payment Portal (`get-job-details-v2.js` and friends) implemented the same fix on its side — it computes balance independently from the same `billing_list.php` response, so a fix on either side alone wouldn't have closed the gap on the other.
 
 ##### Phase D — VAT Adjustment Display ✅ COMPLETE (30 Mar 2026)
@@ -2228,7 +2229,7 @@ Standalone OP-native module replacing the Monday.com "Storage Clients" board. Oo
 - **Signed T&Cs snapshot PDF** (acceptance + signature image recorded; PDF generation not yet wired).
 - Temp storage / incoming deliveries — deliberately NOT here; belongs with the Holding module (Step 10).
 
-#### Step 10: Holding Module — "Held for Clients" / "Lost Property" / temp storage ← MOSTLY BUILT (Jun 2026)
+#### Step 10: Holding Module — "Held for Clients" / "Lost Property" / temp storage ← FEATURE-COMPLETE (Jun 2026)
 
 The unified "things we're temporarily holding for a client" module. **One engine** (`held_items`), one
 `kind` discriminator (`incoming` / `lost_property` / `temp_storage`) that drives behaviour + display
@@ -2272,22 +2273,45 @@ not the dashboard strip — add a slot if wanted). NOT touched by the HH derivat
 temp_storage + lost_property are NOT on the ticker — they're **right-sidebar FYI** on the Job View
 ("📦 Also holding (FYI)", client-wide via org).
 
-**Remaining (next chat):**
-- **Pre-hire review email heads-up** — add a Holding summary to `services/pre-hire-briefing.ts`
-  (`JobBriefing.holding` field + `buildBriefing` query + render block in
-  `email-templates/pre-hire-briefing.ts`). Phrasings: "2 packages here to give to the client",
-  "3 boxes were expected, nothing marked as arrived yet", + temp/lost aide-mémoire. Email-critical
-  file — integrate carefully.
-- **Stage 8 — lost-property chase**: review page (human-gated; `GET /holding/chases/review` ready),
-  daily scan that ASSEMBLES the batch (never auto-sends), gradient wk1/wk2/wk3 `holding_chase`
-  templates. Per spec §7B (a human approves the send — the Monday lesson: never auto-fire a
-  "we'll dispose of your stuff" email).
-- **Stage 9 — Storage-client "Packages held"** cross-link tab (Amazon-deluge case).
-- Desktop CreateModal search-first dedupe nudge; shared-UI refactor (3 copies of location/photo
-  capture); `merch` dashboard-strip slot. All low priority.
+**Smart linking + notify + ship-back (PRs #690/#692/#695):** HH job number is the primary capture
+field — `POST /holding` + `/link` derive `job_id` + client org from it (`resolveJobContext`), live
+`GET /holding/job-lookup/:n` confirms the client in the form, `GET /holding/org-jobs/:orgId`
+reverse-links when staff know the band not the job. `/:id/notify` takes a multi-recipient picker
+(`recipients[]` + `GET /:id/notify-contacts`), branches template by kind, **attaches item photos**
+(compressed client-side ~1600px before upload so emails stay small), enriches the incoming email with
+the description; fires post-save on the Quick Log for incoming + lost. Ship-back forwards postage +
+tracking (`holding_shipped_back`). `locationLabel()` surfaces the "Somewhere else" typed text. Shared
+FE primitives in `components/holding/`.
 
-**Branch:** `claude/zen-allen-V8knQ` (PR #666). Deploy adds the `qrcode` dep (run `npm install`) and
-migrations 113/115/116.
+**Lost-property chase + temp hold-until (PR #698, migration 119):** human-gated chase ladder — NEVER
+auto-fires to clients. `POST /:id/chase` sends the gradient email for the current tier
+(`holding_chase_1/2/3`, wk1 friendly → wk2 firm → wk3 final; job # in subject, staff signature via
+`users.person_id → people`) then bumps the level, only on successful send (422 no email / 502 fail,
+record untouched). `ChaseReviewPanel` on the Lost Property page (Send / Snooze / Skip), opened from
+the digest deep-link `?review=1`. Two timers on the detail card (Last contacted / Next chase due).
+`expected_collection_date` (future = chases paused, doubles as snooze, excluded from review + scan);
+`hold_until` on temp storage (staff reminded 3 days before). `services/holding-reminders.ts` runs
+daily **09:25 Europe/London** — assembles the chase digest (staff bell + info@ email to the review
+queue, NO client emails fired here) + hold-until reminders, per-cycle dedup via
+`hold_until_reminder_sent_for`.
+
+**Briefing + Stage 9 + merch strip (PRs #700/#701):** pre-hire briefing gains a "Things we're holding
+for this client" block (`JobBriefing.holding`, try/catch-guarded). Storage tenancy detail shows the
+client's held items (`HeldItemsSection entityType=organisation`). `merch` is now a slot in
+`job-progress-strip.ts` (+ FE mirror + briefing strip) so the pip shows on the dashboard Today strip.
+
+**Merch card + panel combined (PR #703):** the standalone Overview "Held for Clients" panel was
+duplicating the inert merch checklist pip. Now ONE surface — the merch requirement card in
+`JobPrepChecklist` carries its incoming-items detail + Send Merch Form nested beneath it (same pattern
+as the vehicle card nesting hire_forms/excess); the requirement row is untouched so the prep counter /
+dashboard strip / briefing roll-ups keep working. Merch is item-gated (no items → no requirement), so
+when nothing's logged a plain "Held for Clients" entry card renders instead (preserving the Send-Merch-
+Form entry point + empty state). Pre-hire only; standalone Overview panel removed.
+
+**Remaining / open:**
+- IRL feedback from the chase + hold-until flows (staff trialling over the following weeks).
+
+**Migrations:** 113/115/116 (initial) + 119 (chase/hold). `qrcode` dep added at the initial build.
 
 ### External Tools (already built, need repointing from Monday.com → Ooosh API)
 
@@ -2394,6 +2418,11 @@ These are existing standalone tools that currently push to Monday.com. They need
 - **Book-out photo upload reliability for low-signal areas.** First IRL V&D book-out (job 15738, May 2026) reported "9 uploaded, 5 failed" on photo upload while the PDF correctly embedded all 14 photos — the PDF embed and R2 audit upload are two separate pipelines (PDF uses locally-resized base64s and always works; R2 upload depends on network). Net effect: PDF Alex received was a complete legal record, but the R2 audit trail is missing 5 photos and the "View full size" links in the PDF point at 404s for those 5. Most likely cause: 4/5G signal at a warehouse handover. Captured as a future hardening pass — possible levers: serialise uploads instead of parallelising (slower but more resilient on poor signal), add a "retry failed uploads" button on the success screen so staff can re-attempt without redoing the whole walkaround, pre-upload size warning if photos are particularly large, or treat R2 upload as fully background/queueable so it can complete after the user has left the page. Not pressing — happens rarely, doesn't compromise the PDF, and the workaround "leave it, the PDF is the legal record" is acceptable. Touches `frontend/src/modules/vehicles/lib/photo-upload.ts` (`uploadAllPhotos`) and the `pdfData` r2Url construction in `BookOutPage.tsx`.
 
 - **Book-out/check-in photo memory convention (May 2026) — SHIPPED, regression guard.** A live book-out (RX22SWU, job 15397) repeatedly crashed the browser tab with "out of memory" mid-walkaround on a phone with a high-megapixel camera. The crash is purely client-side (renderer ran out of RAM and reloaded) so it leaves no server trace. Root cause was transient peak memory, not stored/uploaded size — capture is already downscaled. The shared walkaround photo pipeline (`PhotoCapture.tsx` + `BookOutPage`/`CheckInPage`/`CollectionPage`, plus the Next.js portal D&C completion flow at `src/app/job/[id]/complete/page.tsx`) is now tuned to keep peak memory low. **Rules to preserve — do not regress these:** (1) decode image sources via `URL.createObjectURL` + revoke immediately after the canvas draw; never hold a `FileReader.readAsDataURL` base64 of the full-resolution original through decode. (2) Revoke a photo's preview object URL on retake/remove. (3) Resize photos for the PDF **sequentially**, never `Promise.all` — keep only one decoded bitmap/canvas alive at a time (this is the same "serialise" lever noted in the upload-reliability item above, applied to the resize step). (4) `useFormAutosave` skips redundant IndexedDB writes when the draft is unchanged, so photo blobs aren't re-serialised on unrelated re-renders. **Capture resolution stays high deliberately** (vehicle 2048px/0.85, portal completion 1200px/0.8) — the photos are evidence for damage disputes, so don't lower resolution to save memory; use the lifecycle rules above instead. Shipped in PR #594.
+
+- **Book-out/check-in submit-speed pipeline (Jun 2026) — SHIPPED.** jon's own book-out (Scene Queen, HH 15736 / RX24SZG, 10 Jun 2026) validated a ~2-minute submit via the journal: ~7.5s photo upload (NOT the bottleneck — 16 photos, ~470ms cadence, 140-320ms server-side each), **~75s of client-side sequential PDF-thumbnail resizing** ("Preparing photos for PDF…", ~4.7s/photo on the phone), and ~32s of PDF/email round-trips (each driver's 7-9MB base64 condition-report PDF downloaded from `/generate-pdf` then re-uploaded to `/send-email` — per driver, identical except the name). Plus a capture-time UX gap: `compressImage` of the raw camera original takes 3-5s with no loading state on the photo tile, so staff retake photos thinking they "didn't take". Three fixes shipped together:
+  1. **Capture spinner** — `PhotoCapture.tsx` (book-out) + `PhotoComparison.tsx` (check-in) show a "Processing…" tile on the slot while compression runs; double-trigger guarded.
+  2. **Capture-time PDF thumbnails** — `compressImageWithThumb()` in `lib/image-utils.ts` produces the stored 2048px blob AND the ~800px PDF thumbnail (`CapturedPhoto.pdfBase64`) in ONE decode pass at capture, deleting the entire 75s submit-time resize stage. The thumbnail persists through the IndexedDB autosave draft (`db.ts` + `useFormAutosave`); submit falls back to `resizeImageForPdf()` for photos restored from pre-thumbnail drafts. The May 2026 memory rules (single decode alive, objectURL revoked after draw) are preserved — the thumb is drawn from the already-downscaled main canvas.
+  3. **Server-side condition-report send** — `POST /api/vehicles/send-condition-report` (in `FREELANCER_BOOKOUT_ALLOW`, so the freelancer backdoor flow is covered) takes the pdfData + a `recipients[]` list, builds each driver's PDF server-side (`buildConditionReportPdf`), and emails directly — the PDFs never round-trip through the phone. Per-recipient email resolution follows the `/send-email` fallback chain (explicit email → `resolveClientEmailTarget` → info@ with amber banner + timeline interaction). Email HTML/subject lives in `backend/src/services/condition-report-email.ts` (the frontend copy was deleted when CollectionPage + offline `sync-processors.ts` migrated to the same endpoint, Jun 2026 follow-up — the offline replays were previously embedding FULL-SIZE base64 photos in the PDF payload, ~10MB per 16-photo replay, now thumbnail-first with a resize fallback for pre-thumbnail queue items). The legacy `/generate-pdf` + `/send-email` backend endpoints are intentionally retained for pre-deploy tabs still running the old bundle and for `events/:id/regenerate-pdf` — don't delete them until a quiet period confirms nothing hits them. Same follow-up bumped the pg pool `connectionTimeoutMillis` 2s → 10s in `config/database.ts`: two simultaneous book-outs' post-hooks + server-side PDF builds briefly saturated the pool on 10 Jun 2026 and 2s waiters errored (`vehicle requirement sync failed: timeout exceeded`) instead of queueing; the proper fix remains the post-hook outbox pattern (see Future Enhancements). Behaviour note: check-in now uses the same no-client-email fallback as book-out (previously it silently skipped the email); a check-in with no email AND no HH job skips cleanly with an informational result line. Expected submit time after this work: ~10-15s. The "Background upload during walkaround" idea was evaluated and parked — upload wasn't the bottleneck; it remains relevant only to the low-signal hardening item above.
 
 - **Non-SDH book-out — D&C / delivery / collection mode (Phase 1B).** V&D shipped May 2026 (see entry above); the same pattern can extend to delivery / collection / D&C book-outs (freelancer collects van from base → delivers to customer site, or the reverse on collection). The schema already supports `assignment_type` values of `delivery` and `collection`, and the BookOutPage mode switch is positioned to add these — the picker would still pull from the job's crew assignments, the PDF + email flow stays the same, and the only new wiring is the assignment_type promotion at submit time. Trigger from Crew & Transport ops cards / Allocations page when slot is non-self-drive non-V&D. Defer until V&D is proven in live use across more hires.
 
@@ -2686,6 +2715,73 @@ Singleton Stripe SDK client for OP's direct Stripe operations (pre-auth capture,
 **Refund dedup with the Stripe webhook (Jun 2026):** OP-initiated refunds and the corresponding `charge.refunded` webhook both fire for one logical refund event. The reimburse endpoint pre-records a `refund_legs` entry keyed `stripe_refund_<refund.id>` immediately after the Stripe API call succeeds; the webhook handler extracts the latest refund's id from `charge.refunds.data` (sorted by `created` desc) and constructs the same key. `unwindRefundOnExcess()` dedups on `(source, ref)` — whichever path arrives second is a no-op. Falls back to `stripe_charge_<id>` only when the webhook payload's refunds list is missing (defensive — Stripe always includes it on `charge.refunded`).
 
 **Webhook handles both excess and hire payment refunds (Jun 2026 hotfix):** the `charge.refunded` handler first tries `findExcessByPaymentIntent` (existing excess flow via `unwindRefundOnExcess`). If no excess match, it looks up `job_payments` by the original PI for hire payment refunds. For hire payments: dedups on `payment_reference = stripe_refund_id` (OP-initiated path stores the refund id there); if no existing refund row, auto-INSERTs one with `source='stripe_webhook'`. Email subject differentiates: *Stripe excess refund recorded* / *Stripe hire payment refund recorded* / *...already on OP*. The webhook deliberately does NOT push HH paperwork (no auth context + risk of double-push) — surfaces the gap in the email for staff to verify HH manually. Note for `job_payments` refund rows: `stripe_payment_intent` holds the ORIGINAL PI (for cross-reference + webhook lookup), and `payment_reference` holds the Stripe refund id (for dedup). Don't conflate them.
+
+### Cost Capture & Xero Push ✅ (Jun 2026)
+
+Staff capture supplier costs (`costs` table, migration 092) on `/money/costs`
+via `CostCaptureModal`, categorise them to a Xero account, and push them to Xero
+as either **Spend Money** (paid-now methods) or an **AUTHORISED Bill** (pay-later
+methods). Engine: `services/cost-xero-push.ts`; routes: `routes/costs.ts`; UI:
+`components/CostCaptureModal.tsx` + `pages/CostsPage.tsx`.
+
+**Push concurrency — per-cost advisory lock (DO NOT REMOVE).** The push is
+triggered from FIVE sites — create / update / approve / pay / the Push-Now
+button — and four are fire-and-forget (`pushCostToXeroBackground` → `setImmediate`).
+With no guard, two overlapping triggers each loaded the cost with
+`xero_object_id` still null, both passed the `billExists` check, and each created
+its own Xero bill → **duplicate AUTHORISED bills** (live incident: T.Reeve repair
+invoices — one OP cost row, two identical Xero bills; the VAT calc was correct on
+both, it was just billed twice). Fix: `pushCostToXero` wraps its whole body in a
+Postgres advisory lock (`pg_advisory_lock(hashtext('cost-push:'||id)::bigint)`)
+on a dedicated client. The second push waits for the first to commit
+`xero_object_id`, then `loadCost` + the `billExists` / `PUSHED_STATES` guard
+short-circuit it. **Never push a cost to Xero outside `pushCostToXero`** — that's
+how the guard is inherited. Any NEW trigger site just calls
+`pushCostToXeroBackground(costId)` and is automatically serialised.
+
+**VAT treatment — `vat_treatment` (migration 118).** Two ways a cost's VAT is
+pushed, chosen explicitly in the modal (the `buildCostLineItems` helper drives
+the line structure):
+- `'standard'` (default) — a single INCLUSIVE line; Xero derives the VAT from the
+  account / tax type. Correct whenever the VAT is a clean standard rate of net.
+- `'reclaim_split'` — insurance-claim / "VAT-only" invoices where the VAT is
+  non-standard relative to net (e.g. £750 excess + £702.68 reclaimable VAT, total
+  £1,452.68). Pushed as the 3-line EXCLUSIVE structure an accountant enters by
+  hand: `net @ No VAT` / `vat÷0.20 @ 20% VAT` / `−vat÷0.20 @ No VAT`. Lines 2+3
+  net to zero, so subtotal=net, VAT=vat, total=gross for ANY net/vat pair.
+  **Assumes the underlying VAT was charged at the 20% standard rate** (the only
+  realistic case for these UK invoices). It's an explicit opt-in ("VAT reclaim"
+  mode in the modal) so a normal-VAT data-entry slip can't silently trigger it.
+
+**Invoice de-dup (migration 118).** Optional `costs.invoice_number` (fuel/till
+receipts won't have one). `GET /costs/check-invoice?invoice_number=&supplier_name=&exclude_id=`
+returns a non-blocking warning if the same supplier+number already exists; the
+modal surfaces it but never blocks the save. Partial case-insensitive index
+`idx_costs_invoice_dedup`.
+
+**Cost ↔ vehicle service-log unification (Jun 2026).** `CostCaptureModal` is
+dual-purpose — it captures a cost AND/OR a `vehicle_service_log` record in one
+entry, so a garage invoice is entered once:
+- Pick a van → an "Also add to <REG>'s service history" toggle appears,
+  **defaulted ON** ("ask per cost, default yes"), revealing the service fields
+  (type / mileage / garage→defaults to supplier / status / next-due /
+  apply-to-vehicle).
+- On save it creates the cost, then POSTs to the existing
+  `POST /vehicles/fleet/:id/service-log` endpoint (reusing ALL its side-effects —
+  mileage-log, fleet live-figure updates, upward-only mileage ratchet), attaches
+  the receipt to the service record, and links them via
+  `costs.vehicle_service_log_id`. Service-log creation is non-fatal: if it fails
+  the cost is still saved and the modal warns.
+- **Cost optional:** when a van is linked + the toggle is on, the gross amount is
+  no longer required. Blank → service-record-only (handles a £0 MOT pass or a
+  future "Booked" service, no cost row). `onSaved` may therefore receive `null`.
+- The **vehicle page Service History "+ Add Record"** opens this same modal
+  (`presetVehicleId`). **Editing** an existing service record still uses the
+  dedicated `ServiceRecordForm` — so multi-file-with-comments edits and existing
+  £0/Booked records are untouched. Known trade-off: adding via the unified modal
+  carries a single receipt (multi-file-at-add deferred).
+
+Migration 118 (`invoice_number` + `vat_treatment`) is in `run.ts`.
 
 ### PII Encryption ✅ COMPLETE (PR 3, May 2026)
 

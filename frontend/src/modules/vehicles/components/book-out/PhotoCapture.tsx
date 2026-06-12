@@ -2,6 +2,7 @@ import { useState, useRef, useCallback, useEffect } from 'react'
 import { REQUIRED_PHOTOS } from '../../types/vehicle-event'
 import type { CapturedPhoto, PhotoAngle } from '../../types/vehicle-event'
 import { getPhotoGuide, PHOTO_GUIDE_TIPS } from '../photo/PhotoGuides'
+import { compressImageWithThumb } from '../../lib/image-utils'
 
 type ExtendedAngle = CapturedPhoto['angle']
 
@@ -44,6 +45,13 @@ export function PhotoCapture({ photos, onCapture, onRemove, onUpdate }: PhotoCap
    */
   const [editingLabelFor, setEditingLabelFor] = useState<string | null>(null)
   const [editingLabelValue, setEditingLabelValue] = useState('')
+  /**
+   * Angle currently being compressed after the camera returned a file.
+   * Compression of a high-megapixel original takes several seconds on a
+   * phone — without visible feedback users assume the photo "didn't take"
+   * and retake it (validated against the 10 Jun 2026 book-out).
+   */
+  const [processingAngle, setProcessingAngle] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Persist guide preference
@@ -60,17 +68,27 @@ export function PhotoCapture({ photos, onCapture, onRemove, onUpdate }: PhotoCap
       const file = e.target.files?.[0]
       if (!file || !activeAngle) return
 
-      const compressed = await compressImage(file, 2048, 0.85)
-      const blobUrl = URL.createObjectURL(compressed)
-      const label = activeLabel || REQUIRED_PHOTOS.find(r => r.angle === activeAngle)?.label || activeAngle
+      setProcessingAngle(String(activeAngle))
+      try {
+        // Compress for storage AND generate the ~800px PDF thumbnail in one
+        // decode pass — submit no longer has to re-decode every photo.
+        const { blob: compressed, pdfBase64 } = await compressImageWithThumb(file, 2048, 0.85)
+        const blobUrl = URL.createObjectURL(compressed)
+        const label = activeLabel || REQUIRED_PHOTOS.find(r => r.angle === activeAngle)?.label || activeAngle
 
-      onCapture({
-        angle: activeAngle,
-        label,
-        blobUrl,
-        blob: compressed,
-        timestamp: Date.now(),
-      })
+        onCapture({
+          angle: activeAngle,
+          label,
+          blobUrl,
+          blob: compressed,
+          timestamp: Date.now(),
+          pdfBase64,
+        })
+      } catch (err) {
+        console.error('[PhotoCapture] Failed to process photo:', err)
+      } finally {
+        setProcessingAngle(null)
+      }
 
       setActiveAngle(null)
       setActiveLabel(null)
@@ -131,6 +149,23 @@ export function PhotoCapture({ photos, onCapture, onRemove, onUpdate }: PhotoCap
       <div className="grid grid-cols-2 gap-3">
         {REQUIRED_PHOTOS.map(({ angle, label }) => {
           const captured = capturedMap.get(angle)
+          const isProcessing = processingAngle === angle
+
+          if (isProcessing) {
+            return (
+              <div
+                key={angle}
+                className="flex aspect-[4/3] w-full flex-col items-center justify-center rounded-lg border-2 border-ooosh-navy/40 bg-ooosh-navy/5"
+              >
+                <svg className="mb-2 h-6 w-6 animate-spin text-ooosh-navy" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                </svg>
+                <span className="text-xs font-medium text-ooosh-navy">Processing…</span>
+                <span className="mt-0.5 text-[10px] text-gray-500">{label}</span>
+              </div>
+            )
+          }
 
           return (
             <div key={angle} className="relative">
@@ -313,15 +348,17 @@ export function PhotoCapture({ photos, onCapture, onRemove, onUpdate }: PhotoCap
       {/* Add an extra photo (e.g. pre-existing damage, close-up, additional angle) */}
       <button
         onClick={() => {
+          if (processingAngle) return
           // Unique angle per capture so check-in can match retakes 1:1 against
           // the right book-out extra without colliding with siblings.
           const angle = `extra_${Date.now()}` as CapturedPhoto['angle']
           const label = `Extra Photo ${extraPhotos.length + 1}`
           openCamera(angle, label)
         }}
-        className="mt-3 w-full rounded-lg border border-dashed border-gray-300 py-2.5 text-center text-xs font-medium text-gray-500 active:bg-gray-50"
+        disabled={!!processingAngle}
+        className="mt-3 w-full rounded-lg border border-dashed border-gray-300 py-2.5 text-center text-xs font-medium text-gray-500 active:bg-gray-50 disabled:opacity-60"
       >
-        + Add extra photo (optional)
+        {processingAngle?.startsWith('extra_') ? 'Processing photo…' : '+ Add extra photo (optional)'}
       </button>
 
       {/* Full-screen guide overlay */}
@@ -427,63 +464,5 @@ function PhotoGuideOverlay({
   )
 }
 
-/**
- * Compress an image to a target max dimension and JPEG quality.
- */
-async function compressImage(
-  file: File,
-  maxDimension: number,
-  quality: number,
-): Promise<Blob> {
-  return new Promise((resolve, reject) => {
-    const img = new Image()
-    // Hold the object URL so we can revoke it the moment decoding is done.
-    // Without this, the full-resolution original stays pinned in memory for
-    // the whole walkaround (one per photo) — a real OOM risk on phones with
-    // high-megapixel cameras.
-    const objectUrl = URL.createObjectURL(file)
-    img.onload = () => {
-      let { width, height } = img
-
-      if (width > maxDimension || height > maxDimension) {
-        if (width > height) {
-          height = Math.round(height * (maxDimension / width))
-          width = maxDimension
-        } else {
-          width = Math.round(width * (maxDimension / height))
-          height = maxDimension
-        }
-      }
-
-      const canvas = document.createElement('canvas')
-      canvas.width = width
-      canvas.height = height
-
-      const ctx = canvas.getContext('2d')
-      if (!ctx) {
-        URL.revokeObjectURL(objectUrl)
-        reject(new Error('Could not get canvas context'))
-        return
-      }
-
-      ctx.drawImage(img, 0, 0, width, height)
-      // Original is now drawn into the canvas — release the source bytes.
-      URL.revokeObjectURL(objectUrl)
-
-      canvas.toBlob(
-        blob => {
-          if (blob) resolve(blob)
-          else reject(new Error('Canvas toBlob failed'))
-        },
-        'image/jpeg',
-        quality,
-      )
-    }
-
-    img.onerror = () => {
-      URL.revokeObjectURL(objectUrl)
-      reject(new Error('Failed to load image'))
-    }
-    img.src = objectUrl
-  })
-}
+// compressImage moved to ../../lib/image-utils (compressImageWithThumb) so the
+// capture-time PDF-thumbnail pass is shared with the check-in PhotoComparison.

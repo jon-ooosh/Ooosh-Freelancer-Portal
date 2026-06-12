@@ -19,7 +19,8 @@ import type { Cost, CostType, CostPaymentMethod, CostPaymentStatus, CostRecharge
 
 interface Props {
   onClose: () => void;
-  onSaved: (cost: Cost) => void;
+  // null when a vehicle service record was saved with no cost (service-only).
+  onSaved: (cost: Cost | null) => void;
   existing?: Cost | null;
   presetJobId?: string | null;
   presetVehicleId?: string | null;
@@ -66,7 +67,10 @@ const PAYMENT_METHOD_GROUPS = Array.from(new Set(PAYMENT_METHODS.map((m) => m.gr
 // Keep in step with BILL_METHODS in backend routes/costs.ts + cost-xero-push.ts.
 const BILL_METHODS: CostPaymentMethod[] = ['not_yet_paid', 'reimburse_me'];
 
-type VatMode = 'vat20' | 'none' | 'manual';
+// 'reclaim' = non-standard "VAT-only" invoice (insurance claim): enter the
+// No-VAT amount (the excess) as Net + the reclaimable VAT; gross = net + vat.
+// Pushed to Xero as the 3-line VAT-only structure (vat_treatment='reclaim_split').
+type VatMode = 'vat20' | 'none' | 'manual' | 'reclaim';
 
 const PAYMENT_STATUSES: { value: CostPaymentStatus; label: string }[] = [
   { value: 'paid', label: 'Paid' },
@@ -89,6 +93,9 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
   // ── Form state ───────────────────────────────────────────────────────────
   const [supplierName, setSupplierName] = useState(existing?.supplier_name || '');
   const [costDate, setCostDate] = useState(() => (existing?.cost_date ? existing.cost_date.slice(0, 10) : new Date().toISOString().slice(0, 10)));
+  const [invoiceNumber, setInvoiceNumber] = useState(existing?.invoice_number || '');
+  // De-dup: warn if this supplier+invoice number was already captured.
+  const [invoiceDup, setInvoiceDup] = useState<{ id: string; cost_date: string | null; amount_gross: number | null; payment_status: string } | null>(null);
   const [amountGross, setAmountGross] = useState(existing?.amount_gross != null ? String(existing.amount_gross) : '');
   const [amountVat, setAmountVat] = useState(existing?.amount_vat != null ? String(existing.amount_vat) : '');
   const [amountNet, setAmountNet] = useState(existing?.amount_net != null ? String(existing.amount_net) : '');
@@ -96,6 +103,7 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
   // (edit all three). Default driven by category / AI; never assume 20% silently.
   const inferVatMode = (): VatMode => {
     if (!isEdit) return 'vat20';
+    if (existing?.vat_treatment === 'reclaim_split') return 'reclaim';
     const g = Number(existing?.amount_gross || 0);
     const v = Number(existing?.amount_vat || 0);
     const n = Number(existing?.amount_net || 0);
@@ -142,6 +150,26 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
   // Compact quote-vs-actuals summary shown when a job is linked.
   const [jobSummary, setJobSummary] = useState<{ quotedCost: number; clientQuoted: number; actuals: number; extra: number } | null>(null);
 
+  // ── Vehicle link + optional "also log to service history" ────────────────
+  // Forward unification: a garage/vehicle cost can ALSO create a vehicle_service_log
+  // record in one go (no double entry). Service-record creation is offered on NEW
+  // costs only; editing the cost doesn't re-touch the linked service record.
+  type FleetLite = { id: string; reg: string; make?: string | null; model?: string | null; simple_type?: string | null };
+  const [vehicleId, setVehicleId] = useState<string | null>(existing?.vehicle_id || presetVehicleId || null);
+  const [fleet, setFleet] = useState<FleetLite[]>([]);
+  const [vehicleSearch, setVehicleSearch] = useState('');
+  const [vehicleFocused, setVehicleFocused] = useState(false);
+  // Default ON once a vehicle is in play (preset or picked) — "ask per cost,
+  // defaulted to yes". Never offered in edit mode.
+  const [logService, setLogService] = useState<boolean>(!isEdit && Boolean(existing?.vehicle_id || presetVehicleId));
+  const [serviceType, setServiceType] = useState<'service' | 'repair' | 'mot' | 'insurance' | 'tax' | 'tyre' | 'other'>('repair');
+  const [serviceMileage, setServiceMileage] = useState('');
+  const [serviceGarage, setServiceGarage] = useState('');
+  const [serviceStatus, setServiceStatus] = useState('Done');
+  const [serviceNextDueDate, setServiceNextDueDate] = useState('');
+  const [serviceNextDueMileage, setServiceNextDueMileage] = useState('');
+  const [applyToVehicle, setApplyToVehicle] = useState(true);
+
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
@@ -159,6 +187,42 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
     }, 300);
     return () => clearTimeout(t);
   }, [supplierName]);
+
+  // Invoice-number de-dup — debounced; warns if this supplier+invoice number was
+  // already captured (non-blocking). Skips while editing the same cost.
+  useEffect(() => {
+    const num = invoiceNumber.trim();
+    if (!num) { setInvoiceDup(null); return; }
+    const t = setTimeout(async () => {
+      try {
+        const params = new URLSearchParams({ invoice_number: num, supplier_name: supplierName.trim() });
+        if (existing?.id) params.set('exclude_id', existing.id);
+        const r = await api.get<{ data: { duplicate: boolean; match: typeof invoiceDup } }>(`/costs/check-invoice?${params}`);
+        setInvoiceDup(r.data.duplicate ? r.data.match : null);
+      } catch { setInvoiceDup(null); }
+    }, 400);
+    return () => clearTimeout(t);
+  }, [invoiceNumber, supplierName, existing?.id]);
+
+  // Fleet list (small, ~20 vans) — fetched once for the vehicle picker, filtered
+  // client-side. Active vehicles only.
+  useEffect(() => {
+    api.get<{ data: FleetLite[] }>('/vehicles/fleet')
+      .then((r) => setFleet(r.data || []))
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const vehicleLabel = (v: FleetLite | undefined) =>
+    v ? `${v.reg}${v.make || v.model ? ` — ${[v.make, v.model].filter(Boolean).join(' ')}` : v.simple_type ? ` — ${v.simple_type}` : ''}` : '';
+  const selectedVehicle = fleet.find((v) => v.id === vehicleId);
+  const vehFiltered = (() => {
+    const q = vehicleSearch.trim().toLowerCase();
+    const list = q
+      ? fleet.filter((v) => v.reg.toLowerCase().includes(q) || `${v.make || ''} ${v.model || ''} ${v.simple_type || ''}`.toLowerCase().includes(q))
+      : fleet;
+    return list.slice(0, 12);
+  })();
 
   // Job picker — debounced search against the global /api/search, filtered to type='job'.
   useEffect(() => {
@@ -324,7 +388,18 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
     } else if (vatMode === 'none') {
       setAmountVat('0.00');
       setAmountGross(net.toFixed(2));
+    } else if (vatMode === 'reclaim') {
+      const vat = parseFloat(amountVat);
+      if (!isNaN(vat)) setAmountGross(round2(net + vat).toFixed(2));
     }
+  };
+  // In reclaim mode, VAT is entered directly and gross = net + vat.
+  const onVatChange = (v: string) => {
+    setAmountVat(v);
+    if (vatMode !== 'reclaim') return;
+    const vat = parseFloat(v);
+    const net = parseFloat(amountNet);
+    if (!isNaN(vat) && !isNaN(net)) setAmountGross(round2(net + vat).toFixed(2));
   };
 
   // Recompute amounts when the VAT mode changes (keep gross fixed as the anchor).
@@ -340,6 +415,12 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
     } else if (mode === 'none') {
       setAmountNet(gross.toFixed(2));
       setAmountVat('0.00');
+    } else if (mode === 'reclaim') {
+      // Switching in: keep whatever net/vat are set; recompute gross from them
+      // if both present, else leave the user to enter net + vat.
+      const net = parseFloat(amountNet);
+      const vat = parseFloat(amountVat);
+      if (!isNaN(net) && !isNaN(vat)) setAmountGross(round2(net + vat).toFixed(2));
     }
   };
 
@@ -361,6 +442,7 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
           amount_vat: number | null;
           amount_net: number | null;
           vat_treatment: 'standard' | 'no_vat';
+          invoice_number: string | null;
           job_number: string | null;
           description: string | null;
           category_code: string | null;
@@ -371,26 +453,39 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
       const ex = res.data;
       if (ex.supplier) setSupplierName(ex.supplier);
       if (ex.cost_date) setCostDate(ex.cost_date);
+      if (ex.invoice_number) setInvoiceNumber(ex.invoice_number);
       if (ex.description) setDescription(ex.description);
       if (ex.category_code) setCategoryCode(ex.category_code);
       // The document is authoritative on VAT: no VAT shown → No VAT, never an
-      // assumed 20%. Drive the VAT mode from the extraction, then fill amounts.
-      const mode: VatMode = ex.vat_treatment === 'standard' ? 'vat20' : 'none';
-      setVatMode(mode);
+      // assumed 20%. When VAT IS shown, use the document's actual figures —
+      // only snap to the 20%-auto mode when the VAT really is 20% of net;
+      // otherwise keep all three figures verbatim in Manual mode (recomputing
+      // at a forced 20% was mangling correct extractions on non-20% docs).
       setVatTouched(true);
       const gross = ex.amount_gross;
-      if (gross != null) {
+      const vat = ex.amount_vat;
+      const net = ex.amount_net;
+      if (ex.vat_treatment === 'standard' && vat != null && vat > 0 && net != null && gross != null) {
+        const is20 = Math.abs(vat - round2(net * 0.2)) <= 0.02;
+        setVatMode(is20 ? 'vat20' : 'manual');
+        setAmountGross(gross.toFixed(2));
+        setAmountVat(vat.toFixed(2));
+        setAmountNet(net.toFixed(2));
+      } else if (ex.vat_treatment === 'standard' && gross != null) {
+        // VAT-bearing but incomplete figures — derive at 20% from gross.
+        setVatMode('vat20');
         setAmountGross(String(gross));
-        if (mode === 'vat20') {
-          const net = round2(gross / 1.2);
-          setAmountNet(net.toFixed(2));
-          setAmountVat(round2(gross - net).toFixed(2));
-        } else {
-          setAmountNet(gross.toFixed(2));
+        const derivedNet = round2(gross / 1.2);
+        setAmountNet(derivedNet.toFixed(2));
+        setAmountVat(round2(gross - derivedNet).toFixed(2));
+      } else {
+        setVatMode('none');
+        const total = gross ?? net;
+        if (total != null) {
+          setAmountGross(total.toFixed(2));
+          setAmountNet(total.toFixed(2));
           setAmountVat('0.00');
         }
-      } else if (ex.amount_net != null) {
-        setAmountNet(String(ex.amount_net));
       }
       // Job number is a suggestion only — staff confirm before it links.
       setSuggestedJobNumber(!linkedJobId && ex.job_number ? ex.job_number.replace(/\D/g, '') || null : null);
@@ -421,9 +516,27 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
   // quote_actual cost is already billed via its quote.
   const canRecharge = Boolean(linkedJobId) && costIntent === 'extra';
 
+  // A vehicle service record can be logged with no cost (e.g. a £0 MOT pass, or
+  // a future service that's only "Booked"). When that's the case the cost is
+  // optional — we create the service record alone.
+  const wantsService = !isEdit && logService && Boolean(vehicleId);
+
   async function handleSave() {
     setError('');
-    if (!amountGross || Number(amountGross) <= 0) { setError('Gross amount is required.'); return; }
+    if (vatMode === 'reclaim') {
+      if (!amountNet || Number(amountNet) <= 0) { setError('Enter the No-VAT (net) amount, e.g. the excess.'); return; }
+      if (!amountVat || Number(amountVat) <= 0) { setError('Enter the reclaimable VAT amount.'); return; }
+    } else if (!amountGross || Number(amountGross) <= 0) {
+      if (!wantsService) { setError('Gross amount is required.'); return; }
+    }
+    // A cost row needs a category — it's the Xero account code, and the push
+    // fails without it. Service-record-only saves (no cost amount) are exempt.
+    const savingServiceOnly = wantsService
+      && (vatMode === 'reclaim' ? !(Number(amountNet) > 0) : !(Number(amountGross) > 0));
+    if (!savingServiceOnly && !categoryCode) {
+      setError('Pick "What\'s this cost for?" — it sets the Xero category, and the push to Xero fails without it.');
+      return;
+    }
     setSaving(true);
     try {
       let receiptKey = existing?.receipt_r2_key ?? null;
@@ -440,12 +553,40 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
       // uploader's user record — staff don't enter them on the modal.
 
       const cat = COST_CATEGORIES.find((c) => c.xeroCode === categoryCode);
+
+      // Builds the vehicle_service_log payload. Reused by the service-only path
+      // and the cost+service path. costless = no cost row to attach to.
+      const serviceLogBody = (costless: boolean) => ({
+        name: description.trim() || cat?.label || (costless ? 'Vehicle service' : 'Vehicle cost'),
+        service_type: serviceType,
+        service_date: costDate || null,
+        mileage: serviceMileage ? Number(serviceMileage) : null,
+        cost: costless ? null : amountNet ? Number(amountNet) : amountGross ? Number(amountGross) : null,
+        status: serviceStatus,
+        garage: serviceGarage.trim() || supplierName || null,
+        notes: notes || null,
+        next_due_date: serviceNextDueDate || null,
+        next_due_mileage: serviceNextDueMileage ? Number(serviceNextDueMileage) : null,
+        apply_to_vehicle: applyToVehicle,
+        files: receiptKey ? [{ name: receiptName || 'Receipt', url: receiptKey, type: receiptFile?.type || '', size: receiptFile?.size || 0 }] : [],
+      });
+
+      // Service-only: no cost amount entered → create just the service record.
+      const noAmount = vatMode === 'reclaim' ? Number(amountNet) <= 0 : Number(amountGross) <= 0;
+      if (wantsService && noAmount) {
+        await api.post(`/vehicles/fleet/${vehicleId}/service-log`, serviceLogBody(true));
+        onSaved(null);
+        return;
+      }
+
       const payload: Record<string, unknown> = {
         supplier_name: supplierName || null,
         cost_date: costDate || null,
         amount_gross: amountGross ? Number(amountGross) : null,
         amount_vat: amountVat ? Number(amountVat) : null,
         amount_net: amountNet ? Number(amountNet) : null,
+        vat_treatment: vatMode === 'reclaim' ? 'reclaim_split' : 'standard',
+        invoice_number: invoiceNumber.trim() || null,
         description: description || null,
         category: cat?.label || null,
         xero_account_code: cat?.xeroCode || null,
@@ -458,11 +599,11 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
         receipt_r2_key: receiptKey,
         receipt_filename: receiptName,
         notes: notes || null,
-        // Always send job_id so edit-mode can change/clear the link.
+        // Always send job_id + vehicle_id so edit-mode can change/clear the links.
         job_id: linkedJobId || null,
+        vehicle_id: vehicleId || null,
       };
       if (!isEdit) {
-        payload.vehicle_id = presetVehicleId || null;
         payload.platform_issue_id = presetIssueId || null;
         payload.status = 'confirmed';
       }
@@ -470,6 +611,21 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
       const res = isEdit
         ? await api.patch<{ data: Cost }>(`/costs/${existing!.id}`, payload)
         : await api.post<{ data: Cost }>('/costs', payload);
+
+      // Forward unification: optionally create a vehicle service-history record
+      // and link it back to the cost. New costs only; non-fatal if it fails (the
+      // cost is already saved — we surface a warning rather than lose it).
+      if (!isEdit && logService && vehicleId) {
+        try {
+          const sl = await api.post<{ id: string }>(`/vehicles/fleet/${vehicleId}/service-log`, serviceLogBody(false));
+          await api.patch(`/costs/${res.data.id}`, { vehicle_service_log_id: sl.id });
+        } catch (slErr) {
+          console.error('[cost] service-log link failed:', slErr);
+          setError('Cost saved, but adding it to the vehicle service history failed — add it manually from the vehicle page.');
+          setSaving(false);
+          return;
+        }
+      }
       onSaved(res.data);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save cost');
@@ -598,6 +754,19 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
             </div>
 
             <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Invoice number <span className="text-gray-400 font-normal">(optional — de-dup key)</span>
+              </label>
+              <input className={inputCls} value={invoiceNumber} onChange={(e) => setInvoiceNumber(e.target.value)} placeholder="e.g. INV-10472 (leave blank for fuel/till receipts)" />
+              {invoiceDup && (
+                <p className="text-xs text-amber-600 mt-1">
+                  ⚠ Already captured: a cost with this invoice number{supplierName.trim() ? ` for ${supplierName.trim()}` : ''} exists
+                  {invoiceDup.amount_gross != null ? ` (£${Number(invoiceDup.amount_gross).toFixed(2)}` : ''}{invoiceDup.cost_date ? `, ${new Date(invoiceDup.cost_date).toLocaleDateString('en-GB')}` : ''}{invoiceDup.amount_gross != null ? ', ' + invoiceDup.payment_status.replace(/_/g, ' ') + ')' : ''}. Check you're not submitting it twice.
+                </p>
+              )}
+            </div>
+
+            <div>
               <div className="flex items-center justify-between mb-1 flex-wrap gap-2">
                 <span className="text-sm font-medium text-gray-700">Amounts</span>
                 <div className="inline-flex rounded-md border border-gray-300 overflow-hidden text-xs">
@@ -605,6 +774,7 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
                     { v: 'vat20' as VatMode, label: '20% VAT' },
                     { v: 'none' as VatMode, label: 'No VAT' },
                     { v: 'manual' as VatMode, label: 'Manual' },
+                    { v: 'reclaim' as VatMode, label: 'VAT reclaim' },
                   ]).map((o, i) => (
                     <button key={o.v} type="button" onClick={() => applyVatMode(o.v)}
                       className={`px-2.5 py-1 ${i > 0 ? 'border-l border-gray-300' : ''} ${
@@ -617,23 +787,35 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div>
-                  <label className="block text-xs text-gray-500 mb-1">Gross (£) *</label>
-                  <input type="number" step="0.01" min="0" className={inputCls} value={amountGross} onChange={(e) => onGrossChange(e.target.value)} />
+                  <label className="block text-xs text-gray-500 mb-1">{vatMode === 'reclaim' ? 'Net — No VAT (£) *' : `Gross (£)${wantsService ? '' : ' *'}`}</label>
+                  {vatMode === 'reclaim' ? (
+                    <input type="number" step="0.01" min="0" className={inputCls} value={amountNet} onChange={(e) => onNetChange(e.target.value)} placeholder="e.g. 750.00 (excess)" />
+                  ) : (
+                    <input type="number" step="0.01" min="0" className={inputCls} value={amountGross} onChange={(e) => onGrossChange(e.target.value)} placeholder={wantsService ? 'Leave blank if no cost' : undefined} />
+                  )}
                 </div>
                 <div>
-                  <label className="block text-xs text-gray-500 mb-1">VAT (£)</label>
-                  <input type="number" step="0.01" min="0" className={`${inputCls} ${vatMode !== 'manual' ? 'bg-gray-100' : ''}`}
-                    value={amountVat} onChange={(e) => setAmountVat(e.target.value)} disabled={vatMode !== 'manual'} />
+                  <label className="block text-xs text-gray-500 mb-1">{vatMode === 'reclaim' ? 'Reclaimable VAT (£) *' : 'VAT (£)'}</label>
+                  <input type="number" step="0.01" min="0"
+                    className={`${inputCls} ${vatMode !== 'manual' && vatMode !== 'reclaim' ? 'bg-gray-100' : ''}`}
+                    value={amountVat} onChange={(e) => onVatChange(e.target.value)}
+                    disabled={vatMode !== 'manual' && vatMode !== 'reclaim'}
+                    placeholder={vatMode === 'reclaim' ? 'e.g. 702.68' : undefined} />
                 </div>
                 <div>
-                  <label className="block text-xs text-gray-500 mb-1">Net (£)</label>
-                  <input type="number" step="0.01" min="0" className={`${inputCls} ${vatMode === 'none' ? 'bg-gray-100' : ''}`}
-                    value={amountNet} onChange={(e) => onNetChange(e.target.value)} disabled={vatMode === 'none'} />
+                  <label className="block text-xs text-gray-500 mb-1">{vatMode === 'reclaim' ? 'Total (£)' : 'Net (£)'}</label>
+                  {vatMode === 'reclaim' ? (
+                    <input type="number" className={`${inputCls} bg-gray-100`} value={amountGross} disabled />
+                  ) : (
+                    <input type="number" step="0.01" min="0" className={`${inputCls} ${vatMode === 'none' ? 'bg-gray-100' : ''}`}
+                      value={amountNet} onChange={(e) => onNetChange(e.target.value)} disabled={vatMode === 'none'} />
+                  )}
                 </div>
               </div>
               {vatMode === 'vat20' && <p className="text-xs text-gray-400 mt-1">20% VAT — enter gross or net, the other two fill in.</p>}
               {vatMode === 'none' && <p className="text-xs text-gray-400 mt-1">No VAT (e.g. a non-VAT-registered freelancer) — gross = net, no VAT reclaimed.</p>}
               {vatMode === 'manual' && <p className="text-xs text-gray-400 mt-1">Manual — enter all three figures exactly as shown on the receipt.</p>}
+              {vatMode === 'reclaim' && <p className="text-xs text-amber-600 mt-1">Insurance-claim / VAT-only invoice: enter the No-VAT amount (the excess) + the reclaimable VAT. Pushed to Xero as a 3-line VAT-only entry (net @ No VAT, VAT base @ 20%, adjustment), so exactly £{amountVat || '0.00'} VAT is reclaimed.</p>}
             </div>
 
             <div>
@@ -690,6 +872,105 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
                 {jobSummary.clientQuoted > 0 && <div>Quoted to client: <strong>£{jobSummary.clientQuoted.toFixed(2)}</strong>{jobSummary.quotedCost > 0 && <span className="text-gray-400"> (our cost est. £{jobSummary.quotedCost.toFixed(2)})</span>}</div>}
                 <div>Costs logged against the quote: <strong>£{jobSummary.actuals.toFixed(2)}</strong>{jobSummary.extra > 0 && <span> · extras: <strong>£{jobSummary.extra.toFixed(2)}</strong></span>}</div>
                 <div className="text-gray-400">Use this to decide if this cost is covered by the quote (Part of the quote) or above-and-beyond (Extra).</div>
+              </div>
+            )}
+
+            {/* Vehicle link — optional. Picking a van offers a one-step service-history record. */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Vehicle <span className="text-gray-400 font-normal">(optional — link this cost to a van)</span>
+              </label>
+              {vehicleId ? (
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="px-3 py-1.5 text-sm bg-purple-50 text-purple-700 rounded-md border border-purple-200">
+                    {vehicleLabel(selectedVehicle) || '(linked vehicle)'}
+                  </span>
+                  <button type="button"
+                    onClick={() => { setVehicleId(null); setVehicleSearch(''); setLogService(false); }}
+                    className="text-xs text-red-600 hover:underline">
+                    Remove link
+                  </button>
+                </div>
+              ) : (
+                <div className="relative">
+                  <input className={inputCls} value={vehicleSearch}
+                    onChange={(e) => setVehicleSearch(e.target.value)}
+                    onFocus={() => setVehicleFocused(true)}
+                    onBlur={() => setTimeout(() => setVehicleFocused(false), 150)}
+                    placeholder="Search by reg" autoComplete="off" />
+                  {vehicleFocused && (
+                    <div className="absolute z-10 mt-1 w-full max-h-48 overflow-y-auto bg-white border border-gray-200 rounded-md shadow-lg">
+                      {fleet.length === 0 ? (
+                        <div className="px-3 py-2 text-sm text-gray-400">Loading vehicles…</div>
+                      ) : vehFiltered.length === 0 ? (
+                        <div className="px-3 py-2 text-sm text-gray-400">No match</div>
+                      ) : vehFiltered.map((v) => (
+                        <button key={v.id} type="button"
+                          onMouseDown={(e) => { e.preventDefault(); setVehicleId(v.id); setVehicleSearch(''); if (!isEdit) setLogService(true); }}
+                          className="block w-full text-left px-3 py-1.5 text-sm hover:bg-purple-50">
+                          {vehicleLabel(v)}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Service-history record — new costs only. "Ask per cost, default yes." */}
+            {vehicleId && !isEdit && (
+              <div className="rounded-md border border-gray-200 bg-gray-50 p-3 space-y-3">
+                <label className="flex items-center gap-2 text-sm font-medium text-gray-800">
+                  <input type="checkbox" checked={logService} onChange={(e) => setLogService(e.target.checked)} className="rounded" />
+                  Also add to {selectedVehicle?.reg || 'this vehicle'}&apos;s service history
+                </label>
+                {logService && (
+                  <div className="space-y-3">
+                    <div className="flex flex-wrap gap-1.5">
+                      {(['service', 'repair', 'mot', 'insurance', 'tax', 'tyre', 'other'] as const).map((t) => (
+                        <button key={t} type="button" onClick={() => setServiceType(t)}
+                          className={`px-2.5 py-1 text-xs rounded-md border capitalize ${serviceType === t ? 'bg-purple-600 text-white border-purple-600' : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-100'}`}>
+                          {t}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs text-gray-500 mb-1">Mileage</label>
+                        <input type="number" min="0" className={inputCls} value={serviceMileage} onChange={(e) => setServiceMileage(e.target.value)} placeholder="Odometer reading" />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-gray-500 mb-1">Garage / workshop</label>
+                        <input className={inputCls} value={serviceGarage} onChange={(e) => setServiceGarage(e.target.value)} placeholder={supplierName || 'Garage name'} />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-gray-500 mb-1">Status</label>
+                        <select className={inputCls} value={serviceStatus} onChange={(e) => setServiceStatus(e.target.value)}>
+                          {['Done', 'Pending', 'Booked', 'Cancelled'].map((s) => <option key={s} value={s}>{s}</option>)}
+                        </select>
+                      </div>
+                      {(serviceType === 'mot' || serviceType === 'insurance' || serviceType === 'tax' || serviceType === 'service' || serviceType === 'repair') && (
+                        <div>
+                          <label className="block text-xs text-gray-500 mb-1">Next due date</label>
+                          <input type="date" className={inputCls} value={serviceNextDueDate} onChange={(e) => setServiceNextDueDate(e.target.value)} />
+                        </div>
+                      )}
+                      {(serviceType === 'service' || serviceType === 'repair') && (
+                        <div>
+                          <label className="block text-xs text-gray-500 mb-1">Next service mileage</label>
+                          <input type="number" min="0" className={inputCls} value={serviceNextDueMileage} onChange={(e) => setServiceNextDueMileage(e.target.value)} placeholder="e.g. 90000" />
+                        </div>
+                      )}
+                    </div>
+                    <label className="flex items-start gap-2 text-xs text-gray-600">
+                      <input type="checkbox" checked={applyToVehicle} onChange={(e) => setApplyToVehicle(e.target.checked)} className="rounded mt-0.5" />
+                      <span>Update the vehicle&apos;s live figures (mileage, last/next service, due dates). Untick for a historical backfill.</span>
+                    </label>
+                    <p className="text-xs text-gray-400">
+                      Records cost as net (ex VAT) £{amountNet || '0.00'}{receiptFile || existing?.receipt_r2_key ? ' · receipt attached to the service record too' : ''}.
+                    </p>
+                  </div>
+                )}
               </div>
             )}
 
@@ -792,7 +1073,7 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
           <button onClick={onClose} className="px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded-md">Cancel</button>
           <button onClick={handleSave} disabled={saving}
             className="px-4 py-2 text-sm text-white bg-purple-600 hover:bg-purple-700 rounded-md disabled:opacity-50">
-            {saving ? 'Saving…' : isEdit ? 'Save changes' : 'Save cost'}
+            {saving ? 'Saving…' : isEdit ? 'Save changes' : wantsService && (vatMode === 'reclaim' ? Number(amountNet) <= 0 : Number(amountGross) <= 0) ? 'Save service record' : wantsService ? 'Save cost + service record' : 'Save cost'}
           </button>
         </div>
       </div>

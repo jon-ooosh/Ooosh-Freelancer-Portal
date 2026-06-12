@@ -155,6 +155,14 @@ export interface BriefingFlag {
   label: string;
 }
 
+export interface BriefingHolding {
+  incoming_to_give: number;
+  incoming_awaited: number;
+  temp_storage: number;
+  lost_property: number;
+  lines: string[];
+}
+
 export interface JobBriefing {
   job: BriefingJob;
   progress_strip: JobProgressStrip;
@@ -172,6 +180,9 @@ export interface JobBriefing {
    *  resolver the hire-form picker uses (org-level + person-level +
    *  job_organisations chain). */
   contacts: ResolvedContact[];
+  /** Held-items heads-up — incoming packages on the job, plus a client-wide
+   *  aide-mémoire for temp storage / lost property. Null when nothing held. */
+  holding: BriefingHolding | null;
   /** Hire-form URL + last-send info, used by the client-draft builder to
    *  reference the previous send and include the link. Null on non-self-
    *  drive hires or when we don't have a HH job number. */
@@ -720,6 +731,11 @@ export async function buildBriefing(
     );
   }
 
+  // ── Holding heads-up (incoming on this job + client-wide temp/lost) ─
+  // Incoming counts only items linked to THIS job; temp/lost are a client-wide
+  // aide-mémoire (via the client org) — "they've also got X in lost property".
+  const holding = await buildHoldingSummary(jobId, hhJobNumber);
+
   // ── Build briefing ─────────────────────────────────────────────────
   const briefingJob: BriefingJob = {
     id: j.id as string,
@@ -763,8 +779,53 @@ export async function buildBriefing(
         : null,
     },
     contacts,
+    holding,
     hire_form_link,
   };
+}
+
+/**
+ * Held-items summary for the briefing. Incoming = packages linked to this job
+ * (here-to-give vs still-awaited). Temp storage + lost property = client-wide
+ * (via the job's client org), as an aide-mémoire to hand things back. Returns
+ * null when nothing is held, so the email block is omitted.
+ */
+async function buildHoldingSummary(jobId: string, hhJobNumber: number | null): Promise<BriefingHolding | null> {
+  let rows: Array<{ kind: string; status: string; this_job: boolean }> = [];
+  try {
+    const r = await query(
+      `SELECT h.kind, h.status,
+              (h.job_id = $1 OR ($2::int IS NOT NULL AND h.hh_job_number = $2)) AS this_job
+         FROM held_items h
+        WHERE h.status NOT IN ('collected','given_to_client','shipped_back','disposed','cancelled')
+          AND (
+            h.job_id = $1
+            OR ($2::int IS NOT NULL AND h.hh_job_number = $2)
+            OR h.owner_organisation_id = (SELECT client_id FROM jobs WHERE id = $1)
+          )`,
+      [jobId, hhJobNumber],
+    );
+    rows = r.rows as typeof rows;
+  } catch (err) {
+    console.warn(`[pre-hire-briefing] holding summary failed for job ${jobId}:`, err);
+    return null;
+  }
+
+  const incomingThisJob = rows.filter((x) => x.kind === 'incoming' && x.this_job);
+  const incoming_to_give = incomingThisJob.filter((x) => ['arrived', 'stored', 'client_notified'].includes(x.status)).length;
+  const incoming_awaited = incomingThisJob.filter((x) => x.status === 'expected').length;
+  const temp_storage = rows.filter((x) => x.kind === 'temp_storage').length;
+  const lost_property = rows.filter((x) => x.kind === 'lost_property').length;
+
+  if (!incoming_to_give && !incoming_awaited && !temp_storage && !lost_property) return null;
+
+  const lines: string[] = [];
+  if (incoming_to_give) lines.push(`${incoming_to_give} package${incoming_to_give === 1 ? '' : 's'} here to give to the client`);
+  if (incoming_awaited) lines.push(`${incoming_awaited} ${incoming_awaited === 1 ? 'box was' : 'boxes were'} expected — nothing marked as arrived yet`);
+  if (temp_storage) lines.push(`${temp_storage} of this client's item${temp_storage === 1 ? '' : 's'} in temporary storage`);
+  if (lost_property) lines.push(`${lost_property} of this client's item${lost_property === 1 ? '' : 's'} in lost property`);
+
+  return { incoming_to_give, incoming_awaited, temp_storage, lost_property, lines };
 }
 
 // ── Send + log helper ───────────────────────────────────────────────────

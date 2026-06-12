@@ -17,6 +17,7 @@ import { getAuthHeaders } from '../../config/api-config'
 import type { ServiceType, ServiceLogRecord, CreateServiceLogParams } from '../../lib/service-log-api'
 import ServiceRecordForm from './ServiceRecordForm'
 import type { StagedFile } from './ServiceRecordForm'
+import CostCaptureModal from '../../../../components/CostCaptureModal'
 
 const FILTER_OPTIONS: { value: ServiceType | 'all'; label: string }[] = [
   { value: 'all', label: 'All' },
@@ -500,8 +501,20 @@ export default function ServiceHistoryTab({ vehicleId, currentMileage, lastMilea
         }}
       />
 
-      {/* Form modal */}
-      {showForm && (
+      {/* Form modal. Adding a record goes through the unified cost-capture modal
+          (so a service with a cost is entered once); editing an existing record
+          stays on the dedicated service form. */}
+      {showForm && !editing && (
+        <CostCaptureModal
+          presetVehicleId={vehicleId}
+          onSaved={() => {
+            setShowForm(false)
+            queryClient.invalidateQueries({ queryKey: ['vehicle-service-log', vehicleId] })
+          }}
+          onClose={() => setShowForm(false)}
+        />
+      )}
+      {showForm && editing && (
         <ServiceRecordForm
           vehicleId={vehicleId}
           currentMileage={currentMileage}

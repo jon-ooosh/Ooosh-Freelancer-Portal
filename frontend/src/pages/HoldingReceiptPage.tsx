@@ -8,7 +8,8 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
-import { useAuthStore } from '../hooks/useAuthStore';
+import { uploadHeldItemPhotos } from '../components/holding/photo-upload';
+import { locationLabel } from '../components/holding/format';
 import type { HeldItem, HeldItemLocation } from '../../../shared/types';
 
 const inputCls = 'w-full border border-slate-300 rounded-xl px-4 py-3 text-base';
@@ -50,15 +51,8 @@ export default function HoldingReceiptPage() {
     if (!files || files.length === 0) return;
     setUploading(true); setErr('');
     try {
-      for (const file of Array.from(files)) {
-        const fd = new FormData();
-        fd.append('file', file); fd.append('attachment_only', 'true');
-        const token = useAuthStore.getState().accessToken;
-        const res = await fetch('/api/files/upload', { method: 'POST', headers: token ? { Authorization: `Bearer ${token}` } : {}, body: fd });
-        if (!res.ok) throw new Error('Upload failed');
-        const j = await res.json();
-        setPhotos((p) => [...p, { name: j.filename || file.name, url: j.r2_key, type: 'image' }]);
-      }
+      const uploaded = await uploadHeldItemPhotos(files);
+      setPhotos((p) => [...p, ...uploaded]);
     } catch (e) { setErr(e instanceof Error ? e.message : 'Upload failed'); } finally { setUploading(false); }
   }
 
@@ -118,7 +112,7 @@ export default function HoldingReceiptPage() {
         <div className="bg-white rounded-2xl border border-slate-200 p-6 text-center">
           <div className="text-5xl mb-3">📦</div>
           <h1 className="text-xl font-bold text-slate-800 mb-1">Received & stored</h1>
-          <p className="text-slate-500 text-sm mb-6">{h.received_count ?? '?'} item(s){h.storage_location_name ? ` · ${h.storage_location_name}` : ''}.</p>
+          <p className="text-slate-500 text-sm mb-6">{h.received_count ?? '?'} item(s){locationLabel(h) ? ` · ${locationLabel(h)}` : ''}.</p>
 
           <p className="text-sm font-medium text-slate-700 mb-2">Next: let the client know it's arrived</p>
           <button onClick={notify} disabled={notifying || alreadyNotified}
