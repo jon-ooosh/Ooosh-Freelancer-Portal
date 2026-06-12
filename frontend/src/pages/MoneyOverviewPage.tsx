@@ -20,6 +20,8 @@ interface BalanceRow {
   // Present only on resolved rows (migration 117 business override).
   override_reason?: string | null; override_notes?: string | null;
   override_resolved_at?: string | null; override_resolved_by_name?: string | null;
+  // Debt-chase tracker (migration 120).
+  chase_count?: number | null; last_chased_at?: string | null; last_chased_by_name?: string | null;
 }
 interface DepositPendingRow {
   job_id: string; hh_job_number: number | null; job_name: string | null;
@@ -261,12 +263,35 @@ function ResolveBalanceModal({ target, onClose, onDone }: {
   );
 }
 
+// Debt-chase tracker button: count + click-to-log, hover for the last chase.
+// Undo lives in the toast the parent shows after logging.
+function ChaseButton({ row, onChase }: { row: BalanceRow; onChase: (r: BalanceRow) => void }) {
+  const n = row.chase_count || 0;
+  const title = n > 0
+    ? `Chased ${n}× — last ${fmtDate(row.last_chased_at ?? null)}${row.last_chased_by_name ? ` by ${row.last_chased_by_name}` : ''}. Click to log another chase.`
+    : 'No chases logged yet — click to log one (call / email about this balance)';
+  return (
+    <button
+      onClick={(e) => { e.preventDefault(); e.stopPropagation(); onChase(row); }}
+      title={title}
+      className={`text-xs px-2 py-0.5 rounded-full border whitespace-nowrap ${
+        n > 0
+          ? 'bg-amber-50 border-amber-200 text-amber-800 hover:bg-amber-100'
+          : 'bg-white border-gray-200 text-gray-400 hover:text-gray-600 hover:border-gray-300'
+      }`}
+    >
+      📣 {n > 0 ? n : 'Chase'}
+    </button>
+  );
+}
+
 // Grouped balances view — one chase per client, not one per job. Sorted by
 // total outstanding (biggest debt first); expand a client to see their jobs.
-function GroupedBalances({ rows, isAdmin, onResolve }: {
+function GroupedBalances({ rows, isAdmin, onResolve, onChase }: {
   rows: BalanceRow[];
   isAdmin: boolean;
   onResolve: (r: BalanceRow) => void;
+  onChase: (r: BalanceRow) => void;
 }) {
   const [q, setQ] = useState('');
   const [open, setOpen] = useState<Record<string, boolean>>({});
@@ -337,6 +362,7 @@ function GroupedBalances({ rows, isAdmin, onResolve }: {
                             {fmtDate(r.job_end || r.return_date)}<AgeBadge date={r.job_end || r.return_date} />
                           </td>
                           <td className="py-2 pr-3 text-right font-semibold text-red-700 whitespace-nowrap">{gbp(r.balance_outstanding)}</td>
+                          <td className="py-2 pr-3 text-right"><ChaseButton row={r} onChase={onChase} /></td>
                           {isAdmin && (
                             <td className="py-2 text-right">
                               <button
@@ -443,7 +469,7 @@ export default function MoneyOverviewPage() {
   const isAdmin = useAuthStore((s) => s.user?.role) === 'admin';
   const [resolveTarget, setResolveTarget] = useState<BalanceRow | 'bulk' | null>(null);
   const [showResolved, setShowResolved] = useState(false);
-  const [toast, setToast] = useState('');
+  const [toast, setToast] = useState<{ msg: string; undo?: () => void } | null>(null);
   // Filters initialise from the last-used prefs and persist on every change.
   const [prefs] = useState(loadPrefs);
   const [tab, setTab] = useState<Tab>(prefs.tab);
@@ -461,8 +487,10 @@ export default function MoneyOverviewPage() {
     } catch { /* storage blocked — prefs just won't persist */ }
   }, [tab, includeSpeculative, balancesTiming, excessTiming, groupByClient]);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  // `quiet` skips the page-level spinner (row actions like chase logging
+  // shouldn't unmount the table).
+  const load = useCallback(async (quiet = false) => {
+    if (!quiet) setLoading(true);
     setError('');
     try {
       const res = await api.get<{ data: OverviewData }>(`/money/overview${includeSpeculative ? '?include_speculative=1' : ''}`);
@@ -470,7 +498,7 @@ export default function MoneyOverviewPage() {
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load overview');
     } finally {
-      setLoading(false);
+      if (!quiet) setLoading(false);
     }
   }, [includeSpeculative]);
 
@@ -479,10 +507,32 @@ export default function MoneyOverviewPage() {
   const undoResolve = useCallback(async (jobId: string) => {
     try {
       await api.delete(`/money/${jobId}/resolve-balance`);
-      setToast('Balance override removed');
+      setToast({ msg: 'Balance override removed' });
       load();
     } catch (e) {
-      setToast(e instanceof Error ? e.message : 'Failed to undo');
+      setToast({ msg: e instanceof Error ? e.message : 'Failed to undo' });
+    }
+  }, [load]);
+
+  // Log a debt chase (+1) with an Undo in the toast for accidental clicks.
+  const logChase = useCallback(async (r: BalanceRow) => {
+    try {
+      await api.post(`/money/${r.job_id}/chase`, {});
+      setToast({
+        msg: `Chase logged — #${r.hh_job_number ?? '—'}${r.client_name ? ` · ${r.client_name}` : ''}`,
+        undo: async () => {
+          try {
+            await api.delete(`/money/${r.job_id}/chase`);
+            setToast({ msg: 'Chase removed' });
+            load(true);
+          } catch (e) {
+            setToast({ msg: e instanceof Error ? e.message : 'Failed to undo chase' });
+          }
+        },
+      });
+      load(true);
+    } catch (e) {
+      setToast({ msg: e instanceof Error ? e.message : 'Failed to log chase' });
     }
   }, [load]);
 
@@ -491,8 +541,19 @@ export default function MoneyOverviewPage() {
   if (!data) return null;
 
   const t = data.totals;
+
+  // The headline Balances card follows the timing filter, so the number always
+  // matches the list below it.
+  const balancesFiltered = data.balances_outstanding.filter((r) => {
+    if (balancesTiming === 'all') return true;
+    const finished = isPastDate(r.job_end || r.return_date);
+    return balancesTiming === 'finished' ? finished : !finished;
+  });
+  const filteredBalanceTotal = balancesFiltered.reduce((s, r) => s + parseFloat(r.balance_outstanding), 0);
+  const balancesViewLabel = balancesTiming === 'all' ? '' : balancesTiming === 'finished' ? ' · finished only' : ' · upcoming only';
+
   const cards: { key: typeof tab; label: string; value: string; sub: string; subNode?: React.ReactNode; accent: string }[] = [
-    { key: 'balances', label: 'Balances Outstanding', value: gbp(t.balance_outstanding), sub: `${t.balances_count} owing${t.balances_resolved_count ? ` · ${t.balances_resolved_count} resolved` : ''}`, accent: 'text-red-700' },
+    { key: 'balances', label: 'Balances Outstanding', value: gbp(filteredBalanceTotal), sub: `${balancesFiltered.length} owing${balancesViewLabel}${t.balances_resolved_count ? ` · ${t.balances_resolved_count} resolved` : ''}`, accent: 'text-red-700' },
     { key: 'deposits', label: 'Deposits Pending', value: String(t.deposits_pending_count), sub: 'confirmed, no deposit yet', accent: 'text-amber-700' },
     {
       key: 'excess', label: 'Excess Held', value: gbp(t.excess_held), accent: 'text-blue-700',
@@ -510,15 +571,10 @@ export default function MoneyOverviewPage() {
   ];
 
   // Build rows per tab (cells + parallel sort values + search blob).
-  const balancesFiltered = data.balances_outstanding.filter((r) => {
-    if (balancesTiming === 'all') return true;
-    const finished = isPastDate(r.job_end || r.return_date);
-    return balancesTiming === 'finished' ? finished : !finished;
-  });
   const balanceRows: Row[] = balancesFiltered.map((r) => ({
     key: r.job_id, href: jobHref(r),
     search: `${r.hh_job_number ?? ''} ${r.client_name ?? ''} ${r.job_name ?? ''} ${r.pipeline_status ?? ''}`,
-    sort: [r.hh_job_number ?? 0, r.client_name ?? '', r.pipeline_status ?? '', dateMs(r.job_end || r.return_date), parseFloat(r.hire_value_inc_vat), parseFloat(r.balance_outstanding)],
+    sort: [r.hh_job_number ?? 0, r.client_name ?? '', r.pipeline_status ?? '', dateMs(r.job_end || r.return_date), parseFloat(r.hire_value_inc_vat), parseFloat(r.balance_outstanding), dateMs(r.last_chased_at ?? null)],
     cells: [
       <JobRef hh={r.hh_job_number} name={r.job_name} />,
       r.client_name || '—',
@@ -526,6 +582,7 @@ export default function MoneyOverviewPage() {
       <span className="whitespace-nowrap">{fmtDate(r.job_end || r.return_date)}<AgeBadge date={r.job_end || r.return_date} /></span>,
       gbp(r.hire_value_inc_vat),
       <span className="font-semibold text-red-700">{gbp(r.balance_outstanding)}</span>,
+      <ChaseButton row={r} onChase={logChase} />,
       ...(isAdmin ? [
         <button
           onClick={(e) => { e.preventDefault(); e.stopPropagation(); setResolveTarget(r); }}
@@ -540,6 +597,7 @@ export default function MoneyOverviewPage() {
     { label: 'Status', sortable: true }, { label: 'Finishes', sortable: true },
     { label: 'Hire value', sortable: true, align: 'right' },
     { label: 'Outstanding', sortable: true, align: 'right' },
+    { label: 'Chased', sortable: true },
     ...(isAdmin ? [{ label: '', align: 'right' as const }] : []),
   ];
 
@@ -591,7 +649,7 @@ export default function MoneyOverviewPage() {
     <div className="p-4 sm:p-6 max-w-6xl mx-auto">
       <div className="flex items-center justify-between mb-4">
         <h1 className="text-2xl font-bold text-gray-900">Money Overview</h1>
-        <button onClick={load} className="text-sm text-ooosh-600 hover:text-ooosh-700 underline">Refresh</button>
+        <button onClick={() => load()} className="text-sm text-ooosh-600 hover:text-ooosh-700 underline">Refresh</button>
       </div>
       <p className="text-xs text-gray-500 mb-4">
         Cached per-job figures — each job refreshes when its Money tab is opened. Excess and pending refunds are live.
@@ -642,7 +700,7 @@ export default function MoneyOverviewPage() {
               )}
             </div>
             {groupByClient ? (
-              <GroupedBalances rows={balancesFiltered} isAdmin={isAdmin} onResolve={setResolveTarget} />
+              <GroupedBalances rows={balancesFiltered} isAdmin={isAdmin} onResolve={setResolveTarget} onChase={logChase} />
             ) : (
               <Table
                 columns={balanceColumns}
@@ -748,13 +806,19 @@ export default function MoneyOverviewPage() {
         <ResolveBalanceModal
           target={resolveTarget}
           onClose={() => setResolveTarget(null)}
-          onDone={(msg) => { setResolveTarget(null); setToast(msg); load(); }}
+          onDone={(msg) => { setResolveTarget(null); setToast({ msg }); load(); }}
         />
       )}
       {toast && (
         <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 bg-gray-900 text-white text-sm px-4 py-2 rounded-lg shadow-lg flex items-center gap-3">
-          <span>{toast}</span>
-          <button onClick={() => setToast('')} className="text-gray-300 hover:text-white">✕</button>
+          <span>{toast.msg}</span>
+          {toast.undo && (
+            <button onClick={() => { const u = toast.undo!; setToast(null); u(); }}
+              className="font-medium text-amber-300 hover:text-amber-200 underline">
+              Undo
+            </button>
+          )}
+          <button onClick={() => setToast(null)} className="text-gray-300 hover:text-white">✕</button>
         </div>
       )}
     </div>

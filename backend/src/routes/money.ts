@@ -91,8 +91,16 @@ router.get('/overview', authorize('admin', 'manager'), async (req: AuthRequest, 
     // `resolved` list and excluded from the active list + headline total — see
     // migration 117. The override carries reason/notes/who/when for the
     // collapsible "Resolved" section.
-    const balancesAll = await query(
-      `SELECT jf.job_id, j.hh_job_number, j.job_name,
+    //
+    // Active and resolved are SEPARATE queries: filtering resolved rows
+    // client-side after a shared LIMIT let hundreds of resolved rows crowd
+    // small genuine balances out of the active list entirely (job 15758's
+    // £14.40 vanished once 293 resolved rows + 107 active hit the 400 cap).
+    //
+    // Each active row also carries its debt-chase history (migration 120) —
+    // count + last chased, for the overview's chase tracker.
+    const balanceSelect = `
+       SELECT jf.job_id, j.hh_job_number, j.job_name,
               COALESCE(j.client_name, j.company_name) AS client_name,
               j.pipeline_status, j.job_date, j.job_end, j.return_date,
               jf.hire_value_inc_vat, jf.total_hire_deposits, jf.balance_outstanding,
@@ -100,24 +108,38 @@ router.get('/overview', authorize('admin', 'manager'), async (req: AuthRequest, 
               o.reason       AS override_reason,
               o.notes        AS override_notes,
               o.resolved_at  AS override_resolved_at,
-              COALESCE(NULLIF(TRIM(pu.first_name || ' ' || pu.last_name), ''), u.email) AS override_resolved_by_name
+              COALESCE(NULLIF(TRIM(pu.first_name || ' ' || pu.last_name), ''), u.email) AS override_resolved_by_name,
+              ch.chase_count, ch.last_chased_at, ch.last_chased_by_name
        FROM job_financials jf
        JOIN jobs j ON j.id = jf.job_id
        LEFT JOIN job_balance_overrides o ON o.job_id = jf.job_id
        LEFT JOIN users u ON u.id = o.resolved_by
        LEFT JOIN people pu ON pu.id = u.person_id
+       LEFT JOIN LATERAL (
+         SELECT COUNT(*)::int AS chase_count,
+                MAX(c.chased_at) AS last_chased_at,
+                (SELECT COALESCE(NULLIF(TRIM(cp.first_name || ' ' || cp.last_name), ''), cu.email)
+                 FROM job_balance_chases c2
+                 LEFT JOIN users cu ON cu.id = c2.chased_by
+                 LEFT JOIN people cp ON cp.id = cu.person_id
+                 WHERE c2.job_id = jf.job_id
+                 ORDER BY c2.chased_at DESC LIMIT 1) AS last_chased_by_name
+         FROM job_balance_chases c
+         WHERE c.job_id = jf.job_id
+       ) ch ON TRUE
        WHERE jf.balance_outstanding > 0.01
          AND COALESCE(j.pipeline_status, '') NOT IN ('lost', 'cancelled')
-         ${speculativeFilter}
+         ${speculativeFilter}`;
+    const balances = await query(
+      `${balanceSelect} AND o.job_id IS NULL
        ORDER BY jf.balance_outstanding DESC
        LIMIT 400`
     );
-    const balances = {
-      rows: balancesAll.rows.filter((r: Record<string, unknown>) => !r.override_reason),
-    };
-    const balancesResolved = {
-      rows: balancesAll.rows.filter((r: Record<string, unknown>) => !!r.override_reason),
-    };
+    const balancesResolved = await query(
+      `${balanceSelect} AND o.job_id IS NOT NULL
+       ORDER BY o.resolved_at DESC
+       LIMIT 400`
+    );
 
     // Deposits pending — confirmed-ish jobs with no hire deposit recorded yet.
     const depositsPending = await query(
@@ -292,6 +314,60 @@ router.delete('/:jobId/resolve-balance', authorize('admin'), async (req: AuthReq
     const msg = error instanceof Error ? error.message : String(error);
     console.error('[money] unresolve-balance error:', msg);
     res.status(500).json({ error: 'Failed to remove balance override', detail: msg });
+  }
+});
+
+// ── Balance chase log (migration 120) ──
+// "When did we last do something about this debt?" — one row per chase event.
+// POST logs a chase (count +1); DELETE removes the most recent one (undo for
+// accidental clicks). Distinct from pipeline enquiry-chasing — no pipeline
+// state is touched.
+
+// POST /api/money/:jobId/chase — log a debt chase against the job.
+router.post('/:jobId/chase', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {
+  try {
+    const jobUuid = await resolveJobUuid(String(req.params.jobId));
+    if (!jobUuid) { res.status(404).json({ error: 'Job not found' }); return; }
+    const note = typeof req.body?.note === 'string' ? req.body.note.slice(0, 1000) : null;
+    await query(
+      `INSERT INTO job_balance_chases (job_id, chased_by, note) VALUES ($1, $2, $3)`,
+      [jobUuid, req.user!.id, note]
+    );
+    const counts = await query(
+      `SELECT COUNT(*)::int AS chase_count, MAX(chased_at) AS last_chased_at
+       FROM job_balance_chases WHERE job_id = $1`,
+      [jobUuid]
+    );
+    res.json({ data: counts.rows[0], message: 'Chase logged' });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error('[money] chase error:', msg);
+    res.status(500).json({ error: 'Failed to log chase', detail: msg });
+  }
+});
+
+// DELETE /api/money/:jobId/chase — undo the most recent chase on the job.
+router.delete('/:jobId/chase', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {
+  try {
+    const jobUuid = await resolveJobUuid(String(req.params.jobId));
+    if (!jobUuid) { res.status(404).json({ error: 'Job not found' }); return; }
+    const del = await query(
+      `DELETE FROM job_balance_chases
+       WHERE id = (SELECT id FROM job_balance_chases WHERE job_id = $1 ORDER BY chased_at DESC LIMIT 1)
+       RETURNING id`,
+      [jobUuid]
+    );
+    if (del.rows.length === 0) { res.status(404).json({ error: 'No chases logged on this job' }); return; }
+    const counts = await query(
+      `SELECT COUNT(*)::int AS chase_count, MAX(chased_at) AS last_chased_at
+       FROM job_balance_chases WHERE job_id = $1`,
+      [jobUuid]
+    );
+    res.json({ data: counts.rows[0], message: 'Chase removed' });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error('[money] chase undo error:', msg);
+    res.status(500).json({ error: 'Failed to undo chase', detail: msg });
   }
 });
 

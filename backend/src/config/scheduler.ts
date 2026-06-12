@@ -826,6 +826,24 @@ export function startScheduler() {
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: Pre-auth expiry reconciliation scheduled daily at 09:40 Europe/London');
 
+  // ── Cost ↔ Xero reconciliation sync — daily 07:45 Europe/London ─────────
+  // Closes the spend-money loop: when the bookkeeper reconciles our pushed
+  // Spend Money against the bank-feed line IN XERO, flip the OP cost to
+  // `reconciled` so the /money/costs Reconcile tab self-empties and becomes a
+  // true exception list. Silent housekeeping — no emails/bells.
+  cron.schedule('45 7 * * *', async () => {
+    try {
+      const { runCostXeroReconcileSync } = await import('../services/cost-xero-reconcile-sync');
+      const r = await runCostXeroReconcileSync();
+      if (r.checked > 0) {
+        console.log(`Scheduler: Cost Xero reconcile sync — ${r.reconciled} of ${r.checked} flipped to reconciled`);
+      }
+    } catch (err) {
+      console.error('Scheduler: Cost Xero reconcile sync failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: Cost Xero reconcile sync scheduled daily at 07:45 Europe/London');
+
   // ── Job financials backfill — nightly 03:00 Europe/London ────────────
   // Slow-burn fills the job_financials cache (powering /money/overview) for
   // jobs whose Money tab hasn't been opened recently. Drives the live
