@@ -62,8 +62,8 @@ const gbp = (n: number | string | null) =>
 type Timing = 'all' | 'finished' | 'upcoming';
 type Tab = 'balances' | 'deposits' | 'excess' | 'refunds';
 const PREFS_KEY = 'ooosh_money_overview_prefs';
-interface OverviewPrefs { tab: Tab; includeSpeculative: boolean; balancesTiming: Timing; excessTiming: Timing }
-const DEFAULT_PREFS: OverviewPrefs = { tab: 'balances', includeSpeculative: false, balancesTiming: 'all', excessTiming: 'all' };
+interface OverviewPrefs { tab: Tab; includeSpeculative: boolean; balancesTiming: Timing; excessTiming: Timing; groupByClient: boolean }
+const DEFAULT_PREFS: OverviewPrefs = { tab: 'balances', includeSpeculative: false, balancesTiming: 'all', excessTiming: 'all', groupByClient: false };
 function loadPrefs(): OverviewPrefs {
   try {
     const raw = localStorage.getItem(PREFS_KEY);
@@ -85,6 +85,23 @@ function isPastDate(d: string | null): boolean {
   if (!d) return false;
   const today = new Date(); today.setHours(0, 0, 0, 0);
   return new Date(d).getTime() < today.getTime();
+}
+
+function daysAgo(d: string | null): number | null {
+  if (!d) return null;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const days = Math.floor((today.getTime() - new Date(d).getTime()) / 86_400_000);
+  return days > 0 ? days : null;
+}
+
+// Ageing badge on finished hires — the older the debt, the louder the badge.
+function AgeBadge({ date }: { date: string | null }) {
+  const days = daysAgo(date);
+  if (days === null) return null;
+  const cls = days > 90 ? 'bg-red-100 text-red-700'
+    : days > 30 ? 'bg-amber-100 text-amber-800'
+    : 'bg-gray-100 text-gray-500';
+  return <span className={`ml-1.5 text-[10px] px-1.5 py-0.5 rounded whitespace-nowrap ${cls}`}>{days}d ago</span>;
 }
 
 function TimingPills({ value, onChange }: { value: Timing; onChange: (t: Timing) => void }) {
@@ -244,6 +261,104 @@ function ResolveBalanceModal({ target, onClose, onDone }: {
   );
 }
 
+// Grouped balances view — one chase per client, not one per job. Sorted by
+// total outstanding (biggest debt first); expand a client to see their jobs.
+function GroupedBalances({ rows, isAdmin, onResolve }: {
+  rows: BalanceRow[];
+  isAdmin: boolean;
+  onResolve: (r: BalanceRow) => void;
+}) {
+  const [q, setQ] = useState('');
+  const [open, setOpen] = useState<Record<string, boolean>>({});
+
+  const groups = useMemo(() => {
+    const map = new Map<string, BalanceRow[]>();
+    for (const r of rows) {
+      const key = r.client_name || 'Unknown client';
+      const list = map.get(key) || [];
+      list.push(r);
+      map.set(key, list);
+    }
+    const needle = q.trim().toLowerCase();
+    return Array.from(map.entries())
+      .filter(([client]) => !needle || client.toLowerCase().includes(needle))
+      .map(([client, jobs]) => ({
+        client,
+        jobs: jobs.slice().sort((a, b) => dateMs(a.job_end || a.return_date) - dateMs(b.job_end || b.return_date)),
+        total: jobs.reduce((s, j) => s + parseFloat(j.balance_outstanding), 0),
+        oldest: jobs.reduce<string | null>((acc, j) => {
+          const d = j.job_end || j.return_date;
+          return d && (!acc || dateMs(d) < dateMs(acc)) ? d : acc;
+        }, null),
+      }))
+      .sort((a, b) => b.total - a.total);
+  }, [rows, q]);
+
+  return (
+    <div>
+      <div className="flex items-center gap-3 px-4 py-3 border-b border-gray-100">
+        <input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Search client…"
+          className="flex-1 max-w-xs px-3 py-1.5 text-sm border border-gray-300 rounded-md"
+        />
+        <span className="text-xs text-gray-400">{groups.length} client{groups.length === 1 ? '' : 's'}</span>
+      </div>
+      {groups.length === 0 ? (
+        <p className="p-6 text-sm text-gray-500">{rows.length === 0 ? 'No outstanding balances on synced jobs.' : 'No matches.'}</p>
+      ) : (
+        <div className="divide-y divide-gray-100">
+          {groups.map((g) => (
+            <div key={g.client}>
+              <button
+                onClick={() => setOpen((o) => ({ ...o, [g.client]: !o[g.client] }))}
+                className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-left hover:bg-gray-50"
+              >
+                <span className="flex items-center gap-2 min-w-0">
+                  <span className="text-gray-400 text-xs">{open[g.client] ? '▾' : '▸'}</span>
+                  <span className="text-sm font-medium text-gray-800 truncate">{g.client}</span>
+                  <span className="text-xs text-gray-400 whitespace-nowrap">{g.jobs.length} job{g.jobs.length === 1 ? '' : 's'}</span>
+                  {isPastDate(g.oldest) && <AgeBadge date={g.oldest} />}
+                </span>
+                <span className="text-sm font-semibold text-red-700 whitespace-nowrap">{gbp(g.total)}</span>
+              </button>
+              {open[g.client] && (
+                <div className="bg-gray-50/60 px-4 pb-2">
+                  <table className="w-full text-sm">
+                    <tbody className="divide-y divide-gray-100">
+                      {g.jobs.map((r) => (
+                        <tr key={r.job_id}>
+                          <td className="py-2 pr-3">
+                            <Link to={jobHref(r)} className="hover:underline"><JobRef hh={r.hh_job_number} name={r.job_name} /></Link>
+                          </td>
+                          <td className="py-2 pr-3"><Pill text={r.pipeline_status || '—'} /></td>
+                          <td className="py-2 pr-3 whitespace-nowrap text-gray-600">
+                            {fmtDate(r.job_end || r.return_date)}<AgeBadge date={r.job_end || r.return_date} />
+                          </td>
+                          <td className="py-2 pr-3 text-right font-semibold text-red-700 whitespace-nowrap">{gbp(r.balance_outstanding)}</td>
+                          {isAdmin && (
+                            <td className="py-2 text-right">
+                              <button
+                                onClick={() => onResolve(r)}
+                                className="text-xs text-gray-500 hover:text-ooosh-700 underline whitespace-nowrap"
+                              >Resolve</button>
+                            </td>
+                          )}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 type Col = { label: string; sortable?: boolean; align?: 'right' };
 type Row = { key: string; href: string; cells: React.ReactNode[]; sort: (string | number)[]; search: string };
 
@@ -338,12 +453,13 @@ export default function MoneyOverviewPage() {
   // Historic vs upcoming split — finished = hire end date already past.
   const [balancesTiming, setBalancesTiming] = useState<Timing>(prefs.balancesTiming);
   const [excessTiming, setExcessTiming] = useState<Timing>(prefs.excessTiming);
+  const [groupByClient, setGroupByClient] = useState(prefs.groupByClient);
 
   useEffect(() => {
     try {
-      localStorage.setItem(PREFS_KEY, JSON.stringify({ tab, includeSpeculative, balancesTiming, excessTiming } satisfies OverviewPrefs));
+      localStorage.setItem(PREFS_KEY, JSON.stringify({ tab, includeSpeculative, balancesTiming, excessTiming, groupByClient } satisfies OverviewPrefs));
     } catch { /* storage blocked — prefs just won't persist */ }
-  }, [tab, includeSpeculative, balancesTiming, excessTiming]);
+  }, [tab, includeSpeculative, balancesTiming, excessTiming, groupByClient]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -407,7 +523,7 @@ export default function MoneyOverviewPage() {
       <JobRef hh={r.hh_job_number} name={r.job_name} />,
       r.client_name || '—',
       <Pill text={r.pipeline_status || '—'} />,
-      fmtDate(r.job_end || r.return_date),
+      <span className="whitespace-nowrap">{fmtDate(r.job_end || r.return_date)}<AgeBadge date={r.job_end || r.return_date} /></span>,
       gbp(r.hire_value_inc_vat),
       <span className="font-semibold text-red-700">{gbp(r.balance_outstanding)}</span>,
       ...(isAdmin ? [
@@ -509,6 +625,14 @@ export default function MoneyOverviewPage() {
                   />
                   Show enquiries / provisional
                 </label>
+                <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={groupByClient}
+                    onChange={(e) => setGroupByClient(e.target.checked)}
+                  />
+                  Group by client
+                </label>
               </div>
               {isAdmin && (
                 <button
@@ -517,11 +641,15 @@ export default function MoneyOverviewPage() {
                 >Bulk resolve old balances…</button>
               )}
             </div>
-            <Table
-              columns={balanceColumns}
-              empty="No outstanding balances on synced jobs."
-              rows={balanceRows}
-            />
+            {groupByClient ? (
+              <GroupedBalances rows={balancesFiltered} isAdmin={isAdmin} onResolve={setResolveTarget} />
+            ) : (
+              <Table
+                columns={balanceColumns}
+                empty="No outstanding balances on synced jobs."
+                rows={balanceRows}
+              />
+            )}
             {data.balances_resolved.length > 0 && (
               <div className="border-t border-gray-100">
                 <button

@@ -9,7 +9,7 @@
  *
  * Capture is manual (CostCaptureModal); AI extraction is a fast-follow.
  */
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
@@ -49,6 +49,17 @@ const APPROVAL_COLOURS: Record<string, string> = {
   paid: 'bg-green-100 text-green-700',
 };
 
+// Client-side column sort. null = server order (newest captured first).
+type SortKey = 'date' | 'supplier' | 'description' | 'gross' | 'type' | 'status';
+const SORT_VALUE: Record<SortKey, (c: { cost_date: string | null; supplier_name: string | null; description: string | null; amount_gross: number | null; category: string | null; cost_type: string; approval_state: string | null; payment_status: string }) => string | number> = {
+  date: (c) => c.cost_date || '',
+  supplier: (c) => (c.supplier_name || '').toLowerCase(),
+  description: (c) => (c.description || '').toLowerCase(),
+  gross: (c) => Number(c.amount_gross || 0),
+  type: (c) => (c.category || c.cost_type || '').toLowerCase(),
+  status: (c) => c.approval_state || c.payment_status || '',
+};
+
 export default function CostsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const { user } = useAuthStore();
@@ -68,6 +79,23 @@ export default function CostsPage() {
   const [payTarget, setPayTarget] = useState<CostRow | null>(null);
   const [preview, setPreview] = useState<CostRow | null>(null);
   const [actionBusy, setActionBusy] = useState<string | null>(null);
+  const [sortKey, setSortKey] = useState<SortKey | null>(null);
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
+
+  const sortedRows = useMemo(() => {
+    if (!sortKey) return rows;
+    const val = SORT_VALUE[sortKey];
+    return [...rows].sort((a, b) => {
+      const av = val(a); const bv = val(b);
+      const cmp = typeof av === 'number' && typeof bv === 'number' ? av - bv : String(av).localeCompare(String(bv));
+      return sortDir === 'asc' ? cmp : -cmp;
+    });
+  }, [rows, sortKey, sortDir]);
+
+  const clickSort = (key: SortKey) => {
+    if (sortKey === key) setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
+    else { setSortKey(key); setSortDir('asc'); }
+  };
 
   useEffect(() => {
     const t = setTimeout(() => setSearchDebounced(search), 300);
@@ -244,20 +272,20 @@ export default function CostsPage() {
           <table className="min-w-full text-sm">
             <thead className="bg-gray-50 text-gray-600">
               <tr>
-                <th className="px-2.5 py-2 text-left font-medium">Date</th>
-                <th className="px-2.5 py-2 text-left font-medium">Supplier</th>
-                <th className="px-2.5 py-2 text-left font-medium">Description</th>
-                <th className="px-2.5 py-2 text-right font-medium">Gross</th>
-                <th className="px-2.5 py-2 text-left font-medium">Type</th>
+                <SortableTh label="Date" k="date" sortKey={sortKey} sortDir={sortDir} onSort={clickSort} />
+                <SortableTh label="Supplier" k="supplier" sortKey={sortKey} sortDir={sortDir} onSort={clickSort} />
+                <SortableTh label="Description" k="description" sortKey={sortKey} sortDir={sortDir} onSort={clickSort} />
+                <SortableTh label="Gross" k="gross" sortKey={sortKey} sortDir={sortDir} onSort={clickSort} align="right" />
+                <SortableTh label="Type" k="type" sortKey={sortKey} sortDir={sortDir} onSort={clickSort} />
                 <th className="px-2.5 py-2 text-left font-medium">Linked</th>
                 {view === 'all' && <th className="px-2.5 py-2 text-left font-medium">Uploaded by</th>}
-                <th className="px-2.5 py-2 text-left font-medium">Status</th>
+                <SortableTh label="Status" k="status" sortKey={sortKey} sortDir={sortDir} onSort={clickSort} />
                 <th className="px-2.5 py-2 text-left font-medium">Xero</th>
                 <th className="px-2.5 py-2 text-right font-medium">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {rows.map((c) => (
+              {sortedRows.map((c) => (
                 <tr key={c.id} className="hover:bg-gray-50">
                   <td className="px-2.5 py-2 whitespace-nowrap text-gray-700">{fmtDate(c.cost_date)}</td>
                   <td className="px-2.5 py-2 text-gray-900">
@@ -529,6 +557,19 @@ function PayableActions({ cost, isManager, isAdmin, busy, onAction, onPay }: {
     return <ActionBtn busy={busy === cost.id + 'pay'} onClick={onPay} label="Mark paid" />;
   }
   return <span className="text-xs text-gray-400">{s ? `awaiting ${s === 'verified' ? 'approval' : 'payment'}` : '—'}</span>;
+}
+
+function SortableTh({ label, k, sortKey, sortDir, onSort, align }: {
+  label: string; k: SortKey; sortKey: SortKey | null; sortDir: 'asc' | 'desc';
+  onSort: (k: SortKey) => void; align?: 'right';
+}) {
+  return (
+    <th onClick={() => onSort(k)}
+      className={`px-2.5 py-2 font-medium cursor-pointer select-none hover:text-gray-900 whitespace-nowrap ${align === 'right' ? 'text-right' : 'text-left'}`}>
+      {label}
+      {sortKey === k && <span className="ml-1">{sortDir === 'asc' ? '▲' : '▼'}</span>}
+    </th>
+  );
 }
 
 function ActionBtn({ busy, onClick, label }: { busy: boolean; onClick: () => void; label: string }) {
