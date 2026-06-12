@@ -273,6 +273,7 @@ export function startScheduler() {
            AND pipeline_status IN ('new_enquiry', 'quoting', 'paused', 'provisional')
            AND status < 2
            AND is_deleted = false
+           AND COALESCE(is_internal, false) = false
          RETURNING id, job_name, hh_job_number, pipeline_status, job_date`
       );
 

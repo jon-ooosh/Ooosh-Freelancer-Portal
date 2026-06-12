@@ -23,14 +23,15 @@ router.post('/job-progress', async (req: AuthRequest, res: Response) => {
 
     if (ids.length === 0) return res.json({ data: {} });
 
-    // Exclude VD-suspended requirements (hire_forms / excess auto-suspended
-    // when every van slot is Van & Driver) — they're "not required" on this
-    // job, not a problem, so they shouldn't render as a red prob pill.
+    // Exclude suspended requirements (hire_forms / excess auto-suspended when
+    // every van slot is Van & Driver, or the job is marked Internal) —
+    // they're "not required" on this job, not a problem, so they shouldn't
+    // render as a red prob pill.
     const result = await query(
       `SELECT job_id, requirement_type, status, phase
        FROM job_requirements
        WHERE job_id = ANY($1)
-         AND (notes IS NULL OR notes NOT LIKE '%[Suspended: Van & Driver]%')`,
+         AND (notes IS NULL OR notes NOT LIKE '%[Suspended:%')`,
       [ids],
     );
 

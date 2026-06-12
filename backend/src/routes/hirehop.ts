@@ -640,6 +640,66 @@ router.patch('/jobs/:jobId/van-and-driver', authenticate, async (req: AuthReques
   }
 });
 
+// PATCH /api/hirehop/jobs/:jobId/internal — mark a job as internal (garage
+// visits, MOTs, our own vehicle movements booked in HH to keep stock
+// accurate). Mutes the client-facing chain: hire forms + excess requirements
+// are soft-suspended, the job drops out of /money/overview aggregates, the
+// hire-form auto-emailer and last-minute booking alert skip it. Crew &
+// Transport, vehicle allocation, and the Turnaround Schedule stay live.
+router.patch('/jobs/:jobId/internal', async (req: AuthRequest, res: Response) => {
+  try {
+    const jobId = req.params.jobId as string;
+    const isInternal = !!req.body.isInternal;
+
+    const updated = await query(
+      `UPDATE jobs SET is_internal = $1, updated_at = NOW()
+       WHERE id = $2 AND is_deleted = false
+       RETURNING id, is_internal`,
+      [isInternal, jobId]
+    );
+    if (updated.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
+    // Audit trail — the toggle changes money reporting, so log who flipped it.
+    // Logged before the re-derivation so the timeline entry survives even if
+    // derivation hits a transient error.
+    try {
+      await query(
+        `INSERT INTO interactions (type, content, job_id, created_by)
+         VALUES ('note', $1, $2, $3)`,
+        [
+          isInternal
+            ? '🔧 Job marked as Internal — hire forms, excess and money tracking muted (crew & transport unaffected)'
+            : 'Job un-marked as Internal — hire forms, excess and money tracking re-enabled',
+          jobId,
+          req.user!.id,
+        ]
+      );
+    } catch (logErr) {
+      console.warn('Internal toggle: timeline log failed (non-fatal):', logErr);
+    }
+
+    // Re-derive so hire_forms/excess suspend (or restore) immediately rather
+    // than waiting for the next 30-min sync. The flag update above is the
+    // primary action — a derivation failure shouldn't make the toggle look
+    // like it didn't happen (the scheduled sync re-derives within 30 min).
+    let derivation = null;
+    try {
+      const { deriveRequirementsForJob } = await import('../services/hh-requirement-derivation');
+      derivation = await deriveRequirementsForJob(jobId);
+    } catch (deriveErr) {
+      console.error('Internal toggle: re-derivation failed (flag saved, sync will catch up):', deriveErr);
+    }
+
+    res.json({ success: true, isInternal, derivation });
+  } catch (error) {
+    console.error('Internal job toggle error:', error);
+    res.status(500).json({ error: 'Failed to update' });
+  }
+});
+
 // GET /api/hirehop/mappings — show synced records
 router.get('/mappings', async (_req: AuthRequest, res: Response) => {
   try {

@@ -216,7 +216,11 @@ export default function RequirementCard({
   const [hireFormDrivers, setHireFormDrivers] = useState<HireFormDriver[]>([]);
   const [excessInfo, setExcessInfo] = useState<ExcessInfo | null>(null);
 
-  const isSuspendedByVD = req.notes?.includes('[Suspended: Van & Driver]') || false;
+  // Suspension marker — set by the derivation engine when the hire chain is
+  // not required on this job (every van slot is Van & Driver, or the job is
+  // marked Internal). Variable keeps its historic name; it now covers both.
+  const suspensionReason = req.notes?.match(/\[Suspended: (Van & Driver|Internal)\]/)?.[1] || null;
+  const isSuspendedByVD = suspensionReason !== null;
   const statusConfig = PREP_STATUS_CONFIG[req.status] || PREP_STATUS_CONFIG.not_started;
   const typeLabels = TYPE_STATUS_LABELS[req.requirement_type];
   const label = req.custom_label || req.type_label;
@@ -454,9 +458,11 @@ export default function RequirementCard({
               </div>
             )}
 
-            {/* Suspended by Van & Driver banner */}
+            {/* Suspended (Van & Driver / Internal) banner */}
             {isSuspendedByVD && (req.requirement_type === 'hire_forms' || req.requirement_type === 'excess') && (
-              <div className="mt-1 text-xs text-gray-400 italic">Not required — Van & Driver mode</div>
+              <div className="mt-1 text-xs text-gray-400 italic">
+                {suspensionReason === 'Internal' ? 'Not required — Internal job' : 'Not required — Van & Driver mode'}
+              </div>
             )}
 
             {/* Hire Forms — show driver submissions + send button */}
