@@ -489,7 +489,7 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
       `SELECT id, excess_amount_taken, excess_status, payment_method, payment_reference, payment_date, hh_deposit_id
        FROM job_excess
        WHERE job_id = $1 AND assignment_id IS NULL
-         AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required')
+         AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required', 'released')
        ORDER BY created_at DESC LIMIT 1`,
       [jobId]
     ) : { rows: [] };
@@ -561,7 +561,7 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
       const countResult = jobId ? await client.query(
         `SELECT COUNT(*)::int AS count FROM job_excess
          WHERE job_id = $1 AND assignment_id IS NOT NULL
-           AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required', 'waived')`,
+           AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required', 'waived', 'released')`,
         [jobId]
       ) : { rows: [{ count: 0 }] };
       const activeCount = countResult.rows[0].count;
@@ -984,10 +984,12 @@ router.post('/quick-assign', authenticate, validate(quickAssignSchema), async (r
     const vanCount = Math.max(flags?.self_drive_count || 1, 1);
 
     // Try to absorb an orphan record created by the derivation engine.
+    // 'released' is terminal (migration 087) — absorbing one resurrects a dead
+    // pre-auth to 'pending' with stale amount_held (job 15934 incident, Jun 2026).
     const orphanExcess = await query(
       `SELECT id FROM job_excess
        WHERE job_id = $1 AND assignment_id IS NULL
-         AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required')
+         AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required', 'released')
        ORDER BY created_at ASC LIMIT 1`,
       [f.job_id]
     );
@@ -1018,7 +1020,7 @@ router.post('/quick-assign', authenticate, validate(quickAssignSchema), async (r
       const countResult = await query(
         `SELECT COUNT(*)::int AS count FROM job_excess
          WHERE job_id = $1 AND assignment_id IS NOT NULL
-           AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required', 'waived')`,
+           AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required', 'waived', 'released')`,
         [f.job_id]
       );
       const activeCount = countResult.rows[0].count;
