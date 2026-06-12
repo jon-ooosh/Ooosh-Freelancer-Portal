@@ -1168,6 +1168,11 @@ export interface HeldItem {
   job_name?: string | null;
   found_vehicle_reg?: string | null;
   received_by_name?: string | null;
+
+  // Computed chase fields (lost property) — derived in SELECT_WITH_JOINS so the
+  // list, detail card and review queue all agree. null for non-lost-property.
+  next_chase_due?: string | null;
+  chase_state?: 'none' | 'paused' | 'due' | 'scheduled' | null;
 }
 
 // API response wrappers

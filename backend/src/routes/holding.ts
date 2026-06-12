@@ -182,7 +182,34 @@ const SELECT_WITH_JOINS = `
          loc.name                                  AS storage_location_name,
          j.job_name                                AS job_name,
          fv.reg                                    AS found_vehicle_reg,
-         (rbp.first_name || ' ' || rbp.last_name)  AS received_by_name
+         (rbp.first_name || ' ' || rbp.last_name)  AS received_by_name,
+         -- Chase derivation — single source of truth; mirrors the daily scan in
+         -- services/holding-reminders.ts so the list, detail card and review
+         -- queue can never disagree about "what's due".
+         CASE
+           WHEN h.kind <> 'lost_property'
+             OR h.status IN ('collected','shipped_back','disposed','cancelled')
+             OR (h.owner_person_id IS NULL AND h.owner_organisation_id IS NULL)
+             OR h.found_date IS NULL THEN NULL
+           WHEN h.expected_collection_date IS NOT NULL AND h.expected_collection_date >= CURRENT_DATE
+             THEN h.expected_collection_date
+           ELSE GREATEST(
+             (h.found_date + INTERVAL '7 days')::date,
+             COALESCE((h.last_chased_at + INTERVAL '7 days')::date, (h.found_date + INTERVAL '7 days')::date)
+           )
+         END                                       AS next_chase_due,
+         CASE
+           WHEN h.kind <> 'lost_property' THEN NULL
+           WHEN h.status IN ('collected','shipped_back','disposed','cancelled')
+             OR (h.owner_person_id IS NULL AND h.owner_organisation_id IS NULL)
+             OR h.found_date IS NULL THEN 'none'
+           WHEN h.expected_collection_date IS NOT NULL AND h.expected_collection_date >= CURRENT_DATE THEN 'paused'
+           WHEN GREATEST(
+             (h.found_date + INTERVAL '7 days')::date,
+             COALESCE((h.last_chased_at + INTERVAL '7 days')::date, (h.found_date + INTERVAL '7 days')::date)
+           ) <= CURRENT_DATE THEN 'due'
+           ELSE 'scheduled'
+         END                                       AS chase_state
   FROM held_items h
   LEFT JOIN people p              ON p.id = h.owner_person_id
   LEFT JOIN organisations o       ON o.id = h.owner_organisation_id

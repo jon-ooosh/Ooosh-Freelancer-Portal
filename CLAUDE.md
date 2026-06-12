@@ -2315,6 +2315,28 @@ dashboard strip / briefing roll-ups keep working. Merch is item-gated (no items 
 when nothing's logged a plain "Held for Clients" entry card renders instead (preserving the Send-Merch-
 Form entry point + empty state). Pre-hire only; standalone Overview panel removed.
 
+**At-a-glance chase columns + unified capture form + notify-at-create (Jun 2026):** two related
+upgrades after first-live feedback that the chase/notify state was buried behind a row-click.
+- **Lost Property list is now chase-focused at a glance.** The `lost_property` view table gained four
+  click-to-sort columns — **Last contacted · Chases · Next chase due · Expected collection** (the
+  "Found in" column folded into a sub-line under Item; Location dropped from the list — it's on the
+  detail card). Default sort is **Next chase due ascending** so whatever's due floats to the top.
+  "Next chase due" is **colour-coded** (red = due, blue ⏸ = paused by an expected-collection date,
+  grey = none/scheduled). **Single source of truth:** `next_chase_due` + `chase_state`
+  (`none`/`paused`/`due`/`scheduled`) are computed columns in `SELECT_WITH_JOINS` (`routes/holding.ts`)
+  that MIRROR the daily scan in `services/holding-reminders.ts` — the list, the detail card's two
+  timers, and the chase digest can never disagree. Any future "is this due a chase" surface should read
+  these fields rather than re-deriving (the old detail-card `addDays` derivation was replaced).
+- **One shared capture form** (`components/holding/HeldItemForm.tsx`) now backs BOTH the desktop
+  `CreateModal` (HoldingPage) and the mobile `QuickLogSheet` (`/quick`). They were two drifting copies
+  — notify-at-create only existed on mobile. `variant: 'desktop' | 'mobile'` switches styling + trims a
+  couple of secondary incoming fields on mobile; field set + save payload + notify logic are identical.
+  Add new capture fields HERE, not in either page.
+- **Notify-at-create across the board.** The form carries a "✉ Notify client now" checkbox (default
+  ON, hidden when owner unknown or item handed straight to client). On save it hands straight into
+  `NotifyClientModal` mid-flow — pick recipients (resolved from job#/org/person, or free-enter
+  name+email), or untick to just log without emailing. Applies to lost property AND incoming/merch.
+
 **Remaining / open:**
 - IRL feedback from the chase + hold-until flows (staff trialling over the following weeks).
 
