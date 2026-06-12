@@ -451,18 +451,48 @@ router.put('/:orgId/relationships/:relId', validate(updateRelationshipSchema), a
 });
 
 // DELETE /api/organisations/:orgId/relationships/:relId
+// Soft-end: marks the relationship historical (status + end_date) rather than
+// destroying the row, so "Future Agency used to manage this band" survives as
+// an audit trail. Falls back to a hard delete only when a historical twin of
+// the same (from, to, type) already exists — the unique constraint
+// uq_org_relationship would block the soft-end, and the audit is already
+// preserved by that existing historical row.
 router.delete('/:orgId/relationships/:relId', async (req: AuthRequest, res: Response) => {
   try {
     const result = await query(
-      'DELETE FROM organisation_relationships WHERE id = $1 RETURNING *',
+      `UPDATE organisation_relationships
+       SET status = 'historical', end_date = NOW(), updated_at = NOW()
+       WHERE id = $1 AND status = 'active'
+       RETURNING *`,
       [req.params.relId]
     );
+
     if (result.rows.length === 0) {
-      res.status(404).json({ error: 'Relationship not found' });
-      return;
+      // Either it doesn't exist, or it's already historical — confirm which.
+      const existing = await query(
+        'SELECT id FROM organisation_relationships WHERE id = $1',
+        [req.params.relId]
+      );
+      if (existing.rows.length === 0) {
+        res.status(404).json({ error: 'Relationship not found' });
+        return;
+      }
+      // Already historical — idempotent no-op.
     }
+
     res.status(204).send();
-  } catch (error) {
+  } catch (error: any) {
+    // Unique-constraint clash: a historical twin already exists. The audit is
+    // preserved by that row, so hard-delete this active duplicate.
+    if (error?.code === '23505') {
+      try {
+        await query('DELETE FROM organisation_relationships WHERE id = $1', [req.params.relId]);
+        res.status(204).send();
+        return;
+      } catch (delErr) {
+        console.error('Delete org relationship fallback error:', delErr);
+      }
+    }
     console.error('Delete org relationship error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
