@@ -2212,7 +2212,7 @@ Standalone OP-native module replacing the Monday.com "Storage Clients" board. Oo
 - **Signed T&Cs snapshot PDF** (acceptance + signature image recorded; PDF generation not yet wired).
 - Temp storage / incoming deliveries — deliberately NOT here; belongs with the Holding module (Step 10).
 
-#### Step 10: Holding Module — "Held for Clients" / "Lost Property" / temp storage ← MOSTLY BUILT (Jun 2026)
+#### Step 10: Holding Module — "Held for Clients" / "Lost Property" / temp storage ← FEATURE-COMPLETE (Jun 2026)
 
 The unified "things we're temporarily holding for a client" module. **One engine** (`held_items`), one
 `kind` discriminator (`incoming` / `lost_property` / `temp_storage`) that drives behaviour + display
@@ -2256,22 +2256,45 @@ not the dashboard strip — add a slot if wanted). NOT touched by the HH derivat
 temp_storage + lost_property are NOT on the ticker — they're **right-sidebar FYI** on the Job View
 ("📦 Also holding (FYI)", client-wide via org).
 
-**Remaining (next chat):**
-- **Pre-hire review email heads-up** — add a Holding summary to `services/pre-hire-briefing.ts`
-  (`JobBriefing.holding` field + `buildBriefing` query + render block in
-  `email-templates/pre-hire-briefing.ts`). Phrasings: "2 packages here to give to the client",
-  "3 boxes were expected, nothing marked as arrived yet", + temp/lost aide-mémoire. Email-critical
-  file — integrate carefully.
-- **Stage 8 — lost-property chase**: review page (human-gated; `GET /holding/chases/review` ready),
-  daily scan that ASSEMBLES the batch (never auto-sends), gradient wk1/wk2/wk3 `holding_chase`
-  templates. Per spec §7B (a human approves the send — the Monday lesson: never auto-fire a
-  "we'll dispose of your stuff" email).
-- **Stage 9 — Storage-client "Packages held"** cross-link tab (Amazon-deluge case).
-- Desktop CreateModal search-first dedupe nudge; shared-UI refactor (3 copies of location/photo
-  capture); `merch` dashboard-strip slot. All low priority.
+**Smart linking + notify + ship-back (PRs #690/#692/#695):** HH job number is the primary capture
+field — `POST /holding` + `/link` derive `job_id` + client org from it (`resolveJobContext`), live
+`GET /holding/job-lookup/:n` confirms the client in the form, `GET /holding/org-jobs/:orgId`
+reverse-links when staff know the band not the job. `/:id/notify` takes a multi-recipient picker
+(`recipients[]` + `GET /:id/notify-contacts`), branches template by kind, **attaches item photos**
+(compressed client-side ~1600px before upload so emails stay small), enriches the incoming email with
+the description; fires post-save on the Quick Log for incoming + lost. Ship-back forwards postage +
+tracking (`holding_shipped_back`). `locationLabel()` surfaces the "Somewhere else" typed text. Shared
+FE primitives in `components/holding/`.
 
-**Branch:** `claude/zen-allen-V8knQ` (PR #666). Deploy adds the `qrcode` dep (run `npm install`) and
-migrations 113/115/116.
+**Lost-property chase + temp hold-until (PR #698, migration 119):** human-gated chase ladder — NEVER
+auto-fires to clients. `POST /:id/chase` sends the gradient email for the current tier
+(`holding_chase_1/2/3`, wk1 friendly → wk2 firm → wk3 final; job # in subject, staff signature via
+`users.person_id → people`) then bumps the level, only on successful send (422 no email / 502 fail,
+record untouched). `ChaseReviewPanel` on the Lost Property page (Send / Snooze / Skip), opened from
+the digest deep-link `?review=1`. Two timers on the detail card (Last contacted / Next chase due).
+`expected_collection_date` (future = chases paused, doubles as snooze, excluded from review + scan);
+`hold_until` on temp storage (staff reminded 3 days before). `services/holding-reminders.ts` runs
+daily **09:25 Europe/London** — assembles the chase digest (staff bell + info@ email to the review
+queue, NO client emails fired here) + hold-until reminders, per-cycle dedup via
+`hold_until_reminder_sent_for`.
+
+**Briefing + Stage 9 + merch strip (PRs #700/#701):** pre-hire briefing gains a "Things we're holding
+for this client" block (`JobBriefing.holding`, try/catch-guarded). Storage tenancy detail shows the
+client's held items (`HeldItemsSection entityType=organisation`). `merch` is now a slot in
+`job-progress-strip.ts` (+ FE mirror + briefing strip) so the pip shows on the dashboard Today strip.
+
+**Merch card + panel combined (PR #703):** the standalone Overview "Held for Clients" panel was
+duplicating the inert merch checklist pip. Now ONE surface — the merch requirement card in
+`JobPrepChecklist` carries its incoming-items detail + Send Merch Form nested beneath it (same pattern
+as the vehicle card nesting hire_forms/excess); the requirement row is untouched so the prep counter /
+dashboard strip / briefing roll-ups keep working. Merch is item-gated (no items → no requirement), so
+when nothing's logged a plain "Held for Clients" entry card renders instead (preserving the Send-Merch-
+Form entry point + empty state). Pre-hire only; standalone Overview panel removed.
+
+**Remaining / open:**
+- IRL feedback from the chase + hold-until flows (staff trialling over the following weeks).
+
+**Migrations:** 113/115/116 (initial) + 119 (chase/hold). `qrcode` dep added at the initial build.
 
 ### External Tools (already built, need repointing from Monday.com → Ooosh API)
 
