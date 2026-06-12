@@ -1543,6 +1543,7 @@ What `is_internal = true` mutes:
 - **Money overview** (`routes/money.ts` `/overview`): excluded from Balances Outstanding, Deposits Pending and Excess Held lists + headline totals.
 - **Last-minute booking alert** (`money-emails.ts` `sendLastMinuteAlert`).
 - **Stale-enquiry auto-loser** (`config/scheduler.ts`).
+- **Scheduled pre-hire review emails** (`pre-hire-briefing.ts` `findEligibleJobs` — the T-5/T-3/T-1 cron sends). The manual "Pre-Hire Review" button on Job Detail still works on internal jobs — explicit staff action, occasionally useful for a crewed garage run.
 - **"No client email" amber banner** on Job Detail (frontend gate).
 - **Quick-assign excess** (`routes/hire-forms.ts` `/quick-assign`): on internal jobs the per-driver record is created as `not_required` £0 — no orphan absorption, no top-N charge. (Same fix also added `'waived'` to the orphan-absorption exclusion list so quick-assign can never silently un-waive a staff-waived / V&D-waived / internal-waived record on ANY job.)
 
