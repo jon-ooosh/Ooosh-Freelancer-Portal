@@ -30,6 +30,11 @@ interface FinancialData {
     total_deposits: number;
     total_hire_deposits: number;
     total_excess_deposits: number;
+    /** All non-excess credit notes on the job (informational). */
+    total_credit_notes?: number;
+    /** Portion of credit notes treated as a write-off of accrued value —
+     *  already subtracted from balance_outstanding by the backend. */
+    credit_note_write_off?: number;
     balance_outstanding: number;
     // Business-level balance override (migration 117) — admin flagged the HH
     // balance as settled in Xero / written off. Null when not overridden.
@@ -500,7 +505,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
 
   const { financial, excess, client_balance_on_account } = data;
   const depositPercent = financial.hire_value_inc_vat > 0
-    ? Math.min(100, (financial.total_hire_deposits / financial.hire_value_inc_vat) * 100)
+    ? Math.min(100, ((financial.total_hire_deposits + (financial.credit_note_write_off || 0)) / financial.hire_value_inc_vat) * 100)
     : 0;
 
   return (
@@ -590,6 +595,14 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                 >Resolve balance…</button>
               )}
             </div>
+
+            {/* Credit-note write-off transparency — the balance above already
+                reflects it; this explains why it's lower than deposits suggest. */}
+            {(financial.credit_note_write_off ?? 0) > 0.009 && (
+              <p className="text-xs text-gray-500 mt-0.5">
+                Includes £{(financial.credit_note_write_off as number).toFixed(2)} written off by credit note in HireHop
+              </p>
+            )}
 
             {/* Business-override banner — shown to everyone so staff understand
                 why HireHop still shows money owed. */}

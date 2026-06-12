@@ -1194,8 +1194,30 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     const vatAmount = hireValueExVat * vatRate;
     const hireValueIncVat = hireValueExVat + vatAmount;
     const totalDeposits = totalHireDeposits + totalExcessDeposits;
-    // Balance = hire value inc VAT minus hire deposits only (excess deposits are separate)
-    const balanceOutstanding = hireValueIncVat - totalHireDeposits;
+
+    // Credit notes come in two shapes, and only one reduces the balance:
+    //   • Offsetting invoicing issued ABOVE the job's accrued value (billing
+    //     correction — accrued already reflects reality, so reducing the
+    //     balance again would double-count. The job-15627 shape.)
+    //   • Writing off part of the accrued value itself (e.g. OT-CRE-1204 on
+    //     job 15516: £32.40 of a fully-invoiced job written off — HH nets it
+    //     into the invoice's `owing` and Xero considers the job settled, but
+    //     kind=0 accrued never moves, so the accrued-based balance here showed
+    //     a phantom £32.40 owing forever).
+    // Distinguish by how much approved invoicing exceeds accrued: only credit
+    // value beyond that overage is a genuine write-off of accrued value.
+    // Clamped to the remaining balance so a mis-shaped credit note can't flip
+    // the job to phantom-overpaid (the pre-15627 symptom).
+    const approvedInvoiceTotal = approvedInvoices.reduce((s, inv) => s + inv.amount, 0);
+    const invoicedOverage = Math.max(approvedInvoiceTotal - hireValueIncVat, 0);
+    const creditNoteWriteOff = Math.min(
+      Math.max(totalCreditNotesApplied - invoicedOverage, 0),
+      Math.max(hireValueIncVat - totalHireDeposits, 0)
+    );
+
+    // Balance = hire value inc VAT minus hire deposits only (excess deposits
+    // are separate), minus any genuine credit-note write-off
+    const balanceOutstanding = hireValueIncVat - totalHireDeposits - creditNoteWriteOff;
 
     // Side-effect: update cached job_value on jobs table so pipeline/jobs pages show correct value
     if (hireValueExVat > 0 && job.id) {
@@ -1265,14 +1287,19 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     // If VAT adjustment applies, override the VAT figures
     const effectiveVatAmount = vatAdjustment ? vatAdjustment.adjustedVat : vatAmount;
     const effectiveHireValueIncVat = hireValueExVat + effectiveVatAmount;
-    const effectiveBalanceOutstanding = effectiveHireValueIncVat - totalHireDeposits;
+    const effectiveBalanceOutstanding = effectiveHireValueIncVat - totalHireDeposits - creditNoteWriteOff;
 
     // Calculate deposit requirements using effective (VAT-adjusted) total
     let requiredDeposit = Math.max(effectiveHireValueIncVat * 0.25, 100);
     if (effectiveHireValueIncVat < 400) requiredDeposit = effectiveHireValueIncVat;
     if (effectiveHireValueIncVat === 0) requiredDeposit = 0;
     const depositPaid = totalHireDeposits >= (requiredDeposit - 5); // £5 tolerance
-    const depositPercent = effectiveHireValueIncVat > 0 ? Math.min(100, (totalHireDeposits / effectiveHireValueIncVat) * 100) : 0;
+    // Credit-note write-offs count toward payment progress (the written-off
+    // portion is settled, just not by cash) so the bar/label agree with the
+    // £0 balance instead of sitting at 99% forever.
+    const depositPercent = effectiveHireValueIncVat > 0
+      ? Math.min(100, ((totalHireDeposits + creditNoteWriteOff) / effectiveHireValueIncVat) * 100)
+      : 0;
 
     // Build list of unmatched HH excess deposits (not linked to any OP record)
     // These can be manually linked by staff via the UI
@@ -1410,6 +1437,8 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
           total_deposits: totalDeposits,
           total_hire_deposits: totalHireDeposits,
           total_excess_deposits: totalExcessDeposits,
+          total_credit_notes: totalCreditNotesApplied,
+          credit_note_write_off: creditNoteWriteOff,
           balance_outstanding: effectiveBalanceOutstanding,
           required_deposit: requiredDeposit,
           deposit_paid: depositPaid,
