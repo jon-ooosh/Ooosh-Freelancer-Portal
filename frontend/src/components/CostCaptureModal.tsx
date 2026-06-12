@@ -152,15 +152,19 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
 
   // ── Vehicle link + optional "also log to service history" ────────────────
   // Forward unification: a garage/vehicle cost can ALSO create a vehicle_service_log
-  // record in one go (no double entry). Service-record creation is offered on NEW
-  // costs only; editing the cost doesn't re-touch the linked service record.
+  // record in one go (no double entry). Offered on new costs AND in edit mode when
+  // the cost has no linked service record yet (e.g. the van link was added in a
+  // later edit — previously that path silently skipped the service record).
+  // Editing never re-touches an already-linked service record.
   type FleetLite = { id: string; reg: string; make?: string | null; model?: string | null; simple_type?: string | null };
   const [vehicleId, setVehicleId] = useState<string | null>(existing?.vehicle_id || presetVehicleId || null);
   const [fleet, setFleet] = useState<FleetLite[]>([]);
   const [vehicleSearch, setVehicleSearch] = useState('');
   const [vehicleFocused, setVehicleFocused] = useState(false);
-  // Default ON once a vehicle is in play (preset or picked) — "ask per cost,
-  // defaulted to yes". Never offered in edit mode.
+  // Default ON when a vehicle is in play at create time — "ask per cost,
+  // defaulted to yes". Edit mode opens unticked: adding a service record
+  // retroactively is an explicit opt-in, except when the edit itself ADDS the
+  // van link (the picker auto-ticks, mirroring create).
   const [logService, setLogService] = useState<boolean>(!isEdit && Boolean(existing?.vehicle_id || presetVehicleId));
   const [serviceType, setServiceType] = useState<'service' | 'repair' | 'mot' | 'insurance' | 'tax' | 'tyre' | 'other'>('repair');
   const [serviceMileage, setServiceMileage] = useState('');
@@ -516,10 +520,16 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
   // quote_actual cost is already billed via its quote.
   const canRecharge = Boolean(linkedJobId) && costIntent === 'extra';
 
+  // Service-record creation is offered whenever a vehicle is linked and the
+  // cost has no service record yet — at create OR in a later edit (the
+  // "van link added after first save" hole, fixed Jun 2026).
+  const serviceLinkMissing = Boolean(vehicleId) && !existing?.vehicle_service_log_id;
+  const wantsService = logService && serviceLinkMissing;
   // A vehicle service record can be logged with no cost (e.g. a £0 MOT pass, or
   // a future service that's only "Booked"). When that's the case the cost is
-  // optional — we create the service record alone.
-  const wantsService = !isEdit && logService && Boolean(vehicleId);
+  // optional — we create the service record alone. Create mode only: an edit
+  // always has a cost row, so amounts stay required.
+  const serviceOnlyEligible = wantsService && !isEdit;
 
   async function handleSave() {
     setError('');
@@ -527,11 +537,11 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
       if (!amountNet || Number(amountNet) <= 0) { setError('Enter the No-VAT (net) amount, e.g. the excess.'); return; }
       if (!amountVat || Number(amountVat) <= 0) { setError('Enter the reclaimable VAT amount.'); return; }
     } else if (!amountGross || Number(amountGross) <= 0) {
-      if (!wantsService) { setError('Gross amount is required.'); return; }
+      if (!serviceOnlyEligible) { setError('Gross amount is required.'); return; }
     }
     // A cost row needs a category — it's the Xero account code, and the push
     // fails without it. Service-record-only saves (no cost amount) are exempt.
-    const savingServiceOnly = wantsService
+    const savingServiceOnly = serviceOnlyEligible
       && (vatMode === 'reclaim' ? !(Number(amountNet) > 0) : !(Number(amountGross) > 0));
     if (!savingServiceOnly && !categoryCode) {
       setError('Pick "What\'s this cost for?" — it sets the Xero category, and the push to Xero fails without it.');
@@ -573,7 +583,7 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
 
       // Service-only: no cost amount entered → create just the service record.
       const noAmount = vatMode === 'reclaim' ? Number(amountNet) <= 0 : Number(amountGross) <= 0;
-      if (wantsService && noAmount) {
+      if (serviceOnlyEligible && noAmount) {
         await api.post(`/vehicles/fleet/${vehicleId}/service-log`, serviceLogBody(true));
         onSaved(null);
         return;
@@ -613,9 +623,10 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
         : await api.post<{ data: Cost }>('/costs', payload);
 
       // Forward unification: optionally create a vehicle service-history record
-      // and link it back to the cost. New costs only; non-fatal if it fails (the
-      // cost is already saved — we surface a warning rather than lose it).
-      if (!isEdit && logService && vehicleId) {
+      // and link it back to the cost. Fires on create, or on edit when no
+      // service record is linked yet. Non-fatal if it fails (the cost is
+      // already saved — we surface a warning rather than lose it).
+      if (wantsService && vehicleId) {
         try {
           const sl = await api.post<{ id: string }>(`/vehicles/fleet/${vehicleId}/service-log`, serviceLogBody(false));
           await api.patch(`/costs/${res.data.id}`, { vehicle_service_log_id: sl.id });
@@ -787,11 +798,11 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div>
-                  <label className="block text-xs text-gray-500 mb-1">{vatMode === 'reclaim' ? 'Net — No VAT (£) *' : `Gross (£)${wantsService ? '' : ' *'}`}</label>
+                  <label className="block text-xs text-gray-500 mb-1">{vatMode === 'reclaim' ? 'Net — No VAT (£) *' : `Gross (£)${serviceOnlyEligible ? '' : ' *'}`}</label>
                   {vatMode === 'reclaim' ? (
                     <input type="number" step="0.01" min="0" className={inputCls} value={amountNet} onChange={(e) => onNetChange(e.target.value)} placeholder="e.g. 750.00 (excess)" />
                   ) : (
-                    <input type="number" step="0.01" min="0" className={inputCls} value={amountGross} onChange={(e) => onGrossChange(e.target.value)} placeholder={wantsService ? 'Leave blank if no cost' : undefined} />
+                    <input type="number" step="0.01" min="0" className={inputCls} value={amountGross} onChange={(e) => onGrossChange(e.target.value)} placeholder={serviceOnlyEligible ? 'Leave blank if no cost' : undefined} />
                   )}
                 </div>
                 <div>
@@ -906,7 +917,14 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
                         <div className="px-3 py-2 text-sm text-gray-400">No match</div>
                       ) : vehFiltered.map((v) => (
                         <button key={v.id} type="button"
-                          onMouseDown={(e) => { e.preventDefault(); setVehicleId(v.id); setVehicleSearch(''); if (!isEdit) setLogService(true); }}
+                          onMouseDown={(e) => {
+                            e.preventDefault(); setVehicleId(v.id); setVehicleSearch('');
+                            // Auto-tick the service-history offer at create, and in
+                            // edit when this pick ADDS the van link (no link + no
+                            // service record before). An edit that merely changes an
+                            // existing link stays opt-in.
+                            if (!isEdit || (!existing?.vehicle_id && !existing?.vehicle_service_log_id)) setLogService(true);
+                          }}
                           className="block w-full text-left px-3 py-1.5 text-sm hover:bg-purple-50">
                           {vehicleLabel(v)}
                         </button>
@@ -917,13 +935,19 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
               )}
             </div>
 
-            {/* Service-history record — new costs only. "Ask per cost, default yes." */}
-            {vehicleId && !isEdit && (
+            {/* Service-history record — offered whenever a vehicle is linked and no
+                service record exists yet (create, or edit-mode retro-add). */}
+            {vehicleId && !existing?.vehicle_service_log_id && (
               <div className="rounded-md border border-gray-200 bg-gray-50 p-3 space-y-3">
                 <label className="flex items-center gap-2 text-sm font-medium text-gray-800">
                   <input type="checkbox" checked={logService} onChange={(e) => setLogService(e.target.checked)} className="rounded" />
                   Also add to {selectedVehicle?.reg || 'this vehicle'}&apos;s service history
                 </label>
+                {isEdit && !logService && (
+                  <p className="text-xs text-amber-600">
+                    This cost isn&apos;t in the vehicle&apos;s service history — tick above to add a service record when you save.
+                  </p>
+                )}
                 {logService && (
                   <div className="space-y-3">
                     <div className="flex flex-wrap gap-1.5">
@@ -1073,7 +1097,7 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
           <button onClick={onClose} className="px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded-md">Cancel</button>
           <button onClick={handleSave} disabled={saving}
             className="px-4 py-2 text-sm text-white bg-purple-600 hover:bg-purple-700 rounded-md disabled:opacity-50">
-            {saving ? 'Saving…' : isEdit ? 'Save changes' : wantsService && (vatMode === 'reclaim' ? Number(amountNet) <= 0 : Number(amountGross) <= 0) ? 'Save service record' : wantsService ? 'Save cost + service record' : 'Save cost'}
+            {saving ? 'Saving…' : isEdit ? (wantsService ? 'Save changes + service record' : 'Save changes') : serviceOnlyEligible && (vatMode === 'reclaim' ? Number(amountNet) <= 0 : Number(amountGross) <= 0) ? 'Save service record' : wantsService ? 'Save cost + service record' : 'Save cost'}
           </button>
         </div>
       </div>
