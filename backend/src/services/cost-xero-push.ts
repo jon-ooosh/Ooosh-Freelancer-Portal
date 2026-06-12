@@ -39,7 +39,8 @@ import { xeroBroker, XeroApiError, XeroLineItem } from './xero-broker';
 import { getSystemSetting } from '../routes/system-settings';
 
 // Paid-now methods → Spend Money on the mapped bank/card account.
-const SPEND_MONEY_METHODS = ['cot_card', 'amex', 'lloyds_cc', 'petty_cash', 'paypal', 'wise', 'lloyds_transfer'] as const;
+// (Exported for the reconcile sync — cost-xero-reconcile-sync.ts.)
+export const SPEND_MONEY_METHODS = ['cot_card', 'amex', 'lloyds_cc', 'petty_cash', 'paypal', 'wise', 'lloyds_transfer'] as const;
 // Pay-later methods → authorised ACCPAY bill on approval, payment recorded when paid.
 const BILL_METHODS = ['not_yet_paid', 'reimburse_me'] as const;
 
