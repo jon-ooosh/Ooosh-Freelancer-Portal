@@ -401,7 +401,7 @@ export default function OrganisationDetailPage() {
   }
 
   async function handleDeleteRelationship(relId: string) {
-    if (!confirm('Remove this relationship?')) return;
+    if (!confirm('End this relationship? It will be kept on record as historical, not deleted.')) return;
     try {
       await api.delete(`/organisations/${id}/relationships/${relId}`);
       loadOrg();
@@ -1167,8 +1167,9 @@ export default function OrganisationDetailPage() {
                               <button
                                 onClick={() => handleDeleteRelationship(rel.id)}
                                 className="text-xs text-gray-400 hover:text-red-500 transition-colors"
+                                title="End this relationship (kept as historical for the audit trail)"
                               >
-                                Remove
+                                End
                               </button>
                             </div>
                           )}
