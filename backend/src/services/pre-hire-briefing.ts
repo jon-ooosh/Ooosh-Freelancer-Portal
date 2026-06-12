@@ -1037,6 +1037,7 @@ export async function findEligibleJobs(): Promise<EligibleJob[]> {
        FROM jobs j
       WHERE j.is_deleted = false
         AND j.pipeline_status = 'confirmed'
+        AND COALESCE(j.is_internal, false) = false
         AND COALESCE(j.out_date::date, j.job_date::date) IS NOT NULL
         AND COALESCE(j.out_date::date, j.job_date::date) BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '5 days'`,
     [],
