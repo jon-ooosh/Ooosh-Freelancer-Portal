@@ -98,9 +98,12 @@ not code:**
 
 ## 5. Geofence trigger (the scheduler)
 
-**New scheduler task** in `config/scheduler.ts`. Runs frequently during likely return hours
-(suggest **every 3 min between 16:00–02:00 Europe/London**; vans/night is a handful, Traccar
-load is negligible with the existing 5-min device cache).
+**New scheduler task** in `config/scheduler.ts`. The office is open 09:00–17:00, so OOH
+returns can land any time we're **closed** — 6pm, 2am, or 8:30am before we open — and all of
+them need to park properly. So the scan runs across the **closed window: every 3 min from
+17:00 to 08:59 Europe/London**. Cron: `*/3 17-23,0-8 * * *`. (Vans/night is a handful and the
+existing 5-min Traccar device cache means load is negligible.) The 09:00–17:00 gap is
+deliberate — anyone returning during office hours isn't an OOH case.
 
 **File:** `backend/src/services/ooh-sms-approach.ts` → `runOohApproachScan()`.
 
@@ -161,23 +164,36 @@ forget to confirm. The harm is **inconsiderate parking** (and its sibling: leavi
 *somewhere* without telling us). Both are **staff judgements made at morning check-in**, never
 auto-counted.
 
-## 9. Detection — the morning "OOH returns to verify" surface
+## 9. Detection — built into check-in (no separate "verify" chore)
 
-A dashboard **NeedsAttention bucket** ("OOH returns to verify") lists last night's
-OOH-flagged returns. Per returned van, one action — **"Flag parking issue"** — with a reason
-picklist, so every case falls out naturally:
+The flag is captured **at the existing van check-in** (`CheckInPage` in the vehicles module),
+not as a separate flow staff have to remember. We're already physically inspecting the van
+when it comes in — that's the natural moment to record "did they park it properly?".
 
-| Morning situation | Display / action |
-|---|---|
-| Submitted form + parked fine | Green — nothing to do |
-| Submitted form + parked badly | Flag → `parked_blocking` (or `parked_outside_yard`) |
-| No form + van back, location unknown | Amber "unconfirmed" — staff dismiss (was fine) **or** flag `left_without_telling_us` |
-| No form + parked across gates | Flag → `parked_blocking` |
+**On the check-in form, only when the van's assignment(s) have `return_overnight=true`:** a
+**pre-ticked "OOH steps followed" checkbox**. Tick stays = assume fine, nothing logged.
+**Untick it → a small severity modal** with two choices:
 
-Optional auto-signal (assist, never auto-count): for **submitters**, geofence-check the
-submitted coords against an acceptable-parking polygon and surface "parked outside yard" as a
-*hint* on the card. Non-submitters have no coords (they're the typical offenders), so this is
-assistive only.
+| Choice | type | severity |
+|---|---|---|
+| "Didn't tell us where they left it" | `left_without_telling_us` | minor |
+| "Parked badly / blocked access" | `parked_blocking` | serious |
+
+(+ optional free-text note.) On submit, the unticked state writes an `ooh_return_violations`
+row using the attribution cascade in §10. The check-in person usually knows who brought the
+van back, so the attribution picker (when needed) sits right there.
+
+**Retro-flag fallback (§14) — because it won't always be the check-in person who makes the
+call.** The manager who spots a van across the gates at 8am may not be the one who formally
+checks it in at 10am. So the same flag/un-flag affordance is also reachable **after**
+check-in from two places: the job's OOH section (Job Detail → Drivers & Vehicles) and a
+short-lived dashboard list of **OOH returns from the last ~3 days** (so whoever made the call
+can log it retroactively, and a mistaken flag can be cleared). Same modal, same write path.
+
+Optional auto-signal (assist, never auto-flag): for **submitters** we have coords, so we can
+geofence-check them against an acceptable-parking area and surface "parked outside yard" as a
+*hint* next to the checkbox. Non-submitters have no coords (the typical offenders), so this is
+assistive only — the human still makes the call.
 
 ## 10. Attribution cascade ("who returned it?")
 
@@ -235,7 +251,13 @@ OP non-blocking-with-override convention, but firm — which is the point.
 
 ## 14. Surfacing (Part 2)
 
-- **Dashboard:** "OOH returns to verify" NeedsAttention bucket (§9), deep-links to the list.
+- **Check-in form:** the primary capture point — pre-ticked "OOH steps followed" checkbox →
+  severity modal on untick (§9).
+- **Dashboard:** a short-lived "Recent OOH returns" list (last ~3 days) — lets someone other
+  than the check-in person retro-flag, and lets a mistaken flag be cleared. Not a "to-verify"
+  chore; it's a passive log with a flag/un-flag affordance.
+- **Job Detail → Drivers & Vehicles:** flag/un-flag affordance on the OOH section per van,
+  available after check-in.
 - **Driver Detail:** OOH compliance section — return history (submitted ✓/✗, coords),
   violations, block status, **set / lift block** (admin).
 - **Org Detail:** read-only OOH incident rollup (§10).
@@ -261,17 +283,27 @@ Next free migration number after Part 1's:
 
 **Phase 2 — Compliance tracking:**
 6. `ooh_return_violations` + `drivers.ooh_blocked*` migrations + threshold setting.
-7. Morning "verify" NeedsAttention bucket + flag action + attribution cascade.
-8. Driver Detail compliance section + set/lift block; Org rollup.
-9. Enforcement banner + two-tier override at OOH toggle / book-out.
+7. Check-in "OOH steps followed" checkbox + severity modal + attribution cascade (primary
+   capture).
+8. Retro-flag surfaces: "Recent OOH returns" dashboard list + Job Detail OOH flag affordance.
+9. Driver Detail compliance section + set/lift block; Org rollup.
+10. Enforcement banner + two-tier override at OOH toggle / book-out.
 
 **Phase 3 (later, optional):** WhatsApp channel (dedicated number + Meta templates),
 acceptable-parking polygon auto-hint.
 
 ## Operational setup jon owns (can't be coded)
 
-- Create the **Twilio account** (free; PAYG, no monthly minimum).
-- **Register the `OOOSH` alphanumeric sender ID** (UK — may need a one-off form).
+- ✅ **Twilio account** created.
+- **Upgrade out of trial** (add a little credit) — trial only sends to verified numbers and
+  prepends a trial banner; the alphanumeric sender needs a paid account.
+- Create a **Messaging Service** (Messaging → Services) and add **Alphanumeric Sender ID
+  `OOOSH`** to its Sender Pool (UK — may need a short registration). Send via
+  `messagingServiceSid`, not a raw `from`.
+- Create a **Standard API Key** (Account → API keys & tokens) — revocable, preferred over the
+  master Auth Token.
+- Set on the **server `.env`** (jon, not in repo/chat): `TWILIO_ACCOUNT_SID`,
+  `TWILIO_API_KEY_SID`, `TWILIO_API_KEY_SECRET`, `TWILIO_MESSAGING_SERVICE_SID`.
 - Provide **yard lat/lng** for `ooh_base_lat/lng`.
 - Decide a **test redirect mobile** for `SMS_TEST_REDIRECT` during the test-mode rollout.
 
