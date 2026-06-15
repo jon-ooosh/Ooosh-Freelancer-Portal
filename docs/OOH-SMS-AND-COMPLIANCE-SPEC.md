@@ -90,8 +90,11 @@ The module is international-ready for free (normalise via `phone_country`, hand 
 same call regardless of country). **Which countries we actually send to is a policy switch,
 not code:**
 
-- `system_settings.ooh_sms_country_allowlist` (CSV of ISO codes, default `GB`). Numbers
-  outside the list **fall back to email-only** — zero regression, they still get both emails.
+- `system_settings.ooh_sms_country_allowlist` (CSV, default `GB`). Entries may be
+  ISO codes (`GB`) or dialling codes (`+44`/`44`) and are **matched on country calling
+  code**, not ISO region — `+44` is shared across GB/Guernsey/Jersey/IoM, so a real UK
+  mobile can resolve to ISO `GG`; calling-code matching means `GB` still covers it. Numbers
+  whose calling code isn't on the list **fall back to email-only** — zero regression.
 - Caveats baked into the doc, not the code: per-country cost varies; alphanumeric sender IDs
   work across most of Europe but **not US/Canada** (those need a rented number). Start `GB`,
   add EU codes once confident.
@@ -141,17 +144,18 @@ AND COALESCE(hire_end, job_end::date) <= (CURRENT_DATE + 1)   -- only near the r
 | `ooh_base_lat` | — | Yard latitude (one-time setup) |
 | `ooh_base_lng` | — | Yard longitude |
 | `ooh_sms_radius_miles` | `1` | Trigger distance |
-| `ooh_sms_country_allowlist` | `GB` | ISO codes we SMS; others email-only |
+| `ooh_sms_country_allowlist` | `GB` | Calling codes we SMS (ISO or `+44` forms accepted); others email-only |
 
 **Env (`.env`):** `SMS_PROVIDER=twilio`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`,
 `TWILIO_SENDER_ID=OOOSH`, `SMS_MODE=test`, `SMS_TEST_REDIRECT=+44…`, `SMS_LIVE_TEMPLATES=`.
 
-## 7. Migration (Part 1)
+## 7. Migration (Part 1) ✅ BUILT
 
-Next free migration number (check `run.ts` — currently past 120; **add the filename to the
-hardcoded array**):
-- `vehicle_hire_assignments.ooh_sms_sent_at TIMESTAMPTZ`
+`121_sms_and_ooh_approach.sql` (added to the `run.ts` array):
+- `vehicle_hire_assignments.ooh_sms_sent_at TIMESTAMPTZ` + partial index on the armed set.
 - `CREATE TABLE sms_log (…)` mirroring `email_log`.
+- Seeds the four new `system_settings` rows (`ooh_base_lat/lng`, `ooh_sms_radius_miles`,
+  `ooh_sms_country_allowlist`).
 
 ---
 
@@ -274,12 +278,19 @@ Next free migration number after Part 1's:
 
 # Build order
 
-**Phase 1 — SMS module + geofence (self-contained, improves attribution):**
-1. `sms-service.ts` + `SmsProvider`/Twilio + `sms_log` migration + E.164 normalisation.
-2. Settings (`ooh_base_lat/lng`, `ooh_sms_radius_miles`, `ooh_sms_country_allowlist`) + env.
-3. `ooh_return_approach` template.
-4. `ooh-sms-approach.ts` scan + scheduler entry + `ooh_sms_sent_at` migration.
-5. Settings-page UI for the new keys.
+**Phase 1 — SMS module + geofence (self-contained, improves attribution): ✅ BUILT**
+1. ✅ `sms-service.ts` + `SmsProvider`/Twilio (REST, no SDK) + `sms_log` + E.164 normalisation
+   (`libphonenumber-js`, calling-code allowlist).
+2. ✅ Settings (`ooh_base_lat/lng`, `ooh_sms_radius_miles`, `ooh_sms_country_allowlist`) seeded
+   in migration 121 + env vars in `.env.example`.
+3. ✅ `ooh_return_approach` template (`sms-templates.ts`).
+4. ✅ `ooh-sms-approach.ts` scan + scheduler entry (`*/3 17-23,0-8 * * *` Europe/London) +
+   `ooh_sms_sent_at`.
+5. ✅ Settings-page UI — auto-renders the new `ooh_returns` keys (data-driven `OohSettingsSection`).
+
+**Goes live:** ship behind `SMS_MODE=test` (redirects to `SMS_TEST_REDIRECT`), confirm a test
+text lands, then either flip `SMS_MODE=live` or allowlist `ooh_return_approach` via
+`SMS_LIVE_TEMPLATES`.
 
 **Phase 2 — Compliance tracking:**
 6. `ooh_return_violations` + `drivers.ooh_blocked*` migrations + threshold setting.
