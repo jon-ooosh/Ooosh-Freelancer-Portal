@@ -2231,8 +2231,8 @@ Standalone OP-native module replacing the Monday.com "Storage Clients" board. Oo
 - **Door-code encryption** — `storage_rooms.access_code` is plaintext for now (STAFF_ROLES-gated + audited). Moves to the planned `services/encryption.ts` PII layer once it lands (jon: ~within a week of this build). See spec §9.
 - **Xero recurring-invoice tracking** — follow-on from the broader Xero integration work. The manual `invoice sent` log + reminders are the interim value.
 - ~~**Dashboard surface**~~ — done in round 2 as the general "On Today" section (not a NeedsAttention bucket). `/api/storage/overview` still returns counts if a header widget is ever wanted.
-- **Address-book "Storage" tab** on Org/Person detail (mirrors Hire History / Excess History pattern).
-- **Waiting-list → vacancy matching** suggestions on move-out.
+- ~~**Address-book "Storage" tab**~~ — done in round 3. `StorageHistorySection.tsx` (current + past tenancies + waiting-list entries) mounted as a "Storage" tab on Org + Person detail, backed by `GET /api/storage/by-organisation/:id` and `/by-person/:id`. Mirrors the Hire/Excess/Held section pattern.
+- ~~**Waiting-list → vacancy matching**~~ — done in round 3. `GET /api/storage/waiting-list/matches?size=` returns waiting clients fitting a freed room's size (exact / `any` / null, exact-match first). Surfaced via a `VacancyMatchModal` at move-out (uses the freed room's size) and a "Find tenant →" button on available room cards. One click marks a waiting entry offered.
 - **Signed T&Cs snapshot PDF** (acceptance + signature image recorded; PDF generation not yet wired).
 - Temp storage / incoming deliveries — deliberately NOT here; belongs with the Holding module (Step 10).
 

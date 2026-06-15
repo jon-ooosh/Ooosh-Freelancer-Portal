@@ -183,6 +183,7 @@ function RoomsTab({ isAdminManager, onChange }: { isAdminManager: boolean; onCha
   const [rooms, setRooms] = useState<Room[]>([]);
   const [editing, setEditing] = useState<Room | null>(null);
   const [creating, setCreating] = useState(false);
+  const [vacancySize, setVacancySize] = useState<string | null>(null);
   const load = useCallback(async () => { setRooms((await api.get<{ data: Room[] }>('/storage/rooms')).data); }, []);
   useEffect(() => { load(); }, [load]);
 
@@ -204,7 +205,10 @@ function RoomsTab({ isAdminManager, onChange }: { isAdminManager: boolean; onCha
             {r.occupant_name && <p className="text-sm text-slate-700 mb-1">📦 {r.occupant_name}</p>}
             {r.default_weekly_rate != null && <p className="text-xs text-slate-500">Default {money(r.default_weekly_rate)}/wk</p>}
             {(r.photos?.length ?? 0) > 0 && <p className="text-xs text-slate-400">📷 {r.photos!.length} photo{r.photos!.length !== 1 ? 's' : ''}</p>}
-            {isAdminManager && <button onClick={() => setEditing(r)} className="text-xs text-[#7B5EA7] mt-2">Edit</button>}
+            <div className="flex items-center gap-3 mt-2">
+              {isAdminManager && <button onClick={() => setEditing(r)} className="text-xs text-[#7B5EA7]">Edit</button>}
+              {r.status === 'available' && <button onClick={() => setVacancySize(r.size_category)} className="text-xs text-[#7B5EA7]">Find tenant →</button>}
+            </div>
           </div>
         ))}
         {rooms.length === 0 && <p className="text-slate-400 text-sm">No rooms yet.</p>}
@@ -213,6 +217,7 @@ function RoomsTab({ isAdminManager, onChange }: { isAdminManager: boolean; onCha
         <RoomModal room={editing} onClose={() => { setCreating(false); setEditing(null); }}
           onSaved={() => { setCreating(false); setEditing(null); load(); onChange(); }} />
       )}
+      {vacancySize && <VacancyMatchModal size={vacancySize} onClose={() => setVacancySize(null)} />}
     </div>
   );
 }
@@ -309,6 +314,7 @@ function TenanciesTab({ isAdminManager, onChange }: { isAdminManager: boolean; o
   const [showEnded, setShowEnded] = useState(false);
   const [creating, setCreating] = useState(false);
   const [detailId, setDetailId] = useState<string | null>(null);
+  const [vacancySize, setVacancySize] = useState<string | null>(null);
   const load = useCallback(async () => {
     setRows((await api.get<{ data: Tenancy[] }>(`/storage/tenancies?status=${showEnded ? 'all' : 'live'}`)).data);
   }, [showEnded]);
@@ -348,7 +354,8 @@ function TenanciesTab({ isAdminManager, onChange }: { isAdminManager: boolean; o
         <button onClick={() => setCreating(true)} className="bg-[#7B5EA7] text-white px-4 py-2 rounded-lg text-sm font-medium">+ Move In Client</button>
       </div>
       {creating && <MoveInModal onClose={() => setCreating(false)} onSaved={() => { setCreating(false); load(); onChange(); }} />}
-      {detailId && <TenancyDetailModal id={detailId} isAdminManager={isAdminManager} onClose={() => setDetailId(null)} onChange={() => { load(); onChange(); }} />}
+      {detailId && <TenancyDetailModal id={detailId} isAdminManager={isAdminManager} onClose={() => setDetailId(null)} onChange={() => { load(); onChange(); }} onMovedOut={(size) => setVacancySize(size)} />}
+      {vacancySize && <VacancyMatchModal size={vacancySize} onClose={() => setVacancySize(null)} />}
     </div>
   );
 }
@@ -419,7 +426,7 @@ function MoveInModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =>
   );
 }
 
-function TenancyDetailModal({ id, isAdminManager, onClose, onChange }: { id: string; isAdminManager: boolean; onClose: () => void; onChange: () => void }) {
+function TenancyDetailModal({ id, isAdminManager, onClose, onChange, onMovedOut }: { id: string; isAdminManager: boolean; onClose: () => void; onChange: () => void; onMovedOut?: (size: string) => void }) {
   const [t, setT] = useState<Tenancy | null>(null);
   const [busy, setBusy] = useState('');
   const [msg, setMsg] = useState('');
@@ -460,7 +467,7 @@ function TenancyDetailModal({ id, isAdminManager, onClose, onChange }: { id: str
           )}
           {isAdminManager && t.status !== 'ended' && <RateButton id={id} current={t.weekly_rate} onDone={() => { load(); onChange(); }} />}
           {t.status !== 'ended' && (
-            <button disabled={!!busy} onClick={() => { if (confirm('Move this client out? The tenancy will be ended and the room freed.')) action('moveout', async () => { await api.post(`/storage/tenancies/${id}/move-out`, {}); onClose(); }); }}
+            <button disabled={!!busy} onClick={() => { if (confirm('Move this client out? The tenancy will be ended and the room freed.')) action('moveout', async () => { await api.post(`/storage/tenancies/${id}/move-out`, {}); onClose(); onMovedOut?.(t.size_category); }); }}
               className="px-3 py-1.5 bg-red-600 text-white rounded-lg text-xs">Move out</button>
           )}
         </div>
@@ -603,6 +610,38 @@ function WaitingModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =
           <button disabled={saving} onClick={async () => { setSaving(true); try { await api.post('/storage/waiting-list', { organisation_id: f.organisation_id, contact_name: f.contact_name || null, contact_email: f.contact_email || null, contact_phone: f.contact_phone || null, preferred_size: f.preferred_size, notes: f.notes || null }); onSaved(); } finally { setSaving(false); } }}
             className="px-4 py-2 text-sm bg-[#7B5EA7] text-white rounded-lg disabled:opacity-50">Add</button></div>
       </div>
+    </Modal>
+  );
+}
+
+// Vacancy matching — waiting-list clients who fit a freed/available room's size.
+function VacancyMatchModal({ size, onClose }: { size: string; onClose: () => void }) {
+  const [matches, setMatches] = useState<Waiting[]>([]);
+  const [loading, setLoading] = useState(true);
+  const load = useCallback(async () => {
+    setLoading(true);
+    try { setMatches((await api.get<{ data: Waiting[] }>(`/storage/waiting-list/matches?size=${encodeURIComponent(size)}`)).data); }
+    finally { setLoading(false); }
+  }, [size]);
+  useEffect(() => { load(); }, [load]);
+  return (
+    <Modal title={`Waiting list — fits a ${size} room`} onClose={onClose}>
+      {loading ? <p className="text-slate-400 text-sm">Loading…</p> : matches.length === 0 ? (
+        <p className="text-slate-500 text-sm">No one on the waiting list matches this size right now.</p>
+      ) : (
+        <div className="space-y-2">
+          {matches.map((w) => (
+            <div key={w.id} className="border border-slate-200 rounded-lg p-3 flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <p className="font-medium text-slate-800">{w.organisation_name || w.person_name || w.contact_name || 'Unnamed'}</p>
+                <p className="text-xs text-slate-500">Wants {w.preferred_size || 'any'} · asked {fmtDate(w.date_requested)}{w.date_last_offered ? ` · last offered ${fmtDate(w.date_last_offered)}` : ''}{w.contact_email ? ` · ${w.contact_email}` : ''}</p>
+              </div>
+              <button onClick={async () => { await api.patch(`/storage/waiting-list/${w.id}`, { mark_offered: true }); load(); }}
+                className="text-xs bg-[#7B5EA7] text-white px-3 py-1.5 rounded-lg">Mark offered</button>
+            </div>
+          ))}
+        </div>
+      )}
     </Modal>
   );
 }

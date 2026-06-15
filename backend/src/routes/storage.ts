@@ -709,4 +709,58 @@ router.post('/tcs-versions', authorize(...ADMIN_MANAGER), validate(tcsVersionSch
   res.status(201).json({ data: result.rows[0] });
 });
 
+// ════════════════════════ ADDRESS-BOOK READS ════════════════════════
+// Storage tab on Org / Person detail. Returns current + past tenancies plus
+// any waiting-list entries for the entity. Mirrors the Hire/Excess history
+// reusable-section pattern.
+
+const tenancyForEntitySelect = `
+  SELECT t.id, t.status, t.move_in_date, t.move_out_date, t.weekly_rate,
+         t.billing_mode, t.billing_cadence, t.next_bill_date, t.next_rate_review_date,
+         t.access_type, t.tcs_agreement_id,
+         r.name AS room_name, r.size_category, r.location_type,
+         o.name AS organisation_name,
+         p.first_name || ' ' || p.last_name AS lead_contact_name,
+         a.accepted_at AS tcs_accepted_at
+  FROM storage_tenancies t
+  JOIN storage_rooms r ON r.id = t.room_id
+  LEFT JOIN organisations o ON o.id = t.organisation_id
+  LEFT JOIN people p ON p.id = t.lead_contact_person_id
+  LEFT JOIN storage_tcs_agreements a ON a.id = t.tcs_agreement_id`;
+
+router.get('/by-organisation/:id', async (req: AuthRequest, res: Response) => {
+  const [tenancies, waiting] = await Promise.all([
+    query(`${tenancyForEntitySelect} WHERE t.organisation_id = $1 ORDER BY (t.status = 'ended'), t.move_in_date DESC NULLS LAST`, [req.params.id]),
+    query(`SELECT * FROM storage_waiting_list WHERE organisation_id = $1 AND status NOT IN ('converted','withdrawn') ORDER BY date_requested`, [req.params.id]),
+  ]);
+  res.json({ data: { tenancies: tenancies.rows, waiting: waiting.rows } });
+});
+
+router.get('/by-person/:id', async (req: AuthRequest, res: Response) => {
+  const [tenancies, waiting] = await Promise.all([
+    query(`${tenancyForEntitySelect} WHERE t.lead_contact_person_id = $1 ORDER BY (t.status = 'ended'), t.move_in_date DESC NULLS LAST`, [req.params.id]),
+    query(`SELECT * FROM storage_waiting_list WHERE person_id = $1 AND status NOT IN ('converted','withdrawn') ORDER BY date_requested`, [req.params.id]),
+  ]);
+  res.json({ data: { tenancies: tenancies.rows, waiting: waiting.rows } });
+});
+
+// ════════════════════════ VACANCY MATCHING ════════════════════════
+// Waiting-list entries that fit a freed room's size (exact, or 'any'/null).
+// Drives the "room freed — who wants it?" prompt at move-out + the Find-tenant
+// button on available room cards.
+router.get('/waiting-list/matches', async (req: AuthRequest, res: Response) => {
+  const size = req.query.size ? String(req.query.size) : null;
+  const result = await query(
+    `SELECT w.*, o.name AS organisation_name, p.first_name || ' ' || p.last_name AS person_name
+     FROM storage_waiting_list w
+     LEFT JOIN organisations o ON o.id = w.organisation_id
+     LEFT JOIN people p ON p.id = w.person_id
+     WHERE w.status = 'waiting'
+       AND ($1::text IS NULL OR w.preferred_size IS NULL OR w.preferred_size IN ('any', $1))
+     ORDER BY (w.preferred_size = $1) DESC, w.date_requested ASC`,
+    [size]
+  );
+  res.json({ data: result.rows });
+});
+
 export default router;
