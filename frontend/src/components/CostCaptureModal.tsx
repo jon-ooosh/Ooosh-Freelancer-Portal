@@ -50,6 +50,12 @@ const COST_CATEGORIES: { group: string; label: string; xeroCode: string; costTyp
   { group: 'Office & other', label: 'Something else',                    xeroCode: '429', costType: 'overhead' },
 ];
 
+// Categories that represent a genuine service/repair EVENT on a vehicle — the
+// only ones worth mirroring into the van's Service History. Other vehicle costs
+// (fuel, parking, PCNs) keep their reg link on the cost row for charge-back
+// clarity but must NOT create a service record, or the history clogs instantly.
+const SERVICE_HISTORY_CATEGORY_CODES = new Set(['406', '409']);
+
 // Paid-now methods push as a Xero Spend Money on the mapped bank/card account.
 // Pay-later methods land as an authorised ACCPAY bill on approval, paid later.
 const PAYMENT_METHODS: { group: string; value: CostPaymentMethod; label: string }[] = [
@@ -520,10 +526,14 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
   // quote_actual cost is already billed via its quote.
   const canRecharge = Boolean(linkedJobId) && costIntent === 'extra';
 
-  // Service-record creation is offered whenever a vehicle is linked and the
-  // cost has no service record yet — at create OR in a later edit (the
-  // "van link added after first save" hole, fixed Jun 2026).
-  const serviceLinkMissing = Boolean(vehicleId) && !existing?.vehicle_service_log_id;
+  // Service-record creation is offered when a vehicle is linked, the cost has no
+  // service record yet, AND the category is a genuine servicing/repair event —
+  // at create OR in a later edit (the "van link added after first save" hole,
+  // fixed Jun 2026). Fuel/parking/PCN costs keep the reg link but never log to
+  // Service History (decoupled Jun 2026 — would clog it instantly).
+  const serviceLinkMissing = Boolean(vehicleId)
+    && !existing?.vehicle_service_log_id
+    && SERVICE_HISTORY_CATEGORY_CODES.has(categoryCode);
   const wantsService = logService && serviceLinkMissing;
   // A vehicle service record can be logged with no cost (e.g. a £0 MOT pass, or
   // a future service that's only "Booked"). When that's the case the cost is
@@ -935,9 +945,11 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
               )}
             </div>
 
-            {/* Service-history record — offered whenever a vehicle is linked and no
-                service record exists yet (create, or edit-mode retro-add). */}
-            {vehicleId && !existing?.vehicle_service_log_id && (
+            {/* Service-history record — offered when a vehicle is linked, no
+                service record exists yet, and the category is a servicing/repair
+                event (create, or edit-mode retro-add). Fuel/parking/PCN are
+                excluded — they keep the reg link but never log to history. */}
+            {serviceLinkMissing && (
               <div className="rounded-md border border-gray-200 bg-gray-50 p-3 space-y-3">
                 <label className="flex items-center gap-2 text-sm font-medium text-gray-800">
                   <input type="checkbox" checked={logService} onChange={(e) => setLogService(e.target.checked)} className="rounded" />
