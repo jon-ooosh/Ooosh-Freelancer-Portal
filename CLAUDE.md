@@ -2791,10 +2791,23 @@ modal surfaces it but never blocks the save. Partial case-insensitive index
 **Cost ↔ vehicle service-log unification (Jun 2026).** `CostCaptureModal` is
 dual-purpose — it captures a cost AND/OR a `vehicle_service_log` record in one
 entry, so a garage invoice is entered once:
-- Pick a van → an "Also add to <REG>'s service history" toggle appears,
-  **defaulted ON** ("ask per cost, default yes"), revealing the service fields
-  (type / mileage / garage→defaults to supplier / status / next-due /
-  apply-to-vehicle).
+- Pick a van on a **servicing/repair-category** cost → an "Also add to <REG>'s
+  service history" toggle appears, **defaulted ON** ("ask per cost, default yes"),
+  revealing the service fields (type / mileage / garage→defaults to supplier /
+  status / next-due / apply-to-vehicle). The offer is whitelisted to genuine
+  service-event categories (Vehicle servicing `406`, Vehicle repairs `409`) —
+  **fuel / parking / PCN costs keep their reg link on the cost row (the
+  charge-back sanity check) but never create a service record**, or the history
+  clogs instantly (`SERVICE_HISTORY_CATEGORY_CODES` in `CostCaptureModal.tsx`,
+  Jun 2026). Whitelist not blacklist, so a future non-service vehicle category
+  can't slip through.
+- The offer also appears **in edit mode** when a cost has a van link but no
+  `vehicle_service_log_id` yet — covers the "van link added in a later edit"
+  hole where the unification only used to fire at create time, so the cost showed
+  as linked on `/money/costs` but was invisible in Service History (Hi-Q
+  Portslade / RX22SYV incident, Jun 2026). Edit-mode opens unticked with an amber
+  hint; the vehicle picker auto-ticks when the edit itself adds the link. An edit
+  never re-touches an already-linked service record.
 - On save it creates the cost, then POSTs to the existing
   `POST /vehicles/fleet/:id/service-log` endpoint (reusing ALL its side-effects —
   mileage-log, fleet live-figure updates, upward-only mileage ratchet), attaches
