@@ -12,8 +12,9 @@
  *      collapsed (absorbed), incl. its own autopulled loom/cables. A package
  *      is a trusted opaque unit.
  *   3. Of what remains (not inside any VIRTUAL subtree):
+ *        category 408 (cases)     → case (built-here node candidate; its
+ *                                   rackheight, when seeded, is the U CAPACITY)
  *        rackheight > 0           → u_item (carries the half-width flag)
- *        category 408 (cases)     → case (built-here node candidate)
  *        else                     → loose
  *
  * Only kind:2 lines are placeable. kind:3 (selected prompts / notes) and kind:4
@@ -88,10 +89,12 @@ export function classifyRackItems(items: HHLineItem[]): ClassifiedRackItem[] {
       bucket = 'absorbed'; // inside a pre-built package — collapsed, not offered
     } else if (item.VIRTUAL) {
       bucket = 'pre_built';
+    } else if (Number(item.CATEGORY_ID) === CASE_CATEGORY_ID) {
+      // Flightcase. Its rackheight (when seeded) is the U CAPACITY of the rack,
+      // not a height it occupies — drives the capacity gate + proportional render.
+      bucket = 'case';
     } else if (rackHeight !== null && rackHeight > 0) {
       bucket = 'u_item';
-    } else if (Number(item.CATEGORY_ID) === CASE_CATEGORY_ID) {
-      bucket = 'case';
     } else {
       bucket = 'loose';
     }

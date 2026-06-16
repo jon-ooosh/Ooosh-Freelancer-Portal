@@ -1,0 +1,96 @@
+import { useEffect, useMemo, useState } from 'react';
+import { useParams } from 'react-router-dom';
+import { ReactFlow, Background, Controls, type Edge } from '@xyflow/react';
+import '@xyflow/react/dist/style.css';
+import { api } from '../services/api';
+import { rackNodeTypes, type RackFlowNode } from '../components/rackplan/nodes';
+import { RackPlanCtx, RackPlanActions } from '../components/rackplan/context';
+import { RackNode, RackPlanLayout } from '../components/rackplan/types';
+
+interface PublicData {
+  title: string | null;
+  jobName: string | null;
+  hhJobNumber: number | null;
+  layout: RackPlanLayout;
+}
+
+const noop = () => {};
+const readOnlyActions: RackPlanActions = {
+  selectedNodeId: null, readOnly: true,
+  selectNode: noop, removeNode: noop, moveStackItem: noop, removeStackItem: noop, setCapacity: noop,
+};
+
+export default function RackPlanPublicPage() {
+  const { token } = useParams<{ token: string }>();
+  const [data, setData] = useState<PublicData | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [showLabels, setShowLabels] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await api.get<{ data: PublicData }>(`/rack-plans/public/${token}`);
+        if (!cancelled) setData(res.data);
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : 'Plan not found');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [token]);
+
+  const nodes: RackFlowNode[] = useMemo(
+    () => (data?.layout?.nodes ?? []).map((n: RackNode) => ({
+      id: n.id, type: n.type, position: { x: n.x, y: n.y }, data: { node: n },
+    })),
+    [data],
+  );
+
+  const edges: Edge[] = useMemo(
+    () => (data?.layout?.arrows ?? []).map((a) => ({
+      id: a.id, source: a.from_node, target: a.to_node, label: showLabels ? a.label : undefined,
+    })),
+    [data, showLabels],
+  );
+
+  if (error) {
+    return <div className="min-h-screen flex items-center justify-center text-gray-500">{error}</div>;
+  }
+  if (!data) {
+    return <div className="min-h-screen flex items-center justify-center text-gray-400">Loading rack plan…</div>;
+  }
+
+  return (
+    <div className="h-screen w-screen flex flex-col">
+      <div className="flex items-center justify-between px-4 py-2 border-b border-gray-200 bg-white shrink-0">
+        <div>
+          <div className="text-sm font-semibold text-gray-800">{data.title || 'Rack Plan'}</div>
+          <div className="text-xs text-gray-500">
+            {data.jobName}{data.hhJobNumber ? ` · #${data.hhJobNumber}` : ''}
+          </div>
+        </div>
+        <label className="flex items-center gap-1.5 text-xs text-gray-600">
+          <input type="checkbox" checked={showLabels} onChange={(e) => setShowLabels(e.target.checked)} />
+          Show connection labels
+        </label>
+      </div>
+      <div className="flex-1 min-h-0">
+        <RackPlanCtx.Provider value={readOnlyActions}>
+          <ReactFlow
+            nodes={nodes}
+            edges={edges}
+            nodeTypes={rackNodeTypes}
+            nodesDraggable={false}
+            nodesConnectable={false}
+            elementsSelectable={false}
+            fitView
+            proOptions={{ hideAttribution: true }}
+          >
+            <Background />
+            <Controls showInteractive={false} />
+          </ReactFlow>
+        </RackPlanCtx.Provider>
+      </div>
+    </div>
+  );
+}

@@ -12,6 +12,10 @@ export interface RackPlanActions {
   /** Move a U-stack item within a built-here node (dir: -1 up, +1 down). */
   moveStackItem: (nodeId: string, index: number, dir: -1 | 1) => void;
   removeStackItem: (nodeId: string, index: number) => void;
+  /** Set a built-here node's U capacity (null/0 = ungated). */
+  setCapacity: (nodeId: string, capacity: number | null) => void;
+  /** Read-only mode (public view) — hide all edit affordances. */
+  readOnly?: boolean;
 }
 
 export const RackPlanCtx = createContext<RackPlanActions | null>(null);

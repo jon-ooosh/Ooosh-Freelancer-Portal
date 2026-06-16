@@ -50,6 +50,8 @@ export interface RackNode {
   front_photo_key?: string | null;
   /** For built_here nodes — the ordered U-stack. */
   items?: RackStackItem[];
+  /** For built_here nodes — rack U capacity (gate + proportional render). Null = ungated. */
+  capacity_u?: number | null;
 }
 
 export interface RackArrow {
