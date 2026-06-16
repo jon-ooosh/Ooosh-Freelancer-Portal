@@ -1,4 +1,4 @@
--- Migration 121: Staging Calculator plans
+-- Migration 122: Staging Calculator plans
 --
 -- The Staging Calculator (ported from ooosh-utilities into OP, Jun 2026) pushes
 -- calculated staging parts to a HireHop job and generates a 3D viewer link.

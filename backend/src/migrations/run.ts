@@ -155,7 +155,8 @@ async function runMigrations(direction: 'up' | 'down') {
         '118_cost_invoice_number_and_vat.sql',
         '119_holding_chase_and_hold.sql',
         '120_job_balance_chases.sql',
-        '121_staging_plans.sql',
+        '121_ve103b_generated_via.sql',
+        '122_staging_plans.sql',
       ];
 
       for (const migration of migrations) {

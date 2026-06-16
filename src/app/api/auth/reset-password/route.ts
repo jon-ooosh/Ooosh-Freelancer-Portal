@@ -14,6 +14,7 @@ import bcrypt from 'bcryptjs'
 import { SignJWT } from 'jose'
 import { updateFreelancerTextColumn, FREELANCER_COLUMNS } from '@/lib/monday'
 import { consumeResetToken } from '@/lib/password-reset'
+import { clearFailedAttempts } from '@/lib/login-rate-limit'
 import { isOpMode, resetPasswordOP, reportFallback, mondayFallbackAllowed, isOpClientError, OpApiError } from '@/lib/op-api'
 
 const getSessionSecret = () => {
@@ -47,6 +48,12 @@ export async function POST(request: NextRequest) {
       try {
         const opResult = await resetPasswordOP(token, password)
         if (opResult.success && opResult.user) {
+          // A successful reset proves the user owns this email — clear any
+          // failed-login lockout so they're not blocked by a 429 from earlier
+          // wrong-password attempts (the auto-login below papers over this, but
+          // a fresh login on another device would otherwise hit the stale count).
+          clearFailedAttempts(opResult.user.email)
+
           // Re-sign with SESSION_SECRET (see login/route.ts for rationale)
           const sessionToken = await new SignJWT({
             id: opResult.user.id,
@@ -121,6 +128,9 @@ export async function POST(request: NextRequest) {
         { status: 500 }
       )
     }
+
+    // Clear any failed-login lockout — the user has proven email ownership.
+    clearFailedAttempts(tokenData.email)
 
     console.log(`Password reset successful for ${tokenData.email}`)
 

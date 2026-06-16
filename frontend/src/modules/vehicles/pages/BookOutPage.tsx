@@ -909,6 +909,7 @@ export function BookOutPage() {
           body: JSON.stringify({
             assignment_id: leadEntry.id,
             certificate_number: form.ve103b,
+            source: 'book_out',
           }),
         })
         if (response.ok) {
@@ -1699,7 +1700,7 @@ function Ve103bDeskGate({
       const resp = await apiFetch('/api/ve103b/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ assignment_id: leadEntry.id, certificate_number: form.ve103b }),
+        body: JSON.stringify({ assignment_id: leadEntry.id, certificate_number: form.ve103b, source: 'book_out' }),
       })
       if (resp.ok) {
         const data = await resp.json()
