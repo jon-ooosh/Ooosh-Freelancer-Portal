@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ReactFlow,
   Background,
@@ -52,6 +52,9 @@ export default function RackPlanTab({ jobId }: Props) {
   const [saving, setSaving] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [hint, setHint] = useState<string | null>(null);
+  const [uploadedPhotos, setUploadedPhotos] = useState<Record<number, string>>({});
+  const photoInputRef = useRef<HTMLInputElement>(null);
+  const pendingPhotoListId = useRef<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -99,9 +102,40 @@ export default function RackPlanTab({ jobId }: Props) {
     setDirty(true);
   }, []);
 
+  // Photos resolved by stock list_id: uploaded-this-session overlays the picker's saved URLs.
+  const pickerPhotos = useMemo(() => {
+    const m: Record<number, string> = {};
+    for (const p of picker) if (p.frontPhotoKey) m[p.listId] = p.frontPhotoKey;
+    return m;
+  }, [picker]);
+  const photoUrl = useCallback(
+    (listId: number) => uploadedPhotos[listId] ?? pickerPhotos[listId],
+    [uploadedPhotos, pickerPhotos],
+  );
+  const requestPhoto = useCallback((listId: number) => {
+    pendingPhotoListId.current = listId;
+    photoInputRef.current?.click();
+  }, []);
+  const onPhotoFile = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    const listId = pendingPhotoListId.current;
+    e.target.value = '';
+    if (!file || !listId) return;
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      const res = await api.upload<{ data: { url: string } }>(`/rack-plans/photo/${listId}`, fd);
+      setUploadedPhotos((m) => ({ ...m, [listId]: res.data.url }));
+    } catch (err) {
+      setHint(err instanceof Error ? err.message : 'Photo upload failed');
+    }
+  }, []);
+
   const actions: RackPlanActions = useMemo(() => ({
     selectedNodeId,
     readOnly: false,
+    photoUrl,
+    requestPhoto,
     selectNode: (id) => setSelectedNodeId(id),
     removeNode: (nodeId) => {
       setRfNodes((nds) => nds.filter((n) => n.id !== nodeId));
@@ -130,7 +164,7 @@ export default function RackPlanTab({ jobId }: Props) {
       setDirty(true);
     },
     deleteEdge: (edgeId) => { setEdges((eds) => eds.filter((e) => e.id !== edgeId)); setDirty(true); },
-  }), [selectedNodeId, updateNode]);
+  }), [selectedNodeId, updateNode, photoUrl, requestPhoto]);
 
   const onNodesChange = useCallback((changes: NodeChange<RackFlowNode>[]) => {
     setRfNodes((nds) => applyNodeChanges(changes, nds));
@@ -251,6 +285,7 @@ export default function RackPlanTab({ jobId }: Props) {
 
   return (
     <div className="flex flex-col h-full min-h-0">
+      <input ref={photoInputRef} type="file" accept="image/*" className="hidden" onChange={onPhotoFile} />
       {/* Toolbar */}
       <div className="flex items-center justify-between gap-2 flex-wrap mb-2 shrink-0">
         <div className="flex items-center gap-2">

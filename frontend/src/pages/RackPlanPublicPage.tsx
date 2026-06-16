@@ -13,13 +13,10 @@ interface PublicData {
   jobName: string | null;
   hhJobNumber: number | null;
   layout: RackPlanLayout;
+  photos?: Record<number, string>;
 }
 
 const noop = () => {};
-const readOnlyActions: RackPlanActions = {
-  selectedNodeId: null, readOnly: true,
-  selectNode: noop, removeNode: noop, moveStackItem: noop, removeStackItem: noop, setCapacity: noop,
-};
 
 export default function RackPlanPublicPage() {
   const { token } = useParams<{ token: string }>();
@@ -55,6 +52,12 @@ export default function RackPlanPublicPage() {
     })),
     [data, showLabels],
   );
+
+  const readOnlyActions: RackPlanActions = useMemo(() => ({
+    selectedNodeId: null, readOnly: true,
+    selectNode: noop, removeNode: noop, moveStackItem: noop, removeStackItem: noop, setCapacity: noop,
+    photoUrl: (listId: number) => data?.photos?.[listId],
+  }), [data]);
 
   if (error) {
     return <div className="min-h-screen flex items-center justify-center text-gray-500">{error}</div>;

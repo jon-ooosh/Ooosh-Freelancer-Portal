@@ -42,10 +42,12 @@ function NodeHandles() {
 
 // ── Pre-built (opaque package) ──────────────────────────────────────────────
 export const PreBuiltNode = memo(({ id, data, selected }: NodeProps<RackFlowNode>) => {
-  const { removeNode, readOnly } = useActions();
+  const { removeNode, readOnly, photoUrl, requestPhoto } = useActions();
   const node = data.node;
+  const listId = node.hh_list_id ?? 0;
+  const url = listId > 0 ? photoUrl?.(listId) : undefined;
   return (
-    <div className={`rounded-md border-2 bg-purple-50 shadow-sm ${STANDALONE_W} ${selRing(!!selected)}`}>
+    <div className={`rounded-md border-2 bg-purple-50 shadow-sm ${STANDALONE_W} ${selRing(!!selected)} overflow-hidden`}>
       <NodeHandles />
       <div className="flex items-start justify-between gap-1 px-2 py-1.5">
         <div className="text-xs font-semibold text-purple-900 leading-tight">{node.label}</div>
@@ -54,7 +56,15 @@ export const PreBuiltNode = memo(({ id, data, selected }: NodeProps<RackFlowNode
             onClick={() => removeNode(id)} title="Remove from plan">✕</button>
         )}
       </div>
-      <div className="px-2 pb-2 text-[10px] uppercase tracking-wide text-purple-500">Pre-built unit</div>
+      {url && <img src={url} alt="" className="w-full h-24 object-cover" draggable={false} />}
+      <div className="flex items-center justify-between px-2 pb-2 pt-1">
+        <span className="text-[10px] uppercase tracking-wide text-purple-500">Pre-built unit</span>
+        {!readOnly && requestPhoto && listId > 0 && (
+          <button className="nodrag text-[9px] text-gray-500 hover:text-ooosh-600"
+            onClick={(e) => { e.stopPropagation(); requestPhoto(listId); }}
+            title={url ? 'Replace photo' : 'Add photo'}>📷</button>
+        )}
+      </div>
       {node.notes && <div className="px-2 pb-1.5 text-[10px] text-purple-700 italic line-clamp-3">📝 {node.notes}</div>}
     </div>
   );
@@ -90,23 +100,37 @@ function StackCell({
   onMove: (nodeId: string, index: number, dir: -1 | 1) => void;
   onRemove: (nodeId: string, index: number) => void;
 }) {
+  const { photoUrl, requestPhoto } = useActions();
   const h = Math.max(1, item.rackheight || 1);
   const uTag = `${h}U${item.half_width ? ' ½' : ''}`;
+  const url = photoUrl?.(item.hh_list_id);
   return (
-    <div className="relative flex flex-col justify-center px-1.5 min-w-0 h-full w-full">
-      <div className={readOnly ? '' : 'pr-5'}>
-        {h === 1 ? (
-          <div className="flex items-center gap-1 min-w-0">
-            <span className="text-[10px] font-medium text-gray-800 truncate">{item.label}</span>
-            <span className="text-[9px] text-gray-400 shrink-0">{uTag}</span>
-          </div>
-        ) : (
-          <>
-            <div className="text-[10px] font-medium text-gray-800 leading-tight line-clamp-2">{item.label}</div>
-            <div className="text-[9px] text-gray-500">{uTag}</div>
-          </>
-        )}
-      </div>
+    <div className="relative flex flex-col justify-center px-1.5 min-w-0 h-full w-full overflow-hidden">
+      {url && <img src={url} alt="" className="absolute inset-0 w-full h-full object-cover" draggable={false} />}
+      {url ? (
+        <div className="relative z-10 self-start max-w-full bg-black/55 text-white rounded px-1 py-0.5 mr-5">
+          <span className="text-[9px] font-medium truncate block">{item.label} · {uTag}</span>
+        </div>
+      ) : (
+        <div className={readOnly ? '' : 'pr-5'}>
+          {h === 1 ? (
+            <div className="flex items-center gap-1 min-w-0">
+              <span className="text-[10px] font-medium text-gray-800 truncate">{item.label}</span>
+              <span className="text-[9px] text-gray-400 shrink-0">{uTag}</span>
+            </div>
+          ) : (
+            <>
+              <div className="text-[10px] font-medium text-gray-800 leading-tight line-clamp-2">{item.label}</div>
+              <div className="text-[9px] text-gray-500">{uTag}</div>
+            </>
+          )}
+        </div>
+      )}
+      {!readOnly && requestPhoto && item.hh_list_id > 0 && (
+        <button className="nodrag absolute bottom-0 left-0 z-10 text-[9px] leading-none px-1 py-0.5 bg-white/80 rounded-tr text-gray-600 hover:text-ooosh-600"
+          onClick={(e) => { e.stopPropagation(); requestPhoto(item.hh_list_id); }}
+          title={url ? 'Replace photo' : 'Add front-panel photo'}>📷</button>
+      )}
       {!readOnly && (
         <div className="nodrag absolute top-0 right-0 bottom-0 w-5 flex flex-col items-center justify-center bg-white/70">
           <button className="text-[9px] leading-none text-gray-500 hover:text-ooosh-600 disabled:opacity-30"
