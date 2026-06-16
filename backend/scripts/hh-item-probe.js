@@ -113,10 +113,61 @@ async function listCategories() {
   }
 }
 
+// ── Item-master probe (find where the front-panel photo lives) ─────────
+async function probeItemMaster(listId) {
+  console.log(`\n${'='.repeat(70)}`);
+  console.log(`  HireHop Stock-Item Master probe — LIST_ID ${listId}`);
+  console.log(`  (Hunting for the image/photo field — not present on the job pull)`);
+  console.log(`${'='.repeat(70)}\n`);
+
+  // The job pull has no image field, and the public hirehop.info URL uses an
+  // internal asset id (e.g. 2346_592) that is NOT the LIST_ID. So the photo
+  // filename must live on the stock-item master record. We don't know the
+  // endpoint, so try several and dump whatever returns.
+  const candidates = [
+    ['/api/item_data.php', { item: listId }],
+    ['/php_functions/item_data.php', { item: listId }],
+    ['/php_functions/item_refresh.php', { item: listId }],
+    ['/php_functions/stock_item.php', { id: listId }],
+    ['/frames/item_data.php', { item: listId }],
+    ['/api/stock.php', { id: listId }],
+  ];
+
+  for (const [endpoint, params] of candidates) {
+    try {
+      const data = await hhGet(endpoint, params);
+      const ok = data && typeof data === 'object' && !data.error &&
+                 Object.keys(data).length > 0;
+      console.log(`  ${ok ? '✓' : '✗'} ${endpoint} → ${
+        typeof data === 'string' ? data.slice(0, 80)
+          : JSON.stringify(Object.keys(data || {})).slice(0, 200)}`);
+      if (ok) {
+        // Dump any field that smells like an image/asset reference
+        for (const [k, v] of Object.entries(data)) {
+          const lk = k.toLowerCase();
+          if (lk.includes('img') || lk.includes('image') || lk.includes('photo') ||
+              lk.includes('upload') || lk.includes('asset') || lk.includes('file') ||
+              lk.includes('pic') || lk.includes('thumb') ||
+              (typeof v === 'string' && /\.(png|jpe?g|webp)/i.test(v))) {
+            console.log(`      ⮑ ${k}: ${JSON.stringify(v).slice(0, 160)}`);
+          }
+        }
+      }
+    } catch (e) {
+      console.log(`  ✗ ${endpoint} → error: ${e.message}`);
+    }
+  }
+}
+
 // ── Main ───────────────────────────────────────────────────────────────
 async function main() {
   if (ARG === '--categories') {
     return listCategories();
+  }
+  if (ARG === '--item') {
+    const listId = process.argv[3];
+    if (!listId) { console.error('Usage: node hh-item-probe.js --item <LIST_ID>'); process.exit(1); }
+    return probeItemMaster(listId);
   }
 
   console.log(`\n${'='.repeat(70)}`);
