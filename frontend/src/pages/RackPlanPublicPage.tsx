@@ -48,7 +48,9 @@ export default function RackPlanPublicPage() {
 
   const edges: Edge[] = useMemo(
     () => (data?.layout?.arrows ?? []).map((a) => ({
-      id: a.id, source: a.from_node, target: a.to_node, label: showLabels ? a.label : undefined,
+      id: a.id, source: a.from_node, target: a.to_node,
+      sourceHandle: a.from_handle ?? undefined, targetHandle: a.to_handle ?? undefined,
+      label: showLabels ? a.label : undefined,
     })),
     [data, showLabels],
   );
