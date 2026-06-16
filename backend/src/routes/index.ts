@@ -41,6 +41,7 @@ import fillGapRouter from './fill-gap';
 import costsRouter from './costs';
 import storageRouter from './storage';
 import holdingRouter from './holding';
+import rackPlansRouter from './rack-plans';
 
 const router = Router();
 
@@ -75,6 +76,7 @@ router.use('/problems', problemsRouter);  // Job-level problems register (damage
 router.use('/costs', costsRouter);  // Cost Capture & Recharge — staff-facing receipt/cost workflow
 router.use('/storage', storageRouter);  // Client Storage — rooms/tenancies/access/waiting list (+ public T&Cs accept by token)
 router.use('/holding', holdingRouter);  // Holding — Held for Clients / Lost Property / temp storage (held_items engine)
+router.use('/rack-plans', rackPlansRouter);  // Rack Planner — how a rack/system is supplied (pull-only from HireHop) + public view-token
 router.use('/hire-forms', hireFormsRouter);
 router.use('/requirements', requirementsRouter);
 router.use('/portal', portalRouter);  // Freelancer portal — own JWT auth (not OP staff JWT)
