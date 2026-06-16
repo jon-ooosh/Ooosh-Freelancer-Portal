@@ -311,6 +311,13 @@ function rackAnalysis(items) {
     if (rh && typeof rh === 'object') rh = rh.value;
     return rh !== undefined && rh !== null && rh !== '' ? Number(rh) : null;
   };
+  // halfwidth: a HireHop checkbox custom field — truthy = occupies half a 19" bay
+  const halfWidth = (item) => {
+    const cf = getField(item, 'TYPE_CUSTOM_FIELDS', 'CUSTOM_FIELDS') || {};
+    let hw = cf.halfwidth;
+    if (hw && typeof hw === 'object') hw = hw.value;
+    return hw === 1 || hw === '1' || hw === true || hw === 'true' || hw === 'yes' || hw === 'Yes';
+  };
   // Hunt for any field that might carry the front-panel photo path/filename
   const imageFields = (item) => {
     const out = {};
@@ -331,7 +338,7 @@ function rackAnalysis(items) {
     if (kind === 0) return 'header';
     if (kind === 4) return 'service/crew';
     if (isVirtual(item)) return 'PRE-BUILT (virtual)';
-    if (rackHeight(item) !== null) return 'U-ITEM (rackable)';
+    if (rackHeight(item) > 0) return 'U-ITEM (rackable)';
     return 'loose / autopull?';
   }
 
@@ -345,6 +352,7 @@ function rackAnalysis(items) {
     rgt: Number(getField(item, 'RGT', 'rgt') ?? 0),
     virtual: isVirtual(item),
     rh: rackHeight(item),
+    hw: halfWidth(item),
     listId: getField(item, 'LIST_ID', 'ITEM_ID', 'ID'),
     autopull: getField(item, 'AUTOPULL'),
     cat: getField(item, 'CATEGORY_ID', 'ACC_CATEGORY'),
@@ -354,11 +362,11 @@ function rackAnalysis(items) {
 
   // Flat table
   console.log('All lines (in returned order):');
-  console.log('  ' + ['#', 'kind', 'LFT', 'RGT', 'virt', 'rackH', 'cat', 'LIST_ID', 'class', 'name'].join('\t'));
+  console.log('  ' + ['#', 'kind', 'LFT', 'RGT', 'virt', 'rackH', 'halfW', 'cat', 'LIST_ID', 'class', 'name'].join('\t'));
   for (const e of enriched) {
     console.log('  ' + [
       e.idx + 1, e.kind, e.lft, e.rgt, e.virtual ? 'Y' : '-',
-      e.rh ?? '-', e.cat ?? '-', e.listId ?? '-', e.cls, e.name,
+      e.rh ?? '-', e.hw ? '½' : '-', e.cat ?? '-', e.listId ?? '-', e.cls, e.name,
     ].join('\t'));
   }
 
@@ -374,7 +382,7 @@ function rackAnalysis(items) {
     const depth = enriched.filter((p) =>
       p !== e && p.lft < e.lft && p.rgt > e.rgt && p.lft > 0).length;
     const indent = '  ' + '    '.repeat(depth);
-    const tag = e.virtual ? '[PRE-BUILT]' : (e.rh !== null ? `[U-ITEM ${e.rh}U]` : '[loose]');
+    const tag = e.virtual ? '[PRE-BUILT]' : (e.rh > 0 ? `[U-ITEM ${e.rh}U${e.hw ? ' ½w' : ''}]` : '[loose]');
     console.log(`${indent}${tag} ${e.name}  (LFT ${e.lft}–${e.rgt})`);
   }
 
