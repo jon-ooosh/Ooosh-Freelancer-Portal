@@ -59,6 +59,8 @@ export interface RackArrow {
   from_node: string;
   to_node: string;
   label: string;
+  from_handle?: string | null;
+  to_handle?: string | null;
 }
 
 export interface RackPlanLayout {
