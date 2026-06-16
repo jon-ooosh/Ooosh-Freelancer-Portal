@@ -60,11 +60,15 @@ export interface StagingStock {
 
 export async function fetchStagingStock(): Promise<{ stock: StagingStock; rawCounts: Record<string, number> }> {
   const exportId = process.env.HIREHOP_EXPORT_ID;
-  const exportKey = process.env.HIREHOP_EXPORT_KEY;
+  // The STOCK export key may differ from the webhook-verification HIREHOP_EXPORT_KEY,
+  // so prefer a dedicated var and only fall back to the shared one.
+  const exportKey = process.env.HIREHOP_STOCK_EXPORT_KEY || process.env.HIREHOP_EXPORT_KEY;
 
   if (!exportId || !exportKey) {
-    throw new Error('Missing HireHop export credentials. Set HIREHOP_EXPORT_ID and HIREHOP_EXPORT_KEY env vars.');
+    throw new Error('Missing HireHop export credentials. Set HIREHOP_EXPORT_ID and HIREHOP_STOCK_EXPORT_KEY (or HIREHOP_EXPORT_KEY) env vars.');
   }
+  const keyVarUsed = process.env.HIREHOP_STOCK_EXPORT_KEY ? 'HIREHOP_STOCK_EXPORT_KEY' : 'HIREHOP_EXPORT_KEY';
+  console.log(`[Staging] export id=${exportId} key=${exportKey.slice(0, 4)}…(len ${exportKey.length}, from ${keyVarUsed})`);
 
   // Fetch the whole staging subtree in one call (parent 444 → returns all children),
   // then split by category in JS.
@@ -133,9 +137,21 @@ async function fetchCategory(exportId: string, exportKey: string, categoryId: nu
     if (text.trim().startsWith('<')) throw new Error('HireHop returned HTML — likely auth error (check export credentials)');
 
     const data = JSON.parse(text);
+
+    // A wrong key / bad request often comes back as an error object, not HTML —
+    // surface it loudly instead of silently treating it as "0 items".
+    if (data && typeof data === 'object' && !Array.isArray(data) && data.error !== undefined) {
+      throw new Error(`HireHop export error: ${JSON.stringify(data.error)}`);
+    }
+
     // The export may return a bare array or wrap it (items/rows/data) — handle all.
-    if (Array.isArray(data)) return data;
-    return data.items || data.rows || data.data || [];
+    const rows: RawItem[] = Array.isArray(data) ? data : (data.items || data.rows || data.data || []);
+
+    if (rows.length === 0) {
+      const maskedUrl = url.replace(/key=[^&]+/, `key=${exportKey.slice(0, 4)}…`);
+      console.warn(`[Staging] export returned 0 rows.\n  URL: ${maskedUrl}\n  Response head: ${text.slice(0, 400)}`);
+    }
+    return rows;
   }
   return [];
 }
