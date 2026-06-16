@@ -187,6 +187,26 @@ router.get('/by-job/:jobId', async (req: AuthRequest, res: Response) => {
   });
 });
 
+// GET /summary/:jobId — does a non-empty plan exist? (read-only, never creates a row).
+router.get('/summary/:jobId', async (req: AuthRequest, res: Response) => {
+  const jobId = String(req.params.jobId);
+  if (!UUID_RE.test(jobId)) {
+    res.status(400).json({ error: 'jobId must be an OP job UUID' });
+    return;
+  }
+  const result = await query(
+    `SELECT view_token, layout FROM rack_plans WHERE job_id = $1`,
+    [jobId],
+  );
+  if (result.rows.length === 0) {
+    res.json({ data: { hasPlan: false } });
+    return;
+  }
+  const row = result.rows[0];
+  const nodeCount = Array.isArray(row.layout?.nodes) ? row.layout.nodes.length : 0;
+  res.json({ data: { hasPlan: nodeCount > 0, nodeCount, viewToken: row.view_token } });
+});
+
 // PUT /:id — save the layout document.
 const layoutSchema = z.object({
   title: z.string().max(200).optional(),

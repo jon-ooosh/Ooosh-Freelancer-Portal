@@ -85,6 +85,7 @@ export default function RackPlanPublicPage() {
             nodesDraggable={false}
             nodesConnectable={false}
             elementsSelectable={false}
+            defaultEdgeOptions={{ type: 'smoothstep' }}
             fitView
             proOptions={{ hideAttribution: true }}
           >

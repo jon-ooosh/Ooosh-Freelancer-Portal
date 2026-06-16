@@ -21,6 +21,7 @@ import CancelOpenRequirementsSection from '../components/CancelOpenRequirementsS
 import { useAuthStore } from '../hooks/useAuthStore';
 import MoneyTab from '../components/MoneyTab';
 import RackPlanModal from '../components/rackplan/RackPlanModal';
+import RackPlanOverviewCard from '../components/rackplan/RackPlanOverviewCard';
 import DatePicker from '../components/DatePicker';
 import { TimeInput } from '../components/TimeInput';
 import ChaseModal from '../components/ChaseModal';
@@ -1162,6 +1163,7 @@ export default function JobDetailPage() {
   // Staging Calculator — modal launch + conditional tab (only shown once a plan exists)
   const [showStagingModal, setShowStagingModal] = useState(false);
   const [showRackPlanModal, setShowRackPlanModal] = useState(false);
+  const [rackPlanRefreshKey, setRackPlanRefreshKey] = useState(0);
   const [stagingPlanCount, setStagingPlanCount] = useState(0);
   const loadStagingCount = useCallback(async () => {
     if (!id) return;
@@ -3770,6 +3772,9 @@ export default function JobDetailPage() {
               doesn't clutter clean jobs; "+ Log Problem" button sits inside. */}
           {id && <JobProblemsPanel jobId={id} />}
 
+          {/* Rack Plan — surfaces once a plan exists (created from Tools → Rack Planner) */}
+          {id && <RackPlanOverviewCard jobId={id} onEdit={() => setShowRackPlanModal(true)} refreshKey={rackPlanRefreshKey} />}
+
           {/* Holding for this client (incoming deliveries) now lives inside the
               prep checklist's "Held for Clients" block — rolled in with the merch
               requirement so there's one surface. Temp storage + lost property
@@ -4937,7 +4942,7 @@ export default function JobDetailPage() {
 
       {/* Rack Planner — launched from the Job Requirements "Tools" menu (modal) */}
       {showRackPlanModal && id && (
-        <RackPlanModal jobId={id} onClose={() => setShowRackPlanModal(false)} />
+        <RackPlanModal jobId={id} onClose={() => { setShowRackPlanModal(false); setRackPlanRefreshKey((k) => k + 1); }} />
       )}
 
       {/* Staging Calculator Modal — launched from the Job Requirements tools menu */}
