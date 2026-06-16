@@ -22,6 +22,7 @@ import {
   RackStackItem,
 } from './types';
 import { rackNodeTypes, type RackFlowNode } from './nodes';
+import { rackEdgeTypes } from './edges';
 import { computeUsedU } from './stack-utils';
 import { RackPlanCtx, RackPlanActions } from './context';
 
@@ -65,7 +66,8 @@ export default function RackPlanTab({ jobId }: Props) {
         setPicker(d.picker);
         setRfNodes((d.plan.layout?.nodes ?? []).map(toFlowNode));
         setEdges((d.plan.layout?.arrows ?? []).map((a) => ({
-          id: a.id, source: a.from_node, target: a.to_node, label: a.label,
+          id: a.id, source: a.from_node, target: a.to_node, type: 'rackEdge',
+          data: { label: a.label }, deletable: true,
           sourceHandle: a.from_handle ?? undefined, targetHandle: a.to_handle ?? undefined,
         })));
         setDirty(false);
@@ -117,6 +119,17 @@ export default function RackPlanTab({ jobId }: Props) {
     removeStackItem: (nodeId, index) =>
       updateNode(nodeId, (n) => ({ ...n, items: (n.items ?? []).filter((_, i) => i !== index) })),
     setCapacity: (nodeId, capacity) => updateNode(nodeId, (n) => ({ ...n, capacity_u: capacity })),
+    editEdge: (edgeId) => {
+      setEdges((eds) => {
+        const cur = eds.find((e) => e.id === edgeId);
+        const label = window.prompt('Connection label (e.g. "8-way XLR loom", "Cat5 to stagebox")',
+          String((cur?.data as { label?: string } | undefined)?.label ?? ''));
+        if (label === null) return eds;
+        return eds.map((e) => (e.id === edgeId ? { ...e, data: { ...(e.data ?? {}), label } } : e));
+      });
+      setDirty(true);
+    },
+    deleteEdge: (edgeId) => { setEdges((eds) => eds.filter((e) => e.id !== edgeId)); setDirty(true); },
   }), [selectedNodeId, updateNode]);
 
   const onNodesChange = useCallback((changes: NodeChange<RackFlowNode>[]) => {
@@ -131,20 +144,13 @@ export default function RackPlanTab({ jobId }: Props) {
 
   const onConnect = useCallback((c: Connection) => {
     const id = genId();
-    setEdges((eds) => addEdge({ ...c, id, label: '' }, eds));
+    setEdges((eds) => addEdge({ ...c, id, type: 'rackEdge', data: { label: '' }, deletable: true }, eds));
     setDirty(true);
     // Auto-prompt for the label — deferred so it can't interrupt the connect drag.
     setTimeout(() => {
       const label = window.prompt('Connection label (e.g. "8-way XLR loom", "Cat5 to stagebox")', '');
-      if (label) setEdges((eds) => eds.map((x) => (x.id === id ? { ...x, label } : x)));
+      if (label) setEdges((eds) => eds.map((x) => (x.id === id ? { ...x, data: { ...(x.data ?? {}), label } } : x)));
     }, 10);
-  }, []);
-
-  const onEdgeDoubleClick = useCallback((_e: React.MouseEvent, edge: Edge) => {
-    const label = window.prompt('Connection label (e.g. "8-way XLR loom", "Cat5 to stagebox")', String(edge.label ?? ''));
-    if (label === null) return;
-    setEdges((eds) => eds.map((x) => (x.id === edge.id ? { ...x, label } : x)));
-    setDirty(true);
   }, []);
 
   // Count of each HH row already placed (quantity-aware — a qty:3 item can be placed 3×).
@@ -214,7 +220,8 @@ export default function RackPlanTab({ jobId }: Props) {
         ...fn.data.node, id: fn.id, type: fn.data.node.type, x: fn.position.x, y: fn.position.y,
       }));
       const arrows = edges.map((e) => ({
-        id: e.id, from_node: e.source, to_node: e.target, label: String(e.label ?? ''),
+        id: e.id, from_node: e.source, to_node: e.target,
+        label: String((e.data as { label?: string } | undefined)?.label ?? ''),
         from_handle: e.sourceHandle ?? null, to_handle: e.targetHandle ?? null,
       }));
       const layout: RackPlanLayout = { nodes, arrows };
@@ -273,10 +280,9 @@ export default function RackPlanTab({ jobId }: Props) {
               onNodesChange={onNodesChange}
               onEdgesChange={onEdgesChange}
               onConnect={onConnect}
-              onEdgeDoubleClick={onEdgeDoubleClick}
               connectionMode={ConnectionMode.Loose}
-              defaultEdgeOptions={{ type: 'smoothstep' }}
               nodeTypes={rackNodeTypes}
+              edgeTypes={rackEdgeTypes}
               onSelectionChange={({ nodes }) => setSelectedNodeId(nodes[0]?.id ?? null)}
               fitView
               proOptions={{ hideAttribution: true }}

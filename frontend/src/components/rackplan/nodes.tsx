@@ -6,6 +6,8 @@ import { packStackRows, computeUsedU } from './stack-utils';
 
 /** Pixels per rack U in the built-here stack rendering. */
 export const U_PX = 32;
+/** Standalone nodes (pre-built + loose) share one width so the plot reads cleanly. */
+const STANDALONE_W = 'w-48';
 
 export type RackFlowNode = Node<{ node: RackNode }, 'built_here' | 'pre_built' | 'loose'>;
 
@@ -19,16 +21,21 @@ const baseHandle = { width: 9, height: 9, background: '#6b7280' };
 const selRing = (selected: boolean) =>
   selected ? 'ring-2 ring-ooosh-500 border-ooosh-400' : 'border-gray-300';
 
-/** Four connectable points per node. Hidden (but kept for edge anchoring) in read-only. */
+/**
+ * Four connectable points per node. In read-only they're invisible (opacity 0)
+ * but STILL rendered as normal source handles so existing edges anchor to them.
+ * (Hiding them via isConnectable=false stops react-flow measuring them, which
+ * dropped the lines from the client view.)
+ */
 function NodeHandles() {
   const { readOnly } = useActions();
   const style = readOnly ? { ...baseHandle, opacity: 0 } : baseHandle;
   return (
     <>
-      <Handle id="l" type="source" position={Position.Left} style={style} isConnectable={!readOnly} />
-      <Handle id="r" type="source" position={Position.Right} style={style} isConnectable={!readOnly} />
-      <Handle id="t" type="source" position={Position.Top} style={style} isConnectable={!readOnly} />
-      <Handle id="b" type="source" position={Position.Bottom} style={style} isConnectable={!readOnly} />
+      <Handle id="l" type="source" position={Position.Left} style={style} />
+      <Handle id="r" type="source" position={Position.Right} style={style} />
+      <Handle id="t" type="source" position={Position.Top} style={style} />
+      <Handle id="b" type="source" position={Position.Bottom} style={style} />
     </>
   );
 }
@@ -38,7 +45,7 @@ export const PreBuiltNode = memo(({ id, data, selected }: NodeProps<RackFlowNode
   const { removeNode, readOnly } = useActions();
   const node = data.node;
   return (
-    <div className={`rounded-md border-2 bg-purple-50 shadow-sm w-44 ${selRing(!!selected)}`}>
+    <div className={`rounded-md border-2 bg-purple-50 shadow-sm ${STANDALONE_W} ${selRing(!!selected)}`}>
       <NodeHandles />
       <div className="flex items-start justify-between gap-1 px-2 py-1.5">
         <div className="text-xs font-semibold text-purple-900 leading-tight">{node.label}</div>
@@ -59,7 +66,7 @@ export const LooseNode = memo(({ id, data, selected }: NodeProps<RackFlowNode>) 
   const { removeNode, readOnly } = useActions();
   const node = data.node;
   return (
-    <div className={`rounded-md border bg-white shadow-sm w-40 ${selRing(!!selected)}`}>
+    <div className={`rounded-md border bg-white shadow-sm ${STANDALONE_W} ${selRing(!!selected)}`}>
       <NodeHandles />
       <div className="flex items-start justify-between gap-1 px-2 py-1.5">
         <div className="text-xs font-medium text-gray-800 leading-tight">{node.label}</div>
@@ -74,11 +81,11 @@ export const LooseNode = memo(({ id, data, selected }: NodeProps<RackFlowNode>) 
 });
 LooseNode.displayName = 'LooseNode';
 
-// ── A single U-stack cell (one item; full-width or half of a paired band) ────
+// ── A single U-stack cell (fills its wrapper; wrapper sets the width) ────────
 function StackCell({
-  item, index, lastIndex, half, nodeId, readOnly, onMove, onRemove,
+  item, index, lastIndex, nodeId, readOnly, onMove, onRemove,
 }: {
-  item: RackStackItem; index: number; lastIndex: number; half: boolean;
+  item: RackStackItem; index: number; lastIndex: number;
   nodeId: string; readOnly: boolean;
   onMove: (nodeId: string, index: number, dir: -1 | 1) => void;
   onRemove: (nodeId: string, index: number) => void;
@@ -86,7 +93,7 @@ function StackCell({
   const h = Math.max(1, item.rackheight || 1);
   const uTag = `${h}U${item.half_width ? ' ½' : ''}`;
   return (
-    <div className="relative flex flex-col justify-center px-1.5 min-w-0 h-full" style={{ width: half ? '50%' : '100%' }}>
+    <div className="relative flex flex-col justify-center px-1.5 min-w-0 h-full w-full">
       <div className={readOnly ? '' : 'pr-5'}>
         {h === 1 ? (
           <div className="flex items-center gap-1 min-w-0">
@@ -166,25 +173,28 @@ export const BuiltHereNode = memo(({ id, data, selected }: NodeProps<RackFlowNod
           </div>
         )}
 
-        {rows.map((row, ri) => (
-          <div key={ri} className="flex items-stretch rounded bg-gray-100 border border-gray-300 overflow-hidden"
-            style={{ height: row.heightU * U_PX }}>
-            {row.cells.map((cell, ci) => (
-              <div key={cell.index} className={`flex ${ci > 0 ? 'border-l border-dashed border-gray-300' : ''}`}
-                style={{ width: row.cells.length === 2 ? '50%' : '100%' }}>
-                <StackCell item={cell.item} index={cell.index} lastIndex={lastIndex}
-                  half={row.cells.length === 2} nodeId={id} readOnly={!!readOnly}
-                  onMove={moveStackItem} onRemove={removeStackItem} />
-              </div>
-            ))}
-            {/* lone half-width item → blank half */}
-            {row.cells.length === 1 && row.cells[0].item.half_width && (
-              <div className="w-1/2 border-l border-dashed border-gray-300 bg-gray-50 flex items-center justify-center text-[9px] text-gray-400">
-                pair / blank
-              </div>
-            )}
-          </div>
-        ))}
+        {rows.map((row, ri) => {
+          const isPair = row.cells.length === 2;
+          const loneHalf = !isPair && row.cells[0].item.half_width;
+          return (
+            <div key={ri} className="flex items-stretch rounded bg-gray-100 border border-gray-300 overflow-hidden"
+              style={{ height: row.heightU * U_PX }}>
+              {row.cells.map((cell, ci) => (
+                <div key={cell.index}
+                  className={ci > 0 ? 'border-l border-dashed border-gray-300' : ''}
+                  style={{ width: isPair ? '50%' : (cell.item.half_width ? '50%' : '100%') }}>
+                  <StackCell item={cell.item} index={cell.index} lastIndex={lastIndex}
+                    nodeId={id} readOnly={!!readOnly} onMove={moveStackItem} onRemove={removeStackItem} />
+                </div>
+              ))}
+              {loneHalf && (
+                <div className="w-1/2 border-l border-dashed border-gray-300 bg-gray-50 flex items-center justify-center text-[9px] text-gray-400">
+                  pair / blank
+                </div>
+              )}
+            </div>
+          );
+        })}
 
         {Array.from({ length: emptyU }).map((_, i) => (
           <div key={`empty-${i}`} className="rounded border border-dashed border-gray-600 bg-gray-800/40"
