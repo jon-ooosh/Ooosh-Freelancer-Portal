@@ -20,6 +20,7 @@ import CancellationModal from '../components/CancellationModal';
 import CancelOpenRequirementsSection from '../components/CancelOpenRequirementsSection';
 import { useAuthStore } from '../hooks/useAuthStore';
 import MoneyTab from '../components/MoneyTab';
+import RackPlanTab from '../components/rackplan/RackPlanTab';
 import DatePicker from '../components/DatePicker';
 import { TimeInput } from '../components/TimeInput';
 import ChaseModal from '../components/ChaseModal';
@@ -1154,7 +1155,7 @@ export default function JobDetailPage() {
   const [job, setJob] = useState<JobDetail | null>(null);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
-  const validTabs = ['overview', 'timeline', 'files', 'transport', 'drivers', 'money', 'staging'] as const;
+  const validTabs = ['overview', 'timeline', 'files', 'transport', 'drivers', 'money', 'staging', 'rackplan'] as const;
   type TabType = typeof validTabs[number];
   const initialTab = (validTabs.includes(searchParams.get('tab') as TabType) ? searchParams.get('tab') : 'overview') as TabType;
   const [activeTab, setActiveTab] = useState<TabType>(initialTab);
@@ -3731,7 +3732,7 @@ export default function JobDetailPage() {
       {/* Tabs */}
       <div className="border-b border-gray-200 mb-6 -mx-4 px-4 sm:mx-0 sm:px-0 overflow-x-auto scrollbar-hide">
         <nav className="flex gap-4 sm:gap-6 min-w-max">
-          {(['overview', 'timeline', 'transport', 'drivers', 'money', 'files', 'staging'] as const).map((tab) => {
+          {(['overview', 'timeline', 'transport', 'drivers', 'money', 'files', 'staging', 'rackplan'] as const).map((tab) => {
             // Staging tab only appears once a staging plan exists for this job.
             if (tab === 'staging' && stagingPlanCount === 0) return null;
             return (
@@ -3750,6 +3751,7 @@ export default function JobDetailPage() {
                tab === 'drivers' ? (<><span className="sm:hidden">Drivers{vehicleAssignments.length > 0 ? ` (${vehicleAssignments.length})` : ''}</span><span className="hidden sm:inline">Drivers & Vehicles{vehicleAssignments.length > 0 ? ` (${vehicleAssignments.length})` : ''}</span></>) :
                tab === 'money' ? 'Money' :
                tab === 'staging' ? '🏗️ Staging' :
+               tab === 'rackplan' ? '🎚️ Rack Plan' :
                `Files${fileCount > 0 ? ` (${fileCount})` : ''}`}
             </button>
             );
@@ -4930,6 +4932,11 @@ export default function JobDetailPage() {
       {/* Staging Tab — 3D preview plans (only present once a plan exists) */}
       {activeTab === 'staging' && id && (
         <StagingTab jobId={id} />
+      )}
+
+      {/* Rack Plan Tab — how a rack/system is supplied (pull-only from HireHop) */}
+      {activeTab === 'rackplan' && id && (
+        <RackPlanTab jobId={id} />
       )}
 
       {/* Staging Calculator Modal — launched from the Job Requirements tools menu */}
