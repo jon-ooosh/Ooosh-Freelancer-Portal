@@ -16,12 +16,14 @@
  *   DELETE /plans/:id             — delete a staging plan (staff)
  *   GET    /plan/:slug            — PUBLIC: resolve stage config for the 3D viewer (short link)
  *
- * HireHop item-map prefixes (see "the gaffa tape bug", Jun 2026):
- *   b<id> = hire/rental stock   ·   s<id> = sale/consumable stock
- * Consumables (gaffa tape #740, velcro tape #1013) live in HireHop's consumables
- * table, NOT rental stock — pushing them as b<id> hit an unrelated rental item
- * (e.g. b740 = a Pioneer DJM900). The calculator now tags consumables `saleItem:true`
- * and they go out as s<id>.
+ * HireHop item-map prefixes (per save_job.php API docs — confirmed Jun 2026):
+ *   a<id> = sales/consumable   ·   b<id> = hire/rental stock   ·   c<id> = labour
+ * IDs are namespaced PER TABLE, so the same number means different things per
+ * prefix: b740 = a Pioneer DJM900 (hire table), a740 = MagTape gaffa (sales
+ * table). Consumables (gaffa tape #740, velcro tape #1013) are sales-table items,
+ * NOT rental stock — pushing them as b<id> hit the unrelated hire item. The
+ * calculator tags consumables `saleItem:true` and they go out as a<id>.
+ * (The earlier s<id> guess was wrong — save_job.php silently ignored it.)
  */
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
@@ -34,10 +36,9 @@ import { frontendLink } from '../config/app-urls';
 
 const router = Router();
 
-// HireHop item-map prefix for sale/consumable stock (vs 'b' = hire). See header note.
-// If a live test push of the gaffa tape ever lands on the wrong item, this is the
-// one-character knob to turn.
-const SALE_ITEM_PREFIX = 's';
+// HireHop item-map prefix for sale/consumable stock (vs 'b' = hire). Per the
+// save_job.php API docs: a=sales, b=hire, c=labour. See header note.
+const SALE_ITEM_PREFIX = 'a';
 const HIRE_ITEM_PREFIX = 'b';
 
 // ════════════════════════════════════════════════════════════════════════
@@ -224,7 +225,7 @@ router.post('/push', async (req: AuthRequest, res: Response) => {
   }
   const hhJobNumber = parseInt(jobId, 10);
 
-  // Build the HireHop items map: { "b<id>": qty } for hire, { "s<id>": qty } for sale/consumable.
+  // Build the HireHop items map: { "b<id>": qty } for hire, { "a<id>": qty } for sale/consumable.
   const itemsMap: Record<string, number> = {};
   let totalQty = 0;
   for (const item of items) {
