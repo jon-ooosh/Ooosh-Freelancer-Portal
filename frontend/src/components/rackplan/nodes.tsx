@@ -6,8 +6,8 @@ import { packStackRows, computeUsedU } from './stack-utils';
 
 /** Pixels per rack U in the built-here stack rendering. */
 export const U_PX = 32;
-/** Standalone nodes (pre-built + loose) share one width so the plot reads cleanly. */
-const STANDALONE_W = 'w-48';
+/** Standalone nodes (pre-built + loose) match the built-here rack width exactly (w-60). */
+const STANDALONE_W = 'w-60';
 
 export type RackFlowNode = Node<{ node: RackNode }, 'built_here' | 'pre_built' | 'loose'>;
 

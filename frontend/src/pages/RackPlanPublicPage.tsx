@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import { ReactFlow, Background, Controls, type Edge } from '@xyflow/react';
+import { ReactFlow, Background, Controls, ConnectionMode, type Edge } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { api } from '../services/api';
 import { rackNodeTypes, type RackFlowNode } from '../components/rackplan/nodes';
@@ -84,6 +84,7 @@ export default function RackPlanPublicPage() {
             edges={edges}
             nodeTypes={rackNodeTypes}
             edgeTypes={rackEdgeTypes}
+            connectionMode={ConnectionMode.Loose}
             nodesDraggable={false}
             nodesConnectable={false}
             elementsSelectable={false}
