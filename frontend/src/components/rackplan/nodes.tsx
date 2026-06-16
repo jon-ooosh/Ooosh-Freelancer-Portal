@@ -1,10 +1,11 @@
 import { memo, useContext } from 'react';
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
-import { RackNode } from './types';
+import { RackNode, RackStackItem } from './types';
 import { RackPlanCtx } from './context';
+import { packStackRows, computeUsedU } from './stack-utils';
 
 /** Pixels per rack U in the built-here stack rendering. */
-export const U_PX = 30;
+export const U_PX = 32;
 
 export type RackFlowNode = Node<{ node: RackNode }, 'built_here' | 'pre_built' | 'loose'>;
 
@@ -14,18 +15,20 @@ function useActions() {
   return ctx;
 }
 
-const handleStyle = { width: 9, height: 9, background: '#6b7280' };
+const baseHandle = { width: 9, height: 9, background: '#6b7280' };
 const selRing = (selected: boolean) =>
   selected ? 'ring-2 ring-ooosh-500 border-ooosh-400' : 'border-gray-300';
 
-/** Four connectable points per node — ConnectionMode.Loose lets any connect to any. */
+/** Four connectable points per node. Hidden (but kept for edge anchoring) in read-only. */
 function NodeHandles() {
+  const { readOnly } = useActions();
+  const style = readOnly ? { ...baseHandle, opacity: 0 } : baseHandle;
   return (
     <>
-      <Handle id="l" type="source" position={Position.Left} style={handleStyle} />
-      <Handle id="r" type="source" position={Position.Right} style={handleStyle} />
-      <Handle id="t" type="source" position={Position.Top} style={handleStyle} />
-      <Handle id="b" type="source" position={Position.Bottom} style={handleStyle} />
+      <Handle id="l" type="source" position={Position.Left} style={style} isConnectable={!readOnly} />
+      <Handle id="r" type="source" position={Position.Right} style={style} isConnectable={!readOnly} />
+      <Handle id="t" type="source" position={Position.Top} style={style} isConnectable={!readOnly} />
+      <Handle id="b" type="source" position={Position.Bottom} style={style} isConnectable={!readOnly} />
     </>
   );
 }
@@ -71,15 +74,57 @@ export const LooseNode = memo(({ id, data, selected }: NodeProps<RackFlowNode>) 
 });
 LooseNode.displayName = 'LooseNode';
 
+// ── A single U-stack cell (one item; full-width or half of a paired band) ────
+function StackCell({
+  item, index, lastIndex, half, nodeId, readOnly, onMove, onRemove,
+}: {
+  item: RackStackItem; index: number; lastIndex: number; half: boolean;
+  nodeId: string; readOnly: boolean;
+  onMove: (nodeId: string, index: number, dir: -1 | 1) => void;
+  onRemove: (nodeId: string, index: number) => void;
+}) {
+  const h = Math.max(1, item.rackheight || 1);
+  const uTag = `${h}U${item.half_width ? ' ½' : ''}`;
+  return (
+    <div className="relative flex flex-col justify-center px-1.5 min-w-0 h-full" style={{ width: half ? '50%' : '100%' }}>
+      <div className={readOnly ? '' : 'pr-5'}>
+        {h === 1 ? (
+          <div className="flex items-center gap-1 min-w-0">
+            <span className="text-[10px] font-medium text-gray-800 truncate">{item.label}</span>
+            <span className="text-[9px] text-gray-400 shrink-0">{uTag}</span>
+          </div>
+        ) : (
+          <>
+            <div className="text-[10px] font-medium text-gray-800 leading-tight line-clamp-2">{item.label}</div>
+            <div className="text-[9px] text-gray-500">{uTag}</div>
+          </>
+        )}
+      </div>
+      {!readOnly && (
+        <div className="nodrag absolute top-0 right-0 bottom-0 w-5 flex flex-col items-center justify-center bg-white/70">
+          <button className="text-[9px] leading-none text-gray-500 hover:text-ooosh-600 disabled:opacity-30"
+            disabled={index === 0} onClick={(e) => { e.stopPropagation(); onMove(nodeId, index, -1); }} title="Up">▲</button>
+          <button className="text-[10px] leading-none text-red-400 hover:text-red-600 my-0.5"
+            onClick={(e) => { e.stopPropagation(); onRemove(nodeId, index); }} title="Remove">✕</button>
+          <button className="text-[9px] leading-none text-gray-500 hover:text-ooosh-600 disabled:opacity-30"
+            disabled={index === lastIndex} onClick={(e) => { e.stopPropagation(); onMove(nodeId, index, 1); }} title="Down">▼</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Built-here case (U-stack interior) ──────────────────────────────────────
 export const BuiltHereNode = memo(({ id, data, selected }: NodeProps<RackFlowNode>) => {
   const { removeNode, selectNode, moveStackItem, removeStackItem, setCapacity, readOnly } = useActions();
   const node = data.node;
   const items = node.items ?? [];
-  const usedU = items.reduce((s, it) => s + Math.max(1, it.rackheight || 1), 0);
+  const rows = packStackRows(items);
+  const usedU = computeUsedU(items);
   const cap = node.capacity_u ?? null;
   const emptyU = cap !== null ? Math.max(0, cap - usedU) : 0;
   const overU = cap !== null ? Math.max(0, usedU - cap) : 0;
+  const lastIndex = items.length - 1;
 
   return (
     <div className={`rounded-md border-2 bg-gray-900 shadow-md w-60 ${selRing(!!selected)}`}
@@ -121,46 +166,25 @@ export const BuiltHereNode = memo(({ id, data, selected }: NodeProps<RackFlowNod
           </div>
         )}
 
-        {items.map((it, idx) => {
-          const h = Math.max(1, it.rackheight || 1);
-          const uTag = `${h}U${it.half_width ? ' ½' : ''}`;
-          return (
-            <div key={idx} className="flex items-stretch rounded bg-gray-100 border border-gray-300 overflow-hidden"
-              style={{ height: h * U_PX }}>
-              <div className="flex-1 flex min-w-0">
-                <div className="flex flex-col justify-center px-1.5 min-w-0"
-                  style={{ width: it.half_width ? '50%' : '100%' }}>
-                  {h === 1 ? (
-                    <div className="flex items-center gap-1 min-w-0">
-                      <span className="text-[10px] font-medium text-gray-800 truncate">{it.label}</span>
-                      <span className="text-[9px] text-gray-400 shrink-0">{uTag}</span>
-                    </div>
-                  ) : (
-                    <>
-                      <div className="text-[10px] font-medium text-gray-800 leading-tight line-clamp-2">{it.label}</div>
-                      <div className="text-[9px] text-gray-500">{uTag}</div>
-                    </>
-                  )}
-                </div>
-                {it.half_width && (
-                  <div className="w-1/2 border-l border-dashed border-gray-300 bg-gray-50 flex items-center justify-center text-[9px] text-gray-400">
-                    pair / blank
-                  </div>
-                )}
+        {rows.map((row, ri) => (
+          <div key={ri} className="flex items-stretch rounded bg-gray-100 border border-gray-300 overflow-hidden"
+            style={{ height: row.heightU * U_PX }}>
+            {row.cells.map((cell, ci) => (
+              <div key={cell.index} className={`flex ${ci > 0 ? 'border-l border-dashed border-gray-300' : ''}`}
+                style={{ width: row.cells.length === 2 ? '50%' : '100%' }}>
+                <StackCell item={cell.item} index={cell.index} lastIndex={lastIndex}
+                  half={row.cells.length === 2} nodeId={id} readOnly={!!readOnly}
+                  onMove={moveStackItem} onRemove={removeStackItem} />
               </div>
-              {!readOnly && (
-                <div className="nodrag w-5 shrink-0 flex flex-col border-l border-gray-300 bg-white">
-                  <button className="flex-1 text-[9px] text-gray-500 hover:text-ooosh-600 disabled:opacity-30"
-                    disabled={idx === 0} onClick={(e) => { e.stopPropagation(); moveStackItem(id, idx, -1); }} title="Up">▲</button>
-                  <button className="flex-1 text-[9px] text-gray-500 hover:text-ooosh-600 disabled:opacity-30"
-                    disabled={idx === items.length - 1} onClick={(e) => { e.stopPropagation(); moveStackItem(id, idx, 1); }} title="Down">▼</button>
-                  <button className="flex-1 text-[9px] text-gray-400 hover:text-red-600"
-                    onClick={(e) => { e.stopPropagation(); removeStackItem(id, idx); }} title="Remove">✕</button>
-                </div>
-              )}
-            </div>
-          );
-        })}
+            ))}
+            {/* lone half-width item → blank half */}
+            {row.cells.length === 1 && row.cells[0].item.half_width && (
+              <div className="w-1/2 border-l border-dashed border-gray-300 bg-gray-50 flex items-center justify-center text-[9px] text-gray-400">
+                pair / blank
+              </div>
+            )}
+          </div>
+        ))}
 
         {Array.from({ length: emptyU }).map((_, i) => (
           <div key={`empty-${i}`} className="rounded border border-dashed border-gray-600 bg-gray-800/40"

@@ -22,6 +22,7 @@ import {
   RackStackItem,
 } from './types';
 import { rackNodeTypes, type RackFlowNode } from './nodes';
+import { computeUsedU } from './stack-utils';
 import { RackPlanCtx, RackPlanActions } from './context';
 
 interface Props {
@@ -129,8 +130,14 @@ export default function RackPlanTab({ jobId }: Props) {
   }, []);
 
   const onConnect = useCallback((c: Connection) => {
-    setEdges((eds) => addEdge({ ...c, id: genId(), label: '' }, eds));
+    const id = genId();
+    setEdges((eds) => addEdge({ ...c, id, label: '' }, eds));
     setDirty(true);
+    // Auto-prompt for the label — deferred so it can't interrupt the connect drag.
+    setTimeout(() => {
+      const label = window.prompt('Connection label (e.g. "8-way XLR loom", "Cat5 to stagebox")', '');
+      if (label) setEdges((eds) => eds.map((x) => (x.id === id ? { ...x, label } : x)));
+    }, 10);
   }, []);
 
   const onEdgeDoubleClick = useCallback((_e: React.MouseEvent, edge: Edge) => {
@@ -152,9 +159,10 @@ export default function RackPlanTab({ jobId }: Props) {
     return m;
   }, [rfNodes]);
 
+  // Spread new nodes across a grid so they land in open space, not stacked.
   const nextPos = useCallback(() => {
-    const c = rfNodes.length;
-    return { x: 40 + (c % 5) * 60, y: 40 + (c % 8) * 50 };
+    const i = rfNodes.length;
+    return { x: 60 + (i % 4) * 240, y: 60 + Math.floor(i / 4) * 170 };
   }, [rfNodes]);
 
   const addStandaloneNode = useCallback((item: ClassifiedRackItem, type: 'pre_built' | 'loose') => {
@@ -167,11 +175,13 @@ export default function RackPlanTab({ jobId }: Props) {
     setDirty(true);
   }, [nextPos]);
 
-  const addBuiltHereNode = useCallback((label: string, capacity: number | null) => {
+  const addBuiltHereNode = useCallback((label: string, capacity: number | null, item?: ClassifiedRackItem) => {
     const pos = nextPos();
     const node: RackNode = {
       id: genId(), type: 'built_here', x: pos.x, y: pos.y, label, items: [],
       capacity_u: capacity && capacity > 0 ? capacity : null,
+      // A case from HireHop carries its item ref so the picker quantity gate counts it.
+      hh_item_id: item?.itemId, hh_list_id: item?.listId,
     };
     setRfNodes((nds) => [...nds, toFlowNode(node)]);
     setSelectedNodeId(node.id);
@@ -182,7 +192,7 @@ export default function RackPlanTab({ jobId }: Props) {
     const target = rfNodes.find((n) => n.id === selectedNodeId && n.data.node.type === 'built_here');
     if (!target) { setHint('Select a rack first (or add one with “+ New rack”), then click a U-item.'); return; }
     const cap = target.data.node.capacity_u ?? null;
-    const usedU = (target.data.node.items ?? []).reduce((s, it) => s + Math.max(1, it.rackheight || 1), 0);
+    const usedU = computeUsedU(target.data.node.items ?? []);
     const h = item.rackHeight ?? 1;
     if (cap !== null && usedU + h > cap) {
       setHint(`Won't fit — ${target.data.node.label} is ${cap}U and already has ${usedU}U.`);
@@ -265,6 +275,7 @@ export default function RackPlanTab({ jobId }: Props) {
               onConnect={onConnect}
               onEdgeDoubleClick={onEdgeDoubleClick}
               connectionMode={ConnectionMode.Loose}
+              defaultEdgeOptions={{ type: 'smoothstep' }}
               nodeTypes={rackNodeTypes}
               onSelectionChange={({ nodes }) => setSelectedNodeId(nodes[0]?.id ?? null)}
               fitView
@@ -296,7 +307,7 @@ export default function RackPlanTab({ jobId }: Props) {
           <PickerSection title="Pre-built units" items={buckets.pre_built} placedCounts={placedCounts}
             onAdd={(it) => addStandaloneNode(it, 'pre_built')} />
           <PickerSection title="Cases" items={buckets.case} placedCounts={placedCounts}
-            onAdd={(it) => addBuiltHereNode(it.name, it.rackHeight)}
+            onAdd={(it) => addBuiltHereNode(it.name, it.rackHeight, it)}
             badge={(it) => (it.rackHeight ? `${it.rackHeight}U` : '')} />
           <PickerSection title="U-items" items={buckets.u_item} placedCounts={placedCounts}
             onAdd={addUItem} badge={(it) => `${it.rackHeight ?? '?'}U${it.halfWidth ? ' ½' : ''}`} />
