@@ -4,6 +4,7 @@ import { ReactFlow, Background, Controls, type Edge } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { api } from '../services/api';
 import { rackNodeTypes, type RackFlowNode } from '../components/rackplan/nodes';
+import { rackEdgeTypes } from '../components/rackplan/edges';
 import { RackPlanCtx, RackPlanActions } from '../components/rackplan/context';
 import { RackNode, RackPlanLayout } from '../components/rackplan/types';
 
@@ -48,9 +49,9 @@ export default function RackPlanPublicPage() {
 
   const edges: Edge[] = useMemo(
     () => (data?.layout?.arrows ?? []).map((a) => ({
-      id: a.id, source: a.from_node, target: a.to_node,
+      id: a.id, source: a.from_node, target: a.to_node, type: 'rackEdge',
       sourceHandle: a.from_handle ?? undefined, targetHandle: a.to_handle ?? undefined,
-      label: showLabels ? a.label : undefined,
+      data: { label: showLabels ? a.label : '' },
     })),
     [data, showLabels],
   );
@@ -82,10 +83,10 @@ export default function RackPlanPublicPage() {
             nodes={nodes}
             edges={edges}
             nodeTypes={rackNodeTypes}
+            edgeTypes={rackEdgeTypes}
             nodesDraggable={false}
             nodesConnectable={false}
             elementsSelectable={false}
-            defaultEdgeOptions={{ type: 'smoothstep' }}
             fitView
             proOptions={{ hideAttribution: true }}
           >

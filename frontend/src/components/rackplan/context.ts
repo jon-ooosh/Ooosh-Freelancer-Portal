@@ -14,6 +14,9 @@ export interface RackPlanActions {
   removeStackItem: (nodeId: string, index: number) => void;
   /** Set a built-here node's U capacity (null/0 = ungated). */
   setCapacity: (nodeId: string, capacity: number | null) => void;
+  /** Edit / delete a connection (used by the custom edge). */
+  editEdge?: (edgeId: string) => void;
+  deleteEdge?: (edgeId: string) => void;
   /** Read-only mode (public view) — hide all edit affordances. */
   readOnly?: boolean;
 }
