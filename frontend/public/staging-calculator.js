@@ -1736,32 +1736,58 @@ function rotateStageLayout() {
   if (pushContainer) pushContainer.innerHTML = renderPushButton();
 }
 
-/**
- * Open the 3D view in a new tab.
- */
-function open3DView() {
-  const url = build3DViewUrl();
-  if (url) {
-    window.open(url, '_blank');
+// Short 3D link, minted on demand from OP and cached per config so repeated
+// preview/copy on the same stage don't create extra rows. Falls back to the
+// long inline URL if the server can't be reached.
+let _shortLinkCache = { key: null, url: null };
+async function getShortShareLink() {
+  const config = build3DConfig();
+  if (!config) return null;
+  const key = JSON.stringify(config);
+  if (_shortLinkCache.key === key && _shortLinkCache.url) return _shortLinkCache.url;
+  try {
+    const resp = await fetch('/api/staging/preview-link', {
+      method: 'POST',
+      headers: opAuthHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ stageConfig: config }),
+    });
+    const data = await resp.json();
+    if (data && data.success && data.shareLink) {
+      _shortLinkCache = { key, url: data.shareLink };
+      return data.shareLink;
+    }
+  } catch (e) {
+    console.warn('Short link mint failed, falling back to inline URL:', e);
   }
+  return build3DViewUrl(); // fallback (long inline link still renders)
 }
 
 /**
- * Copy the 3D view link to clipboard.
+ * Open the 3D view in a new tab (short link).
  */
-async function copy3DLink() {
-  const url = build3DViewUrl();
-  if (!url) return;
+async function open3DView() {
+  // Open the tab synchronously (avoids popup blockers), then point it at the link.
+  const win = window.open('about:blank', '_blank');
+  const url = await getShortShareLink();
+  if (!url) { if (win) win.close(); return; }
+  if (win) win.location = url; else window.open(url, '_blank');
+}
 
+/**
+ * Copy the 3D view link to clipboard (short link).
+ */
+async function copy3DLink(ev) {
+  const btn = ev && ev.target;
+  const url = await getShortShareLink();
+  if (!url) return;
   try {
     await navigator.clipboard.writeText(url);
-    // Brief visual feedback
-    const btn = event.target;
-    const origText = btn.textContent;
-    btn.textContent = '✅ Copied!';
-    setTimeout(() => { btn.textContent = origText; }, 2000);
+    if (btn) {
+      const origText = btn.textContent;
+      btn.textContent = '✅ Copied!';
+      setTimeout(() => { btn.textContent = origText; }, 2000);
+    }
   } catch (err) {
-    // Fallback for older browsers
     prompt('Copy this link:', url);
   }
 }
@@ -2777,10 +2803,10 @@ function renderEdgeSide(key, label, lengthLabel) {
   let html = `<div class="edge-side">
     <span class="edge-label">${label} <span class="edge-length">(${lengthLabel})</span></span>
     <div class="edge-options edge-options-vertical">
-      <button class="edge-btn edge-btn-sm ${noneActive ? 'active' : ''}" onclick="clearEdge('${key}')">None</button>
-      <button class="edge-btn edge-btn-sm ${sel.handrail ? 'active' : ''}" onclick="toggleEdge('${key}','handrail')">🛡️</button>
-      <button class="edge-btn edge-btn-sm ${sel.steps ? 'active' : ''}" onclick="toggleEdge('${key}','steps')">🪜</button>
-      <button class="edge-btn edge-btn-sm ${sel.skirt ? 'active' : ''}" onclick="toggleEdge('${key}','skirt')">🎭</button>
+      <button class="edge-btn edge-btn-sm ${noneActive ? 'active' : ''}" onclick="clearEdge('${key}')" title="No accessories on this edge">None</button>
+      <button class="edge-btn edge-btn-sm ${sel.handrail ? 'active' : ''}" onclick="toggleEdge('${key}','handrail')" title="Handrail">🛡️</button>
+      <button class="edge-btn edge-btn-sm ${sel.steps ? 'active' : ''}" onclick="toggleEdge('${key}','steps')" title="Steps">🪜</button>
+      <button class="edge-btn edge-btn-sm ${sel.skirt ? 'active' : ''}" onclick="toggleEdge('${key}','skirt')" title="Skirt">🎭</button>
     </div>`;
 
   // Show step position selector when both handrail AND steps are on this edge
@@ -3016,7 +3042,7 @@ function renderActionButtons() {
         onclick="open3DView()">
         🎨 Open 3D Client View
       </button>
-      <button class="chip" style="padding:10px 18px; font-size:14px" onclick="copy3DLink()">
+      <button class="chip" style="padding:10px 18px; font-size:14px" onclick="copy3DLink(event)">
         📋 Copy share link
       </button>
     </div>
