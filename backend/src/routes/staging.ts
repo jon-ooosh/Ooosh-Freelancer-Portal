@@ -187,6 +187,32 @@ const pushSchema = z.object({
   stageSummary: z.string().max(500).optional(),
 });
 
+/** Mint a short 3D share link from a stage config WITHOUT pushing items to a job.
+ * Used by the in-calculator Open/Copy buttons so they get a short link too (the
+ * row is job-less + ephemeral — it never shows on a job's Staging tab). */
+router.post('/preview-link', async (req: AuthRequest, res: Response) => {
+  const parsed = z.object({
+    stageConfig: z.record(z.any()),
+    stageSummary: z.string().max(500).optional(),
+  }).safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ success: false, error: 'stageConfig required.' });
+  }
+  try {
+    const slug = await mintUniqueSlug();
+    const shareLink = frontendLink(`/stage-view.html?p=${slug}`);
+    await query(
+      `INSERT INTO staging_plans (job_id, hh_job_number, slug, stage_config, summary, three_d_url, created_by)
+       VALUES (NULL, NULL, $1, $2, $3, $4, $5)`,
+      [slug, parsed.data.stageConfig, parsed.data.stageSummary || null, shareLink, req.user?.id || null],
+    );
+    return res.json({ success: true, shareLink });
+  } catch (err) {
+    console.error('[Staging] preview-link error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to create preview link' });
+  }
+});
+
 router.post('/push', async (req: AuthRequest, res: Response) => {
   const parsed = pushSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -211,6 +237,7 @@ router.post('/push', async (req: AuthRequest, res: Response) => {
   if (Object.keys(itemsMap).length === 0) {
     return res.status(400).json({ success: false, error: 'No valid items to push.' });
   }
+  console.log(`[Staging] push job ${hhJobNumber} itemsMap:`, JSON.stringify(itemsMap));
 
   // 1) Create the staging_plan first so the HH note can carry the SHORT 3D link.
   let shareLink: string | null = null;
@@ -234,6 +261,7 @@ router.post('/push', async (req: AuthRequest, res: Response) => {
     { job: hhJobNumber, items: JSON.stringify(itemsMap), no_webhook: 1 },
     { priority: 'high' },
   );
+  console.log(`[Staging] save_job response for job ${hhJobNumber}:`, JSON.stringify(pushResp).slice(0, 600));
   if (!pushResp.success) {
     // Roll back the plan row — nothing was added to HH, so a dangling plan/link is misleading.
     if (planId) await query(`DELETE FROM staging_plans WHERE id = $1`, [planId]).catch(() => {});
