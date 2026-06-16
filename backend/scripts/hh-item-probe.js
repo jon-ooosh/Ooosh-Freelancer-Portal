@@ -311,10 +311,11 @@ function rackAnalysis(items) {
     if (rh && typeof rh === 'object') rh = rh.value;
     return rh !== undefined && rh !== null && rh !== '' ? Number(rh) : null;
   };
-  // halfwidth: a HireHop checkbox custom field — truthy = occupies half a 19" bay
+  // rackwidth: a HireHop checkbox custom field — ticked (truthy) = HALF width
+  // (two fit across a 19" bay). Field is named `rackwidth`; absent = full width.
   const halfWidth = (item) => {
     const cf = getField(item, 'TYPE_CUSTOM_FIELDS', 'CUSTOM_FIELDS') || {};
-    let hw = cf.halfwidth;
+    let hw = cf.rackwidth ?? cf.halfwidth;
     if (hw && typeof hw === 'object') hw = hw.value;
     return hw === 1 || hw === '1' || hw === true || hw === 'true' || hw === 'yes' || hw === 'Yes';
   };
