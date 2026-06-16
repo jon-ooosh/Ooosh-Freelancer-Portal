@@ -16,6 +16,13 @@
 
 const HIREHOP_EXPORT_URL = 'https://myhirehop.com/modules/stock/export_data.php';
 
+// "STAGING" parent category — the export returns this category AND all its
+// descendants (445 Decks / 446 Legs & Hardware / 447 Screwjacks / 448 Accessories)
+// in one call. We fetch the parent rather than no-cat-at-all: a no-cat fetch on
+// some export configs returns a truncated/partial list (legs came through but
+// screwjacks/steps/handrails/decks didn't — the bug this fixes, Jun 2026).
+const CATEGORY_STAGING_PARENT = 444;
+
 const CATEGORY_DECKS = 445;
 const CATEGORY_HARDWARE = 446;
 const CATEGORY_SCREWJACKS = 447;
@@ -59,8 +66,9 @@ export async function fetchStagingStock(): Promise<{ stock: StagingStock; rawCou
     throw new Error('Missing HireHop export credentials. Set HIREHOP_EXPORT_ID and HIREHOP_EXPORT_KEY env vars.');
   }
 
-  // Fetch ALL stock in one call (no cat= filter) then split by category in JS.
-  const allRaw = await fetchCategory(exportId, exportKey, null);
+  // Fetch the whole staging subtree in one call (parent 444 → returns all children),
+  // then split by category in JS.
+  const allRaw = await fetchCategory(exportId, exportKey, CATEGORY_STAGING_PARENT);
 
   const decksRaw = allRaw.filter((i) => i.CATEGORY_ID === CATEGORY_DECKS);
   const hardwareRaw = allRaw.filter((i) => i.CATEGORY_ID === CATEGORY_HARDWARE);
