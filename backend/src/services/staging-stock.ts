@@ -69,11 +69,16 @@ export async function fetchStagingStock(): Promise<{ stock: StagingStock; rawCou
   // Fetch the whole staging subtree in one call (parent 444 → returns all children),
   // then split by category in JS.
   const allRaw = await fetchCategory(exportId, exportKey, CATEGORY_STAGING_PARENT);
+  console.log(`[Staging] export returned ${allRaw.length} items; sample CATEGORY_IDs:`,
+    allRaw.slice(0, 5).map((i) => i.CATEGORY_ID));
 
-  const decksRaw = allRaw.filter((i) => i.CATEGORY_ID === CATEGORY_DECKS);
-  const hardwareRaw = allRaw.filter((i) => i.CATEGORY_ID === CATEGORY_HARDWARE);
-  const screwjacksRaw = allRaw.filter((i) => i.CATEGORY_ID === CATEGORY_SCREWJACKS);
-  const accessoriesRaw = allRaw.filter((i) => i.CATEGORY_ID === CATEGORY_ACCESSORIES);
+  // Coerce CATEGORY_ID to Number — the export can return it as a string or number
+  // depending on params, and a string would silently fail a `===` number compare.
+  const catId = (i: RawItem) => Number(i.CATEGORY_ID);
+  const decksRaw = allRaw.filter((i) => catId(i) === CATEGORY_DECKS);
+  const hardwareRaw = allRaw.filter((i) => catId(i) === CATEGORY_HARDWARE);
+  const screwjacksRaw = allRaw.filter((i) => catId(i) === CATEGORY_SCREWJACKS);
+  const accessoriesRaw = allRaw.filter((i) => catId(i) === CATEGORY_ACCESSORIES);
 
   // Handrails and steps can live in either hardware (446) or accessories (448)
   const allHardwareAndAccessories = [...hardwareRaw, ...accessoriesRaw];
@@ -101,7 +106,9 @@ export async function fetchStagingStock(): Promise<{ stock: StagingStock; rawCou
 }
 
 async function fetchCategory(exportId: string, exportKey: string, categoryId: number | null): Promise<RawItem[]> {
-  const params = new URLSearchParams({ id: exportId, key: exportKey, sidx: 'TITLE', sord: 'asc' });
+  // depot=1 (Main Stock) matches the working manual export URL — the category-scoped
+  // export returns nothing without it.
+  const params = new URLSearchParams({ id: exportId, key: exportKey, depot: '1', sidx: 'TITLE', sord: 'asc' });
   if (categoryId !== null) params.set('cat', String(categoryId));
 
   const url = `${HIREHOP_EXPORT_URL}?${params.toString()}`;
@@ -126,7 +133,9 @@ async function fetchCategory(exportId: string, exportKey: string, categoryId: nu
     if (text.trim().startsWith('<')) throw new Error('HireHop returned HTML — likely auth error (check export credentials)');
 
     const data = JSON.parse(text);
-    return Array.isArray(data) ? data : (data.items || []);
+    // The export may return a bare array or wrap it (items/rows/data) — handle all.
+    if (Array.isArray(data)) return data;
+    return data.items || data.rows || data.data || [];
   }
   return [];
 }
