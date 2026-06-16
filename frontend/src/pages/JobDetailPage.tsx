@@ -7,6 +7,7 @@ import JobProblemsPanel from '../components/JobProblemsPanel';
 import HeldItemsSection from '../components/HeldItemsSection';
 import SendMerchFormButton from '../components/SendMerchFormButton';
 import TransportCalculator from '../components/TransportCalculator';
+import { StagingCalculatorModal, StagingTab } from '../components/StagingCalculator';
 import RequirementCard from '../components/RequirementCard';
 import type { JobRequirement } from '../components/RequirementCard';
 import ExcessGateBanner from '../components/ExcessGateBanner';
@@ -1153,10 +1154,21 @@ export default function JobDetailPage() {
   const [job, setJob] = useState<JobDetail | null>(null);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
-  const validTabs = ['overview', 'timeline', 'files', 'transport', 'drivers', 'money'] as const;
+  const validTabs = ['overview', 'timeline', 'files', 'transport', 'drivers', 'money', 'staging'] as const;
   type TabType = typeof validTabs[number];
   const initialTab = (validTabs.includes(searchParams.get('tab') as TabType) ? searchParams.get('tab') : 'overview') as TabType;
   const [activeTab, setActiveTab] = useState<TabType>(initialTab);
+  // Staging Calculator — modal launch + conditional tab (only shown once a plan exists)
+  const [showStagingModal, setShowStagingModal] = useState(false);
+  const [stagingPlanCount, setStagingPlanCount] = useState(0);
+  const loadStagingCount = useCallback(async () => {
+    if (!id) return;
+    try {
+      const res = await api.get<{ data: unknown[] }>(`/staging/plans/${id}`);
+      setStagingPlanCount(res.data?.length || 0);
+    } catch { /* ignore */ }
+  }, [id]);
+  useEffect(() => { loadStagingCount(); }, [loadStagingCount]);
 
   // Reset tab when navigating to a different job. React Router reuses the
   // JobDetailPage component instance across /jobs/A → /jobs/B, so without
@@ -3719,7 +3731,10 @@ export default function JobDetailPage() {
       {/* Tabs */}
       <div className="border-b border-gray-200 mb-6 -mx-4 px-4 sm:mx-0 sm:px-0 overflow-x-auto scrollbar-hide">
         <nav className="flex gap-4 sm:gap-6 min-w-max">
-          {(['overview', 'timeline', 'transport', 'drivers', 'money', 'files'] as const).map((tab) => (
+          {(['overview', 'timeline', 'transport', 'drivers', 'money', 'files', 'staging'] as const).map((tab) => {
+            // Staging tab only appears once a staging plan exists for this job.
+            if (tab === 'staging' && stagingPlanCount === 0) return null;
+            return (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -3734,9 +3749,11 @@ export default function JobDetailPage() {
                tab === 'transport' ? (<><span className="sm:hidden">Transport{(() => { const active = quotes.filter(q => q.status !== 'cancelled').length; return active > 0 ? ` (${active})` : ''; })()}</span><span className="hidden sm:inline">Crew & Transport{(() => { const active = quotes.filter(q => q.status !== 'cancelled').length; return active > 0 ? ` (${active})` : ''; })()}</span></>) :
                tab === 'drivers' ? (<><span className="sm:hidden">Drivers{vehicleAssignments.length > 0 ? ` (${vehicleAssignments.length})` : ''}</span><span className="hidden sm:inline">Drivers & Vehicles{vehicleAssignments.length > 0 ? ` (${vehicleAssignments.length})` : ''}</span></>) :
                tab === 'money' ? 'Money' :
+               tab === 'staging' ? '🏗️ Staging' :
                `Files${fileCount > 0 ? ` (${fileCount})` : ''}`}
             </button>
-          ))}
+            );
+          })}
         </nav>
       </div>
 
@@ -3766,6 +3783,7 @@ export default function JobDetailPage() {
             hasCrewQuotes={quotes.some(q => (q.job_type === 'crewed' || (q.assignments && q.assignments.length > 0)) && q.status !== 'cancelled')}
             hasCrewOnHH={hhSyncResult?.derivation?.flags?.has_crew_items || false}
             onOpenCrewCalculator={() => { setShowCalculator(true); setActiveTab('transport'); }}
+            onLaunchStaging={() => setShowStagingModal(true)}
           />
 
         </div>
@@ -4909,6 +4927,24 @@ export default function JobDetailPage() {
         <MoneyTab jobId={id} job={job} onJobChanged={loadJob} />
       )}
 
+      {/* Staging Tab — 3D preview plans (only present once a plan exists) */}
+      {activeTab === 'staging' && id && (
+        <StagingTab jobId={id} />
+      )}
+
+      {/* Staging Calculator Modal — launched from the Job Requirements tools menu */}
+      {showStagingModal && (
+        <StagingCalculatorModal
+          hhJobNumber={job.hh_job_number}
+          onClose={() => setShowStagingModal(false)}
+          onComplete={async () => {
+            await loadStagingCount();
+            setShowStagingModal(false);
+            setActiveTab('staging');
+          }}
+        />
+      )}
+
       {/* Chase Modal */}
       {/* Excess Payment / Edit Modal — opened from Drivers & Vehicles strip */}
       {excessModalRecord && (
@@ -5765,21 +5801,6 @@ function FileViewerModal({
 
 // ── Overview / Prep Checklist (API-backed) ───────────────────────────────
 
-interface RequirementTypeDef {
-  type: string;
-  label: string;
-  icon: string;
-  steps: string[] | null;
-  sort_order: number;
-}
-
-interface RequirementTemplate {
-  id: string;
-  name: string;
-  description: string | null;
-  requirement_types: string[];
-}
-
 // JobRequirement, DerivedFlags, SeatAvailability, PREP_STATUS_CONFIG, PREP_STATUS_ORDER
 // now imported from '../components/RequirementCard'
 
@@ -5842,7 +5863,7 @@ function OverviewFinancialStrip({ jobId }: { jobId: string }) {
 }
 
 
-function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, seatAvailability, hasCrewQuotes, hasCrewOnHH, onOpenCrewCalculator }: {
+function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, seatAvailability, hasCrewQuotes, hasCrewOnHH, onOpenCrewCalculator, onLaunchStaging }: {
   jobId: string;
   hhJobNumber?: number | null;
   pipelineStatus?: string | null;
@@ -5866,10 +5887,9 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
   hasCrewQuotes?: boolean;
   hasCrewOnHH?: boolean;
   onOpenCrewCalculator?: () => void;
+  onLaunchStaging?: () => void;
 }) {
   const [requirements, setRequirements] = useState<JobRequirement[]>([]);
-  const [types, setTypes] = useState<RequirementTypeDef[]>([]);
-  const [templates, setTemplates] = useState<RequirementTemplate[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAddMenu, setShowAddMenu] = useState(false);
   const [isVanAndDriver, setIsVanAndDriver] = useState(false);
@@ -5917,14 +5937,8 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
   async function loadAll() {
     setLoading(true);
     try {
-      const [reqRes, typesRes, tmplRes] = await Promise.all([
-        api.get<{ data: JobRequirement[] }>(`/requirements/job/${jobId}?phase=${phase}`),
-        api.get<{ data: RequirementTypeDef[] }>('/requirements/types'),
-        api.get<{ data: RequirementTemplate[] }>('/requirements/templates'),
-      ]);
+      const reqRes = await api.get<{ data: JobRequirement[] }>(`/requirements/job/${jobId}?phase=${phase}`);
       setRequirements(reqRes.data);
-      setTypes(typesRes.data);
-      setTemplates(tmplRes.data);
     } catch (err) {
       console.error('Failed to load requirements:', err);
     } finally {
@@ -6035,16 +6049,6 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
     }
   }
 
-  async function applyTemplate(templateId: string) {
-    try {
-      await api.post(`/requirements/job/${jobId}/template/${templateId}`, {});
-      await loadAll();
-      setShowAddMenu(false);
-    } catch (err) {
-      console.error('Failed to apply template:', err);
-    }
-  }
-
   async function updateRequirement(reqId: string, updates: Record<string, unknown>) {
     try {
       await api.patch(`/requirements/${reqId}`, updates);
@@ -6098,8 +6102,6 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
   const blockedCount = countableReqs.filter(r => r.status === 'blocked').length;
   const totalCount = countableReqs.length;
   const progressPct = totalCount > 0 ? Math.round((doneCount / totalCount) * 100) : 0;
-
-  const availableTypes = types.filter(t => t.type === 'custom' || !requirements.some(r => r.requirement_type === t.type));
 
   if (loading) {
     return <div className="text-center text-sm text-gray-500 py-8">Loading prep checklist...</div>;
@@ -6158,49 +6160,21 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
             onClick={() => setShowAddMenu(!showAddMenu)}
             className="px-3 py-1.5 text-sm bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700"
           >
-            + Add Job Requirement
+            🛠 Tools
           </button>
           {showAddMenu && (
             <div className="absolute right-0 mt-1 w-72 bg-white rounded-lg shadow-lg border border-gray-200 z-10 py-1 max-h-96 overflow-y-auto">
-              {/* Templates section */}
-              {templates.length > 0 && (
-                <>
-                  <div className="px-4 py-1.5 text-xs font-semibold text-gray-400 uppercase tracking-wider">Quick Add (Templates)</div>
-                  {templates.map((tmpl) => (
-                    <button
-                      key={`tmpl-${tmpl.id}`}
-                      onClick={() => applyTemplate(tmpl.id)}
-                      className="w-full text-left px-4 py-2 text-sm hover:bg-gray-50 flex items-center gap-2"
-                    >
-                      <span className="text-base">📋</span>
-                      <div>
-                        <span className="font-medium">{tmpl.name}</span>
-                        <span className="text-xs text-gray-400 ml-2">{tmpl.requirement_types.length} items</span>
-                      </div>
-                    </button>
-                  ))}
-                  {availableTypes.length > 0 && (
-                    <div className="border-t border-gray-100 my-1" />
-                  )}
-                </>
-              )}
-              {/* Individual requirement types */}
-              {availableTypes.length > 0 && (
-                <>
-                  <div className="px-4 py-1.5 text-xs font-semibold text-gray-400 uppercase tracking-wider">Individual</div>
-                  {availableTypes.map((t) => (
-                    <button
-                      key={t.type}
-                      onClick={() => addRequirement(t.type)}
-                      className="w-full text-left px-4 py-2 text-sm hover:bg-gray-50 flex items-center gap-2"
-                    >
-                      <span>{t.icon}</span>
-                      <span>{t.label}</span>
-                      {t.steps && <span className="text-xs text-gray-400 ml-auto">{t.steps.length} steps</span>}
-                    </button>
-                  ))}
-                </>
-              )}
+              <div className="px-4 py-1.5 text-xs font-semibold text-gray-400 uppercase tracking-wider">Utilities</div>
+              <button
+                onClick={() => { setShowAddMenu(false); onLaunchStaging?.(); }}
+                className="w-full text-left px-4 py-2 text-sm hover:bg-gray-50 flex items-center gap-2"
+              >
+                <span className="text-base">🏗️</span>
+                <div>
+                  <span className="font-medium">Staging Calculator</span>
+                  <span className="block text-xs text-gray-400">Calculate deck/leg/hardware parts &amp; push to HireHop</span>
+                </div>
+              </button>
             </div>
           )}
         </div>
@@ -6210,8 +6184,8 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
       {/* Requirements list */}
       {requirements.length === 0 ? (
         <div className="bg-white rounded-xl border border-gray-200 p-8 text-center">
-          <p className="text-gray-500 text-sm">No requirements added yet.</p>
-          <p className="text-gray-400 text-xs mt-1">Click "+ Add Job Requirement" to get started, or sync from HireHop.</p>
+          <p className="text-gray-500 text-sm">No requirements yet.</p>
+          <p className="text-gray-400 text-xs mt-1">Requirements are derived from HireHop — click "Sync HH" to pull them in, or add a "+ Reminder".</p>
         </div>
       ) : (
         <div className="space-y-2">

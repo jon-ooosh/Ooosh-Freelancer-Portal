@@ -2347,9 +2347,55 @@ upgrades after first-live feedback that the chase/notify state was buried behind
 These are existing standalone tools that currently push to Monday.com. They need repointing to our status-transition API when ready (Step 5 above):
 
 - **Payment Portal** — Stripe payment processing, currently updates Monday.com. HIGH PRIORITY to repoint (after Steps 1-4).
-- **Staging Calculator** — stage/riser quoting tool (standalone, low priority)
-- **Backline Matcher** — match client requirements to inventory (standalone, low priority)
+- **Staging Calculator** — ✅ **INTEGRATED into OP (Jun 2026)** — see "Staging Calculator Integration" below.
+- **Backline Matcher** — match client requirements to inventory (standalone, lives in separate repo `jon-ooosh/alternative-hirehop-stock`). Next to integrate.
+- **PCN Manager** — penalty charge notice processing (standalone, separate repo `jon-ooosh/PCN-Management-System`). Next to integrate.
 - **Cold Lead Finder** — Ticketmaster API integration (standalone, low priority)
+
+#### Staging Calculator Integration (Jun 2026)
+
+Brought into OP from `ooosh-utilities` (was a static page + 4 Netlify functions). It had
+**zero Monday dependency** — purely HireHop-driven — so this was a host-it-in-OP job, not a
+Monday repoint.
+
+**Approach: embed, don't rewrite.** The calculator is ~114KB of working vanilla JS + a 42KB
+three.js 3D viewer. Rather than port to React, the static assets live in `frontend/public/`
+(`staging-calculator.{html,css,js}`, `stage-view.html`) and are served same-origin. It's
+launched in an **iframe modal** from the **Job Requirements → "🛠 Tools" dropdown** (which
+replaced the dead manual requirement-add picker — templates + individual types were never used;
+"+ Reminder" stayed). Same-origin means the embedded app reuses the OP staff JWT
+(`localStorage.ooosh_access_token`) and calls `/api/staging/*`.
+
+- **Backend:** `routes/staging.ts` (mounted `/api/staging`) + `services/staging-stock.ts` (the
+  HireHop bulk-export parse, ported verbatim). Endpoints: `GET /stock`, `GET /job?job=<hh>`
+  (reads OP `jobs`, no HH round-trip), `POST /availability`, `POST /push`, `GET/PATCH/DELETE
+  /plans/:id`, and **public** `GET /plan/:slug` (no auth — the 3D viewer link clients open).
+  API-token calls go through the broker; the stock export uses its own export ID+key (direct fetch).
+- **The gaffa-tape bug — FIXED.** The old push hardcoded the `b` (hire) prefix on every item, so
+  the gaffa tape (`hirehopId: 740`, a *consumable*) pushed as `b740` = a Pioneer DJM900 (rental
+  stock #740). Consumables live in HireHop's consumables table, addressed with `s<id>`. The
+  calculator now tags consumables `saleItem: true` (gaffa tape #740 + velcro hook tape #1013) and
+  the push builds `s<id>` for them, `b<id>` for hire. **⚠️ The sale prefix `s` is the documented
+  convention but was NOT live-verified — do ONE test push of just the gaffa tape (and velcro) to a
+  scratch job and confirm it adds the tape, not a random hire item, before trusting it. The knob is
+  `SALE_ITEM_PREFIX` in `routes/staging.ts`.**
+- **Short 3D links (migration 121, `staging_plans`).** The old 3D viewer link encoded the whole
+  stage config in the URL (huge + ugly). Now `POST /push` stores the config and mints a short slug;
+  the link is `/stage-view.html?p=<slug>`, resolved via the public `GET /plan/:slug`. `stage-view.html`
+  still decodes legacy `?c=`/`?config=` inline links for backward-compat. The HH job note uses the
+  short link.
+- **Staging tab on Job Detail** — conditional (only appears once a `staging_plans` row exists for
+  the job). Lists each plan's short link with **Open / Copy / Share-with-freelancer / Delete**
+  (delete is a hard delete behind a confirm — disposable calc artefact, not hire-tracking). Share
+  toggles `share_with_freelancer` (same methodology as files-to-share; portal surfacing is a
+  follow-up — the flag is stored, the portal read isn't wired yet). On push-complete the embedded
+  app `postMessage`s the parent, which reveals + switches to the Staging tab.
+- **Deploy requirement:** `HIREHOP_EXPORT_ID` (+ the stock-export `HIREHOP_EXPORT_KEY` value) must
+  be set on the server `.env` — copy both from the retired ooosh-utilities Netlify env. The stock
+  endpoint 502s with a clear message until they're set.
+- **Deferred:** UX/UI polish of the (admittedly cramped) calculator layout — second pass once it's
+  live and jon's clicked around. Portal surfacing of shared staging links. Full React rewrite (only
+  if it earns its keep — low frequency).
 
 ### Future Enhancements (captured, not scheduled)
 
