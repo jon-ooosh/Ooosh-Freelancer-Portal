@@ -2393,6 +2393,22 @@ replaced the dead manual requirement-add picker — templates + individual types
 - **Deploy requirement:** `HIREHOP_EXPORT_ID` (+ the stock-export `HIREHOP_EXPORT_KEY` value) must
   be set on the server `.env` — copy both from the retired ooosh-utilities Netlify env. The stock
   endpoint 502s with a clear message until they're set.
+- **Live config (confirmed Jun 2026, on prod `.env`):** `HIREHOP_EXPORT_ID=2346` (the NUMERIC id
+  only — NOT the full URL), `HIREHOP_EXPORT_KEY=3tsdqih9hpj9` (the stock-export key; the code prefers
+  a dedicated `HIREHOP_STOCK_EXPORT_KEY` and falls back to `HIREHOP_EXPORT_KEY`). `services/staging-stock.ts`
+  fetches `modules/stock/export_data.php?id=…&key=…&depot=1&cat=444&sidx=TITLE&sord=asc` — i.e. the
+  **STAGING parent category 444 with `depot=1`** (a no-cat or no-depot fetch returns a truncated/empty
+  list — proven during go-live). It then splits children by CATEGORY_ID (445 decks / 446 legs+hardware /
+  447 screwjacks / 448 accessories). `[Staging] export id=… returned N items` logs aid diagnosis.
+- **Asset cache-busting:** `staging-calculator.html` loads the JS/CSS with a manual `?v=N` query
+  (currently `?v=2.6`). **Bump it on every edit to `staging-calculator.{js,css}`** or browsers serve
+  the stale cached copy (cost us a confused deploy — new code on server, old code in browser).
+- **⚠️ OUTSTANDING — gaffa tape not landing in HireHop.** The DJM900 bug is fixed (no longer pushes
+  `b740`), but ticking the tape now pushes `s740` and **nothing appears in HH (no error)**. The `s`
+  (sale/consumable) prefix is unconfirmed and HireHop may be silently ignoring it. Push handler logs
+  `[Staging] push job N itemsMap: {…}` + `save_job response: {…}` to diagnose — check whether `s740`
+  is in the map and what HH returns. Likely needs a different consumable addressing in `save_job.php`
+  (the `SALE_ITEM_PREFIX` knob in `routes/staging.ts`). Velcro tape #1013 has the same flag/risk.
 - **Deferred:** UX/UI polish of the (admittedly cramped) calculator layout — second pass once it's
   live and jon's clicked around. Portal surfacing of shared staging links. Full React rewrite (only
   if it earns its keep — low frequency).
