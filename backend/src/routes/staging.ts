@@ -276,7 +276,10 @@ router.post('/push', async (req: AuthRequest, res: Response) => {
     note += `\n${Object.keys(itemsMap).length} item types, ${totalQty} total pieces added.`;
     if (shareLink) note += `\n\n3D Stage Preview:\n${shareLink}`;
     note += `\n\nAdded: ${ts}`;
-    await hhBroker.get('/api/job_note.php', { job: hhJobNumber, note }, { priority: 'low' });
+    // notes_save.php (main_id/type) is the endpoint the original staging tool used and
+    // that works; /api/job_note.php 404s. POST via broker (token auto-added).
+    const noteResp = await hhBroker.post('/php_functions/notes_save.php', { main_id: hhJobNumber, type: 1, note }, { priority: 'low' });
+    if (!noteResp.success) console.warn('[Staging] job note post failed (non-fatal):', noteResp.error);
   } catch (noteErr) {
     console.warn('[Staging] job note failed (non-fatal):', noteErr);
   }
