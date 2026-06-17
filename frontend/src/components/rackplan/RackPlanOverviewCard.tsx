@@ -8,7 +8,20 @@ interface Props {
   refreshKey?: number;
 }
 
-interface Summary { hasPlan: boolean; nodeCount?: number; viewToken?: string }
+interface Summary { hasPlan: boolean; nodeCount?: number; viewToken?: string; updatedAt?: string; editedBy?: string | null }
+
+function relTime(iso?: string): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  const mins = Math.round((Date.now() - d.getTime()) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.round(hrs / 24);
+  if (days < 30) return `${days}d ago`;
+  return d.toLocaleDateString();
+}
 
 /**
  * Surfaces on Job Overview once a rack plan with content exists, so staff know
@@ -36,12 +49,17 @@ export default function RackPlanOverviewCard({ jobId, onEdit, refreshKey }: Prop
           <div className="text-sm font-medium text-gray-800">Rack Plan</div>
           <div className="text-xs text-gray-500">
             {summary.nodeCount} item{summary.nodeCount === 1 ? '' : 's'} laid out
+            {summary.updatedAt && (
+              <span className="text-gray-400">
+                {' · '}last edited {relTime(summary.updatedAt)}{summary.editedBy ? ` by ${summary.editedBy}` : ''}
+              </span>
+            )}
           </div>
         </div>
       </div>
       <div className="flex items-center gap-2 shrink-0">
         {summary.viewToken && (
-          <a className="text-xs text-ooosh-600 hover:underline"
+          <a className="px-3 py-1.5 text-sm rounded border border-ooosh-200 text-ooosh-700 hover:bg-ooosh-50"
             href={`/rack/${summary.viewToken}`} target="_blank" rel="noreferrer">View-only link ↗</a>
         )}
         <button onClick={onEdit}

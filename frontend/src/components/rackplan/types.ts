@@ -34,7 +34,7 @@ export interface RackStackItem {
   front_photo_key?: string | null;
 }
 
-export type RackNodeType = 'built_here' | 'pre_built' | 'loose';
+export type RackNodeType = 'built_here' | 'pre_built' | 'loose' | 'text';
 
 /** A node on the canvas (saved in rack_plans.layout). */
 export interface RackNode {
@@ -44,6 +44,8 @@ export interface RackNode {
   y: number;
   label: string;
   notes?: string;
+  /** Optional accent/border colour (hex) to group/distinguish elements. */
+  color?: string | null;
   /** For pre_built / loose nodes — the HireHop row they represent. */
   hh_item_id?: number;
   hh_list_id?: number;

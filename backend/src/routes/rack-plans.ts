@@ -240,7 +240,12 @@ router.get('/summary/:jobId', async (req: AuthRequest, res: Response) => {
     return;
   }
   const result = await query(
-    `SELECT view_token, layout FROM rack_plans WHERE job_id = $1`,
+    `SELECT p.view_token, p.layout, p.updated_at,
+            TRIM(COALESCE(pe.first_name, '') || ' ' || COALESCE(pe.last_name, '')) AS edited_by
+       FROM rack_plans p
+       LEFT JOIN users u ON u.id = p.updated_by
+       LEFT JOIN people pe ON pe.id = u.person_id
+      WHERE p.job_id = $1`,
     [jobId],
   );
   if (result.rows.length === 0) {
@@ -249,7 +254,12 @@ router.get('/summary/:jobId', async (req: AuthRequest, res: Response) => {
   }
   const row = result.rows[0];
   const nodeCount = Array.isArray(row.layout?.nodes) ? row.layout.nodes.length : 0;
-  res.json({ data: { hasPlan: nodeCount > 0, nodeCount, viewToken: row.view_token } });
+  res.json({
+    data: {
+      hasPlan: nodeCount > 0, nodeCount, viewToken: row.view_token,
+      updatedAt: row.updated_at, editedBy: row.edited_by || null,
+    },
+  });
 });
 
 // PUT /:id — save the layout document.
@@ -275,10 +285,11 @@ router.put('/:id', validate(layoutSchema), async (req: AuthRequest, res: Respons
     `UPDATE rack_plans
         SET layout = $1,
             title = COALESCE($2, title),
+            updated_by = $3,
             updated_at = NOW()
-      WHERE id = $3
+      WHERE id = $4
       RETURNING id, updated_at`,
-    [JSON.stringify(layout), title ?? null, id],
+    [JSON.stringify(layout), title ?? null, req.user?.id ?? null, id],
   );
   if (result.rows.length === 0) {
     res.status(404).json({ error: 'Plan not found' });

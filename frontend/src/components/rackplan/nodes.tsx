@@ -4,12 +4,13 @@ import { RackNode, RackStackItem } from './types';
 import { RackPlanCtx } from './context';
 import { packStackRows, computeUsedU } from './stack-utils';
 
-/** Pixels per rack U in the built-here stack rendering. */
-export const U_PX = 32;
-/** Standalone nodes (pre-built + loose) match the built-here rack width exactly (w-60). */
-const STANDALONE_W = 'w-60';
+/** Pixels per rack U. ~26 keeps front-panel photos close to true rack proportion. */
+export const U_PX = 26;
+/** All standalone + rack nodes share one exact width so the plot lines up. */
+const NODE_W = 240;
+const PALETTE = ['#ef4444', '#f59e0b', '#10b981', '#3b82f6', '#8b5cf6', '#ec4899'];
 
-export type RackFlowNode = Node<{ node: RackNode }, 'built_here' | 'pre_built' | 'loose'>;
+export type RackFlowNode = Node<{ node: RackNode }, 'built_here' | 'pre_built' | 'loose' | 'text'>;
 
 function useActions() {
   const ctx = useContext(RackPlanCtx);
@@ -18,15 +19,7 @@ function useActions() {
 }
 
 const baseHandle = { width: 9, height: 9, background: '#6b7280' };
-const selRing = (selected: boolean) =>
-  selected ? 'ring-2 ring-ooosh-500 border-ooosh-400' : 'border-gray-300';
 
-/**
- * Four connectable points per node. In read-only they're invisible (opacity 0)
- * but STILL rendered as normal source handles so existing edges anchor to them.
- * (Hiding them via isConnectable=false stops react-flow measuring them, which
- * dropped the lines from the client view.)
- */
 function NodeHandles() {
   const { readOnly } = useActions();
   const style = readOnly ? { ...baseHandle, opacity: 0 } : baseHandle;
@@ -40,23 +33,44 @@ function NodeHandles() {
   );
 }
 
+/** Swatch row to set a node's accent/border colour (editor, when selected). */
+function NodeColorBar({ id }: { id: string }) {
+  const { setColor, readOnly } = useActions();
+  if (readOnly || !setColor) return null;
+  return (
+    <div className="nodrag flex items-center gap-1 px-1.5 py-1 border-t border-gray-200/60">
+      {PALETTE.map((c) => (
+        <button key={c} style={{ background: c }} className="w-3.5 h-3.5 rounded-full border border-white shadow-sm"
+          onClick={(e) => { e.stopPropagation(); setColor(id, c); }} title="Border colour" />
+      ))}
+      <button className="w-3.5 h-3.5 rounded-full border border-gray-300 bg-white text-[8px] leading-none text-gray-400"
+        onClick={(e) => { e.stopPropagation(); setColor(id, null); }} title="No colour">✕</button>
+    </div>
+  );
+}
+
+const ringFor = (selected: boolean) => (selected ? 'ring-2 ring-ooosh-500' : '');
+const rootStyle = (color?: string | null) => ({ width: NODE_W, ...(color ? { borderColor: color } : {}) });
+
 // ── Pre-built (opaque package) ──────────────────────────────────────────────
 export const PreBuiltNode = memo(({ id, data, selected }: NodeProps<RackFlowNode>) => {
-  const { removeNode, readOnly, photoUrl, requestPhoto } = useActions();
+  const { removeNode, renameNode, readOnly, photoUrl, requestPhoto } = useActions();
   const node = data.node;
   const listId = node.hh_list_id ?? 0;
   const url = listId > 0 ? photoUrl?.(listId) : undefined;
   return (
-    <div className={`rounded-md border-2 bg-purple-50 shadow-sm ${STANDALONE_W} ${selRing(!!selected)} overflow-hidden`}>
+    <div style={rootStyle(node.color)} className={`rounded-md border-2 border-gray-300 bg-purple-50 shadow-sm overflow-hidden ${ringFor(!!selected)}`}>
       <NodeHandles />
       <div className="flex items-start justify-between gap-1 px-2 py-1.5">
-        <div className="text-xs font-semibold text-purple-900 leading-tight">{node.label}</div>
+        <div className="text-xs font-semibold text-purple-900 leading-tight"
+          onDoubleClick={(e) => { if (!readOnly) { e.stopPropagation(); renameNode?.(id); } }}
+          title={readOnly ? undefined : 'Double-click to rename'}>{node.label}</div>
         {!readOnly && (
           <button className="nodrag text-gray-400 hover:text-red-600 text-xs leading-none"
             onClick={() => removeNode(id)} title="Remove from plan">✕</button>
         )}
       </div>
-      {url && <img src={url} alt="" className="w-full h-24 object-cover" draggable={false} />}
+      {url && <div className="bg-gray-900"><img src={url} alt="" className="w-full h-24 object-contain" draggable={false} /></div>}
       <div className="flex items-center justify-between px-2 pb-2 pt-1">
         <span className="text-[10px] uppercase tracking-wide text-purple-500">Pre-built unit</span>
         {!readOnly && requestPhoto && listId > 0 && (
@@ -66,6 +80,7 @@ export const PreBuiltNode = memo(({ id, data, selected }: NodeProps<RackFlowNode
         )}
       </div>
       {node.notes && <div className="px-2 pb-1.5 text-[10px] text-purple-700 italic line-clamp-3">📝 {node.notes}</div>}
+      {selected && <NodeColorBar id={id} />}
     </div>
   );
 });
@@ -73,23 +88,53 @@ PreBuiltNode.displayName = 'PreBuiltNode';
 
 // ── Loose element (label only) ──────────────────────────────────────────────
 export const LooseNode = memo(({ id, data, selected }: NodeProps<RackFlowNode>) => {
-  const { removeNode, readOnly } = useActions();
+  const { removeNode, renameNode, readOnly } = useActions();
   const node = data.node;
   return (
-    <div className={`rounded-md border bg-white shadow-sm ${STANDALONE_W} ${selRing(!!selected)}`}>
+    <div style={rootStyle(node.color)} className={`rounded-md border-2 border-gray-300 bg-white shadow-sm ${ringFor(!!selected)}`}>
       <NodeHandles />
       <div className="flex items-start justify-between gap-1 px-2 py-1.5">
-        <div className="text-xs font-medium text-gray-800 leading-tight">{node.label}</div>
+        <div className="text-xs font-medium text-gray-800 leading-tight"
+          onDoubleClick={(e) => { if (!readOnly) { e.stopPropagation(); renameNode?.(id); } }}
+          title={readOnly ? undefined : 'Double-click to rename'}>{node.label}</div>
         {!readOnly && (
           <button className="nodrag text-gray-400 hover:text-red-600 text-xs leading-none"
             onClick={() => removeNode(id)} title="Remove from plan">✕</button>
         )}
       </div>
       {node.notes && <div className="px-2 pb-1.5 text-[10px] text-gray-500 italic line-clamp-3">📝 {node.notes}</div>}
+      {selected && <NodeColorBar id={id} />}
     </div>
   );
 });
 LooseNode.displayName = 'LooseNode';
+
+// ── Free-text note node ─────────────────────────────────────────────────────
+export const TextNode = memo(({ id, data, selected }: NodeProps<RackFlowNode>) => {
+  const { removeNode, setText, readOnly } = useActions();
+  const node = data.node;
+  return (
+    <div style={rootStyle(node.color)} className={`rounded-md border-2 border-amber-300 bg-amber-50 shadow-sm ${ringFor(!!selected)}`}>
+      <NodeHandles />
+      <div className="flex items-center justify-between px-2 py-1">
+        <span className="text-[10px] uppercase tracking-wide text-amber-600">Note</span>
+        {!readOnly && (
+          <button className="nodrag text-gray-400 hover:text-red-600 text-xs leading-none"
+            onClick={() => removeNode(id)} title="Remove note">✕</button>
+        )}
+      </div>
+      {readOnly ? (
+        <div className="px-2 pb-2 text-xs text-gray-800 whitespace-pre-wrap">{node.label}</div>
+      ) : (
+        <textarea value={node.label} rows={3} placeholder="Type a note…"
+          onChange={(e) => setText?.(id, e.target.value)}
+          className="nodrag w-full text-xs px-2 pb-2 bg-transparent resize-y outline-none" />
+      )}
+      {selected && <NodeColorBar id={id} />}
+    </div>
+  );
+});
+TextNode.displayName = 'TextNode';
 
 // ── A single U-stack cell (fills its wrapper; wrapper sets the width) ────────
 function StackCell({
@@ -106,7 +151,11 @@ function StackCell({
   const url = photoUrl?.(item.hh_list_id);
   return (
     <div className="relative flex flex-col justify-center px-1.5 min-w-0 h-full w-full overflow-hidden">
-      {url && <img src={url} alt="" className="absolute inset-0 w-full h-full object-cover" draggable={false} />}
+      {url && (
+        <div className="absolute inset-0 bg-gray-900">
+          <img src={url} alt="" className="w-full h-full object-contain" draggable={false} />
+        </div>
+      )}
       {url ? (
         <div className="relative z-10 self-start max-w-full bg-black/55 text-white rounded px-1 py-0.5 mr-5">
           <span className="text-[9px] font-medium truncate block">{item.label} · {uTag}</span>
@@ -147,7 +196,7 @@ function StackCell({
 
 // ── Built-here case (U-stack interior) ──────────────────────────────────────
 export const BuiltHereNode = memo(({ id, data, selected }: NodeProps<RackFlowNode>) => {
-  const { removeNode, selectNode, moveStackItem, removeStackItem, setCapacity, readOnly } = useActions();
+  const { removeNode, selectNode, renameNode, moveStackItem, removeStackItem, setCapacity, readOnly } = useActions();
   const node = data.node;
   const items = node.items ?? [];
   const rows = packStackRows(items);
@@ -158,13 +207,15 @@ export const BuiltHereNode = memo(({ id, data, selected }: NodeProps<RackFlowNod
   const lastIndex = items.length - 1;
 
   return (
-    <div className={`rounded-md border-2 bg-gray-900 shadow-md w-60 ${selRing(!!selected)}`}
+    <div style={rootStyle(node.color)} className={`rounded-md border-2 border-gray-300 bg-gray-900 shadow-md ${ringFor(!!selected)}`}
       onClick={() => !readOnly && selectNode(id)}>
       <NodeHandles />
 
       {/* Header */}
       <div className="flex items-center justify-between gap-1 px-2 py-1.5 bg-gray-800 rounded-t">
-        <div className="text-xs font-semibold text-white leading-tight truncate flex-1">{node.label}</div>
+        <div className="text-xs font-semibold text-white leading-tight truncate flex-1"
+          onDoubleClick={(e) => { if (!readOnly) { e.stopPropagation(); renameNode?.(id); } }}
+          title={readOnly ? undefined : 'Double-click to rename'}>{node.label}</div>
         <div className="flex items-center gap-1 shrink-0">
           {readOnly ? (
             <span className="text-[10px] text-gray-300">{cap !== null ? `${cap}U` : ''}</span>
@@ -227,6 +278,7 @@ export const BuiltHereNode = memo(({ id, data, selected }: NodeProps<RackFlowNod
       </div>
 
       {node.notes && <div className="px-2 pb-1.5 text-[10px] text-gray-300 italic line-clamp-3">📝 {node.notes}</div>}
+      {selected && <NodeColorBar id={id} />}
     </div>
   );
 });
@@ -236,4 +288,5 @@ export const rackNodeTypes = {
   built_here: BuiltHereNode,
   pre_built: PreBuiltNode,
   loose: LooseNode,
+  text: TextNode,
 };
