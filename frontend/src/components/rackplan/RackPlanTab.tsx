@@ -174,6 +174,19 @@ export default function RackPlanTab({ jobId }: Props) {
     },
     setColor: (nodeId, color) => updateNode(nodeId, (n) => ({ ...n, color })),
     setText: (nodeId, text) => updateNode(nodeId, (n) => ({ ...n, label: text })),
+    renameStackItem: (nodeId, index) => {
+      setRfNodes((nds) => nds.map((fn) => {
+        if (fn.id !== nodeId) return fn;
+        const items = [...(fn.data.node.items ?? [])];
+        const cur = items[index];
+        if (!cur) return fn;
+        const next = window.prompt('Item label', cur.label ?? '');
+        if (next === null) return fn;
+        items[index] = { ...cur, label: next };
+        return { ...fn, data: { node: { ...fn.data.node, items } } };
+      }));
+      setDirty(true);
+    },
     editEdge: (edgeId) => {
       setEdges((eds) => {
         const cur = eds.find((e) => e.id === edgeId);
@@ -349,7 +362,7 @@ export default function RackPlanTab({ jobId }: Props) {
         </div>
         <div className="flex items-center gap-3">
           {viewToken && (
-            <a className="text-xs text-ooosh-600 hover:underline"
+            <a className="px-3 py-1.5 text-sm rounded border border-ooosh-200 text-ooosh-700 hover:bg-ooosh-50"
               href={`/rack/${viewToken}`} target="_blank" rel="noreferrer">View-only link ↗</a>
           )}
           <button className="px-3 py-1.5 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50"
