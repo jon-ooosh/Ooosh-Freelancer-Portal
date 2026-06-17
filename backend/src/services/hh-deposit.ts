@@ -69,6 +69,11 @@ export interface PushDepositOpts {
   paymentReference?: string | null;
   paymentType: 'deposit' | 'balance' | 'excess' | 'refund' | 'excess_refund' | 'other';
   notes?: string | null;
+  // When set, this exact HireHop bank account ID is used instead of mapping from
+  // paymentMethod. Used by the Combine-bookings reallocation so the recreated
+  // deposit lands on the SAME bank as the original (clean Xero wash). Falls back
+  // to getHHBankId(paymentMethod) when omitted.
+  bankId?: number;
 }
 
 export interface PushDepositResult {
@@ -117,7 +122,7 @@ export async function pushDepositToHH(opts: PushDepositOpts): Promise<PushDeposi
     const description = `${hhJobNumber} - ${typeLabel}`;
     const memo = `${typeLabel.charAt(0).toUpperCase() + typeLabel.slice(1)} ${formattedDate} via ${methodLabel}${paymentReference ? ` (Ref: ${paymentReference})` : ''}${notes ? ` — ${notes}` : ''} (recorded via Ooosh OP)`;
 
-    const hhBankId = getHHBankId(paymentMethod);
+    const hhBankId = opts.bankId ?? getHHBankId(paymentMethod);
     const depositParams: Record<string, unknown> = {
       ID: 0, // 0 = create new
       DATE: currentDate,
@@ -186,4 +191,116 @@ export async function pushDepositToHH(opts: PushDepositOpts): Promise<PushDeposi
     console.error('[hh-deposit] HH deposit write-back failed:', reason);
     return { hhDepositId: null, xeroSynced: false, error: reason };
   }
+}
+
+export interface ReverseDepositOpts {
+  hhJobNumber: number;            // HH job the deposit currently sits on
+  amount: number;                 // GBP, positive — posted as a NEGATIVE deposit
+  bankId: number;                 // exact HH bank account the original used
+  movedToHhJob: number;           // survivor HH job (for the memo)
+  notes?: string | null;
+}
+
+/**
+ * Post a NEGATIVE (refund-shaped) deposit on the absorbed job to re-attribute a
+ * deposit away from it — the "out" leg of a Combine-bookings deposit move. The
+ * matching "in" leg is a normal pushDepositToHH on the survivor with the same
+ * bankId. The two net to zero cash; this just moves which HireHop job (and thus
+ * which Xero job tracking) the deposit is recognised against.
+ *
+ * Deliberately NOT a real refund: same bank, same day, paired with an equal
+ * positive on the survivor — an accountant sees a clean re-attribution wash.
+ * No client email fires (HH/Xero accounting only).
+ */
+export async function reverseDepositOnHH(opts: ReverseDepositOpts): Promise<PushDepositResult> {
+  const { hhJobNumber, amount, bankId, movedToHhJob, notes } = opts;
+
+  try {
+    let hhClientId: number | null = null;
+    try {
+      const jobDataRes = await hhBroker.get<Record<string, any>>(
+        '/api/job_data.php', { job: hhJobNumber }, { priority: 'high', cacheTTL: 60 }
+      );
+      if (jobDataRes.success && jobDataRes.data) {
+        hhClientId = (jobDataRes.data as any).CLIENT_ID || (jobDataRes.data as any).client_id || null;
+      }
+    } catch { /* non-fatal */ }
+
+    const currentDate = new Date().toISOString().split('T')[0];
+    const formattedDate = new Date().toLocaleDateString('en-GB', {
+      day: '2-digit', month: '2-digit', year: 'numeric',
+    });
+    const description = `${hhJobNumber} - deposit reallocated to job ${movedToHhJob}`;
+    const memo = `Deposit reallocated to job #${movedToHhJob} (bookings combined) ${formattedDate}${notes ? ` — ${notes}` : ''} (via Ooosh OP)`;
+
+    const depositParams: Record<string, unknown> = {
+      ID: 0,
+      DATE: currentDate,
+      DESCRIPTION: description,
+      AMOUNT: -Math.abs(amount),   // negative = re-attribution out
+      MEMO: memo,
+      ACC_ACCOUNT_ID: bankId,
+      ACC_PACKAGE_ID: 3,
+      'CURRENCY[CODE]': 'GBP',
+      'CURRENCY[NAME]': 'United Kingdom Pound',
+      'CURRENCY[SYMBOL]': '£',
+      'CURRENCY[DECIMALS]': 2,
+      'CURRENCY[MULTIPLIER]': 1,
+      'CURRENCY[NEGATIVE_FORMAT]': 1,
+      'CURRENCY[SYMBOL_POSITION]': 0,
+      'CURRENCY[DECIMAL_SEPARATOR]': '.',
+      'CURRENCY[THOUSAND_SEPARATOR]': ',',
+      JOB_ID: hhJobNumber,
+      CLIENT_ID: hhClientId || '',
+      local: new Date().toISOString().replace('T', ' ').substring(0, 19),
+      tz: 'Europe/London',
+      no_webhook: 1,
+    };
+
+    console.log('[hh-deposit] Reversing £' + amount, 'deposit on HH job', hhJobNumber, '→', movedToHhJob);
+    const hhResult = await hhBroker.post('/php_functions/billing_deposit_save.php', depositParams, { priority: 'high' });
+
+    if (!hhResult.success || !hhResult.data) {
+      const reason = hhResult.error || 'HireHop returned no data';
+      console.error('[hh-deposit] HH deposit reversal failed:', reason, hhResult.data);
+      return { hhDepositId: null, xeroSynced: false, error: reason };
+    }
+
+    const data = hhResult.data as any;
+    const hhDepositId = data.hh_id || data.id || data.ID || null;
+    if (!hhDepositId) {
+      const reason = `HireHop accepted the reversal but returned no ID (response keys: ${Object.keys(data).join(', ') || 'none'})`;
+      console.error('[hh-deposit]', reason);
+      return { hhDepositId: null, xeroSynced: false, error: reason };
+    }
+
+    let xeroSynced = false;
+    try {
+      const syncResult = await hhBroker.post('/php_functions/accounting/tasks.php', {
+        hh_package_type: 1, hh_acc_package_id: 3, hh_task: 'post_deposit',
+        hh_id: hhDepositId, hh_acc_id: '',
+      }, { priority: 'high' });
+      xeroSynced = syncResult.success;
+    } catch (syncError) {
+      console.error('[hh-deposit] Xero sync trigger failed (non-fatal):', syncError);
+    }
+
+    return { hhDepositId, xeroSynced, error: null };
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    console.error('[hh-deposit] HH deposit reversal failed:', reason);
+    return { hhDepositId: null, xeroSynced: false, error: reason };
+  }
+}
+
+// Inverse of HH_BANK_IDS — pick a canonical OP method key for a given HH bank
+// account ID, so a deposit read back from HH billing (which only carries the
+// bank ID) can be recreated/labelled. Where several methods share a bank
+// (wise_bacs/rolled_over → 265), the canonical "real payment" method wins.
+export function getMethodForBankId(bankId: number): string {
+  const map: Record<number, string> = {
+    267: 'stripe_gbp', 169: 'worldpay', 165: 'amex', 265: 'wise_bacs',
+    168: 'till_cash', 173: 'paypal', 170: 'lloyds_bank',
+  };
+  return map[bankId] || 'worldpay';
 }
