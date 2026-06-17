@@ -8,11 +8,14 @@ import {
   applyEdgeChanges,
   addEdge,
   type NodeChange,
+  type NodePositionChange,
+  type Node,
   type EdgeChange,
   type Edge,
   type Connection,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
+import { getHelperLines, HelperLines } from './helper-lines';
 import { api } from '../../services/api';
 import {
   ClassifiedRackItem,
@@ -54,6 +57,8 @@ export default function RackPlanTab({ jobId }: Props) {
   const [hint, setHint] = useState<string | null>(null);
   const [uploadedPhotos, setUploadedPhotos] = useState<Record<number, string>>({});
   const [photoEditMode, setPhotoEditMode] = useState(false);
+  const [helperLineH, setHelperLineH] = useState<number | undefined>(undefined);
+  const [helperLineV, setHelperLineV] = useState<number | undefined>(undefined);
   const photoInputRef = useRef<HTMLInputElement>(null);
   const pendingPhotoListId = useRef<number | null>(null);
 
@@ -66,7 +71,7 @@ export default function RackPlanTab({ jobId }: Props) {
         if (cancelled) return;
         const d = res.data;
         setPlanId(d.plan.id);
-        setViewToken(d.plan.viewToken);
+        setViewToken(d.plan.slug ?? d.plan.viewToken);
         setPicker(d.picker);
         setRfNodes((d.plan.layout?.nodes ?? []).map(toFlowNode));
         setEdges((d.plan.layout?.arrows ?? []).map((a) => ({
@@ -201,9 +206,20 @@ export default function RackPlanTab({ jobId }: Props) {
   }), [selectedNodeId, updateNode, photoUrl, requestPhoto, isMissing, photoEditMode]);
 
   const onNodesChange = useCallback((changes: NodeChange<RackFlowNode>[]) => {
+    setHelperLineH(undefined);
+    setHelperLineV(undefined);
+    // Single-node drag → snap to alignment with other nodes + show guide lines.
+    const first = changes[0];
+    if (changes.length === 1 && first.type === 'position' && first.dragging && first.position) {
+      const lines = getHelperLines(first as NodePositionChange, rfNodes as Node[]);
+      first.position.x = lines.snapPosition.x ?? first.position.x;
+      first.position.y = lines.snapPosition.y ?? first.position.y;
+      setHelperLineH(lines.horizontal);
+      setHelperLineV(lines.vertical);
+    }
     setRfNodes((nds) => applyNodeChanges(changes, nds));
     if (changes.some((c) => c.type === 'position' || c.type === 'remove')) setDirty(true);
-  }, []);
+  }, [rfNodes]);
 
   const onEdgesChange = useCallback((changes: EdgeChange<Edge>[]) => {
     setEdges((eds) => applyEdgeChanges(changes, eds));
@@ -399,14 +415,13 @@ export default function RackPlanTab({ jobId }: Props) {
               connectionMode={ConnectionMode.Loose}
               nodeTypes={rackNodeTypes}
               edgeTypes={rackEdgeTypes}
-              snapToGrid
-              snapGrid={[16, 16]}
               onSelectionChange={({ nodes }) => setSelectedNodeId(nodes[0]?.id ?? null)}
               fitView
               proOptions={{ hideAttribution: true }}
             >
               <Background />
               <Controls />
+              <HelperLines horizontal={helperLineH} vertical={helperLineV} />
             </ReactFlow>
           </RackPlanCtx.Provider>
         </div>

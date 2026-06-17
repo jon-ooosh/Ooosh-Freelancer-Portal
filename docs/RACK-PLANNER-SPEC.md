@@ -301,19 +301,30 @@ Backend `routes/rack-plans.ts` + `services/rack-classify.ts`; frontend
   (editor + client). `object-contain` on dark backing = true aspect, no crop.
 - ✅ **View-only page** `/rack/:token` (login-free, outside Layout): read-only
   canvas, Ooosh logo + job/HH header, "show labels" toggle, subtle line grid.
+  **Short eyeball-friendly URL** via a `slug` (migration 125; `/rack/<slug>`,
+  long `view_token` still resolves for backward compat — public endpoint matches
+  `slug OR view_token`).
+- ✅ **Drift display** (§3.6) — placed item removed from HH renders a red
+  "⚠ removed from job" band **holding its U-slot** (+ red strip on standalone
+  nodes); red + amber **banners** above the canvas count removed / on-job-unplaced
+  items (the loom-catcher). Live in editor (computed vs current picker) and
+  client view (from backend `drift.removed`). **Gotcha fixed:** standalone nodes
+  must check `hh_item_id` (per-job ROW id), NOT `hh_list_id` (stock id) — the
+  drift set is row-ids; mixing them flagged everything as removed.
+- ✅ **Editable labels** everywhere — double-click a node header OR a U-item in a
+  rack to override the HireHop name (plan-side display only; never written back).
+- ✅ **Alignment guides** — react-flow helper-lines (`helper-lines.tsx`): drag a
+  node and it snaps to other nodes' edges with a purple guide line (replaced the
+  earlier grid-snap).
+- ✅ **Photo edit-mode toggle** — per-item 📷 controls are OFF by default
+  (opt-in via the "⚙️ Photos" toolbar toggle) so staff can't accidentally
+  overwrite a photo.
 
-**Remaining roadmap:**
-- ⏳ **Drift DISPLAY (frontend)** — the backend already returns `drift`
-  (`removed` ids + `unplaced` pickable items). Still to build per §3.6: red
-  shape holding a removed racked item's U-slot, the quiet "N removed" line, and
-  the explicit **"on job, unplaced" bucket** in the picker. This is the main
-  unbuilt piece.
+**Migrations:** 123 (tables), 124 (`updated_by`), 125 (`slug`).
+
+**Remaining (optional polish only — spec is fully delivered):**
 - ⏳ Proportional **pre-built** node sizing (size the opaque package to its own U
-  height — needs a U height seeded on the package).
-- ⏳ Per-**U-item** label override (node labels are editable; stack-item labels
-  aren't yet).
-- ⏳ Nice-to-have: react-flow alignment **helper-lines** (snap-to-other-node
-  guides) beyond grid snap.
+  height — needs a U height seeded on the package). Not spec-required.
 
 ## 11. Learnings / gotchas (carve these in)
 

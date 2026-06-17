@@ -55,6 +55,16 @@ const photoUpload = multer({
   limits: { fileSize: 10 * 1024 * 1024 },
 });
 
+/** Mint a short, unique, url-safe slug for the view-only link. */
+async function mintRackSlug(): Promise<string> {
+  for (let i = 0; i < 6; i++) {
+    const slug = randomBytes(6).toString('base64url'); // 8 url-safe chars
+    const exists = await query('SELECT 1 FROM rack_plans WHERE slug = $1', [slug]);
+    if (exists.rows.length === 0) return slug;
+  }
+  return randomBytes(9).toString('base64url'); // longer fallback on repeated collisions
+}
+
 interface RackPlanRow {
   id: string;
   job_id: string;
@@ -146,7 +156,7 @@ router.get('/public/:token', publicLimiter, async (req: Request, res: Response) 
             j.line_items, j.job_name
        FROM rack_plans p
        JOIN jobs j ON j.id = p.job_id
-      WHERE p.view_token = $1`,
+      WHERE p.slug = $1 OR p.view_token = $1`,
     [token],
   );
   if (result.rows.length === 0) {
@@ -195,21 +205,28 @@ router.get('/by-job/:jobId', async (req: AuthRequest, res: Response) => {
 
   // Get-or-create the plan (one per job).
   let planResult = await query(
-    `SELECT id, job_id, hh_job_number, title, view_token, layout, updated_at
+    `SELECT id, job_id, hh_job_number, title, view_token, slug, layout, updated_at
        FROM rack_plans WHERE job_id = $1`,
     [jobId],
   );
   if (planResult.rows.length === 0) {
     const token = randomBytes(24).toString('hex');
+    const slug = await mintRackSlug();
     planResult = await query(
-      `INSERT INTO rack_plans (job_id, hh_job_number, view_token, created_by)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO rack_plans (job_id, hh_job_number, view_token, slug, created_by)
+       VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (job_id) DO UPDATE SET updated_at = NOW()
-       RETURNING id, job_id, hh_job_number, title, view_token, layout, updated_at`,
-      [jobId, job.hh_job_number ?? null, token, req.user?.id ?? null],
+       RETURNING id, job_id, hh_job_number, title, view_token, slug, layout, updated_at`,
+      [jobId, job.hh_job_number ?? null, token, slug, req.user?.id ?? null],
     );
   }
-  const plan = planResult.rows[0] as RackPlanRow;
+  let plan = planResult.rows[0] as RackPlanRow & { slug: string | null };
+  // Backfill a slug for any pre-existing plan that doesn't have one yet.
+  if (!plan.slug) {
+    const slug = await mintRackSlug();
+    const upd = await query(`UPDATE rack_plans SET slug = $1 WHERE id = $2 RETURNING slug`, [slug, plan.id]);
+    plan = { ...plan, slug: upd.rows[0]?.slug ?? slug };
+  }
 
   const classified = await attachPhotos(classifyJob(job.line_items));
   const drift = computeDrift(plan.layout, classified);
@@ -222,6 +239,7 @@ router.get('/by-job/:jobId', async (req: AuthRequest, res: Response) => {
         hhJobNumber: plan.hh_job_number,
         title: plan.title,
         viewToken: plan.view_token,
+        slug: plan.slug,
         layout: plan.layout,
         updatedAt: plan.updated_at,
       },
@@ -240,7 +258,7 @@ router.get('/summary/:jobId', async (req: AuthRequest, res: Response) => {
     return;
   }
   const result = await query(
-    `SELECT p.view_token, p.layout, p.updated_at,
+    `SELECT p.view_token, p.slug, p.layout, p.updated_at,
             TRIM(COALESCE(pe.first_name, '') || ' ' || COALESCE(pe.last_name, '')) AS edited_by
        FROM rack_plans p
        LEFT JOIN users u ON u.id = p.updated_by
@@ -256,7 +274,7 @@ router.get('/summary/:jobId', async (req: AuthRequest, res: Response) => {
   const nodeCount = Array.isArray(row.layout?.nodes) ? row.layout.nodes.length : 0;
   res.json({
     data: {
-      hasPlan: nodeCount > 0, nodeCount, viewToken: row.view_token,
+      hasPlan: nodeCount > 0, nodeCount, viewToken: row.view_token, slug: row.slug || row.view_token,
       updatedAt: row.updated_at, editedBy: row.edited_by || null,
     },
   });

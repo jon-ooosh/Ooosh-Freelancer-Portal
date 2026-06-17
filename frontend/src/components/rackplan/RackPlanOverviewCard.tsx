@@ -8,7 +8,7 @@ interface Props {
   refreshKey?: number;
 }
 
-interface Summary { hasPlan: boolean; nodeCount?: number; viewToken?: string; updatedAt?: string; editedBy?: string | null }
+interface Summary { hasPlan: boolean; nodeCount?: number; viewToken?: string; slug?: string; updatedAt?: string; editedBy?: string | null }
 
 function relTime(iso?: string): string {
   if (!iso) return '';
@@ -58,9 +58,9 @@ export default function RackPlanOverviewCard({ jobId, onEdit, refreshKey }: Prop
         </div>
       </div>
       <div className="flex items-center gap-2 shrink-0">
-        {summary.viewToken && (
+        {(summary.slug || summary.viewToken) && (
           <a className="px-3 py-1.5 text-sm rounded border border-ooosh-200 text-ooosh-700 hover:bg-ooosh-50"
-            href={`/rack/${summary.viewToken}`} target="_blank" rel="noreferrer">View-only link ↗</a>
+            href={`/rack/${summary.slug || summary.viewToken}`} target="_blank" rel="noreferrer">View-only link ↗</a>
         )}
         <button onClick={onEdit}
           className="px-3 py-1.5 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700">Edit rack plan</button>
