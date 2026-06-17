@@ -82,6 +82,7 @@ export interface RackPlanResponse {
     hhJobNumber: number | null;
     title: string | null;
     viewToken: string;
+    slug?: string | null;
     layout: RackPlanLayout;
     updatedAt: string;
   };
