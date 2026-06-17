@@ -3480,78 +3480,27 @@ export default function JobDetailPage() {
               </div>
             )}
           </div>
-          <div className="flex flex-col items-end gap-2 flex-shrink-0 max-w-full">
-            <div className="flex items-center gap-2">
-              {/* Internal job toggle — mutes hire forms / excess / money
-                  tracking for garage visits, MOTs and our own vehicle
-                  movements. Crew & Transport stays live. */}
+          {/* Right-side controls — 2×2 grid so they stack neatly instead of
+              crowding the job title. Top row: Sync HH / Pre-Hire Review.
+              Bottom row: Combine / Mark Internal. (Open in HireHop dropped —
+              the #job-number on the left already links there.) Hidden cells
+              just reflow; grid stays tidy with 1–4 buttons. */}
+          <div className="grid grid-cols-2 gap-2 flex-shrink-0 w-full sm:w-[300px]">
+            {job.hh_job_number && (
               <button
-                onClick={toggleInternal}
-                disabled={internalToggling}
-                className={
-                  job.is_internal
-                    ? 'inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-slate-400 bg-slate-100 rounded-lg hover:bg-slate-200 text-slate-700 font-medium disabled:opacity-50 transition-colors'
-                    : 'inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-500 disabled:opacity-50 transition-colors'
-                }
-                title={
-                  job.is_internal
-                    ? 'Internal job — hire forms, excess and money tracking are muted (crew & transport unaffected). Click to revert to a normal client job.'
-                    : 'Mark as internal (garage visit, MOT, our own vehicle movement) — mutes hire form emails, excess and money tracking'
-                }
+                onClick={() => syncFromHireHop(true)}
+                disabled={hhSyncing}
+                className="w-full inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600 disabled:opacity-50 transition-colors"
+                title={hhLastSynced ? `Last synced: ${new Date(hhLastSynced).toLocaleTimeString()}` : 'Sync items from HireHop'}
               >
-                <span>🔧</span>
-                <span className="hidden sm:inline">
-                  {internalToggling ? 'Saving…' : job.is_internal ? 'Internal Job ✓' : 'Mark Internal'}
-                </span>
+                <svg className={`w-3.5 h-3.5 ${hhSyncing ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+                <span>{hhSyncing ? 'Syncing…' : 'Sync HH'}</span>
               </button>
-              {['admin', 'manager', 'weekend_manager'].includes(user?.role || '')
-                && !job.combined_into_job_id
-                && ['new_enquiry', 'quoting', 'paused', 'provisional', 'confirmed', 'prepped', 'prepping'].includes(job.pipeline_status || '') && (
-                <button
-                  onClick={() => setShowCombineModal(true)}
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600 transition-colors"
-                  title="Combine this booking with another pre-hire booking for the same client"
-                >
-                  <span>🔀</span>
-                  <span className="hidden sm:inline">Combine</span>
-                </button>
-              )}
-              {job.hh_job_number && (
-                <button
-                  onClick={() => syncFromHireHop(true)}
-                  disabled={hhSyncing}
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600 disabled:opacity-50 transition-colors"
-                  title={hhLastSynced ? `Last synced: ${new Date(hhLastSynced).toLocaleTimeString()}` : 'Sync items from HireHop'}
-                >
-                  <svg className={`w-3.5 h-3.5 ${hhSyncing ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                  </svg>
-                  <span className="hidden sm:inline">{hhSyncing ? 'Syncing...' : 'Sync HH'}</span>
-                </button>
-              )}
-              {hhJobUrl && (
-                <a
-                  href={hhJobUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600"
-                >
-                  Open in HireHop &rarr;
-                </a>
-              )}
-            </div>
-            {/* Pre-Hire Review — manual send to info@. Admin/manager only.
-                 Visibility whitelist: confirmed / prepping / prepped only.
-                 Provisional and earlier: review isn't meaningful yet.
-                 Dispatched (on hire) onwards: the hire's gone, review's done.
-                 The same content goes out automatically via the daily
-                 09:55 cron for confirmed jobs at T-3d / T-5d / T-1d.
-                 Visual state: faded grey when a recent send exists (within
-                 the last 24h) so staff can see at-a-glance it's been
-                 actioned. Still clickable — sometimes you want to resend.
-                 Sits on its own row beneath Sync HH / Open in HireHop so
-                 the optional "· last sent X" subtitle can't squash the
-                 job title on the left. */}
+            )}
+            {/* Pre-Hire Review — admin/manager only, confirmed/prepping/prepped.
+                Faded grey when sent within the last 24h (still clickable). */}
             {(user?.role === 'admin' || user?.role === 'manager')
               && (job.pipeline_status === 'confirmed'
                   || job.pipeline_status === 'prepping'
@@ -3564,8 +3513,8 @@ export default function JobDetailPage() {
                     disabled={briefingSending}
                     className={
                       sentRecently
-                        ? "hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 text-sm border border-gray-200 bg-gray-50 rounded-lg hover:bg-gray-100 text-gray-500 disabled:opacity-50 transition-colors"
-                        : "hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 text-sm border border-purple-300 rounded-lg hover:bg-purple-50 text-purple-700 disabled:opacity-50 transition-colors"
+                        ? "w-full inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-gray-200 bg-gray-50 rounded-lg hover:bg-gray-100 text-gray-500 disabled:opacity-50 transition-colors"
+                        : "w-full inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-purple-300 rounded-lg hover:bg-purple-50 text-purple-700 disabled:opacity-50 transition-colors"
                     }
                     title={
                       briefingLastSent
@@ -3576,13 +3525,42 @@ export default function JobDetailPage() {
                     {briefingSending
                       ? 'Sending…'
                       : sentRecently
-                        ? <>✓ Pre-Hire Review <span className="text-gray-400 text-xs ml-1">· sent {formatBriefingLastSent()}</span></>
-                        : briefingLastSent
-                          ? <>✉ Pre-Hire Review <span className="text-purple-400 text-xs ml-1">· last sent {formatBriefingLastSent()}</span></>
-                          : '✉ Pre-Hire Review'}
+                        ? '✓ Pre-Hire Review'
+                        : '✉ Pre-Hire Review'}
                   </button>
                 );
               })()}
+            {['admin', 'manager', 'weekend_manager'].includes(user?.role || '')
+              && !job.combined_into_job_id
+              && ['new_enquiry', 'quoting', 'paused', 'provisional', 'confirmed', 'prepped', 'prepping'].includes(job.pipeline_status || '') && (
+              <button
+                onClick={() => setShowCombineModal(true)}
+                className="w-full inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600 transition-colors"
+                title="Combine this booking with another pre-hire booking for the same client"
+              >
+                <span>🔀</span>
+                <span>Combine</span>
+              </button>
+            )}
+            {/* Internal job toggle — mutes hire forms / excess / money tracking
+                for garage visits, MOTs, own vehicle movements. Crew stays live. */}
+            <button
+              onClick={toggleInternal}
+              disabled={internalToggling}
+              className={
+                job.is_internal
+                  ? 'w-full inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-slate-400 bg-slate-100 rounded-lg hover:bg-slate-200 text-slate-700 font-medium disabled:opacity-50 transition-colors'
+                  : 'w-full inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-500 disabled:opacity-50 transition-colors'
+              }
+              title={
+                job.is_internal
+                  ? 'Internal job — hire forms, excess and money tracking are muted (crew & transport unaffected). Click to revert to a normal client job.'
+                  : 'Mark as internal (garage visit, MOT, our own vehicle movement) — mutes hire form emails, excess and money tracking'
+              }
+            >
+              <span>🔧</span>
+              <span>{internalToggling ? 'Saving…' : job.is_internal ? 'Internal Job ✓' : 'Mark Internal'}</span>
+            </button>
           </div>
         </div>
 

@@ -2410,6 +2410,7 @@ router.post(
         }
         const reverse = await reverseDepositOnHH({
           hhJobNumber: Number(absorbed.hh_job_number),
+          hhDepositId: dep.id,
           amount: dep.amount,
           bankId: dep.bankId,
           movedToHhJob: Number(survivor.hh_job_number),
