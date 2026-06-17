@@ -14,6 +14,12 @@ export interface RackPlanActions {
   removeStackItem: (nodeId: string, index: number) => void;
   /** Set a built-here node's U capacity (null/0 = ungated). */
   setCapacity: (nodeId: string, capacity: number | null) => void;
+  /** Rename a node's label (overrides the HireHop name). */
+  renameNode?: (nodeId: string) => void;
+  /** Set a node's accent/border colour (null clears). */
+  setColor?: (nodeId: string, color: string | null) => void;
+  /** Set a text node's content. */
+  setText?: (nodeId: string, text: string) => void;
   /** Edit / delete a connection (used by the custom edge). */
   editEdge?: (edgeId: string) => void;
   deleteEdge?: (edgeId: string) => void;

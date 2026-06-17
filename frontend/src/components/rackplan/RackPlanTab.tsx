@@ -153,6 +153,17 @@ export default function RackPlanTab({ jobId }: Props) {
     removeStackItem: (nodeId, index) =>
       updateNode(nodeId, (n) => ({ ...n, items: (n.items ?? []).filter((_, i) => i !== index) })),
     setCapacity: (nodeId, capacity) => updateNode(nodeId, (n) => ({ ...n, capacity_u: capacity })),
+    renameNode: (nodeId) => {
+      setRfNodes((nds) => nds.map((fn) => {
+        if (fn.id !== nodeId) return fn;
+        const next = window.prompt('Label', fn.data.node.label ?? '');
+        if (next === null) return fn;
+        return { ...fn, data: { node: { ...fn.data.node, label: next } } };
+      }));
+      setDirty(true);
+    },
+    setColor: (nodeId, color) => updateNode(nodeId, (n) => ({ ...n, color })),
+    setText: (nodeId, text) => updateNode(nodeId, (n) => ({ ...n, label: text })),
     editEdge: (edgeId) => {
       setEdges((eds) => {
         const cur = eds.find((e) => e.id === edgeId);
@@ -212,6 +223,14 @@ export default function RackPlanTab({ jobId }: Props) {
       hh_item_id: item.itemId, hh_list_id: item.listId, front_photo_key: item.frontPhotoKey,
     };
     setRfNodes((nds) => [...nds, toFlowNode(node)]);
+    setDirty(true);
+  }, [nextPos]);
+
+  const addTextNode = useCallback(() => {
+    const pos = nextPos();
+    const node: RackNode = { id: genId(), type: 'text', x: pos.x, y: pos.y, label: '' };
+    setRfNodes((nds) => [...nds, toFlowNode(node)]);
+    setSelectedNodeId(node.id);
     setDirty(true);
   }, [nextPos]);
 
@@ -291,6 +310,8 @@ export default function RackPlanTab({ jobId }: Props) {
         <div className="flex items-center gap-2">
           <button className="px-3 py-1.5 text-sm rounded bg-gray-800 text-white hover:bg-gray-700"
             onClick={() => addBuiltHereNode('Rack', null)}>+ New rack</button>
+          <button className="px-3 py-1.5 text-sm rounded border border-amber-300 text-amber-700 hover:bg-amber-50"
+            onClick={addTextNode}>+ Text</button>
           <button className="px-3 py-1.5 text-sm rounded border border-gray-300 text-gray-700 hover:bg-gray-100 disabled:opacity-50"
             onClick={refreshHH} disabled={refreshing}>{refreshing ? 'Refreshing…' : '↻ Refresh from HireHop'}</button>
           {hint && <span className="text-xs text-amber-600">{hint}</span>}

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import { ReactFlow, Background, Controls, ConnectionMode, type Edge } from '@xyflow/react';
+import { ReactFlow, Background, BackgroundVariant, Controls, ConnectionMode, type Edge } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { api } from '../services/api';
 import { rackNodeTypes, type RackFlowNode } from '../components/rackplan/nodes';
@@ -69,13 +69,16 @@ export default function RackPlanPublicPage() {
   return (
     <div className="h-screen w-screen flex flex-col">
       <div className="flex items-center justify-between px-4 py-2 border-b border-gray-200 bg-white shrink-0">
-        <div>
-          <div className="text-sm font-semibold text-gray-800">{data.title || 'Rack Plan'}</div>
-          <div className="text-xs text-gray-500">
-            {data.jobName}{data.hhJobNumber ? ` · #${data.hhJobNumber}` : ''}
+        <div className="flex items-center gap-3 min-w-0">
+          <img src="/ooosh-logo-full.svg" alt="Ooosh" className="h-8 shrink-0" />
+          <div className="min-w-0">
+            <div className="text-sm font-semibold text-gray-800 truncate">{data.title || 'Rack Plan'}</div>
+            <div className="text-xs text-gray-500 truncate">
+              {data.jobName}{data.hhJobNumber ? ` · #${data.hhJobNumber}` : ''}
+            </div>
           </div>
         </div>
-        <label className="flex items-center gap-1.5 text-xs text-gray-600">
+        <label className="flex items-center gap-1.5 text-xs text-gray-600 shrink-0">
           <input type="checkbox" checked={showLabels} onChange={(e) => setShowLabels(e.target.checked)} />
           Show connection labels
         </label>
@@ -94,7 +97,7 @@ export default function RackPlanPublicPage() {
             fitView
             proOptions={{ hideAttribution: true }}
           >
-            <Background />
+            <Background variant={BackgroundVariant.Lines} gap={36} color="#f1f5f9" />
             <Controls showInteractive={false} />
           </ReactFlow>
         </RackPlanCtx.Provider>
