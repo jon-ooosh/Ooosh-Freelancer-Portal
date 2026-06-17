@@ -1378,6 +1378,26 @@ Full cancellation workflow distinguishing **lost enquiries** (never confirmed) f
 - [ ] Early return calculator frontend integration (clause 7.3 — backend built, UI not yet)
 - [ ] Partial cancellation / scope reduction (deferred — noted for future)
 
+#### Combine Bookings (Jun 2026)
+
+Merge two **same-client pre-hire** bookings into one — the "client wants their two separate hires to become one continuous hire" case (e.g. 15–22 Jul + 29 Jul–1 Aug → 15 Jul–1 Aug). Technically a cancellation of one booking, but a no-fee one that works in our favour (van tied up longer = more charge), so it does NOT run the normal cancellation/fee/refund path. Migration **125** added `jobs.combined_into_job_id`.
+
+**Where:** "🔀 Combine" button in the Job Detail header (2×2 control grid: Sync HH / Pre-Hire Review on top, Combine / Mark Internal below). `MANAGER_ROLES`, pre-hire jobs only. Opens `CombineBookingsModal` — lists the same client's other pre-hire bookings (search fallback) → preview (kept / retired / combined dates / deposit-to-move + any blocks) → type-the-retired-HH-number to confirm.
+
+**Survivor (kept) booking is server-decided**, never the browser's call (`assessCombine` in `routes/pipeline.ts`): excess-holder wins (so the held excess never has to move), then status progression (confirmed > provisional > enquiry — an enquiry folds INTO a confirmed booking), then deposit-holder, then earlier start. The endpoint refuses if the call's `:id` ≠ the assessed survivor. If the survivor differs from where staff opened the modal, the frontend navigates there on success.
+
+**The deposit move is the only hard part** — HireHop has no "move deposit between jobs" and **rejects negative deposits** (a rejected row never reaches Xero — this was the first-cut bug). So each deposit is re-attributed the same way an excess reimbursement works: **recreate on the survivor first** (`pushDepositToHH` with explicit `bankId` = original bank), **then refund-against-the-original-deposit on the absorbed job** (`reverseDepositOnHH` → `billing_payments_save.php` with `deposit=<id>, OWNER=0, paid=<amount>` + `post_payment` Xero sync — NOT `billing_deposit_save.php`). Recreate-first ordering means a mid-failure double-counts the money (visible, recoverable) rather than losing it. Same bank + same day = a clean refund-out/receipt-in wash in Xero (stray lines reconcile trivially). **No client emails fire** — it's accounting only.
+
+**Sanity read-back:** after the move, `getNetHireDepositTotal(absorbedHhJob)` (in `services/hh-billing-deposits.ts`) re-reads the absorbed job's NET hire deposits (gross `kind=6` minus `kind=3` refund-against-deposit rows — a gross read would false-positive since the refund is a separate row). Residual > £0.01 → loud `hh_warnings` line telling staff exactly what to remove manually. The modal alerts any `hh_warnings`.
+
+**Eligibility blocks** (re-checked server-side, never trusted from the browser; clear message bounces to a manager): different clients, absorbed job invoiced, both holding real excess money, absorbed job has active transport/crew quotes, survivor not HH-linked, or either job past pre-hire.
+
+**Absorbed job retirement:** `pipeline_status='cancelled'` + `combined_into_job_id` set, £0 fee/£0 refund, `next_chase_date=NULL`; open requirements cancelled, vehicle assignments soft-cancelled (+ fleet status resync), derivation excess stubs (`needed`/`pending`, no money) waived; HH write-back status 9; timeline interactions both sides. Job Detail shows an **indigo "Combined into another booking → View"** banner (links to survivor) INSTEAD of the red cancelled banner (gated on `combined_into_job_id`). **Cancellation analytics must EXCLUDE `combined_into_job_id IS NOT NULL`** — these aren't lost revenue, the money moved sideways.
+
+**Endpoints** (`routes/pipeline.ts`): `GET /:id/combine-candidates` (picker list), `GET /:id/combine-preview?with=<id>` (eligibility + figures), `POST /:id/combine` (survivor = `:id`, `MANAGER_ROLES`). Helpers: `reverseDepositOnHH` + `getMethodForBankId` (`services/hh-deposit.ts`), `getJobBillingFacts` / `getNetHireDepositTotal` (`services/hh-billing-deposits.ts`), `CombineBookingsModal.tsx`.
+
+**Deferred:** moving a *held excess* across (combine forces survivor = excess-holder for now, so it never needs to); multi-deposit edge cases beyond the clean single-deposit hire; combining a job with active crew (blocked — move/cancel the quotes first).
+
 #### Lost / Cancelled cleanup pattern (28 Apr 2026)
 
 **Cross-cutting rule for ALL requirement types** — current and future. When a job moves to `lost` or `cancelled`, every open requirement on the job (reminders, hire forms, excess records, vehicle prep, backline, rehearsal, sub-hires, custom — anything in `job_requirements`) is auto-cancelled UNLESS the user has explicitly opted to keep it alive past close-out.
@@ -2347,9 +2367,85 @@ upgrades after first-live feedback that the chase/notify state was buried behind
 These are existing standalone tools that currently push to Monday.com. They need repointing to our status-transition API when ready (Step 5 above):
 
 - **Payment Portal** — Stripe payment processing, currently updates Monday.com. HIGH PRIORITY to repoint (after Steps 1-4).
-- **Staging Calculator** — stage/riser quoting tool (standalone, low priority)
-- **Backline Matcher** — match client requirements to inventory (standalone, low priority)
+- **Staging Calculator** — ✅ **INTEGRATED into OP (Jun 2026)** — see "Staging Calculator Integration" below.
+- **Backline Matcher** — match client requirements to inventory (standalone, lives in separate repo `jon-ooosh/alternative-hirehop-stock`). Next to integrate.
+- **PCN Manager** — penalty charge notice processing (standalone, separate repo `jon-ooosh/PCN-Management-System`). Next to integrate.
 - **Cold Lead Finder** — Ticketmaster API integration (standalone, low priority)
+
+#### Staging Calculator Integration (Jun 2026)
+
+Brought into OP from `ooosh-utilities` (was a static page + 4 Netlify functions). It had
+**zero Monday dependency** — purely HireHop-driven — so this was a host-it-in-OP job, not a
+Monday repoint.
+
+**Approach: embed, don't rewrite.** The calculator is ~114KB of working vanilla JS + a 42KB
+three.js 3D viewer. Rather than port to React, the static assets live in `frontend/public/`
+(`staging-calculator.{html,css,js}`, `stage-view.html`) and are served same-origin. It's
+launched in an **iframe modal** from the **Job Requirements → "🛠 Tools" dropdown** (which
+replaced the dead manual requirement-add picker — templates + individual types were never used;
+"+ Reminder" stayed). Same-origin means the embedded app reuses the OP staff JWT
+(`localStorage.ooosh_access_token`) and calls `/api/staging/*`.
+
+- **Backend:** `routes/staging.ts` (mounted `/api/staging`) + `services/staging-stock.ts` (the
+  HireHop bulk-export parse, ported verbatim). Endpoints: `GET /stock`, `GET /job?job=<hh>`
+  (reads OP `jobs`, no HH round-trip), `POST /availability`, `POST /push`, `GET/PATCH/DELETE
+  /plans/:id`, and **public** `GET /plan/:slug` (no auth — the 3D viewer link clients open).
+  API-token calls go through the broker; the stock export uses its own export ID+key (direct fetch).
+- **The gaffa-tape bug — FIXED.** The old push hardcoded the `b` (hire) prefix on every item, so
+  the gaffa tape (`hirehopId: 740`, a *consumable*) pushed as `b740` = a Pioneer DJM900 (rental
+  stock #740). Consumables live in HireHop's consumables table, addressed with `s<id>`. The
+  calculator now tags consumables `saleItem: true` (gaffa tape #740 + velcro hook tape #1013) and
+  the push builds `s<id>` for them, `b<id>` for hire. **⚠️ The sale prefix `s` is the documented
+  convention but was NOT live-verified — do ONE test push of just the gaffa tape (and velcro) to a
+  scratch job and confirm it adds the tape, not a random hire item, before trusting it. The knob is
+  `SALE_ITEM_PREFIX` in `routes/staging.ts`.**
+- **Short 3D links (migration 121, `staging_plans`).** The old 3D viewer link encoded the whole
+  stage config in the URL (huge + ugly). Now `POST /push` stores the config and mints a short slug;
+  the link is `/stage-view.html?p=<slug>`, resolved via the public `GET /plan/:slug`. `stage-view.html`
+  still decodes legacy `?c=`/`?config=` inline links for backward-compat. The HH job note uses the
+  short link.
+- **Staging tab on Job Detail** — conditional (only appears once a `staging_plans` row exists for
+  the job). Lists each plan's short link with **Open / Copy / Share-with-freelancer / Delete**
+  (delete is a hard delete behind a confirm — disposable calc artefact, not hire-tracking). Share
+  toggles `share_with_freelancer` (same methodology as files-to-share; portal surfacing is a
+  follow-up — the flag is stored, the portal read isn't wired yet). On push-complete the embedded
+  app `postMessage`s the parent, which reveals + switches to the Staging tab.
+- **Deploy requirement:** `HIREHOP_EXPORT_ID` (+ the stock-export `HIREHOP_EXPORT_KEY` value) must
+  be set on the server `.env` — copy both from the retired ooosh-utilities Netlify env. The stock
+  endpoint 502s with a clear message until they're set.
+- **Live config (confirmed Jun 2026, on prod `.env`):** `HIREHOP_EXPORT_ID=2346` (the NUMERIC id
+  only — NOT the full URL), `HIREHOP_EXPORT_KEY=3tsdqih9hpj9` (the stock-export key; the code prefers
+  a dedicated `HIREHOP_STOCK_EXPORT_KEY` and falls back to `HIREHOP_EXPORT_KEY`). `services/staging-stock.ts`
+  fetches `modules/stock/export_data.php?id=…&key=…&depot=1&cat=444&sidx=TITLE&sord=asc` — i.e. the
+  **STAGING parent category 444 with `depot=1`** (a no-cat or no-depot fetch returns a truncated/empty
+  list — proven during go-live). It then splits children by CATEGORY_ID (445 decks / 446 legs+hardware /
+  447 screwjacks / 448 accessories). `[Staging] export id=… returned N items` logs aid diagnosis.
+- **Asset cache-busting:** `staging-calculator.html` loads the JS/CSS with a manual `?v=N` query
+  (currently `?v=2.6`). **Bump it on every edit to `staging-calculator.{js,css}`** or browsers serve
+  the stale cached copy (cost us a confused deploy — new code on server, old code in browser).
+- **⚠️ OUTSTANDING — gaffa tape (consumable) not landing in HireHop.** Diagnosed live 16 Jun 2026.
+  The DJM900 bug is fixed (no longer `b740`). The tape now pushes as **`s740`** and the log confirms
+  `itemsMap: {"b1708":1,"b1518":4,"b801":4,"s740":1}` is sent and `save_job` returns
+  `{"success":true,…}` — but the `b…` hire items land while **`s740` is silently ignored**. So the
+  `s` (sale/consumable) prefix is NOT how HireHop's `save_job.php` `items` adds a consumable. There's
+  no prior working example (the old utilities tool always pushed `b740` = wrong item), so the correct
+  syntax must be found from HireHop API docs / support, or by inspecting how the **backline matcher**
+  (`alternative-hirehop-stock`) adds sale stock. **Next-session steps:** (1) determine HireHop's
+  consumable add-to-job mechanism — likely either a different `items` key prefix, or consumables go on
+  **billing** (`billing_*.php` sale line) not the supply list; (2) set `SALE_ITEM_PREFIX` in
+  `routes/staging.ts` accordingly, or branch sale items to a billing call. Tape ID **740 is correct**
+  ("MagTape white gaffa tape", consumables table) — ID 21 is a *different* tape (ProGaff, cat 338),
+  don't use it. Velcro #1013 has the same issue. **Interim:** staff add the tape to the job manually
+  in HireHop. The calc's "Short 1 / owned 0" on the tape is cosmetic (tape is cat 338, outside the
+  staging 444 stock fetch — no stock lookup, hardcoded "needs ordering").
+- **Job note endpoint (fixed 16 Jun 2026):** the post-push HH job note (carrying the short 3D link)
+  was hitting `/api/job_note.php` which 404s; repointed to `/php_functions/notes_save.php`
+  (`main_id`/`type=1`/`note`, POST) — the endpoint the original `staging-push.js` used. NB: the
+  additional-driver-charge flow in `hire-forms.ts` still uses `/api/job_note.php` (best-effort) — it
+  may be silently 404ing there too and should likely move to `notes_save.php` as well.
+- **Deferred:** UX/UI polish of the (admittedly cramped) calculator layout — second pass once it's
+  live and jon's clicked around. Portal surfacing of shared staging links. Full React rewrite (only
+  if it earns its keep — low frequency).
 
 ### Future Enhancements (captured, not scheduled)
 
@@ -2710,6 +2806,8 @@ await syncFleetHireStatusByReg(reg);
 **File:** `backend/src/services/hh-deposit.ts`
 
 Centralised two-step HireHop deposit push (`billing_deposit_save.php` + Xero sync via `accounting/tasks.php`). Used by `POST /api/money/:jobId/record-payment` and `POST /api/excess/:id/payment`. Returns a structured `{hhDepositId, xeroSynced, error}` so callers can surface failures rather than silently logging "non-fatal".
+
+`pushDepositToHH` accepts an optional explicit `bankId` (overrides the method→bank mapping) so a deposit can be recreated on the exact original bank. **`reverseDepositOnHH`** (same file) is the "out" leg for moving a deposit off a job (Combine Bookings): it does NOT post a negative deposit — HireHop rejects those and the rejected row never reaches Xero — it posts a **refund payment application** against the specific deposit (`billing_payments_save.php` with `deposit=<id>, OWNER=0, paid=<amount>`) + `post_payment` Xero sync, exactly like excess reimbursement. To reduce/remove a HireHop deposit from anywhere, use a payment application, never a negative deposit. `getMethodForBankId` is the inverse of the bank map for recreating a deposit read back from billing.
 
 **Why this exists:** Before May 2026 the Money tab's Record Payment endpoint had its own inline HH push, and the Excess Manage modal's `/payment` endpoint had no HH push at all — excesses recorded via Manage never appeared in HireHop billing. Job 15624 incident: £1200 worldpay was recorded twice via the Manage modal, doubling the OP-side `excess_amount_taken` to £2400, while HireHop showed nothing for the excess. The shared helper closes both gaps and standardises the failure-surfacing contract.
 

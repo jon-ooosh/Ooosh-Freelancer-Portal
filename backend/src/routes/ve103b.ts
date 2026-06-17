@@ -23,6 +23,9 @@ router.use(authenticate);
 const generateSchema = z.object({
   assignment_id: z.string().uuid(),
   certificate_number: z.string().min(1).max(20),
+  // How the cert was generated, for audit/display. Defaults to the board's
+  // "From Assignment" path; the book-out flow passes 'book_out'.
+  source: z.enum(['book_out', 've103b_board']).optional(),
 });
 
 router.post('/generate', async (req: AuthRequest, res) => {
@@ -156,8 +159,8 @@ router.post('/generate', async (req: AuthRequest, res) => {
       `INSERT INTO ve103b_certificates (
         certificate_number, assignment_id, vehicle_id, driver_id, job_id,
         vehicle_reg, driver_name, driver_address, hire_start, hire_end,
-        hirehop_job_number, pdf_r2_key, pdf_filename, generated_by
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        hirehop_job_number, pdf_r2_key, pdf_filename, generated_by, generated_via
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
       RETURNING id, created_at, date_certificate_supplied`,
       [
         body.certificate_number,
@@ -174,6 +177,7 @@ router.post('/generate', async (req: AuthRequest, res) => {
         pdfR2Key,
         filename,
         req.user!.id,
+        body.source ?? null,
       ],
     );
 
@@ -372,13 +376,13 @@ router.post('/test-generate', async (req: AuthRequest, res) => {
     const insertResult = await query(
       `INSERT INTO ve103b_certificates (
         certificate_number, vehicle_id, vehicle_reg, driver_name, driver_address,
-        hire_start, hire_end, pdf_r2_key, pdf_filename, generated_by
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        hire_start, hire_end, pdf_r2_key, pdf_filename, generated_by, generated_via
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
       RETURNING id, created_at, date_certificate_supplied`,
       [
         body.certificate_number, body.vehicle_id, v.reg, body.driver_name,
         body.driver_address || null, body.hire_start || null, body.hire_end || null,
-        pdfR2Key, filename, req.user!.id,
+        pdfR2Key, filename, req.user!.id, 've103b_board_manual',
       ],
     );
 

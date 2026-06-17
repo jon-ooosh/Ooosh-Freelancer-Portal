@@ -1,4 +1,4 @@
--- Migration 121: SMS module + Out-of-Hours approach reminder
+-- Migration 127: SMS module + Out-of-Hours approach reminder
 --
 -- Part 1 of the OOH SMS + compliance work (docs/OOH-SMS-AND-COMPLIANCE-SPEC.md).
 --
@@ -43,6 +43,6 @@ INSERT INTO system_settings (key, value, label, category, value_type, sort_order
 VALUES
   ('ooh_base_lat',              '',   'Yard latitude (SMS geofence)',                  'ooh_returns', 'text', 80),
   ('ooh_base_lng',              '',   'Yard longitude (SMS geofence)',                 'ooh_returns', 'text', 90),
-  ('ooh_sms_radius_miles',      '1',  'SMS reminder trigger radius (miles)',           'ooh_returns', 'text', 100),
+  ('ooh_sms_radius_miles',      '2',  'SMS reminder trigger radius (miles)',           'ooh_returns', 'text', 100),
   ('ooh_sms_country_allowlist', 'GB', 'SMS country allowlist (ISO codes, comma-sep)',  'ooh_returns', 'text', 110)
 ON CONFLICT (key) DO NOTHING;

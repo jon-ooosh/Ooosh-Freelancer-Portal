@@ -10,7 +10,7 @@ parking-confirmation link + Traccar-prefilled map) works well, but a minority of
 still leave vans inconsiderately in the street. Our neighbours need HGV access to their
 gates; vans left across them cause real problems. Two improvements:
 
-1. **A timely SMS nudge** fired when Traccar shows the van approaching base (~1 mile out),
+1. **A timely SMS nudge** fired when Traccar shows the van approaching base (~2 miles out),
    carrying the same per-driver parking link. Texts get read late at night when emails
    don't, and they land at the decision moment (where to park) rather than hours before.
 2. **Per-driver compliance tracking** so a driver who repeatedly parks badly loses the
@@ -120,7 +120,7 @@ AND vehicle_id IS NOT NULL
 AND COALESCE(hire_end, job_end::date) <= (CURRENT_DATE + 1)   -- only near the return
 ```
 …look up `getLatestPositionForReg(reg)`, Haversine to base, and if
-`distance_miles <= ooh_sms_radius_miles` (default **1**):
+`distance_miles <= ooh_sms_radius_miles` (default **2** — at ~30mph that is ~4 min out, comfortably caught by the 3-min scan; 1 mile risked slipping between scans):
 1. Build the driver's MSISDN from `drivers.phone` + `phone_country`. If unsendable (null,
    or country not in allowlist) → skip (stamp nothing; emails cover them).
 2. `smsService.send('ooh_return_approach', …)` with that driver's own `ooh_parking_token`.
@@ -143,7 +143,7 @@ AND COALESCE(hire_end, job_end::date) <= (CURRENT_DATE + 1)   -- only near the r
 |---|---|---|
 | `ooh_base_lat` | — | Yard latitude (one-time setup) |
 | `ooh_base_lng` | — | Yard longitude |
-| `ooh_sms_radius_miles` | `1` | Trigger distance |
+| `ooh_sms_radius_miles` | `2` | Trigger distance |
 | `ooh_sms_country_allowlist` | `GB` | Calling codes we SMS (ISO or `+44` forms accepted); others email-only |
 
 **Env (`.env`):** `SMS_PROVIDER=twilio`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`,
@@ -151,7 +151,7 @@ AND COALESCE(hire_end, job_end::date) <= (CURRENT_DATE + 1)   -- only near the r
 
 ## 7. Migration (Part 1) ✅ BUILT
 
-`121_sms_and_ooh_approach.sql` (added to the `run.ts` array):
+`127_sms_and_ooh_approach.sql` (added to the `run.ts` array — renumbered from 121 after merging main, which had taken 121–126):
 - `vehicle_hire_assignments.ooh_sms_sent_at TIMESTAMPTZ` + partial index on the armed set.
 - `CREATE TABLE sms_log (…)` mirroring `email_log`.
 - Seeds the four new `system_settings` rows (`ooh_base_lat/lng`, `ooh_sms_radius_miles`,
@@ -282,11 +282,18 @@ Next free migration number after Part 1's:
 1. ✅ `sms-service.ts` + `SmsProvider`/Twilio (REST, no SDK) + `sms_log` + E.164 normalisation
    (`libphonenumber-js`, calling-code allowlist).
 2. ✅ Settings (`ooh_base_lat/lng`, `ooh_sms_radius_miles`, `ooh_sms_country_allowlist`) seeded
-   in migration 121 + env vars in `.env.example`.
+   in migration 127 + env vars in `.env.example`.
 3. ✅ `ooh_return_approach` template (`sms-templates.ts`).
 4. ✅ `ooh-sms-approach.ts` scan + scheduler entry (`*/3 17-23,0-8 * * *` Europe/London) +
    `ooh_sms_sent_at`.
 5. ✅ Settings-page UI — auto-renders the new `ooh_returns` keys (data-driven `OohSettingsSection`).
+6. ⚠️ **TEMPORARY** "Send test SMS" button (OOH Settings) + `POST /api/system-settings/test-sms`
+   + `smsService.sendTest()` — connectivity check, **REMOVE after go-live** (tracked in a GitHub
+   reminder issue). All three touchpoints are commented `TEMPORARY`.
+
+**Sender:** launching with the **UK number +447475911380** in the Messaging Service sender pool
+(Twilio gated the OOOSH alphanumeric sender behind account review; the number is two-way and
+needs no code change to swap to OOOSH later — the service sends via `messagingServiceSid`).
 
 **Goes live:** ship behind `SMS_MODE=test` (redirects to `SMS_TEST_REDIRECT`), confirm a test
 text lands, then either flip `SMS_MODE=live` or allowlist `ooh_return_approach` via

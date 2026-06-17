@@ -1121,6 +1121,10 @@ function OohSettingsSection() {
   const [editing, setEditing] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  // TEMPORARY: SMS connectivity test (remove after go-live — see GH reminder issue)
+  const [testNumber, setTestNumber] = useState('');
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState('');
 
   useEffect(() => {
     loadSettings();
@@ -1177,6 +1181,27 @@ function OohSettingsSection() {
     setEditValues(vals);
     setEditing(false);
     setError('');
+  }
+
+  // TEMPORARY: SMS connectivity test (remove after go-live — see GH reminder issue)
+  async function sendTestSms() {
+    setTesting(true);
+    setTestResult('');
+    try {
+      const res = await api.post<{ success: boolean; redirectedTo: string | null }>(
+        '/system-settings/test-sms',
+        { to: testNumber.trim() || undefined },
+      );
+      setTestResult(
+        res.redirectedTo
+          ? `Sent (test mode → redirected to ${res.redirectedTo}). Check that phone.`
+          : 'Sent. Check the phone.',
+      );
+    } catch (err) {
+      setTestResult(err instanceof Error ? err.message : 'Test SMS failed');
+    } finally {
+      setTesting(false);
+    }
   }
 
   if (loading) return null;
@@ -1272,6 +1297,32 @@ function OohSettingsSection() {
             </div>
           );
         })}
+      </div>
+
+      {/* TEMPORARY: SMS connectivity test — remove after go-live (see GH reminder issue). */}
+      <div className="mt-4 bg-amber-50 border border-amber-200 rounded-lg p-4">
+        <p className="text-sm font-medium text-amber-900">Send test SMS (temporary)</p>
+        <p className="text-xs text-amber-700 mt-0.5 mb-2">
+          Fires one text via Twilio to confirm the setup. While SMS_MODE=test it redirects to
+          SMS_TEST_REDIRECT regardless of the number entered. Remove this once go-live is confirmed.
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            type="tel"
+            value={testNumber}
+            onChange={e => setTestNumber(e.target.value)}
+            placeholder="+447… (blank = test redirect)"
+            className="border border-gray-300 rounded px-2 py-1 text-sm w-64 max-w-full"
+          />
+          <button
+            onClick={sendTestSms}
+            disabled={testing}
+            className="px-4 py-2 text-sm bg-amber-600 text-white rounded font-medium hover:bg-amber-700 disabled:opacity-50"
+          >
+            {testing ? 'Sending…' : 'Send test SMS'}
+          </button>
+        </div>
+        {testResult && <p className="text-xs text-amber-800 mt-2">{testResult}</p>}
       </div>
     </div>
   );

@@ -7,6 +7,7 @@ import JobProblemsPanel from '../components/JobProblemsPanel';
 import HeldItemsSection from '../components/HeldItemsSection';
 import SendMerchFormButton from '../components/SendMerchFormButton';
 import TransportCalculator from '../components/TransportCalculator';
+import { StagingCalculatorModal, StagingTab } from '../components/StagingCalculator';
 import RequirementCard from '../components/RequirementCard';
 import type { JobRequirement } from '../components/RequirementCard';
 import ExcessGateBanner from '../components/ExcessGateBanner';
@@ -16,9 +17,12 @@ import AddToHireModal, { type AddToHireCandidate } from '../components/AddToHire
 import JobContactsCard from '../components/JobContactsCard';
 import type { JobExcess } from '../../../shared/types';
 import CancellationModal from '../components/CancellationModal';
+import CombineBookingsModal from '../components/CombineBookingsModal';
 import CancelOpenRequirementsSection from '../components/CancelOpenRequirementsSection';
 import { useAuthStore } from '../hooks/useAuthStore';
 import MoneyTab from '../components/MoneyTab';
+import RackPlanModal from '../components/rackplan/RackPlanModal';
+import RackPlanOverviewCard from '../components/rackplan/RackPlanOverviewCard';
 import DatePicker from '../components/DatePicker';
 import { TimeInput } from '../components/TimeInput';
 import ChaseModal from '../components/ChaseModal';
@@ -134,6 +138,7 @@ interface JobDetail {
   cancellation_tier: string | null;
   reopened_from_job_id: string | null;
   reopened_to_job_id: string | null;
+  combined_into_job_id?: string | null;
   // Lost-job fields (mirror of cancellation, populated by pipeline transition)
   lost_at?: string | null;
   lost_reason?: string | null;
@@ -1153,10 +1158,24 @@ export default function JobDetailPage() {
   const [job, setJob] = useState<JobDetail | null>(null);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
-  const validTabs = ['overview', 'timeline', 'files', 'transport', 'drivers', 'money'] as const;
+  const validTabs = ['overview', 'timeline', 'files', 'transport', 'drivers', 'money', 'staging'] as const;
   type TabType = typeof validTabs[number];
   const initialTab = (validTabs.includes(searchParams.get('tab') as TabType) ? searchParams.get('tab') : 'overview') as TabType;
   const [activeTab, setActiveTab] = useState<TabType>(initialTab);
+  // Staging Calculator — modal launch + conditional tab (only shown once a plan exists)
+  const [showStagingModal, setShowStagingModal] = useState(false);
+  const [showRackPlanModal, setShowRackPlanModal] = useState(false);
+  const [showCombineModal, setShowCombineModal] = useState(false);
+  const [rackPlanRefreshKey, setRackPlanRefreshKey] = useState(0);
+  const [stagingPlanCount, setStagingPlanCount] = useState(0);
+  const loadStagingCount = useCallback(async () => {
+    if (!id) return;
+    try {
+      const res = await api.get<{ data: unknown[] }>(`/staging/plans/${id}`);
+      setStagingPlanCount(res.data?.length || 0);
+    } catch { /* ignore */ }
+  }, [id]);
+  useEffect(() => { loadStagingCount(); }, [loadStagingCount]);
 
   // Reset tab when navigating to a different job. React Router reuses the
   // JobDetailPage component instance across /jobs/A → /jobs/B, so without
@@ -2602,8 +2621,35 @@ export default function JobDetailPage() {
         &larr; {backLabel}
       </Link>
 
+      {/* Combined banner — absorbed booking folded into another. Replaces the
+          red cancelled banner (it's a merge, not a real cancellation). */}
+      {job.combined_into_job_id && (
+        <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4 mb-4">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex-1">
+              <p className="text-sm font-bold text-indigo-700">
+                🔀 This booking was combined into another booking
+                {job.cancelled_at ? ` on ${new Date(job.cancelled_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}` : ''}
+              </p>
+              <p className="text-xs text-indigo-600 mt-1">
+                Retired with no cancellation fee — its deposit was reallocated to the kept booking.
+              </p>
+              {job.cancellation_notes && (
+                <p className="text-xs text-indigo-600/80 mt-1">{job.cancellation_notes}</p>
+              )}
+            </div>
+            <Link
+              to={`/jobs/${job.combined_into_job_id}`}
+              className="text-xs px-3 py-1.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 whitespace-nowrap text-center shrink-0"
+            >
+              View combined booking &rarr;
+            </Link>
+          </div>
+        </div>
+      )}
+
       {/* Cancelled banner */}
-      {job.pipeline_status === 'cancelled' && (
+      {job.pipeline_status === 'cancelled' && !job.combined_into_job_id && (
         <div className="bg-red-50 border border-red-200 rounded-xl p-4 mb-4">
           <div className="flex items-start gap-3">
             <div className="flex-1">
@@ -3434,66 +3480,27 @@ export default function JobDetailPage() {
               </div>
             )}
           </div>
-          <div className="flex flex-col items-end gap-2 flex-shrink-0 max-w-full">
-            <div className="flex items-center gap-2">
-              {/* Internal job toggle — mutes hire forms / excess / money
-                  tracking for garage visits, MOTs and our own vehicle
-                  movements. Crew & Transport stays live. */}
+          {/* Right-side controls — 2×2 grid so they stack neatly instead of
+              crowding the job title. Top row: Sync HH / Pre-Hire Review.
+              Bottom row: Combine / Mark Internal. (Open in HireHop dropped —
+              the #job-number on the left already links there.) Hidden cells
+              just reflow; grid stays tidy with 1–4 buttons. */}
+          <div className="grid grid-cols-2 gap-2 flex-shrink-0 w-full sm:w-[300px]">
+            {job.hh_job_number && (
               <button
-                onClick={toggleInternal}
-                disabled={internalToggling}
-                className={
-                  job.is_internal
-                    ? 'inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-slate-400 bg-slate-100 rounded-lg hover:bg-slate-200 text-slate-700 font-medium disabled:opacity-50 transition-colors'
-                    : 'inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-500 disabled:opacity-50 transition-colors'
-                }
-                title={
-                  job.is_internal
-                    ? 'Internal job — hire forms, excess and money tracking are muted (crew & transport unaffected). Click to revert to a normal client job.'
-                    : 'Mark as internal (garage visit, MOT, our own vehicle movement) — mutes hire form emails, excess and money tracking'
-                }
+                onClick={() => syncFromHireHop(true)}
+                disabled={hhSyncing}
+                className="w-full inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600 disabled:opacity-50 transition-colors"
+                title={hhLastSynced ? `Last synced: ${new Date(hhLastSynced).toLocaleTimeString()}` : 'Sync items from HireHop'}
               >
-                <span>🔧</span>
-                <span className="hidden sm:inline">
-                  {internalToggling ? 'Saving…' : job.is_internal ? 'Internal Job ✓' : 'Mark Internal'}
-                </span>
+                <svg className={`w-3.5 h-3.5 ${hhSyncing ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+                <span>{hhSyncing ? 'Syncing…' : 'Sync HH'}</span>
               </button>
-              {job.hh_job_number && (
-                <button
-                  onClick={() => syncFromHireHop(true)}
-                  disabled={hhSyncing}
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600 disabled:opacity-50 transition-colors"
-                  title={hhLastSynced ? `Last synced: ${new Date(hhLastSynced).toLocaleTimeString()}` : 'Sync items from HireHop'}
-                >
-                  <svg className={`w-3.5 h-3.5 ${hhSyncing ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                  </svg>
-                  <span className="hidden sm:inline">{hhSyncing ? 'Syncing...' : 'Sync HH'}</span>
-                </button>
-              )}
-              {hhJobUrl && (
-                <a
-                  href={hhJobUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600"
-                >
-                  Open in HireHop &rarr;
-                </a>
-              )}
-            </div>
-            {/* Pre-Hire Review — manual send to info@. Admin/manager only.
-                 Visibility whitelist: confirmed / prepping / prepped only.
-                 Provisional and earlier: review isn't meaningful yet.
-                 Dispatched (on hire) onwards: the hire's gone, review's done.
-                 The same content goes out automatically via the daily
-                 09:55 cron for confirmed jobs at T-3d / T-5d / T-1d.
-                 Visual state: faded grey when a recent send exists (within
-                 the last 24h) so staff can see at-a-glance it's been
-                 actioned. Still clickable — sometimes you want to resend.
-                 Sits on its own row beneath Sync HH / Open in HireHop so
-                 the optional "· last sent X" subtitle can't squash the
-                 job title on the left. */}
+            )}
+            {/* Pre-Hire Review — admin/manager only, confirmed/prepping/prepped.
+                Faded grey when sent within the last 24h (still clickable). */}
             {(user?.role === 'admin' || user?.role === 'manager')
               && (job.pipeline_status === 'confirmed'
                   || job.pipeline_status === 'prepping'
@@ -3506,8 +3513,8 @@ export default function JobDetailPage() {
                     disabled={briefingSending}
                     className={
                       sentRecently
-                        ? "hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 text-sm border border-gray-200 bg-gray-50 rounded-lg hover:bg-gray-100 text-gray-500 disabled:opacity-50 transition-colors"
-                        : "hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 text-sm border border-purple-300 rounded-lg hover:bg-purple-50 text-purple-700 disabled:opacity-50 transition-colors"
+                        ? "w-full inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-gray-200 bg-gray-50 rounded-lg hover:bg-gray-100 text-gray-500 disabled:opacity-50 transition-colors"
+                        : "w-full inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-purple-300 rounded-lg hover:bg-purple-50 text-purple-700 disabled:opacity-50 transition-colors"
                     }
                     title={
                       briefingLastSent
@@ -3518,13 +3525,42 @@ export default function JobDetailPage() {
                     {briefingSending
                       ? 'Sending…'
                       : sentRecently
-                        ? <>✓ Pre-Hire Review <span className="text-gray-400 text-xs ml-1">· sent {formatBriefingLastSent()}</span></>
-                        : briefingLastSent
-                          ? <>✉ Pre-Hire Review <span className="text-purple-400 text-xs ml-1">· last sent {formatBriefingLastSent()}</span></>
-                          : '✉ Pre-Hire Review'}
+                        ? '✓ Pre-Hire Review'
+                        : '✉ Pre-Hire Review'}
                   </button>
                 );
               })()}
+            {['admin', 'manager', 'weekend_manager'].includes(user?.role || '')
+              && !job.combined_into_job_id
+              && ['new_enquiry', 'quoting', 'paused', 'provisional', 'confirmed', 'prepped', 'prepping'].includes(job.pipeline_status || '') && (
+              <button
+                onClick={() => setShowCombineModal(true)}
+                className="w-full inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600 transition-colors"
+                title="Combine this booking with another pre-hire booking for the same client"
+              >
+                <span>🔀</span>
+                <span>Combine</span>
+              </button>
+            )}
+            {/* Internal job toggle — mutes hire forms / excess / money tracking
+                for garage visits, MOTs, own vehicle movements. Crew stays live. */}
+            <button
+              onClick={toggleInternal}
+              disabled={internalToggling}
+              className={
+                job.is_internal
+                  ? 'w-full inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-slate-400 bg-slate-100 rounded-lg hover:bg-slate-200 text-slate-700 font-medium disabled:opacity-50 transition-colors'
+                  : 'w-full inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-500 disabled:opacity-50 transition-colors'
+              }
+              title={
+                job.is_internal
+                  ? 'Internal job — hire forms, excess and money tracking are muted (crew & transport unaffected). Click to revert to a normal client job.'
+                  : 'Mark as internal (garage visit, MOT, our own vehicle movement) — mutes hire form emails, excess and money tracking'
+              }
+            >
+              <span>🔧</span>
+              <span>{internalToggling ? 'Saving…' : job.is_internal ? 'Internal Job ✓' : 'Mark Internal'}</span>
+            </button>
           </div>
         </div>
 
@@ -3719,7 +3755,10 @@ export default function JobDetailPage() {
       {/* Tabs */}
       <div className="border-b border-gray-200 mb-6 -mx-4 px-4 sm:mx-0 sm:px-0 overflow-x-auto scrollbar-hide">
         <nav className="flex gap-4 sm:gap-6 min-w-max">
-          {(['overview', 'timeline', 'transport', 'drivers', 'money', 'files'] as const).map((tab) => (
+          {(['overview', 'timeline', 'transport', 'drivers', 'money', 'files', 'staging'] as const).map((tab) => {
+            // Staging tab only appears once a staging plan exists for this job.
+            if (tab === 'staging' && stagingPlanCount === 0) return null;
+            return (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -3734,9 +3773,11 @@ export default function JobDetailPage() {
                tab === 'transport' ? (<><span className="sm:hidden">Transport{(() => { const active = quotes.filter(q => q.status !== 'cancelled').length; return active > 0 ? ` (${active})` : ''; })()}</span><span className="hidden sm:inline">Crew & Transport{(() => { const active = quotes.filter(q => q.status !== 'cancelled').length; return active > 0 ? ` (${active})` : ''; })()}</span></>) :
                tab === 'drivers' ? (<><span className="sm:hidden">Drivers{vehicleAssignments.length > 0 ? ` (${vehicleAssignments.length})` : ''}</span><span className="hidden sm:inline">Drivers & Vehicles{vehicleAssignments.length > 0 ? ` (${vehicleAssignments.length})` : ''}</span></>) :
                tab === 'money' ? 'Money' :
+               tab === 'staging' ? '🏗️ Staging' :
                `Files${fileCount > 0 ? ` (${fileCount})` : ''}`}
             </button>
-          ))}
+            );
+          })}
         </nav>
       </div>
 
@@ -3750,6 +3791,9 @@ export default function JobDetailPage() {
               broken / dispute / other tracking. Hidden when empty so it
               doesn't clutter clean jobs; "+ Log Problem" button sits inside. */}
           {id && <JobProblemsPanel jobId={id} />}
+
+          {/* Rack Plan — surfaces once a plan exists (created from Tools → Rack Planner) */}
+          {id && <RackPlanOverviewCard jobId={id} onEdit={() => setShowRackPlanModal(true)} refreshKey={rackPlanRefreshKey} />}
 
           {/* Holding for this client (incoming deliveries) now lives inside the
               prep checklist's "Held for Clients" block — rolled in with the merch
@@ -3766,6 +3810,8 @@ export default function JobDetailPage() {
             hasCrewQuotes={quotes.some(q => (q.job_type === 'crewed' || (q.assignments && q.assignments.length > 0)) && q.status !== 'cancelled')}
             hasCrewOnHH={hhSyncResult?.derivation?.flags?.has_crew_items || false}
             onOpenCrewCalculator={() => { setShowCalculator(true); setActiveTab('transport'); }}
+            onLaunchStaging={() => setShowStagingModal(true)}
+            onLaunchRackPlan={() => setShowRackPlanModal(true)}
           />
 
         </div>
@@ -4909,6 +4955,29 @@ export default function JobDetailPage() {
         <MoneyTab jobId={id} job={job} onJobChanged={loadJob} />
       )}
 
+      {/* Staging Tab — 3D preview plans (only present once a plan exists) */}
+      {activeTab === 'staging' && id && (
+        <StagingTab jobId={id} />
+      )}
+
+      {/* Rack Planner — launched from the Job Requirements "Tools" menu (modal) */}
+      {showRackPlanModal && id && (
+        <RackPlanModal jobId={id} onClose={() => { setShowRackPlanModal(false); setRackPlanRefreshKey((k) => k + 1); }} />
+      )}
+
+      {/* Staging Calculator Modal — launched from the Job Requirements tools menu */}
+      {showStagingModal && (
+        <StagingCalculatorModal
+          hhJobNumber={job.hh_job_number}
+          onClose={() => setShowStagingModal(false)}
+          onComplete={async () => {
+            await loadStagingCount();
+            setShowStagingModal(false);
+            setActiveTab('staging');
+          }}
+        />
+      )}
+
       {/* Chase Modal */}
       {/* Excess Payment / Edit Modal — opened from Drivers & Vehicles strip */}
       {excessModalRecord && (
@@ -5343,6 +5412,22 @@ export default function JobDetailPage() {
         />
       )}
 
+      {/* Combine bookings modal */}
+      {showCombineModal && job && (
+        <CombineBookingsModal
+          jobId={job.id}
+          onClose={() => setShowCombineModal(false)}
+          onCombined={(survivorId) => {
+            setShowCombineModal(false);
+            if (survivorId && survivorId !== job.id) {
+              navigate(`/jobs/${survivorId}`);
+            } else {
+              loadJob();
+            }
+          }}
+        />
+      )}
+
       {/* Cancellation modal */}
       {showTransitionModal && transitionTarget === 'cancelled' && job && (
         <CancellationModal
@@ -5765,21 +5850,6 @@ function FileViewerModal({
 
 // ── Overview / Prep Checklist (API-backed) ───────────────────────────────
 
-interface RequirementTypeDef {
-  type: string;
-  label: string;
-  icon: string;
-  steps: string[] | null;
-  sort_order: number;
-}
-
-interface RequirementTemplate {
-  id: string;
-  name: string;
-  description: string | null;
-  requirement_types: string[];
-}
-
 // JobRequirement, DerivedFlags, SeatAvailability, PREP_STATUS_CONFIG, PREP_STATUS_ORDER
 // now imported from '../components/RequirementCard'
 
@@ -5842,7 +5912,7 @@ function OverviewFinancialStrip({ jobId }: { jobId: string }) {
 }
 
 
-function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, seatAvailability, hasCrewQuotes, hasCrewOnHH, onOpenCrewCalculator }: {
+function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, seatAvailability, hasCrewQuotes, hasCrewOnHH, onOpenCrewCalculator, onLaunchStaging, onLaunchRackPlan }: {
   jobId: string;
   hhJobNumber?: number | null;
   pipelineStatus?: string | null;
@@ -5866,10 +5936,10 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
   hasCrewQuotes?: boolean;
   hasCrewOnHH?: boolean;
   onOpenCrewCalculator?: () => void;
+  onLaunchStaging?: () => void;
+  onLaunchRackPlan?: () => void;
 }) {
   const [requirements, setRequirements] = useState<JobRequirement[]>([]);
-  const [types, setTypes] = useState<RequirementTypeDef[]>([]);
-  const [templates, setTemplates] = useState<RequirementTemplate[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAddMenu, setShowAddMenu] = useState(false);
   const [isVanAndDriver, setIsVanAndDriver] = useState(false);
@@ -5917,14 +5987,8 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
   async function loadAll() {
     setLoading(true);
     try {
-      const [reqRes, typesRes, tmplRes] = await Promise.all([
-        api.get<{ data: JobRequirement[] }>(`/requirements/job/${jobId}?phase=${phase}`),
-        api.get<{ data: RequirementTypeDef[] }>('/requirements/types'),
-        api.get<{ data: RequirementTemplate[] }>('/requirements/templates'),
-      ]);
+      const reqRes = await api.get<{ data: JobRequirement[] }>(`/requirements/job/${jobId}?phase=${phase}`);
       setRequirements(reqRes.data);
-      setTypes(typesRes.data);
-      setTemplates(tmplRes.data);
     } catch (err) {
       console.error('Failed to load requirements:', err);
     } finally {
@@ -6035,16 +6099,6 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
     }
   }
 
-  async function applyTemplate(templateId: string) {
-    try {
-      await api.post(`/requirements/job/${jobId}/template/${templateId}`, {});
-      await loadAll();
-      setShowAddMenu(false);
-    } catch (err) {
-      console.error('Failed to apply template:', err);
-    }
-  }
-
   async function updateRequirement(reqId: string, updates: Record<string, unknown>) {
     try {
       await api.patch(`/requirements/${reqId}`, updates);
@@ -6098,8 +6152,6 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
   const blockedCount = countableReqs.filter(r => r.status === 'blocked').length;
   const totalCount = countableReqs.length;
   const progressPct = totalCount > 0 ? Math.round((doneCount / totalCount) * 100) : 0;
-
-  const availableTypes = types.filter(t => t.type === 'custom' || !requirements.some(r => r.requirement_type === t.type));
 
   if (loading) {
     return <div className="text-center text-sm text-gray-500 py-8">Loading prep checklist...</div>;
@@ -6158,49 +6210,31 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
             onClick={() => setShowAddMenu(!showAddMenu)}
             className="px-3 py-1.5 text-sm bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700"
           >
-            + Add Job Requirement
+            🛠 Tools
           </button>
           {showAddMenu && (
             <div className="absolute right-0 mt-1 w-72 bg-white rounded-lg shadow-lg border border-gray-200 z-10 py-1 max-h-96 overflow-y-auto">
-              {/* Templates section */}
-              {templates.length > 0 && (
-                <>
-                  <div className="px-4 py-1.5 text-xs font-semibold text-gray-400 uppercase tracking-wider">Quick Add (Templates)</div>
-                  {templates.map((tmpl) => (
-                    <button
-                      key={`tmpl-${tmpl.id}`}
-                      onClick={() => applyTemplate(tmpl.id)}
-                      className="w-full text-left px-4 py-2 text-sm hover:bg-gray-50 flex items-center gap-2"
-                    >
-                      <span className="text-base">📋</span>
-                      <div>
-                        <span className="font-medium">{tmpl.name}</span>
-                        <span className="text-xs text-gray-400 ml-2">{tmpl.requirement_types.length} items</span>
-                      </div>
-                    </button>
-                  ))}
-                  {availableTypes.length > 0 && (
-                    <div className="border-t border-gray-100 my-1" />
-                  )}
-                </>
-              )}
-              {/* Individual requirement types */}
-              {availableTypes.length > 0 && (
-                <>
-                  <div className="px-4 py-1.5 text-xs font-semibold text-gray-400 uppercase tracking-wider">Individual</div>
-                  {availableTypes.map((t) => (
-                    <button
-                      key={t.type}
-                      onClick={() => addRequirement(t.type)}
-                      className="w-full text-left px-4 py-2 text-sm hover:bg-gray-50 flex items-center gap-2"
-                    >
-                      <span>{t.icon}</span>
-                      <span>{t.label}</span>
-                      {t.steps && <span className="text-xs text-gray-400 ml-auto">{t.steps.length} steps</span>}
-                    </button>
-                  ))}
-                </>
-              )}
+              <div className="px-4 py-1.5 text-xs font-semibold text-gray-400 uppercase tracking-wider">Utilities</div>
+              <button
+                onClick={() => { setShowAddMenu(false); onLaunchStaging?.(); }}
+                className="w-full text-left px-4 py-2 text-sm hover:bg-gray-50 flex items-center gap-2"
+              >
+                <span className="text-base">🏗️</span>
+                <div>
+                  <span className="font-medium">Staging Calculator</span>
+                  <span className="block text-xs text-gray-400">Calculate deck/leg/hardware parts &amp; push to HireHop</span>
+                </div>
+              </button>
+              <button
+                onClick={() => { setShowAddMenu(false); onLaunchRackPlan?.(); }}
+                className="w-full text-left px-4 py-2 text-sm hover:bg-gray-50 flex items-center gap-2"
+              >
+                <span className="text-base">🎚️</span>
+                <div>
+                  <span className="font-medium">Rack Planner</span>
+                  <span className="block text-xs text-gray-400">Lay out how racks/systems are supplied &amp; interconnected</span>
+                </div>
+              </button>
             </div>
           )}
         </div>
@@ -6210,8 +6244,8 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
       {/* Requirements list */}
       {requirements.length === 0 ? (
         <div className="bg-white rounded-xl border border-gray-200 p-8 text-center">
-          <p className="text-gray-500 text-sm">No requirements added yet.</p>
-          <p className="text-gray-400 text-xs mt-1">Click "+ Add Job Requirement" to get started, or sync from HireHop.</p>
+          <p className="text-gray-500 text-sm">No requirements yet.</p>
+          <p className="text-gray-400 text-xs mt-1">Requirements are derived from HireHop — click "Sync HH" to pull them in, or add a "+ Reminder".</p>
         </div>
       ) : (
         <div className="space-y-2">
