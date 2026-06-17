@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
+import OohComplianceTab from '../components/OohComplianceTab';
 import ExcessPaymentModal from '../components/ExcessPaymentModal';
 import CalculatedExcessEditModal from '../components/CalculatedExcessEditModal';
 import type { JobExcess } from '../../../shared/types';
@@ -353,7 +354,7 @@ export default function DriverDetailPage() {
   const [editingCalcExcess, setEditingCalcExcess] = useState(false);
   const [auditLog, setAuditLog] = useState<AuditLogEntry[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'details' | 'hires' | 'excess'>('details');
+  const [activeTab, setActiveTab] = useState<'details' | 'hires' | 'excess' | 'ooh'>('details');
   const [editing, setEditing] = useState(false);
   const [editData, setEditData] = useState<Record<string, any>>({});
   const [saving, setSaving] = useState(false);
@@ -657,6 +658,7 @@ export default function DriverDetailPage() {
             { key: 'details', label: 'Overview' },
             { key: 'hires', label: 'Hire History' },
             { key: 'excess', label: 'Excess History' },
+            { key: 'ooh', label: 'OOH' },
           ] as const).map(({ key, label }) => (
             <button
               key={key}
@@ -690,6 +692,7 @@ export default function DriverDetailPage() {
           />
         )}
         {activeTab === 'hires' && <HireHistoryTab history={hireHistory} />}
+        {activeTab === 'ooh' && <OohComplianceTab driverId={driver.id} />}
         {activeTab === 'excess' && (
           <ExcessHistoryTab
             history={excessHistory}

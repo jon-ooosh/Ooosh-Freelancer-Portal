@@ -34,20 +34,31 @@ export default function OohReturnModal({
   const [sendNow, setSendNow] = useState<boolean>(!infoSentAt);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  // Block enforcement: set when the toggle 409s because the driver is blocked.
+  const [blocked, setBlocked] = useState<{ driverName: string | null; canOverride: boolean } | null>(null);
 
-  async function handleSave() {
+  async function handleSave(override = false) {
     setSaving(true);
     setError('');
     try {
       const body = {
         return_overnight: value === 'yes' ? true : value === 'no' ? false : null,
         send_email_now: value === 'yes' && sendNow,
+        override: override || undefined,
       };
       await api.patch<{ success: boolean }>(`/ooh-return/assignments/${assignmentId}/toggle`, body);
       onSaved();
       onClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save');
+      const e = err as { status?: number; code?: string; details?: { driverName?: string | null; canOverride?: boolean } };
+      if (e.status === 409 && e.code === 'driver_blocked') {
+        setBlocked({
+          driverName: e.details?.driverName ?? null,
+          canOverride: !!e.details?.canOverride,
+        });
+      } else {
+        setError(err instanceof Error ? err.message : 'Failed to save');
+      }
     } finally {
       setSaving(false);
     }
@@ -119,6 +130,25 @@ export default function OohReturnModal({
             </div>
           )}
 
+          {blocked && (
+            <div className="rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800 space-y-2">
+              <p className="font-medium">
+                🚫 {blocked.driverName || 'This driver'} has lost OOH return privileges
+                (repeated inconsiderate parking).
+              </p>
+              {blocked.canOverride ? (
+                <p className="text-red-700">
+                  As a manager you can override this for this hire. The block stays in place —
+                  to lift it permanently, use the driver's page.
+                </p>
+              ) : (
+                <p className="text-red-700">
+                  Only a manager can override this. Otherwise, set this return to "No".
+                </p>
+              )}
+            </div>
+          )}
+
           {error && (
             <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
               {error}
@@ -135,14 +165,25 @@ export default function OohReturnModal({
           >
             Cancel
           </button>
-          <button
-            type="button"
-            onClick={handleSave}
-            disabled={saving}
-            className="px-4 py-2 text-sm bg-ooosh-navy text-white rounded-lg font-medium hover:opacity-90 disabled:opacity-50"
-          >
-            {saving ? 'Saving…' : 'Save'}
-          </button>
+          {blocked && blocked.canOverride ? (
+            <button
+              type="button"
+              onClick={() => handleSave(true)}
+              disabled={saving}
+              className="px-4 py-2 text-sm bg-red-600 text-white rounded-lg font-medium hover:bg-red-700 disabled:opacity-50"
+            >
+              {saving ? 'Saving…' : 'Override & allow OOH'}
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => handleSave(false)}
+              disabled={saving}
+              className="px-4 py-2 text-sm bg-ooosh-navy text-white rounded-lg font-medium hover:opacity-90 disabled:opacity-50"
+            >
+              {saving ? 'Saving…' : 'Save'}
+            </button>
+          )}
         </div>
       </div>
     </div>
