@@ -10,6 +10,7 @@ import { generateBVRLACSV } from '../routes/ve103b';
 import emailService from '../services/email-service';
 import { getFrontendUrl } from './app-urls';
 import { sendOohReminderEmails } from '../services/ooh-return';
+import { runOohApproachScan } from '../services/ooh-sms-approach';
 
 /**
  * Starts the backup and sync schedulers.
@@ -320,6 +321,23 @@ export function startScheduler() {
     }
   });
   console.log('Scheduler: OOH return reminders scheduled daily at 10:00');
+
+  // ── OOH Approach SMS ────────────────────────────────────────────────
+  // Every 3 min during CLOSED hours (17:00–08:59 Europe/London — office is open
+  // 09:00–17:00). Texts a driver the parking link when their OOH-flagged van
+  // comes within the geofence radius of base. One-shot per assignment; skips
+  // cleanly when SMS isn't configured or the base lat/lng aren't set.
+  cron.schedule('*/3 17-23,0-8 * * *', async () => {
+    try {
+      const r = await runOohApproachScan();
+      if (r.texted > 0) {
+        console.log(`Scheduler: OOH approach SMS sent: ${r.texted} (checked ${r.checked}, skipped ${r.skipped})`);
+      }
+    } catch (err) {
+      console.error('Scheduler: OOH approach SMS scan failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: OOH approach SMS scan scheduled every 3 min 17:00–08:59 Europe/London');
 
   // ── Close-Out Requirement Chase Scanner ─────────────────────────────
   // Daily at 09:30 — check for overdue post-hire requirements and create notifications
