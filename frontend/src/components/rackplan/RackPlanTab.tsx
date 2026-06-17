@@ -339,6 +339,8 @@ export default function RackPlanTab({ jobId }: Props) {
               connectionMode={ConnectionMode.Loose}
               nodeTypes={rackNodeTypes}
               edgeTypes={rackEdgeTypes}
+              snapToGrid
+              snapGrid={[16, 16]}
               onSelectionChange={({ nodes }) => setSelectedNodeId(nodes[0]?.id ?? null)}
               fitView
               proOptions={{ hideAttribution: true }}

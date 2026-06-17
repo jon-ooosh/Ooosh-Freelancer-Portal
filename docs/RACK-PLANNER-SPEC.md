@@ -268,3 +268,82 @@ node scripts/hh-item-probe.js 15553        # rack analysis (tree + classificatio
 node scripts/hh-item-probe.js --categories  # HH category tree
 node scripts/hh-item-probe.js --item 755    # stock-master probe (photo hunt)
 ```
+
+## 10. Build status (Jun 2026) — LIVE
+
+Backend `routes/rack-plans.ts` + `services/rack-classify.ts`; frontend
+`components/rackplan/*` (+ `pages/RackPlanPublicPage.tsx`). Migrations 123
+(`rack_plans` + `rack_stock_items`) and 124 (`rack_plans.updated_by`).
+
+**Shipped:**
+- ✅ Storage (one plan/job, JSONB `layout`, login-free `view_token`) + classify
+  service (the locked §3.3 rules) + drift computation (backend).
+- ✅ Launches from **Job Detail → 🛠 Tools → Rack Planner** (a modal, NOT a tab —
+  keeps the tab bar uncluttered). An Overview **Rack Plan card** surfaces once a
+  plan has content (item count, last-edited-by, View-only button, Edit button) so
+  staff know a plan exists.
+- ✅ Canvas (`@xyflow/react`): four node types — built-here rack (U-stack
+  interior), pre-built (opaque package), loose, and **free-text note**. Drag to
+  position, **grid-snap** (16px) for easy in-line alignment.
+- ✅ Picker (right panel) fed from the classifier, **quantity-aware** (a qty:3
+  item places 3× and counts down; rack cases gated too). Section buckets:
+  Pre-built / Cases / U-items / Loose.
+- ✅ Built-here interior: drag-order via ▲▼, per-item ✕, **half-width pairing**
+  (two halves share one U-band; lone half + "pair/blank"), **capacity gate** +
+  proportional empty-U rendering (a case's `rackheight` = its U capacity).
+- ✅ **Connections**: drag any node-dot → any node-dot (Loose mode, 4 source
+  handles/node), right-angle (smoothstep) routing, auto-prompt label on connect,
+  click-to-edit + ✕-delete via an on-line chip.
+- ✅ **Per-node notes**, **editable labels** (double-click — overrides the HH
+  name), **coloured borders** (swatch row when selected, for grouping).
+- ✅ **Front-panel photos**: lazy-seed upload (📷 on bands + pre-built nodes) to
+  the **public R2 bucket** keyed by HH `list_id`, resolved live by `list_id`
+  (editor + client). `object-contain` on dark backing = true aspect, no crop.
+- ✅ **View-only page** `/rack/:token` (login-free, outside Layout): read-only
+  canvas, Ooosh logo + job/HH header, "show labels" toggle, subtle line grid.
+
+**Remaining roadmap:**
+- ⏳ **Drift DISPLAY (frontend)** — the backend already returns `drift`
+  (`removed` ids + `unplaced` pickable items). Still to build per §3.6: red
+  shape holding a removed racked item's U-slot, the quiet "N removed" line, and
+  the explicit **"on job, unplaced" bucket** in the picker. This is the main
+  unbuilt piece.
+- ⏳ Proportional **pre-built** node sizing (size the opaque package to its own U
+  height — needs a U height seeded on the package).
+- ⏳ Per-**U-item** label override (node labels are editable; stack-item labels
+  aren't yet).
+- ⏳ Nice-to-have: react-flow alignment **helper-lines** (snap-to-other-node
+  guides) beyond grid snap.
+
+## 11. Learnings / gotchas (carve these in)
+
+- **HireHop field names:** rack height = `TYPE_CUSTOM_FIELDS.rackheight` (integer,
+  `>0` = rackable; `0` is HH's default = not rackable). Half-width = `rackwidth`
+  (a **boolean checkbox**, despite the name; ticked = half). On a **case** (cat
+  408), `rackheight` means **U capacity**, not occupied height — so classify
+  checks cat 408 BEFORE the generic `rackheight>0 → u_item` rule.
+- **react-flow Loose mode is required on BOTH the editor AND the public view.**
+  All handles are `type="source"` (so any dot connects to any dot). In the default
+  **Strict** connectionMode, react-flow tries to resolve an edge's target end
+  against a *target-type* handle, finds none, and **silently drops the edge** —
+  which is why connection lines rendered in the editor but vanished in the client
+  view for several rounds. Fix = `connectionMode={ConnectionMode.Loose}`
+  everywhere. (Also: hide read-only handles with `opacity:0`, NOT
+  `isConnectable={false}` — the latter stops react-flow measuring them and edges
+  lose their anchor.)
+- **Photos go in the PUBLIC R2 bucket** (`uploadToPublicR2`, `R2_PUBLIC_URL`) —
+  same pattern as vehicle photos — so the login-free client view can show them
+  with no auth. Front-panel images are not PII. Store the full public URL in
+  `rack_stock_items.front_photo_key`; resolve by `list_id` at render (so a photo
+  added after a plan was saved still shows). Render `object-contain` so the true
+  panel aspect is preserved (no squish/crop). Needs `R2_PUBLIC_URL` +
+  `R2_PUBLIC_BUCKET_NAME` on the server (already set for vehicle photos).
+- **The real Ooosh logo is `/ooosh-logo-full.jpg`** (used by login + warehouse +
+  vehicle shell). The `ooosh-logo*.svg` files were a stray/wrong asset and were
+  deleted.
+- **Quantity expansion is count-based:** placement tracks count per HH `itemId`
+  (standalone nodes + stack items), picker remaining = `quantity − placed`. A
+  built-here node created from a case carries the case's `itemId` so it's gated
+  too; blank "+ New rack" nodes carry no item ref (intentionally unlimited).
+- **All node types share one inline `width: 240px`** so the plot lines up — don't
+  reintroduce width classes that can drift between node types.
