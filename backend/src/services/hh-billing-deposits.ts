@@ -87,3 +87,72 @@ export async function getJobBillingFacts(hhJobNumber: number): Promise<JobBillin
 export async function getHireDeposits(hhJobNumber: number): Promise<HireDeposit[]> {
   return (await getJobBillingFacts(hhJobNumber)).hireDeposits;
 }
+
+/**
+ * NET hire deposits currently held on a job — gross kind=6 deposits MINUS the
+ * kind=3 refund applications booked against them. Used by the Combine-bookings
+ * read-back to assert the absorbed job's deposits actually cleared after a move
+ * (a refund is a separate kind=3 row, so getHireDeposits' gross figure would
+ * still show the original deposit and false-positive).
+ *
+ * Mirrors money.ts's hire-deposit netting: a deposit refund is a kind=3 row with
+ * OWNER_DEPOSIT set, OWNER=0 (not applied to an invoice), negative credit. Excess
+ * deposits + their applications are excluded (handled by the excess flows).
+ *
+ * Throws on HH failure. Read with no cache (we're verifying a just-made change).
+ */
+export async function getNetHireDepositTotal(hhJobNumber: number): Promise<number> {
+  const res = await hhBroker.get<any>(
+    '/php_functions/billing_list.php',
+    { main_id: hhJobNumber, type: 1 },
+    { priority: 'high', cacheTTL: 0 },
+  );
+  if (!res.success || !res.data) {
+    throw new Error(`Could not read HireHop billing for job ${hhJobNumber}: ${res.error || 'no data'}`);
+  }
+  const bl = res.data as any;
+  const rows: any[] = Array.isArray(bl?.rows) ? bl.rows : [];
+
+  // Pre-pass: which kind=6 deposits are excess (to exclude their kind=3 apps).
+  const excessDepositIds = new Set<string>();
+  for (const row of rows) {
+    if (parseInt(row.kind ?? '0') !== 6) continue;
+    const data = row.data || {};
+    if (parseFloat(row.credit || data.credit || '0') <= 0) continue;
+    if (isExcessText(String(data.DESCRIPTION || row.desc || '') + ' ' + String(data.MEMO || ''))) {
+      const id = parseInt(data.ID || row.number || '0');
+      if (id > 0) excessDepositIds.add(String(id));
+    }
+  }
+
+  const seen = new Set<number>();
+  let net = 0;
+  for (const row of rows) {
+    const kind = parseInt(row.kind ?? '0');
+    const data = row.data || {};
+    if (kind === 6) {
+      const credit = parseFloat(row.credit || data.credit || '0');
+      if (!isExcessText(String(data.DESCRIPTION || row.desc || '') + ' ' + String(data.MEMO || ''))) {
+        net += credit; // signed (positive deposit in)
+      }
+    } else if (kind === 3) {
+      const credit = parseFloat(row.credit || data.credit || '0');
+      const absA = Math.abs(credit);
+      if (absA <= 0) continue;
+      const dedupId = parseInt(data.ID || '0');
+      if (dedupId > 0) { if (seen.has(dedupId)) continue; seen.add(dedupId); }
+      const ownerDepositId = data.OWNER_DEPOSIT;
+      const appliedToInvoice = data.OWNER != null && parseInt(String(data.OWNER)) > 0;
+      const isExcess = isExcessText(String(data.DESCRIPTION || row.desc || '') + ' ' + String(data.MEMO || ''));
+      if (ownerDepositId) {
+        const fromExcess = excessDepositIds.has(String(ownerDepositId));
+        if (!fromExcess && credit < 0 && !appliedToInvoice) net -= absA; // deposit refund out
+        // applied-to-invoice or excess apps: not a held hire deposit — ignore
+      } else if (credit < 0 && !isExcess) {
+        net -= absA; // standalone refund
+      }
+      // positive direct invoice payment without OWNER_DEPOSIT: not a held deposit
+    }
+  }
+  return net;
+}

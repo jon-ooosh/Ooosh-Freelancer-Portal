@@ -1378,6 +1378,26 @@ Full cancellation workflow distinguishing **lost enquiries** (never confirmed) f
 - [ ] Early return calculator frontend integration (clause 7.3 — backend built, UI not yet)
 - [ ] Partial cancellation / scope reduction (deferred — noted for future)
 
+#### Combine Bookings (Jun 2026)
+
+Merge two **same-client pre-hire** bookings into one — the "client wants their two separate hires to become one continuous hire" case (e.g. 15–22 Jul + 29 Jul–1 Aug → 15 Jul–1 Aug). Technically a cancellation of one booking, but a no-fee one that works in our favour (van tied up longer = more charge), so it does NOT run the normal cancellation/fee/refund path. Migration **125** added `jobs.combined_into_job_id`.
+
+**Where:** "🔀 Combine" button in the Job Detail header (2×2 control grid: Sync HH / Pre-Hire Review on top, Combine / Mark Internal below). `MANAGER_ROLES`, pre-hire jobs only. Opens `CombineBookingsModal` — lists the same client's other pre-hire bookings (search fallback) → preview (kept / retired / combined dates / deposit-to-move + any blocks) → type-the-retired-HH-number to confirm.
+
+**Survivor (kept) booking is server-decided**, never the browser's call (`assessCombine` in `routes/pipeline.ts`): excess-holder wins (so the held excess never has to move), then status progression (confirmed > provisional > enquiry — an enquiry folds INTO a confirmed booking), then deposit-holder, then earlier start. The endpoint refuses if the call's `:id` ≠ the assessed survivor. If the survivor differs from where staff opened the modal, the frontend navigates there on success.
+
+**The deposit move is the only hard part** — HireHop has no "move deposit between jobs" and **rejects negative deposits** (a rejected row never reaches Xero — this was the first-cut bug). So each deposit is re-attributed the same way an excess reimbursement works: **recreate on the survivor first** (`pushDepositToHH` with explicit `bankId` = original bank), **then refund-against-the-original-deposit on the absorbed job** (`reverseDepositOnHH` → `billing_payments_save.php` with `deposit=<id>, OWNER=0, paid=<amount>` + `post_payment` Xero sync — NOT `billing_deposit_save.php`). Recreate-first ordering means a mid-failure double-counts the money (visible, recoverable) rather than losing it. Same bank + same day = a clean refund-out/receipt-in wash in Xero (stray lines reconcile trivially). **No client emails fire** — it's accounting only.
+
+**Sanity read-back:** after the move, `getNetHireDepositTotal(absorbedHhJob)` (in `services/hh-billing-deposits.ts`) re-reads the absorbed job's NET hire deposits (gross `kind=6` minus `kind=3` refund-against-deposit rows — a gross read would false-positive since the refund is a separate row). Residual > £0.01 → loud `hh_warnings` line telling staff exactly what to remove manually. The modal alerts any `hh_warnings`.
+
+**Eligibility blocks** (re-checked server-side, never trusted from the browser; clear message bounces to a manager): different clients, absorbed job invoiced, both holding real excess money, absorbed job has active transport/crew quotes, survivor not HH-linked, or either job past pre-hire.
+
+**Absorbed job retirement:** `pipeline_status='cancelled'` + `combined_into_job_id` set, £0 fee/£0 refund, `next_chase_date=NULL`; open requirements cancelled, vehicle assignments soft-cancelled (+ fleet status resync), derivation excess stubs (`needed`/`pending`, no money) waived; HH write-back status 9; timeline interactions both sides. Job Detail shows an **indigo "Combined into another booking → View"** banner (links to survivor) INSTEAD of the red cancelled banner (gated on `combined_into_job_id`). **Cancellation analytics must EXCLUDE `combined_into_job_id IS NOT NULL`** — these aren't lost revenue, the money moved sideways.
+
+**Endpoints** (`routes/pipeline.ts`): `GET /:id/combine-candidates` (picker list), `GET /:id/combine-preview?with=<id>` (eligibility + figures), `POST /:id/combine` (survivor = `:id`, `MANAGER_ROLES`). Helpers: `reverseDepositOnHH` + `getMethodForBankId` (`services/hh-deposit.ts`), `getJobBillingFacts` / `getNetHireDepositTotal` (`services/hh-billing-deposits.ts`), `CombineBookingsModal.tsx`.
+
+**Deferred:** moving a *held excess* across (combine forces survivor = excess-holder for now, so it never needs to); multi-deposit edge cases beyond the clean single-deposit hire; combining a job with active crew (blocked — move/cancel the quotes first).
+
 #### Lost / Cancelled cleanup pattern (28 Apr 2026)
 
 **Cross-cutting rule for ALL requirement types** — current and future. When a job moves to `lost` or `cancelled`, every open requirement on the job (reminders, hire forms, excess records, vehicle prep, backline, rehearsal, sub-hires, custom — anything in `job_requirements`) is auto-cancelled UNLESS the user has explicitly opted to keep it alive past close-out.
@@ -2786,6 +2806,8 @@ await syncFleetHireStatusByReg(reg);
 **File:** `backend/src/services/hh-deposit.ts`
 
 Centralised two-step HireHop deposit push (`billing_deposit_save.php` + Xero sync via `accounting/tasks.php`). Used by `POST /api/money/:jobId/record-payment` and `POST /api/excess/:id/payment`. Returns a structured `{hhDepositId, xeroSynced, error}` so callers can surface failures rather than silently logging "non-fatal".
+
+`pushDepositToHH` accepts an optional explicit `bankId` (overrides the method→bank mapping) so a deposit can be recreated on the exact original bank. **`reverseDepositOnHH`** (same file) is the "out" leg for moving a deposit off a job (Combine Bookings): it does NOT post a negative deposit — HireHop rejects those and the rejected row never reaches Xero — it posts a **refund payment application** against the specific deposit (`billing_payments_save.php` with `deposit=<id>, OWNER=0, paid=<amount>`) + `post_payment` Xero sync, exactly like excess reimbursement. To reduce/remove a HireHop deposit from anywhere, use a payment application, never a negative deposit. `getMethodForBankId` is the inverse of the bank map for recreating a deposit read back from billing.
 
 **Why this exists:** Before May 2026 the Money tab's Record Payment endpoint had its own inline HH push, and the Excess Manage modal's `/payment` endpoint had no HH push at all — excesses recorded via Manage never appeared in HireHop billing. Job 15624 incident: £1200 worldpay was recorded twice via the Manage modal, doubling the OP-side `excess_amount_taken` to £2400, while HireHop showed nothing for the excess. The shared helper closes both gaps and standardises the failure-surfacing contract.
 

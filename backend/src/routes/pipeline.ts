@@ -16,7 +16,7 @@ import {
 } from '../services/confirmation-hooks';
 import { reactivateAutoCancelledRequirements } from '../services/requirement-cleanup';
 import { pushDepositToHH, reverseDepositOnHH, getMethodForBankId } from '../services/hh-deposit';
-import { getJobBillingFacts, HireDeposit } from '../services/hh-billing-deposits';
+import { getJobBillingFacts, getNetHireDepositTotal, HireDeposit } from '../services/hh-billing-deposits';
 
 const router = Router();
 router.use(authenticate);
@@ -2431,6 +2431,21 @@ router.post(
           [survivorId, dep.amount, method, recreate.hhDepositId || null,
            `Reallocated from job #${absorbed.hh_job_number} (bookings combined)`, userId]
         ).catch(e => console.warn('[Combine] survivor job_payments log failed:', e));
+      }
+
+      // ── 1b. Sanity read-back: re-read the absorbed job's NET hire deposits.
+      // If anything still shows there, a reversal silently didn't apply — turn
+      // that into a loud warning (money insurance) rather than trusting the
+      // per-leg success flags alone.
+      if (aCand.hireDeposits.length > 0) {
+        try {
+          const residual = await getNetHireDepositTotal(Number(absorbed.hh_job_number));
+          if (residual > 0.01) {
+            hhWarnings.push(`Verify: HireHop job #${absorbed.hh_job_number} still shows £${residual.toFixed(2)} of hire deposits after the move — a reversal may not have applied. Remove the residual on #${absorbed.hh_job_number} in HireHop manually.`);
+          }
+        } catch (e) {
+          hhWarnings.push(`Couldn't verify the deposit move on #${absorbed.hh_job_number} (HireHop read-back failed) — please double-check the deposit cleared there.`);
+        }
       }
 
       // ── 2. Extend the survivor's dates to the combined range, push to HH.
