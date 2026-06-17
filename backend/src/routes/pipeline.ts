@@ -2126,7 +2126,22 @@ router.post('/:id/push-dates-to-hh', async (req: AuthRequest, res: Response) => 
 // Xero wash). No client emails fire. See CLAUDE.md "Combine bookings".
 // ============================================================================
 
-const COMBINABLE_STATUSES = ['confirmed', 'prepped', 'prepping'];
+const COMBINABLE_STATUSES = ['new_enquiry', 'quoting', 'paused', 'provisional', 'confirmed', 'prepped', 'prepping'];
+
+// Survivor preference: the more-committed booking continues. Excess money is the
+// strongest pull (we never want to move it), then status progression (a confirmed
+// booking outranks a provisional outranks an enquiry), then holding a deposit
+// (minimise what has to move), then earlier start as the final tiebreak.
+function combineStatusRank(s: string): number {
+  if (['confirmed', 'prepped', 'prepping'].includes(s)) return 3;
+  if (s === 'provisional') return 2;
+  return 1; // new_enquiry / quoting / paused
+}
+function survivorScore(c: CombineCandidateFacts): number {
+  return (c.excessHeld ? 1000 : 0)
+    + combineStatusRank(c.job.pipeline_status) * 10
+    + (c.hireDepositTotal > 0 ? 1 : 0);
+}
 
 interface CombineCandidateFacts {
   job: any;
@@ -2188,39 +2203,42 @@ function assessCombine(a: CombineCandidateFacts, b: CombineCandidateFacts): {
   if (!a.job.client_id || !b.job.client_id || a.job.client_id !== b.job.client_id) {
     blocks.push('The two bookings are for different clients — combine only works within one client.');
   }
-  // Both HH-linked.
-  for (const c of [a, b]) {
-    if (!c.job.hh_job_number) blocks.push(`Job "${c.job.job_name || c.job.id}" isn't linked to HireHop yet.`);
-  }
-  // Both pre-hire.
+  // Both pre-on-hire.
   for (const c of [a, b]) {
     if (!COMBINABLE_STATUSES.includes(c.job.pipeline_status)) {
-      blocks.push(`Job #${c.job.hh_job_number || ''} is "${c.job.pipeline_status}" — only pre-hire bookings (confirmed / prepped) can be combined.`);
+      blocks.push(`"${c.job.job_name || c.job.id}" is "${c.job.pipeline_status}" — only pre-hire bookings (enquiry up to prepped) can be combined.`);
     }
   }
 
-  // Survivor selection: excess-holder wins; else earlier start.
+  // Survivor = the more-committed booking (see survivorScore); earlier start
+  // breaks a tie. So an enquiry folds INTO a confirmed booking, not vice versa.
   let survivor: CombineCandidateFacts;
   let absorbed: CombineCandidateFacts;
-  if (a.excessHeld && b.excessHeld) {
-    blocks.push('Both bookings hold insurance excess money — resolve one before combining so the excess doesn\'t need moving.');
-    survivor = a; absorbed = b;
-  } else if (a.excessHeld) {
-    survivor = a; absorbed = b;
-  } else if (b.excessHeld) {
-    survivor = b; absorbed = a;
+  const sa = survivorScore(a), sb = survivorScore(b);
+  if (sa !== sb) {
+    if (sa > sb) { survivor = a; absorbed = b; } else { survivor = b; absorbed = a; }
   } else {
     const aStart = new Date(a.job.job_date || a.job.out_date || 0).getTime();
     const bStart = new Date(b.job.job_date || b.job.out_date || 0).getTime();
     if (bStart < aStart) { survivor = b; absorbed = a; } else { survivor = a; absorbed = b; }
   }
 
+  if (a.excessHeld && b.excessHeld) {
+    blocks.push('Both bookings hold insurance excess money — resolve one before combining so the excess doesn\'t need moving.');
+  }
+
+  // Only the SURVIVOR must be HH-linked (dates + reattributed deposit are pushed
+  // there). An un-pushed enquiry being absorbed has no deposit to move anyway —
+  // deposits are read from HireHop — so it can fold in without an HH number.
+  if (!survivor.job.hh_job_number) {
+    blocks.push(`The booking being kept ("${survivor.job.job_name || survivor.job.id}") isn't linked to HireHop — link it to HireHop first so the dates and deposit can be pushed.`);
+  }
   // Absorbed-side blocks (the side being retired).
   if (absorbed.hasInvoices) {
     blocks.push(`Job #${absorbed.job.hh_job_number} has an invoice raised — combine doesn't unwind invoiced money. Resolve the invoice first.`);
   }
   if (absorbed.activeQuotes > 0) {
-    blocks.push(`Job #${absorbed.job.hh_job_number} has transport/crew quotes — move or cancel those before combining (this tool only moves the deposit).`);
+    blocks.push(`Job #${absorbed.job.hh_job_number || absorbed.job.job_name} has transport/crew quotes — move or cancel those before combining (this tool only moves the deposit).`);
   }
 
   return { survivor, absorbed, blocks };
@@ -2245,6 +2263,38 @@ function combinedDates(survivor: any, absorbed: any) {
     return_date: max(survivor.return_date, absorbed.return_date),
   };
 }
+
+// GET candidates — same-client pre-on-hire bookings to combine THIS job with.
+// Drives the modal's default picker list (search fallback handled client-side).
+router.get('/:id/combine-candidates', async (req: AuthRequest, res: Response) => {
+  try {
+    const jobId = req.params.id as string;
+    const cur = await query(
+      `SELECT id, client_id, client_name FROM jobs WHERE id = $1 AND is_deleted = false`,
+      [jobId]
+    );
+    if (cur.rows.length === 0) { res.status(404).json({ error: 'Job not found' }); return; }
+    const clientId = cur.rows[0].client_id;
+    if (!clientId) { res.json({ data: [], client_name: cur.rows[0].client_name }); return; }
+
+    const rows = await query(
+      `SELECT id, hh_job_number, job_name, pipeline_status,
+              out_date, job_date, job_end, return_date, job_value
+         FROM jobs
+        WHERE client_id = $1
+          AND id <> $2
+          AND is_deleted = false
+          AND combined_into_job_id IS NULL
+          AND pipeline_status = ANY($3::text[])
+        ORDER BY job_date ASC NULLS LAST`,
+      [clientId, jobId, COMBINABLE_STATUSES]
+    );
+    res.json({ data: rows.rows, client_name: cur.rows[0].client_name });
+  } catch (error: any) {
+    console.error('Combine candidates error:', error);
+    res.status(500).json({ error: error?.message || 'Failed to load candidates' });
+  }
+});
 
 // GET preview — eligibility + figures for the modal. ?with=<otherJobId>
 router.get('/:id/combine-preview', async (req: AuthRequest, res: Response) => {

@@ -17,6 +17,7 @@ import AddToHireModal, { type AddToHireCandidate } from '../components/AddToHire
 import JobContactsCard from '../components/JobContactsCard';
 import type { JobExcess } from '../../../shared/types';
 import CancellationModal from '../components/CancellationModal';
+import CombineBookingsModal from '../components/CombineBookingsModal';
 import CancelOpenRequirementsSection from '../components/CancelOpenRequirementsSection';
 import { useAuthStore } from '../hooks/useAuthStore';
 import MoneyTab from '../components/MoneyTab';
@@ -137,6 +138,7 @@ interface JobDetail {
   cancellation_tier: string | null;
   reopened_from_job_id: string | null;
   reopened_to_job_id: string | null;
+  combined_into_job_id?: string | null;
   // Lost-job fields (mirror of cancellation, populated by pipeline transition)
   lost_at?: string | null;
   lost_reason?: string | null;
@@ -1163,6 +1165,7 @@ export default function JobDetailPage() {
   // Staging Calculator — modal launch + conditional tab (only shown once a plan exists)
   const [showStagingModal, setShowStagingModal] = useState(false);
   const [showRackPlanModal, setShowRackPlanModal] = useState(false);
+  const [showCombineModal, setShowCombineModal] = useState(false);
   const [rackPlanRefreshKey, setRackPlanRefreshKey] = useState(0);
   const [stagingPlanCount, setStagingPlanCount] = useState(0);
   const loadStagingCount = useCallback(async () => {
@@ -2618,8 +2621,35 @@ export default function JobDetailPage() {
         &larr; {backLabel}
       </Link>
 
+      {/* Combined banner — absorbed booking folded into another. Replaces the
+          red cancelled banner (it's a merge, not a real cancellation). */}
+      {job.combined_into_job_id && (
+        <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4 mb-4">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex-1">
+              <p className="text-sm font-bold text-indigo-700">
+                🔀 This booking was combined into another booking
+                {job.cancelled_at ? ` on ${new Date(job.cancelled_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}` : ''}
+              </p>
+              <p className="text-xs text-indigo-600 mt-1">
+                Retired with no cancellation fee — its deposit was reallocated to the kept booking.
+              </p>
+              {job.cancellation_notes && (
+                <p className="text-xs text-indigo-600/80 mt-1">{job.cancellation_notes}</p>
+              )}
+            </div>
+            <Link
+              to={`/jobs/${job.combined_into_job_id}`}
+              className="text-xs px-3 py-1.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 whitespace-nowrap text-center shrink-0"
+            >
+              View combined booking &rarr;
+            </Link>
+          </div>
+        </div>
+      )}
+
       {/* Cancelled banner */}
-      {job.pipeline_status === 'cancelled' && (
+      {job.pipeline_status === 'cancelled' && !job.combined_into_job_id && (
         <div className="bg-red-50 border border-red-200 rounded-xl p-4 mb-4">
           <div className="flex items-start gap-3">
             <div className="flex-1">
@@ -3474,6 +3504,18 @@ export default function JobDetailPage() {
                   {internalToggling ? 'Saving…' : job.is_internal ? 'Internal Job ✓' : 'Mark Internal'}
                 </span>
               </button>
+              {['admin', 'manager', 'weekend_manager'].includes(user?.role || '')
+                && !job.combined_into_job_id
+                && ['new_enquiry', 'quoting', 'paused', 'provisional', 'confirmed', 'prepped', 'prepping'].includes(job.pipeline_status || '') && (
+                <button
+                  onClick={() => setShowCombineModal(true)}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600 transition-colors"
+                  title="Combine this booking with another pre-hire booking for the same client"
+                >
+                  <span>🔀</span>
+                  <span className="hidden sm:inline">Combine</span>
+                </button>
+              )}
               {job.hh_job_number && (
                 <button
                   onClick={() => syncFromHireHop(true)}
@@ -5389,6 +5431,22 @@ export default function JobDetailPage() {
           clientName={job?.client_name || job?.company_name}
           onConfirm={(data) => handleStatusTransition(transitionTarget, data)}
           onCancel={() => { setShowTransitionModal(false); setTransitionTarget(null); }}
+        />
+      )}
+
+      {/* Combine bookings modal */}
+      {showCombineModal && job && (
+        <CombineBookingsModal
+          jobId={job.id}
+          onClose={() => setShowCombineModal(false)}
+          onCombined={(survivorId) => {
+            setShowCombineModal(false);
+            if (survivorId && survivorId !== job.id) {
+              navigate(`/jobs/${survivorId}`);
+            } else {
+              loadJob();
+            }
+          }}
         />
       )}
 
