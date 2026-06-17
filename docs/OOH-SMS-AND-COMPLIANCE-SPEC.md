@@ -299,13 +299,20 @@ needs no code change to swap to OOOSH later — the service sends via `messaging
 text lands, then either flip `SMS_MODE=live` or allowlist `ooh_return_approach` via
 `SMS_LIVE_TEMPLATES`.
 
-**Phase 2 — Compliance tracking:**
-6. `ooh_return_violations` + `drivers.ooh_blocked*` migrations + threshold setting.
-7. Check-in "OOH steps followed" checkbox + severity modal + attribution cascade (primary
-   capture).
-8. Retro-flag surfaces: "Recent OOH returns" dashboard list + Job Detail OOH flag affordance.
-9. Driver Detail compliance section + set/lift block; Org rollup.
-10. Enforcement banner + two-tier override at OOH toggle / book-out.
+**Phase 2 — Compliance tracking: ✅ CORE LOOP BUILT**
+6. ✅ `ooh_return_violations` + `drivers.ooh_blocked*` (migration 128) + threshold setting
+   + `services/ooh-compliance.ts` + endpoints on `routes/ooh-return.ts`.
+7. ✅ Check-in capture — `OohCheckInPrompt` on the check-in success screen (pre-ticked "OOH
+   steps followed", untick → two-choice severity + attribution picker).
+8. Retro-flag surfaces: ✅ "Recent OOH returns" dashboard section (`sections/OohReturns.tsx`,
+   self-fetching, hidden when empty); ⬜ Job Detail OOH flag affordance (remaining).
+9. ✅ Driver Detail "OOH" tab (`OohComplianceTab`) — block status, suggest-and-confirm block
+   (manager) / lift (admin), violation history + dismiss. ⬜ Org rollup (remaining).
+10. ✅ Enforcement — 409 + manager override on the OOH toggle (`OohReturnModal`), override
+    logged to the job timeline.
+
+**Remaining (secondary):** Job Detail per-card OOH flag affordance (the dashboard list +
+check-in capture already cover retro-flagging); read-only Org incident rollup.
 
 **Phase 3 (later, optional):** WhatsApp channel (dedicated number + Meta templates),
 acceptable-parking polygon auto-hint.
