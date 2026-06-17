@@ -34,6 +34,8 @@ import FreelancerBookoutShell from './pages/FreelancerBookoutShell';
 import StoragePage from './pages/StoragePage';
 import StorageTcsAcceptPage from './pages/StorageTcsAcceptPage';
 import HoldingPage from './pages/HoldingPage';
+import PcnsPage from './pages/PcnsPage';
+import PcnDetailPage from './pages/PcnDetailPage';
 import HoldingReceiptPage from './pages/HoldingReceiptPage';
 import QuickActionsPage from './pages/QuickActionsPage';
 import MerchFormPage from './pages/MerchFormPage';
@@ -179,6 +181,8 @@ export default function App() {
                 <Route path="/money/excess" element={<ExcessLedgerPage />} />
                 <Route path="/money/costs" element={<CostsPage />} />
                 <Route path="/vehicles/ve103b" element={<VE103BCertificatesPage />} />
+                <Route path="/vehicles/pcns" element={<PcnsPage />} />
+                <Route path="/vehicles/pcns/:id" element={<PcnDetailPage />} />
                 <Route path="/vehicles/*" element={<VehicleRoutes />} />
                 <Route path="/inbox" element={<InboxPage />} />
                 <Route path="/profile" element={<ProfilePage />} />
