@@ -13,16 +13,47 @@
 import { Router, Request, Response } from 'express';
 import { randomBytes } from 'crypto';
 import { z } from 'zod';
+import multer from 'multer';
 import rateLimit from 'express-rate-limit';
 import { query } from '../config/database';
 import { authenticate, AuthRequest, STAFF_ROLES, authorize } from '../middleware/auth';
 import { validate } from '../middleware/validate';
+import { uploadToPublicR2 } from '../config/r2';
 import { HHLineItem } from '../services/hirehop-job-sync';
 import { classifyRackItems, pickableItems, ClassifiedRackItem } from '../services/rack-classify';
 
 const router = Router();
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const R2_PUBLIC_URL = process.env.R2_PUBLIC_URL || '';
+
+/** Front-panel photos are stored in front_photo_key as a full public URL. */
+function photoToUrl(stored: string | null): string | null {
+  if (!stored) return null;
+  if (/^https?:\/\//i.test(stored)) return stored;
+  return R2_PUBLIC_URL ? `${R2_PUBLIC_URL}/${stored}` : stored;
+}
+
+/** Map of HireHop list_id → public front-panel photo URL. */
+async function getPhotoMap(listIds: number[]): Promise<Record<number, string>> {
+  const ids = [...new Set(listIds.filter((n) => n > 0))];
+  if (ids.length === 0) return {};
+  const result = await query(
+    `SELECT list_id, front_photo_key FROM rack_stock_items WHERE list_id = ANY($1) AND front_photo_key IS NOT NULL`,
+    [ids],
+  );
+  const map: Record<number, string> = {};
+  for (const r of result.rows) {
+    const url = photoToUrl(r.front_photo_key);
+    if (url) map[Number(r.list_id)] = url;
+  }
+  return map;
+}
+
+const photoUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+});
 
 interface RackPlanRow {
   id: string;
@@ -78,9 +109,19 @@ async function attachPhotos(classified: ClassifiedRackItem[]) {
     [listIds],
   );
   const map = new Map<number, string | null>(
-    result.rows.map((r: any) => [Number(r.list_id), r.front_photo_key]),
+    result.rows.map((r: any) => [Number(r.list_id), photoToUrl(r.front_photo_key)]),
   );
   return classified.map((c) => ({ ...c, frontPhotoKey: map.get(c.listId) ?? null }));
+}
+
+/** All hh_list_id referenced by a saved layout (nodes + built-here items). */
+function layoutListIds(layout: { nodes?: any[] }): number[] {
+  const ids: number[] = [];
+  for (const n of layout?.nodes ?? []) {
+    if (typeof n?.hh_list_id === 'number') ids.push(n.hh_list_id);
+    for (const it of n?.items ?? []) if (typeof it?.hh_list_id === 'number') ids.push(it.hh_list_id);
+  }
+  return ids;
 }
 
 /** Classify a job's stored line items. */
@@ -115,6 +156,9 @@ router.get('/public/:token', publicLimiter, async (req: Request, res: Response) 
   const row = result.rows[0];
   const classified = await attachPhotos(classifyJob(row.line_items));
   const drift = computeDrift(row.layout, classified);
+  // Photos resolved live by list_id (so a photo uploaded after the plan was
+  // saved still shows on the client view).
+  const photos = await getPhotoMap(layoutListIds(row.layout));
 
   res.json({
     data: {
@@ -122,6 +166,7 @@ router.get('/public/:token', publicLimiter, async (req: Request, res: Response) 
       jobName: row.job_name,
       hhJobNumber: row.hh_job_number,
       layout: row.layout,
+      photos,
       drift,
     },
   });
@@ -267,6 +312,46 @@ router.post('/stock-photo/:listId', validate(photoSchema), async (req: AuthReque
     [listId, front_photo_key, name ?? null, req.user?.id ?? null],
   );
   res.json({ data: { listId, frontPhotoKey: front_photo_key } });
+});
+
+// POST /photo/:listId — upload a front-panel photo (multipart). Stored in the
+// PUBLIC R2 bucket so the login-free client view can show it. Lazy-seeded: one
+// photo per HireHop stock item, reused on every future job.
+router.post('/photo/:listId', photoUpload.single('file'), async (req: AuthRequest, res: Response) => {
+  const listId = Number(req.params.listId);
+  if (!Number.isInteger(listId) || listId <= 0) {
+    res.status(400).json({ error: 'Invalid listId' });
+    return;
+  }
+  const file = (req as Request & { file?: Express.Multer.File }).file;
+  if (!file) {
+    res.status(400).json({ error: 'No file uploaded' });
+    return;
+  }
+  if (!/^image\//.test(file.mimetype)) {
+    res.status(400).json({ error: 'File must be an image' });
+    return;
+  }
+  if (!R2_PUBLIC_URL) {
+    res.status(503).json({ error: 'Public photo storage not configured (R2_PUBLIC_URL)' });
+    return;
+  }
+
+  const ext = (file.originalname.split('.').pop() || 'jpg').toLowerCase().replace(/[^a-z0-9]/g, '') || 'jpg';
+  const key = `rack-photos/${listId}-${Date.now()}.${ext}`;
+  await uploadToPublicR2(key, file.buffer, file.mimetype);
+  const url = `${R2_PUBLIC_URL}/${key}`;
+
+  await query(
+    `INSERT INTO rack_stock_items (list_id, front_photo_key, updated_by, updated_at)
+     VALUES ($1, $2, $3, NOW())
+     ON CONFLICT (list_id) DO UPDATE
+        SET front_photo_key = EXCLUDED.front_photo_key,
+            updated_by = EXCLUDED.updated_by,
+            updated_at = NOW()`,
+    [listId, url, req.user?.id ?? null],
+  );
+  res.json({ data: { listId, url } });
 });
 
 export default router;

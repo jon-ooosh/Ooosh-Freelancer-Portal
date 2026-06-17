@@ -17,6 +17,10 @@ export interface RackPlanActions {
   /** Edit / delete a connection (used by the custom edge). */
   editEdge?: (edgeId: string) => void;
   deleteEdge?: (edgeId: string) => void;
+  /** Current front-panel photo URL for a HireHop stock item, if any. */
+  photoUrl?: (listId: number) => string | undefined;
+  /** Trigger the upload flow for a stock item's front-panel photo. */
+  requestPhoto?: (listId: number) => void;
   /** Read-only mode (public view) — hide all edit affordances. */
   readOnly?: boolean;
 }

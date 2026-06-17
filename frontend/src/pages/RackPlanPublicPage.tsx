@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import { ReactFlow, Background, Controls, type Edge } from '@xyflow/react';
+import { ReactFlow, Background, Controls, ConnectionMode, type Edge } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { api } from '../services/api';
 import { rackNodeTypes, type RackFlowNode } from '../components/rackplan/nodes';
@@ -13,13 +13,10 @@ interface PublicData {
   jobName: string | null;
   hhJobNumber: number | null;
   layout: RackPlanLayout;
+  photos?: Record<number, string>;
 }
 
 const noop = () => {};
-const readOnlyActions: RackPlanActions = {
-  selectedNodeId: null, readOnly: true,
-  selectNode: noop, removeNode: noop, moveStackItem: noop, removeStackItem: noop, setCapacity: noop,
-};
 
 export default function RackPlanPublicPage() {
   const { token } = useParams<{ token: string }>();
@@ -56,6 +53,12 @@ export default function RackPlanPublicPage() {
     [data, showLabels],
   );
 
+  const readOnlyActions: RackPlanActions = useMemo(() => ({
+    selectedNodeId: null, readOnly: true,
+    selectNode: noop, removeNode: noop, moveStackItem: noop, removeStackItem: noop, setCapacity: noop,
+    photoUrl: (listId: number) => data?.photos?.[listId],
+  }), [data]);
+
   if (error) {
     return <div className="min-h-screen flex items-center justify-center text-gray-500">{error}</div>;
   }
@@ -84,6 +87,7 @@ export default function RackPlanPublicPage() {
             edges={edges}
             nodeTypes={rackNodeTypes}
             edgeTypes={rackEdgeTypes}
+            connectionMode={ConnectionMode.Loose}
             nodesDraggable={false}
             nodesConnectable={false}
             elementsSelectable={false}
