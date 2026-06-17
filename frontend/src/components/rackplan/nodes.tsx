@@ -58,7 +58,7 @@ export const PreBuiltNode = memo(({ id, data, selected }: NodeProps<RackFlowNode
   const node = data.node;
   const listId = node.hh_list_id ?? 0;
   const url = listId > 0 ? photoUrl?.(listId) : undefined;
-  const missing = listId > 0 && isMissing?.(listId);
+  const missing = isMissing?.(node.hh_item_id ?? 0);
   return (
     <div style={missing ? { width: NODE_W, borderColor: '#dc2626' } : rootStyle(node.color)}
       className={`rounded-md border-2 border-gray-300 bg-purple-50 shadow-sm overflow-hidden ${ringFor(!!selected)}`}>
@@ -93,8 +93,7 @@ PreBuiltNode.displayName = 'PreBuiltNode';
 export const LooseNode = memo(({ id, data, selected }: NodeProps<RackFlowNode>) => {
   const { removeNode, renameNode, readOnly, isMissing } = useActions();
   const node = data.node;
-  const listId = node.hh_list_id ?? 0;
-  const missing = listId > 0 && isMissing?.(listId);
+  const missing = isMissing?.(node.hh_item_id ?? 0);
   return (
     <div style={missing ? { width: NODE_W, borderColor: '#dc2626' } : rootStyle(node.color)}
       className={`rounded-md border-2 border-gray-300 bg-white shadow-sm overflow-hidden ${ringFor(!!selected)}`}>
@@ -152,11 +151,13 @@ function StackCell({
   onMove: (nodeId: string, index: number, dir: -1 | 1) => void;
   onRemove: (nodeId: string, index: number) => void;
 }) {
-  const { photoUrl, requestPhoto, isMissing, photoEditMode } = useActions();
+  const { photoUrl, requestPhoto, isMissing, photoEditMode, renameStackItem } = useActions();
   const h = Math.max(1, item.rackheight || 1);
   const uTag = `${h}U${item.half_width ? ' ½' : ''}`;
   const url = photoUrl?.(item.hh_list_id);
   const missing = isMissing?.(item.hh_item_id);
+  const onRename = (e: { stopPropagation: () => void }) => { if (!readOnly) { e.stopPropagation(); renameStackItem?.(nodeId, index); } };
+  const renameTitle = readOnly ? undefined : 'Double-click to rename';
 
   if (missing) {
     return (
@@ -178,11 +179,12 @@ function StackCell({
         </div>
       )}
       {url ? (
-        <div className="relative z-10 self-start max-w-full bg-black/55 text-white rounded px-1 py-0.5 mr-5">
+        <div className="relative z-10 self-start max-w-full bg-black/55 text-white rounded px-1 py-0.5 mr-5"
+          onDoubleClick={onRename} title={renameTitle}>
           <span className="text-[9px] font-medium truncate block">{item.label} · {uTag}</span>
         </div>
       ) : (
-        <div className={readOnly ? '' : 'pr-5'}>
+        <div className={readOnly ? '' : 'pr-5'} onDoubleClick={onRename} title={renameTitle}>
           {h === 1 ? (
             <div className="flex items-center gap-1 min-w-0">
               <span className="text-[10px] font-medium text-gray-800 truncate">{item.label}</span>

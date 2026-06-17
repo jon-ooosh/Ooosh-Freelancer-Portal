@@ -16,6 +16,8 @@ export interface RackPlanActions {
   setCapacity: (nodeId: string, capacity: number | null) => void;
   /** Rename a node's label (overrides the HireHop name). */
   renameNode?: (nodeId: string) => void;
+  /** Rename a U-stack item's label (overrides the HireHop name). */
+  renameStackItem?: (nodeId: string, index: number) => void;
   /** Set a node's accent/border colour (null clears). */
   setColor?: (nodeId: string, color: string | null) => void;
   /** Set a text node's content. */
