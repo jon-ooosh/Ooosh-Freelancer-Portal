@@ -35,6 +35,40 @@ function haversineMiles(lat1: number, lng1: number, lat2: number, lng2: number):
 // Skip a fix older than this — don't text on a stale position.
 const MAX_FIX_AGE_SECONDS = 20 * 60;
 
+/**
+ * Parse a coordinate from system_settings. Accepts decimal degrees
+ * ("50.83125", "-0.2094", "0.2094 W") AND DMS as pasted from Google Maps /
+ * other sources ("50°49'52.5\"N", "0°12'33.7\"W"). A plain parseFloat on a DMS
+ * string silently yields just the degrees and drops the S/W sign — a ~tens-of-
+ * miles error that would stop the geofence ever firing. Returns NaN if unparseable.
+ */
+export function parseCoord(raw: string | null | undefined): number {
+  if (!raw) return NaN;
+  const s = raw.trim();
+
+  // DMS: 50°49'52.5"N  /  0 12 33.7 W  /  50:49:52.5N
+  const dms = s.match(
+    /^(\d+(?:\.\d+)?)\s*[°:\s]\s*(\d+(?:\.\d+)?)\s*['′:\s]\s*(\d+(?:\.\d+)?)\s*["″]?\s*([NSEW])?$/i,
+  );
+  if (dms) {
+    let val = parseFloat(dms[1]) + parseFloat(dms[2]) / 60 + parseFloat(dms[3]) / 3600;
+    const hemi = (dms[4] || '').toUpperCase();
+    if (hemi === 'S' || hemi === 'W') val = -val;
+    return val;
+  }
+
+  // Decimal, optionally with a trailing hemisphere ("50.83125 N", "0.2094 W")
+  const dec = s.match(/^(-?\d+(?:\.\d+)?)\s*([NSEW])?$/i);
+  if (dec) {
+    let val = parseFloat(dec[1]);
+    const hemi = (dec[2] || '').toUpperCase();
+    if ((hemi === 'S' || hemi === 'W') && val > 0) val = -val;
+    return val;
+  }
+
+  return parseFloat(s);
+}
+
 export async function runOohApproachScan(): Promise<{
   checked: number;
   texted: number;
@@ -50,8 +84,8 @@ export async function runOohApproachScan(): Promise<{
     'ooh_sms_radius_miles',
     'ooh_sms_country_allowlist',
   ]);
-  const baseLat = parseFloat(settings.ooh_base_lat || '');
-  const baseLng = parseFloat(settings.ooh_base_lng || '');
+  const baseLat = parseCoord(settings.ooh_base_lat);
+  const baseLng = parseCoord(settings.ooh_base_lng);
   if (!isFinite(baseLat) || !isFinite(baseLng)) {
     console.warn('[ooh-sms] base lat/lng not set — skipping approach scan');
     return out;
