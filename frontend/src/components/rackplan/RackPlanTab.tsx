@@ -53,6 +53,7 @@ export default function RackPlanTab({ jobId }: Props) {
   const [refreshing, setRefreshing] = useState(false);
   const [hint, setHint] = useState<string | null>(null);
   const [uploadedPhotos, setUploadedPhotos] = useState<Record<number, string>>({});
+  const [photoEditMode, setPhotoEditMode] = useState(false);
   const photoInputRef = useRef<HTMLInputElement>(null);
   const pendingPhotoListId = useRef<number | null>(null);
 
@@ -116,6 +117,13 @@ export default function RackPlanTab({ jobId }: Props) {
     pendingPhotoListId.current = listId;
     photoInputRef.current?.click();
   }, []);
+
+  // Drift: a placed item whose HireHop row is no longer on the job.
+  const currentItemIds = useMemo(() => new Set(picker.map((p) => p.itemId)), [picker]);
+  const isMissing = useCallback(
+    (itemId: number) => itemId > 0 && !currentItemIds.has(itemId),
+    [currentItemIds],
+  );
   const onPhotoFile = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     const listId = pendingPhotoListId.current;
@@ -136,6 +144,8 @@ export default function RackPlanTab({ jobId }: Props) {
     readOnly: false,
     photoUrl,
     requestPhoto,
+    isMissing,
+    photoEditMode,
     selectNode: (id) => setSelectedNodeId(id),
     removeNode: (nodeId) => {
       setRfNodes((nds) => nds.filter((n) => n.id !== nodeId));
@@ -175,7 +185,7 @@ export default function RackPlanTab({ jobId }: Props) {
       setDirty(true);
     },
     deleteEdge: (edgeId) => { setEdges((eds) => eds.filter((e) => e.id !== edgeId)); setDirty(true); },
-  }), [selectedNodeId, updateNode, photoUrl, requestPhoto]);
+  }), [selectedNodeId, updateNode, photoUrl, requestPhoto, isMissing, photoEditMode]);
 
   const onNodesChange = useCallback((changes: NodeChange<RackFlowNode>[]) => {
     setRfNodes((nds) => applyNodeChanges(changes, nds));
@@ -299,6 +309,21 @@ export default function RackPlanTab({ jobId }: Props) {
     [rfNodes, selectedNodeId],
   );
 
+  // Drift counts: placed items removed from HH, and on-job items not on the plot.
+  const removedCount = useMemo(() => {
+    let c = 0;
+    for (const fn of rfNodes) {
+      const n = fn.data.node;
+      if (typeof n.hh_item_id === 'number' && isMissing(n.hh_item_id)) c++;
+      for (const it of n.items ?? []) if (isMissing(it.hh_item_id)) c++;
+    }
+    return c;
+  }, [rfNodes, isMissing]);
+  const unplacedCount = useMemo(
+    () => picker.filter((p) => p.quantity - (placedCounts.get(p.itemId) ?? 0) > 0).length,
+    [picker, placedCounts],
+  );
+
   if (loading) return <div className="text-sm text-gray-500 py-8 text-center">Loading rack plan…</div>;
   if (error) return <div className="text-sm text-red-600 py-8 text-center">{error}</div>;
 
@@ -312,6 +337,12 @@ export default function RackPlanTab({ jobId }: Props) {
             onClick={() => addBuiltHereNode('Rack', null)}>+ New rack</button>
           <button className="px-3 py-1.5 text-sm rounded border border-amber-300 text-amber-700 hover:bg-amber-50"
             onClick={addTextNode}>+ Text</button>
+          <button
+            className={`px-3 py-1.5 text-sm rounded border ${photoEditMode ? 'border-ooosh-400 bg-ooosh-50 text-ooosh-700' : 'border-gray-300 text-gray-600 hover:bg-gray-100'}`}
+            onClick={() => setPhotoEditMode((v) => !v)}
+            title="Toggle the per-item 📷 photo controls on/off">
+            ⚙️ Photos: {photoEditMode ? 'On' : 'Off'}
+          </button>
           <button className="px-3 py-1.5 text-sm rounded border border-gray-300 text-gray-700 hover:bg-gray-100 disabled:opacity-50"
             onClick={refreshHH} disabled={refreshing}>{refreshing ? 'Refreshing…' : '↻ Refresh from HireHop'}</button>
           {hint && <span className="text-xs text-amber-600">{hint}</span>}
@@ -325,6 +356,22 @@ export default function RackPlanTab({ jobId }: Props) {
             onClick={save} disabled={!dirty || saving}>{saving ? 'Saving…' : dirty ? 'Save plan' : 'Saved'}</button>
         </div>
       </div>
+
+      {/* Drift banners */}
+      {(removedCount > 0 || unplacedCount > 0) && (
+        <div className="flex flex-wrap gap-2 mb-2 shrink-0">
+          {removedCount > 0 && (
+            <div className="text-xs px-2 py-1 rounded bg-red-50 border border-red-200 text-red-700">
+              🔴 {removedCount} item{removedCount === 1 ? '' : 's'} on the plan {removedCount === 1 ? 'was' : 'were'} removed from the job (shown in red)
+            </div>
+          )}
+          {unplacedCount > 0 && (
+            <div className="text-xs px-2 py-1 rounded bg-amber-50 border border-amber-200 text-amber-700">
+              ⚠ {unplacedCount} item{unplacedCount === 1 ? '' : 's'} on the job not yet on the plot — check the picker for anything that should be (looms, Cat5, power…)
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="flex gap-3 flex-1 min-h-0">
         {/* Canvas */}
