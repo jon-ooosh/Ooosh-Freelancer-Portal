@@ -18,6 +18,7 @@ import { checkMileagePlausibility } from '../lib/mileage-sanity'
 import { knotsToMph } from '../types/traccar'
 import type { IssueLocation } from '../types/issue'
 import { withRetry } from '../lib/retry'
+import OohCheckInPrompt from '../../../components/OohCheckInPrompt'
 import { mapSeverityToOpSeverity } from '../lib/op-issue-mapping'
 import { VehicleIssuesSurfaceBanner } from '../components/issues/VehicleIssuesSurfaceBanner'
 import { sendConditionReport, blobToBase64, resizeImageForPdf } from '../lib/pdf-email'
@@ -1027,6 +1028,12 @@ export function CheckInPage() {
             {form.vehicleReg} checked in
           </p>
         </div>
+
+        {/* OOH return compliance capture — renders only if this was an OOH return */}
+        <OohCheckInPrompt
+          reg={form.vehicleReg}
+          hhJobNumber={form.bookOutHireHopJob ? (parseInt(form.bookOutHireHopJob, 10) || null) : null}
+        />
 
         {opResults.length > 0 && (
           <div className="space-y-2">

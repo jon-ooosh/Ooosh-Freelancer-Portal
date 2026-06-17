@@ -201,8 +201,7 @@ router.patch(
             res.status(409).json({
               error: 'driver_blocked',
               message: `${chkRow.driver_name || 'This driver'} has lost OOH return privileges.`,
-              driverName: chkRow.driver_name,
-              canOverride: isManager,
+              details: { driverName: chkRow.driver_name, canOverride: isManager },
             });
             return;
           }
