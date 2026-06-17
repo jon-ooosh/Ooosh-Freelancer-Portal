@@ -162,7 +162,8 @@ async function runMigrations(direction: 'up' | 'down') {
         '125_combine_bookings.sql',
         '126_rack_plan_slug.sql',
         '127_sms_and_ooh_approach.sql',
-        '128_ooh_return_compliance.sql',
+        '128_encrypt_storage_access_code.sql',
+        '129_ooh_return_compliance.sql',
       ];
 
       for (const migration of migrations) {

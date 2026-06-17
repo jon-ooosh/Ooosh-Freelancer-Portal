@@ -300,7 +300,7 @@ text lands, then either flip `SMS_MODE=live` or allowlist `ooh_return_approach` 
 `SMS_LIVE_TEMPLATES`.
 
 **Phase 2 — Compliance tracking: ✅ CORE LOOP BUILT**
-6. ✅ `ooh_return_violations` + `drivers.ooh_blocked*` (migration 128) + threshold setting
+6. ✅ `ooh_return_violations` + `drivers.ooh_blocked*` (migration 129) + threshold setting
    + `services/ooh-compliance.ts` + endpoints on `routes/ooh-return.ts`.
 7. ✅ Check-in capture — `OohCheckInPrompt` on the check-in success screen (pre-ticked "OOH
    steps followed", untick → two-choice severity + attribution picker).

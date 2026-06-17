@@ -22,10 +22,36 @@ import { logAudit } from '../middleware/audit';
 import { isR2Configured, uploadToR2 } from '../config/r2';
 import { emailService } from '../services/email-service';
 import { getFrontendUrl } from '../config/app-urls';
+import { encrypt, tryDecrypt, isEncryptionConfigured } from '../services/encryption';
 
 const router = Router();
 
 const ADMIN_MANAGER = ['admin', 'manager'] as const;
+
+// ── Door-code encryption (migration 121, see docs/STORAGE-CLIENTS-SPEC.md §9) ──
+// Encrypt-at-rest for the per-tenancy access_code. When the key is configured
+// we store ONLY the ciphertext (plaintext column nulled); otherwise we fall
+// back to plaintext so nothing breaks pre-key.
+function prepAccessCode(code: string | null | undefined): { plain: string | null; enc: string | null } {
+  if (!code) return { plain: null, enc: null };
+  if (isEncryptionConfigured()) return { plain: null, enc: encrypt(code) };
+  return { plain: code, enc: null };
+}
+// Decrypt for the response + strip the ciphertext column so it never leaves the API.
+function revealAccessCode(row: Record<string, unknown>): Record<string, unknown> {
+  if (row['access_code_encrypted']) {
+    row['access_code'] = tryDecrypt(row['access_code_encrypted'] as string) ?? row['access_code'] ?? null;
+  }
+  delete row['access_code_encrypted'];
+  return row;
+}
+// Strip both code fields from a row entirely (list views — the code is only
+// ever exposed via the single-tenancy detail endpoint).
+function stripAccessCode(row: Record<string, unknown>): Record<string, unknown> {
+  delete row['access_code'];
+  delete row['access_code_encrypted'];
+  return row;
+}
 
 // ════════════════════════════════════════════════════════════════════════
 // PUBLIC — T&Cs accept (token, no JWT). MUST be before the staff auth gate.
@@ -278,7 +304,7 @@ router.get('/tenancies', async (req: AuthRequest, res: Response) => {
   if (search) { sql += ` AND (o.name ILIKE $${i} OR r.name ILIKE $${i})`; params.push(`%${search}%`); i++; }
   sql += ` ORDER BY (t.status = 'ended'), r.name`;
   const result = await query(sql, params);
-  res.json({ data: result.rows });
+  res.json({ data: result.rows.map(stripAccessCode) });
 });
 
 router.get('/tenancies/:id', async (req: AuthRequest, res: Response) => {
@@ -303,7 +329,7 @@ router.get('/tenancies/:id', async (req: AuthRequest, res: Response) => {
            WHERE al.tenancy_id = $1 ORDER BY al.added_at DESC`, [req.params.id]),
     query(`SELECT * FROM storage_invoice_log WHERE tenancy_id = $1 ORDER BY sent_at DESC`, [req.params.id]),
   ]);
-  res.json({ data: { ...t.rows[0], rate_history: rateHistory.rows, access_list: accessList.rows, invoices: invoices.rows } });
+  res.json({ data: { ...revealAccessCode(t.rows[0]), rate_history: rateHistory.rows, access_list: accessList.rows, invoices: invoices.rows } });
 });
 
 const tenancySchema = z.object({
@@ -330,24 +356,25 @@ const tenancySchema = z.object({
 router.post('/tenancies', validate(tenancySchema), async (req: AuthRequest, res: Response) => {
   const b = req.body as z.infer<typeof tenancySchema>;
   try {
+    const ac = prepAccessCode(b.access_code);
     const result = await query(
       `INSERT INTO storage_tenancies
         (room_id, organisation_id, lead_contact_person_id, status, move_in_date, weekly_rate,
-         access_type, access_code, key_location,
+         access_type, access_code, access_code_encrypted, key_location,
          billing_mode, billing_cadence, next_bill_date, bill_reminder_person_id,
          bill_reminder_lead_days, bill_overdue_grace_days, rate_review_cadence, next_rate_review_date,
          notes, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,COALESCE($14,7),COALESCE($15,5),$16,$17,$18,$19) RETURNING *`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,COALESCE($15,7),COALESCE($16,5),$17,$18,$19,$20) RETURNING *`,
       [b.room_id, b.organisation_id ?? null, b.lead_contact_person_id ?? null, b.status, b.move_in_date ?? null,
-       b.weekly_rate, b.access_type, b.access_code ?? null, b.key_location ?? null,
+       b.weekly_rate, b.access_type, ac.plain, ac.enc, b.key_location ?? null,
        b.billing_mode, b.billing_cadence, b.next_bill_date ?? null, b.bill_reminder_person_id ?? null,
        b.bill_reminder_lead_days ?? null, b.bill_overdue_grace_days ?? null, b.rate_review_cadence,
        b.next_rate_review_date ?? null, b.notes ?? null, req.user!.id]
     );
     // Reflect occupancy on the room
     await query(`UPDATE storage_rooms SET status = 'occupied', updated_at = NOW() WHERE id = $1 AND status != 'out_of_use'`, [b.room_id]);
-    await logAudit(req.user!.id, 'storage_tenancies', result.rows[0].id, 'create', null, result.rows[0]);
-    res.status(201).json({ data: result.rows[0] });
+    await logAudit(req.user!.id, 'storage_tenancies', result.rows[0].id, 'create', null, stripAccessCode({ ...result.rows[0] }));
+    res.status(201).json({ data: revealAccessCode(result.rows[0]) });
   } catch (err: unknown) {
     if ((err as { code?: string }).code === '23505') {
       res.status(409).json({ error: 'This room already has a live tenancy. End it before adding a new one.' });
@@ -367,6 +394,12 @@ router.put('/tenancies/:id', validate(tenancySchema.partial()), async (req: Auth
   let i = 1;
   for (const [k, v] of Object.entries(req.body)) {
     if (!allowed.includes(k)) continue;
+    if (k === 'access_code') {
+      const ac = prepAccessCode(v as string | null);
+      fields.push(`access_code = $${i++}`); params.push(ac.plain);
+      fields.push(`access_code_encrypted = $${i++}`); params.push(ac.enc);
+      continue;
+    }
     fields.push(`${k} = $${i++}`);
     params.push(v);
   }
@@ -374,8 +407,8 @@ router.put('/tenancies/:id', validate(tenancySchema.partial()), async (req: Auth
   params.push(req.params.id);
   const result = await query(`UPDATE storage_tenancies SET ${fields.join(', ')}, updated_at = NOW() WHERE id = $${i} RETURNING *`, params);
   if (result.rows.length === 0) { res.status(404).json({ error: 'Tenancy not found' }); return; }
-  await logAudit(req.user!.id, 'storage_tenancies', req.params.id as string, 'update', null, result.rows[0]);
-  res.json({ data: result.rows[0] });
+  await logAudit(req.user!.id, 'storage_tenancies', req.params.id as string, 'update', null, stripAccessCode({ ...result.rows[0] }));
+  res.json({ data: revealAccessCode(result.rows[0]) });
 });
 
 // Rate change (writes history)
