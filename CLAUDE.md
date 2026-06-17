@@ -2403,12 +2403,26 @@ replaced the dead manual requirement-add picker — templates + individual types
 - **Asset cache-busting:** `staging-calculator.html` loads the JS/CSS with a manual `?v=N` query
   (currently `?v=2.6`). **Bump it on every edit to `staging-calculator.{js,css}`** or browsers serve
   the stale cached copy (cost us a confused deploy — new code on server, old code in browser).
-- **⚠️ OUTSTANDING — gaffa tape not landing in HireHop.** The DJM900 bug is fixed (no longer pushes
-  `b740`), but ticking the tape now pushes `s740` and **nothing appears in HH (no error)**. The `s`
-  (sale/consumable) prefix is unconfirmed and HireHop may be silently ignoring it. Push handler logs
-  `[Staging] push job N itemsMap: {…}` + `save_job response: {…}` to diagnose — check whether `s740`
-  is in the map and what HH returns. Likely needs a different consumable addressing in `save_job.php`
-  (the `SALE_ITEM_PREFIX` knob in `routes/staging.ts`). Velcro tape #1013 has the same flag/risk.
+- **⚠️ OUTSTANDING — gaffa tape (consumable) not landing in HireHop.** Diagnosed live 16 Jun 2026.
+  The DJM900 bug is fixed (no longer `b740`). The tape now pushes as **`s740`** and the log confirms
+  `itemsMap: {"b1708":1,"b1518":4,"b801":4,"s740":1}` is sent and `save_job` returns
+  `{"success":true,…}` — but the `b…` hire items land while **`s740` is silently ignored**. So the
+  `s` (sale/consumable) prefix is NOT how HireHop's `save_job.php` `items` adds a consumable. There's
+  no prior working example (the old utilities tool always pushed `b740` = wrong item), so the correct
+  syntax must be found from HireHop API docs / support, or by inspecting how the **backline matcher**
+  (`alternative-hirehop-stock`) adds sale stock. **Next-session steps:** (1) determine HireHop's
+  consumable add-to-job mechanism — likely either a different `items` key prefix, or consumables go on
+  **billing** (`billing_*.php` sale line) not the supply list; (2) set `SALE_ITEM_PREFIX` in
+  `routes/staging.ts` accordingly, or branch sale items to a billing call. Tape ID **740 is correct**
+  ("MagTape white gaffa tape", consumables table) — ID 21 is a *different* tape (ProGaff, cat 338),
+  don't use it. Velcro #1013 has the same issue. **Interim:** staff add the tape to the job manually
+  in HireHop. The calc's "Short 1 / owned 0" on the tape is cosmetic (tape is cat 338, outside the
+  staging 444 stock fetch — no stock lookup, hardcoded "needs ordering").
+- **Job note endpoint (fixed 16 Jun 2026):** the post-push HH job note (carrying the short 3D link)
+  was hitting `/api/job_note.php` which 404s; repointed to `/php_functions/notes_save.php`
+  (`main_id`/`type=1`/`note`, POST) — the endpoint the original `staging-push.js` used. NB: the
+  additional-driver-charge flow in `hire-forms.ts` still uses `/api/job_note.php` (best-effort) — it
+  may be silently 404ing there too and should likely move to `notes_save.php` as well.
 - **Deferred:** UX/UI polish of the (admittedly cramped) calculator layout — second pass once it's
   live and jon's clicked around. Portal surfacing of shared staging links. Full React rewrite (only
   if it earns its keep — low frequency).

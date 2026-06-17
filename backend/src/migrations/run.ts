@@ -159,7 +159,8 @@ async function runMigrations(direction: 'up' | 'down') {
         '122_staging_plans.sql',
         '123_rack_planner.sql',
         '124_rack_plan_updated_by.sql',
-        '125_rack_plan_slug.sql',
+        '125_combine_bookings.sql',
+        '126_rack_plan_slug.sql',
       ];
 
       for (const migration of migrations) {

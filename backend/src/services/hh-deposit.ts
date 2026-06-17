@@ -69,6 +69,11 @@ export interface PushDepositOpts {
   paymentReference?: string | null;
   paymentType: 'deposit' | 'balance' | 'excess' | 'refund' | 'excess_refund' | 'other';
   notes?: string | null;
+  // When set, this exact HireHop bank account ID is used instead of mapping from
+  // paymentMethod. Used by the Combine-bookings reallocation so the recreated
+  // deposit lands on the SAME bank as the original (clean Xero wash). Falls back
+  // to getHHBankId(paymentMethod) when omitted.
+  bankId?: number;
 }
 
 export interface PushDepositResult {
@@ -117,7 +122,7 @@ export async function pushDepositToHH(opts: PushDepositOpts): Promise<PushDeposi
     const description = `${hhJobNumber} - ${typeLabel}`;
     const memo = `${typeLabel.charAt(0).toUpperCase() + typeLabel.slice(1)} ${formattedDate} via ${methodLabel}${paymentReference ? ` (Ref: ${paymentReference})` : ''}${notes ? ` — ${notes}` : ''} (recorded via Ooosh OP)`;
 
-    const hhBankId = getHHBankId(paymentMethod);
+    const hhBankId = opts.bankId ?? getHHBankId(paymentMethod);
     const depositParams: Record<string, unknown> = {
       ID: 0, // 0 = create new
       DATE: currentDate,
@@ -186,4 +191,96 @@ export async function pushDepositToHH(opts: PushDepositOpts): Promise<PushDeposi
     console.error('[hh-deposit] HH deposit write-back failed:', reason);
     return { hhDepositId: null, xeroSynced: false, error: reason };
   }
+}
+
+export interface ReverseDepositOpts {
+  hhJobNumber: number;            // HH job the deposit currently sits on
+  hhDepositId: number;            // the original HH deposit ID to refund against
+  amount: number;                 // GBP, positive
+  bankId: number;                 // exact HH bank account the original used
+  movedToHhJob: number;           // survivor HH job (for the memo)
+  notes?: string | null;
+}
+
+/**
+ * Re-attribute a deposit AWAY from a job — the "out" leg of a Combine-bookings
+ * deposit move. The matching "in" leg is a normal pushDepositToHH on the
+ * survivor with the same bankId. Net cash is zero; this just moves which
+ * HireHop job (and Xero job tracking) the deposit is recognised against.
+ *
+ * Uses billing_payments_save.php — a refund payment application against the
+ * specific deposit — NOT a negative deposit (HireHop rejects negative deposits,
+ * and the rejected row never syncs to Xero). This is the exact mechanic the
+ * excess-reimburse flow uses. Xero sync is post_payment (a payment application),
+ * NOT post_deposit.
+ *
+ * Same bank, same day, paired with an equal positive deposit on the survivor —
+ * an accountant sees a refund-out + receipt-in wash that nets to zero on the
+ * bank. No client email fires (HH/Xero accounting only).
+ */
+export async function reverseDepositOnHH(opts: ReverseDepositOpts): Promise<PushDepositResult> {
+  const { hhJobNumber, hhDepositId, amount, bankId, movedToHhJob, notes } = opts;
+
+  try {
+    const currentDate = new Date().toISOString().split('T')[0];
+    const description = `${hhJobNumber} - deposit reallocated to job ${movedToHhJob}`;
+    const memo = `Deposit reallocated to job #${movedToHhJob} (bookings combined)${notes ? ` — ${notes}` : ''} (via Ooosh OP)`;
+
+    console.log('[hh-deposit] Reattributing £' + amount, 'from HH job', hhJobNumber, '(deposit', hhDepositId + ') →', movedToHhJob);
+    const hhResult = await hhBroker.post('/php_functions/billing_payments_save.php', {
+      id: 0,
+      date: currentDate,
+      desc: description,
+      paid: Math.abs(amount),     // refund this much of the deposit
+      memo,
+      bank: bankId,
+      OWNER: 0,
+      deposit: hhDepositId,
+      no_webhook: 1,
+    }, { priority: 'high' });
+
+    if (!hhResult.success || !hhResult.data) {
+      const reason = hhResult.error || 'HireHop returned no data';
+      console.error('[hh-deposit] HH deposit reattribution failed:', reason, hhResult.data);
+      return { hhDepositId: null, xeroSynced: false, error: reason };
+    }
+
+    const data = hhResult.data as any;
+    const paymentAppId = data.hh_id || data.id || data.ID || null;
+    if (!paymentAppId) {
+      const reason = `HireHop accepted the reattribution but returned no ID (response keys: ${Object.keys(data).join(', ') || 'none'})`;
+      console.error('[hh-deposit]', reason);
+      return { hhDepositId: null, xeroSynced: false, error: reason };
+    }
+
+    // Xero sync — post_payment (a payment application, NOT post_deposit).
+    let xeroSynced = false;
+    try {
+      const syncResult = await hhBroker.post('/php_functions/accounting/tasks.php', {
+        hh_package_type: 1, hh_acc_package_id: 3, hh_task: 'post_payment',
+        hh_id: paymentAppId, hh_acc_id: '',
+      }, { priority: 'high' });
+      xeroSynced = syncResult.success;
+    } catch (syncError) {
+      console.error('[hh-deposit] Xero sync trigger failed (non-fatal):', syncError);
+    }
+
+    return { hhDepositId: paymentAppId, xeroSynced, error: null };
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    console.error('[hh-deposit] HH deposit reattribution failed:', reason);
+    return { hhDepositId: null, xeroSynced: false, error: reason };
+  }
+}
+
+// Inverse of HH_BANK_IDS — pick a canonical OP method key for a given HH bank
+// account ID, so a deposit read back from HH billing (which only carries the
+// bank ID) can be recreated/labelled. Where several methods share a bank
+// (wise_bacs/rolled_over → 265), the canonical "real payment" method wins.
+export function getMethodForBankId(bankId: number): string {
+  const map: Record<number, string> = {
+    267: 'stripe_gbp', 169: 'worldpay', 165: 'amex', 265: 'wise_bacs',
+    168: 'till_cash', 173: 'paypal', 170: 'lloyds_bank',
+  };
+  return map[bankId] || 'worldpay';
 }
