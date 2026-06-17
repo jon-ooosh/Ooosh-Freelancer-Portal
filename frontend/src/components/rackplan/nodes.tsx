@@ -54,13 +54,16 @@ const rootStyle = (color?: string | null) => ({ width: NODE_W, ...(color ? { bor
 
 // ── Pre-built (opaque package) ──────────────────────────────────────────────
 export const PreBuiltNode = memo(({ id, data, selected }: NodeProps<RackFlowNode>) => {
-  const { removeNode, renameNode, readOnly, photoUrl, requestPhoto } = useActions();
+  const { removeNode, renameNode, readOnly, photoUrl, requestPhoto, isMissing, photoEditMode } = useActions();
   const node = data.node;
   const listId = node.hh_list_id ?? 0;
   const url = listId > 0 ? photoUrl?.(listId) : undefined;
+  const missing = listId > 0 && isMissing?.(listId);
   return (
-    <div style={rootStyle(node.color)} className={`rounded-md border-2 border-gray-300 bg-purple-50 shadow-sm overflow-hidden ${ringFor(!!selected)}`}>
+    <div style={missing ? { width: NODE_W, borderColor: '#dc2626' } : rootStyle(node.color)}
+      className={`rounded-md border-2 border-gray-300 bg-purple-50 shadow-sm overflow-hidden ${ringFor(!!selected)}`}>
       <NodeHandles />
+      {missing && <div className="bg-red-100 text-red-700 text-[9px] font-medium px-2 py-0.5">⚠ No longer on the job</div>}
       <div className="flex items-start justify-between gap-1 px-2 py-1.5">
         <div className="text-xs font-semibold text-purple-900 leading-tight"
           onDoubleClick={(e) => { if (!readOnly) { e.stopPropagation(); renameNode?.(id); } }}
@@ -73,10 +76,10 @@ export const PreBuiltNode = memo(({ id, data, selected }: NodeProps<RackFlowNode
       {url && <div className="bg-gray-900"><img src={url} alt="" className="w-full h-24 object-contain" draggable={false} /></div>}
       <div className="flex items-center justify-between px-2 pb-2 pt-1">
         <span className="text-[10px] uppercase tracking-wide text-purple-500">Pre-built unit</span>
-        {!readOnly && requestPhoto && listId > 0 && (
+        {!readOnly && requestPhoto && photoEditMode && listId > 0 && (
           <button className="nodrag text-[9px] text-gray-500 hover:text-ooosh-600"
             onClick={(e) => { e.stopPropagation(); requestPhoto(listId); }}
-            title={url ? 'Replace photo' : 'Add photo'}>📷</button>
+            title={url ? 'Replace photo' : 'Add photo'}>📷 {url ? 'Replace' : 'Add'}</button>
         )}
       </div>
       {node.notes && <div className="px-2 pb-1.5 text-[10px] text-purple-700 italic line-clamp-3">📝 {node.notes}</div>}
@@ -88,11 +91,15 @@ PreBuiltNode.displayName = 'PreBuiltNode';
 
 // ── Loose element (label only) ──────────────────────────────────────────────
 export const LooseNode = memo(({ id, data, selected }: NodeProps<RackFlowNode>) => {
-  const { removeNode, renameNode, readOnly } = useActions();
+  const { removeNode, renameNode, readOnly, isMissing } = useActions();
   const node = data.node;
+  const listId = node.hh_list_id ?? 0;
+  const missing = listId > 0 && isMissing?.(listId);
   return (
-    <div style={rootStyle(node.color)} className={`rounded-md border-2 border-gray-300 bg-white shadow-sm ${ringFor(!!selected)}`}>
+    <div style={missing ? { width: NODE_W, borderColor: '#dc2626' } : rootStyle(node.color)}
+      className={`rounded-md border-2 border-gray-300 bg-white shadow-sm overflow-hidden ${ringFor(!!selected)}`}>
       <NodeHandles />
+      {missing && <div className="bg-red-100 text-red-700 text-[9px] font-medium px-2 py-0.5">⚠ No longer on the job</div>}
       <div className="flex items-start justify-between gap-1 px-2 py-1.5">
         <div className="text-xs font-medium text-gray-800 leading-tight"
           onDoubleClick={(e) => { if (!readOnly) { e.stopPropagation(); renameNode?.(id); } }}
@@ -145,10 +152,24 @@ function StackCell({
   onMove: (nodeId: string, index: number, dir: -1 | 1) => void;
   onRemove: (nodeId: string, index: number) => void;
 }) {
-  const { photoUrl, requestPhoto } = useActions();
+  const { photoUrl, requestPhoto, isMissing, photoEditMode } = useActions();
   const h = Math.max(1, item.rackheight || 1);
   const uTag = `${h}U${item.half_width ? ' ½' : ''}`;
   const url = photoUrl?.(item.hh_list_id);
+  const missing = isMissing?.(item.hh_item_id);
+
+  if (missing) {
+    return (
+      <div className="relative flex items-center px-1.5 h-full w-full bg-red-100 overflow-hidden">
+        <span className="text-[9px] font-medium text-red-700 leading-tight flex-1 truncate">⚠ {item.label} — removed from job</span>
+        {!readOnly && (
+          <button className="nodrag text-red-400 hover:text-red-700 text-[10px] leading-none shrink-0"
+            onClick={(e) => { e.stopPropagation(); onRemove(nodeId, index); }} title="Clear from rack">✕</button>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="relative flex flex-col justify-center px-1.5 min-w-0 h-full w-full overflow-hidden">
       {url && (
@@ -175,7 +196,7 @@ function StackCell({
           )}
         </div>
       )}
-      {!readOnly && requestPhoto && item.hh_list_id > 0 && (
+      {!readOnly && requestPhoto && photoEditMode && item.hh_list_id > 0 && (
         <button className="nodrag absolute bottom-0 left-0 z-10 text-[9px] leading-none px-1 py-0.5 bg-white/80 rounded-tr text-gray-600 hover:text-ooosh-600"
           onClick={(e) => { e.stopPropagation(); requestPhoto(item.hh_list_id); }}
           title={url ? 'Replace photo' : 'Add front-panel photo'}>📷</button>

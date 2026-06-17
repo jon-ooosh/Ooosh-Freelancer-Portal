@@ -27,6 +27,10 @@ export interface RackPlanActions {
   photoUrl?: (listId: number) => string | undefined;
   /** Trigger the upload flow for a stock item's front-panel photo. */
   requestPhoto?: (listId: number) => void;
+  /** True when a placed item's HireHop row is no longer on the job (drift). */
+  isMissing?: (itemId: number) => boolean;
+  /** Whether the per-item 📷 photo controls are shown (off by default — opt-in). */
+  photoEditMode?: boolean;
   /** Read-only mode (public view) — hide all edit affordances. */
   readOnly?: boolean;
 }
