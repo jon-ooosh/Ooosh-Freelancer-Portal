@@ -19,6 +19,8 @@ import { hhBroker } from '../services/hirehop-broker';
 import { getFromR2 } from '../config/r2';
 import { resolveClientEmailTarget } from '../services/money-emails';
 import { getSystemSettings } from '../routes/system-settings';
+import { getFrontendUrl } from '../config/app-urls';
+import crypto from 'crypto';
 
 const OOOSH_EMAIL = 'info@oooshtours.co.uk';
 const OOOSH_PHONE = '+44 1273 911382';
@@ -55,6 +57,7 @@ interface ApplyOptions {
   send_email: boolean;
   add_charge?: boolean;       // override the default for the action
   email_override?: string | null;
+  resolution_note?: string | null;  // "they paid direct / deduct from next invoice" — posterity
 }
 
 interface ActionResult {
@@ -168,6 +171,16 @@ export async function applyPcnAction(
   };
   const templateId = templateByAction[opts.action];
 
+  // Pay-direct closed loop: mint a status-bound receipt-upload token so the
+  // email carries a private "upload your proof" link. Reused by the chase
+  // ladder's re-sends, so it lives on the row (not a short-lived token).
+  let receiptUploadUrl = '';
+  if (opts.action === 'pay_direct') {
+    const token = crypto.randomBytes(24).toString('hex');
+    await query(`UPDATE pcns SET receipt_upload_token = $2 WHERE id = $1`, [pcnId, token]);
+    receiptUploadUrl = `${getFrontendUrl()}/pcn-receipt/${token}`;
+  }
+
   if (opts.send_email && templateId) {
     try {
       // Resolve recipient
@@ -237,6 +250,7 @@ export async function applyPcnAction(
           driverListSentence: '',
           jobRef,
           jobRefSentence,
+          receiptUploadUrl,
           oooshEmail: OOOSH_EMAIL,
           oooshPhone: OOOSH_PHONE,
         },
@@ -257,10 +271,20 @@ export async function applyPcnAction(
     [pcnId, map.status, map.action_path]
   );
 
-  // ── 4. Event timeline ──
+  // ── 4. Resolution note (posterity — "they paid direct / deduct from next invoice") ──
+  const resNote = opts.resolution_note?.trim();
+  if (resNote) {
+    await query(
+      `UPDATE pcns SET notes = CASE WHEN notes IS NULL OR notes = '' THEN $2 ELSE notes || E'\\n' || $2 END WHERE id = $1`,
+      [pcnId, `[${new Date().toLocaleDateString('en-GB')}] ${resNote}`]
+    );
+  }
+
+  // ── 5. Event timeline ──
   const bits: string[] = [`Action: ${opts.action.replace(/_/g, ' ')}`];
   if (result.emailed.sent) bits.push(`emailed ${result.emailed.to}${result.emailed.fallback ? ' (fallback)' : ''}`);
   if (result.charge.applied) bits.push('£35+VAT charge added to HH');
+  if (resNote) bits.push(`note: ${resNote}`);
   await query(
     `INSERT INTO pcn_events (pcn_id, event_type, body, metadata, created_by)
      VALUES ($1, 'status_change', $2, $3, $4)`,

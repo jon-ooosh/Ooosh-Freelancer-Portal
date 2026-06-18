@@ -44,6 +44,7 @@ import WarehousePinPage from './pages/WarehousePinPage';
 import WarehouseCollectionsPage from './pages/WarehouseCollectionsPage';
 import OohReturnParkingPage from './pages/OohReturnParkingPage';
 import MobileReceiptUploadPage from './pages/MobileReceiptUploadPage';
+import PcnReceiptUploadPage from './pages/PcnReceiptUploadPage';
 import WarehouseCollectionDetailPage from './pages/WarehouseCollectionDetailPage';
 import Layout from './components/Layout';
 import { VehicleRoutes, initVehicleModule } from './modules/vehicles';
@@ -137,6 +138,8 @@ export default function App() {
       <Route path="/m/receipt/:token" element={<MobileReceiptUploadPage />} />
       {/* Public storage T&Cs acceptance — token-authenticated, no Layout wrapper */}
       <Route path="/storage-tcs/:token" element={<StorageTcsAcceptPage />} />
+      {/* Public PCN pay-direct proof-of-payment upload — token-authenticated, no Layout */}
+      <Route path="/pcn-receipt/:token" element={<PcnReceiptUploadPage />} />
       {/* Public inbound merch-delivery form (no login) — replaces the JotForm */}
       <Route path="/merch-form" element={<MerchFormPage />} />
       {/* Public view-only Rack Plan (tokenised, no login) */}

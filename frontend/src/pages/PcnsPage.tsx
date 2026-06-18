@@ -32,6 +32,10 @@ export interface Pcn {
   status: string;
   action_path: string | null;
   notes: string | null;
+  pay_direct_deadline: string | null;
+  receipt_url: string | null;
+  receipt_uploaded_at: string | null;
+  receipt_chase_level: number | null;
   created_at: string;
 }
 
