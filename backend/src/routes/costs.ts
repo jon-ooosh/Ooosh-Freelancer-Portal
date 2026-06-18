@@ -589,10 +589,28 @@ router.post('/:id/recharge', authorize(...STAFF_ROLES), async (req: AuthRequest,
     await audit(req.user!.id, req.params.id as string, 'recharge_flag',
       { recharge_mode: cost.recharge_mode, recharge_amount: cost.recharge_amount },
       { recharge_mode, recharge_amount: amount });
-    res.json({ data: result.rows[0], hh_pushed: false, note: 'Recharge flagged. HireHop push pending stock-item config.' });
+    res.json({ data: result.rows[0], hh_pushed: false, note: 'Recharge flagged. Use "Push to HireHop" to add the billable line.' });
   } catch (err) {
     console.error('[costs] recharge error:', err);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Push the flagged recharge to HireHop as a billable hire line. Explicit staff
+// action (never auto-fires). Idempotent — a cost already recharged is a no-op.
+router.post('/:id/push-recharge', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const { pushRechargeToHH } = await import('../services/cost-recharge-hh');
+    const result = await pushRechargeToHH(String(req.params.id));
+    if (result.pushed) {
+      await audit(req.user!.id, req.params.id as string, 'recharge_pushed', null,
+        { hh_job: result.hhJobNumber, amount: result.amount, stock: result.stockLabel });
+    }
+    const after = await query('SELECT * FROM costs WHERE id = $1', [req.params.id]);
+    res.json({ data: after.rows[0] || null, result });
+  } catch (err) {
+    console.error('[costs] push-recharge error:', err);
+    res.status(500).json({ error: 'Internal server error', detail: err instanceof Error ? err.message : String(err) });
   }
 });
 

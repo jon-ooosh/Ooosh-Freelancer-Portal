@@ -781,3 +781,54 @@ surfaces beyond the Costs hub:
 The Vehicle entry point already exists via the Service History tab.
 
 No migration.
+
+---
+
+## Build notes — HireHop recharge push (Jun 2026)
+
+The last piece of the original "capture → recharge" promise: an `extra` cost
+flagged for recharge can now be pushed to its HireHop job as a billable hire
+line, from the **Recharges** view ("Push to HireHop" button). Explicit staff
+action — never auto-fires. Idempotent (a cost already recharged is a no-op,
+guarded by `recharged_to_hh_at`).
+
+**Mechanism** (`services/cost-recharge-hh.ts`) — mirrors the proven quotes→HH
+pattern, adapted for HIRE items: `save_job.php` adds the line (`b<stockId>`,
+qty 1), then `items_save.php` (kind 2) sets a custom **unit price = the NET
+amount** with the stock's own nominal. The recharge stock items are 20%-rated,
+so HireHop adds the VAT on top — matching the "net of VAT, VAT added at HH"
+design. Full recharge → the cost's `amount_net`; partial → the entered
+`recharge_amount`. `vat_rate:0` in items_save means "derive from the stock's tax
+rules" (same as the quotes push), so lines bill at 20%.
+
+**Category → HH stock map** (jon's stock IDs, all hire items @ 20%):
+
+| OP category (Xero code) | HH stock | ID | nominal |
+|---|---|---|---|
+| Fuel (410) | Fuel recharge | 1325 | 31 |
+| Parking (411) / Travel (325) | Travel cost | 1772 | 29 |
+| Parking fines / PCNs (399) | PCN / fine handling | 1744 | 22 |
+| Vehicle repairs (409) | Vehicle damage cost | 1741 | 3 |
+| Everything else | Cost / fee / recharge (catch-all) | 1796 | 22 |
+
+Hardcoded in the service (stable; move to system_settings + a Settings UI if
+they ever churn).
+
+**Closed-job handling.** `job_data.php` checked first; a locked job or HH status
+in {7,9,10,11} returns `manualActionRequired` with a message — the cost is left
+un-recharged so it stays in the Recharges view as a known-unresolved item. HH
+errors are surfaced (the broker's nested-error extraction names validation
+issues).
+
+**On success:** stamps `recharged_to_hh_at` + `recharge_hh_item_id`, posts an HH
+job note, and the cost drops out of the Recharges-pending list.
+
+**Endpoint:** `POST /api/costs/:id/push-recharge` (STAFF_ROLES). The legacy
+`/recharge` stays the flag-setter (sets mode/amount); the push is the separate
+explicit action.
+
+⚠️ **Needs one live-test pass** (like the bill flow): the hire-item add +
+price-edit is modelled on the working labour-item path but virtual hire items
+may have HH-specific nuances. Push a real `extra` cost to a scratch job and
+confirm the line + price + 20% VAT land correctly; the surfaced HH errors will
+name anything off.
