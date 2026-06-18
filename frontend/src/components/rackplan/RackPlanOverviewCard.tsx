@@ -6,6 +6,8 @@ interface Props {
   onEdit: () => void;
   /** Bumped by the parent when the modal closes, to re-check for a newly-created plan. */
   refreshKey?: number;
+  /** Called after a successful delete, so the parent can re-sync its refreshKey. */
+  onDeleted?: () => void;
 }
 
 interface Summary { hasPlan: boolean; nodeCount?: number; viewToken?: string; slug?: string; updatedAt?: string; editedBy?: string | null }
@@ -28,8 +30,9 @@ function relTime(iso?: string): string {
  * one's been created (and can jump to edit / grab the client link). Hidden when
  * no plan exists — creation still starts from Tools → Rack Planner.
  */
-export default function RackPlanOverviewCard({ jobId, onEdit, refreshKey }: Props) {
+export default function RackPlanOverviewCard({ jobId, onEdit, refreshKey, onDeleted }: Props) {
   const [summary, setSummary] = useState<Summary | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -38,6 +41,19 @@ export default function RackPlanOverviewCard({ jobId, onEdit, refreshKey }: Prop
       .catch(() => { if (!cancelled) setSummary({ hasPlan: false }); });
     return () => { cancelled = true; };
   }, [jobId, refreshKey]);
+
+  async function remove() {
+    if (!window.confirm('Delete this rack plan? The view-only link sent to the client will stop working. This cannot be undone.')) return;
+    setDeleting(true);
+    try {
+      await api.delete(`/rack-plans/by-job/${jobId}`);
+      setSummary({ hasPlan: false });
+      onDeleted?.();
+    } catch {
+      window.alert('Failed to delete rack plan.');
+      setDeleting(false);
+    }
+  }
 
   if (!summary?.hasPlan) return null;
 
@@ -64,6 +80,9 @@ export default function RackPlanOverviewCard({ jobId, onEdit, refreshKey }: Prop
         )}
         <button onClick={onEdit}
           className="px-3 py-1.5 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700">Edit rack plan</button>
+        <button onClick={remove} disabled={deleting}
+          title="Delete rack plan"
+          className="text-gray-300 hover:text-red-500 disabled:opacity-50 text-lg leading-none px-1">✕</button>
       </div>
     </div>
   );

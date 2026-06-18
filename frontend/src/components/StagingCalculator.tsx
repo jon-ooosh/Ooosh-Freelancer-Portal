@@ -6,8 +6,9 @@
  *   embedded app posts a `staging-complete` message; we surface it to the parent
  *   so it can reveal the Staging tab.
  *
- * StagingTab: appears on Job Detail only once a staging plan exists. Lists each
- *   plan's 3D preview short-link with Copy + Open + Share-with-freelancer + Delete.
+ * StagingOverviewCard: surfaces on Job Overview (next to the Rack Plan bar) once
+ *   a staging plan exists. Lists each plan with Copy + Open + Share-with-freelancer
+ *   + Delete. Hidden when no plan exists — creation still starts from Tools.
  */
 import { useEffect, useState, useCallback } from 'react';
 import { api } from '../services/api';
@@ -80,10 +81,10 @@ export function StagingCalculatorModal({
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Tab — lists the saved 3D plans
+// Overview card — lists the saved 3D plans (mirrors RackPlanOverviewCard)
 // ─────────────────────────────────────────────────────────────────────────
 
-export function StagingTab({ jobId }: { jobId: string }) {
+export function StagingOverviewCard({ jobId, refreshKey }: { jobId: string; refreshKey?: number }) {
   const [plans, setPlans] = useState<StagingPlan[]>([]);
   const [loading, setLoading] = useState(true);
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -99,7 +100,7 @@ export function StagingTab({ jobId }: { jobId: string }) {
     }
   }, [jobId]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(); }, [load, refreshKey]);
 
   async function toggleShare(plan: StagingPlan) {
     const next = !plan.share_with_freelancer;
@@ -133,86 +134,76 @@ export function StagingTab({ jobId }: { jobId: string }) {
     }
   }
 
-  if (loading) return <div className="text-sm text-gray-500 p-4">Loading staging plans…</div>;
-
-  if (plans.length === 0) {
-    return (
-      <div className="bg-white rounded-xl border border-gray-200 p-8 text-center">
-        <p className="text-gray-500 text-sm">No staging plans yet.</p>
-        <p className="text-gray-400 text-xs mt-1">Run the Staging Calculator from the Job Requirements tab — the 3D preview link will appear here.</p>
-      </div>
-    );
-  }
+  // Hidden until a plan exists (matches RackPlanOverviewCard — creation is from Tools).
+  if (loading || plans.length === 0) return null;
 
   return (
-    <div className="space-y-3">
-      {plans.map((plan) => (
-        <div key={plan.id} className="bg-white rounded-xl border border-gray-200 p-4">
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              <div className="flex items-center gap-2">
-                <span className="text-base">🏗️</span>
-                <span className="font-medium text-gray-900">{plan.summary || 'Staging plan'}</span>
-                {plan.share_with_freelancer && (
-                  <span className="text-[11px] font-semibold text-green-700 bg-green-100 rounded px-1.5 py-0.5">Shared</span>
-                )}
-              </div>
-              <div className="text-xs text-gray-400 mt-0.5">
-                Created {new Date(plan.created_at).toLocaleDateString('en-GB')}
-              </div>
-              {plan.three_d_url && (
-                <a
-                  href={plan.three_d_url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-block mt-2 text-sm text-ooosh-600 hover:underline break-all"
-                >
-                  {plan.three_d_url}
-                </a>
-              )}
-            </div>
-            <button
-              onClick={() => remove(plan)}
-              className="text-gray-300 hover:text-red-500 text-lg leading-none flex-shrink-0"
-              title="Delete staging plan"
-            >
-              ✕
-            </button>
-          </div>
-
-          <div className="flex flex-wrap gap-2 mt-3">
-            {plan.three_d_url && (
-              <>
-                <a
-                  href={plan.three_d_url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="px-3 py-1.5 text-sm rounded-lg bg-ooosh-600 text-white hover:bg-ooosh-700"
-                >
-                  🧊 Open 3D preview
-                </a>
-                <button
-                  onClick={() => copy(plan)}
-                  className="px-3 py-1.5 text-sm rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50"
-                >
-                  {copiedId === plan.id ? '✅ Copied!' : '📋 Copy link'}
-                </button>
-              </>
-            )}
-            <button
-              onClick={() => toggleShare(plan)}
-              className={`px-3 py-1.5 text-sm rounded-lg border ${
-                plan.share_with_freelancer
-                  ? 'border-green-300 text-green-700 bg-green-50 hover:bg-green-100'
-                  : 'border-gray-300 text-gray-700 hover:bg-gray-50'
-              }`}
-              title="Share this 3D preview with freelancers (e.g. crew building the stage)"
-            >
-              {plan.share_with_freelancer ? '✓ Shared with freelancers' : '🔗 Share with freelancers'}
-            </button>
-          </div>
+    <div className="bg-white rounded-xl border border-gray-200 p-4">
+      <div className="flex items-center gap-2 mb-3">
+        <span className="text-lg">🏗️</span>
+        <div className="text-sm font-medium text-gray-800">
+          Staging{plans.length > 1 ? ` (${plans.length} plans)` : ''}
         </div>
-      ))}
+      </div>
+
+      <div className="space-y-3">
+        {plans.map((plan) => (
+          <div key={plan.id} className="border-t border-gray-100 pt-3 first:border-t-0 first:pt-0">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="font-medium text-gray-900 text-sm">{plan.summary || 'Staging plan'}</span>
+                  {plan.share_with_freelancer && (
+                    <span className="text-[11px] font-semibold text-green-700 bg-green-100 rounded px-1.5 py-0.5">Shared</span>
+                  )}
+                </div>
+                <div className="text-xs text-gray-400 mt-0.5">
+                  Created {new Date(plan.created_at).toLocaleDateString('en-GB')}
+                </div>
+              </div>
+              <button
+                onClick={() => remove(plan)}
+                className="text-gray-300 hover:text-red-500 text-lg leading-none flex-shrink-0"
+                title="Delete staging plan"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="flex flex-wrap gap-2 mt-2">
+              {plan.three_d_url && (
+                <>
+                  <a
+                    href={plan.three_d_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="px-3 py-1.5 text-sm rounded-lg bg-ooosh-600 text-white hover:bg-ooosh-700"
+                  >
+                    🧊 Open 3D preview
+                  </a>
+                  <button
+                    onClick={() => copy(plan)}
+                    className="px-3 py-1.5 text-sm rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50"
+                  >
+                    {copiedId === plan.id ? '✅ Copied!' : '📋 Copy link'}
+                  </button>
+                </>
+              )}
+              <button
+                onClick={() => toggleShare(plan)}
+                className={`px-3 py-1.5 text-sm rounded-lg border ${
+                  plan.share_with_freelancer
+                    ? 'border-green-300 text-green-700 bg-green-50 hover:bg-green-100'
+                    : 'border-gray-300 text-gray-700 hover:bg-gray-50'
+                }`}
+                title="Share this 3D preview with freelancers (e.g. crew building the stage)"
+              >
+                {plan.share_with_freelancer ? '✓ Shared with freelancers' : '🔗 Share with freelancers'}
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
