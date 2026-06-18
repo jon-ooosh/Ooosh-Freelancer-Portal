@@ -167,6 +167,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '130_pcn_module.sql',
         '131_pcn_receipt_token.sql',
         '132_storage_room_sort_order.sql',
+        '133_storage_tenancy_sort_order.sql',
       ];
 
       for (const migration of migrations) {

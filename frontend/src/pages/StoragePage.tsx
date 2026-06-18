@@ -411,27 +411,70 @@ function TenanciesTab({ isAdminManager, onChange }: { isAdminManager: boolean; o
   const [creating, setCreating] = useState(false);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [vacancySize, setVacancySize] = useState<string | null>(null);
+  const [reordering, setReordering] = useState(false);
+  const [order, setOrder] = useState<Tenancy[]>([]);
+  const [savingOrder, setSavingOrder] = useState(false);
   const load = useCallback(async () => {
     setRows((await api.get<{ data: Tenancy[] }>(`/storage/tenancies?status=${showEnded ? 'all' : 'live'}`)).data);
   }, [showEnded]);
   useEffect(() => { load(); }, [load]);
 
+  const view = reordering ? order : rows;
+  function startReorder() { setOrder(rows); setReordering(true); }
+  function move(idx: number, dir: -1 | 1) {
+    setOrder((cur) => {
+      const next = [...cur];
+      const j = idx + dir;
+      if (j < 0 || j >= next.length) return cur;
+      [next[idx], next[j]] = [next[j], next[idx]];
+      return next;
+    });
+  }
+  async function saveOrder() {
+    setSavingOrder(true);
+    try { await api.post('/storage/tenancies/reorder', { ordered_ids: order.map((t) => t.id) }); setReordering(false); await load(); onChange(); }
+    finally { setSavingOrder(false); }
+  }
+
   return (
     <div>
-      <div className="flex items-center justify-end mb-3">
-        <label className="text-sm text-slate-600 flex items-center gap-2"><input type="checkbox" checked={showEnded} onChange={(e) => setShowEnded(e.target.checked)} /> Show ended</label>
+      <div className="flex items-center justify-between gap-2 mb-3">
+        <div>
+          {isAdminManager && rows.length > 1 && !reordering && (
+            <button onClick={startReorder} className="px-3 py-1.5 rounded-lg text-sm font-medium border border-slate-300 text-slate-600">↕ Reorder</button>
+          )}
+          {reordering && (
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-slate-500">Drag-free reorder — use the arrows.</span>
+              <button onClick={() => setReordering(false)} className="px-3 py-1.5 text-sm text-slate-600">Cancel</button>
+              <button onClick={saveOrder} disabled={savingOrder} className="px-3 py-1.5 text-sm bg-[#7B5EA7] text-white rounded-lg disabled:opacity-50">{savingOrder ? 'Saving…' : 'Done'}</button>
+            </div>
+          )}
+        </div>
+        {!reordering && (
+          <label className="text-sm text-slate-600 flex items-center gap-2"><input type="checkbox" checked={showEnded} onChange={(e) => setShowEnded(e.target.checked)} /> Show ended</label>
+        )}
       </div>
       <div className="overflow-x-auto border border-slate-200 rounded-xl bg-white">
         <table className="w-full text-sm">
           <thead className="bg-slate-50 text-slate-500 text-xs"><tr>
+            {reordering && <th className="px-2 py-2 w-10"></th>}
             <th className="text-left px-3 py-2">Room</th><th className="text-left px-3 py-2">Client</th>
             <th className="text-left px-3 py-2">Rate/wk</th><th className="text-left px-3 py-2">Billing</th>
             <th className="text-left px-3 py-2">Next bill</th><th className="text-left px-3 py-2">Review</th>
             <th className="text-left px-3 py-2">T&Cs</th><th className="text-left px-3 py-2">Status</th>
           </tr></thead>
           <tbody>
-            {rows.map((t) => (
-              <tr key={t.id} onClick={() => setDetailId(t.id)} className="border-t hover:bg-slate-50 cursor-pointer">
+            {view.map((t, idx) => (
+              <tr key={t.id} onClick={reordering ? undefined : () => setDetailId(t.id)} className={`border-t ${reordering ? '' : 'hover:bg-slate-50 cursor-pointer'}`}>
+                {reordering && (
+                  <td className="px-2 py-2">
+                    <div className="flex flex-col items-center">
+                      <button onClick={() => move(idx, -1)} disabled={idx === 0} className="text-slate-400 hover:text-[#7B5EA7] disabled:opacity-30 leading-none text-sm">▲</button>
+                      <button onClick={() => move(idx, 1)} disabled={idx === view.length - 1} className="text-slate-400 hover:text-[#7B5EA7] disabled:opacity-30 leading-none text-sm">▼</button>
+                    </div>
+                  </td>
+                )}
                 <td className="px-3 py-2 font-medium">{t.room_name}</td>
                 <td className="px-3 py-2">{t.organisation_name || t.lead_contact_name || '—'}</td>
                 <td className="px-3 py-2">{money(t.weekly_rate)}</td>
@@ -442,13 +485,15 @@ function TenanciesTab({ isAdminManager, onChange }: { isAdminManager: boolean; o
                 <td className="px-3 py-2 capitalize">{t.status}</td>
               </tr>
             ))}
-            {rows.length === 0 && <tr><td colSpan={8} className="px-3 py-6 text-center text-slate-400">No tenancies.</td></tr>}
+            {view.length === 0 && <tr><td colSpan={reordering ? 9 : 8} className="px-3 py-6 text-center text-slate-400">No tenancies.</td></tr>}
           </tbody>
         </table>
       </div>
-      <div className="mt-4">
-        <button onClick={() => setCreating(true)} className="bg-[#7B5EA7] text-white px-4 py-2 rounded-lg text-sm font-medium">+ Move In Client</button>
-      </div>
+      {!reordering && (
+        <div className="mt-4">
+          <button onClick={() => setCreating(true)} className="bg-[#7B5EA7] text-white px-4 py-2 rounded-lg text-sm font-medium">+ Move In Client</button>
+        </div>
+      )}
       {creating && <MoveInModal onClose={() => setCreating(false)} onSaved={() => { setCreating(false); load(); onChange(); }} />}
       {detailId && <TenancyDetailModal id={detailId} isAdminManager={isAdminManager} onClose={() => setDetailId(null)} onChange={() => { load(); onChange(); }} onMovedOut={(size) => setVacancySize(size)} />}
       {vacancySize && <VacancyMatchModal size={vacancySize} onClose={() => setVacancySize(null)} />}
