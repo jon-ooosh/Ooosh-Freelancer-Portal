@@ -471,7 +471,7 @@ function SettingsContent() {
                   <div className="flex items-center gap-3">
                     {u.avatar_url ? (
                       <img
-                        src={`/api/files/download?key=${encodeURIComponent(u.avatar_url)}`}
+                        src={`/api/auth/avatar/${u.avatar_url.split('/').pop()}`}
                         alt=""
                         className="w-9 h-9 rounded-full object-cover flex-shrink-0"
                       />

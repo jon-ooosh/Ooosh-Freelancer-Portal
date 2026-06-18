@@ -68,6 +68,8 @@ export interface RackArrow {
 export interface RackPlanLayout {
   nodes: RackNode[];
   arrows: RackArrow[];
+  /** Picker items (by HH itemId) dismissed to the "Not needed" group to tidy the view. */
+  notNeeded?: number[];
 }
 
 export interface RackPlanDrift {

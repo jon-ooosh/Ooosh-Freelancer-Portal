@@ -250,6 +250,19 @@ router.get('/by-job/:jobId', async (req: AuthRequest, res: Response) => {
   });
 });
 
+// DELETE /by-job/:jobId — remove the plan entirely. "Gone means gone": the
+// view-only client link 404s afterwards. Used when the job has changed
+// materially (e.g. all rack items removed) and the plan no longer applies.
+router.delete('/by-job/:jobId', async (req: AuthRequest, res: Response) => {
+  const jobId = String(req.params.jobId);
+  if (!UUID_RE.test(jobId)) {
+    res.status(400).json({ error: 'jobId must be an OP job UUID' });
+    return;
+  }
+  await query(`DELETE FROM rack_plans WHERE job_id = $1`, [jobId]);
+  res.json({ data: { deleted: true } });
+});
+
 // GET /summary/:jobId — does a non-empty plan exist? (read-only, never creates a row).
 router.get('/summary/:jobId', async (req: AuthRequest, res: Response) => {
   const jobId = String(req.params.jobId);

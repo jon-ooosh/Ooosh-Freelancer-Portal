@@ -7,7 +7,7 @@ import JobProblemsPanel from '../components/JobProblemsPanel';
 import HeldItemsSection from '../components/HeldItemsSection';
 import SendMerchFormButton from '../components/SendMerchFormButton';
 import TransportCalculator from '../components/TransportCalculator';
-import { StagingCalculatorModal, StagingTab } from '../components/StagingCalculator';
+import { StagingCalculatorModal, StagingOverviewCard } from '../components/StagingCalculator';
 import RequirementCard from '../components/RequirementCard';
 import type { JobRequirement } from '../components/RequirementCard';
 import ExcessGateBanner from '../components/ExcessGateBanner';
@@ -1158,24 +1158,16 @@ export default function JobDetailPage() {
   const [job, setJob] = useState<JobDetail | null>(null);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
-  const validTabs = ['overview', 'timeline', 'files', 'transport', 'drivers', 'money', 'staging'] as const;
+  const validTabs = ['overview', 'timeline', 'files', 'transport', 'drivers', 'money'] as const;
   type TabType = typeof validTabs[number];
   const initialTab = (validTabs.includes(searchParams.get('tab') as TabType) ? searchParams.get('tab') : 'overview') as TabType;
   const [activeTab, setActiveTab] = useState<TabType>(initialTab);
-  // Staging Calculator — modal launch + conditional tab (only shown once a plan exists)
+  // Staging Calculator — modal launch; created plans surface as an Overview card.
   const [showStagingModal, setShowStagingModal] = useState(false);
   const [showRackPlanModal, setShowRackPlanModal] = useState(false);
   const [showCombineModal, setShowCombineModal] = useState(false);
   const [rackPlanRefreshKey, setRackPlanRefreshKey] = useState(0);
-  const [stagingPlanCount, setStagingPlanCount] = useState(0);
-  const loadStagingCount = useCallback(async () => {
-    if (!id) return;
-    try {
-      const res = await api.get<{ data: unknown[] }>(`/staging/plans/${id}`);
-      setStagingPlanCount(res.data?.length || 0);
-    } catch { /* ignore */ }
-  }, [id]);
-  useEffect(() => { loadStagingCount(); }, [loadStagingCount]);
+  const [stagingRefreshKey, setStagingRefreshKey] = useState(0);
 
   // Reset tab when navigating to a different job. React Router reuses the
   // JobDetailPage component instance across /jobs/A → /jobs/B, so without
@@ -3755,9 +3747,7 @@ export default function JobDetailPage() {
       {/* Tabs */}
       <div className="border-b border-gray-200 mb-6 -mx-4 px-4 sm:mx-0 sm:px-0 overflow-x-auto scrollbar-hide">
         <nav className="flex gap-4 sm:gap-6 min-w-max">
-          {(['overview', 'timeline', 'transport', 'drivers', 'money', 'files', 'staging'] as const).map((tab) => {
-            // Staging tab only appears once a staging plan exists for this job.
-            if (tab === 'staging' && stagingPlanCount === 0) return null;
+          {(['overview', 'timeline', 'transport', 'drivers', 'money', 'files'] as const).map((tab) => {
             return (
             <button
               key={tab}
@@ -3773,7 +3763,6 @@ export default function JobDetailPage() {
                tab === 'transport' ? (<><span className="sm:hidden">Transport{(() => { const active = quotes.filter(q => q.status !== 'cancelled').length; return active > 0 ? ` (${active})` : ''; })()}</span><span className="hidden sm:inline">Crew & Transport{(() => { const active = quotes.filter(q => q.status !== 'cancelled').length; return active > 0 ? ` (${active})` : ''; })()}</span></>) :
                tab === 'drivers' ? (<><span className="sm:hidden">Drivers{vehicleAssignments.length > 0 ? ` (${vehicleAssignments.length})` : ''}</span><span className="hidden sm:inline">Drivers & Vehicles{vehicleAssignments.length > 0 ? ` (${vehicleAssignments.length})` : ''}</span></>) :
                tab === 'money' ? 'Money' :
-               tab === 'staging' ? '🏗️ Staging' :
                `Files${fileCount > 0 ? ` (${fileCount})` : ''}`}
             </button>
             );
@@ -3793,7 +3782,10 @@ export default function JobDetailPage() {
           {id && <JobProblemsPanel jobId={id} />}
 
           {/* Rack Plan — surfaces once a plan exists (created from Tools → Rack Planner) */}
-          {id && <RackPlanOverviewCard jobId={id} onEdit={() => setShowRackPlanModal(true)} refreshKey={rackPlanRefreshKey} />}
+          {id && <RackPlanOverviewCard jobId={id} onEdit={() => setShowRackPlanModal(true)} refreshKey={rackPlanRefreshKey} onDeleted={() => setRackPlanRefreshKey((k) => k + 1)} />}
+
+          {/* Staging — surfaces once a plan exists (created from Tools → Staging Calculator) */}
+          {id && <StagingOverviewCard jobId={id} refreshKey={stagingRefreshKey} />}
 
           {/* Holding for this client (incoming deliveries) now lives inside the
               prep checklist's "Held for Clients" block — rolled in with the merch
@@ -4955,11 +4947,6 @@ export default function JobDetailPage() {
         <MoneyTab jobId={id} job={job} onJobChanged={loadJob} />
       )}
 
-      {/* Staging Tab — 3D preview plans (only present once a plan exists) */}
-      {activeTab === 'staging' && id && (
-        <StagingTab jobId={id} />
-      )}
-
       {/* Rack Planner — launched from the Job Requirements "Tools" menu (modal) */}
       {showRackPlanModal && id && (
         <RackPlanModal jobId={id} onClose={() => { setShowRackPlanModal(false); setRackPlanRefreshKey((k) => k + 1); }} />
@@ -4970,10 +4957,9 @@ export default function JobDetailPage() {
         <StagingCalculatorModal
           hhJobNumber={job.hh_job_number}
           onClose={() => setShowStagingModal(false)}
-          onComplete={async () => {
-            await loadStagingCount();
+          onComplete={() => {
+            setStagingRefreshKey((k) => k + 1);
             setShowStagingModal(false);
-            setActiveTab('staging');
           }}
         />
       )}

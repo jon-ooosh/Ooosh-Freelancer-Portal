@@ -51,6 +51,8 @@ export default function RackPlanTab({ jobId }: Props) {
   const [rfNodes, setRfNodes] = useState<RackFlowNode[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  // Picker items dismissed to the "Not needed" group (by HH itemId). Persisted with the plan.
+  const [notNeeded, setNotNeeded] = useState<Set<number>>(new Set());
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -79,6 +81,7 @@ export default function RackPlanTab({ jobId }: Props) {
           data: { label: a.label }, deletable: true,
           sourceHandle: a.from_handle ?? undefined, targetHandle: a.to_handle ?? undefined,
         })));
+        setNotNeeded(new Set(d.plan.layout?.notNeeded ?? []));
         setDirty(false);
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load rack plan');
@@ -316,7 +319,7 @@ export default function RackPlanTab({ jobId }: Props) {
         label: String((e.data as { label?: string } | undefined)?.label ?? ''),
         from_handle: e.sourceHandle ?? null, to_handle: e.targetHandle ?? null,
       }));
-      const layout: RackPlanLayout = { nodes, arrows };
+      const layout: RackPlanLayout = { nodes, arrows, notNeeded: [...notNeeded] };
       await api.put(`/rack-plans/${planId}`, { layout });
       setDirty(false);
     } catch (e) {
@@ -324,14 +327,37 @@ export default function RackPlanTab({ jobId }: Props) {
     } finally {
       setSaving(false);
     }
-  }, [planId, rfNodes, edges]);
+  }, [planId, rfNodes, edges, notNeeded]);
 
-  const buckets = useMemo(() => ({
-    pre_built: picker.filter((p) => p.bucket === 'pre_built'),
-    u_item: picker.filter((p) => p.bucket === 'u_item'),
-    case: picker.filter((p) => p.bucket === 'case'),
-    loose: picker.filter((p) => p.bucket === 'loose'),
-  }), [picker]);
+  // "Not needed" tidy-up: dismiss a picker row to the bottom group, restore it back,
+  // or promote it straight to the canvas (dispatching to the right add-handler by bucket).
+  const dismissItem = useCallback((itemId: number) => {
+    setNotNeeded((s) => { const n = new Set(s); n.add(itemId); return n; });
+    setDirty(true);
+  }, []);
+  const restoreItem = useCallback((itemId: number) => {
+    setNotNeeded((s) => { const n = new Set(s); n.delete(itemId); return n; });
+    setDirty(true);
+  }, []);
+  const addItemByBucket = useCallback((item: ClassifiedRackItem) => {
+    switch (item.bucket) {
+      case 'pre_built': addStandaloneNode(item, 'pre_built'); break;
+      case 'case': addBuiltHereNode(item.name, item.rackHeight, item); break;
+      case 'u_item': addUItem(item); break;
+      default: addStandaloneNode(item, 'loose'); break;
+    }
+  }, [addStandaloneNode, addBuiltHereNode, addUItem]);
+
+  const buckets = useMemo(() => {
+    const visible = picker.filter((p) => !notNeeded.has(p.itemId));
+    return {
+      pre_built: visible.filter((p) => p.bucket === 'pre_built'),
+      u_item: visible.filter((p) => p.bucket === 'u_item'),
+      case: visible.filter((p) => p.bucket === 'case'),
+      loose: visible.filter((p) => p.bucket === 'loose'),
+      notNeeded: picker.filter((p) => notNeeded.has(p.itemId)),
+    };
+  }, [picker, notNeeded]);
 
   const selectedNode = useMemo(
     () => rfNodes.find((n) => n.id === selectedNodeId)?.data.node ?? null,
@@ -349,8 +375,8 @@ export default function RackPlanTab({ jobId }: Props) {
     return c;
   }, [rfNodes, isMissing]);
   const unplacedCount = useMemo(
-    () => picker.filter((p) => p.quantity - (placedCounts.get(p.itemId) ?? 0) > 0).length,
-    [picker, placedCounts],
+    () => picker.filter((p) => !notNeeded.has(p.itemId) && p.quantity - (placedCounts.get(p.itemId) ?? 0) > 0).length,
+    [picker, placedCounts, notNeeded],
   );
 
   if (loading) return <div className="text-sm text-gray-500 py-8 text-center">Loading rack plan…</div>;
@@ -444,14 +470,16 @@ export default function RackPlanTab({ jobId }: Props) {
           )}
 
           <PickerSection title="Pre-built units" items={buckets.pre_built} placedCounts={placedCounts}
-            onAdd={(it) => addStandaloneNode(it, 'pre_built')} />
+            onAdd={(it) => addStandaloneNode(it, 'pre_built')} onDismiss={dismissItem} />
           <PickerSection title="Cases" items={buckets.case} placedCounts={placedCounts}
             onAdd={(it) => addBuiltHereNode(it.name, it.rackHeight, it)}
-            badge={(it) => (it.rackHeight ? `${it.rackHeight}U` : '')} />
+            badge={(it) => (it.rackHeight ? `${it.rackHeight}U` : '')} onDismiss={dismissItem} />
           <PickerSection title="U-items" items={buckets.u_item} placedCounts={placedCounts}
-            onAdd={addUItem} badge={(it) => `${it.rackHeight ?? '?'}U${it.halfWidth ? ' ½' : ''}`} />
+            onAdd={addUItem} badge={(it) => `${it.rackHeight ?? '?'}U${it.halfWidth ? ' ½' : ''}`} onDismiss={dismissItem} />
           <PickerSection title="Loose" items={buckets.loose} placedCounts={placedCounts}
-            onAdd={(it) => addStandaloneNode(it, 'loose')} />
+            onAdd={(it) => addStandaloneNode(it, 'loose')} onDismiss={dismissItem} />
+          <PickerSection title="Not needed" items={buckets.notNeeded} placedCounts={placedCounts}
+            onAdd={addItemByBucket} onRestore={restoreItem} muted />
         </div>
       </div>
     </div>
@@ -459,33 +487,49 @@ export default function RackPlanTab({ jobId }: Props) {
 }
 
 function PickerSection({
-  title, items, placedCounts, onAdd, badge,
+  title, items, placedCounts, onAdd, badge, onDismiss, onRestore, muted,
 }: {
   title: string;
   items: ClassifiedRackItem[];
   placedCounts: Map<number, number>;
   onAdd: (item: ClassifiedRackItem) => void;
   badge?: (item: ClassifiedRackItem) => string;
+  /** ✕ icon to banish a row to the "Not needed" group. */
+  onDismiss?: (itemId: number) => void;
+  /** ↩ icon to return a "Not needed" row to its original bucket. */
+  onRestore?: (itemId: number) => void;
+  /** Greys the section heading (used for the "Not needed" group). */
+  muted?: boolean;
 }) {
   if (items.length === 0) return null;
   return (
     <div>
-      <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500 mb-1">{title} ({items.length})</div>
+      <div className={`text-[11px] font-semibold uppercase tracking-wide mb-1 ${muted ? 'text-gray-400' : 'text-gray-500'}`}>{title} ({items.length})</div>
       <div className="space-y-1">
         {items.map((it) => {
           const used = placedCounts.get(it.itemId) ?? 0;
           const remaining = it.quantity - used;
           const exhausted = remaining <= 0;
           return (
-            <button key={it.itemId} disabled={exhausted} onClick={() => onAdd(it)}
-              className={`w-full text-left text-xs px-2 py-1 rounded border flex items-center justify-between gap-1 ${
-                exhausted ? 'bg-gray-100 border-gray-200 text-gray-400 cursor-default'
-                  : 'bg-white border-gray-300 hover:border-ooosh-400 hover:bg-ooosh-50 text-gray-800'}`}>
-              <span className="truncate leading-tight">{it.name}</span>
-              <span className="shrink-0 text-[10px] text-gray-400">
-                {it.quantity > 1 ? `${remaining}/${it.quantity}` : exhausted ? '✓' : (badge ? badge(it) : '')}
-              </span>
-            </button>
+            <div key={it.itemId} className="flex items-center gap-1">
+              <button disabled={exhausted} onClick={() => onAdd(it)}
+                className={`flex-1 min-w-0 text-left text-xs px-2 py-1 rounded border flex items-center justify-between gap-1 ${
+                  exhausted ? 'bg-gray-100 border-gray-200 text-gray-400 cursor-default'
+                    : 'bg-white border-gray-300 hover:border-ooosh-400 hover:bg-ooosh-50 text-gray-800'}`}>
+                <span className="truncate leading-tight">{it.name}</span>
+                <span className="shrink-0 text-[10px] text-gray-400">
+                  {it.quantity > 1 ? `${remaining}/${it.quantity}` : exhausted ? '✓' : (badge ? badge(it) : '')}
+                </span>
+              </button>
+              {onDismiss && (
+                <button onClick={() => onDismiss(it.itemId)} title="Not needed — move to the bottom"
+                  className="shrink-0 text-gray-300 hover:text-gray-600 text-sm leading-none px-1">✕</button>
+              )}
+              {onRestore && (
+                <button onClick={() => onRestore(it.itemId)} title="Restore to its group"
+                  className="shrink-0 text-gray-400 hover:text-ooosh-600 text-sm leading-none px-1">↩</button>
+              )}
+            </div>
           );
         })}
       </div>
