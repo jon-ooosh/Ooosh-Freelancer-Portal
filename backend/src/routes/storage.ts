@@ -106,8 +106,11 @@ router.post('/tcs/by-token/:token/accept', publicLimiter, validate(acceptSchema)
   const { accepted_by_name, signature } = req.body as z.infer<typeof acceptSchema>;
 
   const tenancyRes = await query(
-    `SELECT t.id, t.tcs_agreement_id, v.id AS version_id
+    `SELECT t.id, t.tcs_agreement_id, v.id AS version_id, v.version, v.body,
+            r.name AS room_name, o.name AS org_name
      FROM storage_tenancies t
+     JOIN storage_rooms r ON r.id = t.room_id
+     LEFT JOIN organisations o ON o.id = t.organisation_id
      LEFT JOIN storage_tcs_versions v ON v.is_current = true
      WHERE t.tcs_token = $1`,
     [token]
@@ -122,37 +125,51 @@ router.post('/tcs/by-token/:token/accept', publicLimiter, validate(acceptSchema)
     return;
   }
 
-  // Persist signature image to R2 if supplied
+  // Persist signature image to R2 if supplied (keep the buffer for the PDF too)
   let signatureKey: string | null = null;
-  if (signature && signature.startsWith('data:image') && isR2Configured()) {
+  let signatureBuf: Buffer | null = null;
+  if (signature && signature.startsWith('data:image')) {
     try {
-      const base64 = signature.split(',')[1] || '';
-      const buf = Buffer.from(base64, 'base64');
-      signatureKey = `files/storage/tcs/${tenancy.id}/signature-${Date.now()}.png`;
-      await uploadToR2(signatureKey, buf, 'image/png');
+      signatureBuf = Buffer.from(signature.split(',')[1] || '', 'base64');
+      if (isR2Configured()) {
+        signatureKey = `files/storage/tcs/${tenancy.id}/signature-${Date.now()}.png`;
+        await uploadToR2(signatureKey, signatureBuf, 'image/png');
+      }
     } catch (err) {
       console.warn('[storage] T&Cs signature upload failed:', err);
     }
   }
 
+  const acceptedAt = new Date();
+  const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.ip || null;
   const agreement = await query(
     `INSERT INTO storage_tcs_agreements
        (tenancy_id, version_id, accepted_by_name, signature_r2_key, ip_address, user_agent)
      VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-    [
-      tenancy.id,
-      tenancy.version_id || null,
-      accepted_by_name,
-      signatureKey,
-      (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.ip || null,
-      req.headers['user-agent'] || null,
-    ]
+    [tenancy.id, tenancy.version_id || null, accepted_by_name, signatureKey, ip, req.headers['user-agent'] || null]
   );
 
   await query(
     `UPDATE storage_tenancies SET tcs_agreement_id = $1, tcs_token = NULL, updated_at = NOW() WHERE id = $2`,
     [agreement.rows[0].id, tenancy.id]
   );
+
+  // Generate the signed-agreement PDF snapshot (best-effort — never block acceptance).
+  if (isR2Configured()) {
+    try {
+      const { generateStorageTcsPdf } = await import('../services/storage-tcs-pdf');
+      const pdfBytes = await generateStorageTcsPdf({
+        orgName: tenancy.org_name, roomName: tenancy.room_name, version: tenancy.version,
+        bodyHtml: tenancy.body || '', acceptedByName: accepted_by_name, acceptedAt,
+        signaturePng: signatureBuf, ip,
+      });
+      const pdfKey = `files/storage/tcs/${tenancy.id}/agreement-${agreement.rows[0].id}.pdf`;
+      await uploadToR2(pdfKey, Buffer.from(pdfBytes), 'application/pdf');
+      await query(`UPDATE storage_tcs_agreements SET pdf_r2_key = $1 WHERE id = $2`, [pdfKey, agreement.rows[0].id]);
+    } catch (err) {
+      console.warn('[storage] T&Cs PDF generation failed (acceptance still recorded):', err);
+    }
+  }
 
   res.json({ data: { accepted: true } });
 });
@@ -312,7 +329,7 @@ router.get('/tenancies/:id', async (req: AuthRequest, res: Response) => {
     `SELECT t.*, r.name AS room_name, r.size_category, r.location_type,
             o.name AS organisation_name,
             p.first_name || ' ' || p.last_name AS lead_contact_name,
-            a.accepted_at AS tcs_accepted_at, a.accepted_by_name AS tcs_accepted_by
+            a.accepted_at AS tcs_accepted_at, a.accepted_by_name AS tcs_accepted_by, a.pdf_r2_key AS tcs_pdf_key
      FROM storage_tenancies t
      JOIN storage_rooms r ON r.id = t.room_id
      LEFT JOIN organisations o ON o.id = t.organisation_id
