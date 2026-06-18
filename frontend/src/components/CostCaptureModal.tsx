@@ -541,7 +541,7 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
   // always has a cost row, so amounts stay required.
   const serviceOnlyEligible = wantsService && !isEdit;
 
-  async function handleSave() {
+  async function handleSave(approveOnSave = false) {
     setError('');
     if (vatMode === 'reclaim') {
       if (!amountNet || Number(amountNet) <= 0) { setError('Enter the No-VAT (net) amount, e.g. the excess.'); return; }
@@ -626,6 +626,9 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
       if (!isEdit) {
         payload.platform_issue_id = presetIssueId || null;
         payload.status = 'confirmed';
+        // One-click "Approve & save" — backend honours it only for a payable +
+        // an approver (admin/manager), and fires the bill push on approval.
+        if (approveOnSave) payload.approve = true;
       }
 
       const res = isEdit
@@ -1107,7 +1110,14 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
 
         <div className="flex justify-end gap-2 px-6 py-4 border-t border-gray-200">
           <button onClick={onClose} className="px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded-md">Cancel</button>
-          <button onClick={handleSave} disabled={saving}
+          {!isEdit && paymentStatus !== 'paid' && (user?.role === 'admin' || user?.role === 'manager') && (
+            <button onClick={() => handleSave(true)} disabled={saving}
+              className="px-4 py-2 text-sm text-white bg-green-600 hover:bg-green-700 rounded-md disabled:opacity-50"
+              title="Save this bill and approve it in one step (skips the separate approve step)">
+              {saving ? 'Saving…' : 'Approve & save'}
+            </button>
+          )}
+          <button onClick={() => handleSave()} disabled={saving}
             className="px-4 py-2 text-sm text-white bg-purple-600 hover:bg-purple-700 rounded-md disabled:opacity-50">
             {saving ? 'Saving…' : isEdit ? (wantsService ? 'Save changes + service record' : 'Save changes') : serviceOnlyEligible && (vatMode === 'reclaim' ? Number(amountNet) <= 0 : Number(amountGross) <= 0) ? 'Save service record' : wantsService ? 'Save cost + service record' : 'Save cost'}
           </button>

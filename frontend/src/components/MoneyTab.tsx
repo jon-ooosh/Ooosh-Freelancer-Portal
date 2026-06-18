@@ -9,6 +9,7 @@ import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { getPaymentState, PAYMENT_STATE_LABELS, PAYMENT_STATE_CLASSES } from '../services/paymentState';
 import ExcessPaymentModal, { statusLabel, statusColor } from './ExcessPaymentModal';
+import CostCaptureModal from './CostCaptureModal';
 import type { JobExcess } from '../../../shared/types';
 
 interface MoneyTabProps {
@@ -170,6 +171,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   // Job costs (Cost Capture) — quoted-vs-actual variance + extra/recharge list.
   const [jobCosts, setJobCosts] = useState<JobCostLite[]>([]);
   const [jobQuotes, setJobQuotes] = useState<JobQuoteLite[]>([]);
+  const [showAddCost, setShowAddCost] = useState(false);
 
   const openRefundModal = (dep: FinancialData['financial']['deposits'][number]) => {
     setRefundingDep(dep);
@@ -1034,7 +1036,14 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
       </div>
 
       {/* Job costs vs quotes (Cost Capture) */}
-      <JobCostsPanel costs={jobCosts} quotes={jobQuotes} />
+      <JobCostsPanel costs={jobCosts} quotes={jobQuotes} onAddCost={() => setShowAddCost(true)} />
+      {showAddCost && (
+        <CostCaptureModal
+          presetJobId={jobId}
+          onClose={() => setShowAddCost(false)}
+          onSaved={() => { setShowAddCost(false); loadJobCosts(); }}
+        />
+      )}
 
       {/* Record Payment Form */}
       {showPaymentForm && (() => {
@@ -1490,11 +1499,27 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
 // expected transport/crew cost. "Actuals" sums the quote_actual costs. Extra
 // costs are listed separately (eligible for client recharge). Hidden when the
 // job has neither costs nor quotes.
-function JobCostsPanel({ costs, quotes }: { costs: JobCostLite[]; quotes: JobQuoteLite[] }) {
+function JobCostsPanel({ costs, quotes, onAddCost }: { costs: JobCostLite[]; quotes: JobQuoteLite[]; onAddCost: () => void }) {
   const m = (n: number) => `£${n.toFixed(2)}`;
   const num = (n: number | null | undefined) => Number(n || 0);
 
-  if (!costs.length && !quotes.length) return null;
+  const AddBtn = (
+    <button onClick={onAddCost} className="text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-md px-3 py-1.5">
+      + Add cost
+    </button>
+  );
+
+  if (!costs.length && !quotes.length) {
+    return (
+      <div className="bg-white border border-gray-200 rounded-lg p-6 mb-6">
+        <div className="flex items-center justify-between">
+          <h3 className="text-lg font-semibold text-gray-900">Job Costs</h3>
+          {AddBtn}
+        </div>
+        <p className="text-sm text-gray-500 mt-2">No supplier costs, fuel, or freelancer invoices logged against this job yet.</p>
+      </div>
+    );
+  }
 
   const liveQuotes = quotes.filter((q) => q.status !== 'cancelled');
   const quotedCost = liveQuotes.reduce((s, q) => s + num(q.freelancer_fee_rounded ?? q.freelancer_fee), 0);
@@ -1519,9 +1544,12 @@ function JobCostsPanel({ costs, quotes }: { costs: JobCostLite[]; quotes: JobQuo
 
   return (
     <div className="bg-white border border-gray-200 rounded-lg p-6 mb-6">
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex items-center justify-between mb-4 gap-3">
         <h3 className="text-lg font-semibold text-gray-900">Job Costs</h3>
-        <a href="/money/costs" className="text-sm text-purple-700 hover:underline">Costs hub →</a>
+        <div className="flex items-center gap-3">
+          <a href="/money/costs" className="text-sm text-purple-700 hover:underline">Costs hub →</a>
+          {AddBtn}
+        </div>
       </div>
 
       {/* Quoted vs actual */}

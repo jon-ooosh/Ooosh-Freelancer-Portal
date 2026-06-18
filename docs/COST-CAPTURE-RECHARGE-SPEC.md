@@ -757,3 +757,27 @@ double scrollbar.
 
 No migration. Backend: `cost-receipt-extract.ts` (schema + prompt),
 `xero-broker.ts` (tax-type resolver), `cost-xero-push.ts` (TaxType on lines).
+
+---
+
+## Build notes — Approve-on-upload + entry points (Jun 2026)
+
+**Approve & save (one-click).** The capture modal shows a green "Approve & save"
+button alongside "Save cost" for a payable (pay-later method) when the user is
+admin/manager — creates the cost AND advances it straight to `approved` (which
+fires the bill push for pay-later methods), skipping the separate approve step.
+"Save cost" still logs-without-approving for "not ready to approve yet".
+`POST /api/costs` accepts an `approve: true` control flag, honoured only for an
+approver + a payable. **`/approve` widened from admin-only to admin+manager**
+(per jon: a manager uploading an invoice should be able to approve it). **Mark
+paid stays admin-only** (money actually leaving + the Xero payment).
+
+**Entry points.** "+ Add cost" now mounts the capture modal from two more
+surfaces beyond the Costs hub:
+- **Job Detail → Money tab** → "Job Costs" panel (preset job; panel now always
+  renders with the button even when empty).
+- **Issue Detail (Problems)** → header button (preset issue + vehicle + job, so
+  the category/links default sensibly for a repair cost).
+The Vehicle entry point already exists via the Service History tab.
+
+No migration.

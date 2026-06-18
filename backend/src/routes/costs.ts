@@ -25,7 +25,8 @@ const extractUpload = multer({
   limits: { fileSize: 10 * 1024 * 1024 },
 });
 
-// Manager+ can verify a payable; only admin can approve / mark paid.
+// Manager+ can verify AND approve a payable (incl. one-click "Approve & save");
+// only admin can mark paid (money actually leaving + the Xero payment).
 const VERIFY_ROLES = ['admin', 'manager'] as const;
 const ADMIN_ONLY = ['admin'] as const;
 
@@ -95,6 +96,9 @@ const createSchema = z.object({
   receipt_filename: z.string().trim().max(200).optional().nullable(),
   status: z.enum(['draft', 'confirmed', 'resolved']).optional(),
   notes: z.string().trim().max(10000).optional().nullable(),
+  // Control flag (not a column): one-click "Approve & save" on a payable.
+  // Honoured only for admin/manager + a payable; ignored otherwise.
+  approve: z.boolean().optional(),
 });
 
 // Update accepts the same fields, all optional.
@@ -437,11 +441,14 @@ router.post('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respon
     coerceRechargeForIntent(data);
 
     // A payable (anything not already paid) enters the approval workflow. If the
-    // booker is uploading it, they vouch for it inline → 'verified'.
+    // booker is uploading it, they vouch for it inline → 'verified'. An approver
+    // (admin/manager) can one-click "Approve & save" to skip straight to
+    // 'approved' (which fires the bill push for pay-later methods).
+    const isPayable = Boolean(data.payment_status && data.payment_status !== 'paid');
+    const canApprove = ['admin', 'manager'].includes(req.user!.role);
+    const approveNow = data.approve === true && isPayable && canApprove;
     let approvalState: string | null = null;
-    if (data.payment_status && data.payment_status !== 'paid') {
-      approvalState = 'verified';
-    }
+    if (isPayable) approvalState = approveNow ? 'approved' : 'verified';
 
     // COT-card payments are stamped with the uploader's name + their stored
     // card last 4 (from Profile) — staff no longer enters either every time.
@@ -459,6 +466,11 @@ router.post('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respon
 
     const cols = ['uploaded_by', 'approval_state'];
     const vals: unknown[] = [req.user!.id, approvalState];
+    if (approveNow) {
+      cols.push('verified_by', 'verified_at', 'approved_by', 'approved_at');
+      const now = new Date();
+      vals.push(req.user!.id, now, req.user!.id, now);
+    }
     for (const c of WRITABLE) {
       if (data[c] !== undefined) { cols.push(c); vals.push(data[c]); }
     }
@@ -602,7 +614,7 @@ router.post('/:id/verify', authorize(...VERIFY_ROLES), async (req: AuthRequest, 
   }
 });
 
-router.post('/:id/approve', authorize(...ADMIN_ONLY), async (req: AuthRequest, res: Response) => {
+router.post('/:id/approve', authorize(...VERIFY_ROLES), async (req: AuthRequest, res: Response) => {
   try {
     const result = await query(
       `UPDATE costs SET approval_state = 'approved', approved_by = $1, approved_at = NOW()
