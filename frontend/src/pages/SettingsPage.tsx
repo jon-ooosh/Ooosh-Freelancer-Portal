@@ -1125,6 +1125,8 @@ function OohSettingsSection() {
   const [testNumber, setTestNumber] = useState('');
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState('');
+  const [scanning, setScanning] = useState(false);
+  const [scanResult, setScanResult] = useState('');
 
   useEffect(() => {
     loadSettings();
@@ -1201,6 +1203,23 @@ function OohSettingsSection() {
       setTestResult(err instanceof Error ? err.message : 'Test SMS failed');
     } finally {
       setTesting(false);
+    }
+  }
+
+  // TEMPORARY: run the geofence scan now (remove after go-live — see GH reminder issue)
+  async function runOohScan() {
+    setScanning(true);
+    setScanResult('');
+    try {
+      const res = await api.post<{ checked: number; texted: number; skipped: number }>(
+        '/system-settings/run-ooh-scan',
+        {},
+      );
+      setScanResult(`Scan done — checked ${res.checked}, texted ${res.texted}, skipped ${res.skipped}.`);
+    } catch (err) {
+      setScanResult(err instanceof Error ? err.message : 'Scan failed');
+    } finally {
+      setScanning(false);
     }
   }
 
@@ -1323,6 +1342,23 @@ function OohSettingsSection() {
           </button>
         </div>
         {testResult && <p className="text-xs text-amber-800 mt-2">{testResult}</p>}
+
+        <div className="mt-3 pt-3 border-t border-amber-200">
+          <p className="text-sm font-medium text-amber-900">Run geofence scan now (temporary)</p>
+          <p className="text-xs text-amber-700 mt-0.5 mb-2">
+            The approach scan normally only runs 17:00–08:59. Use this to test in daylight: needs an
+            OOH-flagged, booked-out van with a recent Traccar fix within the radius. In test mode any
+            text redirects to SMS_TEST_REDIRECT.
+          </p>
+          <button
+            onClick={runOohScan}
+            disabled={scanning}
+            className="px-4 py-2 text-sm bg-amber-600 text-white rounded font-medium hover:bg-amber-700 disabled:opacity-50"
+          >
+            {scanning ? 'Scanning…' : 'Run OOH scan now'}
+          </button>
+          {scanResult && <p className="text-xs text-amber-800 mt-2">{scanResult}</p>}
+        </div>
       </div>
     </div>
   );
