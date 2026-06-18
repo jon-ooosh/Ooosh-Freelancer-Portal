@@ -550,7 +550,7 @@ function PayableActions({ cost, isManager, isAdmin, busy, onAction, onPay }: {
   if ((!s || s === 'submitted') && isManager) {
     return <ActionBtn busy={busy === cost.id + 'verify'} onClick={() => onAction(cost.id, 'verify')} label="Verify" />;
   }
-  if (s === 'verified' && isAdmin) {
+  if (s === 'verified' && isManager) {
     return <ActionBtn busy={busy === cost.id + 'approve'} onClick={() => onAction(cost.id, 'approve')} label="Approve" />;
   }
   if (s === 'approved' && isAdmin) {

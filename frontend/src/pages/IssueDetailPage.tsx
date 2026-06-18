@@ -11,6 +11,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { api } from '../services/api';
 import ThreadView from '../components/messaging/ThreadView';
+import CostCaptureModal from '../components/CostCaptureModal';
 import { useAttachments, type InteractionAttachment } from '../components/messaging/Attachments';
 import { MentionComposer } from '../components/messaging/MentionComposer';
 import ImageLightbox from '../components/ImageLightbox';
@@ -137,6 +138,7 @@ interface User { id: string; first_name: string; last_name: string }
 export default function IssueDetailPage() {
   const { id } = useParams<{ id: string }>();
   const [issue, setIssue] = useState<Issue | null>(null);
+  const [showAddCost, setShowAddCost] = useState(false);
   const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
   const [comment, setComment] = useState('');
@@ -249,17 +251,33 @@ export default function IssueDetailPage() {
   return (
     <div className="max-w-5xl mx-auto">
       {/* ── Header ── */}
-      <div className="mb-3 text-xs">
-        <Link to="/operations/problems" className="text-ooosh-600 hover:underline">← Problems</Link>
-        {issue.job_id && (
-          <>
-            {' · '}
-            <Link to={`/jobs/${issue.job_id}`} className="text-ooosh-600 hover:underline">
-              Back to job {issue.hh_job_number ? `#${issue.hh_job_number}` : ''}
-            </Link>
-          </>
-        )}
+      <div className="mb-3 text-xs flex items-center justify-between gap-3">
+        <div>
+          <Link to="/operations/problems" className="text-ooosh-600 hover:underline">← Problems</Link>
+          {issue.job_id && (
+            <>
+              {' · '}
+              <Link to={`/jobs/${issue.job_id}`} className="text-ooosh-600 hover:underline">
+                Back to job {issue.hh_job_number ? `#${issue.hh_job_number}` : ''}
+              </Link>
+            </>
+          )}
+        </div>
+        <button onClick={() => setShowAddCost(true)}
+          className="text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-md px-3 py-1.5 whitespace-nowrap">
+          + Add cost
+        </button>
       </div>
+
+      {showAddCost && (
+        <CostCaptureModal
+          presetIssueId={issue.id}
+          presetVehicleId={issue.vehicle_id || null}
+          presetJobId={issue.job_id || null}
+          onClose={() => setShowAddCost(false)}
+          onSaved={() => setShowAddCost(false)}
+        />
+      )}
 
       <div className={`rounded-xl border p-4 mb-4 ${
         issue.severity === 'urgent' && !isResolved ? 'border-red-300 bg-red-50/40' : 'border-gray-200 bg-white'
