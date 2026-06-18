@@ -625,7 +625,13 @@ function TenancyDetailModal({ id, isAdminManager, onClose, onChange, onMovedOut 
     <Modal title={`${t.room_name} — ${t.organisation_name || t.lead_contact_name || 'Tenancy'}`} onClose={onClose}>
       <div className="space-y-4 text-sm">
         <div className="grid grid-cols-2 gap-3">
-          <Field label="Weekly rate" value={money(t.weekly_rate)} />
+          <div>
+            <p className="text-xs text-slate-400">Weekly rate</p>
+            <p className="text-slate-800">{money(t.weekly_rate)}</p>
+            {t.previous_weekly_rate != null && (
+              <p className="text-xs text-slate-400">was {money(t.previous_weekly_rate)}{t.last_rate_change_date ? ` · since ${fmtDate(t.last_rate_change_date)}` : ''}</p>
+            )}
+          </div>
           <Field label="Status" value={t.status} />
           <Field label="Billing" value={t.billing_mode === 'recurring' ? 'Recurring (Xero)' : `We invoice (${t.billing_cadence})`} />
           {t.billing_mode === 'manual' && <Field label="Next invoice due" value={fmtDate(t.next_bill_date)} />}
@@ -760,7 +766,7 @@ function RateButton({ id, current, onDone }: { id: string; current: number; onDo
   const [review, setReview] = useState('');
   const [notes, setNotes] = useState('');
   const [saving, setSaving] = useState(false);
-  if (!open) return <button onClick={() => setOpen(true)} className="px-3 py-1.5 bg-[#7B5EA7] text-white rounded-lg text-xs">Change rate</button>;
+  if (!open) return <button onClick={() => setOpen(true)} className="px-3 py-1.5 bg-[#7B5EA7] text-white rounded-lg text-xs">💷 Change rate</button>;
   return (
     <div className="w-full border border-slate-200 rounded-lg p-3 space-y-2">
       <div className="grid grid-cols-2 gap-2">
