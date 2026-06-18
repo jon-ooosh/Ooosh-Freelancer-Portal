@@ -15,8 +15,7 @@ const templates: Record<string, SmsTemplate> = {
     body:
       `Hi {{driverName}}, you're nearly back at Ooosh with {{vehicleReg}}. ` +
       `Please park considerately and do NOT block the neighbours' gates. ` +
-      `Tell us where you've left it: {{parkingFormUrl}} ` +
-      `(Automated message — please don't reply.)`,
+      `Full instructions for how to return are: {{parkingFormUrl}}`,
   },
 };
 
