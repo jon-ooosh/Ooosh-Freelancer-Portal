@@ -13,16 +13,24 @@
  */
 import { Router, Response } from 'express';
 import { z } from 'zod';
+import multer from 'multer';
 import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
 import { getSystemSettings } from './system-settings';
+import { isAnthropicConfigured } from '../config/anthropic';
 
 const router = Router();
 
 router.use(authenticate);
 router.use(authorize(...STAFF_ROLES));
+
+// Multer (memory) for the AI-extract endpoint — 10MB, images + PDF.
+const extractUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+});
 
 // ─────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -79,6 +87,28 @@ router.get('/settings', async (_req: AuthRequest, res: Response) => {
       hh_charge_item: s.pcn_hh_charge_item || 'b1744',
     },
   });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// AI extraction — PRIMARY entry path. Upload a photo/PDF of the notice, get
+// the fields back for the modal to pre-fill. Manual entry is the fallback.
+// Inert (503) when ANTHROPIC_API_KEY is missing. Replaces Netlify extract.js.
+// ─────────────────────────────────────────────────────────────────────────
+
+router.post('/extract', extractUpload.single('file'), async (req: AuthRequest, res: Response) => {
+  if (!isAnthropicConfigured()) {
+    res.status(503).json({ error: 'AI extraction not configured (ANTHROPIC_API_KEY missing on server)' });
+    return;
+  }
+  if (!req.file) { res.status(400).json({ error: 'No file provided' }); return; }
+  try {
+    const { extractPcn } = await import('../services/pcn-extract');
+    const data = await extractPcn(req.file.buffer, req.file.mimetype);
+    res.json({ data });
+  } catch (err) {
+    console.error('[pcns] extract error:', err);
+    res.status(500).json({ error: 'Extraction failed', details: (err as Error).message });
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────
