@@ -218,6 +218,55 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// GET /api/organisations/:id/contact-candidates
+// Active contact people for an org, expanded across related orgs (Org>Org via
+// organisation_relationships — e.g. a band's management company). Mirrors the
+// New Enquiry job cascade (/pipeline/:jobId/contacts) but org-scoped. Used by
+// the storage lead-contact picker. ACTIVE roles only (por.status='active') —
+// ended roles carry status='historical' and must NOT surface.
+router.get('/:id/contact-candidates', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await query(
+      `WITH related AS (
+         SELECT $1::uuid AS org_id, 0 AS priority
+         UNION
+         SELECT CASE WHEN r.from_org_id = $1 THEN r.to_org_id ELSE r.from_org_id END, 1
+         FROM organisation_relationships r
+         WHERE (r.from_org_id = $1 OR r.to_org_id = $1) AND r.status = 'active'
+       )
+       SELECT DISTINCT ON (p.id)
+              p.id AS person_id, p.first_name, p.last_name, p.email, p.phone,
+              por.role, por.is_primary AS is_org_primary,
+              o.id AS source_org_id, o.name AS source_org_name, rel.priority
+       FROM related rel
+       JOIN person_organisation_roles por ON por.organisation_id = rel.org_id AND por.status = 'active'
+       JOIN organisations o ON o.id = rel.org_id AND o.is_deleted = false
+       JOIN people p ON p.id = por.person_id AND p.is_deleted = false
+       ORDER BY p.id, rel.priority, por.is_primary DESC`,
+      [req.params.id]
+    );
+    const candidates = result.rows
+      .map((r: Record<string, unknown>) => ({
+        person_id: r.person_id,
+        name: `${r.first_name || ''} ${r.last_name || ''}`.trim(),
+        email: r.email,
+        role: r.role,
+        is_org_primary: r.is_org_primary,
+        source_org_id: r.source_org_id,
+        source_org_name: r.source_org_name,
+        own_org: r.priority === 0,
+      }))
+      // Display order: own-org first, then org-primary, then name
+      .sort((a, b) => Number(b.own_org) - Number(a.own_org)
+        || Number(b.is_org_primary) - Number(a.is_org_primary)
+        || a.name.localeCompare(b.name));
+    res.json({ data: candidates });
+  } catch (error) {
+    console.error('Get org contact candidates error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // POST /api/organisations
 router.post('/', validate(createOrgSchema), async (req: AuthRequest, res: Response) => {
   try {

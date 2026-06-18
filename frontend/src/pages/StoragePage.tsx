@@ -29,7 +29,7 @@ interface Tenancy {
   organisation_name: string | null; lead_contact_name: string | null; lead_contact_person_id: string | null; status: string;
   move_in_date: string | null; move_out_date: string | null; weekly_rate: number; billing_mode: string;
   billing_cadence: string; next_bill_date: string | null; next_rate_review_date: string | null;
-  last_rate_change_date: string | null; previous_weekly_rate: number | null; tcs_accepted_at: string | null;
+  last_rate_change_date: string | null; previous_weekly_rate: number | null; tcs_accepted_at: string | null; tcs_pdf_key?: string | null;
   notes: string | null; access_type?: string | null; access_code?: string | null; key_location?: string | null;
   rate_history?: { id: string; effective_date: string; old_rate: number | null; new_rate: number; notes: string | null }[];
   access_list?: { id: string; person_name: string | null; name: string | null; phone: string | null; relationship: string | null }[];
@@ -104,16 +104,19 @@ function EntitySearch({ kind, value, label, onPick }: {
 }
 
 // ── Lead-contact picker scoped to the selected org (global search fallback) ──
-interface OrgPerson { person_id: string; person_name: string; role: string | null; status: string }
+// Uses the org-scoped cascade (active roles on the org + related orgs via
+// organisation_relationships) — same Org>Org & Org>person logic as the New
+// Enquiry contact picker. Ended/historical roles never surface.
+interface OrgContact { person_id: string; name: string; role: string | null; source_org_name: string | null; own_org: boolean }
 function ContactPicker({ orgId, value, onPick }: { orgId: string | null; value: string; onPick: (id: string | null, name: string) => void }) {
-  const [orgPeople, setOrgPeople] = useState<OrgPerson[]>([]);
+  const [candidates, setCandidates] = useState<OrgContact[]>([]);
   const [searchAll, setSearchAll] = useState(false);
   useEffect(() => {
     setSearchAll(false);
-    if (!orgId) { setOrgPeople([]); return; }
-    api.get<{ people?: OrgPerson[] }>(`/organisations/${orgId}`)
-      .then((o) => setOrgPeople((o.people || []).filter((p) => p.status !== 'ended')))
-      .catch(() => setOrgPeople([]));
+    if (!orgId) { setCandidates([]); return; }
+    api.get<{ data: OrgContact[] }>(`/organisations/${orgId}/contact-candidates`)
+      .then((r) => setCandidates(r.data || []))
+      .catch(() => setCandidates([]));
   }, [orgId]);
   return (
     <div>
@@ -123,12 +126,14 @@ function ContactPicker({ orgId, value, onPick }: { orgId: string | null; value: 
           <span className="text-sm flex-1">{value}</span>
           <button type="button" onClick={() => onPick(null, '')} className="text-xs text-red-500">clear</button>
         </div>
-      ) : orgId && orgPeople.length > 0 && !searchAll ? (
+      ) : orgId && candidates.length > 0 && !searchAll ? (
         <div className="space-y-1">
-          {orgPeople.map((p) => (
-            <button type="button" key={p.person_id} onClick={() => onPick(p.person_id, p.person_name)}
+          {candidates.map((p) => (
+            <button type="button" key={p.person_id} onClick={() => onPick(p.person_id, p.name)}
               className="block w-full text-left px-3 py-2 text-sm border border-slate-200 rounded-lg hover:bg-slate-50">
-              {p.person_name}{p.role ? <span className="text-slate-400"> · {p.role}</span> : ''}
+              {p.name}
+              {p.role ? <span className="text-slate-400"> · {p.role}</span> : ''}
+              {!p.own_org && p.source_org_name ? <span className="text-slate-400"> · via {p.source_org_name}</span> : ''}
             </button>
           ))}
           <button type="button" onClick={() => setSearchAll(true)} className="text-xs text-[#7B5EA7]">search all people instead</button>
@@ -136,7 +141,7 @@ function ContactPicker({ orgId, value, onPick }: { orgId: string | null; value: 
       ) : (
         <>
           <EntitySearch kind="people" label="" value="" onPick={onPick} />
-          {orgId && orgPeople.length > 0 && <button type="button" onClick={() => setSearchAll(false)} className="text-xs text-[#7B5EA7] mt-1">back to {`${orgPeople.length}`} org contact{orgPeople.length !== 1 ? 's' : ''}</button>}
+          {orgId && candidates.length > 0 && <button type="button" onClick={() => setSearchAll(false)} className="text-xs text-[#7B5EA7] mt-1">back to {`${candidates.length}`} org contact{candidates.length !== 1 ? 's' : ''}</button>}
         </>
       )}
     </div>
@@ -581,6 +586,18 @@ function TenancyDetailModal({ id, isAdminManager, onClose, onChange, onMovedOut 
             : '—'
           } />
         </div>
+
+        {t.tcs_pdf_key && (
+          <button
+            onClick={async () => {
+              try {
+                const { blob } = await api.blob(`/files/download?key=${encodeURIComponent(t.tcs_pdf_key as string)}`);
+                window.open(URL.createObjectURL(blob), '_blank');
+              } catch { setMsg('Could not open the signed T&Cs PDF.'); }
+            }}
+            className="text-xs text-[#7B5EA7] underline"
+          >📄 Download signed T&Cs</button>
+        )}
 
         {msg && <p className="text-red-600">{msg}</p>}
 
