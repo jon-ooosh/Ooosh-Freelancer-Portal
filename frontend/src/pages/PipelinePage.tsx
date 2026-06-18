@@ -886,6 +886,24 @@ function NewEnquiryModal({
   const [linkedOrgPickedName, setLinkedOrgPickedName] = useState('');
   const [linkedOrgRole, setLinkedOrgRole] = useState<string>('band');
 
+  // Org-graph contacts. When the picked client has org-to-org relationships
+  // (e.g. a band managed by an agency, repped by an agent), surface those
+  // related orgs and their EXISTING people so staff can tick an agent / TM
+  // onto this hire without re-creating them. Ticking does two writes the rest
+  // of the contact/email logic already reads: links the related org
+  // (job_organisations, via linkedOrgs on submit) AND ticks the person
+  // (job_contacts, via tickedExistingPersonIds). The graph link the user made
+  // on the Relationships tab is what powers this — no duplicate people.
+  const [orgSuggestions, setOrgSuggestions] = useState<Array<{
+    org_id: string; org_name: string; org_type: string;
+    relationship_type: string; suggested_role: string;
+  }>>([]);
+  const [relatedOrgPeople, setRelatedOrgPeople] = useState<Record<string, Array<{
+    id: string; person_id: string; person_name: string; person_email: string | null;
+    role: string; is_primary: boolean; status: string;
+  }>>>({});
+  const [expandedRelatedOrgs, setExpandedRelatedOrgs] = useState<Set<string>>(new Set());
+
   // Backwards-compat shims for client history (which keys off the band's
   // org_id). Derived from linkedOrgs — first band wins.
   const bandLink = linkedOrgs.find(l => l.role === 'band' && l.orgId);
@@ -1055,6 +1073,37 @@ function NewEnquiryModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clientId]);
 
+  // Org-graph cascade: when a client org is picked, pull its org-to-org
+  // relationships (management, agency, label, promoter...) and each related
+  // org's existing people, so they're reachable as tickable contacts on this
+  // hire. Collapsed by default to keep the picker tidy; the count in each
+  // group header tells staff there's something behind it.
+  useEffect(() => {
+    if (!clientId) { setOrgSuggestions([]); setRelatedOrgPeople({}); setExpandedRelatedOrgs(new Set()); return; }
+    let cancelled = false;
+    setExpandedRelatedOrgs(new Set());
+    (async () => {
+      try {
+        const res = await api.get<{ data: Array<{ org_id: string; org_name: string; org_type: string; relationship_type: string; suggested_role: string }> }>(`/organisations/${clientId}/suggestions`);
+        if (cancelled) return;
+        const suggestions = res.data || [];
+        setOrgSuggestions(suggestions);
+        const peopleByOrg: Record<string, Array<{ id: string; person_id: string; person_name: string; person_email: string | null; role: string; is_primary: boolean; status: string }>> = {};
+        await Promise.all(suggestions.map(async (s) => {
+          try {
+            const orgData = await api.get<{ people?: Array<{ id: string; person_id: string; person_name: string; person_email: string | null; role: string; is_primary: boolean; status: string }> | null }>(`/organisations/${s.org_id}`);
+            peopleByOrg[s.org_id] = (orgData.people || []).filter(p => p.status === 'active');
+          } catch { peopleByOrg[s.org_id] = []; }
+        }));
+        if (!cancelled) setRelatedOrgPeople(peopleByOrg);
+      } catch {
+        if (!cancelled) { setOrgSuggestions([]); setRelatedOrgPeople({}); }
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clientId]);
+
   // Pre-fill the client (and optionally a contact) when opened from a client's
   // detail page via ?client=<orgId>&contact=<personId>. Fires once per open.
   // Seeding personFirstClickedId before clientId lets the existing cascade
@@ -1178,6 +1227,51 @@ function NewEnquiryModal({
       const nextPending = pendingContacts.find(c => c.target === 'client' && c._tempId !== key);
       setLeadContactKey(nextExisting ?? nextPending?._tempId ?? null);
     }
+  };
+
+  // Map an org-graph suggestion's role onto a valid linked-org role. The
+  // graph may suggest a related org as 'client' (e.g. a band's manager), but
+  // we already have a client here — surface those as 'management'. Anything
+  // not in LINKED_ORG_ROLES falls back to 'other' so job_organisations.role
+  // stays valid.
+  const suggestedToLinkedRole = (suggestedRole: string): string => {
+    if (suggestedRole === 'client') return 'management';
+    return LINKED_ORG_ROLES.some(r => r.value === suggestedRole) ? suggestedRole : 'other';
+  };
+
+  // Ensure a related org from the graph is linked to this hire. On submit
+  // linkedOrgs become job_organisations rows, which is what makes the org's
+  // people candidates on Job Detail later + a recipient fallback. Idempotent.
+  const ensureRelatedOrgLinked = (s: { org_id: string; org_name: string; suggested_role: string }) => {
+    setLinkedOrgs(prev => {
+      if (prev.some(lo => lo.orgId === s.org_id)) return prev;
+      return [...prev, {
+        _tempId: `lo-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        orgId: s.org_id,
+        orgName: s.org_name,
+        role: suggestedToLinkedRole(s.suggested_role),
+        isNew: false,
+      }];
+    });
+  };
+
+  // "+ Add to hire" on the suggestion strip — link the related org and open
+  // its contact group so staff can tick the specific person.
+  const handleAddRelatedOrg = (s: { org_id: string; org_name: string; suggested_role: string }) => {
+    ensureRelatedOrgLinked(s);
+    setExpandedRelatedOrgs(prev => new Set(prev).add(s.org_id));
+  };
+
+  // Tick a contact who belongs to a related org: link the org (so it persists
+  // + becomes a candidate) AND tick the person (flows into job_contacts via
+  // tickedExistingPersonIds). Reuses the shared chip toggle so lead-promotion
+  // and the emailless guard behave exactly as for client contacts.
+  const handleRelatedContactClick = (
+    s: { org_id: string; org_name: string; suggested_role: string },
+    person: { person_id: string; person_email: string | null }
+  ) => {
+    ensureRelatedOrgLinked(s);
+    handleChipClick(person.person_id, !!(person.person_email && person.person_email.trim()));
   };
 
   const handleClientSelect = async (result: SearchResult) => {
@@ -2025,6 +2119,111 @@ function NewEnquiryModal({
               {(tickedExistingPersonIds.size > 0 || pendingContacts.filter(c => c.target === 'client').length > 0) && leadContactKey && (
                 <p className="text-xs text-gray-400 italic mt-1">★ marks the lead contact. Click another chip to promote it.</p>
               )}
+            </div>
+          )}
+
+          {/* Org-graph contacts — surface people at orgs CONNECTED to the
+              client via the Relationships tab (management, agency, label...).
+              Collapsed by default; expand to tick an agent / TM onto this
+              hire. Ticking links the related org + ticks the person, so the
+              email/contact logic picks them up with no re-creation. */}
+          {clientId && orgSuggestions.length > 0 && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Connected to {clientName || 'this client'} <span className="text-gray-400 font-normal">(from the org's relationships — expand to add a contact)</span>
+              </label>
+              <div className="space-y-1.5">
+                {orgSuggestions.map(s => {
+                  const people = relatedOrgPeople[s.org_id] || [];
+                  const expanded = expandedRelatedOrgs.has(s.org_id);
+                  const isLinked = linkedOrgs.some(lo => lo.orgId === s.org_id);
+                  const roleLabel = LINKED_ORG_ROLES.find(r => r.value === suggestedToLinkedRole(s.suggested_role))?.label || s.suggested_role;
+                  return (
+                    <div key={s.org_id} className="border border-gray-200 rounded-lg overflow-hidden">
+                      <div className="flex items-center justify-between px-3 py-2 bg-gray-50">
+                        <button
+                          type="button"
+                          onClick={() => setExpandedRelatedOrgs(prev => {
+                            const next = new Set(prev);
+                            next.has(s.org_id) ? next.delete(s.org_id) : next.add(s.org_id);
+                            return next;
+                          })}
+                          className="flex items-center gap-2 text-sm text-gray-700 hover:text-gray-900 min-w-0"
+                        >
+                          <span className="text-gray-400">{expanded ? '▾' : '▸'}</span>
+                          <span className="font-medium truncate">{s.org_name}</span>
+                          <span className="text-xs text-gray-400">· {roleLabel}</span>
+                          <span className="text-xs text-gray-400">({people.length})</span>
+                        </button>
+                        {isLinked ? (
+                          <span className="text-xs text-purple-600 whitespace-nowrap" title="Linked to this hire">✓ on this hire</span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => handleAddRelatedOrg(s)}
+                            className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium whitespace-nowrap"
+                            title="Link this organisation to the hire"
+                          >
+                            + Add to hire
+                          </button>
+                        )}
+                      </div>
+                      {expanded && (
+                        <div className="px-3 py-2">
+                          {people.length === 0 ? (
+                            <p className="text-xs text-gray-400 italic">No contacts on file at {s.org_name}.</p>
+                          ) : (
+                            <div className="flex flex-wrap gap-1.5">
+                              {people.map(p => {
+                                const ticked = tickedExistingPersonIds.has(p.person_id);
+                                const isLead = leadContactKey === p.person_id;
+                                const hasEmail = !!(p.person_email && p.person_email.trim());
+                                return (
+                                  <span
+                                    key={p.id}
+                                    className={`inline-flex items-center gap-1 px-2 py-1 border rounded text-xs cursor-pointer transition-colors ${
+                                      isLead
+                                        ? 'bg-blue-100 border-blue-400 text-blue-900'
+                                        : ticked
+                                          ? 'bg-blue-50 border-blue-200 text-blue-800'
+                                          : 'bg-gray-50 border-gray-200 text-gray-500 hover:bg-gray-100'
+                                    }`}
+                                    onClick={() => ticked ? handleChipClick(p.person_id, hasEmail) : handleRelatedContactClick(s, p)}
+                                    title={
+                                      isLead
+                                        ? 'Lead contact'
+                                        : ticked
+                                          ? (hasEmail ? 'Click again to make lead contact' : 'No email — can\'t be lead contact')
+                                          : (hasEmail ? 'Click to add to this hire' : 'Click to add as CC (no email — can\'t be lead)')
+                                    }
+                                  >
+                                    {isLead && <span title="Lead contact">★</span>}
+                                    <span className={isLead ? 'font-bold' : 'font-medium'}>{p.person_name}</span>
+                                    {p.role && <span className="opacity-60">({p.role})</span>}
+                                    {!hasEmail && (
+                                      <span className="opacity-50 italic text-[10px]" title="No email on file">⚠ no email</span>
+                                    )}
+                                    {ticked && (
+                                      <button
+                                        type="button"
+                                        onClick={(e) => { e.stopPropagation(); handleChipRemove(p.person_id); }}
+                                        className="ml-0.5 opacity-50 hover:opacity-100 leading-none"
+                                        title="Remove from this hire"
+                                      >
+                                        &times;
+                                      </button>
+                                    )}
+                                  </span>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
 
