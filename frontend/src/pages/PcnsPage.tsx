@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
+import PcnActionChooser from '../components/PcnActionChooser';
 
 // ── Types ───────────────────────────────────────────────────────────────
 export interface Pcn {
@@ -14,6 +15,7 @@ export interface Pcn {
   vehicle_reg: string | null;
   fleet_reg: string | null;
   driver_name: string | null;
+  driver_email: string | null;
   client_organisation_name: string | null;
   job_name: string | null;
   offence_at: string | null;
@@ -232,7 +234,10 @@ const EMPTY_FORM = {
 };
 
 function CreatePcnModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
+  const navigate = useNavigate();
   const fileRef = useRef<HTMLInputElement>(null);
+  // After save, the modal switches to the "what next?" action step.
+  const [created, setCreated] = useState<{ id: string; driver_email: string | null } | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [extracting, setExtracting] = useState(false);
   const [extractError, setExtractError] = useState<string | null>(null);
@@ -349,8 +354,10 @@ function CreatePcnModal({ onClose, onCreated }: { onClose: () => void; onCreated
         body.hh_job_number = picked.hh_job_number;
         body.client_organisation_id = picked.client_organisation_id;
       }
-      await api.post('/pcns', body);
-      onCreated();
+      const r = await api.post<{ data: { id: string } }>('/pcns', body);
+      // Keep the modal open and move to the action step rather than closing.
+      setCreated({ id: r.data.id, driver_email: picked?.driver_email ?? null });
+      setSaving(false);
     } catch {
       setError('Failed to save PCN.');
       setSaving(false);
@@ -358,6 +365,30 @@ function CreatePcnModal({ onClose, onCreated }: { onClose: () => void; onCreated
   };
 
   const input = 'border rounded-lg px-3 py-2 text-sm w-full';
+
+  // ── Post-save: "what next?" action step ─────────────────────────────────
+  if (created) {
+    return (
+      <div className="fixed inset-0 bg-black/40 flex items-start justify-center z-50 p-4 overflow-y-auto" onClick={onCreated}>
+        <div className="bg-white rounded-xl max-w-2xl w-full my-8 p-5" onClick={(e) => e.stopPropagation()}>
+          <h2 className="text-lg font-bold text-slate-800">PCN logged ✓</h2>
+          <p className="text-sm text-slate-500 mb-4">What do you want to do with it?</p>
+          <PcnActionChooser pcnId={created.id} driverEmail={created.driver_email} onActioned={() => { /* stays open to show the outcome */ }} />
+          <div className="flex justify-between items-center gap-2 mt-5">
+            <button
+              onClick={() => { onCreated(); navigate(`/vehicles/pcns/${created.id}`); }}
+              className="text-sm text-[#7B5EA7] hover:underline"
+            >
+              Open PCN →
+            </button>
+            <button onClick={onCreated} className="px-4 py-2 text-sm rounded-lg border hover:bg-slate-50">
+              Done / decide later
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="fixed inset-0 bg-black/40 flex items-start justify-center z-50 p-4 overflow-y-auto" onClick={onClose}>

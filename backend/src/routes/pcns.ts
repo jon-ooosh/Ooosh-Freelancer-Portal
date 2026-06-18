@@ -15,7 +15,7 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import multer from 'multer';
 import { query } from '../config/database';
-import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
+import { authenticate, authorize, AuthRequest, STAFF_ROLES, MANAGER_ROLES } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
 import { getSystemSettings } from './system-settings';
@@ -368,6 +368,56 @@ router.patch('/:id', validate(updateSchema), async (req: AuthRequest, res: Respo
   }
   await logAudit(req.user!.id, 'pcns', pcn.id, 'update', before, pcn);
   res.json({ data: pcn });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Action — the "what next" chooser. Drives status + action_path, fires the
+// branded client/driver email (optional), and adds the conditional £35+VAT
+// HireHop handling charge (transfer / recharge). See services/pcn-actions.ts.
+//
+// RBAC: money-moving / charge-adding actions (transfer_liability, pay_recharge)
+// are MANAGER_ROLES-tier — they push a charge to HireHop and recharge the
+// client. The lenient pay-direct path + ID requests + internal/query are
+// STAFF_ROLES (the router-level gate). Mirrors the excess RBAC precedent.
+// ─────────────────────────────────────────────────────────────────────────
+
+const actionSchema = z.object({
+  action: z.enum([
+    'transfer_liability', 'pay_direct', 'pay_recharge',
+    'request_driver_id', 'internal_ooosh', 'internal_freelancer', 'query',
+  ]),
+  send_email: z.boolean().optional().default(true),
+  add_charge: z.boolean().optional(),
+  email_override: z.string().email().optional().nullable(),
+});
+
+const MANAGER_TIER_ACTIONS = new Set(['transfer_liability', 'pay_recharge']);
+
+router.post('/:id/action', validate(actionSchema), async (req: AuthRequest, res: Response) => {
+  const b = req.body as z.infer<typeof actionSchema>;
+
+  // Per-action gate: charge-adding / money-moving actions need manager tier.
+  if (MANAGER_TIER_ACTIONS.has(b.action) && !MANAGER_ROLES.includes(req.user!.role as never)) {
+    res.status(403).json({ error: 'This action requires a manager — it adds a charge / recharges the client. Refer to a manager.' });
+    return;
+  }
+
+  const exists = await query(`SELECT id FROM pcns WHERE id = $1 AND is_deleted = false`, [req.params.id]);
+  if (exists.rows.length === 0) { res.status(404).json({ error: 'PCN not found' }); return; }
+
+  try {
+    const { applyPcnAction } = await import('../services/pcn-actions');
+    const result = await applyPcnAction(
+      String(req.params.id),
+      { action: b.action, send_email: b.send_email !== false, add_charge: b.add_charge, email_override: b.email_override },
+      req.user!.id
+    );
+    await logAudit(req.user!.id, 'pcns', String(req.params.id), 'update', null, { action: b.action, ...result });
+    res.json({ data: result });
+  } catch (err) {
+    console.error('[pcns] action error:', err);
+    res.status(500).json({ error: 'Action failed', details: (err as Error).message });
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────

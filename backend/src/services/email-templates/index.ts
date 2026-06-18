@@ -1545,6 +1545,130 @@ const templates: Record<string, EmailTemplate> = {
       </p>
     `,
   },
+
+  // ── PCN module (penalty charge notices) ──────────────────────────────────
+
+  pcn_transfer_liability: {
+    variant: 'client',
+    preheader: 'Action required — parking/traffic charge notice',
+    subject: 'Parking/Traffic Charge Notice — {{vehicleReg}} ({{jobRef}})',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Parking / Traffic Charge Notice</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Dear {{driverName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        We've received a charge notice for a vehicle that was hired to you at the time of the alleged offence{{jobRefSentence}}. Details below:
+      </p>
+      <table role="presentation" width="100%" style="margin:0 0 16px;border-collapse:collapse;font-size:14px;color:#1e293b;">
+        <tr><td style="padding:4px 0;color:#64748b;">Reference</td><td style="padding:4px 0;font-weight:600;">{{pcnReference}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Issuing authority</td><td style="padding:4px 0;">{{issuer}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Vehicle</td><td style="padding:4px 0;">{{vehicleReg}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Date / time</td><td style="padding:4px 0;">{{offenceDateTime}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Location</td><td style="padding:4px 0;">{{location}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Fine</td><td style="padding:4px 0;">{{fineLine}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Final deadline</td><td style="padding:4px 0;">{{finalDeadline}}</td></tr>
+      </table>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        As the driver at the time, liability for this notice rests with you. Please either pay the issuing authority directly using the reference above, or appeal directly with them if you believe it was issued in error. {{handlingSentence}}
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">A copy of the notice is attached.</p>
+      <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">Any queries, reply to this email or call {{oooshPhone}}.</p>
+    `,
+  },
+
+  pcn_pay_direct: {
+    variant: 'client',
+    preheader: 'Please pay this charge directly within 48 hours',
+    subject: 'Parking/Traffic Charge Notice — {{vehicleReg}} — please action ({{jobRef}})',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Parking / Traffic Charge Notice</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Dear {{driverName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        We've received a charge notice for a vehicle hired to you at the time of the alleged offence{{jobRefSentence}}:
+      </p>
+      <table role="presentation" width="100%" style="margin:0 0 16px;border-collapse:collapse;font-size:14px;color:#1e293b;">
+        <tr><td style="padding:4px 0;color:#64748b;">Reference</td><td style="padding:4px 0;font-weight:600;">{{pcnReference}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Issuing authority</td><td style="padding:4px 0;">{{issuer}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Vehicle</td><td style="padding:4px 0;">{{vehicleReg}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Date / time</td><td style="padding:4px 0;">{{offenceDateTime}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Location</td><td style="padding:4px 0;">{{location}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Fine</td><td style="padding:4px 0;">{{fineLine}}</td></tr>
+      </table>
+      <p style="margin:0 0 16px;padding:12px 14px;background-color:#fef3c7;border-radius:8px;font-size:15px;color:#92400e;line-height:1.6;">
+        <strong>If you wish to pay the fine directly</strong>, please do so within <strong>48 hours</strong> and forward us a receipt as proof for our records. <strong>If you wish to appeal</strong>, or we don't receive proof of payment, we'll transfer liability into your name with an administration fee of <strong>{{handlingFee}}+VAT</strong>.
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">Please send your receipt to <a href="mailto:{{oooshEmail}}" style="color:#7B5EA7;text-decoration:none;">{{oooshEmail}}</a>. A copy of the notice is attached.</p>
+      <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">Any queries, reply to this email or call {{oooshPhone}}.</p>
+    `,
+  },
+
+  pcn_request_driver_id: {
+    variant: 'client',
+    preheader: 'Driver identification required',
+    subject: 'Driver Identification Required — {{vehicleReg}} — {{offenceDate}} ({{jobRef}})',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Driver Identification Required</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Dear {{clientName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        We've received a charge notice for vehicle <strong>{{vehicleReg}}</strong>, which was on hire to you at the time{{jobRefSentence}}.
+      </p>
+      <table role="presentation" width="100%" style="margin:0 0 16px;border-collapse:collapse;font-size:14px;color:#1e293b;">
+        <tr><td style="padding:4px 0;color:#64748b;">Date / time</td><td style="padding:4px 0;">{{offenceDateTime}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Location</td><td style="padding:4px 0;">{{location}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Reference</td><td style="padding:4px 0;">{{pcnReference}}</td></tr>
+      </table>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Our records show more than one driver was authorised on this hire{{driverListSentence}}. To transfer liability to the issuing authority, we need to confirm who was driving at the above time. Please reply with the full name and contact details of the driver.
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        If we don't hear from you within 7 days, we may be unable to transfer liability and the charge (plus an administration fee) will be applied to your account.
+      </p>
+      <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">Any queries, reply to this email or call {{oooshPhone}}.</p>
+    `,
+  },
+
+  pcn_police_nip_urgent: {
+    variant: 'client',
+    preheader: 'URGENT — police notice, driver details required',
+    subject: 'URGENT: Police Notice — Driver Identification Required — {{vehicleReg}} ({{jobRef}})',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#b91c1c;">URGENT — Notice of Intended Prosecution</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Dear {{clientName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        We've received a Notice of Intended Prosecution (NIP) from the police for vehicle <strong>{{vehicleReg}}</strong>, which was on hire to you at the time of the alleged offence{{jobRefSentence}}.
+      </p>
+      <table role="presentation" width="100%" style="margin:0 0 16px;border-collapse:collapse;font-size:14px;color:#1e293b;">
+        <tr><td style="padding:4px 0;color:#64748b;">Date / time</td><td style="padding:4px 0;">{{offenceDateTime}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Location</td><td style="padding:4px 0;">{{location}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Reference</td><td style="padding:4px 0;">{{pcnReference}}</td></tr>
+      </table>
+      <p style="margin:0 0 16px;padding:12px 14px;background-color:#fee2e2;border-radius:8px;font-size:15px;color:#991b1b;line-height:1.6;">
+        We're legally required to provide driver details to the police within <strong>28 days</strong> of the offence. Failure to do so is a criminal offence. Please reply <strong>URGENTLY</strong> with the full name, address and date of birth of the person driving at the above time.
+      </p>
+      <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">If you have any questions, call us immediately on {{oooshPhone}}.</p>
+    `,
+  },
+
+  pcn_pay_recharge: {
+    variant: 'client',
+    preheader: 'Charge notice paid on your behalf',
+    subject: 'Charge Notice — {{vehicleReg}} — Paid on Your Behalf ({{jobRef}})',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Charge Notice — Paid on Your Behalf</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Dear {{clientName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        We've received a charge notice for vehicle <strong>{{vehicleReg}}</strong>, on hire to you at the time{{jobRefSentence}}. To avoid the charge escalating, we've paid it on your behalf and will recharge it to your account.
+      </p>
+      <table role="presentation" width="100%" style="margin:0 0 16px;border-collapse:collapse;font-size:14px;color:#1e293b;">
+        <tr><td style="padding:4px 0;color:#64748b;">Reference</td><td style="padding:4px 0;font-weight:600;">{{pcnReference}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Issuing authority</td><td style="padding:4px 0;">{{issuer}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Date / time</td><td style="padding:4px 0;">{{offenceDateTime}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Fine paid</td><td style="padding:4px 0;">{{fineLine}}</td></tr>
+      </table>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">{{handlingSentence}} A copy of the notice is attached.</p>
+      <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">Any queries, reply to this email or call {{oooshPhone}}.</p>
+    `,
+  },
+
 };
 
 export default templates;
