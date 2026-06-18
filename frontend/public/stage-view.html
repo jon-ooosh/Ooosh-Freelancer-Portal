@@ -1,0 +1,1087 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Stage Configuration — Ooosh Tours</title>
+
+  <!-- Favicon -->
+  <link rel="icon" href="/favicon.ico" type="image/x-icon">
+  <link rel="icon" href="/favicon-192.png" type="image/png" sizes="192x192">
+
+  <!-- Open Graph meta tags — makes shared links look nice in emails, WhatsApp, Slack etc -->
+  <meta property="og:title" content="Stage Configuration — Ooosh Tours">
+  <meta property="og:description" content="Interactive 3D stage layout preview. Rotate, zoom, and explore the proposed staging configuration.">
+  <meta property="og:type" content="website">
+  <meta property="og:image" content="https://staff.oooshtours.co.uk/android-chrome-192x192.png">
+  <meta property="og:image:width" content="192">
+  <meta property="og:image:height" content="192">
+  <meta property="og:site_name" content="Ooosh Tours">
+
+  <!-- Twitter card (used by many apps as fallback) -->
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="Stage Configuration — Ooosh Tours">
+  <meta name="twitter:description" content="Interactive 3D stage layout preview from Ooosh Tours.">
+  <meta name="twitter:image" content="https://staff.oooshtours.co.uk/android-chrome-192x192.png">
+
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap');
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'DM Sans', sans-serif;
+      background: #0c0f14;
+      color: #e8eaed;
+      overflow: hidden;
+      height: 100vh;
+    }
+
+    /* ── Top bar ── */
+    .top-bar {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      z-index: 100;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 24px;
+      background: linear-gradient(180deg, rgba(12,15,20,0.95) 0%, rgba(12,15,20,0) 100%);
+      pointer-events: none;
+    }
+    .top-bar > * { pointer-events: auto; }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .brand-logo {
+      width: 36px;
+      height: 36px;
+      border-radius: 8px;
+      object-fit: contain;
+    }
+    .brand-text {
+      font-weight: 700;
+      font-size: 16px;
+      letter-spacing: -0.02em;
+      color: #f1f5f9;
+    }
+    .brand-sub {
+      font-size: 11px;
+      color: #64748b;
+      font-family: 'Space Mono', monospace;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+    }
+
+    /* ── Dimensions panel ── */
+    .dims-panel {
+      position: fixed;
+      bottom: 24px;
+      left: 24px;
+      z-index: 100;
+      background: rgba(15, 18, 25, 0.9);
+      backdrop-filter: blur(16px);
+      border: 1px solid rgba(255,255,255,0.06);
+      border-radius: 14px;
+      padding: 20px 24px;
+      min-width: 220px;
+    }
+    .dims-title {
+      font-family: 'Space Mono', monospace;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.15em;
+      color: #64748b;
+      margin-bottom: 14px;
+    }
+    .dim-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      padding: 6px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.04);
+    }
+    .dim-row:last-child { border-bottom: none; }
+    .dim-name {
+      font-size: 13px;
+      color: #94a3b8;
+      font-weight: 500;
+    }
+    .dim-val {
+      font-family: 'Space Mono', monospace;
+      font-size: 15px;
+      font-weight: 700;
+      color: #f1f5f9;
+    }
+    .dim-secondary-val {
+      font-family: 'Space Mono', monospace;
+      font-size: 11px;
+      color: #475569;
+      margin-left: 6px;
+    }
+
+    /* ── Controls hint ── */
+    .controls-hint {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      z-index: 100;
+      font-size: 12px;
+      color: #475569;
+      text-align: right;
+      line-height: 1.8;
+    }
+    .controls-hint kbd {
+      display: inline-block;
+      padding: 2px 6px;
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 4px;
+      font-family: 'Space Mono', monospace;
+      font-size: 10px;
+      color: #94a3b8;
+    }
+
+    /* ── Canvas ── */
+    #stage-canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+    }
+
+    /* ── Loading state ── */
+    .loading-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 200;
+      background: #0c0f14;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      transition: opacity 0.5s;
+    }
+    .loading-overlay.fade-out {
+      opacity: 0;
+      pointer-events: none;
+    }
+    .loading-spinner {
+      width: 32px; height: 32px;
+      border: 3px solid rgba(99,102,241,0.2);
+      border-top-color: #6366f1;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .loading-text {
+      font-family: 'Space Mono', monospace;
+      font-size: 12px;
+      color: #64748b;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+
+    /* ── Error state ── */
+    .error-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 200;
+      background: #0c0f14;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      padding: 40px;
+      text-align: center;
+    }
+    .error-overlay h2 {
+      font-size: 20px;
+      color: #f87171;
+    }
+    .error-overlay p {
+      color: #64748b;
+      font-size: 14px;
+      max-width: 400px;
+    }
+
+    /* ── Responsive ── */
+    @media (max-width: 640px) {
+      .dims-panel { bottom: 12px; left: 12px; right: 12px; min-width: unset; }
+      .controls-hint { display: none; }
+      .top-bar { padding: 12px 16px; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Loading overlay -->
+  <div class="loading-overlay" id="loading">
+    <div class="loading-spinner"></div>
+    <div class="loading-text">Building stage…</div>
+  </div>
+
+  <!-- Top bar -->
+  <div class="top-bar">
+    <div class="brand">
+      <img src="/favicon-192.png" alt="Ooosh Tours" class="brand-logo">
+      <div>
+        <div class="brand-text">Ooosh Tours</div>
+        <div class="brand-sub">Stage Configuration</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Dimensions panel (populated by JS) -->
+  <div class="dims-panel" id="dims-panel" style="display:none">
+    <div class="dims-title">Dimensions</div>
+    <div id="dims-content"></div>
+  </div>
+
+  <!-- Controls hint -->
+  <div class="controls-hint">
+    <kbd>Drag</kbd> rotate<br>
+    <kbd>Scroll</kbd> zoom<br>
+    <kbd>Shift+Drag</kbd> pan
+  </div>
+
+  <!-- Three.js canvas -->
+  <canvas id="stage-canvas"></canvas>
+
+  <!-- Pako for URL decompression (tiny — ~13KB gzipped) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script>
+    // ========================================================================
+    // PARSE CONFIG FROM URL
+    // ========================================================================
+
+    function parseConfig() {
+      const params = new URLSearchParams(window.location.search);
+
+      // Try new compressed format first (?c=)
+      const compressed = params.get('c');
+      if (compressed) {
+        try {
+          const base64 = compressed.replace(/-/g, '+').replace(/_/g, '/');
+          const binary = atob(base64);
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i++) {
+            bytes[i] = binary.charCodeAt(i);
+          }
+          const json = pako.inflate(bytes, { to: 'string' });
+          return JSON.parse(json);
+        } catch (e) {
+          console.error('Failed to decompress config:', e);
+        }
+      }
+
+      // Legacy format (?config={JSON})
+      const raw = params.get('config');
+      if (raw) {
+        try {
+          return JSON.parse(decodeURIComponent(raw));
+        } catch (e) {
+          console.error('Failed to parse config:', e);
+          return null;
+        }
+      }
+
+      return null;
+    }
+
+    // ========================================================================
+    // UNIT HELPERS
+    // ========================================================================
+
+    function inchesToMetricStr(inches) {
+      const cm = inches * 2.54;
+      if (cm >= 100) return (cm / 100).toFixed(2) + 'm';
+      return Math.round(cm) + 'cm';
+    }
+
+    function inchesToFeetStr(inches) {
+      let ft = Math.floor(inches / 12);
+      let rem = Math.round(inches % 12);
+      if (rem >= 12) { ft++; rem = 0; }
+      if (rem === 0) return ft + "'";
+      if (ft === 0) return rem + '"';
+      return ft + "' " + rem + '"';
+    }
+
+    function formatDim(inches, unit) {
+      const primary = unit === 'm' ? inchesToMetricStr(inches) : inchesToFeetStr(inches);
+      const secondary = unit === 'm' ? inchesToFeetStr(inches) : inchesToMetricStr(inches);
+      return { primary, secondary };
+    }
+
+    // ========================================================================
+    // MAIN 3D SCENE
+    // ========================================================================
+
+    // Resolve the stage config. Short links (?p=<slug>) are resolved from OP's
+    // public endpoint (config stored server-side — no huge URL). Legacy inline
+    // links (?c= / ?config=) still decode locally for backward compatibility.
+    (async function initStageView() {
+      let config = null;
+      const slug = new URLSearchParams(window.location.search).get('p');
+      if (slug) {
+        try {
+          const resp = await fetch(`/api/staging/plan/${encodeURIComponent(slug)}`);
+          const data = await resp.json();
+          if (data && data.success) config = data.config;
+        } catch (e) {
+          console.error('Failed to load stage preview:', e);
+        }
+      } else {
+        config = parseConfig();
+      }
+
+      if (!config) {
+        document.getElementById('loading').innerHTML = `
+          <div class="error-overlay">
+            <h2>No stage data</h2>
+            <p>This page needs to be opened from the Staging Calculator with a valid configuration.</p>
+          </div>
+        `;
+      } else {
+        buildScene(config);
+      }
+    })();
+
+    function buildScene(cfg) {
+      const canvas = document.getElementById('stage-canvas');
+
+      // ── Apply rotation if requested ──
+      // When cfg.rot=true, the stage length and width axes are swapped to match
+      // the rotated 2D layout. We transpose deck coords and swap dimensions.
+      // IMPORTANT: cfg.acc is NOT remapped here. accessorySelections were already
+      // remapped by rotateStageLayout() before being serialised into the URL, so
+      // the acc data arrives already in the correct rotated coordinate frame.
+      if (cfg.rot) {
+        [cfg.l, cfg.w] = [cfg.w, cfg.l];
+        cfg.d = cfg.d.map(([x, y, dl, dw]) => [y, x, dw, dl]);
+        cfg.j = cfg.j.map(([x, y, t]) => [y, x, t]);
+        // cfg.acc left as-is — already correctly rotated
+      }
+
+      // ── Renderer ──
+      const renderer = new THREE.WebGLRenderer({
+        canvas,
+        antialias: true,
+        alpha: false,
+      });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1.1;
+      renderer.outputEncoding = THREE.sRGBEncoding;
+
+      // ── Scene ──
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x0c0f14);
+      scene.fog = new THREE.FogExp2(0x0c0f14, 0.008);
+
+      // ── Scale: 1 unit = 1 inch → convert to Three.js units (1 foot = 1 unit) ──
+      const SCALE = 1 / 12;
+      const stageLength = cfg.l * SCALE;
+      const stageWidth = cfg.w * SCALE;
+      const stageHeight = cfg.h * SCALE;
+
+      // ── Camera ──
+      const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 500);
+      const maxDim = Math.max(stageLength, stageWidth);
+      const camDist = maxDim * 2.2;
+      camera.position.set(camDist * 0.7, stageHeight + camDist * 0.5, camDist * 0.8);
+      camera.lookAt(stageLength / 2, stageHeight / 2, stageWidth / 2);
+
+      // ── Lights ──
+      const ambientLight = new THREE.AmbientLight(0x8899bb, 0.4);
+      scene.add(ambientLight);
+
+      const mainLight = new THREE.DirectionalLight(0xffeedd, 1.2);
+      mainLight.position.set(maxDim * 1.5, maxDim * 2, maxDim * 1.2);
+      mainLight.castShadow = true;
+      mainLight.shadow.mapSize.width = 2048;
+      mainLight.shadow.mapSize.height = 2048;
+      mainLight.shadow.camera.near = 0.5;
+      mainLight.shadow.camera.far = maxDim * 6;
+      const shadowSize = maxDim * 2;
+      mainLight.shadow.camera.left = -shadowSize;
+      mainLight.shadow.camera.right = shadowSize;
+      mainLight.shadow.camera.top = shadowSize;
+      mainLight.shadow.camera.bottom = -shadowSize;
+      mainLight.shadow.bias = -0.0005;
+      scene.add(mainLight);
+
+      const fillLight = new THREE.DirectionalLight(0x4488cc, 0.3);
+      fillLight.position.set(-maxDim, maxDim * 0.5, -maxDim * 0.5);
+      scene.add(fillLight);
+
+      const rimLight = new THREE.DirectionalLight(0xffffff, 0.15);
+      rimLight.position.set(0, maxDim * 0.3, -maxDim * 1.5);
+      scene.add(rimLight);
+
+      // ── Ground plane ──
+      const groundGeo = new THREE.PlaneGeometry(maxDim * 8, maxDim * 8);
+      const groundMat = new THREE.MeshStandardMaterial({
+        color: 0x151820,
+        roughness: 0.95,
+        metalness: 0.05,
+      });
+      const ground = new THREE.Mesh(groundGeo, groundMat);
+      ground.rotation.x = -Math.PI / 2;
+      ground.position.y = -0.01;
+      ground.receiveShadow = true;
+      scene.add(ground);
+
+      // Subtle grid
+      const gridHelper = new THREE.GridHelper(maxDim * 6, maxDim * 6, 0x1a1f2a, 0x1a1f2a);
+      gridHelper.position.y = 0;
+      scene.add(gridHelper);
+
+      // ── Materials ──
+      const deckTopMat = new THREE.MeshStandardMaterial({
+        color: 0x1a1a1a, roughness: 0.9, metalness: 0.0,
+      });
+      const deckSideMat = new THREE.MeshStandardMaterial({
+        color: 0x999999, roughness: 0.35, metalness: 0.7,
+      });
+      const deckFrameMat = new THREE.MeshStandardMaterial({
+        color: 0x666666, roughness: 0.4, metalness: 0.65,
+      });
+      const trussMat = new THREE.MeshStandardMaterial({
+        color: 0xaaaaaa, roughness: 0.3, metalness: 0.75,
+      });
+      const legMat = new THREE.MeshStandardMaterial({
+        color: 0x888888, roughness: 0.3, metalness: 0.8,
+      });
+      const combinerMat = new THREE.MeshStandardMaterial({
+        color: 0x555555, roughness: 0.4, metalness: 0.7,
+      });
+      // Handrail material — bright aluminium
+      const handrailMat = new THREE.MeshStandardMaterial({
+        color: 0xbbbbbb, roughness: 0.25, metalness: 0.8,
+      });
+      // Step material — dark with yellow safety nosing
+      const stepMat = new THREE.MeshStandardMaterial({
+        color: 0x333333, roughness: 0.7, metalness: 0.3,
+      });
+      const stepEdgeMat = new THREE.MeshStandardMaterial({
+        color: 0xf5c518, roughness: 0.5, metalness: 0.2,
+      });
+
+      // ── Build Litedeck panels ──
+      const DECK_THICKNESS = 0.5 * SCALE;
+      const GAP = 0.3 * SCALE;
+      const TRUSS_H = 2.5 * SCALE;
+      const TRUSS_W = 0.4 * SCALE;
+      const TRUSS_DIAG = 0.3 * SCALE;
+
+      function addRail(px, py, pz, sx, sy, sz, mat) {
+        const geo = new THREE.BoxGeometry(sx, sy, sz);
+        const mesh = new THREE.Mesh(geo, mat || deckSideMat);
+        mesh.position.set(px, py, pz);
+        mesh.castShadow = true;
+        scene.add(mesh);
+      }
+
+      function addDiagonal(x1, y1, z1, x2, y2, z2) {
+        const ddx = x2 - x1, ddy = y2 - y1, ddz = z2 - z1;
+        const length = Math.sqrt(ddx*ddx + ddy*ddy + ddz*ddz);
+        const geo = new THREE.BoxGeometry(TRUSS_DIAG, length, TRUSS_DIAG);
+        const mesh = new THREE.Mesh(geo, trussMat);
+        mesh.position.set((x1+x2)/2, (y1+y2)/2, (z1+z2)/2);
+        const dir = new THREE.Vector3(ddx, ddy, ddz).normalize();
+        const up = new THREE.Vector3(0, 1, 0);
+        const quat = new THREE.Quaternion().setFromUnitVectors(up, dir);
+        mesh.quaternion.copy(quat);
+        mesh.castShadow = true;
+        scene.add(mesh);
+      }
+
+      for (const [dx, dy, dl, dw] of cfg.d) {
+        const x = dx * SCALE;
+        const z = dy * SCALE;
+        const deckL = dl * SCALE - GAP;
+        const deckW = dw * SCALE - GAP;
+        const cx = x + (deckL + GAP) / 2;
+        const cz = z + (deckW + GAP) / 2;
+
+        // ── Dark carpet top surface ──
+        const topGeo = new THREE.BoxGeometry(deckL, DECK_THICKNESS, deckW);
+        const materials = [
+          deckSideMat, deckSideMat, deckTopMat, deckFrameMat, deckSideMat, deckSideMat,
+        ];
+        const deckMesh = new THREE.Mesh(topGeo, materials);
+        deckMesh.position.set(cx, stageHeight - DECK_THICKNESS / 2, cz);
+        deckMesh.castShadow = true;
+        deckMesh.receiveShadow = true;
+        scene.add(deckMesh);
+
+        // ── Litedeck truss edge frame ──
+        const trussTop = stageHeight - DECK_THICKNESS;
+        const trussBot = trussTop - TRUSS_H;
+
+        const halfL = deckL / 2;
+        const halfW = deckW / 2;
+
+        const edges = [
+          { pos: [cx, 0, cz + halfW], len: deckL, isX: true },
+          { pos: [cx, 0, cz - halfW], len: deckL, isX: true },
+          { pos: [cx + halfL, 0, cz], len: deckW, isX: false },
+          { pos: [cx - halfL, 0, cz], len: deckW, isX: false },
+        ];
+
+        for (const edge of edges) {
+          const [ex, , ez] = edge.pos;
+          const trussRailMid = trussBot + TRUSS_H / 2;
+
+          if (edge.isX) {
+            addRail(ex, trussTop - TRUSS_W/2, ez, edge.len, TRUSS_W, TRUSS_W);
+            addRail(ex, trussBot + TRUSS_W/2, ez, edge.len, TRUSS_W, TRUSS_W);
+          } else {
+            addRail(ex, trussTop - TRUSS_W/2, ez, TRUSS_W, TRUSS_W, edge.len);
+            addRail(ex, trussBot + TRUSS_W/2, ez, TRUSS_W, TRUSS_W, edge.len);
+          }
+
+          const segments = Math.max(2, Math.round(edge.len / (4 * SCALE)));
+          const segLen = edge.len / segments;
+
+          for (let i = 0; i < segments; i++) {
+            const t0 = -edge.len/2 + i * segLen;
+            const tMid = t0 + segLen / 2;
+            const t1 = t0 + segLen;
+
+            if (edge.isX) {
+              addDiagonal(ex + t0, trussTop - TRUSS_W, ez, ex + tMid, trussBot + TRUSS_W, ez);
+              addDiagonal(ex + tMid, trussBot + TRUSS_W, ez, ex + t1, trussTop - TRUSS_W, ez);
+            } else {
+              addDiagonal(ex, trussTop - TRUSS_W, ez + t0, ex, trussBot + TRUSS_W, ez + tMid);
+              addDiagonal(ex, trussBot + TRUSS_W, ez + tMid, ex, trussTop - TRUSS_W, ez + t1);
+            }
+          }
+
+          if (edge.isX) {
+            addRail(ex - halfL, trussRailMid, ez, TRUSS_W, TRUSS_H, TRUSS_W);
+            addRail(ex + halfL, trussRailMid, ez, TRUSS_W, TRUSS_H, TRUSS_W);
+          } else {
+            addRail(ex, trussRailMid, ez - edge.len/2, TRUSS_W, TRUSS_H, TRUSS_W);
+            addRail(ex, trussRailMid, ez + edge.len/2, TRUSS_W, TRUSS_H, TRUSS_W);
+          }
+        }
+
+        // ── Cross-members under deck ──
+        const FRAME_H = 1.5 * SCALE;
+        const FRAME_W = 0.8 * SCALE;
+        const frameY = stageHeight - DECK_THICKNESS - FRAME_H / 2;
+
+        for (const offset of [0.25, 0.75]) {
+          const barGeo = new THREE.BoxGeometry(deckL * 0.98, FRAME_H, FRAME_W);
+          const barMesh = new THREE.Mesh(barGeo, deckFrameMat);
+          barMesh.position.set(cx, frameY, z + (deckW + GAP) * offset);
+          barMesh.castShadow = true;
+          scene.add(barMesh);
+        }
+      }
+
+      // ── Build legs ──
+      const LEG_RADIUS = 0.6 * SCALE;
+      const COMBINER_HEIGHT = 6 * SCALE;
+      const usesCombiners = cfg.cm !== 'none';
+
+      for (const [jx, jy, jtype] of cfg.j) {
+        let x = jx * SCALE;
+        let z = jy * SCALE;
+        const baseY = 0;
+        const topY = stageHeight - DECK_THICKNESS;
+
+        // ── Nudge perimeter legs inward so they tuck under the deck ──
+        const inset = LEG_RADIUS * 1.2;
+        if (jx === 0) x += inset;
+        else if (jx === cfg.l) x -= inset;
+        if (jy === 0) z += inset;
+        else if (jy === cfg.w) z -= inset;
+
+        if (usesCombiners && jtype !== 'solo') {
+          // Combiner plate
+          const plateHeight = COMBINER_HEIGHT;
+          const plateGeo = new THREE.BoxGeometry(
+            jtype === 'interior' ? 3.5 * SCALE : 2.5 * SCALE,
+            plateHeight,
+            jtype === 'interior' ? 3.5 * SCALE : 2.5 * SCALE
+          );
+          const plateMesh = new THREE.Mesh(plateGeo, combinerMat);
+          plateMesh.position.set(x, topY - plateHeight / 2, z);
+          plateMesh.castShadow = true;
+          scene.add(plateMesh);
+
+          // Single leg below combiner
+          const legH = topY - plateHeight - baseY;
+          if (legH > 0) {
+            const legGeo = new THREE.CylinderGeometry(LEG_RADIUS, LEG_RADIUS, legH, 12);
+            const legMesh = new THREE.Mesh(legGeo, legMat);
+            legMesh.position.set(x, baseY + legH / 2, z);
+            legMesh.castShadow = true;
+            scene.add(legMesh);
+
+            const basePlateGeo = new THREE.CylinderGeometry(LEG_RADIUS * 2, LEG_RADIUS * 2, 0.3 * SCALE, 12);
+            const basePlateMesh = new THREE.Mesh(basePlateGeo, combinerMat);
+            basePlateMesh.position.set(x, 0.15 * SCALE, z);
+            basePlateMesh.castShadow = true;
+            scene.add(basePlateMesh);
+          }
+        } else {
+          // Solo corner — individual leg
+          const legH = topY - baseY;
+          if (legH > 0) {
+            const legGeo = new THREE.CylinderGeometry(LEG_RADIUS, LEG_RADIUS, legH, 12);
+            const legMesh = new THREE.Mesh(legGeo, legMat);
+            legMesh.position.set(x, baseY + legH / 2, z);
+            legMesh.castShadow = true;
+            scene.add(legMesh);
+
+            const basePlateGeo = new THREE.CylinderGeometry(LEG_RADIUS * 2, LEG_RADIUS * 2, 0.3 * SCALE, 12);
+            const basePlateMesh = new THREE.Mesh(basePlateGeo, combinerMat);
+            basePlateMesh.position.set(x, 0.15 * SCALE, z);
+            basePlateMesh.castShadow = true;
+            scene.add(basePlateMesh);
+          }
+        }
+      }
+
+      // ── Build handrails and steps from accessories config ──
+      const acc = cfg.acc || {};
+      const HANDRAIL_HEIGHT = 42 * SCALE;   // 3.5ft (42") tall handrail
+      const HANDRAIL_POST_R = 1.5 * SCALE;  // 1.5" radius posts
+      const HANDRAIL_BAR_R = 0.75 * SCALE;  // 0.75" radius rails
+      const POST_SPACING = 48 * SCALE;      // Post every ~4ft (48")
+
+      // Edge definitions: which direction each edge runs and where it sits
+      // In 3D: X = length direction, Z = width direction
+      const edgeDefs = {
+        front: { start: [0, stageWidth], end: [stageLength, stageWidth], axis: 'x', fixed: stageWidth },
+        back:  { start: [0, 0], end: [stageLength, 0], axis: 'x', fixed: 0 },
+        left:  { start: [0, 0], end: [0, stageWidth], axis: 'z', fixed: 0 },
+        right: { start: [stageLength, 0], end: [stageLength, stageWidth], axis: 'z', fixed: stageLength },
+      };
+
+      for (const [edgeName, sel] of Object.entries(acc)) {
+        if (!sel || (!sel.handrail && !sel.steps)) continue;
+        const def = edgeDefs[edgeName];
+        if (!def) continue;
+
+        const edgeLen = def.axis === 'x' ? stageLength : stageWidth;
+
+        // ── Calculate step gap position (if both handrail + steps on this edge) ──
+        const STEP_WIDTH_3D = 36 * SCALE;  // ~3ft (36") visual step width
+        const GAP_WIDTH = 48 * SCALE;      // 4ft (48") gap in handrail for steps
+        const hasGap = sel.handrail && sel.steps;
+        let gapStart = 0, gapEnd = 0, gapCenter = edgeLen / 2;
+
+        if (hasGap) {
+          const stepPos = sel.stepPosition || 'middle';
+          if (stepPos === 'front') {
+            gapCenter = GAP_WIDTH / 2 + 6 * SCALE;
+          } else if (stepPos === 'back') {
+            gapCenter = edgeLen - GAP_WIDTH / 2 - 6 * SCALE;
+          } else {
+            gapCenter = edgeLen / 2;
+          }
+          gapStart = gapCenter - GAP_WIDTH / 2;
+          gapEnd = gapCenter + GAP_WIDTH / 2;
+        }
+
+        // ── Handrails ──
+        if (sel.handrail) {
+          const segments = [];
+          if (hasGap && gapStart > 6 * SCALE && gapEnd < edgeLen - 6 * SCALE) {
+            if (gapStart > 12 * SCALE) segments.push({ from: 0, to: gapStart });
+            if (edgeLen - gapEnd > 12 * SCALE) segments.push({ from: gapEnd, to: edgeLen });
+          } else if (hasGap && gapStart <= 6 * SCALE) {
+            if (edgeLen - gapEnd > 12 * SCALE) segments.push({ from: gapEnd, to: edgeLen });
+          } else if (hasGap && gapEnd >= edgeLen - 6 * SCALE) {
+            if (gapStart > 12 * SCALE) segments.push({ from: 0, to: gapStart });
+          } else {
+            segments.push({ from: 0, to: edgeLen });
+          }
+
+          for (const seg of segments) {
+            const segLen = seg.to - seg.from;
+            const segMid = (seg.from + seg.to) / 2;
+            const numPosts = Math.max(2, Math.floor(segLen / POST_SPACING) + 1);
+            const postStep = segLen / (numPosts - 1);
+
+            for (let i = 0; i < numPosts; i++) {
+              const t = seg.from + i * postStep;
+              let px, pz;
+              if (def.axis === 'x') {
+                px = t;
+                pz = def.fixed;
+              } else {
+                px = def.fixed;
+                pz = t;
+              }
+
+              const postGeo = new THREE.CylinderGeometry(HANDRAIL_POST_R, HANDRAIL_POST_R, HANDRAIL_HEIGHT, 8);
+              const postMesh = new THREE.Mesh(postGeo, handrailMat);
+              postMesh.position.set(px, stageHeight + HANDRAIL_HEIGHT / 2, pz);
+              postMesh.castShadow = true;
+              scene.add(postMesh);
+            }
+
+            // Top rail bar
+            if (def.axis === 'x') {
+              const barGeo = new THREE.CylinderGeometry(HANDRAIL_BAR_R, HANDRAIL_BAR_R, segLen, 8);
+              const barMesh = new THREE.Mesh(barGeo, handrailMat);
+              barMesh.rotation.z = Math.PI / 2;
+              barMesh.position.set(segMid, stageHeight + HANDRAIL_HEIGHT, def.fixed);
+              barMesh.castShadow = true;
+              scene.add(barMesh);
+
+              // Mid rail
+              const midGeo = new THREE.CylinderGeometry(HANDRAIL_BAR_R * 0.8, HANDRAIL_BAR_R * 0.8, segLen, 8);
+              const midMesh = new THREE.Mesh(midGeo, handrailMat);
+              midMesh.rotation.z = Math.PI / 2;
+              midMesh.position.set(segMid, stageHeight + HANDRAIL_HEIGHT * 0.5, def.fixed);
+              midMesh.castShadow = true;
+              scene.add(midMesh);
+            } else {
+              const barGeo = new THREE.CylinderGeometry(HANDRAIL_BAR_R, HANDRAIL_BAR_R, segLen, 8);
+              const barMesh = new THREE.Mesh(barGeo, handrailMat);
+              barMesh.rotation.x = Math.PI / 2;
+              barMesh.position.set(def.fixed, stageHeight + HANDRAIL_HEIGHT, segMid);
+              barMesh.castShadow = true;
+              scene.add(barMesh);
+
+              const midGeo = new THREE.CylinderGeometry(HANDRAIL_BAR_R * 0.8, HANDRAIL_BAR_R * 0.8, segLen, 8);
+              const midMesh = new THREE.Mesh(midGeo, handrailMat);
+              midMesh.rotation.x = Math.PI / 2;
+              midMesh.position.set(def.fixed, stageHeight + HANDRAIL_HEIGHT * 0.5, segMid);
+              midMesh.castShadow = true;
+              scene.add(midMesh);
+            }
+          }
+        }
+
+        // ── Steps ──
+        if (sel.steps) {
+          const STEP_TOTAL_DEPTH = 24 * SCALE;   // Total depth the staircase extends from stage edge
+          const numSteps = Math.max(1, Math.round(stageHeight / (8 * SCALE)));  // ~8" rise per step
+          const stepRise = stageHeight / numSteps;
+          const stepDepth = STEP_TOTAL_DEPTH / numSteps;  // Depth of each individual step tread
+
+          // Nosing thickness — a thin strip of yellow on the leading edge of each tread.
+          // For x-axis edges the nosing is thin in Z; for z-axis edges thin in X.
+          const NOSE_THICKNESS = 1.5 * SCALE;
+
+          // Centre of steps along this edge
+          const stepCenterAlongEdge = hasGap ? gapCenter : (() => {
+            const pos = sel.stepPosition || 'middle';
+            if (pos === 'front') return STEP_WIDTH_3D / 2 + 6 * SCALE;
+            if (pos === 'back') return edgeLen - STEP_WIDTH_3D / 2 - 6 * SCALE;
+            return edgeLen / 2;
+          })();
+
+          // Outward direction from stage edge
+          let baseX, baseZ, dirX, dirZ;
+          if (def.axis === 'x') {
+            baseX = stepCenterAlongEdge;
+            baseZ = def.fixed;
+            dirX = 0;
+            dirZ = (edgeName === 'front') ? 1 : -1;
+          } else {
+            baseX = def.fixed;
+            baseZ = stepCenterAlongEdge;
+            dirX = (edgeName === 'right') ? 1 : -1;
+            dirZ = 0;
+          }
+
+          // Step geometry dimensions:
+          // For x-axis edges: tread is STEP_WIDTH_3D wide (X) × stepDepth deep (Z)
+          // For z-axis edges: tread is stepDepth wide (X) × STEP_WIDTH_3D deep (Z)
+          const stepW = def.axis === 'x' ? STEP_WIDTH_3D : stepDepth;
+          const stepD = def.axis === 'x' ? stepDepth : STEP_WIDTH_3D;
+
+          for (let i = 0; i < numSteps; i++) {
+            // i = 0 is the lowest (bottom) step, i = numSteps-1 is the top step nearest stage.
+            // 
+            // Centre of each step tread, measured outward from the stage edge:
+            //   Top step (i = numSteps-1) sits at 0.5 × stepDepth from the stage edge.
+            //   Bottom step (i = 0) sits at (numSteps - 0.5) × stepDepth from the stage edge.
+            //
+            // Formula: outwardDist = (numSteps - i - 0.5) * stepDepth
+            const outwardDist = (numSteps - i - 0.5) * stepDepth;
+
+            const stepY = (i + 0.5) * stepRise;  // Vertical centre of this tread
+
+            // Position of the tread centre in world space
+            const stepCX = baseX + dirX * outwardDist;
+            const stepCZ = baseZ + dirZ * outwardDist;
+
+            const geo = new THREE.BoxGeometry(stepW, stepRise * 0.9, stepD);
+            const mesh = new THREE.Mesh(geo, stepMat);
+            mesh.position.set(stepCX, stepY, stepCZ);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            scene.add(mesh);
+
+            // ── Yellow safety nosing on the leading (outward-facing) edge of each tread ──
+            // The nosing strip runs along the full width of the tread but is very thin in
+            // the outward direction. Its position is at the outermost face of the tread.
+            //
+            // Outermost face distance from stage edge: (numSteps - i) * stepDepth
+            const outerFaceDist = (numSteps - i) * stepDepth;
+            const noseCX = baseX + dirX * outerFaceDist;
+            const noseCZ = baseZ + dirZ * outerFaceDist;
+
+            // Nosing geometry is oriented based on edge axis so it lies flat along the tread edge.
+            // x-axis edges: nosing is wide in X (stepW), thin in Z (NOSE_THICKNESS)
+            // z-axis edges: nosing is thin in X (NOSE_THICKNESS), wide in Z (stepD)
+            const noseGeoW = def.axis === 'x' ? stepW : NOSE_THICKNESS;
+            const noseGeoD = def.axis === 'x' ? NOSE_THICKNESS : stepD;
+            const noseGeo = new THREE.BoxGeometry(noseGeoW, stepRise * 0.15, noseGeoD);
+            const noseMesh = new THREE.Mesh(noseGeo, stepEdgeMat);
+            noseMesh.position.set(noseCX, stepY + stepRise * 0.4, noseCZ);
+            noseMesh.castShadow = true;
+            scene.add(noseMesh);
+          }
+        }
+      }
+
+      // ── Skirting ──
+      // A thin dark fabric drape on selected edges, hanging from just below the
+      // deck surface down to the ground. Driven by cfg.acc.{edge}.skirt = true.
+      // Uses the same edgeDefs already defined above for handrails/steps.
+      const skirtMat = new THREE.MeshStandardMaterial({
+        color: 0x1a1a1a,       // Very dark grey — close to black like real staging scrim
+        roughness: 0.95,
+        metalness: 0.0,
+        side: THREE.DoubleSide,  // Visible from both inside and outside
+      });
+      const SKIRT_THICKNESS = 0.05 * SCALE;  // ~0.6" — thin enough to look like fabric
+      // Hang from just under the deck surface down to the ground
+      const skirtHeight = stageHeight - DECK_THICKNESS;
+      const skirtMidY = skirtHeight / 2;
+
+      for (const [edgeName, sel] of Object.entries(acc)) {
+        if (!sel || !sel.skirt) continue;
+        const def = edgeDefs[edgeName];
+        if (!def) continue;
+
+        let skirtGeo, skirtMesh;
+        if (def.axis === 'x') {
+          // Front/back edges: drape runs along the X (length) axis
+          skirtGeo = new THREE.BoxGeometry(stageLength, skirtHeight, SKIRT_THICKNESS);
+          skirtMesh = new THREE.Mesh(skirtGeo, skirtMat);
+          skirtMesh.position.set(stageLength / 2, skirtMidY, def.fixed);
+        } else {
+          // Left/right edges: drape runs along the Z (width) axis
+          skirtGeo = new THREE.BoxGeometry(SKIRT_THICKNESS, skirtHeight, stageWidth);
+          skirtMesh = new THREE.Mesh(skirtGeo, skirtMat);
+          skirtMesh.position.set(def.fixed, skirtMidY, stageWidth / 2);
+        }
+        skirtMesh.receiveShadow = true;
+        scene.add(skirtMesh);
+      }
+
+      // ── Audience label — vertical sign on the front face of the stage ──
+      // "Front" (audience side) is at z = stageWidth.
+      // Hanging it vertically on the front face means it's always clearly visible
+      // from the camera regardless of step positions or rotation, and never
+      // ends up underneath the steps like a flat ground label would.
+      (function addAudienceLabel() {
+        const labelCanvas = document.createElement('canvas');
+        labelCanvas.width = 512;
+        labelCanvas.height = 80;
+        const ctx = labelCanvas.getContext('2d');
+        ctx.clearRect(0, 0, 512, 80);
+        ctx.font = 'bold 32px Arial, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = '#94a3b8';
+        ctx.fillText('\u25c4  AUDIENCE  \u25ba', 256, 40);
+
+        const texture = new THREE.CanvasTexture(labelCanvas);
+        // Size relative to the front edge width
+        const labelW = Math.min(stageLength * 0.6, stageLength - 0.2);
+        const labelH = labelW * (80 / 512);
+        const geo = new THREE.PlaneGeometry(labelW, labelH);
+        const mat = new THREE.MeshBasicMaterial({
+          map: texture,
+          transparent: true,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+        });
+        const mesh = new THREE.Mesh(geo, mat);
+        // No x-rotation — stays vertical (default PlaneGeometry faces +z)
+        // Centred on the front face, halfway up the stage height
+        mesh.position.set(stageLength / 2, stageHeight * 0.45, stageWidth + 0.02);
+        scene.add(mesh);
+      })();
+
+      // ── Orbit controls (manual — r128 doesn't bundle OrbitControls) ──
+      let isDragging = false;
+      let isShiftDrag = false;
+      let prevMouse = { x: 0, y: 0 };
+      let spherical = { theta: Math.PI * 0.25, phi: Math.PI * 0.35, radius: camDist };
+      const target = new THREE.Vector3(stageLength / 2, stageHeight * 0.3, stageWidth / 2);
+
+      function updateCamera() {
+        const r = spherical.radius;
+        const sinPhi = Math.sin(spherical.phi);
+        const cosPhi = Math.cos(spherical.phi);
+        const sinTheta = Math.sin(spherical.theta);
+        const cosTheta = Math.cos(spherical.theta);
+
+        camera.position.set(
+          target.x + r * sinPhi * cosTheta,
+          target.y + r * cosPhi,
+          target.z + r * sinPhi * sinTheta
+        );
+        camera.lookAt(target);
+      }
+      updateCamera();
+
+      canvas.addEventListener('mousedown', (e) => {
+        isDragging = true;
+        isShiftDrag = e.shiftKey;
+        prevMouse = { x: e.clientX, y: e.clientY };
+      });
+
+      canvas.addEventListener('mousemove', (e) => {
+        if (!isDragging) return;
+        const dx = e.clientX - prevMouse.x;
+        const dy = e.clientY - prevMouse.y;
+        prevMouse = { x: e.clientX, y: e.clientY };
+
+        if (isShiftDrag) {
+          const right = new THREE.Vector3();
+          const up = new THREE.Vector3(0, 1, 0);
+          camera.getWorldDirection(right);
+          right.cross(up).normalize();
+          const panSpeed = spherical.radius * 0.002;
+          target.add(right.multiplyScalar(-dx * panSpeed));
+          target.y += dy * panSpeed;
+        } else {
+          spherical.theta -= dx * 0.005;
+          spherical.phi = Math.max(0.1, Math.min(Math.PI * 0.49, spherical.phi - dy * 0.005));
+        }
+        updateCamera();
+      });
+
+      canvas.addEventListener('mouseup', () => { isDragging = false; });
+      canvas.addEventListener('mouseleave', () => { isDragging = false; });
+
+      canvas.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        spherical.radius *= (1 + e.deltaY * 0.001);
+        spherical.radius = Math.max(maxDim * 0.5, Math.min(maxDim * 8, spherical.radius));
+        updateCamera();
+      }, { passive: false });
+
+      // Touch support
+      let lastTouchDist = 0;
+      canvas.addEventListener('touchstart', (e) => {
+        if (e.touches.length === 1) {
+          isDragging = true;
+          isShiftDrag = false;
+          prevMouse = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+        } else if (e.touches.length === 2) {
+          lastTouchDist = Math.hypot(
+            e.touches[0].clientX - e.touches[1].clientX,
+            e.touches[0].clientY - e.touches[1].clientY
+          );
+        }
+      });
+
+      canvas.addEventListener('touchmove', (e) => {
+        e.preventDefault();
+        if (e.touches.length === 1 && isDragging) {
+          const dx = e.touches[0].clientX - prevMouse.x;
+          const dy = e.touches[0].clientY - prevMouse.y;
+          prevMouse = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+          spherical.theta -= dx * 0.005;
+          spherical.phi = Math.max(0.1, Math.min(Math.PI * 0.49, spherical.phi - dy * 0.005));
+          updateCamera();
+        } else if (e.touches.length === 2) {
+          const dist = Math.hypot(
+            e.touches[0].clientX - e.touches[1].clientX,
+            e.touches[0].clientY - e.touches[1].clientY
+          );
+          spherical.radius *= lastTouchDist / dist;
+          spherical.radius = Math.max(maxDim * 0.5, Math.min(maxDim * 8, spherical.radius));
+          lastTouchDist = dist;
+          updateCamera();
+        }
+      }, { passive: false });
+
+      canvas.addEventListener('touchend', () => { isDragging = false; });
+
+      // ── Resize ──
+      window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+
+      // ── Populate dimensions panel ──
+      const unit = cfg.u || 'm';
+      const l = formatDim(cfg.l, unit);
+      const w = formatDim(cfg.w, unit);
+      const h = formatDim(cfg.h, unit);
+      const areaSqFt = (cfg.l * cfg.w) / 144;
+      const areaSqM = (cfg.l * cfg.w) / 1550.0031;
+      const areaStr = unit === 'm'
+        ? `${areaSqM.toFixed(1)} sq m`
+        : `${areaSqFt.toFixed(1)} sq ft`;
+
+      document.getElementById('dims-content').innerHTML = `
+        <div class="dim-row">
+          <span class="dim-name">Length</span>
+          <span><span class="dim-val">${l.primary}</span><span class="dim-secondary-val">${l.secondary}</span></span>
+        </div>
+        <div class="dim-row">
+          <span class="dim-name">Width</span>
+          <span><span class="dim-val">${w.primary}</span><span class="dim-secondary-val">${w.secondary}</span></span>
+        </div>
+        <div class="dim-row">
+          <span class="dim-name">Height</span>
+          <span><span class="dim-val">${h.primary}</span><span class="dim-secondary-val">${h.secondary}</span></span>
+        </div>
+        <div class="dim-row">
+          <span class="dim-name">Area</span>
+          <span class="dim-val">${areaStr}</span>
+        </div>
+        <div class="dim-row">
+          <span class="dim-name">Decks</span>
+          <span class="dim-val">${cfg.d.length}</span>
+        </div>
+      `;
+      document.getElementById('dims-panel').style.display = '';
+
+      // ── Animate ──
+      function animate() {
+        requestAnimationFrame(animate);
+        renderer.render(scene, camera);
+      }
+
+      // Remove loading overlay and start rendering
+      const loadingEl = document.getElementById('loading');
+      setTimeout(() => {
+        loadingEl.classList.add('fade-out');
+        setTimeout(() => loadingEl.remove(), 600);
+      }, 400);
+
+      animate();
+    }
+  </script>
+</body>
+</html>

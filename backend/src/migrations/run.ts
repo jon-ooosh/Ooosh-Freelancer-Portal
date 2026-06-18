@@ -155,7 +155,16 @@ async function runMigrations(direction: 'up' | 'down') {
         '118_cost_invoice_number_and_vat.sql',
         '119_holding_chase_and_hold.sql',
         '120_job_balance_chases.sql',
-        '121_pcn_module.sql',
+        '121_ve103b_generated_via.sql',
+        '122_staging_plans.sql',
+        '123_rack_planner.sql',
+        '124_rack_plan_updated_by.sql',
+        '125_combine_bookings.sql',
+        '126_rack_plan_slug.sql',
+        '127_sms_and_ooh_approach.sql',
+        '128_encrypt_storage_access_code.sql',
+        '129_ooh_return_compliance.sql',
+        '130_pcn_module.sql',
       ];
 
       for (const migration of migrations) {

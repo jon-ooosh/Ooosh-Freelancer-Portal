@@ -42,6 +42,8 @@ import costsRouter from './costs';
 import storageRouter from './storage';
 import holdingRouter from './holding';
 import pcnsRouter from './pcns';
+import rackPlansRouter from './rack-plans';
+import stagingRouter from './staging';
 
 const router = Router();
 
@@ -77,6 +79,8 @@ router.use('/costs', costsRouter);  // Cost Capture & Recharge — staff-facing 
 router.use('/storage', storageRouter);  // Client Storage — rooms/tenancies/access/waiting list (+ public T&Cs accept by token)
 router.use('/holding', holdingRouter);  // Holding — Held for Clients / Lost Property / temp storage (held_items engine)
 router.use('/pcns', pcnsRouter);  // PCN module — Penalty Charge Notice management (Vehicles), replaces Monday PCN boards
+router.use('/rack-plans', rackPlansRouter);  // Rack Planner — how a rack/system is supplied (pull-only from HireHop) + public view-token
+router.use('/staging', stagingRouter);  // Staging Calculator — stock/availability/push + 3D plan short-links (embedded vanilla-JS tool)
 router.use('/hire-forms', hireFormsRouter);
 router.use('/requirements', requirementsRouter);
 router.use('/portal', portalRouter);  // Freelancer portal — own JWT auth (not OP staff JWT)

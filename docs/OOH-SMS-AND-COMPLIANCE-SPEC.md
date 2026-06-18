@@ -10,7 +10,7 @@ parking-confirmation link + Traccar-prefilled map) works well, but a minority of
 still leave vans inconsiderately in the street. Our neighbours need HGV access to their
 gates; vans left across them cause real problems. Two improvements:
 
-1. **A timely SMS nudge** fired when Traccar shows the van approaching base (~1 mile out),
+1. **A timely SMS nudge** fired when Traccar shows the van approaching base (~2 miles out),
    carrying the same per-driver parking link. Texts get read late at night when emails
    don't, and they land at the decision moment (where to park) rather than hours before.
 2. **Per-driver compliance tracking** so a driver who repeatedly parks badly loses the
@@ -90,8 +90,11 @@ The module is international-ready for free (normalise via `phone_country`, hand 
 same call regardless of country). **Which countries we actually send to is a policy switch,
 not code:**
 
-- `system_settings.ooh_sms_country_allowlist` (CSV of ISO codes, default `GB`). Numbers
-  outside the list **fall back to email-only** — zero regression, they still get both emails.
+- `system_settings.ooh_sms_country_allowlist` (CSV, default `GB`). Entries may be
+  ISO codes (`GB`) or dialling codes (`+44`/`44`) and are **matched on country calling
+  code**, not ISO region — `+44` is shared across GB/Guernsey/Jersey/IoM, so a real UK
+  mobile can resolve to ISO `GG`; calling-code matching means `GB` still covers it. Numbers
+  whose calling code isn't on the list **fall back to email-only** — zero regression.
 - Caveats baked into the doc, not the code: per-country cost varies; alphanumeric sender IDs
   work across most of Europe but **not US/Canada** (those need a rented number). Start `GB`,
   add EU codes once confident.
@@ -117,7 +120,7 @@ AND vehicle_id IS NOT NULL
 AND COALESCE(hire_end, job_end::date) <= (CURRENT_DATE + 1)   -- only near the return
 ```
 …look up `getLatestPositionForReg(reg)`, Haversine to base, and if
-`distance_miles <= ooh_sms_radius_miles` (default **1**):
+`distance_miles <= ooh_sms_radius_miles` (default **2** — at ~30mph that is ~4 min out, comfortably caught by the 3-min scan; 1 mile risked slipping between scans):
 1. Build the driver's MSISDN from `drivers.phone` + `phone_country`. If unsendable (null,
    or country not in allowlist) → skip (stamp nothing; emails cover them).
 2. `smsService.send('ooh_return_approach', …)` with that driver's own `ooh_parking_token`.
@@ -140,18 +143,19 @@ AND COALESCE(hire_end, job_end::date) <= (CURRENT_DATE + 1)   -- only near the r
 |---|---|---|
 | `ooh_base_lat` | — | Yard latitude (one-time setup) |
 | `ooh_base_lng` | — | Yard longitude |
-| `ooh_sms_radius_miles` | `1` | Trigger distance |
-| `ooh_sms_country_allowlist` | `GB` | ISO codes we SMS; others email-only |
+| `ooh_sms_radius_miles` | `2` | Trigger distance |
+| `ooh_sms_country_allowlist` | `GB` | Calling codes we SMS (ISO or `+44` forms accepted); others email-only |
 
 **Env (`.env`):** `SMS_PROVIDER=twilio`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`,
 `TWILIO_SENDER_ID=OOOSH`, `SMS_MODE=test`, `SMS_TEST_REDIRECT=+44…`, `SMS_LIVE_TEMPLATES=`.
 
-## 7. Migration (Part 1)
+## 7. Migration (Part 1) ✅ BUILT
 
-Next free migration number (check `run.ts` — currently past 120; **add the filename to the
-hardcoded array**):
-- `vehicle_hire_assignments.ooh_sms_sent_at TIMESTAMPTZ`
+`127_sms_and_ooh_approach.sql` (added to the `run.ts` array — renumbered from 121 after merging main, which had taken 121–126):
+- `vehicle_hire_assignments.ooh_sms_sent_at TIMESTAMPTZ` + partial index on the armed set.
 - `CREATE TABLE sms_log (…)` mirroring `email_log`.
+- Seeds the four new `system_settings` rows (`ooh_base_lat/lng`, `ooh_sms_radius_miles`,
+  `ooh_sms_country_allowlist`).
 
 ---
 
@@ -274,20 +278,41 @@ Next free migration number after Part 1's:
 
 # Build order
 
-**Phase 1 — SMS module + geofence (self-contained, improves attribution):**
-1. `sms-service.ts` + `SmsProvider`/Twilio + `sms_log` migration + E.164 normalisation.
-2. Settings (`ooh_base_lat/lng`, `ooh_sms_radius_miles`, `ooh_sms_country_allowlist`) + env.
-3. `ooh_return_approach` template.
-4. `ooh-sms-approach.ts` scan + scheduler entry + `ooh_sms_sent_at` migration.
-5. Settings-page UI for the new keys.
+**Phase 1 — SMS module + geofence (self-contained, improves attribution): ✅ BUILT**
+1. ✅ `sms-service.ts` + `SmsProvider`/Twilio (REST, no SDK) + `sms_log` + E.164 normalisation
+   (`libphonenumber-js`, calling-code allowlist).
+2. ✅ Settings (`ooh_base_lat/lng`, `ooh_sms_radius_miles`, `ooh_sms_country_allowlist`) seeded
+   in migration 127 + env vars in `.env.example`.
+3. ✅ `ooh_return_approach` template (`sms-templates.ts`).
+4. ✅ `ooh-sms-approach.ts` scan + scheduler entry (`*/3 17-23,0-8 * * *` Europe/London) +
+   `ooh_sms_sent_at`.
+5. ✅ Settings-page UI — auto-renders the new `ooh_returns` keys (data-driven `OohSettingsSection`).
+6. ⚠️ **TEMPORARY** "Send test SMS" button (OOH Settings) + `POST /api/system-settings/test-sms`
+   + `smsService.sendTest()` — connectivity check, **REMOVE after go-live** (tracked in a GitHub
+   reminder issue). All three touchpoints are commented `TEMPORARY`.
 
-**Phase 2 — Compliance tracking:**
-6. `ooh_return_violations` + `drivers.ooh_blocked*` migrations + threshold setting.
-7. Check-in "OOH steps followed" checkbox + severity modal + attribution cascade (primary
-   capture).
-8. Retro-flag surfaces: "Recent OOH returns" dashboard list + Job Detail OOH flag affordance.
-9. Driver Detail compliance section + set/lift block; Org rollup.
-10. Enforcement banner + two-tier override at OOH toggle / book-out.
+**Sender:** launching with the **UK number +447475911380** in the Messaging Service sender pool
+(Twilio gated the OOOSH alphanumeric sender behind account review; the number is two-way and
+needs no code change to swap to OOOSH later — the service sends via `messagingServiceSid`).
+
+**Goes live:** ship behind `SMS_MODE=test` (redirects to `SMS_TEST_REDIRECT`), confirm a test
+text lands, then either flip `SMS_MODE=live` or allowlist `ooh_return_approach` via
+`SMS_LIVE_TEMPLATES`.
+
+**Phase 2 — Compliance tracking: ✅ CORE LOOP BUILT**
+6. ✅ `ooh_return_violations` + `drivers.ooh_blocked*` (migration 129) + threshold setting
+   + `services/ooh-compliance.ts` + endpoints on `routes/ooh-return.ts`.
+7. ✅ Check-in capture — `OohCheckInPrompt` on the check-in success screen (pre-ticked "OOH
+   steps followed", untick → two-choice severity + attribution picker).
+8. Retro-flag surfaces: ✅ "Recent OOH returns" dashboard section (`sections/OohReturns.tsx`,
+   self-fetching, hidden when empty); ⬜ Job Detail OOH flag affordance (remaining).
+9. ✅ Driver Detail "OOH" tab (`OohComplianceTab`) — block status, suggest-and-confirm block
+   (manager) / lift (admin), violation history + dismiss. ⬜ Org rollup (remaining).
+10. ✅ Enforcement — 409 + manager override on the OOH toggle (`OohReturnModal`), override
+    logged to the job timeline.
+
+**Remaining (secondary):** Job Detail per-card OOH flag affordance (the dashboard list +
+check-in capture already cover retro-flagging); read-only Org incident rollup.
 
 **Phase 3 (later, optional):** WhatsApp channel (dedicated number + Meta templates),
 acceptable-parking polygon auto-hint.

@@ -39,6 +39,7 @@ import PcnDetailPage from './pages/PcnDetailPage';
 import HoldingReceiptPage from './pages/HoldingReceiptPage';
 import QuickActionsPage from './pages/QuickActionsPage';
 import MerchFormPage from './pages/MerchFormPage';
+import RackPlanPublicPage from './pages/RackPlanPublicPage';
 import WarehousePinPage from './pages/WarehousePinPage';
 import WarehouseCollectionsPage from './pages/WarehouseCollectionsPage';
 import OohReturnParkingPage from './pages/OohReturnParkingPage';
@@ -138,6 +139,8 @@ export default function App() {
       <Route path="/storage-tcs/:token" element={<StorageTcsAcceptPage />} />
       {/* Public inbound merch-delivery form (no login) — replaces the JotForm */}
       <Route path="/merch-form" element={<MerchFormPage />} />
+      {/* Public view-only Rack Plan (tokenised, no login) */}
+      <Route path="/rack/:token" element={<RackPlanPublicPage />} />
       {/* Mobile quick-action launcher — staff JWT, full-screen, no Layout chrome */}
       <Route path="/quick" element={<ProtectedRoute><QuickActionsPage /></ProtectedRoute>} />
       {/* Warehouse kiosk — own PIN-based session, no Layout wrapper */}
