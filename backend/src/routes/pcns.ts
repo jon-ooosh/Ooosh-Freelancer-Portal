@@ -173,7 +173,36 @@ router.get('/match', async (req: AuthRequest, res: Response) => {
     drivers.push(row);
   }
 
-  res.json({ data: { drivers, match_count: drivers.length } });
+  // Crew / transport context — for V&D and D&C supplies we rarely record a reg
+  // against the run, so a vehicle-match alone won't find who was driving. Pull
+  // every freelancer/crew assignment on a transport quote whose job spans the
+  // offence date so staff can decipher it manually. Broad net by design.
+  const crew = await query(
+    `SELECT DISTINCT
+            qa.person_id,
+            p.first_name || ' ' || p.last_name AS person_name,
+            p.email                            AS person_email,
+            p.is_freelancer,
+            qa.role,
+            q.job_type,
+            j.id                               AS job_id,
+            j.hh_job_number,
+            j.job_name,
+            j.job_date,
+            j.job_end
+     FROM quote_assignments qa
+     JOIN quotes q ON q.id = qa.quote_id AND q.is_deleted = false
+     JOIN people p ON p.id = qa.person_id
+     JOIN jobs j   ON j.id = q.job_id
+     WHERE qa.status <> 'cancelled'
+       AND $1::date >= (COALESCE(j.job_date, j.out_date))::date
+       AND $1::date <= (COALESCE(j.job_end, j.return_date, j.job_date))::date
+     ORDER BY j.job_date NULLS LAST
+     LIMIT 25`,
+    [offenceDate.toISOString()]
+  );
+
+  res.json({ data: { drivers, match_count: drivers.length, crew_candidates: crew.rows } });
 });
 
 // ─────────────────────────────────────────────────────────────────────────

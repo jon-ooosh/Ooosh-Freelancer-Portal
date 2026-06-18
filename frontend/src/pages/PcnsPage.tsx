@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import PcnActionChooser from '../components/PcnActionChooser';
+import { compressImage } from '../components/holding/compress';
 
 // ── Types ───────────────────────────────────────────────────────────────
 export interface Pcn {
@@ -11,6 +12,8 @@ export interface Pcn {
   vehicle_id: string | null;
   driver_id: string | null;
   job_id: string | null;
+  client_organisation_id: string | null;
+  pcn_document_url: string | null;
   hh_job_number: number | null;
   vehicle_reg: string | null;
   fleet_reg: string | null;
@@ -44,6 +47,18 @@ interface MatchedDriver {
   job_name: string | null;
   client_organisation_id: string | null;
   client_organisation_name: string | null;
+}
+
+interface CrewCandidate {
+  person_id: string;
+  person_name: string | null;
+  person_email: string | null;
+  is_freelancer: boolean;
+  role: string;
+  job_type: string;
+  job_id: string | null;
+  hh_job_number: number | null;
+  job_name: string | null;
 }
 
 interface ExtractedPcn {
@@ -238,6 +253,7 @@ function CreatePcnModal({ onClose, onCreated }: { onClose: () => void; onCreated
   const fileRef = useRef<HTMLInputElement>(null);
   // After save, the modal switches to the "what next?" action step.
   const [created, setCreated] = useState<{ id: string; driver_email: string | null } | null>(null);
+  const [actionTaken, setActionTaken] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [extracting, setExtracting] = useState(false);
   const [extractError, setExtractError] = useState<string | null>(null);
@@ -245,6 +261,7 @@ function CreatePcnModal({ onClose, onCreated }: { onClose: () => void; onCreated
   const [showForm, setShowForm] = useState(false); // revealed after extract OR manual choice
   const [form, setForm] = useState({ ...EMPTY_FORM });
   const [matches, setMatches] = useState<MatchedDriver[] | null>(null);
+  const [crewCandidates, setCrewCandidates] = useState<CrewCandidate[]>([]);
   const [picked, setPicked] = useState<MatchedDriver | null>(null);
   const [matching, setMatching] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -262,7 +279,9 @@ function CreatePcnModal({ onClose, onCreated }: { onClose: () => void; onCreated
     setExtracting(true); setExtractError(null);
     try {
       const fd = new FormData();
-      fd.append('file', file);
+      // Compress photos (~1600px) before sending — keeps the upload small while
+      // staying legible for extraction. PDFs + non-images pass through untouched.
+      fd.append('file', await compressImage(file));
       const r = await api.upload<{ data: ExtractedPcn }>('/pcns/extract', fd);
       const d = r.data;
       setForm({
@@ -302,10 +321,11 @@ function CreatePcnModal({ onClose, onCreated }: { onClose: () => void; onCreated
     setMatching(true); setError(null); setPicked(null);
     try {
       const offenceAt = `${form.offence_date}T${form.offence_time || '12:00'}:00`;
-      const r = await api.get<{ data: { drivers: MatchedDriver[] } }>(
+      const r = await api.get<{ data: { drivers: MatchedDriver[]; crew_candidates?: CrewCandidate[] } }>(
         `/pcns/match?reg=${encodeURIComponent(form.vehicle_reg)}&offence_at=${encodeURIComponent(offenceAt)}`
       );
       setMatches(r.data.drivers);
+      setCrewCandidates(r.data.crew_candidates || []);
       if (r.data.drivers.length === 1) setPicked(r.data.drivers[0]);
     } catch {
       setError('Driver match failed.');
@@ -323,7 +343,7 @@ function CreatePcnModal({ onClose, onCreated }: { onClose: () => void; onCreated
         try {
           const fd = new FormData();
           fd.append('attachment_only', 'true');
-          fd.append('file', file);
+          fd.append('file', await compressImage(file));
           const up = await api.upload<{ r2_key: string }>('/files/upload', fd);
           documentUrl = up.r2_key;
         } catch { /* keep going — the PCN record matters more than the scan */ }
@@ -372,8 +392,10 @@ function CreatePcnModal({ onClose, onCreated }: { onClose: () => void; onCreated
       <div className="fixed inset-0 bg-black/40 flex items-start justify-center z-50 p-4 overflow-y-auto" onClick={onCreated}>
         <div className="bg-white rounded-xl max-w-2xl w-full my-8 p-5" onClick={(e) => e.stopPropagation()}>
           <h2 className="text-lg font-bold text-slate-800">PCN logged ✓</h2>
-          <p className="text-sm text-slate-500 mb-4">What do you want to do with it?</p>
-          <PcnActionChooser pcnId={created.id} driverEmail={created.driver_email} onActioned={() => { /* stays open to show the outcome */ }} />
+          <p className="text-sm text-slate-500 mb-4">
+            {actionTaken ? 'Action taken. Anything else, or close.' : 'What do you want to do with it?'}
+          </p>
+          <PcnActionChooser pcnId={created.id} driverEmail={created.driver_email} onActioned={() => setActionTaken(true)} />
           <div className="flex justify-between items-center gap-2 mt-5">
             <button
               onClick={() => { onCreated(); navigate(`/vehicles/pcns/${created.id}`); }}
@@ -381,8 +403,9 @@ function CreatePcnModal({ onClose, onCreated }: { onClose: () => void; onCreated
             >
               Open PCN →
             </button>
-            <button onClick={onCreated} className="px-4 py-2 text-sm rounded-lg border hover:bg-slate-50">
-              Done / decide later
+            <button onClick={onCreated}
+              className={`px-4 py-2 text-sm rounded-lg ${actionTaken ? 'bg-[#7B5EA7] text-white hover:bg-[#6a5092]' : 'border hover:bg-slate-50'}`}>
+              {actionTaken ? 'Close' : 'Done / decide later'}
             </button>
           </div>
         </div>
@@ -518,6 +541,27 @@ function CreatePcnModal({ onClose, onCreated }: { onClose: () => void; onCreated
                       Clear selection (log without a driver)
                     </button>
                   )}
+                </div>
+              )}
+
+              {/* Crew / transport context — V&D + D&C runs rarely record a reg,
+                  so this helps decipher who had the van that day. Read-only. */}
+              {matches !== null && crewCandidates.length > 0 && (
+                <div className="mt-3 bg-slate-50 rounded-lg px-3 py-2">
+                  <p className="text-xs font-medium text-slate-600 mb-1">
+                    Crew / transport on this date {matches.length === 0 ? '(no self-drive hire matched — was this a van & driver / D&C run?)' : ''}
+                  </p>
+                  <ul className="space-y-0.5">
+                    {crewCandidates.map((c) => (
+                      <li key={c.person_id + (c.hh_job_number || '')} className="text-xs text-slate-600">
+                        <strong>{c.person_name || 'Unknown'}</strong>
+                        <span className="text-slate-400"> — {c.role} · {c.job_type}</span>
+                        {c.hh_job_number ? ` · job #${c.hh_job_number}` : ''}
+                        {c.is_freelancer ? <span className="ml-1 text-[10px] uppercase text-amber-600">freelancer</span> : ''}
+                      </li>
+                    ))}
+                  </ul>
+                  <p className="text-[11px] text-slate-400 mt-1">For reference — pick "Internal — Freelancer" on the next step if one of these was driving.</p>
                 </div>
               )}
             </div>
