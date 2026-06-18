@@ -164,6 +164,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '127_sms_and_ooh_approach.sql',
         '128_encrypt_storage_access_code.sql',
         '129_ooh_return_compliance.sql',
+        '130_pcn_module.sql',
       ];
 
       for (const migration of migrations) {
