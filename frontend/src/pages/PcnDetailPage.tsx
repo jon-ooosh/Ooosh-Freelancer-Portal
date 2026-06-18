@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { Pcn, PCN_STATUS_LABEL, PcnStatusPill, FINE_TYPE_LABEL } from './PcnsPage';
+import PcnActionChooser from '../components/PcnActionChooser';
 
 interface PcnEvent {
   id: string;
@@ -105,33 +106,36 @@ export default function PcnDetailPage() {
           )}
         </div>
 
-        {/* Action panel */}
+        {/* Action panel — the "what next?" chooser */}
         <div className="bg-white rounded-lg border p-4">
-          <h2 className="text-sm font-semibold text-slate-700 mb-3">Action</h2>
-          <label className="text-sm block mb-3">Status
-            <select
-              className="border rounded-lg px-3 py-2 text-sm w-full mt-1"
-              value={pcn.status}
-              disabled={saving}
-              onChange={(e) => patch({ status: e.target.value })}
-            >
-              {Object.entries(PCN_STATUS_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
-            </select>
-          </label>
-          <label className="text-sm block">Action path
-            <select
-              className="border rounded-lg px-3 py-2 text-sm w-full mt-1"
-              value={pcn.action_path || ''}
-              disabled={saving}
-              onChange={(e) => patch({ action_path: e.target.value || null })}
-            >
-              <option value="">— not set —</option>
-              {Object.entries(ACTION_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
-            </select>
-          </label>
-          <p className="text-xs text-slate-400 mt-3">
-            Email + HireHop charge + pay-direct receipt flow land in a later PR.
-          </p>
+          <h2 className="text-sm font-semibold text-slate-700 mb-3">What next?</h2>
+          <PcnActionChooser pcnId={pcn.id} driverEmail={pcn.driver_email} onActioned={() => load()} />
+
+          {/* Manual override — set status / action path directly without firing email or charge */}
+          <details className="mt-4 border-t pt-3">
+            <summary className="text-xs text-slate-500 cursor-pointer">Manual override (no email / no charge)</summary>
+            <label className="text-sm block mt-2 mb-3">Status
+              <select
+                className="border rounded-lg px-3 py-2 text-sm w-full mt-1"
+                value={pcn.status}
+                disabled={saving}
+                onChange={(e) => patch({ status: e.target.value })}
+              >
+                {Object.entries(PCN_STATUS_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+              </select>
+            </label>
+            <label className="text-sm block">Action path
+              <select
+                className="border rounded-lg px-3 py-2 text-sm w-full mt-1"
+                value={pcn.action_path || ''}
+                disabled={saving}
+                onChange={(e) => patch({ action_path: e.target.value || null })}
+              >
+                <option value="">— not set —</option>
+                {Object.entries(ACTION_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+              </select>
+            </label>
+          </details>
         </div>
       </div>
 
