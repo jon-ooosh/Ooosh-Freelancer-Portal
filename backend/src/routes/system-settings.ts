@@ -82,6 +82,20 @@ router.post('/test-sms', authorize('admin', 'manager'), async (req: AuthRequest,
   }
 });
 
+// TEMPORARY: run the OOH approach geofence scan on demand (the cron only runs
+// 17:00–08:59). Lets staff test the geofence in daylight. REMOVE with the test
+// SMS button after go-live. Tracked in the GitHub reminder issue.
+router.post('/run-ooh-scan', authorize('admin', 'manager'), async (_req: AuthRequest, res: Response) => {
+  try {
+    const { runOohApproachScan } = await import('../services/ooh-sms-approach');
+    const summary = await runOohApproachScan();
+    res.json({ success: true, ...summary });
+  } catch (error) {
+    console.error('[system-settings] run-ooh-scan error:', error);
+    res.status(500).json({ error: 'Scan failed' });
+  }
+});
+
 export default router;
 
 // ── Helper for backend code that needs to read settings ──────────────
