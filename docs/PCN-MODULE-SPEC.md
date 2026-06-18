@@ -352,15 +352,17 @@ page).
 
 ## 12. Build order (proposed)
 
-1. Migration (`pcns` + `pcn_events`) + add to `run.ts`.
-2. `routes/pcns.ts` — CRUD, `match`, settings reads; `services/pcn-*` for extraction + HH charge +
-   email.
-3. `/vehicles/pcns` list + detail page; Vehicles nav entry.
-4. Pay-direct flow + `mobile_upload_tokens` `pcn_receipt` purpose + public upload page.
-5. Receipt-chase scheduler + info@ alerts + issuer-deadline / NIP nudges.
-6. `PcnHistorySection` (Vehicle/Driver/Person/Org) + conditional Job Detail card.
-7. Dashboard NeedsAttention buckets.
-8. Email templates (6) into the registry.
+1. ✅ Migration (`pcns` + `pcn_events`) + add to `run.ts`. (migration 130)
+2. ✅ `routes/pcns.ts` — CRUD, `match`, settings reads; **`/extract` (Claude Vision, `services/pcn-extract.ts`)**.
+3. ✅ `/vehicles/pcns` list + detail page; Vehicles nav entry. **Extraction-first Log PCN modal** (upload → extract → review → save; manual entry is the fallback). Document stored to R2 on save.
+4. ✅ **"Log PCN" tile on `/quick`** (mobile-first — most PCNs arrive on paper; the file input offers camera OR PDF).
+5. Pay-direct flow + `mobile_upload_tokens` `pcn_receipt` purpose + public upload page.
+6. Receipt-chase scheduler + info@ alerts + issuer-deadline / NIP nudges.
+7. `PcnHistorySection` (Vehicle/Driver/Person/Org) + conditional Job Detail card.
+8. Dashboard NeedsAttention buckets.
+9. Email templates (transfer / driver-ID / pay-direct / receipt-chase / pay-recharge) into the registry + HireHop £35 handling charge.
+
+**Extraction is the PRIMARY entry path** (matches the legacy Netlify flow): the Log PCN modal leads with "take a photo or choose a file → Extract Data", pre-fills the form, and staff review/correct before saving. Manual entry is the fallback (a one-tap "enter details manually" link, and the fields are always editable). Extraction uses Claude Haiku via the shared `config/anthropic.ts` client — inert (503 → graceful "enter manually" message) when `ANTHROPIC_API_KEY` isn't set; it IS set on prod (the cost-receipt extractor already uses it).
 
 ---
 

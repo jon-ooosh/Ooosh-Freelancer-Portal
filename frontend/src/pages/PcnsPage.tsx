@@ -1,5 +1,5 @@
-import { useEffect, useState, useCallback } from 'react';
-import { Link } from 'react-router-dom';
+import { useEffect, useState, useCallback, useRef } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 
 // ── Types ───────────────────────────────────────────────────────────────
@@ -42,6 +42,23 @@ interface MatchedDriver {
   job_name: string | null;
   client_organisation_id: string | null;
   client_organisation_name: string | null;
+}
+
+interface ExtractedPcn {
+  reference: string | null;
+  vehicle_reg: string | null;
+  offence_date: string | null;
+  offence_time: string | null;
+  location: string | null;
+  issuing_authority: string | null;
+  offence_description: string | null;
+  fine_amount: number | null;
+  reduced_amount: number | null;
+  reduced_deadline: string | null;
+  final_deadline: string | null;
+  fine_type: string;
+  confidence: 'high' | 'medium' | 'low';
+  notes: string | null;
 }
 
 // ── Display maps ──────────────────────────────────────────────────────────
@@ -97,7 +114,17 @@ export default function PcnsPage() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
+  const [searchParams, setSearchParams] = useSearchParams();
   const [showCreate, setShowCreate] = useState(false);
+
+  // Deep-link: /vehicles/pcns?new=1 (from the Quick tab) opens the modal.
+  useEffect(() => {
+    if (searchParams.get('new') === '1') {
+      setShowCreate(true);
+      searchParams.delete('new');
+      setSearchParams(searchParams, { replace: true });
+    }
+  }, [searchParams, setSearchParams]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -196,14 +223,22 @@ export default function PcnsPage() {
   );
 }
 
-// ── Create modal: manual entry + driver match ─────────────────────────────
+// ── Create modal: extraction-first, manual fallback ───────────────────────
+const EMPTY_FORM = {
+  reference: '', fine_type: 'private_pcn', vehicle_reg: '',
+  offence_date: '', offence_time: '', location: '', issuing_authority: '',
+  fine_amount: '', reduced_amount: '', reduced_deadline: '', final_deadline: '',
+  notes: '',
+};
+
 function CreatePcnModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
-  const [form, setForm] = useState({
-    reference: '', fine_type: 'private_pcn', vehicle_reg: '',
-    offence_date: '', offence_time: '', location: '', issuing_authority: '',
-    fine_amount: '', reduced_amount: '', reduced_deadline: '', final_deadline: '',
-    notes: '',
-  });
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [file, setFile] = useState<File | null>(null);
+  const [extracting, setExtracting] = useState(false);
+  const [extractError, setExtractError] = useState<string | null>(null);
+  const [confidence, setConfidence] = useState<string | null>(null);
+  const [showForm, setShowForm] = useState(false); // revealed after extract OR manual choice
+  const [form, setForm] = useState({ ...EMPTY_FORM });
   const [matches, setMatches] = useState<MatchedDriver[] | null>(null);
   const [picked, setPicked] = useState<MatchedDriver | null>(null);
   const [matching, setMatching] = useState(false);
@@ -211,6 +246,48 @@ function CreatePcnModal({ onClose, onCreated }: { onClose: () => void; onCreated
   const [error, setError] = useState<string | null>(null);
 
   const set = (k: string, v: string) => setForm((f) => ({ ...f, [k]: v }));
+
+  const pickFile = (f: File | null) => {
+    setFile(f);
+    setExtractError(null);
+  };
+
+  const extract = async () => {
+    if (!file) return;
+    setExtracting(true); setExtractError(null);
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      const r = await api.upload<{ data: ExtractedPcn }>('/pcns/extract', fd);
+      const d = r.data;
+      setForm({
+        reference: d.reference || '',
+        fine_type: d.fine_type || 'private_pcn',
+        vehicle_reg: d.vehicle_reg || '',
+        offence_date: d.offence_date || '',
+        offence_time: d.offence_time || '',
+        location: d.location || '',
+        issuing_authority: d.issuing_authority || '',
+        fine_amount: d.fine_amount != null ? String(d.fine_amount) : '',
+        reduced_amount: d.reduced_amount != null ? String(d.reduced_amount) : '',
+        reduced_deadline: d.reduced_deadline || '',
+        final_deadline: d.final_deadline || '',
+        notes: [d.offence_description, d.notes].filter(Boolean).join(' — '),
+      });
+      setConfidence(d.confidence);
+      setShowForm(true);
+    } catch (e) {
+      const msg = (e as { message?: string })?.message || '';
+      setExtractError(
+        msg.includes('503') || msg.toLowerCase().includes('not configured')
+          ? 'AI extraction isn’t configured on the server yet — enter the details manually below.'
+          : 'Extraction failed — enter the details manually below.'
+      );
+      setShowForm(true);
+    } finally {
+      setExtracting(false);
+    }
+  };
 
   const findDriver = async () => {
     if (!form.vehicle_reg.trim() || !form.offence_date) {
@@ -235,6 +312,17 @@ function CreatePcnModal({ onClose, onCreated }: { onClose: () => void; onCreated
   const save = async () => {
     setSaving(true); setError(null);
     try {
+      // Stash the document in R2 first (best-effort — don't block the save).
+      let documentUrl: string | null = null;
+      if (file) {
+        try {
+          const fd = new FormData();
+          fd.append('attachment_only', 'true');
+          fd.append('file', file);
+          const up = await api.upload<{ r2_key: string }>('/files/upload', fd);
+          documentUrl = up.r2_key;
+        } catch { /* keep going — the PCN record matters more than the scan */ }
+      }
       const offenceAt = form.offence_date
         ? `${form.offence_date}T${form.offence_time || '12:00'}:00`
         : null;
@@ -251,6 +339,7 @@ function CreatePcnModal({ onClose, onCreated }: { onClose: () => void; onCreated
         reduced_deadline: form.reduced_deadline || null,
         final_deadline: form.final_deadline || null,
         notes: form.notes || null,
+        pcn_document_url: documentUrl,
       };
       if (picked) {
         body.vehicle_id = picked.vehicle_id;
@@ -275,88 +364,140 @@ function CreatePcnModal({ onClose, onCreated }: { onClose: () => void; onCreated
       <div className="bg-white rounded-xl max-w-2xl w-full my-8 p-5" onClick={(e) => e.stopPropagation()}>
         <h2 className="text-lg font-bold text-slate-800 mb-4">Log PCN</h2>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <label className="text-sm">Reference
-            <input className={input} value={form.reference} onChange={(e) => set('reference', e.target.value)} />
-          </label>
-          <label className="text-sm">Type
-            <select className={input} value={form.fine_type} onChange={(e) => set('fine_type', e.target.value)}>
-              {Object.entries(FINE_TYPE_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
-            </select>
-          </label>
-          <label className="text-sm">Vehicle reg
-            <input className={input} value={form.vehicle_reg} onChange={(e) => set('vehicle_reg', e.target.value)} />
-          </label>
-          <label className="text-sm">Issuing authority
-            <input className={input} value={form.issuing_authority} onChange={(e) => set('issuing_authority', e.target.value)} />
-          </label>
-          <label className="text-sm">Offence date
-            <input type="date" className={input} value={form.offence_date} onChange={(e) => set('offence_date', e.target.value)} />
-          </label>
-          <label className="text-sm">Offence time
-            <input type="time" className={input} value={form.offence_time} onChange={(e) => set('offence_time', e.target.value)} />
-          </label>
-          <label className="text-sm">Location
-            <input className={input} value={form.location} onChange={(e) => set('location', e.target.value)} />
-          </label>
-          <label className="text-sm">Fine amount (£)
-            <input type="number" className={input} value={form.fine_amount} onChange={(e) => set('fine_amount', e.target.value)} />
-          </label>
-          <label className="text-sm">Reduced amount (£)
-            <input type="number" className={input} value={form.reduced_amount} onChange={(e) => set('reduced_amount', e.target.value)} />
-          </label>
-          <label className="text-sm">Reduced deadline
-            <input type="date" className={input} value={form.reduced_deadline} onChange={(e) => set('reduced_deadline', e.target.value)} />
-          </label>
-          <label className="text-sm">Final deadline
-            <input type="date" className={input} value={form.final_deadline} onChange={(e) => set('final_deadline', e.target.value)} />
-          </label>
-        </div>
-
-        <label className="text-sm block mt-3">Notes
-          <textarea className={`${input} resize-y min-h-[60px]`} value={form.notes} onChange={(e) => set('notes', e.target.value)} />
-        </label>
-
-        {/* Driver matching */}
-        <div className="mt-4 border-t pt-3">
-          <div className="flex items-center justify-between">
-            <span className="text-sm font-medium text-slate-700">Driver match</span>
-            <button onClick={findDriver} disabled={matching}
-              className="text-sm border rounded-lg px-3 py-1.5 hover:bg-slate-50 disabled:opacity-50">
-              {matching ? 'Matching…' : '🔍 Find driver from hire data'}
-            </button>
-          </div>
-          {matches !== null && (
-            <div className="mt-2 space-y-1">
-              {matches.length === 0 && (
-                <p className="text-sm text-amber-700">No hire matched this reg + time. Save as-is and triage manually.</p>
-              )}
-              {matches.map((m) => (
-                <label key={m.assignment_id}
-                  className={`flex items-center gap-2 text-sm border rounded-lg px-3 py-2 cursor-pointer ${picked?.assignment_id === m.assignment_id ? 'border-[#7B5EA7] bg-purple-50' : ''}`}>
-                  <input type="radio" name="driver" checked={picked?.assignment_id === m.assignment_id}
-                    onChange={() => setPicked(m)} />
-                  <span>
-                    <strong>{m.driver_name || '(no driver on row)'}</strong>
-                    {m.client_organisation_name ? ` · ${m.client_organisation_name}` : ''}
-                    {m.hh_job_number ? ` · job #${m.hh_job_number}` : ''}
-                  </span>
-                </label>
-              ))}
-              {matches.length > 0 && (
-                <button onClick={() => setPicked(null)} className="text-xs text-slate-500 hover:underline">
-                  Clear selection (log without a driver)
-                </button>
-              )}
+        {/* Step 1 — Upload & extract (primary path) */}
+        <div className="border-2 border-dashed rounded-xl p-5 text-center">
+          <input
+            ref={fileRef}
+            type="file"
+            accept="image/*,application/pdf"
+            className="hidden"
+            onChange={(e) => pickFile(e.target.files?.[0] || null)}
+          />
+          {!file ? (
+            <>
+              <p className="text-4xl mb-2">📄</p>
+              <button onClick={() => fileRef.current?.click()}
+                className="text-[#7B5EA7] font-medium hover:underline">
+                Take a photo or choose a file
+              </button>
+              <p className="text-xs text-slate-400 mt-1">Snap the paper notice, or upload a JPEG / PNG / PDF</p>
+            </>
+          ) : (
+            <div className="flex items-center justify-center gap-3 flex-wrap">
+              <span className="text-sm text-slate-700">📎 {file.name}</span>
+              <button onClick={() => fileRef.current?.click()} className="text-xs text-slate-500 hover:underline">change</button>
+              <button onClick={extract} disabled={extracting}
+                className="bg-[#7B5EA7] text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-[#6a5092] disabled:opacity-50">
+                {extracting ? 'Extracting…' : '✨ Extract Data'}
+              </button>
             </div>
           )}
         </div>
+
+        {extractError && <p className="text-sm text-amber-700 mt-2">{extractError}</p>}
+
+        {!showForm && (
+          <p className="text-center text-sm text-slate-400 mt-3">
+            or <button onClick={() => setShowForm(true)} className="text-[#7B5EA7] hover:underline">enter details manually</button>
+          </p>
+        )}
+
+        {/* Step 2 — Review / correct / fill */}
+        {showForm && (
+          <>
+            {confidence && (
+              <div className={`mt-3 text-sm rounded-lg px-3 py-2 ${
+                confidence === 'high' ? 'bg-green-50 text-green-800'
+                : confidence === 'medium' ? 'bg-amber-50 text-amber-800'
+                : 'bg-red-50 text-red-800'}`}>
+                Extracted with <strong>{confidence}</strong> confidence — please check the fields below before saving.
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
+              <label className="text-sm">Reference
+                <input className={input} value={form.reference} onChange={(e) => set('reference', e.target.value)} />
+              </label>
+              <label className="text-sm">Type
+                <select className={input} value={form.fine_type} onChange={(e) => set('fine_type', e.target.value)}>
+                  {Object.entries(FINE_TYPE_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                </select>
+              </label>
+              <label className="text-sm">Vehicle reg
+                <input className={input} value={form.vehicle_reg} onChange={(e) => set('vehicle_reg', e.target.value)} />
+              </label>
+              <label className="text-sm">Issuing authority
+                <input className={input} value={form.issuing_authority} onChange={(e) => set('issuing_authority', e.target.value)} />
+              </label>
+              <label className="text-sm">Offence date
+                <input type="date" className={input} value={form.offence_date} onChange={(e) => set('offence_date', e.target.value)} />
+              </label>
+              <label className="text-sm">Offence time
+                <input type="time" className={input} value={form.offence_time} onChange={(e) => set('offence_time', e.target.value)} />
+              </label>
+              <label className="text-sm">Location
+                <input className={input} value={form.location} onChange={(e) => set('location', e.target.value)} />
+              </label>
+              <label className="text-sm">Fine amount (£)
+                <input type="number" className={input} value={form.fine_amount} onChange={(e) => set('fine_amount', e.target.value)} />
+              </label>
+              <label className="text-sm">Reduced amount (£)
+                <input type="number" className={input} value={form.reduced_amount} onChange={(e) => set('reduced_amount', e.target.value)} />
+              </label>
+              <label className="text-sm">Reduced deadline
+                <input type="date" className={input} value={form.reduced_deadline} onChange={(e) => set('reduced_deadline', e.target.value)} />
+              </label>
+              <label className="text-sm">Final deadline
+                <input type="date" className={input} value={form.final_deadline} onChange={(e) => set('final_deadline', e.target.value)} />
+              </label>
+            </div>
+
+            <label className="text-sm block mt-3">Notes
+              <textarea className={`${input} resize-y min-h-[60px]`} value={form.notes} onChange={(e) => set('notes', e.target.value)} />
+            </label>
+
+            {/* Driver matching */}
+            <div className="mt-4 border-t pt-3">
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-medium text-slate-700">Driver match</span>
+                <button onClick={findDriver} disabled={matching}
+                  className="text-sm border rounded-lg px-3 py-1.5 hover:bg-slate-50 disabled:opacity-50">
+                  {matching ? 'Matching…' : '🔍 Find driver from hire data'}
+                </button>
+              </div>
+              {matches !== null && (
+                <div className="mt-2 space-y-1">
+                  {matches.length === 0 && (
+                    <p className="text-sm text-amber-700">No hire matched this reg + time. Save as-is and triage manually.</p>
+                  )}
+                  {matches.map((m) => (
+                    <label key={m.assignment_id}
+                      className={`flex items-center gap-2 text-sm border rounded-lg px-3 py-2 cursor-pointer ${picked?.assignment_id === m.assignment_id ? 'border-[#7B5EA7] bg-purple-50' : ''}`}>
+                      <input type="radio" name="driver" checked={picked?.assignment_id === m.assignment_id}
+                        onChange={() => setPicked(m)} />
+                      <span>
+                        <strong>{m.driver_name || '(no driver on row)'}</strong>
+                        {m.client_organisation_name ? ` · ${m.client_organisation_name}` : ''}
+                        {m.hh_job_number ? ` · job #${m.hh_job_number}` : ''}
+                      </span>
+                    </label>
+                  ))}
+                  {matches.length > 0 && (
+                    <button onClick={() => setPicked(null)} className="text-xs text-slate-500 hover:underline">
+                      Clear selection (log without a driver)
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          </>
+        )}
 
         {error && <p className="text-sm text-red-600 mt-3">{error}</p>}
 
         <div className="flex justify-end gap-2 mt-5">
           <button onClick={onClose} className="px-4 py-2 text-sm rounded-lg border hover:bg-slate-50">Cancel</button>
-          <button onClick={save} disabled={saving}
+          <button onClick={save} disabled={saving || !showForm}
             className="px-4 py-2 text-sm rounded-lg bg-[#7B5EA7] text-white hover:bg-[#6a5092] disabled:opacity-50">
             {saving ? 'Saving…' : 'Save PCN'}
           </button>
