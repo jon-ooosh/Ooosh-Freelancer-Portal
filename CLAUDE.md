@@ -2369,7 +2369,7 @@ These are existing standalone tools that currently push to Monday.com. They need
 - **Payment Portal** — Stripe payment processing, currently updates Monday.com. HIGH PRIORITY to repoint (after Steps 1-4).
 - **Staging Calculator** — ✅ **INTEGRATED into OP (Jun 2026)** — see "Staging Calculator Integration" below.
 - **Backline Matcher** — match client requirements to inventory (standalone, lives in separate repo `jon-ooosh/alternative-hirehop-stock`). Next to integrate.
-- **PCN Manager** — penalty charge notice processing (standalone, separate repo `jon-ooosh/PCN-Management-System`). Next to integrate.
+- **PCN Manager** — penalty charge notice processing. ✅ **INTEGRATED into OP (Jun 2026, PRs 1–3)** — see "PCN Module Integration" below. PR 4 (surfacing) outstanding.
 - **Cold Lead Finder** — Ticketmaster API integration (standalone, low priority)
 
 #### Staging Calculator Integration (Jun 2026)
@@ -2446,6 +2446,136 @@ replaced the dead manual requirement-add picker — templates + individual types
 - **Deferred:** UX/UI polish of the (admittedly cramped) calculator layout — second pass once it's
   live and jon's clicked around. Portal surfacing of shared staging links. Full React rewrite (only
   if it earns its keep — low frequency).
+
+#### PCN Module Integration (Jun 2026) — PRs 1–3 SHIPPED, PR 4 OUTSTANDING
+
+Penalty Charge Notice management, re-homed from the standalone Monday-driven
+`jon-ooosh/PCN-Management-System` Netlify app into OP **under Vehicles** before
+the Monday board is decommissioned. Standalone module, same shape as
+Storage/Holding (one engine table + `*_events` audit + FK anchors + reusable
+history section). **Full spec: `docs/PCN-MODULE-SPEC.md`** (read it first).
+
+**Where:** `/vehicles/pcns` (list, `PcnsPage.tsx`) + `/vehicles/pcns/:id`
+(detail, `PcnDetailPage.tsx`), "PCNs" in the Vehicles nav submenu, and a
+🅿️ "Log PCN" tile on `/quick` (mobile-first — most PCNs arrive on paper).
+
+**Storage** (migrations **130** `pcns` + `pcn_events` + settings seed, **131**
+`receipt_upload_token`):
+- `pcns` — `reference`, `fine_type` (private_pcn / council_pcn / police_nip /
+  toll / other), FK anchors (`vehicle_id` / `driver_id` / `assignment_id` /
+  `job_id` / `client_organisation_id`) + denormalised `hh_job_number` /
+  `vehicle_reg`, extracted detail (offence_at, location, issuing_authority,
+  fine/reduced amounts + deadlines, `extraction_confidence`), lifecycle
+  (`status`, `action_path`), handling-charge tracking, pay-direct/receipt loop
+  columns, `pcn_document_url`, `notes`, soft `is_deleted`.
+- **Statuses:** received / awaiting_driver_id / driver_notified_pay /
+  paid_by_driver / liability_transferred / paid_recharged / internal_ooosh /
+  internal_freelancer / under_query / closed.
+- **Settings** (in `system_settings`, category `pcn`): `pcn_handling_charge`
+  (35), `pcn_vat_rate` (20), `pcn_receipt_chase_days` (`3,5,7`),
+  `pcn_pay_direct_hours` (48), `pcn_police_nip_urgency_days` (5),
+  `pcn_hh_charge_item` (`b1744` — **⚠️ placeholder; jon to confirm the real
+  HireHop stock-item id for the £35 handling charge before transfer/recharge is
+  used in anger**).
+
+**Backend** `routes/pcns.ts` (mounted `/api/pcns`, `STAFF_ROLES` gate) +
+`services/pcn-extract.ts` (Claude Haiku, extraction-first) +
+`services/pcn-actions.ts` (the action engine) + `services/pcn-chase.ts`
+(chase ladder). Public receipt endpoints are defined BEFORE the auth gate.
+
+**EXTRACTION-FIRST is the core UX** (jon was firm on this). The Log-PCN modal
+leads with upload → `POST /api/pcns/extract` (Claude Haiku, `config/anthropic.ts`
+guarded → 503 if no key) → pre-filled editable review → save. Manual entry is the
+FALLBACK link. Photos compressed (~1600px via `components/holding/compress`)
+before both the extract send and the R2 stash. PDF upload supported for laptop.
+
+**Driver matching** — `GET /api/pcns/match?reg=&offence_at=` reads
+`vehicle_hire_assignments ⋈ drivers ⋈ jobs` with the dual-match-on-hh_job_number
+pattern (V&D rows carry only `hirehop_job_id`), deduped per (driver, jobKey).
+Also returns **`crew_candidates`** — freelancers/crew on transport quotes whose
+job spans the offence date — the decision-support for V&D / D&C runs where no reg
+is recorded ("was this a van & driver run? who was driving?").
+
+**Action chooser** (`components/PcnActionChooser.tsx`, the "what next?" surface —
+post-create step in the modal + panel on the detail page). Seven paths via
+`POST /api/pcns/:id/action` (`applyPcnAction` in `pcn-actions.ts`):
+| Action | Email | £35 charge | Tier |
+|---|---|---|---|
+| 💳 Driver to pay direct (lenient, 48h + closed loop) | driver | no | STAFF |
+| 📨 Transfer liability to driver | driver | yes (default on) | **MANAGER** |
+| 🧾 Pay & recharge client | client | yes (default on) | **MANAGER** |
+| ❓ Request driver ID (NIP-aware template) | client | no | STAFF |
+| 🏢 Internal — Ooosh / 🧑‍🔧 Freelancer / ⚖️ Query | none | no | STAFF |
+
+Each fires the branded client/driver email (driver email → `resolveClientEmailTarget`
+→ info@ fallback, **attaches the notice scan** from R2) and the conditional
+£35+VAT HireHop charge (transfer/recharge only — `addHandlingCharge` ports the
+legacy hirehop-charge.js status/lock guards, **skips closed HH jobs** status
+7/9/10/11 with a clear message). MANAGER-tier gate on the charge-adding actions
+(`MANAGER_TIER_ACTIONS` set). Every action accepts an optional `resolution_note`
+("Dave to pay direct / deduct from next invoice") appended to notes + timeline.
+
+**Pay-direct closed loop (PR 3):** the lenient path, made rock-solid.
+- `applyPcnAction` for `pay_direct` mints a **status-bound** `receipt_upload_token`
+  (migration 131 — lives for days while chases run, rejects once paid/escalated;
+  mirrors the OOH parking token, NOT the 15-min `mobile_upload_tokens`). The
+  `pcn_pay_direct` email carries an "Upload proof of payment" button →
+  `{{receiptUploadUrl}}` → public no-login page `/pcn-receipt/:token`
+  (`PcnReceiptUploadPage.tsx`, camera capture).
+- Public `GET`/`POST /api/pcns/public/receipt/:token` (before the auth gate):
+  upload attaches to R2 (`files/pcn-receipts/<id>/…`), flips status →
+  `paid_by_driver`, logs `receipt_received`, emails **info@**
+  (`pcn_receipt_received_alert`) so a human verifies.
+- **Chase ladder** `services/pcn-chase.ts` (scheduler daily **09:35
+  Europe/London**): scans `driver_notified_pay` + no receipt past
+  `pay_direct_deadline`, chases on the 3/5/7-day ladder (re-sends the pay-direct
+  email with the same upload link), idempotent via `receipt_chase_level` +
+  `receipt_chase_sent_for` (**stamp-first**, per the sanity-scanner convention).
+  **info@ alerted at EVERY rung** (`pcn_chase_alert`); final rung flags one-click
+  escalation to Transfer Liability.
+
+**Email templates** (all in `email-templates/index.ts`): `pcn_transfer_liability`,
+`pcn_pay_direct` (has the upload CTA), `pcn_request_driver_id`,
+`pcn_police_nip_urgent`, `pcn_pay_recharge` (client-facing, carry HH job number);
+`pcn_receipt_received_alert` + `pcn_chase_alert` (internal/info@). NB the template
+substituter only supports `{{#if}}` — NOT `{{^if}}`; compute either/or strings as
+a variable (the chase alert passes a pre-built `subjectLine`).
+
+**Detail page** surfaces: clickable Vehicle→fleet / Client→org / Job→job links,
+"View scanned PCN" + "View payment receipt" authenticated blob lightboxes
+(`DocLightbox`, reuses `/api/files/download`), pay-direct deadline + chase-progress
+panel, action chooser + a "Manual override (no email/no charge)" details block,
+event timeline.
+
+**Cutover note:** historic-PCN triage is manual (OP live ~10 weeks; 99% of future
+PCNs match a live hire). No Monday data migration — the Monday board just gets
+decommissioned. No `ANTHROPIC_API_KEY` on the server = extraction 503s cleanly,
+manual entry still works.
+
+**⚠️ PR 4 — Surfacing (OUTSTANDING, the next session's work):**
+- **`PcnHistorySection.tsx`** — reusable component (by vehicle / driver / person /
+  org), mounted as a tab/section on VehicleDetailPage, DriverDetailPage,
+  PersonDetailPage, OrganisationDetailPage. Backed by the existing
+  `GET /api/pcns/by-vehicle|by-driver|by-org/:id` endpoints. **This is also where
+  the freelancer "this guy always gets speeding tickets" view lands** (jon's
+  request — keep it as a manual at-a-glance history, no automation).
+  - **Needs a `person_id` anchor on `pcns`** (new migration) so a freelancer PCN
+    (a person on a `quote_assignment`, not a `driver`) can link to their address-
+    book record + show in their PcnHistorySection. Add `by-person/:id` endpoint.
+    Wire the crew-candidate pick on the action step to set `person_id` for
+    internal_freelancer.
+- **Conditional Job-view PCN card** — on Job Detail, a card that appears ONLY when
+  PCNs are associated with the job (received / transferred / sorted / outstanding
+  per notice). Backed by `GET /api/pcns/by-job/:jobId` (already exists).
+- **Dashboard NeedsAttention buckets** — Police NIP 28-day urgency (time-critical,
+  red), ready-to-transfer (drivers chased to exhaustion), upcoming deadlines.
+  Follow the dashboard bucket extension contract (`/api/dashboard/operations`
+  `needs_attention` + `NABucket` in `NeedsAttention.tsx`).
+- **Deferred / discuss:** freelancer recharge MECHANISM (deduct-from-pay vs
+  separate invoice — distinct from the client £35 HH charge; jon: keep manual for
+  now, just record what was done via `resolution_note`). Charge-to-closed-HH-job
+  solution (re-opening HH is too messy; likely an OP→Xero answer once the rest of
+  PCN is done — edge-case it for now).
 
 ### Future Enhancements (captured, not scheduled)
 
