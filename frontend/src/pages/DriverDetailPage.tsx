@@ -3,6 +3,7 @@ import { useParams, useNavigate, Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import OohComplianceTab from '../components/OohComplianceTab';
+import PcnHistorySection from '../components/PcnHistorySection';
 import ExcessPaymentModal from '../components/ExcessPaymentModal';
 import CalculatedExcessEditModal from '../components/CalculatedExcessEditModal';
 import type { JobExcess } from '../../../shared/types';
@@ -354,7 +355,8 @@ export default function DriverDetailPage() {
   const [editingCalcExcess, setEditingCalcExcess] = useState(false);
   const [auditLog, setAuditLog] = useState<AuditLogEntry[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'details' | 'hires' | 'excess' | 'ooh'>('details');
+  const [activeTab, setActiveTab] = useState<'details' | 'hires' | 'excess' | 'ooh' | 'pcns'>('details');
+  const [pcnCount, setPcnCount] = useState<{ open: number; total: number } | null>(null);
   const [editing, setEditing] = useState(false);
   const [editData, setEditData] = useState<Record<string, any>>({});
   const [saving, setSaving] = useState(false);
@@ -371,6 +373,7 @@ export default function DriverDetailPage() {
     setActiveTab('details');
     setHireHistory([]);
     setExcessHistory([]);
+    setPcnCount(null);
     setEditing(false);
     setEditData({});
   }, [id]);
@@ -659,6 +662,7 @@ export default function DriverDetailPage() {
             { key: 'hires', label: 'Hire History' },
             { key: 'excess', label: 'Excess History' },
             { key: 'ooh', label: 'OOH' },
+            { key: 'pcns', label: pcnCount ? `PCNs (${pcnCount.total})` : 'PCNs' },
           ] as const).map(({ key, label }) => (
             <button
               key={key}
@@ -693,6 +697,14 @@ export default function DriverDetailPage() {
         )}
         {activeTab === 'hires' && <HireHistoryTab history={hireHistory} />}
         {activeTab === 'ooh' && <OohComplianceTab driverId={driver.id} />}
+        {activeTab === 'pcns' && (
+          <PcnHistorySection
+            entityType="driver"
+            entityId={driver.id}
+            showRepeatFlag
+            onCount={(open, total) => setPcnCount({ open, total })}
+          />
+        )}
         {activeTab === 'excess' && (
           <ExcessHistoryTab
             history={excessHistory}

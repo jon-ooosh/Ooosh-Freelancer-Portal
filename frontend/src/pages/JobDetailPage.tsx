@@ -5,6 +5,7 @@ import { getPaymentState, PAYMENT_STATE_LABELS, PAYMENT_STATE_CLASSES } from '..
 import ActivityTimeline from '../components/ActivityTimeline';
 import JobProblemsPanel from '../components/JobProblemsPanel';
 import HeldItemsSection from '../components/HeldItemsSection';
+import PcnHistorySection from '../components/PcnHistorySection';
 import SendMerchFormButton from '../components/SendMerchFormButton';
 import TransportCalculator from '../components/TransportCalculator';
 import { StagingCalculatorModal, StagingOverviewCard } from '../components/StagingCalculator';
@@ -3786,6 +3787,12 @@ export default function JobDetailPage() {
 
           {/* Staging — surfaces once a plan exists (created from Tools → Staging Calculator) */}
           {id && <StagingOverviewCard jobId={id} refreshKey={stagingRefreshKey} />}
+
+          {/* PCNs — penalty charge notices on this job. Renders only when rows
+              exist (a PCN isn't a per-job prep gate); one row per notice. */}
+          {id && (
+            <PcnHistorySection entityType="job" entityId={id} hideWhenEmpty heading="🅿️ Penalty Charge Notices" />
+          )}
 
           {/* Holding for this client (incoming deliveries) now lives inside the
               prep checklist's "Held for Clients" block — rolled in with the merch

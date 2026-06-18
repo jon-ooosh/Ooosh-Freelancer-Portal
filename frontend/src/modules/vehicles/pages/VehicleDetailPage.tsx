@@ -9,6 +9,7 @@ import { VehicleLocationTab } from '../components/tracking/VehicleLocationTab'
 import { PrepHistoryTab } from '../components/prep/PrepHistoryTab'
 import ServiceHistoryTab from '../components/service/ServiceHistoryTab'
 import { VehicleEventsHistory } from '../components/events/VehicleEventsHistory'
+import { Pcn, PcnStatusPill, pcnTrafficLight, PCN_LIGHT_DOT, FINE_TYPE_LABEL, fmtPcnDate, fmtPcnMoney } from '../../../components/pcn/format'
 import { updateVehicle, correctCurrentMileage, fetchComplianceSettings, DEFAULT_COMPLIANCE, uploadVehicleFile, deleteVehicleFile, markVehicleWashed } from '../lib/fleet-api'
 import { checkMileagePlausibility } from '../lib/mileage-sanity'
 import { getRossettsStatus, URGENCY_DOT, URGENCY_TEXT } from '../lib/service-status'
@@ -238,7 +239,7 @@ export function VehicleDetailPage() {
   })
   const cs = complianceSettings || DEFAULT_COMPLIANCE
   const [searchParams] = useSearchParams()
-  const validTabs = ['details', 'service', 'issues', 'history', 'location', 'preps'] as const
+  const validTabs = ['details', 'service', 'issues', 'history', 'location', 'preps', 'pcns'] as const
   type TabName = typeof validTabs[number]
   const initialTab = validTabs.includes(searchParams.get('tab') as TabName) ? (searchParams.get('tab') as TabName) : 'details'
   const [activeTab, setActiveTab] = useState<TabName>(initialTab)
@@ -458,7 +459,7 @@ export function VehicleDetailPage() {
 
       {/* Tab bar */}
       <div className="flex gap-1 rounded-lg bg-gray-100 p-1">
-        {(['details', 'service', 'issues', 'history', 'preps', 'location'] as const).map(tab => (
+        {(['details', 'service', 'issues', 'history', 'preps', 'location', 'pcns'] as const).map(tab => (
           <button
             key={tab}
             type="button"
@@ -469,7 +470,7 @@ export function VehicleDetailPage() {
                 : 'text-gray-500 hover:text-gray-700'
             }`}
           >
-            {tab === 'details' ? 'Details' : tab === 'service' ? 'Service' : tab === 'issues' ? 'Issues' : tab === 'history' ? 'Events' : tab === 'preps' ? 'Preps' : 'Location'}
+            {tab === 'details' ? 'Details' : tab === 'service' ? 'Service' : tab === 'issues' ? 'Issues' : tab === 'history' ? 'Events' : tab === 'preps' ? 'Preps' : tab === 'location' ? 'Location' : 'PCNs'}
           </button>
         ))}
       </div>
@@ -487,6 +488,11 @@ export function VehicleDetailPage() {
       {/* Issues tab — OP job_issues backed, open issues surfaced by default */}
       {activeTab === 'issues' && (
         <VehicleIssuesSectionOp vehicleId={vehicle.id} />
+      )}
+
+      {/* PCNs tab — OP pcns backed, penalty charge notices against this reg */}
+      {activeTab === 'pcns' && (
+        <VehiclePcnsSectionOp vehicleId={vehicle.id} />
       )}
 
       {/* Events tab — book-outs, check-ins, preps. Book-out/check-in rows
@@ -1467,6 +1473,95 @@ function OpIssueRowCard({ issue }: { issue: OpIssueRow }) {
             {new Date(issue.updated_at).toLocaleDateString('en-GB')}
           </div>
         </div>
+      </div>
+    </Link>
+  )
+}
+
+// ── PCNs (OP pcns-backed, mirrors the Issues section above) ──────────────
+const PCN_RESOLVED = new Set(['paid_by_driver', 'paid_recharged', 'internal_ooosh', 'internal_freelancer', 'closed'])
+
+function VehiclePcnsSectionOp({ vehicleId }: { vehicleId: string }) {
+  const [showResolved, setShowResolved] = useState(false)
+
+  const { data: pcns = [], isLoading } = useQuery({
+    queryKey: ['op-vehicle-pcns', vehicleId],
+    enabled: Boolean(vehicleId),
+    queryFn: async (): Promise<Pcn[]> => {
+      const resp = await apiFetch(`/api/pcns/by-vehicle/${vehicleId}`)
+      if (!resp.ok) throw new Error(`Failed to fetch PCNs: ${resp.status}`)
+      const body = await resp.json() as { data: Pcn[] }
+      return body.data || []
+    },
+    staleTime: 60_000,
+  })
+
+  const open = pcns.filter(p => !PCN_RESOLVED.has(p.status))
+  const resolved = pcns.filter(p => PCN_RESOLVED.has(p.status))
+
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white p-4">
+      <div className="mb-2 flex items-center justify-between">
+        <h3 className="text-sm font-semibold uppercase tracking-wide text-gray-500">
+          PCNs {pcns.length > 0 && <span className="normal-case text-gray-400">({pcns.length})</span>}
+        </h3>
+        <Link to="/vehicles/pcns" className="text-xs font-medium text-blue-600">All PCNs →</Link>
+      </div>
+
+      {isLoading ? (
+        <p className="text-sm text-gray-400 text-center py-4">Loading…</p>
+      ) : pcns.length === 0 ? (
+        <p className="text-sm text-gray-400 text-center py-4">No penalty charge notices</p>
+      ) : (
+        <div className="space-y-2">
+          {open.length > 0 && (
+            <>
+              <p className="text-[11px] font-medium uppercase tracking-wide text-amber-600">In flight ({open.length})</p>
+              {open.map(p => <OpPcnRowCard key={p.id} pcn={p} />)}
+            </>
+          )}
+          {resolved.length > 0 && (
+            <>
+              <button
+                type="button"
+                onClick={() => setShowResolved(!showResolved)}
+                className="mt-1 flex w-full items-center justify-between text-[11px] font-medium uppercase tracking-wide text-green-600"
+              >
+                <span>Resolved ({resolved.length})</span>
+                <span className="text-gray-400">{showResolved ? 'Hide' : 'Show'}</span>
+              </button>
+              {showResolved && resolved.map(p => <OpPcnRowCard key={p.id} pcn={p} />)}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function OpPcnRowCard({ pcn }: { pcn: Pcn }) {
+  const light = pcnTrafficLight(pcn)
+  const sub = [
+    pcn.offence_at ? `${fmtPcnDate(pcn.offence_at)}${pcn.offence_time_text ? ` ${pcn.offence_time_text}` : ''}` : null,
+    pcn.hh_job_number ? `J-${pcn.hh_job_number}` : null,
+    pcn.client_organisation_name || null,
+    pcn.fine_amount != null ? fmtPcnMoney(pcn.fine_amount) : null,
+  ].filter(Boolean).join(' · ')
+  return (
+    <Link
+      to={`/vehicles/pcns/${pcn.id}`}
+      className="block rounded border border-gray-200 bg-white px-2.5 py-2 text-sm hover:border-ooosh-300 hover:bg-ooosh-50/40"
+    >
+      <div className="flex items-start gap-2">
+        <span className={`mt-1.5 h-2 w-2 rounded-full shrink-0 ${PCN_LIGHT_DOT[light]}`} title={light} />
+        <div className="min-w-0 flex-1">
+          <div className="font-medium text-gray-900 truncate">
+            {pcn.reference || '(no reference)'}
+            <span className="ml-1.5 text-[10px] text-gray-400">{FINE_TYPE_LABEL[pcn.fine_type] || pcn.fine_type}</span>
+          </div>
+          {sub && <div className="text-[10px] text-gray-500 mt-0.5">{sub}</div>}
+        </div>
+        <PcnStatusPill status={pcn.status} />
       </div>
     </Link>
   )
