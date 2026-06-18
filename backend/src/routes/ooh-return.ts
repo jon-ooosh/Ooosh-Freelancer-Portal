@@ -22,6 +22,7 @@ import {
   sendOohInfoEmailsForJob,
 } from '../services/ooh-return';
 import { getLatestPositionForReg } from '../services/traccar-server';
+import { getSystemSettings } from '../routes/system-settings';
 import {
   resolveJobId,
   resolveVehicleId,
@@ -55,6 +56,15 @@ router.get('/by-token/:token', publicLimiter, async (req: Request, res: Response
     res.status(404).json({ error: 'Link is no longer valid (van may already be checked in).' });
     return;
   }
+  // The return procedure (gate code, address, key drop, etc.) — same content as
+  // the OOH info email, so this token-gated link is a one-stop shop for the driver.
+  const s = await getSystemSettings([
+    'ooh_gate_code',
+    'ooh_yard_address',
+    'ooh_yard_maps_url',
+    'ooh_keydrop_photo_url',
+    'ooh_what3words',
+  ]);
   res.json({
     data: {
       vehicleReg: ctx.vehicleReg,
@@ -62,6 +72,13 @@ router.get('/by-token/:token', publicLimiter, async (req: Request, res: Response
       jobName: ctx.jobName,
       driverName: ctx.driverName,
       alreadySubmitted: ctx.alreadySubmitted,
+      info: {
+        gateCode: s.ooh_gate_code || null,
+        yardAddress: s.ooh_yard_address || null,
+        yardMapsUrl: s.ooh_yard_maps_url || null,
+        keydropPhotoUrl: s.ooh_keydrop_photo_url || null,
+        what3words: s.ooh_what3words || null,
+      },
     },
   });
 });
