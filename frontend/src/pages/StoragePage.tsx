@@ -26,7 +26,7 @@ interface Room {
 interface Tenancy {
   id: string; room_id: string; room_name: string; size_category: SizeCat; location_type?: string | null;
   organisation_id: string | null;
-  organisation_name: string | null; lead_contact_name: string | null; status: string;
+  organisation_name: string | null; lead_contact_name: string | null; lead_contact_person_id: string | null; status: string;
   move_in_date: string | null; move_out_date: string | null; weekly_rate: number; billing_mode: string;
   billing_cadence: string; next_bill_date: string | null; next_rate_review_date: string | null;
   last_rate_change_date: string | null; previous_weekly_rate: number | null; tcs_accepted_at: string | null;
@@ -79,7 +79,7 @@ function EntitySearch({ kind, value, label, onPick }: {
   }, [q, kind]);
   return (
     <div className="relative">
-      <label className="block text-xs font-medium text-slate-500 mb-1">{label}</label>
+      {label && <label className="block text-xs font-medium text-slate-500 mb-1">{label}</label>}
       {value ? (
         <div className="flex items-center gap-2 border border-slate-300 rounded-lg px-3 py-2 bg-slate-50">
           <span className="text-sm flex-1">{value}</span>
@@ -97,6 +97,46 @@ function EntitySearch({ kind, value, label, onPick }: {
               ))}
             </div>
           )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── Lead-contact picker scoped to the selected org (global search fallback) ──
+interface OrgPerson { person_id: string; person_name: string; role: string | null; status: string }
+function ContactPicker({ orgId, value, onPick }: { orgId: string | null; value: string; onPick: (id: string | null, name: string) => void }) {
+  const [orgPeople, setOrgPeople] = useState<OrgPerson[]>([]);
+  const [searchAll, setSearchAll] = useState(false);
+  useEffect(() => {
+    setSearchAll(false);
+    if (!orgId) { setOrgPeople([]); return; }
+    api.get<{ people?: OrgPerson[] }>(`/organisations/${orgId}`)
+      .then((o) => setOrgPeople((o.people || []).filter((p) => p.status !== 'ended')))
+      .catch(() => setOrgPeople([]));
+  }, [orgId]);
+  return (
+    <div>
+      <label className="block text-xs font-medium text-slate-500 mb-1">Lead contact</label>
+      {value ? (
+        <div className="flex items-center gap-2 border border-slate-300 rounded-lg px-3 py-2 bg-slate-50">
+          <span className="text-sm flex-1">{value}</span>
+          <button type="button" onClick={() => onPick(null, '')} className="text-xs text-red-500">clear</button>
+        </div>
+      ) : orgId && orgPeople.length > 0 && !searchAll ? (
+        <div className="space-y-1">
+          {orgPeople.map((p) => (
+            <button type="button" key={p.person_id} onClick={() => onPick(p.person_id, p.person_name)}
+              className="block w-full text-left px-3 py-2 text-sm border border-slate-200 rounded-lg hover:bg-slate-50">
+              {p.person_name}{p.role ? <span className="text-slate-400"> · {p.role}</span> : ''}
+            </button>
+          ))}
+          <button type="button" onClick={() => setSearchAll(true)} className="text-xs text-[#7B5EA7]">search all people instead</button>
+        </div>
+      ) : (
+        <>
+          <EntitySearch kind="people" label="" value="" onPick={onPick} />
+          {orgId && orgPeople.length > 0 && <button type="button" onClick={() => setSearchAll(false)} className="text-xs text-[#7B5EA7] mt-1">back to {`${orgPeople.length}`} org contact{orgPeople.length !== 1 ? 's' : ''}</button>}
         </>
       )}
     </div>
@@ -393,8 +433,8 @@ function MoveInModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =>
             <option value="">Select a room…</option>
             {rooms.map((r) => <option key={r.id} value={r.id}>{r.name} ({r.size_category}){r.default_weekly_rate != null ? ` · ${money(r.default_weekly_rate)}/wk` : ''}</option>)}
           </select></div>
-        <EntitySearch kind="organisations" label="Client organisation" value={f.org_name} onPick={(id, name) => setF({ ...f, organisation_id: id, org_name: name })} />
-        <EntitySearch kind="people" label="Lead contact" value={f.contact_name} onPick={(id, name) => setF({ ...f, lead_contact_person_id: id, contact_name: name })} />
+        <EntitySearch kind="organisations" label="Client organisation" value={f.org_name} onPick={(id, name) => setF({ ...f, organisation_id: id, org_name: name, lead_contact_person_id: null, contact_name: '' })} />
+        <ContactPicker orgId={f.organisation_id} value={f.contact_name} onPick={(id, name) => setF({ ...f, lead_contact_person_id: id, contact_name: name })} />
         <div className="grid grid-cols-2 gap-3">
           <div><label className="block text-xs text-slate-500 mb-1">Weekly rate £</label><input className={inputCls} type="number" value={f.weekly_rate} onChange={(e) => setF({ ...f, weekly_rate: e.target.value })} /></div>
           <div><label className="block text-xs text-slate-500 mb-1">Move-in date</label><input className={inputCls} type="date" value={f.move_in_date} onChange={(e) => setF({ ...f, move_in_date: e.target.value })} /></div>
@@ -426,10 +466,87 @@ function MoveInModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =>
   );
 }
 
+// Full edit of a tenancy's mutable fields (everything except weekly rate, which
+// goes through Change rate so it keeps history, and the room, which is fixed for
+// the life of the tenancy — a room change is a move-out + move-in).
+function EditTenancyForm({ t, onCancel, onSaved }: { t: Tenancy; onCancel: () => void; onSaved: () => void }) {
+  const [f, setF] = useState({
+    organisation_id: t.organisation_id, org_name: t.organisation_name || '',
+    lead_contact_person_id: t.lead_contact_person_id, contact_name: t.lead_contact_name || '',
+    access_type: t.access_type || 'door_code', access_code: t.access_code || '', key_location: t.key_location || '',
+    billing_mode: t.billing_mode, billing_cadence: t.billing_cadence,
+    next_bill_date: (t.next_bill_date || '').slice(0, 10),
+    next_rate_review_date: (t.next_rate_review_date || '').slice(0, 10),
+    move_in_date: (t.move_in_date || '').slice(0, 10),
+    status: t.status, notes: t.notes || '',
+  });
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+  async function save() {
+    setSaving(true); setErr('');
+    try {
+      await api.put(`/storage/tenancies/${t.id}`, {
+        organisation_id: f.organisation_id, lead_contact_person_id: f.lead_contact_person_id,
+        status: f.status, move_in_date: f.move_in_date || null,
+        access_type: f.access_type, access_code: f.access_code || null, key_location: f.key_location || null,
+        billing_mode: f.billing_mode, billing_cadence: f.billing_cadence,
+        next_bill_date: f.next_bill_date || null, next_rate_review_date: f.next_rate_review_date || null,
+        notes: f.notes || null,
+      });
+      onSaved();
+    } catch (e) { setErr(e instanceof Error ? e.message : 'Save failed'); } finally { setSaving(false); }
+  }
+  return (
+    <div className="space-y-3">
+      <EntitySearch kind="organisations" label="Client organisation" value={f.org_name}
+        onPick={(id, name) => setF({ ...f, organisation_id: id, org_name: name, lead_contact_person_id: null, contact_name: '' })} />
+      <ContactPicker orgId={f.organisation_id} value={f.contact_name}
+        onPick={(id, name) => setF({ ...f, lead_contact_person_id: id, contact_name: name })} />
+      <div className="grid grid-cols-2 gap-3">
+        <div><label className="block text-xs text-slate-500 mb-1">Access</label>
+          <select className={inputCls} value={f.access_type} onChange={(e) => setF({ ...f, access_type: e.target.value })}>
+            <option value="door_code">Door code</option><option value="we_hold_key">We hold a key</option><option value="client_key">Client key / padlock</option>
+          </select></div>
+        {f.access_type === 'door_code' && <div><label className="block text-xs text-slate-500 mb-1">Door code</label><input className={inputCls} value={f.access_code} onChange={(e) => setF({ ...f, access_code: e.target.value })} /></div>}
+        {f.access_type === 'we_hold_key' && <div><label className="block text-xs text-slate-500 mb-1">Key location</label><input className={inputCls} value={f.key_location} onChange={(e) => setF({ ...f, key_location: e.target.value })} /></div>}
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div><label className="block text-xs text-slate-500 mb-1">Billing</label>
+          <select className={inputCls} value={f.billing_mode} onChange={(e) => setF({ ...f, billing_mode: e.target.value })}>
+            <option value="manual">We invoice</option><option value="recurring">Recurring (Xero)</option>
+          </select></div>
+        {f.billing_mode === 'manual' && <div><label className="block text-xs text-slate-500 mb-1">Cadence</label>
+          <select className={inputCls} value={f.billing_cadence} onChange={(e) => setF({ ...f, billing_cadence: e.target.value })}>
+            <option value="monthly">Monthly</option><option value="quarterly">Quarterly</option><option value="annual">Annual</option><option value="custom">Custom</option>
+          </select></div>}
+      </div>
+      {f.billing_mode === 'manual' && <div><label className="block text-xs text-slate-500 mb-1">Next invoice due</label><input className={inputCls} type="date" value={f.next_bill_date} onChange={(e) => setF({ ...f, next_bill_date: e.target.value })} /></div>}
+      <div className="grid grid-cols-2 gap-3">
+        <div><label className="block text-xs text-slate-500 mb-1">Next rate review</label><input className={inputCls} type="date" value={f.next_rate_review_date} onChange={(e) => setF({ ...f, next_rate_review_date: e.target.value })} /></div>
+        <div><label className="block text-xs text-slate-500 mb-1">Move-in date</label><input className={inputCls} type="date" value={f.move_in_date} onChange={(e) => setF({ ...f, move_in_date: e.target.value })} /></div>
+      </div>
+      <div><label className="block text-xs text-slate-500 mb-1">Status</label>
+        <select className={inputCls} value={f.status} onChange={(e) => setF({ ...f, status: e.target.value })}>
+          <option value="reserved">Reserved</option><option value="active">Active</option><option value="notice">Notice</option>
+        </select></div>
+      <div><label className="block text-xs text-slate-500 mb-1">Notes</label><textarea className={inputCls} rows={2} value={f.notes} onChange={(e) => setF({ ...f, notes: e.target.value })} /></div>
+      {err && <p className="text-red-600 text-sm">{err}</p>}
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-xs text-slate-400">Weekly rate is changed via “Change rate” (keeps history).</p>
+        <div className="flex gap-2">
+          <button onClick={onCancel} className="px-4 py-2 text-sm text-slate-600">Cancel</button>
+          <button onClick={save} disabled={saving} className="px-4 py-2 text-sm bg-[#7B5EA7] text-white rounded-lg disabled:opacity-50">{saving ? 'Saving…' : 'Save changes'}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function TenancyDetailModal({ id, isAdminManager, onClose, onChange, onMovedOut }: { id: string; isAdminManager: boolean; onClose: () => void; onChange: () => void; onMovedOut?: (size: string) => void }) {
   const [t, setT] = useState<Tenancy | null>(null);
   const [busy, setBusy] = useState('');
   const [msg, setMsg] = useState('');
+  const [editing, setEditing] = useState(false);
   const load = useCallback(async () => { setT((await api.get<{ data: Tenancy }>(`/storage/tenancies/${id}`)).data); }, [id]);
   useEffect(() => { load(); }, [load]);
 
@@ -438,6 +555,14 @@ function TenancyDetailModal({ id, isAdminManager, onClose, onChange, onMovedOut 
     try { await fn(); await load(); onChange(); } catch (e) { setMsg(e instanceof Error ? e.message : 'Failed'); } finally { setBusy(''); }
   }
   if (!t) return <Modal title="Tenancy" onClose={onClose}><p className="text-slate-400">Loading…</p></Modal>;
+
+  if (editing) {
+    return (
+      <Modal title={`Edit — ${t.room_name}`} onClose={() => setEditing(false)}>
+        <EditTenancyForm t={t} onCancel={() => setEditing(false)} onSaved={() => { setEditing(false); load(); onChange(); }} />
+      </Modal>
+    );
+  }
 
   return (
     <Modal title={`${t.room_name} — ${t.organisation_name || t.lead_contact_name || 'Tenancy'}`} onClose={onClose}>
@@ -449,9 +574,12 @@ function TenancyDetailModal({ id, isAdminManager, onClose, onChange, onMovedOut 
           {t.billing_mode === 'manual' && <Field label="Next invoice due" value={fmtDate(t.next_bill_date)} />}
           <Field label="Next rate review" value={fmtDate(t.next_rate_review_date)} />
           <Field label="T&Cs" value={t.tcs_accepted_at ? `Accepted ${fmtDate(t.tcs_accepted_at)}` : 'Not accepted'} />
-          {t.access_type === 'door_code' && t.access_code && <Field label="Door code" value={t.access_code} />}
-          {t.access_type === 'we_hold_key' && <Field label="Access" value={`We hold a key${t.key_location ? ` · ${t.key_location}` : ''}`} />}
-          {t.access_type === 'client_key' && <Field label="Access" value="Client key / padlock" />}
+          <Field label="Access" value={
+            t.access_type === 'door_code' ? `Door code: ${t.access_code || '— not set'}`
+            : t.access_type === 'we_hold_key' ? `We hold a key${t.key_location ? ` · ${t.key_location}` : ''}`
+            : t.access_type === 'client_key' ? 'Client key / padlock'
+            : '—'
+          } />
         </div>
 
         {msg && <p className="text-red-600">{msg}</p>}
@@ -464,6 +592,10 @@ function TenancyDetailModal({ id, isAdminManager, onClose, onChange, onMovedOut 
           {!t.tcs_accepted_at && t.status !== 'ended' && (
             <button disabled={!!busy} onClick={() => action('tcs', async () => { await api.post(`/storage/tenancies/${id}/send-tcs`, {}); setMsg('T&Cs link sent.'); })}
               className="px-3 py-1.5 bg-slate-700 text-white rounded-lg text-xs">✉ Send T&Cs</button>
+          )}
+          {t.status !== 'ended' && (
+            <button disabled={!!busy} onClick={() => setEditing(true)}
+              className="px-3 py-1.5 bg-[#7B5EA7] text-white rounded-lg text-xs">✏️ Edit details</button>
           )}
           {isAdminManager && t.status !== 'ended' && <RateButton id={id} current={t.weekly_rate} onDone={() => { load(); onChange(); }} />}
           {t.status !== 'ended' && (
