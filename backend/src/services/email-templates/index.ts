@@ -1596,8 +1596,46 @@ const templates: Record<string, EmailTemplate> = {
       <p style="margin:0 0 16px;padding:12px 14px;background-color:#fef3c7;border-radius:8px;font-size:15px;color:#92400e;line-height:1.6;">
         <strong>If you wish to pay the fine directly</strong>, please do so within <strong>48 hours</strong> and forward us a receipt as proof for our records. <strong>If you wish to appeal</strong>, or we don't receive proof of payment, we'll transfer liability into your name with an administration fee of <strong>{{handlingFee}}+VAT</strong>.
       </p>
-      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">Please send your receipt to <a href="mailto:{{oooshEmail}}" style="color:#7B5EA7;text-decoration:none;">{{oooshEmail}}</a>. A copy of the notice is attached.</p>
+      {{#if receiptUploadUrl}}
+      <table role="presentation" width="100%" style="margin:0 0 16px;"><tr><td align="center">
+        <a href="{{receiptUploadUrl}}" style="display:inline-block;padding:12px 28px;background-color:#7B5EA7;color:#ffffff;font-size:15px;font-weight:600;text-decoration:none;border-radius:8px;">Upload proof of payment</a>
+      </td></tr></table>
+      <p style="margin:0 0 16px;font-size:13px;color:#64748b;line-height:1.6;text-align:center;">Tap the button to upload your receipt — quickest way to keep this off your account.</p>
+      {{/if}}
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">You can also reply with your receipt or send it to <a href="mailto:{{oooshEmail}}" style="color:#7B5EA7;text-decoration:none;">{{oooshEmail}}</a>. A copy of the notice is attached.</p>
       <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">Any queries, reply to this email or call {{oooshPhone}}.</p>
+    `,
+  },
+
+  pcn_receipt_received_alert: {
+    variant: 'internal',
+    subject: 'PCN proof of payment received — {{vehicleReg}} ({{pcnReference}})',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:18px;color:#1e293b;">Driver uploaded proof of payment</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        <strong>{{driverName}}</strong> has uploaded a receipt for PCN <strong>{{pcnReference}}</strong> (vehicle {{vehicleReg}}{{#if jobNumber}}, job #{{jobNumber}}{{/if}}).
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        The PCN is now marked <strong>Paid by Driver</strong>. Please verify the receipt and close it off.
+      </p>
+      <p style="margin:0;font-size:14px;"><a href="{{pcnUrl}}" style="color:#7B5EA7;">Open the PCN →</a></p>
+    `,
+  },
+
+  pcn_chase_alert: {
+    variant: 'internal',
+    subject: '{{subjectLine}}',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:18px;color:#1e293b;">Pay-direct chase {{level}} of {{total}} sent</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        <strong>{{driverName}}</strong> still hasn't sent proof of payment for PCN <strong>{{pcnReference}}</strong> (vehicle {{vehicleReg}}) — now <strong>{{daysPast}} days</strong> past the pay-direct deadline. Reminder #{{level}} has just been re-sent.
+      </p>
+      {{#if escalate}}
+      <p style="margin:0 0 16px;padding:12px 14px;background-color:#fee2e2;border-radius:8px;font-size:15px;color:#991b1b;line-height:1.6;">
+        <strong>This was the final chase.</strong> Consider transferring liability into the driver's name (adds the handling fee) — open the PCN and use the "Transfer liability" action.
+      </p>
+      {{/if}}
+      <p style="margin:0;font-size:14px;"><a href="{{pcnUrl}}" style="color:#7B5EA7;">Open the PCN →</a></p>
     `,
   },
 

@@ -796,6 +796,24 @@ export function startScheduler() {
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: Holding reminders scheduled daily at 09:25 Europe/London');
 
+  // ── PCN pay-direct chase ladder ──────────────────────────────────────────
+  // Daily at 09:35 Europe/London. Chases drivers who were told to pay a charge
+  // direct but haven't sent proof, on the 3/5/7-day ladder. info@ alerted at
+  // every rung; final rung flags for escalation to liability transfer.
+  // See services/pcn-chase.ts.
+  cron.schedule('35 9 * * *', async () => {
+    try {
+      const { runPcnChases } = await import('../services/pcn-chase');
+      const r = await runPcnChases();
+      if (r.chased) {
+        console.log(`Scheduler: PCN chases — ${r.chased} chased, ${r.escalations} flagged for escalation`);
+      }
+    } catch (err) {
+      console.error('Scheduler: PCN chase ladder failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: PCN pay-direct chases scheduled daily at 09:35 Europe/London');
+
   // ── Pre-auth expiry reconciliation (silent housekeeping) ─────────────────
   // Daily at 09:40 Europe/London. Closes out held pre-auths past their window.
   // NO emails / bell nudges — the dashboard "Pre-auth Holds Expiring" bucket is

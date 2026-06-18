@@ -11,26 +11,111 @@
  *
  * See docs/PCN-MODULE-SPEC.md.
  */
-import { Router, Response } from 'express';
+import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import multer from 'multer';
+import crypto from 'crypto';
 import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES, MANAGER_ROLES } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
 import { getSystemSettings } from './system-settings';
 import { isAnthropicConfigured } from '../config/anthropic';
+import { uploadToR2 } from '../config/r2';
 
 const router = Router();
 
-router.use(authenticate);
-router.use(authorize(...STAFF_ROLES));
-
-// Multer (memory) for the AI-extract endpoint — 10MB, images + PDF.
+// Multer (memory) — 10MB, images + PDF. Shared by AI-extract + receipt upload.
 const extractUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 },
 });
+
+// ─────────────────────────────────────────────────────────────────────────
+// PUBLIC — pay-direct receipt upload (token-authenticated, NO staff auth).
+// Defined BEFORE the auth gate. The driver gets the link by email; it's valid
+// while the PCN is still awaiting their payment (status='driver_notified_pay'),
+// and rejects once paid/escalated (status-bound, mirrors the OOH parking token).
+// ─────────────────────────────────────────────────────────────────────────
+
+async function resolveReceiptToken(token: string) {
+  const r = await query(
+    `SELECT p.*, fv.reg AS fleet_reg, d.full_name AS driver_name
+     FROM pcns p
+     LEFT JOIN fleet_vehicles fv ON fv.id = p.vehicle_id
+     LEFT JOIN drivers d ON d.id = p.driver_id
+     WHERE p.receipt_upload_token = $1 AND p.is_deleted = false`,
+    [token]
+  );
+  return r.rows[0] || null;
+}
+
+router.get('/public/receipt/:token', async (req: Request, res: Response) => {
+  const pcn = await resolveReceiptToken(String(req.params.token));
+  if (!pcn) { res.status(404).json({ error: 'This link is not valid.' }); return; }
+  const alreadyPaid = pcn.status !== 'driver_notified_pay';
+  res.json({
+    data: {
+      reference: pcn.reference,
+      vehicle_reg: pcn.fleet_reg || pcn.vehicle_reg,
+      issuing_authority: pcn.issuing_authority,
+      fine_amount: pcn.fine_amount,
+      reduced_amount: pcn.reduced_amount,
+      reduced_deadline: pcn.reduced_deadline,
+      driver_name: pcn.driver_name,
+      already_uploaded: !!pcn.receipt_url,
+      // If the PCN has moved on (paid/escalated), the form shows a closed state.
+      closed: alreadyPaid && !pcn.receipt_url,
+    },
+  });
+});
+
+router.post('/public/receipt/:token', extractUpload.single('file'), async (req: Request, res: Response) => {
+  const pcn = await resolveReceiptToken(String(req.params.token));
+  if (!pcn) { res.status(404).json({ error: 'This link is not valid.' }); return; }
+  if (pcn.status !== 'driver_notified_pay') {
+    res.status(409).json({ error: 'This charge is no longer awaiting your payment — please contact us.' });
+    return;
+  }
+  if (!req.file) { res.status(400).json({ error: 'No file provided' }); return; }
+
+  const ext = (req.file.mimetype || '').includes('pdf') ? 'pdf' : 'jpg';
+  const key = `files/pcn-receipts/${pcn.id}/${crypto.randomBytes(8).toString('hex')}.${ext}`;
+  await uploadToR2(key, req.file.buffer, req.file.mimetype || 'application/octet-stream');
+
+  await query(
+    `UPDATE pcns SET receipt_url = $2, receipt_uploaded_at = NOW(), status = 'paid_by_driver', updated_at = NOW()
+     WHERE id = $1`,
+    [pcn.id, key]
+  );
+  await query(
+    `INSERT INTO pcn_events (pcn_id, event_type, body, metadata)
+     VALUES ($1, 'receipt_received', $2, $3)`,
+    [pcn.id, 'Driver uploaded proof of payment', JSON.stringify({ receipt_url: key })]
+  );
+
+  // Alert info@ — pay-direct must be "rock solid" (jon): a human confirms it.
+  try {
+    const { emailService } = await import('../services/email-service');
+    await emailService.send('pcn_receipt_received_alert', {
+      to: 'info@oooshtours.co.uk',
+      variables: {
+        vehicleReg: pcn.fleet_reg || pcn.vehicle_reg || '—',
+        pcnReference: pcn.reference || '—',
+        driverName: pcn.driver_name || 'the driver',
+        jobNumber: String(pcn.hh_job_number || ''),
+        pcnUrl: `${(await import('../config/app-urls')).getFrontendUrl()}/vehicles/pcns/${pcn.id}`,
+      },
+    });
+  } catch (err) {
+    console.error('[pcns] receipt-received alert failed:', err);
+  }
+
+  res.json({ data: { ok: true } });
+});
+
+router.use(authenticate);
+router.use(authorize(...STAFF_ROLES));
 
 // ─────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -418,6 +503,7 @@ const actionSchema = z.object({
   send_email: z.boolean().optional().default(true),
   add_charge: z.boolean().optional(),
   email_override: z.string().email().optional().nullable(),
+  resolution_note: z.string().max(2000).optional().nullable(),
 });
 
 const MANAGER_TIER_ACTIONS = new Set(['transfer_liability', 'pay_recharge']);
@@ -438,7 +524,7 @@ router.post('/:id/action', validate(actionSchema), async (req: AuthRequest, res:
     const { applyPcnAction } = await import('../services/pcn-actions');
     const result = await applyPcnAction(
       String(req.params.id),
-      { action: b.action, send_email: b.send_email !== false, add_charge: b.add_charge, email_override: b.email_override },
+      { action: b.action, send_email: b.send_email !== false, add_charge: b.add_charge, email_override: b.email_override, resolution_note: b.resolution_note },
       req.user!.id
     );
     await logAudit(req.user!.id, 'pcns', String(req.params.id), 'update', null, { action: b.action, ...result });

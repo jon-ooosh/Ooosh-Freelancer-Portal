@@ -32,6 +32,7 @@ export default function PcnDetailPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [viewDoc, setViewDoc] = useState(false);
+  const [viewReceipt, setViewReceipt] = useState(false);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -117,6 +118,27 @@ export default function PcnDetailPage() {
               <button onClick={() => setViewDoc(true)} className="text-sm text-[#7B5EA7] hover:underline">📄 View scanned PCN</button>
             </div>
           )}
+
+          {/* Pay-direct tracking — deadline + chase ladder progress */}
+          {pcn.status === 'driver_notified_pay' && (
+            <div className="mt-3 pt-3 border-t">
+              <dt className="text-xs text-slate-500 mb-1">Driver to pay direct</dt>
+              <dd className="text-sm text-slate-800">
+                {pcn.pay_direct_deadline && <>Deadline {fmtDate(pcn.pay_direct_deadline)}. </>}
+                {pcn.receipt_chase_level
+                  ? <span className="text-amber-700">Chased {pcn.receipt_chase_level}×, awaiting proof.</span>
+                  : <span className="text-slate-500">Awaiting proof of payment.</span>}
+              </dd>
+              <p className="text-xs text-slate-400 mt-1">Chases auto-send on the 3/5/7-day ladder; info@ is copied each time.</p>
+            </div>
+          )}
+
+          {pcn.receipt_url && (
+            <div className="mt-3 pt-3 border-t">
+              <dt className="text-xs text-slate-500 mb-1">Proof of payment {pcn.receipt_uploaded_at ? `(uploaded ${fmtDate(pcn.receipt_uploaded_at)})` : ''}</dt>
+              <button onClick={() => setViewReceipt(true)} className="text-sm text-green-700 hover:underline">🧾 View payment receipt</button>
+            </div>
+          )}
         </div>
 
         {/* Action panel — the "what next?" chooser */}
@@ -174,6 +196,9 @@ export default function PcnDetailPage() {
 
       {viewDoc && pcn.pcn_document_url && (
         <DocLightbox r2Key={pcn.pcn_document_url} onClose={() => setViewDoc(false)} />
+      )}
+      {viewReceipt && pcn.receipt_url && (
+        <DocLightbox r2Key={pcn.receipt_url} onClose={() => setViewReceipt(false)} />
       )}
     </div>
   );

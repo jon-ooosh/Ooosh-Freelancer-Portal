@@ -84,6 +84,7 @@ export default function PcnActionChooser({
   const [sendEmail, setSendEmail] = useState(true);
   const [addCharge, setAddCharge] = useState(true);
   const [emailOverride, setEmailOverride] = useState('');
+  const [note, setNote] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ActionResult | null>(null);
@@ -93,6 +94,7 @@ export default function PcnActionChooser({
     setSendEmail(a.hasEmail);
     setAddCharge(a.chargeable);
     setEmailOverride('');
+    setNote('');
     setError(null);
     setResult(null);
   };
@@ -106,6 +108,7 @@ export default function PcnActionChooser({
         send_email: selected.hasEmail ? sendEmail : false,
         add_charge: selected.chargeable ? addCharge : false,
         email_override: emailOverride.trim() || null,
+        resolution_note: note.trim() || null,
       });
       setResult(r.data);
       onActioned(r.data);
@@ -193,6 +196,14 @@ export default function PcnActionChooser({
                     Add the £35+VAT handling charge to the HireHop job
                   </label>
                 )}
+                <textarea
+                  value={note}
+                  onChange={(e) => setNote(e.target.value)}
+                  placeholder={a.key === 'internal_freelancer'
+                    ? 'Note for the record (e.g. "Dave to pay direct / deduct from next invoice")'
+                    : 'Note for the record (optional)'}
+                  className="border rounded-lg px-3 py-1.5 text-sm w-full resize-y min-h-[44px]"
+                />
                 {error && <p className="text-sm text-red-600">{error}</p>}
                 <button
                   type="button"
