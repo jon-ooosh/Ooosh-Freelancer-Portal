@@ -439,7 +439,10 @@ function TenanciesTab({ isAdminManager, onChange }: { isAdminManager: boolean; o
   return (
     <div>
       <div className="flex items-center justify-between gap-2 mb-3">
-        <div>
+        <div className="flex items-center gap-2">
+          {!reordering && (
+            <button onClick={() => setCreating(true)} className="bg-[#7B5EA7] text-white px-4 py-2 rounded-lg text-sm font-medium">+ Move In Client</button>
+          )}
           {isAdminManager && rows.length > 1 && !reordering && (
             <button onClick={startReorder} className="px-3 py-1.5 rounded-lg text-sm font-medium border border-slate-300 text-slate-600">↕ Reorder</button>
           )}
@@ -489,11 +492,6 @@ function TenanciesTab({ isAdminManager, onChange }: { isAdminManager: boolean; o
           </tbody>
         </table>
       </div>
-      {!reordering && (
-        <div className="mt-4">
-          <button onClick={() => setCreating(true)} className="bg-[#7B5EA7] text-white px-4 py-2 rounded-lg text-sm font-medium">+ Move In Client</button>
-        </div>
-      )}
       {creating && <MoveInModal onClose={() => setCreating(false)} onSaved={() => { setCreating(false); load(); onChange(); }} />}
       {detailId && <TenancyDetailModal id={detailId} isAdminManager={isAdminManager} onClose={() => setDetailId(null)} onChange={() => { load(); onChange(); }} onMovedOut={(size) => setVacancySize(size)} />}
       {vacancySize && <VacancyMatchModal size={vacancySize} onClose={() => setVacancySize(null)} />}
