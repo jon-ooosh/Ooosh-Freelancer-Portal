@@ -218,7 +218,7 @@ export default function RequirementCard({
   const [hireFormDrivers, setHireFormDrivers] = useState<HireFormDriver[]>([]);
   const [excessInfo, setExcessInfo] = useState<ExcessInfo | null>(null);
   // Carnet — read-only reflection of the real lifecycle (managed in Operations)
-  const [carnet, setCarnet] = useState<{ mode: string; status: string } | null>(null);
+  const [carnet, setCarnet] = useState<{ id: string; mode: string; status: string } | null>(null);
 
   // Suspension marker — set by the derivation engine when the hire chain is
   // not required on this job (every van slot is Van & Driver, or the job is
@@ -245,7 +245,7 @@ export default function RequirementCard({
         .catch(() => {});
     }
     if (req.requirement_type === 'carnet' && jobId) {
-      api.get<{ data: { mode: string; status: string } | null }>(`/carnets/by-job/${jobId}`)
+      api.get<{ data: { id: string; mode: string; status: string } | null }>(`/carnets/by-job/${jobId}`)
         .then(d => setCarnet(d?.data || null))
         .catch(() => {});
     }
@@ -682,7 +682,7 @@ export default function RequirementCard({
                     );
                   })}
                 </div>
-                <Link to={`/operations/carnets?job=${jobId}`} className="text-xs text-purple-600 hover:text-purple-800 font-medium">
+                <Link to={carnet?.id ? `/operations/carnets/${carnet.id}` : '/operations/carnets'} className="text-xs text-purple-600 hover:text-purple-800 font-medium">
                   Manage carnet in Operations →
                 </Link>
               </div>

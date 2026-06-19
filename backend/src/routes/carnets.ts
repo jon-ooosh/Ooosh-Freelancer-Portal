@@ -70,10 +70,15 @@ router.get('/by-job/:jobId', async (req: AuthRequest, res: Response) => {
   }
 });
 
-// GET /api/carnets/:id — single carnet + GMRs.
+// GET /api/carnets/:id — single carnet + GMRs (+ job header fields).
 router.get('/:id', async (req: AuthRequest, res: Response) => {
   try {
-    const result = await query(`SELECT * FROM job_carnets WHERE id = $1`, [req.params.id]);
+    const result = await query(
+      `SELECT c.*, j.hh_job_number, j.job_name, j.client_name, j.job_date
+       FROM job_carnets c JOIN jobs j ON j.id = c.job_id
+       WHERE c.id = $1`,
+      [req.params.id]
+    );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Carnet not found' });
     const carnet = result.rows[0];
     const gmrs = await query(
