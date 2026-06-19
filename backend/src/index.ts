@@ -48,6 +48,10 @@ process.on('uncaughtException', (err) => {
 });
 
 const app = express();
+// We sit behind exactly one nginx hop, so trust a single proxy. Without this,
+// every request collapses to 127.0.0.1 (so express-rate-limit buckets everyone
+// together and logs an ERR_ERL_UNEXPECTED_X_FORWARDED_FOR validation error).
+app.set('trust proxy', 1);
 const httpServer = createServer(app);
 const PORT = process.env.PORT || 3001;
 
