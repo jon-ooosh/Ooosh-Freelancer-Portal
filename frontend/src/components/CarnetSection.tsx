@@ -105,7 +105,7 @@ function R2Image({ k, className }: { k: string; className?: string }) {
   return <img src={src} alt="QR" className={className} />;
 }
 
-export default function CarnetSection({ jobId }: { jobId: string }) {
+export default function CarnetSection({ jobId, onChanged }: { jobId: string; onChanged?: () => void }) {
   const [carnet, setCarnet] = useState<Carnet | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -131,12 +131,13 @@ export default function CarnetSection({ jobId }: { jobId: string }) {
     try {
       await api.patch(`/carnets/${carnet.id}`, body);
       await load();
+      onChanged?.();
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'Update failed');
     } finally {
       setBusy(false);
     }
-  }, [carnet, load]);
+  }, [carnet, load, onChanged]);
 
   if (loading || !carnet) return null;
 
@@ -242,7 +243,7 @@ export default function CarnetSection({ jobId }: { jobId: string }) {
             onClick={async () => {
               if (!window.confirm('Cancel this carnet? It stays on record for audit but drops out of active tracking.')) return;
               setBusy(true);
-              try { await api.post(`/carnets/${carnet.id}/cancel`, {}); await load(); }
+              try { await api.post(`/carnets/${carnet.id}/cancel`, {}); await load(); onChanged?.(); }
               finally { setBusy(false); }
             }}
             className="ml-auto text-xs text-red-600 hover:text-red-800"

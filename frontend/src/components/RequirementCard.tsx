@@ -12,6 +12,7 @@
  */
 
 import { useState, useEffect, useRef } from 'react';
+import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 
 // ── Types ──────────────────────────────────────────────────────────────
@@ -216,6 +217,8 @@ export default function RequirementCard({
   // Hire form submissions + excess data (loaded for nested cards)
   const [hireFormDrivers, setHireFormDrivers] = useState<HireFormDriver[]>([]);
   const [excessInfo, setExcessInfo] = useState<ExcessInfo | null>(null);
+  // Carnet — read-only reflection of the real lifecycle (managed in Operations)
+  const [carnet, setCarnet] = useState<{ mode: string; status: string } | null>(null);
 
   // Suspension marker — set by the derivation engine when the hire chain is
   // not required on this job (every van slot is Van & Driver, or the job is
@@ -239,6 +242,11 @@ export default function RequirementCard({
         .then(d => {
           if (d?.data?.totals) setExcessInfo(d.data);
         })
+        .catch(() => {});
+    }
+    if (req.requirement_type === 'carnet' && jobId) {
+      api.get<{ data: { mode: string; status: string } | null }>(`/carnets/by-job/${jobId}`)
+        .then(d => setCarnet(d?.data || null))
         .catch(() => {});
     }
   }, [req.requirement_type, hhJobNumber, jobId]);
@@ -344,7 +352,11 @@ export default function RequirementCard({
   // is read-only like the vehicle card — hand-setting it would just be overwritten.
   const isContextualStatus = (isNested && (req.requirement_type === 'hire_forms' || req.requirement_type === 'excess'))
     || req.requirement_type === 'vehicle'
-    || req.requirement_type === 'merch';
+    || req.requirement_type === 'merch'
+    // Carnet status is the real lifecycle (managed in Operations); the card is a
+    // read-only reflection — hand-setting the generic 4-state status would be
+    // misleading against the 9-state lifecycle.
+    || req.requirement_type === 'carnet';
 
   // Click outside to dismiss status dropdown
   const statusMenuRef = useRef<HTMLDivElement>(null);
@@ -652,6 +664,30 @@ export default function RequirementCard({
               </div>
             )}
 
+            {/* Carnet — read-only lifecycle reflection + link to Operations (where it's managed) */}
+            {req.requirement_type === 'carnet' && (
+              <div className="mt-2">
+                <div className="flex flex-wrap items-center gap-1 mb-2">
+                  {(carnet?.mode === 'client_arranges'
+                    ? [['requested', 'Requested'], ['spreadsheet_sent', 'Sent'], ['done', 'Done']]
+                    : [['detected', 'Detected'], ['form_sent', 'Form'], ['info_received', 'Info'], ['applied', 'Applied'], ['received', 'Received'], ['with_client', 'With client'], ['returned', 'Returned'], ['discharged', 'Discharged'], ['closed', 'Closed']]
+                  ).map(([key, lbl], i, arr) => {
+                    const curIdx = arr.findIndex((s) => s[0] === (carnet?.status || 'detected'));
+                    const done = i < curIdx;
+                    const active = i === curIdx;
+                    return (
+                      <span key={key} className={`px-2 py-0.5 rounded text-xs ${active ? 'bg-purple-600 text-white' : done ? 'bg-purple-100 text-purple-700' : 'bg-gray-100 text-gray-400'}`}>
+                        {lbl}
+                      </span>
+                    );
+                  })}
+                </div>
+                <Link to={`/operations/carnets?job=${jobId}`} className="text-xs text-purple-600 hover:text-purple-800 font-medium">
+                  Manage carnet in Operations →
+                </Link>
+              </div>
+            )}
+
             {/* Invoice — show "Mark as Sent" button when status is in_progress (generated) */}
             {req.requirement_type === 'invoice' && req.status === 'in_progress' && (
               <div className="mt-1.5">
@@ -842,8 +878,9 @@ export default function RequirementCard({
         </div>
       </div>
 
-      {/* Multi-step progress bar — not for merch (derived pip, never advances steps) */}
-      {req.type_steps && req.requirement_type !== 'merch' && (
+      {/* Multi-step progress bar — not for merch (derived pip) or carnet (its own
+          lifecycle reflection + Operations link replace the generic 6-step bar) */}
+      {req.type_steps && req.requirement_type !== 'merch' && req.requirement_type !== 'carnet' && (
         <div className="mt-3 flex gap-1">
           {req.type_steps.map((step: string, i: number) => {
             const currentIdx = req.current_step ? req.type_steps!.indexOf(req.current_step) : -1;

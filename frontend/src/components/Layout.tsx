@@ -45,6 +45,7 @@ const navItems: NavItem[] = [
       { path: '/holding', label: 'Held for Clients' },
       { path: '/holding/lost-property', label: 'Lost Property' },
       { path: '/warehouse/collections', label: 'Warehouse Collections' },
+      { path: '/operations/carnets', label: 'Carnets' },
       { path: '/operations/problems', label: 'Problems' },
       { path: '/operations/issues', label: 'Issues' },
     ],
