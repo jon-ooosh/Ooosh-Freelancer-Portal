@@ -38,7 +38,50 @@ export interface Pcn {
   receipt_url: string | null;
   receipt_uploaded_at: string | null;
   receipt_chase_level: number | null;
+  documents?: PcnDocument[] | null;
   created_at: string;
+}
+
+// ── Documents (multi-doc audit: notice front/back, correspondence, responses) ─
+export type PcnDocKind = 'notice_front' | 'notice_back' | 'correspondence' | 'response' | 'receipt' | 'other';
+
+export interface PcnDocument {
+  r2_key: string;
+  name?: string | null;
+  kind?: PcnDocKind | null;
+  comment?: string | null;
+  uploaded_at?: string | null;
+  uploaded_by?: string | null;
+}
+
+export const PCN_DOC_KIND_LABEL: Record<PcnDocKind, string> = {
+  notice_front: 'Notice (front)',
+  notice_back: 'Notice (back)',
+  correspondence: 'Correspondence',
+  response: 'Issuer response',
+  receipt: 'Receipt / proof',
+  other: 'Other',
+};
+
+export const PCN_DOC_KINDS: PcnDocKind[] = ['notice_front', 'notice_back', 'correspondence', 'response', 'receipt', 'other'];
+
+// Unified document list for display: the `documents` array, plus the legacy
+// single pointers (pcn_document_url as the notice, receipt_url as the proof),
+// deduped by r2_key. Mirrors the backend's noticeDocumentKeys merge so the UI
+// and the email-attach agree about what a PCN "has".
+export function mergePcnDocuments(
+  pcn: Pick<Pcn, 'documents' | 'pcn_document_url' | 'receipt_url' | 'receipt_uploaded_at'>,
+): PcnDocument[] {
+  const out: PcnDocument[] = [...(pcn.documents || [])];
+  const seen = new Set(out.map((d) => d.r2_key));
+  if (pcn.pcn_document_url && !seen.has(pcn.pcn_document_url)) {
+    out.push({ r2_key: pcn.pcn_document_url, name: 'Scanned notice', kind: 'notice_front' });
+    seen.add(pcn.pcn_document_url);
+  }
+  if (pcn.receipt_url && !seen.has(pcn.receipt_url)) {
+    out.push({ r2_key: pcn.receipt_url, name: 'Proof of payment', kind: 'receipt', uploaded_at: pcn.receipt_uploaded_at });
+  }
+  return out;
 }
 
 // ── Display maps ──────────────────────────────────────────────────────────

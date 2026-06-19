@@ -18,7 +18,7 @@ import { query } from '../config/database';
 import { emailService } from '../services/email-service';
 import { getSystemSettings } from '../routes/system-settings';
 import { resolveClientEmailTarget } from '../services/money-emails';
-import { getFromR2 } from '../config/r2';
+import { collectNoticeAttachments } from './pcn-documents';
 import { getFrontendUrl } from '../config/app-urls';
 
 const OOOSH_EMAIL = 'info@oooshtours.co.uk';
@@ -105,20 +105,13 @@ async function sendChase(pcn: Record<string, unknown>, handlingFee: string): Pro
       ? `${money(pcn.fine_amount)}${reduced ? ` (${reduced} if paid by ${fmtDate(pcn.reduced_deadline)})` : ''}`
       : '—';
 
-    // Notice attachment (best-effort)
-    const attachments: { filename: string; content: Buffer; contentType: string }[] = [];
-    if (pcn.pcn_document_url) {
-      try {
-        const obj = await getFromR2(pcn.pcn_document_url as string);
-        const bytes = await (obj.Body as { transformToByteArray: () => Promise<Uint8Array> }).transformToByteArray();
-        const isPdf = String(pcn.pcn_document_url).toLowerCase().endsWith('.pdf');
-        attachments.push({
-          filename: `PCN-${pcn.vehicle_reg || 'notice'}-${pcn.reference || ''}.${isPdf ? 'pdf' : 'jpg'}`.replace(/\s/g, ''),
-          content: Buffer.from(bytes),
-          contentType: isPdf ? 'application/pdf' : 'image/jpeg',
-        });
-      } catch { /* best-effort */ }
-    }
+    // Notice attachments (front + back, best-effort).
+    const attachments = await collectNoticeAttachments({
+      documents: pcn.documents,
+      pcn_document_url: pcn.pcn_document_url as string | null,
+      vehicle_reg: (pcn.vehicle_reg as string) || (pcn.fleet_reg as string) || null,
+      reference: pcn.reference as string | null,
+    });
 
     const jobRefSentence = pcn.hh_job_number ? ` (our ref #${pcn.hh_job_number})` : '';
     await emailService.send('pcn_pay_direct', {

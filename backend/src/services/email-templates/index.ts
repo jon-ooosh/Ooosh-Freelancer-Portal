@@ -1570,7 +1570,7 @@ const templates: Record<string, EmailTemplate> = {
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
         As the driver at the time, liability for this notice rests with you. Please either pay the issuing authority directly using the reference above, or appeal directly with them if you believe it was issued in error. {{handlingSentence}}
       </p>
-      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">A copy of the notice is attached.</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">A copy of the notice is attached — please refer to it for the issuing authority's accepted payment methods and options.</p>
       <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">Any queries, reply to this email or call {{oooshPhone}}.</p>
     `,
   },
@@ -1602,7 +1602,7 @@ const templates: Record<string, EmailTemplate> = {
       </td></tr></table>
       <p style="margin:0 0 16px;font-size:13px;color:#64748b;line-height:1.6;text-align:center;">Tap the button to upload your receipt — quickest way to keep this off your account.</p>
       {{/if}}
-      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">You can also reply with your receipt or send it to <a href="mailto:{{oooshEmail}}" style="color:#7B5EA7;text-decoration:none;">{{oooshEmail}}</a>. A copy of the notice is attached.</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">You can also reply with your receipt or send it to <a href="mailto:{{oooshEmail}}" style="color:#7B5EA7;text-decoration:none;">{{oooshEmail}}</a>. A copy of the notice is attached — please refer to it for the issuer's payment options.</p>
       <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">Any queries, reply to this email or call {{oooshPhone}}.</p>
     `,
   },
