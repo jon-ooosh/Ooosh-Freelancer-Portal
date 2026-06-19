@@ -1,7 +1,14 @@
 # ATA Carnet Management — Implementation Spec
 
-**Status:** Drafted Jun 2026. Not yet built. Designed to run across multiple sessions.
+**Status:** Drafted Jun 2026. Building across multiple sessions.
 **Replaces:** Monday.com carnet tracking + the standalone Jotform carnet request form (`form 243083554868063`).
+
+### Build progress
+- [x] **Slice 1 — Foundation (this PR):** migration 135 (`job_carnets` + `carnet_gmrs`), HH detection of sale item 575 in the derivation engine (auto-creates the `carnet` requirement card + a `job_carnets` record, mode=we_supply, status=detected; stale-cleanup wired), read-only `/api/carnets` endpoints.
+- [ ] **Slice 2 — Client request form + signed-authority PDF** (public token page, the Letter of Authorisation, GMR seeding from crossings).
+- [ ] **Slice 3 — Job Detail Carnet tab + GMR management** (custody surface, QR upload/send, document attachments, full CRUD).
+- [ ] **Slice 4 — Send timing scheduler + email templates** (T-28d / on-confirmation / chase / ad-hoc).
+- [ ] **Slice 5 — Operations overview page + dashboard NeedsAttention bucket.**
 
 ---
 
@@ -55,8 +62,8 @@ CREATE TABLE IF NOT EXISTS job_carnets (
 
   lead_name               TEXT,
   lead_email              TEXT,
-  lead_role               TEXT,               -- "role in touring party" e.g. Tour Manager
-  applicant_designation   TEXT DEFAULT 'Company Director', -- legal capacity for the authority
+  lead_role               TEXT,               -- "role in touring party" — shown as the client's
+                                              -- role/designation on the authority (e.g. Driver)
   additional_names        JSONB DEFAULT '[]', -- [{ first, last }] — unlimited
 
   -- ── Workflow timestamps / refs ──
@@ -130,7 +137,7 @@ CREATE INDEX IF NOT EXISTS idx_carnet_gmrs_carnet ON carnet_gmrs (carnet_id);
 
 The `carnet` requirement type is **already seeded** (migration 021). We keep it as the thin **prep-checklist pip** that deep-links into the Carnet module — exactly how the `vehicle` card nests/links to hire_forms + excess + the Money tab. Migration 103 may optionally `UPDATE requirement_type_definitions` to align the `steps` label set with the lifecycle below (cosmetic; the rich workflow lives in `job_carnets`, the card just mirrors a 4-state pip).
 
-**Remember:** add `103_carnets.sql` to the hardcoded `migrations` array in `backend/src/migrations/run.ts`.
+**Remember:** add `135_carnets.sql` to the hardcoded `migrations` array in `backend/src/migrations/run.ts`.
 
 ---
 
@@ -169,27 +176,40 @@ The Jotform combines **info-gathering + Letter of Authority T&Cs + signature** i
 | Non-EU countries | multi-checkbox + other | → `non_eu_countries` |
 | Lead name | first/last | required → `lead_name` |
 | Lead email | email | → `lead_email` |
-| Role in touring party | text | required → `lead_role` (e.g. Tour Manager) |
-| Role / designation | text, default "Company Director" | → `applicant_designation` (legal capacity for the authority) |
+| Role in touring party | text | required → `lead_role` — appears as the client's "Role / designation" on the authority (e.g. Driver) |
 | Additional names | repeatable first/last | **unlimited** (Jotform capped at 6 — we don't) → `additional_names` |
 | Need us to arrange GMR(s)? | radio Yes/No | seeds the GMR section |
 | Crossings | repeatable: date + location | **unlimited** (Jotform capped at 2) → seeds `carnet_gmrs` rows (`status='needed'`) |
 | Authority T&Cs | scrollable terms (verbatim text below) | must accept |
 | Signature | signature pad | required → drives the signed-authority PDF |
 
-### The Letter of Authority text (verbatim from the Jotform terms widget — store as the canonical template)
+### The generated Letter of Authorisation (exact wording — this is the canonical client-facing document)
 
-> By my signature below I confirm I have read and agree to be bound by these terms & conditions:
+The generated PDF is titled **"Letter of Authorisation"** with the Ooosh logo + company address block (Compass House, 7 East Street, Portslade, East Sussex, BN41 1DL, UK) and the submission date. It carries **two signature blocks**:
+
+**Block 1 — Ooosh appoints the client as agent** (Ooosh-side signature, fixed from config):
+
+> I, **{ooosh_signatory_name}**, of Ooosh! Tours Ltd, hereby appoint **{lead_name}** to be our agent for the purpose of dealing with and signing ATA Carnets, under the appropriate International Convention, and guaranteed by the appropriate Chamber of Commerce, and to deliver to Customs any documents in this connection.
 >
-> Ooosh Tours Ltd will use the above information to process a carnet on your behalf.
->
-> By my signature I (lead name shown above) accept full responsibility for any charges, fees, taxes or similar that may become due by the use or misuse of said Carnet, and under no circumstances will Ooosh! Tours Ltd be held responsible for any such costs.
+> Signed: *{ooosh_signature_image}*
+> Role / designation: **{ooosh_signatory_role}** *(e.g. Company Director)*
+
+**Block 2 — Client accepts liability** (client-side signature, captured on the form):
+
+> By this declaration I, **{lead_name}**, accept full responsibility for any charges, fees, taxes or similar that may become due by the use or misuse of said Carnet, and under no circumstances will Ooosh! Tours Ltd be held responsible for any such costs.
 >
 > This responsibility will last until the closure of the carnet in the usual timeframe (usually eighteen (18) months from the end date of the carnet).
 >
-> Ooosh Tours Ltd will appoint (lead name shown above) to be our agent for the purpose of dealing with and signing ATA Carnets, under the appropriate International Convention, and guaranteed by the appropriate Chamber of Commerce, and to deliver to Customs any documents in this connection.
->
-> Please note that as part of this service we will usually supply a list of equipment, with serial numbers, weights etc. detailed. Although we will act in good faith, this service is provided without guarantee and we reserve the right to make changes to the agreed equipment, and accept no responsibility whatsoever for any charges, losses or damages incurred by you or your representatives as a result of any such changes.
+> Signed: *{client_signature_image}*
+> Role / designation: **{lead_role}** *(the touring-party role they entered, e.g. Driver)*
+
+**Ooosh-signatory config** (the fixed Block 1 details — store in `system_settings`, edited from the Settings page, so the signatory/address can change without a deploy):
+- `carnet_ooosh_signatory_name` (e.g. "Jonathan Wood")
+- `carnet_ooosh_signatory_role` (e.g. "Company Director")
+- `carnet_ooosh_signature_url` (R2 key — the stored director signature image stamped onto Block 1)
+- `carnet_company_address` (the address block, default "Compass House, 7 East Street, Portslade, East Sussex, BN41 1DL, UK")
+
+The PDF generator (`services/carnet-authority-pdf.ts`) stamps the fixed Block 1 (Ooosh signatory + signature image) and renders Block 2 with the client's captured signature. Reuses the jsPDF + logo-from-R2 pattern from `services/hire-form-pdf.ts` / the VE103B/condition-report PDFs (avoid the StandardFonts WinAnsi tick-encoding trap — render bullets/lines, not Unicode glyphs).
 
 ### On submission
 
@@ -309,7 +329,7 @@ Money: the £750 is item 575 in HireHop → naturally surfaces on the OP Money t
 ## Files to create / modify
 
 **Create:**
-- `backend/src/migrations/103_carnets.sql`
+- `backend/src/migrations/135_carnets.sql`
 - `backend/src/routes/carnets.ts`
 - `backend/src/services/carnet-authority-pdf.ts`
 - `backend/src/services/carnet-auto-email.ts` (or extend the hire-form auto-email scheduler)
