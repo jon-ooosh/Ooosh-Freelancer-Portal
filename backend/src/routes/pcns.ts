@@ -180,20 +180,38 @@ router.get('/settings', async (_req: AuthRequest, res: Response) => {
 // Inert (503) when ANTHROPIC_API_KEY is missing. Replaces Netlify extract.js.
 // ─────────────────────────────────────────────────────────────────────────
 
-router.post('/extract', extractUpload.single('file'), async (req: AuthRequest, res: Response) => {
+// Accepts one or more pages (front + back of a paper notice, or a multi-page
+// PDF). Back-compat: a single `file` field still works.
+router.post('/extract', extractUpload.any(), async (req: AuthRequest, res: Response) => {
   if (!isAnthropicConfigured()) {
     res.status(503).json({ error: 'AI extraction not configured (ANTHROPIC_API_KEY missing on server)' });
     return;
   }
-  if (!req.file) { res.status(400).json({ error: 'No file provided' }); return; }
+  const uploaded = (req.files as Express.Multer.File[] | undefined) || [];
+  if (uploaded.length === 0) { res.status(400).json({ error: 'No file provided' }); return; }
   try {
     const { extractPcn } = await import('../services/pcn-extract');
-    const data = await extractPcn(req.file.buffer, req.file.mimetype);
+    const data = await extractPcn(uploaded.map((f) => ({ buffer: f.buffer, mimeType: f.mimetype })));
     res.json({ data });
   } catch (err) {
     console.error('[pcns] extract error:', err);
     res.status(500).json({ error: 'Extraction failed', details: (err as Error).message });
   }
+});
+
+// Duplicate detection (non-blocking flag) — surfaces any existing non-deleted
+// PCN(s) sharing this reference so staff can spot an accidental re-upload.
+// Never blocks the save; references can be blank or mis-keyed.
+router.get('/check-duplicate', async (req: AuthRequest, res: Response) => {
+  const reference = String(req.query.reference || '').trim();
+  if (!reference) { res.json({ data: [] }); return; }
+  const excludeId = String(req.query.exclude_id || '');
+  const params: unknown[] = [reference];
+  let sql = `${SELECT_WITH_JOINS} WHERE p.is_deleted = false AND LOWER(TRIM(p.reference)) = LOWER($1)`;
+  if (excludeId) { sql += ` AND p.id <> $2`; params.push(excludeId); }
+  sql += ` ORDER BY p.created_at DESC LIMIT 10`;
+  const r = await query(sql, params);
+  res.json({ data: r.rows });
 });
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -382,6 +400,14 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
 
 const fineType = z.enum(['private_pcn', 'council_pcn', 'police_nip', 'toll', 'other']);
 
+const DOC_KINDS = ['notice_front', 'notice_back', 'correspondence', 'response', 'receipt', 'other'] as const;
+const pcnDocSchema = z.object({
+  r2_key: z.string(),
+  name: z.string().optional().nullable(),
+  kind: z.enum(DOC_KINDS).optional(),
+  comment: z.string().optional().nullable(),
+});
+
 const createSchema = z.object({
   reference: z.string().optional().nullable(),
   fine_type: fineType.optional(),
@@ -403,11 +429,22 @@ const createSchema = z.object({
   final_deadline: z.string().optional().nullable(),
   extraction_confidence: z.enum(['high', 'medium', 'low']).optional().nullable(),
   pcn_document_url: z.string().optional().nullable(),
+  documents: z.array(pcnDocSchema).optional(),
   notes: z.string().optional().nullable(),
 });
 
 router.post('/', validate(createSchema), async (req: AuthRequest, res: Response) => {
   const b = req.body as z.infer<typeof createSchema>;
+
+  // Stamp uploaded_at / uploaded_by onto each document at write time.
+  const docs = (b.documents ?? []).map((d) => ({
+    r2_key: d.r2_key,
+    name: d.name ?? null,
+    kind: d.kind ?? 'other',
+    comment: d.comment ?? null,
+    uploaded_at: new Date().toISOString(),
+    uploaded_by: req.user!.id,
+  }));
 
   const result = await query(
     `INSERT INTO pcns (
@@ -415,10 +452,10 @@ router.post('/', validate(createSchema), async (req: AuthRequest, res: Response)
        client_organisation_id, hh_job_number, vehicle_reg,
        offence_at, offence_time_text, location, issuing_authority, offence_description,
        fine_amount, reduced_amount, reduced_deadline, final_deadline,
-       extraction_confidence, pcn_document_url, notes, handled_by, status
+       extraction_confidence, pcn_document_url, documents, notes, handled_by, status
      ) VALUES (
        $1,$2,$3,$4,$5,$6, $7,$8,$9, $10,$11,$12,$13,$14,
-       $15,$16,$17,$18, $19,$20,$21,$22, 'received'
+       $15,$16,$17,$18, $19,$20,$21::jsonb,$22,$23, 'received'
      ) RETURNING *`,
     [
       b.reference ?? null, b.fine_type ?? 'other', b.vehicle_id ?? null, b.driver_id ?? null,
@@ -428,7 +465,7 @@ router.post('/', validate(createSchema), async (req: AuthRequest, res: Response)
       b.issuing_authority ?? null, b.offence_description ?? null,
       b.fine_amount ?? null, b.reduced_amount ?? null, b.reduced_deadline ?? null,
       b.final_deadline ?? null, b.extraction_confidence ?? null,
-      b.pcn_document_url ?? null, b.notes ?? null, req.user!.id,
+      b.pcn_document_url ?? null, JSON.stringify(docs), b.notes ?? null, req.user!.id,
     ]
   );
   const pcn = result.rows[0];
@@ -560,6 +597,65 @@ router.delete('/:id', authorize('admin', 'manager', 'weekend_manager'), async (r
   if (r.rows.length === 0) { res.status(404).json({ error: 'PCN not found' }); return; }
   await logAudit(req.user!.id, 'pcns', String(req.params.id), 'delete', null, null);
   res.json({ data: { deleted: true } });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Documents (multi-doc audit trail — notice front/back, correspondence,
+// council/company responses). The file is uploaded to R2 first via
+// /api/files/upload?attachment_only=true; this appends the metadata entry.
+// ─────────────────────────────────────────────────────────────────────────
+
+const addDocSchema = z.object({
+  r2_key: z.string().min(1),
+  name: z.string().optional().nullable(),
+  kind: z.enum(DOC_KINDS).optional(),
+  comment: z.string().optional().nullable(),
+});
+
+router.post('/:id/documents', validate(addDocSchema), async (req: AuthRequest, res: Response) => {
+  const b = req.body as z.infer<typeof addDocSchema>;
+  const entry = {
+    r2_key: b.r2_key,
+    name: b.name ?? null,
+    kind: b.kind ?? 'other',
+    comment: b.comment ?? null,
+    uploaded_at: new Date().toISOString(),
+    uploaded_by: req.user!.id,
+  };
+  const r = await query(
+    `UPDATE pcns SET documents = COALESCE(documents, '[]'::jsonb) || $2::jsonb, updated_at = NOW()
+     WHERE id = $1 AND is_deleted = false
+     RETURNING documents`,
+    [req.params.id, JSON.stringify([entry])]
+  );
+  if (r.rows.length === 0) { res.status(404).json({ error: 'PCN not found' }); return; }
+  await logPcnEvent(
+    String(req.params.id), 'document_added',
+    `Document added (${entry.kind.replace(/_/g, ' ')})${entry.name ? `: ${entry.name}` : ''}`,
+    { r2_key: entry.r2_key, kind: entry.kind }, req.user!.id
+  );
+  res.json({ data: { documents: r.rows[0].documents } });
+});
+
+// Remove a document entry by r2_key (the R2 object itself is left in place —
+// cheap, and keeps the audit chain intact). Logs a document_removed event.
+router.delete('/:id/documents', async (req: AuthRequest, res: Response) => {
+  const r2Key = String(req.query.r2_key || (req.body && req.body.r2_key) || '');
+  if (!r2Key) { res.status(400).json({ error: 'r2_key is required' }); return; }
+  const r = await query(
+    `UPDATE pcns
+       SET documents = COALESCE((
+             SELECT jsonb_agg(d) FROM jsonb_array_elements(documents) d
+             WHERE d->>'r2_key' <> $2
+           ), '[]'::jsonb),
+           updated_at = NOW()
+     WHERE id = $1 AND is_deleted = false
+     RETURNING documents`,
+    [req.params.id, r2Key]
+  );
+  if (r.rows.length === 0) { res.status(404).json({ error: 'PCN not found' }); return; }
+  await logPcnEvent(String(req.params.id), 'document_removed', 'Document removed', { r2_key: r2Key }, req.user!.id);
+  res.json({ data: { documents: r.rows[0].documents } });
 });
 
 export default router;

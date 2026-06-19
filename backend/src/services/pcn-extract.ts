@@ -108,12 +108,20 @@ function buildContentBlock(mimeType: string, base64: string) {
   throw new Error(`Unsupported file type: ${mimeType} (expected image/jpeg|png|gif|webp or application/pdf)`);
 }
 
-export async function extractPcn(buffer: Buffer, mimeType: string): Promise<ExtractedPcn> {
+export async function extractPcn(
+  files: { buffer: Buffer; mimeType: string }[],
+): Promise<ExtractedPcn> {
   if (!isAnthropicConfigured()) {
     throw new Error('ANTHROPIC_API_KEY not configured');
   }
+  if (!files.length) throw new Error('No files provided for extraction');
   const client = getAnthropicClient();
-  const contentBlock = buildContentBlock(mimeType, buffer.toString('base64'));
+  // Feed every uploaded page (front + back of a paper notice, or a multi-page
+  // PDF) into one call so the model reads them together. The structured schema
+  // only captures the defined fields — payment instructions on the back page
+  // are retained as a stored document + attached to client emails, NOT pulled
+  // into a field we'd have to stand behind.
+  const contentBlocks = files.map((f) => buildContentBlock(f.mimeType, f.buffer.toString('base64')));
 
   const response = await client.messages.create({
     model: MODEL_ID,
@@ -122,7 +130,10 @@ export async function extractPcn(buffer: Buffer, mimeType: string): Promise<Extr
     messages: [
       {
         role: 'user',
-        content: [contentBlock, { type: 'text', text: 'Extract the details from this charge notice.' }],
+        content: [
+          ...contentBlocks,
+          { type: 'text', text: 'Extract the details from this charge notice (pages may include the front and back of one notice).' },
+        ],
       },
     ],
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

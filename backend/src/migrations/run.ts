@@ -169,7 +169,9 @@ async function runMigrations(direction: 'up' | 'down') {
         '132_storage_room_sort_order.sql',
         '133_storage_tenancy_sort_order.sql',
         '134_end_roles_for_deleted_people.sql',
-        '135_backline_demand.sql',
+        '135_carnets.sql',
+        '136_pcn_documents.sql',
+        '137_backline_demand.sql',
       ];
 
       for (const migration of migrations) {

@@ -42,6 +42,41 @@ const fmtDate = (s: string | null | undefined) => {
   return y && m && d ? `${d}/${m}/${y}` : s;
 };
 
+// Compact day/month for the dense table — full date (with year) is on hover.
+const fmtDayMonth = (s: string | null | undefined) => {
+  if (!s) return '—';
+  const [, m, d] = s.slice(0, 10).split('-');
+  return m && d ? `${d}/${m}` : s;
+};
+
+// Default supplier payment terms until per-supplier terms are tracked (read
+// from the Xero contact / editable override) — see
+// docs/COSTS-PAYMENT-AUTOMATION-SPEC.md. Mirrors addDaysISO in cost-xero-push.ts
+// and the PayModal due-date calc.
+const DEFAULT_TERMS_DAYS = 30;
+
+// Due date for an unpaid bill (invoice date + terms) with a countdown chip.
+// Returns null when there's no cost_date. tone: red = due/overdue, amber =
+// within a week, grey = comfortably ahead.
+function dueInfo(costDate: string | null | undefined) {
+  if (!costDate) return null;
+  const due = new Date(`${costDate.slice(0, 10)}T00:00:00Z`);
+  due.setUTCDate(due.getUTCDate() + DEFAULT_TERMS_DAYS);
+  const now = new Date();
+  const todayUTC = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const days = Math.round((due.getTime() - todayUTC) / 86_400_000);
+  const dd = String(due.getUTCDate()).padStart(2, '0');
+  const mm = String(due.getUTCMonth() + 1).padStart(2, '0');
+  const fullLabel = due.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+  let countdown: string;
+  let tone: string;
+  if (days < 0) { countdown = `${Math.abs(days)}d overdue`; tone = 'bg-red-100 text-red-700'; }
+  else if (days === 0) { countdown = 'due today'; tone = 'bg-red-100 text-red-700'; }
+  else if (days <= 7) { countdown = `in ${days}d`; tone = 'bg-amber-100 text-amber-700'; }
+  else { countdown = `in ${days}d`; tone = 'bg-gray-100 text-gray-600'; }
+  return { dateLabel: `${dd}/${mm}`, fullLabel, countdown, tone };
+}
+
 const APPROVAL_COLOURS: Record<string, string> = {
   submitted: 'bg-gray-100 text-gray-700',
   verified: 'bg-blue-100 text-blue-700',
@@ -282,6 +317,7 @@ export default function CostsPage() {
             <thead className="bg-gray-50 text-gray-600">
               <tr>
                 <SortableTh label="Date" k="date" sortKey={sortKey} sortDir={sortDir} onSort={clickSort} />
+                {view === 'payable' && <th className="px-2.5 py-2 text-left font-medium">Due</th>}
                 <SortableTh label="Supplier" k="supplier" sortKey={sortKey} sortDir={sortDir} onSort={clickSort} />
                 <SortableTh label="Description" k="description" sortKey={sortKey} sortDir={sortDir} onSort={clickSort} />
                 <SortableTh label="Gross" k="gross" sortKey={sortKey} sortDir={sortDir} onSort={clickSort} align="right" />
@@ -296,7 +332,20 @@ export default function CostsPage() {
             <tbody className="divide-y divide-gray-100">
               {sortedRows.map((c) => (
                 <tr key={c.id} className="hover:bg-gray-50">
-                  <td className="px-2.5 py-2 whitespace-nowrap text-gray-700">{fmtDate(c.cost_date)}</td>
+                  <td className="px-2.5 py-2 whitespace-nowrap text-gray-700" title={fmtDate(c.cost_date)}>{fmtDayMonth(c.cost_date)}</td>
+                  {view === 'payable' && (() => {
+                    const due = dueInfo(c.cost_date);
+                    return (
+                      <td className="px-2.5 py-2 whitespace-nowrap text-gray-700">
+                        {due ? (
+                          <div className="flex items-center gap-1.5" title={`Due ${due.fullLabel} (invoice + ${DEFAULT_TERMS_DAYS}d)`}>
+                            <span>{due.dateLabel}</span>
+                            <span className={`px-1.5 py-0.5 text-xs rounded-full ${due.tone}`}>{due.countdown}</span>
+                          </div>
+                        ) : '—'}
+                      </td>
+                    );
+                  })()}
                   <td className="px-2.5 py-2 text-gray-900">
                     <div className="flex items-center gap-2">
                       {c.receipt_r2_key && <ReceiptThumb cost={c} onOpen={() => setPreview(c)} />}

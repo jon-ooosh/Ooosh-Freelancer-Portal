@@ -2,7 +2,15 @@ import { useEffect, useState, useCallback } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { Pcn, PCN_STATUS_LABEL, PcnStatusPill, FINE_TYPE_LABEL } from './PcnsPage';
+import {
+  PcnDocument,
+  PcnDocKind,
+  PCN_DOC_KINDS,
+  PCN_DOC_KIND_LABEL,
+  mergePcnDocuments,
+} from '../components/pcn/format';
 import PcnActionChooser from '../components/PcnActionChooser';
+import { compressImage } from '../components/holding/compress';
 
 interface PcnEvent {
   id: string;
@@ -31,8 +39,6 @@ export default function PcnDetailPage() {
   const [pcn, setPcn] = useState<PcnDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [viewDoc, setViewDoc] = useState(false);
-  const [viewReceipt, setViewReceipt] = useState(false);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -112,12 +118,9 @@ export default function PcnDetailPage() {
               <dd className="text-sm text-slate-800 whitespace-pre-wrap">{pcn.notes}</dd>
             </div>
           )}
-          {pcn.pcn_document_url && (
-            <div className="mt-3 pt-3 border-t">
-              <dt className="text-xs text-slate-500 mb-1">Scanned notice</dt>
-              <button onClick={() => setViewDoc(true)} className="text-sm text-[#7B5EA7] hover:underline">📄 View scanned PCN</button>
-            </div>
-          )}
+          <div className="mt-3 pt-3 border-t">
+            <PcnDocuments pcn={pcn} reload={load} />
+          </div>
 
           {/* Pay-direct tracking — deadline + chase ladder progress */}
           {pcn.status === 'driver_notified_pay' && (
@@ -130,13 +133,6 @@ export default function PcnDetailPage() {
                   : <span className="text-slate-500">Awaiting proof of payment.</span>}
               </dd>
               <p className="text-xs text-slate-400 mt-1">Chases auto-send on the 3/5/7-day ladder; info@ is copied each time.</p>
-            </div>
-          )}
-
-          {pcn.receipt_url && (
-            <div className="mt-3 pt-3 border-t">
-              <dt className="text-xs text-slate-500 mb-1">Proof of payment {pcn.receipt_uploaded_at ? `(uploaded ${fmtDate(pcn.receipt_uploaded_at)})` : ''}</dt>
-              <button onClick={() => setViewReceipt(true)} className="text-sm text-green-700 hover:underline">🧾 View payment receipt</button>
             </div>
           )}
         </div>
@@ -194,12 +190,123 @@ export default function PcnDetailPage() {
         )}
       </div>
 
-      {viewDoc && pcn.pcn_document_url && (
-        <DocLightbox r2Key={pcn.pcn_document_url} onClose={() => setViewDoc(false)} />
+    </div>
+  );
+}
+
+// Documents — the multi-doc audit list (notice front/back, correspondence,
+// council/company responses) + an "Add document" control. After an add it
+// surfaces the next-steps chooser so staff can progress the PCN off the back
+// of, e.g., an issuer's response landing.
+function PcnDocuments({ pcn, reload }: { pcn: PcnDetail; reload: () => Promise<void> | void }) {
+  const [file, setFile] = useState<File | null>(null);
+  const [kind, setKind] = useState<PcnDocKind>('response');
+  const [comment, setComment] = useState('');
+  const [uploading, setUploading] = useState(false);
+  const [err, setErr] = useState('');
+  const [view, setView] = useState<PcnDocument | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [justAdded, setJustAdded] = useState(false);
+  const [showNext, setShowNext] = useState(false);
+
+  const docs = mergePcnDocuments(pcn);
+  const terminal = ['paid_by_driver', 'paid_recharged', 'internal_ooosh', 'internal_freelancer', 'closed'].includes(pcn.status);
+  // r2_keys stored in the documents array can be removed; the legacy pointers can't.
+  const removableKeys = new Set((pcn.documents || []).map((d) => d.r2_key));
+
+  const add = async () => {
+    if (!file) return;
+    setUploading(true); setErr('');
+    try {
+      const fd = new FormData();
+      fd.append('attachment_only', 'true');
+      fd.append('file', await compressImage(file));
+      const up = await api.upload<{ r2_key: string }>('/files/upload', fd);
+      await api.post(`/pcns/${pcn.id}/documents`, { r2_key: up.r2_key, name: file.name, kind, comment: comment.trim() || null });
+      setFile(null); setComment(''); setAdding(false);
+      setJustAdded(true);
+      await reload();
+    } catch {
+      setErr('Upload failed — please try again.');
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const remove = async (d: PcnDocument) => {
+    if (!confirm('Remove this document from the PCN? (The file itself is retained.)')) return;
+    try {
+      await api.delete(`/pcns/${pcn.id}/documents?r2_key=${encodeURIComponent(d.r2_key)}`);
+      await reload();
+    } catch { /* surfaced on next load */ }
+  };
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <dt className="text-xs text-slate-500">Documents {docs.length > 0 && <span className="text-slate-400">({docs.length})</span>}</dt>
+        {!adding && <button onClick={() => { setAdding(true); setJustAdded(false); }} className="text-xs text-[#7B5EA7] hover:underline">+ Add document</button>}
+      </div>
+
+      {docs.length === 0 && !adding && <p className="text-sm text-slate-400">No documents yet.</p>}
+
+      <ul className="space-y-1">
+        {docs.map((d, i) => (
+          <li key={d.r2_key + i} className="flex items-center gap-2 text-sm bg-slate-50 rounded px-2 py-1.5">
+            <span className="text-[10px] uppercase tracking-wide text-slate-400 w-24 shrink-0">{PCN_DOC_KIND_LABEL[(d.kind as PcnDocKind) || 'other']}</span>
+            <button onClick={() => setView(d)} className="text-[#7B5EA7] hover:underline truncate flex-1 text-left">
+              📄 {d.name || 'Document'}
+            </button>
+            {d.comment && <span className="text-xs text-slate-400 truncate hidden sm:block">{d.comment}</span>}
+            {removableKeys.has(d.r2_key) && (
+              <button onClick={() => remove(d)} className="text-xs text-slate-400 hover:text-red-600 shrink-0">remove</button>
+            )}
+          </li>
+        ))}
+      </ul>
+
+      {adding && (
+        <div className="mt-2 border rounded-lg p-3 bg-slate-50/60 space-y-2">
+          <input
+            type="file"
+            accept="image/*,application/pdf"
+            onChange={(e) => setFile(e.target.files?.[0] || null)}
+            className="text-sm w-full"
+          />
+          <div className="flex gap-2 flex-wrap">
+            <select value={kind} onChange={(e) => setKind(e.target.value as PcnDocKind)} className="border rounded px-2 py-1.5 text-sm">
+              {PCN_DOC_KINDS.map((k) => <option key={k} value={k}>{PCN_DOC_KIND_LABEL[k]}</option>)}
+            </select>
+            <input value={comment} onChange={(e) => setComment(e.target.value)} placeholder="Comment (optional)"
+              className="border rounded px-2 py-1.5 text-sm flex-1 min-w-[140px]" />
+          </div>
+          {err && <p className="text-sm text-red-600">{err}</p>}
+          <div className="flex gap-2 justify-end">
+            <button onClick={() => { setAdding(false); setFile(null); setErr(''); }} className="text-sm px-3 py-1.5 border rounded-lg hover:bg-white">Cancel</button>
+            <button onClick={add} disabled={uploading || !file}
+              className="text-sm px-3 py-1.5 rounded-lg bg-[#7B5EA7] text-white hover:bg-[#6a5092] disabled:opacity-50">
+              {uploading ? 'Uploading…' : 'Add document'}
+            </button>
+          </div>
+        </div>
       )}
-      {viewReceipt && pcn.receipt_url && (
-        <DocLightbox r2Key={pcn.receipt_url} onClose={() => setViewReceipt(false)} />
+
+      {/* Next steps off the back of an added document (e.g. issuer responded) */}
+      {justAdded && !terminal && (
+        <div className="mt-2 rounded-lg bg-green-50 border border-green-200 px-3 py-2">
+          <p className="text-sm text-green-800">✓ Document added. Does this move the PCN on?</p>
+          {!showNext ? (
+            <button onClick={() => setShowNext(true)} className="text-sm text-[#7B5EA7] hover:underline mt-1">Choose next step →</button>
+          ) : (
+            <div className="mt-2">
+              <PcnActionChooser pcnId={pcn.id} driverEmail={pcn.driver_email}
+                onActioned={() => { setShowNext(false); setJustAdded(false); reload(); }} />
+            </div>
+          )}
+        </div>
       )}
+
+      {view && <DocLightbox r2Key={view.r2_key} onClose={() => setView(null)} />}
     </div>
   );
 }
