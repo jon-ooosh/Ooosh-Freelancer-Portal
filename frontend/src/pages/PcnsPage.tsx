@@ -11,6 +11,8 @@ import {
   PcnStatusPill,
   pcnTrafficLight,
   PcnLight,
+  PCN_DOC_KINDS,
+  PCN_DOC_KIND_LABEL,
 } from '../components/pcn/format';
 
 // Re-export the shared display surface so existing importers (PcnDetailPage)
@@ -283,7 +285,10 @@ function CreatePcnModal({ onClose, onCreated }: { onClose: () => void; onCreated
   // After save, the modal switches to the "what next?" action step.
   const [created, setCreated] = useState<{ id: string; driver_email: string | null } | null>(null);
   const [actionTaken, setActionTaken] = useState(false);
-  const [file, setFile] = useState<File | null>(null);
+  // Multiple pages: front + back of a paper notice, or extra pages. Each carries
+  // a `kind` so it's filed correctly. Index 0 defaults to the notice front.
+  const [pages, setPages] = useState<{ file: File; kind: string }[]>([]);
+  const [dupes, setDupes] = useState<Pcn[]>([]);
   const [extracting, setExtracting] = useState(false);
   const [extractError, setExtractError] = useState<string | null>(null);
   const [confidence, setConfidence] = useState<string | null>(null);
@@ -298,19 +303,42 @@ function CreatePcnModal({ onClose, onCreated }: { onClose: () => void; onCreated
 
   const set = (k: string, v: string) => setForm((f) => ({ ...f, [k]: v }));
 
-  const pickFile = (f: File | null) => {
-    setFile(f);
+  const addFiles = (fileList: FileList | null) => {
+    if (!fileList || fileList.length === 0) return;
     setExtractError(null);
+    setPages((prev) => {
+      const next = [...prev];
+      Array.from(fileList).forEach((f) => {
+        const kind = next.length === 0 ? 'notice_front' : next.length === 1 ? 'notice_back' : 'other';
+        next.push({ file: f, kind });
+      });
+      return next;
+    });
   };
+  const setPageKind = (i: number, kind: string) => setPages((p) => p.map((pg, idx) => (idx === i ? { ...pg, kind } : pg)));
+  const removePage = (i: number) => setPages((p) => p.filter((_, idx) => idx !== i));
+
+  // Non-blocking duplicate flag — surface any existing PCN sharing this ref.
+  useEffect(() => {
+    const ref = form.reference.trim();
+    if (!ref) { setDupes([]); return; }
+    const t = setTimeout(() => {
+      api.get<{ data: Pcn[] }>(`/pcns/check-duplicate?reference=${encodeURIComponent(ref)}`)
+        .then((r) => setDupes(r.data))
+        .catch(() => setDupes([]));
+    }, 400);
+    return () => clearTimeout(t);
+  }, [form.reference]);
 
   const extract = async () => {
-    if (!file) return;
+    if (pages.length === 0) return;
     setExtracting(true); setExtractError(null);
     try {
       const fd = new FormData();
       // Compress photos (~1600px) before sending — keeps the upload small while
       // staying legible for extraction. PDFs + non-images pass through untouched.
-      fd.append('file', await compressImage(file));
+      // All pages go in one call so front + back are read together.
+      for (const pg of pages) fd.append('files', await compressImage(pg.file));
       const r = await api.upload<{ data: ExtractedPcn }>('/pcns/extract', fd);
       const d = r.data;
       setForm({
@@ -366,17 +394,20 @@ function CreatePcnModal({ onClose, onCreated }: { onClose: () => void; onCreated
   const save = async () => {
     setSaving(true); setError(null);
     try {
-      // Stash the document in R2 first (best-effort — don't block the save).
-      let documentUrl: string | null = null;
-      if (file) {
+      // Stash each page in R2 first (best-effort — don't block the save).
+      const documents: { r2_key: string; name: string; kind: string }[] = [];
+      for (const pg of pages) {
         try {
           const fd = new FormData();
           fd.append('attachment_only', 'true');
-          fd.append('file', await compressImage(file));
+          fd.append('file', await compressImage(pg.file));
           const up = await api.upload<{ r2_key: string }>('/files/upload', fd);
-          documentUrl = up.r2_key;
-        } catch { /* keep going — the PCN record matters more than the scan */ }
+          documents.push({ r2_key: up.r2_key, name: pg.file.name, kind: pg.kind });
+        } catch { /* keep going — the PCN record matters more than a scan */ }
       }
+      // Legacy primary pointer = the notice front (or first uploaded), so the
+      // email-attach + existing readers keep working.
+      const documentUrl = documents.find((d) => d.kind === 'notice_front')?.r2_key ?? documents[0]?.r2_key ?? null;
       const offenceAt = form.offence_date
         ? `${form.offence_date}T${form.offence_time || '12:00'}:00`
         : null;
@@ -394,6 +425,7 @@ function CreatePcnModal({ onClose, onCreated }: { onClose: () => void; onCreated
         final_deadline: form.final_deadline || null,
         notes: form.notes || null,
         pcn_document_url: documentUrl,
+        documents,
       };
       if (picked) {
         body.vehicle_id = picked.vehicle_id;
@@ -447,32 +479,45 @@ function CreatePcnModal({ onClose, onCreated }: { onClose: () => void; onCreated
       <div className="bg-white rounded-xl max-w-2xl w-full my-8 p-5" onClick={(e) => e.stopPropagation()}>
         <h2 className="text-lg font-bold text-slate-800 mb-4">Log PCN</h2>
 
-        {/* Step 1 — Upload & extract (primary path) */}
-        <div className="border-2 border-dashed rounded-xl p-5 text-center">
+        {/* Step 1 — Upload & extract (primary path). Multiple pages supported
+            — front + back of a paper notice are read together by extraction. */}
+        <div className="border-2 border-dashed rounded-xl p-5">
           <input
             ref={fileRef}
             type="file"
             accept="image/*,application/pdf"
+            multiple
             className="hidden"
-            onChange={(e) => pickFile(e.target.files?.[0] || null)}
+            onChange={(e) => { addFiles(e.target.files); if (fileRef.current) fileRef.current.value = ''; }}
           />
-          {!file ? (
-            <>
+          {pages.length === 0 ? (
+            <div className="text-center">
               <p className="text-4xl mb-2">📄</p>
               <button onClick={() => fileRef.current?.click()}
                 className="text-[#7B5EA7] font-medium hover:underline">
                 Take a photo or choose a file
               </button>
-              <p className="text-xs text-slate-400 mt-1">Snap the paper notice, or upload a JPEG / PNG / PDF</p>
-            </>
+              <p className="text-xs text-slate-400 mt-1">Snap the notice (front &amp; back), or upload JPEG / PNG / PDF — add as many pages as you need</p>
+            </div>
           ) : (
-            <div className="flex items-center justify-center gap-3 flex-wrap">
-              <span className="text-sm text-slate-700">📎 {file.name}</span>
-              <button onClick={() => fileRef.current?.click()} className="text-xs text-slate-500 hover:underline">change</button>
-              <button onClick={extract} disabled={extracting}
-                className="bg-[#7B5EA7] text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-[#6a5092] disabled:opacity-50">
-                {extracting ? 'Extracting…' : '✨ Extract Data'}
-              </button>
+            <div className="space-y-2">
+              {pages.map((pg, i) => (
+                <div key={i} className="flex items-center gap-2 flex-wrap bg-slate-50 rounded-lg px-3 py-2">
+                  <span className="text-sm text-slate-700 flex-1 min-w-0 truncate">📎 {pg.file.name}</span>
+                  <select value={pg.kind} onChange={(e) => setPageKind(i, e.target.value)}
+                    className="border rounded px-2 py-1 text-xs">
+                    {PCN_DOC_KINDS.map((k) => <option key={k} value={k}>{PCN_DOC_KIND_LABEL[k]}</option>)}
+                  </select>
+                  <button onClick={() => removePage(i)} className="text-xs text-slate-400 hover:text-red-600">remove</button>
+                </div>
+              ))}
+              <div className="flex items-center justify-between flex-wrap gap-2 pt-1">
+                <button onClick={() => fileRef.current?.click()} className="text-xs text-[#7B5EA7] hover:underline">+ Add another page</button>
+                <button onClick={extract} disabled={extracting}
+                  className="bg-[#7B5EA7] text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-[#6a5092] disabled:opacity-50">
+                  {extracting ? 'Extracting…' : '✨ Extract Data'}
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -494,6 +539,20 @@ function CreatePcnModal({ onClose, onCreated }: { onClose: () => void; onCreated
                 : confidence === 'medium' ? 'bg-amber-50 text-amber-800'
                 : 'bg-red-50 text-red-800'}`}>
                 Extracted with <strong>{confidence}</strong> confidence — please check the fields below before saving.
+              </div>
+            )}
+
+            {dupes.length > 0 && (
+              <div className="mt-3 text-sm rounded-lg px-3 py-2 bg-amber-50 text-amber-800 border border-amber-200">
+                ⚠ A PCN with this reference is already logged
+                {dupes.slice(0, 3).map((d) => (
+                  <span key={d.id}>
+                    {' '}— <Link to={`/vehicles/pcns/${d.id}`} target="_blank" className="underline font-medium">
+                      {PCN_STATUS_LABEL[d.status] || d.status}, {fmtDate(d.created_at)}
+                    </Link>
+                  </span>
+                ))}
+                . You can still log it (non-blocking).
               </div>
             )}
 

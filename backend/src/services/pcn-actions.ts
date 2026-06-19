@@ -16,7 +16,7 @@
 import { query } from '../config/database';
 import { emailService } from '../services/email-service';
 import { hhBroker } from '../services/hirehop-broker';
-import { getFromR2 } from '../config/r2';
+import { collectNoticeAttachments } from './pcn-documents';
 import { resolveClientEmailTarget } from '../services/money-emails';
 import { getSystemSettings } from '../routes/system-settings';
 import { getFrontendUrl } from '../config/app-urls';
@@ -204,20 +204,9 @@ export async function applyPcnAction(
       }
       if (!to) { to = OOOSH_EMAIL; fallback = true; }
 
-      // Notice attachment (best-effort)
-      const attachments = [];
-      if (pcn.pcn_document_url) {
-        try {
-          const obj = await getFromR2(pcn.pcn_document_url);
-          const bytes = await (obj.Body as { transformToByteArray: () => Promise<Uint8Array> }).transformToByteArray();
-          const isPdf = pcn.pcn_document_url.toLowerCase().endsWith('.pdf');
-          attachments.push({
-            filename: `PCN-${pcn.vehicle_reg || 'notice'}-${pcn.reference || ''}.${isPdf ? 'pdf' : 'jpg'}`.replace(/\s/g, ''),
-            content: Buffer.from(bytes),
-            contentType: isPdf ? 'application/pdf' : 'image/jpeg',
-          });
-        } catch { /* attachment best-effort */ }
-      }
+      // Notice attachments (front + back, best-effort) — the back page usually
+      // carries the issuer's payment options, which the client templates point to.
+      const attachments = await collectNoticeAttachments(pcn);
 
       const reduced = money(pcn.reduced_amount);
       const fineLine = money(pcn.fine_amount)
