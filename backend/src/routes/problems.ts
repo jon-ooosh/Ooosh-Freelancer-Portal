@@ -260,6 +260,7 @@ router.get('/picker/:jobId', async (req: AuthRequest, res: Response) => {
        JOIN person_organisation_roles por ON por.organisation_id = o.id
        JOIN people p ON p.id = por.person_id
        WHERE jo.job_id = $1
+         AND p.is_deleted = false
          AND (por.end_date IS NULL OR por.end_date > CURRENT_DATE)
        ORDER BY p.first_name, p.last_name
        LIMIT 100`,

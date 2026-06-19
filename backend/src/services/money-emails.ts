@@ -107,7 +107,7 @@ export async function getJobEmailRecipients(jobId: string): Promise<{
        END AS priority
      FROM people p
      JOIN person_organisation_roles por ON por.person_id = p.id AND por.status = 'active'
-     WHERE p.email IS NOT NULL AND p.email != ''
+     WHERE p.is_deleted = false AND p.email IS NOT NULL AND p.email != ''
        AND (
          por.organisation_id IN (SELECT organisation_id FROM job_organisations WHERE job_id = $1)
          OR por.organisation_id = (SELECT client_id FROM jobs WHERE id = $1)

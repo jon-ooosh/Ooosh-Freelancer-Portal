@@ -151,7 +151,7 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
         ) ORDER BY por.status, p.last_name)
         FROM person_organisation_roles por
         JOIN people p ON p.id = por.person_id
-        WHERE por.organisation_id = o.id
+        WHERE por.organisation_id = o.id AND p.is_deleted = false
         ) as people,
         (SELECT json_agg(json_build_object('id', sub.id, 'name', sub.name, 'type', sub.type))
          FROM organisations sub WHERE sub.parent_id = o.id AND sub.is_deleted = false
