@@ -331,6 +331,16 @@ router.get('/by-driver/:id', async (req: AuthRequest, res: Response) => {
   res.json({ data: r.rows });
 });
 
+// PCNs where the responsible driver is this person (freelancer/crew who drove
+// an Ooosh van — pcns.driver_person_id). Mirrors by-driver for the people side.
+router.get('/by-person/:id', async (req: AuthRequest, res: Response) => {
+  const r = await query(
+    `${SELECT_WITH_JOINS} WHERE p.driver_person_id = $1 AND p.is_deleted = false ORDER BY p.offence_at DESC NULLS LAST, p.created_at DESC`,
+    [req.params.id]
+  );
+  res.json({ data: r.rows });
+});
+
 router.get('/by-org/:id', async (req: AuthRequest, res: Response) => {
   const r = await query(
     `${SELECT_WITH_JOINS} WHERE p.client_organisation_id = $1 AND p.is_deleted = false ORDER BY p.offence_at DESC NULLS LAST, p.created_at DESC`,

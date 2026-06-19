@@ -26,13 +26,14 @@ import {
   fmtPcnMoney,
 } from './pcn/format';
 
-type EntityType = 'vehicle' | 'driver' | 'organisation' | 'job';
+type EntityType = 'vehicle' | 'driver' | 'organisation' | 'job' | 'person';
 
 const ENDPOINT_BY_TYPE: Record<EntityType, string> = {
   vehicle: 'by-vehicle',
   driver: 'by-driver',
   organisation: 'by-org',
   job: 'by-job',
+  person: 'by-person',
 };
 
 // A PCN is "resolved" once it reaches a green terminal state. Anything else is
