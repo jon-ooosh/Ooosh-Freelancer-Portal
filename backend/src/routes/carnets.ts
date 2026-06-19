@@ -113,6 +113,35 @@ async function logCarnetInteraction(jobId: string, content: string, userId?: str
   }
 }
 
+// Map the carnet lifecycle status onto the thin `carnet` job_requirement so the
+// Job-View tracker (and the pre-hire prep counter) reflect real progress.
+// Management lives in Operations; the requirement card is a read-only reflection.
+const CARNET_REQ_STATUS: Record<string, 'not_started' | 'in_progress' | 'done'> = {
+  // we_supply
+  detected: 'not_started', form_sent: 'not_started',
+  info_received: 'in_progress', applied: 'in_progress', received: 'in_progress',
+  with_client: 'in_progress', returned: 'in_progress', discharged: 'in_progress',
+  closed: 'done',
+  // client_arranges
+  requested: 'not_started', spreadsheet_sent: 'in_progress', done: 'done',
+  // a cancelled carnet is no longer outstanding
+  cancelled: 'done',
+};
+
+async function syncCarnetRequirementStatus(jobId: string, carnetStatus: string) {
+  const reqStatus = CARNET_REQ_STATUS[carnetStatus];
+  if (!reqStatus) return;
+  try {
+    await query(
+      `UPDATE job_requirements SET status = $1, updated_at = NOW()
+       WHERE job_id = $2 AND requirement_type = 'carnet' AND phase = 'pre_hire'`,
+      [reqStatus, jobId]
+    );
+  } catch (err) {
+    console.error('[carnets] requirement status sync failed:', err);
+  }
+}
+
 // POST /api/carnets — manual create (primarily client_arranges; also rare manual we_supply).
 router.post('/', async (req: AuthRequest, res: Response) => {
   try {
@@ -225,6 +254,7 @@ router.patch('/:id', async (req: AuthRequest, res: Response) => {
     );
     if (statusChanged) {
       await logCarnetInteraction(carnet.job_id, `📄 Carnet status → ${b.status}`, req.user?.id);
+      await syncCarnetRequirementStatus(carnet.job_id, b.status);
     }
     res.json({ data: result.rows[0] });
   } catch (err) {
@@ -243,6 +273,7 @@ router.post('/:id/cancel', async (req: AuthRequest, res: Response) => {
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Carnet not found or already cancelled' });
     await logCarnetInteraction(result.rows[0].job_id, '📄 Carnet cancelled', req.user?.id);
+    await syncCarnetRequirementStatus(result.rows[0].job_id, 'cancelled');
     res.json({ data: result.rows[0] });
   } catch (err) {
     console.error('[carnets] cancel error:', err);

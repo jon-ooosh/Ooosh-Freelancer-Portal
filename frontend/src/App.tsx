@@ -21,6 +21,7 @@ import DriverDetailPage from './pages/DriverDetailPage';
 import TransportOpsPage from './pages/TransportOpsPage';
 import BacklinePage from './pages/BacklinePage';
 import BacklineMatcherPage from './pages/BacklineMatcherPage';
+import CarnetsPage from './pages/CarnetsPage';
 import IssuesPage from './pages/IssuesPage';
 import ProblemsPage from './pages/ProblemsPage';
 import IssueDetailPage from './pages/IssueDetailPage';
@@ -172,6 +173,7 @@ export default function App() {
                 <Route path="/operations/transport" element={<TransportOpsPage />} />
                 <Route path="/operations/backline" element={<BacklinePage />} />
                 <Route path="/operations/backline-matcher" element={<BacklineMatcherPage />} />
+                <Route path="/operations/carnets" element={<CarnetsPage />} />
                 <Route path="/operations/fill-gap/:jobId" element={<FillGapPage />} />
                 <Route path="/operations/issues" element={<IssuesPage />} />
                 <Route path="/operations/issues/:id" element={<IssuesPage />} />
