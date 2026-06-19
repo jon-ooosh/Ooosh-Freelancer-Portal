@@ -79,6 +79,12 @@ const SEAT_PARENT_LIST_ID = 1645; // "Rear seats:" stock item
 // QUANTITY = number of vans going abroad = number of certs needed.
 const VE103B_CERT_LIST_ID = 1023;
 
+// ATA Carnet arrangement fee — chargeable HH sale item (CATEGORY_ID 355 "Misc
+// Sale Item", £750). Its presence on a job is sales' signal that we're
+// arranging a carnet on the client's behalf (the 'we_supply' mode). Mirrors
+// the VE103B detection exactly. See docs/CARNET-SPEC.md.
+const CARNET_ARRANGEMENT_LIST_ID = 575;
+
 // ── Derived flags shape ──────────────────────────────────────────────────
 
 export type VehicleSlotMode = 'self_drive' | 'van_and_driver';
@@ -104,6 +110,7 @@ export interface DerivedFlags {
   seat_config: 'round_table' | 'forward_facing' | null;
   ve103b_required: boolean;           // VE103B cert item (1023) present on the job
   vans_going_abroad: number;          // Count of certs needed (= qty of item 1023)
+  has_carnet: boolean;                // Carnet arrangement fee (575) present — we supply a carnet
   has_backline: boolean;
   backline_item_count: number;
   has_rehearsal: boolean;
@@ -134,6 +141,7 @@ export function deriveFlags(items: HHLineItem[], slotModes: VehicleSlotModes = {
     seat_config: null,
     ve103b_required: false,
     vans_going_abroad: 0,
+    has_carnet: false,
     has_backline: false,
     backline_item_count: 0,
     has_rehearsal: false,
@@ -189,6 +197,11 @@ export function deriveFlags(items: HHLineItem[], slotModes: VehicleSlotModes = {
     if (item.LIST_ID === VE103B_CERT_LIST_ID && item.kind !== 0) {
       flags.ve103b_required = true;
       flags.vans_going_abroad += Math.max(1, item.QUANTITY);
+    }
+
+    // ── Carnet arrangement fee (sale item 575) → we're supplying a carnet ──
+    if (item.LIST_ID === CARNET_ARRANGEMENT_LIST_ID && item.kind !== 0) {
+      flags.has_carnet = true;
     }
 
     if (BACKLINE_CATEGORIES.includes(item.CATEGORY_ID) && item.kind === 2) {
@@ -490,15 +503,44 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
       });
     }
 
+    // ── Carnet (sale item 575 — we supply a carnet) ──
+    if (flags.has_carnet) {
+      await upsertAutoRequirement(client, jobId, 'carnet', flags, previousFlags, result, {
+        notes: 'ATA Carnet arrangement detected from HireHop — we supply',
+        snapshot: items.filter(i => i.LIST_ID === CARNET_ARRANGEMENT_LIST_ID && i.kind !== 0),
+      });
+
+      // Ensure a job_carnets record exists (we_supply mode). Like the job_excess
+      // auto-create: only inserts if none exists, never clobbers staff progress.
+      // The unique-live index means a 'cancelled' row won't block a fresh one.
+      const existingCarnet = await client.query(
+        `SELECT id FROM job_carnets WHERE job_id = $1 AND status <> 'cancelled' LIMIT 1`,
+        [jobId]
+      );
+      if (existingCarnet.rows.length === 0) {
+        await client.query(
+          `INSERT INTO job_carnets (job_id, mode, status, notes, created_by)
+           VALUES ($1, 'we_supply', 'detected', $2, $3)`,
+          [
+            jobId,
+            'Auto-created: carnet arrangement fee (item 575) detected on HireHop',
+            '00000000-0000-0000-0000-000000000000',
+          ]
+        );
+        result.requirementsCreated.push('carnet_record');
+      }
+    }
+
     // ── Clean up stale requirements ──
     // If HH doesn't have items for a requirement type that was auto-created,
     // remove it (if not_started) or flag it (if staff has acted on it).
-    const DETECTABLE_TYPES = ['vehicle', 'hire_forms', 'excess', 'backline', 'rehearsal'];
+    const DETECTABLE_TYPES = ['vehicle', 'hire_forms', 'excess', 'backline', 'rehearsal', 'carnet'];
     const activeTypes = new Set<string>();
     if (flags.has_vehicle) { activeTypes.add('vehicle'); }
     if (flags.has_vehicle && hasAnySelfDrive && !isInternal) { activeTypes.add('hire_forms'); activeTypes.add('excess'); }
     if (flags.has_backline) { activeTypes.add('backline'); }
     if (flags.has_rehearsal) { activeTypes.add('rehearsal'); }
+    if (flags.has_carnet) { activeTypes.add('carnet'); }
 
     // Every vehicle slot is van_and_driver (or job is internal) —
     // hire_forms/excess are suspended, not stale
