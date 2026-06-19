@@ -45,6 +45,7 @@ import pcnsRouter from './pcns';
 import rackPlansRouter from './rack-plans';
 import stagingRouter from './staging';
 import carnetsRouter from './carnets';
+import backlineMatcherRouter from './backline-matcher';
 
 const router = Router();
 
@@ -72,6 +73,7 @@ router.use('/excess', excessRouter);
 router.use('/money', moneyRouter);
 router.use('/ve103b', ve103bRouter);
 router.use('/backline', backlineRouter);
+router.use('/backline-matcher', backlineMatcherRouter);  // AI equipment matcher + demand tracker (replaces alternative-hirehop-stock Netlify app)
 router.use('/cancellations', cancellationsRouter);
 router.use('/fill-gap', fillGapRouter);  // Replacement candidates for cancelled / lost jobs (Phase 1 — SQL only)
 router.use('/issues', issuesRouter);

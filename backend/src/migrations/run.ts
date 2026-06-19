@@ -171,6 +171,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '134_end_roles_for_deleted_people.sql',
         '135_carnets.sql',
         '136_pcn_documents.sql',
+        '137_backline_demand.sql',
       ];
 
       for (const migration of migrations) {

@@ -9,6 +9,7 @@ import PcnHistorySection from '../components/PcnHistorySection';
 import SendMerchFormButton from '../components/SendMerchFormButton';
 import TransportCalculator from '../components/TransportCalculator';
 import { StagingCalculatorModal, StagingOverviewCard } from '../components/StagingCalculator';
+import BacklineMatcherModal from '../components/BacklineMatcherModal';
 import RequirementCard from '../components/RequirementCard';
 import type { JobRequirement } from '../components/RequirementCard';
 import ExcessGateBanner from '../components/ExcessGateBanner';
@@ -1166,6 +1167,7 @@ export default function JobDetailPage() {
   // Staging Calculator — modal launch; created plans surface as an Overview card.
   const [showStagingModal, setShowStagingModal] = useState(false);
   const [showRackPlanModal, setShowRackPlanModal] = useState(false);
+  const [showBacklineMatcher, setShowBacklineMatcher] = useState(false);
   const [showCombineModal, setShowCombineModal] = useState(false);
   const [rackPlanRefreshKey, setRackPlanRefreshKey] = useState(0);
   const [stagingRefreshKey, setStagingRefreshKey] = useState(0);
@@ -3811,6 +3813,7 @@ export default function JobDetailPage() {
             onOpenCrewCalculator={() => { setShowCalculator(true); setActiveTab('transport'); }}
             onLaunchStaging={() => setShowStagingModal(true)}
             onLaunchRackPlan={() => setShowRackPlanModal(true)}
+            onLaunchBacklineMatcher={() => setShowBacklineMatcher(true)}
           />
 
         </div>
@@ -4971,6 +4974,14 @@ export default function JobDetailPage() {
         />
       )}
 
+      {/* Backline Matcher — launched from the Job Requirements tools menu, job pre-filled */}
+      {showBacklineMatcher && (
+        <BacklineMatcherModal
+          hhJobNumber={job.hh_job_number}
+          onClose={() => setShowBacklineMatcher(false)}
+        />
+      )}
+
       {/* Chase Modal */}
       {/* Excess Payment / Edit Modal — opened from Drivers & Vehicles strip */}
       {excessModalRecord && (
@@ -5905,7 +5916,7 @@ function OverviewFinancialStrip({ jobId }: { jobId: string }) {
 }
 
 
-function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, seatAvailability, hasCrewQuotes, hasCrewOnHH, onOpenCrewCalculator, onLaunchStaging, onLaunchRackPlan }: {
+function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, seatAvailability, hasCrewQuotes, hasCrewOnHH, onOpenCrewCalculator, onLaunchStaging, onLaunchRackPlan, onLaunchBacklineMatcher }: {
   jobId: string;
   hhJobNumber?: number | null;
   pipelineStatus?: string | null;
@@ -5931,6 +5942,7 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
   onOpenCrewCalculator?: () => void;
   onLaunchStaging?: () => void;
   onLaunchRackPlan?: () => void;
+  onLaunchBacklineMatcher?: () => void;
 }) {
   const [requirements, setRequirements] = useState<JobRequirement[]>([]);
   const [loading, setLoading] = useState(true);
@@ -6226,6 +6238,16 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
                 <div>
                   <span className="font-medium">Rack Planner</span>
                   <span className="block text-xs text-gray-400">Lay out how racks/systems are supplied &amp; interconnected</span>
+                </div>
+              </button>
+              <button
+                onClick={() => { setShowAddMenu(false); onLaunchBacklineMatcher?.(); }}
+                className="w-full text-left px-4 py-2 text-sm hover:bg-gray-50 flex items-center gap-2"
+              >
+                <span className="text-base">🎸</span>
+                <div>
+                  <span className="font-medium">Backline Matcher</span>
+                  <span className="block text-xs text-gray-400">Find alternatives for kit a client asked for that we may not stock</span>
                 </div>
               </button>
             </div>

@@ -2373,7 +2373,7 @@ These are existing standalone tools that currently push to Monday.com. They need
 
 - **Payment Portal** — Stripe payment processing, currently updates Monday.com. HIGH PRIORITY to repoint (after Steps 1-4).
 - **Staging Calculator** — ✅ **INTEGRATED into OP (Jun 2026)** — see "Staging Calculator Integration" below.
-- **Backline Matcher** — match client requirements to inventory (standalone, lives in separate repo `jon-ooosh/alternative-hirehop-stock`). Next to integrate.
+- **Backline Matcher** — ✅ **INTEGRATED into OP (Jun 2026)** — see "Backline Matcher Integration" below.
 - **PCN Manager** — penalty charge notice processing (standalone, separate repo `jon-ooosh/PCN-Management-System`). Next to integrate.
 - **Cold Lead Finder** — Ticketmaster API integration (standalone, low priority)
 
@@ -2451,6 +2451,58 @@ replaced the dead manual requirement-add picker — templates + individual types
 - **Deferred:** UX/UI polish of the (admittedly cramped) calculator layout — second pass once it's
   live and jon's clicked around. Portal surfacing of shared staging links. Full React rewrite (only
   if it earns its keep — low frequency).
+
+#### Backline Matcher Integration (Jun 2026)
+
+Brought into OP from the standalone `alternative-hirehop-stock` Netlify app
+(2 functions + a vanilla-JS `app.html`, password / `?hubToken=` auth). Like the
+Staging Calculator it had **no Monday _read_ dependency** — it pulled stock from
+the same HireHop bulk-export endpoint OP already wraps — but it _wrote_ every
+search to a Monday demand board, which Monday's shutdown was killing. So this was
+a host-in-OP + replace-the-Monday-write job. **Native React, not an iframe** (the
+UI is a textarea + result cards — trivial to rebuild, and going native gets OP's
+JWT auth for free, which is what locks out the old direct-URL access).
+
+- **Where:** Operations submenu → "Backline Matcher" (`/operations/backline-matcher`)
+  AND the Job Detail "🛠 Tools" dropdown (`BacklineMatcherModal`, job number
+  pre-filled so availability checks against the real hire dates).
+- **Backend:** `routes/backline-matcher.ts` (`/api/backline-matcher/*`, STAFF_ROLES) +
+  `services/backline-stock.ts` (export fetch, mirrors `staging-stock.ts` — same
+  `HIREHOP_EXPORT_ID`/`HIREHOP_EXPORT_KEY`; fetches the 5 backline parent cats
+  372/379/385/399/406 with `depot=1`, deduped) + `services/backline-matcher.ts`
+  (the Claude call). Endpoints: `POST /match`, `GET /stock`, `GET /demand`,
+  `PATCH /demand/:id`.
+- **Matcher upgrades over the original:** Claude returns **structured JSON**
+  (have-it verdict + ranked alternatives carrying `stock_id`) via the
+  `output_config` json_schema pattern (same as `cost-receipt-extract.ts`), so the
+  UI renders proper cards with availability pills instead of a markdown blob. The
+  well-tuned domain prompt (FT/RT/BD abbreviations, "different model number ≠
+  variant" precision) is ported verbatim. **Prompt caching** on the system prompt.
+  Model: `claude-sonnet-4-6`. When a HH job is attached, per-item availability is
+  checked via the broker (`items_picklist_avail.php`, chunked 50s, cached) and
+  folded into the prompt so Claude prioritises what's free for the dates.
+- **Demand tracker** (migration 137, `backline_demand`): replaces Monday board
+  2227909940. Every `/match` upserts on the normalised request — bumps count, adds
+  potential hire-days, records the job ref, stores Claude's have-it verdict. The
+  verdict is a **per-search snapshot** (last-known), NOT live truth — live
+  availability happens at search time inside `/match`; the table never re-polls
+  HireHop. Surfaced as a sortable/searchable table on the Operations page
+  (most-requested / do-we-stock-it / hire-days) = purchasing intelligence.
+- **Monday pull:** `scripts/migrate-monday-backline-demand.ts` (dry-run default,
+  `--commit`) pulls the ~30 board rows into `backline_demand`. Idempotent (counts
+  SET from Monday, not incremented). Needs `MONDAY_API_TOKEN`; board id defaults
+  to 2227909940 (`MONDAY_BOARD_ID_BACKLINE_DEMAND` overrides).
+- **Lock-down (in `alternative-hirehop-stock` repo):** both Netlify functions
+  return **410 Gone**; `app.html`/`index.html` are meta-refresh redirects to the
+  OP route; `netlify.toml` 301s `/app` + `/app.html`. Kills the
+  `?hubToken=...backline-matcher...` deep-link — everyone comes through OP's JWT.
+- **Deploy requirement:** `ANTHROPIC_API_KEY` (already on prod — PCN + cost
+  extraction use it) + `HIREHOP_EXPORT_ID`/`HIREHOP_EXPORT_KEY` (already on prod
+  for Staging). No new server config beyond running migration 137.
+- **Deferred:** stock deep-links from alternatives to HireHop (uncertain stock-item
+  URL — left out rather than guess); availability-into-prompt for the no-job case
+  (skipped — only checks when a job is attached). Cross-link demand → Fill-a-Gap /
+  purchasing if it earns its keep.
 
 ### Future Enhancements (captured, not scheduled)
 
