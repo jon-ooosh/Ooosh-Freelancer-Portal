@@ -40,6 +40,7 @@ const navItems: NavItem[] = [
       { path: '/quick', label: '⚡ Quick Log (mobile)' },
       { path: '/operations/transport', label: 'Crew & Transport' },
       { path: '/operations/backline', label: 'Backline' },
+      { path: '/operations/backline-matcher', label: 'Backline Matcher' },
       { path: '/storage', label: 'Storage' },
       { path: '/holding', label: 'Held for Clients' },
       { path: '/holding/lost-property', label: 'Lost Property' },
