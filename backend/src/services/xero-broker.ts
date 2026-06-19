@@ -395,6 +395,28 @@ class XeroBroker {
       .map((c) => ({ ContactID: c.ContactID, Name: c.Name }));
   }
 
+  /**
+   * Read a contact's BILL payment terms (PaymentTerms.Bills) and map them onto
+   * our {basis, days} model. Returns null when no bill terms are set, or when
+   * Xero uses a term type we don't model (the fixed Nth-of-month variants —
+   * staff set those manually). Used to seed supplier_payment_terms from Xero.
+   */
+  async getContactBillTerms(contactId: string): Promise<{ basis: 'invoice_date' | 'end_of_invoice_month'; days: number } | null> {
+    const r = await this.request<{ Contacts?: Array<{ PaymentTerms?: { Bills?: { Day?: number; Type?: string } } }> }>(
+      'GET', `/Contacts/${encodeURIComponent(contactId)}`,
+    );
+    const bills = r.Contacts?.[0]?.PaymentTerms?.Bills;
+    if (!bills || bills.Day == null || !bills.Type) return null;
+    const day = Number(bills.Day);
+    if (!Number.isFinite(day) || day < 0) return null;
+    switch (bills.Type) {
+      case 'DAYSAFTERBILLDATE':  return { basis: 'invoice_date', days: day };
+      case 'DAYSAFTERBILLMONTH': return { basis: 'end_of_invoice_month', days: day };
+      // OFCURRENTMONTH / OFOLLOWINGMONTH are fixed-day-of-month — not our model.
+      default: return null;
+    }
+  }
+
   /** Create an unpaid supplier bill (ACCPAY invoice). */
   async createBill(input: CreateBillInput): Promise<{ InvoiceID: string; InvoiceNumber?: string }> {
     const contact = await this.getOrCreateContact(input.contactName);

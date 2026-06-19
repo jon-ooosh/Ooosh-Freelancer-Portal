@@ -14,7 +14,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import CostCaptureModal from '../components/CostCaptureModal';
-import type { Cost } from '../../../shared/types';
+import type { Cost, SupplierPaymentTerms } from '../../../shared/types';
 
 type ViewMode = 'all' | 'payable' | 'recharge' | 'reconcile';
 
@@ -49,19 +49,27 @@ const fmtDayMonth = (s: string | null | undefined) => {
   return m && d ? `${d}/${m}` : s;
 };
 
-// Default supplier payment terms until per-supplier terms are tracked (read
-// from the Xero contact / editable override) — see
-// docs/COSTS-PAYMENT-AUTOMATION-SPEC.md. Mirrors addDaysISO in cost-xero-push.ts
-// and the PayModal due-date calc.
+// Default terms when a supplier has none stored — see
+// docs/COSTS-PAYMENT-AUTOMATION-SPEC.md.
 const DEFAULT_TERMS_DAYS = 30;
 
-// Due date for an unpaid bill (invoice date + terms) with a countdown chip.
-// Returns null when there's no cost_date. tone: red = due/overdue, amber =
-// within a week, grey = comfortably ahead.
-function dueInfo(costDate: string | null | undefined) {
+// Fallback flat invoice + 30 when the server hasn't supplied a computed due
+// date (older API). Normally the server sends `due_date` from the supplier's
+// resolved terms.
+function flatDueIso(costDate: string | null | undefined): string | null {
   if (!costDate) return null;
-  const due = new Date(`${costDate.slice(0, 10)}T00:00:00Z`);
-  due.setUTCDate(due.getUTCDate() + DEFAULT_TERMS_DAYS);
+  const d = new Date(`${costDate.slice(0, 10)}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + DEFAULT_TERMS_DAYS);
+  return d.toISOString().slice(0, 10);
+}
+
+// Build the Due-column display from the server-computed due date (falling back
+// to flat+30). Returns null when there's no date. tone: red = due/overdue,
+// amber = within a week, grey = comfortably ahead.
+function dueInfo(c: { due_date?: string | null; cost_date: string | null }) {
+  const iso = c.due_date || flatDueIso(c.cost_date);
+  if (!iso) return null;
+  const due = new Date(`${iso}T00:00:00Z`);
   const now = new Date();
   const todayUTC = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
   const days = Math.round((due.getTime() - todayUTC) / 86_400_000);
@@ -75,6 +83,13 @@ function dueInfo(costDate: string | null | undefined) {
   else if (days <= 7) { countdown = `in ${days}d`; tone = 'bg-amber-100 text-amber-700'; }
   else { countdown = `in ${days}d`; tone = 'bg-gray-100 text-gray-600'; }
   return { dateLabel: `${dd}/${mm}`, fullLabel, countdown, tone };
+}
+
+// Human description of a supplier's terms for the Due cell tooltip.
+function termsLabel(t?: SupplierPaymentTerms): string {
+  if (!t || t.source === 'default') return `invoice + ${DEFAULT_TERMS_DAYS}d (default)`;
+  const base = t.basis === 'end_of_invoice_month' ? 'end of invoice month' : 'invoice date';
+  return `${base} + ${t.days}d${t.source === 'xero' ? ' · from Xero' : ''}`;
 }
 
 const APPROVAL_COLOURS: Record<string, string> = {
@@ -112,6 +127,7 @@ export default function CostsPage() {
   const [showCapture, setShowCapture] = useState(false);
   const [editing, setEditing] = useState<CostRow | null>(null);
   const [payTarget, setPayTarget] = useState<CostRow | null>(null);
+  const [termsTarget, setTermsTarget] = useState<CostRow | null>(null);
   const [preview, setPreview] = useState<CostRow | null>(null);
   const [actionBusy, setActionBusy] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<SortKey | null>(null);
@@ -334,15 +350,19 @@ export default function CostsPage() {
                 <tr key={c.id} className="hover:bg-gray-50">
                   <td className="px-2.5 py-2 whitespace-nowrap text-gray-700" title={fmtDate(c.cost_date)}>{fmtDayMonth(c.cost_date)}</td>
                   {view === 'payable' && (() => {
-                    const due = dueInfo(c.cost_date);
+                    const due = dueInfo(c);
                     return (
-                      <td className="px-2.5 py-2 whitespace-nowrap text-gray-700">
-                        {due ? (
-                          <div className="flex items-center gap-1.5" title={`Due ${due.fullLabel} (invoice + ${DEFAULT_TERMS_DAYS}d)`}>
-                            <span>{due.dateLabel}</span>
-                            <span className={`px-1.5 py-0.5 text-xs rounded-full ${due.tone}`}>{due.countdown}</span>
-                          </div>
-                        ) : '—'}
+                      <td className="px-2.5 py-2 whitespace-nowrap">
+                        <button onClick={() => setTermsTarget(c)}
+                          title={due ? `Due ${due.fullLabel} · terms: ${termsLabel(c.terms)} · click to set this supplier's terms` : 'Set this supplier’s payment terms'}
+                          className="flex items-center gap-1.5 text-gray-700 hover:text-purple-700">
+                          {due ? (
+                            <>
+                              <span className="border-b border-dashed border-gray-300 group-hover:border-purple-300">{due.dateLabel}</span>
+                              <span className={`px-1.5 py-0.5 text-xs rounded-full ${due.tone}`}>{due.countdown}</span>
+                            </>
+                          ) : <span className="text-gray-400">set terms</span>}
+                        </button>
                       </td>
                     );
                   })()}
@@ -437,7 +457,122 @@ export default function CostsPage() {
           onSubmit={(date, method) => payCost(payTarget.id, date, method)}
         />
       )}
+      {termsTarget && (
+        <SupplierTermsModal
+          cost={termsTarget}
+          onClose={() => setTermsTarget(null)}
+          onSaved={() => { setTermsTarget(null); load(true); }}
+        />
+      )}
       {preview && <ReceiptPreview cost={preview} onClose={() => setPreview(null)} />}
+    </div>
+  );
+}
+
+// Per-supplier payment terms editor (opened from the Due cell). Terms apply to
+// every bill from this supplier and drive the computed due date + the Xero bill
+// due date. Keyed by Xero contact id when the cost has one, else supplier name.
+function SupplierTermsModal({ cost, onClose, onSaved }: {
+  cost: CostRow;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [basis, setBasis] = useState<SupplierPaymentTerms['basis']>(cost.terms?.basis || 'invoice_date');
+  const [days, setDays] = useState<number>(cost.terms?.days ?? DEFAULT_TERMS_DAYS);
+  const [source, setSource] = useState<SupplierPaymentTerms['source']>(cost.terms?.source || 'default');
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const supplier = cost.supplier_name || 'this supplier';
+
+  // Load the current effective terms (handles the case where they were set on
+  // another bill from the same supplier since this row was fetched).
+  useEffect(() => {
+    const params = new URLSearchParams();
+    if (cost.supplier_name) params.set('supplier_name', cost.supplier_name);
+    if (cost.xero_contact_id) params.set('xero_contact_id', cost.xero_contact_id);
+    api.get<{ data: SupplierPaymentTerms }>(`/costs/suppliers/terms?${params.toString()}`)
+      .then((r) => { setBasis(r.data.basis); setDays(r.data.days); setSource(r.data.source); })
+      .catch(() => { /* keep row's terms as the seed */ })
+      .finally(() => setLoading(false));
+  }, [cost.supplier_name, cost.xero_contact_id]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  // Preview the resulting due date against this cost's invoice date.
+  const preview = (() => {
+    if (!cost.cost_date) return null;
+    const [y, m, d] = cost.cost_date.slice(0, 10).split('-').map((n) => parseInt(n, 10));
+    if (!y || !m || !d) return null;
+    const base = basis === 'end_of_invoice_month' ? new Date(Date.UTC(y, m, 0)) : new Date(Date.UTC(y, m - 1, d));
+    base.setUTCDate(base.getUTCDate() + days);
+    return base.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+  })();
+
+  async function save() {
+    setSaving(true);
+    try {
+      await api.put('/costs/suppliers/terms', {
+        supplier_name: cost.supplier_name || null,
+        xero_contact_id: cost.xero_contact_id || null,
+        basis,
+        days,
+      });
+      onSaved();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to save terms');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div className="bg-white rounded-lg shadow-xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
+          <h2 className="text-lg font-semibold text-gray-900">Payment terms</h2>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
+        </div>
+        <div className="px-6 py-4 space-y-4">
+          <p className="text-sm text-gray-600">
+            Applies to <strong>all bills from {supplier}</strong>.
+            {source === 'xero' && <span className="text-gray-400"> Currently from Xero.</span>}
+            {!cost.xero_contact_id && <span className="text-gray-400"> (Matched by name — pick this supplier from the Xero list when capturing to match by account.)</span>}
+          </p>
+          <div className="flex items-end gap-2">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Due</label>
+              <input type="number" min={0} max={365} value={days}
+                onChange={(e) => setDays(Math.max(0, Math.min(365, parseInt(e.target.value, 10) || 0)))}
+                className="w-20 border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-purple-500" />
+            </div>
+            <span className="pb-2.5 text-sm text-gray-600">days after</span>
+            <div className="flex-1">
+              <select value={basis} onChange={(e) => setBasis(e.target.value as SupplierPaymentTerms['basis'])}
+                className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-purple-500">
+                <option value="invoice_date">the invoice date</option>
+                <option value="end_of_invoice_month">end of the invoice month (EOM)</option>
+              </select>
+            </div>
+          </div>
+          {preview && (
+            <p className="text-xs text-gray-500">
+              This bill (invoiced {fmtDate(cost.cost_date)}) would be due <strong>{preview}</strong>.
+            </p>
+          )}
+          {loading && <p className="text-xs text-gray-400">Loading current terms…</p>}
+        </div>
+        <div className="flex justify-end gap-2 px-6 py-4 border-t border-gray-200">
+          <button onClick={onClose} className="px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded-md">Cancel</button>
+          <button onClick={save} disabled={saving}
+            className="px-4 py-2 text-sm text-white bg-purple-600 hover:bg-purple-700 rounded-md disabled:opacity-50">
+            {saving ? 'Saving…' : 'Save terms'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -538,13 +673,12 @@ function PayModal({ cost, busy, onClose, onSubmit }: {
   const [paidDate, setPaidDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [paidMethod, setPaidMethod] = useState('lloyds_transfer');
   const isReimburse = cost.payment_method === 'reimburse_me';
-  // Due date mirrors the Xero bill: invoice date + 30 days (no per-supplier
-  // terms tracked) — keep in step with addDaysISO in cost-xero-push.ts.
+  // Due date from the supplier's resolved terms (server-computed), falling back
+  // to flat invoice + 30 for an older API response.
   const dueDate = (() => {
-    if (!cost.cost_date) return null;
-    const d = new Date(`${cost.cost_date.slice(0, 10)}T00:00:00Z`);
-    d.setUTCDate(d.getUTCDate() + 30);
-    return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+    const iso = cost.due_date || flatDueIso(cost.cost_date);
+    if (!iso) return null;
+    return new Date(`${iso}T00:00:00Z`).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
   })();
 
   useEffect(() => {
