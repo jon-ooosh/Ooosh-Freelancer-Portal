@@ -10,7 +10,6 @@ import SendMerchFormButton from '../components/SendMerchFormButton';
 import TransportCalculator from '../components/TransportCalculator';
 import { StagingCalculatorModal, StagingOverviewCard } from '../components/StagingCalculator';
 import BacklineMatcherModal from '../components/BacklineMatcherModal';
-import CarnetSection from '../components/CarnetSection';
 import RequirementCard from '../components/RequirementCard';
 import type { JobRequirement } from '../components/RequirementCard';
 import ExcessGateBanner from '../components/ExcessGateBanner';
@@ -3790,9 +3789,6 @@ export default function JobDetailPage() {
 
           {/* Staging — surfaces once a plan exists (created from Tools → Staging Calculator) */}
           {id && <StagingOverviewCard jobId={id} refreshKey={stagingRefreshKey} />}
-
-          {/* Carnet — surfaces when the job has a carnet (HH-detected via item 575, or manual) */}
-          {id && <CarnetSection jobId={id} />}
 
           {/* PCNs — penalty charge notices on this job. Renders only when rows
               exist (a PCN isn't a per-job prep gate); one row per notice. */}
