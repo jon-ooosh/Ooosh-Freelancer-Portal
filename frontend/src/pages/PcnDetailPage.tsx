@@ -39,6 +39,7 @@ export default function PcnDetailPage() {
   const [pcn, setPcn] = useState<PcnDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [assignOpen, setAssignOpen] = useState(false);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -94,9 +95,20 @@ export default function PcnDetailPage() {
             {field('Vehicle', pcn.vehicle_id
               ? <Link className="text-[#7B5EA7] hover:underline" to={`/vehicles/fleet/${pcn.vehicle_id}`}>{pcn.fleet_reg || pcn.vehicle_reg}</Link>
               : (pcn.fleet_reg || pcn.vehicle_reg || '—'))}
-            {field('Driver', pcn.driver_id
-              ? <Link className="text-[#7B5EA7] hover:underline" to={`/drivers/${pcn.driver_id}`}>{pcn.driver_name}</Link>
-              : (pcn.driver_name || '—'))}
+            {field('Driver', (
+              <span className="inline-flex items-center gap-2 flex-wrap">
+                {pcn.driver_id
+                  ? <Link className="text-[#7B5EA7] hover:underline" to={`/drivers/${pcn.driver_id}`}>{pcn.driver_name}</Link>
+                  : <span className="text-slate-400">{pcn.driver_name || 'Unassigned'}</span>}
+                <button
+                  type="button"
+                  onClick={() => setAssignOpen(true)}
+                  className="text-xs text-[#7B5EA7] hover:underline"
+                >
+                  {pcn.driver_id ? 'Change' : 'Assign'}
+                </button>
+              </span>
+            ))}
             {field('Client', pcn.client_organisation_id
               ? <Link className="text-[#7B5EA7] hover:underline" to={`/organisations/${pcn.client_organisation_id}`}>{pcn.client_organisation_name}</Link>
               : (pcn.client_organisation_name || '—'))}
@@ -190,6 +202,130 @@ export default function PcnDetailPage() {
         )}
       </div>
 
+      {assignOpen && (
+        <AssignDriverModal
+          pcn={pcn}
+          onClose={() => setAssignOpen(false)}
+          onAssign={async (driverId) => { await patch({ driver_id: driverId }); setAssignOpen(false); }}
+        />
+      )}
+    </div>
+  );
+}
+
+// Assign / change / unassign the driver after the fact. Sources candidates two
+// ways: drivers who were on this vehicle around the offence date (the
+// multi-driver "who was actually in the van" case, via /pcns/match), plus a
+// free search over all drivers. Unassign clears it back to no driver.
+function AssignDriverModal({ pcn, onClose, onAssign }: {
+  pcn: PcnDetail;
+  onClose: () => void;
+  onAssign: (driverId: string | null) => Promise<void>;
+}) {
+  const [candidates, setCandidates] = useState<{ driver_id: string; driver_name: string; reg?: string; hh_job_number?: number | null }[]>([]);
+  const [loadingCand, setLoadingCand] = useState(false);
+  const [q, setQ] = useState('');
+  const [results, setResults] = useState<{ id: string; full_name: string; email: string | null }[]>([]);
+  const [busy, setBusy] = useState(false);
+
+  const reg = pcn.fleet_reg || pcn.vehicle_reg;
+
+  // Who was on this vehicle around the offence date.
+  useEffect(() => {
+    if (!reg || !pcn.offence_at) return;
+    setLoadingCand(true);
+    api.get<{ data: { drivers: Array<{ driver_id: string | null; driver_name: string | null; reg?: string; hh_job_number?: number | null }> } }>(
+      `/pcns/match?reg=${encodeURIComponent(reg)}&offence_at=${encodeURIComponent(pcn.offence_at)}`
+    )
+      .then((r) => {
+        const seen = new Set<string>();
+        setCandidates(
+          (r.data.drivers || [])
+            .filter((d): d is typeof d & { driver_id: string } => !!d.driver_id && !seen.has(d.driver_id) && !!seen.add(d.driver_id))
+            .map((d) => ({ driver_id: d.driver_id, driver_name: d.driver_name || '(unnamed)', reg: d.reg, hh_job_number: d.hh_job_number }))
+        );
+      })
+      .catch(() => { /* non-fatal — search still works */ })
+      .finally(() => setLoadingCand(false));
+  }, [reg, pcn.offence_at]);
+
+  // Free driver search (debounced).
+  useEffect(() => {
+    if (q.trim().length < 2) { setResults([]); return; }
+    const t = setTimeout(() => {
+      api.get<{ data: Array<{ id: string; full_name: string; email: string | null }> }>(
+        `/drivers?search=${encodeURIComponent(q.trim())}&limit=10`
+      )
+        .then((r) => setResults(r.data))
+        .catch(() => setResults([]));
+    }, 250);
+    return () => clearTimeout(t);
+  }, [q]);
+
+  const choose = async (driverId: string | null) => {
+    setBusy(true);
+    try { await onAssign(driverId); } finally { setBusy(false); }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div className="bg-white rounded-xl max-w-md w-full p-5" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="font-semibold text-slate-800">Assign driver</h3>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600">✕</button>
+        </div>
+
+        {(loadingCand || candidates.length > 0) && (
+          <div className="mb-4">
+            <p className="text-xs text-slate-500 mb-1">On this vehicle around the offence date</p>
+            {loadingCand ? (
+              <p className="text-xs text-slate-400">Checking…</p>
+            ) : (
+              <div className="space-y-1">
+                {candidates.map((c) => (
+                  <button key={c.driver_id} disabled={busy} onClick={() => choose(c.driver_id)}
+                    className="w-full text-left px-3 py-2 rounded-lg border hover:bg-slate-50 text-sm disabled:opacity-50">
+                    <span className="font-medium text-slate-800">{c.driver_name}</span>
+                    <span className="text-slate-400"> · {c.reg}{c.hh_job_number ? ` · #${c.hh_job_number}` : ''}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        <div>
+          <p className="text-xs text-slate-500 mb-1">Or search all drivers</p>
+          <input
+            autoFocus
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="Name, email, licence…"
+            className="border rounded-lg px-3 py-2 text-sm w-full"
+          />
+          {results.length > 0 && (
+            <div className="mt-1 space-y-1 max-h-52 overflow-y-auto">
+              {results.map((d) => (
+                <button key={d.id} disabled={busy} onClick={() => choose(d.id)}
+                  className="w-full text-left px-3 py-2 rounded-lg border hover:bg-slate-50 text-sm disabled:opacity-50">
+                  <span className="font-medium text-slate-800">{d.full_name}</span>
+                  {d.email && <span className="text-slate-400"> · {d.email}</span>}
+                </button>
+              ))}
+            </div>
+          )}
+          {q.trim().length >= 2 && results.length === 0 && (
+            <p className="text-xs text-slate-400 mt-1">No drivers found.</p>
+          )}
+        </div>
+
+        {pcn.driver_id && (
+          <button disabled={busy} onClick={() => choose(null)}
+            className="mt-4 text-xs text-red-600 hover:underline disabled:opacity-50">
+            Unassign current driver ({pcn.driver_name})
+          </button>
+        )}
+      </div>
     </div>
   );
 }
