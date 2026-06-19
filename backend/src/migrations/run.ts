@@ -174,6 +174,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '137_backline_demand.sql',
         '138_pcn_deadline_nudges.sql',
         '139_supplier_payment_terms.sql',
+        '140_pcn_driver_person.sql',
       ];
 
       for (const migration of migrations) {

@@ -99,13 +99,15 @@ export default function PcnDetailPage() {
               <span className="inline-flex items-center gap-2 flex-wrap">
                 {pcn.driver_id
                   ? <Link className="text-[#7B5EA7] hover:underline" to={`/drivers/${pcn.driver_id}`}>{pcn.driver_name}</Link>
-                  : <span className="text-slate-400">{pcn.driver_name || 'Unassigned'}</span>}
+                  : pcn.driver_person_id
+                    ? <Link className="text-[#7B5EA7] hover:underline" to={`/people/${pcn.driver_person_id}`}>{pcn.driver_person_name} <span className="text-xs text-slate-400">(crew)</span></Link>
+                    : <span className="text-slate-400">Unassigned</span>}
                 <button
                   type="button"
                   onClick={() => setAssignOpen(true)}
                   className="text-xs text-[#7B5EA7] hover:underline"
                 >
-                  {pcn.driver_id ? 'Change' : 'Assign'}
+                  {(pcn.driver_id || pcn.driver_person_id) ? 'Change' : 'Assign'}
                 </button>
               </span>
             ))}
@@ -206,87 +208,108 @@ export default function PcnDetailPage() {
         <AssignDriverModal
           pcn={pcn}
           onClose={() => setAssignOpen(false)}
-          onAssign={async (driverId) => { await patch({ driver_id: driverId }); setAssignOpen(false); }}
+          onAssign={async (body) => { await patch(body); setAssignOpen(false); }}
         />
       )}
     </div>
   );
 }
 
-// Assign / change / unassign the driver after the fact. Sources candidates two
-// ways: drivers who were on this vehicle around the offence date (the
-// multi-driver "who was actually in the van" case, via /pcns/match), plus a
-// free search over all drivers. Unassign clears it back to no driver.
+// Assign / change / unassign the responsible driver after the fact. The driver
+// can be a client self-drive driver (drivers table) OR a freelancer/crew person
+// who was driving an Ooosh van (people table). Candidates are sourced from
+// /pcns/match — drivers AND crew who were on the job around the offence date
+// (the "who was actually in the van" case) — plus a free search over either
+// drivers or freelancers. Unassign clears it back to no driver.
 function AssignDriverModal({ pcn, onClose, onAssign }: {
   pcn: PcnDetail;
   onClose: () => void;
-  onAssign: (driverId: string | null) => Promise<void>;
+  onAssign: (body: { driver_id: string | null; driver_person_id: string | null }) => Promise<void>;
 }) {
-  const [candidates, setCandidates] = useState<{ driver_id: string; driver_name: string; reg?: string; hh_job_number?: number | null }[]>([]);
+  const [drivers, setDrivers] = useState<{ driver_id: string; driver_name: string; reg?: string; hh_job_number?: number | null }[]>([]);
+  const [crew, setCrew] = useState<{ person_id: string; person_name: string; is_freelancer: boolean; role?: string | null; hh_job_number?: number | null }[]>([]);
   const [loadingCand, setLoadingCand] = useState(false);
+  const [mode, setMode] = useState<'driver' | 'freelancer'>('driver');
   const [q, setQ] = useState('');
-  const [results, setResults] = useState<{ id: string; full_name: string; email: string | null }[]>([]);
+  const [results, setResults] = useState<{ id: string; name: string; sub: string | null }[]>([]);
   const [busy, setBusy] = useState(false);
 
   const reg = pcn.fleet_reg || pcn.vehicle_reg;
 
-  // Who was on this vehicle around the offence date.
+  // Drivers + crew who were on the job around the offence date.
   useEffect(() => {
     if (!reg || !pcn.offence_at) return;
     setLoadingCand(true);
-    api.get<{ data: { drivers: Array<{ driver_id: string | null; driver_name: string | null; reg?: string; hh_job_number?: number | null }> } }>(
-      `/pcns/match?reg=${encodeURIComponent(reg)}&offence_at=${encodeURIComponent(pcn.offence_at)}`
-    )
+    api.get<{ data: {
+      drivers: Array<{ driver_id: string | null; driver_name: string | null; reg?: string; hh_job_number?: number | null }>;
+      crew_candidates?: Array<{ person_id: string; person_name: string | null; is_freelancer: boolean; role?: string | null; hh_job_number?: number | null }>;
+    } }>(`/pcns/match?reg=${encodeURIComponent(reg)}&offence_at=${encodeURIComponent(pcn.offence_at)}`)
       .then((r) => {
-        const seen = new Set<string>();
-        setCandidates(
-          (r.data.drivers || [])
-            .filter((d): d is typeof d & { driver_id: string } => !!d.driver_id && !seen.has(d.driver_id) && !!seen.add(d.driver_id))
-            .map((d) => ({ driver_id: d.driver_id, driver_name: d.driver_name || '(unnamed)', reg: d.reg, hh_job_number: d.hh_job_number }))
-        );
+        const seenD = new Set<string>();
+        setDrivers((r.data.drivers || [])
+          .filter((d): d is typeof d & { driver_id: string } => !!d.driver_id && !seenD.has(d.driver_id) && !!seenD.add(d.driver_id))
+          .map((d) => ({ driver_id: d.driver_id, driver_name: d.driver_name || '(unnamed)', reg: d.reg, hh_job_number: d.hh_job_number })));
+        const seenP = new Set<string>();
+        setCrew((r.data.crew_candidates || [])
+          .filter((c) => c.person_id && !seenP.has(c.person_id) && !!seenP.add(c.person_id))
+          .map((c) => ({ person_id: c.person_id, person_name: c.person_name || '(unnamed)', is_freelancer: c.is_freelancer, role: c.role, hh_job_number: c.hh_job_number })));
       })
       .catch(() => { /* non-fatal — search still works */ })
       .finally(() => setLoadingCand(false));
   }, [reg, pcn.offence_at]);
 
-  // Free driver search (debounced).
+  // Free search over drivers OR freelancer people, per the toggle.
   useEffect(() => {
     if (q.trim().length < 2) { setResults([]); return; }
     const t = setTimeout(() => {
-      api.get<{ data: Array<{ id: string; full_name: string; email: string | null }> }>(
-        `/drivers?search=${encodeURIComponent(q.trim())}&limit=10`
-      )
-        .then((r) => setResults(r.data))
-        .catch(() => setResults([]));
+      if (mode === 'driver') {
+        api.get<{ data: Array<{ id: string; full_name: string; email: string | null }> }>(
+          `/drivers?search=${encodeURIComponent(q.trim())}&limit=10`
+        ).then((r) => setResults(r.data.map((d) => ({ id: d.id, name: d.full_name, sub: d.email }))))
+          .catch(() => setResults([]));
+      } else {
+        api.get<{ data: Array<{ id: string; first_name: string; last_name: string; email: string | null }> }>(
+          `/people?search=${encodeURIComponent(q.trim())}&is_freelancer=true&limit=10`
+        ).then((r) => setResults(r.data.map((p) => ({ id: p.id, name: `${p.first_name} ${p.last_name}`.trim(), sub: p.email }))))
+          .catch(() => setResults([]));
+      }
     }, 250);
     return () => clearTimeout(t);
-  }, [q]);
+  }, [q, mode]);
 
-  const choose = async (driverId: string | null) => {
-    setBusy(true);
-    try { await onAssign(driverId); } finally { setBusy(false); }
-  };
+  const wrap = (fn: () => Promise<void>) => async () => { setBusy(true); try { await fn(); } finally { setBusy(false); } };
+  const assignDriver = (id: string) => wrap(() => onAssign({ driver_id: id, driver_person_id: null }));
+  const assignPerson = (id: string) => wrap(() => onAssign({ driver_id: null, driver_person_id: id }));
+  const chooseResult = (id: string) => (mode === 'driver' ? assignDriver(id) : assignPerson(id))();
 
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={onClose}>
-      <div className="bg-white rounded-xl max-w-md w-full p-5" onClick={(e) => e.stopPropagation()}>
+      <div className="bg-white rounded-xl max-w-md w-full p-5 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-3">
           <h3 className="font-semibold text-slate-800">Assign driver</h3>
           <button onClick={onClose} className="text-slate-400 hover:text-slate-600">✕</button>
         </div>
 
-        {(loadingCand || candidates.length > 0) && (
+        {/* Candidates on the job around the offence date */}
+        {(loadingCand || drivers.length > 0 || crew.length > 0) && (
           <div className="mb-4">
-            <p className="text-xs text-slate-500 mb-1">On this vehicle around the offence date</p>
+            <p className="text-xs text-slate-500 mb-1">On this job around the offence date</p>
             {loadingCand ? (
               <p className="text-xs text-slate-400">Checking…</p>
             ) : (
               <div className="space-y-1">
-                {candidates.map((c) => (
-                  <button key={c.driver_id} disabled={busy} onClick={() => choose(c.driver_id)}
+                {drivers.map((c) => (
+                  <button key={`d-${c.driver_id}`} disabled={busy} onClick={assignDriver(c.driver_id)}
                     className="w-full text-left px-3 py-2 rounded-lg border hover:bg-slate-50 text-sm disabled:opacity-50">
                     <span className="font-medium text-slate-800">{c.driver_name}</span>
-                    <span className="text-slate-400"> · {c.reg}{c.hh_job_number ? ` · #${c.hh_job_number}` : ''}</span>
+                    <span className="text-slate-400"> · driver · {c.reg}{c.hh_job_number ? ` · #${c.hh_job_number}` : ''}</span>
+                  </button>
+                ))}
+                {crew.map((c) => (
+                  <button key={`p-${c.person_id}`} disabled={busy} onClick={assignPerson(c.person_id)}
+                    className="w-full text-left px-3 py-2 rounded-lg border hover:bg-slate-50 text-sm disabled:opacity-50">
+                    <span className="font-medium text-slate-800">{c.person_name}</span>
+                    <span className="text-slate-400"> · {c.is_freelancer ? 'freelancer' : 'crew'}{c.role ? ` (${c.role})` : ''}{c.hh_job_number ? ` · #${c.hh_job_number}` : ''}</span>
                   </button>
                 ))}
               </div>
@@ -294,35 +317,46 @@ function AssignDriverModal({ pcn, onClose, onAssign }: {
           </div>
         )}
 
+        {/* Free search — drivers or freelancers */}
         <div>
-          <p className="text-xs text-slate-500 mb-1">Or search all drivers</p>
+          <div className="flex items-center justify-between mb-1">
+            <p className="text-xs text-slate-500">Or search</p>
+            <div className="flex rounded-lg border overflow-hidden text-xs">
+              {(['driver', 'freelancer'] as const).map((m) => (
+                <button key={m} onClick={() => { setMode(m); setResults([]); }}
+                  className={`px-2.5 py-1 font-medium ${mode === m ? 'bg-[#7B5EA7] text-white' : 'bg-white text-slate-600 hover:bg-slate-50'}`}>
+                  {m === 'driver' ? 'Drivers' : 'Freelancers'}
+                </button>
+              ))}
+            </div>
+          </div>
           <input
             autoFocus
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="Name, email, licence…"
+            placeholder={mode === 'driver' ? 'Name, email, licence…' : 'Name or email…'}
             className="border rounded-lg px-3 py-2 text-sm w-full"
           />
           {results.length > 0 && (
             <div className="mt-1 space-y-1 max-h-52 overflow-y-auto">
-              {results.map((d) => (
-                <button key={d.id} disabled={busy} onClick={() => choose(d.id)}
+              {results.map((r) => (
+                <button key={r.id} disabled={busy} onClick={() => chooseResult(r.id)}
                   className="w-full text-left px-3 py-2 rounded-lg border hover:bg-slate-50 text-sm disabled:opacity-50">
-                  <span className="font-medium text-slate-800">{d.full_name}</span>
-                  {d.email && <span className="text-slate-400"> · {d.email}</span>}
+                  <span className="font-medium text-slate-800">{r.name}</span>
+                  {r.sub && <span className="text-slate-400"> · {r.sub}</span>}
                 </button>
               ))}
             </div>
           )}
           {q.trim().length >= 2 && results.length === 0 && (
-            <p className="text-xs text-slate-400 mt-1">No drivers found.</p>
+            <p className="text-xs text-slate-400 mt-1">No {mode === 'driver' ? 'drivers' : 'freelancers'} found.</p>
           )}
         </div>
 
-        {pcn.driver_id && (
-          <button disabled={busy} onClick={() => choose(null)}
+        {(pcn.driver_id || pcn.driver_person_id) && (
+          <button disabled={busy} onClick={wrap(() => onAssign({ driver_id: null, driver_person_id: null }))}
             className="mt-4 text-xs text-red-600 hover:underline disabled:opacity-50">
-            Unassign current driver ({pcn.driver_name})
+            Unassign current driver ({pcn.driver_name || pcn.driver_person_name})
           </button>
         )}
       </div>
