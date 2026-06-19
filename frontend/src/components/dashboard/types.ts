@@ -264,6 +264,17 @@ export interface OnTodayItem {
   href: string;
 }
 
+export interface PcnAttentionItem {
+  id: string;
+  reference: string | null;
+  fine_type: string;
+  status: string;
+  hh_job_number: number | null;
+  reg: string | null;
+  issuer_deadline: string | null;
+  offence_at: string | null;
+}
+
 export interface OperationsData {
   on_today?: OnTodayItem[];
   stat_cards: {
@@ -310,6 +321,11 @@ export interface OperationsData {
     /** Card-machine receipt scans outstanding (migration 087 / PR 3). */
     receipts_outstanding_count?: number;
     receipts_outstanding?: ReceiptOutstanding[];
+    /** PCN buckets (Step 8) — internal surfacing, never client comms. */
+    pcn_nip_urgent?: PcnAttentionItem[];
+    pcn_ready_to_transfer?: PcnAttentionItem[];
+    pcn_deadline_approaching?: PcnAttentionItem[];
+    pcn_awaiting_action?: PcnAttentionItem[];
   };
   transport_ops: {
     summary: Record<string, number>;
