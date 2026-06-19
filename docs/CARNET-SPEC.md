@@ -5,8 +5,8 @@
 
 ### Build progress
 - [x] **Slice 1 — Foundation (this PR):** migration 135 (`job_carnets` + `carnet_gmrs`), HH detection of sale item 575 in the derivation engine (auto-creates the `carnet` requirement card + a `job_carnets` record, mode=we_supply, status=detected; stale-cleanup wired), read-only `/api/carnets` endpoints.
-- [ ] **Slice 2 — Client request form + signed-authority PDF** (public token page, the Letter of Authorisation, GMR seeding from crossings).
-- [ ] **Slice 3 — Job Detail Carnet tab + GMR management** (custody surface, QR upload/send, document attachments, full CRUD).
+- [x] **Slice 3 — Staff cockpit (shipped before slice 2):** `CarnetSection` self-fetching card on Job Detail Overview (hides when no carnet). Lifecycle stepper (warnings-not-gates), custody control, manual detail edit, GMR management (add/edit/status/QR upload/mark-sent/delete), document attachments, soft cancel. Backend write endpoints on `/api/carnets` (POST create, PATCH with status→custody/timestamp side-effects + timeline log, cancel, GMR CRUD, files). Manual `client_arranges` UI entry point deferred to slice 5 (Operations page) — backend create supports it now.
+- [ ] **Slice 2 — Client request form + signed-authority PDF** (public token page, the Letter of Authorisation, GMR seeding from crossings) — needs the Ooosh signatory signature image + name/role/address.
 - [ ] **Slice 4 — Send timing scheduler + email templates** (T-28d / on-confirmation / chase / ad-hoc).
 - [ ] **Slice 5 — Operations overview page + dashboard NeedsAttention bucket.**
 
