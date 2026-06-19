@@ -9,6 +9,8 @@ import {
   PCN_STATUS_COLOUR,
   FINE_TYPE_LABEL,
   PcnStatusPill,
+  pcnTrafficLight,
+  PcnLight,
 } from '../components/pcn/format';
 
 // Re-export the shared display surface so existing importers (PcnDetailPage)
@@ -69,6 +71,13 @@ export default function PcnsPage() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
+  const [typeFilter, setTypeFilter] = useState('');
+  const [offenceFrom, setOffenceFrom] = useState('');
+  const [offenceTo, setOffenceTo] = useState('');
+  const [sort, setSort] = useState('created_desc');
+  // Traffic-light filter is derived (partly from deadlines) so it's applied
+  // client-side over the already-fetched rows.
+  const [lightFilter, setLightFilter] = useState<'' | PcnLight>('');
   const [searchParams, setSearchParams] = useSearchParams();
   const [showCreate, setShowCreate] = useState(false);
 
@@ -87,14 +96,25 @@ export default function PcnsPage() {
       const params = new URLSearchParams();
       if (search.trim()) params.set('search', search.trim());
       if (statusFilter) params.set('status', statusFilter);
+      if (typeFilter) params.set('fine_type', typeFilter);
+      if (offenceFrom) params.set('offence_from', offenceFrom);
+      if (offenceTo) params.set('offence_to', offenceTo);
+      if (sort) params.set('sort', sort);
       const r = await api.get<{ data: Pcn[] }>(`/pcns?${params.toString()}`);
       setPcns(r.data);
     } finally {
       setLoading(false);
     }
-  }, [search, statusFilter]);
+  }, [search, statusFilter, typeFilter, offenceFrom, offenceTo, sort]);
 
   useEffect(() => { load(); }, [load]);
+
+  const visible = lightFilter ? pcns.filter((p) => pcnTrafficLight(p) === lightFilter) : pcns;
+  const hasFilters = !!(search || statusFilter || typeFilter || offenceFrom || offenceTo || lightFilter || sort !== 'created_desc');
+  const clearFilters = () => {
+    setSearch(''); setStatusFilter(''); setTypeFilter('');
+    setOffenceFrom(''); setOffenceTo(''); setLightFilter(''); setSort('created_desc');
+  };
 
   return (
     <div className="max-w-7xl mx-auto p-4 sm:p-6">
@@ -108,29 +128,100 @@ export default function PcnsPage() {
         </button>
       </div>
 
-      <div className="flex flex-wrap gap-2 mb-4">
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search ref, reg, authority, job #…"
-          className="border rounded-lg px-3 py-2 text-sm flex-1 min-w-[220px]"
-        />
-        <select
-          value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value)}
-          className="border rounded-lg px-3 py-2 text-sm"
-        >
-          <option value="">All statuses</option>
-          {Object.entries(PCN_STATUS_LABEL).map(([k, v]) => (
-            <option key={k} value={k}>{v}</option>
-          ))}
-        </select>
+      <div className="bg-white rounded-lg border p-3 mb-4 space-y-2">
+        {/* Row 1 — search + the server-side dropdowns */}
+        <div className="flex flex-wrap gap-2">
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search ref, reg, authority, job #…"
+            className="border rounded-lg px-3 py-2 text-sm flex-1 min-w-[220px]"
+          />
+          <select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value)}
+            className="border rounded-lg px-3 py-2 text-sm"
+          >
+            <option value="">All statuses</option>
+            {Object.entries(PCN_STATUS_LABEL).map(([k, v]) => (
+              <option key={k} value={k}>{v}</option>
+            ))}
+          </select>
+          <select
+            value={typeFilter}
+            onChange={(e) => setTypeFilter(e.target.value)}
+            className="border rounded-lg px-3 py-2 text-sm"
+          >
+            <option value="">All types</option>
+            {Object.entries(FINE_TYPE_LABEL).map(([k, v]) => (
+              <option key={k} value={k}>{v}</option>
+            ))}
+          </select>
+          <select
+            value={sort}
+            onChange={(e) => setSort(e.target.value)}
+            className="border rounded-lg px-3 py-2 text-sm"
+            title="Sort"
+          >
+            <option value="created_desc">Newest logged</option>
+            <option value="offence_desc">Offence date (newest)</option>
+            <option value="offence_asc">Offence date (oldest)</option>
+            <option value="deadline_asc">Deadline soonest</option>
+            <option value="fine_desc">Fine (high → low)</option>
+          </select>
+        </div>
+
+        {/* Row 2 — offence date range, traffic-light, clear */}
+        <div className="flex flex-wrap items-center gap-2">
+          <label className="text-xs text-slate-500">Offence</label>
+          <input
+            type="date"
+            value={offenceFrom}
+            onChange={(e) => setOffenceFrom(e.target.value)}
+            className="border rounded-lg px-2 py-1.5 text-sm"
+            title="Offence date from"
+          />
+          <span className="text-slate-400 text-sm">→</span>
+          <input
+            type="date"
+            value={offenceTo}
+            onChange={(e) => setOffenceTo(e.target.value)}
+            className="border rounded-lg px-2 py-1.5 text-sm"
+            title="Offence date to"
+          />
+
+          <div className="flex rounded-lg border overflow-hidden ml-1">
+            {([
+              ['', 'All'],
+              ['red', '🔴 Outstanding'],
+              ['amber', '🟡 In flight'],
+              ['green', '🟢 Sorted'],
+            ] as const).map(([val, label]) => (
+              <button
+                key={val || 'all'}
+                onClick={() => setLightFilter(val)}
+                className={`px-2.5 py-1.5 text-xs font-medium border-l first:border-l-0 ${
+                  lightFilter === val ? 'bg-[#7B5EA7] text-white' : 'bg-white text-slate-600 hover:bg-slate-50'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {hasFilters && (
+            <button onClick={clearFilters} className="text-xs text-slate-500 hover:text-slate-700 underline ml-1">
+              Clear
+            </button>
+          )}
+          <span className="text-xs text-slate-400 ml-auto">{visible.length} PCN{visible.length === 1 ? '' : 's'}</span>
+        </div>
       </div>
 
       <div className="bg-white rounded-lg border overflow-x-auto">
         {loading ? (
           <div className="p-8 text-center text-slate-400">Loading…</div>
-        ) : pcns.length === 0 ? (
+        ) : visible.length === 0 ? (
           <div className="p-8 text-center text-slate-400">No PCNs found.</div>
         ) : (
           <table className="w-full text-sm">
@@ -147,7 +238,7 @@ export default function PcnsPage() {
               </tr>
             </thead>
             <tbody>
-              {pcns.map((p) => (
+              {visible.map((p) => (
                 <tr key={p.id} className="border-t hover:bg-slate-50">
                   <td className="px-3 py-2">
                     <Link to={`/vehicles/pcns/${p.id}`} className="text-[#7B5EA7] font-medium hover:underline">
