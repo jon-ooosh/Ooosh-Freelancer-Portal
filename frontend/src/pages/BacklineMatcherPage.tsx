@@ -47,6 +47,15 @@ export default function BacklineMatcherPage() {
   const [q, setQ] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
 
+  async function updateStatus(id: string, status: DemandRow['have_it_status']) {
+    setRows((prev) => prev.map((r) => (r.id === id ? { ...r, have_it_status: status } : r)));
+    try {
+      await api.patch(`/backline-matcher/demand/${id}`, { have_it_status: status });
+    } catch {
+      loadDemand();
+    }
+  }
+
   const loadDemand = useCallback(async () => {
     setLoading(true);
     try {
@@ -142,7 +151,16 @@ export default function BacklineMatcherPage() {
                       <td className="px-4 py-2 text-right text-gray-700">{row.request_count}</td>
                       <td className="px-4 py-2 text-right text-gray-700">{row.total_hire_days || '—'}</td>
                       <td className="px-4 py-2">
-                        <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${badge.cls}`}>{badge.label}</span>
+                        <select
+                          value={row.have_it_status}
+                          onChange={(e) => updateStatus(row.id, e.target.value as DemandRow['have_it_status'])}
+                          className={`text-xs font-medium pl-2 pr-6 py-0.5 rounded-full border-0 cursor-pointer focus:ring-2 focus:ring-ooosh-400 ${badge.cls}`}
+                          title="Update whether we stock this"
+                        >
+                          <option value="no">Not stocked</option>
+                          <option value="sort_of">Similar</option>
+                          <option value="yes">In stock</option>
+                        </select>
                       </td>
                       <td className="px-4 py-2 text-gray-500 text-xs">
                         {row.job_refs.length > 0 ? row.job_refs.slice(0, 4).map((j) => (

@@ -81,7 +81,8 @@ export default function BacklineMatcher({
       setData(resp);
       onLogged?.();
     } catch (err: any) {
-      setError(err?.message || 'Match failed. Try again.');
+      const detail = err?.details ? ` — ${err.details}` : '';
+      setError((err?.message || 'Match failed. Try again.') + detail);
     } finally {
       setLoading(false);
     }
