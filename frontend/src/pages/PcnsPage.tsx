@@ -74,15 +74,19 @@ export default function PcnsPage() {
   const [search, setSearch] = useState('');
   // Seed status/type from the URL so dashboard deep-links (e.g. the PCN
   // NeedsAttention buckets → ?status= / ?fine_type=) land pre-filtered.
+  // Otherwise fall back to the last-used view persisted in localStorage.
   const initialParams = new URLSearchParams(window.location.search);
-  const [statusFilter, setStatusFilter] = useState(initialParams.get('status') || '');
-  const [typeFilter, setTypeFilter] = useState(initialParams.get('fine_type') || '');
-  const [offenceFrom, setOffenceFrom] = useState('');
-  const [offenceTo, setOffenceTo] = useState('');
-  const [sort, setSort] = useState('created_desc');
+  const prefs: Record<string, string> = (() => {
+    try { return JSON.parse(localStorage.getItem('ooosh_pcns_prefs') || '{}'); } catch { return {}; }
+  })();
+  const [statusFilter, setStatusFilter] = useState(initialParams.get('status') || prefs.statusFilter || '');
+  const [typeFilter, setTypeFilter] = useState(initialParams.get('fine_type') || prefs.typeFilter || '');
+  const [offenceFrom, setOffenceFrom] = useState(prefs.offenceFrom || '');
+  const [offenceTo, setOffenceTo] = useState(prefs.offenceTo || '');
+  const [sort, setSort] = useState(prefs.sort || 'created_desc');
   // Traffic-light filter is derived (partly from deadlines) so it's applied
   // client-side over the already-fetched rows.
-  const [lightFilter, setLightFilter] = useState<'' | PcnLight>('');
+  const [lightFilter, setLightFilter] = useState<'' | PcnLight>((prefs.lightFilter as PcnLight) || '');
   const [searchParams, setSearchParams] = useSearchParams();
   const [showCreate, setShowCreate] = useState(false);
 
@@ -113,6 +117,13 @@ export default function PcnsPage() {
   }, [search, statusFilter, typeFilter, offenceFrom, offenceTo, sort]);
 
   useEffect(() => { load(); }, [load]);
+
+  // Persist the last-used sort + filters so the view is restored on return.
+  useEffect(() => {
+    localStorage.setItem('ooosh_pcns_prefs', JSON.stringify({
+      sort, statusFilter, typeFilter, offenceFrom, offenceTo, lightFilter,
+    }));
+  }, [sort, statusFilter, typeFilter, offenceFrom, offenceTo, lightFilter]);
 
   const visible = lightFilter ? pcns.filter((p) => pcnTrafficLight(p) === lightFilter) : pcns;
   const hasFilters = !!(search || statusFilter || typeFilter || offenceFrom || offenceTo || lightFilter || sort !== 'created_desc');
@@ -278,7 +289,12 @@ export default function PcnsPage() {
                   </td>
                   <td className="px-3 py-2">{FINE_TYPE_LABEL[p.fine_type] || p.fine_type}</td>
                   <td className="px-3 py-2">{p.fleet_reg || p.vehicle_reg || '—'}</td>
-                  <td className="px-3 py-2">{p.driver_name || '—'}</td>
+                  <td className="px-3 py-2">
+                    {p.driver_name
+                      || (p.driver_person_name
+                        ? <>{p.driver_person_name} <span className="text-xs text-slate-400">(crew)</span></>
+                        : '—')}
+                  </td>
                   <td className="px-3 py-2">{p.hh_job_number ? `#${p.hh_job_number}` : '—'}</td>
                   <td className="px-3 py-2">{fmtDate(p.offence_at)}{p.offence_time_text ? ` ${p.offence_time_text}` : ''}</td>
                   <td className="px-3 py-2">{money(p.fine_amount)}</td>

@@ -153,6 +153,26 @@ async function resolveDriver(pool: Pool, email: string | null, name: string | nu
   return null;
 }
 
+/** Fallback match against freelancer people (for crew who drove an Ooosh van
+ *  but have no drivers row) → pcns.driver_person_id. */
+async function resolvePerson(pool: Pool, email: string | null, name: string | null): Promise<{ id: string } | null> {
+  if (email) {
+    const r = await pool.query(
+      `SELECT id FROM people WHERE LOWER(email) = $1 AND is_freelancer = true AND is_deleted = false LIMIT 1`,
+      [email]
+    );
+    if (r.rows[0]) return { id: r.rows[0].id };
+  }
+  if (name) {
+    const r = await pool.query(
+      `SELECT id FROM people WHERE LOWER(TRIM(REGEXP_REPLACE(first_name || ' ' || last_name, '\\s+', ' ', 'g'))) = $1 AND is_freelancer = true AND is_deleted = false LIMIT 1`,
+      [normName(name)]
+    );
+    if (r.rows[0]) return { id: r.rows[0].id };
+  }
+  return null;
+}
+
 async function main() {
   if (!MONDAY_API_TOKEN) { console.error('MONDAY_API_TOKEN not set'); process.exit(1); }
   if (!process.env.DATABASE_URL) { console.error('DATABASE_URL not set'); process.exit(1); }
@@ -182,7 +202,7 @@ async function main() {
     }
     const hireForms = allPulses.size ? await fetchHireFormItems([...allPulses]) : new Map<number, MondayItem>();
 
-    const stats = { linked: 0, byEmail: 0, byName: 0, unmatched: 0, alreadySet: 0, noSource: 0 };
+    const stats = { linked: 0, byEmail: 0, byName: 0, byPerson: 0, unmatched: 0, alreadySet: 0, noSource: 0 };
     const unmatched: string[] = [];
 
     for (const it of items) {
@@ -200,29 +220,34 @@ async function main() {
 
       // Only touch rows still missing a driver.
       const pcn = await pool.query(
-        `SELECT id, driver_id FROM pcns WHERE reference = $1 AND is_deleted = false LIMIT 1`,
+        `SELECT id, driver_id, driver_person_id FROM pcns WHERE reference = $1 AND is_deleted = false LIMIT 1`,
         [reference]
       );
       if (pcn.rows.length === 0) continue;
-      if (pcn.rows[0].driver_id) { stats.alreadySet++; continue; }
+      if (pcn.rows[0].driver_id || pcn.rows[0].driver_person_id) { stats.alreadySet++; continue; }
 
+      // Drivers table first; fall back to freelancer people.
       const match = await resolveDriver(pool, email, name);
-      if (!match) {
+      const person = match ? null : await resolvePerson(pool, email, name);
+      if (!match && !person) {
         stats.unmatched++;
         unmatched.push(`${reference} → ${name || '?'}${email ? ` <${email}>` : ''}`);
         continue;
       }
 
-      if (match.by === 'email') stats.byEmail++; else stats.byName++;
-      console.log(`  ✓ ${reference}  → ${name || email}  (by ${match.by})`);
+      const col = match ? 'driver_id' : 'driver_person_id';   // fixed strings, not user input
+      const matchedId = match ? match.id : person!.id;
+      const by = match ? match.by : 'freelancer';
+      if (match) { if (match.by === 'email') stats.byEmail++; else stats.byName++; } else stats.byPerson++;
+      console.log(`  ✓ ${reference}  → ${name || email}  (${by})`);
 
       if (COMMIT) {
-        await pool.query(`UPDATE pcns SET driver_id = $2, updated_at = NOW() WHERE id = $1`, [pcn.rows[0].id, match.id]);
+        await pool.query(`UPDATE pcns SET ${col} = $2, updated_at = NOW() WHERE id = $1`, [pcn.rows[0].id, matchedId]);
         await pool.query(
           `INSERT INTO pcn_events (pcn_id, event_type, body, metadata, created_by)
            VALUES ($1, 'matched', $2, $3, $4)`,
-          [pcn.rows[0].id, `Driver matched on backfill (${match.by})`,
-           JSON.stringify({ source: 'monday', hire_form_item_id: pulse ?? null, matched_by: match.by, name, email }),
+          [pcn.rows[0].id, `Driver matched on backfill (${by})`,
+           JSON.stringify({ source: 'monday', hire_form_item_id: pulse ?? null, matched_by: by, name, email }),
            SYSTEM_USER_ID]
         );
       }
@@ -232,6 +257,7 @@ async function main() {
     console.log(`  with a driver source:     ${stats.linked}`);
     console.log(`  matched by email:         ${stats.byEmail}`);
     console.log(`  matched by name:          ${stats.byName}`);
+    console.log(`  matched freelancer:       ${stats.byPerson}`);
     console.log(`  already had a driver:     ${stats.alreadySet}`);
     console.log(`  unmatched (no OP driver): ${stats.unmatched}`);
     console.log(`  no driver source on item: ${stats.noSource}`);

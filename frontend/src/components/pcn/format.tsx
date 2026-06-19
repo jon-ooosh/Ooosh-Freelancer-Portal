@@ -13,6 +13,7 @@ export interface Pcn {
   fine_type: string;
   vehicle_id: string | null;
   driver_id: string | null;
+  driver_person_id: string | null;
   job_id: string | null;
   client_organisation_id: string | null;
   pcn_document_url: string | null;
@@ -21,6 +22,8 @@ export interface Pcn {
   fleet_reg: string | null;
   driver_name: string | null;
   driver_email: string | null;
+  driver_person_name: string | null;
+  driver_person_email: string | null;
   client_organisation_name: string | null;
   job_name: string | null;
   offence_at: string | null;

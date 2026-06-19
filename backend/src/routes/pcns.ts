@@ -140,12 +140,15 @@ const SELECT_WITH_JOINS = `
          fv.reg                                     AS fleet_reg,
          d.full_name                                AS driver_name,
          d.email                                    AS driver_email,
+         (dp.first_name || ' ' || dp.last_name)     AS driver_person_name,
+         dp.email                                   AS driver_person_email,
          o.name                                     AS client_organisation_name,
          j.job_name                                 AS job_name,
          (hb.first_name || ' ' || hb.last_name)     AS handled_by_name
   FROM pcns p
   LEFT JOIN fleet_vehicles fv ON fv.id = p.vehicle_id
   LEFT JOIN drivers d         ON d.id = p.driver_id
+  LEFT JOIN people dp         ON dp.id = p.driver_person_id
   LEFT JOIN organisations o   ON o.id = p.client_organisation_id
   LEFT JOIN jobs j            ON j.id = p.job_id
   LEFT JOIN users hu          ON hu.id = p.handled_by
@@ -429,6 +432,7 @@ const createSchema = z.object({
   fine_type: fineType.optional(),
   vehicle_id: z.string().uuid().optional().nullable(),
   driver_id: z.string().uuid().optional().nullable(),
+  driver_person_id: z.string().uuid().optional().nullable(),
   assignment_id: z.string().uuid().optional().nullable(),
   job_id: z.string().uuid().optional().nullable(),
   client_organisation_id: z.string().uuid().optional().nullable(),
@@ -510,7 +514,7 @@ const updateSchema = createSchema.partial().extend({
 });
 
 const UPDATABLE = [
-  'reference', 'fine_type', 'vehicle_id', 'driver_id', 'assignment_id', 'job_id',
+  'reference', 'fine_type', 'vehicle_id', 'driver_id', 'driver_person_id', 'assignment_id', 'job_id',
   'client_organisation_id', 'hh_job_number', 'vehicle_reg', 'offence_at',
   'offence_time_text', 'location', 'issuing_authority', 'offence_description',
   'fine_amount', 'reduced_amount', 'reduced_deadline', 'final_deadline',
@@ -550,6 +554,11 @@ router.patch('/:id', validate(updateSchema), async (req: AuthRequest, res: Respo
     await logPcnEvent(pcn.id, 'matched',
       b.driver_id ? 'Driver assigned' : 'Driver unassigned',
       { from: before.driver_id ?? null, to: b.driver_id ?? null }, req.user!.id);
+  }
+  if ('driver_person_id' in b && (b.driver_person_id ?? null) !== (before.driver_person_id ?? null)) {
+    await logPcnEvent(pcn.id, 'matched',
+      b.driver_person_id ? 'Freelancer/crew assigned as driver' : 'Driver (crew) unassigned',
+      { from: before.driver_person_id ?? null, to: b.driver_person_id ?? null }, req.user!.id);
   }
   await logAudit(req.user!.id, 'pcns', pcn.id, 'update', before, pcn);
   res.json({ data: pcn });
