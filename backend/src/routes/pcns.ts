@@ -367,13 +367,29 @@ router.get('/', async (req: AuthRequest, res: Response) => {
   if (offence_from) { sql += ` AND p.offence_at >= $${i++}`; params.push(offence_from); }
   if (offence_to) { sql += ` AND p.offence_at < ($${i++}::date + INTERVAL '1 day')`; params.push(offence_to); }
 
-  // Sort — whitelisted; NULLS LAST so undated rows don't crowd the top.
+  // Sort — whitelisted; NULLS LAST so undated/unmatched rows don't crowd the
+  // top. One <field>_asc / <field>_desc pair per clickable column header.
   const SORTS: Record<string, string> = {
-    created_desc: 'p.created_at DESC',
-    offence_desc: 'p.offence_at DESC NULLS LAST, p.created_at DESC',
-    offence_asc: 'p.offence_at ASC NULLS LAST, p.created_at DESC',
-    fine_desc: 'p.fine_amount DESC NULLS LAST, p.created_at DESC',
-    deadline_asc: 'COALESCE(p.reduced_deadline, p.final_deadline) ASC NULLS LAST, p.created_at DESC',
+    created_desc:   'p.created_at DESC',
+    created_asc:    'p.created_at ASC',
+    reference_asc:  'p.reference ASC NULLS LAST, p.created_at DESC',
+    reference_desc: 'p.reference DESC NULLS LAST, p.created_at DESC',
+    type_asc:       'p.fine_type ASC, p.created_at DESC',
+    type_desc:      'p.fine_type DESC, p.created_at DESC',
+    reg_asc:        "COALESCE(fv.reg, p.vehicle_reg) ASC NULLS LAST, p.created_at DESC",
+    reg_desc:       "COALESCE(fv.reg, p.vehicle_reg) DESC NULLS LAST, p.created_at DESC",
+    driver_asc:     'd.full_name ASC NULLS LAST, p.created_at DESC',
+    driver_desc:    'd.full_name DESC NULLS LAST, p.created_at DESC',
+    job_asc:        'p.hh_job_number ASC NULLS LAST, p.created_at DESC',
+    job_desc:       'p.hh_job_number DESC NULLS LAST, p.created_at DESC',
+    offence_desc:   'p.offence_at DESC NULLS LAST, p.created_at DESC',
+    offence_asc:    'p.offence_at ASC NULLS LAST, p.created_at DESC',
+    fine_desc:      'p.fine_amount DESC NULLS LAST, p.created_at DESC',
+    fine_asc:       'p.fine_amount ASC NULLS LAST, p.created_at DESC',
+    status_asc:     'p.status ASC, p.created_at DESC',
+    status_desc:    'p.status DESC, p.created_at DESC',
+    deadline_asc:   'COALESCE(p.reduced_deadline, p.final_deadline) ASC NULLS LAST, p.created_at DESC',
+    deadline_desc:  'COALESCE(p.reduced_deadline, p.final_deadline) DESC NULLS LAST, p.created_at DESC',
   };
   sql += ` ORDER BY ${SORTS[String(sort)] || SORTS.created_desc}`;
   const r = await query(sql, params);
