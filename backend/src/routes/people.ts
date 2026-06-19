@@ -416,6 +416,14 @@ router.delete('/:id', authorize('admin', 'manager'), async (req: AuthRequest, re
     }
 
     await query('UPDATE people SET is_deleted = true, updated_at = NOW() WHERE id = $1', [req.params.id]);
+    // End any still-active organisation roles so the person stops surfacing in
+    // org People tabs / contact pickers and the data stays honest (not just hidden).
+    await query(
+      `UPDATE person_organisation_roles
+         SET status = 'historical', end_date = COALESCE(end_date, NOW()), updated_at = NOW()
+       WHERE person_id = $1 AND status = 'active'`,
+      [req.params.id]
+    );
     await logAudit(req.user!.id, 'people', req.params.id as string, 'delete', current.rows[0], null);
 
     res.status(204).send();
