@@ -271,11 +271,12 @@ router.get('/managers', async (_req: AuthRequest, res: Response) => {
     const result = await query(`
       SELECT DISTINCT p.id, p.first_name, p.last_name
       FROM people p
-      WHERE p.id IN (
-        SELECT manager1_person_id FROM jobs WHERE is_deleted = false AND manager1_person_id IS NOT NULL
-        UNION
-        SELECT manager2_person_id FROM jobs WHERE is_deleted = false AND manager2_person_id IS NOT NULL
-      )
+      WHERE p.is_deleted = false
+        AND p.id IN (
+          SELECT manager1_person_id FROM jobs WHERE is_deleted = false AND manager1_person_id IS NOT NULL
+          UNION
+          SELECT manager2_person_id FROM jobs WHERE is_deleted = false AND manager2_person_id IS NOT NULL
+        )
       ORDER BY p.first_name, p.last_name
     `);
     res.json({ data: result.rows });
@@ -989,6 +990,7 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
              WHERE qa.quote_id IN (SELECT id FROM quotes WHERE job_id = $1 AND is_deleted = false)
                AND qa.status NOT IN ('cancelled', 'declined')
                AND qa.is_ooosh_crew = false
+               AND p.is_deleted = false
                AND p.email IS NOT NULL`,
           [jobId]
         );

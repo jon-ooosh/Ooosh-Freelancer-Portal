@@ -15,7 +15,7 @@ import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import rateLimit from 'express-rate-limit';
 import { randomBytes } from 'node:crypto';
-import { query } from '../config/database';
+import { query, getClient } from '../config/database';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
@@ -241,9 +241,33 @@ router.get('/rooms', async (req: AuthRequest, res: Response) => {
   let i = 1;
   if (status) { sql += ` AND r.status = $${i++}`; params.push(status); }
   if (search) { sql += ` AND r.name ILIKE $${i++}`; params.push(`%${search}%`); }
-  sql += ` ORDER BY r.name`;
+  sql += ` ORDER BY COALESCE(r.sort_order, 2147483647), r.name`;
   const result = await query(sql, params);
   res.json({ data: result.rows });
+});
+
+// Persist a manual room order. Drives both the Rooms tab and (since tenancies
+// are keyed off rooms) the Tenancies tab. Admin/manager only.
+router.post('/rooms/reorder', authorize(...ADMIN_MANAGER), async (req: AuthRequest, res: Response) => {
+  const ids = (req.body?.ordered_ids ?? []) as unknown[];
+  if (!Array.isArray(ids) || ids.length === 0 || !ids.every((x) => typeof x === 'string')) {
+    res.status(400).json({ error: 'ordered_ids must be a non-empty array of room ids' });
+    return;
+  }
+  const client = await getClient();
+  try {
+    await client.query('BEGIN');
+    for (let idx = 0; idx < ids.length; idx++) {
+      await client.query(`UPDATE storage_rooms SET sort_order = $1, updated_at = NOW() WHERE id = $2`, [(idx + 1) * 10, ids[idx]]);
+    }
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+  res.json({ data: { reordered: ids.length } });
 });
 
 router.get('/rooms/:id', async (req: AuthRequest, res: Response) => {
@@ -319,9 +343,33 @@ router.get('/tenancies', async (req: AuthRequest, res: Response) => {
   if (status === 'live') { sql += ` AND t.status IN ('active','notice','reserved')`; }
   else if (status) { sql += ` AND t.status = $${i++}`; params.push(status); }
   if (search) { sql += ` AND (o.name ILIKE $${i} OR r.name ILIKE $${i})`; params.push(`%${search}%`); i++; }
-  sql += ` ORDER BY (t.status = 'ended'), r.name`;
+  sql += ` ORDER BY (t.status = 'ended'), COALESCE(t.sort_order, 2147483647), r.name`;
   const result = await query(sql, params);
   res.json({ data: result.rows.map(stripAccessCode) });
+});
+
+// Persist a manual tenancy order for the Tenancies tab. Independent of room
+// order (migration 133). Admin/manager only.
+router.post('/tenancies/reorder', authorize(...ADMIN_MANAGER), async (req: AuthRequest, res: Response) => {
+  const ids = (req.body?.ordered_ids ?? []) as unknown[];
+  if (!Array.isArray(ids) || ids.length === 0 || !ids.every((x) => typeof x === 'string')) {
+    res.status(400).json({ error: 'ordered_ids must be a non-empty array of tenancy ids' });
+    return;
+  }
+  const client = await getClient();
+  try {
+    await client.query('BEGIN');
+    for (let idx = 0; idx < ids.length; idx++) {
+      await client.query(`UPDATE storage_tenancies SET sort_order = $1, updated_at = NOW() WHERE id = $2`, [(idx + 1) * 10, ids[idx]]);
+    }
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+  res.json({ data: { reordered: ids.length } });
 });
 
 router.get('/tenancies/:id', async (req: AuthRequest, res: Response) => {

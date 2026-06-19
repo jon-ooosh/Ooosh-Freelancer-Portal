@@ -1666,10 +1666,14 @@ Global operational view for what's currently happening / about to happen with tr
   - **Tidy.** `GET /get-checklist-settings` and `GET /get-events` added to `FREELANCER_BOOKOUT_ALLOW`. `/get-events` gains a scope check that clamps the query to the session's allocated reg (no fleet-wide enumeration). Kills the 403 console noise the freelancer was hitting on every walkaround load.
   - **Still TODO (Round 5+):** Vehicle swap mid-hire (Phase D3 — UI; soft check-in primitive shipped May 2026, see `docs/VAN-SWAP-AND-SOFT-CHECKIN-SPEC.md`). Multi-van D&C (drivers × vans expansion of the resolve merge). Freelancer-led interim check-in (reuses the soft check-in primitive).
 
-##### Carnets (inline on Prep Checklist, with global overview)
-- [ ] Carnet fields on `job_requirements` with step tracking: applied → received → items listed → stamped out → returned → closed
-- [ ] Global carnet overview page (`/operations/carnets`) — outstanding carnets, post-hire returns pending
-- [ ] Reminder automation: chase for return after hire ends
+##### Carnets ← IN PROGRESS (Jun 2026) — see `docs/CARNET-SPEC.md`
+Full ATA Carnet module replacing the Monday board + Jotform request form. Dedicated `job_carnets` + `carnet_gmrs` tables (NOT just a requirement card — promoted to a module like job_issues/storage because of the GMR children, custody chain, client form + signed authority, and document storage). Two modes on one record: `we_supply` (HH-detected via sale item **575** "Arrangement fee - provision of ATA Carnet", £750 — mirrors VE103B detection exactly) and `client_arranges` (manual lightweight "thing to do"). Per-job scope. Money stays in HireHop (item 575 → Money tab). GMRs tracked requested → made → sent, with number + uploaded QR image for forwarding to clients.
+- [x] **Slice 1 (migration 135 + HH detection):** `job_carnets` + `carnet_gmrs` tables; derivation engine detects item 575 → auto-creates `carnet` requirement card + `job_carnets` (we_supply/detected); read-only `/api/carnets`. Stale-cleanup wired (`carnet` added to DETECTABLE_TYPES).
+- [ ] Slice 2: public client request form (Jotform port) + signed Letter of Authorisation PDF (two-signature: Ooosh appoints agent + client accepts liability; Ooosh signatory from `system_settings`) + GMR seeding from crossings
+- [ ] Slice 3: Job Detail Carnet tab — custody surface (reuse held-for-clients), GMR management (QR upload/send), document attachments, full CRUD
+- [ ] Slice 4: send-timing scheduler (T-28d / on-confirmation if sooner / chase / ad-hoc via email routing) + email templates (`carnet_request`, `carnet_request_chase`, `carnet_authority_received_internal`, `carnet_gmr_details`)
+- [ ] Slice 5: `/operations/carnets` overview + dashboard NeedsAttention bucket
+- Lifecycle (we_supply): detected → form_sent → info_received → applied → received → with_client → returned → discharged → closed. `format='digital'` carnets skip physical custody/discharge steps. Warnings-not-gates throughout.
 
 **Parallelisation notes:** Streams 2-7 can all run simultaneously — they touch different tables, routes, and pages. Stream 1 + the HH-Derived Requirements Engine are the foundation and should complete first, as all other streams plug into it.
 

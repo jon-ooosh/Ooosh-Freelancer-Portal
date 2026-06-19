@@ -357,7 +357,7 @@ router.post('/auth/register/complete', async (req: Request, res: Response) => {
     // Gate again — still must be an approved freelancer
     const personResult = await query(
       `SELECT id, first_name, last_name, email FROM people
-       WHERE LOWER(email) = $1 AND is_freelancer = true AND is_approved = true`,
+       WHERE LOWER(email) = $1 AND is_freelancer = true AND is_approved = true AND is_deleted = false`,
       [email]
     );
     if (personResult.rows.length === 0) {

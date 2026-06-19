@@ -196,13 +196,22 @@ export default function CostsPage() {
     }
   }
 
+  // Push the flagged recharge to HireHop as a billable line. Surfaces HH's own
+  // message on failure (closed job, validation, etc.) so staff know what to do.
   async function confirmRecharge(c: CostRow) {
+    if (!confirm(`Add a £${Number(c.recharge_amount ?? c.amount_gross ?? 0).toFixed(2)} recharge line (+ VAT) to HireHop${c.hh_job_number ? ` job #${c.hh_job_number}` : ''}?`)) return;
     setActionBusy(c.id + 'recharge');
     try {
-      await api.post(`/costs/${c.id}/recharge`, { recharge_mode: c.recharge_mode, recharge_amount: c.recharge_amount });
+      const r = await api.post<{ result: { pushed?: boolean; error?: string; skipped?: string; manualActionRequired?: boolean; amount?: number; stockLabel?: string } }>(
+        `/costs/${c.id}/push-recharge`, {},
+      );
+      const res = r.result || {};
+      if (res.pushed) alert(`Recharged to HireHop: ${res.stockLabel} £${Number(res.amount || 0).toFixed(2)} + VAT added to the job.`);
+      else if (res.error) alert(`Recharge ${res.manualActionRequired ? 'needs manual action' : 'failed'}: ${res.error}`);
+      else if (res.skipped) alert(`Skipped: ${res.skipped}`);
       await load(true);
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to confirm recharge');
+      alert(err instanceof Error ? err.message : 'Failed to push recharge to HireHop');
     } finally {
       setActionBusy(null);
     }
@@ -335,8 +344,8 @@ export default function CostsPage() {
                       )}
                       {view === 'recharge' && !c.recharged_to_hh_at && (
                         <button disabled={actionBusy === c.id + 'recharge'} onClick={() => confirmRecharge(c)}
-                          className="px-2 py-1 text-xs text-blue-700 hover:bg-blue-50 rounded disabled:opacity-50">
-                          Confirm recharge
+                          className="px-2 py-1 text-xs text-white bg-blue-600 hover:bg-blue-700 rounded disabled:opacity-50">
+                          {actionBusy === c.id + 'recharge' ? '…' : 'Push to HireHop'}
                         </button>
                       )}
                       <button onClick={() => setEditing(c)} title="Edit"

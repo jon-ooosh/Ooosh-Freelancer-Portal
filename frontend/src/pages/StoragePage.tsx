@@ -22,6 +22,7 @@ interface Room {
   dimensions: string | null; area_sqft: number | null; description: string | null;
   photos?: { name: string; url: string; type?: string }[];
   status: string; notes: string | null; occupant_name?: string | null; tenancy_id?: string | null;
+  sort_order?: number | null;
 }
 interface Tenancy {
   id: string; room_id: string; room_name: string; size_category: SizeCat; location_type?: string | null;
@@ -229,13 +230,62 @@ function RoomsTab({ isAdminManager, onChange }: { isAdminManager: boolean; onCha
   const [editing, setEditing] = useState<Room | null>(null);
   const [creating, setCreating] = useState(false);
   const [vacancySize, setVacancySize] = useState<string | null>(null);
+  const [reordering, setReordering] = useState(false);
+  const [order, setOrder] = useState<Room[]>([]);
+  const [savingOrder, setSavingOrder] = useState(false);
   const load = useCallback(async () => { setRooms((await api.get<{ data: Room[] }>('/storage/rooms')).data); }, []);
   useEffect(() => { load(); }, [load]);
+
+  function startReorder() { setOrder(rooms); setReordering(true); }
+  function move(idx: number, dir: -1 | 1) {
+    setOrder((cur) => {
+      const next = [...cur];
+      const j = idx + dir;
+      if (j < 0 || j >= next.length) return cur;
+      [next[idx], next[j]] = [next[j], next[idx]];
+      return next;
+    });
+  }
+  async function saveOrder() {
+    setSavingOrder(true);
+    try { await api.post('/storage/rooms/reorder', { ordered_ids: order.map((r) => r.id) }); setReordering(false); await load(); onChange(); }
+    finally { setSavingOrder(false); }
+  }
+
+  if (reordering) {
+    return (
+      <div>
+        <div className="flex items-center justify-between mb-4">
+          <p className="text-sm text-slate-500">Use the arrows to set the order. This applies to both the Rooms and Tenancies tabs.</p>
+          <div className="flex gap-2">
+            <button onClick={() => setReordering(false)} className="px-4 py-2 text-sm text-slate-600">Cancel</button>
+            <button onClick={saveOrder} disabled={savingOrder} className="px-4 py-2 text-sm bg-[#7B5EA7] text-white rounded-lg disabled:opacity-50">{savingOrder ? 'Saving…' : 'Done'}</button>
+          </div>
+        </div>
+        <div className="border border-slate-200 rounded-xl bg-white divide-y">
+          {order.map((r, idx) => (
+            <div key={r.id} className="flex items-center gap-3 px-3 py-2">
+              <div className="flex flex-col">
+                <button onClick={() => move(idx, -1)} disabled={idx === 0} className="text-slate-400 hover:text-[#7B5EA7] disabled:opacity-30 leading-none text-sm">▲</button>
+                <button onClick={() => move(idx, 1)} disabled={idx === order.length - 1} className="text-slate-400 hover:text-[#7B5EA7] disabled:opacity-30 leading-none text-sm">▼</button>
+              </div>
+              <span className="font-medium text-slate-800 flex-1">{r.name}</span>
+              <span className="text-xs text-slate-500 capitalize">{r.size_category}{r.location_type ? ` · ${r.location_type}` : ''}</span>
+              <span className={`px-2 py-0.5 rounded text-xs font-medium ${ROOM_STATUS_COLOUR[r.status] || 'bg-slate-100'}`}>{r.status.replace('_', ' ')}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div>
       {isAdminManager && (
-        <button onClick={() => setCreating(true)} className="mb-4 bg-[#7B5EA7] text-white px-4 py-2 rounded-lg text-sm font-medium">+ Add Room</button>
+        <div className="mb-4 flex gap-2">
+          <button onClick={() => setCreating(true)} className="bg-[#7B5EA7] text-white px-4 py-2 rounded-lg text-sm font-medium">+ Add Room</button>
+          {rooms.length > 1 && <button onClick={startReorder} className="px-4 py-2 rounded-lg text-sm font-medium border border-slate-300 text-slate-600">↕ Reorder</button>}
+        </div>
       )}
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {rooms.map((r) => (
@@ -250,6 +300,7 @@ function RoomsTab({ isAdminManager, onChange }: { isAdminManager: boolean; onCha
             {r.occupant_name && <p className="text-sm text-slate-700 mb-1">📦 {r.occupant_name}</p>}
             {r.default_weekly_rate != null && <p className="text-xs text-slate-500">Default {money(r.default_weekly_rate)}/wk</p>}
             {(r.photos?.length ?? 0) > 0 && <p className="text-xs text-slate-400">📷 {r.photos!.length} photo{r.photos!.length !== 1 ? 's' : ''}</p>}
+            {r.notes && <p className="text-xs text-slate-500 mt-1 whitespace-pre-wrap">📝 {r.notes}</p>}
             <div className="flex items-center gap-3 mt-2">
               {isAdminManager && <button onClick={() => setEditing(r)} className="text-xs text-[#7B5EA7]">Edit</button>}
               {r.status === 'available' && <button onClick={() => setVacancySize(r.size_category)} className="text-xs text-[#7B5EA7]">Find tenant →</button>}
@@ -360,27 +411,73 @@ function TenanciesTab({ isAdminManager, onChange }: { isAdminManager: boolean; o
   const [creating, setCreating] = useState(false);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [vacancySize, setVacancySize] = useState<string | null>(null);
+  const [reordering, setReordering] = useState(false);
+  const [order, setOrder] = useState<Tenancy[]>([]);
+  const [savingOrder, setSavingOrder] = useState(false);
   const load = useCallback(async () => {
     setRows((await api.get<{ data: Tenancy[] }>(`/storage/tenancies?status=${showEnded ? 'all' : 'live'}`)).data);
   }, [showEnded]);
   useEffect(() => { load(); }, [load]);
 
+  const view = reordering ? order : rows;
+  function startReorder() { setOrder(rows); setReordering(true); }
+  function move(idx: number, dir: -1 | 1) {
+    setOrder((cur) => {
+      const next = [...cur];
+      const j = idx + dir;
+      if (j < 0 || j >= next.length) return cur;
+      [next[idx], next[j]] = [next[j], next[idx]];
+      return next;
+    });
+  }
+  async function saveOrder() {
+    setSavingOrder(true);
+    try { await api.post('/storage/tenancies/reorder', { ordered_ids: order.map((t) => t.id) }); setReordering(false); await load(); onChange(); }
+    finally { setSavingOrder(false); }
+  }
+
   return (
     <div>
-      <div className="flex items-center justify-end mb-3">
-        <label className="text-sm text-slate-600 flex items-center gap-2"><input type="checkbox" checked={showEnded} onChange={(e) => setShowEnded(e.target.checked)} /> Show ended</label>
+      <div className="flex items-center justify-between gap-2 mb-3">
+        <div className="flex items-center gap-2">
+          {!reordering && (
+            <button onClick={() => setCreating(true)} className="bg-[#7B5EA7] text-white px-4 py-2 rounded-lg text-sm font-medium">+ Move In Client</button>
+          )}
+          {isAdminManager && rows.length > 1 && !reordering && (
+            <button onClick={startReorder} className="px-3 py-1.5 rounded-lg text-sm font-medium border border-slate-300 text-slate-600">↕ Reorder</button>
+          )}
+          {reordering && (
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-slate-500">Drag-free reorder — use the arrows.</span>
+              <button onClick={() => setReordering(false)} className="px-3 py-1.5 text-sm text-slate-600">Cancel</button>
+              <button onClick={saveOrder} disabled={savingOrder} className="px-3 py-1.5 text-sm bg-[#7B5EA7] text-white rounded-lg disabled:opacity-50">{savingOrder ? 'Saving…' : 'Done'}</button>
+            </div>
+          )}
+        </div>
+        {!reordering && (
+          <label className="text-sm text-slate-600 flex items-center gap-2"><input type="checkbox" checked={showEnded} onChange={(e) => setShowEnded(e.target.checked)} /> Show ended</label>
+        )}
       </div>
       <div className="overflow-x-auto border border-slate-200 rounded-xl bg-white">
         <table className="w-full text-sm">
           <thead className="bg-slate-50 text-slate-500 text-xs"><tr>
+            {reordering && <th className="px-2 py-2 w-10"></th>}
             <th className="text-left px-3 py-2">Room</th><th className="text-left px-3 py-2">Client</th>
             <th className="text-left px-3 py-2">Rate/wk</th><th className="text-left px-3 py-2">Billing</th>
             <th className="text-left px-3 py-2">Next bill</th><th className="text-left px-3 py-2">Review</th>
             <th className="text-left px-3 py-2">T&Cs</th><th className="text-left px-3 py-2">Status</th>
           </tr></thead>
           <tbody>
-            {rows.map((t) => (
-              <tr key={t.id} onClick={() => setDetailId(t.id)} className="border-t hover:bg-slate-50 cursor-pointer">
+            {view.map((t, idx) => (
+              <tr key={t.id} onClick={reordering ? undefined : () => setDetailId(t.id)} className={`border-t ${reordering ? '' : 'hover:bg-slate-50 cursor-pointer'}`}>
+                {reordering && (
+                  <td className="px-2 py-2">
+                    <div className="flex flex-col items-center">
+                      <button onClick={() => move(idx, -1)} disabled={idx === 0} className="text-slate-400 hover:text-[#7B5EA7] disabled:opacity-30 leading-none text-sm">▲</button>
+                      <button onClick={() => move(idx, 1)} disabled={idx === view.length - 1} className="text-slate-400 hover:text-[#7B5EA7] disabled:opacity-30 leading-none text-sm">▼</button>
+                    </div>
+                  </td>
+                )}
                 <td className="px-3 py-2 font-medium">{t.room_name}</td>
                 <td className="px-3 py-2">{t.organisation_name || t.lead_contact_name || '—'}</td>
                 <td className="px-3 py-2">{money(t.weekly_rate)}</td>
@@ -391,12 +488,9 @@ function TenanciesTab({ isAdminManager, onChange }: { isAdminManager: boolean; o
                 <td className="px-3 py-2 capitalize">{t.status}</td>
               </tr>
             ))}
-            {rows.length === 0 && <tr><td colSpan={8} className="px-3 py-6 text-center text-slate-400">No tenancies.</td></tr>}
+            {view.length === 0 && <tr><td colSpan={reordering ? 9 : 8} className="px-3 py-6 text-center text-slate-400">No tenancies.</td></tr>}
           </tbody>
         </table>
-      </div>
-      <div className="mt-4">
-        <button onClick={() => setCreating(true)} className="bg-[#7B5EA7] text-white px-4 py-2 rounded-lg text-sm font-medium">+ Move In Client</button>
       </div>
       {creating && <MoveInModal onClose={() => setCreating(false)} onSaved={() => { setCreating(false); load(); onChange(); }} />}
       {detailId && <TenancyDetailModal id={detailId} isAdminManager={isAdminManager} onClose={() => setDetailId(null)} onChange={() => { load(); onChange(); }} onMovedOut={(size) => setVacancySize(size)} />}
@@ -464,6 +558,7 @@ function MoveInModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =>
         </div>
         {f.billing_mode === 'manual' && <div><label className="block text-xs text-slate-500 mb-1">Next invoice due</label><input className={inputCls} type="date" value={f.next_bill_date} onChange={(e) => setF({ ...f, next_bill_date: e.target.value })} /></div>}
         <div><label className="block text-xs text-slate-500 mb-1">Next rate review</label><input className={inputCls} type="date" value={f.next_rate_review_date} onChange={(e) => setF({ ...f, next_rate_review_date: e.target.value })} /></div>
+        <div><label className="block text-xs text-slate-500 mb-1">Notes</label><textarea className={inputCls} rows={2} value={f.notes} onChange={(e) => setF({ ...f, notes: e.target.value })} placeholder="Anything worth recording about this client / tenancy" /></div>
         {err && <p className="text-red-600 text-sm">{err}</p>}
         <div className="flex justify-end gap-2"><button onClick={onClose} className="px-4 py-2 text-sm text-slate-600">Cancel</button><button onClick={save} disabled={saving} className="px-4 py-2 text-sm bg-[#7B5EA7] text-white rounded-lg disabled:opacity-50">{saving ? 'Saving…' : 'Move in'}</button></div>
       </div>
@@ -573,7 +668,13 @@ function TenancyDetailModal({ id, isAdminManager, onClose, onChange, onMovedOut 
     <Modal title={`${t.room_name} — ${t.organisation_name || t.lead_contact_name || 'Tenancy'}`} onClose={onClose}>
       <div className="space-y-4 text-sm">
         <div className="grid grid-cols-2 gap-3">
-          <Field label="Weekly rate" value={money(t.weekly_rate)} />
+          <div>
+            <p className="text-xs text-slate-400">Weekly rate</p>
+            <p className="text-slate-800">{money(t.weekly_rate)}</p>
+            {t.previous_weekly_rate != null && (
+              <p className="text-xs text-slate-400">was {money(t.previous_weekly_rate)}{t.last_rate_change_date ? ` · since ${fmtDate(t.last_rate_change_date)}` : ''}</p>
+            )}
+          </div>
           <Field label="Status" value={t.status} />
           <Field label="Billing" value={t.billing_mode === 'recurring' ? 'Recurring (Xero)' : `We invoice (${t.billing_cadence})`} />
           {t.billing_mode === 'manual' && <Field label="Next invoice due" value={fmtDate(t.next_bill_date)} />}
@@ -598,6 +699,8 @@ function TenancyDetailModal({ id, isAdminManager, onClose, onChange, onMovedOut 
             className="text-xs text-[#7B5EA7] underline"
           >📄 Download signed T&Cs</button>
         )}
+
+        <TenancyNotes id={id} notes={t.notes} editable={t.status !== 'ended'} onSaved={() => { load(); onChange(); }} />
 
         {msg && <p className="text-red-600">{msg}</p>}
 
@@ -667,13 +770,46 @@ function Field({ label, value }: { label: string; value: string }) {
   return <div><p className="text-xs text-slate-400">{label}</p><p className="text-slate-800 capitalize">{value}</p></div>;
 }
 
+// Notes shown on the tenancy detail pop-up, editable inline so staff don't have
+// to open the full "Edit details" form just to jot something down.
+function TenancyNotes({ id, notes, editable, onSaved }: { id: string; notes: string | null; editable: boolean; onSaved: () => void }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(notes || '');
+  const [saving, setSaving] = useState(false);
+  useEffect(() => { setDraft(notes || ''); }, [notes]);
+  async function save() {
+    setSaving(true);
+    try { await api.put(`/storage/tenancies/${id}`, { notes: draft.trim() || null }); setEditing(false); onSaved(); }
+    finally { setSaving(false); }
+  }
+  return (
+    <div className="border border-slate-200 rounded-lg p-3 bg-amber-50/40">
+      <div className="flex items-center justify-between mb-1">
+        <h4 className="font-medium text-slate-700">Notes</h4>
+        {editable && !editing && <button onClick={() => setEditing(true)} className="text-xs text-[#7B5EA7]">{notes ? 'Edit' : '+ Add note'}</button>}
+      </div>
+      {editing ? (
+        <div className="space-y-2">
+          <textarea className={inputCls} rows={3} value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="Anything worth recording about this client / tenancy" autoFocus />
+          <div className="flex gap-2 justify-end">
+            <button onClick={() => { setDraft(notes || ''); setEditing(false); }} className="text-xs text-slate-500">Cancel</button>
+            <button disabled={saving} onClick={save} className="text-xs bg-[#7B5EA7] text-white px-3 py-1.5 rounded-lg disabled:opacity-50">{saving ? 'Saving…' : 'Save'}</button>
+          </div>
+        </div>
+      ) : (
+        <p className="text-sm text-slate-600 whitespace-pre-wrap">{notes || <span className="text-slate-400">No notes yet.</span>}</p>
+      )}
+    </div>
+  );
+}
+
 function RateButton({ id, current, onDone }: { id: string; current: number; onDone: () => void }) {
   const [open, setOpen] = useState(false);
   const [rate, setRate] = useState(String(current));
   const [review, setReview] = useState('');
   const [notes, setNotes] = useState('');
   const [saving, setSaving] = useState(false);
-  if (!open) return <button onClick={() => setOpen(true)} className="px-3 py-1.5 bg-[#7B5EA7] text-white rounded-lg text-xs">Change rate</button>;
+  if (!open) return <button onClick={() => setOpen(true)} className="px-3 py-1.5 bg-[#7B5EA7] text-white rounded-lg text-xs">💷 Change rate</button>;
   return (
     <div className="w-full border border-slate-200 rounded-lg p-3 space-y-2">
       <div className="grid grid-cols-2 gap-2">
