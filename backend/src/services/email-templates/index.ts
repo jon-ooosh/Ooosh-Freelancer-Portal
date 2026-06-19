@@ -1639,6 +1639,27 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  pcn_deadline_alert: {
+    variant: 'internal',
+    subject: '{{subjectLine}}',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:18px;color:#1e293b;">{{#if urgent}}URGENT — Police NIP still unactioned{{else}}PCN deadline approaching{{/if}}</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        PCN <strong>{{pcnReference}}</strong> (vehicle <strong>{{vehicleReg}}</strong>) is still <strong>{{statusLabel}}</strong> — {{deadlineLabel}}.
+      </p>
+      {{#if urgent}}
+      <p style="margin:0 0 16px;padding:12px 14px;background-color:#fee2e2;border-radius:8px;font-size:15px;color:#991b1b;line-height:1.6;">
+        We're legally required to identify the driver to the police within 28 days of the offence. Action this now — request driver ID from the client, or transfer liability.
+      </p>
+      {{else}}
+      <p style="margin:0 0 16px;padding:12px 14px;background-color:#fef3c7;border-radius:8px;font-size:15px;color:#92400e;line-height:1.6;">
+        Action this before the deadline to keep the reduced rate / avoid escalation — choose a path on the PCN.
+      </p>
+      {{/if}}
+      <p style="margin:0;font-size:14px;"><a href="{{pcnUrl}}" style="color:#7B5EA7;">Open the PCN →</a></p>
+    `,
+  },
+
   pcn_request_driver_id: {
     variant: 'client',
     preheader: 'Driver identification required',

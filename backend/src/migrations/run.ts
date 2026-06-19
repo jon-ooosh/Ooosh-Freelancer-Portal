@@ -172,6 +172,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '135_carnets.sql',
         '136_pcn_documents.sql',
         '137_backline_demand.sql',
+        '138_pcn_deadline_nudges.sql',
       ];
 
       for (const migration of migrations) {

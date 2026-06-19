@@ -814,6 +814,23 @@ export function startScheduler() {
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: PCN pay-direct chases scheduled daily at 09:35 Europe/London');
 
+  // ── PCN deadline / Police-NIP nudges ─────────────────────────────────────
+  // Daily at 09:37 Europe/London. Internal-only (info@) nudge for PCNs whose
+  // issuer deadline is approaching, or Police NIPs still unactioned in the
+  // 28-day legal window. Stamp-first dedup per deadline. NO client emails —
+  // safe for historical/imported PCNs. The dashboard "PCN" buckets are the
+  // passive surface for the same data. See services/pcn-attention.ts.
+  cron.schedule('37 9 * * *', async () => {
+    try {
+      const { runPcnDeadlineNudges } = await import('../services/pcn-attention');
+      const r = await runPcnDeadlineNudges();
+      if (r.nudged) console.log(`Scheduler: PCN deadline nudges — ${r.nudged} info@ alert(s) sent`);
+    } catch (err) {
+      console.error('Scheduler: PCN deadline nudges failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: PCN deadline / NIP nudges scheduled daily at 09:37 Europe/London');
+
   // ── Pre-auth expiry reconciliation (silent housekeeping) ─────────────────
   // Daily at 09:40 Europe/London. Closes out held pre-auths past their window.
   // NO emails / bell nudges — the dashboard "Pre-auth Holds Expiring" bucket is

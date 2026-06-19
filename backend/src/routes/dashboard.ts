@@ -768,6 +768,20 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       console.warn('Dashboard on_today (storage) skipped:', (err as Error).message);
     }
 
+    // ── PCN needs-attention buckets (Step 8) ──────────────────────────────
+    // Defensive (pre-migration env / missing table can't 500 the dashboard).
+    // Shares the exact classification the deadline-nudge scheduler uses.
+    let pcnAttention = {
+      nip_urgent: [] as unknown[], ready_to_transfer: [] as unknown[],
+      deadline_approaching: [] as unknown[], awaiting_action: [] as unknown[],
+    };
+    try {
+      const { getPcnAttentionBuckets } = await import('../services/pcn-attention');
+      pcnAttention = await getPcnAttentionBuckets();
+    } catch (err) {
+      console.warn('Dashboard PCN attention skipped:', (err as Error).message);
+    }
+
     res.json({
       stat_cards: { ...statCardsResult.rows[0], on_hire_spark: onHireSpark },
       on_today: onToday,
@@ -830,6 +844,11 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         // attached. Amber to-do, non-blocking.
         receipts_outstanding_count: receiptsOutstandingResult.rows.length,
         receipts_outstanding: receiptsOutstandingResult.rows,
+        // ── PCN buckets (Step 8) — internal-only surfacing, never client comms ──
+        pcn_nip_urgent: pcnAttention.nip_urgent,
+        pcn_ready_to_transfer: pcnAttention.ready_to_transfer,
+        pcn_deadline_approaching: pcnAttention.deadline_approaching,
+        pcn_awaiting_action: pcnAttention.awaiting_action,
       },
       transport_ops: {
         summary: transportOpsSummary,

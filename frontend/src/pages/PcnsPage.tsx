@@ -72,8 +72,11 @@ export default function PcnsPage() {
   const [pcns, setPcns] = useState<Pcn[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState('');
-  const [typeFilter, setTypeFilter] = useState('');
+  // Seed status/type from the URL so dashboard deep-links (e.g. the PCN
+  // NeedsAttention buckets → ?status= / ?fine_type=) land pre-filtered.
+  const initialParams = new URLSearchParams(window.location.search);
+  const [statusFilter, setStatusFilter] = useState(initialParams.get('status') || '');
+  const [typeFilter, setTypeFilter] = useState(initialParams.get('fine_type') || '');
   const [offenceFrom, setOffenceFrom] = useState('');
   const [offenceTo, setOffenceTo] = useState('');
   const [sort, setSort] = useState('created_desc');
