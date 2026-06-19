@@ -121,6 +121,34 @@ export default function PcnsPage() {
     setOffenceFrom(''); setOffenceTo(''); setLightFilter(''); setSort('created_desc');
   };
 
+  // Column-header sorting. Clicking a column sorts by it; clicking the active
+  // column flips direction. Date/number columns lead with desc (newest/highest
+  // first); text columns with asc (A→Z).
+  const DESC_FIRST = new Set(['offence', 'fine', 'job']);
+  const sortField = sort.replace(/_(asc|desc)$/, '');
+  const sortDir: 'asc' | 'desc' = sort.endsWith('_asc') ? 'asc' : 'desc';
+  const toggleSort = (field: string) =>
+    setSort(
+      sortField === field
+        ? `${field}_${sortDir === 'asc' ? 'desc' : 'asc'}`
+        : `${field}_${DESC_FIRST.has(field) ? 'desc' : 'asc'}`
+    );
+  const th = (field: string, label: string) => (
+    <th className="px-3 py-2 font-medium">
+      <button
+        type="button"
+        onClick={() => toggleSort(field)}
+        className="inline-flex items-center gap-1 hover:text-slate-700"
+        title={`Sort by ${label}`}
+      >
+        {label}
+        <span className="text-[10px] text-slate-400">
+          {sortField === field ? (sortDir === 'asc' ? '▲' : '▼') : '↕'}
+        </span>
+      </button>
+    </th>
+  );
+
   return (
     <div className="max-w-7xl mx-auto p-4 sm:p-6">
       <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
@@ -163,16 +191,14 @@ export default function PcnsPage() {
             ))}
           </select>
           <select
-            value={sort}
+            value={['created_desc', 'deadline_asc'].includes(sort) ? sort : 'column'}
             onChange={(e) => setSort(e.target.value)}
             className="border rounded-lg px-3 py-2 text-sm"
-            title="Sort"
+            title="Sort (or click a column heading)"
           >
             <option value="created_desc">Newest logged</option>
-            <option value="offence_desc">Offence date (newest)</option>
-            <option value="offence_asc">Offence date (oldest)</option>
             <option value="deadline_asc">Deadline soonest</option>
-            <option value="fine_desc">Fine (high → low)</option>
+            <option value="column" disabled hidden>Sorted by column ↕</option>
           </select>
         </div>
 
@@ -232,14 +258,14 @@ export default function PcnsPage() {
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-slate-500 text-left">
               <tr>
-                <th className="px-3 py-2 font-medium">Reference</th>
-                <th className="px-3 py-2 font-medium">Type</th>
-                <th className="px-3 py-2 font-medium">Vehicle</th>
-                <th className="px-3 py-2 font-medium">Driver</th>
-                <th className="px-3 py-2 font-medium">Job</th>
-                <th className="px-3 py-2 font-medium">Offence</th>
-                <th className="px-3 py-2 font-medium">Fine</th>
-                <th className="px-3 py-2 font-medium">Status</th>
+                {th('reference', 'Reference')}
+                {th('type', 'Type')}
+                {th('reg', 'Vehicle')}
+                {th('driver', 'Driver')}
+                {th('job', 'Job')}
+                {th('offence', 'Offence')}
+                {th('fine', 'Fine')}
+                {th('status', 'Status')}
               </tr>
             </thead>
             <tbody>
