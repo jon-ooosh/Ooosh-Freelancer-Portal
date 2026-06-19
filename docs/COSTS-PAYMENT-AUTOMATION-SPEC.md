@@ -29,7 +29,26 @@ follow-ups below.
 - Invoice number was already surfaced (grey `#…` under the supplier name) and
   already shown in the mark-paid modal — no change needed.
 
-### The terms layer (follow-up)
+### The terms layer — SHIPPED (Jun 2026)
+
+Built per the design below. Migration **139** (`costs.xero_contact_id` +
+`supplier_payment_terms`). Shared service `services/supplier-terms.ts` is the one
+due-date calc, used by the costs list, the get-one endpoint, the mark-paid modal
+(via the list payload) and the Xero bill push (`cost-xero-push.ts`) — they can't
+drift. The capture modal now keeps the picked supplier's `ContactID`; a
+fire-and-forget background seed pulls the contact's `PaymentTerms.Bills` from
+Xero the first time a Xero-linked supplier is captured. Staff edit/override terms
+per-supplier from the Due cell on Bills-to-Pay (`SupplierTermsModal`), endpoints
+`GET`/`PUT /api/costs/suppliers/terms`. `DEFAULT_TERMS_DAYS = 30` remains the
+fallback when nothing's stored.
+
+**Deferred:** a one-shot backfill seeding terms from Xero for *existing*
+suppliers (existing costs have no `xero_contact_id`, so there's nothing to seed
+from yet — they pick up terms when next captured/edited, or staff set them
+manually). Writing edited terms back to the Xero contact (`PUT /Contacts`) is
+still OP-only by design.
+
+### The terms layer (design)
 
 **Goal:** due dates that reflect each supplier's real terms, including EOM
 (e.g. the garage's "30 days EOM"), with a sensible default and an editable

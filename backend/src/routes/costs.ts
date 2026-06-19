@@ -74,6 +74,9 @@ const createSchema = z.object({
   amount_net: money.optional().nullable(),
   vat_treatment: z.enum(['standard', 'reclaim_split']).optional(),
   invoice_number: z.string().trim().max(100).optional().nullable(),
+  // Xero contact id captured when staff pick a real Xero supplier in the
+  // autocomplete — lets terms resolve by stable id + seed from Xero.
+  xero_contact_id: z.string().trim().max(60).optional().nullable(),
   currency: z.string().trim().length(3).optional(),
   description: z.string().trim().max(10000).optional().nullable(),
   category: z.string().trim().max(100).optional().nullable(),
@@ -123,7 +126,7 @@ const allocationSchema = z.object({
 // workflow timestamps + Xero state are server-controlled).
 const WRITABLE = [
   'supplier_name', 'cost_date', 'amount_gross', 'amount_vat', 'amount_net', 'vat_treatment',
-  'invoice_number', 'currency',
+  'invoice_number', 'xero_contact_id', 'currency',
   'description', 'category', 'xero_account_code', 'cost_type', 'payment_method',
   'cot_card_holder', 'cot_card_last4', 'payment_status', 'job_id', 'vehicle_id',
   'quote_assignment_id', 'platform_issue_id', 'vehicle_service_log_id', 'vehicle_fuel_log_id',
@@ -214,6 +217,19 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     `;
     const result = await query(sql, params);
 
+    // Resolve per-supplier payment terms in one query and attach the computed
+    // due date (+ the terms that produced it) to each row. Single source of
+    // truth for the bill due date — the list, mark-paid modal and Xero push all
+    // read these. See docs/COSTS-PAYMENT-AUTOMATION-SPEC.md.
+    const { buildTermsResolver, computeDueDate } = await import('../services/supplier-terms');
+    const resolve = await buildTermsResolver(
+      result.rows.map((r) => ({ xeroContactId: r.xero_contact_id, supplierName: r.supplier_name })),
+    );
+    const rows = result.rows.map((r) => {
+      const terms = resolve({ xeroContactId: r.xero_contact_id, supplierName: r.supplier_name });
+      return { ...r, terms, due_date: computeDueDate(r.cost_date, terms) };
+    });
+
     // Headline counts for the hub tabs.
     const stats = await query(`
       SELECT
@@ -224,7 +240,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       FROM costs
     `);
 
-    res.json({ data: result.rows, stats: stats.rows[0] });
+    res.json({ data: rows, stats: stats.rows[0] });
   } catch (err) {
     console.error('[costs] list error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -399,6 +415,51 @@ router.get('/xero/suppliers', authorize(...STAFF_ROLES), async (req: AuthRequest
   }
 });
 
+// ── Supplier payment terms ───────────────────────────────────────────────────
+// Per-supplier due-date terms, keyed by Xero contact id (when known) else name.
+// Multi-segment paths so they don't collide with /:id below.
+
+const termsSchema = z.object({
+  supplier_name: z.string().trim().max(200).optional().nullable(),
+  xero_contact_id: z.string().trim().max(60).optional().nullable(),
+  basis: z.enum(['invoice_date', 'end_of_invoice_month']),
+  days: z.number().int().min(0).max(365),
+});
+
+// Resolve the effective terms for a supplier (for the editor to pre-fill).
+router.get('/suppliers/terms', async (req: AuthRequest, res: Response) => {
+  try {
+    const supplierName = typeof req.query.supplier_name === 'string' ? req.query.supplier_name : null;
+    const xeroContactId = typeof req.query.xero_contact_id === 'string' ? req.query.xero_contact_id : null;
+    const { resolveTermsForSupplier } = await import('../services/supplier-terms');
+    const terms = await resolveTermsForSupplier(xeroContactId, supplierName);
+    res.json({ data: terms });
+  } catch (err) {
+    console.error('[costs] get supplier terms error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Set/override a supplier's terms (applies to all their bills). Low-stakes —
+// staff still set the real pay date at mark-paid — so STAFF_ROLES, like cost edit.
+router.put('/suppliers/terms', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const parse = termsSchema.safeParse(req.body);
+    if (!parse.success) { res.status(400).json({ error: 'Invalid input', issues: parse.error.issues }); return; }
+    const { supplier_name, xero_contact_id, basis, days } = parse.data;
+    if (!supplier_name && !xero_contact_id) { res.status(400).json({ error: 'A supplier name or Xero contact id is required' }); return; }
+    const { upsertSupplierTerms, resolveTermsForSupplier } = await import('../services/supplier-terms');
+    await upsertSupplierTerms({
+      supplierName: supplier_name, xeroContactId: xero_contact_id, basis, days, source: 'manual', userId: req.user!.id,
+    });
+    const terms = await resolveTermsForSupplier(xero_contact_id, supplier_name);
+    res.json({ data: terms });
+  } catch (err) {
+    console.error('[costs] set supplier terms error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // ── Get one (with allocations) ───────────────────────────────────────────────
 
 router.get('/:id', async (req: AuthRequest, res: Response) => {
@@ -424,7 +485,10 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
        WHERE a.cost_id = $1 ORDER BY a.created_at ASC`,
       [req.params.id],
     );
-    res.json({ data: { ...result.rows[0], allocations: allocations.rows } });
+    const cost = result.rows[0];
+    const { resolveTermsForSupplier, computeDueDate } = await import('../services/supplier-terms');
+    const terms = await resolveTermsForSupplier(cost.xero_contact_id, cost.supplier_name);
+    res.json({ data: { ...cost, terms, due_date: computeDueDate(cost.cost_date, terms), allocations: allocations.rows } });
   } catch (err) {
     console.error('[costs] get error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -486,7 +550,16 @@ router.post('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respon
     const { pushCostToXeroBackground } = await import('../services/cost-xero-push');
     pushCostToXeroBackground(result.rows[0].id);
 
-    res.status(201).json({ data: result.rows[0] });
+    // First time we see a Xero-linked supplier, seed its payment terms from the
+    // Xero contact (fire-and-forget — never blocks capture).
+    const created = result.rows[0];
+    if (created.xero_contact_id) {
+      void import('../services/supplier-terms')
+        .then((m) => m.seedTermsFromXeroIfMissing(created.xero_contact_id, created.supplier_name))
+        .catch(() => { /* non-fatal — staff can set terms manually */ });
+    }
+
+    res.status(201).json({ data: created });
   } catch (err) {
     console.error('[costs] create error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -522,6 +595,13 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
     if (!updated.xero_object_id || updated.xero_sync_state === 'error' || updated.xero_sync_state === 'pending') {
       const { pushCostToXeroBackground } = await import('../services/cost-xero-push');
       pushCostToXeroBackground(updated.id);
+    }
+
+    // Seed terms from Xero if a contact id was just attached and none exist yet.
+    if (updated.xero_contact_id) {
+      void import('../services/supplier-terms')
+        .then((m) => m.seedTermsFromXeroIfMissing(updated.xero_contact_id, updated.supplier_name))
+        .catch(() => { /* non-fatal — staff can set terms manually */ });
     }
 
     res.json({ data: updated });

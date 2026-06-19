@@ -98,6 +98,10 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
 
   // ── Form state ───────────────────────────────────────────────────────────
   const [supplierName, setSupplierName] = useState(existing?.supplier_name || '');
+  // Xero contact id of a picked supplier suggestion — lets terms resolve by
+  // stable id + seed from Xero. Cleared when the name is hand-edited (the id no
+  // longer matches what's typed).
+  const [xeroContactId, setXeroContactId] = useState<string | null>(existing?.xero_contact_id || null);
   const [costDate, setCostDate] = useState(() => (existing?.cost_date ? existing.cost_date.slice(0, 10) : new Date().toISOString().slice(0, 10)));
   const [invoiceNumber, setInvoiceNumber] = useState(existing?.invoice_number || '');
   // De-dup: warn if this supplier+invoice number was already captured.
@@ -601,6 +605,7 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
 
       const payload: Record<string, unknown> = {
         supplier_name: supplierName || null,
+        xero_contact_id: xeroContactId,
         cost_date: costDate || null,
         amount_gross: amountGross ? Number(amountGross) : null,
         amount_vat: amountVat ? Number(amountVat) : null,
@@ -755,7 +760,7 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
               <div className="relative">
                 <label className="block text-sm font-medium text-gray-700 mb-1">Supplier</label>
                 <input className={inputCls} value={supplierName}
-                  onChange={(e) => setSupplierName(e.target.value)}
+                  onChange={(e) => { setSupplierName(e.target.value); setXeroContactId(null); }}
                   onFocus={() => setSupplierFocused(true)}
                   onBlur={() => setTimeout(() => setSupplierFocused(false), 150)}
                   placeholder="e.g. TTS360, Shell" autoComplete="off" />
@@ -763,7 +768,7 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
                   <div className="absolute z-10 mt-1 w-full max-h-48 overflow-y-auto bg-white border border-gray-200 rounded-md shadow-lg">
                     {supplierSuggestions.map((s) => (
                       <button key={s.ContactID} type="button"
-                        onMouseDown={(e) => { e.preventDefault(); setSupplierName(s.Name); setSupplierSuggestions([]); }}
+                        onMouseDown={(e) => { e.preventDefault(); setSupplierName(s.Name); setXeroContactId(s.ContactID); setSupplierSuggestions([]); }}
                         className="block w-full text-left px-3 py-1.5 text-sm hover:bg-purple-50">
                         {s.Name}
                       </button>

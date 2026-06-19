@@ -998,6 +998,14 @@ export type CostApprovalState = 'submitted' | 'verified' | 'approved' | 'paid';
 export type CostXeroSyncState = 'pending' | 'bill_created' | 'attached' | 'reconciled' | 'error';
 export type CostStatus = 'draft' | 'confirmed' | 'resolved';
 
+// Supplier payment terms → bill due date. 'default' source = no stored terms
+// (flat invoice + 30). See docs/COSTS-PAYMENT-AUTOMATION-SPEC.md.
+export interface SupplierPaymentTerms {
+  basis: 'invoice_date' | 'end_of_invoice_month';
+  days: number;
+  source: 'manual' | 'xero' | 'default';
+}
+
 export interface Cost {
   id: string;
   uploaded_by: string | null;
@@ -1010,6 +1018,10 @@ export interface Cost {
   amount_net: number | null;
   vat_treatment?: 'standard' | 'reclaim_split';
   invoice_number?: string | null;
+  xero_contact_id?: string | null;
+  // Computed server-side from the supplier's payment terms (list + get-one).
+  due_date?: string | null;
+  terms?: SupplierPaymentTerms;
   currency: string;
   description: string | null;
   category: string | null;

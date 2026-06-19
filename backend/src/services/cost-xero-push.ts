@@ -126,6 +126,7 @@ interface CostRow {
   description: string | null;
   category: string | null;
   cost_date: string | null;
+  xero_contact_id: string | null;
   paid_method: string | null;
   paid_value_date: string | null;
   paid_at: string | null;
@@ -150,9 +151,10 @@ function dateOnly(v: string | null | undefined): string | undefined {
   return v ? new Date(v).toISOString().slice(0, 10) : undefined;
 }
 
-// Xero requires a DueDate on an ACCPAY bill. Default to invoice date + 30 days
-// (no per-supplier terms tracked yet); staff set the real payment date at
-// "Mark paid" anyway, so this just drives the Bills-to-pay aging.
+// Xero requires a DueDate on an ACCPAY bill. We derive it from the supplier's
+// payment terms (computeDueDate), falling back to invoice + 30 when there's no
+// invoice date. Staff set the real payment date at "Mark paid" anyway, so this
+// just drives the Bills-to-pay aging.
 function addDaysISO(iso: string | undefined, days: number): string {
   const base = iso ? new Date(`${iso}T00:00:00Z`) : new Date();
   base.setUTCDate(base.getUTCDate() + days);
@@ -337,12 +339,15 @@ async function pushBill(cost: CostRow): Promise<PushResult> {
     const description = (isReimburse && cost.supplier_name ? `${cost.supplier_name} — ${baseDesc}` : baseDesc).slice(0, 4000);
 
     const { lineItems, lineAmountTypes } = await buildCostLineItems(cost, description);
+    const { resolveTermsForSupplier, computeDueDate } = await import('./supplier-terms');
+    const billTerms = await resolveTermsForSupplier(cost.xero_contact_id, cost.supplier_name);
+    const billDueDate = computeDueDate(dateOnly(cost.cost_date), billTerms) ?? addDaysISO(dateOnly(cost.cost_date), 30);
     let invoiceID: string;
     try {
       const bill = await xeroBroker.createBill({
         contactName,
         date: dateOnly(cost.cost_date),
-        dueDate: addDaysISO(dateOnly(cost.cost_date), 30),
+        dueDate: billDueDate,
         reference: xeroReference(cost),
         status: 'AUTHORISED',
         lineAmountTypes,
