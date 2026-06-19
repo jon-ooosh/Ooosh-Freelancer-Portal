@@ -6,9 +6,16 @@
  * tab below the prep checklist. Drives the we_supply lifecycle (status, custody,
  * GMRs, documents) and the client_arranges minimal flow.
  *
+ * NOTE (Jun 2026): this rich cockpit is currently NOT mounted anywhere — it was
+ * briefly on the Job Detail Overview but pulled (too heavy for job view, and it
+ * duplicated the requirement-card tracker). It's retained as the basis for the
+ * Operations > Carnets tab (slice 5), where the full management lives. Job View
+ * keeps only the thin `carnet` requirement card (tracker bar). When mounting in
+ * Operations, adapt it to take a carnet id / list context rather than jobId.
+ *
  * Slice 3 (staff management). The public client request form + signed
  * Letter of Authorisation PDF (which populates the client-data fields and seeds
- * GMRs) land in the next slice.
+ * GMRs) land in a later slice.
  */
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../services/api';
