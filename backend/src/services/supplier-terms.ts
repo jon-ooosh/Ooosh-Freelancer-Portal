@@ -44,10 +44,17 @@ export function preferredTermKey(xeroContactId?: string | null, supplierName?: s
  * no invoice date. UTC throughout to avoid timezone day-shift (cost_date is a
  * DATE). For end_of_invoice_month, the base is the last day of the invoice's
  * month, then + days (so days=0 = pay by EOM, days=30 = EOM + 30).
+ *
+ * Accepts either a string or a JS Date — node-postgres returns DATE columns as
+ * Date objects, so the backend callers (list / get-one) pass a Date here.
  */
-export function computeDueDate(invoiceDate: string | null | undefined, terms: SupplierTerms): string | null {
+export function computeDueDate(invoiceDate: string | Date | null | undefined, terms: SupplierTerms): string | null {
   if (!invoiceDate) return null;
-  const iso = invoiceDate.slice(0, 10);
+  // Normalise to YYYY-MM-DD. Date objects (pg DATE) → ISO date part; the server
+  // runs UTC so midnight-local == midnight-UTC (mirrors dateOnly in cost-xero-push).
+  const iso = typeof invoiceDate === 'string'
+    ? invoiceDate.slice(0, 10)
+    : new Date(invoiceDate).toISOString().slice(0, 10);
   const [y, m, d] = iso.split('-').map((n) => parseInt(n, 10));
   if (!y || !m || !d) return null;
   // Base: invoice date, or the last day of the invoice's month.
@@ -73,11 +80,17 @@ export async function buildTermsResolver(
 
   const byKey = new Map<string, TermsRow>();
   if (wantedKeys.size) {
-    const r = await query(
-      `SELECT term_key, basis, days, source FROM supplier_payment_terms WHERE term_key = ANY($1)`,
-      [Array.from(wantedKeys)],
-    );
-    for (const row of r.rows as TermsRow[]) byKey.set(row.term_key, row);
+    try {
+      const r = await query(
+        `SELECT term_key, basis, days, source FROM supplier_payment_terms WHERE term_key = ANY($1)`,
+        [Array.from(wantedKeys)],
+      );
+      for (const row of r.rows as TermsRow[]) byKey.set(row.term_key, row);
+    } catch (err) {
+      // Never let a terms lookup take down the costs list — degrade to defaults
+      // (e.g. if the migration hasn't run yet). Self-heals once it has.
+      console.warn('[supplier-terms] resolver query failed, using defaults:', (err as Error).message);
+    }
   }
 
   return (s) => {
@@ -96,14 +109,18 @@ export async function resolveTermsForSupplier(
 ): Promise<SupplierTerms> {
   const keys = termKeysFor(xeroContactId, supplierName);
   if (!keys.length) return DEFAULT_TERMS;
-  const r = await query(
-    `SELECT term_key, basis, days, source FROM supplier_payment_terms WHERE term_key = ANY($1)`,
-    [keys],
-  );
-  const byKey = new Map((r.rows as TermsRow[]).map((row) => [row.term_key, row] as const));
-  for (const key of keys) {
-    const row = byKey.get(key);
-    if (row) return { basis: row.basis, days: row.days, source: row.source };
+  try {
+    const r = await query(
+      `SELECT term_key, basis, days, source FROM supplier_payment_terms WHERE term_key = ANY($1)`,
+      [keys],
+    );
+    const byKey = new Map((r.rows as TermsRow[]).map((row) => [row.term_key, row] as const));
+    for (const key of keys) {
+      const row = byKey.get(key);
+      if (row) return { basis: row.basis, days: row.days, source: row.source };
+    }
+  } catch (err) {
+    console.warn('[supplier-terms] resolve query failed, using defaults:', (err as Error).message);
   }
   return DEFAULT_TERMS;
 }
