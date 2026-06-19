@@ -28,7 +28,11 @@
  * Env: MONDAY_API_TOKEN, DATABASE_URL.
  */
 
+import dotenv from 'dotenv';
 import { Pool } from 'pg';
+
+dotenv.config();
+
 
 const PCN_TRACKER_BOARD_ID = '18390180140';
 const DRIVER_LINK_COLUMN = 'board_relation_mky4ptk1'; // link → Driver Hire Form board

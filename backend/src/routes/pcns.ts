@@ -546,6 +546,11 @@ router.patch('/:id', validate(updateSchema), async (req: AuthRequest, res: Respo
     await logPcnEvent(pcn.id, 'status_change', `Status → ${b.status}`,
       { from: before.status, to: b.status }, req.user!.id);
   }
+  if ('driver_id' in b && (b.driver_id ?? null) !== (before.driver_id ?? null)) {
+    await logPcnEvent(pcn.id, 'matched',
+      b.driver_id ? 'Driver assigned' : 'Driver unassigned',
+      { from: before.driver_id ?? null, to: b.driver_id ?? null }, req.user!.id);
+  }
   await logAudit(req.user!.id, 'pcns', pcn.id, 'update', before, pcn);
   res.json({ data: pcn });
 });
