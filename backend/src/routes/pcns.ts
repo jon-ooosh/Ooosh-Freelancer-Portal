@@ -332,7 +332,7 @@ router.get('/by-job/:jobId', async (req: AuthRequest, res: Response) => {
 // ─────────────────────────────────────────────────────────────────────────
 
 router.get('/', async (req: AuthRequest, res: Response) => {
-  const { status, fine_type, search } = req.query;
+  const { status, fine_type, search, offence_from, offence_to, sort } = req.query;
   let sql = `${SELECT_WITH_JOINS} WHERE p.is_deleted = false`;
   const params: unknown[] = [];
   let i = 1;
@@ -344,7 +344,20 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     params.push(`%${search}%`);
     i++;
   }
-  sql += ` ORDER BY p.created_at DESC`;
+  // Offence-date range (inclusive). `offence_to` is bumped to end-of-day so a
+  // same-day from/to selects that whole day.
+  if (offence_from) { sql += ` AND p.offence_at >= $${i++}`; params.push(offence_from); }
+  if (offence_to) { sql += ` AND p.offence_at < ($${i++}::date + INTERVAL '1 day')`; params.push(offence_to); }
+
+  // Sort — whitelisted; NULLS LAST so undated rows don't crowd the top.
+  const SORTS: Record<string, string> = {
+    created_desc: 'p.created_at DESC',
+    offence_desc: 'p.offence_at DESC NULLS LAST, p.created_at DESC',
+    offence_asc: 'p.offence_at ASC NULLS LAST, p.created_at DESC',
+    fine_desc: 'p.fine_amount DESC NULLS LAST, p.created_at DESC',
+    deadline_asc: 'COALESCE(p.reduced_deadline, p.final_deadline) ASC NULLS LAST, p.created_at DESC',
+  };
+  sql += ` ORDER BY ${SORTS[String(sort)] || SORTS.created_desc}`;
   const r = await query(sql, params);
   res.json({ data: r.rows });
 });

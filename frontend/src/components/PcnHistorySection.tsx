@@ -40,7 +40,7 @@ const ENDPOINT_BY_TYPE: Record<EntityType, string> = {
 const RESOLVED = new Set(['paid_by_driver', 'paid_recharged', 'internal_ooosh', 'internal_freelancer', 'closed']);
 
 // Repeat-offender threshold for the driver view (§7): N+ PCNs in a rolling 12 months.
-const REPEAT_THRESHOLD = 3;
+const REPEAT_THRESHOLD = 2;
 
 export function PcnHistorySection({
   entityType,
