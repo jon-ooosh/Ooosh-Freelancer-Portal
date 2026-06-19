@@ -6,29 +6,30 @@
  * HireHop's bulk stock export endpoint — the SAME endpoint + EXPORT credentials
  * the Staging Calculator uses (`services/staging-stock.ts`), NOT the API token.
  *
- * Strategy: fetch each backline PARENT category with depot=1 and concatenate.
- * The export returns a category AND all its descendants in one call (proven by
- * the staging integration — a no-cat fetch can come back truncated). The five
- * backline parents (guitars/basses/drums/keyboards/accessories) cover the full
- * 372-410 backline category range. Deduped by stock ID.
+ * Strategy: ONE export call (no category filter) → filter to backline
+ * categories client-side. This mirrors the original Netlify app, which ran this
+ * way in production for years. An earlier per-parent-category approach made five
+ * rapid calls and tripped HireHop's export rate limit (429). One call is both
+ * proven and far less likely to be throttled; a single 429 retry covers the rest.
  *
- * Cached briefly in-process (stock changes rarely; the matcher hits this on
- * every search). Not routed through the broker — different auth, one bulk call.
+ * Uses the same EXPORT credentials the Staging Calculator uses
+ * (`HIREHOP_EXPORT_ID` + `HIREHOP_EXPORT_KEY`), NOT the API token. Cached briefly
+ * in-process (stock changes rarely; the matcher hits this on every search). Not
+ * routed through the broker — different auth, one bulk call.
  */
 
 const HIREHOP_EXPORT_URL = 'https://myhirehop.com/modules/stock/export_data.php';
 
-// Backline parent categories. The export pulls each parent + its descendants,
-// so these five cover the whole backline range (372-410) enumerated in the
-// original get-stock.js. Everything except vehicles (370-371), rehearsal (450)
-// and storage (449).
-const BACKLINE_PARENT_CATEGORIES = [
-  372, // Guitars (amps, cabs, combos, FX)
-  379, // Basses (amps, cabs, combos)
-  385, // Drums (kits, hardware, cymbals)
-  399, // Keyboards (keys, amps, pedals)
-  406, // Backline accessories (stands, cases, etc.)
-];
+// All backline category IDs (from the original get-stock.js). Everything except
+// vehicles (370-371), rehearsal (450) and storage (449). The export returns ALL
+// stock in one call; we keep only items whose CATEGORY_ID is in this set.
+const BACKLINE_CATEGORY_IDS = new Set<number>([
+  372, 373, 374, 375, 376, 377, 378, // Guitars (amps, cabs, combos, FX)
+  379, 380, 381, 382, 383, 384, // Basses
+  385, 386, 387, 388, 389, 390, 391, 392, 393, 394, 395, 396, 397, 398, // Drums
+  399, 400, 401, 402, 403, 404, // Keyboards
+  406, 407, 408, 409, 410, // Backline accessories
+]);
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
@@ -63,22 +64,24 @@ function exportCreds(): { id: string; key: string } {
   return { id, key };
 }
 
-async function fetchCategory(catId: number): Promise<RawItem[]> {
+async function fetchAllStock(): Promise<RawItem[]> {
   const { id, key } = exportCreds();
-  const params = new URLSearchParams({
-    id,
-    key,
-    depot: '1',
-    cat: String(catId),
-    sidx: 'TITLE',
-    sord: 'asc',
-  });
-  const response = await fetch(`${HIREHOP_EXPORT_URL}?${params.toString()}`);
-  if (!response.ok) {
-    throw new Error(`HireHop export returned ${response.status} for cat ${catId}`);
+  const params = new URLSearchParams({ id, key, sidx: 'TITLE', sord: 'asc' });
+  const url = `${HIREHOP_EXPORT_URL}?${params.toString()}`;
+
+  // One 429 retry — the export endpoint occasionally throttles under load.
+  let lastStatus = 0;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 1500));
+    const response = await fetch(url);
+    if (response.ok) {
+      const data = await response.json();
+      return Array.isArray(data) ? data : [];
+    }
+    lastStatus = response.status;
+    if (response.status !== 429) break; // only retry rate-limits
   }
-  const data = await response.json();
-  return Array.isArray(data) ? data : [];
+  throw new Error(`HireHop export returned ${lastStatus}`);
 }
 
 function mapItem(item: RawItem): BacklineStockItem {
@@ -101,20 +104,20 @@ export async function fetchBacklineStock(): Promise<BacklineStockItem[]> {
     return cache.items;
   }
 
+  const raw = await fetchAllStock();
   const seen = new Set<number>();
   const items: BacklineStockItem[] = [];
 
-  for (const catId of BACKLINE_PARENT_CATEGORIES) {
-    const raw = await fetchCategory(catId);
-    for (const r of raw) {
-      const id = Number(r.ID);
-      if (!Number.isFinite(id) || seen.has(id)) continue;
-      seen.add(id);
-      items.push(mapItem(r));
-    }
+  for (const r of raw) {
+    const catId = Number(r.CATEGORY_ID);
+    if (!BACKLINE_CATEGORY_IDS.has(catId)) continue;
+    const id = Number(r.ID);
+    if (!Number.isFinite(id) || seen.has(id)) continue;
+    seen.add(id);
+    items.push(mapItem(r));
   }
 
-  console.log(`[Backline] export returned ${items.length} backline items`);
+  console.log(`[Backline] export returned ${raw.length} items, ${items.length} backline`);
   cache = { items, at: Date.now() };
   return items;
 }
