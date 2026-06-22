@@ -272,6 +272,32 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  low_tread_alert: {
+    variant: 'internal',
+    subject: 'Low tyre tread at prep — {{vehicleReg}}',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Low Tyre Tread Flagged at Prep</h2>
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
+        <strong>{{vehicleReg}}</strong> was prepped by {{preparedBy}} and one or more tyres
+        are at or below {{amberThreshold}}mm. Plan a tyre change before the next hire.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#fffbeb;border-radius:8px;border:1px solid #fde68a;">
+            <p style="margin:0 0 4px;font-size:12px;color:#92400e;">Low tyres</p>
+            <p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">{{lowTyres}}</p>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0 0 16px;font-size:13px;color:#64748b;">
+        Mileage at prep: {{mileage}}
+      </p>
+      <p style="margin:0;font-size:14px;color:#334155;">
+        <a href="{{vehicleUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">View vehicle in Ooosh &rarr;</a>
+      </p>
+    `,
+  },
+
   chase_reminder: {
     variant: 'internal',
     subject: 'Chase Due — {{jobName}} ({{jobNumber}})',
