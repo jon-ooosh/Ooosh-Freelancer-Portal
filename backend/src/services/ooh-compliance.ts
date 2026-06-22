@@ -299,52 +299,37 @@ export interface RecentOohReturn {
   existingViolationId: string | null;
 }
 
-/**
- * OOH-flagged returns in the last N days — powers the dashboard "Recent OOH
- * returns" retro-flag list (so someone other than the check-in person can flag).
- */
-export async function getRecentOohReturns(days: number): Promise<RecentOohReturn[]> {
-  const r = await query(
-    `SELECT vha.job_id, j.hh_job_number, j.job_name,
-            vha.vehicle_id, fv.reg AS vehicle_reg,
-            vha.driver_id, d.full_name AS driver_name,
-            vha.ooh_returned_at, vha.checked_in_at, vha.status_changed_at, vha.status,
-            COALESCE(d.ooh_blocked, FALSE) AS blocked,
-            vha.id AS assignment_id
-       FROM vehicle_hire_assignments vha
-       JOIN jobs j ON j.id = vha.job_id
-       LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
-       LEFT JOIN drivers d ON d.id = vha.driver_id
-      WHERE vha.return_overnight = TRUE
-        AND vha.vehicle_id IS NOT NULL
-        AND GREATEST(
-              COALESCE(vha.ooh_returned_at, 'epoch'::timestamptz),
-              COALESCE(vha.checked_in_at, 'epoch'::timestamptz),
-              CASE WHEN vha.status = 'returned' THEN COALESCE(vha.status_changed_at, 'epoch'::timestamptz) ELSE 'epoch'::timestamptz END
-            ) >= NOW() - ($1 || ' days')::interval
-      ORDER BY vha.vehicle_id, vha.van_requirement_index NULLS LAST, vha.created_at ASC`,
-    [String(days)],
-  );
+interface OohReturnRow {
+  job_id: string;
+  hh_job_number: number | null;
+  job_name: string | null;
+  vehicle_id: string;
+  vehicle_reg: string;
+  driver_id: string | null;
+  driver_name: string | null;
+  ooh_returned_at: Date | null;
+  checked_in_at: Date | null;
+  status_changed_at: Date | null;
+  status: string;
+  blocked: boolean;
+  assignment_id: string;
+}
 
-  interface Row {
-    job_id: string;
-    hh_job_number: number | null;
-    job_name: string | null;
-    vehicle_id: string;
-    vehicle_reg: string;
-    driver_id: string | null;
-    driver_name: string | null;
-    ooh_returned_at: Date | null;
-    checked_in_at: Date | null;
-    status_changed_at: Date | null;
-    status: string;
-    blocked: boolean;
-    assignment_id: string;
-  }
-  const rows = r.rows as Row[];
+const OOH_RETURN_SELECT = `
+  SELECT vha.job_id, j.hh_job_number, j.job_name,
+         vha.vehicle_id, fv.reg AS vehicle_reg,
+         vha.driver_id, d.full_name AS driver_name,
+         vha.ooh_returned_at, vha.checked_in_at, vha.status_changed_at, vha.status,
+         COALESCE(d.ooh_blocked, FALSE) AS blocked,
+         vha.id AS assignment_id
+    FROM vehicle_hire_assignments vha
+    JOIN jobs j ON j.id = vha.job_id
+    LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+    LEFT JOIN drivers d ON d.id = vha.driver_id`;
 
-  // Group by (job, vehicle)
-  const groups = new Map<string, Row[]>();
+/** Group (job, vehicle) rows into RecentOohReturn[] and mark "already flagged". */
+async function buildRecentReturns(rows: OohReturnRow[]): Promise<RecentOohReturn[]> {
+  const groups = new Map<string, OohReturnRow[]>();
   for (const row of rows) {
     const key = `${row.job_id}:${row.vehicle_id}`;
     if (!groups.has(key)) groups.set(key, []);
@@ -394,4 +379,93 @@ export async function getRecentOohReturns(days: number): Promise<RecentOohReturn
   // Newest return first
   out.sort((a, b) => (b.returnedAt || '').localeCompare(a.returnedAt || ''));
   return out;
+}
+
+/**
+ * OOH-flagged returns in the last N days — powers the dashboard "Recent OOH
+ * returns" retro-flag list (so someone other than the check-in person can flag).
+ */
+export async function getRecentOohReturns(days: number): Promise<RecentOohReturn[]> {
+  const r = await query(
+    `${OOH_RETURN_SELECT}
+      WHERE vha.return_overnight = TRUE
+        AND vha.vehicle_id IS NOT NULL
+        AND GREATEST(
+              COALESCE(vha.ooh_returned_at, 'epoch'::timestamptz),
+              COALESCE(vha.checked_in_at, 'epoch'::timestamptz),
+              CASE WHEN vha.status = 'returned' THEN COALESCE(vha.status_changed_at, 'epoch'::timestamptz) ELSE 'epoch'::timestamptz END
+            ) >= NOW() - ($1 || ' days')::interval
+      ORDER BY vha.vehicle_id, vha.van_requirement_index NULLS LAST, vha.created_at ASC`,
+    [String(days)],
+  );
+  return buildRecentReturns(r.rows as OohReturnRow[]);
+}
+
+/**
+ * OOH-flagged returns for one job — powers the Job Detail "Out-of-hours returns"
+ * panel (flag/un-flag per van). No date filter; includes vans still out as well
+ * as returned, so the affordance is there before and after check-in.
+ */
+export async function getOohReturnsForJob(jobId: string): Promise<RecentOohReturn[]> {
+  const r = await query(
+    `${OOH_RETURN_SELECT}
+      WHERE vha.job_id = $1
+        AND vha.return_overnight = TRUE
+        AND vha.vehicle_id IS NOT NULL
+        AND vha.status IN ('booked_out', 'active', 'returned')
+      ORDER BY vha.vehicle_id, vha.van_requirement_index NULLS LAST, vha.created_at ASC`,
+    [jobId],
+  );
+  return buildRecentReturns(r.rows as OohReturnRow[]);
+}
+
+/**
+ * Read-only OOH incident rollup for an organisation (as the job client) —
+ * surfaces the "band member who says just-park-anywhere" pattern across a
+ * client's drivers without punishing a one-off. Excludes dismissed violations.
+ * A null driver row = unattributed ("whole hire") incidents.
+ */
+export interface OrgOohIncidents {
+  totalIncidents: number;
+  drivers: Array<{
+    driverId: string | null;
+    driverName: string | null;
+    blocked: boolean;
+    incidentCount: number;
+    lastIncidentOn: string | null;
+  }>;
+}
+
+export async function getOrgOohIncidents(orgId: string): Promise<OrgOohIncidents> {
+  const r = await query(
+    `SELECT v.driver_id,
+            d.full_name AS driver_name,
+            COALESCE(d.ooh_blocked, FALSE) AS blocked,
+            COUNT(*)::int AS incident_count,
+            MAX(v.occurred_on) AS last_incident_on
+       FROM ooh_return_violations v
+       JOIN jobs j ON j.id = v.job_id
+       LEFT JOIN drivers d ON d.id = v.driver_id
+      WHERE j.client_id = $1 AND v.dismissed = FALSE
+      GROUP BY v.driver_id, d.full_name, COALESCE(d.ooh_blocked, FALSE)
+      ORDER BY incident_count DESC, last_incident_on DESC NULLS LAST`,
+    [orgId],
+  );
+  const drivers = (r.rows as Array<{
+    driver_id: string | null;
+    driver_name: string | null;
+    blocked: boolean;
+    incident_count: number;
+    last_incident_on: Date | null;
+  }>).map(row => ({
+    driverId: row.driver_id,
+    driverName: row.driver_name,
+    blocked: row.blocked,
+    incidentCount: row.incident_count,
+    lastIncidentOn: row.last_incident_on ? String(row.last_incident_on).slice(0, 10) : null,
+  }));
+  return {
+    totalIncidents: drivers.reduce((s, x) => s + x.incidentCount, 0),
+    drivers,
+  };
 }

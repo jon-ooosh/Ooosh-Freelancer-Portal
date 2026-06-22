@@ -15,6 +15,7 @@ import type { JobRequirement } from '../components/RequirementCard';
 import ExcessGateBanner from '../components/ExcessGateBanner';
 import ExcessPaymentModal from '../components/ExcessPaymentModal';
 import OohReturnModal from '../components/OohReturnModal';
+import JobOohReturns from '../components/JobOohReturns';
 import AddToHireModal, { type AddToHireCandidate } from '../components/AddToHireModal';
 import JobContactsCard from '../components/JobContactsCard';
 import type { JobExcess } from '../../../shared/types';
@@ -3955,6 +3956,9 @@ export default function JobDetailPage() {
               clientId={job?.client_id || undefined}
             />
           )}
+
+          {/* Out-of-hours returns — flag/un-flag badly-parked OOH returns per van */}
+          <JobOohReturns jobId={job.id} />
 
           {vehicleAssignmentsLoading ? (
             <div className="flex justify-center py-12">
