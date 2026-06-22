@@ -96,7 +96,10 @@ function getProblems(session: PrepHistorySession): string[] {
       problems.push(sec.notes.trim())
     }
     for (const item of sec.items || []) {
-      if (item.value?.toLowerCase().includes('problem') || item.value?.toLowerCase() === 'n/a') {
+      // 'N/A' is a legitimate "not fitted / not applicable" answer — NOT a
+      // problem (some vans were never fitted with a fire extinguisher, etc.).
+      // Only genuine "Problem" answers count.
+      if (item.value?.toLowerCase().includes('problem')) {
         const desc = item.detail || item.name
         problems.push(desc)
       }

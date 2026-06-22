@@ -231,6 +231,24 @@ export function ensureTyreChecklistContent(
   const out: Record<string, ChecklistItem[]> = {}
   for (const [key, list] of Object.entries(prepMap)) {
     const items = [...list]
+
+    // Fire extinguisher (and any "not fitted" item): N/A must be a selectable,
+    // NON-flag option. Some vans were never fitted with an extinguisher, so
+    // "N/A" is a legitimate answer, not a problem. Prod's R2 checklist predates
+    // the default fix, so normalise here: guarantee 'N/A' is in options and
+    // strip it out of flagValues if a stale config has it flagging. Runs on
+    // every list (not gated on tyre content). Idempotent.
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i]!
+      if (it.name.toLowerCase().includes('fire extinguisher') && it.inputType === 'options') {
+        const options = it.options.includes('N/A') ? it.options : [...it.options, 'N/A']
+        const flagValues = it.flagValues.filter(v => v.toLowerCase() !== 'n/a')
+        if (options !== it.options || flagValues.length !== it.flagValues.length) {
+          items[i] = { ...it, options, flagValues }
+        }
+      }
+    }
+
     const hasTread = items.some(i => i.unit === 'mm' && i.name.toLowerCase().includes('tread'))
     // Only touch lists that actually carry the tyre tread items.
     if (!hasTread) {
