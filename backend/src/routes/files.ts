@@ -180,6 +180,7 @@ router.get('/download', async (req: AuthRequest, res: Response) => {
       'avatars/',
       'completion/',     // portal completion photos + signatures
       'delivery-notes/', // completion delivery-note PDFs
+      'carnet-authority/', // carnet Letter of Authorisation PDFs
     ];
     if (!allowedPrefixes.some((p) => key.startsWith(p))) {
       res.status(403).json({ error: 'Invalid file key' });
