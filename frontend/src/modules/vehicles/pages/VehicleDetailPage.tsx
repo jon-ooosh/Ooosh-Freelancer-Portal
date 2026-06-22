@@ -239,17 +239,33 @@ export function VehicleDetailPage() {
   })
   const cs = complianceSettings || DEFAULT_COMPLIANCE
   const [searchParams] = useSearchParams()
-  const validTabs = ['details', 'service', 'issues', 'history', 'location', 'preps', 'pcns'] as const
-  type TabName = typeof validTabs[number]
-  const initialTab = validTabs.includes(searchParams.get('tab') as TabName) ? (searchParams.get('tab') as TabName) : 'details'
-  const [activeTab, setActiveTab] = useState<TabName>(initialTab)
+  // Top-level tabs. Service / Events / Preps / Issues / PCNs are grouped under
+  // a single "History" parent with its own sub-tab bar; Details + Location
+  // stay top-level. `?tab=` deep-links still accept the child names (and the
+  // legacy `history` = Events alias) and resolve to History + the right sub-tab.
+  const TOP_TABS = ['details', 'history', 'location'] as const
+  type TopTab = typeof TOP_TABS[number]
+  const HISTORY_SUBS = ['service', 'events', 'preps', 'issues', 'pcns'] as const
+  type HistorySub = typeof HISTORY_SUBS[number]
+
+  function parseTabParam(raw: string | null): { top: TopTab; sub?: HistorySub } {
+    if (raw === 'location') return { top: 'location' }
+    if (raw === 'history') return { top: 'history', sub: 'events' } // legacy: history = Events
+    if (raw && (HISTORY_SUBS as readonly string[]).includes(raw)) return { top: 'history', sub: raw as HistorySub }
+    return { top: 'details' }
+  }
+
+  const parsed = parseTabParam(searchParams.get('tab'))
+  const [activeTab, setActiveTab] = useState<TopTab>(parsed.top)
+  const [historySub, setHistorySub] = useState<HistorySub>(parsed.sub ?? 'service')
 
   // Reset tab when switching vehicles — component instance is reused
   // across /vehicles/fleet/A → /B so without this the active tab
   // "drags across".
   useEffect(() => {
-    const urlTab = searchParams.get('tab')
-    setActiveTab(validTabs.includes(urlTab as TabName) ? (urlTab as TabName) : 'details')
+    const p = parseTabParam(searchParams.get('tab'))
+    setActiveTab(p.top)
+    setHistorySub(p.sub ?? 'service')
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id])
   const [editingTracker, setEditingTracker] = useState(false)
@@ -457,9 +473,9 @@ export function VehicleDetailPage() {
         </div>
       )}
 
-      {/* Tab bar */}
+      {/* Tab bar — Details | History | Location */}
       <div className="flex gap-1 rounded-lg bg-gray-100 p-1">
-        {(['details', 'service', 'issues', 'history', 'preps', 'location', 'pcns'] as const).map(tab => (
+        {TOP_TABS.map(tab => (
           <button
             key={tab}
             type="button"
@@ -470,7 +486,7 @@ export function VehicleDetailPage() {
                 : 'text-gray-500 hover:text-gray-700'
             }`}
           >
-            {tab === 'details' ? 'Details' : tab === 'service' ? 'Service' : tab === 'issues' ? 'Issues' : tab === 'history' ? 'Events' : tab === 'preps' ? 'Preps' : tab === 'location' ? 'Location' : 'PCNs'}
+            {tab === 'details' ? 'Details' : tab === 'history' ? 'History' : 'Location'}
           </button>
         ))}
       </div>
@@ -480,30 +496,46 @@ export function VehicleDetailPage() {
         <VehicleLocationTab reg={vehicle.reg} />
       )}
 
-      {/* Service History tab */}
-      {activeTab === 'service' && (
-        <ServiceHistoryTab vehicleId={vehicle.id} currentMileage={(vehicle as unknown as { currentMileage?: number | null }).currentMileage ?? null} lastMileageUpdate={vehicle.lastMileageUpdate ?? null} />
-      )}
-
-      {/* Issues tab — OP job_issues backed, open issues surfaced by default */}
-      {activeTab === 'issues' && (
-        <VehicleIssuesSectionOp vehicleId={vehicle.id} />
-      )}
-
-      {/* PCNs tab — OP pcns backed, penalty charge notices against this reg */}
-      {activeTab === 'pcns' && (
-        <VehiclePcnsSectionOp vehicleId={vehicle.id} />
-      )}
-
-      {/* Events tab — book-outs, check-ins, preps. Book-out/check-in rows
-          link through to the full "life of a hire" comparison page. */}
+      {/* History tab — sub-tab bar (Service / Events / Preps / Issues / PCNs) */}
       {activeTab === 'history' && (
-        <VehicleEventsHistory vehicleReg={vehicle.reg} vehicleId={vehicle.id} />
-      )}
+        <div className="space-y-4">
+          <div className="flex gap-1 overflow-x-auto rounded-lg bg-gray-100 p-1 scrollbar-hide">
+            {HISTORY_SUBS.map(sub => (
+              <button
+                key={sub}
+                type="button"
+                onClick={() => setHistorySub(sub)}
+                className={`shrink-0 whitespace-nowrap rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+                  historySub === sub
+                    ? 'bg-white text-ooosh-navy shadow-sm'
+                    : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                {sub === 'service' ? 'Service' : sub === 'events' ? 'Events' : sub === 'preps' ? 'Preps' : sub === 'issues' ? 'Issues' : 'PCNs'}
+              </button>
+            ))}
+          </div>
 
-      {/* Prep History tab */}
-      {activeTab === 'preps' && (
-        <PrepHistoryTab vehicleReg={vehicle.reg} />
+          {historySub === 'service' && (
+            <ServiceHistoryTab vehicleId={vehicle.id} currentMileage={(vehicle as unknown as { currentMileage?: number | null }).currentMileage ?? null} lastMileageUpdate={vehicle.lastMileageUpdate ?? null} />
+          )}
+          {/* Events — book-outs, check-ins, preps. Rows link through to the
+              full "life of a hire" comparison page. */}
+          {historySub === 'events' && (
+            <VehicleEventsHistory vehicleReg={vehicle.reg} vehicleId={vehicle.id} />
+          )}
+          {historySub === 'preps' && (
+            <PrepHistoryTab vehicleReg={vehicle.reg} />
+          )}
+          {/* OP job_issues backed, open issues surfaced by default */}
+          {historySub === 'issues' && (
+            <VehicleIssuesSectionOp vehicleId={vehicle.id} />
+          )}
+          {/* OP pcns backed, penalty charge notices against this reg */}
+          {historySub === 'pcns' && (
+            <VehiclePcnsSectionOp vehicleId={vehicle.id} />
+          )}
+        </div>
       )}
 
       {/* Details tab */}
