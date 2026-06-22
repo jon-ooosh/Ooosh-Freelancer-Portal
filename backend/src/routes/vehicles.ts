@@ -2928,6 +2928,57 @@ router.get('/prep-pdf', async (req: AuthRequest, res: Response) => {
 });
 
 /**
+ * GET /api/vehicles/fleet/:id/forecast
+ * Deterministic forward-looking health picture (tyres, mileage pace, service-due,
+ * compliance runway, fluid frequency, cost trajectory, recurring issues) plus the
+ * latest cached AI assessment. Drives the Vehicle > Forecast tab.
+ */
+router.get('/fleet/:id/forecast', async (req: AuthRequest, res: Response) => {
+  try {
+    const { buildVehicleForecast } = await import('../services/vehicle-forecast');
+    const { getLatestAssessment } = await import('../services/vehicle-forecast-ai');
+    const forecast = await buildVehicleForecast(String(req.params.id));
+    if (!forecast) {
+      res.status(404).json({ error: 'Vehicle not found' });
+      return;
+    }
+    const assessment = await getLatestAssessment(String(req.params.id));
+    res.json({ forecast, assessment });
+  } catch (error) {
+    console.error('[vehicles/forecast] error:', error);
+    res.status(500).json({ error: 'Failed to build vehicle forecast' });
+  }
+});
+
+/**
+ * POST /api/vehicles/fleet/:id/forecast/assess
+ * Generate a fresh AI health assessment on demand ("Regenerate" button).
+ * Scheduled regeneration runs 3x/week — see config/scheduler.ts.
+ */
+router.post('/fleet/:id/forecast/assess', async (req: AuthRequest, res: Response) => {
+  try {
+    const { isAnthropicConfigured } = await import('../config/anthropic');
+    if (!isAnthropicConfigured()) {
+      res.status(503).json({ error: 'AI assessment is not configured (ANTHROPIC_API_KEY missing)' });
+      return;
+    }
+    const { generateVehicleAssessment } = await import('../services/vehicle-forecast-ai');
+    const assessment = await generateVehicleAssessment(String(req.params.id), {
+      trigger: 'manual',
+      userId: req.user?.id ?? null,
+    });
+    if (!assessment) {
+      res.status(404).json({ error: 'Vehicle not found' });
+      return;
+    }
+    res.json({ assessment });
+  } catch (error) {
+    console.error('[vehicles/forecast] assess error:', error);
+    res.status(500).json({ error: 'Failed to generate assessment' });
+  }
+});
+
+/**
  * GET /api/vehicles/get-recent-events?limit=10
  * Fetch recent events across all vehicles.
  * Scans per-vehicle indexes and returns the most recent N events.
