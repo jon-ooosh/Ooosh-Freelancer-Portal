@@ -36,6 +36,7 @@ import FillGapPage from './pages/FillGapPage';
 import FreelancerBookoutShell from './pages/FreelancerBookoutShell';
 import StoragePage from './pages/StoragePage';
 import StorageTcsAcceptPage from './pages/StorageTcsAcceptPage';
+import CarnetFormPage from './pages/CarnetFormPage';
 import HoldingPage from './pages/HoldingPage';
 import PcnsPage from './pages/PcnsPage';
 import PcnDetailPage from './pages/PcnDetailPage';
@@ -141,6 +142,7 @@ export default function App() {
       <Route path="/m/receipt/:token" element={<MobileReceiptUploadPage />} />
       {/* Public storage T&Cs acceptance — token-authenticated, no Layout wrapper */}
       <Route path="/storage-tcs/:token" element={<StorageTcsAcceptPage />} />
+      <Route path="/carnet-form/:token" element={<CarnetFormPage />} />
       {/* Public PCN pay-direct proof-of-payment upload — token-authenticated, no Layout */}
       <Route path="/pcn-receipt/:token" element={<PcnReceiptUploadPage />} />
       {/* Public inbound merch-delivery form (no login) — replaces the JotForm */}
