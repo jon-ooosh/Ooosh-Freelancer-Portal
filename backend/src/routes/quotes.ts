@@ -261,6 +261,11 @@ const saveQuoteSchema = calculateSchema.extend({
   internalNotes: z.string().optional().nullable(),
   freelancerNotes: z.string().optional().nullable(),
   crewCount: z.number().int().min(1).optional().nullable(),
+  // Override the strict arrivalTime inherited from calculateSchema: on save the
+  // time is OPTIONAL. A blank time is stored as NULL (renders "Time TBC", pushes
+  // no time to HireHop) — the 09:00 default is applied only to the cost
+  // calculation below, never to the stored value.
+  arrivalTime: z.string().optional().nullable(),
 });
 
 // Insert one quote row. Used twice when creating delivery + collection siblings.
@@ -269,7 +274,7 @@ async function insertQuoteRow(
   body: any,
   jobType: 'delivery' | 'collection' | 'crewed',
   jobDate: string | null,
-  arrivalTime: string,
+  arrivalTime: string | null,
   result: ReturnType<typeof calculateCosts>,
   settings: unknown,
   crewCount: number,
@@ -374,7 +379,10 @@ router.post('/', validate(saveQuoteSchema), async (req: AuthRequest, res: Respon
       calculationMode: req.body.calculationMode,
       distanceMiles: req.body.distanceMiles,
       driveTimeMins: req.body.driveTimeMins,
-      arrivalTime: req.body.arrivalTime,
+      // Costing only — the OOH split needs a time, so assume 09:00 when none was
+      // entered. The STORED arrival_time (passed to insertQuoteRow below) keeps
+      // the real null so the quote shows "Time TBC".
+      arrivalTime: req.body.arrivalTime || '09:00',
       workDurationHrs: req.body.workDurationHrs,
       numDays: req.body.numDays,
       setupExtraHrs: req.body.setupExtraHrs,
@@ -414,7 +422,7 @@ router.post('/', validate(saveQuoteSchema), async (req: AuthRequest, res: Respon
       req.body,
       req.body.jobType,
       req.body.jobDate || null,
-      req.body.arrivalTime,
+      req.body.arrivalTime || null,
       primaryResult,
       settings,
       crewCount,
