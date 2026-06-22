@@ -9,7 +9,6 @@ import { useState, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { apiFetch } from '../../config/api-config'
 import type { PrepHistorySession } from '../../lib/prep-history'
-import { PrepTrendsPanel } from './PrepTrendsPanel'
 
 interface PrepHistoryTabProps {
   vehicleReg: string
@@ -149,9 +148,6 @@ export function PrepHistoryTab({ vehicleReg }: PrepHistoryTabProps) {
 
   return (
     <div className="space-y-3">
-      {/* Tyre wear & projection (per-corner, from prep history) */}
-      <PrepTrendsPanel sessions={sessions} />
-
       {/* Mileage trend summary */}
       {sessions.length >= 2 && (() => {
         const mileages = sessions

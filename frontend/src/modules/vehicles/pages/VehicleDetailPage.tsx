@@ -7,6 +7,7 @@ import { apiFetch } from '../config/api-config'
 import { useVehicleTracker, useUpdateTrackerAssignment } from '../hooks/useTrackerAssignments'
 import { VehicleLocationTab } from '../components/tracking/VehicleLocationTab'
 import { PrepHistoryTab } from '../components/prep/PrepHistoryTab'
+import { ForecastTab } from '../components/forecast/ForecastTab'
 import ServiceHistoryTab from '../components/service/ServiceHistoryTab'
 import { VehicleEventsHistory } from '../components/events/VehicleEventsHistory'
 import { Pcn, PcnStatusPill, pcnTrafficLight, PCN_LIGHT_DOT, FINE_TYPE_LABEL, fmtPcnDate, fmtPcnMoney } from '../../../components/pcn/format'
@@ -243,13 +244,14 @@ export function VehicleDetailPage() {
   // a single "History" parent with its own sub-tab bar; Details + Location
   // stay top-level. `?tab=` deep-links still accept the child names (and the
   // legacy `history` = Events alias) and resolve to History + the right sub-tab.
-  const TOP_TABS = ['details', 'history', 'location'] as const
+  const TOP_TABS = ['details', 'history', 'forecast', 'location'] as const
   type TopTab = typeof TOP_TABS[number]
   const HISTORY_SUBS = ['service', 'events', 'preps', 'issues', 'pcns'] as const
   type HistorySub = typeof HISTORY_SUBS[number]
 
   function parseTabParam(raw: string | null): { top: TopTab; sub?: HistorySub } {
     if (raw === 'location') return { top: 'location' }
+    if (raw === 'forecast') return { top: 'forecast' }
     if (raw === 'history') return { top: 'history', sub: 'events' } // legacy: history = Events
     if (raw && (HISTORY_SUBS as readonly string[]).includes(raw)) return { top: 'history', sub: raw as HistorySub }
     return { top: 'details' }
@@ -486,10 +488,15 @@ export function VehicleDetailPage() {
                 : 'text-gray-500 hover:text-gray-700'
             }`}
           >
-            {tab === 'details' ? 'Details' : tab === 'history' ? 'History' : 'Location'}
+            {tab === 'details' ? 'Details' : tab === 'history' ? 'History' : tab === 'forecast' ? 'Forecast' : 'Location'}
           </button>
         ))}
       </div>
+
+      {/* Forecast tab — forward-looking health + AI assessment */}
+      {activeTab === 'forecast' && (
+        <ForecastTab vehicleId={vehicle.id} />
+      )}
 
       {/* Location tab */}
       {activeTab === 'location' && (
