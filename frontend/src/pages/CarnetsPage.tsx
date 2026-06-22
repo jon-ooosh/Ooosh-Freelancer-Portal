@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
+import Countdown from '../components/CarnetCountdown';
 
 interface CarnetRow {
   id: string;
@@ -22,6 +23,8 @@ interface CarnetRow {
   carnet_start_date: string | null;
   carnet_expiry_date: string | null;
   chase_date: string | null;
+  needed_by: string | null;
+  return_by: string | null;
   hh_job_number: number | null;
   job_name: string | null;
   client_name: string | null;
@@ -45,12 +48,6 @@ const STATUS_COLOUR: Record<string, string> = {
   done: 'bg-green-100 text-green-700',
   cancelled: 'bg-red-100 text-red-700',
 };
-
-function fmt(d: string | null): string {
-  if (!d) return '—';
-  const dt = new Date(d);
-  return Number.isNaN(dt.getTime()) ? '—' : dt.toLocaleDateString('en-GB');
-}
 
 export default function CarnetsPage() {
   const navigate = useNavigate();
@@ -123,12 +120,13 @@ export default function CarnetsPage() {
               <th className="text-left px-3 py-2">Status</th>
               <th className="text-left px-3 py-2">Custody</th>
               <th className="text-left px-3 py-2">GMRs</th>
-              <th className="text-left px-3 py-2">Expiry</th>
+              <th className="text-left px-3 py-2">Needed by</th>
+              <th className="text-left px-3 py-2">Return by</th>
             </tr>
           </thead>
           <tbody>
-            {loading && <tr><td colSpan={7} className="px-3 py-6 text-center text-gray-400">Loading…</td></tr>}
-            {!loading && rows.length === 0 && <tr><td colSpan={7} className="px-3 py-6 text-center text-gray-400">No carnets.</td></tr>}
+            {loading && <tr><td colSpan={8} className="px-3 py-6 text-center text-gray-400">Loading…</td></tr>}
+            {!loading && rows.length === 0 && <tr><td colSpan={8} className="px-3 py-6 text-center text-gray-400">No carnets.</td></tr>}
             {rows.map((r) => (
               <tr
                 key={r.id}
@@ -141,7 +139,8 @@ export default function CarnetsPage() {
                 <td className="px-3 py-2"><span className={`px-2 py-0.5 rounded text-xs capitalize ${STATUS_COLOUR[r.status] || 'bg-gray-100 text-gray-700'}`}>{r.status.replace(/_/g, ' ')}</span></td>
                 <td className="px-3 py-2 text-gray-600 capitalize">{r.custody_location === 'ooosh' ? 'We have it' : r.custody_location || '—'}</td>
                 <td className="px-3 py-2 text-gray-600">{r.gmr_count > 0 ? `${r.gmr_sent_count}/${r.gmr_count} sent` : '—'}</td>
-                <td className="px-3 py-2 text-gray-600">{fmt(r.carnet_expiry_date)}</td>
+                <td className="px-3 py-2"><Countdown date={r.needed_by} /></td>
+                <td className="px-3 py-2"><Countdown date={r.return_by} /></td>
               </tr>
             ))}
           </tbody>

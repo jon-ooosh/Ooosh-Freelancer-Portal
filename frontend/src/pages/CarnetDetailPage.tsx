@@ -9,6 +9,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
 import CarnetSection from '../components/CarnetSection';
+import Countdown from '../components/CarnetCountdown';
 
 interface CarnetHead {
   id: string;
@@ -18,6 +19,8 @@ interface CarnetHead {
   hh_job_number: number | null;
   job_name: string | null;
   client_name: string | null;
+  needed_by: string | null;
+  return_by: string | null;
 }
 
 export default function CarnetDetailPage() {
@@ -60,6 +63,10 @@ export default function CarnetDetailPage() {
             Carnet — {head.hh_job_number ? `#${head.hh_job_number}` : 'job'}{head.client_name ? ` · ${head.client_name}` : ''}
           </h1>
           {head.job_name && <p className="text-sm text-gray-500">{head.job_name}</p>}
+          <div className="flex flex-wrap gap-4 mt-2 text-sm">
+            <Countdown date={head.needed_by} label="Needed by" />
+            {head.mode === 'we_supply' && <Countdown date={head.return_by} label="Return by" />}
+          </div>
         </div>
         <button
           onClick={() => navigate(`/jobs/${head.job_id}`)}

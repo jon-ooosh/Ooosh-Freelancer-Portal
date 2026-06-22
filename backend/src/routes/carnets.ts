@@ -35,6 +35,11 @@ router.get('/', async (req: AuthRequest, res: Response) => {
               c.carnet_start_date, c.carnet_expiry_date, c.chase_date,
               c.form_sent_at, c.form_submitted_at, c.created_at, c.updated_at,
               j.hh_job_number, j.job_name, j.client_name, j.job_date,
+              -- "Needed by" = when the carnet must be in hand (form start date if
+              -- given, else the tour's outgoing date). "Return by" = when we need
+              -- it back to discharge (we_supply only).
+              COALESCE(c.carnet_start_date, j.out_date, j.job_date) AS needed_by,
+              CASE WHEN c.mode = 'we_supply' THEN COALESCE(j.return_date, j.job_end) END AS return_by,
               (SELECT COUNT(*) FROM carnet_gmrs g WHERE g.carnet_id = c.id) AS gmr_count,
               (SELECT COUNT(*) FROM carnet_gmrs g WHERE g.carnet_id = c.id AND g.status = 'sent') AS gmr_sent_count
        FROM job_carnets c
@@ -74,7 +79,9 @@ router.get('/by-job/:jobId', async (req: AuthRequest, res: Response) => {
 router.get('/:id', async (req: AuthRequest, res: Response) => {
   try {
     const result = await query(
-      `SELECT c.*, j.hh_job_number, j.job_name, j.client_name, j.job_date
+      `SELECT c.*, j.hh_job_number, j.job_name, j.client_name, j.job_date,
+              COALESCE(c.carnet_start_date, j.out_date, j.job_date) AS needed_by,
+              CASE WHEN c.mode = 'we_supply' THEN COALESCE(j.return_date, j.job_end) END AS return_by
        FROM job_carnets c JOIN jobs j ON j.id = c.job_id
        WHERE c.id = $1`,
       [req.params.id]
