@@ -10,6 +10,9 @@
 import { Router, Response } from 'express';
 import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
+import { getSystemSettings } from './system-settings';
+import { getFromR2, uploadToR2 } from '../config/r2';
+import { generateCarnetAuthorityPdf } from '../services/carnet-authority-pdf';
 
 const router = Router();
 
@@ -36,10 +39,12 @@ router.get('/', async (req: AuthRequest, res: Response) => {
               c.form_sent_at, c.form_submitted_at, c.created_at, c.updated_at,
               j.hh_job_number, j.job_name, j.client_name, j.job_date,
               -- "Needed by" = when the carnet must be in hand (form start date if
-              -- given, else the tour's outgoing date). "Return by" = when we need
-              -- it back to discharge (we_supply only).
+              -- given, else the tour's outgoing date). "Return by" = 7 days after
+              -- the carnet's validity ends (start + length), we_supply only — the
+              -- discharge deadline, NOT the job end date.
               COALESCE(c.carnet_start_date, j.out_date, j.job_date) AS needed_by,
-              CASE WHEN c.mode = 'we_supply' THEN COALESCE(j.return_date, j.job_end) END AS return_by,
+              CASE WHEN c.mode = 'we_supply' AND c.carnet_expiry_date IS NOT NULL
+                   THEN c.carnet_expiry_date + 7 END AS return_by,
               (SELECT COUNT(*) FROM carnet_gmrs g WHERE g.carnet_id = c.id) AS gmr_count,
               (SELECT COUNT(*) FROM carnet_gmrs g WHERE g.carnet_id = c.id AND g.status = 'sent') AS gmr_sent_count
        FROM job_carnets c
@@ -81,7 +86,8 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
     const result = await query(
       `SELECT c.*, j.hh_job_number, j.job_name, j.client_name, j.job_date,
               COALESCE(c.carnet_start_date, j.out_date, j.job_date) AS needed_by,
-              CASE WHEN c.mode = 'we_supply' THEN COALESCE(j.return_date, j.job_end) END AS return_by
+              CASE WHEN c.mode = 'we_supply' AND c.carnet_expiry_date IS NOT NULL
+                   THEN c.carnet_expiry_date + 7 END AS return_by
        FROM job_carnets c JOIN jobs j ON j.id = c.job_id
        WHERE c.id = $1`,
       [req.params.id]
@@ -425,6 +431,74 @@ router.delete('/:id/files/:idx', async (req: AuthRequest, res: Response) => {
   } catch (err) {
     console.error('[carnets] file delete error:', err);
     res.status(500).json({ error: 'Failed to remove file' });
+  }
+});
+
+// Read an R2 object into a Buffer (signature image).
+async function r2ToBuffer(key: string): Promise<Buffer | null> {
+  try {
+    const resp = await getFromR2(key);
+    if (!resp.Body) return null;
+    const chunks: Buffer[] = [];
+    for await (const chunk of resp.Body as NodeJS.ReadableStream) {
+      chunks.push(Buffer.from(chunk as Uint8Array));
+    }
+    return Buffer.concat(chunks);
+  } catch {
+    return null;
+  }
+}
+
+// POST /api/carnets/:id/generate-authority — build the Letter of Authorisation
+// PDF from the carnet's details + the Ooosh signatory settings, store in R2,
+// set signed_authority_url, and surface it on the job's Files tab.
+router.post('/:id/generate-authority', async (req: AuthRequest, res: Response) => {
+  try {
+    const cur = await query(
+      `SELECT c.*, j.hh_job_number FROM job_carnets c JOIN jobs j ON j.id = c.job_id WHERE c.id = $1`,
+      [req.params.id]
+    );
+    if (cur.rows.length === 0) return res.status(404).json({ error: 'Carnet not found' });
+    const carnet = cur.rows[0];
+
+    const settings = await getSystemSettings([
+      'carnet_ooosh_signatory_name', 'carnet_ooosh_signatory_role',
+      'carnet_company_address', 'carnet_ooosh_signature_url',
+    ]);
+
+    const sigKey = settings.carnet_ooosh_signature_url;
+    const signatureBuffer = sigKey ? await r2ToBuffer(sigKey) : null;
+
+    const pdfBytes = await generateCarnetAuthorityPdf({
+      date: new Date(),
+      companyAddress: settings.carnet_company_address || 'Compass House, 7 East Street, Portslade, East Sussex, BN41 1DL, UK',
+      signatoryName: settings.carnet_ooosh_signatory_name || 'Jonathan Wood',
+      signatoryRole: settings.carnet_ooosh_signatory_role || 'Company Director',
+      signatureBuffer,
+      leadName: carnet.lead_name || '',
+      leadRole: carnet.lead_role || '',
+      clientSignatureBuffer: null, // captured by the public form (next slice)
+    });
+
+    const key = `carnet-authority/${carnet.id}/letter-of-authorisation-${Date.now()}.pdf`;
+    await uploadToR2(key, Buffer.from(pdfBytes), 'application/pdf');
+
+    // Set on the carnet + surface on the job Files tab.
+    await query(`UPDATE job_carnets SET signed_authority_url = $1, updated_at = NOW() WHERE id = $2`, [key, carnet.id]);
+    const jobFiles = await query(`SELECT files FROM jobs WHERE id = $1`, [carnet.job_id]);
+    const files = Array.isArray(jobFiles.rows[0]?.files) ? jobFiles.rows[0].files : [];
+    files.push({
+      url: key, name: 'Letter of Authorisation (carnet).pdf', label: 'Carnet authority',
+      uploaded_at: new Date().toISOString(), uploaded_by: req.user?.id || SYSTEM_USER_ID,
+    });
+    await query(`UPDATE jobs SET files = $1 WHERE id = $2`, [JSON.stringify(files), carnet.job_id]);
+
+    await logCarnetInteraction(carnet.job_id, '📄 Carnet Letter of Authorisation generated', req.user?.id);
+
+    res.json({ data: { signed_authority_url: key, signature_present: !!signatureBuffer } });
+  } catch (err) {
+    console.error('[carnets] generate-authority error:', err);
+    res.status(500).json({ error: 'Failed to generate Letter of Authorisation' });
   }
 });
 

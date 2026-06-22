@@ -530,6 +530,8 @@ function SettingsContent() {
       {/* Out-of-Hours return settings — admin & manager */}
       <OohSettingsSection />
 
+      <CarnetSettingsSection />
+
       {/* Xero bank account mapping — admin & manager */}
       <XeroBankAccountsSection />
 
@@ -1111,6 +1113,112 @@ interface SystemSetting {
   category: string | null;
   value_type: string | null;
   sort_order: number;
+}
+
+function CarnetSettingsSection() {
+  const [settings, setSettings] = useState<SystemSetting[]>([]);
+  const [vals, setVals] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+  const [sigSrc, setSigSrc] = useState<string | null>(null);
+
+  const TEXT_KEYS = ['carnet_ooosh_signatory_name', 'carnet_ooosh_signatory_role', 'carnet_company_address'];
+
+  useEffect(() => { load(); }, []);
+
+  async function load() {
+    try {
+      const res = await api.get<{ data: SystemSetting[] }>('/system-settings?category=carnets');
+      setSettings(res.data);
+      const v: Record<string, string> = {};
+      for (const s of res.data) v[s.key] = s.value ?? '';
+      setVals(v);
+      const sigKey = res.data.find(s => s.key === 'carnet_ooosh_signature_url')?.value;
+      if (sigKey) {
+        try {
+          const { blob } = await api.blob(`/files/download?key=${encodeURIComponent(sigKey)}`);
+          setSigSrc(URL.createObjectURL(blob));
+        } catch { setSigSrc(null); }
+      } else setSigSrc(null);
+    } catch {
+      setError('Could not load carnet settings (has migration 141 run?).');
+    } finally { setLoading(false); }
+  }
+
+  async function saveText() {
+    setSaving(true); setError(''); setSuccess('');
+    try {
+      const changed: Record<string, string | null> = {};
+      for (const k of TEXT_KEYS) {
+        const orig = settings.find(s => s.key === k)?.value ?? '';
+        if (orig !== (vals[k] ?? '')) changed[k] = vals[k] === '' ? null : vals[k];
+      }
+      if (Object.keys(changed).length > 0) { await api.put('/system-settings', { settings: changed }); setSuccess('Saved.'); }
+      load();
+    } catch (e) { setError(e instanceof Error ? e.message : 'Save failed'); }
+    finally { setSaving(false); }
+  }
+
+  async function uploadSignature(file: File) {
+    setUploading(true); setError(''); setSuccess('');
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('attachment_only', 'true');
+      const up = await api.upload<{ r2_key: string }>('/files/upload', fd);
+      await api.put('/system-settings', { settings: { carnet_ooosh_signature_url: up.r2_key } });
+      setSuccess('Signature uploaded.');
+      load();
+    } catch (e) { setError(e instanceof Error ? e.message : 'Upload failed'); }
+    finally { setUploading(false); }
+  }
+
+  if (loading) return null;
+
+  return (
+    <div className="bg-white rounded-lg shadow p-6 mb-6">
+      <h2 className="text-lg font-semibold text-gray-900 mb-1">Carnet — Letter of Authorisation</h2>
+      <p className="text-sm text-gray-500 mb-4">The Ooosh signatory + signature stamped onto the carnet Letter of Authorisation.</p>
+      {error && <div className="mb-3 text-sm text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2">{error}</div>}
+      {success && <div className="mb-3 text-sm text-green-700 bg-green-50 border border-green-200 rounded px-3 py-2">{success}</div>}
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
+        <label className="text-sm">
+          <span className="text-gray-500 text-xs">Signatory name</span>
+          <input className="mt-1 w-full border rounded px-2 py-1" value={vals.carnet_ooosh_signatory_name || ''} onChange={(e) => setVals({ ...vals, carnet_ooosh_signatory_name: e.target.value })} />
+        </label>
+        <label className="text-sm">
+          <span className="text-gray-500 text-xs">Signatory role / designation</span>
+          <input className="mt-1 w-full border rounded px-2 py-1" value={vals.carnet_ooosh_signatory_role || ''} onChange={(e) => setVals({ ...vals, carnet_ooosh_signatory_role: e.target.value })} />
+        </label>
+        <label className="text-sm sm:col-span-2">
+          <span className="text-gray-500 text-xs">Company address (letter header — comma separated)</span>
+          <input className="mt-1 w-full border rounded px-2 py-1" value={vals.carnet_company_address || ''} onChange={(e) => setVals({ ...vals, carnet_company_address: e.target.value })} />
+        </label>
+      </div>
+      <button onClick={saveText} disabled={saving} className="px-3 py-1.5 bg-purple-600 text-white rounded text-sm disabled:opacity-50 mb-5">
+        {saving ? 'Saving…' : 'Save details'}
+      </button>
+
+      <div className="border-t pt-4">
+        <span className="text-gray-500 text-xs">Signature image</span>
+        <div className="flex items-center gap-4 mt-2">
+          {sigSrc
+            ? <img src={sigSrc} alt="Ooosh signature" className="h-16 border rounded bg-white object-contain px-2" />
+            : <span className="text-sm text-gray-400">No signature uploaded yet</span>}
+          <label className="px-3 py-1.5 bg-gray-100 hover:bg-gray-200 rounded text-sm cursor-pointer">
+            {uploading ? 'Uploading…' : sigSrc ? 'Replace' : 'Upload signature'}
+            <input type="file" accept="image/png,image/jpeg" className="hidden" disabled={uploading}
+              onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadSignature(f); }} />
+          </label>
+        </div>
+        <p className="text-xs text-gray-400 mt-2">PNG or JPG. A transparent-background PNG looks best on the letter.</p>
+      </div>
+    </div>
+  );
 }
 
 function OohSettingsSection() {
