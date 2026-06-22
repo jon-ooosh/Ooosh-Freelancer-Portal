@@ -537,7 +537,14 @@ export function PrepPage() {
           selectedOption: f.selectedOption,
           severity: f.severity,
           description: f.description,
-          photoKeys: f.photos.map(p => `events/${eventId}/${selectedVehicle.reg}/${p.angle}_${p.timestamp}.jpg`),
+          // MUST mirror uploadPhoto()'s key derivation exactly:
+          // events/{eventId}/{SAFE-REG}/{angle}.jpg — safeReg uppercases +
+          // hyphenates whitespace, and there is NO timestamp suffix. The old
+          // `${reg}/${angle}_${timestamp}.jpg` form never matched what was
+          // actually uploaded, so stored photoKeys were unretrievable.
+          photoKeys: f.photos.map(
+            p => `events/${eventId}/${selectedVehicle.reg.replace(/\s+/g, '-').toUpperCase()}/${p.angle}.jpg`,
+          ),
         })),
       }
 
@@ -1237,12 +1244,17 @@ function PrepItemRow({
       const { compressImage } = await import('../lib/image-utils')
       const compressed = await compressImage(file, 1024, 0.7)
       const blobUrl = URL.createObjectURL(compressed)
+      const ts = Date.now()
       const newPhoto: CapturedPhoto = {
-        angle: 'other',
+        // Unique angle per flag photo so multiple photos don't overwrite each
+        // other in R2 (they previously all shared `'other'` →
+        // events/{eventId}/{reg}/other.jpg collision). The angle IS the R2
+        // key segment, so it must be globally unique within the event.
+        angle: `flag_${ts}`,
         label: `Flag photo - ${item.name}`,
         blobUrl,
         blob: compressed,
-        timestamp: Date.now(),
+        timestamp: ts,
       }
       onUpdateFlag({ photos: [...flagged.photos, newPhoto] })
     } catch (err) {

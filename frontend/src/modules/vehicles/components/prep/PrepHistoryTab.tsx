@@ -305,6 +305,7 @@ interface FlaggedItemDoc {
 }
 
 function PrepDetailModal({ session, onClose }: { session: PrepHistorySession; onClose: () => void }) {
+  const [downloading, setDownloading] = useState(false)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     window.addEventListener('keydown', onKey)
@@ -315,6 +316,33 @@ function PrepDetailModal({ session, onClose }: { session: PrepHistorySession; on
   const flagged: FlaggedItemDoc[] = Array.isArray(doc.flaggedItems) ? (doc.flaggedItems as FlaggedItemDoc[]) : []
   const r2Public = (import.meta.env.VITE_R2_PUBLIC_URL as string | undefined) || ''
   const allPhotoKeys = flagged.flatMap(f => f.photoKeys || [])
+  const eventId = typeof doc.eventId === 'string' ? doc.eventId : ''
+
+  async function downloadPdf() {
+    if (!eventId || downloading) return
+    setDownloading(true)
+    try {
+      // Authenticated blob fetch — apiFetch attaches the OP staff JWT.
+      const resp = await apiFetch(
+        `/prep-pdf?vehicleReg=${encodeURIComponent(session.vehicleReg)}&eventId=${encodeURIComponent(eventId)}`,
+      )
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+      const blob = await resp.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${session.vehicleReg.replace(/\s+/g, '-')}-${session.date}-prep.pdf`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      console.warn('[prep] PDF download failed:', err)
+      alert('Could not generate the prep PDF. Please try again.')
+    } finally {
+      setDownloading(false)
+    }
+  }
 
   const meta: { label: string; value: string }[] = []
   if (session.preparedBy) meta.push({ label: 'Prepared by', value: session.preparedBy })
@@ -345,16 +373,43 @@ function PrepDetailModal({ session, onClose }: { session: PrepHistorySession; on
               </span>
             )}
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-md p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
-            aria-label="Close"
-          >
-            <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
+          <div className="flex items-center gap-2">
+            {eventId && (
+              <button
+                type="button"
+                onClick={downloadPdf}
+                disabled={downloading}
+                className="inline-flex items-center gap-1.5 rounded-md border border-ooosh-blue/30 bg-ooosh-blue/5 px-3 py-1.5 text-xs font-medium text-ooosh-blue hover:bg-ooosh-blue/10 disabled:opacity-50"
+              >
+                {downloading ? (
+                  <>
+                    <svg className="h-3.5 w-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z" />
+                    </svg>
+                    Generating…
+                  </>
+                ) : (
+                  <>
+                    <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5 5-5M12 15V3" />
+                    </svg>
+                    Download PDF
+                  </>
+                )}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-md p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+              aria-label="Close"
+            >
+              <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
         </div>
 
         <div className="max-h-[70vh] overflow-y-auto px-5 py-4 space-y-4">
