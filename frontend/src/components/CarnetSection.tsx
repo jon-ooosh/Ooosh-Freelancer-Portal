@@ -235,9 +235,29 @@ export default function CarnetSection({ jobId, onChanged }: { jobId: string; onC
 
       {/* Footer actions */}
       {!isCancelled && (
-        <div className="mt-4 pt-3 border-t border-gray-100 flex items-center gap-3">
-          {carnet.signed_authority_url && (
-            <DownloadLink k={carnet.signed_authority_url} label="Signed authority (PDF)" />
+        <div className="mt-4 pt-3 border-t border-gray-100 flex flex-wrap items-center gap-3">
+          {carnet.mode === 'we_supply' && (
+            <button
+              disabled={busy}
+              onClick={async () => {
+                setBusy(true); setErr(null);
+                try {
+                  const r = await api.post<{ data: { signature_present: boolean } }>(`/carnets/${carnet.id}/generate-authority`, {});
+                  await load();
+                  if (r.data && !r.data.signature_present) {
+                    setErr('Letter generated, but no Ooosh signature is set yet — add one in Settings → Carnet. (A signature line was drawn instead.)');
+                  }
+                } catch (e) {
+                  setErr(e instanceof Error ? e.message : 'Failed to generate letter');
+                } finally { setBusy(false); }
+              }}
+              className="px-3 py-1.5 bg-purple-600 text-white rounded text-xs font-medium disabled:opacity-50"
+            >
+              Generate Letter of Authorisation
+            </button>
+          )}
+          {carnet.mode === 'we_supply' && carnet.signed_authority_url && (
+            <DownloadLink k={carnet.signed_authority_url} label="Download letter (PDF)" />
           )}
           <button
             onClick={async () => {
