@@ -8,7 +8,13 @@ import { usePrepAutosave } from '../hooks/usePrepAutosave'
 import { useSettings } from '../hooks/useSettings'
 import { getPrepSections as getPrepSectionsFromSettings } from '../lib/settings-api'
 import type { ChecklistItem, DetailPrompt } from '../lib/settings-api'
-import { DEFAULT_CHECKLIST_SETTINGS } from '../config/default-checklist-settings'
+import { DEFAULT_CHECKLIST_SETTINGS, ensureTyreChecklistContent } from '../config/default-checklist-settings'
+import {
+  checkTyreTreadPlausibility,
+  checkTyreTreadCap,
+  TYRE_TREAD_RED_MM,
+  TYRE_TREAD_AMBER_MM,
+} from '../lib/tyre-sanity'
 import { createVehicleEvent } from '../lib/events-api'
 import { fetchLastEventForVehicle } from '../lib/events-query'
 import { checkMileagePlausibility, resolveMileageFloor } from '../lib/mileage-sanity'
@@ -129,9 +135,12 @@ export function PrepPage() {
   // Get prep checklist sections from R2 settings (fallback to defaults)
   const sections: PrepSection[] = useMemo(() => {
     if (!selectedVehicle) return []
-    const prepMap = settings?.prepItems && Object.keys(settings.prepItems).length > 0
+    const rawMap = settings?.prepItems && Object.keys(settings.prepItems).length > 0
       ? settings.prepItems
       : DEFAULT_CHECKLIST_SETTINGS.prepItems
+    // Guarantee the safety-critical tyre content (tread wording + wall
+    // tickboxes) is present even when the live R2 checklist predates it.
+    const prepMap = ensureTyreChecklistContent(rawMap)
     return getPrepSectionsFromSettings(prepMap, selectedVehicle.simpleType)
   }, [selectedVehicle, settings])
 
@@ -1145,12 +1154,13 @@ function PrepSectionComponent({
               showValidation={showValidation}
               onResponse={(value) => {
                 onResponse(item.name, value)
-                // Flag logic: option-based flagValues + auto-flag tyre depth ≤ 3mm
+                // Flag logic: option-based flagValues + auto-flag low tyre tread.
+                // Red threshold (≤ TYRE_TREAD_RED_MM) raised from 3 → 4 Jun 2026.
                 if (item.flagValues.includes(value)) {
                   onFlag(item.name, value)
                 } else if (item.unit === 'mm') {
                   const num = parseFloat(value)
-                  if (!isNaN(num) && num > 0 && num <= 3) {
+                  if (!isNaN(num) && num > 0 && num <= TYRE_TREAD_RED_MM) {
                     onFlag(item.name, `${value}mm — below safe minimum`)
                   } else {
                     onRemoveFlag(item.name)
@@ -1216,6 +1226,7 @@ function PrepItemRow({
   onUpdateFlag: (updates: Partial<FlaggedItem>) => void
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const [capError, setCapError] = useState<string | null>(null)
   const isIncomplete = showValidation && !value
   const gridCols = item.options.length <= 3 ? 'grid-cols-2' : 'grid-cols-3'
 
@@ -1301,7 +1312,18 @@ function PrepItemRow({
               type="number"
               inputMode="decimal"
               value={value}
-              onChange={e => onResponse(e.target.value)}
+              onChange={e => {
+                const next = e.target.value
+                // Hard cap on tyre tread — reject a missing-decimal entry
+                // (e.g. 82 meaning 8.2mm) outright so staff are forced to
+                // enter the decimal. No real tyre exceeds ~9mm.
+                if (item.unit === 'mm' && checkTyreTreadCap(next)) {
+                  setCapError(checkTyreTreadCap(next))
+                  return
+                }
+                setCapError(null)
+                onResponse(next)
+              }}
               placeholder={previousValue ? `Prev: ${previousValue}` : `Enter ${item.unit || 'value'}`}
               className="w-32 rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-700 placeholder:text-gray-400 focus:border-blue-300 focus:outline-none focus:ring-1 focus:ring-blue-300"
             />
@@ -1309,6 +1331,11 @@ function PrepItemRow({
               <span className="text-xs font-medium text-gray-500">{item.unit}</span>
             )}
           </div>
+          {capError && (
+            <p className="mt-1 text-xs font-bold text-red-600 bg-red-50 rounded px-2 py-0.5">
+              {capError}
+            </p>
+          )}
           {item.unit === 'PSI' && recommendedTyrePsi != null && (
             <p className="mt-1 text-xs text-blue-500">Recommended: {recommendedTyrePsi} PSI</p>
           )}
@@ -1326,17 +1353,17 @@ function PrepItemRow({
               Pressure adjusted
             </button>
           )}
-          {/* Tyre depth: yellow warning at ≤5mm, red at ≤3mm */}
+          {/* Tyre depth: red at ≤TYRE_TREAD_RED_MM, amber up to TYRE_TREAD_AMBER_MM */}
           {item.unit === 'mm' && value && (() => {
             const depth = parseFloat(value)
-            if (!isNaN(depth) && depth > 0 && depth <= 3) {
+            if (!isNaN(depth) && depth > 0 && depth <= TYRE_TREAD_RED_MM) {
               return (
                 <p className="mt-1 text-xs font-bold text-red-600 bg-red-50 rounded px-2 py-0.5">
-                  Below legal minimum (1.6mm) — replace urgently
+                  Below safe minimum — replace urgently (legal limit 1.6mm)
                 </p>
               )
             }
-            if (!isNaN(depth) && depth > 3 && depth <= 5) {
+            if (!isNaN(depth) && depth > TYRE_TREAD_RED_MM && depth <= TYRE_TREAD_AMBER_MM) {
               return (
                 <p className="mt-1 text-xs font-semibold text-amber-600 bg-amber-50 rounded px-2 py-0.5">
                   Getting low — plan replacement soon
@@ -1344,6 +1371,20 @@ function PrepItemRow({
               )
             }
             return null
+          })()}
+          {/* Tyre tread sanity nudge — compares against the last recorded depth
+              for this corner. Non-blocking. */}
+          {item.unit === 'mm' && value && (() => {
+            const check = checkTyreTreadPlausibility({
+              newReading: parseFloat(value),
+              lastReading: previousValue ? parseFloat(previousValue) : null,
+            })
+            if (check.level === 'ok' || !check.message) return null
+            return (
+              <p className="mt-1 text-xs text-amber-700 bg-amber-50 rounded px-2 py-0.5">
+                {check.message}
+              </p>
+            )
           })()}
           {previousValue && !value && (
             <p className="mt-1 text-xs text-gray-400">Previous: {previousValue} {item.unit}</p>

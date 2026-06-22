@@ -39,8 +39,14 @@ import {
   buildConditionReportEmailHtml,
   type ConditionReportEmailParams,
 } from '../services/condition-report-email';
+import { getSystemSetting } from './system-settings';
 
 const router = Router();
+
+// Default low-tread alert threshold (mm). Staff-tweakable via the
+// `tyre_tread_amber_threshold` system_settings key. Keep in step with the
+// frontend TYRE_TREAD_AMBER_MM constant in lib/tyre-sanity.ts.
+const DEFAULT_TYRE_TREAD_AMBER_MM = 5;
 
 // ── Public: Freelancer book-out token redemption ────────────────────
 //
@@ -2704,12 +2710,103 @@ router.post('/save-prep', async (req: AuthRequest, res: Response) => {
       console.warn('[vehicles/prep] Failed to update needs_external_wash:', err);
     }
 
+    // Low tyre tread alert. The prep checklist is where the change decision is
+    // made, so the vehicle manager is bell+emailed at prep (NOT book-out — too
+    // late to plan a swap by then) whenever any tyre is at/below the amber
+    // threshold. ONE email per prep listing all the low corners. Non-blocking.
+    try {
+      await notifyLowTreadAtPrep(reg, data);
+    } catch (err) {
+      console.warn('[vehicles/prep] Low-tread notify failed:', err);
+    }
+
     res.json({ success: true, eventId });
   } catch (error) {
     console.error('[vehicles/prep] save-prep error:', error);
     res.status(500).json({ error: 'Failed to save prep session' });
   }
 });
+
+/**
+ * Scan a saved prep session for low tyre tread and, if any corner is at/below
+ * the amber threshold, fire ONE alert (bell to the vehicle manager + email to
+ * info@/will@) listing all the low corners. Best-effort — never throws to the
+ * caller.
+ */
+async function notifyLowTreadAtPrep(reg: string, data: any): Promise<void> {
+  const thresholdRaw = await getSystemSetting('tyre_tread_amber_threshold');
+  const threshold = (() => {
+    const n = parseFloat(thresholdRaw || '');
+    return Number.isFinite(n) && n > 0 ? n : DEFAULT_TYRE_TREAD_AMBER_MM;
+  })();
+
+  const sections: any[] = Array.isArray(data?.sections) ? data.sections : [];
+  const low: { corner: string; depth: number }[] = [];
+  for (const sec of sections) {
+    const items: any[] = Array.isArray(sec?.items) ? sec.items : [];
+    for (const it of items) {
+      if (it?.unit !== 'mm') continue;
+      const depth = parseFloat(it?.value);
+      if (!Number.isFinite(depth) || depth <= 0) continue;
+      if (depth <= threshold) {
+        // "Front left tyre tread depth" → "Front left"
+        const corner = String(it?.name || '')
+          .replace(/\s*tyre tread depth\s*/i, '')
+          .trim() || String(it?.name || '');
+        low.push({ corner, depth });
+      }
+    }
+  }
+
+  if (low.length === 0) return;
+
+  const lowTyres = low.map(l => `${l.corner} (${l.depth}mm)`).join(', ');
+  const frontendUrl = process.env.FRONTEND_URL || 'https://staff.oooshtours.co.uk';
+  const vehicleId = data?.vehicleId || null;
+  const vehicleUrl = vehicleId
+    ? `${frontendUrl}/vehicles/fleet/${vehicleId}`
+    : `${frontendUrl}/vehicles`;
+
+  const { getVehicleNotificationTargets } = await import('../services/vehicle-notify');
+  const targets = await getVehicleNotificationTargets();
+
+  try {
+    await emailService.send('low_tread_alert', {
+      to: targets.to,
+      cc: targets.cc,
+      variables: {
+        vehicleReg: reg,
+        preparedBy: data?.preparedBy || 'staff',
+        amberThreshold: String(threshold),
+        lowTyres,
+        mileage: data?.mileage != null ? String(data.mileage) : 'not recorded',
+        vehicleUrl,
+      },
+    });
+  } catch (emailErr) {
+    console.warn('[vehicles/prep] Low-tread email failed:', (emailErr as Error).message);
+  }
+
+  // Bell for the vehicle manager. email_sent_at set so the escalation
+  // scheduler doesn't fire a duplicate. Best-effort per recipient.
+  for (const userId of targets.bellUserIds) {
+    try {
+      await query(
+        `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, priority, action_url, email_sent_at)
+         VALUES ($1, 'compliance', $2, $3, 'fleet_vehicles', $4, 'normal', $5, NOW())`,
+        [
+          userId,
+          `Low tyre tread — ${reg}`,
+          `Prepped by ${data?.preparedBy || 'staff'}. Low: ${lowTyres}`,
+          vehicleId,
+          vehicleId ? `/vehicles/fleet/${vehicleId}` : '/vehicles',
+        ],
+      );
+    } catch (bellErr) {
+      console.warn('[vehicles/prep] Low-tread bell failed:', (bellErr as Error).message);
+    }
+  }
+}
 
 /**
  * GET /api/vehicles/get-prep-history?vehicleReg=XXX&limit=10
