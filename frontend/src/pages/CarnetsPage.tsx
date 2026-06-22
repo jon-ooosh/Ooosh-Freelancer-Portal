@@ -1,17 +1,16 @@
 /**
- * CarnetsPage — Operations > Carnets overview + management.
+ * CarnetsPage — Operations > Carnets overview (list).
  *
- * Master/detail: a filterable list of every carnet (both modes), and the rich
- * CarnetSection cockpit for the selected one. The Job-View `carnet` requirement
- * card links here (?job=<jobId> auto-selects). This is where the full lifecycle,
- * custody, GMR and document management lives — kept off the job view.
+ * Filterable list of every carnet (both modes). Each row opens its own detail
+ * page (/operations/carnets/:id) — kept separate so the list doesn't get messy
+ * with inline-expanded cockpits. The full lifecycle / custody / GMR / document
+ * management lives on the detail page.
  *
  * See docs/CARNET-SPEC.md.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
-import CarnetSection from '../components/CarnetSection';
 
 interface CarnetRow {
   id: string;
@@ -54,13 +53,12 @@ function fmt(d: string | null): string {
 }
 
 export default function CarnetsPage() {
-  const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
   const [rows, setRows] = useState<CarnetRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState('');
   const [mode, setMode] = useState('');
   const [status, setStatus] = useState('');
-  const [selectedJob, setSelectedJob] = useState<string | null>(searchParams.get('job'));
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -79,19 +77,6 @@ export default function CarnetsPage() {
   }, [q, mode, status]);
 
   useEffect(() => { load(); }, [load]);
-
-  // Auto-select from ?job= once rows have loaded (or keep an explicit selection).
-  useEffect(() => {
-    const jobParam = searchParams.get('job');
-    if (jobParam) setSelectedJob(jobParam);
-  }, [searchParams]);
-
-  const selectJob = (jobId: string | null) => {
-    setSelectedJob(jobId);
-    const next = new URLSearchParams(searchParams);
-    if (jobId) next.set('job', jobId); else next.delete('job');
-    setSearchParams(next, { replace: true });
-  };
 
   const counts = useMemo(() => ({
     total: rows.length,
@@ -128,7 +113,7 @@ export default function CarnetsPage() {
       </div>
 
       {/* List */}
-      <div className="bg-white rounded-lg border border-gray-200 overflow-x-auto mb-6">
+      <div className="bg-white rounded-lg border border-gray-200 overflow-x-auto">
         <table className="w-full text-sm">
           <thead className="bg-gray-50 text-gray-500 text-xs uppercase">
             <tr>
@@ -147,8 +132,8 @@ export default function CarnetsPage() {
             {rows.map((r) => (
               <tr
                 key={r.id}
-                onClick={() => selectJob(r.job_id)}
-                className={`border-t border-gray-100 cursor-pointer hover:bg-purple-50 ${selectedJob === r.job_id ? 'bg-purple-50' : ''}`}
+                onClick={() => navigate(`/operations/carnets/${r.id}`)}
+                className="border-t border-gray-100 cursor-pointer hover:bg-purple-50"
               >
                 <td className="px-3 py-2 font-medium text-gray-800">{r.hh_job_number ? `#${r.hh_job_number}` : '—'}<div className="text-xs text-gray-400 truncate max-w-[180px]">{r.job_name}</div></td>
                 <td className="px-3 py-2 text-gray-600">{r.client_name || '—'}</td>
@@ -162,17 +147,6 @@ export default function CarnetsPage() {
           </tbody>
         </table>
       </div>
-
-      {/* Detail cockpit */}
-      {selectedJob && (
-        <div>
-          <div className="flex items-center justify-between mb-2">
-            <h2 className="text-sm font-medium text-gray-500">Selected carnet</h2>
-            <button onClick={() => selectJob(null)} className="text-xs text-gray-400 hover:text-gray-600">Close</button>
-          </div>
-          <CarnetSection jobId={selectedJob} onChanged={load} />
-        </div>
-      )}
     </div>
   );
 }
