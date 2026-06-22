@@ -12,6 +12,7 @@ import HireHistoryTab from '../components/HireHistoryTab';
 import HeldItemsSection from '../components/HeldItemsSection';
 import StorageHistorySection from '../components/StorageHistorySection';
 import PcnHistorySection from '../components/PcnHistorySection';
+import OohOrgIncidents from '../components/OohOrgIncidents';
 import { ORG_RELATIONSHIP_LABELS, PERSON_ORG_ROLES_WITH_MAIN_CONTACT, type OrgRelationshipType, type OrganisationRelationship } from '../../../shared/types';
 import { useAuthStore } from '../hooks/useAuthStore';
 
@@ -120,7 +121,7 @@ export default function OrganisationDetailPage() {
   const [showDnoForm, setShowDnoForm] = useState(false);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'people' | 'relationships' | 'hire_history' | 'timeline' | 'details' | 'excess' | 'issues' | 'held' | 'storage' | 'pcns'>('people');
+  const [activeTab, setActiveTab] = useState<'people' | 'relationships' | 'hire_history' | 'timeline' | 'details' | 'excess' | 'issues' | 'held' | 'storage' | 'pcns' | 'ooh'>('people');
   const [issuesCount, setIssuesCount] = useState<number | null>(null);
   const [pcnCount, setPcnCount] = useState<number | null>(null);
 
@@ -709,7 +710,7 @@ export default function OrganisationDetailPage() {
       {/* Tabs */}
       <div className="border-b border-gray-200 mb-6">
         <nav className="flex gap-6">
-          {(['people', 'relationships', 'hire_history', 'timeline', 'details', 'excess', 'issues', 'held', 'storage', 'pcns'] as const).map((tab) => {
+          {(['people', 'relationships', 'hire_history', 'timeline', 'details', 'excess', 'issues', 'held', 'storage', 'pcns', 'ooh'] as const).map((tab) => {
             const relCount = (org.relationships || []).filter(r => r.status === 'active').length;
             // linked_job_count comes from the backend's UNION of job_organisations + jobs.client_id,
             // matching the Hire History tab content. Falls back to local linked_jobs.length only
@@ -726,6 +727,7 @@ export default function OrganisationDetailPage() {
               : tab === 'held' ? 'Held Items'
               : tab === 'storage' ? 'Storage'
               : tab === 'pcns' ? (pcnCount ? `PCNs (${pcnCount})` : 'PCNs')
+              : tab === 'ooh' ? 'OOH'
               : 'Details';
             return (
               <button
@@ -1553,6 +1555,11 @@ export default function OrganisationDetailPage() {
       {/* PCNs Tab — penalty charge notices where this org is the client/hirer */}
       {activeTab === 'pcns' && id && (
         <PcnHistorySection entityType="organisation" entityId={id} onCount={(_open, total) => setPcnCount(total)} />
+      )}
+
+      {/* OOH Tab — read-only out-of-hours return incident rollup for this client's drivers */}
+      {activeTab === 'ooh' && id && (
+        <OohOrgIncidents orgId={id} />
       )}
 
       {/* Edit Panel */}
