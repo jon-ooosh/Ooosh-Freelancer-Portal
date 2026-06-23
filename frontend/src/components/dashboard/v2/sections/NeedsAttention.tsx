@@ -209,6 +209,14 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
   };
 
   // Secondary row (amber/blue/purple)
+  const carnets: NABucket = {
+    key: 'carnets',
+    title: 'Carnets',
+    accent: 'amber',
+    count: na.carnet_count || 0,
+    items: [],
+    viewAllHref: '/operations/carnets',
+  };
   const referrals: NABucket = {
     key: 'referrals',
     title: 'Referrals',
@@ -414,7 +422,7 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
   // expiringHolds leads the secondary row — red accent, time-critical (hold
   // auto-voids at day 5). Sits ahead of the amber/blue/purple buckets so it
   // catches the eye when present.
-  const secondaryBuckets = [expiringHolds, receiptsOutstanding, ...pcnBuckets, referrals, excess, transportArrangements, fleetBucket, problemsBucket];
+  const secondaryBuckets = [expiringHolds, receiptsOutstanding, ...pcnBuckets, carnets, referrals, excess, transportArrangements, fleetBucket, problemsBucket];
   const secondaryAny = secondaryBuckets.some(b => b.count > 0);
 
   return (
