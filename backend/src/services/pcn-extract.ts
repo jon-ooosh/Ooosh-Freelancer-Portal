@@ -8,12 +8,10 @@
  * Netlify `extract.js`.
  *
  * Mirrors services/cost-receipt-extract.ts (model, prompt caching, structured
- * output, deterministic parse fallback).
+ * output, deterministic parse fallback). Shares the Claude vision scaffolding
+ * via services/document-extract.ts.
  */
-import { getAnthropicClient, isAnthropicConfigured } from '../config/anthropic';
-
-const MODEL_ID = 'claude-haiku-4-5';
-const MAX_TOKENS = 1024;
+import { extractDocument } from './document-extract';
 
 const FINE_TYPES = ['private_pcn', 'council_pcn', 'police_nip', 'toll', 'other'] as const;
 
@@ -86,72 +84,21 @@ export interface ExtractedPcn {
   notes: string | null;
 }
 
-const SUPPORTED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
-
-function buildContentBlock(mimeType: string, base64: string) {
-  if (mimeType === 'application/pdf') {
-    return {
-      type: 'document' as const,
-      source: { type: 'base64' as const, media_type: 'application/pdf' as const, data: base64 },
-    };
-  }
-  if (SUPPORTED_IMAGE_TYPES.has(mimeType)) {
-    return {
-      type: 'image' as const,
-      source: {
-        type: 'base64' as const,
-        media_type: mimeType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
-        data: base64,
-      },
-    };
-  }
-  throw new Error(`Unsupported file type: ${mimeType} (expected image/jpeg|png|gif|webp or application/pdf)`);
-}
-
 export async function extractPcn(
   files: { buffer: Buffer; mimeType: string }[],
 ): Promise<ExtractedPcn> {
-  if (!isAnthropicConfigured()) {
-    throw new Error('ANTHROPIC_API_KEY not configured');
-  }
-  if (!files.length) throw new Error('No files provided for extraction');
-  const client = getAnthropicClient();
   // Feed every uploaded page (front + back of a paper notice, or a multi-page
   // PDF) into one call so the model reads them together. The structured schema
   // only captures the defined fields — payment instructions on the back page
   // are retained as a stored document + attached to client emails, NOT pulled
   // into a field we'd have to stand behind.
-  const contentBlocks = files.map((f) => buildContentBlock(f.mimeType, f.buffer.toString('base64')));
-
-  const response = await client.messages.create({
-    model: MODEL_ID,
-    max_tokens: MAX_TOKENS,
-    system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
-    messages: [
-      {
-        role: 'user',
-        content: [
-          ...contentBlocks,
-          { type: 'text', text: 'Extract the details from this charge notice (pages may include the front and back of one notice).' },
-        ],
-      },
-    ],
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    output_config: { format: { type: 'json_schema', schema: SCHEMA as any } } as any,
+  const parsed = await extractDocument<ExtractedPcn>({
+    files,
+    systemPrompt: SYSTEM_PROMPT,
+    schema: SCHEMA,
+    userInstruction: 'Extract the details from this charge notice (pages may include the front and back of one notice).',
+    logTag: 'pcn-extract',
   });
-
-  const textBlock = response.content.find((b) => b.type === 'text');
-  if (!textBlock || textBlock.type !== 'text') {
-    throw new Error('Claude returned no text content');
-  }
-  let parsed: ExtractedPcn;
-  try {
-    parsed = JSON.parse(textBlock.text);
-  } catch {
-    const m = textBlock.text.match(/\{[\s\S]*\}/);
-    if (!m) throw new Error('Claude returned unparseable response');
-    parsed = JSON.parse(m[0]);
-  }
 
   // Normalise the reg the same way the matcher does (uppercase, no spaces).
   if (parsed.vehicle_reg) parsed.vehicle_reg = parsed.vehicle_reg.toUpperCase().replace(/\s/g, '');

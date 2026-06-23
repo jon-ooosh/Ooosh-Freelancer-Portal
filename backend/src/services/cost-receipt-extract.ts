@@ -19,11 +19,8 @@
  * canonical form — stops duplicate suppliers from typo variants. Returned
  * alongside `supplier_matched: {from, to}` so the UI can show what changed.
  */
-import { getAnthropicClient, isAnthropicConfigured } from '../config/anthropic';
+import { extractDocument } from './document-extract';
 import { xeroBroker } from './xero-broker';
-
-const MODEL_ID = 'claude-haiku-4-5';
-const MAX_TOKENS = 1024;
 
 // Xero account codes the OP capture modal exposes — keep in step with
 // COST_CATEGORIES in frontend/src/components/CostCaptureModal.tsx.
@@ -114,10 +111,6 @@ export interface ExtractedReceipt {
   supplier_matched?: { from: string; to: string };
 }
 
-const SUPPORTED_IMAGE_TYPES = new Set([
-  'image/jpeg', 'image/png', 'image/gif', 'image/webp',
-]);
-
 const round2 = (n: number) => Math.round(n * 100) / 100;
 const close = (a: number, b: number) => Math.abs(a - b) <= 0.02;
 
@@ -179,30 +172,6 @@ function normaliseAmounts(p: ExtractedReceipt): void {
   downgrade();
 }
 
-function buildContentBlock(mimeType: string, base64: string) {
-  if (mimeType === 'application/pdf') {
-    return {
-      type: 'document' as const,
-      source: {
-        type: 'base64' as const,
-        media_type: 'application/pdf' as const,
-        data: base64,
-      },
-    };
-  }
-  if (SUPPORTED_IMAGE_TYPES.has(mimeType)) {
-    return {
-      type: 'image' as const,
-      source: {
-        type: 'base64' as const,
-        media_type: mimeType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
-        data: base64,
-      },
-    };
-  }
-  throw new Error(`Unsupported file type: ${mimeType} (expected image/jpeg|png|gif|webp or application/pdf)`);
-}
-
 /**
  * Try to canonicalise the extracted supplier name against Xero contacts.
  * Case-insensitive substring match either way ("TTS 360" vs "TTS360 Ltd") —
@@ -229,53 +198,13 @@ async function canonicaliseSupplier(
 }
 
 export async function extractReceipt(buffer: Buffer, mimeType: string): Promise<ExtractedReceipt> {
-  if (!isAnthropicConfigured()) {
-    throw new Error('ANTHROPIC_API_KEY not configured');
-  }
-  const client = getAnthropicClient();
-  const contentBlock = buildContentBlock(mimeType, buffer.toString('base64'));
-
-  const response = await client.messages.create({
-    model: MODEL_ID,
-    max_tokens: MAX_TOKENS,
-    // One cache_control breakpoint on the system prompt — its bytes are
-    // identical across every call so this hits the cache from request 2.
-    system: [
-      {
-        type: 'text',
-        text: SYSTEM_PROMPT,
-        cache_control: { type: 'ephemeral' },
-      },
-    ],
-    messages: [
-      {
-        role: 'user',
-        content: [
-          contentBlock,
-          { type: 'text', text: 'Extract the details from this receipt.' },
-        ],
-      },
-    ],
-    // Structured-output constraint: response will be valid JSON matching SCHEMA.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    output_config: { format: { type: 'json_schema', schema: SCHEMA as any } } as any,
+  const parsed = await extractDocument<ExtractedReceipt>({
+    files: { buffer, mimeType },
+    systemPrompt: SYSTEM_PROMPT,
+    schema: SCHEMA,
+    userInstruction: 'Extract the details from this receipt.',
+    logTag: 'receipt-extract',
   });
-
-  // Pull the JSON text out of the response content blocks.
-  const textBlock = response.content.find((b) => b.type === 'text');
-  if (!textBlock || textBlock.type !== 'text') {
-    throw new Error('Claude returned no text content');
-  }
-  let parsed: ExtractedReceipt;
-  try {
-    parsed = JSON.parse(textBlock.text);
-  } catch {
-    // Structured outputs should make this unreachable, but if Claude wraps in
-    // a code fence on a flake, dig out the JSON object.
-    const m = textBlock.text.match(/\{[\s\S]*\}/);
-    if (!m) throw new Error('Claude returned unparseable response');
-    parsed = JSON.parse(m[0]);
-  }
 
   // Deterministic repair of gross/net/VAT arithmetic (downgrades confidence
   // when a correction was needed so the modal flags it for a human check).
@@ -288,14 +217,6 @@ export async function extractReceipt(buffer: Buffer, mimeType: string): Promise<
       parsed.supplier_matched = { from: parsed.supplier, to: canonical };
       parsed.supplier = canonical;
     }
-  }
-
-  // Telemetry — cache hits should appear from request 2 onwards.
-  if (response.usage?.cache_read_input_tokens) {
-    console.log(
-      `[receipt-extract] cache read: ${response.usage.cache_read_input_tokens} tokens, ` +
-        `confidence: ${parsed.confidence}`,
-    );
   }
 
   return parsed;
