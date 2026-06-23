@@ -14,6 +14,7 @@ import { HH_TO_PIPELINE } from '../services/hirehop-writeback';
 import { verifyApiKey } from '../middleware/api-key';
 import {
   triggerHireFormEmailOnConfirmation,
+  triggerCarnetFormOnConfirmation,
   hireFormResultIsAnomaly,
   sendConfirmationSilentSkipAlert,
 } from '../services/confirmation-hooks';
@@ -279,6 +280,7 @@ async function handleJobStatusChange(
       void (async () => {
         try {
           const hfResult = await triggerHireFormEmailOnConfirmation(job.id);
+          triggerCarnetFormOnConfirmation(job.id).catch(() => {});
           const anomaly = hireFormResultIsAnomaly(hfResult);
           if (anomaly) {
             const jobRow = await query(

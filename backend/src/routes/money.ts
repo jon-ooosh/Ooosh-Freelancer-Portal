@@ -19,6 +19,7 @@ import { getStripeClient, isStripeConfigured, isStripeError } from '../config/st
 import { sendPaymentEmail, sendExcessEmail, sendLastMinuteAlert } from '../services/money-emails';
 import {
   triggerHireFormEmailOnConfirmation as triggerHireFormEmailOnConfirmationShared,
+  triggerCarnetFormOnConfirmation,
   hireFormResultIsAnomaly,
   sendConfirmationSilentSkipAlert,
   type SilentSkipIssue,
@@ -1751,6 +1752,7 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
         (async () => {
           try {
             const hfResult = await triggerHireFormEmailOnConfirmationShared(job.id);
+            triggerCarnetFormOnConfirmation(job.id).catch(() => {});
             const anomaly = hireFormResultIsAnomaly(hfResult);
             if (anomaly) {
               await sendConfirmationSilentSkipAlert({
@@ -2472,6 +2474,7 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
     if (statusChanged) {
       try {
         const hfResult = await triggerHireFormEmailOnConfirmationShared(job.id);
+        triggerCarnetFormOnConfirmation(job.id).catch(() => {});
         const anomaly = hireFormResultIsAnomaly(hfResult);
         if (anomaly) silentSkipIssues.push(anomaly);
       } catch (err) {

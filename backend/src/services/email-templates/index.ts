@@ -197,6 +197,25 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  carnet_gmr_details: {
+    variant: 'client',
+    preheader: 'Your GMR for the UK border',
+    subject: 'Your GMR - {{jobName}} (job #{{jobNumber}})',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Your GMR{{crossingSuffix}}</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Hi {{clientName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Here's the GMR (Goods Movement Reference) you'll need at the UK border for
+        <strong>{{jobName}}</strong> (job <strong>#{{jobNumber}}</strong>):
+      </p>
+      <p style="margin:0 0 16px;font-size:18px;color:#1e293b;"><strong>GMR: {{gmrNumber}}</strong>{{crossingLine}}</p>
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.6;">
+        The QR code is attached{{qrNote}} — have it ready to show at check-in.
+      </p>
+      <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">Any questions, just reply to this email.</p>
+    `,
+  },
+
   carnet_authority_copy: {
     variant: 'client',
     preheader: 'Your signed Letter of Authorisation',

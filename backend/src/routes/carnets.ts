@@ -572,6 +572,57 @@ router.post('/:id/gmrs/:gmrId/mark-sent', async (req: AuthRequest, res: Response
   }
 });
 
+// POST /api/carnets/:id/gmrs/:gmrId/email — forward the GMR number + QR to the
+// client, then mark it sent. Falls back to the job's client contact if the
+// carnet has no lead email.
+router.post('/:id/gmrs/:gmrId/email', async (req: AuthRequest, res: Response) => {
+  try {
+    const g = await query(
+      `SELECT g.*, c.lead_email, c.job_id, j.hh_job_number, j.job_name, j.client_name
+       FROM carnet_gmrs g
+       JOIN job_carnets c ON c.id = g.carnet_id
+       JOIN jobs j ON j.id = c.job_id
+       WHERE g.id = $1 AND g.carnet_id = $2`,
+      [req.params.gmrId, req.params.id]
+    );
+    if (g.rows.length === 0) return res.status(404).json({ error: 'GMR not found' });
+    const gmr = g.rows[0];
+    if (!gmr.gmr_reference) return res.status(400).json({ error: 'Add the GMR number before sending.' });
+
+    let to = (gmr.lead_email || '').trim();
+    if (!to) {
+      const target = await resolveClientEmailTarget(gmr.job_id);
+      to = target?.primaryEmail || '';
+    }
+    if (!to) return res.status(422).json({ error: 'No client email on file — set the lead email on the carnet first.' });
+
+    const attachments = [];
+    if (gmr.qr_image_url) {
+      const qr = await r2ToBuffer(gmr.qr_image_url);
+      if (qr) attachments.push({ filename: `GMR-${gmr.gmr_reference}.png`, content: qr, contentType: 'image/png' });
+    }
+    const crossing = [gmr.crossing_location, gmr.crossing_date ? new Date(gmr.crossing_date).toLocaleDateString('en-GB') : null].filter(Boolean).join(' · ');
+    await emailService.send('carnet_gmr_details', {
+      to,
+      variables: {
+        clientName: gmr.client_name || '', jobName: gmr.job_name || '', jobNumber: String(gmr.hh_job_number || ''),
+        gmrNumber: gmr.gmr_reference,
+        crossingSuffix: gmr.crossing_location ? ` — ${gmr.crossing_location}` : '',
+        crossingLine: crossing ? ` <span style="color:#64748b;">(${crossing})</span>` : '',
+        qrNote: attachments.length ? '' : ' separately',
+      },
+      attachments: attachments.length ? attachments : undefined,
+    });
+
+    await query(`UPDATE carnet_gmrs SET status = 'sent', sent_to_client_at = NOW(), updated_at = NOW() WHERE id = $1`, [gmr.id]);
+    await logCarnetInteraction(gmr.job_id, `📄 GMR ${gmr.gmr_reference} sent to ${to}`, req.user?.id);
+    res.json({ data: { sent: true, recipient: to } });
+  } catch (err) {
+    console.error('[carnets] gmr email error:', err);
+    res.status(500).json({ error: 'Failed to send GMR' });
+  }
+});
+
 // DELETE /api/carnets/:id/gmrs/:gmrId
 router.delete('/:id/gmrs/:gmrId', async (req: AuthRequest, res: Response) => {
   try {

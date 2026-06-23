@@ -34,6 +34,57 @@ async function logInteraction(jobId: string, content: string) {
   } catch (e) { console.error('[carnet-auto-email] interaction log failed:', e); }
 }
 
+interface CarnetRow { id: string; job_id: string; hh_job_number: number | null; job_name: string | null; client_name: string | null }
+
+// Mint the token + send the initial request form for one detected carnet.
+// Used by the daily scheduler AND the on-confirmation hook.
+async function sendInitialForm(c: CarnetRow): Promise<boolean> {
+  const token = randomBytes(24).toString('base64url');
+  await query(
+    `UPDATE job_carnets SET form_token = $1, form_sent_at = NOW(), status = 'form_sent', updated_at = NOW() WHERE id = $2`,
+    [token, c.id]
+  );
+  const url = `${getFrontendUrl()}/carnet-form/${token}`;
+  const target = await resolveClientEmailTarget(c.job_id, 'carnet_request');
+  if (target?.primaryEmail) {
+    await emailService.send('carnet_request', {
+      to: target.primaryEmail, cc: target.ccEmails,
+      variables: { clientName: c.client_name || '', jobName: c.job_name || '', jobNumber: String(c.hh_job_number || ''), formUrl: url },
+    });
+    await logInteraction(c.job_id, `📄 Carnet request form auto-sent to ${target.primaryEmail}`);
+    return true;
+  }
+  await logInteraction(c.job_id, '📄 Carnet request form ready but no client email on file — staff to send manually');
+  return false;
+}
+
+/**
+ * Send the carnet request form for a single job on confirmation, if it has a
+ * we-supply carnet still 'detected' and within the initial window. Idempotent
+ * (form_sent_at gate). Returns 1 if sent, 0 otherwise. Gated on lost/cancelled
+ * + internal via JOB_GATE.
+ */
+export async function sendCarnetFormForJob(jobId: string): Promise<number> {
+  const res = await query(
+    `SELECT c.id, c.job_id, j.hh_job_number, j.job_name, j.client_name
+     FROM job_carnets c JOIN jobs j ON j.id = c.job_id
+     WHERE c.job_id = $1 AND c.mode = 'we_supply' AND c.status = 'detected' AND c.form_sent_at IS NULL
+       AND ${JOB_GATE}
+       AND COALESCE(c.carnet_start_date, j.out_date, j.job_date) IS NOT NULL
+       AND COALESCE(c.carnet_start_date, j.out_date, j.job_date) <= CURRENT_DATE + ($2 || ' days')::interval
+     LIMIT 1`,
+    [jobId, INITIAL_WINDOW_DAYS]
+  );
+  if (res.rows.length === 0) return 0;
+  try {
+    await sendInitialForm(res.rows[0]);
+    return 1;
+  } catch (e) {
+    console.error(`[carnet-auto-email] on-confirmation send failed for job ${jobId}:`, e);
+    return 0;
+  }
+}
+
 export async function runCarnetAutoEmails(): Promise<{ sent: number; chased: number }> {
   let sent = 0;
   let chased = 0;
@@ -50,23 +101,7 @@ export async function runCarnetAutoEmails(): Promise<{ sent: number; chased: num
   );
   for (const c of toSend.rows) {
     try {
-      const token = randomBytes(24).toString('base64url');
-      await query(
-        `UPDATE job_carnets SET form_token = $1, form_sent_at = NOW(), status = 'form_sent', updated_at = NOW() WHERE id = $2`,
-        [token, c.id]
-      );
-      const url = `${getFrontendUrl()}/carnet-form/${token}`;
-      const target = await resolveClientEmailTarget(c.job_id, 'carnet_request');
-      if (target?.primaryEmail) {
-        await emailService.send('carnet_request', {
-          to: target.primaryEmail, cc: target.ccEmails,
-          variables: { clientName: c.client_name || '', jobName: c.job_name || '', jobNumber: String(c.hh_job_number || ''), formUrl: url },
-        });
-        await logInteraction(c.job_id, `📄 Carnet request form auto-sent to ${target.primaryEmail}`);
-        sent++;
-      } else {
-        await logInteraction(c.job_id, '📄 Carnet request form ready but no client email on file — staff to send manually');
-      }
+      if (await sendInitialForm(c)) sent++;
     } catch (e) {
       console.error(`[carnet-auto-email] initial send failed for carnet ${c.id}:`, e);
     }
