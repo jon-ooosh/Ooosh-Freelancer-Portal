@@ -85,6 +85,7 @@ const EMAIL_BUCKETS: ReadonlyArray<{
   { id: 'bookings_payments', label: 'Bookings & payments', description: 'Booking confirmations, payment receipts, last-minute alerts.' },
   { id: 'send_invoice', label: 'Send invoice', description: 'Invoices and statements (often a different person — accountant / finance).' },
   { id: 'hire_forms', label: 'Hire forms & driver', description: 'Hire form send/chase emails to drivers.' },
+  { id: 'carnet', label: 'Carnet', description: 'ATA Carnet request form send/chase emails.' },
   { id: 'excess', label: 'Insurance excess', description: 'Excess payment confirmations, pre-auth holds, reimbursements, claims.' },
   { id: 'delivery_on_day', label: 'Delivery / on-the-day', description: 'Delivery notes, collection confirmations, check-in summaries.' },
 ];

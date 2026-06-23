@@ -643,6 +643,22 @@ export function startScheduler() {
   });
   console.log('Scheduler: Hire form auto-emails scheduled daily at 09:00');
 
+  // ── Carnet request-form auto-emails ──────────────────────────────────
+  // Daily at 09:15 — send the carnet request form (T-28 days) + chase if not back.
+  cron.schedule('15 9 * * *', async () => {
+    console.log('Scheduler: Checking carnet request-form triggers...');
+    try {
+      const { runCarnetAutoEmails } = await import('../services/carnet-auto-email');
+      const result = await runCarnetAutoEmails();
+      if (result.sent > 0 || result.chased > 0) {
+        console.log(`Scheduler: Carnet request forms — ${result.sent} sent, ${result.chased} chased`);
+      }
+    } catch (err) {
+      console.error('Scheduler: Carnet auto-email failed:', err);
+    }
+  });
+  console.log('Scheduler: Carnet request-form auto-emails scheduled daily at 09:15');
+
   // ── Freelancer completion chaser ─────────────────────────────────────
   // Every 30 minutes — nudge freelancers who haven't completed jobs that
   // are past their scheduled time. Levels: 2h / 6h / 14h, then staff
