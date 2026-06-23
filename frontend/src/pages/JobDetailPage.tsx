@@ -334,6 +334,101 @@ const SWAP_REASONS = [
 
 interface OpenIssueLite { id: string; summary: string; category: string; severity: string; status: string }
 
+/**
+ * ChangeVanButton — re-point ONE driver to a different van on a multi-van
+ * job, pre-book-out. The Job Detail counterpart of the Allocations page
+ * "Change van" picker (PR #829): lets staff distribute drivers across the
+ * job's vans (e.g. 5 drivers / 2 vans) without leaving Job Detail. Plain
+ * PATCH /api/hire-forms/:id { vehicle_id } — no cascade, no swap/breakdown
+ * machinery (that's SwapVehicleButton's job, post-book-out). Options are
+ * matched to the current van's type so a Premium driver can't be put on a
+ * Luton. Only rendered on multi-van self-drive cards that aren't booked out.
+ */
+function ChangeVanButton({ assignmentId, vehicleId, currentVehicleReg, onChanged }: {
+  assignmentId: string;
+  vehicleId: string;
+  currentVehicleReg: string;
+  onChanged: () => void;
+}) {
+  const [showPicker, setShowPicker] = useState(false);
+  const [vehicles, setVehicles] = useState<{ id: string; reg: string; simpleType: string }[]>([]);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (!showPicker || vehicles.length > 0) return;
+    api.get<{ data: { id: string; reg: string; simple_type: string }[] }>('/vehicles/fleet')
+      .then(r => setVehicles((r.data || []).map(v => ({ id: v.id, reg: v.reg, simpleType: v.simple_type }))))
+      .catch(() => setError('Could not load vehicles'));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showPicker]);
+
+  // Match the current van's type (Premium → Premium) — derived from the loaded
+  // fleet so the caller doesn't have to thread the type through.
+  const currentType = vehicles.find(v => v.id === vehicleId)?.simpleType;
+  const options = vehicles.filter(v => v.id !== vehicleId && (!currentType || v.simpleType === currentType));
+
+  const handlePick = async (newVehicleId: string) => {
+    setSubmitting(true);
+    setError('');
+    try {
+      await api.patch(`/hire-forms/${assignmentId}`, { vehicle_id: newVehicleId });
+      setShowPicker(false);
+      onChanged();
+    } catch (err: any) {
+      setError(err?.body?.error || err?.message || 'Failed to change van');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  if (!showPicker) {
+    return (
+      <button
+        onClick={() => setShowPicker(true)}
+        className="text-xs font-medium text-ooosh-navy underline hover:text-ooosh-700"
+        title="Move this driver to a different van on this job"
+      >
+        🔀 Change van
+      </button>
+    );
+  }
+
+  return (
+    <div className="mt-2 w-full max-w-xs space-y-2 rounded-lg border border-gray-200 bg-gray-50 p-3">
+      <p className="text-xs font-medium text-gray-700">
+        Move from <strong>{currentVehicleReg}</strong> to:
+      </p>
+      {error && <p className="text-xs text-red-600">{error}</p>}
+      {options.length === 0 ? (
+        <p className="text-xs text-gray-500">
+          {vehicles.length === 0 ? 'Loading vans…' : 'No other matching vans available.'}
+        </p>
+      ) : (
+        <div className="flex max-h-48 flex-col gap-1 overflow-y-auto">
+          {options.map(v => (
+            <button
+              key={v.id}
+              disabled={submitting}
+              onClick={() => handlePick(v.id)}
+              className="rounded border border-gray-200 bg-white px-2 py-1.5 text-left text-xs hover:bg-gray-100 disabled:opacity-50"
+            >
+              <span className="font-mono font-bold text-ooosh-navy">{v.reg}</span>
+              <span className="ml-1 text-gray-400">{v.simpleType}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      <button
+        onClick={() => { setShowPicker(false); setError(''); }}
+        className="text-xs text-gray-500 hover:text-gray-700"
+      >
+        Cancel
+      </button>
+    </div>
+  );
+}
+
 function SwapVehicleButton({ assignmentId, vehicleId, currentVehicleReg, onSwapped }: {
   assignmentId: string;
   vehicleId: string | null;
@@ -4385,6 +4480,24 @@ export default function JobDetailPage() {
                         }
                         return null;
                       })()}
+
+                      {/* Change van — distribute this driver across the job's
+                          vans on a multi-van hire, pre-book-out. Job Detail
+                          counterpart of the Allocations "Change van" (PR #829).
+                          Self-drive, soft/confirmed, van linked, multi-van
+                          (>1 vehicle slot) only; the post-book-out move is the
+                          Swap Vehicle flow below. */}
+                      {a.assignment_type === 'self_drive' &&
+                       (a.status === 'soft' || a.status === 'confirmed') &&
+                       a.vehicle_id &&
+                       (hhSyncResult?.derivation?.flags?.vehicle_slots?.length ?? 0) > 1 && (
+                        <ChangeVanButton
+                          assignmentId={a.id}
+                          vehicleId={a.vehicle_id}
+                          currentVehicleReg={a.vehicle_reg}
+                          onChanged={loadVehicleAssignments}
+                        />
+                      )}
 
                       {/* Hire Form PDF actions */}
                       {a.assignment_type === 'self_drive' && (
