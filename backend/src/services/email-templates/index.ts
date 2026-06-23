@@ -484,6 +484,18 @@ const templates: Record<string, EmailTemplate> = {
           </td>
         </tr>
       </table>
+      {{#if multiVanNote}}
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#f3effa;border-radius:8px;border:1px solid #d8cdef;">
+            <p style="margin:0;font-size:14px;color:#4c3a6b;line-height:1.6;">
+              This is one of the vehicles on your hire. As more than one van is booked,
+              you'll receive a separate agreement for each — please keep them all for your records.
+            </p>
+          </td>
+        </tr>
+      </table>
+      {{/if}}
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
         Please retain the attached document for your records.
       </p>
