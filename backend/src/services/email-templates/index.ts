@@ -178,6 +178,25 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  carnet_request_chase: {
+    variant: 'client',
+    preheader: 'Reminder: we still need your ATA Carnet details',
+    subject: 'Reminder: ATA Carnet details needed - {{jobName}} (job #{{jobNumber}})',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">A quick reminder</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Hi {{clientName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        We still need a few details to arrange the ATA Carnet for <strong>{{jobName}}</strong>
+        (job <strong>#{{jobNumber}}</strong>). The carnet takes time to issue, so please complete the form
+        as soon as you can.
+      </p>
+      <p style="margin:0 0 24px;">
+        <a href="{{formUrl}}" style="display:inline-block;background-color:#7B5EA7;color:#ffffff;text-decoration:none;padding:12px 22px;border-radius:8px;font-size:15px;font-weight:600;">Complete the carnet form →</a>
+      </p>
+      <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">Any questions, just reply to this email.</p>
+    `,
+  },
+
   carnet_authority_copy: {
     variant: 'client',
     preheader: 'Your signed Letter of Authorisation',
