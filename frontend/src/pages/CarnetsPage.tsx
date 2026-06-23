@@ -49,6 +49,62 @@ const STATUS_COLOUR: Record<string, string> = {
   cancelled: 'bg-red-100 text-red-700',
 };
 
+interface JobHit { id: string; hh_job_number: number | null; job_name: string | null; client_name: string | null }
+
+// Manual create for the "client arranges their own carnet — just log it" case.
+function NewClientCarnetModal({ onClose, onCreated }: { onClose: () => void; onCreated: (id: string) => void }) {
+  const [q, setQ] = useState('');
+  const [hits, setHits] = useState<JobHit[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+
+  useEffect(() => {
+    if (q.trim().length < 2) { setHits([]); return; }
+    const t = setTimeout(async () => {
+      setSearching(true);
+      try {
+        const res = await api.get<{ data: JobHit[] }>(`/hirehop/jobs?search=${encodeURIComponent(q.trim())}&limit=10`);
+        setHits(res.data || []);
+      } catch { setHits([]); }
+      finally { setSearching(false); }
+    }, 300);
+    return () => clearTimeout(t);
+  }, [q]);
+
+  async function create(job: JobHit) {
+    setBusy(true); setErr('');
+    try {
+      const res = await api.post<{ data: { id: string } }>('/carnets', { job_id: job.id, mode: 'client_arranges' });
+      onCreated(res.data.id);
+    } catch (e) { setErr(e instanceof Error ? e.message : 'Could not create — does this job already have a carnet?'); }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div className="bg-white rounded-lg p-5 w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+        <h2 className="text-lg font-semibold mb-1">Client-arranged carnet</h2>
+        <p className="text-sm text-gray-500 mb-3">For when the client arranges their own carnet — pick the job to log it against.</p>
+        <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search job / client / HH number"
+          className="w-full border border-gray-300 rounded px-3 py-2 text-sm mb-2" />
+        {err && <p className="text-sm text-red-600 mb-2">{err}</p>}
+        <div className="max-h-64 overflow-y-auto divide-y divide-gray-100">
+          {searching && <p className="text-sm text-gray-400 py-2">Searching…</p>}
+          {!searching && hits.map((j) => (
+            <button key={j.id} disabled={busy} onClick={() => create(j)} className="w-full text-left py-2 hover:bg-purple-50 px-2 rounded text-sm disabled:opacity-50">
+              <span className="font-medium">{j.hh_job_number ? `#${j.hh_job_number}` : '—'}</span> · {j.job_name || '—'}
+              <span className="text-gray-400"> · {j.client_name || ''}</span>
+            </button>
+          ))}
+          {!searching && q.trim().length >= 2 && hits.length === 0 && <p className="text-sm text-gray-400 py-2">No matching jobs.</p>}
+        </div>
+        <div className="mt-3 text-right"><button onClick={onClose} className="text-sm text-gray-500">Cancel</button></div>
+      </div>
+    </div>
+  );
+}
+
 export default function CarnetsPage() {
   const navigate = useNavigate();
   const [rows, setRows] = useState<CarnetRow[]>([]);
@@ -81,12 +137,19 @@ export default function CarnetsPage() {
     open: rows.filter((r) => !['closed', 'done', 'cancelled'].includes(r.status)).length,
   }), [rows]);
 
+  const [showNew, setShowNew] = useState(false);
+
   return (
     <div className="max-w-6xl mx-auto px-4 py-6">
       <div className="flex items-center justify-between mb-4">
         <h1 className="text-2xl font-bold text-gray-900">📄 Carnets</h1>
-        <div className="text-sm text-gray-500">{counts.total} total · {counts.weSupply} we supply · {counts.open} open</div>
+        <div className="flex items-center gap-3">
+          <div className="text-sm text-gray-500">{counts.total} total · {counts.weSupply} we supply · {counts.open} open</div>
+          <button onClick={() => setShowNew(true)} className="px-3 py-1.5 bg-purple-600 text-white rounded text-sm font-medium">+ Client-arranged carnet</button>
+        </div>
       </div>
+
+      {showNew && <NewClientCarnetModal onClose={() => setShowNew(false)} onCreated={(id) => navigate(`/operations/carnets/${id}`)} />}
 
       {/* Filters */}
       <div className="flex flex-wrap gap-2 mb-4">
