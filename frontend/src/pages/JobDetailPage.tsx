@@ -1349,7 +1349,11 @@ export default function JobDetailPage() {
   const [reqSummary, setReqSummary] = useState<{
     hireFormsStatus: string | null;
     postHireOpenCount: number;
-  }>({ hireFormsStatus: null, postHireOpenCount: 0 });
+    // True when the job has vehicles but every slot is Van & Driver (or the
+    // hire-form chain is suspended). Used to suppress the "no hire form sent"
+    // banner, which only applies to self-drive hires.
+    allVanAndDriver: boolean;
+  }>({ hireFormsStatus: null, postHireOpenCount: 0, allVanAndDriver: false });
   const [assignModalQuoteId, setAssignModalQuoteId] = useState<string | null>(null);
   const [peopleOptions, setPeopleOptions] = useState<PersonOption[]>([]);
   const [peopleSearch, setPeopleSearch] = useState('');
@@ -2006,7 +2010,7 @@ export default function JobDetailPage() {
       setAllocationConflicts([]);
       setDateMismatches([]);
       setJobOrgs([]);
-      setReqSummary({ hireFormsStatus: null, postHireOpenCount: 0 });
+      setReqSummary({ hireFormsStatus: null, postHireOpenCount: 0, allVanAndDriver: false });
       setLoading(true);
 
       loadJob();
@@ -2053,15 +2057,26 @@ export default function JobDetailPage() {
   async function loadRequirementsSummary() {
     if (!id) return;
     try {
-      const [pre, post] = await Promise.all([
+      const [pre, post, flagsRes] = await Promise.all([
         api.get<{ data: JobRequirement[] }>(`/requirements/job/${id}?phase=pre_hire`),
         api.get<{ data: JobRequirement[] }>(`/requirements/job/${id}?phase=post_hire`),
+        api.get<{ flags?: { has_vehicle?: boolean; self_drive_count?: number } }>(
+          `/hirehop/jobs/${id}/derived-flags`
+        ).catch(() => ({ flags: undefined })),
       ]);
       const hf = pre.data.find(r => r.requirement_type === 'hire_forms');
       const openPost = post.data.filter(r => r.status !== 'done').length;
+      // Suppress the self-drive hire-form banner when the job is wholly V&D —
+      // either the live derived flags say so (vehicles present, zero self-drive
+      // slots) or the hire-form requirement is suspended (notes marker). Reading
+      // the flags keeps the banner honest even if the requirement state lags.
+      const flags = flagsRes?.flags;
+      const flagsVD = !!(flags?.has_vehicle && (flags?.self_drive_count ?? 1) === 0);
+      const reqSuspended = typeof hf?.notes === 'string' && hf.notes.includes('[Suspended:');
       setReqSummary({
         hireFormsStatus: hf?.status || null,
         postHireOpenCount: openPost,
+        allVanAndDriver: flagsVD || reqSuspended,
       });
     } catch {
       // non-fatal — alerts just won't fire
@@ -2663,6 +2678,7 @@ export default function JobDetailPage() {
   const hireFormMissing: { daysToOut: number } | null = (() => {
     if (!['confirmed', 'prepped'].includes(job.pipeline_status || '')) return null;
     if (!outDay) return null;
+    if (reqSummary.allVanAndDriver) return null; // V&D hire — no customer hire form needed
     if (reqSummary.hireFormsStatus !== 'not_started') return null;
     const daysToOut = daysBetween(outDay, todayLocalISO);
     if (daysToOut < 0 || daysToOut > 5) return null;

@@ -228,7 +228,18 @@ export default function RequirementCard({
   const isSuspendedByVD = suspensionReason !== null;
   const statusConfig = PREP_STATUS_CONFIG[req.status] || PREP_STATUS_CONFIG.not_started;
   const typeLabels = TYPE_STATUS_LABELS[req.requirement_type];
-  const label = req.custom_label || req.type_label;
+  // The `vehicle` type_label is the static "Vehicle (Self-Drive)" from the
+  // requirement-type picklist. Override it with a mode-aware suffix computed
+  // from the live derived slot modes so a V&D (or mixed) job reads honestly.
+  const vehicleModeSuffix = (() => {
+    if (req.requirement_type !== 'vehicle' || req.custom_label) return null;
+    const sd = derivedFlags?.self_drive_count ?? 0;
+    const vd = derivedFlags?.van_and_driver_count ?? 0;
+    if (sd === 0 && vd === 0) return null; // no slot data — leave static label
+    if (sd > 0 && vd > 0) return `Mixed — ${sd} self-drive, ${vd} van & driver`;
+    return vd > 0 ? 'Van & Driver' : 'Self-Drive';
+  })();
+  const label = vehicleModeSuffix ? `Vehicle (${vehicleModeSuffix})` : (req.custom_label || req.type_label);
 
   // Load hire form and excess data for nested cards
   useEffect(() => {
