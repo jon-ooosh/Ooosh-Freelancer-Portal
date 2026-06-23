@@ -340,33 +340,62 @@ interface OpenIssueLite { id: string; summary: string; category: string; severit
  * "Change van" picker (PR #829): lets staff distribute drivers across the
  * job's vans (e.g. 5 drivers / 2 vans) without leaving Job Detail. Plain
  * PATCH /api/hire-forms/:id { vehicle_id } — no cascade, no swap/breakdown
- * machinery (that's SwapVehicleButton's job, post-book-out). Options are
- * matched to the current van's type so a Premium driver can't be put on a
- * Luton. Only rendered on multi-van self-drive cards that aren't booked out.
+ * machinery (that's SwapVehicleButton's job, post-book-out).
+ *
+ * Mirrors the Allocations picker's smarts: offers same-type vans only
+ * (Premium → Premium), drops vans busy on another job in this hire window
+ * (via /assignments/availability), and shows each van's prep status with
+ * the prepped ("Available") ones first. Only rendered on multi-van
+ * self-drive cards that aren't booked out.
  */
-function ChangeVanButton({ assignmentId, vehicleId, currentVehicleReg, onChanged }: {
+function ChangeVanButton({ assignmentId, vehicleId, currentVehicleReg, jobStart, jobEnd, excludeHhJobId, onChanged }: {
   assignmentId: string;
   vehicleId: string;
   currentVehicleReg: string;
+  jobStart: string | null;
+  jobEnd: string | null;
+  excludeHhJobId: number | null;
   onChanged: () => void;
 }) {
   const [showPicker, setShowPicker] = useState(false);
-  const [vehicles, setVehicles] = useState<{ id: string; reg: string; simpleType: string }[]>([]);
+  const [vehicles, setVehicles] = useState<{ id: string; reg: string; simpleType: string; hireStatus: string }[]>([]);
+  const [unavailableIds, setUnavailableIds] = useState<Set<string>>(new Set());
+  const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
-    if (!showPicker || vehicles.length > 0) return;
-    api.get<{ data: { id: string; reg: string; simple_type: string }[] }>('/vehicles/fleet')
-      .then(r => setVehicles((r.data || []).map(v => ({ id: v.id, reg: v.reg, simpleType: v.simple_type }))))
+    if (!showPicker) return;
+    setLoading(true);
+    const fleetP = api.get<{ data: { id: string; reg: string; simple_type: string; hire_status: string }[] }>('/vehicles/fleet')
+      .then(r => setVehicles((r.data || []).map(v => ({
+        id: v.id, reg: v.reg, simpleType: v.simple_type, hireStatus: v.hire_status || '',
+      }))))
       .catch(() => setError('Could not load vehicles'));
+    // Availability — exclude THIS job so its own vans don't self-conflict.
+    // Advisory: if the call fails we just don't grey anything out (fail open).
+    const availP = (jobStart && jobEnd)
+      ? api.get<{ data: { unavailable: { vehicleId: string }[] } }>(
+          `/assignments/availability?start=${encodeURIComponent(jobStart)}&end=${encodeURIComponent(jobEnd)}${excludeHhJobId ? `&exclude_hh_job_id=${excludeHhJobId}` : ''}`,
+        )
+          .then(r => setUnavailableIds(new Set((r.data?.unavailable || []).map(u => u.vehicleId))))
+          .catch(() => { /* fail open */ })
+      : Promise.resolve();
+    Promise.all([fleetP, availP]).finally(() => setLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showPicker]);
 
-  // Match the current van's type (Premium → Premium) — derived from the loaded
-  // fleet so the caller doesn't have to thread the type through.
+  // Same type as the current van, minus vans busy on another job in this hire
+  // window. Prepped ("Available") vans sort first. currentType derived from
+  // the loaded fleet so the caller doesn't have to thread the type through.
   const currentType = vehicles.find(v => v.id === vehicleId)?.simpleType;
-  const options = vehicles.filter(v => v.id !== vehicleId && (!currentType || v.simpleType === currentType));
+  const options = vehicles
+    .filter(v => v.id !== vehicleId && (!currentType || v.simpleType === currentType) && !unavailableIds.has(v.id))
+    .sort((a, b) => {
+      const rank = (s: string) => (s === 'Available' ? 0 : 1);
+      return rank(a.hireStatus) - rank(b.hireStatus) || a.reg.localeCompare(b.reg);
+    });
+  const readyCount = options.filter(v => v.hireStatus === 'Available').length;
 
   const handlePick = async (newVehicleId: string) => {
     setSubmitting(true);
@@ -398,25 +427,43 @@ function ChangeVanButton({ assignmentId, vehicleId, currentVehicleReg, onChanged
     <div className="mt-2 w-full max-w-xs space-y-2 rounded-lg border border-gray-200 bg-gray-50 p-3">
       <p className="text-xs font-medium text-gray-700">
         Move from <strong>{currentVehicleReg}</strong> to:
+        {!loading && (
+          <span className="ml-1 font-normal text-gray-400">
+            ({options.length} matching{readyCount < options.length ? `, ${readyCount} ready` : ''})
+          </span>
+        )}
       </p>
       {error && <p className="text-xs text-red-600">{error}</p>}
-      {options.length === 0 ? (
-        <p className="text-xs text-gray-500">
-          {vehicles.length === 0 ? 'Loading vans…' : 'No other matching vans available.'}
-        </p>
+      {loading ? (
+        <p className="text-xs text-gray-500">Loading vans…</p>
+      ) : options.length === 0 ? (
+        <p className="text-xs text-gray-500">No other matching vans available.</p>
       ) : (
         <div className="flex max-h-48 flex-col gap-1 overflow-y-auto">
-          {options.map(v => (
-            <button
-              key={v.id}
-              disabled={submitting}
-              onClick={() => handlePick(v.id)}
-              className="rounded border border-gray-200 bg-white px-2 py-1.5 text-left text-xs hover:bg-gray-100 disabled:opacity-50"
-            >
-              <span className="font-mono font-bold text-ooosh-navy">{v.reg}</span>
-              <span className="ml-1 text-gray-400">{v.simpleType}</span>
-            </button>
-          ))}
+          {options.map(v => {
+            const ready = v.hireStatus === 'Available';
+            return (
+              <button
+                key={v.id}
+                disabled={submitting}
+                onClick={() => handlePick(v.id)}
+                className="flex items-center justify-between gap-2 rounded border border-gray-200 bg-white px-2 py-1.5 text-left text-xs hover:bg-gray-100 disabled:opacity-50"
+              >
+                <span>
+                  <span className="font-mono font-bold text-ooosh-navy">{v.reg}</span>
+                  <span className="ml-1 text-gray-400">{v.simpleType}</span>
+                </span>
+                <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
+                  ready ? 'bg-green-100 text-green-700'
+                    : v.hireStatus === 'On Hire' ? 'bg-blue-100 text-blue-700'
+                      : v.hireStatus === 'Not Ready' ? 'bg-red-100 text-red-700'
+                        : 'bg-amber-100 text-amber-700'
+                }`}>
+                  {v.hireStatus || 'Unknown'}
+                </span>
+              </button>
+            );
+          })}
         </div>
       )}
       <button
@@ -4495,6 +4542,9 @@ export default function JobDetailPage() {
                           assignmentId={a.id}
                           vehicleId={a.vehicle_id}
                           currentVehicleReg={a.vehicle_reg}
+                          jobStart={toDateInputValue(job.job_date || job.out_date || null)}
+                          jobEnd={toDateInputValue(job.job_end || job.return_date || null)}
+                          excludeHhJobId={job.hh_job_number ?? null}
                           onChanged={loadVehicleAssignments}
                         />
                       )}
