@@ -1,6 +1,8 @@
 # PCN MODULE SPEC — Penalty Charge Notice management (Monday → OP)
 
-**Status:** SPEC / DESIGN — shaped, not yet built. Refer to this before implementation.
+**Status:** ✅ BUILT & LIVE (Jun 2026). Build order §12 complete; Monday board imported
+(67 PCNs with scans). Remaining: deferred items in §13. See the "PCN Manager Integration"
+section in CLAUDE.md for the as-built summary.
 
 **Last shaped:** Jun 2026 (jon + Claude design session)
 
@@ -356,11 +358,13 @@ page).
 2. ✅ `routes/pcns.ts` — CRUD, `match`, settings reads; **`/extract` (Claude Vision, `services/pcn-extract.ts`)**.
 3. ✅ `/vehicles/pcns` list + detail page; Vehicles nav entry. **Extraction-first Log PCN modal** (upload → extract → review → save; manual entry is the fallback). Document stored to R2 on save.
 4. ✅ **"Log PCN" tile on `/quick`** (mobile-first — most PCNs arrive on paper; the file input offers camera OR PDF).
-5. Pay-direct flow + `mobile_upload_tokens` `pcn_receipt` purpose + public upload page.
-6. Receipt-chase scheduler + info@ alerts + issuer-deadline / NIP nudges.
-7. `PcnHistorySection` (Vehicle/Driver/Person/Org) + conditional Job Detail card.
-8. Dashboard NeedsAttention buckets.
-9. Email templates (transfer / driver-ID / pay-direct / receipt-chase / pay-recharge) into the registry + HireHop £35 handling charge.
+5. ✅ Pay-direct flow + `mobile_upload_tokens` `pcn_receipt` purpose + public upload page.
+6. ✅ Receipt-chase scheduler + info@ alerts + issuer-deadline / NIP nudges.
+7. ✅ `PcnHistorySection` (Vehicle/Driver/Person/Org) + conditional Job Detail card.
+8. ✅ Dashboard NeedsAttention buckets.
+9. ✅ Email templates (transfer / driver-ID / pay-direct / receipt-chase / pay-recharge) into the registry + HireHop £35 handling charge.
+
+**Post-build additions (Jun 2026):** Monday board import (`scripts/migrate-monday-pcns.ts`, 67 PCNs + scans) + driver backfill (`scripts/backfill-pcn-drivers.ts`); assign-driver-after-the-fact on PcnDetailPage with a freelancer/crew person link (migration 140, `pcns.driver_person_id`); click-to-sort + persisted list view. See CLAUDE.md "PCN Manager Integration".
 
 **Extraction is the PRIMARY entry path** (matches the legacy Netlify flow): the Log PCN modal leads with "take a photo or choose a file → Extract Data", pre-fills the form, and staff review/correct before saving. Manual entry is the fallback (a one-tap "enter details manually" link, and the fields are always editable). Extraction uses Claude Haiku via the shared `config/anthropic.ts` client — inert (503 → graceful "enter manually" message) when `ANTHROPIC_API_KEY` isn't set; it IS set on prod (the cost-receipt extractor already uses it).
 

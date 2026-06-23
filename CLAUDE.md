@@ -2375,8 +2375,81 @@ These are existing standalone tools that currently push to Monday.com. They need
 - **Payment Portal** — Stripe payment processing, currently updates Monday.com. HIGH PRIORITY to repoint (after Steps 1-4).
 - **Staging Calculator** — ✅ **INTEGRATED into OP (Jun 2026)** — see "Staging Calculator Integration" below.
 - **Backline Matcher** — ✅ **INTEGRATED into OP (Jun 2026)** — see "Backline Matcher Integration" below.
-- **PCN Manager** — penalty charge notice processing (standalone, separate repo `jon-ooosh/PCN-Management-System`). Next to integrate.
+- **PCN Manager** — ✅ **INTEGRATED into OP (Jun 2026)** — see "PCN Manager Integration" below.
 - **Cold Lead Finder** — Ticketmaster API integration (standalone, low priority)
+
+#### PCN Manager Integration (Jun 2026)
+
+Penalty Charge Notice module, re-homed from the standalone `PCN-Management-System`
+Netlify app (Monday PCN Tracker board + PCN Settings board + Jotform/extraction
+flow) into OP under Vehicles. **Spec:** `docs/PCN-MODULE-SPEC.md`. Migrations
+130/131/136/138/**140**.
+
+**Storage:** `pcns` (the tracker record, replaces the Monday board) + `pcn_events`
+(typed audit timeline) + `documents` JSONB (multi-doc: notice front/back,
+correspondence, responses, receipts — migration 136). Settings live in
+`system_settings` (category `pcn`), replacing the Monday PCN Settings board.
+
+**Build order (spec §12) — all shipped:** CRUD + `/match` + AI `/extract`
+(`pcn-extract.ts`, Claude Haiku via `config/anthropic.ts`); list (`PcnsPage`) +
+detail (`PcnDetailPage`) + Vehicles nav; extraction-first Log PCN modal +
+`/quick` tile; pay-direct flow + public receipt upload (`PcnReceiptUploadPage`,
+`mobile_upload_tokens` `pcn_receipt` purpose); receipt-chase scheduler
+(`pcn-chase.ts`, runs in `scheduler.ts`) + deadline/NIP nudges (`pcn-attention.ts`,
+silent info@ alerts); `PcnHistorySection` (Vehicle/Driver/Org/**Person**) +
+conditional Job Detail card; dashboard NeedsAttention buckets; all 8 email
+templates + the conditional £35+VAT HireHop handling charge (`pcn-actions.ts`,
+item `b1744`). **RBAC:** money-moving actions (transfer_liability, pay_recharge)
+are MANAGER_ROLES; pay-direct / ID-request / internal / query are STAFF_ROLES.
+
+**Monday import (`scripts/migrate-monday-pcns.ts`):** one-pass importer modelled
+on `migrate-monday-driver-files.ts`. Paginates the PCN Tracker board
+(`18390180140`), maps columns → `pcns` scalars (column IDs lifted from the legacy
+`create-pcn.js`), downloads the attached notice scan(s) via each asset's
+`public_url` → R2 (`files/pcn-documents/<uuid>/`) → `documents` JSONB. Email-silent
+(direct DB writes, never the action endpoints; historical deadlines are in the
+past so the info@-only nudges don't fire). Idempotent: upsert on `reference`, fills
+NULL gaps only, skips docs whose Monday asset-id is already present (`--force` to
+re-import). Best-effort anchoring: vehicle (reg parsed from the notice filename →
+`fleet_vehicles`), job (`JOB_NUMBER` → `jobs.hh_job_number`). Reports unmapped
+status/type/action labels so the enum maps can be extended before committing.
+**First live run: 67 PCNs imported with scans.** NB: any new script that needs the
+Monday token must `import dotenv` + `dotenv.config()` — importers that only import
+`pg` never load the backend `.env` and `MONDAY_API_TOKEN` reads as unset (the PCN
+import worked only because it transitively imports `config/r2`, which calls
+`dotenv.config()`).
+
+**Driver backfill (`scripts/backfill-pcn-drivers.ts`):** the import couldn't anchor
+drivers — OP `drivers.monday_item_id` comes from the global driver board
+(`9798399405`) but the PCN board's driver link points at the Driver Hire Form board
+(`841453886`), different pulse-id spaces. The PCN board's `board_relation` turned
+out to be an **empty mirror**, so the backfill matches by **name/email** against a
+text column (`--name-column <colId>` — jon copied the mirrored names into
+`text_mm4fh7s4`): drivers table first (email → name), then freelancer **people**
+(→ `driver_person_id`). Dry-run default, `--commit`, sets `driver_id`/
+`driver_person_id` only where both are NULL, logs a `matched` event.
+
+**Assign-driver-after-the-fact (this session):** a PCN's responsible driver can be
+set/changed/unassigned from `PcnDetailPage` after creation (multi-driver jobs,
+"which of three freelancers was in the van"). Migration **140** added
+`pcns.driver_person_id` (FK → `people`) so the driver can be a **freelancer/crew
+person** with no `drivers` row, alongside the existing `driver_id` (client
+self-drive). Exactly one of the two is set; the picker clears the other. Picker
+sources: drivers + crew candidates who were on the job around the offence date
+(from `/pcns/match` `crew_candidates`), plus a **Drivers | Freelancers** search
+toggle (`/drivers` / `/people?is_freelancer=true`). PATCH `/pcns/:id` accepts both
+ids and logs a `matched` event on change. List + detail render the person (with a
+"crew" tag, link to `/people/:id`); the Person PCN tab (`by-person`, gated to
+freelancers) shows their PCN history.
+
+**List UX (this session):** click-to-sort column headers (a `<field>_asc/_desc`
+pair per column in the `/pcns` SORTS whitelist) + last-used sort/filter persisted
+to localStorage (`ooosh_pcns_prefs`; dashboard deep-link URL params still win on
+load).
+
+**Deferred:** pay & recharge via the Money tab (currently just the HH line item);
+shared `document-extract` primitive with the deferred vehicle service-record
+extractor.
 
 #### Staging Calculator Integration (Jun 2026)
 
