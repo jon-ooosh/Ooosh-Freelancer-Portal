@@ -6643,28 +6643,50 @@ function JobFilesSection({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
   const [selectedTag, setSelectedTag] = useState('');
+  const [customTag, setCustomTag] = useState('');
   const [fileComment, setFileComment] = useState('');
   const [deleting, setDeleting] = useState<string | null>(null);
   const [error, setError] = useState('');
   const [filterTag, setFilterTag] = useState('');
   const [viewingFile, setViewingFile] = useState<FileAttachment | null>(null);
   const [emailingFile, setEmailingFile] = useState<FileAttachment | null>(null);
+  const [dragOver, setDragOver] = useState(false);
+
+  // Link-adding mode (external URLs — Dropbox/WeTransfer/Drive links etc.)
+  const [linkMode, setLinkMode] = useState(false);
+  const [linkUrl, setLinkUrl] = useState('');
+  const [linkName, setLinkName] = useState('');
+  const [addingLink, setAddingLink] = useState(false);
+
+  // When the tag is "Other", the user types a free-text tag instead. This
+  // resolves the value actually saved as the label.
+  const effectiveTag = selectedTag === 'Other' ? customTag.trim() : selectedTag;
+  const resetMeta = () => {
+    setSelectedTag('');
+    setCustomTag('');
+    setFileComment('');
+  };
 
   // Post-save metadata edit — keyed on file URL because that's stable
   // across re-renders (label/comment shift around as users edit).
   const [editingFileUrl, setEditingFileUrl] = useState<string | null>(null);
   const [editLabel, setEditLabel] = useState('');
+  const [editCustomTag, setEditCustomTag] = useState('');
   const [editComment, setEditComment] = useState('');
   const [savingEdit, setSavingEdit] = useState(false);
+
+  const effectiveEditTag = editLabel === 'Other' ? editCustomTag.trim() : editLabel;
 
   const startEdit = (file: FileAttachment) => {
     setEditingFileUrl(file.url);
     setEditLabel(file.label || '');
+    setEditCustomTag('');
     setEditComment(file.comment || '');
   };
   const cancelEdit = () => {
     setEditingFileUrl(null);
     setEditLabel('');
+    setEditCustomTag('');
     setEditComment('');
   };
   const saveEdit = async (file: FileAttachment) => {
@@ -6676,7 +6698,7 @@ function JobFilesSection({
         entity_id: jobId,
         file_url: file.url,
         updates: {
-          label: editLabel.trim() || null,
+          label: effectiveEditTag.trim() || null,
           comment: editComment.trim() || null,
         },
       });
@@ -6703,10 +6725,7 @@ function JobFilesSection({
     }
   };
 
-  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
+  const uploadFile = async (file: File) => {
     setUploading(true);
     setError('');
     try {
@@ -6714,18 +6733,54 @@ function JobFilesSection({
       formData.append('file', file);
       formData.append('entity_type', 'jobs');
       formData.append('entity_id', jobId);
-      if (selectedTag) formData.append('label', selectedTag);
+      if (effectiveTag) formData.append('label', effectiveTag);
       if (fileComment.trim()) formData.append('comment', fileComment.trim());
 
       await api.upload('/files/upload', formData);
-      setSelectedTag('');
-      setFileComment('');
+      resetMeta();
       onFilesChanged();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Upload failed');
     } finally {
       setUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  const handleUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) void uploadFile(file);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) void uploadFile(file);
+  };
+
+  const addLink = async () => {
+    if (!linkUrl.trim()) return;
+    setAddingLink(true);
+    setError('');
+    try {
+      await api.post('/files/add-link', {
+        entity_type: 'jobs',
+        entity_id: jobId,
+        url: linkUrl.trim(),
+        name: linkName.trim() || undefined,
+        label: effectiveTag || undefined,
+        comment: fileComment.trim() || undefined,
+      });
+      setLinkUrl('');
+      setLinkName('');
+      setLinkMode(false);
+      resetMeta();
+      onFilesChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to add link');
+    } finally {
+      setAddingLink(false);
     }
   };
 
@@ -6754,8 +6809,15 @@ function JobFilesSection({
   return (
     <div className="space-y-6">
       {/* Upload section */}
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-        <h3 className="text-sm font-semibold text-gray-700 mb-4">Upload File</h3>
+      <div
+        className={`bg-white rounded-xl shadow-sm border p-6 transition-colors ${
+          dragOver ? 'border-ooosh-400 ring-2 ring-ooosh-200 bg-ooosh-50/40' : 'border-gray-200'
+        }`}
+        onDragOver={(e) => { e.preventDefault(); if (!dragOver) setDragOver(true); }}
+        onDragLeave={(e) => { e.preventDefault(); setDragOver(false); }}
+        onDrop={handleDrop}
+      >
+        <h3 className="text-sm font-semibold text-gray-700 mb-4">Add File or Link</h3>
 
         {error && (
           <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">{error}</div>
@@ -6776,17 +6838,29 @@ function JobFilesSection({
                 ))}
               </select>
             </div>
+            {selectedTag === 'Other' && (
+              <div>
+                <label className="block text-xs font-medium text-gray-500 mb-1">Custom tag</label>
+                <input
+                  type="text"
+                  value={customTag}
+                  onChange={(e) => setCustomTag(e.target.value)}
+                  placeholder="e.g. Client Files"
+                  className="border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                />
+              </div>
+            )}
             <div className="flex-1 min-w-[200px]">
               <label className="block text-xs font-medium text-gray-500 mb-1">Comment</label>
               <input
                 type="text"
                 value={fileComment}
                 onChange={(e) => setFileComment(e.target.value)}
-                placeholder="Optional note about this file..."
+                placeholder="Optional note about this file or link..."
                 className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
               />
             </div>
-            <div>
+            <div className="flex items-center gap-2">
               <input
                 ref={fileInputRef}
                 type="file"
@@ -6802,9 +6876,57 @@ function JobFilesSection({
               >
                 {uploading ? 'Uploading...' : 'Choose File'}
               </button>
+              <button
+                onClick={() => { setLinkMode(!linkMode); setError(''); }}
+                className={`px-4 py-2 text-sm font-medium rounded-lg border transition-colors ${
+                  linkMode
+                    ? 'bg-ooosh-50 border-ooosh-300 text-ooosh-700'
+                    : 'border-gray-300 text-gray-700 hover:bg-gray-50'
+                }`}
+              >
+                🔗 Add Link
+              </button>
             </div>
           </div>
-          <p className="text-xs text-gray-400">PDF, images, docs, spreadsheets. Max 10MB. Images and PDFs can be viewed inline.</p>
+
+          {linkMode && (
+            <div className="flex items-end gap-3 flex-wrap pt-2 border-t border-gray-100">
+              <div className="flex-1 min-w-[260px]">
+                <label className="block text-xs font-medium text-gray-500 mb-1">Link URL</label>
+                <input
+                  type="url"
+                  value={linkUrl}
+                  onChange={(e) => setLinkUrl(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') void addLink(); }}
+                  placeholder="https://www.dropbox.com/..."
+                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                  autoFocus
+                />
+              </div>
+              <div className="flex-1 min-w-[180px]">
+                <label className="block text-xs font-medium text-gray-500 mb-1">Display name <span className="text-gray-400">(optional)</span></label>
+                <input
+                  type="text"
+                  value={linkName}
+                  onChange={(e) => setLinkName(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') void addLink(); }}
+                  placeholder="e.g. Dropbox — full rider"
+                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                />
+              </div>
+              <button
+                onClick={() => void addLink()}
+                disabled={addingLink || !linkUrl.trim()}
+                className="px-4 py-2 bg-ooosh-600 text-white text-sm font-medium rounded-lg hover:bg-ooosh-700 disabled:opacity-50"
+              >
+                {addingLink ? 'Adding...' : 'Add Link'}
+              </button>
+            </div>
+          )}
+
+          <p className="text-xs text-gray-400">
+            PDF, images, docs, spreadsheets. Max 10MB. Drag &amp; drop a file anywhere on this box. Images and PDFs view inline; links open in a new tab.
+          </p>
         </div>
       </div>
 
@@ -6847,8 +6969,16 @@ function JobFilesSection({
         ) : (
           <div className="space-y-2">
             {filteredFiles.map((file, idx) => {
-              const canPreview = isPreviewable(file.name);
+              const isLink = file.type === 'link';
+              const canPreview = !isLink && isPreviewable(file.name);
               const isEditing = editingFileUrl === file.url;
+              const openFile = () => {
+                if (isLink) {
+                  window.open(file.url, '_blank', 'noopener,noreferrer');
+                } else {
+                  setViewingFile(file);
+                }
+              };
               return (
                 <div
                   key={file.url || idx}
@@ -6856,22 +6986,25 @@ function JobFilesSection({
                 >
                   <div className="flex items-start gap-3 min-w-0 flex-1">
                     <div className={`w-8 h-8 rounded flex items-center justify-center text-xs font-bold flex-shrink-0 ${
+                      isLink ? 'bg-sky-100 text-sky-600' :
                       file.type === 'image' ? 'bg-purple-100 text-purple-600' :
                       file.type === 'document' ? 'bg-blue-100 text-blue-600' :
                       'bg-gray-100 text-gray-500'
                     }`}>
-                      {file.type === 'image' ? 'IMG' : file.type === 'document' ? 'DOC' : 'FILE'}
+                      {isLink ? '🔗' : file.type === 'image' ? 'IMG' : file.type === 'document' ? 'DOC' : 'FILE'}
                     </div>
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
                         <button
-                          onClick={() => setViewingFile(file)}
+                          onClick={openFile}
                           className="text-sm font-medium text-gray-900 hover:text-ooosh-600 truncate text-left"
                         >
                           {file.name}
-                          {canPreview && (
+                          {isLink ? (
+                            <span className="text-xs text-gray-400 ml-1">(open link ↗)</span>
+                          ) : canPreview ? (
                             <span className="text-xs text-gray-400 ml-1">(click to view)</span>
-                          )}
+                          ) : null}
                         </button>
                         {!isEditing && file.label && (
                           <span className={`inline-flex px-1.5 py-0.5 rounded text-xs font-medium flex-shrink-0 ${fileTagColour(file.label)}`}>
@@ -6897,6 +7030,15 @@ function JobFilesSection({
                                 <option value={editLabel}>{editLabel}</option>
                               )}
                             </select>
+                            {editLabel === 'Other' && (
+                              <input
+                                type="text"
+                                value={editCustomTag}
+                                onChange={(e) => setEditCustomTag(e.target.value)}
+                                placeholder="Custom tag"
+                                className="text-xs border border-gray-300 rounded px-2 py-1 focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                              />
+                            )}
                           </div>
                           <input
                             type="text"
@@ -6949,13 +7091,15 @@ function JobFilesSection({
                       >
                         {file.share_with_freelancer ? 'Shared' : 'Share'}
                       </button>
-                      <button
-                        onClick={() => setEmailingFile(file)}
-                        className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium opacity-0 group-hover:opacity-100 transition-opacity"
-                        title="Email this file"
-                      >
-                        Email
-                      </button>
+                      {!isLink && (
+                        <button
+                          onClick={() => setEmailingFile(file)}
+                          className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium opacity-0 group-hover:opacity-100 transition-opacity"
+                          title="Email this file"
+                        >
+                          Email
+                        </button>
+                      )}
                       <button
                         onClick={() => startEdit(file)}
                         className="text-xs text-gray-600 hover:text-gray-800 font-medium opacity-0 group-hover:opacity-100 transition-opacity"
@@ -6963,12 +7107,14 @@ function JobFilesSection({
                       >
                         Edit
                       </button>
-                      <button
-                        onClick={() => setViewingFile(file)}
-                        className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium opacity-0 group-hover:opacity-100 transition-opacity"
-                      >
-                        View
-                      </button>
+                      {!isLink && (
+                        <button
+                          onClick={() => setViewingFile(file)}
+                          className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium opacity-0 group-hover:opacity-100 transition-opacity"
+                        >
+                          View
+                        </button>
+                      )}
                       <button
                         onClick={() => handleDelete(file.url)}
                         disabled={deleting === file.url}

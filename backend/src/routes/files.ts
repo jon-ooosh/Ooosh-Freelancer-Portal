@@ -247,8 +247,11 @@ router.delete('/delete', async (req: AuthRequest, res: Response) => {
       );
     }
 
-    // Remove from R2
-    await deleteFromR2(key);
+    // Remove from R2 — skip for external links (type: 'link'), which have an
+    // http(s) URL as their "key" and no object in our bucket.
+    if (!/^https?:\/\//i.test(String(key))) {
+      await deleteFromR2(key);
+    }
 
     // Record as activity interaction
     const fkColumn = getEntityFk(entity_type);
@@ -310,6 +313,77 @@ router.patch('/update-metadata', async (req: AuthRequest, res: Response) => {
   } catch (error) {
     console.error('File metadata update error:', error);
     res.status(500).json({ error: 'Update failed' });
+  }
+});
+
+// POST /api/files/add-link — store an external URL as a FileAttachment.
+//
+// A "link" is a FileAttachment whose `url` is an http(s) address rather than
+// an R2 storage key (type: 'link'). We host no bytes — it's a pointer to a
+// client's Dropbox / WeTransfer / Google Drive etc. Sits in the same files
+// JSONB array as uploaded files so tags, comments, share-with-freelancer and
+// the filter row all apply. Generic over every entity type.
+router.post('/add-link', async (req: AuthRequest, res: Response) => {
+  try {
+    const { entity_type, entity_id, url, name, label, comment, share_with_freelancer } = req.body;
+    if (!entity_type || !entity_id || !url) {
+      res.status(400).json({ error: 'entity_type, entity_id, and url are required' });
+      return;
+    }
+
+    const validTypes = ['people', 'organisations', 'venues', 'interactions', 'jobs', 'drivers'];
+    if (!validTypes.includes(entity_type)) {
+      res.status(400).json({ error: 'Invalid entity_type' });
+      return;
+    }
+
+    // Validate it's a real http(s) URL — guards against javascript: / data:
+    // and other unsafe schemes. Bare domains (no scheme) get https:// prepended.
+    const raw = String(url).trim();
+    let parsed: URL;
+    try {
+      parsed = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
+    } catch {
+      res.status(400).json({ error: 'Invalid URL' });
+      return;
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      res.status(400).json({ error: 'Only http(s) links are allowed' });
+      return;
+    }
+
+    const displayName = (name && String(name).trim()) || parsed.hostname.replace(/^www\./, '');
+
+    const fileAttachment: Record<string, unknown> = {
+      name: displayName,
+      url: parsed.toString(),
+      type: 'link',
+      uploaded_at: new Date().toISOString(),
+      uploaded_by: req.user!.email,
+    };
+    if (label && String(label).trim()) fileAttachment.label = String(label).trim();
+    if (comment && String(comment).trim()) fileAttachment.comment = String(comment).trim();
+    if (share_with_freelancer === true) fileAttachment.share_with_freelancer = true;
+
+    await query(
+      `UPDATE ${entity_type} SET files = COALESCE(files, '[]'::jsonb) || $1::jsonb, updated_at = NOW() WHERE id = $2`,
+      [JSON.stringify([fileAttachment]), entity_id]
+    );
+
+    const fkColumn = getEntityFk(entity_type);
+    if (fkColumn) {
+      const display = label && String(label).trim() ? `${String(label).trim()} (${displayName})` : displayName;
+      await query(
+        `INSERT INTO interactions (id, type, content, ${fkColumn}, created_by, created_at)
+         VALUES ($1, 'note', $2, $3, $4, NOW())`,
+        [uuid(), `🔗 Added link: ${display}`, entity_id, req.user!.id]
+      );
+    }
+
+    res.status(201).json(fileAttachment);
+  } catch (error) {
+    console.error('Add link error:', error);
+    res.status(500).json({ error: 'Failed to add link' });
   }
 });
 

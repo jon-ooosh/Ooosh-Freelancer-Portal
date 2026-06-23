@@ -10,7 +10,10 @@ export interface FileAttachment {
   label?: string;
   comment?: string;
   url: string;
-  type: 'document' | 'image' | 'other';
+  // 'link' = an external URL (Dropbox, WeTransfer, Google Drive, etc.) rather
+  // than a file stored in R2. `url` holds the http(s) address; no bytes are
+  // hosted by us. Rendered with a distinct chip and opened in a new tab.
+  type: 'document' | 'image' | 'other' | 'link';
   uploaded_at: string;
   uploaded_by: string;
   share_with_freelancer?: boolean;
