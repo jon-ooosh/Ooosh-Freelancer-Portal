@@ -1,0 +1,56 @@
+name: CI
+
+# Build-check gate for pull requests targeting main.
+#
+# Why this exists: deploy.yml runs on *push to main*, so merging a PR
+# auto-deploys to the Hetzner server with no pre-merge gate. This workflow
+# build-checks the two apps the server actually builds (backend + frontend),
+# so a PR that would break the deploy goes red BEFORE it can be merged.
+# Mirrors deploy.yml's build steps exactly (minus migrate/restart) on the
+# same Node version as production.
+#
+# The repo-root Next.js portal (/) is intentionally NOT built here — it
+# deploys via Netlify, which gates its own build separately.
+
+on:
+  pull_request:
+    branches:
+      - main
+
+# Cancel an in-flight run if the PR is updated again (e.g. dependabot rebase).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci
+      - run: npm run build
+
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run build
