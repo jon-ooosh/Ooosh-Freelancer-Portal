@@ -528,6 +528,10 @@ function RequirementSlots({
   // created slot has a driver attached but no vehicle yet, letting staff
   // pick a van for that specific driver card without leaving the page.
   const [linkPickerForId, setLinkPickerForId] = useState<string | null>(null)
+  // Inline picker for MOVING a single already-vanned driver to a different
+  // van on a multi-van job (e.g. 5 drivers over 2 vans). Distinct from the
+  // link picker above: this re-points one card without cascading to siblings.
+  const [changeVanForId, setChangeVanForId] = useState<string | null>(null)
   const [linking, setLinking] = useState(false)
 
   /** Soft-refresh allocations data without a full page reload — preserves scroll. */
@@ -642,6 +646,37 @@ function RequirementSlots({
       alert(err instanceof Error ? err.message : 'Failed to unlink vehicle')
     } finally {
       setLinking(false)
+    }
+  }
+
+  /**
+   * Re-point ONE driver card to a different van — no cascade. Used to
+   * distribute drivers across the vans on a multi-van job (e.g. 5 drivers
+   * over 2 vans: leave 3 on van A, move 2 onto van B). Deliberately does
+   * NOT touch siblings — unlike linkVehicleToHireForm's "pick once, all
+   * driverless siblings follow" cascade, which is for the one-van case.
+   * Same backend PATCH the link/unlink paths use.
+   */
+  async function changeVanOnHireForm(allocationId: string, vehicle: Vehicle) {
+    try {
+      setLinking(true)
+      const { apiFetch } = await import('../config/api-config')
+      const resp = await apiFetch(`/api/hire-forms/${encodeURIComponent(allocationId)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ vehicle_id: vehicle.id }),
+      })
+      if (!resp.ok) {
+        const txt = await resp.text().catch(() => 'Unknown error')
+        throw new Error(`PATCH failed for ${allocationId}: ${resp.status} ${txt}`)
+      }
+      refreshAllocationsSoftly()
+    } catch (err) {
+      console.error('[allocations] Change van on hire form failed:', err)
+      alert(err instanceof Error ? err.message : 'Failed to change van')
+    } finally {
+      setLinking(false)
+      setChangeVanForId(null)
     }
   }
 
@@ -783,6 +818,34 @@ function RequirementSlots({
                         return ready < matchingVehicles.length ? `, ${ready} ready` : ''
                       })()
                     })
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* Multi-van split — move THIS driver to a different van on the
+                job without disturbing the others. Only on multi-van jobs
+                (slotsNeeded > 1): the 99% single-van case uses unlink+repick.
+                Hidden once booked out (the van's physically committed). This
+                is what lets staff distribute N drivers across the job's vans
+                (e.g. 5 drivers / 2 vans) without DB surgery. */}
+            {slotsNeeded > 1 && allocation.hireFormLinked && allocation.vehicleReg &&
+              allocation.rawStatus !== 'booked_out' && allocation.rawStatus !== 'active' && (
+              <div className="mt-2">
+                {changeVanForId === allocation.id ? (
+                  <VanPicker
+                    vehicles={matchingVehicles}
+                    onSelect={(vehicle) => changeVanOnHireForm(allocation.id, vehicle)}
+                    onCancel={() => setChangeVanForId(null)}
+                  />
+                ) : (
+                  <button
+                    onClick={() => setChangeVanForId(allocation.id)}
+                    disabled={linking}
+                    className="text-xs font-medium text-ooosh-navy underline disabled:text-gray-400"
+                    title="Move this driver to a different van on this job"
+                  >
+                    Change van
                   </button>
                 )}
               </div>
