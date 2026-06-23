@@ -7,12 +7,202 @@
  *
  * See docs/CARNET-SPEC.md.
  */
-import { Router, Response } from 'express';
+import { Router, Response, Request } from 'express';
+import rateLimit from 'express-rate-limit';
+import { randomBytes } from 'node:crypto';
 import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
+import { getSystemSettings } from './system-settings';
+import { getFromR2, uploadToR2 } from '../config/r2';
+import { generateCarnetAuthorityPdf } from '../services/carnet-authority-pdf';
+import { getFrontendUrl } from '../config/app-urls';
+import { emailService } from '../services/email-service';
+import { resolveClientEmailTarget } from '../services/money-emails';
 
 const router = Router();
 
+// The two-block authority wording shown to the client before they sign.
+const CARNET_AUTHORITY_TERMS =
+  'Ooosh Tours Ltd will use the information you provide to process an ATA Carnet on your behalf, ' +
+  'appointing the lead person named above as our agent for dealing with and signing the Carnet, under ' +
+  'the appropriate International Convention and guaranteed by the appropriate Chamber of Commerce.\n\n' +
+  'By signing, the lead person accepts full responsibility for any charges, fees, taxes or similar that ' +
+  'may become due by the use or misuse of the Carnet — under no circumstances will Ooosh! Tours Ltd be ' +
+  'held responsible for any such costs. This responsibility lasts until the closure of the Carnet in the ' +
+  'usual timeframe (usually eighteen (18) months from the end date of the Carnet).\n\n' +
+  'As part of this service we will usually supply a list of equipment with serial numbers, weights etc. ' +
+  'Although we act in good faith, this is provided without guarantee and we reserve the right to make ' +
+  'changes to the agreed equipment, accepting no responsibility for any charges, losses or damages ' +
+  'incurred as a result of any such changes.';
+
+const TERMINAL_FORM_STATUSES = ['discharged', 'closed', 'cancelled'];
+
+// ════════════════════════════════════════════════════════════════════════
+// PUBLIC — client request form (token, no JWT). MUST be before the auth gate.
+// ════════════════════════════════════════════════════════════════════════
+
+const publicLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 30,
+  message: { error: 'Too many requests' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// GET /api/carnets/form/:token — form context + validity.
+router.get('/form/:token', publicLimiter, async (req: Request, res: Response) => {
+  try {
+    const result = await query(
+      `SELECT c.id, c.status, c.lead_name, c.form_submitted_at,
+              j.hh_job_number, j.job_name, j.client_name
+       FROM job_carnets c JOIN jobs j ON j.id = c.job_id
+       WHERE c.form_token = $1`,
+      [req.params.token]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'This link is not valid.' });
+    const c = result.rows[0];
+    const valid = !TERMINAL_FORM_STATUSES.includes(c.status);
+    res.json({
+      data: {
+        valid,
+        already_submitted: !!c.form_submitted_at,
+        hh_job_number: c.hh_job_number,
+        job_name: c.job_name,
+        client_name: c.client_name,
+        lead_name: c.lead_name,
+        authority_terms: CARNET_AUTHORITY_TERMS,
+      },
+    });
+  } catch (err) {
+    console.error('[carnets] form context error:', err);
+    res.status(500).json({ error: 'Could not load the form.' });
+  }
+});
+
+// POST /api/carnets/form/:token/submit — the combined info + authority + signature.
+router.post('/form/:token/submit', publicLimiter, async (req: Request, res: Response) => {
+  try {
+    const cur = await query(
+      `SELECT c.*, j.hh_job_number, j.client_name FROM job_carnets c JOIN jobs j ON j.id = c.job_id WHERE c.form_token = $1`,
+      [req.params.token]
+    );
+    if (cur.rows.length === 0) return res.status(404).json({ error: 'This link is not valid.' });
+    const carnet = cur.rows[0];
+    if (carnet.form_submitted_at) return res.status(409).json({ error: 'This form has already been submitted.' });
+    if (TERMINAL_FORM_STATUSES.includes(carnet.status)) return res.status(410).json({ error: 'This carnet is closed.' });
+
+    const b = req.body || {};
+    const length = [2, 6, 12].includes(Number(b.carnet_length_months)) ? Number(b.carnet_length_months) : null;
+    const leadName = String(b.lead_name || '').trim();
+    if (!leadName) return res.status(400).json({ error: 'Lead name is required.' });
+    if (!length) return res.status(400).json({ error: 'Please choose a carnet length.' });
+    if (!b.carnet_start_date) return res.status(400).json({ error: 'Please provide a required start date.' });
+    if (!b.accepted) return res.status(400).json({ error: 'Please accept the terms.' });
+    if (!b.signature || !String(b.signature).startsWith('data:image')) return res.status(400).json({ error: 'Please provide a signature.' });
+
+    const expiry = addMonthsISO(String(b.carnet_start_date), length);
+    const liability = addMonthsISO(expiry, 18);
+
+    // Client signature → R2 (kept as a buffer for the PDF).
+    let clientSigBuf: Buffer | null = null;
+    try {
+      clientSigBuf = Buffer.from(String(b.signature).split(',')[1] || '', 'base64');
+      await uploadToR2(`carnet-authority/${carnet.id}/client-signature-${Date.now()}.png`, clientSigBuf, 'image/png');
+    } catch { clientSigBuf = null; }
+
+    const additionalNames = Array.isArray(b.additional_names)
+      ? b.additional_names.filter((n: { first?: string; last?: string }) => (n?.first || n?.last))
+      : [];
+
+    await query(
+      `UPDATE job_carnets SET
+         carnet_length_months = $1, carnet_start_date = $2, carnet_expiry_date = $3, liability_until = $4,
+         eu_countries = $5, non_eu_countries = $6, lead_name = $7, lead_email = $8, lead_role = $9,
+         additional_names = $10, form_submitted_at = NOW(), status = 'info_received', updated_at = NOW()
+       WHERE id = $11`,
+      [
+        length, b.carnet_start_date, expiry, liability,
+        Array.isArray(b.eu_countries) ? b.eu_countries : [],
+        Array.isArray(b.non_eu_countries) ? b.non_eu_countries : [],
+        leadName, String(b.lead_email || '').trim() || null, String(b.lead_role || '').trim() || null,
+        JSON.stringify(additionalNames), carnet.id,
+      ]
+    );
+
+    // Seed GMRs from the crossings (only if none exist yet).
+    const existingGmrs = await query(`SELECT COUNT(*) AS n FROM carnet_gmrs WHERE carnet_id = $1`, [carnet.id]);
+    if (parseInt(existingGmrs.rows[0].n, 10) === 0 && b.gmr_needed && Array.isArray(b.crossings)) {
+      let order = 0;
+      for (const x of b.crossings) {
+        if (!x?.crossing_date && !x?.crossing_location) continue;
+        const direction = ['into_eu', 'out_of_eu'].includes(x.direction) ? x.direction : null;
+        await query(
+          `INSERT INTO carnet_gmrs (carnet_id, crossing_date, crossing_location, direction, status, sort_order)
+           VALUES ($1, $2, $3, $4, 'needed', $5)`,
+          [carnet.id, x.crossing_date || null, x.crossing_location || null, direction, order++]
+        );
+      }
+    }
+
+    // Generate the final two-signature Letter of Authorisation.
+    let pdfKey: string | null = null;
+    let pdfBuffer: Buffer | null = null;
+    try {
+      const settings = await getSystemSettings([
+        'carnet_ooosh_signatory_name', 'carnet_ooosh_signatory_role',
+        'carnet_company_address', 'carnet_ooosh_signature_url',
+      ]);
+      const oooshSig = settings.carnet_ooosh_signature_url ? await r2ToBuffer(settings.carnet_ooosh_signature_url) : null;
+      const pdfBytes = await generateCarnetAuthorityPdf({
+        date: new Date(),
+        companyAddress: settings.carnet_company_address || 'Compass House, 7 East Street, Portslade, East Sussex, BN41 1DL, UK',
+        signatoryName: settings.carnet_ooosh_signatory_name || 'Jonathan Wood',
+        signatoryRole: settings.carnet_ooosh_signatory_role || 'Company Director',
+        signatureBuffer: oooshSig,
+        leadName, leadRole: String(b.lead_role || '').trim(),
+        clientSignatureBuffer: clientSigBuf,
+      });
+      pdfBuffer = Buffer.from(pdfBytes);
+      pdfKey = `carnet-authority/${carnet.id}/letter-of-authorisation-${Date.now()}.pdf`;
+      await uploadToR2(pdfKey, pdfBuffer, 'application/pdf');
+      await query(`UPDATE job_carnets SET signed_authority_url = $1 WHERE id = $2`, [pdfKey, carnet.id]);
+      const jf = await query(`SELECT files FROM jobs WHERE id = $1`, [carnet.job_id]);
+      const files = Array.isArray(jf.rows[0]?.files) ? jf.rows[0].files : [];
+      files.push({ url: pdfKey, name: 'Letter of Authorisation (carnet).pdf', label: 'Carnet authority', uploaded_at: new Date().toISOString(), uploaded_by: SYSTEM_USER_ID });
+      await query(`UPDATE jobs SET files = $1 WHERE id = $2`, [JSON.stringify(files), carnet.job_id]);
+    } catch (err) {
+      console.error('[carnets] authority PDF generation on submit failed:', err);
+    }
+
+    await syncCarnetRequirementStatus(carnet.job_id, 'info_received');
+    await logCarnetInteraction(carnet.job_id, `📄 Carnet request form submitted by ${leadName} — authority signed`, undefined);
+
+    // Email: signed copy to the client + notification to the office.
+    const jobNumber = String(carnet.hh_job_number || '');
+    const attachments = pdfBuffer ? [{ filename: 'Letter of Authorisation.pdf', content: pdfBuffer, contentType: 'application/pdf' }] : undefined;
+    if (b.lead_email) {
+      emailService.send('carnet_authority_copy', {
+        to: String(b.lead_email).trim(),
+        variables: { leadName, jobNumber },
+        attachments,
+      }).catch((e) => console.error('[carnets] client copy email failed:', e));
+    }
+    emailService.send('carnet_authority_received_internal', {
+      to: 'info@oooshtours.co.uk',
+      variables: { leadName, jobNumber, clientName: carnet.client_name || '' },
+      attachments,
+    }).catch((e) => console.error('[carnets] internal notify failed:', e));
+
+    res.json({ data: { ok: true } });
+  } catch (err) {
+    console.error('[carnets] form submit error:', err);
+    res.status(500).json({ error: 'Could not submit the form. Please try again.' });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════════
+// STAFF — everything below requires a JWT.
+// ════════════════════════════════════════════════════════════════════════
 router.use(authenticate);
 router.use(authorize(...STAFF_ROLES));
 
@@ -35,6 +225,13 @@ router.get('/', async (req: AuthRequest, res: Response) => {
               c.carnet_start_date, c.carnet_expiry_date, c.chase_date,
               c.form_sent_at, c.form_submitted_at, c.created_at, c.updated_at,
               j.hh_job_number, j.job_name, j.client_name, j.job_date,
+              -- "Needed by" = when the carnet must be in hand (form start date if
+              -- given, else the tour's outgoing date). "Return by" = 7 days after
+              -- the carnet's validity ends (start + length), we_supply only — the
+              -- discharge deadline, NOT the job end date.
+              COALESCE(c.carnet_start_date, j.out_date, j.job_date) AS needed_by,
+              CASE WHEN c.mode = 'we_supply' AND c.carnet_expiry_date IS NOT NULL
+                   THEN c.carnet_expiry_date + 7 END AS return_by,
               (SELECT COUNT(*) FROM carnet_gmrs g WHERE g.carnet_id = c.id) AS gmr_count,
               (SELECT COUNT(*) FROM carnet_gmrs g WHERE g.carnet_id = c.id AND g.status = 'sent') AS gmr_sent_count
        FROM job_carnets c
@@ -70,10 +267,18 @@ router.get('/by-job/:jobId', async (req: AuthRequest, res: Response) => {
   }
 });
 
-// GET /api/carnets/:id — single carnet + GMRs.
+// GET /api/carnets/:id — single carnet + GMRs (+ job header fields).
 router.get('/:id', async (req: AuthRequest, res: Response) => {
   try {
-    const result = await query(`SELECT * FROM job_carnets WHERE id = $1`, [req.params.id]);
+    const result = await query(
+      `SELECT c.*, j.hh_job_number, j.job_name, j.client_name, j.job_date,
+              COALESCE(c.carnet_start_date, j.out_date, j.job_date) AS needed_by,
+              CASE WHEN c.mode = 'we_supply' AND c.carnet_expiry_date IS NOT NULL
+                   THEN c.carnet_expiry_date + 7 END AS return_by
+       FROM job_carnets c JOIN jobs j ON j.id = c.job_id
+       WHERE c.id = $1`,
+      [req.params.id]
+    );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Carnet not found' });
     const carnet = result.rows[0];
     const gmrs = await query(
@@ -413,6 +618,129 @@ router.delete('/:id/files/:idx', async (req: AuthRequest, res: Response) => {
   } catch (err) {
     console.error('[carnets] file delete error:', err);
     res.status(500).json({ error: 'Failed to remove file' });
+  }
+});
+
+// Read an R2 object into a Buffer (signature image).
+async function r2ToBuffer(key: string): Promise<Buffer | null> {
+  try {
+    const resp = await getFromR2(key);
+    if (!resp.Body) return null;
+    const chunks: Buffer[] = [];
+    for await (const chunk of resp.Body as NodeJS.ReadableStream) {
+      chunks.push(Buffer.from(chunk as Uint8Array));
+    }
+    return Buffer.concat(chunks);
+  } catch {
+    return null;
+  }
+}
+
+// POST /api/carnets/:id/generate-authority — build the Letter of Authorisation
+// PDF from the carnet's details + the Ooosh signatory settings, store in R2,
+// set signed_authority_url, and surface it on the job's Files tab.
+router.post('/:id/generate-authority', async (req: AuthRequest, res: Response) => {
+  try {
+    const cur = await query(
+      `SELECT c.*, j.hh_job_number FROM job_carnets c JOIN jobs j ON j.id = c.job_id WHERE c.id = $1`,
+      [req.params.id]
+    );
+    if (cur.rows.length === 0) return res.status(404).json({ error: 'Carnet not found' });
+    const carnet = cur.rows[0];
+
+    const settings = await getSystemSettings([
+      'carnet_ooosh_signatory_name', 'carnet_ooosh_signatory_role',
+      'carnet_company_address', 'carnet_ooosh_signature_url',
+    ]);
+
+    const sigKey = settings.carnet_ooosh_signature_url;
+    const signatureBuffer = sigKey ? await r2ToBuffer(sigKey) : null;
+
+    const pdfBytes = await generateCarnetAuthorityPdf({
+      date: new Date(),
+      companyAddress: settings.carnet_company_address || 'Compass House, 7 East Street, Portslade, East Sussex, BN41 1DL, UK',
+      signatoryName: settings.carnet_ooosh_signatory_name || 'Jonathan Wood',
+      signatoryRole: settings.carnet_ooosh_signatory_role || 'Company Director',
+      signatureBuffer,
+      leadName: carnet.lead_name || '',
+      leadRole: carnet.lead_role || '',
+      clientSignatureBuffer: null, // captured by the public form (next slice)
+    });
+
+    const key = `carnet-authority/${carnet.id}/letter-of-authorisation-${Date.now()}.pdf`;
+    await uploadToR2(key, Buffer.from(pdfBytes), 'application/pdf');
+
+    // Set on the carnet + surface on the job Files tab.
+    await query(`UPDATE job_carnets SET signed_authority_url = $1, updated_at = NOW() WHERE id = $2`, [key, carnet.id]);
+    const jobFiles = await query(`SELECT files FROM jobs WHERE id = $1`, [carnet.job_id]);
+    const files = Array.isArray(jobFiles.rows[0]?.files) ? jobFiles.rows[0].files : [];
+    files.push({
+      url: key, name: 'Letter of Authorisation (carnet).pdf', label: 'Carnet authority',
+      uploaded_at: new Date().toISOString(), uploaded_by: req.user?.id || SYSTEM_USER_ID,
+    });
+    await query(`UPDATE jobs SET files = $1 WHERE id = $2`, [JSON.stringify(files), carnet.job_id]);
+
+    await logCarnetInteraction(carnet.job_id, '📄 Carnet Letter of Authorisation generated', req.user?.id);
+
+    res.json({ data: { signed_authority_url: key, signature_present: !!signatureBuffer } });
+  } catch (err) {
+    console.error('[carnets] generate-authority error:', err);
+    res.status(500).json({ error: 'Failed to generate Letter of Authorisation' });
+  }
+});
+
+// POST /api/carnets/:id/send-form — mint (or reuse) the client form token and
+// return the link; optionally email it to the client. we_supply only.
+router.post('/:id/send-form', async (req: AuthRequest, res: Response) => {
+  try {
+    const cur = await query(
+      `SELECT c.*, j.hh_job_number, j.job_name FROM job_carnets c JOIN jobs j ON j.id = c.job_id WHERE c.id = $1`,
+      [req.params.id]
+    );
+    if (cur.rows.length === 0) return res.status(404).json({ error: 'Carnet not found' });
+    const carnet = cur.rows[0];
+    if (carnet.mode !== 'we_supply') return res.status(400).json({ error: 'Request form only applies to we-supply carnets' });
+
+    // Reuse an existing token (so a re-send keeps the same link); else mint one.
+    let token: string = carnet.form_token;
+    if (!token) {
+      token = randomBytes(24).toString('base64url');
+    }
+    await query(
+      `UPDATE job_carnets SET form_token = $1, form_sent_at = NOW(),
+         status = CASE WHEN status = 'detected' THEN 'form_sent' ELSE status END,
+         updated_at = NOW()
+       WHERE id = $2`,
+      [token, carnet.id]
+    );
+    if (carnet.status === 'detected') await syncCarnetRequirementStatus(carnet.job_id, 'form_sent');
+
+    const url = `${getFrontendUrl()}/carnet-form/${token}`;
+    let sent = false;
+    let recipient: string | null = null;
+
+    if (req.body?.send_email) {
+      try {
+        const target = await resolveClientEmailTarget(carnet.job_id, 'carnet_request');
+        if (target?.primaryEmail) {
+          recipient = target.primaryEmail;
+          await emailService.send('carnet_request', {
+            to: target.primaryEmail,
+            cc: target.ccEmails,
+            variables: { clientName: carnet.client_name || '', jobName: carnet.job_name || '', jobNumber: String(carnet.hh_job_number || ''), formUrl: url },
+          });
+          sent = true;
+        }
+      } catch (e) {
+        console.error('[carnets] send-form email failed:', e);
+      }
+    }
+
+    await logCarnetInteraction(carnet.job_id, sent ? `📄 Carnet request form sent to ${recipient}` : '📄 Carnet request form link generated', req.user?.id);
+    res.json({ data: { url, token, sent, recipient } });
+  } catch (err) {
+    console.error('[carnets] send-form error:', err);
+    res.status(500).json({ error: 'Failed to generate the request form link' });
   }
 });
 

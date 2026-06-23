@@ -58,6 +58,7 @@ interface Carnet {
   lead_role: string | null;
   additional_names: { first?: string; last?: string }[];
   application_ref: string | null;
+  form_sent_at: string | null;
   form_submitted_at: string | null;
   signed_authority_url: string | null;
   chase_date: string | null;
@@ -111,6 +112,7 @@ export default function CarnetSection({ jobId, onChanged }: { jobId: string; onC
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
+  const [sendMsg, setSendMsg] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -233,11 +235,68 @@ export default function CarnetSection({ jobId, onChanged }: { jobId: string; onC
       {/* Documents */}
       <DocsManager carnet={carnet} reload={load} />
 
+      {/* Request-form actions (we_supply) */}
+      {!isCancelled && carnet.mode === 'we_supply' && (
+        <div className="mt-4 pt-3 border-t border-gray-100">
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              disabled={busy}
+              onClick={async () => {
+                setBusy(true); setErr(null); setSendMsg(null);
+                try {
+                  const r = await api.post<{ data: { sent: boolean; recipient: string | null } }>(`/carnets/${carnet.id}/send-form`, { send_email: true });
+                  await load();
+                  setSendMsg(r.data.sent ? `Form sent to ${r.data.recipient}` : 'No client email on file — use Copy link instead.');
+                } catch (e) { setErr(e instanceof Error ? e.message : 'Send failed'); }
+                finally { setBusy(false); }
+              }}
+              className="px-3 py-1.5 bg-purple-600 text-white rounded text-xs font-medium disabled:opacity-50"
+            >Send request form to client</button>
+            <button
+              disabled={busy}
+              onClick={async () => {
+                setBusy(true); setErr(null); setSendMsg(null);
+                try {
+                  const r = await api.post<{ data: { url: string } }>(`/carnets/${carnet.id}/send-form`, { send_email: false });
+                  await load();
+                  try { await navigator.clipboard.writeText(r.data.url); setSendMsg('Link copied to clipboard'); }
+                  catch { setSendMsg(r.data.url); }
+                } catch (e) { setErr(e instanceof Error ? e.message : 'Failed'); }
+                finally { setBusy(false); }
+              }}
+              className="px-3 py-1.5 bg-gray-100 hover:bg-gray-200 rounded text-xs"
+            >Copy form link</button>
+            {carnet.form_sent_at && <span className="text-xs text-gray-400">Form sent {fmtDate(carnet.form_sent_at)}</span>}
+          </div>
+          {sendMsg && <p className="text-xs text-green-700 mt-2 break-all">{sendMsg}</p>}
+        </div>
+      )}
+
       {/* Footer actions */}
       {!isCancelled && (
-        <div className="mt-4 pt-3 border-t border-gray-100 flex items-center gap-3">
-          {carnet.signed_authority_url && (
-            <DownloadLink k={carnet.signed_authority_url} label="Signed authority (PDF)" />
+        <div className="mt-4 pt-3 border-t border-gray-100 flex flex-wrap items-center gap-3">
+          {carnet.mode === 'we_supply' && (
+            <button
+              disabled={busy}
+              onClick={async () => {
+                setBusy(true); setErr(null);
+                try {
+                  const r = await api.post<{ data: { signature_present: boolean } }>(`/carnets/${carnet.id}/generate-authority`, {});
+                  await load();
+                  if (r.data && !r.data.signature_present) {
+                    setErr('Letter generated, but no Ooosh signature is set yet — add one in Settings → Carnet. (A signature line was drawn instead.)');
+                  }
+                } catch (e) {
+                  setErr(e instanceof Error ? e.message : 'Failed to generate letter');
+                } finally { setBusy(false); }
+              }}
+              className="px-3 py-1.5 bg-purple-600 text-white rounded text-xs font-medium disabled:opacity-50"
+            >
+              Generate Letter of Authorisation
+            </button>
+          )}
+          {carnet.mode === 'we_supply' && carnet.signed_authority_url && (
+            <DownloadLink k={carnet.signed_authority_url} label="Download letter (PDF)" />
           )}
           <button
             onClick={async () => {

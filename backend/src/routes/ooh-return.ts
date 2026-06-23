@@ -29,6 +29,8 @@ import {
   getOohVanDrivers,
   createViolation,
   getRecentOohReturns,
+  getOohReturnsForJob,
+  getOrgOohIncidents,
   getDriverCompliance,
   setDriverBlock,
   getBlockThreshold,
@@ -397,6 +399,38 @@ router.get(
     } catch (err) {
       console.error('[ooh-return] recent-returns error:', err);
       res.status(500).json({ error: 'Failed to load recent OOH returns' });
+    }
+  }
+);
+
+// Staff: OOH returns on a single job — Job Detail "Out-of-hours returns" panel.
+router.get(
+  '/job/:jobId/returns',
+  authenticate,
+  authorize(...STAFF_ROLES),
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const data = await getOohReturnsForJob(String(req.params.jobId));
+      res.json({ data });
+    } catch (err) {
+      console.error('[ooh-return] job returns error:', err);
+      res.status(500).json({ error: 'Failed to load OOH returns for job' });
+    }
+  }
+);
+
+// Staff: read-only OOH incident rollup for a client organisation.
+router.get(
+  '/by-organisation/:orgId',
+  authenticate,
+  authorize(...STAFF_ROLES),
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const data = await getOrgOohIncidents(String(req.params.orgId));
+      res.json({ data });
+    } catch (err) {
+      console.error('[ooh-return] org incidents error:', err);
+      res.status(500).json({ error: 'Failed to load OOH incidents for organisation' });
     }
   }
 );

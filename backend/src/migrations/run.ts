@@ -175,7 +175,9 @@ async function runMigrations(direction: 'up' | 'down') {
         '138_pcn_deadline_nudges.sql',
         '139_supplier_payment_terms.sql',
         '140_pcn_driver_person.sql',
-        '141_pcn_fine_recharge.sql',
+        '141_carnet_signatory_settings.sql',
+        '142_vehicle_forecast_assessments.sql',
+        '143_pcn_fine_recharge.sql',
       ];
 
       for (const migration of migrations) {

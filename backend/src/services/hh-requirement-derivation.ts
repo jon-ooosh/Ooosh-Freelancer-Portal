@@ -82,8 +82,15 @@ const VE103B_CERT_LIST_ID = 1023;
 // ATA Carnet arrangement fee — chargeable HH sale item (CATEGORY_ID 355 "Misc
 // Sale Item", £750). Its presence on a job is sales' signal that we're
 // arranging a carnet on the client's behalf (the 'we_supply' mode). Mirrors
-// the VE103B detection exactly. See docs/CARNET-SPEC.md.
+// the VE103B detection. See docs/CARNET-SPEC.md.
+//
+// ⚠️ The CATEGORY_ID 355 guard is REQUIRED, not belt-and-braces: HireHop's
+// asset and sale-item stock-ID spaces are SEPARATE, so a rental ASSET can also
+// carry LIST_ID 575 (a completely different item). Matching LIST_ID alone
+// false-fired the carnet on any job carrying asset-575 (jobs 16142 / 16007 /
+// 15828 incident, Jun 2026). The real carnet sale item is uniquely 575 + cat 355.
 const CARNET_ARRANGEMENT_LIST_ID = 575;
+const MISC_SALE_CATEGORY = 355;
 
 // ── Derived flags shape ──────────────────────────────────────────────────
 
@@ -200,7 +207,7 @@ export function deriveFlags(items: HHLineItem[], slotModes: VehicleSlotModes = {
     }
 
     // ── Carnet arrangement fee (sale item 575) → we're supplying a carnet ──
-    if (item.LIST_ID === CARNET_ARRANGEMENT_LIST_ID && item.kind !== 0) {
+    if (item.LIST_ID === CARNET_ARRANGEMENT_LIST_ID && item.CATEGORY_ID === MISC_SALE_CATEGORY && item.kind !== 0) {
       flags.has_carnet = true;
     }
 
@@ -507,7 +514,7 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
     if (flags.has_carnet) {
       await upsertAutoRequirement(client, jobId, 'carnet', flags, previousFlags, result, {
         notes: 'ATA Carnet arrangement detected from HireHop — we supply',
-        snapshot: items.filter(i => i.LIST_ID === CARNET_ARRANGEMENT_LIST_ID && i.kind !== 0),
+        snapshot: items.filter(i => i.LIST_ID === CARNET_ARRANGEMENT_LIST_ID && i.CATEGORY_ID === MISC_SALE_CATEGORY && i.kind !== 0),
       });
 
       // Ensure a job_carnets record exists (we_supply mode). Like the job_excess
@@ -528,6 +535,25 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
           ]
         );
         result.requirementsCreated.push('carnet_record');
+      }
+    } else {
+      // Carnet no longer detected on HH (or never really was — see the asset/sale
+      // ID-collision note on the detection constant). Remove an UNTOUCHED
+      // auto-created record so false positives self-heal on the next sync.
+      // Mirrors the requirement stale-cleanup below (which deletes not_started
+      // auto requirements). Anything a human has touched (status moved off
+      // 'detected', client form back, application ref, or a lead name entered)
+      // is left intact for manual review.
+      const wiped = await client.query(
+        `DELETE FROM job_carnets
+         WHERE job_id = $1 AND mode = 'we_supply' AND status = 'detected'
+           AND form_submitted_at IS NULL AND application_ref IS NULL AND lead_name IS NULL
+           AND NOT EXISTS (SELECT 1 FROM carnet_gmrs g WHERE g.carnet_id = job_carnets.id)
+         RETURNING id`,
+        [jobId]
+      );
+      if (wiped.rows.length > 0) {
+        result.requirementsUpdated.push('carnet_record (removed — not on HH)');
       }
     }
 

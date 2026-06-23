@@ -81,6 +81,10 @@ const REPLACED_PRESENT_SINGLE: Record<string, DetailPrompt> = {
   },
 }
 
+// Tread-measurement instruction. Shared so the live-form normaliser
+// (PrepPage) can recognise + apply the canonical wording.
+export const TREAD_NOTE = 'Measure all 3 points across the tyre width and enter the LOWEST.'
+
 // ── Helper ──
 function item(
   name: string,
@@ -143,13 +147,17 @@ const PREP_ALL: ChecklistItem[] = [
   item('Orange side marker lights', 'Vehicle Exterior', ['All working fine', 'Problem'], ['Problem']),
   item('Spare wheel', 'Vehicle Exterior', ['Present & tagged', 'Problem'], ['Problem']),
   item('Front left tyre pressure', 'Vehicle Exterior', [], [], { inputType: 'number', unit: 'PSI' }),
-  item('Front left tyre tread depth', 'Vehicle Exterior', [], [], { inputType: 'number', unit: 'mm' }),
+  item('Front left tyre tread depth', 'Vehicle Exterior', [], [], { inputType: 'number', unit: 'mm', notes: TREAD_NOTE }),
   item('Front right tyre pressure', 'Vehicle Exterior', [], [], { inputType: 'number', unit: 'PSI' }),
-  item('Front right tyre tread depth', 'Vehicle Exterior', [], [], { inputType: 'number', unit: 'mm' }),
+  item('Front right tyre tread depth', 'Vehicle Exterior', [], [], { inputType: 'number', unit: 'mm', notes: TREAD_NOTE }),
   item('Rear left tyre pressure', 'Vehicle Exterior', [], [], { inputType: 'number', unit: 'PSI' }),
-  item('Rear left tyre tread depth', 'Vehicle Exterior', [], [], { inputType: 'number', unit: 'mm' }),
+  item('Rear left tyre tread depth', 'Vehicle Exterior', [], [], { inputType: 'number', unit: 'mm', notes: TREAD_NOTE }),
   item('Rear right tyre pressure', 'Vehicle Exterior', [], [], { inputType: 'number', unit: 'PSI' }),
-  item('Rear right tyre tread depth', 'Vehicle Exterior', [], [], { inputType: 'number', unit: 'mm' }),
+  item('Rear right tyre tread depth', 'Vehicle Exterior', [], [], { inputType: 'number', unit: 'mm', notes: TREAD_NOTE }),
+  // Tyre walls — the outward (kerb side) and inward (chassis side) faces both
+  // need eyeballing for cracks, bulges and damage that don't show in tread depth.
+  item('Exterior tyre walls OK?', 'Vehicle Exterior', ['Ok', 'Problem'], ['Problem'], { notes: 'Outward-facing wall of each tyre — check for cracks, bulges, splits.' }),
+  item('Interior tyre walls OK?', 'Vehicle Exterior', ['Ok', 'Problem'], ['Problem'], { notes: 'Inward-facing (chassis side) wall of each tyre — check for cracks, bulges, splits.' }),
 
   // Engine
   item('Oil level', 'Engine', ['Ok', 'Topped up', 'Problem'], ['Problem'], { notes: 'Should be 1/2 full', detailPrompts: FLUID_TOPUP }),
@@ -201,6 +209,90 @@ const PREP_ALL: ChecklistItem[] = [
   item('Loading lights', 'Boot', ['Tested & all working ok', 'Fixed & now all working', 'N/A'], [], { detailPrompts: FIXED_ISSUE }),
   item('Floor hoovered & mopped (boot)', 'Boot', ['All clean', 'Problem', 'N/A'], ['Problem']),
 ]
+
+// ── Live-form normaliser ──
+//
+// The live prep form reads its checklist from R2 (`settings/checklists.json`),
+// falling back to DEFAULT_CHECKLIST_SETTINGS only when R2 is empty. Prod has a
+// customised R2 copy, so editing the defaults above is NOT enough to get the
+// tread wording + tyre-wall tickboxes onto the live form. This normaliser is
+// applied to whatever prepMap the form ends up using, guaranteeing the
+// safety-critical tyre content is present regardless of R2 state.
+//
+// Idempotent + minimally invasive: only adds the wall tickboxes if absent, and
+// only sets the tread note when the item has no note (won't clobber a custom
+// one set via the Checklists settings editor).
+const EXTERIOR_WALL_NAME = 'Exterior tyre walls OK?'
+const INTERIOR_WALL_NAME = 'Interior tyre walls OK?'
+
+export function ensureTyreChecklistContent(
+  prepMap: Record<string, ChecklistItem[]>,
+): Record<string, ChecklistItem[]> {
+  const out: Record<string, ChecklistItem[]> = {}
+  for (const [key, list] of Object.entries(prepMap)) {
+    const items = [...list]
+
+    // Fire extinguisher (and any "not fitted" item): N/A must be a selectable,
+    // NON-flag option. Some vans were never fitted with an extinguisher, so
+    // "N/A" is a legitimate answer, not a problem. Prod's R2 checklist predates
+    // the default fix, so normalise here: guarantee 'N/A' is in options and
+    // strip it out of flagValues if a stale config has it flagging. Runs on
+    // every list (not gated on tyre content). Idempotent.
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i]!
+      if (it.name.toLowerCase().includes('fire extinguisher') && it.inputType === 'options') {
+        const options = it.options.includes('N/A') ? it.options : [...it.options, 'N/A']
+        const flagValues = it.flagValues.filter(v => v.toLowerCase() !== 'n/a')
+        if (options !== it.options || flagValues.length !== it.flagValues.length) {
+          items[i] = { ...it, options, flagValues }
+        }
+      }
+    }
+
+    const hasTread = items.some(i => i.unit === 'mm' && i.name.toLowerCase().includes('tread'))
+    // Only touch lists that actually carry the tyre tread items.
+    if (!hasTread) {
+      out[key] = items
+      continue
+    }
+
+    // Canonical tread wording where none is set.
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i]!
+      if (it.unit === 'mm' && it.name.toLowerCase().includes('tread') && !it.notes) {
+        items[i] = { ...it, notes: TREAD_NOTE }
+      }
+    }
+
+    // Ensure both wall tickboxes exist, inserted after the last tyre item.
+    const wallSection = items.find(i => i.unit === 'mm')?.section || 'Vehicle Exterior'
+    const toAdd: ChecklistItem[] = []
+    if (!items.some(i => i.name === EXTERIOR_WALL_NAME)) {
+      toAdd.push(item(EXTERIOR_WALL_NAME, wallSection, ['Ok', 'Problem'], ['Problem'], {
+        notes: 'Outward-facing wall of each tyre — check for cracks, bulges, splits.',
+      }))
+    }
+    if (!items.some(i => i.name === INTERIOR_WALL_NAME)) {
+      toAdd.push(item(INTERIOR_WALL_NAME, wallSection, ['Ok', 'Problem'], ['Problem'], {
+        notes: 'Inward-facing (chassis side) wall of each tyre — check for cracks, bulges, splits.',
+      }))
+    }
+    if (toAdd.length > 0) {
+      let lastTyreIdx = -1
+      for (let i = 0; i < items.length; i++) {
+        if (items[i]!.unit === 'mm' || items[i]!.unit === 'PSI') lastTyreIdx = i
+      }
+      if (lastTyreIdx >= 0) {
+        items.splice(lastTyreIdx + 1, 0, ...toAdd)
+      } else {
+        items.push(...toAdd)
+      }
+    }
+
+    out[key] = items
+  }
+  return out
+}
 
 // ── Combined default settings ──
 

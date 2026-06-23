@@ -86,6 +86,19 @@ log segment count for cost visibility. First template `ooh_return_approach`:
 
 ## 4. International policy (module is capable, sending is staged)
 
+**DECISION (Jun 2026): UK-only for now.** `ooh_sms_country_allowlist` stays `GB`. International
+is deferred to the **end-of-year driver hire-form intake rebuild**, where the driver's phone
+number will be **validated at the point of capture** (E.164, correct country) — solving the
+data-quality problem at source rather than retrofitting it. The **alphanumeric-sender vs
+rented-number** sending convention will be settled in that same pass (alpha IDs work across most
+of the EU but not US/CA; some countries require sender registration). Numbers already in the
+system can get an auto/manual clean-up at that point. Until then, non-UK drivers fall back to the
+existing OOH emails (no regression). The data-quality caveat below is the reason for waiting:
+`normaliseMsisdn` falls back to GB when `phone_country` is blank (load-bearing for the UK
+majority — most UK rows are `07…` with no country), so a foreign number stored in national format
+is indistinguishable from a UK one. Storing foreign mobiles in `+CC` form at intake removes that
+ambiguity.
+
 The module is international-ready for free (normalise via `phone_country`, hand to Twilio —
 same call regardless of country). **Which countries we actually send to is a policy switch,
 not code:**
@@ -305,14 +318,19 @@ text lands, then either flip `SMS_MODE=live` or allowlist `ooh_return_approach` 
 7. ✅ Check-in capture — `OohCheckInPrompt` on the check-in success screen (pre-ticked "OOH
    steps followed", untick → two-choice severity + attribution picker).
 8. Retro-flag surfaces: ✅ "Recent OOH returns" dashboard section (`sections/OohReturns.tsx`,
-   self-fetching, hidden when empty); ⬜ Job Detail OOH flag affordance (remaining).
+   self-fetching, hidden when empty); ✅ Job Detail OOH flag affordance (`JobOohReturns`, Drivers
+   & Vehicles tab — flag + un-flag per van, `GET /ooh-return/job/:jobId/returns`).
 9. ✅ Driver Detail "OOH" tab (`OohComplianceTab`) — block status, suggest-and-confirm block
-   (manager) / lift (admin), violation history + dismiss. ⬜ Org rollup (remaining).
+   (manager) / lift (admin), violation history + dismiss. ✅ Org rollup (`OohOrgIncidents`, Org
+   Detail "OOH" tab — read-only, `GET /ooh-return/by-organisation/:orgId`).
 10. ✅ Enforcement — 409 + manager override on the OOH toggle (`OohReturnModal`), override
     logged to the job timeline.
 
-**Remaining (secondary):** Job Detail per-card OOH flag affordance (the dashboard list +
-check-in capture already cover retro-flagging); read-only Org incident rollup.
+**Shared flag form:** extracted to `components/OohFlagForm.tsx`, reused by the dashboard
+"Recent OOH returns" section and the Job Detail panel (same severity choice + attribution picker
++ POST `/ooh-return/violations`).
+
+**Phase 2 now feature-complete.** Both previously-remaining secondary surfaces shipped Jun 2026.
 
 **Phase 3 (later, optional):** WhatsApp channel (dedicated number + Meta templates),
 acceptable-parking polygon auto-hint.

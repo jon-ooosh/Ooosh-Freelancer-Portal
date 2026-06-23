@@ -159,6 +159,53 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  carnet_request: {
+    variant: 'client',
+    preheader: 'We need a few details to arrange your ATA Carnet',
+    subject: 'ATA Carnet details needed - {{jobName}} (job #{{jobNumber}})',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">ATA Carnet request</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Hi {{clientName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        We're arranging an ATA Carnet for <strong>{{jobName}}</strong> (job <strong>#{{jobNumber}}</strong>).
+        Please complete the short form below — it gathers the countries you're visiting, the names to go on
+        the carnet, and the signed authority we need to apply on your behalf.
+      </p>
+      <p style="margin:0 0 24px;">
+        <a href="{{formUrl}}" style="display:inline-block;background-color:#7B5EA7;color:#ffffff;text-decoration:none;padding:12px 22px;border-radius:8px;font-size:15px;font-weight:600;">Complete the carnet form →</a>
+      </p>
+      <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">Any questions, just reply to this email.</p>
+    `,
+  },
+
+  carnet_authority_copy: {
+    variant: 'client',
+    preheader: 'Your signed Letter of Authorisation',
+    subject: 'Your ATA Carnet authority (job #{{jobNumber}})',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Thank you, {{leadName}}</h2>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        We've received your ATA Carnet details for job <strong>#{{jobNumber}}</strong>. A copy of the signed
+        Letter of Authorisation is attached for your records. We'll be in touch as your carnet progresses.
+      </p>
+      <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">Any questions, just reply to this email.</p>
+    `,
+  },
+
+  carnet_authority_received_internal: {
+    variant: 'internal',
+    preheader: 'Carnet authority received',
+    subject: 'Carnet authority signed - {{clientName}} (job #{{jobNumber}})',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:18px;color:#1e293b;">Carnet request form submitted</h2>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.6;">
+        <strong>{{leadName}}</strong> has completed the carnet request form for <strong>{{clientName}}</strong>
+        (job <strong>#{{jobNumber}}</strong>). The signed Letter of Authorisation is attached, and the carnet
+        has moved to "Info received" — ready to apply.
+      </p>
+    `,
+  },
+
   merch_label: {
     variant: 'client',
     preheader: 'Your delivery labels are attached',
@@ -266,6 +313,32 @@ const templates: Record<string, EmailTemplate> = {
           </td>
         </tr>
       </table>
+      <p style="margin:0;font-size:14px;color:#334155;">
+        <a href="{{vehicleUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">View vehicle in Ooosh &rarr;</a>
+      </p>
+    `,
+  },
+
+  low_tread_alert: {
+    variant: 'internal',
+    subject: 'Low tyre tread at prep — {{vehicleReg}}',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Low Tyre Tread Flagged at Prep</h2>
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
+        <strong>{{vehicleReg}}</strong> was prepped by {{preparedBy}} and one or more tyres
+        are at or below {{amberThreshold}}mm. Plan a tyre change before the next hire.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#fffbeb;border-radius:8px;border:1px solid #fde68a;">
+            <p style="margin:0 0 4px;font-size:12px;color:#92400e;">Low tyres</p>
+            <p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">{{lowTyres}}</p>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0 0 16px;font-size:13px;color:#64748b;">
+        Mileage at prep: {{mileage}}
+      </p>
       <p style="margin:0;font-size:14px;color:#334155;">
         <a href="{{vehicleUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">View vehicle in Ooosh &rarr;</a>
       </p>

@@ -39,8 +39,14 @@ import {
   buildConditionReportEmailHtml,
   type ConditionReportEmailParams,
 } from '../services/condition-report-email';
+import { getSystemSetting } from './system-settings';
 
 const router = Router();
+
+// Default low-tread alert threshold (mm). Staff-tweakable via the
+// `tyre_tread_amber_threshold` system_settings key. Keep in step with the
+// frontend TYRE_TREAD_AMBER_MM constant in lib/tyre-sanity.ts.
+const DEFAULT_TYRE_TREAD_AMBER_MM = 5;
 
 // ── Public: Freelancer book-out token redemption ────────────────────
 //
@@ -2704,12 +2710,103 @@ router.post('/save-prep', async (req: AuthRequest, res: Response) => {
       console.warn('[vehicles/prep] Failed to update needs_external_wash:', err);
     }
 
+    // Low tyre tread alert. The prep checklist is where the change decision is
+    // made, so the vehicle manager is bell+emailed at prep (NOT book-out — too
+    // late to plan a swap by then) whenever any tyre is at/below the amber
+    // threshold. ONE email per prep listing all the low corners. Non-blocking.
+    try {
+      await notifyLowTreadAtPrep(reg, data);
+    } catch (err) {
+      console.warn('[vehicles/prep] Low-tread notify failed:', err);
+    }
+
     res.json({ success: true, eventId });
   } catch (error) {
     console.error('[vehicles/prep] save-prep error:', error);
     res.status(500).json({ error: 'Failed to save prep session' });
   }
 });
+
+/**
+ * Scan a saved prep session for low tyre tread and, if any corner is at/below
+ * the amber threshold, fire ONE alert (bell to the vehicle manager + email to
+ * info@/will@) listing all the low corners. Best-effort — never throws to the
+ * caller.
+ */
+async function notifyLowTreadAtPrep(reg: string, data: any): Promise<void> {
+  const thresholdRaw = await getSystemSetting('tyre_tread_amber_threshold');
+  const threshold = (() => {
+    const n = parseFloat(thresholdRaw || '');
+    return Number.isFinite(n) && n > 0 ? n : DEFAULT_TYRE_TREAD_AMBER_MM;
+  })();
+
+  const sections: any[] = Array.isArray(data?.sections) ? data.sections : [];
+  const low: { corner: string; depth: number }[] = [];
+  for (const sec of sections) {
+    const items: any[] = Array.isArray(sec?.items) ? sec.items : [];
+    for (const it of items) {
+      if (it?.unit !== 'mm') continue;
+      const depth = parseFloat(it?.value);
+      if (!Number.isFinite(depth) || depth <= 0) continue;
+      if (depth <= threshold) {
+        // "Front left tyre tread depth" → "Front left"
+        const corner = String(it?.name || '')
+          .replace(/\s*tyre tread depth\s*/i, '')
+          .trim() || String(it?.name || '');
+        low.push({ corner, depth });
+      }
+    }
+  }
+
+  if (low.length === 0) return;
+
+  const lowTyres = low.map(l => `${l.corner} (${l.depth}mm)`).join(', ');
+  const frontendUrl = process.env.FRONTEND_URL || 'https://staff.oooshtours.co.uk';
+  const vehicleId = data?.vehicleId || null;
+  const vehicleUrl = vehicleId
+    ? `${frontendUrl}/vehicles/fleet/${vehicleId}`
+    : `${frontendUrl}/vehicles`;
+
+  const { getVehicleNotificationTargets } = await import('../services/vehicle-notify');
+  const targets = await getVehicleNotificationTargets();
+
+  try {
+    await emailService.send('low_tread_alert', {
+      to: targets.to,
+      cc: targets.cc,
+      variables: {
+        vehicleReg: reg,
+        preparedBy: data?.preparedBy || 'staff',
+        amberThreshold: String(threshold),
+        lowTyres,
+        mileage: data?.mileage != null ? String(data.mileage) : 'not recorded',
+        vehicleUrl,
+      },
+    });
+  } catch (emailErr) {
+    console.warn('[vehicles/prep] Low-tread email failed:', (emailErr as Error).message);
+  }
+
+  // Bell for the vehicle manager. email_sent_at set so the escalation
+  // scheduler doesn't fire a duplicate. Best-effort per recipient.
+  for (const userId of targets.bellUserIds) {
+    try {
+      await query(
+        `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, priority, action_url, email_sent_at)
+         VALUES ($1, 'compliance', $2, $3, 'fleet_vehicles', $4, 'normal', $5, NOW())`,
+        [
+          userId,
+          `Low tyre tread — ${reg}`,
+          `Prepped by ${data?.preparedBy || 'staff'}. Low: ${lowTyres}`,
+          vehicleId,
+          vehicleId ? `/vehicles/fleet/${vehicleId}` : '/vehicles',
+        ],
+      );
+    } catch (bellErr) {
+      console.warn('[vehicles/prep] Low-tread bell failed:', (bellErr as Error).message);
+    }
+  }
+}
 
 /**
  * GET /api/vehicles/get-prep-history?vehicleReg=XXX&limit=10
@@ -2762,6 +2859,122 @@ router.get('/get-prep-history', async (req: AuthRequest, res: Response) => {
   } catch (error) {
     console.error('[vehicles/prep] get-prep-history error:', error);
     res.status(500).json({ error: 'Failed to load prep history' });
+  }
+});
+
+/**
+ * GET /api/vehicles/prep-pdf?vehicleReg=XXX&eventId=YYY
+ * Branded per-prep PDF export (all readings + flags + photos) for
+ * insurers / clients. Reads the prep-session JSON from R2, loads any
+ * flagged-item photos from the public bucket, and streams the PDF back
+ * as an attachment.
+ */
+router.get('/prep-pdf', async (req: AuthRequest, res: Response) => {
+  try {
+    const vehicleReg = req.query.vehicleReg as string | undefined;
+    const eventId = req.query.eventId as string | undefined;
+    if (!vehicleReg || !eventId) {
+      res.status(400).json({ error: 'vehicleReg and eventId are required' });
+      return;
+    }
+
+    const reg = vehicleReg.toUpperCase();
+    const session = await readR2Json<any>(`prep-sessions/${reg}/${eventId}.json`);
+    if (!session) {
+      res.status(404).json({ error: 'Prep session not found' });
+      return;
+    }
+
+    // Load flagged-item photos from the PUBLIC bucket. Prep photos are
+    // written to events/{eventId}/{SAFE-REG}/*.jpg (same prefix as
+    // condition photos). Listing the prefix is more robust than trusting
+    // the stored photoKeys (historical sessions had a key mismatch).
+    const r2PublicBase = process.env.R2_PUBLIC_URL || '';
+    const photos: Array<{ label: string; base64: string; r2Url?: string }> = [];
+    if (isR2Configured()) {
+      try {
+        const safeReg = reg.replace(/\s+/g, '-');
+        const photoObjects = await listPublicR2Objects(`events/${eventId}/${safeReg}/`);
+        for (const obj of photoObjects) {
+          if (!obj.Key) continue;
+          try {
+            const photoResp = await getFromPublicR2(obj.Key);
+            const stream = photoResp.Body as NodeJS.ReadableStream;
+            const chunks: Buffer[] = [];
+            for await (const chunk of stream) chunks.push(Buffer.from(chunk as Uint8Array));
+            photos.push({
+              label: 'Prep photo',
+              base64: Buffer.concat(chunks).toString('base64'),
+              r2Url: r2PublicBase ? `${r2PublicBase}/${obj.Key}` : undefined,
+            });
+          } catch (err) {
+            console.warn(`[vehicles/prep-pdf] Failed to load photo ${obj.Key}:`, err);
+          }
+        }
+      } catch (err) {
+        console.warn('[vehicles/prep-pdf] Photo listing failed:', err);
+      }
+    }
+
+    const { pdfBytes, filename } = await buildPrepReportPdf(session, photos);
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(Buffer.from(pdfBytes));
+  } catch (error) {
+    console.error('[vehicles/prep] prep-pdf error:', error);
+    res.status(500).json({ error: 'Failed to generate prep PDF' });
+  }
+});
+
+/**
+ * GET /api/vehicles/fleet/:id/forecast
+ * Deterministic forward-looking health picture (tyres, mileage pace, service-due,
+ * compliance runway, fluid frequency, cost trajectory, recurring issues) plus the
+ * latest cached AI assessment. Drives the Vehicle > Forecast tab.
+ */
+router.get('/fleet/:id/forecast', async (req: AuthRequest, res: Response) => {
+  try {
+    const { buildVehicleForecast } = await import('../services/vehicle-forecast');
+    const { getLatestAssessment } = await import('../services/vehicle-forecast-ai');
+    const forecast = await buildVehicleForecast(String(req.params.id));
+    if (!forecast) {
+      res.status(404).json({ error: 'Vehicle not found' });
+      return;
+    }
+    const assessment = await getLatestAssessment(String(req.params.id));
+    res.json({ forecast, assessment });
+  } catch (error) {
+    console.error('[vehicles/forecast] error:', error);
+    res.status(500).json({ error: 'Failed to build vehicle forecast' });
+  }
+});
+
+/**
+ * POST /api/vehicles/fleet/:id/forecast/assess
+ * Generate a fresh AI health assessment on demand ("Regenerate" button).
+ * Scheduled regeneration runs 3x/week — see config/scheduler.ts.
+ */
+router.post('/fleet/:id/forecast/assess', async (req: AuthRequest, res: Response) => {
+  try {
+    const { isAnthropicConfigured } = await import('../config/anthropic');
+    if (!isAnthropicConfigured()) {
+      res.status(503).json({ error: 'AI assessment is not configured (ANTHROPIC_API_KEY missing)' });
+      return;
+    }
+    const { generateVehicleAssessment } = await import('../services/vehicle-forecast-ai');
+    const assessment = await generateVehicleAssessment(String(req.params.id), {
+      trigger: 'manual',
+      userId: req.user?.id ?? null,
+    });
+    if (!assessment) {
+      res.status(404).json({ error: 'Vehicle not found' });
+      return;
+    }
+    res.json({ assessment });
+  } catch (error) {
+    console.error('[vehicles/forecast] assess error:', error);
+    res.status(500).json({ error: 'Failed to generate assessment' });
   }
 });
 
@@ -3462,6 +3675,279 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
   const jobPart = data.hireHopJob ? '-Job' + data.hireHopJob : '';
   const docType = isInterim ? 'interim' : isCheckIn ? 'check-in' : 'book-out';
   const filename = `${safeReg}-${ddmmyy}${jobPart}-${docType}.pdf`;
+
+  return { pdfBytes, filename };
+}
+
+/**
+ * Build a per-prep branded PDF from a prep-session document
+ * (prep-sessions/{REG}/{eventId}.json). Mirrors buildConditionReportPdf's
+ * jsPDF pattern (navy header + logo + filled-rect bullets, no Unicode glyphs
+ * → no WinAnsi crash). Used by GET /prep-pdf for insurer/client exports.
+ *
+ * `data` is the prep-session JSON. `photos` is the pre-loaded flagged-item
+ * photo set (base64 + optional public r2Url for "View full size" links).
+ */
+async function buildPrepReportPdf(
+  data: any,
+  photos: Array<{ label: string; base64: string; r2Url?: string }>,
+): Promise<{ pdfBytes: Uint8Array; filename: string }> {
+  const jspdfModule = await import('jspdf');
+  const JsPDF = (jspdfModule as any).jsPDF
+    ?? (jspdfModule as any).default?.jsPDF
+    ?? (jspdfModule as any).default;
+  if (!JsPDF) throw new Error('jsPDF constructor not found in module exports');
+
+  const pdf: any = new JsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+  const pageWidth = 210;
+  const margin = 15;
+  const contentWidth = pageWidth - margin * 2;
+  let y = margin;
+
+  const addText = (
+    text: string,
+    x: number,
+    yPos: number,
+    opts?: { size?: number; bold?: boolean; color?: [number, number, number]; align?: 'left' | 'center' | 'right' },
+  ) => {
+    pdf.setFontSize(opts?.size || 10);
+    pdf.setFont('helvetica', opts?.bold ? 'bold' : 'normal');
+    const c = opts?.color || [51, 51, 51];
+    pdf.setTextColor(c[0], c[1], c[2]);
+    const xPos = opts?.align === 'center' ? pageWidth / 2
+      : opts?.align === 'right' ? pageWidth - margin : x;
+    pdf.text(text, xPos, yPos, opts?.align ? { align: opts.align } : undefined);
+  };
+
+  const addLine = (yPos: number) => {
+    pdf.setDrawColor(200, 200, 200);
+    pdf.setLineWidth(0.3);
+    pdf.line(margin, yPos, pageWidth - margin, yPos);
+  };
+
+  const addRow = (label: string, value: string, yPos: number) => {
+    addText(label, margin, yPos, { size: 9, color: [120, 120, 120] });
+    addText(value || '-', margin + 50, yPos, { size: 10, bold: true });
+    return yPos + 6;
+  };
+
+  const checkNewPage = (needed: number) => {
+    if (y + needed > 280) { pdf.addPage(); y = margin; }
+  };
+
+  // -- Header with logo --
+  pdf.setFillColor(27, 42, 78);
+  pdf.rect(0, 0, pageWidth, 38, 'F');
+
+  const logoDataUri = await fetchLogoDataUri();
+  if (logoDataUri) {
+    try {
+      pdf.addImage(logoDataUri, 'PNG', 12, 4, 30, 30);
+    } catch (e) {
+      console.warn('[vehicles/prep-pdf] Logo embed failed:', e instanceof Error ? e.message : e);
+    }
+  }
+
+  addText('VEHICLE PREP REPORT', 0, 15, { size: 18, bold: true, color: [255, 255, 255], align: 'center' });
+  addText('Pre-Hire Preparation Record', 0, 23, { size: 11, color: [180, 190, 210], align: 'center' });
+
+  const timestamp = formatFullDateTime(data.completedAt || data.startedAt || data.date);
+  addText(timestamp, 0, 31, { size: 8, color: [140, 150, 170], align: 'center' });
+
+  y = 48;
+
+  // -- Vehicle Details --
+  addText('VEHICLE DETAILS', margin, y, { size: 11, bold: true, color: [27, 42, 78] });
+  y += 3; addLine(y); y += 6;
+  y = addRow('Registration', data.vehicleReg, y);
+  y = addRow('Type', data.vehicleType || '-', y);
+  y += 4;
+
+  // -- Prep Details --
+  addText('PREP DETAILS', margin, y, { size: 11, bold: true, color: [27, 42, 78] });
+  y += 3; addLine(y); y += 6;
+  y = addRow('Prepared by', data.preparedBy || '-', y);
+  if (data.mileage != null) y = addRow('Mileage', Number(data.mileage).toLocaleString('en-GB') + ' miles', y);
+  if (data.fuelLevel) y = addRow('Fuel', String(data.fuelLevel), y);
+  if (data.durationMinutes != null) y = addRow('Duration', `${data.durationMinutes} min`, y);
+  y = addRow('Date', formatDayDate(data.date), y);
+  if (data.overallStatus) y = addRow('Overall status', String(data.overallStatus), y);
+  y += 4;
+
+  // -- Checklist sections --
+  const sections: any[] = Array.isArray(data.sections) ? data.sections : [];
+  for (const sec of sections) {
+    const items: any[] = Array.isArray(sec.items) ? sec.items : [];
+    checkNewPage(14 + items.length * 5);
+    addText(String(sec.name || 'Section').toUpperCase(), margin, y, { size: 11, bold: true, color: [27, 42, 78] });
+    y += 3; addLine(y); y += 6;
+
+    for (const item of items) {
+      checkNewPage(6);
+      const isFlagged = item.flagged === true
+        || String(item.value || '').toLowerCase().includes('problem');
+      const valueText = `${item.value || '-'}${item.unit ? ` ${item.unit}` : ''}`;
+      addText(String(item.name || ''), margin, y, { size: 9, color: [120, 120, 120] });
+      addText(valueText, margin + 90, y, {
+        size: 9, bold: true, color: isFlagged ? [202, 138, 4] : [51, 51, 51],
+      });
+      y += 5;
+      if (item.detail) {
+        const detailLines = pdf.splitTextToSize(String(item.detail), contentWidth - 94) as string[];
+        for (const line of detailLines) {
+          checkNewPage(4);
+          addText(line, margin + 90, y, { size: 8, color: [140, 140, 140] });
+          y += 4;
+        }
+      }
+    }
+
+    if (sec.notes && String(sec.notes).trim()) {
+      checkNewPage(8);
+      const noteLines = pdf.splitTextToSize(`Notes: ${sec.notes}`, contentWidth) as string[];
+      for (const line of noteLines) {
+        checkNewPage(5);
+        addText(line, margin, y, { size: 8, color: [146, 64, 14] });
+        y += 4;
+      }
+    }
+    y += 4;
+  }
+
+  // -- Flagged items --
+  const flagged: any[] = Array.isArray(data.flaggedItems) ? data.flaggedItems : [];
+  if (flagged.length > 0) {
+    checkNewPage(14 + flagged.length * 10);
+    addText('FLAGGED ITEMS', margin, y, { size: 11, bold: true, color: [27, 42, 78] });
+    y += 3; addLine(y); y += 6;
+
+    for (let fi = 0; fi < flagged.length; fi++) {
+      const f = flagged[fi];
+      checkNewPage(12);
+      const sevColor: [number, number, number] =
+        String(f.severity).toLowerCase() === 'critical' ? [220, 38, 38] :
+        String(f.severity).toLowerCase() === 'major' ? [234, 88, 12] :
+        [202, 138, 4];
+      const heading = `${fi + 1}. ${f.checklistItem || 'Item'}${f.selectedOption ? ` — ${f.selectedOption}` : ''}`;
+      addText(heading, margin, y, { size: 10, bold: true, color: [80, 80, 80] });
+      if (f.severity) {
+        pdf.setFontSize(8);
+        pdf.setTextColor(sevColor[0], sevColor[1], sevColor[2]);
+        pdf.text(String(f.severity), pageWidth - margin, y, { align: 'right' });
+      }
+      y += 5;
+      if (f.description) {
+        const descLines = pdf.splitTextToSize(String(f.description), contentWidth - 8) as string[];
+        for (const line of descLines) {
+          checkNewPage(5);
+          addText(line, margin + 4, y, { size: 9, color: [80, 80, 80] });
+          y += 4;
+        }
+      }
+      y += 3;
+    }
+    y += 2;
+  }
+
+  // -- Photos --
+  checkNewPage(20);
+  addText('PHOTOS', margin, y, { size: 11, bold: true, color: [27, 42, 78] });
+  y += 3; addLine(y); y += 6;
+
+  if (photos.length > 0) {
+    const colWidth = contentWidth / 2 - 2;
+    const maxPhotoH = 55;
+    const getImageDims = (base64: string): { w: number; h: number } => {
+      try {
+        const props = pdf.getImageProperties(base64);
+        return { w: props.width || 4, h: props.height || 3 };
+      } catch {
+        return { w: 4, h: 3 };
+      }
+    };
+    const fitImage = (imgW: number, imgH: number, maxW: number, maxH: number) => {
+      const ratio = imgW / imgH;
+      let w = maxW;
+      let h = w / ratio;
+      if (h > maxH) { h = maxH; w = h * ratio; }
+      return { w, h };
+    };
+
+    for (let i = 0; i < photos.length; i += 2) {
+      const leftFit = fitImage(...Object.values(getImageDims(photos[i].base64)) as [number, number], colWidth, maxPhotoH);
+      let rowH = leftFit.h;
+      let rightFit = { w: 0, h: 0 };
+      if (i + 1 < photos.length) {
+        rightFit = fitImage(...Object.values(getImageDims(photos[i + 1].base64)) as [number, number], colWidth, maxPhotoH);
+        rowH = Math.max(leftFit.h, rightFit.h);
+      }
+      checkNewPage(rowH + 12);
+
+      const leftX = margin;
+      try {
+        pdf.addImage(photos[i].base64, 'JPEG', leftX, y, leftFit.w, leftFit.h, undefined, 'FAST');
+      } catch {
+        pdf.setDrawColor(200, 200, 200);
+        pdf.setFillColor(245, 245, 245);
+        pdf.roundedRect(leftX, y, colWidth, rowH, 2, 2, 'FD');
+      }
+      const rightX = margin + colWidth + 4;
+      if (i + 1 < photos.length) {
+        try {
+          pdf.addImage(photos[i + 1].base64, 'JPEG', rightX, y, rightFit.w, rightFit.h, undefined, 'FAST');
+        } catch {
+          pdf.setDrawColor(200, 200, 200);
+          pdf.setFillColor(245, 245, 245);
+          pdf.roundedRect(rightX, y, colWidth, rowH, 2, 2, 'FD');
+        }
+      }
+
+      const labelY = y + rowH + 4;
+      addText(photos[i].label, leftX, labelY, { size: 7, color: [120, 120, 120] });
+      if (photos[i].r2Url) {
+        pdf.setFontSize(6);
+        pdf.setTextColor(27, 42, 78);
+        pdf.textWithLink('View full size', leftX, labelY + 4, { url: photos[i].r2Url });
+      }
+      if (i + 1 < photos.length) {
+        addText(photos[i + 1].label, rightX, labelY, { size: 7, color: [120, 120, 120] });
+        if (photos[i + 1].r2Url) {
+          pdf.setFontSize(6);
+          pdf.setTextColor(27, 42, 78);
+          pdf.textWithLink('View full size', rightX, labelY + 4, { url: photos[i + 1].r2Url });
+        }
+      }
+      y += rowH + 12;
+    }
+    addText(`${photos.length} photo${photos.length === 1 ? '' : 's'} captured`, margin, y, { size: 8, color: [120, 120, 120] });
+    y += 6;
+  } else {
+    addText('No photos captured', margin, y, { size: 9, color: [180, 180, 180] });
+    y += 6;
+  }
+
+  // -- Footer on every page --
+  const pageCount = pdf.getNumberOfPages();
+  for (let p = 1; p <= pageCount; p++) {
+    pdf.setPage(p);
+    pdf.setFontSize(7);
+    pdf.setTextColor(160, 160, 160);
+    const generated = new Date().toISOString().split('T')[0];
+    pdf.text(
+      'Ooosh Tours Ltd - Vehicle Prep Report - Generated ' + generated,
+      pageWidth / 2, 292, { align: 'center' },
+    );
+    pdf.text('Page ' + p + ' of ' + pageCount, pageWidth - margin, 292, { align: 'right' });
+  }
+
+  const pdfArrayBuffer = pdf.output('arraybuffer') as ArrayBuffer;
+  const pdfBytes = new Uint8Array(pdfArrayBuffer);
+
+  const eventDateStr = String(data.date || new Date().toISOString().slice(0, 10));
+  const dp = eventDateStr.split('-'); // YYYY-MM-DD
+  const ddmmyy = dp.length === 3 ? dp[2] + dp[1] + dp[0].slice(2) : eventDateStr;
+  const safeReg = String(data.vehicleReg || 'unknown').replace(/\s+/g, '-');
+  const filename = `${safeReg}-${ddmmyy}-prep.pdf`;
 
   return { pdfBytes, filename };
 }

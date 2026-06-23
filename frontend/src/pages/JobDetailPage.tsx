@@ -15,6 +15,7 @@ import type { JobRequirement } from '../components/RequirementCard';
 import ExcessGateBanner from '../components/ExcessGateBanner';
 import ExcessPaymentModal from '../components/ExcessPaymentModal';
 import OohReturnModal from '../components/OohReturnModal';
+import JobOohReturns from '../components/JobOohReturns';
 import AddToHireModal, { type AddToHireCandidate } from '../components/AddToHireModal';
 import JobContactsCard from '../components/JobContactsCard';
 import type { JobExcess } from '../../../shared/types';
@@ -1997,6 +1998,21 @@ export default function JobDetailPage() {
     }
   }
 
+  // Cycle the operational arrangement status (ops_status) through the same six
+  // states as the Transport Ops dropdown, so staff can drive a quote from
+  // "To Be Arranged" to "Completed" without leaving the job page.
+  async function cycleOpsStatus(quoteId: string, current: string) {
+    const order = ['todo', 'arranging', 'arranged', 'dispatched', 'completed', 'cancelled'];
+    const idx = order.indexOf(current);
+    const next = order[(idx + 1) % order.length];
+    try {
+      await api.patch(`/quotes/${quoteId}/ops-status`, { ops_status: next });
+      await loadQuotes();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to update arrangement status');
+    }
+  }
+
   async function searchVenues(search: string) {
     try {
       const data = await api.get<{ data: { id: string; name: string; city: string | null }[] }>(
@@ -3956,6 +3972,9 @@ export default function JobDetailPage() {
             />
           )}
 
+          {/* Out-of-hours returns — flag/un-flag badly-parked OOH returns per van */}
+          <JobOohReturns jobId={job.id} />
+
           {vehicleAssignmentsLoading ? (
             <div className="flex justify-center py-12">
               <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-ooosh-600" />
@@ -4541,9 +4560,37 @@ export default function JobDetailPage() {
                         }`}>
                           {q.calculation_mode === 'dayrate' ? 'Day Rate' : 'Hourly'}
                         </span>
-                        <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${sc.bg} ${sc.text}`}>
-                          {sc.label}
-                        </span>
+                        {/* Commercial booking status. Hidden for draft — the
+                            interactive arrangement pill below already reads "To Be
+                            Arranged", and the Confirm/Cancel buttons cover draft. */}
+                        {quoteStatus !== 'draft' && (
+                          <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${sc.bg} ${sc.text}`}>
+                            {sc.label}
+                          </span>
+                        )}
+                        {/* Arrangement (ops) status pill — clickable, cycles through the
+                            same six states as the Transport Ops dropdown. */}
+                        {!isCancelled && (() => {
+                          const ops = (q as { ops_status?: string }).ops_status || 'todo';
+                          const cfg: Record<string, { label: string; cls: string }> = {
+                            todo:       { label: 'To Be Arranged', cls: 'bg-red-100 text-red-700' },
+                            arranging:  { label: 'Arranging',      cls: 'bg-amber-100 text-amber-700' },
+                            arranged:   { label: 'Arranged',       cls: 'bg-blue-100 text-blue-700' },
+                            dispatched: { label: 'Dispatched',     cls: 'bg-indigo-100 text-indigo-700' },
+                            completed:  { label: 'Completed',      cls: 'bg-green-100 text-green-700' },
+                            cancelled:  { label: 'Cancelled',      cls: 'bg-gray-100 text-gray-500' },
+                          };
+                          const c = cfg[ops] || cfg.todo;
+                          return (
+                            <button
+                              onClick={() => cycleOpsStatus(q.id, ops)}
+                              className={`text-xs px-2 py-0.5 rounded-full font-medium cursor-pointer hover:opacity-80 transition-opacity ${c.cls}`}
+                              title="Click to cycle arrangement status: To Be Arranged → Arranging → Arranged → Dispatched → Completed → Cancelled"
+                            >
+                              {c.label}
+                            </button>
+                          );
+                        })()}
                         {q.run_group && (
                           <span
                             className="text-xs px-2 py-0.5 rounded-full font-medium bg-violet-100 text-violet-700"

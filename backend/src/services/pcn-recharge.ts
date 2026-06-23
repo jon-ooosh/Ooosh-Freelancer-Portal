@@ -30,7 +30,13 @@ import { getSystemSettings } from '../routes/system-settings';
 
 // Sales nominal for the PCN recharge stock (matches cost-recharge-hh.ts '399').
 const PCN_RECHARGE_NOMINAL = 22;
-const CLOSED_HH_STATUSES = [7, 9, 10, 11];
+// Genuinely-terminal HH statuses where a billable line can't / shouldn't be added.
+// Deliberately LOOSER than cost-recharge's [7,9,10,11]: PCNs characteristically
+// arrive AFTER the hire returns (status 7 = Returned), when the invoice is usually
+// still open and the fine is exactly what we want to bill. HireHop's LOCKED flag
+// (set on completion/invoicing) is the real "can't touch it" gate and is checked
+// alongside this. We only hard-block Cancelled / Not Interested / Completed.
+const CLOSED_HH_STATUSES = [9, 10, 11];
 
 export interface PcnFineRechargeResult {
   applied: boolean;
@@ -72,7 +78,7 @@ export async function addPcnFineLine(
     if (locked || CLOSED_HH_STATUSES.includes(hhStatus)) {
       return {
         applied: false, manualActionRequired: true,
-        message: `HireHop job #${hhJobNumber} is ${locked ? 'locked' : 'closed'} — add the £${fineAmount.toFixed(2)} PCN fine line manually.`,
+        message: `HireHop job #${hhJobNumber} is ${locked ? 'locked' : 'closed'} — can't auto-add the line. Recharge the £${fineAmount.toFixed(2)} fine manually in HireHop or raise a separate invoice.`,
       };
     }
 

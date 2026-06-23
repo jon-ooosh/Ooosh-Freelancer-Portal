@@ -22,6 +22,7 @@ import TransportOpsPage from './pages/TransportOpsPage';
 import BacklinePage from './pages/BacklinePage';
 import BacklineMatcherPage from './pages/BacklineMatcherPage';
 import CarnetsPage from './pages/CarnetsPage';
+import CarnetDetailPage from './pages/CarnetDetailPage';
 import IssuesPage from './pages/IssuesPage';
 import ProblemsPage from './pages/ProblemsPage';
 import IssueDetailPage from './pages/IssueDetailPage';
@@ -35,6 +36,7 @@ import FillGapPage from './pages/FillGapPage';
 import FreelancerBookoutShell from './pages/FreelancerBookoutShell';
 import StoragePage from './pages/StoragePage';
 import StorageTcsAcceptPage from './pages/StorageTcsAcceptPage';
+import CarnetFormPage from './pages/CarnetFormPage';
 import HoldingPage from './pages/HoldingPage';
 import PcnsPage from './pages/PcnsPage';
 import PcnDetailPage from './pages/PcnDetailPage';
@@ -140,6 +142,7 @@ export default function App() {
       <Route path="/m/receipt/:token" element={<MobileReceiptUploadPage />} />
       {/* Public storage T&Cs acceptance — token-authenticated, no Layout wrapper */}
       <Route path="/storage-tcs/:token" element={<StorageTcsAcceptPage />} />
+      <Route path="/carnet-form/:token" element={<CarnetFormPage />} />
       {/* Public PCN pay-direct proof-of-payment upload — token-authenticated, no Layout */}
       <Route path="/pcn-receipt/:token" element={<PcnReceiptUploadPage />} />
       {/* Public inbound merch-delivery form (no login) — replaces the JotForm */}
@@ -174,6 +177,7 @@ export default function App() {
                 <Route path="/operations/backline" element={<BacklinePage />} />
                 <Route path="/operations/backline-matcher" element={<BacklineMatcherPage />} />
                 <Route path="/operations/carnets" element={<CarnetsPage />} />
+                <Route path="/operations/carnets/:id" element={<CarnetDetailPage />} />
                 <Route path="/operations/fill-gap/:jobId" element={<FillGapPage />} />
                 <Route path="/operations/issues" element={<IssuesPage />} />
                 <Route path="/operations/issues/:id" element={<IssuesPage />} />

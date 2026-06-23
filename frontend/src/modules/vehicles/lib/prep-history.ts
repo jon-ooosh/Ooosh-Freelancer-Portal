@@ -29,6 +29,8 @@ export interface PrepHistorySession {
   durationMinutes?: number
   overallStatus: string
   sections: PrepHistorySection[]
+  /** Present on hydrated full session docs — needed for the PDF export. */
+  eventId?: string
 }
 
 /**
