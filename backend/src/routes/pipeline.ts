@@ -11,6 +11,7 @@ import emailService from '../services/email-service';
 import { getFrontendUrl } from '../config/app-urls';
 import {
   triggerHireFormEmailOnConfirmation,
+  triggerCarnetFormOnConfirmation,
   hireFormResultIsAnomaly,
   sendConfirmationSilentSkipAlert,
 } from '../services/confirmation-hooks';
@@ -953,6 +954,7 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
       (async () => {
         try {
           const hfResult = await triggerHireFormEmailOnConfirmation(jobId);
+          triggerCarnetFormOnConfirmation(jobId).catch(() => {}); // best-effort, gated internally
           const anomaly = hireFormResultIsAnomaly(hfResult);
           if (anomaly) {
             const jobRow = await query(

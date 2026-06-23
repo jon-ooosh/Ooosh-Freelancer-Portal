@@ -480,7 +480,18 @@ function ClientArrangesBlock({ carnet, onSave, busy }: {
 function GmrManager({ carnet, reload }: { carnet: Carnet; reload: () => Promise<void> }) {
   const [adding, setAdding] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
   const sent = carnet.gmrs.filter((g) => g.status === 'sent').length;
+
+  const emailGmr = async (gmrId: string) => {
+    setBusy(true); setMsg(null);
+    try {
+      const r = await api.post<{ data: { recipient: string } }>(`/carnets/${carnet.id}/gmrs/${gmrId}/email`, {});
+      setMsg(`GMR sent to ${r.data.recipient}`);
+      await reload();
+    } catch (e) { setMsg(e instanceof Error ? e.message : 'Failed to send GMR'); }
+    finally { setBusy(false); }
+  };
 
   const updateGmr = async (gmrId: string, body: Record<string, unknown>) => {
     setBusy(true);
@@ -539,6 +550,7 @@ function GmrManager({ carnet, reload }: { carnet: Carnet; reload: () => Promise<
                   Upload QR
                   <input type="file" accept="image/*" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadQr(g.id, f); }} />
                 </label>}
+            {g.gmr_reference && <button onClick={() => emailGmr(g.id)} disabled={busy} className="text-xs text-purple-600 hover:text-purple-800">✉ Email to client</button>}
             {g.status !== 'sent' && <button onClick={() => updateGmr(g.id, { status: 'sent' })} disabled={busy} className="text-xs text-green-600 hover:text-green-800">Mark sent</button>}
             <button
               onClick={async () => { if (window.confirm('Delete this GMR?')) { setBusy(true); try { await api.delete(`/carnets/${carnet.id}/gmrs/${g.id}`); await reload(); } finally { setBusy(false); } } }}
@@ -546,6 +558,7 @@ function GmrManager({ carnet, reload }: { carnet: Carnet; reload: () => Promise<
           </div>
         ))}
       </div>
+      {msg && <p className="text-xs text-green-700 mt-2">{msg}</p>}
     </div>
   );
 }
