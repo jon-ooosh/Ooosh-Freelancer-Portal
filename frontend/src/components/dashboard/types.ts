@@ -310,6 +310,7 @@ export interface OperationsData {
     overdue_transport_ops?: OverdueTransportRow[];
     total_overdue_count?: number;
     client_intros: ClientIntroJob[];
+    carnet_count?: number;
     referral_count: number;
     referrals: PendingReferral[];
     excess_count: number;

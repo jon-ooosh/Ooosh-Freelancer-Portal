@@ -1,15 +1,15 @@
 # ATA Carnet Management — Implementation Spec
 
-**Status:** Drafted Jun 2026. Building across multiple sessions.
+**Status:** ✅ COMPLETE (Jun 2026). Live. The build notes below are retained for history; CLAUDE.md → "Carnets" carries the canonical conventions.
 **Replaces:** Monday.com carnet tracking + the standalone Jotform carnet request form (`form 243083554868063`).
 
-### Build progress
-- [x] **Slice 1 — Foundation (this PR):** migration 135 (`job_carnets` + `carnet_gmrs`), HH detection of sale item 575 in the derivation engine (auto-creates the `carnet` requirement card + a `job_carnets` record, mode=we_supply, status=detected; stale-cleanup wired), read-only `/api/carnets` endpoints.
-- [x] **Slice 3 — Staff backend + cockpit component (shipped before slice 2):** backend write endpoints on `/api/carnets` (POST create, PATCH with status→custody/timestamp side-effects + timeline log, cancel, GMR CRUD, files). `CarnetSection` rich cockpit component built (lifecycle stepper, custody, detail edit, GMR management incl. QR upload, documents, soft cancel). **Job-view placement reversed (Jun 2026):** the rich card was briefly on Job Detail Overview but pulled — too heavy for job view and it duplicated the requirement-card tracker. **Job View now keeps only the thin `carnet` requirement card (tracker bar)**; `CarnetSection` is retained unmounted as the basis for the Operations tab (slice 5). Manual `client_arranges` UI entry also lands in slice 5.
-- [x] **Slice 5 (Operations tab + cohesion):** `/operations/carnets` page (master/detail — filterable list + the rich `CarnetSection` cockpit for the selected carnet; `?job=` auto-selects), Operations nav entry. **Cohesion fix:** the Job-View `carnet` requirement card is now a read-only reflection of the real lifecycle — generic 4-state dropdown + 6-step `type_steps` bar suppressed for carnet, replaced by a lifecycle stepper (9-state we_supply / 3-state client_arranges, fetched live) + a **"Manage carnet in Operations →"** link. Backend `syncCarnetRequirementStatus` maps `job_carnets.status → carnet` requirement status on every PATCH/cancel, so the pre-hire prep counter stays accurate. Remaining for this area: manual `client_arranges` create UI + dashboard NeedsAttention bucket.
-- [ ] **Slice 2 (still to come) — Client request form + signed-authority PDF.**
-- [ ] **Slice 2 — Client request form + signed-authority PDF** (public token page, the Letter of Authorisation, GMR seeding from crossings) — needs the Ooosh signatory signature image + name/role/address.
-- [ ] **Slice 4 — Send timing scheduler + email templates** (T-28d / on-confirmation / chase / ad-hoc).
+### Build progress — all shipped
+- [x] **Slice 1 — Foundation:** migration 135 (`job_carnets` + `carnet_gmrs`), HH detection of sale item 575 (`LIST_ID===575 AND CATEGORY_ID===355`), auto-creates the `carnet` requirement card + `job_carnets` record, stale-cleanup, read-only `/api/carnets`.
+- [x] **Slice 3 — Staff backend + cockpit:** `/api/carnets` write endpoints + `CarnetSection`. Rich card kept off Job View (thin requirement-card tracker only); cockpit reused on the Operations tab.
+- [x] **Slice 5 — Operations tab + cohesion:** `/operations/carnets` list + `/operations/carnets/:id` detail; Job-View card is a read-only lifecycle reflection + "Manage in Operations →" link; `syncCarnetRequirementStatus`. Needed-by / Return-by (`carnet_expiry_date + 7`) countdowns.
+- [x] **Slice 2 — Client request form + signed authority:** Settings → Carnet signature upload (`system_settings`, migration 141); `carnet-authority-pdf.ts` two-signature letter; public `CarnetFormPage` (`/carnet-form/:token`) + submit (stores, seeds GMRs, generates the final PDF, emails client + info@); staff send/copy.
+- [x] **Slice 4 — Auto-send + email routing:** `carnet-auto-email.ts` (daily 09:15, T-28d send + T-14 chase); `carnet` email-routing bucket.
+- [x] **Final polish:** required form fields + default start date + scroll-gated terms; letter-of-authority tracking + soft gate from `applied`; phase-coloured stepper; manual `client_arranges` create; dashboard "Carnets" NeedsAttention bucket.
 - [ ] **Slice 5 — Operations overview page + dashboard NeedsAttention bucket.**
 
 ---

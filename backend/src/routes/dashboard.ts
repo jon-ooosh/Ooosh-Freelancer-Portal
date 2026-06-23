@@ -654,6 +654,25 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         ORDER BY je.updated_at DESC
         LIMIT 10
       `),
+
+      // 27. Carnets needing attention (we_supply, open): approaching/overdue and
+      // not yet obtained, or out with the client past the discharge deadline, or
+      // returned-but-not-discharged. Non-blocking amber bucket.
+      query(`
+        SELECT COUNT(*) AS count
+        FROM job_carnets c JOIN jobs j ON j.id = c.job_id
+        WHERE c.mode = 'we_supply'
+          AND c.status NOT IN ('discharged', 'closed', 'cancelled')
+          AND j.is_deleted = false
+          AND COALESCE(j.is_internal, false) = false
+          AND j.pipeline_status NOT IN ('lost', 'cancelled')
+          AND (
+            (c.status IN ('detected','form_sent','info_received','applied')
+              AND COALESCE(c.carnet_start_date, j.out_date, j.job_date)::date <= CURRENT_DATE + INTERVAL '14 days')
+            OR (c.status = 'with_client' AND c.carnet_expiry_date IS NOT NULL AND (c.carnet_expiry_date + 7) < CURRENT_DATE)
+            OR (c.status = 'returned')
+          )
+      `),
     ]);
 
     const [
@@ -671,6 +690,7 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       pendingReferralsResult, pendingExcessResult,
       prepTimeResult, onHireSparkResult, deprepTimeResult,
       expiringHoldsResult, receiptsOutstandingResult,
+      carnetCountResult,
     ] = results;
 
     // Build the 14-day on-hire series — oldest day first, today last.
@@ -825,6 +845,7 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
           + overdueBacklineResult.rows.length
           + overdueTransportOpsResult.rows.length,
         client_intros: clientIntrosResult.rows,
+        carnet_count: parseInt(carnetCountResult.rows[0].count as string),
         referral_count: parseInt(referralCountResult.rows[0].count as string),
         referrals: pendingReferralsResult.rows,
         // ── Excess (semantics changed Apr 2026) ──
