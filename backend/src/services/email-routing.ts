@@ -29,6 +29,7 @@ export type EmailBucket =
   | 'bookings_payments'
   | 'send_invoice'
   | 'hire_forms'
+  | 'carnet'
   | 'excess'
   | 'delivery_on_day';
 
@@ -52,6 +53,11 @@ export const EMAIL_BUCKETS: ReadonlyArray<{
     id: 'hire_forms',
     label: 'Hire forms & driver',
     description: 'Hire form send/chase emails to drivers.',
+  },
+  {
+    id: 'carnet',
+    label: 'Carnet',
+    description: 'ATA Carnet request form send/chase emails.',
   },
   {
     id: 'excess',
@@ -90,6 +96,10 @@ export const TEMPLATE_BUCKETS: Readonly<Record<string, EmailBucket>> = {
   // Hire forms & driver-facing client emails
   hire_form_request: 'hire_forms',
   hire_form_chase: 'hire_forms',
+
+  // Carnet request form
+  carnet_request: 'carnet',
+  carnet_request_chase: 'carnet',
 
   // Insurance excess (every active lifecycle template)
   excess_payment_confirmed: 'excess',
