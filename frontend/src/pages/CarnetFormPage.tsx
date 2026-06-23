@@ -28,6 +28,9 @@ interface Ctx {
   job_name: string | null;
   client_name: string | null;
   lead_name: string | null;
+  lead_email: string | null;
+  lead_role: string | null;
+  default_start_date: string | null;
   authority_terms: string;
 }
 
@@ -53,6 +56,7 @@ export default function CarnetFormPage() {
     { crossing_date: '', crossing_location: '', direction: 'out_of_eu' },
   ]);
   const [accepted, setAccepted] = useState(false);
+  const [termsScrolled, setTermsScrolled] = useState(false);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const drawing = useRef(false);
@@ -64,11 +68,22 @@ export default function CarnetFormPage() {
         const res = await fetch(`/api/carnets/form/${token}`);
         const j = await res.json();
         if (!res.ok) { setError(j.error || 'This link is not valid.'); }
-        else { setCtx(j.data); setLeadName(j.data.lead_name || ''); }
+        else {
+          setCtx(j.data);
+          setLeadName(j.data.lead_name || '');
+          setLeadEmail(j.data.lead_email || '');
+          setLeadRole(j.data.lead_role || '');
+          if (j.data.default_start_date) setStartDate(j.data.default_start_date);
+        }
       } catch { setError('Could not load the form.'); }
       finally { setLoading(false); }
     })();
   }, [token]);
+
+  function onTermsScroll(e: React.UIEvent<HTMLDivElement>) {
+    const el = e.currentTarget;
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 8) setTermsScrolled(true);
+  }
 
   function toggle(list: string[], setList: (v: string[]) => void, v: string) {
     setList(list.includes(v) ? list.filter((x) => x !== v) : [...list, v]);
@@ -102,7 +117,12 @@ export default function CarnetFormPage() {
     if (!length) return setError('Please choose a carnet length.');
     if (!startDate) return setError('Please provide a required start date.');
     if (!leadName.trim()) return setError('Please enter the lead name.');
-    if (!accepted) return setError('Please accept the terms.');
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(leadEmail.trim())) return setError('Please enter a valid lead email.');
+    if (!leadRole.trim()) return setError('Please enter the lead role.');
+    if (eu.length + nonEu.length === 0) return setError('Please select at least one country.');
+    if (gmrNeeded === '') return setError('Please answer the GMR question.');
+    if (gmrNeeded === 'yes' && !crossings.some((c) => c.crossing_date && c.crossing_location)) return setError('Please add at least one crossing (date + location).');
+    if (!accepted) return setError('Please read and accept the terms.');
     if (!hasInk.current) return setError('Please sign in the box.');
     setSubmitting(true);
     try {
@@ -145,7 +165,7 @@ export default function CarnetFormPage() {
       <h1 className="text-2xl font-bold text-slate-800">Carnet request form</h1>
       {ctx && <p className="text-sm text-slate-500 mb-5">{ctx.job_name || 'Your hire'}{ctx.hh_job_number ? ` · job #${ctx.hh_job_number}` : ''}</p>}
 
-      <Section title="Length of carnet required">
+      <Section title="Length of carnet required" required>
         <div className="flex gap-4">
           {['2', '6', '12'].map((m) => (
             <label key={m} className={cell}><input type="radio" name="len" checked={length === m} onChange={() => setLength(m)} /> {m} months</label>
@@ -153,11 +173,11 @@ export default function CarnetFormPage() {
         </div>
       </Section>
 
-      <Section title="Required start date">
+      <Section title="Required start date" required>
         <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="border border-slate-300 rounded px-2 py-1 text-sm" />
       </Section>
 
-      <Section title="EU countries you'll travel through">
+      <Section title="Countries you'll travel through" required hint="select at least one across EU and non-EU">
         <div className="grid grid-cols-2 sm:grid-cols-3 gap-1">
           {EU_COUNTRIES.map((c) => <label key={c} className={cell}><input type="checkbox" checked={eu.includes(c)} onChange={() => toggle(eu, setEu, c)} /> {c}</label>)}
         </div>
@@ -169,7 +189,7 @@ export default function CarnetFormPage() {
         </div>
       </Section>
 
-      <Section title="Lead person (signs the authority)">
+      <Section title="Lead person (signs the authority)" required>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
           <input placeholder="Lead name" value={leadName} onChange={(e) => setLeadName(e.target.value)} className="border border-slate-300 rounded px-2 py-1 text-sm" />
           <input placeholder="Lead email" value={leadEmail} onChange={(e) => setLeadEmail(e.target.value)} className="border border-slate-300 rounded px-2 py-1 text-sm" />
@@ -187,7 +207,7 @@ export default function CarnetFormPage() {
         <button onClick={() => setExtra([...extra, ''])} className="text-sm text-purple-600 hover:text-purple-800">+ Add name</button>
       </Section>
 
-      <Section title="Do you need us to arrange GMR(s) too? (UK border)">
+      <Section title="Do you need us to arrange GMR(s) too? (UK border)" required>
         <div className="flex gap-4 mb-2">
           <label className={cell}><input type="radio" name="gmr" checked={gmrNeeded === 'yes'} onChange={() => setGmrNeeded('yes')} /> Yes</label>
           <label className={cell}><input type="radio" name="gmr" checked={gmrNeeded === 'no'} onChange={() => setGmrNeeded('no')} /> No</label>
@@ -215,12 +235,16 @@ export default function CarnetFormPage() {
 
       {ctx && (
         <Section title="Terms & authority">
-          <div className="text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded p-3 max-h-40 overflow-y-auto whitespace-pre-line mb-2">{ctx.authority_terms}</div>
-          <label className={cell}><input type="checkbox" checked={accepted} onChange={(e) => setAccepted(e.target.checked)} /> I have read and agree to the above, and I sign as the lead person named.</label>
+          <div onScroll={onTermsScroll} className="text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded p-3 max-h-40 overflow-y-auto whitespace-pre-line mb-1">{ctx.authority_terms}</div>
+          {!termsScrolled && <p className="text-xs text-amber-600 mb-2">Please scroll to the end of the terms to continue.</p>}
+          <label className={`${cell} ${!termsScrolled ? 'opacity-50' : ''}`}>
+            <input type="checkbox" disabled={!termsScrolled} checked={accepted} onChange={(e) => setAccepted(e.target.checked)} />
+            I have read and agree to the above, and I sign as the lead person named.
+          </label>
         </Section>
       )}
 
-      <Section title="Signature">
+      <Section title="Signature" required>
         <canvas ref={canvasRef} width={600} height={160} onPointerDown={start} onPointerMove={move} onPointerUp={() => { drawing.current = false; }} onPointerLeave={() => { drawing.current = false; }}
           className="w-full border border-slate-300 rounded-lg bg-white touch-none" style={{ maxWidth: 600 }} />
         <button onClick={clearSig} className="text-xs text-slate-500 underline mt-1">Clear signature</button>
@@ -241,10 +265,13 @@ function Shell({ children }: { children: React.ReactNode }) {
     </div>
   );
 }
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+function Section({ title, children, required, hint }: { title: string; children: React.ReactNode; required?: boolean; hint?: string }) {
   return (
     <div className="mb-5">
-      <h2 className="text-sm font-semibold text-slate-700 mb-2">{title}</h2>
+      <h2 className="text-sm font-semibold text-slate-700 mb-2">
+        {title}{required && <span className="text-red-500"> *</span>}
+        {hint && <span className="ml-2 text-xs font-normal text-slate-400">{hint}</span>}
+      </h2>
       {children}
     </div>
   );

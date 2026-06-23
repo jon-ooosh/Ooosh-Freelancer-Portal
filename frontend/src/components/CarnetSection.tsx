@@ -85,6 +85,28 @@ const CLIENT_STEPS: { key: string; label: string }[] = [
   { key: 'done', label: 'Done' },
 ];
 
+// Phase colours so "where are we" reads at a glance. active = current step,
+// done = completed step; future steps stay grey.
+export const STEP_PHASE: Record<string, { active: string; done: string }> = {
+  detected:      { active: 'bg-slate-500 text-white',  done: 'bg-slate-100 text-slate-600' },
+  form_sent:     { active: 'bg-sky-500 text-white',    done: 'bg-sky-100 text-sky-700' },
+  info_received: { active: 'bg-blue-600 text-white',   done: 'bg-blue-100 text-blue-700' },
+  applied:       { active: 'bg-indigo-600 text-white', done: 'bg-indigo-100 text-indigo-700' },
+  received:      { active: 'bg-violet-600 text-white', done: 'bg-violet-100 text-violet-700' },
+  with_client:   { active: 'bg-amber-500 text-white',  done: 'bg-amber-100 text-amber-700' },
+  returned:      { active: 'bg-teal-600 text-white',   done: 'bg-teal-100 text-teal-700' },
+  discharged:    { active: 'bg-green-600 text-white',  done: 'bg-green-100 text-green-700' },
+  closed:        { active: 'bg-green-700 text-white',  done: 'bg-green-100 text-green-700' },
+  // client_arranges
+  requested:        { active: 'bg-slate-500 text-white', done: 'bg-slate-100 text-slate-600' },
+  spreadsheet_sent: { active: 'bg-amber-500 text-white', done: 'bg-amber-100 text-amber-700' },
+  done:             { active: 'bg-green-700 text-white', done: 'bg-green-100 text-green-700' },
+};
+export const FUTURE_STEP = 'bg-gray-100 text-gray-400 hover:bg-gray-200';
+
+// Steps from this index require a signed Letter of Authority (soft gate).
+const AUTHORITY_REQUIRED_FROM = 3; // 'applied'
+
 function fmtDate(d: string | null): string {
   if (!d) return '—';
   const dt = new Date(d);
@@ -113,6 +135,7 @@ export default function CarnetSection({ jobId, onChanged }: { jobId: string; onC
   const [err, setErr] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [sendMsg, setSendMsg] = useState<string | null>(null);
+  const [pendingStatus, setPendingStatus] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -146,6 +169,19 @@ export default function CarnetSection({ jobId, onChanged }: { jobId: string; onC
   const steps = carnet.mode === 'we_supply' ? WE_SUPPLY_STEPS : CLIENT_STEPS;
   const currentIdx = steps.findIndex((s) => s.key === carnet.status);
   const isCancelled = carnet.status === 'cancelled';
+  // We "have the letter of authority" once the client has signed (form submitted).
+  const hasAuthority = !!carnet.form_submitted_at;
+
+  // Soft gate: advancing to 'applied' or beyond without a signed authority asks first.
+  const requestStatus = (key: string) => {
+    if (key === carnet.status) return;
+    const idx = WE_SUPPLY_STEPS.findIndex((s) => s.key === key);
+    if (carnet.mode === 'we_supply' && idx >= AUTHORITY_REQUIRED_FROM && !hasAuthority) {
+      setPendingStatus(key);
+    } else {
+      patch({ status: key });
+    }
+  };
 
   return (
     <div className="bg-white rounded-lg border border-gray-200 p-4 sm:p-6">
@@ -173,23 +209,31 @@ export default function CarnetSection({ jobId, onChanged }: { jobId: string; onC
 
       {err && <div className="mb-3 text-sm text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2">{err}</div>}
 
+      {/* Letter of authority status (we_supply) */}
+      {carnet.mode === 'we_supply' && !isCancelled && (
+        <div className="mb-3 text-sm">
+          <span className="text-gray-500">Letter of authority: </span>
+          {hasAuthority
+            ? <span className="text-green-700 font-medium">✓ Received{carnet.form_submitted_at ? ` ${fmtDate(carnet.form_submitted_at)}` : ''}</span>
+            : <span className="text-amber-600 font-medium">✗ Not received yet</span>}
+        </div>
+      )}
+
       {!isCancelled && (
         <>
-          {/* Lifecycle stepper */}
+          {/* Lifecycle stepper — phase-coloured, click to set (soft gate from Applied) */}
           <div className="flex flex-wrap gap-1.5 mb-4">
             {steps.map((s, i) => {
               const done = i < currentIdx;
               const active = i === currentIdx;
+              const phase = STEP_PHASE[s.key];
+              const cls = active ? phase.active : done ? phase.done : FUTURE_STEP;
               return (
                 <button
                   key={s.key}
                   disabled={busy}
-                  onClick={() => patch({ status: s.key })}
-                  className={`px-2.5 py-1 rounded text-xs font-medium transition ${
-                    active ? 'bg-purple-600 text-white'
-                      : done ? 'bg-purple-100 text-purple-700'
-                      : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
-                  }`}
+                  onClick={() => requestStatus(s.key)}
+                  className={`px-2.5 py-1 rounded text-xs font-medium transition ${cls}`}
                   title="Set status (no hard gates — click any step)"
                 >
                   {s.label}
@@ -197,6 +241,17 @@ export default function CarnetSection({ jobId, onChanged }: { jobId: string; onC
               );
             })}
           </div>
+
+          {/* Soft gate — advancing past Applied without the signed authority */}
+          {pendingStatus && (
+            <div className="mb-4 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-sm">
+              <p className="text-amber-800 mb-2">No letter of authority received yet — OK to continue to "{steps.find((s) => s.key === pendingStatus)?.label}"?</p>
+              <div className="flex gap-2">
+                <button onClick={() => { const k = pendingStatus; setPendingStatus(null); patch({ status: k! }); }} className="px-3 py-1 bg-amber-600 text-white rounded text-xs">Continue anyway</button>
+                <button onClick={() => setPendingStatus(null)} className="px-3 py-1 bg-white border border-gray-300 rounded text-xs">Cancel</button>
+              </div>
+            </div>
+          )}
 
           {/* Custody (we_supply only) */}
           {carnet.mode === 'we_supply' && (
