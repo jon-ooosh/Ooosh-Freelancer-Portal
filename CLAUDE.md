@@ -2447,9 +2447,33 @@ pair per column in the `/pcns` SORTS whitelist) + last-used sort/filter persiste
 to localStorage (`ooosh_pcns_prefs`; dashboard deep-link URL params still win on
 load).
 
-**Deferred:** pay & recharge via the Money tab (currently just the HH line item);
-shared `document-extract` primitive with the deferred vehicle service-record
-extractor.
+**Pay & recharge (Jun 2026):** `pay_recharge` now recharges the actual fine amount
+to the client as a **custom-priced HireHop billable line** (`services/pcn-recharge.ts`
+`addPcnFineLine`, stock id from `pcn_hh_charge_item`, mirrors the proven
+`cost-recharge-hh.ts` add-line→price dance), alongside the separate £35+VAT handling
+charge. Because it's a real HH billable line it **auto-surfaces on the Money tab**
+(which reads HH billing live) — no extra Money-tab wiring. Tracked on
+`pcns.fine_recharge_amount / fine_recharged_at / fine_recharge_hh_item_id`
+(migration **143**, idempotent — won't double-recharge). VAT: the fine line uses the
+same stock item as the handling fee (1744, 20%-rated via `vat_rate:0` → HH derives),
+so a recharged fine carries the same treatment as the admin fee; point at a dedicated
+stock item if a fine should ever be zero-rated/disbursement. **Closed-job handling:**
+`addPcnFineLine` reads `job_data.php` at push time — pushes if the job is open; if it's
+`LOCKED` or terminally closed (Cancelled 9 / Not Interested 10 / Completed 11) it
+returns `manualActionRequired` advising staff to recharge manually in HireHop or raise
+a separate invoice (status + email still proceed; the email won't claim the fine
+landed). Deliberately LOOSER than cost-recharge's `[7,9,10,11]` block — PCNs typically
+arrive after the hire RETURNS (status 7, invoice usually still open), so Returned jobs
+are allowed to attempt; `LOCKED` is the real gate. The `pcn_pay_recharge` email states
+what actually landed. Only fires for `pay_recharge` (transfer_liability doesn't — there
+Ooosh never pays the issuer).
+
+**Shared extractor (Jun 2026):** `services/document-extract.ts` is the common
+Claude-vision primitive (prompt-cached system prompt, json_schema structured output,
+image/PDF blocks single or multi-page, parse-with-fence-fallback, cache telemetry).
+`pcn-extract.ts` + `cost-receipt-extract.ts` call `extractDocument<T>()` and keep only
+their prompt/schema/post-processing; the deferred vehicle service-record extractor
+reuses it.
 
 #### Staging Calculator Integration (Jun 2026)
 

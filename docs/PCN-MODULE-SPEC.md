@@ -372,11 +372,13 @@ page).
 
 ## 13. Open / deferred
 
-- **Pay & recharge via the Money tab** rather than just an HH line item (improvement, deferred).
+- ✅ **Pay & recharge** (Jun 2026) — `pay_recharge` recharges the fine as a custom-priced HireHop
+  line (`services/pcn-recharge.ts`, migration 141), auto-surfacing on the Money tab, alongside the
+  £35+VAT handling charge. See CLAUDE.md "PCN Manager Integration".
+- ✅ **AI extraction sharing** (Jun 2026) — `services/document-extract.ts` shared primitive now backs
+  both `pcn-extract.ts` and `cost-receipt-extract.ts`; the vehicle service-record extractor will reuse it.
 - **Duplicate detection** on `reference` at upload (legacy had it as last-to-do; cheap to add here).
 - **Historical Monday hire data** — not migrated; pre-OP unmatched PCNs are manual triage (§1).
-- **AI extraction sharing** with the deferred Vehicle service-record extractor (same shape — could
-  share a `services/document-extract` primitive later).
 
 ---
 
