@@ -37,7 +37,7 @@ const ACTIONS: ActionMeta[] = [
   },
   {
     key: 'pay_recharge', emoji: '🧾', title: 'Pay & recharge the client',
-    desc: 'We pay the fine and recharge the client via HireHop. Adds the £35+VAT handling fee.',
+    desc: 'We pay the fine and recharge it to the client via HireHop (shows on the Money tab), plus the £35+VAT handling fee.',
     hasEmail: true, chargeable: true, managerOnly: true,
   },
   {
@@ -66,6 +66,7 @@ interface ActionResult {
   status: string;
   emailed: { sent: boolean; to: string | null; fallback: boolean; error: string | null };
   charge: { attempted: boolean; applied: boolean; message: string | null };
+  fineRecharge?: { attempted: boolean; applied: boolean; amount: number | null; message: string | null };
 }
 
 export default function PcnActionChooser({
@@ -138,6 +139,11 @@ export default function PcnActionChooser({
         {result.charge.attempted && (
           <p className={result.charge.applied ? 'text-slate-600' : 'text-amber-700'}>
             {result.charge.applied ? '✓' : '⚠'} {result.charge.message}
+          </p>
+        )}
+        {result.fineRecharge?.attempted && result.fineRecharge.message && (
+          <p className={result.fineRecharge.applied ? 'text-slate-600' : 'text-amber-700'}>
+            {result.fineRecharge.applied ? '✓' : '⚠'} {result.fineRecharge.message}
           </p>
         )}
       </div>

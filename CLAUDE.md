@@ -2446,9 +2446,27 @@ pair per column in the `/pcns` SORTS whitelist) + last-used sort/filter persiste
 to localStorage (`ooosh_pcns_prefs`; dashboard deep-link URL params still win on
 load).
 
-**Deferred:** pay & recharge via the Money tab (currently just the HH line item);
-shared `document-extract` primitive with the deferred vehicle service-record
-extractor.
+**Pay & recharge (Jun 2026):** `pay_recharge` now recharges the actual fine amount
+to the client as a **custom-priced HireHop billable line** (`services/pcn-recharge.ts`
+`addPcnFineLine`, stock id from `pcn_hh_charge_item`, mirrors the proven
+`cost-recharge-hh.ts` add-line→price dance), alongside the separate £35+VAT handling
+charge. Because it's a real HH billable line it **auto-surfaces on the Money tab**
+(which reads HH billing live) — no extra Money-tab wiring. Tracked on
+`pcns.fine_recharge_amount / fine_recharged_at / fine_recharge_hh_item_id`
+(migration **141**, idempotent — won't double-recharge). VAT: the fine line uses the
+same stock item as the handling fee (1744, 20%-rated via `vat_rate:0` → HH derives),
+so a recharged fine carries the same treatment as the admin fee; point at a dedicated
+stock item if a fine should ever be zero-rated/disbursement. The `pcn_pay_recharge`
+email now states what actually landed (doesn't claim the fine if the HH job was
+locked/closed and the push fell back to manual). Only fires for `pay_recharge`
+(transfer_liability doesn't — there Ooosh never pays the issuer).
+
+**Shared extractor (Jun 2026):** `services/document-extract.ts` is the common
+Claude-vision primitive (prompt-cached system prompt, json_schema structured output,
+image/PDF blocks single or multi-page, parse-with-fence-fallback, cache telemetry).
+`pcn-extract.ts` + `cost-receipt-extract.ts` call `extractDocument<T>()` and keep only
+their prompt/schema/post-processing; the deferred vehicle service-record extractor
+reuses it.
 
 #### Staging Calculator Integration (Jun 2026)
 

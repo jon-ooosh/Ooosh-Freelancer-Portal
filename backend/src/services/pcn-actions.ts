@@ -17,6 +17,7 @@ import { query } from '../config/database';
 import { emailService } from '../services/email-service';
 import { hhBroker } from '../services/hirehop-broker';
 import { collectNoticeAttachments } from './pcn-documents';
+import { addPcnFineLine } from './pcn-recharge';
 import { resolveClientEmailTarget } from '../services/money-emails';
 import { getSystemSettings } from '../routes/system-settings';
 import { getFrontendUrl } from '../config/app-urls';
@@ -64,6 +65,7 @@ interface ActionResult {
   status: string;
   emailed: { sent: boolean; to: string | null; fallback: boolean; error: string | null };
   charge: { attempted: boolean; applied: boolean; message: string | null };
+  fineRecharge: { attempted: boolean; applied: boolean; amount: number | null; message: string | null };
 }
 
 /**
@@ -139,6 +141,7 @@ export async function applyPcnAction(
     status: map.status,
     emailed: { sent: false, to: null, fallback: false, error: null },
     charge: { attempted: false, applied: false, message: null },
+    fineRecharge: { attempted: false, applied: false, amount: null, message: null },
   };
 
   // ── 1. HireHop handling charge (transfer / recharge, when not waived) ──
@@ -154,6 +157,32 @@ export async function applyPcnAction(
         await query(
           `UPDATE pcns SET handling_charge_applied = true, handling_amount = $2, hh_charge_pushed_at = NOW() WHERE id = $1`,
           [pcnId, parseFloat(settings.pcn_handling_charge || '35')]
+        );
+      }
+    }
+  }
+
+  // ── 1b. Fine recharge (pay_recharge only) — bill the actual fine to the
+  // client as a custom-priced HH line (auto-surfaces on the Money tab). The
+  // £35 admin fee above is separate. Idempotent via fine_recharged_at. ──
+  if (opts.action === 'pay_recharge') {
+    const fineAmt = Number(pcn.fine_amount ?? pcn.reduced_amount ?? 0);
+    if (pcn.fine_recharged_at) {
+      result.fineRecharge.message = 'Fine already recharged to HireHop.';
+    } else if (!pcn.hh_job_number) {
+      result.fineRecharge.message = 'No HireHop job linked — fine not recharged.';
+    } else if (!(fineAmt > 0)) {
+      result.fineRecharge.message = 'No fine amount on the PCN — nothing to recharge.';
+    } else {
+      result.fineRecharge.attempted = true;
+      const f = await addPcnFineLine(Number(pcn.hh_job_number), fineAmt, pcn);
+      result.fineRecharge.applied = f.applied;
+      result.fineRecharge.amount = f.applied ? (f.amount ?? fineAmt) : null;
+      result.fineRecharge.message = f.message;
+      if (f.applied) {
+        await query(
+          `UPDATE pcns SET fine_recharge_amount = $2, fine_recharged_at = NOW(), fine_recharge_hh_item_id = $3 WHERE id = $1`,
+          [pcnId, fineAmt, f.lineId ?? null]
         );
       }
     }
@@ -212,10 +241,22 @@ export async function applyPcnAction(
       const fineLine = money(pcn.fine_amount)
         ? `${money(pcn.fine_amount)}${reduced ? ` (${reduced} if paid by ${fmtDate(pcn.reduced_deadline)})` : ''}`
         : '—';
-      const handlingSentence =
-        opts.action === 'pay_recharge'
-          ? (addCharge ? `We've added the fine plus an administration fee of ${handlingFee}+VAT to your account.` : `We've added the fine to your account.`)
-          : (addCharge ? `As per our hire terms, an administration fee of ${handlingFee}+VAT applies for processing this notice.` : '');
+      // Reflect what actually landed on the client's account (don't over-claim
+      // the fine if the recharge couldn't push to a locked/closed HH job).
+      let handlingSentence: string;
+      if (opts.action === 'pay_recharge') {
+        const fineBilled = result.fineRecharge.applied;
+        const adminBilled = result.charge.applied;
+        const fineStr = fineBilled && result.fineRecharge.amount != null
+          ? `the fine of ${money(result.fineRecharge.amount)}`
+          : 'the fine';
+        if (fineBilled && adminBilled) handlingSentence = `We've added ${fineStr} plus an administration fee of ${handlingFee}+VAT to your account.`;
+        else if (fineBilled) handlingSentence = `We've added ${fineStr} to your account.`;
+        else if (adminBilled) handlingSentence = `We've added an administration fee of ${handlingFee}+VAT to your account; the fine will be added separately.`;
+        else handlingSentence = `The fine and any administration fee will be added to your account.`;
+      } else {
+        handlingSentence = addCharge ? `As per our hire terms, an administration fee of ${handlingFee}+VAT applies for processing this notice.` : '';
+      }
       const jobRef = pcn.hh_job_number ? `#${pcn.hh_job_number}` : '';
       const jobRefSentence = pcn.hh_job_number ? ` (our ref #${pcn.hh_job_number})` : '';
 
@@ -273,6 +314,7 @@ export async function applyPcnAction(
   const bits: string[] = [`Action: ${opts.action.replace(/_/g, ' ')}`];
   if (result.emailed.sent) bits.push(`emailed ${result.emailed.to}${result.emailed.fallback ? ' (fallback)' : ''}`);
   if (result.charge.applied) bits.push('£35+VAT charge added to HH');
+  if (result.fineRecharge.applied && result.fineRecharge.amount != null) bits.push(`fine ${money(result.fineRecharge.amount)} recharged to HH`);
   if (resNote) bits.push(`note: ${resNote}`);
   await query(
     `INSERT INTO pcn_events (pcn_id, event_type, body, metadata, created_by)
