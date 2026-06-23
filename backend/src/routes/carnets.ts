@@ -53,8 +53,9 @@ const publicLimiter = rateLimit({
 router.get('/form/:token', publicLimiter, async (req: Request, res: Response) => {
   try {
     const result = await query(
-      `SELECT c.id, c.status, c.lead_name, c.form_submitted_at,
-              j.hh_job_number, j.job_name, j.client_name
+      `SELECT c.id, c.status, c.lead_name, c.lead_email, c.lead_role, c.form_submitted_at,
+              j.hh_job_number, j.job_name, j.client_name,
+              COALESCE(c.carnet_start_date, j.out_date, j.job_date) AS default_start_date
        FROM job_carnets c JOIN jobs j ON j.id = c.job_id
        WHERE c.form_token = $1`,
       [req.params.token]
@@ -70,6 +71,9 @@ router.get('/form/:token', publicLimiter, async (req: Request, res: Response) =>
         job_name: c.job_name,
         client_name: c.client_name,
         lead_name: c.lead_name,
+        lead_email: c.lead_email,
+        lead_role: c.lead_role,
+        default_start_date: c.default_start_date ? new Date(c.default_start_date).toISOString().slice(0, 10) : null,
         authority_terms: CARNET_AUTHORITY_TERMS,
       },
     });
@@ -94,9 +98,17 @@ router.post('/form/:token/submit', publicLimiter, async (req: Request, res: Resp
     const b = req.body || {};
     const length = [2, 6, 12].includes(Number(b.carnet_length_months)) ? Number(b.carnet_length_months) : null;
     const leadName = String(b.lead_name || '').trim();
-    if (!leadName) return res.status(400).json({ error: 'Lead name is required.' });
+    const leadEmail = String(b.lead_email || '').trim();
+    const leadRole = String(b.lead_role || '').trim();
+    const euCountries = Array.isArray(b.eu_countries) ? b.eu_countries : [];
+    const nonEuCountries = Array.isArray(b.non_eu_countries) ? b.non_eu_countries : [];
     if (!length) return res.status(400).json({ error: 'Please choose a carnet length.' });
     if (!b.carnet_start_date) return res.status(400).json({ error: 'Please provide a required start date.' });
+    if (!leadName) return res.status(400).json({ error: 'Lead name is required.' });
+    if (!leadEmail || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(leadEmail)) return res.status(400).json({ error: 'A valid lead email is required.' });
+    if (!leadRole) return res.status(400).json({ error: 'Lead role is required.' });
+    if (euCountries.length + nonEuCountries.length === 0) return res.status(400).json({ error: 'Please select at least one country.' });
+    if (b.gmr_needed !== true && b.gmr_needed !== false) return res.status(400).json({ error: 'Please answer the GMR question.' });
     if (!b.accepted) return res.status(400).json({ error: 'Please accept the terms.' });
     if (!b.signature || !String(b.signature).startsWith('data:image')) return res.status(400).json({ error: 'Please provide a signature.' });
 
@@ -122,9 +134,8 @@ router.post('/form/:token/submit', publicLimiter, async (req: Request, res: Resp
        WHERE id = $11`,
       [
         length, b.carnet_start_date, expiry, liability,
-        Array.isArray(b.eu_countries) ? b.eu_countries : [],
-        Array.isArray(b.non_eu_countries) ? b.non_eu_countries : [],
-        leadName, String(b.lead_email || '').trim() || null, String(b.lead_role || '').trim() || null,
+        euCountries, nonEuCountries,
+        leadName, leadEmail || null, leadRole || null,
         JSON.stringify(additionalNames), carnet.id,
       ]
     );
@@ -159,7 +170,7 @@ router.post('/form/:token/submit', publicLimiter, async (req: Request, res: Resp
         signatoryName: settings.carnet_ooosh_signatory_name || 'Jonathan Wood',
         signatoryRole: settings.carnet_ooosh_signatory_role || 'Company Director',
         signatureBuffer: oooshSig,
-        leadName, leadRole: String(b.lead_role || '').trim(),
+        leadName, leadRole,
         clientSignatureBuffer: clientSigBuf,
       });
       pdfBuffer = Buffer.from(pdfBytes);
@@ -180,9 +191,9 @@ router.post('/form/:token/submit', publicLimiter, async (req: Request, res: Resp
     // Email: signed copy to the client + notification to the office.
     const jobNumber = String(carnet.hh_job_number || '');
     const attachments = pdfBuffer ? [{ filename: 'Letter of Authorisation.pdf', content: pdfBuffer, contentType: 'application/pdf' }] : undefined;
-    if (b.lead_email) {
+    if (leadEmail) {
       emailService.send('carnet_authority_copy', {
-        to: String(b.lead_email).trim(),
+        to: leadEmail,
         variables: { leadName, jobNumber },
         attachments,
       }).catch((e) => console.error('[carnets] client copy email failed:', e));

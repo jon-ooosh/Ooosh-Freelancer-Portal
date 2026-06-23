@@ -14,6 +14,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
+import { STEP_PHASE, FUTURE_STEP } from './CarnetSection';
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -675,8 +676,10 @@ export default function RequirementCard({
                     const curIdx = arr.findIndex((s) => s[0] === (carnet?.status || 'detected'));
                     const done = i < curIdx;
                     const active = i === curIdx;
+                    const phase = STEP_PHASE[key];
+                    const cls = active ? phase.active : done ? phase.done : FUTURE_STEP;
                     return (
-                      <span key={key} className={`px-2 py-0.5 rounded text-xs ${active ? 'bg-purple-600 text-white' : done ? 'bg-purple-100 text-purple-700' : 'bg-gray-100 text-gray-400'}`}>
+                      <span key={key} className={`px-2 py-0.5 rounded text-xs ${cls}`}>
                         {lbl}
                       </span>
                     );
