@@ -1291,6 +1291,25 @@ function firePostBookOutHooks(opts: {
     });
   }
 
+  // Multi-van fan-out: every OTHER self-drive driver on the job also gets a
+  // hire agreement for THIS van — the "everyone drives everything" paperwork,
+  // so each driver holds proof of eligibility for every van. No-op on
+  // single-van jobs (no other-van drivers). Idempotent per (driver, van) via
+  // the hire_form_documents UNIQUE constraint.
+  setImmediate(() => {
+    runHookWithRecovery(
+      {
+        hookLabel: 'Multi-van hire form fan-out',
+        jobId,
+        hhJobNumber,
+        assignmentId,
+      },
+      () => fanOutVanHireForms({ jobId, hhJobNumber, vanVehicleId: vehicleId })
+    ).catch((err) => {
+      console.error(`[hire-forms] Multi-van fan-out failed for van ${vehicleId} on job ${jobId ?? hhJobNumber}:`, err);
+    });
+  });
+
   // Out-of-hours return info email (function dedupes per-assignment via
   // ooh_info_sent_at, so safe to call when only some vans on the job are OOH).
   if (returnOvernight === true && jobId) {
@@ -2011,6 +2030,155 @@ async function generateAndEmailHireFormPdf(assignmentId: string, trigger: string
     }
   } else {
     console.warn(`[hire-forms] ${trigger}: email failed for ${assignmentId}:`, emailResult);
+  }
+}
+
+/**
+ * Fan a just-booked-out van's hire agreement out to every OTHER self-drive
+ * driver on the job (drivers not on this van get a PDF for it too, so on a
+ * multi-van hire every driver ends up holding an agreement for every van).
+ *
+ * No-op on single-van jobs: the only drivers are on the booked-out van, so
+ * the target set is empty. Each (driver, van) PDF is generated + emailed
+ * exactly once — the hire_form_documents UNIQUE(assignment_id, vehicle_id)
+ * constraint serialises concurrent book-out hooks (a multi-driver van fires
+ * this once per driver) so nobody is emailed twice. Throws if any cross-van
+ * email failed, so runHookWithRecovery retries just the failed ones (a failed
+ * leg drops its claim row, the succeeded ones short-circuit on re-run).
+ */
+async function fanOutVanHireForms(ctx: {
+  jobId: string | null;
+  hhJobNumber: number | null;
+  vanVehicleId: string;
+}): Promise<void> {
+  const { jobId, hhJobNumber, vanVehicleId } = ctx;
+
+  // Target = signed self-drive drivers on the job NOT on the booked-out van
+  // (those get this van's agreement via their own-van column path). One row
+  // per driver. `IS DISTINCT FROM` keeps not-yet-allocated (NULL vehicle_id)
+  // drivers in the target set too.
+  const targets = await query(
+    `SELECT DISTINCT ON (vha.driver_id) vha.id
+       FROM vehicle_hire_assignments vha
+      WHERE (($1::uuid IS NOT NULL AND vha.job_id = $1)
+             OR ($2::int IS NOT NULL AND vha.hirehop_job_id = $2))
+        AND vha.assignment_type = 'self_drive'
+        AND vha.driver_id IS NOT NULL
+        AND vha.status NOT IN ('cancelled', 'swapped')
+        AND vha.vehicle_id IS DISTINCT FROM $3
+      ORDER BY vha.driver_id, vha.created_at`,
+    [jobId, hhJobNumber, vanVehicleId]
+  );
+  if (targets.rows.length === 0) return;
+
+  let anyFailed = false;
+  for (const t of targets.rows) {
+    const status = await generateAndEmailCrossVanHireForm(t.id as string, vanVehicleId, { jobId, hhJobNumber });
+    if (status === 'failed') anyFailed = true;
+  }
+  if (anyFailed) {
+    throw new Error('one or more cross-van hire form emails failed — will retry');
+  }
+}
+
+/**
+ * Generate + email ONE driver a hire agreement for a van that is NOT their
+ * own assigned van (the cross-van leg of fanOutVanHireForms). Same driver
+ * data + dates as their own agreement, with the other van's reg/model swapped
+ * in — the PDF builder already takes a single reg, so no builder change.
+ *
+ * Idempotency: claim-first INSERT against UNIQUE(assignment_id, vehicle_id).
+ * Loser of a concurrent race gets 0 rows → 'skipped' (never emails). On email
+ * failure the claim is dropped so a later book-out can retry cleanly.
+ */
+async function generateAndEmailCrossVanHireForm(
+  driverAssignmentId: string,
+  vanVehicleId: string,
+  ctx: { jobId: string | null; hhJobNumber: number | null },
+): Promise<'sent' | 'skipped' | 'failed'> {
+  const claim = await query(
+    `INSERT INTO hire_form_documents (assignment_id, vehicle_id, driver_id, job_id, hirehop_job_id)
+     SELECT $1, $2, vha.driver_id, $3, $4
+       FROM vehicle_hire_assignments vha WHERE vha.id = $1
+     ON CONFLICT (assignment_id, vehicle_id) DO NOTHING
+     RETURNING id`,
+    [driverAssignmentId, vanVehicleId, ctx.jobId, ctx.hhJobNumber],
+  );
+  if (claim.rows.length === 0) return 'skipped';
+  const docId = claim.rows[0].id as string;
+
+  try {
+    const formData = await loadHireFormData(driverAssignmentId);
+    if (!formData) {
+      await query(`DELETE FROM hire_form_documents WHERE id = $1`, [docId]);
+      return 'failed';
+    }
+
+    const van = await query(`SELECT reg, vehicle_type FROM fleet_vehicles WHERE id = $1`, [vanVehicleId]);
+    const vanReg = van.rows[0]?.reg as string | undefined;
+    const vanModel = (van.rows[0]?.vehicle_type as string | undefined) || '';
+    if (!vanReg || vanReg === 'TBC') {
+      await query(`DELETE FROM hire_form_documents WHERE id = $1`, [docId]);
+      return 'failed';
+    }
+
+    // Swap in the cross van — everything else stays the driver's own.
+    formData.vehicleReg = vanReg;
+    formData.vehicleModel = vanModel;
+
+    const { pdfBytes, filename } = await generateHireFormPdf(formData);
+    const r2Key = `hire-forms/${driverAssignmentId}/${filename}`;
+    await uploadToR2(r2Key, Buffer.from(pdfBytes), 'application/pdf');
+
+    const target = await resolveHireFormEmailTarget(driverAssignmentId, formData.email);
+    if (target.kind === 'none') {
+      // No recipient — keep the PDF + record (proof of authorisation) but leave
+      // emailed_at NULL. Won't auto-retry; staff can resend if a contact lands.
+      await query(
+        `UPDATE hire_form_documents SET vehicle_reg = $1, pdf_r2_key = $2 WHERE id = $3`,
+        [vanReg, r2Key, docId],
+      );
+      console.warn(`[hire-forms] cross-van: no recipient for ${driverAssignmentId} van ${vanReg}; PDF stored, not emailed`);
+      return 'skipped';
+    }
+
+    const emailResult = await emailService.send('hire_form', {
+      to: target.to,
+      cc: target.cc.length > 0 ? target.cc : undefined,
+      prependBanner: target.kind === 'fallback' ? target.banner : undefined,
+      variables: {
+        driverName: formData.driverName,
+        vehicleReg: vanReg,
+        vehicleModel: vanModel || 'TBC',
+        hireStart: fmtDate(formData.hireStartDate),
+        hireEnd: fmtDate(formData.hireEndDate),
+        jobNumber: formData.hhJobNumber || '',
+        multiVanNote: 'yes',
+      },
+      attachments: [{ filename, content: Buffer.from(pdfBytes), contentType: 'application/pdf' }],
+    });
+
+    if (!emailResult.success) {
+      await query(`DELETE FROM hire_form_documents WHERE id = $1`, [docId]);
+      console.warn(`[hire-forms] cross-van: email failed for ${driverAssignmentId} van ${vanReg}`);
+      return 'failed';
+    }
+
+    await query(
+      `UPDATE hire_form_documents
+         SET vehicle_reg = $1, pdf_r2_key = $2, email_to = $3, emailed_at = NOW()
+       WHERE id = $4`,
+      [vanReg, r2Key, target.to, docId],
+    );
+    if (target.kind === 'fallback' && target.jobId) {
+      await logFallbackToTimeline({ jobId: target.jobId, templateId: 'hire_form' });
+    }
+    console.log(`[hire-forms] cross-van: ${vanReg} agreement sent to ${target.to} for assignment ${driverAssignmentId}`);
+    return 'sent';
+  } catch (err) {
+    await query(`DELETE FROM hire_form_documents WHERE id = $1`, [docId]).catch(() => {});
+    console.error(`[hire-forms] cross-van: error for ${driverAssignmentId} van ${vanVehicleId}:`, err);
+    return 'failed';
   }
 }
 

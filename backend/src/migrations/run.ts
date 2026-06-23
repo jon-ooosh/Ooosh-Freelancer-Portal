@@ -178,6 +178,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '141_carnet_signatory_settings.sql',
         '142_vehicle_forecast_assessments.sql',
         '143_pcn_fine_recharge.sql',
+  '144_hire_form_documents.sql',
       ];
 
       for (const migration of migrations) {
