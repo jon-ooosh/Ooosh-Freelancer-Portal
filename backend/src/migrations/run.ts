@@ -181,6 +181,7 @@ async function runMigrations(direction: 'up' | 'down') {
   '144_hire_form_documents.sql',
         '145_pcn_issued_date.sql',
         '146_self_drive_van_override.sql',
+        '147_cost_xero_stale.sql',
       ];
 
       for (const migration of migrations) {
