@@ -9,6 +9,7 @@ import {
   PCN_STATUS_COLOUR,
   FINE_TYPE_LABEL,
   PcnStatusPill,
+  PcnNextActionCell,
   pcnTrafficLight,
   PcnLight,
   PCN_DOC_KINDS,
@@ -270,11 +271,11 @@ export default function PcnsPage() {
             <thead className="bg-slate-50 text-slate-500 text-left">
               <tr>
                 {th('reference', 'Reference')}
-                {th('type', 'Type')}
                 {th('reg', 'Vehicle')}
                 {th('driver', 'Driver')}
                 {th('job', 'Job')}
                 {th('offence', 'Offence')}
+                <th className="px-3 py-2 font-medium">Next action</th>
                 {th('fine', 'Fine')}
                 {th('status', 'Status')}
               </tr>
@@ -287,7 +288,6 @@ export default function PcnsPage() {
                       {p.reference || '(no ref)'}
                     </Link>
                   </td>
-                  <td className="px-3 py-2">{FINE_TYPE_LABEL[p.fine_type] || p.fine_type}</td>
                   <td className="px-3 py-2">{p.fleet_reg || p.vehicle_reg || '—'}</td>
                   <td className="px-3 py-2">
                     {p.driver_name
@@ -297,6 +297,7 @@ export default function PcnsPage() {
                   </td>
                   <td className="px-3 py-2">{p.hh_job_number ? `#${p.hh_job_number}` : '—'}</td>
                   <td className="px-3 py-2">{fmtDate(p.offence_at)}{p.offence_time_text ? ` ${p.offence_time_text}` : ''}</td>
+                  <td className="px-3 py-2"><PcnNextActionCell pcn={p} /></td>
                   <td className="px-3 py-2">{money(p.fine_amount)}</td>
                   <td className="px-3 py-2"><PcnStatusPill status={p.status} /></td>
                 </tr>

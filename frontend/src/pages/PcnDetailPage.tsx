@@ -7,6 +7,7 @@ import {
   PcnDocKind,
   PCN_DOC_KINDS,
   PCN_DOC_KIND_LABEL,
+  PcnNextActionCell,
   mergePcnDocuments,
 } from '../components/pcn/format';
 import PcnActionChooser from '../components/PcnActionChooser';
@@ -125,6 +126,7 @@ export default function PcnDetailPage() {
             {field('Fine', money(pcn.fine_amount))}
             {field('Reduced', pcn.reduced_amount ? `${money(pcn.reduced_amount)} by ${fmtDate(pcn.reduced_deadline)}` : '—')}
             {field('Final deadline', fmtDate(pcn.final_deadline))}
+            {field('Next action', <PcnNextActionCell pcn={pcn} />)}
           </dl>
           {pcn.notes && (
             <div className="mt-3 pt-3 border-t">
