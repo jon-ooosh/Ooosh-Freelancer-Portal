@@ -239,7 +239,12 @@ export default function RequirementCard({
     if (sd > 0 && vd > 0) return `Mixed — ${sd} self-drive, ${vd} van & driver`;
     return vd > 0 ? 'Van & Driver' : 'Self-Drive';
   })();
-  const label = vehicleModeSuffix ? `Vehicle (${vehicleModeSuffix})` : (req.custom_label || req.type_label);
+  const label = req.custom_label || req.type_label;
+  // When the vehicle card carries a mode suffix, render the base "Vehicle" word
+  // in the (strikethrough-on-done) title and the mode as a separate, never-struck
+  // qualifier — otherwise a completed V&D vehicle shows "Vehicle (Van & Driver)"
+  // crossed out, which reads as "mode cancelled" rather than "prep done".
+  const titleBase = vehicleModeSuffix ? 'Vehicle' : label;
 
   // Load hire form and excess data for nested cards
   useEffect(() => {
@@ -394,8 +399,13 @@ export default function RequirementCard({
           <span className="text-lg flex-shrink-0">{isNested ? '↳' : ''} {req.type_icon}</span>
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
-              <span className={`font-medium ${req.status === 'done' ? 'text-gray-400 line-through' : 'text-gray-900'}`}>
-                {label}
+              <span className="font-medium">
+                <span className={req.status === 'done' ? 'text-gray-400 line-through' : 'text-gray-900'}>
+                  {titleBase}
+                </span>
+                {vehicleModeSuffix && (
+                  <span className="text-gray-500"> ({vehicleModeSuffix})</span>
+                )}
               </span>
               {req.is_auto && req.source === 'hirehop_sync' && (
                 <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-500 border border-blue-200 font-medium">HH</span>
