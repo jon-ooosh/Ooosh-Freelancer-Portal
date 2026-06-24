@@ -89,6 +89,7 @@ interface EmailContact {
 }
 
 interface HireFormDriver {
+  driver_id: string | null;
   driver_name: string | null;
   status: string;
   created_at: string;
@@ -553,8 +554,14 @@ export default function RequirementCard({
               <div className="mt-1 space-y-1">
                 {/* Summary counts */}
                 {(() => {
+                  // "Received" = a customer actually submitted a hire form,
+                  // which is what links a driver (driver_id set by
+                  // POST /api/hire-forms). A driverless row is a staff
+                  // allocation placeholder, NOT a received form — counting it
+                  // claimed "1 received" on jobs where no form had arrived.
                   const received = hireFormDrivers.filter(d =>
-                    d.status === 'confirmed' || d.status === 'booked_out' || d.status === 'active'
+                    d.driver_id &&
+                    (d.status === 'confirmed' || d.status === 'booked_out' || d.status === 'active')
                   ).length;
                   const referralCount = hireFormDrivers.filter(d => d.requires_referral).length;
                   // Parse all "sent" entries from the notes — each line was
@@ -603,25 +610,32 @@ export default function RequirementCard({
                   );
                 })()}
 
-                {/* Individual driver list */}
-                {hireFormDrivers.length > 0 ? (
-                  <div className="space-y-0.5">
-                    {hireFormDrivers.map((d, i) => (
-                      <div key={i} className="flex items-center gap-2 text-xs">
-                        <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
-                          d.status === 'confirmed' || d.status === 'booked_out' || d.status === 'active' ? 'bg-green-500' :
-                          d.status === 'soft' ? 'bg-amber-400' : 'bg-gray-300'
-                        }`} />
-                        <span className="text-gray-700">{d.driver_name || 'Unknown driver'}</span>
-                        {d.requires_referral && (
-                          <span className="text-[10px] px-1 py-0.5 rounded bg-red-50 text-red-600 border border-red-200">Referral</span>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="text-xs text-gray-400">No hire forms submitted yet</div>
-                )}
+                {/* Individual driver list — only rows with a real submitted
+                    form (driver_id set). Driverless allocation placeholders
+                    belong to the vehicle/allocation layer, not the hire-form
+                    card, and showing them here as "Unknown driver" with a
+                    green dot misrepresented an un-submitted form as received. */}
+                {(() => {
+                  const submittedForms = hireFormDrivers.filter(d => d.driver_id);
+                  return submittedForms.length > 0 ? (
+                    <div className="space-y-0.5">
+                      {submittedForms.map((d, i) => (
+                        <div key={i} className="flex items-center gap-2 text-xs">
+                          <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+                            d.status === 'confirmed' || d.status === 'booked_out' || d.status === 'active' ? 'bg-green-500' :
+                            d.status === 'soft' ? 'bg-amber-400' : 'bg-gray-300'
+                          }`} />
+                          <span className="text-gray-700">{d.driver_name || 'Unknown driver'}</span>
+                          {d.requires_referral && (
+                            <span className="text-[10px] px-1 py-0.5 rounded bg-red-50 text-red-600 border border-red-200">Referral</span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-xs text-gray-400">No hire forms submitted yet</div>
+                  );
+                })()}
                 {/* Always available — staff legitimately need this when:
                     - 0 received: original email went to spam, wrong contact,
                       need to send to a different person, etc.

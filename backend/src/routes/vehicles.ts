@@ -184,7 +184,16 @@ router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) =
       customer_driver_email: string | null;
     };
 
-    async function fetchAllocatedVehicleRow(): Promise<VhaRow | null> {
+    // Discriminated outcome so the caller can tell apart "no van allocated"
+    // from "van allocated but no signed hire form to book against" — they
+    // need different messages, and the latter is now a hard block (see the
+    // freelancer gate note below).
+    type ResolveOutcome =
+      | { kind: 'ok'; row: VhaRow }
+      | { kind: 'no_allocation' }
+      | { kind: 'no_hire_form' };
+
+    async function fetchAllocatedVehicleRow(): Promise<ResolveOutcome> {
       // Pull all currently-active rows on the job once and pick from them
       // in JS — we need to inspect the set as a whole to decide whether to
       // merge, and a single result row hides that.
@@ -202,13 +211,13 @@ router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) =
         [jobId, hhJobNumber]
       );
       const rows = result.rows as Array<VhaRow & { created_at: string; van_requirement_index: number | null }>;
-      if (rows.length === 0) return null;
+      if (rows.length === 0) return { kind: 'no_allocation' };
 
       // First preference: a row that already has BOTH vehicle and driver —
       // this is the post-merge steady state, or a job that was created the
       // tidy way from the start. Just use it.
       const merged = rows.find(r => r.vehicle_id && r.driver_id);
-      if (merged) return merged;
+      if (merged) return { kind: 'ok', row: merged };
 
       // Second preference: smart-merge candidate. Find the freelancer's
       // allocation row (vehicle, no driver) and the customer's hire-form
@@ -281,17 +290,26 @@ router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) =
             LIMIT 1`,
           [customerRow.assignment_id]
         );
-        return (reread.rows[0] as VhaRow) || null;
+        const rereadRow = reread.rows[0] as VhaRow | undefined;
+        return rereadRow ? { kind: 'ok', row: rereadRow } : { kind: 'no_hire_form' };
       }
 
-      // Fallback: no merge possible. Hand back the most recent row with a
-      // vehicle so book-out can still proceed (legacy behaviour). Common in
-      // staff-test scenarios where there's no customer hire form yet.
-      return rows.find(r => r.vehicle_id) || null;
+      // No merge possible. A freelancer must NOT be able to hand a van over
+      // without a signed customer hire agreement — there's no named driver,
+      // no excess, and nothing to put on the condition-report PDF. So the
+      // old "hand back any vehicle row so book-out can proceed" fallback is
+      // gone. If a van is allocated but no driver-linked hire-form row
+      // exists, block with a distinct reason; otherwise it's a plain
+      // no-allocation. (Staff book-out doesn't use this endpoint — they go
+      // through the normal allocations flow with its own soft guidance.)
+      if (rows.some(r => r.vehicle_id)) {
+        return { kind: 'no_hire_form' };
+      }
+      return { kind: 'no_allocation' };
     }
 
-    const vha = await fetchAllocatedVehicleRow();
-    if (!vha) {
+    const outcome = await fetchAllocatedVehicleRow();
+    if (outcome.kind === 'no_allocation') {
       console.warn('[freelancer-bookout] No allocated vehicle for job', { jobId, hhJobNumber });
       res.status(409).json({
         error: 'No vehicle allocated for this job yet',
@@ -300,6 +318,16 @@ router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) =
       });
       return;
     }
+    if (outcome.kind === 'no_hire_form') {
+      console.warn('[freelancer-bookout] Van allocated but no signed hire form for job', { jobId, hhJobNumber });
+      res.status(409).json({
+        error: 'Customer hire form not received yet',
+        code: 'no_hire_form',
+        hint: 'The customer must complete and sign their hire form before this van can be booked out. Please contact the Ooosh office.',
+      });
+      return;
+    }
+    const vha = outcome.row;
     console.log('[freelancer-bookout] Vehicle resolved', {
       assignmentId: vha.assignment_id,
       registration: vha.registration,
