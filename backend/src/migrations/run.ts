@@ -179,7 +179,8 @@ async function runMigrations(direction: 'up' | 'down') {
         '142_vehicle_forecast_assessments.sql',
         '143_pcn_fine_recharge.sql',
   '144_hire_form_documents.sql',
-  '145_pcn_issued_date.sql',
+        '145_pcn_issued_date.sql',
+        '146_self_drive_van_override.sql',
       ];
 
       for (const migration of migrations) {

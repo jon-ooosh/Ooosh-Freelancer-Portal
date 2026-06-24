@@ -2945,10 +2945,24 @@ async function processAdditionalDriverCharge(hhJobId: number, jobId: string | nu
     }
   }
 
-  const freeDrivers = vehicleCount * DRIVERS_PER_VEHICLE;
+  // Sequential-swap override: if staff have declared the real simultaneous
+  // van count (HH lists qty-2 but it's one van swapped mid-hire), use that for
+  // the free-driver allowance (2 free per real van) instead of the raw HH qty.
+  // Otherwise an undercharge: a 1-van swap with 3 drivers would read 4 free
+  // (2 vans x 2) and bill nobody, when 1 should be chargeable. Same column the
+  // derivation reads for excess; capped so the override can only REDUCE.
+  const overrideRow = jobId
+    ? await query(`SELECT self_drive_van_override FROM jobs WHERE id = $1`, [jobId])
+    : await query(`SELECT self_drive_van_override FROM jobs WHERE hh_job_number = $1`, [hhJobId]);
+  const vanOverride = overrideRow.rows[0]?.self_drive_van_override;
+  const effectiveVanCount = (vanOverride !== null && vanOverride !== undefined)
+    ? Math.min(Number(vanOverride), vehicleCount)
+    : vehicleCount;
+
+  const freeDrivers = effectiveVanCount * DRIVERS_PER_VEHICLE;
   const chargeableDrivers = Math.max(0, driverCount - freeDrivers);
   const newChargesNeeded = Math.max(0, chargeableDrivers - existingCharges);
-  console.log(`[processAdditionalDriverCharge] HH job ${hhJobId}: drivers=${driverCount}, vehicles=${vehicleCount}, free=${freeDrivers}, chargeable=${chargeableDrivers}, existing=${existingCharges}, new=${newChargesNeeded}`);
+  console.log(`[processAdditionalDriverCharge] HH job ${hhJobId}: drivers=${driverCount}, vehicles=${vehicleCount}, effectiveVans=${effectiveVanCount}, free=${freeDrivers}, chargeable=${chargeableDrivers}, existing=${existingCharges}, new=${newChargesNeeded}`);
 
   if (newChargesNeeded <= 0) {
     return { driverCount, vehicleCount, freeDrivers, existingCharges, chargesAdded: 0, message: 'No additional charges needed' };
