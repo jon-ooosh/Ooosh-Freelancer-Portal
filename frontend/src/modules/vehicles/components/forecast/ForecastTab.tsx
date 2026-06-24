@@ -192,9 +192,13 @@ function RecurringCard({ f }: { f: VehicleForecast }) {
 function AssessmentPanel({
   assessment, onRegenerate, regenerating,
 }: { assessment: VehicleAssessment | null; onRegenerate: () => void; regenerating: boolean }) {
+  // Collapsed by default — show the headline + a 2-line summary teaser, expand for
+  // the full watch / recommended detail. Keeps the forecast cards above the fold.
+  const [expanded, setExpanded] = useState(false)
   const statusLabel = assessment?.overall_status
     ? { good: 'Healthy', watch: 'Keep an eye', attention: 'Needs attention' }[assessment.overall_status] || assessment.overall_status
     : null
+  const hasDetail = !!assessment && (assessment.watch_items.length > 0 || assessment.recommendations.length > 0 || !!assessment.summary)
   return (
     <div className="rounded-lg border border-ooosh-blue/20 bg-ooosh-blue/[0.03] p-4">
       <div className="flex items-start justify-between gap-3">
@@ -219,7 +223,25 @@ function AssessmentPanel({
       </div>
 
       {!assessment ? (
-        <p className="mt-2 text-sm text-gray-400">No assessment yet — generated automatically three times a week, or click Regenerate.</p>
+        <p className="mt-2 text-sm text-gray-400">No assessment yet — generated automatically once a week, or click Regenerate.</p>
+      ) : !expanded ? (
+        <div className="mt-2">
+          {assessment.headline && <p className="text-sm font-medium text-gray-900">{assessment.headline}</p>}
+          {assessment.summary && (
+            <p className="mt-0.5 text-sm leading-relaxed text-gray-700 line-clamp-2">{assessment.summary}</p>
+          )}
+          {hasDetail && (
+            <button
+              type="button"
+              onClick={() => setExpanded(true)}
+              className="mt-1 text-xs font-medium text-ooosh-blue hover:underline"
+            >
+              … Show more{assessment.watch_items.length + assessment.recommendations.length > 0
+                ? ` (${assessment.watch_items.length + assessment.recommendations.length} item${assessment.watch_items.length + assessment.recommendations.length === 1 ? '' : 's'})`
+                : ''}
+            </button>
+          )}
+        </div>
       ) : (
         <div className="mt-2 space-y-3">
           {assessment.headline && <p className="text-sm font-medium text-gray-900">{assessment.headline}</p>}
@@ -251,6 +273,14 @@ function AssessmentPanel({
           <p className="text-[10px] text-gray-400">
             Generated {fmtDateTime(assessment.generated_at)}{assessment.trigger === 'manual' ? ' (manual)' : ''}. AI synthesis of the data above — always sanity-check against the figures.
           </p>
+
+          <button
+            type="button"
+            onClick={() => setExpanded(false)}
+            className="text-xs font-medium text-ooosh-blue hover:underline"
+          >
+            Show less
+          </button>
         </div>
       )}
     </div>
