@@ -22,7 +22,7 @@ export interface ForecastCorner {
 }
 
 export interface VehicleForecast {
-  vehicle: { id: string; reg: string; currentMileage: number | null; simpleType: string | null }
+  vehicle: { id: string; reg: string; currentMileage: number | null; simpleType: string | null; ulezCompliant?: boolean | null }
   mileage: { perDay: number | null; perWeek: number | null; annualProjected: number | null; readings: number }
   service: {
     nextDueMileage: number | null

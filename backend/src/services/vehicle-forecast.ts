@@ -71,7 +71,7 @@ export interface CornerForecast {
 }
 
 export interface VehicleForecast {
-  vehicle: { id: string; reg: string; currentMileage: number | null; simpleType: string | null };
+  vehicle: { id: string; reg: string; currentMileage: number | null; simpleType: string | null; ulezCompliant: boolean | null };
   mileage: { perDay: number | null; perWeek: number | null; annualProjected: number | null; readings: number };
   service: {
     nextDueMileage: number | null;
@@ -194,9 +194,17 @@ function daysUntil(dateStr: string | null): number | null {
   return Math.round((d.getTime() - Date.now()) / 86400000);
 }
 
+/** Safe yyyy-mm-dd — returns null for null/invalid dates instead of throwing. */
+function isoDate(value: unknown): string | null {
+  if (value == null || value === '') return null;
+  const d = new Date(value as string);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString().slice(0, 10);
+}
+
 export async function buildVehicleForecast(vehicleId: string): Promise<VehicleForecast | null> {
   const vRes = await query(
-    `SELECT id, reg, simple_type, current_mileage, mot_due, tax_due, insurance_due, tfl_due,
+    `SELECT id, reg, simple_type, current_mileage, mot_due, tax_due, tfl_due, ulez_compliant,
             next_service_due, last_service_mileage, last_service_date
        FROM fleet_vehicles WHERE id = $1`,
     [vehicleId],
@@ -289,18 +297,23 @@ export async function buildVehicleForecast(vehicleId: string): Promise<VehicleFo
   if (milesUntil != null) serviceStatus = milesUntil <= 0 ? 'due' : milesUntil <= 1500 ? 'soon' : 'ok';
 
   // ── Compliance runway ──
+  // Insurance is a blanket fleet policy (no per-van date) so it's deliberately
+  // NOT tracked here. Only surface items that actually have a date — a van with
+  // no TFL date (e.g. a 6-seater that can't register for the discount) simply
+  // doesn't appear, rather than nagging as "unknown / unmanageable".
   const compliance = [
     { kind: 'MOT', due: v.mot_due },
     { kind: 'Tax', due: v.tax_due },
-    { kind: 'Insurance', due: v.insurance_due },
     { kind: 'TFL', due: v.tfl_due },
-  ].map((c) => {
-    const due = c.due ? new Date(c.due).toISOString().slice(0, 10) : null;
-    const days = daysUntil(due);
-    let status: 'ok' | 'soon' | 'overdue' | 'unknown' = 'unknown';
-    if (days != null) status = days < 0 ? 'overdue' : days <= 30 ? 'soon' : 'ok';
-    return { kind: c.kind, due, days, status };
-  });
+  ]
+    .map((c) => {
+      const due = isoDate(c.due);
+      const days = daysUntil(due);
+      let status: 'ok' | 'soon' | 'overdue' | 'unknown' = 'unknown';
+      if (days != null) status = days < 0 ? 'overdue' : days <= 30 ? 'soon' : 'ok';
+      return { kind: c.kind, due, days, status };
+    })
+    .filter((c) => c.due != null);
 
   // ── Cost trajectory (last 12 months) ──
   const sRes = await query(
@@ -326,7 +339,7 @@ export async function buildVehicleForecast(vehicleId: string): Promise<VehicleFo
     if (span > 0) perMile = Math.round((last12mTotal / span) * 100) / 100;
   }
   const recent = sRes.rows.slice(0, 8).map((r) => ({
-    date: r.service_date ? new Date(r.service_date).toISOString().slice(0, 10) : null,
+    date: isoDate(r.service_date),
     type: r.service_type || 'service',
     name: r.name || '',
     cost: r.cost != null ? Number(r.cost) : null,
@@ -348,7 +361,7 @@ export async function buildVehicleForecast(vehicleId: string): Promise<VehicleFo
     recurringIssues = iRes.rows.map((r) => ({
       label: String(r.label),
       count: Number(r.count),
-      lastDate: r.last_at ? new Date(r.last_at).toISOString().slice(0, 10) : null,
+      lastDate: isoDate(r.last_at),
     }));
   } catch (err) {
     console.warn('[vehicle-forecast] recurring-issue query failed:', err);
@@ -367,12 +380,12 @@ export async function buildVehicleForecast(vehicleId: string): Promise<VehicleFo
     }
   }
   for (const r of sRes.rows.slice(0, 6)) {
-    if (r.notes) notesForAi.push(`Service ${r.service_date ? new Date(r.service_date).toISOString().slice(0, 10) : ''}: ${r.name} — ${r.notes}`);
-    else if (r.name) notesForAi.push(`Service ${r.service_date ? new Date(r.service_date).toISOString().slice(0, 10) : ''}: ${r.name}`);
+    if (r.notes) notesForAi.push(`Service ${isoDate(r.service_date) || ''}: ${r.name} — ${r.notes}`);
+    else if (r.name) notesForAi.push(`Service ${isoDate(r.service_date) || ''}: ${r.name}`);
   }
 
   return {
-    vehicle: { id: v.id, reg, currentMileage, simpleType: v.simple_type ?? null },
+    vehicle: { id: v.id, reg, currentMileage, simpleType: v.simple_type ?? null, ulezCompliant: v.ulez_compliant ?? null },
     mileage: { perDay: perDay == null ? null : Math.round(perDay * 10) / 10, perWeek, annualProjected, readings: mrows.length },
     service: {
       nextDueMileage,
@@ -380,7 +393,7 @@ export async function buildVehicleForecast(vehicleId: string): Promise<VehicleFo
       etaWeeks,
       status: serviceStatus,
       lastServiceMileage: v.last_service_mileage ?? null,
-      lastServiceDate: v.last_service_date ? new Date(v.last_service_date).toISOString().slice(0, 10) : null,
+      lastServiceDate: isoDate(v.last_service_date),
     },
     compliance,
     fluids,
