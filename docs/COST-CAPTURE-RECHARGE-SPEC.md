@@ -855,3 +855,35 @@ those jobs — a `cost_allocations` row per line.
 No migration (`cost_allocations` shipped in 092). Allocation is metadata for
 per-job cost attribution/reporting — it does not change the cost's own `job_id`
 or its Xero push.
+
+---
+
+## Build notes — Edit-after-push: warn + manual re-sync (Jun 2026)
+
+Closed the gap where editing a cost that's **already in Xero** (fixing the
+account code/amount/supplier after a bill or spend-money was created) left Xero
+stale — the PATCH only ever re-pushed costs that weren't yet in Xero.
+
+- **Migration 146** — `costs.xero_stale BOOLEAN`. Set by the PATCH handler when
+  an already-pushed cost (`xero_object_id` + `bill_created`/`attached`/`reconciled`)
+  is edited with a **Xero-affecting field** (amount net/vat/gross, account code,
+  supplier, description, vat_treatment, cost_date, payment_method, invoice_number).
+  Non-Xero edits (notes, payment_status) don't flag it. We deliberately do NOT
+  auto-re-push — a reconciled object mustn't be silently mutated.
+- **`XeroCell`** shows an amber **"Xero out of date · Re-sync"** pill (takes
+  precedence over the synced pills).
+- **`POST /api/costs/:id/resync-xero`** → `resyncCostToXero()` updates the
+  existing Xero object IN PLACE (`updateBill` / `updateSpendMoney` — POST with the
+  object ID, never a fresh create, so it can't duplicate). Shares the per-cost
+  advisory lock. **Hard refusals (409):** a PAID bill (amounts locked once a
+  payment exists) and a RECONCILED spend-money — Xero won't allow the edit. The
+  frontend then offers a **dismiss** (`{ dismiss: true }` → clears `xero_stale`
+  without touching Xero) for "I've fixed it directly in Xero".
+- **Broker:** added `updateBill` / `updateSpendMoney` (POST-with-ID) to
+  `xero-broker.ts`.
+
+> ⚠️ The in-place update path (POST-with-ID for Invoices / BankTransactions)
+> follows Xero's documented semantics but wasn't live-verified at build time —
+> confirm one real re-sync of each kind (an unpaid AUTHORISED bill and an
+> unreconciled spend-money) before relying on it. Worst case is a clean error +
+> the stale flag staying put, never a duplicate or a corrupted object.

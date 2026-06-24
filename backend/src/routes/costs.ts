@@ -591,10 +591,21 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
     );
     if (!result.rows.length) { res.status(404).json({ error: 'Cost not found' }); return; }
 
-    // Background push to Xero if the cost isn't already attached/reconciled.
-    // The push service itself guards on state — safe to call unconditionally.
     const updated = result.rows[0];
-    if (!updated.xero_object_id || updated.xero_sync_state === 'error' || updated.xero_sync_state === 'pending') {
+    const alreadyPushed = Boolean(updated.xero_object_id) && ['bill_created', 'attached', 'reconciled'].includes(updated.xero_sync_state);
+
+    if (alreadyPushed) {
+      // Already in Xero — we can't silently re-push (it may be reconciled). If a
+      // Xero-affecting field changed, flag it stale so the UI warns + offers a
+      // manual "Re-sync to Xero". Non-Xero edits (notes, payment_status) leave it alone.
+      const XERO_AFFECTING = ['amount_net', 'amount_vat', 'amount_gross', 'xero_account_code',
+        'supplier_name', 'description', 'vat_treatment', 'cost_date', 'payment_method', 'invoice_number'];
+      if (XERO_AFFECTING.some((f) => data[f] !== undefined) && !updated.xero_stale) {
+        const s = await query(`UPDATE costs SET xero_stale=TRUE WHERE id=$1 RETURNING xero_stale`, [updated.id]);
+        updated.xero_stale = s.rows[0]?.xero_stale ?? true;
+      }
+    } else if (!updated.xero_object_id || updated.xero_sync_state === 'error' || updated.xero_sync_state === 'pending') {
+      // Not yet in Xero — background push (the service guards on state).
       const { pushCostToXeroBackground } = await import('../services/cost-xero-push');
       pushCostToXeroBackground(updated.id);
     }
@@ -625,6 +636,31 @@ router.post('/:id/sync-xero', authorize(...STAFF_ROLES), async (req: AuthRequest
     res.json({ data: after.rows[0], result });
   } catch (err) {
     console.error('[costs] sync-xero error:', err);
+    res.status(500).json({ error: 'Internal server error', detail: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// Re-sync an edited, already-pushed cost to Xero IN PLACE (updates the existing
+// object, never duplicates). Behind the xero_stale flag's "Re-sync to Xero"
+// button. 409 if Xero has the object locked (paid bill / reconciled txn).
+router.post('/:id/resync-xero', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    // dismiss: staff fixed a Xero-locked cost (paid bill / reconciled txn)
+    // directly in Xero — just clear the stale flag, don't touch Xero.
+    if (req.body?.dismiss === true) {
+      const r = await query(`UPDATE costs SET xero_stale=FALSE WHERE id=$1 RETURNING *`, [id]);
+      if (!r.rows.length) return res.status(404).json({ error: 'Cost not found' });
+      return res.json({ data: r.rows[0], result: { pushed: false, skipped: 'Marked resolved' } });
+    }
+    const { resyncCostToXero } = await import('../services/cost-xero-push');
+    const result = await resyncCostToXero(id);
+    const after = await query('SELECT * FROM costs WHERE id = $1', [id]);
+    if (!after.rows.length) return res.status(404).json({ error: 'Cost not found' });
+    if (result.locked) return res.status(409).json({ error: result.error, data: after.rows[0], result });
+    res.json({ data: after.rows[0], result });
+  } catch (err) {
+    console.error('[costs] resync-xero error:', err);
     res.status(500).json({ error: 'Internal server error', detail: err instanceof Error ? err.message : String(err) });
   }
 });

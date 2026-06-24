@@ -1061,6 +1061,8 @@ export interface Cost {
   xero_payment_id: string | null;
   xero_synced_at: string | null;
   xero_error: string | null;
+  /** Set when an already-pushed cost is edited with a Xero-affecting field; cleared on re-sync. */
+  xero_stale?: boolean;
   status: CostStatus;
   notes: string | null;
   created_at: string;

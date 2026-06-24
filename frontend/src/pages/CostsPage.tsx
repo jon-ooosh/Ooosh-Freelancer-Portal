@@ -236,6 +236,25 @@ export default function CostsPage() {
     }
   }
 
+  async function resyncStale(c: CostRow) {
+    setActionBusy(c.id + 'resync');
+    try {
+      const r = await api.post<{ result?: { error?: string; skipped?: string } }>(`/costs/${c.id}/resync-xero`, {});
+      if (r.result?.error) alert(`Re-sync: ${r.result.error}`);
+      await load(true);
+    } catch (err) {
+      // 409 = Xero has it locked (paid bill / reconciled txn). Offer to clear the
+      // flag since staff will fix it directly in Xero.
+      const msg = err instanceof Error ? err.message : 'Failed to re-sync';
+      if (confirm(`${msg}\n\nMark as resolved here? (only do this once you've fixed it in Xero)`)) {
+        try { await api.post(`/costs/${c.id}/resync-xero`, { dismiss: true }); await load(true); }
+        catch (e2) { alert(e2 instanceof Error ? e2.message : 'Failed to clear flag'); }
+      }
+    } finally {
+      setActionBusy(null);
+    }
+  }
+
   async function retrySync(c: CostRow) {
     setActionBusy(c.id + 'sync');
     try {
@@ -407,7 +426,8 @@ export default function CostsPage() {
                     )}
                   </td>
                   <td className="px-2.5 py-2">
-                    <XeroCell cost={c} busy={actionBusy === c.id + 'sync'} onRetry={() => retrySync(c)} />
+                    <XeroCell cost={c} busy={actionBusy === c.id + 'sync'} onRetry={() => retrySync(c)}
+                      resyncBusy={actionBusy === c.id + 'resync'} onResync={() => resyncStale(c)} />
                   </td>
                   <td className="px-2.5 py-2 text-right whitespace-nowrap">
                     <div className="flex items-center justify-end gap-2">
@@ -787,8 +807,22 @@ function ActionBtn({ busy, onClick, label }: { busy: boolean; onClick: () => voi
   );
 }
 
-function XeroCell({ cost, busy, onRetry }: { cost: Cost; busy: boolean; onRetry: () => void }) {
+function XeroCell({ cost, busy, onRetry, resyncBusy, onResync }: { cost: Cost; busy: boolean; onRetry: () => void; resyncBusy?: boolean; onResync?: () => void }) {
   const isBill = cost.payment_method === 'not_yet_paid' || cost.payment_method === 'reimburse_me';
+  // Edited after it was pushed → Xero is out of date. Takes precedence over the
+  // synced pills; offer a manual re-sync.
+  if (cost.xero_stale && cost.xero_object_id) {
+    return (
+      <div className="flex items-center gap-2">
+        <span className="px-2 py-0.5 text-xs rounded-full bg-amber-100 text-amber-800" title="This cost was edited after it was pushed — Xero is out of date">Xero out of date</span>
+        {onResync && (
+          <button disabled={resyncBusy} onClick={onResync} className="text-xs text-purple-700 hover:underline disabled:opacity-50">
+            {resyncBusy ? '…' : 'Re-sync'}
+          </button>
+        )}
+      </div>
+    );
+  }
   // Paid-now costs have nothing to push until they're paid. Bills push on
   // approval, so show their state regardless of payment status.
   if (!isBill && cost.payment_status !== 'paid') {

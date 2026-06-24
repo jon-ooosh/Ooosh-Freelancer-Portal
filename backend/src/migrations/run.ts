@@ -180,6 +180,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '143_pcn_fine_recharge.sql',
   '144_hire_form_documents.sql',
   '145_pcn_issued_date.sql',
+  '146_cost_xero_stale.sql',
       ];
 
       for (const migration of migrations) {
