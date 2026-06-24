@@ -14,6 +14,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import CostCaptureModal from '../components/CostCaptureModal';
+import CostAllocationModal from '../components/CostAllocationModal';
 import type { Cost, SupplierPaymentTerms } from '../../../shared/types';
 
 type ViewMode = 'all' | 'payable' | 'recharge' | 'reconcile';
@@ -23,6 +24,7 @@ interface CostRow extends Cost {
   hh_job_number?: number | null;
   job_name?: string | null;
   vehicle_reg?: string | null;
+  allocation_count?: number;
 }
 
 interface Stats {
@@ -126,6 +128,7 @@ export default function CostsPage() {
   const [typeFilter, setTypeFilter] = useState('');
   const [showCapture, setShowCapture] = useState(false);
   const [editing, setEditing] = useState<CostRow | null>(null);
+  const [allocating, setAllocating] = useState<CostRow | null>(null);
   const [payTarget, setPayTarget] = useState<CostRow | null>(null);
   const [termsTarget, setTermsTarget] = useState<CostRow | null>(null);
   const [preview, setPreview] = useState<CostRow | null>(null);
@@ -417,6 +420,10 @@ export default function CostsPage() {
                           {actionBusy === c.id + 'recharge' ? '…' : 'Push to HireHop'}
                         </button>
                       )}
+                      <button onClick={() => setAllocating(c)} title="Split across jobs"
+                        className={`px-1.5 py-1 text-sm rounded hover:bg-gray-100 ${c.allocation_count ? 'text-purple-700' : 'text-gray-500 hover:text-gray-800'}`}>
+                        ⑂{c.allocation_count ? <span className="text-[10px] align-top">{c.allocation_count}</span> : ''}
+                      </button>
                       <button onClick={() => setEditing(c)} title="Edit"
                         className="px-1.5 py-1 text-sm text-gray-500 hover:text-gray-800 hover:bg-gray-100 rounded">
                         ✎
@@ -447,6 +454,13 @@ export default function CostsPage() {
           existing={editing}
           onClose={() => setEditing(null)}
           onSaved={() => { setEditing(null); load(); }}
+        />
+      )}
+      {allocating && (
+        <CostAllocationModal
+          cost={allocating}
+          onClose={() => setAllocating(null)}
+          onSaved={() => { setAllocating(null); load(true); }}
         />
       )}
       {payTarget && (
