@@ -978,10 +978,17 @@ async function upsertAutoRequirement(
 type SuspensionReason = 'Van & Driver' | 'Internal';
 
 async function suspendRequirement(client: any, jobId: string, requirementType: string, reason: SuspensionReason): Promise<void> {
-  // Only suspend auto-created pre_hire requirements that aren't already suspended
+  // Suspend the pre_hire requirement of this type regardless of how it was
+  // created. Only ever called for hire_forms / excess, both of which are fully
+  // V&D-/Internal-governed — when the job is wholly Van & Driver (or internal)
+  // they aren't needed no matter their origin. NB: the enquiry-form
+  // "Self-drive van" quick-select inserts these with is_auto=false (column
+  // default), so filtering on is_auto=true here silently skipped them and left
+  // the hire-form/excess chain live on V&D jobs.
   const existing = await client.query(
     `SELECT id, status, notes FROM job_requirements
-     WHERE job_id = $1 AND requirement_type = $2 AND is_auto = true AND phase = 'pre_hire'`,
+     WHERE job_id = $1 AND requirement_type = $2 AND phase = 'pre_hire'
+       AND status NOT IN ('cancelled', 'done')`,
     [jobId, requirementType]
   );
   if (existing.rows.length === 0) return;
@@ -1059,9 +1066,12 @@ async function restoreJobExcessFromSuspension(client: any, jobId: string): Promi
  * toggle. Puts it back to its previous status.
  */
 async function restoreSuspendedRequirement(client: any, jobId: string, requirementType: string): Promise<void> {
+  // Mirror suspendRequirement: marker-gated, origin-agnostic (no is_auto filter)
+  // so a manually-created (enquiry-form) hire_forms/excess requirement that was
+  // suspended on V&D gets restored when the job flips back to self-drive.
   const existing = await client.query(
     `SELECT id, notes FROM job_requirements
-     WHERE job_id = $1 AND requirement_type = $2 AND is_auto = true AND status = 'blocked' AND phase = 'pre_hire'`,
+     WHERE job_id = $1 AND requirement_type = $2 AND status = 'blocked' AND phase = 'pre_hire'`,
     [jobId, requirementType]
   );
   if (existing.rows.length === 0) return;
