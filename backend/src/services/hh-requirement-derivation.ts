@@ -310,7 +310,7 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
 
   // Load job with line items
   const jobResult = await query(
-    `SELECT id, hh_job_number, client_name, line_items, hh_derived_flags, is_van_and_driver, vehicle_slot_modes, is_internal
+    `SELECT id, hh_job_number, client_name, line_items, hh_derived_flags, is_van_and_driver, vehicle_slot_modes, is_internal, self_drive_van_override
      FROM jobs WHERE id = $1 AND is_deleted = false`,
     [jobId]
   );
@@ -336,6 +336,19 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
     }
     flags.van_and_driver_count = flags.vehicle_slots.length;
     flags.self_drive_count = 0;
+  }
+  // Sequential-swap override (Option X): when staff have declared the real
+  // simultaneous self-drive van count (e.g. HH lists qty-2 but it's one van
+  // swapped mid-hire), cap self_drive_count to that. vehicle_slots is left
+  // intact so the card still shows both physical vans (with a "treated as N"
+  // label) — only the COUNT that drives excess + top-N + additional-driver
+  // charge is corrected. The existing excess mismatch logic then either
+  // auto-updates an uncollected record or flags one with money taken.
+  if (job.self_drive_van_override !== null && job.self_drive_van_override !== undefined) {
+    const ov = Number(job.self_drive_van_override);
+    if (Number.isFinite(ov) && ov >= 0) {
+      flags.self_drive_count = Math.min(ov, flags.self_drive_count);
+    }
   }
   result.flags = flags;
 

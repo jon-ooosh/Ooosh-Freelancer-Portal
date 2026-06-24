@@ -6174,6 +6174,9 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
   const [loading, setLoading] = useState(true);
   const [showAddMenu, setShowAddMenu] = useState(false);
   const [isVanAndDriver, setIsVanAndDriver] = useState(false);
+  // Sequential-swap override: staff-declared real simultaneous self-drive van
+  // count (null = HH-derived). Drives the structure control on the vehicle card.
+  const [selfDriveVanOverride, setSelfDriveVanOverride] = useState<number | null>(null);
   // Local copy of derived flags so per-slot toggles can update the UI without a page refresh.
   // Seeded from the parent prop; refreshed from the PATCH response on every slot/toggle change.
   const [localFlags, setLocalFlags] = useState<typeof derivedFlags>(derivedFlags);
@@ -6210,8 +6213,8 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
   useEffect(() => {
     loadAll();
     // Load van & driver flag
-    api.get<{ isVanAndDriver: boolean }>(`/hirehop/jobs/${jobId}/derived-flags`)
-      .then(d => setIsVanAndDriver(d.isVanAndDriver || false))
+    api.get<{ isVanAndDriver: boolean; selfDriveVanOverride: number | null }>(`/hirehop/jobs/${jobId}/derived-flags`)
+      .then(d => { setIsVanAndDriver(d.isVanAndDriver || false); setSelfDriveVanOverride(d.selfDriveVanOverride ?? null); })
       .catch(() => {});
   }, [jobId, phase]);
 
@@ -6265,6 +6268,19 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
       await applyDerivationResult(data.derivation);
     } catch (err) {
       console.error('Failed to change slot mode:', err);
+    }
+  }
+
+  async function changeVehicleCountOverride(count: number | null) {
+    try {
+      const data = await api.patch<{ selfDriveVanOverride: number | null; derivation?: { flags?: typeof derivedFlags } }>(
+        `/hirehop/jobs/${jobId}/vehicle-count-override`,
+        { count }
+      );
+      setSelfDriveVanOverride(data.selfDriveVanOverride ?? null);
+      await applyDerivationResult(data.derivation);
+    } catch (err) {
+      console.error('Failed to set vehicle count override:', err);
     }
   }
 
@@ -6517,6 +6533,8 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
                   onRemove={removeRequirement}
                   onVanAndDriverToggle={req.requirement_type === 'vehicle' ? toggleVanAndDriver : undefined}
                   onSlotModeChange={req.requirement_type === 'vehicle' ? changeSlotMode : undefined}
+                  selfDriveVanOverride={selfDriveVanOverride}
+                  onVehicleCountOverride={req.requirement_type === 'vehicle' ? changeVehicleCountOverride : undefined}
                   onReload={loadAll}
                 />
               );

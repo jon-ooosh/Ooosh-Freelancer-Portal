@@ -177,6 +177,8 @@ export default function RequirementCard({
   onRemove,
   onVanAndDriverToggle,
   onSlotModeChange,
+  selfDriveVanOverride,
+  onVehicleCountOverride,
   onReload,
 }: {
   req: JobRequirement;
@@ -191,6 +193,8 @@ export default function RequirementCard({
   onRemove: (reqId: string, reason?: string) => void;
   onVanAndDriverToggle?: () => void;
   onSlotModeChange?: (itemId: number, slotIndex: number, mode: VehicleSlotMode) => void;
+  selfDriveVanOverride?: number | null;
+  onVehicleCountOverride?: (count: number | null) => void;
   onReload?: () => void;
 }) {
   const [showStatusMenu, setShowStatusMenu] = useState(false);
@@ -479,6 +483,47 @@ export default function RequirementCard({
                     )}
                   </div>
                 )}
+                {/* Sequential-swap structure control — only on multi-van
+                    self-drive jobs. HH qty-2 can mean one van swapped mid-hire
+                    (per-item going-out dates in HireHop), not two vans out at
+                    once. The override caps the count that drives excess + the
+                    additional-driver charge (£1,200 not £2,400). vehicle_slots
+                    still shows both physical vans. */}
+                {onVehicleCountOverride && derivedFlags.vehicle_slots
+                  && derivedFlags.vehicle_slots.filter(s => s.mode === 'self_drive').length > 1 && (() => {
+                  const physicalSelfDrive = derivedFlags.vehicle_slots.filter(s => s.mode === 'self_drive').length;
+                  const isSwap = selfDriveVanOverride !== null && selfDriveVanOverride !== undefined;
+                  return (
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="text-gray-500">Structure:</span>
+                      <button
+                        onClick={() => onVehicleCountOverride(null)}
+                        className={`px-2 py-0.5 rounded text-[10px] font-medium border transition-colors ${
+                          !isSwap
+                            ? 'bg-indigo-100 text-indigo-700 border-indigo-300'
+                            : 'bg-gray-100 text-gray-500 border-gray-200 hover:bg-gray-200'
+                        }`}
+                        title="Both vans out at the same time"
+                      >
+                        {physicalSelfDrive} simultaneous
+                      </button>
+                      <button
+                        onClick={() => onVehicleCountOverride(1)}
+                        className={`px-2 py-0.5 rounded text-[10px] font-medium border transition-colors ${
+                          isSwap
+                            ? 'bg-amber-100 text-amber-700 border-amber-300'
+                            : 'bg-gray-100 text-gray-500 border-gray-200 hover:bg-gray-200'
+                        }`}
+                        title="One van swapped mid-hire (per-item dates in HireHop) — excess + charges for one van"
+                      >
+                        🔄 1 van, swapped
+                      </button>
+                      {isSwap && (
+                        <span className="text-amber-600">— excess + charges treated as 1 van (£1,200)</span>
+                      )}
+                    </div>
+                  );
+                })()}
                 {derivedFlags.seat_config && (
                   <div className={derivedFlags.seat_config === 'forward_facing' ? 'text-amber-600' : 'text-green-600'}>
                     {derivedFlags.seat_config === 'forward_facing' ? '⬆️ Forward-facing seats' : '🔄 Round a table'}

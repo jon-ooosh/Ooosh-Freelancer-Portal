@@ -521,8 +521,8 @@ router.get('/jobs/:jobId/derived-flags', authenticate, async (req: AuthRequest, 
     const isUuid = /^[0-9a-f]{8}-/.test(jobId);
     const jobResult = await query(
       isUuid
-        ? `SELECT hh_derived_flags, line_items_synced_at, is_van_and_driver, vehicle_slot_modes FROM jobs WHERE id = $1`
-        : `SELECT hh_derived_flags, line_items_synced_at, is_van_and_driver, vehicle_slot_modes FROM jobs WHERE hh_job_number = $1`,
+        ? `SELECT hh_derived_flags, line_items_synced_at, is_van_and_driver, vehicle_slot_modes, self_drive_van_override FROM jobs WHERE id = $1`
+        : `SELECT hh_derived_flags, line_items_synced_at, is_van_and_driver, vehicle_slot_modes, self_drive_van_override FROM jobs WHERE hh_job_number = $1`,
       [isUuid ? jobId : parseInt(jobId, 10)]
     );
 
@@ -546,6 +546,10 @@ router.get('/jobs/:jobId/derived-flags', authenticate, async (req: AuthRequest, 
       flags,
       lastSynced: job.line_items_synced_at,
       vehicleSlotModes: job.vehicle_slot_modes || {},
+      // Sequential-swap override: the staff-declared real simultaneous
+      // self-drive van count (null = use HH-derived). Drives the structure
+      // control on the vehicle requirement card.
+      selfDriveVanOverride: job.self_drive_van_override ?? null,
       // Legacy field — kept for one release for any lingering clients
       isVanAndDriver: flags?.has_vehicle && flags?.self_drive_count === 0,
       seatAvailability,
@@ -604,6 +608,41 @@ router.patch('/jobs/:jobId/vehicle-slot-mode', authenticate, async (req: AuthReq
     res.json({ success: true, vehicleSlotModes: modes, derivation });
   } catch (error) {
     console.error('Vehicle slot mode error:', error);
+    res.status(500).json({ error: 'Failed to update' });
+  }
+});
+
+// PATCH /api/hirehop/jobs/:jobId/vehicle-count-override — declare the real
+// simultaneous self-drive van count for a sequential-swap hire (HH lists
+// qty-2 but it's one van swapped mid-hire). count=null clears the override
+// (back to HH-derived). Re-derives so excess + requirements update.
+router.patch('/jobs/:jobId/vehicle-count-override', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const jobId = req.params.jobId as string;
+    const { count, note } = req.body as { count?: number | null; note?: string };
+
+    if (count !== null && count !== undefined && (!Number.isInteger(count) || count < 0)) {
+      res.status(400).json({ error: 'count must be a non-negative integer or null' });
+      return;
+    }
+
+    const exists = await query(`SELECT id FROM jobs WHERE id = $1`, [jobId]);
+    if (exists.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
+    await query(
+      `UPDATE jobs SET self_drive_van_override = $1, vehicle_structure_note = $2, updated_at = NOW() WHERE id = $3`,
+      [count ?? null, note ?? null, jobId]
+    );
+
+    const { deriveRequirementsForJob } = await import('../services/hh-requirement-derivation');
+    const derivation = await deriveRequirementsForJob(jobId);
+
+    res.json({ success: true, selfDriveVanOverride: count ?? null, derivation });
+  } catch (error) {
+    console.error('Vehicle count override error:', error);
     res.status(500).json({ error: 'Failed to update' });
   }
 });
