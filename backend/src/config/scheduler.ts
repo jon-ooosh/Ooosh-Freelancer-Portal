@@ -810,6 +810,21 @@ export function startScheduler() {
       console.error('Scheduler: Holding reminders failed:', err);
     }
   }, { timezone: 'Europe/London' });
+
+  // COT receipt chase — daily 09:35 Europe/London. Nudges each card-holder about
+  // company-card purchases with no receipt attached (older than the grace window).
+  // See services/cost-receipt-chaser.ts.
+  cron.schedule('35 9 * * *', async () => {
+    try {
+      const { runCostReceiptChase } = await import('../services/cost-receipt-chaser');
+      const r = await runCostReceiptChase();
+      if (r.holdersNudged) {
+        console.log(`Scheduler: COT receipt chase — nudged ${r.holdersNudged} staff about ${r.costsChased} missing receipts`);
+      }
+    } catch (err) {
+      console.error('Scheduler: COT receipt chase failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
   console.log('Scheduler: Holding reminders scheduled daily at 09:25 Europe/London');
 
   // ── Vehicle forecast AI assessments ──────────────────────────────────────

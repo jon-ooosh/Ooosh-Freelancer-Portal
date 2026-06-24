@@ -155,4 +155,56 @@ router.post('/:id/force-password', authorize('admin'), validate(forcePasswordSch
   }
 });
 
+// ── COT card register (admin-managed) ───────────────────────────────────────
+// Admin sets each staff member's company card (last 4 + a friendly label). The
+// cost-capture flow auto-fills the card holder + last 4 from this server-side —
+// staff never type card details.
+
+// GET /api/users/cot-cards — the register (admin only)
+router.get('/cot-cards', authorize('admin'), async (_req: AuthRequest, res: Response) => {
+  try {
+    const result = await query(
+      `SELECT u.id, u.email, u.is_active, u.cot_card_last4, u.cot_card_label,
+              p.first_name, p.last_name
+         FROM users u
+         LEFT JOIN people p ON p.id = u.person_id
+        WHERE u.role <> 'freelancer'
+        ORDER BY u.is_active DESC, p.first_name, p.last_name`
+    );
+    res.json({ data: result.rows });
+  } catch (error) {
+    console.error('List COT cards error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+const cotCardSchema = z.object({
+  cot_card_last4: z.string().regex(/^\d{4}$/).nullable().optional(),
+  cot_card_label: z.string().trim().max(60).nullable().optional(),
+});
+
+// PATCH /api/users/:id/cot-card — admin sets a staff member's company card
+router.patch('/:id/cot-card', authorize('admin'), async (req: AuthRequest, res: Response) => {
+  try {
+    const parse = cotCardSchema.safeParse(req.body);
+    if (!parse.success) { res.status(400).json({ error: 'Invalid input', issues: parse.error.issues }); return; }
+    const { cot_card_last4, cot_card_label } = parse.data;
+    const sets: string[] = [];
+    const vals: unknown[] = [];
+    if (cot_card_last4 !== undefined) { vals.push(cot_card_last4 || null); sets.push(`cot_card_last4 = $${vals.length}`); }
+    if (cot_card_label !== undefined) { vals.push(cot_card_label || null); sets.push(`cot_card_label = $${vals.length}`); }
+    if (!sets.length) { res.status(400).json({ error: 'Nothing to update' }); return; }
+    vals.push(req.params.id);
+    const r = await query(
+      `UPDATE users SET ${sets.join(', ')} WHERE id = $${vals.length} RETURNING id, cot_card_last4, cot_card_label`,
+      vals,
+    );
+    if (!r.rows.length) { res.status(404).json({ error: 'User not found' }); return; }
+    res.json({ data: r.rows[0] });
+  } catch (error) {
+    console.error('Update COT card error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 export default router;

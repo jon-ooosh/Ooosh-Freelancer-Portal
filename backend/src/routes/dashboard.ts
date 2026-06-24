@@ -673,6 +673,17 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
             OR (c.status = 'returned')
           )
       `),
+
+      // 28. COT receipts outstanding: company-card costs with no receipt
+      // attached, older than the 3-day grace. The daily chaser nudges each
+      // card-holder; this surfaces the fleet-wide backlog as an amber bucket.
+      query(`
+        SELECT COUNT(*) AS count
+        FROM costs c
+        WHERE c.payment_method = 'cot_card'
+          AND c.receipt_r2_key IS NULL
+          AND c.cost_date <= CURRENT_DATE - INTERVAL '3 days'
+      `),
     ]);
 
     const [
@@ -690,7 +701,7 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       pendingReferralsResult, pendingExcessResult,
       prepTimeResult, onHireSparkResult, deprepTimeResult,
       expiringHoldsResult, receiptsOutstandingResult,
-      carnetCountResult,
+      carnetCountResult, cotReceiptsResult,
     ] = results;
 
     // Build the 14-day on-hire series — oldest day first, today last.
@@ -846,6 +857,7 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
           + overdueTransportOpsResult.rows.length,
         client_intros: clientIntrosResult.rows,
         carnet_count: parseInt(carnetCountResult.rows[0].count as string),
+        cot_receipts_outstanding_count: parseInt(cotReceiptsResult.rows[0].count as string),
         referral_count: parseInt(referralCountResult.rows[0].count as string),
         referrals: pendingReferralsResult.rows,
         // ── Excess (semantics changed Apr 2026) ──
