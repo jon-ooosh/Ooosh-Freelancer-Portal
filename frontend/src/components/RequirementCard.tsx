@@ -89,6 +89,7 @@ interface EmailContact {
 }
 
 interface HireFormDriver {
+  driver_id: string | null;
   driver_name: string | null;
   status: string;
   created_at: string;
@@ -177,6 +178,8 @@ export default function RequirementCard({
   onRemove,
   onVanAndDriverToggle,
   onSlotModeChange,
+  selfDriveVanOverride,
+  onVehicleCountOverride,
   onReload,
 }: {
   req: JobRequirement;
@@ -191,6 +194,8 @@ export default function RequirementCard({
   onRemove: (reqId: string, reason?: string) => void;
   onVanAndDriverToggle?: () => void;
   onSlotModeChange?: (itemId: number, slotIndex: number, mode: VehicleSlotMode) => void;
+  selfDriveVanOverride?: number | null;
+  onVehicleCountOverride?: (count: number | null) => void;
   onReload?: () => void;
 }) {
   const [showStatusMenu, setShowStatusMenu] = useState(false);
@@ -479,6 +484,47 @@ export default function RequirementCard({
                     )}
                   </div>
                 )}
+                {/* Sequential-swap structure control — only on multi-van
+                    self-drive jobs. HH qty-2 can mean one van swapped mid-hire
+                    (per-item going-out dates in HireHop), not two vans out at
+                    once. The override caps the count that drives excess + the
+                    additional-driver charge (£1,200 not £2,400). vehicle_slots
+                    still shows both physical vans. */}
+                {onVehicleCountOverride && derivedFlags.vehicle_slots
+                  && derivedFlags.vehicle_slots.filter(s => s.mode === 'self_drive').length > 1 && (() => {
+                  const physicalSelfDrive = derivedFlags.vehicle_slots.filter(s => s.mode === 'self_drive').length;
+                  const isSwap = selfDriveVanOverride !== null && selfDriveVanOverride !== undefined;
+                  return (
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="text-gray-500">Structure:</span>
+                      <button
+                        onClick={() => onVehicleCountOverride(null)}
+                        className={`px-2 py-0.5 rounded text-[10px] font-medium border transition-colors ${
+                          !isSwap
+                            ? 'bg-indigo-100 text-indigo-700 border-indigo-300'
+                            : 'bg-gray-100 text-gray-500 border-gray-200 hover:bg-gray-200'
+                        }`}
+                        title="Both vans out at the same time"
+                      >
+                        {physicalSelfDrive} simultaneous
+                      </button>
+                      <button
+                        onClick={() => onVehicleCountOverride(1)}
+                        className={`px-2 py-0.5 rounded text-[10px] font-medium border transition-colors ${
+                          isSwap
+                            ? 'bg-amber-100 text-amber-700 border-amber-300'
+                            : 'bg-gray-100 text-gray-500 border-gray-200 hover:bg-gray-200'
+                        }`}
+                        title="One van swapped mid-hire (per-item dates in HireHop) — excess + charges for one van"
+                      >
+                        🔄 1 van, swapped
+                      </button>
+                      {isSwap && (
+                        <span className="text-amber-600">— excess + charges treated as 1 van (£1,200)</span>
+                      )}
+                    </div>
+                  );
+                })()}
                 {derivedFlags.seat_config && (
                   <div className={derivedFlags.seat_config === 'forward_facing' ? 'text-amber-600' : 'text-green-600'}>
                     {derivedFlags.seat_config === 'forward_facing' ? '⬆️ Forward-facing seats' : '🔄 Round a table'}
@@ -508,8 +554,14 @@ export default function RequirementCard({
               <div className="mt-1 space-y-1">
                 {/* Summary counts */}
                 {(() => {
+                  // "Received" = a customer actually submitted a hire form,
+                  // which is what links a driver (driver_id set by
+                  // POST /api/hire-forms). A driverless row is a staff
+                  // allocation placeholder, NOT a received form — counting it
+                  // claimed "1 received" on jobs where no form had arrived.
                   const received = hireFormDrivers.filter(d =>
-                    d.status === 'confirmed' || d.status === 'booked_out' || d.status === 'active'
+                    d.driver_id &&
+                    (d.status === 'confirmed' || d.status === 'booked_out' || d.status === 'active')
                   ).length;
                   const referralCount = hireFormDrivers.filter(d => d.requires_referral).length;
                   // Parse all "sent" entries from the notes — each line was
@@ -558,25 +610,32 @@ export default function RequirementCard({
                   );
                 })()}
 
-                {/* Individual driver list */}
-                {hireFormDrivers.length > 0 ? (
-                  <div className="space-y-0.5">
-                    {hireFormDrivers.map((d, i) => (
-                      <div key={i} className="flex items-center gap-2 text-xs">
-                        <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
-                          d.status === 'confirmed' || d.status === 'booked_out' || d.status === 'active' ? 'bg-green-500' :
-                          d.status === 'soft' ? 'bg-amber-400' : 'bg-gray-300'
-                        }`} />
-                        <span className="text-gray-700">{d.driver_name || 'Unknown driver'}</span>
-                        {d.requires_referral && (
-                          <span className="text-[10px] px-1 py-0.5 rounded bg-red-50 text-red-600 border border-red-200">Referral</span>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="text-xs text-gray-400">No hire forms submitted yet</div>
-                )}
+                {/* Individual driver list — only rows with a real submitted
+                    form (driver_id set). Driverless allocation placeholders
+                    belong to the vehicle/allocation layer, not the hire-form
+                    card, and showing them here as "Unknown driver" with a
+                    green dot misrepresented an un-submitted form as received. */}
+                {(() => {
+                  const submittedForms = hireFormDrivers.filter(d => d.driver_id);
+                  return submittedForms.length > 0 ? (
+                    <div className="space-y-0.5">
+                      {submittedForms.map((d, i) => (
+                        <div key={i} className="flex items-center gap-2 text-xs">
+                          <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+                            d.status === 'confirmed' || d.status === 'booked_out' || d.status === 'active' ? 'bg-green-500' :
+                            d.status === 'soft' ? 'bg-amber-400' : 'bg-gray-300'
+                          }`} />
+                          <span className="text-gray-700">{d.driver_name || 'Unknown driver'}</span>
+                          {d.requires_referral && (
+                            <span className="text-[10px] px-1 py-0.5 rounded bg-red-50 text-red-600 border border-red-200">Referral</span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-xs text-gray-400">No hire forms submitted yet</div>
+                  );
+                })()}
                 {/* Always available — staff legitimately need this when:
                     - 0 received: original email went to spam, wrong contact,
                       need to send to a different person, etc.

@@ -864,7 +864,7 @@ Closed the gap where editing a cost that's **already in Xero** (fixing the
 account code/amount/supplier after a bill or spend-money was created) left Xero
 stale — the PATCH only ever re-pushed costs that weren't yet in Xero.
 
-- **Migration 146** — `costs.xero_stale BOOLEAN`. Set by the PATCH handler when
+- **Migration 147** — `costs.xero_stale BOOLEAN`. Set by the PATCH handler when
   an already-pushed cost (`xero_object_id` + `bill_created`/`attached`/`reconciled`)
   is edited with a **Xero-affecting field** (amount net/vat/gross, account code,
   supplier, description, vat_treatment, cost_date, payment_method, invoice_number).

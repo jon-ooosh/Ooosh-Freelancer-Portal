@@ -813,11 +813,10 @@ export function startScheduler() {
   console.log('Scheduler: Holding reminders scheduled daily at 09:25 Europe/London');
 
   // ── Vehicle forecast AI assessments ──────────────────────────────────────
-  // 3x/week: Sunday 18:00 (ready for Monday AM), Wednesday + Friday 07:00, all
-  // Europe/London. Regenerates the cached AI health narrative for every active
-  // van (deterministic forecast cards are computed live, not here). On-demand
-  // regeneration is the Forecast tab "Regenerate" button. See
-  // services/vehicle-forecast-ai.ts.
+  // Weekly: Sunday 18:00 Europe/London (ready for Monday AM). Regenerates the
+  // cached AI health narrative for every active van (deterministic forecast
+  // cards are computed live, not here). On-demand regeneration is the Forecast
+  // tab "Regenerate" button. See services/vehicle-forecast-ai.ts.
   const runForecastBatch = async () => {
     try {
       const { runScheduledForecastAssessments } = await import('../services/vehicle-forecast-ai');
@@ -828,8 +827,7 @@ export function startScheduler() {
     }
   };
   cron.schedule('0 18 * * 0', runForecastBatch, { timezone: 'Europe/London' });
-  cron.schedule('0 7 * * 3,5', runForecastBatch, { timezone: 'Europe/London' });
-  console.log('Scheduler: Vehicle forecast assessments scheduled Sun 18:00 + Wed/Fri 07:00 Europe/London');
+  console.log('Scheduler: Vehicle forecast assessments scheduled weekly Sun 18:00 Europe/London');
 
   // ── PCN pay-direct chase ladder ──────────────────────────────────────────
   // Daily at 09:35 Europe/London. Chases drivers who were told to pay a charge

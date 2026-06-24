@@ -159,11 +159,15 @@ function projectTo(
   const milesRemaining = Math.round((currentTread - threshold) / ratePerMile)
   const reachedAtMileage = currentMileage != null ? currentMileage + milesRemaining : null
   let estimatedDate: string | null = null
-  if (milesPerDay != null && milesPerDay > 0) {
-    const days = milesRemaining / milesPerDay
-    const d = new Date()
-    d.setDate(d.getDate() + Math.round(days))
-    estimatedDate = d.toISOString().slice(0, 10)
+  if (milesPerDay != null && milesPerDay > 0 && Number.isFinite(milesRemaining)) {
+    const days = Math.round(milesRemaining / milesPerDay)
+    // Guard against absurd projections (tiny wear rate → millions of days) that
+    // overflow the JS Date and make toISOString() throw "Invalid time value".
+    if (days >= 0 && days < 36500) {
+      const d = new Date()
+      d.setDate(d.getDate() + days)
+      if (!Number.isNaN(d.getTime())) estimatedDate = d.toISOString().slice(0, 10)
+    }
   }
   return { milesRemaining, reachedAtMileage, estimatedDate }
 }
