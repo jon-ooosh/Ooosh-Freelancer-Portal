@@ -53,6 +53,7 @@ interface ExtractedPcn {
   vehicle_reg: string | null;
   offence_date: string | null;
   offence_time: string | null;
+  issued_date: string | null;
   location: string | null;
   issuing_authority: string | null;
   offence_description: string | null;
@@ -275,6 +276,7 @@ export default function PcnsPage() {
                 {th('driver', 'Driver')}
                 {th('job', 'Job')}
                 {th('offence', 'Offence')}
+                {th('issued', 'PCN date')}
                 <th className="px-3 py-2 font-medium">Next action</th>
                 {th('fine', 'Fine')}
                 {th('status', 'Status')}
@@ -297,6 +299,7 @@ export default function PcnsPage() {
                   </td>
                   <td className="px-3 py-2">{p.hh_job_number ? `#${p.hh_job_number}` : '—'}</td>
                   <td className="px-3 py-2">{fmtDate(p.offence_at)}{p.offence_time_text ? ` ${p.offence_time_text}` : ''}</td>
+                  <td className="px-3 py-2">{fmtDate(p.issued_date)}</td>
                   <td className="px-3 py-2"><PcnNextActionCell pcn={p} /></td>
                   <td className="px-3 py-2">{money(p.fine_amount)}</td>
                   <td className="px-3 py-2"><PcnStatusPill status={p.status} /></td>
@@ -320,7 +323,7 @@ export default function PcnsPage() {
 // ── Create modal: extraction-first, manual fallback ───────────────────────
 const EMPTY_FORM = {
   reference: '', fine_type: 'private_pcn', vehicle_reg: '',
-  offence_date: '', offence_time: '', location: '', issuing_authority: '',
+  offence_date: '', offence_time: '', issued_date: '', location: '', issuing_authority: '',
   fine_amount: '', reduced_amount: '', reduced_deadline: '', final_deadline: '',
   notes: '',
 };
@@ -393,6 +396,7 @@ function CreatePcnModal({ onClose, onCreated }: { onClose: () => void; onCreated
         vehicle_reg: d.vehicle_reg || '',
         offence_date: d.offence_date || '',
         offence_time: d.offence_time || '',
+        issued_date: d.issued_date || '',
         location: d.location || '',
         issuing_authority: d.issuing_authority || '',
         fine_amount: d.fine_amount != null ? String(d.fine_amount) : '',
@@ -463,6 +467,7 @@ function CreatePcnModal({ onClose, onCreated }: { onClose: () => void; onCreated
         vehicle_reg: form.vehicle_reg.toUpperCase().replace(/\s/g, '') || null,
         offence_at: offenceAt,
         offence_time_text: form.offence_time || null,
+        issued_date: form.issued_date || null,
         location: form.location || null,
         issuing_authority: form.issuing_authority || null,
         fine_amount: form.fine_amount ? Number(form.fine_amount) : null,
@@ -622,6 +627,9 @@ function CreatePcnModal({ onClose, onCreated }: { onClose: () => void; onCreated
               </label>
               <label className="text-sm">Offence time
                 <input type="time" className={input} value={form.offence_time} onChange={(e) => set('offence_time', e.target.value)} />
+              </label>
+              <label className="text-sm">PCN issued date
+                <input type="date" className={input} value={form.issued_date} onChange={(e) => set('issued_date', e.target.value)} />
               </label>
               <label className="text-sm">Location
                 <input className={input} value={form.location} onChange={(e) => set('location', e.target.value)} />

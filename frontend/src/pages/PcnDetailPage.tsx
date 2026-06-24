@@ -121,6 +121,7 @@ export default function PcnDetailPage() {
                   : `#${pcn.hh_job_number}`)
               : '—')}
             {field('Offence', `${fmtDate(pcn.offence_at)}${pcn.offence_time_text ? ' ' + pcn.offence_time_text : ''}`)}
+            {field('PCN date', fmtDate(pcn.issued_date))}
             {field('Location', pcn.location || '—')}
             {field('Authority', pcn.issuing_authority || '—')}
             {field('Fine', money(pcn.fine_amount))}

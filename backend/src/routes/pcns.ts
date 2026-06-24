@@ -397,6 +397,8 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     job_desc:       'p.hh_job_number DESC NULLS LAST, p.created_at DESC',
     offence_desc:   'p.offence_at DESC NULLS LAST, p.created_at DESC',
     offence_asc:    'p.offence_at ASC NULLS LAST, p.created_at DESC',
+    issued_desc:    'p.issued_date DESC NULLS LAST, p.created_at DESC',
+    issued_asc:     'p.issued_date ASC NULLS LAST, p.created_at DESC',
     fine_desc:      'p.fine_amount DESC NULLS LAST, p.created_at DESC',
     fine_asc:       'p.fine_amount ASC NULLS LAST, p.created_at DESC',
     status_asc:     'p.status ASC, p.created_at DESC',
@@ -450,6 +452,7 @@ const createSchema = z.object({
   vehicle_reg: z.string().optional().nullable(),
   offence_at: z.string().optional().nullable(),
   offence_time_text: z.string().optional().nullable(),
+  issued_date: z.string().optional().nullable(),
   location: z.string().optional().nullable(),
   issuing_authority: z.string().optional().nullable(),
   offence_description: z.string().optional().nullable(),
@@ -482,10 +485,10 @@ router.post('/', validate(createSchema), async (req: AuthRequest, res: Response)
        client_organisation_id, hh_job_number, vehicle_reg,
        offence_at, offence_time_text, location, issuing_authority, offence_description,
        fine_amount, reduced_amount, reduced_deadline, final_deadline,
-       extraction_confidence, pcn_document_url, documents, notes, handled_by, status
+       extraction_confidence, pcn_document_url, documents, notes, handled_by, issued_date, status
      ) VALUES (
        $1,$2,$3,$4,$5,$6, $7,$8,$9, $10,$11,$12,$13,$14,
-       $15,$16,$17,$18, $19,$20,$21::jsonb,$22,$23, 'received'
+       $15,$16,$17,$18, $19,$20,$21::jsonb,$22,$23, $24, 'received'
      ) RETURNING *`,
     [
       b.reference ?? null, b.fine_type ?? 'other', b.vehicle_id ?? null, b.driver_id ?? null,
@@ -496,6 +499,7 @@ router.post('/', validate(createSchema), async (req: AuthRequest, res: Response)
       b.fine_amount ?? null, b.reduced_amount ?? null, b.reduced_deadline ?? null,
       b.final_deadline ?? null, b.extraction_confidence ?? null,
       b.pcn_document_url ?? null, JSON.stringify(docs), b.notes ?? null, req.user!.id,
+      b.issued_date ?? null,
     ]
   );
   const pcn = result.rows[0];
@@ -526,7 +530,7 @@ const updateSchema = createSchema.partial().extend({
 const UPDATABLE = [
   'reference', 'fine_type', 'vehicle_id', 'driver_id', 'driver_person_id', 'assignment_id', 'job_id',
   'client_organisation_id', 'hh_job_number', 'vehicle_reg', 'offence_at',
-  'offence_time_text', 'location', 'issuing_authority', 'offence_description',
+  'offence_time_text', 'issued_date', 'location', 'issuing_authority', 'offence_description',
   'fine_amount', 'reduced_amount', 'reduced_deadline', 'final_deadline',
   'extraction_confidence', 'pcn_document_url', 'notes', 'status', 'action_path',
 ] as const;

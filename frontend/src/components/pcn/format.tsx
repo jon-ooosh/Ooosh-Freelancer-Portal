@@ -28,6 +28,7 @@ export interface Pcn {
   job_name: string | null;
   offence_at: string | null;
   offence_time_text: string | null;
+  issued_date: string | null;
   location: string | null;
   issuing_authority: string | null;
   fine_amount: number | null;

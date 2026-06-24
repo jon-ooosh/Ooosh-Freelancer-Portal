@@ -31,6 +31,7 @@ Extraction rules:
 - vehicle_reg: the vehicle registration, UPPERCASE with no spaces (e.g. "RX22SWN").
 - offence_date: format YYYY-MM-DD. UK dates are usually DD/MM/YYYY. Null if not visible.
 - offence_time: 24-hour HH:MM. Null if not visible.
+- issued_date: the date the notice itself was issued / dated / printed (often labelled "Date of Notice", "Date Issued", "Issue Date", or the letter date) — distinct from the offence date. Format YYYY-MM-DD. Null if not visible.
 - location: where the offence occurred (street, car park, zone).
 - issuing_authority: who issued the notice (council name, parking company, police force, toll operator). For a rental pass-through, use the ORIGINAL issuer, not the rental company.
 - fine_amount: the full charge in pounds (number only, no symbol). Null if not visible.
@@ -48,6 +49,7 @@ const SCHEMA = {
     vehicle_reg: { type: ['string', 'null'] },
     offence_date: { type: ['string', 'null'] },
     offence_time: { type: ['string', 'null'] },
+    issued_date: { type: ['string', 'null'] },
     location: { type: ['string', 'null'] },
     issuing_authority: { type: ['string', 'null'] },
     offence_description: { type: ['string', 'null'] },
@@ -60,7 +62,7 @@ const SCHEMA = {
     notes: { type: ['string', 'null'] },
   },
   required: [
-    'reference', 'vehicle_reg', 'offence_date', 'offence_time', 'location',
+    'reference', 'vehicle_reg', 'offence_date', 'offence_time', 'issued_date', 'location',
     'issuing_authority', 'offence_description', 'fine_amount', 'reduced_amount',
     'reduced_deadline', 'final_deadline', 'fine_type', 'confidence', 'notes',
   ],
@@ -72,6 +74,7 @@ export interface ExtractedPcn {
   vehicle_reg: string | null;
   offence_date: string | null;
   offence_time: string | null;
+  issued_date: string | null;
   location: string | null;
   issuing_authority: string | null;
   offence_description: string | null;
