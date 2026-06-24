@@ -113,13 +113,14 @@ const rechargeSchema = z.object({
 });
 
 const allocationSchema = z.object({
+  // Empty array clears the split (deletes all allocations for the cost).
   allocations: z.array(z.object({
     job_id: z.string().uuid().optional().nullable(),
     quote_assignment_id: z.string().uuid().optional().nullable(),
     amount: money,
     recharge: z.boolean().optional(),
     notes: z.string().trim().max(2000).optional().nullable(),
-  })).min(1),
+  })),
 });
 
 // Columns a staff member may set directly via create/update (whitelist —
@@ -205,7 +206,8 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       SELECT c.*,
         CONCAT(up.first_name, ' ', up.last_name) AS uploaded_by_name,
         j.hh_job_number, j.job_name,
-        fv.reg AS vehicle_reg
+        fv.reg AS vehicle_reg,
+        (SELECT COUNT(*)::int FROM cost_allocations a WHERE a.cost_id = c.id) AS allocation_count
       FROM costs c
       LEFT JOIN users u   ON u.id = c.uploaded_by
       LEFT JOIN people up ON up.id = u.person_id

@@ -832,3 +832,26 @@ price-edit is modelled on the working labour-item path but virtual hire items
 may have HH-specific nuances. Push a real `extra` cost to a scratch job and
 confirm the line + price + 20% VAT land correctly; the surfaced HH errors will
 name anything off.
+
+---
+
+## Build notes — Bundled-invoice allocation split UI (Jun 2026)
+
+Wires a UI to the long-existing `PUT /api/costs/:id/allocations` backend. One
+cost (e.g. a freelancer's bundled invoice covering several jobs) splits across
+those jobs — a `cost_allocations` row per line.
+
+- **`CostAllocationModal.tsx`** — add jobs (search picker), enter an amount per
+  line, optional per-line `recharge` flag. Each line shows that job's expected
+  crew/transport cost (sum of its quote freelancer fees) inline as a sanity
+  check. A running reconciliation bar enforces "allocated total = cost gross"
+  (±1p) before Save is enabled; saving with no lines clears the split.
+- **CostsPage** — a `⑂` "Split across jobs" row action opens it; the icon shows
+  the allocation count + turns purple when a cost is already split. The list
+  query now returns `allocation_count`.
+- **Backend** — `allocationSchema` now allows an empty array (to clear a split);
+  the `PUT` was already a transactional delete-all + re-insert.
+
+No migration (`cost_allocations` shipped in 092). Allocation is metadata for
+per-job cost attribution/reporting — it does not change the cost's own `job_id`
+or its Xero push.
