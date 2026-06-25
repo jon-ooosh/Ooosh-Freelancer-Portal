@@ -32,6 +32,7 @@ Rules:
 - If a fluid is topped up frequently (a "watch" status), flag possible consumption worth a mechanic's eye.
 - Compliance: only items listed under COMPLIANCE are tracked, each with a real date. Anything overdue is urgent; anything within ~30 days is worth booking. Do NOT flag missing compliance items — insurance is a blanket fleet policy (not tracked per-van), and an absent TFL line just means that van isn't registered (e.g. a 6-seater that can't claim the discount). Never recommend "set/confirm the insurance date" or "confirm TFL status".
 - ULEZ: a van shown as "ULEZ compliant: yes" needs no action. Only mention ULEZ if it is explicitly non-compliant.
+- Costs: call out a repair that recurs in the service records (e.g. the same component fixed 2+ times) as a watch item — it often signals an underlying fault worth investigating rather than re-patching. Flag a clear year-on-year cost jump, and an unusually high single category, only when material. Don't restate the totals if nothing stands out.
 - Keep watch_items and recommendations SHORT and actionable. Empty arrays are fine for a healthy van.
 - overall_status: "good" (nothing pressing), "watch" (a few things to keep an eye on), "attention" (something needs booking/doing soon).
 - Return ONLY valid JSON matching the schema. No markdown, no commentary.`;
@@ -136,6 +137,20 @@ function forecastToPrompt(f: VehicleForecast): string {
 
   lines.push('\nCOSTS (last 12 months):');
   lines.push(`  Total £${f.costs.last12mTotal} (service £${f.costs.serviceTotal} + fuel £${f.costs.fuelTotal})${f.costs.perMile != null ? `, ~£${f.costs.perMile}/mile` : ''}`);
+  if (f.costs.prior12mTotal != null) {
+    const delta = Math.round((f.costs.last12mTotal - f.costs.prior12mTotal) * 100) / 100;
+    const dir = delta > 0 ? `up £${delta}` : delta < 0 ? `down £${Math.abs(delta)}` : 'flat';
+    lines.push(`  Prior 12 months: £${f.costs.prior12mTotal} (${dir} year-on-year)`);
+  }
+  if (f.costs.byCategory.length) {
+    lines.push(`  Service spend by category: ${f.costs.byCategory.map((c) => `${c.type} £${c.total} (${c.count})`).join(', ')}`);
+  }
+  if (f.costs.recent.length) {
+    lines.push('\nRECENT SERVICE RECORDS (newest first — look for repeated repairs to the same component):');
+    for (const r of f.costs.recent) {
+      lines.push(`  ${r.date || '?'} [${r.type}]${r.cost != null ? ` £${r.cost}` : ''}: ${r.name || '(no description)'}${r.garage ? ` @ ${r.garage}` : ''}`);
+    }
+  }
 
   if (f.recurringIssues.length) {
     lines.push('\nRECURRING ISSUES:');

@@ -167,6 +167,10 @@ export interface VehicleForecast {
     perMile: number | null;
     serviceTotal: number;
     fuelTotal: number;
+    /** Total for the 12 months BEFORE the last 12 (for a year-on-year trend), or null. */
+    prior12mTotal: number | null;
+    /** Last-12m service spend grouped by service_type, biggest first. */
+    byCategory: Array<{ type: string; total: number; count: number }>;
     recent: Array<{ date: string | null; type: string; name: string; cost: number | null; garage: string | null }>;
   };
   recurringIssues: Array<{ label: string; count: number; lastDate: string | null }>;
@@ -473,13 +477,46 @@ export async function buildVehicleForecast(vehicleId: string): Promise<VehicleFo
     const span = Number(m12[m12.length - 1].mileage) - Number(m12[0].mileage);
     if (span > 0) perMile = Math.round((last12mTotal / span) * 100) / 100;
   }
-  const recent = sRes.rows.slice(0, 8).map((r) => ({
+  const recent = sRes.rows.slice(0, 12).map((r) => ({
     date: isoDate(r.service_date),
     type: r.service_type || 'service',
     name: r.name || '',
     cost: r.cost != null ? Number(r.cost) : null,
     garage: r.garage || null,
   }));
+
+  // Per-category service spend (last 12m) — where the money's going.
+  const byCategoryMap = new Map<string, { total: number; count: number }>();
+  for (const r of sRes.rows) {
+    const type = r.service_type || 'service';
+    const entry = byCategoryMap.get(type) || { total: 0, count: 0 };
+    entry.total += Number(r.cost) || 0;
+    entry.count += 1;
+    byCategoryMap.set(type, entry);
+  }
+  const byCategory = [...byCategoryMap.entries()]
+    .map(([type, e]) => ({ type, total: Math.round(e.total * 100) / 100, count: e.count }))
+    .sort((a, b) => b.total - a.total);
+
+  // Prior 12 months (12–24 months ago) for a simple cost trend comparison.
+  const psRes = await query(
+    `SELECT COALESCE(SUM(cost),0) AS total FROM vehicle_service_log
+      WHERE vehicle_id = $1
+        AND service_date >= (CURRENT_DATE - INTERVAL '24 months')
+        AND service_date <  (CURRENT_DATE - INTERVAL '12 months')`,
+    [vehicleId],
+  );
+  const pfRes = await query(
+    `SELECT COALESCE(SUM(cost),0) AS total FROM vehicle_fuel_log
+      WHERE vehicle_id = $1
+        AND date >= (CURRENT_DATE - INTERVAL '24 months')
+        AND date <  (CURRENT_DATE - INTERVAL '12 months')`,
+    [vehicleId],
+  );
+  const prior12mServiceTotal = Number(psRes.rows[0]?.total) || 0;
+  const prior12mTotal = prior12mServiceTotal > 0 || Number(pfRes.rows[0]?.total) > 0
+    ? Math.round((prior12mServiceTotal + (Number(pfRes.rows[0]?.total) || 0)) * 100) / 100
+    : null; // null = no prior-year data to compare against
 
   // ── Recurring issues (by category/component) ──
   let recurringIssues: VehicleForecast['recurringIssues'] = [];
@@ -534,7 +571,7 @@ export async function buildVehicleForecast(vehicleId: string): Promise<VehicleFo
     fluids,
     tyres: { corners, prepsWithTread },
     tyreEvents,
-    costs: { last12mTotal: Math.round(last12mTotal * 100) / 100, perMile, serviceTotal: Math.round(serviceTotal * 100) / 100, fuelTotal: Math.round(fuelTotal * 100) / 100, recent },
+    costs: { last12mTotal: Math.round(last12mTotal * 100) / 100, perMile, serviceTotal: Math.round(serviceTotal * 100) / 100, fuelTotal: Math.round(fuelTotal * 100) / 100, prior12mTotal, byCategory, recent },
     recurringIssues,
     prepSessions: [...ordered].reverse(), // newest-first for the frontend panel
     notesForAi,
