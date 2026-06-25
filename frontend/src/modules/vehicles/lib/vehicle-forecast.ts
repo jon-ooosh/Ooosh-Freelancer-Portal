@@ -41,6 +41,8 @@ export interface VehicleForecast {
     perMile: number | null
     serviceTotal: number
     fuelTotal: number
+    prior12mTotal: number | null
+    byCategory: Array<{ type: string; total: number; count: number }>
     recent: Array<{ date: string | null; type: string; name: string; cost: number | null; garage: string | null }>
   }
   recurringIssues: Array<{ label: string; count: number; lastDate: string | null }>
