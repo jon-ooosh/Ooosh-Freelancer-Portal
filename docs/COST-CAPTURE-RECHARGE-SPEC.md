@@ -959,3 +959,22 @@ server-computed `due_date`; undated bills sort last ascending).
 ### UI fix
 The Xero-status cell got `whitespace-nowrap` so the "In Xero" pill no longer wraps
 to two lines now the split button shares the row.
+
+---
+
+## Build notes — feedback round 3 (Jun 2026)
+
+- **"This Friday" filter fix**: the due-date filters formatted dates with
+  `toISOString()` (UTC), so under BST (UTC+1) local midnight shifted to the
+  previous UTC day — the range filters (this week / next 7) still matched but the
+  exact-match `friday` filter compared against Thursday and returned nothing. Now
+  formats in local time.
+- **Two new filters**: "Next Friday" (the pay-run one cycle out) + a per-supplier
+  dropdown (distinct suppliers from the loaded rows; applies across all views).
+- **Xero-status cell de-squish**: actionable states (stale / error / not-synced /
+  pending) now render as ONE clickable pill ("Re-sync" / "Sync failed — retry" /
+  "Sync now") instead of a status pill + a separate button. The extra button was
+  widening the column and pushing the row actions (incl. delete) off-screen.
+- **Delete warns about Xero**: deleting a cost that's in Xero (`xero_object_id`
+  set) now warns it removes the cost from OP only — the Xero bill/txn must be
+  voided separately. (Edits DO push to Xero; deletes don't.)
