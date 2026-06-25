@@ -3019,6 +3019,15 @@ as either **Spend Money** (paid-now methods) or an **AUTHORISED Bill** (pay-late
 methods). Engine: `services/cost-xero-push.ts`; routes: `routes/costs.ts`; UI:
 `components/CostCaptureModal.tsx` + `pages/CostsPage.tsx`.
 
+**Feedback-round additions (Jun 2026)** — all in `docs/COST-CAPTURE-RECHARGE-SPEC.md`:
+- **Bundled-invoice allocation split** (`cost_allocations`, migration 092): split one cost across jobs via `PUT /costs/:id/allocations` — `CostAllocationModal`, surfaced both as a `⑂` row action AND a "Split across multiple jobs" tick at capture time (`onSavedAndSplit`).
+- **Edit-after-push → manual re-sync** (migration 147, `costs.xero_stale`): editing a Xero-affecting field on an already-pushed cost flags it stale (amber "Re-sync" pill) rather than silently diverging or auto-mutating a reconciled object. `POST /costs/:id/resync-xero` updates the Xero object IN PLACE (`updateBill`/`updateSpendMoney`, POST-with-ID, never duplicates); 409 + dismiss for Xero-locked (paid/reconciled). **Delete is OP-only — it does NOT delete the Xero bill/txn** (the delete confirm warns when `xero_object_id` is set; void in Xero separately).
+- **COT receipt chaser** (migration 148): weekly digest (Wed 12:00 London) to each card-holder about company-card costs missing a receipt (3-day grace), `services/cost-receipt-chaser.ts`; `?missing_receipt=1[&mine=1]` list filter + "COT Receipts" dashboard bucket.
+- **COT card register** (migration 148, `users.cot_card_label`): admin-managed card per staff (Settings → COT Card Register, `GET /users/cot-cards` + `PATCH /users/:id/cot-card`); capture stamps holder + last4 server-side, staff never type card details.
+- **Supplier terms pull-through fix**: `costs.xero_contact_id` was never persisted (the bill was created by contact *name*), so Xero terms never seeded. `pushBill` now resolves the contact first, writes the id back, seeds terms, then computes the due date + creates the bill by `contactId`. Skipped for `reimburse_me`.
+- **Freelancer Friday terms**: `freelancerDueDate(approvedAt)` = first Friday on/after (approval + 7 days), overriding supplier/Xero terms for `cost_type='freelancer_invoice'` (list display, bill push, re-sync). Xero can't model this. `SupplierTerms.source` gained `'freelancer'`.
+- **Bills-to-Pay UX**: sortable Due column + Overdue / This Friday / Next Friday / This week / Next 7 days filter pills (client-side over server `due_date` — format dates in LOCAL time, not `toISOString()`, or BST shifts the exact-Friday match) + a per-supplier dropdown. The Xero-status cell collapses status+sync into one clickable pill so row actions don't get pushed off-screen.
+
 **Push concurrency — per-cost advisory lock (DO NOT REMOVE).** The push is
 triggered from FIVE sites — create / update / approve / pay / the Push-Now
 button — and four are fire-and-forget (`pushCostToXeroBackground` → `setImmediate`).
