@@ -35,6 +35,7 @@ export interface VehicleForecast {
   compliance: Array<{ kind: string; due: string | null; days: number | null; status: 'ok' | 'soon' | 'overdue' | 'unknown' }>
   fluids: Array<{ key: string; label: string; topUps: number; preps: number; milesBetween: number | null; status: 'ok' | 'watch' }>
   tyres: { corners: ForecastCorner[]; prepsWithTread: number }
+  tyreEvents: Array<{ date: string | null; mileage: number | null; corners: Array<'FL' | 'FR' | 'RL' | 'RR'>; description: string }>
   costs: {
     last12mTotal: number
     perMile: number | null
