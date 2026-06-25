@@ -64,6 +64,8 @@ export interface XeroLineItem {
 
 export interface CreateBillInput {
   contactName: string;
+  /** When known, used directly (skips the name-based get-or-create lookup). */
+  contactId?: string;
   reference?: string;
   date?: string;          // YYYY-MM-DD
   dueDate?: string;       // YYYY-MM-DD
@@ -419,7 +421,7 @@ class XeroBroker {
 
   /** Create an unpaid supplier bill (ACCPAY invoice). */
   async createBill(input: CreateBillInput): Promise<{ InvoiceID: string; InvoiceNumber?: string }> {
-    const contact = await this.getOrCreateContact(input.contactName);
+    const contactID = input.contactId ?? (await this.getOrCreateContact(input.contactName)).ContactID;
     const r = await this.request<{ Invoices: Array<{ InvoiceID: string; InvoiceNumber?: string }> }>(
       'PUT',
       '/Invoices',
@@ -428,7 +430,7 @@ class XeroBroker {
           Invoices: [
             {
               Type: 'ACCPAY',
-              Contact: { ContactID: contact.ContactID },
+              Contact: { ContactID: contactID },
               Reference: input.reference,
               Date: input.date,
               DueDate: input.dueDate,

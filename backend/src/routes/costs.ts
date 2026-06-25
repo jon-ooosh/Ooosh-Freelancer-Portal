@@ -233,11 +233,18 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     // due date (+ the terms that produced it) to each row. Single source of
     // truth for the bill due date — the list, mark-paid modal and Xero push all
     // read these. See docs/COSTS-PAYMENT-AUTOMATION-SPEC.md.
-    const { buildTermsResolver, computeDueDate } = await import('../services/supplier-terms');
+    const { buildTermsResolver, computeDueDate, freelancerDueDate } = await import('../services/supplier-terms');
     const resolve = await buildTermsResolver(
       result.rows.map((r) => ({ xeroContactId: r.xero_contact_id, supplierName: r.supplier_name })),
     );
     const rows = result.rows.map((r) => {
+      // Freelancer invoices follow Ooosh terms (first Friday +1wk after approval),
+      // not supplier/Xero terms. The Friday date only exists once approved — until
+      // then we fall back to the standard terms display.
+      if (r.cost_type === 'freelancer_invoice' && r.approved_at) {
+        const terms = { basis: 'invoice_date' as const, days: 0, source: 'freelancer' as const };
+        return { ...r, terms, due_date: freelancerDueDate(r.approved_at) };
+      }
       const terms = resolve({ xeroContactId: r.xero_contact_id, supplierName: r.supplier_name });
       return { ...r, terms, due_date: computeDueDate(r.cost_date, terms) };
     });

@@ -21,6 +21,9 @@ interface Props {
   onClose: () => void;
   // null when a vehicle service record was saved with no cost (service-only).
   onSaved: (cost: Cost | null) => void;
+  // When set + the user ticked "covers multiple jobs", called instead of onSaved
+  // so the parent can open the allocation/split modal for the new cost.
+  onSavedAndSplit?: (cost: Cost) => void;
   existing?: Cost | null;
   presetJobId?: string | null;
   presetVehicleId?: string | null;
@@ -91,7 +94,7 @@ interface XeroContactLite { ContactID: string; Name: string }
 interface JobSuggestion { id: string; type: string; name: string; subtitle?: string }
 type ExistingRow = (Cost & { hh_job_number?: number | null; job_name?: string | null }) | null | undefined;
 
-export default function CostCaptureModal({ onClose, onSaved, existing, presetJobId, presetVehicleId, presetIssueId }: Props) {
+export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, existing, presetJobId, presetVehicleId, presetIssueId }: Props) {
   const existingRow = existing as ExistingRow;
   const { user } = useAuthStore();
   const isEdit = Boolean(existing);
@@ -185,6 +188,7 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
   const [applyToVehicle, setApplyToVehicle] = useState(true);
 
   const [saving, setSaving] = useState(false);
+  const [splitAfterSave, setSplitAfterSave] = useState(false);
   const [error, setError] = useState('');
 
   // ── Supplier autocomplete (Xero contact search) ──────────────────────────
@@ -655,7 +659,11 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
           return;
         }
       }
-      onSaved(res.data);
+      if (splitAfterSave && !isEdit && onSavedAndSplit && res.data) {
+        onSavedAndSplit(res.data);
+      } else {
+        onSaved(res.data);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save cost');
     } finally {
@@ -1113,7 +1121,14 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
           </div>
         </div>
 
-        <div className="flex justify-end gap-2 px-6 py-4 border-t border-gray-200">
+        <div className="flex items-center justify-between gap-2 px-6 py-4 border-t border-gray-200">
+          {!isEdit && onSavedAndSplit ? (
+            <label className="flex items-center gap-2 text-sm text-gray-600 cursor-pointer" title="One invoice covering several jobs — split the amount across them after saving">
+              <input type="checkbox" checked={splitAfterSave} onChange={(e) => setSplitAfterSave(e.target.checked)} />
+              Split across multiple jobs
+            </label>
+          ) : <span />}
+          <div className="flex gap-2">
           <button onClick={onClose} className="px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded-md">Cancel</button>
           {!isEdit && paymentStatus !== 'paid' && (user?.role === 'admin' || user?.role === 'manager') && (
             <button onClick={() => handleSave(true)} disabled={saving}
@@ -1126,6 +1141,7 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
             className="px-4 py-2 text-sm text-white bg-purple-600 hover:bg-purple-700 rounded-md disabled:opacity-50">
             {saving ? 'Saving…' : isEdit ? (wantsService ? 'Save changes + service record' : 'Save changes') : serviceOnlyEligible && (vatMode === 'reclaim' ? Number(amountNet) <= 0 : Number(amountGross) <= 0) ? 'Save service record' : wantsService ? 'Save cost + service record' : 'Save cost'}
           </button>
+          </div>
         </div>
       </div>
     </div>

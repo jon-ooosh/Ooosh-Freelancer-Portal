@@ -919,3 +919,43 @@ manages both from **Settings → COT Card Register** (`GET /api/users/cot-cards`
 holder + last 4 server-side from the user's record, so **staff never type card
 details** — the register is purely admin-set. The capture hint now points staff
 at an admin rather than their own Profile.
+
+---
+
+## Build notes — feedback round 2 (Jun 2026)
+
+Batch of fixes/improvements off the first live week of the cost hub. No migration.
+
+### Supplier terms pull-through fix (the real bug)
+Xero supplier terms never applied because **`costs.xero_contact_id` was never
+populated** — `createBill` took a contact *name* and the returned bill never wrote
+the Xero ContactID back, so `seedTermsFromXeroIfMissing` had nothing to work with
+and terms always fell back to invoice+30. Fix in `pushBill`: resolve/create the
+Xero contact FIRST, persist its id onto the cost, seed terms from it, THEN compute
+the due date and create the bill against the contact id (`createBill` gained an
+optional `contactId`). Skipped for `reimburse_me` (the "contact" there is the
+staff member). Establishes the link on first push, so terms pull through on this
+and every future bill for the supplier.
+
+### Freelancer Friday terms (Xero can't model this)
+Ooosh pays freelancers "the first Friday one week after approval". New
+`freelancerDueDate(approvedAt)` = first Friday on/after (approval + 7 days). Used
+for any `cost_type='freelancer_invoice'` bill, overriding supplier/Xero terms — in
+the costs list display (once approved), the Xero bill push, and the re-sync path.
+Lands payment 7–13 days out, matching the published terms. (The 30-day "overdue"
+threshold in the T&Cs is a dispute nuance, not modelled — "overdue" in the UI is
+simply past the Friday due date.)
+
+### Capture-time split
+The "split across jobs" allocation modal now surfaces at capture: a **"Split
+across multiple jobs"** tick in the capture modal footer (new-cost only) hands the
+saved cost straight to the allocation modal via a new `onSavedAndSplit` callback.
+
+### Bills to Pay — sortable Due + filters
+The Due column is now click-to-sort, and the payable view gained due-date filter
+pills: **Overdue / This Friday / This week / Next 7 days** (client-side over the
+server-computed `due_date`; undated bills sort last ascending).
+
+### UI fix
+The Xero-status cell got `whitespace-nowrap` so the "In Xero" pill no longer wraps
+to two lines now the split button shares the row.
