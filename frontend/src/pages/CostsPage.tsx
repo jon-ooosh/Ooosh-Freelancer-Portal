@@ -25,6 +25,7 @@ interface CostRow extends Cost {
   job_name?: string | null;
   vehicle_reg?: string | null;
   allocation_count?: number;
+  due_date?: string | null;
 }
 
 interface Stats {
@@ -90,6 +91,7 @@ function dueInfo(c: { due_date?: string | null; cost_date: string | null }) {
 // Human description of a supplier's terms for the Due cell tooltip.
 function termsLabel(t?: SupplierPaymentTerms): string {
   if (!t || t.source === 'default') return `invoice + ${DEFAULT_TERMS_DAYS}d (default)`;
+  if (t.source === 'freelancer') return 'freelancer — first Friday +1wk after approval';
   const base = t.basis === 'end_of_invoice_month' ? 'end of invoice month' : 'invoice date';
   return `${base} + ${t.days}d${t.source === 'xero' ? ' · from Xero' : ''}`;
 }
@@ -102,9 +104,12 @@ const APPROVAL_COLOURS: Record<string, string> = {
 };
 
 // Client-side column sort. null = server order (newest captured first).
-type SortKey = 'date' | 'supplier' | 'description' | 'gross' | 'type' | 'status';
-const SORT_VALUE: Record<SortKey, (c: { cost_date: string | null; supplier_name: string | null; description: string | null; amount_gross: number | null; category: string | null; cost_type: string; approval_state: string | null; payment_status: string }) => string | number> = {
+type SortKey = 'date' | 'due' | 'supplier' | 'description' | 'gross' | 'type' | 'status';
+type DueFilter = 'all' | 'overdue' | 'friday' | 'this_week' | 'next_7';
+const SORT_VALUE: Record<SortKey, (c: { cost_date: string | null; due_date?: string | null; supplier_name: string | null; description: string | null; amount_gross: number | null; category: string | null; cost_type: string; approval_state: string | null; payment_status: string }) => string | number> = {
   date: (c) => c.cost_date || '',
+  // Undated bills sort last under ascending (the common "what's due soonest" view).
+  due: (c) => c.due_date || '9999-12-31',
   supplier: (c) => (c.supplier_name || '').toLowerCase(),
   description: (c) => (c.description || '').toLowerCase(),
   gross: (c) => Number(c.amount_gross || 0),
@@ -137,16 +142,40 @@ export default function CostsPage() {
   const [actionBusy, setActionBusy] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<SortKey | null>(null);
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
+  const [dueFilter, setDueFilter] = useState<DueFilter>('all');
 
   const sortedRows = useMemo(() => {
-    if (!sortKey) return rows;
+    let base = rows;
+    // Due-date filters only apply in the Bills to Pay view.
+    if (view === 'payable' && dueFilter !== 'all') {
+      const today = new Date(); today.setHours(0, 0, 0, 0);
+      const iso = (d: Date) => d.toISOString().slice(0, 10);
+      const todayStr = iso(today);
+      // End of this week = upcoming Sunday (Mon-start week).
+      const endOfWeek = new Date(today); endOfWeek.setDate(today.getDate() + ((7 - today.getDay()) % 7 || 7));
+      // Next Friday on/after today (today if it's a Friday).
+      const friday = new Date(today); friday.setDate(today.getDate() + ((5 - today.getDay() + 7) % 7));
+      const next7 = new Date(today); next7.setDate(today.getDate() + 7);
+      base = rows.filter((c) => {
+        if (c.payment_status === 'paid' || !c.due_date) return false;
+        const d = c.due_date.slice(0, 10);
+        switch (dueFilter) {
+          case 'overdue':   return d < todayStr;
+          case 'friday':    return d === iso(friday);
+          case 'this_week': return d >= todayStr && d <= iso(endOfWeek);
+          case 'next_7':    return d >= todayStr && d <= iso(next7);
+          default:          return true;
+        }
+      });
+    }
+    if (!sortKey) return base;
     const val = SORT_VALUE[sortKey];
-    return [...rows].sort((a, b) => {
+    return [...base].sort((a, b) => {
       const av = val(a); const bv = val(b);
       const cmp = typeof av === 'number' && typeof bv === 'number' ? av - bv : String(av).localeCompare(String(bv));
       return sortDir === 'asc' ? cmp : -cmp;
     });
-  }, [rows, sortKey, sortDir]);
+  }, [rows, sortKey, sortDir, view, dueFilter]);
 
   const clickSort = (key: SortKey) => {
     if (sortKey === key) setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
@@ -355,6 +384,27 @@ export default function CostsPage() {
         </select>
       </div>
 
+      {/* Due-date filters — Bills to Pay only */}
+      {view === 'payable' && (
+        <div className="flex flex-wrap items-center gap-1.5 mb-4">
+          <span className="text-xs text-gray-400 mr-1">Due:</span>
+          {([
+            ['all', 'All'],
+            ['overdue', 'Overdue'],
+            ['friday', 'This Friday'],
+            ['this_week', 'This week'],
+            ['next_7', 'Next 7 days'],
+          ] as [DueFilter, string][]).map(([key, label]) => (
+            <button key={key} onClick={() => setDueFilter(key)}
+              className={`px-2.5 py-1 text-xs rounded-full border ${dueFilter === key
+                ? (key === 'overdue' ? 'bg-red-600 border-red-600 text-white' : 'bg-purple-600 border-purple-600 text-white')
+                : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'}`}>
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* Table */}
       {loading ? (
         <div className="text-center text-gray-500 py-12">Loading…</div>
@@ -366,7 +416,7 @@ export default function CostsPage() {
             <thead className="bg-gray-50 text-gray-600">
               <tr>
                 <SortableTh label="Date" k="date" sortKey={sortKey} sortDir={sortDir} onSort={clickSort} />
-                {view === 'payable' && <th className="px-2.5 py-2 text-left font-medium">Due</th>}
+                {view === 'payable' && <SortableTh label="Due" k="due" sortKey={sortKey} sortDir={sortDir} onSort={clickSort} />}
                 <SortableTh label="Supplier" k="supplier" sortKey={sortKey} sortDir={sortDir} onSort={clickSort} />
                 <SortableTh label="Description" k="description" sortKey={sortKey} sortDir={sortDir} onSort={clickSort} />
                 <SortableTh label="Gross" k="gross" sortKey={sortKey} sortDir={sortDir} onSort={clickSort} align="right" />
@@ -436,7 +486,7 @@ export default function CostsPage() {
                       </span>
                     )}
                   </td>
-                  <td className="px-2.5 py-2">
+                  <td className="px-2.5 py-2 whitespace-nowrap">
                     <XeroCell cost={c} busy={actionBusy === c.id + 'sync'} onRetry={() => retrySync(c)}
                       resyncBusy={actionBusy === c.id + 'resync'} onResync={() => resyncStale(c)} />
                   </td>
@@ -478,6 +528,7 @@ export default function CostsPage() {
         <CostCaptureModal
           onClose={() => setShowCapture(false)}
           onSaved={() => { setShowCapture(false); load(); }}
+          onSavedAndSplit={(c) => { setShowCapture(false); load(); setAllocating(c as CostRow); }}
         />
       )}
       {editing && (

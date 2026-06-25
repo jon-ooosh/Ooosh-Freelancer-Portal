@@ -1006,7 +1006,7 @@ export type CostStatus = 'draft' | 'confirmed' | 'resolved';
 export interface SupplierPaymentTerms {
   basis: 'invoice_date' | 'end_of_invoice_month';
   days: number;
-  source: 'manual' | 'xero' | 'default';
+  source: 'manual' | 'xero' | 'default' | 'freelancer';
 }
 
 export interface Cost {
