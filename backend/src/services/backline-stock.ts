@@ -18,18 +18,18 @@
  * routed through the broker — different auth, one bulk call.
  */
 
+import { BACKLINE_CATEGORY_ID_SET } from './backline-categories';
+
 const HIREHOP_EXPORT_URL = 'https://myhirehop.com/modules/stock/export_data.php';
 
-// All backline category IDs (from the original get-stock.js). Everything except
-// vehicles (370-371), rehearsal (450) and storage (449). The export returns ALL
-// stock in one call; we keep only items whose CATEGORY_ID is in this set.
-const BACKLINE_CATEGORY_IDS = new Set<number>([
-  372, 373, 374, 375, 376, 377, 378, // Guitars (amps, cabs, combos, FX)
-  379, 380, 381, 382, 383, 384, // Basses
-  385, 386, 387, 388, 389, 390, 391, 392, 393, 394, 395, 396, 397, 398, // Drums
-  399, 400, 401, 402, 403, 404, // Keyboards
-  406, 407, 408, 409, 410, // Backline accessories
-]);
+// "Backline" = ALL hireable warehouse equipment, not just instruments. The set
+// of category IDs is the SINGLE SOURCE OF TRUTH in `backline-categories.ts`,
+// shared with the HH-derived requirements engine so the two can never drift.
+// The export returns ALL stock in one call; we keep only items whose CATEGORY_ID
+// is in this set. (Pre-Jun 2026 this file kept its own copy that stopped at 410,
+// silently excluding PA/Sound — mics, speakers, mixers — DJ, lighting, power,
+// staging and video, so the matcher reported "not in stock" for items we hold.)
+const BACKLINE_CATEGORY_IDS = BACKLINE_CATEGORY_ID_SET;
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
