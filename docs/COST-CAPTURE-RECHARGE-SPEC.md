@@ -887,3 +887,32 @@ stale — the PATCH only ever re-pushed costs that weren't yet in Xero.
 > confirm one real re-sync of each kind (an unpaid AUTHORISED bill and an
 > unreconciled spend-money) before relying on it. Worst case is a clean error +
 > the stale flag staying put, never a duplicate or a corrupted object.
+
+---
+
+## Build notes — COT receipt chaser + admin card register (Jun 2026)
+
+Third of the three nice-to-haves. Migration **148**.
+
+### Receipt chaser (OP-side)
+Company-card (COT) purchases are already in Xero via the bank feed — the one
+thing OP needs is the receipt. `services/cost-receipt-chaser.ts` (daily 09:35
+Europe/London) nudges each card-holder about their own cot_card costs with no
+receipt attached, older than a 3-day grace. One digest notification per holder,
+deep-linked to `/money/costs?missing_receipt=1&mine=1`. Per-cost dedup via
+`costs.receipt_chase_sent_at` (re-nudges weekly until the receipt lands; a cost
+drops out the moment `receipt_r2_key` is set). The cost list gained
+`?missing_receipt=1` (+ `&mine=1`) filters and a clearable banner. A fleet-wide
+**"COT Receipts"** amber NeedsAttention bucket surfaces the backlog
+(`cot_receipts_outstanding_count` on `/api/dashboard/operations`).
+
+> OP-side only — chases what staff logged in OP. Purchases never logged at all
+> are the job of the future Xero-matched reconciliation (Component 4c).
+
+### Admin card register
+`users.cot_card_label` added alongside the existing `cot_card_last4`. **Admin**
+manages both from **Settings → COT Card Register** (`GET /api/users/cot-cards`,
+`PATCH /api/users/:id/cot-card`, admin-only). The capture flow already stamps the
+holder + last 4 server-side from the user's record, so **staff never type card
+details** — the register is purely admin-set. The capture hint now points staff
+at an admin rather than their own Profile.

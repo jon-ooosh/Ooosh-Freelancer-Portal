@@ -286,6 +286,17 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
     })),
     viewAllHref: '/money/excess',
   };
+  // Company-card (COT) purchases with no receipt attached, older than the 3-day
+  // grace. The daily chaser nudges each holder; this is the fleet-wide backlog.
+  // Amber — action-needed (bookkeeping audit), not time-critical.
+  const cotReceipts: NABucket = {
+    key: 'cot_receipts',
+    title: 'COT Receipts',
+    accent: 'amber',
+    count: na.cot_receipts_outstanding_count || 0,
+    items: [],
+    viewAllHref: '/money/costs?missing_receipt=1',
+  };
 
   // Transport arrangements to action — quotes in next 7 days on a
   // confirmed/pre-dispatch job where any arranging pill (client intro /
@@ -422,7 +433,7 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
   // expiringHolds leads the secondary row — red accent, time-critical (hold
   // auto-voids at day 5). Sits ahead of the amber/blue/purple buckets so it
   // catches the eye when present.
-  const secondaryBuckets = [expiringHolds, receiptsOutstanding, ...pcnBuckets, carnets, referrals, excess, transportArrangements, fleetBucket, problemsBucket];
+  const secondaryBuckets = [expiringHolds, receiptsOutstanding, cotReceipts, ...pcnBuckets, carnets, referrals, excess, transportArrangements, fleetBucket, problemsBucket];
   const secondaryAny = secondaryBuckets.some(b => b.count > 0);
 
   return (

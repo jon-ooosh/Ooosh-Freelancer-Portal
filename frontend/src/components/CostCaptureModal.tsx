@@ -1055,7 +1055,7 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
 
             {paymentMethod === 'cot_card' && !user?.cot_card_last4 && (
               <p className="text-xs text-gray-500 italic">
-                Set your COT card last 4 in Profile to enable Xero reconciliation matching.
+                No company card on file for you — ask an admin to add it in Settings → COT Card Register (enables Xero reconciliation matching).
               </p>
             )}
 

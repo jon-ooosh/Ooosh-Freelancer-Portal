@@ -120,6 +120,8 @@ export default function CostsPage() {
   const isAdmin = role === 'admin';
 
   const [view, setView] = useState<ViewMode>((searchParams.get('view') as ViewMode) || 'all');
+  const missingReceipt = searchParams.get('missing_receipt') === '1';
+  const mineOnly = searchParams.get('mine') === '1';
   const [rows, setRows] = useState<CostRow[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [loading, setLoading] = useState(true);
@@ -165,6 +167,8 @@ export default function CostsPage() {
       if (view !== 'all') params.set('view', view);
       if (typeFilter) params.set('cost_type', typeFilter);
       if (searchDebounced) params.set('search', searchDebounced);
+      if (missingReceipt) params.set('missing_receipt', '1');
+      if (mineOnly) params.set('mine', '1');
       const res = await api.get<{ data: CostRow[]; stats: Stats }>(`/costs?${params.toString()}`);
       setRows(res.data);
       setStats(res.stats);
@@ -173,7 +177,7 @@ export default function CostsPage() {
     } finally {
       if (!quiet) setLoading(false);
     }
-  }, [view, typeFilter, searchDebounced]);
+  }, [view, typeFilter, searchDebounced, missingReceipt, mineOnly]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -329,6 +333,13 @@ export default function CostsPage() {
       </div>
 
       {/* Filters */}
+      {missingReceipt && (
+        <div className="flex items-center justify-between gap-2 mb-4 bg-amber-50 border border-amber-200 text-amber-800 rounded-md px-3 py-2 text-sm">
+          <span>Showing company-card costs with no receipt attached{mineOnly ? ' (yours)' : ''}. Open each one to attach its receipt.</span>
+          <button onClick={() => { searchParams.delete('missing_receipt'); searchParams.delete('mine'); setSearchParams(searchParams, { replace: true }); }}
+            className="text-amber-700 hover:underline whitespace-nowrap">Clear filter</button>
+        </div>
+      )}
       <div className="flex flex-wrap gap-2 mb-4">
         <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search supplier / description"
           className="border border-gray-300 rounded-md px-3 py-1.5 text-sm flex-1 min-w-[200px]" />

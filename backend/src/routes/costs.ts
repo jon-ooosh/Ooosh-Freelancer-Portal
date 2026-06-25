@@ -161,10 +161,20 @@ async function audit(userId: string, costId: string, action: string, prev: unkno
 
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
-    const { view, cost_type, status, payment_status, job_id, vehicle_id, search, limit = '200' } = req.query;
+    const { view, cost_type, status, payment_status, job_id, vehicle_id, search, missing_receipt, mine, limit = '200' } = req.query;
 
     const conditions: string[] = [];
     const params: unknown[] = [];
+
+    // COT receipt chase: company-card costs with no receipt attached. `mine`
+    // scopes to the logged-in card-holder (used by the chase notification link).
+    if (missing_receipt === '1' || missing_receipt === 'true') {
+      conditions.push(`c.payment_method = 'cot_card' AND c.receipt_r2_key IS NULL`);
+    }
+    if ((mine === '1' || mine === 'true') && req.user?.id) {
+      params.push(req.user.id);
+      conditions.push(`c.uploaded_by = $${params.length}`);
+    }
 
     if (view === 'payable') {
       conditions.push(`c.payment_status <> 'paid'`);
