@@ -1,14 +1,17 @@
 /**
- * COT receipt chaser — runs daily from config/scheduler.ts.
+ * COT receipt chaser — runs WEEKLY from config/scheduler.ts (Wed 12:00 London).
  *
  * Company-card (COT) purchases are already in Xero via the bank feed, so the
  * one thing OP needs from staff is the RECEIPT. Without it the bookkeeper chases
- * months later. This nudges the card-holder within days instead: any cot_card
- * cost older than GRACE_DAYS with no receipt attached gets a single inbox
- * notification to whoever logged it, deep-linked to their own missing-receipt
- * list. Per-cost dedup via receipt_chase_sent_at — re-fires only after
- * RECHASE_DAYS so it's a reminder, not daily spam. A cost drops out the moment a
- * receipt lands (receipt_r2_key set).
+ * months later. This sends ONE weekly digest per card-holder summarising their
+ * own cot_card costs (older than GRACE_DAYS) that still have no receipt attached,
+ * deep-linked to their missing-receipt list. A cost drops out the moment a
+ * receipt lands (receipt_r2_key set). The weekly cadence is the throttle — no
+ * per-cost dedup needed; receipt_chase_sent_at is stamped only as a "last
+ * chased" record.
+ *
+ * Looks at ALL outstanding costs (it backfills) — but because it's a single
+ * weekly digest, a bigger backlog just means a higher count, never more emails.
  *
  * OP-side only (no Xero read) — chases what staff logged in OP. Purchases never
  * logged at all are caught later by the Xero-matched reconciliation (future).
@@ -16,8 +19,7 @@
 import { query } from '../config/database';
 import { getFrontendUrl } from '../config/app-urls';
 
-const GRACE_DAYS = 3;    // give staff a few days to attach the receipt
-const RECHASE_DAYS = 7;  // re-nudge weekly until the receipt lands
+const GRACE_DAYS = 3;    // give staff a few days to attach the receipt before the weekly digest picks it up
 
 interface ChaseResult { holdersNudged: number; costsChased: number; }
 
@@ -25,6 +27,7 @@ export async function runCostReceiptChase(): Promise<ChaseResult> {
   const result: ChaseResult = { holdersNudged: 0, costsChased: 0 };
 
   // One row per card-holder with their outstanding count + the cost ids to stamp.
+  // No per-cost dedup — the once-a-week schedule is the throttle.
   const due = await query(
     `SELECT c.uploaded_by AS user_id,
             COUNT(*)::int  AS n,
@@ -34,10 +37,8 @@ export async function runCostReceiptChase(): Promise<ChaseResult> {
         AND c.receipt_r2_key IS NULL
         AND c.uploaded_by IS NOT NULL
         AND c.cost_date <= (CURRENT_DATE - ($1 || ' days')::interval)
-        AND (c.receipt_chase_sent_at IS NULL
-             OR c.receipt_chase_sent_at < NOW() - ($2 || ' days')::interval)
       GROUP BY c.uploaded_by`,
-    [String(GRACE_DAYS), String(RECHASE_DAYS)]
+    [String(GRACE_DAYS)]
   );
 
   const actionUrl = `${getFrontendUrl()}/money/costs?missing_receipt=1&mine=1`;
