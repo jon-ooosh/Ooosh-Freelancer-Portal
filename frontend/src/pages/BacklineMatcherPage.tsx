@@ -28,12 +28,33 @@ const STATUS_BADGE: Record<DemandRow['have_it_status'], { label: string; cls: st
   no: { label: 'Not stocked', cls: 'bg-red-100 text-red-700' },
 };
 
-const SORTS = [
-  { key: 'count', label: 'Most requested' },
-  { key: 'recent', label: 'Recently asked' },
-  { key: 'days', label: 'Most hire-days' },
-  { key: 'name', label: 'A–Z' },
-];
+// Click-to-sort columns. `field` is the backend sort base; the sort key sent to
+// the API is `${field}_${dir}`. `defaultDir` is the direction applied when the
+// column is first clicked (desc for counts/dates, asc for text).
+type SortDir = 'asc' | 'desc';
+const SORT_COLUMNS = [
+  { field: 'name', label: 'Request', align: 'left', defaultDir: 'asc' as SortDir },
+  { field: 'request_count', label: 'Times asked', align: 'right', defaultDir: 'desc' as SortDir },
+  { field: 'hire_days', label: 'Hire-days', align: 'right', defaultDir: 'desc' as SortDir },
+  { field: 'have_it', label: 'Do we have it?', align: 'left', defaultDir: 'asc' as SortDir },
+  { field: 'last_asked', label: 'Last asked', align: 'left', defaultDir: 'desc' as SortDir },
+] as const;
+
+const PREFS_KEY = 'ooosh_backline_demand_prefs';
+const DEFAULT_SORT = 'request_count_desc';
+
+function loadPrefs(): { sort: string; statusFilter: string } {
+  try {
+    const raw = localStorage.getItem(PREFS_KEY);
+    if (raw) {
+      const p = JSON.parse(raw);
+      return { sort: p.sort || DEFAULT_SORT, statusFilter: p.statusFilter || '' };
+    }
+  } catch {
+    /* ignore */
+  }
+  return { sort: DEFAULT_SORT, statusFilter: '' };
+}
 
 function fmtDate(d: string | null) {
   if (!d) return '—';
@@ -43,9 +64,29 @@ function fmtDate(d: string | null) {
 export default function BacklineMatcherPage() {
   const [rows, setRows] = useState<DemandRow[]>([]);
   const [loading, setLoading] = useState(true);
-  const [sort, setSort] = useState('count');
+  const initial = loadPrefs();
+  const [sort, setSort] = useState(initial.sort);
   const [q, setQ] = useState('');
-  const [statusFilter, setStatusFilter] = useState('');
+  const [statusFilter, setStatusFilter] = useState(initial.statusFilter);
+
+  // Persist sort + status filter so the view comes back the way staff left it.
+  useEffect(() => {
+    try {
+      localStorage.setItem(PREFS_KEY, JSON.stringify({ sort, statusFilter }));
+    } catch {
+      /* ignore */
+    }
+  }, [sort, statusFilter]);
+
+  function onSortColumn(field: string, defaultDir: SortDir) {
+    setSort((cur) => {
+      const [curField, curDir] = cur.split(/_(asc|desc)$/);
+      if (curField === field) {
+        return `${field}_${curDir === 'asc' ? 'desc' : 'asc'}`;
+      }
+      return `${field}_${defaultDir}`;
+    });
+  }
 
   async function updateStatus(id: string, status: DemandRow['have_it_status']) {
     setRows((prev) => prev.map((r) => (r.id === id ? { ...r, have_it_status: status } : r)));
@@ -110,15 +151,6 @@ export default function BacklineMatcherPage() {
               <option value="sort_of">Similar only</option>
               <option value="yes">In stock</option>
             </select>
-            <select
-              value={sort}
-              onChange={(e) => setSort(e.target.value)}
-              className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm"
-            >
-              {SORTS.map((s) => (
-                <option key={s.key} value={s.key}>{s.label}</option>
-              ))}
-            </select>
           </div>
         </div>
 
@@ -126,12 +158,29 @@ export default function BacklineMatcherPage() {
           <table className="w-full text-sm">
             <thead className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wide">
               <tr>
-                <th className="text-left px-4 py-2 font-medium">Request</th>
-                <th className="text-right px-4 py-2 font-medium">Times asked</th>
-                <th className="text-right px-4 py-2 font-medium">Hire-days</th>
-                <th className="text-left px-4 py-2 font-medium">Do we have it?</th>
-                <th className="text-left px-4 py-2 font-medium">Jobs</th>
-                <th className="text-left px-4 py-2 font-medium">Last asked</th>
+                {SORT_COLUMNS.map((col) => {
+                  const [curField, curDir] = sort.split(/_(asc|desc)$/);
+                  const active = curField === col.field;
+                  // "Do we have it?" header sits before the Jobs column.
+                  const th = (
+                    <th
+                      key={col.field}
+                      onClick={() => onSortColumn(col.field, col.defaultDir)}
+                      className={`${col.align === 'right' ? 'text-right' : 'text-left'} px-4 py-2 font-medium cursor-pointer select-none hover:text-gray-700 ${active ? 'text-gray-900' : ''}`}
+                      title="Click to sort"
+                    >
+                      {col.label}
+                      <span className="ml-1 inline-block w-2 text-gray-400">
+                        {active ? (curDir === 'asc' ? '▲' : '▼') : ''}
+                      </span>
+                    </th>
+                  );
+                  // Inject the non-sortable Jobs column between "Do we have it?" and "Last asked".
+                  if (col.field === 'have_it') {
+                    return [th, <th key="jobs" className="text-left px-4 py-2 font-medium">Jobs</th>];
+                  }
+                  return th;
+                })}
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
