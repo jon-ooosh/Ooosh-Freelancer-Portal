@@ -426,6 +426,8 @@ export default function CostsPage() {
         </div>
       )}
 
+      {view === 'reconcile' && isManager && <XeroCotProbe />}
+
       {/* Table */}
       {loading ? (
         <div className="text-center text-gray-500 py-12">Loading…</div>
@@ -970,6 +972,127 @@ function StatCard({ label, value, sub, color }: { label: string; value: string; 
       <div className="text-xs text-gray-500">{label}</div>
       <div className="text-xl font-bold text-gray-900">{value}</div>
       {sub && <div className="text-xs text-gray-500">{sub}</div>}
+    </div>
+  );
+}
+
+// ── Xero COT probe ──────────────────────────────────────────────────────────
+// "What's on the company card in Xero that isn't in OP." Reads SPEND bank
+// transactions on the mapped COT account and lists the ones with no matching
+// OP cost. Also the verification tool for the Codat→Xero feed — if it returns
+// transactions we can read + match the card; if it returns nothing the
+// purchases aren't landing as readable BankTransactions yet.
+interface CotProbeTxn {
+  bank_transaction_id: string | null;
+  date: string | null;
+  total: number;
+  reference: string | null;
+  contact_name: string | null;
+  is_reconciled: boolean;
+  status: string | null;
+}
+interface CotProbeResult {
+  configured: boolean;
+  message?: string;
+  account_id?: string;
+  window?: { days: number; from: string };
+  fetched?: number;
+  matched?: number;
+  unmatched_count?: number;
+  unmatched?: CotProbeTxn[];
+}
+
+function XeroCotProbe() {
+  const [days, setDays] = useState(30);
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<CotProbeResult | null>(null);
+  const [error, setError] = useState('');
+
+  async function run() {
+    setLoading(true); setError(''); setResult(null);
+    try {
+      const r = await api.get<{ data: CotProbeResult }>(`/costs/reconcile/xero-cot?days=${days}`);
+      setResult(r.data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Probe failed');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="mb-4 border border-gray-200 rounded-lg p-4 bg-gray-50">
+      <div className="flex flex-wrap items-center gap-3">
+        <div>
+          <h3 className="text-sm font-semibold text-gray-800">Company card in Xero, not in OP</h3>
+          <p className="text-xs text-gray-500">Reads card spend from Xero and lists anything with no matching OP cost.</p>
+        </div>
+        <div className="ml-auto flex items-center gap-2">
+          <select value={days} onChange={(e) => setDays(Number(e.target.value))}
+            className="border border-gray-300 rounded-md px-2 py-1 text-sm">
+            <option value={14}>Last 14 days</option>
+            <option value={30}>Last 30 days</option>
+            <option value={60}>Last 60 days</option>
+            <option value={90}>Last 90 days</option>
+          </select>
+          <button onClick={run} disabled={loading}
+            className="px-3 py-1.5 text-sm text-white bg-purple-600 hover:bg-purple-700 rounded-md disabled:opacity-50">
+            {loading ? 'Checking…' : 'Check Xero'}
+          </button>
+        </div>
+      </div>
+
+      {error && <div className="mt-3 bg-red-50 border border-red-200 text-red-700 text-sm rounded-md px-3 py-2">{error}</div>}
+
+      {result && !result.configured && (
+        <div className="mt-3 bg-amber-50 border border-amber-200 text-amber-800 text-sm rounded-md px-3 py-2">{result.message}</div>
+      )}
+
+      {result && result.configured && (
+        <div className="mt-3">
+          <p className="text-sm text-gray-700 mb-2">
+            Fetched <strong>{result.fetched}</strong> card transaction{result.fetched === 1 ? '' : 's'} from the last {result.window?.days} days ·{' '}
+            <span className="text-green-700">{result.matched} matched</span> ·{' '}
+            <span className={result.unmatched_count ? 'text-amber-700 font-medium' : 'text-gray-500'}>{result.unmatched_count} not in OP</span>
+          </p>
+          {result.fetched === 0 && (
+            <p className="text-xs text-gray-500 italic">
+              No card transactions came back. Either there genuinely weren't any, or the card's purchases are sitting in Xero as raw
+              (unreconciled) bank-statement lines, which the API doesn't expose until they're coded/reconciled. If you can see card spend
+              in Xero for this period but nothing shows here, it's the latter — tell me and we'll take the statement-line route.
+            </p>
+          )}
+          {result.unmatched && result.unmatched.length > 0 && (
+            <div className="overflow-x-auto">
+              <table className="min-w-full text-sm">
+                <thead>
+                  <tr className="text-left text-gray-500 border-b border-gray-200">
+                    <th className="py-1.5 pr-3 font-medium">Date</th>
+                    <th className="py-1.5 px-3 font-medium text-right">Amount</th>
+                    <th className="py-1.5 px-3 font-medium">Reference / payee</th>
+                    <th className="py-1.5 pl-3 font-medium">In Xero</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {result.unmatched.map((t, i) => (
+                    <tr key={t.bank_transaction_id || i} className="border-b border-gray-100">
+                      <td className="py-1.5 pr-3 whitespace-nowrap text-gray-700">{t.date || '—'}</td>
+                      <td className="py-1.5 px-3 text-right font-medium text-gray-900">£{t.total.toFixed(2)}</td>
+                      <td className="py-1.5 px-3 text-gray-600">{t.reference || t.contact_name || '—'}</td>
+                      <td className="py-1.5 pl-3">
+                        <span className={`text-xs px-2 py-0.5 rounded-full ${t.is_reconciled ? 'bg-emerald-100 text-emerald-800' : 'bg-gray-100 text-gray-600'}`}>
+                          {t.is_reconciled ? 'reconciled' : t.status?.toLowerCase() || 'unreconciled'}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p className="text-xs text-gray-400 mt-2">These are card payments in Xero with no matching cost in OP — log them (and attach the receipt) so they reconcile.</p>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
