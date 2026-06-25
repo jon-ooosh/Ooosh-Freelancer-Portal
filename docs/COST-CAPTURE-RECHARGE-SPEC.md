@@ -1010,3 +1010,22 @@ counts + a table of the unmatched.
 
 No migration; no writes. Next step is decided by what the probe returns on the
 live org.
+
+---
+
+## Build notes — extraction date sanity check (Jun 2026)
+
+The probe (above) confirmed live: COT bank-feed transactions show as
+**Unreconciled** in Xero but ARE readable via `GET /BankTransactions` (33 fetched
+/ 33 matched / 0 orphans on the first run). So the full matcher is viable — no
+statement-line workaround needed.
+
+Date fix off the same session: a fuel receipt dated 11/06 (11 June) was extracted
+as 6 November — a US-style MM/DD misread that landed it months in the future.
+`normaliseCostDate()` in `cost-receipt-extract.ts` now post-checks the extracted
+date: anything implausibly future (> today + 7d) tries the day/month swap and, if
+that lands a valid past date, takes it (downgrading confidence so the modal flags
+it); otherwise keeps the date but still downgrades. Prompt also strengthened to
+"UK day-first; when ambiguous read 11/06 as 11 June not 6 November; normally today
+or in the recent past". The capture modal shows an amber "this date is in the
+future" hint for manual entry too.

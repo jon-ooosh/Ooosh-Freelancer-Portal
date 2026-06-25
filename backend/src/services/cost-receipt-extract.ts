@@ -60,7 +60,7 @@ Extraction rules:
 - If only a gross total is visible and no VAT is shown, treat it as no_vat (net = gross, vat = 0).
 - invoice_number: the supplier's invoice/receipt reference as printed (e.g. "INV-10472", "138106", "SI-2024-0091") — usually labelled "Invoice No", "Invoice #", "Reference", "Receipt No" or similar, often near the date in the header. Return it exactly as printed (keep any prefix). Null when there genuinely isn't one (common on fuel/till receipts). Do NOT use the order number, customer number, account number, or our job number.
 - supplier: the merchant's canonical company name as printed on the receipt header (e.g. "TTS360 Ltd", "Shell U.K. Limited", "Halfords Autocentres") — NOT the tagline, address line, or "thank you" line. Strip trailing punctuation.
-- cost_date: format YYYY-MM-DD. Receipt dates are usually DD/MM/YYYY (UK). Null if not visible.
+- cost_date: format YYYY-MM-DD. Receipt dates are UK DAY-FIRST (DD/MM/YYYY) — when a date is ambiguous (both parts ≤ 12, e.g. 11/06), read it day-first (11 June, NOT 6 November). The cost date is normally TODAY or in the recent past; it should not be months in the future. Null if not visible.
 - job_number: if the document clearly references an Ooosh job/booking number (e.g. "Job 15291", "#15291", "Attention: Ooosh Tours (#15291)", "your ref 15291"), return JUST the digits as a string. Otherwise null. Do NOT guess from invoice numbers, phone numbers, postcodes, dates, or amounts — only a clear job/booking reference.
 - description: 1-2 line summary of what was bought (e.g. "Brake pads and disc rotors", "5 packs of D'Addario strings").
 - confidence: "high" when every key field reads cleanly; "medium" with some guessing on amounts or supplier; "low" on poor image quality or non-receipt input.
@@ -173,6 +173,43 @@ function normaliseAmounts(p: ExtractedReceipt): void {
 }
 
 /**
+ * Date sanity check. Receipt dates are UK day-first (DD/MM/YYYY) and almost
+ * always today or in the recent past. The model occasionally reads an ambiguous
+ * date the US way (MM/DD), turning e.g. 11/06 (11 June) into 6 November — which
+ * then lands months in the FUTURE. When the extracted date is implausibly
+ * future, try the day/month swap; if that lands a valid date in the past, take
+ * it (and downgrade confidence so the modal flags it). If it can't be repaired,
+ * keep the date but still downgrade so a human double-checks.
+ */
+function normaliseCostDate(p: ExtractedReceipt): void {
+  if (!p.cost_date) return;
+  const m = p.cost_date.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return;
+  const [, ys, mo, da] = m;
+  const month = Number(mo), day = Number(da);
+  const now = new Date();
+  const todayUTC = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const TOL_MS = 7 * 86_400_000; // allow a week's grace for the odd genuinely-future invoice
+  const downgrade = () => { if (p.confidence === 'high') p.confidence = 'medium'; };
+
+  const t = Date.UTC(Number(ys), month - 1, day);
+  if (t <= todayUTC + TOL_MS) return; // plausible — leave it
+
+  // Implausibly future. If both fields are ≤ 12 the date is ambiguous, so the
+  // day/month swap is safe (a ≤12 "day" is valid in any month). Take the swap
+  // only if it brings the date back into the plausible (past) range.
+  if (month <= 12 && day <= 12) {
+    const swapped = Date.UTC(Number(ys), day - 1, month);
+    if (swapped <= todayUTC + TOL_MS) {
+      p.cost_date = `${ys}-${da}-${mo}`; // day↔month
+      downgrade();
+      return;
+    }
+  }
+  downgrade(); // can't safely repair — flag for the human
+}
+
+/**
  * Try to canonicalise the extracted supplier name against Xero contacts.
  * Case-insensitive substring match either way ("TTS 360" vs "TTS360 Ltd") —
  * fine for typo-class duplicates without over-matching. Fails silently if
@@ -209,6 +246,7 @@ export async function extractReceipt(buffer: Buffer, mimeType: string): Promise<
   // Deterministic repair of gross/net/VAT arithmetic (downgrades confidence
   // when a correction was needed so the modal flags it for a human check).
   normaliseAmounts(parsed);
+  normaliseCostDate(parsed);
 
   // Xero supplier canonicalisation — non-blocking, best-effort.
   if (parsed.supplier && parsed.supplier.trim()) {

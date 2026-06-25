@@ -787,6 +787,9 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Date</label>
                 <input type="date" className={inputCls} value={costDate} onChange={(e) => setCostDate(e.target.value)} />
+                {costDate && costDate > new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10) && (
+                  <p className="text-xs text-amber-600 mt-1">⚠️ This date is in the future — is that right? Receipt dates are usually today or earlier (UK day/month).</p>
+                )}
               </div>
             </div>
 
