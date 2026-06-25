@@ -1485,6 +1485,28 @@ router.patch('/:id', authenticateVehicleFlexible, validate(patchSchema), async (
       setClauses.push(`status_changed_at = NOW()`);
     }
 
+    // Stamp booked_out_at (and booked_out_by) on the booked_out transition.
+    // Without this, a book-out driven purely through this PATCH — the
+    // BookOutPage writeback loop that flips every hire form on the van — leaves
+    // booked_out_at NULL. Only the SEPARATE save-event vehicle event ever set
+    // it. When that event fails to land (transient error, abandoned walkaround,
+    // offline-queue not flushed), the row reads as booked_out with no timestamp
+    // and no history card, which then fools the check-in job-resolver into
+    // picking a stale book-out from a PREVIOUS hire (RX73TBZ, jobs 16057↔16149,
+    // Jun 2026 — the Unpeople return got stamped against the prior Ritchie Prior
+    // hire). COALESCE keeps it idempotent on PATCH retries and never overwrites
+    // a real walkaround timestamp. Freelancer book-outs (no req.user) still get
+    // booked_out_at; they just don't stamp booked_out_by.
+    if (updates.status === 'booked_out') {
+      setClauses.push(`booked_out_at = COALESCE(booked_out_at, NOW())`);
+      const bookedOutActor = req.user?.id || null;
+      if (bookedOutActor) {
+        setClauses.push(`booked_out_by = COALESCE(booked_out_by, $${paramIdx})`);
+        values.push(bookedOutActor);
+        paramIdx++;
+      }
+    }
+
     setClauses.push('updated_at = NOW()');
 
     if (setClauses.length === 1) {
