@@ -28,9 +28,11 @@ Write a concise, practical assessment for the warehouse/ops team. Be specific an
 Rules:
 - Tyre thresholds: plan replacement at 5mm, replace at 4mm. Never reference the 1.6mm legal limit as a target — Ooosh acts well before legal.
 - Fronts and rears wear at different rates; call out the worst corner/axle.
+- A corner showing no current tread with a recent tyre replacement just means a new tyre was fitted and not yet measured — note it positively ("rears replaced, awaiting first reading"), do NOT flag it as a problem. Only treat wheel/alignment/balancing work as a tyre change if new tyres were actually fitted.
 - If a fluid is topped up frequently (a "watch" status), flag possible consumption worth a mechanic's eye.
 - Compliance: only items listed under COMPLIANCE are tracked, each with a real date. Anything overdue is urgent; anything within ~30 days is worth booking. Do NOT flag missing compliance items — insurance is a blanket fleet policy (not tracked per-van), and an absent TFL line just means that van isn't registered (e.g. a 6-seater that can't claim the discount). Never recommend "set/confirm the insurance date" or "confirm TFL status".
 - ULEZ: a van shown as "ULEZ compliant: yes" needs no action. Only mention ULEZ if it is explicitly non-compliant.
+- Costs: call out a repair that recurs in the service records (e.g. the same component fixed 2+ times) as a watch item — it often signals an underlying fault worth investigating rather than re-patching. Flag a clear year-on-year cost jump, and an unusually high single category, only when material. Don't restate the totals if nothing stands out.
 - Keep watch_items and recommendations SHORT and actionable. Empty arrays are fine for a healthy van.
 - overall_status: "good" (nothing pressing), "watch" (a few things to keep an eye on), "attention" (something needs booking/doing soon).
 - Return ONLY valid JSON matching the schema. No markdown, no commentary.`;
@@ -101,6 +103,14 @@ function forecastToPrompt(f: VehicleForecast): string {
     lines.push(`  ${c.corner} (${c.label}): ${c.currentTread}mm [${c.status}]${c.wearRatePer1000 != null ? `, wearing ${c.wearRatePer1000}mm/1000mi` : ', wear rate unknown'}${proj.length ? ', ' + proj.join(', ') : ''}${c.resetCount > 0 ? `, ${c.resetCount} tyre change(s) detected` : ''}`);
   }
 
+  if (f.tyreEvents.length) {
+    lines.push('\nTYRE REPLACEMENTS (from service records — already used to reset the wear baselines above):');
+    for (const e of f.tyreEvents.slice(-8)) {
+      const where = e.corners.length === 4 ? 'all corners' : e.corners.join('/');
+      lines.push(`  ${e.date || '?'}${e.mileage != null ? ` @ ${e.mileage}mi` : ''}: ${where} — ${e.description}`);
+    }
+  }
+
   lines.push('\nSERVICE:');
   if (f.service.nextDueMileage != null) {
     lines.push(`  Next service due at ${f.service.nextDueMileage} mi (${f.service.milesUntil != null ? `${f.service.milesUntil} mi away` : 'distance unknown'}${f.service.etaWeeks != null ? `, ~${f.service.etaWeeks} weeks at current pace` : ''}) [${f.service.status}]`);
@@ -127,6 +137,20 @@ function forecastToPrompt(f: VehicleForecast): string {
 
   lines.push('\nCOSTS (last 12 months):');
   lines.push(`  Total £${f.costs.last12mTotal} (service £${f.costs.serviceTotal} + fuel £${f.costs.fuelTotal})${f.costs.perMile != null ? `, ~£${f.costs.perMile}/mile` : ''}`);
+  if (f.costs.prior12mTotal != null) {
+    const delta = Math.round((f.costs.last12mTotal - f.costs.prior12mTotal) * 100) / 100;
+    const dir = delta > 0 ? `up £${delta}` : delta < 0 ? `down £${Math.abs(delta)}` : 'flat';
+    lines.push(`  Prior 12 months: £${f.costs.prior12mTotal} (${dir} year-on-year)`);
+  }
+  if (f.costs.byCategory.length) {
+    lines.push(`  Service spend by category: ${f.costs.byCategory.map((c) => `${c.type} £${c.total} (${c.count})`).join(', ')}`);
+  }
+  if (f.costs.recent.length) {
+    lines.push('\nRECENT SERVICE RECORDS (newest first — look for repeated repairs to the same component):');
+    for (const r of f.costs.recent) {
+      lines.push(`  ${r.date || '?'} [${r.type}]${r.cost != null ? ` £${r.cost}` : ''}: ${r.name || '(no description)'}${r.garage ? ` @ ${r.garage}` : ''}`);
+    }
+  }
 
   if (f.recurringIssues.length) {
     lines.push('\nRECURRING ISSUES:');
