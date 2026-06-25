@@ -25,6 +25,20 @@ import { TYRE_TREAD_CAP_MM, TYRE_TREAD_RED_MM, TYRE_TREAD_AMBER_MM } from './tyr
 /** A jump UP of more than this between consecutive preps = a new/swapped tyre. */
 const TREAD_RESET_JUMP_MM = 1.5
 
+/**
+ * Minimum wear rate (mm lost per mile) we treat as a real, measurable signal.
+ * 0.05 mm per 1,000 miles. Below this the least-squares slope is indistinguishable
+ * from measurement noise on near-flat tread readings — a tyre with effectively no
+ * wear would otherwise "read" a rate of ~0.000001 mm/mile (which rounds to "0 mm /
+ * 1,000 mi" on screen) yet still divide into a projection of hundreds of thousands
+ * of miles: the trillion-mile "to the sun and back" bug. Below the floor we report
+ * no usable rate, so the wear rate shows "not enough data" and projections show "—".
+ */
+const MIN_WEAR_RATE_PER_MILE = 0.00005
+
+/** Cap on how far ahead we'll project. Beyond this it's noise, not a forecast. */
+const MAX_PROJECTION_MILES = 150_000
+
 export type Corner = 'FL' | 'FR' | 'RL' | 'RR'
 export type Axle = 'front' | 'rear'
 
@@ -137,7 +151,7 @@ function wearRate(points: TreadPoint[]): number | null {
   if (denom === 0) return null
   const slope = (n * sxy - sx * sy) / denom // mm per mile (negative as miles rise)
   const loss = -slope // flip so positive = wearing down
-  return loss > 0 ? loss : null // not measurably wearing → no usable rate
+  return loss >= MIN_WEAR_RATE_PER_MILE ? loss : null // below the noise floor → no usable rate
 }
 
 function projectTo(
@@ -147,7 +161,7 @@ function projectTo(
   ratePerMile: number | null,
   milesPerDay: number | null,
 ): Projection | null {
-  if (currentTread == null || ratePerMile == null || ratePerMile <= 0) return null
+  if (currentTread == null || ratePerMile == null || ratePerMile < MIN_WEAR_RATE_PER_MILE) return null
   if (currentTread <= threshold) {
     // Already at/below the threshold.
     return {
@@ -157,6 +171,10 @@ function projectTo(
     }
   }
   const milesRemaining = Math.round((currentTread - threshold) / ratePerMile)
+  // Defence-in-depth: a wear rate that scrapes past the floor on a near-flat
+  // series can still yield an implausibly distant date. Beyond this horizon the
+  // projection isn't a useful planning signal — show "—" rather than a number.
+  if (milesRemaining > MAX_PROJECTION_MILES) return null
   const reachedAtMileage = currentMileage != null ? currentMileage + milesRemaining : null
   let estimatedDate: string | null = null
   if (milesPerDay != null && milesPerDay > 0 && Number.isFinite(milesRemaining)) {

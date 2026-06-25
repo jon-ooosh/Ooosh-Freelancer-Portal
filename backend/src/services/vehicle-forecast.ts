@@ -27,6 +27,16 @@ const TYRE_RED_MM = 4; // replace now
 const TYRE_AMBER_MM = 5; // plan replacement
 const TREAD_RESET_JUMP_MM = 1.5; // jump UP = new/swapped tyre
 
+// Minimum wear rate (mm lost per mile) we treat as a real, measurable signal.
+// 0.05 mm per 1,000 miles. Below this the least-squares slope is indistinguishable
+// from measurement noise on near-flat tread readings — a tyre with effectively no
+// wear would otherwise "read" a rate of ~0.000001 mm/mile and project hundreds of
+// thousands of miles (the trillion-mile "to the sun and back" bug). Below the floor
+// we report no usable rate (null) so the UI and the AI both show "—"/"unknown".
+const MIN_WEAR_RATE_PER_MILE = 0.00005;
+// Cap on how far ahead we'll project. Beyond this it's noise, not a forecast.
+const MAX_PROJECTION_MILES = 150000;
+
 type Corner = 'FL' | 'FR' | 'RL' | 'RR';
 const CORNERS: Corner[] = ['FL', 'FR', 'RL', 'RR'];
 const CORNER_LABEL: Record<Corner, string> = {
@@ -141,7 +151,7 @@ function wearRatePerMile(points: { mileage: number; tread: number }[]): number |
   const denom = n * sxx - sx * sx;
   if (denom === 0) return null;
   const loss = -((n * sxy - sx * sy) / denom);
-  return loss > 0 ? loss : null;
+  return loss >= MIN_WEAR_RATE_PER_MILE ? loss : null; // below the noise floor → no usable rate
 }
 
 function computeCorner(corner: Corner, ordered: PrepSessionDoc[]): CornerForecast {
@@ -162,8 +172,9 @@ function computeCorner(corner: Corner, ordered: PrepSessionDoc[]): CornerForecas
   const currentTread = latest?.tread ?? null;
   const rate = wearRatePerMile(segment.map((p) => ({ mileage: p.mileage, tread: p.tread })));
   const milesTo = (threshold: number): number | null => {
-    if (currentTread == null || rate == null || rate <= 0 || currentTread <= threshold) return null;
-    return Math.round((currentTread - threshold) / rate);
+    if (currentTread == null || rate == null || rate < MIN_WEAR_RATE_PER_MILE || currentTread <= threshold) return null;
+    const miles = Math.round((currentTread - threshold) / rate);
+    return miles > MAX_PROJECTION_MILES ? null : miles; // implausibly distant → no useful forecast
   };
   let status: CornerForecast['status'] = 'unknown';
   if (currentTread != null) status = currentTread <= TYRE_RED_MM ? 'red' : currentTread <= TYRE_AMBER_MM ? 'amber' : 'green';
