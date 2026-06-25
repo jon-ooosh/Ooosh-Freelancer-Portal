@@ -252,11 +252,27 @@ router.get('/stock', async (_req: AuthRequest, res: Response) => {
 /** Demand-tracker list. Sortable + searchable. */
 router.get('/demand', async (req: AuthRequest, res: Response) => {
   const q = String(req.query.q || '').trim();
+  // Click-to-sort whitelist: a `<field>_asc/_desc` pair per sortable column,
+  // each with a stable `request_count DESC` tiebreaker so the LIMIT 500 picks a
+  // deterministic top-500. Legacy keys (count/recent/days/name) kept for the
+  // old dropdown-driven callers.
   const sortMap: Record<string, string> = {
+    // legacy
     count: 'request_count DESC',
     recent: 'last_requested_at DESC',
     days: 'total_hire_days DESC',
     name: 'display_request ASC',
+    // click-to-sort pairs
+    name_asc: 'display_request ASC, request_count DESC',
+    name_desc: 'display_request DESC, request_count DESC',
+    request_count_asc: 'request_count ASC, last_requested_at DESC',
+    request_count_desc: 'request_count DESC, last_requested_at DESC',
+    hire_days_asc: 'total_hire_days ASC, request_count DESC',
+    hire_days_desc: 'total_hire_days DESC, request_count DESC',
+    have_it_asc: 'have_it_status ASC, request_count DESC',
+    have_it_desc: 'have_it_status DESC, request_count DESC',
+    last_asked_asc: 'last_requested_at ASC, request_count DESC',
+    last_asked_desc: 'last_requested_at DESC, request_count DESC',
   };
   const orderBy = sortMap[String(req.query.sort || 'count')] || sortMap.count;
   const status = String(req.query.status || '').trim();

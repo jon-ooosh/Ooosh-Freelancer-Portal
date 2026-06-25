@@ -105,7 +105,7 @@ const APPROVAL_COLOURS: Record<string, string> = {
 
 // Client-side column sort. null = server order (newest captured first).
 type SortKey = 'date' | 'due' | 'supplier' | 'description' | 'gross' | 'type' | 'status';
-type DueFilter = 'all' | 'overdue' | 'friday' | 'this_week' | 'next_7';
+type DueFilter = 'all' | 'overdue' | 'friday' | 'next_friday' | 'this_week' | 'next_7';
 const SORT_VALUE: Record<SortKey, (c: { cost_date: string | null; due_date?: string | null; supplier_name: string | null; description: string | null; amount_gross: number | null; category: string | null; cost_type: string; approval_state: string | null; payment_status: string }) => string | number> = {
   date: (c) => c.cost_date || '',
   // Undated bills sort last under ascending (the common "what's due soonest" view).
@@ -143,28 +143,34 @@ export default function CostsPage() {
   const [sortKey, setSortKey] = useState<SortKey | null>(null);
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
   const [dueFilter, setDueFilter] = useState<DueFilter>('all');
+  const [supplierFilter, setSupplierFilter] = useState('');
 
   const sortedRows = useMemo(() => {
     let base = rows;
+    if (supplierFilter) base = base.filter((c) => (c.supplier_name || '') === supplierFilter);
     // Due-date filters only apply in the Bills to Pay view.
     if (view === 'payable' && dueFilter !== 'all') {
       const today = new Date(); today.setHours(0, 0, 0, 0);
-      const iso = (d: Date) => d.toISOString().slice(0, 10);
-      const todayStr = iso(today);
+      // Format in LOCAL time — toISOString() is UTC and shifts the day under BST,
+      // which broke the exact-match "This Friday" filter.
+      const fmt = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      const todayStr = fmt(today);
       // End of this week = upcoming Sunday (Mon-start week).
       const endOfWeek = new Date(today); endOfWeek.setDate(today.getDate() + ((7 - today.getDay()) % 7 || 7));
-      // Next Friday on/after today (today if it's a Friday).
+      // Next Friday on/after today (today if it's a Friday); the one after = +7.
       const friday = new Date(today); friday.setDate(today.getDate() + ((5 - today.getDay() + 7) % 7));
+      const nextFriday = new Date(friday); nextFriday.setDate(friday.getDate() + 7);
       const next7 = new Date(today); next7.setDate(today.getDate() + 7);
-      base = rows.filter((c) => {
+      base = base.filter((c) => {
         if (c.payment_status === 'paid' || !c.due_date) return false;
         const d = c.due_date.slice(0, 10);
         switch (dueFilter) {
-          case 'overdue':   return d < todayStr;
-          case 'friday':    return d === iso(friday);
-          case 'this_week': return d >= todayStr && d <= iso(endOfWeek);
-          case 'next_7':    return d >= todayStr && d <= iso(next7);
-          default:          return true;
+          case 'overdue':     return d < todayStr;
+          case 'friday':      return d === fmt(friday);
+          case 'next_friday': return d === fmt(nextFriday);
+          case 'this_week':   return d >= todayStr && d <= fmt(endOfWeek);
+          case 'next_7':      return d >= todayStr && d <= fmt(next7);
+          default:            return true;
         }
       });
     }
@@ -175,7 +181,12 @@ export default function CostsPage() {
       const cmp = typeof av === 'number' && typeof bv === 'number' ? av - bv : String(av).localeCompare(String(bv));
       return sortDir === 'asc' ? cmp : -cmp;
     });
-  }, [rows, sortKey, sortDir, view, dueFilter]);
+  }, [rows, sortKey, sortDir, view, dueFilter, supplierFilter]);
+
+  const supplierOptions = useMemo(
+    () => Array.from(new Set(rows.map((r) => r.supplier_name).filter((s): s is string => !!s))).sort((a, b) => a.localeCompare(b)),
+    [rows],
+  );
 
   const clickSort = (key: SortKey) => {
     if (sortKey === key) setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
@@ -257,7 +268,11 @@ export default function CostsPage() {
       alert('This cost is reconciled in Xero and is locked — void it in Xero rather than deleting here.');
       return;
     }
-    if (!confirm(`Delete this cost${c.supplier_name ? ` from ${c.supplier_name}` : ''}? This cannot be undone.`)) return;
+    const inXero = !!c.xero_object_id;
+    const xeroNote = inXero
+      ? '\n\n⚠️ This removes the cost from OP only — it will NOT delete the bill/transaction in Xero. Void it in Xero separately if needed.'
+      : '';
+    if (!confirm(`Delete this cost${c.supplier_name ? ` from ${c.supplier_name}` : ''}? This cannot be undone.${xeroNote}`)) return;
     setActionBusy(c.id + 'delete');
     try {
       await api.delete(`/costs/${c.id}`);
@@ -382,6 +397,11 @@ export default function CostsPage() {
           <option value="parts">Parts</option>
           <option value="freelancer_invoice">Freelancer invoice</option>
         </select>
+        <select value={supplierFilter} onChange={(e) => setSupplierFilter(e.target.value)}
+          className="border border-gray-300 rounded-md px-3 py-1.5 text-sm max-w-[180px]">
+          <option value="">All suppliers</option>
+          {supplierOptions.map((s) => <option key={s} value={s}>{s}</option>)}
+        </select>
       </div>
 
       {/* Due-date filters — Bills to Pay only */}
@@ -392,6 +412,7 @@ export default function CostsPage() {
             ['all', 'All'],
             ['overdue', 'Overdue'],
             ['friday', 'This Friday'],
+            ['next_friday', 'Next Friday'],
             ['this_week', 'This week'],
             ['next_7', 'Next 7 days'],
           ] as [DueFilter, string][]).map(([key, label]) => (
@@ -874,16 +895,13 @@ function XeroCell({ cost, busy, onRetry, resyncBusy, onResync }: { cost: Cost; b
   // Edited after it was pushed → Xero is out of date. Takes precedence over the
   // synced pills; offer a manual re-sync.
   if (cost.xero_stale && cost.xero_object_id) {
-    return (
-      <div className="flex items-center gap-2">
-        <span className="px-2 py-0.5 text-xs rounded-full bg-amber-100 text-amber-800" title="This cost was edited after it was pushed — Xero is out of date">Xero out of date</span>
-        {onResync && (
-          <button disabled={resyncBusy} onClick={onResync} className="text-xs text-purple-700 hover:underline disabled:opacity-50">
-            {resyncBusy ? '…' : 'Re-sync'}
-          </button>
-        )}
-      </div>
-    );
+    return onResync ? (
+      <button disabled={resyncBusy} onClick={onResync}
+        title="Edited after it was pushed — Xero is out of date. Click to re-sync."
+        className="px-2 py-0.5 text-xs rounded-full bg-amber-100 text-amber-800 hover:bg-amber-200 disabled:opacity-50 whitespace-nowrap">
+        {resyncBusy ? '…' : 'Re-sync'}
+      </button>
+    ) : <span className="px-2 py-0.5 text-xs rounded-full bg-amber-100 text-amber-800">Out of date</span>;
   }
   // Paid-now costs have nothing to push until they're paid. Bills push on
   // approval, so show their state regardless of payment status.
@@ -911,39 +929,32 @@ function XeroCell({ cost, busy, onRetry, resyncBusy, onResync }: { cost: Cost; b
   if (cost.xero_sync_state === 'bill_created') {
     return <span className="px-2 py-0.5 text-xs rounded-full bg-blue-100 text-blue-800" title="In Xero; receipt attach pending">{isBill ? 'Bill created' : 'Sent'}</span>;
   }
+  // Actionable states collapse the status + sync button into ONE clickable pill
+  // (the button used to widen the column and push the row actions off-screen).
   if (cost.xero_sync_state === 'error') {
     return (
-      <div className="flex items-center gap-2">
-        <span className="px-2 py-0.5 text-xs rounded-full bg-red-100 text-red-800" title={cost.xero_error || ''}>Failed</span>
-        <button disabled={busy} onClick={onRetry} className="text-xs text-purple-700 hover:underline disabled:opacity-50">
-          {busy ? '…' : 'Retry'}
-        </button>
-      </div>
+      <button disabled={busy} onClick={onRetry} title={`Push failed — click to retry.${cost.xero_error ? ' ' + cost.xero_error : ''}`}
+        className="px-2 py-0.5 text-xs rounded-full bg-red-100 text-red-800 hover:bg-red-200 disabled:opacity-50 whitespace-nowrap">
+        {busy ? '…' : 'Sync failed — retry'}
+      </button>
     );
   }
-  // pending + advisory xero_error → soft "Not synced" pill. Push now stays
-  // available so staff can re-trigger after fixing the underlying gap (e.g.
-  // they've just set the bank-account mapping).
+  // pending + advisory xero_error → soft "Sync now". Re-triggerable after staff
+  // fix the underlying gap (e.g. they've just set the bank-account mapping).
   if (cost.xero_error) {
     return (
-      <div className="flex items-center gap-2">
-        <span className="px-2 py-0.5 text-xs rounded-full bg-gray-100 text-gray-600" title={cost.xero_error}>
-          Not synced
-        </span>
-        <button disabled={busy} onClick={onRetry} className="text-xs text-purple-700 hover:underline disabled:opacity-50">
-          {busy ? '…' : 'Push now'}
-        </button>
-      </div>
+      <button disabled={busy} onClick={onRetry} title={`Not synced — click to push to Xero.${cost.xero_error ? ' ' + cost.xero_error : ''}`}
+        className="px-2 py-0.5 text-xs rounded-full bg-gray-100 text-gray-600 hover:bg-gray-200 disabled:opacity-50 whitespace-nowrap">
+        {busy ? '…' : 'Sync now'}
+      </button>
     );
   }
   // pending (paid but not yet pushed — likely scheduler just queued it)
   return (
-    <div className="flex items-center gap-2">
-      <span className="px-2 py-0.5 text-xs rounded-full bg-gray-100 text-gray-700">Pending</span>
-      <button disabled={busy} onClick={onRetry} className="text-xs text-purple-700 hover:underline disabled:opacity-50">
-        {busy ? '…' : 'Push now'}
-      </button>
-    </div>
+    <button disabled={busy} onClick={onRetry} title="Queued for Xero — click to push now."
+      className="px-2 py-0.5 text-xs rounded-full bg-gray-100 text-gray-700 hover:bg-gray-200 disabled:opacity-50 whitespace-nowrap">
+      {busy ? '…' : 'Sync now'}
+    </button>
   );
 }
 
