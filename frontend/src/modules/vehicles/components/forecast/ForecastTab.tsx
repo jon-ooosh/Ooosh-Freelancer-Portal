@@ -324,8 +324,8 @@ export function ForecastTab({ vehicleId }: Props) {
     <div className="space-y-4">
       <AssessmentPanel assessment={data.assessment} onRegenerate={handleRegenerate} regenerating={regenerating} />
 
-      {/* Tyre wear & projection — reuses the prep-trends panel, same prep data */}
-      <PrepTrendsPanel sessions={f.prepSessions} />
+      {/* Tyre wear & projection — reuses the prep-trends panel, same prep data + service-record tyre changes */}
+      <PrepTrendsPanel sessions={f.prepSessions} tyreEvents={f.tyreEvents} />
 
       {/* Deterministic cards */}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
