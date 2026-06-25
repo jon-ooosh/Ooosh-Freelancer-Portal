@@ -811,10 +811,10 @@ export function startScheduler() {
     }
   }, { timezone: 'Europe/London' });
 
-  // COT receipt chase — daily 09:35 Europe/London. Nudges each card-holder about
-  // company-card purchases with no receipt attached (older than the grace window).
-  // See services/cost-receipt-chaser.ts.
-  cron.schedule('35 9 * * *', async () => {
+  // COT receipt chase — WEEKLY, Wednesday 12:00 Europe/London. One digest per
+  // card-holder summarising their company-card purchases still missing a receipt
+  // (older than the 3-day grace). See services/cost-receipt-chaser.ts.
+  cron.schedule('0 12 * * 3', async () => {
     try {
       const { runCostReceiptChase } = await import('../services/cost-receipt-chaser');
       const r = await runCostReceiptChase();
