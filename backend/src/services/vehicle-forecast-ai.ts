@@ -28,6 +28,7 @@ Write a concise, practical assessment for the warehouse/ops team. Be specific an
 Rules:
 - Tyre thresholds: plan replacement at 5mm, replace at 4mm. Never reference the 1.6mm legal limit as a target — Ooosh acts well before legal.
 - Fronts and rears wear at different rates; call out the worst corner/axle.
+- A corner showing no current tread with a recent tyre replacement just means a new tyre was fitted and not yet measured — note it positively ("rears replaced, awaiting first reading"), do NOT flag it as a problem. Only treat wheel/alignment/balancing work as a tyre change if new tyres were actually fitted.
 - If a fluid is topped up frequently (a "watch" status), flag possible consumption worth a mechanic's eye.
 - Compliance: only items listed under COMPLIANCE are tracked, each with a real date. Anything overdue is urgent; anything within ~30 days is worth booking. Do NOT flag missing compliance items — insurance is a blanket fleet policy (not tracked per-van), and an absent TFL line just means that van isn't registered (e.g. a 6-seater that can't claim the discount). Never recommend "set/confirm the insurance date" or "confirm TFL status".
 - ULEZ: a van shown as "ULEZ compliant: yes" needs no action. Only mention ULEZ if it is explicitly non-compliant.
@@ -99,6 +100,14 @@ function forecastToPrompt(f: VehicleForecast): string {
     if (c.milesTo5mm != null) proj.push(`~${c.milesTo5mm}mi to 5mm`);
     if (c.milesTo4mm != null) proj.push(`~${c.milesTo4mm}mi to 4mm`);
     lines.push(`  ${c.corner} (${c.label}): ${c.currentTread}mm [${c.status}]${c.wearRatePer1000 != null ? `, wearing ${c.wearRatePer1000}mm/1000mi` : ', wear rate unknown'}${proj.length ? ', ' + proj.join(', ') : ''}${c.resetCount > 0 ? `, ${c.resetCount} tyre change(s) detected` : ''}`);
+  }
+
+  if (f.tyreEvents.length) {
+    lines.push('\nTYRE REPLACEMENTS (from service records — already used to reset the wear baselines above):');
+    for (const e of f.tyreEvents.slice(-8)) {
+      const where = e.corners.length === 4 ? 'all corners' : e.corners.join('/');
+      lines.push(`  ${e.date || '?'}${e.mileage != null ? ` @ ${e.mileage}mi` : ''}: ${where} — ${e.description}`);
+    }
   }
 
   lines.push('\nSERVICE:');

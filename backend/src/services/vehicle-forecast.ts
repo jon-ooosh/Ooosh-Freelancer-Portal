@@ -49,6 +49,72 @@ const CORNER_TREAD_NAMES: Record<Corner, string[]> = {
   RR: ['rear right tyre tread', 'rr tread'],
 };
 
+/**
+ * A tyre-replacement event detected in a service record. Used to reset the wear
+ * baseline at the mileage the tyre was fitted — so a fresh tyre doesn't inherit
+ * the old one's projection, even when no prep reading captured the swap.
+ */
+export interface TyreServiceEvent {
+  date: string | null;
+  mileage: number | null;
+  corners: Corner[];
+  description: string;
+}
+
+// STRONG = unambiguous "new tyre(s) fitted" — wins over ancillary balance/align
+// work ("fit new tyres & balance" is a replacement, not just a balance).
+const TYRE_RESET_STRONG_RE = /\b(replac\w*|renew\w*|new\b|fit(?:ted|ting)?|suppl(?:y|ied)|full\s+set|set\s+of)\b/;
+// WEAK = "change(d)" — only a replacement when not paired with repair-type work
+// ("changed the nearside rear tyre" yes; "changed a valve, checked tyres" no).
+const TYRE_RESET_WEAK_RE = /\bchang\w*\b/;
+// Tyre work that does NOT reset the baseline (vetoes a WEAK-only signal).
+const TYRE_NONRESET_RE = /\b(punctur\w*|repair\w*|rotat\w*|balanc\w*|align\w*|track\w*|pressure|valve|inspect\w*)\b/;
+
+/** Which corners a tyre description refers to (UK nearside = left, offside = right). */
+function parseTyreCorners(text: string): Corner[] {
+  const set = new Set<Corner>();
+  if (/\bfl\b/.test(text)) set.add('FL');
+  if (/\bfr\b/.test(text)) set.add('FR');
+  if (/\brl\b/.test(text)) set.add('RL');
+  if (/\brr\b/.test(text)) set.add('RR');
+  const near = /near\s?side|n\/s/.test(text);   // left
+  const off = /off\s?side|o\/s/.test(text);     // right
+  const front = /\bfront\b/.test(text);
+  const rear = /\brear\b|\bback\b/.test(text);
+  if (near && front) set.add('FL');
+  if (off && front) set.add('FR');
+  if (near && rear) set.add('RL');
+  if (off && rear) set.add('RR');
+  if (near && !front && !rear) { set.add('FL'); set.add('RL'); }
+  if (off && !front && !rear) { set.add('FR'); set.add('RR'); }
+  if (front && !near && !off) { set.add('FL'); set.add('FR'); }
+  if (rear && !near && !off) { set.add('RL'); set.add('RR'); }
+  if (/\ball\b|full\s+set|set\s+of|\bfour\b|\b4\s+tyres?\b|\bx\s?4\b/.test(text)) {
+    CORNERS.forEach((c) => set.add(c));
+  }
+  // Replacement with no location hint → assume a full set (conservative over-reset).
+  if (set.size === 0) CORNERS.forEach((c) => set.add(c));
+  return CORNERS.filter((c) => set.has(c));
+}
+
+/**
+ * Classify a service record as a tyre replacement (and which corners), or null
+ * if it's not a tyre swap. Deterministic keyword logic — the forecast must be
+ * reproducible without a per-build LLM call. The AI narrator still receives the
+ * raw notes AND these structured events, so it can comment on anything fuzzy
+ * (e.g. a "wheel alignment" record that isn't a tyre change).
+ */
+function classifyTyreEvent(name: string, notes: string, serviceType: string): Corner[] | null {
+  const text = `${name} ${notes}`.toLowerCase();
+  const isTyreContext = serviceType === 'tyre' || /\btyres?\b|\btires?\b/.test(text);
+  if (!isTyreContext) return null;
+  const strong = TYRE_RESET_STRONG_RE.test(text);
+  const weak = TYRE_RESET_WEAK_RE.test(text);
+  if (!strong && !weak) return null; // pure repair / balance / rotate → no baseline reset
+  if (!strong && weak && TYRE_NONRESET_RE.test(text)) return null; // "change"-only alongside repair → don't reset
+  return parseTyreCorners(text);
+}
+
 const FLUID_DEFS = [
   { key: 'oil', label: 'Oil', match: ['oil level', 'oil'] },
   { key: 'coolant', label: 'Coolant / water', match: ['water level', 'coolant', 'water'] },
@@ -94,6 +160,8 @@ export interface VehicleForecast {
   compliance: Array<{ kind: string; due: string | null; days: number | null; status: 'ok' | 'soon' | 'overdue' | 'unknown' }>;
   fluids: Array<{ key: string; label: string; topUps: number; preps: number; milesBetween: number | null; status: 'ok' | 'watch' }>;
   tyres: { corners: CornerForecast[]; prepsWithTread: number };
+  /** Tyre replacements detected in service records (used to reset wear baselines). */
+  tyreEvents: TyreServiceEvent[];
   costs: {
     last12mTotal: number;
     perMile: number | null;
@@ -154,23 +222,51 @@ function wearRatePerMile(points: { mileage: number; tread: number }[]): number |
   return loss >= MIN_WEAR_RATE_PER_MILE ? loss : null; // below the noise floor → no usable rate
 }
 
-function computeCorner(corner: Corner, ordered: PrepSessionDoc[]): CornerForecast {
+function computeCorner(corner: Corner, ordered: PrepSessionDoc[], tyreEvents: TyreServiceEvent[]): CornerForecast {
   const pts: { mileage: number; tread: number; date: string }[] = [];
   for (const s of ordered) {
     const tread = readCornerTread(s, corner);
     if (tread == null) continue;
     pts.push({ mileage: Number(s.mileage), tread, date: s.date });
   }
-  // Detect tyre changes (tread jumps up) → reset wear baseline.
-  let resetCount = 0;
-  let segStart = 0;
+
+  // Reset boundaries: a new tyre resets the wear baseline. Detected two ways — a
+  // tread JUMP UP between preps, or a service record that fitted new tyres here.
+  const resetIdx = new Set<number>();
   for (let i = 1; i < pts.length; i++) {
-    if (pts[i].tread - pts[i - 1].tread > TREAD_RESET_JUMP_MM) { resetCount++; segStart = i; }
+    if (pts[i].tread - pts[i - 1].tread > TREAD_RESET_JUMP_MM) resetIdx.add(i);
   }
-  const segment = pts.slice(segStart);
-  const latest = pts.length ? pts[pts.length - 1] : null;
-  const currentTread = latest?.tread ?? null;
-  const rate = wearRatePerMile(segment.map((p) => ({ mileage: p.mileage, tread: p.tread })));
+  // Map each tyre-service event to the first reading at/after it (by mileage, else date).
+  let changedAfterLastReading = false;
+  for (const e of tyreEvents.filter((ev) => ev.corners.includes(corner))) {
+    let idx = -1;
+    for (let i = 0; i < pts.length; i++) {
+      const byMileage = e.mileage != null && Number.isFinite(pts[i].mileage) && pts[i].mileage >= e.mileage;
+      const byDate = e.mileage == null && e.date != null && pts[i].date >= e.date;
+      if (byMileage || byDate) { idx = i; break; }
+    }
+    if (idx >= 0) resetIdx.add(idx);
+    else if (pts.length > 0) changedAfterLastReading = true; // tyre fitted since the last reading
+  }
+
+  const segStart = resetIdx.size ? Math.max(...resetIdx) : 0;
+  const resetCount = resetIdx.size + (changedAfterLastReading ? 1 : 0);
+
+  // If a replacement is newer than every reading, the latest reading is the OLD
+  // tyre — don't show it as "current" (would false-alarm "replace now" on a fresh
+  // tyre). Report unknown until the next prep measures the new one.
+  let currentTread: number | null;
+  let rate: number | null;
+  if (changedAfterLastReading) {
+    currentTread = null;
+    rate = null;
+  } else {
+    const segment = pts.slice(segStart);
+    const latest = pts.length ? pts[pts.length - 1] : null;
+    currentTread = latest?.tread ?? null;
+    rate = wearRatePerMile(segment.map((p) => ({ mileage: p.mileage, tread: p.tread })));
+  }
+
   const milesTo = (threshold: number): number | null => {
     if (currentTread == null || rate == null || rate < MIN_WEAR_RATE_PER_MILE || currentTread <= threshold) return null;
     const miles = Math.round((currentTread - threshold) / rate);
@@ -249,8 +345,36 @@ export async function buildVehicleForecast(vehicleId: string): Promise<VehicleFo
     }
   }
 
+  // ── Tyre service events (cross-reference replacements to reset wear baselines) ──
+  // Full history (not the 12-month cost window) — a tyre can outlive a year.
+  const tyreEvents: TyreServiceEvent[] = [];
+  try {
+    const teRes = await query(
+      `SELECT service_date, mileage, name, notes, service_type
+         FROM vehicle_service_log
+        WHERE vehicle_id = $1
+          AND (service_type = 'tyre'
+               OR name ILIKE '%tyre%' OR notes ILIKE '%tyre%'
+               OR name ILIKE '%tire%' OR notes ILIKE '%tire%')
+        ORDER BY mileage ASC NULLS LAST, service_date ASC NULLS LAST`,
+      [vehicleId],
+    );
+    for (const r of teRes.rows) {
+      const corners = classifyTyreEvent(r.name || '', r.notes || '', r.service_type || '');
+      if (!corners || corners.length === 0) continue;
+      tyreEvents.push({
+        date: isoDate(r.service_date),
+        mileage: r.mileage != null && Number.isFinite(Number(r.mileage)) ? Number(r.mileage) : null,
+        corners,
+        description: String(r.name || 'Tyre service').trim(),
+      });
+    }
+  } catch (err) {
+    console.warn('[vehicle-forecast] tyre-event query failed:', err);
+  }
+
   // ── Tyres ──
-  const corners = CORNERS.map((c) => computeCorner(c, ordered));
+  const corners = CORNERS.map((c) => computeCorner(c, ordered, tyreEvents));
   const prepsWithTread = ordered.filter((s) => CORNERS.some((c) => readCornerTread(s, c) != null)).length;
 
   // ── Fluids — top-up frequency + miles-between ──
@@ -409,6 +533,7 @@ export async function buildVehicleForecast(vehicleId: string): Promise<VehicleFo
     compliance,
     fluids,
     tyres: { corners, prepsWithTread },
+    tyreEvents,
     costs: { last12mTotal: Math.round(last12mTotal * 100) / 100, perMile, serviceTotal: Math.round(serviceTotal * 100) / 100, fuelTotal: Math.round(fuelTotal * 100) / 100, recent },
     recurringIssues,
     prepSessions: [...ordered].reverse(), // newest-first for the frontend panel
