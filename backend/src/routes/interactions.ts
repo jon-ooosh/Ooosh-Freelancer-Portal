@@ -31,8 +31,9 @@ const createInteractionSchema = z.object({
   opportunity_id: z.string().uuid().optional().nullable(),
   venue_id: z.string().uuid().optional().nullable(),
   issue_id: z.string().uuid().optional().nullable(),
+  held_item_id: z.string().uuid().optional().nullable(),
   // Threading: if set, this is a reply. Server flattens to thread root and
-  // inherits the parent's anchor (job/person/org/venue/issue/opportunity).
+  // inherits the parent's anchor (job/person/org/venue/issue/held-item/opportunity).
   parent_interaction_id: z.string().uuid().optional().nullable(),
   // Attachments — files already uploaded via attachment_only=true
   attachments: z.array(attachmentSchema).optional().default([]),
@@ -66,7 +67,7 @@ const createInteractionSchema = z.object({
 // summary rows from job_issue_events instead of the chatter.)
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
-    const { person_id, organisation_id, job_id, venue_id, issue_id, page = '1', limit = '50' } = req.query;
+    const { person_id, organisation_id, job_id, venue_id, issue_id, held_item_id, page = '1', limit = '50' } = req.query;
     const offset = (parseInt(page as string) - 1) * parseInt(limit as string);
 
     let sql = `
@@ -82,13 +83,13 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     let paramIndex = 1;
 
     if (person_id) {
-      // Issue messages don't bubble to person timelines.
-      sql += ` AND i.person_id = $${paramIndex} AND i.issue_id IS NULL`;
+      // Issue + held-item messages don't bubble to person timelines.
+      sql += ` AND i.person_id = $${paramIndex} AND i.issue_id IS NULL AND i.held_item_id IS NULL`;
       params.push(person_id);
       paramIndex++;
     }
     if (organisation_id) {
-      sql += ` AND i.organisation_id = $${paramIndex} AND i.issue_id IS NULL`;
+      sql += ` AND i.organisation_id = $${paramIndex} AND i.issue_id IS NULL AND i.held_item_id IS NULL`;
       params.push(organisation_id);
       paramIndex++;
     }
@@ -96,8 +97,9 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       // Job timeline filters issue-scoped interactions out by default — the
       // IssueDetailPage owns that conversation. Caller can pass
       // include_issues=true to override (e.g. for a forensic "everything
-      // that touched this job" view).
-      sql += ` AND i.job_id = $${paramIndex}`;
+      // that touched this job" view). Held-item chatter never bubbles here —
+      // it lives on the held-item record's own discussion thread.
+      sql += ` AND i.job_id = $${paramIndex} AND i.held_item_id IS NULL`;
       params.push(job_id);
       paramIndex++;
       if (req.query.include_issues !== 'true') {
@@ -105,13 +107,18 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       }
     }
     if (venue_id) {
-      sql += ` AND i.venue_id = $${paramIndex} AND i.issue_id IS NULL`;
+      sql += ` AND i.venue_id = $${paramIndex} AND i.issue_id IS NULL AND i.held_item_id IS NULL`;
       params.push(venue_id);
       paramIndex++;
     }
     if (issue_id) {
       sql += ` AND i.issue_id = $${paramIndex}`;
       params.push(issue_id);
+      paramIndex++;
+    }
+    if (held_item_id) {
+      sql += ` AND i.held_item_id = $${paramIndex}`;
+      params.push(held_item_id);
       paramIndex++;
     }
 
@@ -284,7 +291,7 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
       next_chase_date, chase_alert_user_id, chase_alert_delivery, skip_chase_bump,
       attachments,
     } = req.body;
-    let { person_id, organisation_id, job_id, opportunity_id, venue_id, issue_id, parent_interaction_id } = req.body;
+    let { person_id, organisation_id, job_id, opportunity_id, venue_id, issue_id, held_item_id, parent_interaction_id } = req.body;
 
     // Threading: if this is a reply, look up the parent and inherit its
     // anchor. We FLATTEN to the thread root — replies always hang off root,
@@ -294,7 +301,7 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
     if (parent_interaction_id) {
       const parentResult = await query(
         `SELECT id, parent_interaction_id, person_id, organisation_id, job_id,
-                opportunity_id, venue_id, issue_id, created_by, mentioned_user_ids
+                opportunity_id, venue_id, issue_id, held_item_id, created_by, mentioned_user_ids
          FROM interactions WHERE id = $1`,
         [parent_interaction_id]
       );
@@ -309,7 +316,7 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
         parent_interaction_id = parentRow!.parent_interaction_id as string;
         // Re-fetch the actual root for anchor inheritance.
         const rootResult = await query(
-          `SELECT id, person_id, organisation_id, job_id, opportunity_id, venue_id, issue_id,
+          `SELECT id, person_id, organisation_id, job_id, opportunity_id, venue_id, issue_id, held_item_id,
                   created_by, mentioned_user_ids
            FROM interactions WHERE id = $1`,
           [parent_interaction_id]
@@ -325,6 +332,7 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
       opportunity_id = (parentRow!.opportunity_id as string | null) ?? null;
       venue_id = (parentRow!.venue_id as string | null) ?? null;
       issue_id = (parentRow!.issue_id as string | null) ?? null;
+      held_item_id = (parentRow!.held_item_id as string | null) ?? null;
     }
 
     // If linked to a job, snapshot current status for tracking
@@ -354,13 +362,13 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
 
     const result = await query(
       `INSERT INTO interactions (type, content, person_id, organisation_id, job_id, opportunity_id, venue_id,
-        issue_id, parent_interaction_id, mentioned_user_ids, files, created_by,
+        issue_id, held_item_id, parent_interaction_id, mentioned_user_ids, files, created_by,
         job_status_at_creation, job_status_name_at_creation, pipeline_status_at_creation,
         chase_method, chase_response)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14, $15, $16, $17)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14, $15, $16, $17, $18)
        RETURNING *`,
       [type, content, person_id, organisation_id, job_id, opportunity_id, venue_id,
-        issue_id || null, parent_interaction_id || null,
+        issue_id || null, held_item_id || null, parent_interaction_id || null,
         mentioned_user_ids, JSON.stringify(filesPayload), req.user!.id,
         jobStatusAt, jobStatusNameAt, pipelineStatusAt,
         chase_method || null, chase_response || null]
@@ -438,20 +446,35 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
     );
     const creatorName = creatorResult.rows[0]?.name || 'Someone';
 
+    // Held-item discussions deep-link back to the holding page with the item
+    // pre-opened. Lost property lives on its own view; everything else on the
+    // main "Held for Clients" page. One cheap lookup to pick the right page.
+    let heldItemUrl: string | null = null;
+    if (held_item_id) {
+      const hi = await query(`SELECT kind FROM held_items WHERE id = $1`, [held_item_id]);
+      const kind = hi.rows[0]?.kind;
+      heldItemUrl = kind === 'lost_property'
+        ? `/holding/lost-property?item=${held_item_id}`
+        : `/holding?item=${held_item_id}`;
+    }
+
     // Resolve the entity anchor that mentions / thread re-notifications point at.
-    // Issue-anchored interactions point at the IssueDetailPage rather than a
-    // generic entity page.
+    // Issue- and held-item-anchored interactions point at their own surfaces
+    // rather than a generic entity page.
     const entityType = issue_id ? 'job_issues'
+      : held_item_id ? 'held_items'
       : person_id ? 'people'
       : organisation_id ? 'organisations'
       : venue_id ? 'venues'
       : job_id ? 'jobs'
       : null;
-    const entityId = issue_id || person_id || organisation_id || venue_id || job_id || null;
+    const entityId = issue_id || held_item_id || person_id || organisation_id || venue_id || job_id || null;
 
     // Build action URL for click-through navigation. Issue messages route to
-    // the IssueDetailPage; otherwise default to the entity's timeline tab.
+    // the IssueDetailPage, held-item messages to the holding page; otherwise
+    // default to the entity's timeline tab.
     const actionUrl = issue_id ? `/operations/problems/${issue_id}`
+      : heldItemUrl ? heldItemUrl
       : job_id ? `/jobs/${job_id}?tab=timeline`
       : person_id ? `/people/${person_id}`
       : organisation_id ? `/organisations/${organisation_id}`

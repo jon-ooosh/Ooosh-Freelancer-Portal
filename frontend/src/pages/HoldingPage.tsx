@@ -6,6 +6,9 @@ import { NotifyClientModal } from '../components/holding/NotifyClientModal';
 import { HeldItemForm } from '../components/holding/HeldItemForm';
 import { locationLabelOrDash } from '../components/holding/format';
 import { ChaseReviewPanel } from '../components/holding/ChaseReviewPanel';
+import ThreadView from '../components/messaging/ThreadView';
+import { MentionComposer } from '../components/messaging/MentionComposer';
+import { useAttachments } from '../components/messaging/Attachments';
 import type { HeldItem, HeldItemKind, HeldItemLocation } from '../../../shared/types';
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -117,7 +120,22 @@ export default function HoldingPage({ view }: { view: View }) {
   useEffect(() => { load(); }, [load]);
   useEffect(() => { api.get<{ data: HeldItemLocation[] }>('/holding/locations').then((r) => setLocations(r.data)).catch(() => {}); }, []);
 
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  // Deep-link: ?item=<id> (e.g. from a discussion @mention notification)
+  // pre-opens that held item's detail modal. Clear it again on close so a
+  // refresh doesn't keep re-opening.
+  const itemParam = searchParams.get('item');
+  useEffect(() => { if (itemParam) setDetailId(itemParam); }, [itemParam]);
+  const closeDetail = useCallback(() => {
+    setDetailId(null);
+    if (searchParams.has('item')) {
+      const next = new URLSearchParams(searchParams);
+      next.delete('item');
+      setSearchParams(next, { replace: true });
+    }
+  }, [searchParams, setSearchParams]);
+
   const kinds = VIEW_KINDS[view];
   const rows = items.filter((i) => kinds.includes(i.kind) && (!unknownOnly || i.owner_unknown));
   const openCount = items.filter((i) => kinds.includes(i.kind) && !['collected', 'given_to_client', 'shipped_back', 'disposed', 'cancelled'].includes(i.status)).length;
@@ -231,7 +249,7 @@ export default function HoldingPage({ view }: { view: View }) {
       </div>
 
       {creating && <CreateModal view={view} locations={locations} onClose={() => setCreating(false)} onSaved={() => { setCreating(false); load(); }} />}
-      {detailId && <DetailModal id={detailId} locations={locations} onClose={() => setDetailId(null)} onChange={load} />}
+      {detailId && <DetailModal id={detailId} locations={locations} onClose={closeDetail} onChange={load} />}
     </div>
   );
 }
@@ -367,6 +385,11 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
             )}
           </div>
         )}
+
+        {/* Discussion — internal @mentionable thread on this item. Separate
+            from the client-facing "Notify client". Mentions fire bell/email
+            per each user's notification preference. */}
+        <HeldItemDiscussion heldItemId={id} />
       </div>
       {notifyOpen && (
         <NotifyClientModal item={h} onClose={() => setNotifyOpen(false)}
@@ -378,6 +401,91 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
 
 function Field({ label, value }: { label: string; value: string }) {
   return <div><p className="text-xs text-slate-400">{label}</p><p className="text-slate-800 capitalize">{value}</p></div>;
+}
+
+// Internal @mentionable discussion thread on a held item. Reuses the shared
+// messaging primitives (same as IssueDetailPage). Mentions fire the standard
+// mention notification (bell + email per the @-mentioned user's preference)
+// with a deep-link back to this item. Distinct from "Notify client" — this is
+// staff-to-staff, never reaches the client.
+interface DiscussionRow { id: string; parent_interaction_id: string | null; created_at: string }
+function HeldItemDiscussion({ heldItemId }: { heldItemId: string }) {
+  const [rows, setRows] = useState<DiscussionRow[]>([]);
+  const [comment, setComment] = useState('');
+  const [mentionedIds, setMentionedIds] = useState<string[]>([]);
+  const [posting, setPosting] = useState(false);
+  const attach = useAttachments();
+
+  const load = useCallback(async () => {
+    try {
+      const r = await api.get<{ data: DiscussionRow[] }>(`/interactions?held_item_id=${heldItemId}&limit=100`);
+      setRows(r.data);
+    } catch { /* non-fatal — thread just stays empty */ }
+  }, [heldItemId]);
+  useEffect(() => { load(); }, [load]);
+
+  async function post() {
+    const trimmed = comment.trim();
+    if (!trimmed && attach.pending.length === 0) return;  // allow attachment-only posts
+    setPosting(true);
+    try {
+      await api.post('/interactions', {
+        type: 'note',
+        content: trimmed || '(attachment)',
+        held_item_id: heldItemId,
+        attachments: attach.payload(),
+        mentioned_user_ids: mentionedIds,
+      });
+      setComment(''); setMentionedIds([]); attach.clear();
+      load();
+    } catch (e) { console.error('Held-item note failed:', e); }
+    finally { setPosting(false); }
+  }
+
+  // Top-level comments only; each <ThreadView> fetches + renders its own replies.
+  const topComments = rows
+    .filter((r) => !r.parent_interaction_id)
+    .sort((a, b) => a.created_at.localeCompare(b.created_at));
+
+  return (
+    <div className="pt-3 border-t">
+      <h4 className="text-xs font-semibold text-slate-500 mb-2">Discussion</h4>
+      <div className="space-y-2">
+        {topComments.length === 0 && <p className="text-xs text-slate-400 italic">No notes yet. Add one below — @mention a colleague to ping them.</p>}
+        {topComments.map((c) => (
+          <div key={c.id} className="border border-slate-200 rounded-lg p-2 bg-slate-50/40">
+            <ThreadView interactionId={c.id} onReplied={load} />
+          </div>
+        ))}
+      </div>
+      <div className="mt-3">
+        <MentionComposer
+          value={comment}
+          onChange={setComment}
+          mentionedIds={mentionedIds}
+          onMentionedIdsChange={setMentionedIds}
+          attach={attach}
+          placeholder="Add a note… (type @ to mention, paste images to attach)"
+          rows={2}
+          disabled={posting}
+          footer={
+            <div className="flex justify-between items-center mt-2 gap-2">
+              <label className="text-[11px] text-slate-500 cursor-pointer hover:text-slate-700">
+                📎 Attach file
+                <input type="file" multiple className="hidden"
+                  onChange={(e) => { if (e.target.files) attach.addFiles(e.target.files); e.target.value = ''; }} />
+              </label>
+              <button onClick={post}
+                disabled={(!comment.trim() && attach.pending.length === 0) || posting || attach.hasInFlight}
+                className="px-3 py-1.5 text-xs bg-[#7B5EA7] text-white rounded-lg disabled:opacity-50">
+                {posting ? 'Posting…' : attach.hasInFlight ? 'Uploading…' : 'Post note'}
+              </button>
+            </div>
+          }
+        />
+      </div>
+    </div>
+  );
 }
 
 const dstr = (d: string | null | undefined) => (d ? new Date(d).toLocaleDateString('en-GB') : null);

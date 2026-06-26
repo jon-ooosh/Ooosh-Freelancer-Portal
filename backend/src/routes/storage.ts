@@ -16,7 +16,7 @@ import { z } from 'zod';
 import rateLimit from 'express-rate-limit';
 import { randomBytes } from 'node:crypto';
 import { query, getClient } from '../config/database';
-import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
+import { authenticate, authorize, AuthRequest, STAFF_ROLES, MANAGER_ROLES } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
 import { isR2Configured, uploadToR2 } from '../config/r2';
@@ -26,7 +26,10 @@ import { encrypt, tryDecrypt, isEncryptionConfigured } from '../services/encrypt
 
 const router = Router();
 
-const ADMIN_MANAGER = ['admin', 'manager'] as const;
+// Storage management actions (rooms create/edit/reorder, tenancy reorder, rate
+// changes, T&Cs versions). Manager tier = admin + manager + weekend_manager so
+// the weekend team isn't blocked when admin/manager are off.
+const ADMIN_MANAGER = MANAGER_ROLES;
 
 // ── Door-code encryption (migration 121, see docs/STORAGE-CLIENTS-SPEC.md §9) ──
 // Encrypt-at-rest for the per-tenancy access_code. When the key is configured
