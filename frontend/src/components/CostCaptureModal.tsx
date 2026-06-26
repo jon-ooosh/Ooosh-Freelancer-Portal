@@ -1184,7 +1184,25 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
           </div>
         </div>
 
-        <div className="flex items-center justify-between gap-2 px-6 py-4 border-t border-gray-200">
+        <div className="px-6 py-4 border-t border-gray-200 space-y-3">
+          {/* Xero transparency: paid costs sync automatically on save (Spend
+              Money); pay-later bills wait for approval before they post. Makes
+              the behaviour visible — the push itself is unchanged. */}
+          {(() => {
+            const serviceOnlySave = serviceOnlyEligible && (vatMode === 'reclaim' ? Number(amountNet) <= 0 : Number(amountGross) <= 0);
+            if (serviceOnlySave) return null;
+            const isBillMethod = BILL_METHODS.includes(paymentMethod);
+            return (
+              <p className="text-xs text-gray-500">
+                {isBillMethod ? (
+                  <>💡 <strong>Save cost</strong> records this bill awaiting approval; <strong>Approve &amp; save</strong> posts it to Xero now.</>
+                ) : (
+                  <>✓ This paid cost syncs to Xero automatically on save (Spend Money). The Xero status shows on its row in the Costs list.</>
+                )}
+              </p>
+            );
+          })()}
+          <div className="flex items-center justify-between gap-2">
           {!isEdit && onSavedAndSplit ? (
             <label className="flex items-center gap-2 text-sm text-gray-600 cursor-pointer" title="One invoice covering several jobs — split the amount across them after saving">
               <input type="checkbox" checked={splitAfterSave} onChange={(e) => setSplitAfterSave(e.target.checked)} />
@@ -1204,6 +1222,7 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
             className="px-4 py-2 text-sm text-white bg-purple-600 hover:bg-purple-700 rounded-md disabled:opacity-50">
             {saving ? 'Saving…' : isEdit ? (wantsService ? 'Save changes + service record' : 'Save changes') : serviceOnlyEligible && (vatMode === 'reclaim' ? Number(amountNet) <= 0 : Number(amountGross) <= 0) ? 'Save service record' : wantsService ? 'Save cost + service record' : 'Save cost'}
           </button>
+          </div>
           </div>
         </div>
       </div>
