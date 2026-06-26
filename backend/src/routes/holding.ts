@@ -505,13 +505,23 @@ const linkSchema = z.object({
   client_name_text: z.string().optional().nullable(),
   job_id: z.string().uuid().optional().nullable(),
   hh_job_number: z.number().int().optional().nullable(),
+  // edit=true: the caller is the authoritative owner/job editor — SET fields
+  // directly (so values can be CHANGED or CLEARED), not COALESCE-backfilled.
+  // Omitted/false keeps the original backfill-only behaviour (fill NULLs only).
+  edit: z.boolean().optional(),
 });
 
 router.post('/:id/link', validate(linkSchema), async (req: AuthRequest, res: Response) => {
   const b = req.body as z.infer<typeof linkSchema>;
+  const edit = b.edit === true;
+
+  // Remember the current job so we can re-sync its merch pip if the link moves.
+  const prev = await query(`SELECT job_id FROM held_items WHERE id = $1`, [req.params.id]);
+  if (prev.rows.length === 0) { res.status(404).json({ error: 'Held item not found' }); return; }
+  const oldJobId = prev.rows[0].job_id as string | null;
 
   // If an HH job number was supplied, resolve the OP job + its client so we can
-  // backfill both the job link and the owner from one entry (HH number first).
+  // derive both the job link and the owner from one entry (HH number first).
   const jobCtx = await resolveJobContext(b.hh_job_number);
   const jobId = b.job_id ?? jobCtx.jobId;
   // An explicitly-picked owner always wins; otherwise derive the org from the job.
@@ -519,22 +529,37 @@ router.post('/:id/link', validate(linkSchema), async (req: AuthRequest, res: Res
   const ownerOrgId = b.owner_organisation_id ?? (ownerGiven ? null : jobCtx.clientOrgId);
   const clientNameText = b.client_name_text ?? ((ownerGiven || ownerOrgId) ? null : jobCtx.clientName);
 
-  // Resolve the job's out_date so forward-looking kinds get a needed_by deadline
+  // edit=true → authoritative SET (change/clear). Otherwise COALESCE backfill.
   const result = await query(
-    `UPDATE held_items SET
-        owner_person_id       = COALESCE($1, owner_person_id),
-        owner_organisation_id = COALESCE($2, owner_organisation_id),
-        client_name_text      = COALESCE($3, client_name_text),
-        job_id                = COALESCE($4, job_id),
-        hh_job_number         = COALESCE($5, hh_job_number),
-        owner_unknown         = CASE
-          WHEN $1 IS NOT NULL OR $2 IS NOT NULL THEN false ELSE owner_unknown END,
-        needed_by             = CASE
-          WHEN $4 IS NOT NULL AND kind IN ('incoming','temp_storage') AND needed_by IS NULL
-          THEN (SELECT out_date::date FROM jobs WHERE id = $4)
-          ELSE needed_by END,
-        updated_at            = NOW()
-     WHERE id = $6 RETURNING *`,
+    edit
+      ? `UPDATE held_items SET
+            owner_person_id       = $1,
+            owner_organisation_id = $2,
+            client_name_text      = $3,
+            job_id                = $4,
+            hh_job_number         = $5,
+            owner_unknown         = CASE
+              WHEN $1 IS NOT NULL OR $2 IS NOT NULL OR $3 IS NOT NULL THEN false ELSE true END,
+            needed_by             = CASE
+              WHEN $4 IS NOT NULL AND kind IN ('incoming','temp_storage') AND needed_by IS NULL
+              THEN (SELECT out_date::date FROM jobs WHERE id = $4)
+              ELSE needed_by END,
+            updated_at            = NOW()
+         WHERE id = $6 RETURNING *`
+      : `UPDATE held_items SET
+            owner_person_id       = COALESCE($1, owner_person_id),
+            owner_organisation_id = COALESCE($2, owner_organisation_id),
+            client_name_text      = COALESCE($3, client_name_text),
+            job_id                = COALESCE($4, job_id),
+            hh_job_number         = COALESCE($5, hh_job_number),
+            owner_unknown         = CASE
+              WHEN $1 IS NOT NULL OR $2 IS NOT NULL THEN false ELSE owner_unknown END,
+            needed_by             = CASE
+              WHEN $4 IS NOT NULL AND kind IN ('incoming','temp_storage') AND needed_by IS NULL
+              THEN (SELECT out_date::date FROM jobs WHERE id = $4)
+              ELSE needed_by END,
+            updated_at            = NOW()
+         WHERE id = $6 RETURNING *`,
     [
       b.owner_person_id ?? null, ownerOrgId, clientNameText,
       jobId, b.hh_job_number ?? null, req.params.id,
@@ -544,10 +569,13 @@ router.post('/:id/link', validate(linkSchema), async (req: AuthRequest, res: Res
   const item = result.rows[0];
   await logAudit(req.user!.id, 'held_items', item.id, 'update', null, item);
 
-  if (item.job_id) {
-    await logToJobTimeline(item, req.user!.id, 'linked');
-    await syncMerchRequirementStatus(item.job_id);
-  }
+  // Re-sync the merch pip on BOTH the old and new job (a re-point leaves the
+  // old job's pip stale otherwise).
+  const jobsToSync = new Set<string>();
+  if (oldJobId) jobsToSync.add(oldJobId);
+  if (item.job_id) jobsToSync.add(item.job_id);
+  for (const jid of jobsToSync) await syncMerchRequirementStatus(jid);
+  if (item.job_id) await logToJobTimeline(item, req.user!.id, 'linked');
 
   res.json({ data: item });
 });
