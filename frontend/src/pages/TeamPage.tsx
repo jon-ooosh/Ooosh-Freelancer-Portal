@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { hasManagerRole } from '../lib/roles';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 
@@ -38,7 +39,7 @@ export default function TeamPage() {
   const [showForm, setShowForm] = useState(false);
   const [showInactive, setShowInactive] = useState(false);
   const currentUser = useAuthStore((s) => s.user);
-  const isAdmin = currentUser?.role === 'admin' || currentUser?.role === 'manager';
+  const isAdmin = hasManagerRole(currentUser?.role);
 
   // New user form
   const [firstName, setFirstName] = useState('');

@@ -5,6 +5,7 @@
  */
 
 import { useState, useEffect } from 'react'
+import { hasManagerRole } from '../../../lib/roles'
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { vmPath } from '../config/route-paths'
@@ -225,7 +226,7 @@ export function VehicleSettingsPage() {
   const queryClient = useQueryClient()
   const { data: vehicle, isLoading, isError } = useVehicle(id)
   const opAuth = getOpAuthState()
-  const isAdmin = opAuth?.userRole === 'admin' || opAuth?.userRole === 'manager'
+  const isAdmin = hasManagerRole(opAuth?.userRole)
   // Sale figures (price/notes) are admin-only; sold date + removal checklist
   // are operational so any admin/manager who can reach this page may set them.
   const isStrictAdmin = opAuth?.userRole === 'admin'

@@ -6,10 +6,10 @@
  *      single "N chases ready to review" nudge that deep-links to the review
  *      queue. We do NOT auto-send the client chase email; a human approves the
  *      batch on the review page (spec §7B). Deduped to once per ~20h.
- *   2. Temp-storage hold-until — temp items whose hold_until is within 3 days,
- *      reminding staff the hold is ending. Per-cycle dedup via
- *      hold_until_reminder_sent_for (stamps the hold_until it fired for, so it
- *      re-fires if the date is moved forward).
+ *   2. Hold-until / review — delivery + temp-storage items whose hold_until is
+ *      within 3 days, reminding staff the hold/review date is approaching.
+ *      Per-cycle dedup via hold_until_reminder_sent_for (stamps the hold_until
+ *      it fired for, so it re-fires if the date is moved forward).
  *
  * See docs/HOLDING-MODULE-SPEC.md §7.
  */
@@ -79,14 +79,16 @@ export async function runHoldingReminders(): Promise<HoldingReminderResult> {
     }
   }
 
-  // ── 2. Temp-storage hold-until reminders ──────────────────────────────────
+  // ── 2. Hold-until / review reminders ──────────────────────────────────────
+  // Delivery + temp-storage items: a hold/review date lets staff park "deal
+  // with this by X" on anything we're holding (the two kinds blur in practice).
   const holds = await query(
-    `SELECT h.id, h.description, h.hold_until, h.hh_job_number,
+    `SELECT h.id, h.kind, h.description, h.hold_until, h.hh_job_number,
             (p.first_name || ' ' || p.last_name) AS person_name, o.name AS org_name, h.client_name_text
      FROM held_items h
      LEFT JOIN people p ON p.id = h.owner_person_id
      LEFT JOIN organisations o ON o.id = h.owner_organisation_id
-     WHERE h.kind = 'temp_storage'
+     WHERE h.kind IN ('incoming','temp_storage')
        AND h.status NOT IN ('collected','given_to_client','shipped_back','disposed','cancelled')
        AND h.hold_until IS NOT NULL
        AND h.hold_until <= CURRENT_DATE + ($1 || ' days')::interval
@@ -97,9 +99,9 @@ export async function runHoldingReminders(): Promise<HoldingReminderResult> {
     const who = h.person_name || h.org_name || h.client_name_text || 'a client';
     const when = new Date(h.hold_until).toLocaleDateString('en-GB');
     const overdue = new Date(h.hold_until) < new Date();
-    const title = `Temp storage ${overdue ? 'hold ended' : 'hold ending'}: ${h.description || 'item'}`;
+    const title = `Hold/review ${overdue ? 'date passed' : 'date approaching'}: ${h.description || 'item'}`;
     const content = `${who} — hold until ${when}${overdue ? ' (passed)' : ''}. Decide: collect / return / extend.`;
-    await notify(admins, title, content, h.id, '/holding?view=held', overdue ? 'high' : 'normal');
+    await notify(admins, title, content, h.id, `/holding?item=${h.id}`, overdue ? 'high' : 'normal');
     await query(`UPDATE held_items SET hold_until_reminder_sent_for = hold_until WHERE id = $1`, [h.id]);
     result.holdUntil += 1;
   }

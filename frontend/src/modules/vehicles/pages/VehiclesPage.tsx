@@ -1,4 +1,5 @@
 import { Link, useSearchParams } from 'react-router-dom'
+import { hasManagerRole } from '../../../lib/roles'
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useFilteredVehicles } from '../hooks/useVehicles'
@@ -476,7 +477,7 @@ export function VehiclesPage() {
   )
   const [showAddForm, setShowAddForm] = useState(false)
   const opAuth = getOpAuthState()
-  const isAdmin = opAuth?.userRole === 'admin' || opAuth?.userRole === 'manager'
+  const isAdmin = hasManagerRole(opAuth?.userRole)
   // Finance is admin-only — the Finance board view + finance fields on the add
   // form only render for strict admins.
   const isStrictAdmin = opAuth?.userRole === 'admin'

@@ -1186,6 +1186,9 @@ export interface HeldItem {
   found_vehicle_reg?: string | null;
   received_by_name?: string | null;
 
+  // Count of discussion-thread interactions on this item (SELECT_WITH_JOINS).
+  discussion_count?: number;
+
   // Computed chase fields (lost property) — derived in SELECT_WITH_JOINS so the
   // list, detail card and review queue all agree. null for non-lost-property.
   next_chase_due?: string | null;

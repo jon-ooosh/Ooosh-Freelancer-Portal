@@ -183,6 +183,7 @@ const SELECT_WITH_JOINS = `
          j.job_name                                AS job_name,
          fv.reg                                    AS found_vehicle_reg,
          (rbp.first_name || ' ' || rbp.last_name)  AS received_by_name,
+         (SELECT COUNT(*)::int FROM interactions i WHERE i.held_item_id = h.id) AS discussion_count,
          -- Chase derivation — single source of truth; mirrors the daily scan in
          -- services/holding-reminders.ts so the list, detail card and review
          -- queue can never disagree about "what's due".
