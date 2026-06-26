@@ -1620,15 +1620,32 @@ router.get('/jobs/going-out', async (req: AuthRequest, res: Response) => {
     const today = new Date().toISOString().split('T')[0];
     const tomorrow = new Date(Date.now() + 86400000).toISOString().split('T')[0];
 
+    // The third OR clause keeps STAGGERED MULTI-VAN jobs visible: a job with
+    // more than one van whose vans leave on different days. Once the first
+    // van goes out, the job's out_date is in the past and the plain window
+    // drops it — making the remaining van unbookable from this picker
+    // (job 15411, Jun 2026: HLR left day 1, HLU collected day 2, only HLR
+    // showed). We retain a job that has already started, isn't back yet, and
+    // still has a van slot in a pre-book-out state. Dual-match join
+    // (job_id OR hirehop_job_id) because staff-allocation rows carry only
+    // hirehop_job_id — job_id stays NULL until a hire form is submitted.
     const result = await query(
-      `SELECT * FROM jobs
-       WHERE is_deleted = false
-         AND status = ANY($1)
+      `SELECT DISTINCT j.* FROM jobs j
+       LEFT JOIN vehicle_hire_assignments vha
+         ON (vha.job_id = j.id OR vha.hirehop_job_id = j.hh_job_number)
+         AND vha.status IN ('soft', 'confirmed')
+       WHERE j.is_deleted = false
+         AND j.status = ANY($1)
          AND (
-           (out_date IS NOT NULL AND out_date::date >= $2::date AND out_date::date <= $3::date)
-           OR (out_date IS NULL AND job_date IS NOT NULL AND job_date::date >= $2::date AND job_date::date <= $3::date)
+           (j.out_date IS NOT NULL AND j.out_date::date >= $2::date AND j.out_date::date <= $3::date)
+           OR (j.out_date IS NULL AND j.job_date IS NOT NULL AND j.job_date::date >= $2::date AND j.job_date::date <= $3::date)
+           OR (
+             vha.id IS NOT NULL
+             AND COALESCE(j.out_date, j.job_date)::date < $2::date
+             AND COALESCE(j.return_date, j.job_end)::date >= $2::date
+           )
          )
-       ORDER BY out_date ASC NULLS LAST, job_date ASC NULLS LAST`,
+       ORDER BY j.out_date ASC NULLS LAST, j.job_date ASC NULLS LAST`,
       [ACTIVE_STATUSES, today, tomorrow]
     );
 
@@ -1677,15 +1694,27 @@ router.get('/jobs/upcoming', async (req: AuthRequest, res: Response) => {
     const today = new Date().toISOString().split('T')[0];
     const endDate = new Date(Date.now() + days * 86400000).toISOString().split('T')[0];
 
+    // See /jobs/going-out above for the staggered multi-van rationale. Same
+    // shape here so the Allocations page (which reads /jobs/upcoming) keeps a
+    // part-way-through multi-van job visible — the second van can be
+    // allocated and booked out even after the first has gone out.
     const result = await query(
-      `SELECT * FROM jobs
-       WHERE is_deleted = false
-         AND status = ANY($1)
+      `SELECT DISTINCT j.* FROM jobs j
+       LEFT JOIN vehicle_hire_assignments vha
+         ON (vha.job_id = j.id OR vha.hirehop_job_id = j.hh_job_number)
+         AND vha.status IN ('soft', 'confirmed')
+       WHERE j.is_deleted = false
+         AND j.status = ANY($1)
          AND (
-           (out_date IS NOT NULL AND out_date::date >= $2::date AND out_date::date <= $3::date)
-           OR (out_date IS NULL AND job_date IS NOT NULL AND job_date::date >= $2::date AND job_date::date <= $3::date)
+           (j.out_date IS NOT NULL AND j.out_date::date >= $2::date AND j.out_date::date <= $3::date)
+           OR (j.out_date IS NULL AND j.job_date IS NOT NULL AND j.job_date::date >= $2::date AND j.job_date::date <= $3::date)
+           OR (
+             vha.id IS NOT NULL
+             AND COALESCE(j.out_date, j.job_date)::date < $2::date
+             AND COALESCE(j.return_date, j.job_end)::date >= $2::date
+           )
          )
-       ORDER BY out_date ASC NULLS LAST, job_date ASC NULLS LAST`,
+       ORDER BY j.out_date ASC NULLS LAST, j.job_date ASC NULLS LAST`,
       [ACTIVE_STATUSES, today, endDate]
     );
 
