@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { hasManagerRole } from '../lib/roles';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { api } from '../services/api';
 import SlidePanel from '../components/SlidePanel';
@@ -114,7 +115,7 @@ export default function OrganisationDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const user = useAuthStore((s) => s.user);
-  const isAdmin = user?.role === 'admin' || user?.role === 'manager';
+  const isAdmin = hasManagerRole(user?.role);
 
   const [org, setOrg] = useState<OrgDetail | null>(null);
   const [dnoReason, setDnoReason] = useState('');

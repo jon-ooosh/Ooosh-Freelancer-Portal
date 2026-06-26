@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { hasManagerRole } from '../lib/roles';
 import { useParams, useNavigate, Link, useLocation, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { getPaymentState, PAYMENT_STATE_LABELS, PAYMENT_STATE_CLASSES } from '../services/paymentState';
@@ -2922,7 +2923,7 @@ export default function JobDetailPage() {
                 >
                   Already reopened &rarr; View new booking
                 </Link>
-              ) : (user?.role === 'admin' || user?.role === 'manager') ? (
+              ) : hasManagerRole(user?.role) ? (
                 <button
                   onClick={async () => {
                     if (!window.confirm('Re-open this cancelled job as a new booking? The original job will stay cancelled for audit purposes.')) return;
@@ -3720,7 +3721,7 @@ export default function JobDetailPage() {
             )}
             {/* Pre-Hire Review — admin/manager only, confirmed/prepping/prepped.
                 Faded grey when sent within the last 24h (still clickable). */}
-            {(user?.role === 'admin' || user?.role === 'manager')
+            {hasManagerRole(user?.role)
               && (job.pipeline_status === 'confirmed'
                   || job.pipeline_status === 'prepping'
                   || job.pipeline_status === 'prepped') && (() => {

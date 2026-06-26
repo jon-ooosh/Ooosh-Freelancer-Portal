@@ -10,6 +10,7 @@
  * Capture is manual (CostCaptureModal); AI extraction is a fast-follow.
  */
 import { useState, useEffect, useCallback, useMemo } from 'react';
+import { hasManagerRole } from '../lib/roles';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
@@ -121,7 +122,7 @@ export default function CostsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const { user } = useAuthStore();
   const role = user?.role || '';
-  const isManager = role === 'admin' || role === 'manager';
+  const isManager = hasManagerRole(role);
   const isAdmin = role === 'admin';
 
   const [view, setView] = useState<ViewMode>((searchParams.get('view') as ViewMode) || 'all');

@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, ReactNode } from 'react';
+import { hasManagerRole } from '../lib/roles';
 import { useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
@@ -175,7 +176,7 @@ export default function StoragePage() {
   const role = useAuthStore((s) => s.user?.role) || '';
   // Manager tier (admin + manager + weekend_manager) can manage rooms,
   // tenancies, rates and T&Cs — mirrors MANAGER_ROLES on the backend.
-  const isAdminManager = role === 'admin' || role === 'manager' || role === 'weekend_manager';
+  const isAdminManager = hasManagerRole(role);
   const [params, setParams] = useSearchParams();
   const tab = (TABS.includes(params.get('tab') as Tab) ? params.get('tab') : 'tenancies') as Tab;
   const setTab = (t: Tab) => setParams({ tab: t });

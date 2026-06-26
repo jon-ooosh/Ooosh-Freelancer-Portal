@@ -63,7 +63,13 @@ export function authorize(...allowedRoles: AuthUser['role'][]) {
       return;
     }
 
-    if (!allowedRoles.includes(req.user.role)) {
+    // weekend_manager has IDENTICAL privileges to manager (jon, Jun 2026 —
+    // they're one privilege level in our eyes). Accept it ANYWHERE manager is
+    // allowed, so callers never need to spell out weekend_manager alongside
+    // manager. Purely additive — never removes access a route already granted.
+    const allowed = allowedRoles.includes(req.user.role)
+      || (req.user.role === 'weekend_manager' && allowedRoles.includes('manager'));
+    if (!allowed) {
       res.status(403).json({ error: 'Insufficient permissions' });
       return;
     }

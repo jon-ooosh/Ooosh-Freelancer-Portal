@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { hasManagerRole } from '../lib/roles';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
@@ -86,7 +87,7 @@ export default function PersonDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const user = useAuthStore((s) => s.user);
-  const isAdmin = user?.role === 'admin' || user?.role === 'manager';
+  const isAdmin = hasManagerRole(user?.role);
 
   const [person, setPerson] = useState<PersonDetail | null>(null);
   const [dnoReason, setDnoReason] = useState('');

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { hasManagerRole } from '../lib/roles';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
@@ -344,7 +345,7 @@ export default function DriverDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const user = useAuthStore((s) => s.user);
-  const canEdit = user?.role === 'admin' || user?.role === 'manager';
+  const canEdit = hasManagerRole(user?.role);
 
   const [driver, setDriver] = useState<DriverDetail | null>(null);
   const [hireHistory, setHireHistory] = useState<HireHistoryItem[]>([]);

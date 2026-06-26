@@ -12,6 +12,7 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
+import { hasManagerRole } from '../lib/roles';
 import { useSearchParams, useParams, useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
@@ -509,7 +510,7 @@ export default function IssuesPage() {
   const navigate = useNavigate();
 
   const user = useAuthStore(s => s.user);
-  const canTriage = user?.role === 'admin' || user?.role === 'manager';
+  const canTriage = hasManagerRole(user?.role);
 
   const statusFilter = searchParams.get('status') || 'open'; // default: hide done/wont_fix
   const categoryFilter = searchParams.get('category') || '';
