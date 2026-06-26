@@ -59,6 +59,8 @@ Extraction rules:
 - VAT: ONLY treat the cost as VAT-bearing if the document explicitly shows a VAT amount or a VAT line/number. Many UK sole-traders and freelancers are not VAT-registered and their invoices show NO VAT — for those, set amount_vat to 0, amount_net equal to amount_gross, and vat_treatment to "no_vat". When a VAT amount IS shown, set vat_treatment to "standard" and return the actual gross/net/vat from the document. NEVER invent or assume 20% VAT that isn't printed.
 - If only a gross total is visible and no VAT is shown, treat it as no_vat (net = gross, vat = 0).
 - invoice_number: the supplier's invoice/receipt reference as printed (e.g. "INV-10472", "138106", "SI-2024-0091") — usually labelled "Invoice No", "Invoice #", "Reference", "Receipt No" or similar, often near the date in the header. Return it exactly as printed (keep any prefix). Null when there genuinely isn't one (common on fuel/till receipts). Do NOT use the order number, customer number, account number, or our job number.
+- vehicle_reg: the UK vehicle registration plate of the vehicle the cost relates to, if shown — usually labelled "Vehicle Reg", "Reg", "Registration", "Reg No", or "VRM" (common on garage invoices, MOT certificates, tyre receipts). Return it normalised: uppercase, no spaces (e.g. "RO23 HLR" → "RO23HLR"). Null if no registration is shown. Do NOT use the VIN / chassis number, the make/model, or the production year.
+- mileage: the vehicle's odometer reading in miles, if shown — usually labelled "Mileage", "Mileage (miles)", "Odometer", "Miles", or "Mileage in". Return as an integer, stripping commas and units (e.g. "99,607 miles" → 99607). Null if not shown. Do NOT confuse it with the invoice number, year, or any monetary amount.
 - supplier: the merchant's canonical company name as printed on the receipt header (e.g. "TTS360 Ltd", "Shell U.K. Limited", "Halfords Autocentres") — NOT the tagline, address line, or "thank you" line. Strip trailing punctuation.
 - cost_date: format YYYY-MM-DD. Receipt dates are UK DAY-FIRST (DD/MM/YYYY) — when a date is ambiguous (both parts ≤ 12, e.g. 11/06), read it day-first (11 June, NOT 6 November). The cost date is normally TODAY or in the recent past; it should not be months in the future. Null if not visible.
 - job_number: if the document clearly references an Ooosh job/booking number (e.g. "Job 15291", "#15291", "Attention: Ooosh Tours (#15291)", "your ref 15291"), return JUST the digits as a string. Otherwise null. Do NOT guess from invoice numbers, phone numbers, postcodes, dates, or amounts — only a clear job/booking reference.
@@ -79,6 +81,8 @@ const SCHEMA = {
     vat_treatment: { type: 'string', enum: ['standard', 'no_vat'] },
     invoice_number: { type: ['string', 'null'] },
     job_number: { type: ['string', 'null'] },
+    vehicle_reg: { type: ['string', 'null'] },
+    mileage: { type: ['number', 'null'] },
     description: { type: ['string', 'null'] },
     category_code: {
       anyOf: [
@@ -90,7 +94,8 @@ const SCHEMA = {
   },
   required: [
     'supplier', 'cost_date', 'amount_gross', 'amount_vat', 'amount_net',
-    'vat_treatment', 'invoice_number', 'job_number', 'description', 'category_code', 'confidence',
+    'vat_treatment', 'invoice_number', 'job_number', 'vehicle_reg', 'mileage',
+    'description', 'category_code', 'confidence',
   ],
   additionalProperties: false,
 };
@@ -104,6 +109,10 @@ export interface ExtractedReceipt {
   vat_treatment: 'standard' | 'no_vat';
   invoice_number: string | null;
   job_number: string | null;
+  /** UK reg plate of the related vehicle, normalised uppercase no-spaces. */
+  vehicle_reg: string | null;
+  /** Odometer reading in miles. */
+  mileage: number | null;
   description: string | null;
   category_code: string | null;
   confidence: 'high' | 'medium' | 'low';
@@ -210,6 +219,25 @@ function normaliseCostDate(p: ExtractedReceipt): void {
 }
 
 /**
+ * Tidy the extracted vehicle reg + mileage. The fleet-match + sanity-check
+ * happens in the modal (against the loaded fleet list) — here we just normalise
+ * the shapes so matching is reliable: reg → uppercase alphanumerics only,
+ * mileage → a sane positive integer (drop commas/decimals, reject absurd reads).
+ */
+function normaliseVehicle(p: ExtractedReceipt): void {
+  if (p.vehicle_reg) {
+    const cleaned = p.vehicle_reg.replace(/[^a-z0-9]/gi, '').toUpperCase();
+    p.vehicle_reg = cleaned.length >= 2 && cleaned.length <= 8 ? cleaned : null;
+  }
+  if (p.mileage != null) {
+    const m = Math.round(p.mileage);
+    // Odometers are positive and well under 1,000,000 miles — anything outside
+    // that is a misread (e.g. a phone number or invoice ref), so drop it.
+    p.mileage = m > 0 && m < 1_000_000 ? m : null;
+  }
+}
+
+/**
  * Try to canonicalise the extracted supplier name against Xero contacts.
  * Case-insensitive substring match either way ("TTS 360" vs "TTS360 Ltd") —
  * fine for typo-class duplicates without over-matching. Fails silently if
@@ -247,6 +275,7 @@ export async function extractReceipt(buffer: Buffer, mimeType: string): Promise<
   // when a correction was needed so the modal flags it for a human check).
   normaliseAmounts(parsed);
   normaliseCostDate(parsed);
+  normaliseVehicle(parsed);
 
   // Xero supplier canonicalisation — non-blocking, best-effort.
   if (parsed.supplier && parsed.supplier.trim()) {
