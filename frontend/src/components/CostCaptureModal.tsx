@@ -13,6 +13,7 @@
  * Net / VAT / Gross auto-calculate at 20% (toggle off to edit manually).
  */
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { hasManagerRole } from '../lib/roles';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import type { Cost, CostType, CostPaymentMethod, CostPaymentStatus, CostRechargeMode, CostIntent } from '../../../shared/types';
@@ -1133,7 +1134,7 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
           ) : <span />}
           <div className="flex gap-2">
           <button onClick={onClose} className="px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded-md">Cancel</button>
-          {!isEdit && paymentStatus !== 'paid' && (user?.role === 'admin' || user?.role === 'manager') && (
+          {!isEdit && paymentStatus !== 'paid' && hasManagerRole(user?.role) && (
             <button onClick={() => handleSave(true)} disabled={saving}
               className="px-4 py-2 text-sm text-white bg-green-600 hover:bg-green-700 rounded-md disabled:opacity-50"
               title="Save this bill and approve it in one step (skips the separate approve step)">

@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { hasManagerRole } from '../lib/roles';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { Navigate } from 'react-router-dom';
@@ -72,7 +73,7 @@ function getPasswordStrength(pw: string): { score: number; label: string; color:
 export default function SettingsPage() {
   const user = useAuthStore((s) => s.user);
 
-  if (user?.role !== 'admin' && user?.role !== 'manager') {
+  if (!hasManagerRole(user?.role)) {
     return <Navigate to="/" replace />;
   }
 

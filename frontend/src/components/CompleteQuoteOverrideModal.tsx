@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { hasManagerRole } from '../lib/roles';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 
@@ -39,7 +40,7 @@ export default function CompleteQuoteOverrideModal({
   onCompleted,
 }: CompleteQuoteOverrideModalProps) {
   const user = useAuthStore((s) => s.user);
-  const canOverride = user?.role === 'admin' || user?.role === 'manager';
+  const canOverride = hasManagerRole(user?.role);
 
   const [reason, setReason] = useState('');
   const [extraNotes, setExtraNotes] = useState('');
