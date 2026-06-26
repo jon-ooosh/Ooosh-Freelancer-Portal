@@ -959,6 +959,23 @@ router.get('/dispatch-check/:jobId', async (req: AuthRequest, res: Response) => 
   try {
     const { jobId } = req.params;
 
+    // Dispatch readiness is a PRE-DISPATCH concept: the excess + referral gates
+    // only matter while a van could still go out. Once the hire is physically
+    // back (returned_incomplete onward) or the job is dead (cancelled), these
+    // gates are moot — surfacing them just sends staff down a "did we take an
+    // excess?" rabbit hole while finishing up a hire (e.g. a pre-auth hold that
+    // legitimately expired uncaptured shows excess_status='released', which is
+    // not "collected" but also nothing to chase on a returned van). Post-hire
+    // excess resolution is tracked separately by the excess_resolve close-out
+    // card. On-hire (dispatched) jobs still show the gate — genuine "exposed
+    // while out" signal — so we only suppress from returned_incomplete onward.
+    const jobLifecycle = await query(
+      `SELECT pipeline_status FROM jobs WHERE id = $1`,
+      [jobId]
+    );
+    const hireFinished = ['returned_incomplete', 'returned', 'completed', 'cancelled']
+      .includes(jobLifecycle.rows[0]?.pipeline_status);
+
     // Find all self_drive assignments for this job with excess + referral status
     const result = await query(
       `SELECT vha.id AS assignment_id,
@@ -992,8 +1009,8 @@ router.get('/dispatch-check/:jobId', async (req: AuthRequest, res: Response) => 
     }> = [];
 
     for (const row of result.rows) {
-      // Check excess status
-      if (row.excess_status && !['taken', 'waived', 'rolled_over', 'not_required', 'reimbursed', 'partially_reimbursed', 'fully_claimed', 'pre_auth'].includes(row.excess_status)) {
+      // Check excess status (suppressed once the hire is finished — see above)
+      if (!hireFinished && row.excess_status && !['taken', 'waived', 'rolled_over', 'not_required', 'reimbursed', 'partially_reimbursed', 'fully_claimed', 'pre_auth'].includes(row.excess_status)) {
         blockers.push({
           type: 'excess_pending',
           assignmentId: row.assignment_id,
@@ -1005,8 +1022,8 @@ router.get('/dispatch-check/:jobId', async (req: AuthRequest, res: Response) => 
         });
       }
 
-      // Check referral status
-      if (row.requires_referral && row.referral_status !== 'approved') {
+      // Check referral status (suppressed once the hire is finished — see above)
+      if (!hireFinished && row.requires_referral && row.referral_status !== 'approved') {
         blockers.push({
           type: 'referral_pending',
           assignmentId: row.assignment_id,
@@ -1017,26 +1034,29 @@ router.get('/dispatch-check/:jobId', async (req: AuthRequest, res: Response) => 
       }
     }
 
-    // Also check for job-level excess (not tied to a specific assignment)
-    const jobExcessResult = await query(
-      `SELECT je.id AS excess_id, je.excess_amount_required, je.excess_status,
-              je.client_name, je.dispatch_override
-       FROM job_excess je
-       WHERE je.job_id = $1
-         AND je.assignment_id IS NULL
-         AND je.excess_status NOT IN ('taken', 'waived', 'rolled_over', 'not_required', 'reimbursed', 'partially_reimbursed', 'fully_claimed', 'pre_auth')`,
-      [jobId]
-    );
-    for (const row of jobExcessResult.rows) {
-      blockers.push({
-        type: 'excess_pending',
-        assignmentId: 'job-level',
-        excessId: row.excess_id,
-        driverName: row.client_name || null,
-        vehicleReg: null,
-        amountRequired: row.excess_amount_required ? parseFloat(row.excess_amount_required) : null,
-        dispatchOverride: row.dispatch_override,
-      });
+    // Also check for job-level excess (not tied to a specific assignment).
+    // Suppressed once the hire is finished — same reasoning as above.
+    if (!hireFinished) {
+      const jobExcessResult = await query(
+        `SELECT je.id AS excess_id, je.excess_amount_required, je.excess_status,
+                je.client_name, je.dispatch_override
+         FROM job_excess je
+         WHERE je.job_id = $1
+           AND je.assignment_id IS NULL
+           AND je.excess_status NOT IN ('taken', 'waived', 'rolled_over', 'not_required', 'reimbursed', 'partially_reimbursed', 'fully_claimed', 'pre_auth')`,
+        [jobId]
+      );
+      for (const row of jobExcessResult.rows) {
+        blockers.push({
+          type: 'excess_pending',
+          assignmentId: 'job-level',
+          excessId: row.excess_id,
+          driverName: row.client_name || null,
+          vehicleReg: null,
+          amountRequired: row.excess_amount_required ? parseFloat(row.excess_amount_required) : null,
+          dispatchOverride: row.dispatch_override,
+        });
+      }
     }
 
     res.json({
