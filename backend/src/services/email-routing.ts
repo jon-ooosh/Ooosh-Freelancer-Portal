@@ -115,6 +115,7 @@ export const TEMPLATE_BUCKETS: Readonly<Record<string, EmailBucket>> = {
   delivery_note: 'delivery_on_day',
   collection_confirmation: 'delivery_on_day',
   vehicle_checked_in: 'delivery_on_day',
+  vehicle_swapped: 'delivery_on_day',
 };
 
 /**

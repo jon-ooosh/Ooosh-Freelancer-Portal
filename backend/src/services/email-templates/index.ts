@@ -37,6 +37,23 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  vehicle_swapped: {
+    variant: 'client',
+    preheader: 'A quick update about the vehicle on your hire',
+    subject: 'Vehicle update for your hire{{#if jobNumber}} (#{{jobNumber}}){{/if}}',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Vehicle update</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Hi {{clientName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        {{#if planned}}As arranged, the vehicle for your hire{{/if}}{{#if unplanned}}We've had to change the vehicle on your hire{{/if}}
+        <strong>{{jobName}}</strong>{{#if jobNumber}} (job <strong>#{{jobNumber}}</strong>){{/if}} is now
+        <strong>{{newReg}}</strong>{{#if oldReg}} (previously {{oldReg}}){{/if}}.
+      </p>
+      {{#if planned}}<p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">Everything else about your booking stays the same.</p>{{/if}}{{#if unplanned}}<p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">Apologies for the change - the rest of your booking is unaffected and we've made sure the replacement is ready to go.</p>{{/if}}
+      <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">Any questions, just reply to this email or call us on +44 1273 911382.</p>
+    `,
+  },
+
   holding_lost_property_found: {
     variant: 'client',
     preheader: 'We found some lost property after your hire',

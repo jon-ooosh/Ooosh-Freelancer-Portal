@@ -22,6 +22,7 @@ import { syncVehicleRequirementStatus } from '../services/vehicle-requirement-sy
 import { cancelOrphanSiblingAllocations, cancelStaleVanAllocationsOnReturn } from '../services/vha-dedup';
 import { createJobIssue, logIssueEvent } from '../services/job-issues';
 import { hhBroker } from '../services/hirehop-broker';
+import { recordSoftCheckInEvent } from '../services/vehicle-event-log';
 
 const router = Router();
 router.use(authenticate);
@@ -1577,6 +1578,30 @@ router.post(
       }
     }
 
+    // 4b. Interim assessment on the swapped-out van's Event History (breakdown
+    // only). Puts the soft check-in on the van's timeline and lets staff produce
+    // the Interim Assessment PDF on demand via the existing Event History
+    // "regenerate PDF" affordance (it derives isInterim from the soft-check-in
+    // eventType). Planned swaps skip this — the van takes a normal full check-in
+    // on return, which produces its own condition report. Best-effort.
+    if (!isPlanned && orig.vehicle_reg) {
+      const swapDriverNames = slotRows
+        .map((r: any) => r.driver_name)
+        .filter(Boolean)
+        .join(', ');
+      recordSoftCheckInEvent({
+        reg: orig.vehicle_reg,
+        hhJob: orig.hirehop_job_id ?? null,
+        mileage: soft_checkin?.mileage ?? null,
+        fuelLevel: soft_checkin?.fuel_level ?? null,
+        location: soft_checkin?.location ?? null,
+        notes: soft_checkin?.notes ?? null,
+        driverName: swapDriverNames || orig.driver_name || null,
+        toReg: newVehicle.reg,
+        swapReason: swap_reason,
+      }).catch(err => console.warn('[assignments] swap interim event-history write failed:', err));
+    }
+
     // 5. Link or create a Problems-register issue for this swap.
     let issueId: string | null = null;
     try {
@@ -1665,6 +1690,22 @@ router.post(
         note: `Mid-hire vehicle swap on ${new Date().toLocaleDateString('en-GB')}: ` +
               `${orig.vehicle_reg || 'unknown'} → ${newVehicle.reg}. Reason: ${swap_reason}.`,
       }, { priority: 'low' }).catch(err => console.warn('[assignments] swap HH note failed:', err));
+    }
+
+    // 8b. Notify the client their hire vehicle has changed (best-effort).
+    // Skipped for internal jobs inside the helper. Routed via the client email
+    // resolver (job_contacts → address book → info@ fallback with banner).
+    if (orig.job_id) {
+      import('../services/vehicle-emails')
+        .then(({ sendVehicleSwappedEmail }) =>
+          sendVehicleSwappedEmail({
+            jobId: orig.job_id,
+            newReg: newVehicle.reg,
+            oldReg: orig.vehicle_reg ?? null,
+            planned: isPlanned,
+          })
+        )
+        .catch(err => console.warn('[assignments] swap client email failed:', err));
     }
 
     // VE103B: scoped to the lead driver's cert. We can't auto-regenerate (a
