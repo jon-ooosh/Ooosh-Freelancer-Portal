@@ -41,6 +41,7 @@ export function HeldItemsSection({
   heading,
   bare,
   emptyHint,
+  excludeJobId,
 }: {
   entityType: 'person' | 'organisation' | 'job';
   entityId: string;
@@ -51,6 +52,7 @@ export function HeldItemsSection({
   heading?: string;                // optional heading rendered above the card (only when items exist)
   bare?: boolean;                  // no outer card wrapper (for embedding in another panel)
   emptyHint?: string;              // muted text shown when empty + not hideWhenEmpty
+  excludeJobId?: string;           // drop items linked to this job (already shown elsewhere on the page)
 }) {
   const [items, setItems] = useState<HeldItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -62,14 +64,15 @@ export function HeldItemsSection({
     api.get<{ data: HeldItem[] }>(`/holding/${ENDPOINT_BY_TYPE[entityType]}/${entityId}`)
       .then((res) => {
         if (cancelled) return;
-        const filtered = (res.data || []).filter((i) => !kinds || kinds.includes(i.kind));
+        const filtered = (res.data || []).filter((i) =>
+          (!kinds || kinds.includes(i.kind)) && (!excludeJobId || i.job_id !== excludeJobId));
         setItems(filtered);
         if (onCount) onCount(filtered.filter((i) => !TERMINAL.has(i.status)).length);
       })
       .catch(() => { if (!cancelled) setItems([]); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [entityType, entityId, onCount, kinds]);
+  }, [entityType, entityId, onCount, kinds, excludeJobId]);
 
   if (loading) return hideWhenEmpty ? null : <div className="text-sm text-gray-500 text-center py-8">Loading…</div>;
 

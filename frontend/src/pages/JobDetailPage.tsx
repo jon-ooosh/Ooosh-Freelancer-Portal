@@ -5744,11 +5744,15 @@ export default function JobDetailPage() {
       {/* Client trading history sidebar (desktop only) */}
       {showClientHistory && (
         <div className="hidden lg:block w-72 shrink-0">
-          {/* Holding FYI — temp storage + lost property we hold for this client.
+          {/* Holding FYI — anything we're still holding for this client that
+              arrived for a DIFFERENT job (incoming/merch held for a future
+              hire, temp storage, lost property). excludeJobId drops items tied
+              to THIS job — those already show in the merch card on Overview.
               Informational only (not on the prep ticker). Hidden when empty. */}
           {job.client_id && (
             <div className="mb-4">
-              <HeldItemsSection entityType="organisation" entityId={job.client_id} kinds={['temp_storage', 'lost_property']}
+              <HeldItemsSection entityType="organisation" entityId={job.client_id}
+                kinds={['incoming', 'temp_storage', 'lost_property']} excludeJobId={job.id}
                 openOnly hideWhenEmpty heading="📦 Also holding (FYI)" />
             </div>
           )}
