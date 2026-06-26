@@ -354,10 +354,21 @@ function CreatePcnModal({ onClose, onCreated }: { onClose: () => void; onCreated
 
   const addFiles = (fileList: FileList | null) => {
     if (!fileList || fileList.length === 0) return;
+    // Snapshot the File objects synchronously, BEFORE the setPages updater runs.
+    // The onChange handler resets the input's value (`fileRef.current.value = ''`)
+    // immediately after this call so the same file can be re-selected. On iOS
+    // WebKit (Safari AND Chrome) that reset empties the live FileList *by
+    // reference* — and React defers the functional updater below, so reading
+    // `Array.from(fileList)` inside it would see an already-empty list: the
+    // chosen photo silently never appears (no chip, no spinner). Capturing to a
+    // plain array here keeps the File objects valid past the reset. Android /
+    // desktop don't mutate the existing FileList on reset, which is why this only
+    // ever bit iPhones.
+    const incoming = Array.from(fileList);
     setExtractError(null);
     setPages((prev) => {
       const next = [...prev];
-      Array.from(fileList).forEach((f) => {
+      incoming.forEach((f) => {
         const kind = next.length === 0 ? 'notice_front' : next.length === 1 ? 'notice_back' : 'other';
         next.push({ file: f, kind });
       });

@@ -22,6 +22,7 @@ import { syncVehicleRequirementStatus } from '../services/vehicle-requirement-sy
 import { cancelOrphanSiblingAllocations, cancelStaleVanAllocationsOnReturn } from '../services/vha-dedup';
 import { createJobIssue, logIssueEvent } from '../services/job-issues';
 import { hhBroker } from '../services/hirehop-broker';
+import { recordSoftCheckInEvent } from '../services/vehicle-event-log';
 
 const router = Router();
 router.use(authenticate);
@@ -959,6 +960,23 @@ router.get('/dispatch-check/:jobId', async (req: AuthRequest, res: Response) => 
   try {
     const { jobId } = req.params;
 
+    // Dispatch readiness is a PRE-DISPATCH concept: the excess + referral gates
+    // only matter while a van could still go out. Once the hire is physically
+    // back (returned_incomplete onward) or the job is dead (cancelled), these
+    // gates are moot — surfacing them just sends staff down a "did we take an
+    // excess?" rabbit hole while finishing up a hire (e.g. a pre-auth hold that
+    // legitimately expired uncaptured shows excess_status='released', which is
+    // not "collected" but also nothing to chase on a returned van). Post-hire
+    // excess resolution is tracked separately by the excess_resolve close-out
+    // card. On-hire (dispatched) jobs still show the gate — genuine "exposed
+    // while out" signal — so we only suppress from returned_incomplete onward.
+    const jobLifecycle = await query(
+      `SELECT pipeline_status FROM jobs WHERE id = $1`,
+      [jobId]
+    );
+    const hireFinished = ['returned_incomplete', 'returned', 'completed', 'cancelled']
+      .includes(jobLifecycle.rows[0]?.pipeline_status);
+
     // Find all self_drive assignments for this job with excess + referral status
     const result = await query(
       `SELECT vha.id AS assignment_id,
@@ -992,8 +1010,8 @@ router.get('/dispatch-check/:jobId', async (req: AuthRequest, res: Response) => 
     }> = [];
 
     for (const row of result.rows) {
-      // Check excess status
-      if (row.excess_status && !['taken', 'waived', 'rolled_over', 'not_required', 'reimbursed', 'partially_reimbursed', 'fully_claimed', 'pre_auth'].includes(row.excess_status)) {
+      // Check excess status (suppressed once the hire is finished — see above)
+      if (!hireFinished && row.excess_status && !['taken', 'waived', 'rolled_over', 'not_required', 'reimbursed', 'partially_reimbursed', 'fully_claimed', 'pre_auth'].includes(row.excess_status)) {
         blockers.push({
           type: 'excess_pending',
           assignmentId: row.assignment_id,
@@ -1005,8 +1023,8 @@ router.get('/dispatch-check/:jobId', async (req: AuthRequest, res: Response) => 
         });
       }
 
-      // Check referral status
-      if (row.requires_referral && row.referral_status !== 'approved') {
+      // Check referral status (suppressed once the hire is finished — see above)
+      if (!hireFinished && row.requires_referral && row.referral_status !== 'approved') {
         blockers.push({
           type: 'referral_pending',
           assignmentId: row.assignment_id,
@@ -1017,26 +1035,29 @@ router.get('/dispatch-check/:jobId', async (req: AuthRequest, res: Response) => 
       }
     }
 
-    // Also check for job-level excess (not tied to a specific assignment)
-    const jobExcessResult = await query(
-      `SELECT je.id AS excess_id, je.excess_amount_required, je.excess_status,
-              je.client_name, je.dispatch_override
-       FROM job_excess je
-       WHERE je.job_id = $1
-         AND je.assignment_id IS NULL
-         AND je.excess_status NOT IN ('taken', 'waived', 'rolled_over', 'not_required', 'reimbursed', 'partially_reimbursed', 'fully_claimed', 'pre_auth')`,
-      [jobId]
-    );
-    for (const row of jobExcessResult.rows) {
-      blockers.push({
-        type: 'excess_pending',
-        assignmentId: 'job-level',
-        excessId: row.excess_id,
-        driverName: row.client_name || null,
-        vehicleReg: null,
-        amountRequired: row.excess_amount_required ? parseFloat(row.excess_amount_required) : null,
-        dispatchOverride: row.dispatch_override,
-      });
+    // Also check for job-level excess (not tied to a specific assignment).
+    // Suppressed once the hire is finished — same reasoning as above.
+    if (!hireFinished) {
+      const jobExcessResult = await query(
+        `SELECT je.id AS excess_id, je.excess_amount_required, je.excess_status,
+                je.client_name, je.dispatch_override
+         FROM job_excess je
+         WHERE je.job_id = $1
+           AND je.assignment_id IS NULL
+           AND je.excess_status NOT IN ('taken', 'waived', 'rolled_over', 'not_required', 'reimbursed', 'partially_reimbursed', 'fully_claimed', 'pre_auth')`,
+        [jobId]
+      );
+      for (const row of jobExcessResult.rows) {
+        blockers.push({
+          type: 'excess_pending',
+          assignmentId: 'job-level',
+          excessId: row.excess_id,
+          driverName: row.client_name || null,
+          vehicleReg: null,
+          amountRequired: row.excess_amount_required ? parseFloat(row.excess_amount_required) : null,
+          dispatchOverride: row.dispatch_override,
+        });
+      }
     }
 
     res.json({
@@ -1384,6 +1405,13 @@ router.post('/compat/allocations', async (req: AuthRequest, res: Response) => {
 // Original assignment gets status 'swapped'; new assignment is created for the replacement vehicle.
 const swapSchema = z.object({
   new_vehicle_id: z.string().uuid(),
+  // 'breakdown' (default) = the van's out of service: fleet → Not Ready
+  // (sticky), a Problems-register issue records why, an interim assessment is
+  // the record. 'planned' = a deliberate change (e.g. client upgrading to a
+  // bigger van) where the outgoing van is fine and just coming back — skip the
+  // Not Ready + issue framing and let it take a normal check-in to Available.
+  // Defaults to 'breakdown' so existing callers are unchanged.
+  swap_kind: z.enum(['breakdown', 'planned']).default('breakdown'),
   // swap_reason carries the picklist code + free-text details combined by
   // the frontend (e.g. "breakdown: brake pad failure on the M6").
   swap_reason: z.string().min(1).max(500),
@@ -1417,7 +1445,8 @@ router.post(
   validate(swapSchema),
   async (req: AuthRequest, res: Response) => {
   const id = String(req.params.id);
-  const { new_vehicle_id, swap_reason, soft_checkin, issue_link } = req.body as z.infer<typeof swapSchema>;
+  const { new_vehicle_id, swap_kind, swap_reason, soft_checkin, issue_link } = req.body as z.infer<typeof swapSchema>;
+  const isPlanned = swap_kind === 'planned';
 
   try {
     // 1. Load original assignment
@@ -1538,15 +1567,22 @@ router.post(
     // is the one we redirect to BookOutPage for (the lead row).
     const leadSwap = swapped.find(s => s.oldId === id) || swapped[0];
 
-    // 4. Soft check-in of the van being swapped OUT — set fleet status to
-    // 'Not Ready' (sticky). The van's off to a garage / tow truck; it's not
-    // available until repaired + re-prepped. syncFleetHireStatus below
-    // preserves 'Not Ready'. We also record the soft-checkin mileage if given.
+    // 4. Soft check-in of the van being swapped OUT.
+    // breakdown: set fleet status to 'Not Ready' (sticky) — the van's off to a
+    //   garage / tow truck; not available until repaired + re-prepped.
+    //   syncFleetHireStatus below preserves 'Not Ready'.
+    // planned: DON'T force 'Not Ready' — the van's fine and coming back. The
+    //   final syncFleetHireStatus derives 'Prep Needed' (no live row), and the
+    //   van takes a normal check-in to Available via the swapped-row eligibility
+    //   path (check-in-eligibility recognises status='swapped' + checked_in_at
+    //   NULL). Either way we still record any soft-checkin mileage given.
     if (orig.vehicle_id) {
-      await query(
-        `UPDATE fleet_vehicles SET hire_status = 'Not Ready', updated_at = NOW() WHERE id = $1`,
-        [orig.vehicle_id]
-      );
+      if (!isPlanned) {
+        await query(
+          `UPDATE fleet_vehicles SET hire_status = 'Not Ready', updated_at = NOW() WHERE id = $1`,
+          [orig.vehicle_id]
+        );
+      }
       if (soft_checkin?.mileage && soft_checkin.mileage > 0) {
         await query(
           `INSERT INTO vehicle_mileage_log (vehicle_id, mileage, source, source_ref, recorded_by)
@@ -1560,6 +1596,30 @@ router.post(
           [soft_checkin.mileage, orig.vehicle_id]
         ).catch(() => {});
       }
+    }
+
+    // 4b. Interim assessment on the swapped-out van's Event History (breakdown
+    // only). Puts the soft check-in on the van's timeline and lets staff produce
+    // the Interim Assessment PDF on demand via the existing Event History
+    // "regenerate PDF" affordance (it derives isInterim from the soft-check-in
+    // eventType). Planned swaps skip this — the van takes a normal full check-in
+    // on return, which produces its own condition report. Best-effort.
+    if (!isPlanned && orig.vehicle_reg) {
+      const swapDriverNames = slotRows
+        .map((r: any) => r.driver_name)
+        .filter(Boolean)
+        .join(', ');
+      recordSoftCheckInEvent({
+        reg: orig.vehicle_reg,
+        hhJob: orig.hirehop_job_id ?? null,
+        mileage: soft_checkin?.mileage ?? null,
+        fuelLevel: soft_checkin?.fuel_level ?? null,
+        location: soft_checkin?.location ?? null,
+        notes: soft_checkin?.notes ?? null,
+        driverName: swapDriverNames || orig.driver_name || null,
+        toReg: newVehicle.reg,
+        swapReason: swap_reason,
+      }).catch(err => console.warn('[assignments] swap interim event-history write failed:', err));
     }
 
     // 5. Link or create a Problems-register issue for this swap.
@@ -1590,7 +1650,8 @@ router.post(
             old_assignment_id: id, new_assignment_id: leadSwap?.newId ?? null,
           });
           // Breakdown/accident makes a low-severity issue acute — bump it.
-          if (existing.rows[0].severity === 'low') {
+          // A planned swap is not an escalation, so leave the severity alone.
+          if (!isPlanned && existing.rows[0].severity === 'low') {
             await query(`UPDATE job_issues SET severity = 'urgent', updated_at = NOW() WHERE id = $1`, [issueId]);
           }
         }
@@ -1632,9 +1693,10 @@ router.post(
         `INSERT INTO interactions (type, content, job_id, created_by)
          VALUES ('note', $1, $2, $3)`,
         [
-          `🔄 Vehicle swapped: ${orig.vehicle_reg || 'unknown'} → ${newVehicle.reg} ` +
+          `🔄 Vehicle swapped${isPlanned ? ' (planned)' : ''}: ${orig.vehicle_reg || 'unknown'} → ${newVehicle.reg} ` +
           `(${swapped.length} driver(s)). Reason: ${swap_reason}.` +
-          (issueId ? ` Issue logged.` : ''),
+          (issueId ? ` Issue logged.` : '') +
+          (isPlanned ? ` ${orig.vehicle_reg || 'Outgoing van'} to be checked in normally on return.` : ''),
           orig.job_id, req.user!.id,
         ]
       ).catch(err => console.warn('[assignments] swap timeline interaction failed:', err));
@@ -1648,6 +1710,22 @@ router.post(
         note: `Mid-hire vehicle swap on ${new Date().toLocaleDateString('en-GB')}: ` +
               `${orig.vehicle_reg || 'unknown'} → ${newVehicle.reg}. Reason: ${swap_reason}.`,
       }, { priority: 'low' }).catch(err => console.warn('[assignments] swap HH note failed:', err));
+    }
+
+    // 8b. Notify the client their hire vehicle has changed (best-effort).
+    // Skipped for internal jobs inside the helper. Routed via the client email
+    // resolver (job_contacts → address book → info@ fallback with banner).
+    if (orig.job_id) {
+      import('../services/vehicle-emails')
+        .then(({ sendVehicleSwappedEmail }) =>
+          sendVehicleSwappedEmail({
+            jobId: orig.job_id,
+            newReg: newVehicle.reg,
+            oldReg: orig.vehicle_reg ?? null,
+            planned: isPlanned,
+          })
+        )
+        .catch(err => console.warn('[assignments] swap client email failed:', err));
     }
 
     // VE103B: scoped to the lead driver's cert. We can't auto-regenerate (a
@@ -1670,6 +1748,11 @@ router.post(
       data: {
         original: { id, status: 'swapped', swap_reason, vehicle_reg: orig.vehicle_reg },
         replacement: fullNew.rows[0],
+        swap_kind,
+        // Planned swaps: the outgoing van is fine and needs a normal check-in
+        // when it's back. The frontend surfaces this in the success toast.
+        outgoing_reg: orig.vehicle_reg,
+        outgoing_check_in_needed: isPlanned,
         swapped_count: swapped.length,
         issue_id: issueId,
         ve103b_regen_needed: ve103bRegenNeeded,
