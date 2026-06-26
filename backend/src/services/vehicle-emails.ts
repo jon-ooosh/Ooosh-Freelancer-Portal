@@ -4,6 +4,64 @@
 import { query } from '../config/database';
 import { emailService } from './email-service';
 import { getFrontendUrl } from '../config/app-urls';
+import { resolveClientEmailTarget, buildFallbackBanner, logFallbackToTimeline } from './money-emails';
+
+/**
+ * Notify the client that the vehicle on their hire has changed (vehicle swap).
+ * Fires best-effort from the swap endpoint for BOTH kinds:
+ *  - planned: confirms the arranged change (e.g. an upgrade)
+ *  - breakdown: informs them their van was changed
+ * Routed through resolveClientEmailTarget (job_contacts → address book → info@
+ * fallback with banner). Skipped for internal jobs (garage runs etc. — no
+ * client). Never throws; the swap's durable record is the DB + Job Issue.
+ */
+export async function sendVehicleSwappedEmail(opts: {
+  jobId: string; // OP job UUID
+  newReg: string;
+  oldReg?: string | null;
+  planned: boolean;
+}): Promise<{ sent: boolean; reason?: string }> {
+  const { jobId, newReg, oldReg, planned } = opts;
+  try {
+    const jobRow = await query(
+      `SELECT COALESCE(is_internal, false) AS is_internal FROM jobs WHERE id = $1`,
+      [jobId]
+    );
+    if (jobRow.rows.length === 0) return { sent: false, reason: 'no_job' };
+    if (jobRow.rows[0].is_internal) return { sent: false, reason: 'internal_job' };
+
+    const target = await resolveClientEmailTarget(jobId, 'vehicle_swapped');
+    const res = await emailService.send('vehicle_swapped', {
+      to: target.primaryEmail,
+      cc: target.ccEmails.length > 0 ? target.ccEmails : undefined,
+      prependBanner: target.isFallback
+        ? buildFallbackBanner({
+            jobId,
+            clientName: target.clientName,
+            jobNumber: target.jobNumber,
+            jobName: target.jobName,
+          })
+        : undefined,
+      variables: {
+        clientName: target.primaryFirstName || target.clientName || 'there',
+        jobName: target.jobName || `Job #${target.jobNumber || ''}`,
+        jobNumber: target.jobNumber || '',
+        newReg,
+        oldReg: oldReg || '',
+        // Complementary flags — the template engine has no {{else}}, so we
+        // drive the two intro variants with mutually-exclusive {{#if}} blocks.
+        planned: planned ? 'yes' : '',
+        unplanned: planned ? '' : 'yes',
+      },
+    });
+    if (!res.success) return { sent: false, reason: 'error' };
+    if (target.isFallback) await logFallbackToTimeline({ jobId, templateId: 'vehicle_swapped' });
+    return { sent: true };
+  } catch (err) {
+    console.warn('[vehicle-emails] vehicle_swapped send failed:', err instanceof Error ? err.message : err);
+    return { sent: false, reason: 'error' };
+  }
+}
 
 /**
  * Build + send the "marked Returned but vans still booked out" safety-net

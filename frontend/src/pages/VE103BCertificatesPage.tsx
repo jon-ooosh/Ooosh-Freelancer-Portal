@@ -69,6 +69,11 @@ export default function VE103BCertificatesPage() {
   const [voidReason, setVoidReason] = useState('');
   const [voiding, setVoiding] = useState(false);
 
+  // Reactivate modal (free a voided cert's number for reuse)
+  const [reactivateTarget, setReactivateTarget] = useState<VE103BCert | null>(null);
+  const [reactivateReason, setReactivateReason] = useState('');
+  const [reactivating, setReactivating] = useState(false);
+
   // BVRLA report
   const [reportMonth, setReportMonth] = useState(() => {
     const now = new Date();
@@ -102,8 +107,10 @@ export default function VE103BCertificatesPage() {
 
   // Escape key to close modals
   const closeVoid = useCallback(() => { setVoidTarget(null); setVoidReason(''); }, []);
+  const closeReactivate = useCallback(() => { setReactivateTarget(null); setReactivateReason(''); }, []);
   const closeGenerate = useCallback(() => { setShowGenerate(false); setGenError(''); setGenSuccess(''); }, []);
   useEscapeKey(closeVoid, !!voidTarget);
+  useEscapeKey(closeReactivate, !!reactivateTarget);
   useEscapeKey(closeGenerate, showGenerate);
 
   // Debounce search
@@ -142,6 +149,23 @@ export default function VE103BCertificatesPage() {
       console.error('Failed to void certificate:', err);
     } finally {
       setVoiding(false);
+    }
+  }
+
+  async function handleReactivate() {
+    if (!reactivateTarget) return;
+    setReactivating(true);
+    try {
+      await api.post(`/ve103b/${reactivateTarget.id}/reactivate`, {
+        reason: reactivateReason.trim() || undefined,
+      });
+      setReactivateTarget(null);
+      setReactivateReason('');
+      loadCerts(pagination.page);
+    } catch (err) {
+      console.error('Failed to reactivate certificate:', err);
+    } finally {
+      setReactivating(false);
     }
   }
 
@@ -418,6 +442,15 @@ export default function VE103BCertificatesPage() {
                         Void
                       </button>
                     )}
+                    {cert.status === 'void' && (
+                      <button
+                        onClick={() => setReactivateTarget(cert)}
+                        className="rounded px-2 py-1 text-xs font-medium text-ooosh-navy hover:bg-ooosh-50 transition-colors"
+                        title="Free this certificate number for reuse (physical cert is fine)"
+                      >
+                        Reactivate
+                      </button>
+                    )}
                   </div>
                 </td>
               </tr>
@@ -488,6 +521,51 @@ export default function VE103BCertificatesPage() {
                 className="rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
               >
                 {voiding ? 'Voiding...' : 'Void Certificate'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Reactivate modal */}
+      {reactivateTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="w-full max-w-md rounded-xl bg-white p-6 shadow-xl">
+            <h3 className="text-lg font-semibold text-gray-900">Reactivate Certificate</h3>
+            <p className="mt-2 text-sm text-gray-600">
+              This frees certificate number <strong>{reactivateTarget.certificate_number}</strong> for
+              reuse — use it when the physical VE103B form is fine and was only voided by mistake
+              (e.g. wrong reg). The number becomes available to re-issue and is removed from the
+              BVRLA report (it'll be reported correctly when re-generated).
+            </p>
+            <p className="mt-2 text-sm text-gray-500">
+              The voided OP record for this certificate will be deleted. Use <strong>Void</strong>
+              {' '}instead if the physical certificate has been spoiled.
+            </p>
+            <div className="mt-4">
+              <label className="block text-sm font-medium text-gray-700">Reason (optional)</label>
+              <input
+                type="text"
+                value={reactivateReason}
+                onChange={e => setReactivateReason(e.target.value)}
+                placeholder="e.g. Misgenerated with wrong reg, form unused"
+                className="mt-1 w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-ooosh-navy focus:outline-none focus:ring-1 focus:ring-ooosh-navy"
+                autoFocus
+              />
+            </div>
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                onClick={closeReactivate}
+                className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleReactivate}
+                disabled={reactivating}
+                className="rounded-lg bg-ooosh-navy px-4 py-2 text-sm font-medium text-white hover:bg-ooosh-800 disabled:opacity-50"
+              >
+                {reactivating ? 'Reactivating...' : 'Free for Reuse'}
               </button>
             </div>
           </div>

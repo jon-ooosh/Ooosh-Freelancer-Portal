@@ -710,7 +710,7 @@ router.get('/by-job/:hirehopJobId', authenticateVehicleFlexible, async (req: Fle
       LEFT JOIN job_excess je ON je.assignment_id = vha.id
       WHERE vha.hirehop_job_id = $1
         AND vha.assignment_type = 'self_drive'
-        AND vha.status != 'cancelled'
+        AND vha.status NOT IN ('cancelled', 'swapped')
       ORDER BY vha.van_requirement_index ASC`,
       [hirehopJobId]
     );
@@ -1427,6 +1427,36 @@ router.patch('/:id', authenticateVehicleFlexible, validate(patchSchema), async (
       }
     }
 
+    // Guard: never let a vehicle-link or book-out write land on a TERMINAL row
+    // (swapped / returned / cancelled). After a swap, by-job used to surface the
+    // swapped original alongside the replacement; the BookOutPage writeback loop
+    // then stamped the replacement van's reg + status='booked_out' onto the
+    // swapped row, resurrecting it as a duplicate booked_out row and leaving the
+    // outgoing van with no live assignment (job 15828, RX21UOB→RX24SZE, Jun 2026
+    // — the same class as RX73TBZ). by-job no longer returns swapped rows, but
+    // this is the belt-and-braces stop for any other caller: a stale tab, an
+    // offline-queue replay, or a direct API call. No-op (200) rather than 4xx so
+    // the writeback loop treats it as success and moves on without corrupting it.
+    const wantsVehicleChange = updates.vehicle_id !== undefined;
+    const wantsBookOut = updates.status === 'booked_out';
+    if (wantsVehicleChange || wantsBookOut) {
+      const cur = await query(
+        `SELECT status FROM vehicle_hire_assignments WHERE id = $1`,
+        [id]
+      );
+      if (cur.rows.length === 0) {
+        return res.status(404).json({ error: 'Hire form not found' });
+      }
+      const curStatus = cur.rows[0].status as string;
+      if (curStatus === 'swapped' || curStatus === 'returned' || curStatus === 'cancelled') {
+        console.warn(
+          `[hire-forms] PATCH ignored on terminal row ${id} (status=${curStatus}); ` +
+          `refusing vehicle-link/book-out write (wantsVehicleChange=${wantsVehicleChange}, wantsBookOut=${wantsBookOut})`
+        );
+        return res.json({ data: { id, no_op: true, reason: 'terminal_status' } });
+      }
+    }
+
     // Overlap check when a vehicle is being linked/changed. We only run the
     // check if vehicle_id is being SET to a non-null value; unlinking (null)
     // is always allowed. Self-assignment (same vehicle) is excluded via the
@@ -1483,6 +1513,28 @@ router.patch('/:id', authenticateVehicleFlexible, validate(patchSchema), async (
 
     if (updates.status) {
       setClauses.push(`status_changed_at = NOW()`);
+    }
+
+    // Stamp booked_out_at (and booked_out_by) on the booked_out transition.
+    // Without this, a book-out driven purely through this PATCH — the
+    // BookOutPage writeback loop that flips every hire form on the van — leaves
+    // booked_out_at NULL. Only the SEPARATE save-event vehicle event ever set
+    // it. When that event fails to land (transient error, abandoned walkaround,
+    // offline-queue not flushed), the row reads as booked_out with no timestamp
+    // and no history card, which then fools the check-in job-resolver into
+    // picking a stale book-out from a PREVIOUS hire (RX73TBZ, jobs 16057↔16149,
+    // Jun 2026 — the Unpeople return got stamped against the prior Ritchie Prior
+    // hire). COALESCE keeps it idempotent on PATCH retries and never overwrites
+    // a real walkaround timestamp. Freelancer book-outs (no req.user) still get
+    // booked_out_at; they just don't stamp booked_out_by.
+    if (updates.status === 'booked_out') {
+      setClauses.push(`booked_out_at = COALESCE(booked_out_at, NOW())`);
+      const bookedOutActor = req.user?.id || null;
+      if (bookedOutActor) {
+        setClauses.push(`booked_out_by = COALESCE(booked_out_by, $${paramIdx})`);
+        values.push(bookedOutActor);
+        paramIdx++;
+      }
     }
 
     setClauses.push('updated_at = NOW()');

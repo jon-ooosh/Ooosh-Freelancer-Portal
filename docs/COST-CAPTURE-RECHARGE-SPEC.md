@@ -959,3 +959,73 @@ server-computed `due_date`; undated bills sort last ascending).
 ### UI fix
 The Xero-status cell got `whitespace-nowrap` so the "In Xero" pill no longer wraps
 to two lines now the split button shares the row.
+
+---
+
+## Build notes — feedback round 3 (Jun 2026)
+
+- **"This Friday" filter fix**: the due-date filters formatted dates with
+  `toISOString()` (UTC), so under BST (UTC+1) local midnight shifted to the
+  previous UTC day — the range filters (this week / next 7) still matched but the
+  exact-match `friday` filter compared against Thursday and returned nothing. Now
+  formats in local time.
+- **Two new filters**: "Next Friday" (the pay-run one cycle out) + a per-supplier
+  dropdown (distinct suppliers from the loaded rows; applies across all views).
+- **Xero-status cell de-squish**: actionable states (stale / error / not-synced /
+  pending) now render as ONE clickable pill ("Re-sync" / "Sync failed — retry" /
+  "Sync now") instead of a status pill + a separate button. The extra button was
+  widening the column and pushing the row actions (incl. delete) off-screen.
+- **Delete warns about Xero**: deleting a cost that's in Xero (`xero_object_id`
+  set) now warns it removes the cost from OP only — the Xero bill/txn must be
+  voided separately. (Edits DO push to Xero; deletes don't.)
+
+---
+
+## Build notes — Xero-matched reconciliation, step 1: the probe (Jun 2026)
+
+Closing the "in Xero but not in OP" gap for the COT card. The OP-side chaser only
+sees costs staff logged; this catches card spend that was never logged at all.
+
+The unknown (spec §"Open verification items" #1) is the **Codat→Xero shape**: do
+COT purchases land in Xero as readable `BankTransactions` (SPEND), or as raw
+unreconciled bank-statement lines (which the standard Accounting API does NOT
+expose until coded/reconciled)? Matching is only viable in the former case.
+
+So step 1 is a **read-only probe** rather than a built matcher:
+`GET /api/costs/reconcile/xero-cot?days=N` (admin/manager) reads SPEND bank
+transactions on the mapped COT account (`xero_bank_cot_card` system setting) over
+the window and flags each as matched (OP cost via pushed `xero_object_id`, else
+amount+near-date) or **unmatched** (in Xero, not in OP). Surfaced on the Reconcile
+tab via `XeroCotProbe` ("Check Xero" button) — shows fetched / matched / not-in-OP
+counts + a table of the unmatched.
+
+**What the result tells us:**
+- Transactions come back (matched + unmatched) → the feed lands as readable
+  BankTransactions; build the full matcher (auto-surface unmatched as action
+  items, "log in OP" prefill, dismiss list, optional chase).
+- Zero come back but Xero shows card spend for the period → the purchases are raw
+  statement lines; the standard API can't read them, so we need the
+  statement-lines route (restricted endpoint / partner feed / or rely on the
+  bookkeeper coding them first, then they appear as BankTransactions).
+
+No migration; no writes. Next step is decided by what the probe returns on the
+live org.
+
+---
+
+## Build notes — extraction date sanity check (Jun 2026)
+
+The probe (above) confirmed live: COT bank-feed transactions show as
+**Unreconciled** in Xero but ARE readable via `GET /BankTransactions` (33 fetched
+/ 33 matched / 0 orphans on the first run). So the full matcher is viable — no
+statement-line workaround needed.
+
+Date fix off the same session: a fuel receipt dated 11/06 (11 June) was extracted
+as 6 November — a US-style MM/DD misread that landed it months in the future.
+`normaliseCostDate()` in `cost-receipt-extract.ts` now post-checks the extracted
+date: anything implausibly future (> today + 7d) tries the day/month swap and, if
+that lands a valid past date, takes it (downgrading confidence so the modal flags
+it); otherwise keeps the date but still downgrades. Prompt also strengthened to
+"UK day-first; when ambiguous read 11/06 as 11 June not 6 November; normally today
+or in the recent past". The capture modal shows an amber "this date is in the
+future" hint for manual entry too.

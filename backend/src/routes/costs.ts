@@ -342,6 +342,99 @@ router.get('/xero/health', authorize(...VERIFY_ROLES), async (_req: AuthRequest,
   }
 });
 
+// Reconcile probe — "what's on the COT card in Xero that ISN'T in OP".
+// Reads SPEND bank transactions on the mapped COT bank account over a window
+// and flags which have a matching OP cost (by pushed BankTransactionID, else by
+// amount + near date). Doubles as the verification tool for the Codat→Xero feed:
+// if this returns transactions, OP can read the COT card and matching is viable;
+// if it returns nothing, the card's purchases aren't landing as readable
+// BankTransactions (they're sitting as raw, unreconciled statement lines) and we
+// need a different route. Read-only, admin/manager.
+router.get('/reconcile/xero-cot', authorize(...VERIFY_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const { isXeroConfigured } = await import('../config/xero');
+    if (!isXeroConfigured()) {
+      return res.status(503).json({ error: 'Xero not configured (XERO_CLIENT_ID / XERO_CLIENT_SECRET missing)' });
+    }
+    const { getSystemSetting } = await import('./system-settings');
+    const accountId = await getSystemSetting('xero_bank_cot_card');
+    if (!accountId) {
+      return res.json({
+        data: { configured: false, message: 'No Xero bank account mapped for the COT card. Set it in Settings → Xero Bank Accounts (the "Company card (COT)" row) first.' },
+      });
+    }
+
+    const days = Math.min(Math.max(parseInt(String(req.query.days ?? '30'), 10) || 30, 1), 180);
+    const start = new Date(); start.setUTCDate(start.getUTCDate() - days);
+    const y = start.getUTCFullYear(), m = start.getUTCMonth() + 1, d = start.getUTCDate();
+    const where = `BankAccount.AccountID==Guid("${accountId}") AND Type=="SPEND" AND Date>=DateTime(${y},${m},${d})`;
+
+    const { xeroBroker } = await import('../services/xero-broker');
+    const raw = await xeroBroker.getBankTransactions(where);
+
+    // Parse the fields we need, defensively (Xero Date can be /Date(ms)/ or ISO).
+    const parseXeroDate = (v: unknown): string | null => {
+      if (typeof v !== 'string') return null;
+      const ms = v.match(/\/Date\((\d+)/);
+      if (ms) return new Date(parseInt(ms[1], 10)).toISOString().slice(0, 10);
+      const t = Date.parse(v);
+      return Number.isNaN(t) ? null : new Date(t).toISOString().slice(0, 10);
+    };
+    type XTxn = { BankTransactionID?: string; Date?: string; Total?: number; Reference?: string; IsReconciled?: boolean; Status?: string; Contact?: { Name?: string } };
+    const txns = (raw as XTxn[]).map((t) => ({
+      bank_transaction_id: t.BankTransactionID ?? null,
+      date: parseXeroDate(t.Date),
+      total: typeof t.Total === 'number' ? t.Total : Number(t.Total ?? 0),
+      reference: t.Reference ?? null,
+      contact_name: t.Contact?.Name ?? null,
+      is_reconciled: t.IsReconciled === true,
+      status: t.Status ?? null,
+    }));
+
+    // OP costs to match against: anything pushed (xero_object_id) + every COT
+    // card cost in the window (for amount/date fallback matching).
+    const opRows = (await query(
+      `SELECT id, xero_object_id, amount_gross, cost_date, supplier_name
+         FROM costs
+        WHERE xero_object_id IS NOT NULL
+           OR (payment_method = 'cot_card' AND cost_date >= (CURRENT_DATE - ($1 || ' days')::interval))`,
+      [String(days)],
+    )).rows as Array<{ id: string; xero_object_id: string | null; amount_gross: string | number | null; cost_date: string | null; supplier_name: string | null }>;
+
+    const byXeroId = new Map(opRows.filter((r) => r.xero_object_id).map((r) => [r.xero_object_id as string, r]));
+    const daysBetween = (a: string, b: string) => Math.abs((Date.parse(a) - Date.parse(b)) / 86400000);
+
+    const results = txns.map((tx) => {
+      let match: { cost_id: string; matched_by: 'xero_id' | 'amount_date' } | null = null;
+      if (tx.bank_transaction_id && byXeroId.has(tx.bank_transaction_id)) {
+        match = { cost_id: byXeroId.get(tx.bank_transaction_id)!.id, matched_by: 'xero_id' };
+      } else if (tx.date) {
+        const cand = opRows.find((r) =>
+          r.cost_date && Math.abs(Number(r.amount_gross ?? 0) - tx.total) <= 0.01 && daysBetween(r.cost_date.slice(0, 10), tx.date!) <= 4,
+        );
+        if (cand) match = { cost_id: cand.id, matched_by: 'amount_date' };
+      }
+      return { ...tx, op_match: match };
+    });
+
+    const unmatched = results.filter((r) => !r.op_match);
+    res.json({
+      data: {
+        configured: true,
+        account_id: accountId,
+        window: { days, from: start.toISOString().slice(0, 10) },
+        fetched: results.length,
+        matched: results.length - unmatched.length,
+        unmatched_count: unmatched.length,
+        unmatched,
+      },
+    });
+  } catch (err) {
+    console.error('[costs] xero-cot probe error:', err);
+    res.status(502).json({ error: 'Xero request failed', detail: err instanceof Error ? err.message : String(err) });
+  }
+});
+
 router.get('/xero/accounts', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
   try {
     const { isXeroConfigured } = await import('../config/xero');

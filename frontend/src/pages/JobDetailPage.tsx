@@ -486,6 +486,11 @@ function SwapVehicleButton({ assignmentId, vehicleId, currentVehicleReg, onSwapp
   const [showForm, setShowForm] = useState(false);
   const [vehicles, setVehicles] = useState<{ id: string; reg: string; simpleType: string }[]>([]);
   const [selectedVehicle, setSelectedVehicle] = useState('');
+  // 'breakdown' = van out of service (→ Not Ready + Problems issue + interim
+  // assessment). 'planned' = deliberate change (e.g. client upgrading vans);
+  // the outgoing van is fine and just gets a normal check-in when it's back.
+  const [swapKind, setSwapKind] = useState<'breakdown' | 'planned'>('breakdown');
+  const planned = swapKind === 'planned';
   const [reasonCode, setReasonCode] = useState('breakdown');
   const [reasonDetails, setReasonDetails] = useState('');
   // Soft check-in of the van being swapped out
@@ -525,7 +530,8 @@ function SwapVehicleButton({ assignmentId, vehicleId, currentVehicleReg, onSwapp
 
   const handleSwap = async () => {
     if (!selectedVehicle || !reasonDetails.trim()) return;
-    if (issueChoice === 'new' && !newIssueSummary.trim()) {
+    // Issue is only required for a breakdown swap. Planned swaps don't log one.
+    if (!planned && issueChoice === 'new' && !newIssueSummary.trim()) {
       setError('Give the new issue a short summary, or link an existing one.');
       return;
     }
@@ -535,6 +541,7 @@ function SwapVehicleButton({ assignmentId, vehicleId, currentVehicleReg, onSwapp
       const reasonLabel = SWAP_REASONS.find(r => r.code === reasonCode)?.label || reasonCode;
       const payload: any = {
         new_vehicle_id: selectedVehicle,
+        swap_kind: swapKind,
         swap_reason: `${reasonLabel}: ${reasonDetails.trim()}`,
       };
       const softCheckin: any = {};
@@ -544,20 +551,23 @@ function SwapVehicleButton({ assignmentId, vehicleId, currentVehicleReg, onSwapp
       if (checkinNotes.trim()) softCheckin.notes = checkinNotes.trim();
       if (Object.keys(softCheckin).length > 0) payload.soft_checkin = softCheckin;
 
-      if (issueChoice === 'new') {
-        payload.issue_link = {
-          new_issue: {
-            category: reasonCode === 'accident' ? 'damaged' : reasonCode === 'client_request' ? 'other' : 'breakdown',
-            severity: 'urgent',
-            summary: newIssueSummary.trim(),
-            description: reasonDetails.trim() || null,
-          },
-        };
-      } else if (issueChoice !== 'none') {
-        payload.issue_link = { existing_issue_id: issueChoice };
+      // Problem record is breakdown-only. A planned change isn't a fault.
+      if (!planned) {
+        if (issueChoice === 'new') {
+          payload.issue_link = {
+            new_issue: {
+              category: reasonCode === 'accident' ? 'damaged' : reasonCode === 'client_request' ? 'other' : 'breakdown',
+              severity: 'urgent',
+              summary: newIssueSummary.trim(),
+              description: reasonDetails.trim() || null,
+            },
+          };
+        } else if (issueChoice !== 'none') {
+          payload.issue_link = { existing_issue_id: issueChoice };
+        }
       }
 
-      const resp = await api.post<{ data: { redirect_to?: string; ve103b_regen_needed?: boolean; ve103b_reg?: string | null; swapped_count?: number } }>(
+      const resp = await api.post<{ data: { redirect_to?: string; ve103b_regen_needed?: boolean; ve103b_reg?: string | null; swapped_count?: number; outgoing_check_in_needed?: boolean; outgoing_reg?: string } }>(
         `/assignments/${assignmentId}/swap-vehicle`, payload,
       );
       const data = resp.data;
@@ -567,6 +577,14 @@ function SwapVehicleButton({ assignmentId, vehicleId, currentVehicleReg, onSwapp
           `Vehicle swapped. NOTE: the original had a VE103B certificate — ` +
           `generate a new VE103B for ${data.ve103b_reg || 'the replacement'} from the VE103B page ` +
           `(a new certificate number is required, so this can't be done automatically).`
+        );
+      }
+
+      if (data?.outgoing_check_in_needed) {
+        alert(
+          `Planned swap done. When ${data.outgoing_reg || currentVehicleReg} is back, ` +
+          `check it in as normal (Drivers & Vehicles tab → Check In) to capture its ` +
+          `return mileage and condition and free it for the next hire.`
         );
       }
 
@@ -602,6 +620,32 @@ function SwapVehicleButton({ assignmentId, vehicleId, currentVehicleReg, onSwapp
       <p className="text-xs font-medium text-orange-800">
         Swap <strong>{currentVehicleReg}</strong> — moves every driver on this van to the replacement.
       </p>
+
+      {/* Swap kind — breakdown (out of service) vs planned (van's fine) */}
+      <div className="space-y-1">
+        <label className="block text-[11px] font-semibold text-gray-600 uppercase tracking-wide">Type of swap</label>
+        <div className="flex gap-1">
+          <button
+            type="button"
+            onClick={() => { setSwapKind('breakdown'); if (reasonCode === 'client_request') { setReasonCode('breakdown'); setNewIssueSummary(`${currentVehicleReg}: Breakdown`); } }}
+            className={`flex-1 rounded px-2 py-1.5 text-xs font-medium border ${!planned ? 'bg-orange-600 text-white border-orange-600' : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'}`}
+          >
+            🛠 Breakdown / fault
+          </button>
+          <button
+            type="button"
+            onClick={() => { setSwapKind('planned'); setReasonCode('client_request'); }}
+            className={`flex-1 rounded px-2 py-1.5 text-xs font-medium border ${planned ? 'bg-ooosh-600 text-white border-ooosh-600' : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'}`}
+          >
+            📋 Planned change
+          </button>
+        </div>
+        <p className="text-[11px] text-gray-500">
+          {planned
+            ? `${currentVehicleReg} is fine — it'll take a normal check-in to Available when it's back. No fault logged.`
+            : `${currentVehicleReg} goes out of service (Not Ready) with a problem record.`}
+        </p>
+      </div>
 
       {/* Reason */}
       <div className="space-y-1">
@@ -651,10 +695,15 @@ function SwapVehicleButton({ assignmentId, vehicleId, currentVehicleReg, onSwapp
         </div>
         <input type="text" value={location} onChange={e => setLocation(e.target.value)} placeholder="Where is it? (garage / tow truck / venue)" className="w-full text-sm border border-gray-300 rounded px-2 py-1.5" />
         <input type="text" value={checkinNotes} onChange={e => setCheckinNotes(e.target.value)} placeholder="Condition notes" className="w-full text-sm border border-gray-300 rounded px-2 py-1.5" />
-        <p className="text-[11px] text-gray-500">{currentVehicleReg} will be marked <strong>Not Ready</strong> — full check-in when it's back at base.</p>
+        <p className="text-[11px] text-gray-500">
+          {planned
+            ? <>Optional — the proper check-in on return captures the full state.</>
+            : <>{currentVehicleReg} will be marked <strong>Not Ready</strong> — full check-in when it's back at base.</>}
+        </p>
       </div>
 
-      {/* Issue link/create */}
+      {/* Issue link/create — breakdown only; a planned change isn't a fault */}
+      {!planned && (
       <div className="space-y-1">
         <label className="block text-[11px] font-semibold text-gray-600 uppercase tracking-wide">Problem record</label>
         <select
@@ -678,6 +727,7 @@ function SwapVehicleButton({ assignmentId, vehicleId, currentVehicleReg, onSwapp
           />
         )}
       </div>
+      )}
 
       {error && <p className="text-xs text-red-600">{error}</p>}
       <div className="flex gap-2 pt-1">
