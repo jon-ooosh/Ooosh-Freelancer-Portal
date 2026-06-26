@@ -89,6 +89,8 @@ const PAYMENT_STATUSES: { value: CostPaymentStatus; label: string }[] = [
 
 const SPLIT_KEY = 'ooosh_cost_modal_split_pct';
 const round2 = (n: number) => Math.round(n * 100) / 100;
+// Normalise a UK reg for comparison — strip spaces/punctuation, uppercase.
+const normReg = (s: string) => s.replace(/[^a-z0-9]/gi, '').toUpperCase();
 
 interface XeroContactLite { ContactID: string; Name: string }
 interface JobSuggestion { id: string; type: string; name: string; subtitle?: string }
@@ -160,6 +162,10 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
   // AI-spotted job number (suggestion only — staff confirm to link).
   const [suggestedJobNumber, setSuggestedJobNumber] = useState<string | null>(null);
   const [linkingSuggestion, setLinkingSuggestion] = useState(false);
+  // AI-spotted vehicle reg feedback: matched=true → we auto-linked the van
+  // (still flag it for a sanity check); matched=false → reg seen but not in the
+  // active fleet, so the user links manually.
+  const [vehicleRegNote, setVehicleRegNote] = useState<{ reg: string; matched: boolean } | null>(null);
   // Compact quote-vs-actuals summary shown when a job is linked.
   const [jobSummary, setJobSummary] = useState<{ quotedCost: number; clientQuoted: number; actuals: number; extra: number } | null>(null);
 
@@ -449,6 +455,7 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
     setExtracting(true);
     setExtractError('');
     setAiPrefilled(false);
+    setVehicleRegNote(null);
     try {
       const fd = new FormData();
       fd.append('file', receiptFile);
@@ -462,6 +469,8 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
           vat_treatment: 'standard' | 'no_vat';
           invoice_number: string | null;
           job_number: string | null;
+          vehicle_reg: string | null;
+          mileage: number | null;
           description: string | null;
           category_code: string | null;
           confidence: 'high' | 'medium' | 'low';
@@ -507,6 +516,29 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
       }
       // Job number is a suggestion only — staff confirm before it links.
       setSuggestedJobNumber(!linkedJobId && ex.job_number ? ex.job_number.replace(/\D/g, '') || null : null);
+      // Vehicle reg → match against the already-loaded active fleet, client-side.
+      // Exact match (it's our plate) auto-links the van so the mileage/garage
+      // pre-fill has somewhere to land; a reg we don't recognise is surfaced as
+      // a note so staff can link manually. Never overrides an existing link.
+      if (ex.vehicle_reg && !vehicleId) {
+        const wanted = normReg(ex.vehicle_reg);
+        const match = fleet.find((v) => normReg(v.reg) === wanted);
+        if (match) {
+          setVehicleId(match.id);
+          // Auto-tick the service-history offer for servicing/repair categories
+          // (mirrors picking a van by hand). Use the freshly-extracted category.
+          if (SERVICE_HISTORY_CATEGORY_CODES.has(ex.category_code || categoryCode)) setLogService(true);
+          setVehicleRegNote({ reg: match.reg, matched: true });
+        } else {
+          setVehicleRegNote({ reg: ex.vehicle_reg, matched: false });
+        }
+      }
+      // Mileage → pre-fill the service-history mileage field (suggestion only;
+      // confirmed before save, and the service endpoint's upward-only ratchet
+      // still guards the van's live odometer).
+      if (ex.mileage != null) setServiceMileage(String(ex.mileage));
+      // Garage is the supplier on a garage invoice — pre-fill if not set.
+      if (ex.supplier && !serviceGarage.trim()) setServiceGarage(ex.supplier);
       setAiPrefilled(true);
       setAiConfidence(ex.confidence);
     } catch (err) {
@@ -721,6 +753,16 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
                     📎 Looks like <strong>job #{suggestedJobNumber}</strong> on this invoice — {linkingSuggestion ? 'linking…' : 'tap to link it'}
                   </button>
                 )}
+                {vehicleRegNote?.matched && (
+                  <div className="mt-2 px-3 py-2 text-xs rounded-md border border-purple-200 bg-purple-50 text-purple-800">
+                    🚐 Linked <strong>{vehicleRegNote.reg}</strong> from the receipt — check it&apos;s the right van before saving.
+                  </div>
+                )}
+                {vehicleRegNote && !vehicleRegNote.matched && (
+                  <div className="mt-2 px-3 py-2 text-xs rounded-md border border-amber-200 bg-amber-50 text-amber-800">
+                    🚐 Receipt shows reg <strong>{vehicleRegNote.reg}</strong> — not in the active fleet. Link a vehicle manually below if needed.
+                  </div>
+                )}
                 {extractError && (
                   <div className="mt-2 px-3 py-2 text-xs bg-red-50 border border-red-200 text-red-700 rounded-md">
                     {extractError}
@@ -926,7 +968,7 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
                     {vehicleLabel(selectedVehicle) || '(linked vehicle)'}
                   </span>
                   <button type="button"
-                    onClick={() => { setVehicleId(null); setVehicleSearch(''); setLogService(false); }}
+                    onClick={() => { setVehicleId(null); setVehicleSearch(''); setLogService(false); setVehicleRegNote(null); }}
                     className="text-xs text-red-600 hover:underline">
                     Remove link
                   </button>
