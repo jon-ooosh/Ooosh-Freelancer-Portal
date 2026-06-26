@@ -710,7 +710,7 @@ router.get('/by-job/:hirehopJobId', authenticateVehicleFlexible, async (req: Fle
       LEFT JOIN job_excess je ON je.assignment_id = vha.id
       WHERE vha.hirehop_job_id = $1
         AND vha.assignment_type = 'self_drive'
-        AND vha.status != 'cancelled'
+        AND vha.status NOT IN ('cancelled', 'swapped')
       ORDER BY vha.van_requirement_index ASC`,
       [hirehopJobId]
     );
@@ -1424,6 +1424,36 @@ router.patch('/:id', authenticateVehicleFlexible, validate(patchSchema), async (
         // Nothing left to write — return 200 idempotently rather than
         // 400, so the freelancer's writeback loop registers as success.
         return res.json({ data: { id, no_op: true } });
+      }
+    }
+
+    // Guard: never let a vehicle-link or book-out write land on a TERMINAL row
+    // (swapped / returned / cancelled). After a swap, by-job used to surface the
+    // swapped original alongside the replacement; the BookOutPage writeback loop
+    // then stamped the replacement van's reg + status='booked_out' onto the
+    // swapped row, resurrecting it as a duplicate booked_out row and leaving the
+    // outgoing van with no live assignment (job 15828, RX21UOB→RX24SZE, Jun 2026
+    // — the same class as RX73TBZ). by-job no longer returns swapped rows, but
+    // this is the belt-and-braces stop for any other caller: a stale tab, an
+    // offline-queue replay, or a direct API call. No-op (200) rather than 4xx so
+    // the writeback loop treats it as success and moves on without corrupting it.
+    const wantsVehicleChange = updates.vehicle_id !== undefined;
+    const wantsBookOut = updates.status === 'booked_out';
+    if (wantsVehicleChange || wantsBookOut) {
+      const cur = await query(
+        `SELECT status FROM vehicle_hire_assignments WHERE id = $1`,
+        [id]
+      );
+      if (cur.rows.length === 0) {
+        return res.status(404).json({ error: 'Hire form not found' });
+      }
+      const curStatus = cur.rows[0].status as string;
+      if (curStatus === 'swapped' || curStatus === 'returned' || curStatus === 'cancelled') {
+        console.warn(
+          `[hire-forms] PATCH ignored on terminal row ${id} (status=${curStatus}); ` +
+          `refusing vehicle-link/book-out write (wantsVehicleChange=${wantsVehicleChange}, wantsBookOut=${wantsBookOut})`
+        );
+        return res.json({ data: { id, no_op: true, reason: 'terminal_status' } });
       }
     }
 
