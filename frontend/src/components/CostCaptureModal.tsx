@@ -166,6 +166,12 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
   // (still flag it for a sanity check); matched=false → reg seen but not in the
   // active fleet, so the user links manually.
   const [vehicleRegNote, setVehicleRegNote] = useState<{ reg: string; matched: boolean } | null>(null);
+  // Reg extracted from the receipt, awaiting a fleet match. Held in state (not
+  // matched inline in the async handler) so the match runs in an effect once the
+  // fleet list has actually loaded — the fleet fetch can still be in flight when
+  // the multi-second AI extraction returns, and an inline match would compare
+  // against a stale/empty fleet captured in the handler's closure.
+  const [pendingVehicleReg, setPendingVehicleReg] = useState<string | null>(null);
   // Compact quote-vs-actuals summary shown when a job is linked.
   const [jobSummary, setJobSummary] = useState<{ quotedCost: number; clientQuoted: number; actuals: number; extra: number } | null>(null);
 
@@ -236,6 +242,26 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
       .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Match an AI-extracted reg against the fleet once the fleet has loaded.
+  // Done here (not inline in the async extract handler) so a fleet fetch still
+  // in flight when extraction returns doesn't cause a false "not in fleet". An
+  // exact match auto-links the van (it's our plate) so the mileage/garage
+  // pre-fill has somewhere to land; an unrecognised reg is surfaced as a note.
+  useEffect(() => {
+    if (!pendingVehicleReg || fleet.length === 0) return;
+    if (vehicleId) { setPendingVehicleReg(null); return; }
+    const wanted = normReg(pendingVehicleReg);
+    const match = fleet.find((v) => normReg(v.reg) === wanted);
+    if (match) {
+      setVehicleId(match.id);
+      if (SERVICE_HISTORY_CATEGORY_CODES.has(categoryCode)) setLogService(true);
+      setVehicleRegNote({ reg: match.reg, matched: true });
+    } else {
+      setVehicleRegNote({ reg: pendingVehicleReg, matched: false });
+    }
+    setPendingVehicleReg(null);
+  }, [pendingVehicleReg, fleet, vehicleId, categoryCode]);
 
   const vehicleLabel = (v: FleetLite | undefined) =>
     v ? `${v.reg}${v.make || v.model ? ` — ${[v.make, v.model].filter(Boolean).join(' ')}` : v.simple_type ? ` — ${v.simple_type}` : ''}` : '';
@@ -471,6 +497,7 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
           job_number: string | null;
           vehicle_reg: string | null;
           mileage: number | null;
+          service_type: 'service' | 'repair' | 'mot' | 'insurance' | 'tax' | 'tyre' | 'other' | null;
           description: string | null;
           category_code: string | null;
           confidence: 'high' | 'medium' | 'low';
@@ -516,23 +543,13 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
       }
       // Job number is a suggestion only — staff confirm before it links.
       setSuggestedJobNumber(!linkedJobId && ex.job_number ? ex.job_number.replace(/\D/g, '') || null : null);
-      // Vehicle reg → match against the already-loaded active fleet, client-side.
-      // Exact match (it's our plate) auto-links the van so the mileage/garage
-      // pre-fill has somewhere to land; a reg we don't recognise is surfaced as
-      // a note so staff can link manually. Never overrides an existing link.
-      if (ex.vehicle_reg && !vehicleId) {
-        const wanted = normReg(ex.vehicle_reg);
-        const match = fleet.find((v) => normReg(v.reg) === wanted);
-        if (match) {
-          setVehicleId(match.id);
-          // Auto-tick the service-history offer for servicing/repair categories
-          // (mirrors picking a van by hand). Use the freshly-extracted category.
-          if (SERVICE_HISTORY_CATEGORY_CODES.has(ex.category_code || categoryCode)) setLogService(true);
-          setVehicleRegNote({ reg: match.reg, matched: true });
-        } else {
-          setVehicleRegNote({ reg: ex.vehicle_reg, matched: false });
-        }
-      }
+      // Vehicle reg → hand off to the fleet-match effect (waits for the fleet
+      // list to load before matching). Never overrides an existing link.
+      if (ex.vehicle_reg && !vehicleId) setPendingVehicleReg(ex.vehicle_reg);
+      // Service type → pre-select the matching pill when the AI classified the
+      // work (e.g. a tyres-only invoice → "tyre"). Mixed invoices come back as
+      // "service"/"other"; staff adjust. Suggestion only.
+      if (ex.service_type) setServiceType(ex.service_type);
       // Mileage → pre-fill the service-history mileage field (suggestion only;
       // confirmed before save, and the service endpoint's upward-only ratchet
       // still guards the van's live odometer).

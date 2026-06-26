@@ -61,6 +61,7 @@ Extraction rules:
 - invoice_number: the supplier's invoice/receipt reference as printed (e.g. "INV-10472", "138106", "SI-2024-0091") — usually labelled "Invoice No", "Invoice #", "Reference", "Receipt No" or similar, often near the date in the header. Return it exactly as printed (keep any prefix). Null when there genuinely isn't one (common on fuel/till receipts). Do NOT use the order number, customer number, account number, or our job number.
 - vehicle_reg: the UK vehicle registration plate of the vehicle the cost relates to, if shown — usually labelled "Vehicle Reg", "Reg", "Registration", "Reg No", or "VRM" (common on garage invoices, MOT certificates, tyre receipts). Return it normalised: uppercase, no spaces (e.g. "RO23 HLR" → "RO23HLR"). Null if no registration is shown. Do NOT use the VIN / chassis number, the make/model, or the production year.
 - mileage: the vehicle's odometer reading in miles, if shown — usually labelled "Mileage", "Mileage (miles)", "Odometer", "Miles", or "Mileage in". Return as an integer, stripping commas and units (e.g. "99,607 miles" → 99607). Null if not shown. Do NOT confuse it with the invoice number, year, or any monetary amount.
+- service_type: when the document is a vehicle servicing/repair/garage invoice, classify the PRIMARY work into ONE of: "service" (routine/scheduled service, oil/filter change, inspection), "repair" (mechanical, bodywork, glass, accident or breakage fixes), "mot" (MOT test), "tyre" (tyres, wheels, balancing, alignment, tracking, punctures), "insurance" (insurance-related work), "tax" (road tax / VED), "other" (anything else). If the invoice clearly covers ONE kind of work, return that specific type (e.g. an invoice only for replacing tyres → "tyre"). If it's a genuine mix of different work, return "service". Null when the document is NOT a vehicle servicing/repair document (fuel, parking, non-vehicle costs).
 - supplier: the merchant's canonical company name as printed on the receipt header (e.g. "TTS360 Ltd", "Shell U.K. Limited", "Halfords Autocentres") — NOT the tagline, address line, or "thank you" line. Strip trailing punctuation.
 - cost_date: format YYYY-MM-DD. Receipt dates are UK DAY-FIRST (DD/MM/YYYY) — when a date is ambiguous (both parts ≤ 12, e.g. 11/06), read it day-first (11 June, NOT 6 November). The cost date is normally TODAY or in the recent past; it should not be months in the future. Null if not visible.
 - job_number: if the document clearly references an Ooosh job/booking number (e.g. "Job 15291", "#15291", "Attention: Ooosh Tours (#15291)", "your ref 15291"), return JUST the digits as a string. Otherwise null. Do NOT guess from invoice numbers, phone numbers, postcodes, dates, or amounts — only a clear job/booking reference.
@@ -83,6 +84,12 @@ const SCHEMA = {
     job_number: { type: ['string', 'null'] },
     vehicle_reg: { type: ['string', 'null'] },
     mileage: { type: ['number', 'null'] },
+    service_type: {
+      anyOf: [
+        { type: 'string', enum: ['service', 'repair', 'mot', 'insurance', 'tax', 'tyre', 'other'] },
+        { type: 'null' },
+      ],
+    },
     description: { type: ['string', 'null'] },
     category_code: {
       anyOf: [
@@ -95,7 +102,7 @@ const SCHEMA = {
   required: [
     'supplier', 'cost_date', 'amount_gross', 'amount_vat', 'amount_net',
     'vat_treatment', 'invoice_number', 'job_number', 'vehicle_reg', 'mileage',
-    'description', 'category_code', 'confidence',
+    'service_type', 'description', 'category_code', 'confidence',
   ],
   additionalProperties: false,
 };
@@ -113,6 +120,8 @@ export interface ExtractedReceipt {
   vehicle_reg: string | null;
   /** Odometer reading in miles. */
   mileage: number | null;
+  /** Primary vehicle work classification, mapped to the service-log pills. */
+  service_type: 'service' | 'repair' | 'mot' | 'insurance' | 'tax' | 'tyre' | 'other' | null;
   description: string | null;
   category_code: string | null;
   confidence: 'high' | 'medium' | 'low';
