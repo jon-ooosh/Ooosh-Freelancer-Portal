@@ -74,6 +74,16 @@ const FOUND_IN_LABEL: Record<string, string> = {
   van: 'Van', rehearsal: 'Rehearsal room', backline: 'Backline', elsewhere: 'Somewhere else',
 };
 
+// Hold-until on the held list: amber within 3 days, red once passed — mirrors
+// the reminder window in services/holding-reminders.ts.
+function HoldUntilCell({ value }: { value: string | null | undefined }) {
+  if (!value) return <span className="text-slate-300">—</span>;
+  const days = Math.floor((new Date(value).getTime() - Date.now()) / 86400000);
+  const cls = days < 0 ? 'text-red-600 font-medium' : days <= 3 ? 'text-amber-600' : 'text-slate-600';
+  const title = days < 0 ? 'Hold date passed' : days <= 3 ? 'Hold ending soon' : '';
+  return <span className={cls} title={title}>{fmtDate(value)}</span>;
+}
+
 function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
   useEffect(() => {
     const h = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
@@ -188,6 +198,7 @@ export default function HoldingPage({ view }: { view: View }) {
                 <th className="text-left px-3 py-2">Job</th>
                 <th className="text-left px-3 py-2">Boxes</th>
                 <th className="text-left px-3 py-2">Needed by</th>
+                <th className="text-left px-3 py-2">Hold until</th>
                 <th className="text-left px-3 py-2">Location</th>
                 <th className="text-left px-3 py-2">Status</th>
               </>
@@ -230,6 +241,7 @@ export default function HoldingPage({ view }: { view: View }) {
                       <td className="px-3 py-2">{h.hh_job_number ? `#${h.hh_job_number}` : '—'}</td>
                       <td className="px-3 py-2">{received}</td>
                       <td className="px-3 py-2">{fmtDate(h.needed_by)}</td>
+                      <td className="px-3 py-2"><HoldUntilCell value={h.hold_until} /></td>
                       <td className="px-3 py-2">{locationLabelOrDash(h)}</td>
                       <td className="px-3 py-2"><span className={`px-2 py-0.5 rounded text-xs font-medium capitalize ${STATUS_COLOUR[h.status] || 'bg-slate-100'}`}>{statusLabel(h.status)}</span></td>
                     </>
@@ -246,7 +258,7 @@ export default function HoldingPage({ view }: { view: View }) {
                 </tr>
               );
             })}
-            {sortedRows.length === 0 && <tr><td colSpan={view === 'held' ? 7 : 8} className="px-3 py-8 text-center text-slate-400">{loading ? 'Loading…' : 'Nothing here.'}</td></tr>}
+            {sortedRows.length === 0 && <tr><td colSpan={8} className="px-3 py-8 text-center text-slate-400">{loading ? 'Loading…' : 'Nothing here.'}</td></tr>}
           </tbody>
         </table>
       </div>
