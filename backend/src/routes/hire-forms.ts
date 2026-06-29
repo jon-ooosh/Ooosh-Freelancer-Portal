@@ -17,7 +17,7 @@ import {
   type FlexibleVehicleRequest,
 } from '../middleware/freelancer-bookout-auth';
 import { validate } from '../middleware/validate';
-import { generateHireFormPdf, fetchLogo, type HireFormData } from '../services/hire-form-pdf';
+import { generateHireFormPdf, fetchLogo, composeMakeModel, type HireFormData } from '../services/hire-form-pdf';
 import { uploadToR2, getFromR2 } from '../config/r2';
 import { emailService } from '../services/email-service';
 import { getFrontendUrl } from '../config/app-urls';
@@ -2166,7 +2166,7 @@ async function generateAndEmailCrossVanHireForm(
       return 'failed';
     }
 
-    const van = await query(`SELECT reg, vehicle_type FROM fleet_vehicles WHERE id = $1`, [vanVehicleId]);
+    const van = await query(`SELECT reg, vehicle_type, make, model FROM fleet_vehicles WHERE id = $1`, [vanVehicleId]);
     const vanReg = van.rows[0]?.reg as string | undefined;
     const vanModel = (van.rows[0]?.vehicle_type as string | undefined) || '';
     if (!vanReg || vanReg === 'TBC') {
@@ -2177,6 +2177,7 @@ async function generateAndEmailCrossVanHireForm(
     // Swap in the cross van — everything else stays the driver's own.
     formData.vehicleReg = vanReg;
     formData.vehicleModel = vanModel;
+    formData.vehicleMakeModel = composeMakeModel(van.rows[0]?.make, van.rows[0]?.model) || undefined;
 
     const { pdfBytes, filename } = await generateHireFormPdf(formData);
     const r2Key = `hire-forms/${driverAssignmentId}/${filename}`;
@@ -2258,6 +2259,8 @@ async function loadHireFormData(assignmentId: string): Promise<HireFormData | nu
       COALESCE(j.hh_job_number, vha.hirehop_job_id) AS resolved_hh_job_number,
       fv.reg AS vehicle_reg,
       fv.vehicle_type AS vehicle_model,
+      fv.make AS vehicle_make,
+      fv.model AS vehicle_make_model,
       d.full_name AS driver_name,
       d.email AS driver_email,
       d.phone AS driver_phone,
@@ -2395,6 +2398,7 @@ async function loadHireFormData(assignmentId: string): Promise<HireFormData | nu
     datePassedTest: toISODate(row.driver_date_passed_test),
     vehicleReg: row.vehicle_reg || '',
     vehicleModel: row.vehicle_model || '',
+    vehicleMakeModel: composeMakeModel(row.vehicle_make, row.vehicle_make_model) || undefined,
     hireStartDate: toISODate(row.resolved_hire_start),
     hireStartTime: row.resolved_start_time ? String(row.resolved_start_time) : undefined,
     hireEndDate: toISODate(row.resolved_hire_end),
