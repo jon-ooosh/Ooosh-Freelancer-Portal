@@ -7,6 +7,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
+import { hasManagerRole } from '../lib/roles';
 import { getPaymentState, PAYMENT_STATE_LABELS, PAYMENT_STATE_CLASSES } from '../services/paymentState';
 import ExcessPaymentModal, { statusLabel, statusColor } from './ExcessPaymentModal';
 import CostCaptureModal from './CostCaptureModal';
@@ -130,7 +131,9 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   const [data, setData] = useState<FinancialData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const isAdmin = useAuthStore((s) => s.user?.role) === 'admin';
+  const role = useAuthStore((s) => s.user?.role);
+  const isAdmin = role === 'admin';
+  const canManage = hasManagerRole(role);
   const [showResolveBalance, setShowResolveBalance] = useState(false);
   const [balReason, setBalReason] = useState('xero_settled');
   const [balNotes, setBalNotes] = useState('');
@@ -249,6 +252,41 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
     setRefundError('');
     setRefundResult(null);
     if (refundResult) loadData();
+  };
+
+  // Dismiss-pending-refund — clears an OP IOU WITHOUT moving money, for refunds
+  // already done out-of-band (HireHop / Stripe / bank direct) or artifacts.
+  // Distinct from "Process refund" which actually sends money.
+  const [dismissRefund, setDismissRefund] = useState<NonNullable<FinancialData['financial']['pending_refunds']>[number] | null>(null);
+  const [dismissReason, setDismissReason] = useState('refunded_externally');
+  const [dismissNotes, setDismissNotes] = useState('');
+  const [dismissLoading, setDismissLoading] = useState(false);
+  const [dismissError, setDismissError] = useState('');
+
+  const openDismissRefundModal = (pr: NonNullable<FinancialData['financial']['pending_refunds']>[number]) => {
+    setDismissRefund(pr);
+    setDismissReason('refunded_externally');
+    setDismissNotes('');
+    setDismissError('');
+  };
+
+  const submitDismissRefund = async () => {
+    if (!dismissRefund) return;
+    setDismissLoading(true);
+    setDismissError('');
+    try {
+      await api.post(`/money/${jobId}/dismiss-refund`, {
+        refund_id: dismissRefund.id,
+        reason: dismissReason,
+        notes: dismissNotes.trim() || null,
+      });
+      setDismissRefund(null);
+      loadData();
+    } catch (e) {
+      setDismissError(e instanceof Error ? e.message : 'Failed to clear refund');
+    } finally {
+      setDismissLoading(false);
+    }
   };
 
   // When the staff member changes the deposit to refund against, default the
@@ -1027,6 +1065,15 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                     >
                       Process refund
                     </button>
+                    {canManage && (
+                      <button
+                        onClick={() => openDismissRefundModal(pr)}
+                        title="Clear this IOU without moving money (already refunded out-of-band, or shouldn't have been logged)"
+                        className="text-xs font-medium text-amber-700 hover:text-amber-900 underline"
+                      >
+                        Clear
+                      </button>
+                    )}
                   </div>
                 </div>
               ))}
@@ -1356,6 +1403,53 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                 </div>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Clear (dismiss) pending refund modal — no money moves */}
+      {dismissRefund && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setDismissRefund(null)}>
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full" onClick={(e) => e.stopPropagation()}>
+            <div className="px-5 py-4 border-b border-gray-200">
+              <h3 className="text-lg font-semibold text-gray-900">Clear Pending Refund</h3>
+              <p className="text-xs text-gray-500 mt-0.5">
+                £{Number(dismissRefund.amount).toFixed(2)} — clears the IOU without moving any money. Doesn't touch HireHop / Stripe / Xero.
+                To actually send a refund, use "Process refund" instead.
+              </p>
+            </div>
+            <div className="px-5 py-4 space-y-3">
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Reason</label>
+                <select
+                  value={dismissReason}
+                  onChange={(e) => setDismissReason(e.target.value)}
+                  className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md"
+                >
+                  <option value="refunded_externally">Already refunded outside OP (HireHop / Stripe / bank)</option>
+                  <option value="not_required">Not required (artifact / superseded)</option>
+                  <option value="duplicate">Duplicate record</option>
+                  <option value="other">Other</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Notes (optional)</label>
+                <textarea
+                  value={dismissNotes}
+                  onChange={(e) => setDismissNotes(e.target.value)}
+                  rows={2}
+                  placeholder="e.g. refunded £150 in full direct in HireHop"
+                  className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md resize-y"
+                />
+              </div>
+              {dismissError && <p className="text-xs text-red-600">{dismissError}</p>}
+              <div className="flex justify-end gap-2">
+                <button onClick={() => setDismissRefund(null)} className="px-4 py-2 text-sm font-medium text-gray-700 border border-gray-300 rounded-md hover:bg-gray-50">Cancel</button>
+                <button onClick={submitDismissRefund} disabled={dismissLoading} className="px-4 py-2 text-sm font-medium text-white bg-amber-600 hover:bg-amber-700 rounded-md disabled:opacity-50">
+                  {dismissLoading ? 'Clearing…' : 'Clear refund'}
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

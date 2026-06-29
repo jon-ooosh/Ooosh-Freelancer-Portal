@@ -10,6 +10,7 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
+import { hasManagerRole } from '../lib/roles';
 
 interface BalanceRow {
   job_id: string; hh_job_number: number | null; job_name: string | null;
@@ -263,6 +264,108 @@ function ResolveBalanceModal({ target, onClose, onDone }: {
   );
 }
 
+// Pending-refund dismiss reasons (mirror of money.ts DISMISS_REFUND_REASONS).
+const DISMISS_REASONS = [
+  { value: 'refunded_externally', label: 'Already refunded outside OP (HireHop / Stripe / bank)' },
+  { value: 'not_required', label: 'Not required (artifact / superseded)' },
+  { value: 'duplicate', label: 'Duplicate record' },
+  { value: 'other', label: 'Other' },
+];
+
+// Dismiss-refund modal — single (a PendingRefundRow) or bulk ('bulk', date-based).
+// Clears the OP IOU WITHOUT moving money — for refunds already done out-of-band
+// or pre-refund-tracking artifacts. Does NOT touch HireHop / Stripe / Xero.
+function DismissRefundModal({ target, isAdmin, onClose, onDone }: {
+  target: PendingRefundRow | 'bulk';
+  isAdmin: boolean;
+  onClose: () => void;
+  onDone: (msg: string) => void;
+}) {
+  const isBulk = target === 'bulk';
+  const [reason, setReason] = useState('refunded_externally');
+  const [notes, setNotes] = useState('');
+  const [beforeDate, setBeforeDate] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  const submit = async () => {
+    setSaving(true); setErr('');
+    try {
+      if (isBulk) {
+        if (!beforeDate) throw new Error('Pick a "logged before" date');
+        const res = await api.post<{ dismissed: number }>('/money/refunds/bulk-dismiss', {
+          reason, notes: notes || null, logged_before: beforeDate,
+        });
+        onDone(`Cleared ${res.dismissed} pending refund${res.dismissed === 1 ? '' : 's'}`);
+      } else {
+        await api.post(`/money/${target.job_id}/dismiss-refund`, {
+          refund_id: String(target.id), reason, notes: notes || null,
+        });
+        onDone('Pending refund cleared');
+      }
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Failed');
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-5" onClick={(e) => e.stopPropagation()}>
+        <h3 className="text-lg font-semibold text-gray-900 mb-1">
+          {isBulk ? 'Bulk clear pending refunds' : 'Clear pending refund'}
+        </h3>
+        {isBulk ? (
+          <p className="text-xs text-gray-500 mb-3">
+            Clears every pending refund logged before the chosen date. Use for the backlog from
+            before refund tracking was finished. Does NOT move any money or touch HireHop / Stripe / Xero.
+          </p>
+        ) : (
+          <p className="text-xs text-gray-500 mb-3">
+            #{target.hh_job_number ?? '—'}{target.client_name ? ` · ${target.client_name}` : ''} · {gbp(target.amount)}.
+            Clears this IOU — no money moves. Use when the refund was already handled in HireHop / Stripe / the bank,
+            or shouldn't have been logged. To actually send a refund, use the Money tab on the job instead.
+          </p>
+        )}
+
+        {isBulk && (
+          <div className="mb-3">
+            <label className="block text-xs font-medium text-gray-600 mb-1">Logged before</label>
+            <input type="date" value={beforeDate} onChange={(e) => setBeforeDate(e.target.value)}
+              className="w-full text-sm border border-gray-300 rounded-md px-3 py-2" />
+          </div>
+        )}
+
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-600 mb-1">Reason</label>
+          <select value={reason} onChange={(e) => setReason(e.target.value)}
+            className="w-full text-sm border border-gray-300 rounded-md px-3 py-2">
+            {DISMISS_REASONS.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
+          </select>
+        </div>
+
+        <div className="mb-4">
+          <label className="block text-xs font-medium text-gray-600 mb-1">Notes (optional)</label>
+          <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2}
+            placeholder="e.g. refunded £150 in full direct in HireHop"
+            className="w-full text-sm border border-gray-300 rounded-md px-3 py-2 resize-y" />
+        </div>
+
+        {err && <p className="text-xs text-red-600 mb-3">{err}</p>}
+        {isBulk && !isAdmin && <p className="text-xs text-amber-600 mb-3">Bulk clear is admin-only.</p>}
+
+        <div className="flex justify-end gap-2">
+          <button onClick={onClose} className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
+          <button onClick={submit} disabled={saving || (isBulk && !isAdmin)}
+            className="px-4 py-1.5 text-sm font-medium text-white bg-ooosh-600 rounded-md hover:bg-ooosh-700 disabled:opacity-50">
+            {saving ? 'Saving…' : isBulk ? 'Clear matching' : 'Clear refund'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Debt-chase tracker button: count + click-to-log, hover for the last chase.
 // Undo lives in the toast the parent shows after logging.
 function ChaseButton({ row, onChase }: { row: BalanceRow; onChase: (r: BalanceRow) => void }) {
@@ -466,8 +569,11 @@ export default function MoneyOverviewPage() {
   const [data, setData] = useState<OverviewData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const isAdmin = useAuthStore((s) => s.user?.role) === 'admin';
+  const role = useAuthStore((s) => s.user?.role);
+  const isAdmin = role === 'admin';
+  const canManage = hasManagerRole(role);
   const [resolveTarget, setResolveTarget] = useState<BalanceRow | 'bulk' | null>(null);
+  const [dismissTarget, setDismissTarget] = useState<PendingRefundRow | 'bulk' | null>(null);
   const [showResolved, setShowResolved] = useState(false);
   const [toast, setToast] = useState<{ msg: string; undo?: () => void } | null>(null);
   // Filters initialise from the last-used prefs and persist on every change.
@@ -642,8 +748,22 @@ export default function MoneyOverviewPage() {
       fmtDate(r.payment_date),
       <span className="font-semibold text-purple-700">{gbp(r.amount)}</span>,
       <span className="text-gray-500 text-xs">{r.notes || '—'}</span>,
+      ...(canManage ? [
+        <button
+          onClick={(e) => { e.preventDefault(); e.stopPropagation(); setDismissTarget(r); }}
+          title="Clear this IOU without moving money (already refunded out-of-band / artifact)"
+          className="text-xs text-gray-500 hover:text-ooosh-700 underline whitespace-nowrap"
+        >Clear</button>,
+      ] : []),
     ],
   }));
+
+  const refundColumns: Col[] = [
+    { label: 'Job', sortable: true }, { label: 'Client', sortable: true },
+    { label: 'Logged', sortable: true }, { label: 'Amount', sortable: true, align: 'right' },
+    { label: 'Reason' },
+    ...(canManage ? [{ label: '', align: 'right' as const }] : []),
+  ];
 
   return (
     <div className="p-4 sm:p-6 max-w-6xl mx-auto">
@@ -790,15 +910,25 @@ export default function MoneyOverviewPage() {
           </>
         )}
         {tab === 'refunds' && (
-          <Table
-            columns={[
-              { label: 'Job', sortable: true }, { label: 'Client', sortable: true },
-              { label: 'Logged', sortable: true }, { label: 'Amount', sortable: true, align: 'right' },
-              { label: 'Reason' },
-            ]}
-            empty="No pending refunds."
-            rows={refundRows}
-          />
+          <>
+            <div className="flex items-center justify-between gap-3 flex-wrap px-4 pt-3">
+              <p className="text-xs text-gray-500">
+                Refund IOUs from cancellations awaiting processing. <strong>Process</strong> moves money (Money tab on the job);
+                <strong> Clear</strong> just removes the IOU for refunds already handled out-of-band.
+              </p>
+              {isAdmin && data.pending_refunds.length > 0 && (
+                <button
+                  onClick={() => setDismissTarget('bulk')}
+                  className="text-xs text-gray-500 hover:text-ooosh-700 underline whitespace-nowrap"
+                >Bulk clear old refunds…</button>
+              )}
+            </div>
+            <Table
+              columns={refundColumns}
+              empty="No pending refunds."
+              rows={refundRows}
+            />
+          </>
         )}
       </div>
 
@@ -807,6 +937,14 @@ export default function MoneyOverviewPage() {
           target={resolveTarget}
           onClose={() => setResolveTarget(null)}
           onDone={(msg) => { setResolveTarget(null); setToast({ msg }); load(); }}
+        />
+      )}
+      {dismissTarget && (
+        <DismissRefundModal
+          target={dismissTarget}
+          isAdmin={isAdmin}
+          onClose={() => setDismissTarget(null)}
+          onDone={(msg) => { setDismissTarget(null); setToast({ msg }); load(); }}
         />
       )}
       {toast && (
