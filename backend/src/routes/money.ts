@@ -422,6 +422,150 @@ router.post('/balances/bulk-resolve', authorize('admin'), validate(bulkResolveSc
   }
 });
 
+// ── Dismiss / clear a pending refund (migration-less — status flip) ──
+//
+// Pending refunds are OP-only `job_payments` IOUs created by a cancellation
+// (payment_type='refund', status='pending'). The normal action is to PROCESS
+// them via /refund-payment (moves money via Stripe/HH). But some never need
+// processing through OP:
+//   - already refunded out-of-band (directly in HireHop / Stripe / bank), or
+//   - artifacts from before the refund-tracking work was finished, or
+//   - the wrong amount / a duplicate.
+// This action CLEARS the IOU without moving any money — sibling of the
+// excess "mark externally resolved" + balance "resolve" actions. It sets
+// payment_status='cancelled' so the row drops out of the Pending Refunds list
+// and the Money tab IOU, leaving an annotated audit trail. It does NOT touch
+// HireHop, Stripe, or Xero.
+const DISMISS_REFUND_REASONS = [
+  'refunded_externally',  // already refunded directly in HireHop / Stripe / bank
+  'not_required',         // refund not actually due (artifact / superseded)
+  'duplicate',            // duplicate IOU
+  'other',
+] as const;
+const DISMISS_REASON_LABELS: Record<string, string> = {
+  refunded_externally: 'Already refunded outside OP',
+  not_required: 'Not required',
+  duplicate: 'Duplicate record',
+  other: 'Other',
+};
+
+const dismissRefundSchema = z.object({
+  refund_id: z.string().uuid(),
+  reason: z.enum(DISMISS_REFUND_REASONS),
+  notes: z.string().max(1000).nullable().optional(),
+});
+
+// POST /api/money/:jobId/dismiss-refund — clear one pending refund IOU.
+router.post('/:jobId/dismiss-refund', authorize('admin', 'manager'), validate(dismissRefundSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const jobUuid = await resolveJobUuid(String(req.params.jobId));
+    if (!jobUuid) { res.status(404).json({ error: 'Job not found' }); return; }
+    const { refund_id, reason, notes } = req.body as { refund_id: string; reason: string; notes?: string | null };
+
+    // Validate it belongs to this job and is still a pending refund.
+    const check = await query(
+      `SELECT id, amount FROM job_payments
+       WHERE id = $1 AND job_id = $2 AND payment_type = 'refund' AND payment_status = 'pending'`,
+      [refund_id, jobUuid]
+    );
+    if (check.rows.length === 0) {
+      res.status(404).json({ error: 'Pending refund not found, not on this job, or already processed' });
+      return;
+    }
+
+    const reasonLabel = DISMISS_REASON_LABELS[reason] || reason;
+    const stamp = `[Dismissed: ${reasonLabel}${notes ? ` — ${notes}` : ''} — by ${req.user!.email} on ${new Date().toISOString().split('T')[0]}]`;
+    const updated = await query(
+      `UPDATE job_payments
+         SET payment_status = 'cancelled',
+             notes = COALESCE(notes, '') || E'\n' || $2,
+             recorded_by = $3,
+             updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [refund_id, stamp, req.user!.id]
+    );
+
+    // Timeline note so the dismissal is visible on the job's Activity Timeline.
+    await query(
+      `INSERT INTO interactions (type, content, job_id, created_by)
+       VALUES ('note', $1, $2, $3)`,
+      [`Pending refund of £${parseFloat(check.rows[0].amount).toFixed(2)} cleared — ${reasonLabel}${notes ? ` (${notes})` : ''}. No money moved through OP.`, jobUuid, req.user!.id]
+    ).catch((e) => console.error('[money] dismiss-refund timeline note failed (non-fatal):', e));
+
+    await query(
+      `INSERT INTO audit_log (user_id, entity_type, entity_id, action, after_json)
+       VALUES ($1, 'job_payments', $2, 'dismiss_refund', $3::jsonb)`,
+      [req.user!.id, jobUuid, JSON.stringify({ refund_id, reason, notes: notes ?? null })]
+    ).catch((e) => console.error('[money] audit_log insert failed (dismiss_refund):', e));
+
+    res.json({ data: updated.rows[0], message: 'Pending refund cleared' });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error('[money] dismiss-refund error:', msg);
+    res.status(500).json({ error: 'Failed to clear pending refund', detail: msg });
+  }
+});
+
+const bulkDismissRefundSchema = z.object({
+  reason: z.enum(DISMISS_REFUND_REASONS),
+  notes: z.string().max(1000).nullable().optional(),
+  refund_ids: z.array(z.string().uuid()).max(500).optional(),
+  // YYYY-MM-DD — clear every pending refund logged before this date. For the
+  // pre-refund-tracking backlog sweep.
+  logged_before: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+}).refine((d) => (d.refund_ids && d.refund_ids.length > 0) || d.logged_before, {
+  message: 'Provide refund_ids or logged_before',
+});
+
+// POST /api/money/refunds/bulk-dismiss — clear many pending refunds at once
+// (multi-select, or "everything logged before <date>" for the old backlog).
+router.post('/refunds/bulk-dismiss', authorize('admin'), validate(bulkDismissRefundSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { reason, notes, refund_ids, logged_before } = req.body as {
+      reason: string; notes?: string | null; refund_ids?: string[]; logged_before?: string;
+    };
+    const reasonLabel = DISMISS_REASON_LABELS[reason] || reason;
+    const stamp = `[Dismissed (bulk): ${reasonLabel}${notes ? ` — ${notes}` : ''} — by ${req.user!.email} on ${new Date().toISOString().split('T')[0]}]`;
+
+    const conds: string[] = [`payment_type = 'refund'`, `payment_status = 'pending'`];
+    const params: unknown[] = [stamp, req.user!.id];
+    let p = 3;
+    if (refund_ids && refund_ids.length > 0) {
+      conds.push(`id = ANY($${p}::uuid[])`);
+      params.push(refund_ids);
+      p++;
+    } else if (logged_before) {
+      conds.push(`payment_date::date < $${p}::date`);
+      params.push(logged_before);
+      p++;
+    }
+
+    const result = await query(
+      `UPDATE job_payments
+         SET payment_status = 'cancelled',
+             notes = COALESCE(notes, '') || E'\n' || $1,
+             recorded_by = $2,
+             updated_at = NOW()
+       WHERE ${conds.join(' AND ')}
+       RETURNING id`,
+      params
+    );
+
+    await query(
+      `INSERT INTO audit_log (user_id, entity_type, entity_id, action, after_json)
+       VALUES ($1, 'job_payments', NULL, 'bulk_dismiss_refund', $2::jsonb)`,
+      [req.user!.id, JSON.stringify({ reason, notes: notes ?? null, count: result.rows.length, logged_before: logged_before ?? null })]
+    ).catch((e) => console.error('[money] audit_log insert failed (bulk_dismiss_refund):', e));
+
+    res.json({ dismissed: result.rows.length, message: `Cleared ${result.rows.length} pending refund(s)` });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error('[money] bulk-dismiss-refund error:', msg);
+    res.status(500).json({ error: 'Failed to bulk-clear pending refunds', detail: msg });
+  }
+});
+
 // ── HireHop bank account labels (for emails) ──
 const PAYMENT_METHODS_LABELS: Record<string, string> = {
   stripe_gbp: 'Stripe GBP',
