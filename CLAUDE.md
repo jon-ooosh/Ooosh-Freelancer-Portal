@@ -2488,6 +2488,55 @@ image/PDF blocks single or multi-page, parse-with-fence-fallback, cache telemetr
 their prompt/schema/post-processing; the deferred vehicle service-record extractor
 reuses it.
 
+**Hire-agreement PCN compliance (Jun 2026).** Councils began rejecting PCN
+liability-transfer representations because the hire form didn't name the vehicle's
+exact make + model — which is a **prescribed statutory particular** of a valid
+"hiring agreement" (Sch 2, Road Traffic (Owner Liability) Regs 2000 **SI 2000/2546**,
+cross-referenced by RTOA 1988 s66(8); and SI 2005/2757 reg 5(2) for bus lanes outside
+London). A missing applicable particular is "fatal to the hire agreement" — liability
+stays with us (London Tribunals, *Camden v Europcar*). Two pieces shipped:
+- **Make/model on the hire form PDF.** `hire-form-pdf.ts` vehicle line is now
+  `reg - type - make/model` (e.g. `RX73TCJ - PREMIUM LWB (M) - MERCEDES-BENZ SPRINTER
+  317`), wrapping if long, each segment included only if present (records without
+  make/model fall back to the old `reg - type`). `composeMakeModel(make, model)` helper
+  (dedupes when model already leads with make); `HireFormData.vehicleMakeModel`
+  populated from `fleet_vehicles.make`/`.model` in `loadHireFormData` + the cross-van
+  path. Takes effect on newly-generated PDFs only.
+- **Transfer-liability soft pre-flight** (`services/pcn-transfer-check.ts`,
+  `GET /api/pcns/:id/transfer-check`, surfaced in `PcnActionChooser` when staff pick
+  "Transfer liability"). **Advisory only — never blocks.** Warns when a representation
+  is likely to be rejected so staff can fall back to Pay & recharge: no driver linked,
+  no signed hire agreement on file, **make/model missing on the fleet record**, missing
+  driver particulars (DOB/address/licence), offence date outside the recorded hire
+  window, or a **London bus-lane PCN** (can't be transferred at all — London Local
+  Authorities Act 1996 lacuna; outside London bus lanes transfer fine via SI 2005/2757).
+  Bus-lane + London detection is a keyword heuristic (free-text `issuing_authority`,
+  `fine_type` doesn't separate bus lanes from other council PCNs).
+
+**⏳ PENDING — hire-form T&Cs wording tweaks (jon to action in a quiet window, not
+mid-busy-period).** The full T&Cs (embedded in `hire-form-pdf.ts` `TERMS_AND_CONDITIONS`
++ live at oooshtours.co.uk/files/Ooosh_vehicle_hire_terms.pdf) are substantively strong
+— §4.2 already covers fine transfer + £35+VAT handling fee + **post-hire liability**
+("some fines may not be received… until after your hire has ended: you remain liable
+regardless"), §10.1 covers data protection comprehensively, and the page-1 declaration
+cites s66 RTOA 1988 / Sch 6 RTA 1991 / TMA 2004 / POFA 2012. Belt-and-braces tweaks to
+make when convenient (legal text — worth a solicitor / BVRLA-template check first):
+  1. **Name the modern charge types explicitly** in the page-1 liability declaration and
+     §4.2 — currently "parking or traffic fines / penalty charge notice" (a fair
+     catch-all). Add **Congestion Charge, ULEZ / Clean Air Zone, and tolls (Dart Charge,
+     Mersey Gateway, foreign vignettes)** by name to shut down "that's not a parking fine".
+  2. **Add an s172 driver-identification clause** — hirer authorises us to disclose their
+     identity to police/authority as the driver for camera/speeding NIPs, and remains
+     responsible for the consequences. Not currently explicit.
+  3. *(Optional polish)* Lift the road-traffic statement of liability out of the insurance
+     proposal declaration into its own clearly-headed, separately-signed block. The
+     current version is signed and cites the statutes, so substance is fine — only worth it
+     if reprinting the form anyway.
+NB the substitute-vehicle statutory particulars (Sch 2 B3–B5) and "actual return date/time"
+(B10) need NO form change: each van swap generates a fresh self-contained agreement naming
+its own reg+make/model, and B10 is a firm's-copy particular already captured at check-in
+(don't re-issue/re-email a form post-hire).
+
 #### Staging Calculator Integration (Jun 2026)
 
 Brought into OP from `ooosh-utilities` (was a static page + 4 Netlify functions). It had

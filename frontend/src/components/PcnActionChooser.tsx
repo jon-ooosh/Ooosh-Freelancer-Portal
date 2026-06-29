@@ -69,6 +69,12 @@ interface ActionResult {
   fineRecharge?: { attempted: boolean; applied: boolean; amount: number | null; message: string | null };
 }
 
+interface TransferWarning {
+  code: string;
+  severity: 'high' | 'info';
+  message: string;
+}
+
 export default function PcnActionChooser({
   pcnId,
   driverEmail,
@@ -89,6 +95,8 @@ export default function PcnActionChooser({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ActionResult | null>(null);
+  const [transferWarnings, setTransferWarnings] = useState<TransferWarning[] | null>(null);
+  const [checkingTransfer, setCheckingTransfer] = useState(false);
 
   const choose = (a: ActionMeta) => {
     setSelected(a);
@@ -98,6 +106,20 @@ export default function PcnActionChooser({
     setNote('');
     setError(null);
     setResult(null);
+    setTransferWarnings(null);
+
+    // Soft pre-flight for liability transfers: warn if the representation is
+    // likely to be rejected (missing make/model, no signed agreement, offence
+    // outside the hire window, London bus lane) so staff can switch to Pay &
+    // recharge. Advisory only — never disables the Confirm button.
+    if (a.key === 'transfer_liability') {
+      setCheckingTransfer(true);
+      api
+        .get<{ data: { warnings: TransferWarning[] } }>(`/pcns/${pcnId}/transfer-check`)
+        .then((r) => setTransferWarnings(r.data.warnings || []))
+        .catch(() => setTransferWarnings(null))
+        .finally(() => setCheckingTransfer(false));
+    }
   };
 
   const confirm = async () => {
@@ -179,6 +201,28 @@ export default function PcnActionChooser({
             {/* Inline options + confirm for the chosen action */}
             {isSel && !blocked && (
               <div className="border border-t-0 rounded-b-lg -mt-1 px-3 py-3 bg-purple-50/50 space-y-2">
+                {/* Liability-transfer pre-flight advisory (soft — never blocks) */}
+                {a.key === 'transfer_liability' && checkingTransfer && (
+                  <p className="text-xs text-slate-500">Checking the hire agreement…</p>
+                )}
+                {a.key === 'transfer_liability' && transferWarnings && transferWarnings.length > 0 && (
+                  <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 space-y-1.5">
+                    <p className="text-xs font-semibold text-amber-800">
+                      ⚠ This transfer may be rejected — consider Pay &amp; recharge instead:
+                    </p>
+                    <ul className="space-y-1">
+                      {transferWarnings.map((w, i) => (
+                        <li key={i} className="text-xs text-amber-800 flex gap-1.5">
+                          <span>{w.severity === 'high' ? '🔴' : 'ℹ️'}</span>
+                          <span>{w.message}</span>
+                        </li>
+                      ))}
+                    </ul>
+                    <p className="text-[11px] text-amber-700/80 pt-0.5">
+                      You can still proceed — this is a warning, not a block.
+                    </p>
+                  </div>
+                )}
                 {a.hasEmail && (
                   <>
                     <label className="flex items-center gap-2 text-sm text-slate-700">
