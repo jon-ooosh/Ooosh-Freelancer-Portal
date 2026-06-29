@@ -105,7 +105,7 @@ When excess is applied to Job B, B's Money tab should make the cross-job settlem
 2. **Cross-job invoice lookup** endpoints (same-client list + targeted job lookup, with the same-client guard).
 3. **Claim endpoint** cross-job audit + same-client guard + `target_hh_job` + `bank`.
 4. **Frontend** "Apply to another job" section in the Apply-to-Invoice flow.
-5. **B-side marker** on the target job's Money tab.
+5. **B-side marker** on the target job's Money tab. **DEFERRED (Jun 2026).** The target job already reads the correct £0 balance via the invoice-reconciliation path (its invoice shows owing=0, so OP infers the £137.62 as paid). But the cross-job excess application is NOT surfaced as a payment-history line on B: it carries "Excess" in its description so `isExcessPayment` is true, while its `OWNER_DEPOSIT` (the deposit on A) is absent from B's own excess-deposit set, so it falls through the `kind=3` branches in `routes/money.ts` without being pushed to `deposits[]`. Adding an explicit "settled from {client} excess held on job #A" line needs a deliberate `kind=3` reader change (detect: `isExcess && OWNER_DEPOSIT set && OWNER non-zero && deposit not in this job's excess set → render as a cross-job settlement line, source job from the description/memo), best built + tested against live billing data. Items 1–4 shipped without it.
 
 **Phase 2 — generalise to non-excess credit:**
 6. **Money-tab apply endpoint** — apply any held deposit/credit on this job to a same-client invoice on another job (pure HH application + `job_payments` audit + B-side marker). Reuses the picker + bank handling from Phase 1.
