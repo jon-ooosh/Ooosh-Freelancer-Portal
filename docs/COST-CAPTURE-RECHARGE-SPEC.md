@@ -1204,3 +1204,34 @@ keep the `costs → job → client_organisation` join clean and don't bury clien
 5. Dashboard "Recharges to resolve" bucket.
 6. Recharges-view status filter pills (the absorb-audit slice).
 7. *(Parked)* client-level roll-up panel.
+
+### Build notes — Phase D shipped (Jun 2026)
+
+Steps 1–6 built end-to-end (PR #889). Files:
+- **Migration 150** (`150_cost_recharge_lifecycle.sql`) — the `recharge_status` +
+  markup + resolution-audit columns, backfill, `cost_recharge` markup settings,
+  and the `cost_resolve` `requirement_type_definitions` row (💸).
+- **`services/cost-recharge-markup.ts`** — markup compute + `getRechargeMarkupDefaults`;
+  exposed via `GET /api/costs/recharge-defaults`.
+- **`routes/costs.ts`** — `push-recharge` now persists the modal's final/markup
+  figures + refreshes the close-out card; new `POST /:id/resolve-recharge`
+  (`recharged_external` / `absorbed` + reason); pending bucket re-keyed on
+  `recharge_status` across list/stats/by-job; `view=recharge&recharge_status=…`
+  audit slice (`all` / terminal states); `deriveRechargeStatusForWrite` keeps the
+  status in step on create/update without ever clobbering a terminal resolution.
+- **`services/cost-requirement-sync.ts`** + derivation hook — `cost_resolve`
+  post-hire close-out card (sibling of `excess_resolve`), resolution-authoritative.
+- **`routes/dashboard.ts`** — `recharges_to_resolve_count/_total` in `needs_attention`.
+- **Frontend** — `RechargeResolveModal.tsx` (markup breakdown + 3 paths, ex-VAT with
+  inc-VAT preview, `RechargeStatusPill`) wired into the Recharges tab (replacing the
+  one-shot "Push to HireHop" button) and the Job View Money tab "Extra costs" rows;
+  status filter pills on the Recharges view; dashboard "Recharges to Resolve" amber
+  bucket. Shared `Cost` type extended with the new fields.
+
+**Live-test checklist (carry over from the original recharge push):** the HH
+hire-line add + price-edit path itself was flagged "needs one live-test pass" —
+push a real `extra` cost to a scratch job via the new modal and confirm the line,
+price, and 20% VAT land, plus that a closed-HH-job push correctly bounces the modal
+to the "Billed externally" path. Markup default is greater-of-£10-or-20% (editable
+in Settings via the `cost_recharge` system_settings rows — no dedicated Settings UI
+section yet; edit the rows directly or add a section if it churns).

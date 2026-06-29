@@ -993,6 +993,12 @@ export type CostPaymentMethod =
   | 'reimburse_me' | 'not_yet_paid';
 export type CostPaymentStatus = 'paid' | 'awaiting_payment' | 'awaiting_invoice';
 export type CostRechargeMode = 'none' | 'full' | 'partial';
+// Recharge resolution lifecycle (Phase D). pending = flagged, not yet resolved;
+// recharged_hh = pushed to HireHop; recharged_external = billed another way
+// (closed HH job → direct Xero invoice etc.); absorbed = written off (reason kept).
+export type CostRechargeStatus = 'pending' | 'recharged_hh' | 'recharged_external' | 'absorbed';
+// Markup applied to the recharge net (ex VAT). greater_of = max(percent, floor).
+export type CostMarkupType = 'greater_of' | 'percent' | 'fixed' | 'none';
 // Job-linked costs only. quote_actual = part of an existing quote (track, never
 // recharge — already billed via the quote); extra = above-and-beyond, eligible
 // for client recharge. NULL on overhead/vehicle costs with no job.
@@ -1045,6 +1051,14 @@ export interface Cost {
   cost_intent: CostIntent | null;
   recharged_to_hh_at: string | null;
   recharge_hh_item_id: string | null;
+  /** Resolution lifecycle: pending | recharged_hh | recharged_external | absorbed. NULL when recharge_mode='none'. */
+  recharge_status: CostRechargeStatus | null;
+  recharge_base_amount: number | null;
+  recharge_markup_type: CostMarkupType | null;
+  recharge_markup_value: number | null;
+  recharge_resolution_note: string | null;
+  recharge_resolved_by: string | null;
+  recharge_resolved_at: string | null;
   approval_state: CostApprovalState | null;
   verified_by: string | null;
   verified_at: string | null;

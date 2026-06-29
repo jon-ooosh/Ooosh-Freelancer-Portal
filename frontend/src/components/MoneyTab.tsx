@@ -10,6 +10,7 @@ import { useAuthStore } from '../hooks/useAuthStore';
 import { getPaymentState, PAYMENT_STATE_LABELS, PAYMENT_STATE_CLASSES } from '../services/paymentState';
 import ExcessPaymentModal, { statusLabel, statusColor } from './ExcessPaymentModal';
 import CostCaptureModal from './CostCaptureModal';
+import RechargeResolveModal, { RechargeStatusPill } from './RechargeResolveModal';
 import type { JobExcess } from '../../../shared/types';
 
 interface MoneyTabProps {
@@ -113,10 +114,12 @@ interface JobCostLite {
   description: string | null;
   category: string | null;
   amount_gross: number | null;
+  amount_net: number | null;
   cost_intent: 'quote_actual' | 'extra' | null;
   recharge_mode: 'none' | 'full' | 'partial';
   recharge_amount: number | null;
   recharged_to_hh_at: string | null;
+  recharge_status: string | null;
 }
 interface JobQuoteLite {
   id: string;
@@ -1036,7 +1039,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
       </div>
 
       {/* Job costs vs quotes (Cost Capture) */}
-      <JobCostsPanel costs={jobCosts} quotes={jobQuotes} onAddCost={() => setShowAddCost(true)} />
+      <JobCostsPanel costs={jobCosts} quotes={jobQuotes} onAddCost={() => setShowAddCost(true)} onChanged={loadJobCosts} />
       {showAddCost && (
         <CostCaptureModal
           presetJobId={jobId}
@@ -1499,9 +1502,10 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
 // expected transport/crew cost. "Actuals" sums the quote_actual costs. Extra
 // costs are listed separately (eligible for client recharge). Hidden when the
 // job has neither costs nor quotes.
-function JobCostsPanel({ costs, quotes, onAddCost }: { costs: JobCostLite[]; quotes: JobQuoteLite[]; onAddCost: () => void }) {
+function JobCostsPanel({ costs, quotes, onAddCost, onChanged }: { costs: JobCostLite[]; quotes: JobQuoteLite[]; onAddCost: () => void; onChanged: () => void }) {
   const m = (n: number) => `£${n.toFixed(2)}`;
   const num = (n: number | null | undefined) => Number(n || 0);
+  const [resolving, setResolving] = useState<JobCostLite | null>(null);
 
   const AddBtn = (
     <button onClick={onAddCost} className="text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-md px-3 py-1.5">
@@ -1581,21 +1585,34 @@ function JobCostsPanel({ costs, quotes, onAddCost }: { costs: JobCostLite[]; quo
             <span className="text-sm font-semibold text-gray-900">{m(extraTotal)}</span>
           </div>
           <ul className="space-y-1">
-            {extraCosts.map((c) => (
-              <li key={c.id} className="flex items-center justify-between text-sm">
-                <span className="text-gray-600 truncate">{c.supplier_name || c.description || c.category || 'Cost'}</span>
-                <span className="flex items-center gap-2">
-                  <span className="text-gray-900">{m(num(c.amount_gross))}</span>
-                  {c.recharge_mode !== 'none' && (
-                    <span className="px-2 py-0.5 text-xs rounded-full bg-blue-50 text-blue-700">
-                      recharge{c.recharged_to_hh_at ? ' ✓' : ' pending'}
-                    </span>
-                  )}
-                </span>
-              </li>
-            ))}
+            {extraCosts.map((c) => {
+              const pending = c.recharge_mode !== 'none' && (c.recharge_status ?? 'pending') === 'pending';
+              return (
+                <li key={c.id} className="flex items-center justify-between text-sm gap-2">
+                  <span className="text-gray-600 truncate">{c.supplier_name || c.description || c.category || 'Cost'}</span>
+                  <span className="flex items-center gap-2 shrink-0">
+                    <span className="text-gray-900">{m(num(c.amount_gross))}</span>
+                    {c.recharge_mode !== 'none' && <RechargeStatusPill status={c.recharge_status} mode={c.recharge_mode} />}
+                    {pending && (
+                      <button onClick={() => setResolving(c)}
+                        className="px-2 py-0.5 text-xs text-white bg-blue-600 hover:bg-blue-700 rounded">
+                        Resolve
+                      </button>
+                    )}
+                  </span>
+                </li>
+              );
+            })}
           </ul>
         </div>
+      )}
+
+      {resolving && (
+        <RechargeResolveModal
+          cost={resolving}
+          onClose={() => setResolving(null)}
+          onResolved={() => { setResolving(null); onChanged(); }}
+        />
       )}
 
       {unclassified.length > 0 && (
