@@ -177,7 +177,7 @@ async function audit(userId: string, costId: string, action: string, prev: unkno
 
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
-    const { view, cost_type, status, payment_status, job_id, vehicle_id, search, missing_receipt, mine, limit = '200' } = req.query;
+    const { view, cost_type, status, payment_status, job_id, vehicle_id, search, missing_receipt, mine, recharge_status, limit = '200' } = req.query;
 
     const conditions: string[] = [];
     const params: unknown[] = [];
@@ -195,8 +195,16 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     if (view === 'payable') {
       conditions.push(`c.payment_status <> 'paid'`);
     } else if (view === 'recharge') {
-      // Pending = flagged for recharge and not yet resolved (pushed/external/absorbed).
-      conditions.push(`c.recharge_mode <> 'none' AND COALESCE(c.recharge_status, 'pending') = 'pending'`);
+      // Default = pending (flagged, not yet resolved). A recharge_status param
+      // ('all' or a specific terminal state) drives the absorb/recharged audit slice.
+      if (recharge_status === 'all') {
+        conditions.push(`c.recharge_mode <> 'none'`);
+      } else if (typeof recharge_status === 'string' && recharge_status) {
+        params.push(recharge_status);
+        conditions.push(`c.recharge_mode <> 'none' AND c.recharge_status = $${params.length}`);
+      } else {
+        conditions.push(`c.recharge_mode <> 'none' AND COALESCE(c.recharge_status, 'pending') = 'pending'`);
+      }
     } else if (view === 'reconcile') {
       conditions.push(`c.payment_method = 'cot_card' AND c.xero_sync_state <> 'reconciled'`);
     }
