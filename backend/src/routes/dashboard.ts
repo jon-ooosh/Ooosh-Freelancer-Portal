@@ -684,6 +684,22 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
           AND c.receipt_r2_key IS NULL
           AND c.cost_date <= CURRENT_DATE - INTERVAL '3 days'
       `),
+
+      // 29. Recharges to resolve: costs flagged for client recharge that are
+      // still pending (not pushed to HireHop, billed externally, or absorbed).
+      // The "buried" surface the cost lifecycle work is about — staff log a
+      // refuel recharge at check-in and it sits unresolved. Scoped to active /
+      // finished hires so dead enquiries don't surface; internal jobs excluded.
+      query(`
+        SELECT COUNT(*) AS count, COALESCE(SUM(COALESCE(c.recharge_amount, c.amount_net, c.amount_gross, 0)), 0) AS total_amount
+        FROM costs c
+        JOIN jobs j ON j.id = c.job_id
+        WHERE c.recharge_mode <> 'none'
+          AND COALESCE(c.recharge_status, 'pending') = 'pending'
+          AND c.cost_intent IS DISTINCT FROM 'quote_actual'
+          AND COALESCE(j.is_internal, false) = false
+          AND j.pipeline_status NOT IN ('lost', 'cancelled', 'new_enquiry', 'quoting', 'paused', 'provisional')
+      `),
     ]);
 
     const [
@@ -702,6 +718,7 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       prepTimeResult, onHireSparkResult, deprepTimeResult,
       expiringHoldsResult, receiptsOutstandingResult,
       carnetCountResult, cotReceiptsResult,
+      rechargesToResolveResult,
     ] = results;
 
     // Build the 14-day on-hire series — oldest day first, today last.
@@ -858,6 +875,10 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         client_intros: clientIntrosResult.rows,
         carnet_count: parseInt(carnetCountResult.rows[0].count as string),
         cot_receipts_outstanding_count: parseInt(cotReceiptsResult.rows[0].count as string),
+        // Recharges flagged but not yet resolved (push to HH / bill externally /
+        // absorb). Amber bucket — the cost lifecycle "don't let it get buried".
+        recharges_to_resolve_count: parseInt(rechargesToResolveResult.rows[0].count as string),
+        recharges_to_resolve_total: parseFloat(rechargesToResolveResult.rows[0].total_amount as string),
         referral_count: parseInt(referralCountResult.rows[0].count as string),
         referrals: pendingReferralsResult.rows,
         // ── Excess (semantics changed Apr 2026) ──

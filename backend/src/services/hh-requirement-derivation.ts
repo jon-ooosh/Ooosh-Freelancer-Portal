@@ -17,6 +17,7 @@
 import { query, getClient } from '../config/database';
 import type { HHLineItem } from './hirehop-job-sync';
 import { syncExcessRequirementStatus } from './excess-requirement-sync';
+import { syncCostResolveRequirementStatus } from './cost-requirement-sync';
 import { hhBroker } from './hirehop-broker';
 import { calculateVatAdjustment } from './vat-adjustment';
 import { BACKLINE_CATEGORY_IDS } from './backline-categories';
@@ -711,6 +712,18 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
         }
       }
 
+      // Conditional: cost recharge resolution — only if the job has any cost
+      // flagged for client recharge. Skipped on internal jobs (no client to bill).
+      if (!isInternal) {
+        const rechargeCount = await client.query(
+          `SELECT COUNT(*) AS cnt FROM costs WHERE job_id = $1 AND recharge_mode <> 'none'`,
+          [jobId]
+        );
+        if (parseInt(rechargeCount.rows[0]?.cnt || '0') > 0) {
+          await ensureCloseout('cost_resolve', 'Resolve all client recharges (bill to HireHop, bill externally, or absorb)');
+        }
+      }
+
       // Conditional: freelancer follow-up — only if crew assignments exist
       const crewCount = await client.query(
         `SELECT COUNT(*) AS cnt FROM quote_assignments qa
@@ -758,6 +771,9 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
       // 'in_progress' — including demoting a card staff marked Resolved while
       // money's still in limbo. Replaces the old forward-only autoResolve.
       await syncExcessRequirementStatus(jobId, client);
+      // Same treatment for the cost_resolve card — green only when every
+      // recharge-flagged cost on the job is resolved (pushed/external/absorbed).
+      await syncCostResolveRequirementStatus(jobId, client);
 
       // Client follow-up: check if any interaction exists after return_date
       const postReturnInteraction = await client.query(
