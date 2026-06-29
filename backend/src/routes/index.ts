@@ -46,6 +46,7 @@ import rackPlansRouter from './rack-plans';
 import stagingRouter from './staging';
 import carnetsRouter from './carnets';
 import backlineMatcherRouter from './backline-matcher';
+import wiseRouter from './wise';
 
 const router = Router();
 
@@ -74,6 +75,7 @@ router.use('/money', moneyRouter);
 router.use('/ve103b', ve103bRouter);
 router.use('/backline', backlineRouter);
 router.use('/backline-matcher', backlineMatcherRouter);  // AI equipment matcher + demand tracker (replaces alternative-hirehop-stock Netlify app)
+router.use('/wise', wiseRouter);  // Wise supplier payments — scaffolding (read-only health check; spec Part 2)
 router.use('/cancellations', cancellationsRouter);
 router.use('/fill-gap', fillGapRouter);  // Replacement candidates for cancelled / lost jobs (Phase 1 — SQL only)
 router.use('/issues', issuesRouter);
