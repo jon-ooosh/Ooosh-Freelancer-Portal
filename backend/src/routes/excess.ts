@@ -82,6 +82,16 @@ const claimSchema = z.object({
   amount: z.number().positive(),
   invoice_id: z.number().int().positive().nullable().optional(), // HH invoice ID (required for HH-linked records)
   notes: z.string().nullable().optional(),
+  // Cross-job apply (CROSS-JOB-EXCESS-APPLY-SPEC): the invoice may live on a
+  // DIFFERENT same-client job than the excess. When set, used for the audit
+  // memo + the same-client guard. Omitted = invoice is on the excess's own job.
+  target_hh_job: z.number().int().positive().nullable().optional(),
+  // Bank the application is attributed to in HireHop/Xero. Confirmable in the UI,
+  // defaulted from the source deposit's real bank. Omitted → resolved server-side
+  // (see resolveDepositBankId). NOT hardcoded to Worldpay any more.
+  bank: z.number().int().positive().nullable().optional(),
+  // Manager-only escape hatch for the rare genuine cross-CLIENT apply.
+  allow_cross_client: z.boolean().optional(),
 });
 
 // Capture-a-pre-auth schema (migration 087). Converts held money → taken money.
@@ -519,6 +529,110 @@ router.get('/:id/outstanding-invoices', async (req: AuthRequest, res: Response) 
   }
 });
 
+// Shared: fetch a HireHop job's open (owing > 0) invoices via billing_list.php.
+type OpenInvoice = { id: number; number: string; description: string; amount: number; owing: number; date: string | null };
+async function fetchOpenInvoicesForJob(hhJobId: number | string): Promise<OpenInvoice[]> {
+  const billingRes = await hhBroker.get('/php_functions/billing_list.php',
+    { main_id: hhJobId, type: 1 }, { priority: 'low', cacheTTL: 30 });
+  if (!billingRes.success || !billingRes.data) return [];
+  const bl = billingRes.data as Record<string, any>;
+  const invoices: OpenInvoice[] = [];
+  for (const row of bl.rows || []) {
+    if (parseInt(row.kind ?? '0') !== 1) continue;
+    const owing = Number(row.owing ?? row.data?.owing ?? 0);
+    if (owing <= 0.005) continue;
+    const invoiceId = parseInt(row.data?.ID || row.number || String(row.id).replace('b', '') || '0');
+    if (!invoiceId) continue;
+    invoices.push({
+      id: invoiceId,
+      number: String(row.data?.NUMBER || row.number || ''),
+      description: String(row.data?.DESCRIPTION || row.desc || ''),
+      amount: Number(row.data?.NET ?? row.debit ?? 0) + Number(row.data?.TAX ?? 0),
+      owing,
+      date: row.data?.TAX_POINT || row.date || null,
+    });
+  }
+  return invoices;
+}
+
+// ── GET /api/excess/:id/cross-job-invoices ─────────────────────────────────
+// Same-client open invoices on OTHER jobs, for the cross-job apply picker
+// (CROSS-JOB-EXCESS-APPLY-SPEC). Scoped to the excess's client_id — the
+// correctness boundary AND the size bound. Pre-filtered via the job_financials
+// cache (balance_outstanding > 0) so we only hit HH billing for jobs that
+// actually owe; capped at 25 jobs. Lazy-load this only when staff expand the
+// "apply to another job" section.
+
+router.get('/:id/cross-job-invoices', async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const excess = await query(
+      `SELECT je.hirehop_job_id, j.client_id, j.client_name
+         FROM job_excess je LEFT JOIN jobs j ON j.id = je.job_id WHERE je.id = $1`,
+      [id]
+    );
+    if (excess.rows.length === 0) { res.status(404).json({ error: 'Excess record not found' }); return; }
+    const { hirehop_job_id, client_id } = excess.rows[0];
+    if (!client_id) { res.json({ data: { jobs: [], reason: 'no_client' } }); return; }
+
+    // Candidate same-client jobs with a cached outstanding balance (excluding
+    // this excess's own job). job_financials is the fast pre-filter; we only
+    // fetch live HH billing for these few.
+    const candidates = await query(
+      `SELECT j.hh_job_number, j.job_name, jf.balance_outstanding
+         FROM jobs j JOIN job_financials jf ON jf.job_id = j.id
+        WHERE j.client_id = $1
+          AND j.hh_job_number IS NOT NULL
+          AND ($2::int IS NULL OR j.hh_job_number <> $2)
+          AND jf.balance_outstanding > 0.01
+          AND COALESCE(j.is_deleted, false) = false
+        ORDER BY jf.balance_outstanding DESC
+        LIMIT 25`,
+      [client_id, hirehop_job_id || null]
+    );
+
+    const jobs: Array<{ hh_job_number: number; job_name: string | null; invoices: OpenInvoice[] }> = [];
+    for (const c of candidates.rows) {
+      const invoices = await fetchOpenInvoicesForJob(c.hh_job_number);
+      if (invoices.length > 0) jobs.push({ hh_job_number: c.hh_job_number, job_name: c.job_name || null, invoices });
+    }
+    res.json({ data: { jobs, capped: candidates.rows.length >= 25 } });
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error('[excess] Cross-job invoices error:', errMsg);
+    res.status(500).json({ error: 'Failed to load cross-job invoices', detail: errMsg });
+  }
+});
+
+// ── GET /api/excess/:id/job-invoices/:hhJobNumber ──────────────────────────
+// Targeted lookup: open invoices on a SPECIFIC job (the "or enter a job number"
+// fallback). Returns a same_client flag so the UI can warn before a manager
+// override, rather than hard-blocking the lookup itself.
+
+router.get('/:id/job-invoices/:hhJobNumber', async (req: AuthRequest, res: Response) => {
+  try {
+    const { id, hhJobNumber } = req.params;
+    const hhNum = parseInt(String(hhJobNumber), 10);
+    if (!hhNum) { res.status(400).json({ error: 'Invalid job number' }); return; }
+
+    const ctx = await query(
+      `SELECT
+         (SELECT j.client_id FROM job_excess je JOIN jobs j ON j.id = je.job_id WHERE je.id = $1) AS src_client,
+         (SELECT client_id FROM jobs WHERE hh_job_number = $2) AS tgt_client,
+         (SELECT job_name FROM jobs WHERE hh_job_number = $2) AS tgt_job_name`,
+      [id, hhNum]
+    );
+    const { src_client, tgt_client, tgt_job_name } = ctx.rows[0] || {};
+    const sameClient = !!src_client && !!tgt_client && String(src_client) === String(tgt_client);
+    const invoices = await fetchOpenInvoicesForJob(hhNum);
+    res.json({ data: { hh_job_number: hhNum, job_name: tgt_job_name || null, same_client: sameClient, invoices } });
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error('[excess] Job invoices lookup error:', errMsg);
+    res.status(500).json({ error: 'Failed to load job invoices', detail: errMsg });
+  }
+});
+
 // ── GET /api/excess/:id/available-rollover ─────────────────────────────────
 // "Does this client have a rolled-over excess balance available to apply to
 // THIS excess record?" — drives the "Apply Rolled Over Excess" action in the
@@ -775,6 +889,43 @@ function deriveExcessStatus(currentStatus: string, required: number, taken: numb
   if (taken >= required) return 'taken';
   if (taken > 0) return 'partially_paid';
   return 'needed';
+}
+
+/**
+ * Resolve which HireHop bank a held deposit actually sits on, for use as the
+ * (metadata-only) bank on a deposit→invoice application. Replaces the old
+ * hardcoded `bank: 169` (Worldpay) which mis-attributed every claim — surfaced
+ * by the cross-job apply proof (a Wise-collected excess showed as Worldpay).
+ *
+ * The bank id is NOT load-bearing in OP (classification is keyword-based), but
+ * it drives the HH/Xero bank attribution + the displayed bank name, so it
+ * should be right. Resolution order:
+ *   1. The record's own payment_method, if it's a real bank method.
+ *   2. Walk the rollover chain by hh_deposit_id to the ORIGINATING record (the
+ *      one that first took the money — its method is the true bank; a
+ *      'rolled_over' method is NOT, it always maps to 265 regardless).
+ *   3. null → caller decides (and the UI surfaces a confirmable field so a
+ *      human catches it).
+ * A `bank` passed explicitly from the confirmable UI field always wins over this.
+ */
+async function resolveDepositBankId(record: {
+  payment_method?: string | null;
+  hh_deposit_id?: number | null;
+}): Promise<number | null> {
+  const isReal = (m?: string | null) => !!m && m !== 'rolled_over' && HH_BANK_IDS[m] != null;
+  if (isReal(record.payment_method)) return HH_BANK_IDS[record.payment_method as string];
+
+  if (record.hh_deposit_id) {
+    const origin = await query(
+      `SELECT payment_method FROM job_excess
+       WHERE hh_deposit_id = $1 AND payment_method IS NOT NULL AND payment_method <> 'rolled_over'
+       ORDER BY created_at ASC LIMIT 1`,
+      [record.hh_deposit_id]
+    );
+    const m = origin.rows[0]?.payment_method as string | undefined;
+    if (isReal(m)) return HH_BANK_IDS[m as string];
+  }
+  return null;
 }
 
 router.put('/:id', validate(updateExcessSchema), async (req: AuthRequest, res: Response) => {
@@ -1942,7 +2093,7 @@ router.post('/:id/release', validate(releaseSchema), async (req: AuthRequest, re
 router.post('/:id/claim', validate(claimSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
-    const { amount, invoice_id, notes } = req.body;
+    const { amount, invoice_id, notes, target_hh_job, bank, allow_cross_client } = req.body;
 
     const currentResult = await query(`SELECT * FROM job_excess WHERE id = $1`, [id]);
     if (currentResult.rows.length === 0) {
@@ -1985,25 +2136,57 @@ router.post('/:id/claim', validate(claimSchema), async (req: AuthRequest, res: R
         return;
       }
 
-      // ── Push the application to HireHop ──────────────────────────────
-      // bank=169 (Worldpay default) is just metadata — no real cash moves; the
-      // deposit is already in the bank, this just reallocates it from
-      // "deposit liability" → "invoice paid" (which the invoice line item's
-      // ACC_NOMINAL_ID then routes to the right Xero revenue account).
-      const currentDate = new Date().toISOString().split('T')[0];
-      const description = `${current.hirehop_job_id} - Excess applied to invoice`;
-      const memo = notes
-        ? `Excess claim — ${notes} (recorded via Ooosh OP)`
-        : `Excess claim — applied to invoice (recorded via Ooosh OP)`;
+      // ── Cross-job apply: same-client guard ───────────────────────────
+      // When the invoice lives on a different job (target_hh_job set + differs
+      // from the excess's own job), it MUST be the same client unless a manager
+      // explicitly overrides. The picker enforces this, but the endpoint is the
+      // real boundary — applying one client's money to another's invoice is the
+      // dangerous case. See CROSS-JOB-EXCESS-APPLY-SPEC.
+      const isCrossJob = target_hh_job != null && Number(target_hh_job) !== Number(current.hirehop_job_id);
+      if (isCrossJob && !allow_cross_client) {
+        const clientCheck = await query(
+          `SELECT
+             (SELECT client_id FROM jobs WHERE hh_job_number = $1) AS src_client,
+             (SELECT client_id FROM jobs WHERE hh_job_number = $2) AS tgt_client`,
+          [current.hirehop_job_id, target_hh_job]
+        );
+        const { src_client, tgt_client } = clientCheck.rows[0] || {};
+        if (!src_client || !tgt_client || String(src_client) !== String(tgt_client)) {
+          res.status(409).json({
+            error: 'Cross-client apply blocked',
+            detail: `The target invoice (job ${target_hh_job}) belongs to a different client than this excess (job ${current.hirehop_job_id}). Applying one client's money to another client's invoice is almost always wrong. A manager can override with allow_cross_client if this is genuinely intended.`,
+            code: 'cross_client_blocked',
+          });
+          return;
+        }
+      }
 
-      console.log(`[excess] Claim: applying £${amount} of deposit ${current.hh_deposit_id} to invoice ${invoice_id} on job ${current.hirehop_job_id}`);
+      // ── Push the application to HireHop ──────────────────────────────
+      // The application's `bank` is metadata only — no real cash moves; the
+      // deposit is already in the bank, this just reallocates it from
+      // "deposit liability" → "invoice paid" (the invoice line's ACC_NOMINAL_ID
+      // routes it to the right Xero revenue account). It still drives the HH/Xero
+      // bank attribution + displayed bank name, so resolve it from the source
+      // deposit's real bank (confirmable `bank` from the UI wins). Never the old
+      // hardcoded Worldpay default.
+      const resolvedBank = (bank as number | undefined) ?? (await resolveDepositBankId(current)) ?? 169;
+      const currentDate = new Date().toISOString().split('T')[0];
+      const description = isCrossJob
+        ? `${current.hirehop_job_id} - Excess applied to invoice (cross-job → ${target_hh_job})`
+        : `${current.hirehop_job_id} - Excess applied to invoice`;
+      const crossJobTag = isCrossJob ? ` (cross-job → job ${target_hh_job})` : '';
+      const memo = notes
+        ? `Excess claim — ${notes}${crossJobTag} (recorded via Ooosh OP)`
+        : `Excess claim — applied to invoice${crossJobTag} (recorded via Ooosh OP)`;
+
+      console.log(`[excess] Claim: applying £${amount} of deposit ${current.hh_deposit_id} (bank ${resolvedBank}) to invoice ${invoice_id}${isCrossJob ? ` on job ${target_hh_job} (cross-job)` : ` on job ${current.hirehop_job_id}`}`);
       const hhResult = await hhBroker.post('/php_functions/billing_payments_save.php', {
         id: 0,
         date: currentDate,
         desc: description,
         paid: amount,
         memo: memo,
-        bank: 169, // Worldpay default — metadata only, no real bank movement
+        bank: resolvedBank,
         OWNER: invoice_id,
         deposit: current.hh_deposit_id,
         correction: 0,
@@ -2054,9 +2237,12 @@ router.post('/:id/claim', validate(claimSchema), async (req: AuthRequest, res: R
       : current.excess_status;
 
     const dateStr = new Date().toISOString().split('T')[0];
+    const crossJobNote = target_hh_job != null && Number(target_hh_job) !== Number(current.hirehop_job_id)
+      ? ` → job ${target_hh_job} invoice`
+      : '';
     const noteEntry = notes
-      ? `[${dateStr}] £${amount.toFixed(2)}: ${notes}`
-      : `[${dateStr}] £${amount.toFixed(2)} claim`;
+      ? `[${dateStr}] £${amount.toFixed(2)}${crossJobNote}: ${notes}`
+      : `[${dateStr}] £${amount.toFixed(2)} claim${crossJobNote}`;
     const newNotes = current.claim_notes
       ? `${current.claim_notes}\n${noteEntry}`
       : noteEntry;
