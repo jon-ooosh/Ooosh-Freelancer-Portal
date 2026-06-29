@@ -2289,10 +2289,14 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
     if (effectivePaymentType === 'excess') {
       // If no excess_id provided, try to find or create a job_excess record
       if (!resolvedExcessId) {
-        // Look for an existing job_excess record for this job
+        // Look for an existing job_excess record for this job. 'released' is
+        // terminal (migration 087): a late/duplicate excess_pre_auth event must
+        // NOT re-arm a released record (it stomps amount_released bookkeeping —
+        // job 15934 incident, Jun 2026); a genuinely fresh hold after a release
+        // gets a fresh record via the auto-create below.
         const existingExcess = await query(
           `SELECT id, excess_status FROM job_excess
-           WHERE job_id = $1 AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required')
+           WHERE job_id = $1 AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required', 'released')
            ORDER BY created_at DESC LIMIT 1`,
           [job.id]
         );
