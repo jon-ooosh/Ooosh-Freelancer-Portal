@@ -10,6 +10,7 @@ import { generateBVRLACSV } from '../routes/ve103b';
 import emailService from '../services/email-service';
 import { getFrontendUrl } from './app-urls';
 import { sendOohReminderEmails } from '../services/ooh-return';
+import { runOohApproachScan } from '../services/ooh-sms-approach';
 
 /**
  * Starts the backup and sync schedulers.
@@ -273,6 +274,7 @@ export function startScheduler() {
            AND pipeline_status IN ('new_enquiry', 'quoting', 'paused', 'provisional')
            AND status < 2
            AND is_deleted = false
+           AND COALESCE(is_internal, false) = false
          RETURNING id, job_name, hh_job_number, pipeline_status, job_date`
       );
 
@@ -319,6 +321,23 @@ export function startScheduler() {
     }
   });
   console.log('Scheduler: OOH return reminders scheduled daily at 10:00');
+
+  // ── OOH Approach SMS ────────────────────────────────────────────────
+  // Every 3 min during CLOSED hours (17:00–08:59 Europe/London — office is open
+  // 09:00–17:00). Texts a driver the parking link when their OOH-flagged van
+  // comes within the geofence radius of base. One-shot per assignment; skips
+  // cleanly when SMS isn't configured or the base lat/lng aren't set.
+  cron.schedule('*/3 17-23,0-8 * * *', async () => {
+    try {
+      const r = await runOohApproachScan();
+      if (r.texted > 0) {
+        console.log(`Scheduler: OOH approach SMS sent: ${r.texted} (checked ${r.checked}, skipped ${r.skipped})`);
+      }
+    } catch (err) {
+      console.error('Scheduler: OOH approach SMS scan failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: OOH approach SMS scan scheduled every 3 min 17:00–08:59 Europe/London');
 
   // ── Close-Out Requirement Chase Scanner ─────────────────────────────
   // Daily at 09:30 — check for overdue post-hire requirements and create notifications
@@ -463,14 +482,15 @@ export function startScheduler() {
   // migration 102) guarantee at most ONE email per transition.
   cron.schedule('*/15 * * * *', async () => {
     try {
-      const { runDispatchSanityScan, runReturnedBookedOutScan } = await import('../services/sanity-check-scanner');
-      const [dispatch, returned] = await Promise.all([
+      const { runDispatchSanityScan, runReturnedBookedOutScan, runBookedOutNoTimestampScan } = await import('../services/sanity-check-scanner');
+      const [dispatch, returned, noTs] = await Promise.all([
         runDispatchSanityScan(),
         runReturnedBookedOutScan(),
+        runBookedOutNoTimestampScan(),
       ]);
-      if (dispatch.warned > 0 || returned.warned > 0) {
+      if (dispatch.warned > 0 || returned.warned > 0 || noTs.warned > 0) {
         console.log(
-          `Scheduler: Sanity scans — dispatch ${dispatch.warned}/${dispatch.checked}, returned ${returned.warned}/${returned.checked}`
+          `Scheduler: Sanity scans — dispatch ${dispatch.warned}/${dispatch.checked}, returned ${returned.warned}/${returned.checked}, booked_out-no-ts ${noTs.warned}/${noTs.checked}`
         );
       }
     } catch (err) {
@@ -624,6 +644,22 @@ export function startScheduler() {
   });
   console.log('Scheduler: Hire form auto-emails scheduled daily at 09:00');
 
+  // ── Carnet request-form auto-emails ──────────────────────────────────
+  // Daily at 09:15 — send the carnet request form (T-28 days) + chase if not back.
+  cron.schedule('15 9 * * *', async () => {
+    console.log('Scheduler: Checking carnet request-form triggers...');
+    try {
+      const { runCarnetAutoEmails } = await import('../services/carnet-auto-email');
+      const result = await runCarnetAutoEmails();
+      if (result.sent > 0 || result.chased > 0) {
+        console.log(`Scheduler: Carnet request forms — ${result.sent} sent, ${result.chased} chased`);
+      }
+    } catch (err) {
+      console.error('Scheduler: Carnet auto-email failed:', err);
+    }
+  });
+  console.log('Scheduler: Carnet request-form auto-emails scheduled daily at 09:15');
+
   // ── Freelancer completion chaser ─────────────────────────────────────
   // Every 30 minutes — nudge freelancers who haven't completed jobs that
   // are past their scheduled time. Levels: 2h / 6h / 14h, then staff
@@ -775,7 +811,74 @@ export function startScheduler() {
       console.error('Scheduler: Holding reminders failed:', err);
     }
   }, { timezone: 'Europe/London' });
+
+  // COT receipt chase — WEEKLY, Wednesday 12:00 Europe/London. One digest per
+  // card-holder summarising their company-card purchases still missing a receipt
+  // (older than the 3-day grace). See services/cost-receipt-chaser.ts.
+  cron.schedule('0 12 * * 3', async () => {
+    try {
+      const { runCostReceiptChase } = await import('../services/cost-receipt-chaser');
+      const r = await runCostReceiptChase();
+      if (r.holdersNudged) {
+        console.log(`Scheduler: COT receipt chase — nudged ${r.holdersNudged} staff about ${r.costsChased} missing receipts`);
+      }
+    } catch (err) {
+      console.error('Scheduler: COT receipt chase failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
   console.log('Scheduler: Holding reminders scheduled daily at 09:25 Europe/London');
+
+  // ── Vehicle forecast AI assessments ──────────────────────────────────────
+  // Weekly: Sunday 18:00 Europe/London (ready for Monday AM). Regenerates the
+  // cached AI health narrative for every active van (deterministic forecast
+  // cards are computed live, not here). On-demand regeneration is the Forecast
+  // tab "Regenerate" button. See services/vehicle-forecast-ai.ts.
+  const runForecastBatch = async () => {
+    try {
+      const { runScheduledForecastAssessments } = await import('../services/vehicle-forecast-ai');
+      const r = await runScheduledForecastAssessments();
+      console.log(`Scheduler: Vehicle forecast assessments — ${r.done} done, ${r.skipped} skipped, ${r.failed} failed`);
+    } catch (err) {
+      console.error('Scheduler: Vehicle forecast assessments failed:', err);
+    }
+  };
+  cron.schedule('0 18 * * 0', runForecastBatch, { timezone: 'Europe/London' });
+  console.log('Scheduler: Vehicle forecast assessments scheduled weekly Sun 18:00 Europe/London');
+
+  // ── PCN pay-direct chase ladder ──────────────────────────────────────────
+  // Daily at 09:35 Europe/London. Chases drivers who were told to pay a charge
+  // direct but haven't sent proof, on the 3/5/7-day ladder. info@ alerted at
+  // every rung; final rung flags for escalation to liability transfer.
+  // See services/pcn-chase.ts.
+  cron.schedule('35 9 * * *', async () => {
+    try {
+      const { runPcnChases } = await import('../services/pcn-chase');
+      const r = await runPcnChases();
+      if (r.chased) {
+        console.log(`Scheduler: PCN chases — ${r.chased} chased, ${r.escalations} flagged for escalation`);
+      }
+    } catch (err) {
+      console.error('Scheduler: PCN chase ladder failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: PCN pay-direct chases scheduled daily at 09:35 Europe/London');
+
+  // ── PCN deadline / Police-NIP nudges ─────────────────────────────────────
+  // Daily at 09:37 Europe/London. Internal-only (info@) nudge for PCNs whose
+  // issuer deadline is approaching, or Police NIPs still unactioned in the
+  // 28-day legal window. Stamp-first dedup per deadline. NO client emails —
+  // safe for historical/imported PCNs. The dashboard "PCN" buckets are the
+  // passive surface for the same data. See services/pcn-attention.ts.
+  cron.schedule('37 9 * * *', async () => {
+    try {
+      const { runPcnDeadlineNudges } = await import('../services/pcn-attention');
+      const r = await runPcnDeadlineNudges();
+      if (r.nudged) console.log(`Scheduler: PCN deadline nudges — ${r.nudged} info@ alert(s) sent`);
+    } catch (err) {
+      console.error('Scheduler: PCN deadline nudges failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: PCN deadline / NIP nudges scheduled daily at 09:37 Europe/London');
 
   // ── Pre-auth expiry reconciliation (silent housekeeping) ─────────────────
   // Daily at 09:40 Europe/London. Closes out held pre-auths past their window.
@@ -825,6 +928,24 @@ export function startScheduler() {
     }
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: Pre-auth expiry reconciliation scheduled daily at 09:40 Europe/London');
+
+  // ── Cost ↔ Xero reconciliation sync — daily 07:45 Europe/London ─────────
+  // Closes the spend-money loop: when the bookkeeper reconciles our pushed
+  // Spend Money against the bank-feed line IN XERO, flip the OP cost to
+  // `reconciled` so the /money/costs Reconcile tab self-empties and becomes a
+  // true exception list. Silent housekeeping — no emails/bells.
+  cron.schedule('45 7 * * *', async () => {
+    try {
+      const { runCostXeroReconcileSync } = await import('../services/cost-xero-reconcile-sync');
+      const r = await runCostXeroReconcileSync();
+      if (r.checked > 0) {
+        console.log(`Scheduler: Cost Xero reconcile sync — ${r.reconciled} of ${r.checked} flipped to reconciled`);
+      }
+    } catch (err) {
+      console.error('Scheduler: Cost Xero reconcile sync failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: Cost Xero reconcile sync scheduled daily at 07:45 Europe/London');
 
   // ── Job financials backfill — nightly 03:00 Europe/London ────────────
   // Slow-burn fills the job_financials cache (powering /money/overview) for

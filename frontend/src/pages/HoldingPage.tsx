@@ -2,13 +2,13 @@ import { useEffect, useState, useCallback, ReactNode } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { EntitySearch } from '../components/holding/EntitySearch';
-import { JobNumberField } from '../components/holding/JobNumberField';
 import { NotifyClientModal } from '../components/holding/NotifyClientModal';
-import { OrgJobSuggestions } from '../components/holding/OrgJobSuggestions';
-import { DuplicateNudge } from '../components/holding/DuplicateNudge';
-import { uploadHeldItemPhotos } from '../components/holding/photo-upload';
+import { HeldItemForm } from '../components/holding/HeldItemForm';
 import { locationLabelOrDash } from '../components/holding/format';
 import { ChaseReviewPanel } from '../components/holding/ChaseReviewPanel';
+import ThreadView from '../components/messaging/ThreadView';
+import { MentionComposer } from '../components/messaging/MentionComposer';
+import { useAttachments } from '../components/messaging/Attachments';
 import type { HeldItem, HeldItemKind, HeldItemLocation } from '../../../shared/types';
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -39,6 +39,23 @@ const KIND_LABEL: Record<HeldItemKind, string> = {
   incoming: 'Delivery', temp_storage: 'Temp storage', lost_property: 'Lost property',
 };
 
+// ── Lost-property list sorting + chase-due rendering ─────────────────────────
+type SortKey = 'found_date' | 'last_chased_at' | 'escalation_level' | 'next_chase_due' | 'expected_collection_date';
+function sortVal(h: HeldItem, key: SortKey): number | null {
+  if (key === 'escalation_level') return h.escalation_level ?? 0;
+  const v = h[key] as string | null | undefined;
+  return v ? Date.parse(v) : null;
+}
+// Colour-coded next-chase cell — reads the backend-computed chase_state so the
+// list agrees with the detail card and the daily chase scanner.
+function NextChaseCell({ item }: { item: HeldItem }) {
+  if (!item.next_chase_due || !item.chase_state || item.chase_state === 'none') return <span className="text-slate-300">—</span>;
+  const d = fmtDate(item.next_chase_due);
+  if (item.chase_state === 'due') return <span className="text-red-600 font-medium" title="Due a chase">{d}</span>;
+  if (item.chase_state === 'paused') return <span className="text-blue-600" title="Paused — client gave a collection date">⏸ {d}</span>;
+  return <span className="text-slate-600">{d}</span>;
+}
+
 // Inline photo thumbnail — authenticated blob fetch (download endpoint needs the JWT header)
 function PhotoThumb({ photoKey, onOpen }: { photoKey: string; onOpen: () => void }) {
   const [src, setSrc] = useState('');
@@ -56,6 +73,16 @@ function PhotoThumb({ photoKey, onOpen }: { photoKey: string; onOpen: () => void
 const FOUND_IN_LABEL: Record<string, string> = {
   van: 'Van', rehearsal: 'Rehearsal room', backline: 'Backline', elsewhere: 'Somewhere else',
 };
+
+// Hold-until on the held list: amber within 3 days, red once passed — mirrors
+// the reminder window in services/holding-reminders.ts.
+function HoldUntilCell({ value }: { value: string | null | undefined }) {
+  if (!value) return <span className="text-slate-300">—</span>;
+  const days = Math.floor((new Date(value).getTime() - Date.now()) / 86400000);
+  const cls = days < 0 ? 'text-red-600 font-medium' : days <= 3 ? 'text-amber-600' : 'text-slate-600';
+  const title = days < 0 ? 'Hold date passed' : days <= 3 ? 'Hold ending soon' : '';
+  return <span className={cls} title={title}>{fmtDate(value)}</span>;
+}
 
 function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
   useEffect(() => {
@@ -76,14 +103,6 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
   );
 }
 
-// Photo upload (shared shape with the rest of the app — R2 key in `url`)
-async function uploadPhotos(files: FileList | null, onDone: (atts: { name: string; url: string; type: string }[]) => void, onErr: (m: string) => void, setBusy: (b: boolean) => void) {
-  if (!files || files.length === 0) return;
-  setBusy(true);
-  try { onDone(await uploadHeldItemPhotos(files)); }
-  catch (e) { onErr(e instanceof Error ? e.message : 'Upload failed'); } finally { setBusy(false); }
-}
-
 // ════════════════════════════════════════════════════════════════════════
 export default function HoldingPage({ view }: { view: View }) {
   const [items, setItems] = useState<HeldItem[]>([]);
@@ -94,6 +113,8 @@ export default function HoldingPage({ view }: { view: View }) {
   const [creating, setCreating] = useState(false);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  // Lost-property list defaults to "what needs chasing now" at the top.
+  const [sort, setSort] = useState<{ key: SortKey; dir: 'asc' | 'desc' }>({ key: 'next_chase_due', dir: 'asc' });
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -109,10 +130,44 @@ export default function HoldingPage({ view }: { view: View }) {
   useEffect(() => { load(); }, [load]);
   useEffect(() => { api.get<{ data: HeldItemLocation[] }>('/holding/locations').then((r) => setLocations(r.data)).catch(() => {}); }, []);
 
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  // Deep-link: ?item=<id> (e.g. from a discussion @mention notification)
+  // pre-opens that held item's detail modal. Clear it again on close so a
+  // refresh doesn't keep re-opening.
+  const itemParam = searchParams.get('item');
+  useEffect(() => { if (itemParam) setDetailId(itemParam); }, [itemParam]);
+  const closeDetail = useCallback(() => {
+    setDetailId(null);
+    if (searchParams.has('item')) {
+      const next = new URLSearchParams(searchParams);
+      next.delete('item');
+      setSearchParams(next, { replace: true });
+    }
+  }, [searchParams, setSearchParams]);
+
   const kinds = VIEW_KINDS[view];
   const rows = items.filter((i) => kinds.includes(i.kind) && (!unknownOnly || i.owner_unknown));
   const openCount = items.filter((i) => kinds.includes(i.kind) && !['collected', 'given_to_client', 'shipped_back', 'disposed', 'cancelled'].includes(i.status)).length;
+
+  // Sorting is lost-property only (held keeps its needed-by server order). Nulls
+  // always sink to the bottom regardless of direction.
+  const sortedRows = view === 'lost_property'
+    ? [...rows].sort((a, b) => {
+        const va = sortVal(a, sort.key), vb = sortVal(b, sort.key);
+        if (va === vb) return 0;
+        if (va === null) return 1;
+        if (vb === null) return -1;
+        return sort.dir === 'asc' ? va - vb : vb - va;
+      })
+    : rows;
+
+  const SortTh = ({ label, k }: { label: string; k: SortKey }) => (
+    <th onClick={() => setSort((s) => ({ key: k, dir: s.key === k && s.dir === 'asc' ? 'desc' : 'asc' }))}
+      className="text-left px-3 py-2 cursor-pointer select-none hover:text-slate-700 whitespace-nowrap">
+      {label}{sort.key === k ? (sort.dir === 'asc' ? ' ▲' : ' ▼') : ''}
+    </th>
+  );
 
   return (
     <div className="p-4 sm:p-6 max-w-7xl mx-auto">
@@ -138,14 +193,28 @@ export default function HoldingPage({ view }: { view: View }) {
           <thead className="bg-slate-50 text-slate-500 text-xs"><tr>
             <th className="text-left px-3 py-2">Item</th>
             <th className="text-left px-3 py-2">Client</th>
-            {view === 'held'
-              ? <><th className="text-left px-3 py-2">Job</th><th className="text-left px-3 py-2">Boxes</th><th className="text-left px-3 py-2">Needed by</th></>
-              : <><th className="text-left px-3 py-2">Found in</th><th className="text-left px-3 py-2">Found</th></>}
-            <th className="text-left px-3 py-2">Location</th>
-            <th className="text-left px-3 py-2">Status</th>
+            {view === 'held' ? (
+              <>
+                <th className="text-left px-3 py-2">Job</th>
+                <th className="text-left px-3 py-2">Boxes</th>
+                <th className="text-left px-3 py-2">Needed by</th>
+                <th className="text-left px-3 py-2">Hold until</th>
+                <th className="text-left px-3 py-2">Location</th>
+                <th className="text-left px-3 py-2">Status</th>
+              </>
+            ) : (
+              <>
+                <SortTh label="Found" k="found_date" />
+                <SortTh label="Last contacted" k="last_chased_at" />
+                <SortTh label="Chases" k="escalation_level" />
+                <SortTh label="Next chase due" k="next_chase_due" />
+                <SortTh label="Expected collection" k="expected_collection_date" />
+                <th className="text-left px-3 py-2">Status</th>
+              </>
+            )}
           </tr></thead>
           <tbody>
-            {rows.map((h) => {
+            {sortedRows.map((h) => {
               const client = h.owner_person_name || h.owner_organisation_name || h.client_name_text;
               const received = h.received_count != null && h.box_count != null ? `${h.received_count}/${h.box_count}` : (h.box_count != null ? String(h.box_count) : '—');
               return (
@@ -153,187 +222,60 @@ export default function HoldingPage({ view }: { view: View }) {
                   <td className="px-3 py-2 font-medium text-slate-800">
                     {h.description || <span className="text-slate-400 italic">No description</span>}
                     {view === 'held' && <span className="ml-1 text-xs text-slate-400">· {KIND_LABEL[h.kind]}</span>}
+                    {!!h.discussion_count && (
+                      <span className="ml-1.5 text-xs text-slate-400" title={`${h.discussion_count} discussion note${h.discussion_count === 1 ? '' : 's'}`}>💬 {h.discussion_count}</span>
+                    )}
+                    {view === 'lost_property' && h.found_in && (
+                      <span className="block text-xs font-normal text-slate-400">
+                        {FOUND_IN_LABEL[h.found_in]}{h.found_vehicle_reg ? ` · ${h.found_vehicle_reg}` : (h.found_location_text ? ` · ${h.found_location_text}` : '')}
+                      </span>
+                    )}
                   </td>
                   <td className="px-3 py-2">
                     {h.owner_unknown
                       ? <span className="text-xs px-2 py-0.5 rounded bg-amber-100 text-amber-800">❓ Unknown</span>
                       : (client || <span className="text-slate-400">—</span>)}
                   </td>
-                  {view === 'held'
-                    ? <>
-                        <td className="px-3 py-2">{h.hh_job_number ? `#${h.hh_job_number}` : '—'}</td>
-                        <td className="px-3 py-2">{received}</td>
-                        <td className="px-3 py-2">{fmtDate(h.needed_by)}</td>
-                      </>
-                    : <>
-                        <td className="px-3 py-2">{h.found_in ? FOUND_IN_LABEL[h.found_in] : '—'}{h.found_vehicle_reg ? ` (${h.found_vehicle_reg})` : ''}</td>
-                        <td className="px-3 py-2">{fmtDate(h.found_date)}</td>
-                      </>}
-                  <td className="px-3 py-2">{locationLabelOrDash(h)}</td>
-                  <td className="px-3 py-2"><span className={`px-2 py-0.5 rounded text-xs font-medium capitalize ${STATUS_COLOUR[h.status] || 'bg-slate-100'}`}>{statusLabel(h.status)}</span></td>
+                  {view === 'held' ? (
+                    <>
+                      <td className="px-3 py-2">{h.hh_job_number ? `#${h.hh_job_number}` : '—'}</td>
+                      <td className="px-3 py-2">{received}</td>
+                      <td className="px-3 py-2">{fmtDate(h.needed_by)}</td>
+                      <td className="px-3 py-2"><HoldUntilCell value={h.hold_until} /></td>
+                      <td className="px-3 py-2">{locationLabelOrDash(h)}</td>
+                      <td className="px-3 py-2"><span className={`px-2 py-0.5 rounded text-xs font-medium capitalize ${STATUS_COLOUR[h.status] || 'bg-slate-100'}`}>{statusLabel(h.status)}</span></td>
+                    </>
+                  ) : (
+                    <>
+                      <td className="px-3 py-2 whitespace-nowrap">{fmtDate(h.found_date)}</td>
+                      <td className="px-3 py-2 whitespace-nowrap">{h.last_chased_at ? fmtDate(h.last_chased_at) : <span className="text-slate-400">Not yet</span>}</td>
+                      <td className="px-3 py-2 text-center">{h.escalation_level || 0}</td>
+                      <td className="px-3 py-2 whitespace-nowrap"><NextChaseCell item={h} /></td>
+                      <td className="px-3 py-2 whitespace-nowrap">{h.expected_collection_date ? fmtDate(h.expected_collection_date) : <span className="text-slate-400">—</span>}</td>
+                      <td className="px-3 py-2"><span className={`px-2 py-0.5 rounded text-xs font-medium capitalize ${STATUS_COLOUR[h.status] || 'bg-slate-100'}`}>{statusLabel(h.status)}</span></td>
+                    </>
+                  )}
                 </tr>
               );
             })}
-            {rows.length === 0 && <tr><td colSpan={view === 'held' ? 6 : 5} className="px-3 py-8 text-center text-slate-400">{loading ? 'Loading…' : 'Nothing here.'}</td></tr>}
+            {sortedRows.length === 0 && <tr><td colSpan={8} className="px-3 py-8 text-center text-slate-400">{loading ? 'Loading…' : 'Nothing here.'}</td></tr>}
           </tbody>
         </table>
       </div>
 
       {creating && <CreateModal view={view} locations={locations} onClose={() => setCreating(false)} onSaved={() => { setCreating(false); load(); }} />}
-      {detailId && <DetailModal id={detailId} locations={locations} onClose={() => setDetailId(null)} onChange={load} />}
+      {detailId && <DetailModal id={detailId} locations={locations} onClose={closeDetail} onChange={load} />}
     </div>
   );
 }
 
 // ════════════════════════ CREATE ════════════════════════
+// Thin wrapper around the shared HeldItemForm (also used by the mobile /quick
+// launcher) so the desktop + mobile capture flows can never drift apart.
 function CreateModal({ view, locations, onClose, onSaved }: { view: View; locations: HeldItemLocation[]; onClose: () => void; onSaved: () => void }) {
-  const [f, setF] = useState({
-    kind: (view === 'lost_property' ? 'lost_property' : 'incoming') as HeldItemKind,
-    description: '', box_count: '',
-    owner_unknown: false,
-    owner_organisation_id: null as string | null, org_name: '',
-    owner_person_id: null as string | null, person_name: '',
-    client_name_text: '', hh_job_number: '',
-    found_in: 'van', found_location_text: '',
-    storage_location_id: '', storage_location_text: '',
-    expected_date: '', import_charge_flag: '', hold_until: '', notes: '',
-  });
-  const [photos, setPhotos] = useState<{ name: string; url: string; type: string }[]>([]);
-  const [uploading, setUploading] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [err, setErr] = useState('');
-
-  const GIVEN = '__given__';
-  const givenStraight = f.storage_location_id === GIVEN;
-  const somewhereElse = (() => {
-    const loc = locations.find((l) => l.id === f.storage_location_id);
-    return loc?.name === 'Somewhere else';
-  })();
-
-  async function save() {
-    setSaving(true); setErr('');
-    try {
-      await api.post('/holding', {
-        kind: f.kind,
-        owner_unknown: f.owner_unknown,
-        description: f.description || null,
-        box_count: f.box_count ? Number(f.box_count) : null,
-        owner_organisation_id: f.owner_unknown ? null : f.owner_organisation_id,
-        owner_person_id: f.owner_unknown ? null : f.owner_person_id,
-        client_name_text: f.owner_unknown ? null : (f.client_name_text || null),
-        hh_job_number: f.hh_job_number ? Number(f.hh_job_number) : null,
-        found_in: f.kind === 'lost_property' ? f.found_in : null,
-        found_location_text: f.kind === 'lost_property' ? (f.found_location_text || null) : null,
-        storage_location_id: givenStraight ? null : (f.storage_location_id || null),
-        storage_location_text: somewhereElse ? (f.storage_location_text || null) : null,
-        status: givenStraight ? 'given_to_client' : undefined,
-        expected_date: f.kind === 'incoming' && f.expected_date ? f.expected_date : null,
-        import_charge_flag: f.kind === 'incoming' && f.import_charge_flag ? f.import_charge_flag : null,
-        hold_until: f.kind === 'temp_storage' && f.hold_until ? f.hold_until : null,
-        notes: f.notes || null,
-        photos,
-      });
-      onSaved();
-    } catch (e) { setErr(e instanceof Error ? e.message : 'Save failed'); } finally { setSaving(false); }
-  }
-
   return (
     <Modal title={view === 'held' ? 'Log Held Item' : 'Log Lost Property'} onClose={onClose}>
-      <div className="space-y-3">
-        {view === 'held' && (
-          <div className="flex gap-2">
-            {(['incoming', 'temp_storage'] as HeldItemKind[]).map((k) => (
-              <button key={k} type="button" onClick={() => setF({ ...f, kind: k })}
-                className={`px-3 py-1.5 rounded-lg text-sm border ${f.kind === k ? 'bg-[#7B5EA7] text-white border-[#7B5EA7]' : 'bg-white text-slate-600 border-slate-300'}`}>
-                {KIND_LABEL[k]}
-              </button>
-            ))}
-          </div>
-        )}
-
-        <div><label className="block text-xs text-slate-500 mb-1">Description</label>
-          <input className={inputCls} value={f.description} onChange={(e) => setF({ ...f, description: e.target.value })}
-            placeholder={view === 'lost_property' ? 'e.g. Black rucksack, 2 cables' : 'e.g. 3 merch boxes'} /></div>
-
-        {f.kind !== 'lost_property' && (
-          <div className="grid grid-cols-2 gap-3">
-            <div><label className="block text-xs text-slate-500 mb-1">Number of boxes/items</label><input className={inputCls} type="number" value={f.box_count} onChange={(e) => setF({ ...f, box_count: e.target.value })} /></div>
-            {f.kind === 'incoming' && <div><label className="block text-xs text-slate-500 mb-1">Expected date</label><input className={inputCls} type="date" value={f.expected_date} onChange={(e) => setF({ ...f, expected_date: e.target.value })} /></div>}
-          </div>
-        )}
-
-        {f.kind === 'lost_property' && (
-          <div className="grid grid-cols-2 gap-3">
-            <div><label className="block text-xs text-slate-500 mb-1">Found in</label>
-              <select className={inputCls} value={f.found_in} onChange={(e) => setF({ ...f, found_in: e.target.value })}>
-                <option value="van">Van</option><option value="rehearsal">Rehearsal room</option><option value="backline">Backline</option><option value="elsewhere">Somewhere else</option>
-              </select></div>
-            {f.found_in === 'van' && <div><label className="block text-xs text-slate-500 mb-1">Van reg</label><input className={inputCls} value={f.found_location_text} onChange={(e) => setF({ ...f, found_location_text: e.target.value })} placeholder="e.g. RX22SXL" /></div>}
-          </div>
-        )}
-
-        {/* Owner — HireHop job # first; we derive the client from it */}
-        <div className="border border-slate-200 rounded-lg p-3 space-y-2">
-          <label className="flex items-center gap-2 text-sm text-slate-600">
-            <input type="checkbox" checked={f.owner_unknown} onChange={(e) => setF({ ...f, owner_unknown: e.target.checked })} />
-            Owner unknown (log now, link later)
-          </label>
-          {!f.owner_unknown && (
-            <>
-              <JobNumberField value={f.hh_job_number} onChange={(v) => setF({ ...f, hh_job_number: v })} />
-              <DuplicateNudge hhJobNumber={f.hh_job_number} />
-              <EntitySearch kind="organisations" label="Client / band (organisation)" value={f.org_name} onPick={(id, name) => setF({ ...f, owner_organisation_id: id, org_name: name })} />
-              <OrgJobSuggestions orgId={f.owner_organisation_id} hasNumber={!!f.hh_job_number} onPick={(n) => setF({ ...f, hh_job_number: n })} />
-              <EntitySearch kind="people" label="Or a person" value={f.person_name} onPick={(id, name) => setF({ ...f, owner_person_id: id, person_name: name })} />
-              <div><label className="block text-xs text-slate-500 mb-1">Or just a name (free text)</label><input className={inputCls} value={f.client_name_text} onChange={(e) => setF({ ...f, client_name_text: e.target.value })} /></div>
-            </>
-          )}
-        </div>
-
-        {/* Where stored */}
-        <div className="grid grid-cols-2 gap-3">
-          <div><label className="block text-xs text-slate-500 mb-1">Where stored</label>
-            <select className={inputCls} value={f.storage_location_id} onChange={(e) => setF({ ...f, storage_location_id: e.target.value })}>
-              <option value="">—</option>
-              <option value={GIVEN}>✋ Given straight to client</option>
-              {locations.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
-            </select></div>
-          {somewhereElse && <div><label className="block text-xs text-slate-500 mb-1">Where exactly?</label><input className={inputCls} value={f.storage_location_text} onChange={(e) => setF({ ...f, storage_location_text: e.target.value })} /></div>}
-        </div>
-
-        {f.kind === 'incoming' && (
-          <div><label className="block text-xs text-slate-500 mb-1">Customs / import charge?</label>
-            <select className={inputCls} value={f.import_charge_flag} onChange={(e) => setF({ ...f, import_charge_flag: e.target.value })}>
-              <option value="">—</option><option value="no">No</option><option value="yes">Yes</option><option value="unknown">Don't know</option>
-            </select></div>
-        )}
-
-        {f.kind === 'temp_storage' && (
-          <div><label className="block text-xs text-slate-500 mb-1">Hold until (optional)</label>
-            <input className={inputCls} type="date" value={f.hold_until} onChange={(e) => setF({ ...f, hold_until: e.target.value })} />
-            <p className="text-[11px] text-slate-400 mt-1">We'll remind the team 3 days before this date.</p></div>
-        )}
-
-        {/* Photos */}
-        <div>
-          <label className="block text-xs text-slate-500 mb-1">Photos</label>
-          <div className="flex flex-wrap gap-2 mb-2">
-            {photos.map((p, idx) => (
-              <span key={idx} className="inline-flex items-center gap-1 text-xs bg-slate-100 rounded px-2 py-1">📷 {p.name}
-                <button type="button" onClick={() => setPhotos((cur) => cur.filter((_, j) => j !== idx))} className="text-red-500">×</button></span>
-            ))}
-          </div>
-          <input type="file" accept="image/*" multiple capture="environment" className="text-xs"
-            onChange={(e) => uploadPhotos(e.target.files, (a) => setPhotos((p) => [...p, ...a]), setErr, setUploading)} />
-          {uploading && <span className="text-xs text-slate-400 ml-2">Uploading…</span>}
-        </div>
-
-        <div><label className="block text-xs text-slate-500 mb-1">Notes</label><textarea className={inputCls} rows={2} value={f.notes} onChange={(e) => setF({ ...f, notes: e.target.value })} /></div>
-
-        {err && <p className="text-red-600 text-sm">{err}</p>}
-        <div className="flex justify-end gap-2"><button onClick={onClose} className="px-4 py-2 text-sm text-slate-600">Cancel</button>
-          <button onClick={save} disabled={saving} className="px-4 py-2 text-sm bg-[#7B5EA7] text-white rounded-lg disabled:opacity-50">{saving ? 'Saving…' : 'Log it'}</button></div>
-      </div>
+      <HeldItemForm variant="desktop" kinds={VIEW_KINDS[view]} locations={locations} onDone={onSaved} onCancel={onClose} />
     </Modal>
   );
 }
@@ -386,11 +328,8 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
               : <p className="text-slate-800">—</p>}
           </div>
           {h.kind !== 'lost_property' && <Field label="Boxes" value={h.received_count != null && h.box_count != null ? `${h.received_count}/${h.box_count}` : (h.box_count != null ? String(h.box_count) : '—')} />}
-          {/* Before arrival: show expected / needed-by. After: show the arrival log. */}
-          {h.kind !== 'lost_property' && h.status === 'expected' && <>
-            <Field label="Expected" value={fmtDate(h.expected_date)} />
-            <Field label="Needed by" value={fmtDate(h.needed_by)} />
-          </>}
+          {/* Dates (expected / needed-by / hold-until) are editable in the
+              Dates section below. Here we just show the arrival log once it's in. */}
           {h.kind !== 'lost_property' && h.status !== 'expected' && h.arrived_at &&
             <Field label="Arrived" value={`${fmtDate(h.arrived_at)}${h.received_by_name ? ` by ${h.received_by_name}` : ''}`} />}
           {h.kind === 'lost_property' && <Field label="Found in" value={h.found_in ? `${FOUND_IN_LABEL[h.found_in]}${h.found_vehicle_reg ? ` (${h.found_vehicle_reg})` : (h.found_location_text ? ` (${h.found_location_text})` : '')}` : '—'} />}
@@ -412,11 +351,16 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
 
         {msg && <p className="text-red-600">{msg}</p>}
 
+        {/* Details — editable description + box counts (not locked to first input) */}
+        {isOpen && <DetailsSection item={h} onChange={() => { load(); onChange(); }} />}
+
         {/* Chase & collection (lost property) */}
         {h.kind === 'lost_property' && isOpen && <ChaseCollectionSection item={h} onChange={() => { load(); onChange(); }} />}
 
-        {/* Hold until (temp storage) */}
-        {h.kind === 'temp_storage' && isOpen && <HoldUntilSection item={h} onChange={() => { load(); onChange(); }} />}
+        {/* Dates — editable for deliveries + temp storage (lost property uses
+            its own chase/collection dates above). */}
+        {(h.kind === 'incoming' || h.kind === 'temp_storage') && isOpen &&
+          <DatesSection item={h} onChange={() => { load(); onChange(); }} />}
 
         {/* Link / backfill owner */}
         {isOpen && (
@@ -458,6 +402,11 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
             )}
           </div>
         )}
+
+        {/* Discussion — internal @mentionable thread on this item. Separate
+            from the client-facing "Notify client". Mentions fire bell/email
+            per each user's notification preference. */}
+        <HeldItemDiscussion heldItemId={id} />
       </div>
       {notifyOpen && (
         <NotifyClientModal item={h} onClose={() => setNotifyOpen(false)}
@@ -471,20 +420,103 @@ function Field({ label, value }: { label: string; value: string }) {
   return <div><p className="text-xs text-slate-400">{label}</p><p className="text-slate-800 capitalize">{value}</p></div>;
 }
 
-const dstr = (d: string | null | undefined) => (d ? new Date(d).toLocaleDateString('en-GB') : null);
-function addDays(d: string, n: number): string {
-  const x = new Date(d); x.setDate(x.getDate() + n); return x.toLocaleDateString('en-GB');
+// Internal @mentionable discussion thread on a held item. Reuses the shared
+// messaging primitives (same as IssueDetailPage). Mentions fire the standard
+// mention notification (bell + email per the @-mentioned user's preference)
+// with a deep-link back to this item. Distinct from "Notify client" — this is
+// staff-to-staff, never reaches the client.
+interface DiscussionRow { id: string; parent_interaction_id: string | null; created_at: string }
+function HeldItemDiscussion({ heldItemId }: { heldItemId: string }) {
+  const [rows, setRows] = useState<DiscussionRow[]>([]);
+  const [comment, setComment] = useState('');
+  const [mentionedIds, setMentionedIds] = useState<string[]>([]);
+  const [posting, setPosting] = useState(false);
+  const attach = useAttachments();
+
+  const load = useCallback(async () => {
+    try {
+      const r = await api.get<{ data: DiscussionRow[] }>(`/interactions?held_item_id=${heldItemId}&limit=100`);
+      setRows(r.data);
+    } catch { /* non-fatal — thread just stays empty */ }
+  }, [heldItemId]);
+  useEffect(() => { load(); }, [load]);
+
+  async function post() {
+    const trimmed = comment.trim();
+    if (!trimmed && attach.pending.length === 0) return;  // allow attachment-only posts
+    setPosting(true);
+    try {
+      await api.post('/interactions', {
+        type: 'note',
+        content: trimmed || '(attachment)',
+        held_item_id: heldItemId,
+        attachments: attach.payload(),
+        mentioned_user_ids: mentionedIds,
+      });
+      setComment(''); setMentionedIds([]); attach.clear();
+      load();
+    } catch (e) { console.error('Held-item note failed:', e); }
+    finally { setPosting(false); }
+  }
+
+  // Top-level comments only; each <ThreadView> fetches + renders its own replies.
+  const topComments = rows
+    .filter((r) => !r.parent_interaction_id)
+    .sort((a, b) => a.created_at.localeCompare(b.created_at));
+
+  return (
+    <div className="pt-3 border-t">
+      <h4 className="text-xs font-semibold text-slate-500 mb-2">Discussion</h4>
+      <div className="space-y-2">
+        {topComments.length === 0 && <p className="text-xs text-slate-400 italic">No notes yet. Add one below — @mention a colleague to ping them.</p>}
+        {topComments.map((c) => (
+          <div key={c.id} className="border border-slate-200 rounded-lg p-2 bg-slate-50/40">
+            <ThreadView interactionId={c.id} onReplied={load} />
+          </div>
+        ))}
+      </div>
+      <div className="mt-3">
+        <MentionComposer
+          value={comment}
+          onChange={setComment}
+          mentionedIds={mentionedIds}
+          onMentionedIdsChange={setMentionedIds}
+          attach={attach}
+          placeholder="Add a note… (type @ to mention, paste images to attach)"
+          rows={2}
+          disabled={posting}
+          footer={
+            <div className="flex justify-between items-center mt-2 gap-2">
+              <label className="text-[11px] text-slate-500 cursor-pointer hover:text-slate-700">
+                📎 Attach file
+                <input type="file" multiple className="hidden"
+                  onChange={(e) => { if (e.target.files) attach.addFiles(e.target.files); e.target.value = ''; }} />
+              </label>
+              <button onClick={post}
+                disabled={(!comment.trim() && attach.pending.length === 0) || posting || attach.hasInFlight}
+                className="px-3 py-1.5 text-xs bg-[#7B5EA7] text-white rounded-lg disabled:opacity-50">
+                {posting ? 'Posting…' : attach.hasInFlight ? 'Uploading…' : 'Post note'}
+              </button>
+            </div>
+          }
+        />
+      </div>
+    </div>
+  );
 }
+
+const dstr = (d: string | null | undefined) => (d ? new Date(d).toLocaleDateString('en-GB') : null);
 
 // Lost property: two timers (last contacted / next chase due) + defer control.
 function ChaseCollectionSection({ item, onChange }: { item: HeldItem; onChange: () => void }) {
   const [date, setDate] = useState(item.expected_collection_date ? item.expected_collection_date.slice(0, 10) : '');
   const [saving, setSaving] = useState(false);
-  const paused = item.expected_collection_date && new Date(item.expected_collection_date) >= new Date();
-  const nextDue = paused
-    ? `Paused until ${dstr(item.expected_collection_date)}`
-    : item.last_chased_at ? addDays(item.last_chased_at, 7)
-    : item.found_date ? addDays(item.found_date, 7) : '—';
+  // Read the backend-computed chase fields so this card, the list and the daily
+  // scanner all agree.
+  const paused = item.chase_state === 'paused';
+  const nextDue = item.next_chase_due
+    ? (paused ? `Paused until ${dstr(item.next_chase_due)}` : (dstr(item.next_chase_due) || '—'))
+    : '—';
 
   async function save(val: string | null) {
     setSaving(true);
@@ -511,24 +543,125 @@ function ChaseCollectionSection({ item, onChange }: { item: HeldItem; onChange: 
 }
 
 // Temp storage: hold-until date (staff reminded 3 days before).
-function HoldUntilSection({ item, onChange }: { item: HeldItem; onChange: () => void }) {
-  const [date, setDate] = useState(item.hold_until ? item.hold_until.slice(0, 10) : '');
+// Editable description + box counts — so a held item isn't locked to its
+// first input. Description applies to all kinds; box counts only to deliveries
+// / temp storage (lost property has no declared quantity).
+function DetailsSection({ item, onChange }: { item: HeldItem; onChange: () => void }) {
+  return (
+    <div className="border border-slate-200 rounded-lg p-3 bg-slate-50/50 space-y-2">
+      <p className="text-xs font-semibold text-slate-500">Details</p>
+      <InlineText label="Description" value={item.description} field="description" itemId={item.id} onChange={onChange} />
+      {item.kind !== 'lost_property' && (
+        <div className="grid grid-cols-2 gap-3">
+          <InlineNumber label="Boxes expected" value={item.box_count} field="box_count" itemId={item.id} onChange={onChange} />
+          <InlineNumber label="Received" value={item.received_count} field="received_count" itemId={item.id} onChange={onChange} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Inline text field — saves on blur, clears to null when emptied.
+function InlineText({ label, value, field, itemId, onChange }: {
+  label: string; value: string | null | undefined; field: 'description'; itemId: string; onChange: () => void;
+}) {
+  const [val, setVal] = useState(value ?? '');
   const [saving, setSaving] = useState(false);
-  async function save(val: string | null) {
+  useEffect(() => { setVal(value ?? ''); }, [value]);
+  async function save() {
+    const next = val.trim();
+    if (next === (value ?? '').trim()) return;
     setSaving(true);
-    try { await api.put(`/holding/${item.id}`, { hold_until: val }); onChange(); }
+    try { await api.put(`/holding/${itemId}`, { [field]: next || null }); onChange(); }
     finally { setSaving(false); }
   }
   return (
-    <div className="border border-slate-200 rounded-lg p-3 space-y-2 bg-slate-50/50">
-      <div className="flex flex-wrap items-center gap-2">
-        <label className="text-xs text-slate-500">Hold until:</label>
-        <input type="date" className="border border-slate-300 rounded px-2 py-1 text-xs" value={date} onChange={(e) => setDate(e.target.value)} />
-        <button disabled={saving || !date} onClick={() => save(date)} className="text-xs bg-[#7B5EA7] text-white px-3 py-1 rounded disabled:opacity-40">Save</button>
-        {item.hold_until && <button disabled={saving} onClick={() => { setDate(''); save(null); }} className="text-xs text-slate-500">clear</button>}
-        {item.hold_until && <span className="text-xs text-slate-500">currently {dstr(item.hold_until)}</span>}
+    <div>
+      <label className="text-xs text-slate-400 block mb-0.5">{label}</label>
+      <input value={val} disabled={saving} onChange={(e) => setVal(e.target.value)} onBlur={save}
+        className="border border-slate-300 rounded px-2 py-1 text-xs w-full" />
+    </div>
+  );
+}
+
+// Inline non-negative integer field — saves on blur, clears to null when emptied.
+function InlineNumber({ label, value, field, itemId, onChange }: {
+  label: string; value: number | null | undefined; field: 'box_count' | 'received_count'; itemId: string; onChange: () => void;
+}) {
+  const asStr = (v: number | null | undefined) => (v == null ? '' : String(v));
+  const [val, setVal] = useState(asStr(value));
+  const [saving, setSaving] = useState(false);
+  useEffect(() => { setVal(asStr(value)); }, [value]);
+  async function save() {
+    const trimmed = val.trim();
+    const next = trimmed === '' ? null : Number(trimmed);
+    if (next !== null && (Number.isNaN(next) || next < 0)) { setVal(asStr(value)); return; }
+    if (asStr(next) === asStr(value)) return;
+    setSaving(true);
+    try { await api.put(`/holding/${itemId}`, { [field]: next }); onChange(); }
+    finally { setSaving(false); }
+  }
+  return (
+    <div>
+      <label className="text-xs text-slate-400 block mb-0.5">{label}</label>
+      <input type="number" min="0" value={val} disabled={saving} onChange={(e) => setVal(e.target.value)} onBlur={save}
+        className="border border-slate-300 rounded px-2 py-1 text-xs w-full" />
+    </div>
+  );
+}
+
+// Editable dates for delivery + temp-storage items. Lost property uses its own
+// chase/collection dates instead. Backend PUT already accepts all of these.
+// "Hold until / review" crosses delivery + temp storage — a parkable "deal with
+// this by X" date that fires a staff reminder 3 days out (holding-reminders.ts).
+function DatesSection({ item, onChange }: { item: HeldItem; onChange: () => void }) {
+  return (
+    <div className="border border-slate-200 rounded-lg p-3 bg-slate-50/50 space-y-2">
+      <p className="text-xs font-semibold text-slate-500">Dates</p>
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        {item.kind === 'incoming' && (
+          <InlineDate label="Expected" value={item.expected_date} field="expected_date" itemId={item.id} onChange={onChange} />
+        )}
+        <InlineDate label="Needed by" value={item.needed_by} field="needed_by" itemId={item.id} onChange={onChange} />
+        <InlineDate label="Hold until / review" value={item.hold_until} field="hold_until" itemId={item.id} onChange={onChange}
+          hint="Reminds the team 3 days before." />
       </div>
-      <p className="text-[11px] text-slate-400">We'll remind the team 3 days before this date.</p>
+    </div>
+  );
+}
+
+// One inline date field — saves on pick (native date inputs fire onChange on a
+// complete date). Clearing sends null.
+function InlineDate({ label, value, field, itemId, onChange, hint }: {
+  label: string;
+  value: string | null | undefined;
+  field: 'expected_date' | 'needed_by' | 'hold_until';
+  itemId: string;
+  onChange: () => void;
+  hint?: string;
+}) {
+  const current = value ? value.slice(0, 10) : '';
+  const [val, setVal] = useState(current);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => { setVal(value ? value.slice(0, 10) : ''); }, [value]);
+
+  async function save(next: string) {
+    if (next === current) return;
+    setSaving(true);
+    try { await api.put(`/holding/${itemId}`, { [field]: next || null }); onChange(); }
+    finally { setSaving(false); }
+  }
+
+  return (
+    <div>
+      <label className="text-xs text-slate-400 block mb-0.5">{label}</label>
+      <div className="flex items-center gap-1">
+        <input type="date" value={val} disabled={saving}
+          onChange={(e) => { setVal(e.target.value); save(e.target.value); }}
+          className="border border-slate-300 rounded px-2 py-1 text-xs w-full" />
+        {val && <button disabled={saving} onClick={() => { setVal(''); save(''); }} className="text-slate-400 hover:text-slate-600 text-xs px-1" title="Clear">×</button>}
+      </div>
+      {hint && <p className="text-[11px] text-slate-400 mt-0.5">{hint}</p>}
     </div>
   );
 }
@@ -541,21 +674,28 @@ function LinkForm({ item, onDone }: { item: HeldItem; onDone: () => void }) {
   const [saving, setSaving] = useState(false);
   return (
     <div className="border border-slate-200 rounded-lg p-3 mt-2 space-y-2">
-      <EntitySearch kind="organisations" label="Client / band" value={org.name} onPick={(id, name) => setOrg({ id, name })} />
-      <EntitySearch kind="people" label="Person" value={person.name} onPick={(id, name) => setPerson({ id, name })} />
+      <div className="flex items-end gap-1">
+        <div className="flex-1"><EntitySearch kind="organisations" label="Client / band" value={org.name} onPick={(id, name) => setOrg({ id, name })} /></div>
+        {(org.id || org.name) && <button type="button" onClick={() => setOrg({ id: null, name: '' })} className="text-xs text-slate-400 hover:text-slate-600 pb-2" title="Clear">✕</button>}
+      </div>
+      <div className="flex items-end gap-1">
+        <div className="flex-1"><EntitySearch kind="people" label="Person" value={person.name} onPick={(id, name) => setPerson({ id, name })} /></div>
+        {(person.id || person.name) && <button type="button" onClick={() => setPerson({ id: null, name: '' })} className="text-xs text-slate-400 hover:text-slate-600 pb-2" title="Clear">✕</button>}
+      </div>
       <div><label className="block text-xs text-slate-500 mb-1">Or a name</label><input className={inputCls} value={clientText} onChange={(e) => setClientText(e.target.value)} /></div>
-      <div><label className="block text-xs text-slate-500 mb-1">HireHop job #</label><input className={inputCls} type="number" value={hh} onChange={(e) => setHh(e.target.value)} /></div>
+      <div><label className="block text-xs text-slate-500 mb-1">HireHop job # <span className="text-slate-400">(clear to unlink)</span></label><input className={inputCls} type="number" value={hh} onChange={(e) => setHh(e.target.value)} /></div>
       <div className="flex justify-end">
         <button disabled={saving} onClick={async () => {
           setSaving(true);
           try {
             await api.post(`/holding/${item.id}/link`, {
+              edit: true,
               owner_organisation_id: org.id, owner_person_id: person.id,
-              client_name_text: clientText || null, hh_job_number: hh ? Number(hh) : null,
+              client_name_text: clientText.trim() || null, hh_job_number: hh ? Number(hh) : null,
             });
             onDone();
           } finally { setSaving(false); }
-        }} className="text-xs bg-[#7B5EA7] text-white px-3 py-1.5 rounded-lg disabled:opacity-50">Save link</button>
+        }} className="text-xs bg-[#7B5EA7] text-white px-3 py-1.5 rounded-lg disabled:opacity-50">Save</button>
       </div>
     </div>
   );

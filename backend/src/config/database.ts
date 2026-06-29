@@ -7,7 +7,12 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   max: 20,
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 2000,
+  // 10s, not 2s: under brief contention (e.g. two simultaneous book-outs
+  // firing post-hooks while server-side PDF builds occupy the event loop —
+  // observed 10 Jun 2026, "timeout exceeded when trying to connect" from
+  // vehicle-requirement-sync), waiters should queue rather than error.
+  // Still bounded so a genuinely wedged pool surfaces as failures.
+  connectionTimeoutMillis: 10000,
 });
 
 pool.on('error', (err) => {

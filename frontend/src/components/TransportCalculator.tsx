@@ -499,7 +499,15 @@ export default function TransportCalculator({
       // Build the canonical calculator input — the SAME object the display used —
       // so the backend recomputes (and HireHop receives) exactly what's on screen.
       const input = buildCalculatorInput(formData);
-      const arrivalTime = input.arrivalTime;
+      // input.arrivalTime carries the 09:00 costing default (the OOH split needs a
+      // time). The STORED arrival time is the user's ACTUAL entry — leave it blank
+      // when none was given so the quote shows "Time TBC" and pushes no time to
+      // HireHop, instead of a fabricated 09:00.
+      const enteredArrival = formData.arrivalTime.trim()
+        ? (/^\d{2}:\d{2}$/.test(formData.arrivalTime.trim())
+            ? formData.arrivalTime.trim()
+            : (normalizeTimeInput(formData.arrivalTime) || null))
+        : null;
 
       // Payload expenses come from the engine input; only the fuel line's display
       // amount is swapped to the engine-derived figure (engine ignores it for calc).
@@ -513,7 +521,7 @@ export default function TransportCalculator({
         calculationMode: input.calculationMode,
         distanceMiles: input.distanceMiles,
         driveTimeMins: input.driveTimeMins,
-        arrivalTime,
+        arrivalTime: enteredArrival,
         workDurationHrs: input.workDurationHrs,
         numDays: input.numDays,
         setupExtraHrs: input.setupExtraHrs,
@@ -531,7 +539,7 @@ export default function TransportCalculator({
         whatIsIt: formData.whatIsIt || null,
         addCollection: formData.addCollection,
         collectionDate: formData.collectionDate || null,
-        collectionTime: formData.collectionArrivalTime || arrivalTime,
+        collectionTime: formData.collectionArrivalTime || input.arrivalTime,
         clientName: clientName || null,
         includesSetup: formData.includesSetupWork,
         setupDescription: formData.setupWorkDescription || null,

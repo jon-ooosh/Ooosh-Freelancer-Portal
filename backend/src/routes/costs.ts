@@ -25,7 +25,8 @@ const extractUpload = multer({
   limits: { fileSize: 10 * 1024 * 1024 },
 });
 
-// Manager+ can verify a payable; only admin can approve / mark paid.
+// Manager+ can verify AND approve a payable (incl. one-click "Approve & save");
+// only admin can mark paid (money actually leaving + the Xero payment).
 const VERIFY_ROLES = ['admin', 'manager'] as const;
 const ADMIN_ONLY = ['admin'] as const;
 
@@ -73,6 +74,9 @@ const createSchema = z.object({
   amount_net: money.optional().nullable(),
   vat_treatment: z.enum(['standard', 'reclaim_split']).optional(),
   invoice_number: z.string().trim().max(100).optional().nullable(),
+  // Xero contact id captured when staff pick a real Xero supplier in the
+  // autocomplete — lets terms resolve by stable id + seed from Xero.
+  xero_contact_id: z.string().trim().max(60).optional().nullable(),
   currency: z.string().trim().length(3).optional(),
   description: z.string().trim().max(10000).optional().nullable(),
   category: z.string().trim().max(100).optional().nullable(),
@@ -95,6 +99,9 @@ const createSchema = z.object({
   receipt_filename: z.string().trim().max(200).optional().nullable(),
   status: z.enum(['draft', 'confirmed', 'resolved']).optional(),
   notes: z.string().trim().max(10000).optional().nullable(),
+  // Control flag (not a column): one-click "Approve & save" on a payable.
+  // Honoured only for admin/manager + a payable; ignored otherwise.
+  approve: z.boolean().optional(),
 });
 
 // Update accepts the same fields, all optional.
@@ -106,20 +113,21 @@ const rechargeSchema = z.object({
 });
 
 const allocationSchema = z.object({
+  // Empty array clears the split (deletes all allocations for the cost).
   allocations: z.array(z.object({
     job_id: z.string().uuid().optional().nullable(),
     quote_assignment_id: z.string().uuid().optional().nullable(),
     amount: money,
     recharge: z.boolean().optional(),
     notes: z.string().trim().max(2000).optional().nullable(),
-  })).min(1),
+  })),
 });
 
 // Columns a staff member may set directly via create/update (whitelist —
 // workflow timestamps + Xero state are server-controlled).
 const WRITABLE = [
   'supplier_name', 'cost_date', 'amount_gross', 'amount_vat', 'amount_net', 'vat_treatment',
-  'invoice_number', 'currency',
+  'invoice_number', 'xero_contact_id', 'currency',
   'description', 'category', 'xero_account_code', 'cost_type', 'payment_method',
   'cot_card_holder', 'cot_card_last4', 'payment_status', 'job_id', 'vehicle_id',
   'quote_assignment_id', 'platform_issue_id', 'vehicle_service_log_id', 'vehicle_fuel_log_id',
@@ -153,10 +161,20 @@ async function audit(userId: string, costId: string, action: string, prev: unkno
 
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
-    const { view, cost_type, status, payment_status, job_id, vehicle_id, search, limit = '200' } = req.query;
+    const { view, cost_type, status, payment_status, job_id, vehicle_id, search, missing_receipt, mine, limit = '200' } = req.query;
 
     const conditions: string[] = [];
     const params: unknown[] = [];
+
+    // COT receipt chase: company-card costs with no receipt attached. `mine`
+    // scopes to the logged-in card-holder (used by the chase notification link).
+    if (missing_receipt === '1' || missing_receipt === 'true') {
+      conditions.push(`c.payment_method = 'cot_card' AND c.receipt_r2_key IS NULL`);
+    }
+    if ((mine === '1' || mine === 'true') && req.user?.id) {
+      params.push(req.user.id);
+      conditions.push(`c.uploaded_by = $${params.length}`);
+    }
 
     if (view === 'payable') {
       conditions.push(`c.payment_status <> 'paid'`);
@@ -198,7 +216,8 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       SELECT c.*,
         CONCAT(up.first_name, ' ', up.last_name) AS uploaded_by_name,
         j.hh_job_number, j.job_name,
-        fv.reg AS vehicle_reg
+        fv.reg AS vehicle_reg,
+        (SELECT COUNT(*)::int FROM cost_allocations a WHERE a.cost_id = c.id) AS allocation_count
       FROM costs c
       LEFT JOIN users u   ON u.id = c.uploaded_by
       LEFT JOIN people up ON up.id = u.person_id
@@ -210,6 +229,26 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     `;
     const result = await query(sql, params);
 
+    // Resolve per-supplier payment terms in one query and attach the computed
+    // due date (+ the terms that produced it) to each row. Single source of
+    // truth for the bill due date — the list, mark-paid modal and Xero push all
+    // read these. See docs/COSTS-PAYMENT-AUTOMATION-SPEC.md.
+    const { buildTermsResolver, computeDueDate, freelancerDueDate } = await import('../services/supplier-terms');
+    const resolve = await buildTermsResolver(
+      result.rows.map((r) => ({ xeroContactId: r.xero_contact_id, supplierName: r.supplier_name })),
+    );
+    const rows = result.rows.map((r) => {
+      // Freelancer invoices follow Ooosh terms (first Friday +1wk after approval),
+      // not supplier/Xero terms. The Friday date only exists once approved — until
+      // then we fall back to the standard terms display.
+      if (r.cost_type === 'freelancer_invoice' && r.approved_at) {
+        const terms = { basis: 'invoice_date' as const, days: 0, source: 'freelancer' as const };
+        return { ...r, terms, due_date: freelancerDueDate(r.approved_at) };
+      }
+      const terms = resolve({ xeroContactId: r.xero_contact_id, supplierName: r.supplier_name });
+      return { ...r, terms, due_date: computeDueDate(r.cost_date, terms) };
+    });
+
     // Headline counts for the hub tabs.
     const stats = await query(`
       SELECT
@@ -220,7 +259,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       FROM costs
     `);
 
-    res.json({ data: result.rows, stats: stats.rows[0] });
+    res.json({ data: rows, stats: stats.rows[0] });
   } catch (err) {
     console.error('[costs] list error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -300,6 +339,99 @@ router.get('/xero/health', authorize(...VERIFY_ROLES), async (_req: AuthRequest,
   } catch (err) {
     console.error('[costs] xero health error:', err);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Reconcile probe — "what's on the COT card in Xero that ISN'T in OP".
+// Reads SPEND bank transactions on the mapped COT bank account over a window
+// and flags which have a matching OP cost (by pushed BankTransactionID, else by
+// amount + near date). Doubles as the verification tool for the Codat→Xero feed:
+// if this returns transactions, OP can read the COT card and matching is viable;
+// if it returns nothing, the card's purchases aren't landing as readable
+// BankTransactions (they're sitting as raw, unreconciled statement lines) and we
+// need a different route. Read-only, admin/manager.
+router.get('/reconcile/xero-cot', authorize(...VERIFY_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const { isXeroConfigured } = await import('../config/xero');
+    if (!isXeroConfigured()) {
+      return res.status(503).json({ error: 'Xero not configured (XERO_CLIENT_ID / XERO_CLIENT_SECRET missing)' });
+    }
+    const { getSystemSetting } = await import('./system-settings');
+    const accountId = await getSystemSetting('xero_bank_cot_card');
+    if (!accountId) {
+      return res.json({
+        data: { configured: false, message: 'No Xero bank account mapped for the COT card. Set it in Settings → Xero Bank Accounts (the "Company card (COT)" row) first.' },
+      });
+    }
+
+    const days = Math.min(Math.max(parseInt(String(req.query.days ?? '30'), 10) || 30, 1), 180);
+    const start = new Date(); start.setUTCDate(start.getUTCDate() - days);
+    const y = start.getUTCFullYear(), m = start.getUTCMonth() + 1, d = start.getUTCDate();
+    const where = `BankAccount.AccountID==Guid("${accountId}") AND Type=="SPEND" AND Date>=DateTime(${y},${m},${d})`;
+
+    const { xeroBroker } = await import('../services/xero-broker');
+    const raw = await xeroBroker.getBankTransactions(where);
+
+    // Parse the fields we need, defensively (Xero Date can be /Date(ms)/ or ISO).
+    const parseXeroDate = (v: unknown): string | null => {
+      if (typeof v !== 'string') return null;
+      const ms = v.match(/\/Date\((\d+)/);
+      if (ms) return new Date(parseInt(ms[1], 10)).toISOString().slice(0, 10);
+      const t = Date.parse(v);
+      return Number.isNaN(t) ? null : new Date(t).toISOString().slice(0, 10);
+    };
+    type XTxn = { BankTransactionID?: string; Date?: string; Total?: number; Reference?: string; IsReconciled?: boolean; Status?: string; Contact?: { Name?: string } };
+    const txns = (raw as XTxn[]).map((t) => ({
+      bank_transaction_id: t.BankTransactionID ?? null,
+      date: parseXeroDate(t.Date),
+      total: typeof t.Total === 'number' ? t.Total : Number(t.Total ?? 0),
+      reference: t.Reference ?? null,
+      contact_name: t.Contact?.Name ?? null,
+      is_reconciled: t.IsReconciled === true,
+      status: t.Status ?? null,
+    }));
+
+    // OP costs to match against: anything pushed (xero_object_id) + every COT
+    // card cost in the window (for amount/date fallback matching).
+    const opRows = (await query(
+      `SELECT id, xero_object_id, amount_gross, cost_date, supplier_name
+         FROM costs
+        WHERE xero_object_id IS NOT NULL
+           OR (payment_method = 'cot_card' AND cost_date >= (CURRENT_DATE - ($1 || ' days')::interval))`,
+      [String(days)],
+    )).rows as Array<{ id: string; xero_object_id: string | null; amount_gross: string | number | null; cost_date: string | null; supplier_name: string | null }>;
+
+    const byXeroId = new Map(opRows.filter((r) => r.xero_object_id).map((r) => [r.xero_object_id as string, r]));
+    const daysBetween = (a: string, b: string) => Math.abs((Date.parse(a) - Date.parse(b)) / 86400000);
+
+    const results = txns.map((tx) => {
+      let match: { cost_id: string; matched_by: 'xero_id' | 'amount_date' } | null = null;
+      if (tx.bank_transaction_id && byXeroId.has(tx.bank_transaction_id)) {
+        match = { cost_id: byXeroId.get(tx.bank_transaction_id)!.id, matched_by: 'xero_id' };
+      } else if (tx.date) {
+        const cand = opRows.find((r) =>
+          r.cost_date && Math.abs(Number(r.amount_gross ?? 0) - tx.total) <= 0.01 && daysBetween(r.cost_date.slice(0, 10), tx.date!) <= 4,
+        );
+        if (cand) match = { cost_id: cand.id, matched_by: 'amount_date' };
+      }
+      return { ...tx, op_match: match };
+    });
+
+    const unmatched = results.filter((r) => !r.op_match);
+    res.json({
+      data: {
+        configured: true,
+        account_id: accountId,
+        window: { days, from: start.toISOString().slice(0, 10) },
+        fetched: results.length,
+        matched: results.length - unmatched.length,
+        unmatched_count: unmatched.length,
+        unmatched,
+      },
+    });
+  } catch (err) {
+    console.error('[costs] xero-cot probe error:', err);
+    res.status(502).json({ error: 'Xero request failed', detail: err instanceof Error ? err.message : String(err) });
   }
 });
 
@@ -395,6 +527,51 @@ router.get('/xero/suppliers', authorize(...STAFF_ROLES), async (req: AuthRequest
   }
 });
 
+// ── Supplier payment terms ───────────────────────────────────────────────────
+// Per-supplier due-date terms, keyed by Xero contact id (when known) else name.
+// Multi-segment paths so they don't collide with /:id below.
+
+const termsSchema = z.object({
+  supplier_name: z.string().trim().max(200).optional().nullable(),
+  xero_contact_id: z.string().trim().max(60).optional().nullable(),
+  basis: z.enum(['invoice_date', 'end_of_invoice_month']),
+  days: z.number().int().min(0).max(365),
+});
+
+// Resolve the effective terms for a supplier (for the editor to pre-fill).
+router.get('/suppliers/terms', async (req: AuthRequest, res: Response) => {
+  try {
+    const supplierName = typeof req.query.supplier_name === 'string' ? req.query.supplier_name : null;
+    const xeroContactId = typeof req.query.xero_contact_id === 'string' ? req.query.xero_contact_id : null;
+    const { resolveTermsForSupplier } = await import('../services/supplier-terms');
+    const terms = await resolveTermsForSupplier(xeroContactId, supplierName);
+    res.json({ data: terms });
+  } catch (err) {
+    console.error('[costs] get supplier terms error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Set/override a supplier's terms (applies to all their bills). Low-stakes —
+// staff still set the real pay date at mark-paid — so STAFF_ROLES, like cost edit.
+router.put('/suppliers/terms', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const parse = termsSchema.safeParse(req.body);
+    if (!parse.success) { res.status(400).json({ error: 'Invalid input', issues: parse.error.issues }); return; }
+    const { supplier_name, xero_contact_id, basis, days } = parse.data;
+    if (!supplier_name && !xero_contact_id) { res.status(400).json({ error: 'A supplier name or Xero contact id is required' }); return; }
+    const { upsertSupplierTerms, resolveTermsForSupplier } = await import('../services/supplier-terms');
+    await upsertSupplierTerms({
+      supplierName: supplier_name, xeroContactId: xero_contact_id, basis, days, source: 'manual', userId: req.user!.id,
+    });
+    const terms = await resolveTermsForSupplier(xero_contact_id, supplier_name);
+    res.json({ data: terms });
+  } catch (err) {
+    console.error('[costs] set supplier terms error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // ── Get one (with allocations) ───────────────────────────────────────────────
 
 router.get('/:id', async (req: AuthRequest, res: Response) => {
@@ -420,7 +597,10 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
        WHERE a.cost_id = $1 ORDER BY a.created_at ASC`,
       [req.params.id],
     );
-    res.json({ data: { ...result.rows[0], allocations: allocations.rows } });
+    const cost = result.rows[0];
+    const { resolveTermsForSupplier, computeDueDate } = await import('../services/supplier-terms');
+    const terms = await resolveTermsForSupplier(cost.xero_contact_id, cost.supplier_name);
+    res.json({ data: { ...cost, terms, due_date: computeDueDate(cost.cost_date, terms), allocations: allocations.rows } });
   } catch (err) {
     console.error('[costs] get error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -437,11 +617,14 @@ router.post('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respon
     coerceRechargeForIntent(data);
 
     // A payable (anything not already paid) enters the approval workflow. If the
-    // booker is uploading it, they vouch for it inline → 'verified'.
+    // booker is uploading it, they vouch for it inline → 'verified'. An approver
+    // (admin/manager) can one-click "Approve & save" to skip straight to
+    // 'approved' (which fires the bill push for pay-later methods).
+    const isPayable = Boolean(data.payment_status && data.payment_status !== 'paid');
+    const canApprove = ['admin', 'manager'].includes(req.user!.role);
+    const approveNow = data.approve === true && isPayable && canApprove;
     let approvalState: string | null = null;
-    if (data.payment_status && data.payment_status !== 'paid') {
-      approvalState = 'verified';
-    }
+    if (isPayable) approvalState = approveNow ? 'approved' : 'verified';
 
     // COT-card payments are stamped with the uploader's name + their stored
     // card last 4 (from Profile) — staff no longer enters either every time.
@@ -459,6 +642,11 @@ router.post('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respon
 
     const cols = ['uploaded_by', 'approval_state'];
     const vals: unknown[] = [req.user!.id, approvalState];
+    if (approveNow) {
+      cols.push('verified_by', 'verified_at', 'approved_by', 'approved_at');
+      const now = new Date();
+      vals.push(req.user!.id, now, req.user!.id, now);
+    }
     for (const c of WRITABLE) {
       if (data[c] !== undefined) { cols.push(c); vals.push(data[c]); }
     }
@@ -474,7 +662,16 @@ router.post('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respon
     const { pushCostToXeroBackground } = await import('../services/cost-xero-push');
     pushCostToXeroBackground(result.rows[0].id);
 
-    res.status(201).json({ data: result.rows[0] });
+    // First time we see a Xero-linked supplier, seed its payment terms from the
+    // Xero contact (fire-and-forget — never blocks capture).
+    const created = result.rows[0];
+    if (created.xero_contact_id) {
+      void import('../services/supplier-terms')
+        .then((m) => m.seedTermsFromXeroIfMissing(created.xero_contact_id, created.supplier_name))
+        .catch(() => { /* non-fatal — staff can set terms manually */ });
+    }
+
+    res.status(201).json({ data: created });
   } catch (err) {
     console.error('[costs] create error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -504,12 +701,30 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
     );
     if (!result.rows.length) { res.status(404).json({ error: 'Cost not found' }); return; }
 
-    // Background push to Xero if the cost isn't already attached/reconciled.
-    // The push service itself guards on state — safe to call unconditionally.
     const updated = result.rows[0];
-    if (!updated.xero_object_id || updated.xero_sync_state === 'error' || updated.xero_sync_state === 'pending') {
+    const alreadyPushed = Boolean(updated.xero_object_id) && ['bill_created', 'attached', 'reconciled'].includes(updated.xero_sync_state);
+
+    if (alreadyPushed) {
+      // Already in Xero — we can't silently re-push (it may be reconciled). If a
+      // Xero-affecting field changed, flag it stale so the UI warns + offers a
+      // manual "Re-sync to Xero". Non-Xero edits (notes, payment_status) leave it alone.
+      const XERO_AFFECTING = ['amount_net', 'amount_vat', 'amount_gross', 'xero_account_code',
+        'supplier_name', 'description', 'vat_treatment', 'cost_date', 'payment_method', 'invoice_number'];
+      if (XERO_AFFECTING.some((f) => data[f] !== undefined) && !updated.xero_stale) {
+        const s = await query(`UPDATE costs SET xero_stale=TRUE WHERE id=$1 RETURNING xero_stale`, [updated.id]);
+        updated.xero_stale = s.rows[0]?.xero_stale ?? true;
+      }
+    } else if (!updated.xero_object_id || updated.xero_sync_state === 'error' || updated.xero_sync_state === 'pending') {
+      // Not yet in Xero — background push (the service guards on state).
       const { pushCostToXeroBackground } = await import('../services/cost-xero-push');
       pushCostToXeroBackground(updated.id);
+    }
+
+    // Seed terms from Xero if a contact id was just attached and none exist yet.
+    if (updated.xero_contact_id) {
+      void import('../services/supplier-terms')
+        .then((m) => m.seedTermsFromXeroIfMissing(updated.xero_contact_id, updated.supplier_name))
+        .catch(() => { /* non-fatal — staff can set terms manually */ });
     }
 
     res.json({ data: updated });
@@ -531,6 +746,31 @@ router.post('/:id/sync-xero', authorize(...STAFF_ROLES), async (req: AuthRequest
     res.json({ data: after.rows[0], result });
   } catch (err) {
     console.error('[costs] sync-xero error:', err);
+    res.status(500).json({ error: 'Internal server error', detail: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// Re-sync an edited, already-pushed cost to Xero IN PLACE (updates the existing
+// object, never duplicates). Behind the xero_stale flag's "Re-sync to Xero"
+// button. 409 if Xero has the object locked (paid bill / reconciled txn).
+router.post('/:id/resync-xero', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    // dismiss: staff fixed a Xero-locked cost (paid bill / reconciled txn)
+    // directly in Xero — just clear the stale flag, don't touch Xero.
+    if (req.body?.dismiss === true) {
+      const r = await query(`UPDATE costs SET xero_stale=FALSE WHERE id=$1 RETURNING *`, [id]);
+      if (!r.rows.length) return res.status(404).json({ error: 'Cost not found' });
+      return res.json({ data: r.rows[0], result: { pushed: false, skipped: 'Marked resolved' } });
+    }
+    const { resyncCostToXero } = await import('../services/cost-xero-push');
+    const result = await resyncCostToXero(id);
+    const after = await query('SELECT * FROM costs WHERE id = $1', [id]);
+    if (!after.rows.length) return res.status(404).json({ error: 'Cost not found' });
+    if (result.locked) return res.status(409).json({ error: result.error, data: after.rows[0], result });
+    res.json({ data: after.rows[0], result });
+  } catch (err) {
+    console.error('[costs] resync-xero error:', err);
     res.status(500).json({ error: 'Internal server error', detail: err instanceof Error ? err.message : String(err) });
   }
 });
@@ -577,10 +817,28 @@ router.post('/:id/recharge', authorize(...STAFF_ROLES), async (req: AuthRequest,
     await audit(req.user!.id, req.params.id as string, 'recharge_flag',
       { recharge_mode: cost.recharge_mode, recharge_amount: cost.recharge_amount },
       { recharge_mode, recharge_amount: amount });
-    res.json({ data: result.rows[0], hh_pushed: false, note: 'Recharge flagged. HireHop push pending stock-item config.' });
+    res.json({ data: result.rows[0], hh_pushed: false, note: 'Recharge flagged. Use "Push to HireHop" to add the billable line.' });
   } catch (err) {
     console.error('[costs] recharge error:', err);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Push the flagged recharge to HireHop as a billable hire line. Explicit staff
+// action (never auto-fires). Idempotent — a cost already recharged is a no-op.
+router.post('/:id/push-recharge', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const { pushRechargeToHH } = await import('../services/cost-recharge-hh');
+    const result = await pushRechargeToHH(String(req.params.id));
+    if (result.pushed) {
+      await audit(req.user!.id, req.params.id as string, 'recharge_pushed', null,
+        { hh_job: result.hhJobNumber, amount: result.amount, stock: result.stockLabel });
+    }
+    const after = await query('SELECT * FROM costs WHERE id = $1', [req.params.id]);
+    res.json({ data: after.rows[0] || null, result });
+  } catch (err) {
+    console.error('[costs] push-recharge error:', err);
+    res.status(500).json({ error: 'Internal server error', detail: err instanceof Error ? err.message : String(err) });
   }
 });
 
@@ -602,7 +860,7 @@ router.post('/:id/verify', authorize(...VERIFY_ROLES), async (req: AuthRequest, 
   }
 });
 
-router.post('/:id/approve', authorize(...ADMIN_ONLY), async (req: AuthRequest, res: Response) => {
+router.post('/:id/approve', authorize(...VERIFY_ROLES), async (req: AuthRequest, res: Response) => {
   try {
     const result = await query(
       `UPDATE costs SET approval_state = 'approved', approved_by = $1, approved_at = NOW()

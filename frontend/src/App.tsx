@@ -20,6 +20,9 @@ import DriversPage from './pages/DriversPage';
 import DriverDetailPage from './pages/DriverDetailPage';
 import TransportOpsPage from './pages/TransportOpsPage';
 import BacklinePage from './pages/BacklinePage';
+import BacklineMatcherPage from './pages/BacklineMatcherPage';
+import CarnetsPage from './pages/CarnetsPage';
+import CarnetDetailPage from './pages/CarnetDetailPage';
 import IssuesPage from './pages/IssuesPage';
 import ProblemsPage from './pages/ProblemsPage';
 import IssueDetailPage from './pages/IssueDetailPage';
@@ -33,14 +36,19 @@ import FillGapPage from './pages/FillGapPage';
 import FreelancerBookoutShell from './pages/FreelancerBookoutShell';
 import StoragePage from './pages/StoragePage';
 import StorageTcsAcceptPage from './pages/StorageTcsAcceptPage';
+import CarnetFormPage from './pages/CarnetFormPage';
 import HoldingPage from './pages/HoldingPage';
+import PcnsPage from './pages/PcnsPage';
+import PcnDetailPage from './pages/PcnDetailPage';
 import HoldingReceiptPage from './pages/HoldingReceiptPage';
 import QuickActionsPage from './pages/QuickActionsPage';
 import MerchFormPage from './pages/MerchFormPage';
+import RackPlanPublicPage from './pages/RackPlanPublicPage';
 import WarehousePinPage from './pages/WarehousePinPage';
 import WarehouseCollectionsPage from './pages/WarehouseCollectionsPage';
 import OohReturnParkingPage from './pages/OohReturnParkingPage';
 import MobileReceiptUploadPage from './pages/MobileReceiptUploadPage';
+import PcnReceiptUploadPage from './pages/PcnReceiptUploadPage';
 import WarehouseCollectionDetailPage from './pages/WarehouseCollectionDetailPage';
 import Layout from './components/Layout';
 import { VehicleRoutes, initVehicleModule } from './modules/vehicles';
@@ -134,8 +142,13 @@ export default function App() {
       <Route path="/m/receipt/:token" element={<MobileReceiptUploadPage />} />
       {/* Public storage T&Cs acceptance — token-authenticated, no Layout wrapper */}
       <Route path="/storage-tcs/:token" element={<StorageTcsAcceptPage />} />
+      <Route path="/carnet-form/:token" element={<CarnetFormPage />} />
+      {/* Public PCN pay-direct proof-of-payment upload — token-authenticated, no Layout */}
+      <Route path="/pcn-receipt/:token" element={<PcnReceiptUploadPage />} />
       {/* Public inbound merch-delivery form (no login) — replaces the JotForm */}
       <Route path="/merch-form" element={<MerchFormPage />} />
+      {/* Public view-only Rack Plan (tokenised, no login) */}
+      <Route path="/rack/:token" element={<RackPlanPublicPage />} />
       {/* Mobile quick-action launcher — staff JWT, full-screen, no Layout chrome */}
       <Route path="/quick" element={<ProtectedRoute><QuickActionsPage /></ProtectedRoute>} />
       {/* Warehouse kiosk — own PIN-based session, no Layout wrapper */}
@@ -162,6 +175,9 @@ export default function App() {
                 <Route path="/pipeline" element={<PipelinePage />} />
                 <Route path="/operations/transport" element={<TransportOpsPage />} />
                 <Route path="/operations/backline" element={<BacklinePage />} />
+                <Route path="/operations/backline-matcher" element={<BacklineMatcherPage />} />
+                <Route path="/operations/carnets" element={<CarnetsPage />} />
+                <Route path="/operations/carnets/:id" element={<CarnetDetailPage />} />
                 <Route path="/operations/fill-gap/:jobId" element={<FillGapPage />} />
                 <Route path="/operations/issues" element={<IssuesPage />} />
                 <Route path="/operations/issues/:id" element={<IssuesPage />} />
@@ -179,6 +195,8 @@ export default function App() {
                 <Route path="/money/excess" element={<ExcessLedgerPage />} />
                 <Route path="/money/costs" element={<CostsPage />} />
                 <Route path="/vehicles/ve103b" element={<VE103BCertificatesPage />} />
+                <Route path="/vehicles/pcns" element={<PcnsPage />} />
+                <Route path="/vehicles/pcns/:id" element={<PcnDetailPage />} />
                 <Route path="/vehicles/*" element={<VehicleRoutes />} />
                 <Route path="/inbox" element={<InboxPage />} />
                 <Route path="/profile" element={<ProfilePage />} />

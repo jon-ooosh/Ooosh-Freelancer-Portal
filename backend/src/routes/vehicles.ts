@@ -39,8 +39,14 @@ import {
   buildConditionReportEmailHtml,
   type ConditionReportEmailParams,
 } from '../services/condition-report-email';
+import { getSystemSetting } from './system-settings';
 
 const router = Router();
+
+// Default low-tread alert threshold (mm). Staff-tweakable via the
+// `tyre_tread_amber_threshold` system_settings key. Keep in step with the
+// frontend TYRE_TREAD_AMBER_MM constant in lib/tyre-sanity.ts.
+const DEFAULT_TYRE_TREAD_AMBER_MM = 5;
 
 // ── Public: Freelancer book-out token redemption ────────────────────
 //
@@ -178,7 +184,16 @@ router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) =
       customer_driver_email: string | null;
     };
 
-    async function fetchAllocatedVehicleRow(): Promise<VhaRow | null> {
+    // Discriminated outcome so the caller can tell apart "no van allocated"
+    // from "van allocated but no signed hire form to book against" — they
+    // need different messages, and the latter is now a hard block (see the
+    // freelancer gate note below).
+    type ResolveOutcome =
+      | { kind: 'ok'; row: VhaRow }
+      | { kind: 'no_allocation' }
+      | { kind: 'no_hire_form' };
+
+    async function fetchAllocatedVehicleRow(): Promise<ResolveOutcome> {
       // Pull all currently-active rows on the job once and pick from them
       // in JS — we need to inspect the set as a whole to decide whether to
       // merge, and a single result row hides that.
@@ -196,13 +211,13 @@ router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) =
         [jobId, hhJobNumber]
       );
       const rows = result.rows as Array<VhaRow & { created_at: string; van_requirement_index: number | null }>;
-      if (rows.length === 0) return null;
+      if (rows.length === 0) return { kind: 'no_allocation' };
 
       // First preference: a row that already has BOTH vehicle and driver —
       // this is the post-merge steady state, or a job that was created the
       // tidy way from the start. Just use it.
       const merged = rows.find(r => r.vehicle_id && r.driver_id);
-      if (merged) return merged;
+      if (merged) return { kind: 'ok', row: merged };
 
       // Second preference: smart-merge candidate. Find the freelancer's
       // allocation row (vehicle, no driver) and the customer's hire-form
@@ -275,17 +290,26 @@ router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) =
             LIMIT 1`,
           [customerRow.assignment_id]
         );
-        return (reread.rows[0] as VhaRow) || null;
+        const rereadRow = reread.rows[0] as VhaRow | undefined;
+        return rereadRow ? { kind: 'ok', row: rereadRow } : { kind: 'no_hire_form' };
       }
 
-      // Fallback: no merge possible. Hand back the most recent row with a
-      // vehicle so book-out can still proceed (legacy behaviour). Common in
-      // staff-test scenarios where there's no customer hire form yet.
-      return rows.find(r => r.vehicle_id) || null;
+      // No merge possible. A freelancer must NOT be able to hand a van over
+      // without a signed customer hire agreement — there's no named driver,
+      // no excess, and nothing to put on the condition-report PDF. So the
+      // old "hand back any vehicle row so book-out can proceed" fallback is
+      // gone. If a van is allocated but no driver-linked hire-form row
+      // exists, block with a distinct reason; otherwise it's a plain
+      // no-allocation. (Staff book-out doesn't use this endpoint — they go
+      // through the normal allocations flow with its own soft guidance.)
+      if (rows.some(r => r.vehicle_id)) {
+        return { kind: 'no_hire_form' };
+      }
+      return { kind: 'no_allocation' };
     }
 
-    const vha = await fetchAllocatedVehicleRow();
-    if (!vha) {
+    const outcome = await fetchAllocatedVehicleRow();
+    if (outcome.kind === 'no_allocation') {
       console.warn('[freelancer-bookout] No allocated vehicle for job', { jobId, hhJobNumber });
       res.status(409).json({
         error: 'No vehicle allocated for this job yet',
@@ -294,6 +318,16 @@ router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) =
       });
       return;
     }
+    if (outcome.kind === 'no_hire_form') {
+      console.warn('[freelancer-bookout] Van allocated but no signed hire form for job', { jobId, hhJobNumber });
+      res.status(409).json({
+        error: 'Customer hire form not received yet',
+        code: 'no_hire_form',
+        hint: 'The customer must complete and sign their hire form before this van can be booked out. Please contact the Ooosh office.',
+      });
+      return;
+    }
+    const vha = outcome.row;
     console.log('[freelancer-bookout] Vehicle resolved', {
       assignmentId: vha.assignment_id,
       registration: vha.registration,
@@ -1586,15 +1620,32 @@ router.get('/jobs/going-out', async (req: AuthRequest, res: Response) => {
     const today = new Date().toISOString().split('T')[0];
     const tomorrow = new Date(Date.now() + 86400000).toISOString().split('T')[0];
 
+    // The third OR clause keeps STAGGERED MULTI-VAN jobs visible: a job with
+    // more than one van whose vans leave on different days. Once the first
+    // van goes out, the job's out_date is in the past and the plain window
+    // drops it — making the remaining van unbookable from this picker
+    // (job 15411, Jun 2026: HLR left day 1, HLU collected day 2, only HLR
+    // showed). We retain a job that has already started, isn't back yet, and
+    // still has a van slot in a pre-book-out state. Dual-match join
+    // (job_id OR hirehop_job_id) because staff-allocation rows carry only
+    // hirehop_job_id — job_id stays NULL until a hire form is submitted.
     const result = await query(
-      `SELECT * FROM jobs
-       WHERE is_deleted = false
-         AND status = ANY($1)
+      `SELECT DISTINCT j.* FROM jobs j
+       LEFT JOIN vehicle_hire_assignments vha
+         ON (vha.job_id = j.id OR vha.hirehop_job_id = j.hh_job_number)
+         AND vha.status IN ('soft', 'confirmed')
+       WHERE j.is_deleted = false
+         AND j.status = ANY($1)
          AND (
-           (out_date IS NOT NULL AND out_date::date >= $2::date AND out_date::date <= $3::date)
-           OR (out_date IS NULL AND job_date IS NOT NULL AND job_date::date >= $2::date AND job_date::date <= $3::date)
+           (j.out_date IS NOT NULL AND j.out_date::date >= $2::date AND j.out_date::date <= $3::date)
+           OR (j.out_date IS NULL AND j.job_date IS NOT NULL AND j.job_date::date >= $2::date AND j.job_date::date <= $3::date)
+           OR (
+             vha.id IS NOT NULL
+             AND COALESCE(j.out_date, j.job_date)::date < $2::date
+             AND COALESCE(j.return_date, j.job_end)::date >= $2::date
+           )
          )
-       ORDER BY out_date ASC NULLS LAST, job_date ASC NULLS LAST`,
+       ORDER BY j.out_date ASC NULLS LAST, j.job_date ASC NULLS LAST`,
       [ACTIVE_STATUSES, today, tomorrow]
     );
 
@@ -1643,15 +1694,27 @@ router.get('/jobs/upcoming', async (req: AuthRequest, res: Response) => {
     const today = new Date().toISOString().split('T')[0];
     const endDate = new Date(Date.now() + days * 86400000).toISOString().split('T')[0];
 
+    // See /jobs/going-out above for the staggered multi-van rationale. Same
+    // shape here so the Allocations page (which reads /jobs/upcoming) keeps a
+    // part-way-through multi-van job visible — the second van can be
+    // allocated and booked out even after the first has gone out.
     const result = await query(
-      `SELECT * FROM jobs
-       WHERE is_deleted = false
-         AND status = ANY($1)
+      `SELECT DISTINCT j.* FROM jobs j
+       LEFT JOIN vehicle_hire_assignments vha
+         ON (vha.job_id = j.id OR vha.hirehop_job_id = j.hh_job_number)
+         AND vha.status IN ('soft', 'confirmed')
+       WHERE j.is_deleted = false
+         AND j.status = ANY($1)
          AND (
-           (out_date IS NOT NULL AND out_date::date >= $2::date AND out_date::date <= $3::date)
-           OR (out_date IS NULL AND job_date IS NOT NULL AND job_date::date >= $2::date AND job_date::date <= $3::date)
+           (j.out_date IS NOT NULL AND j.out_date::date >= $2::date AND j.out_date::date <= $3::date)
+           OR (j.out_date IS NULL AND j.job_date IS NOT NULL AND j.job_date::date >= $2::date AND j.job_date::date <= $3::date)
+           OR (
+             vha.id IS NOT NULL
+             AND COALESCE(j.out_date, j.job_date)::date < $2::date
+             AND COALESCE(j.return_date, j.job_end)::date >= $2::date
+           )
          )
-       ORDER BY out_date ASC NULLS LAST, job_date ASC NULLS LAST`,
+       ORDER BY j.out_date ASC NULLS LAST, j.job_date ASC NULLS LAST`,
       [ACTIVE_STATUSES, today, endDate]
     );
 
@@ -2154,19 +2217,31 @@ router.get('/check-in-eligibility', async (req: AuthRequest, res: Response) => {
 
     const result = await query(
       `SELECT vha.id, vha.status, vha.checked_in_at, vha.booked_out_at,
-              vha.status_changed_at, vha.hirehop_job_id, vha.updated_at
+              vha.status_changed_at, vha.swapped_at, vha.hirehop_job_id, vha.updated_at
        FROM vehicle_hire_assignments vha
        JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
        WHERE fv.reg = $1
-         AND vha.status IN ('booked_out', 'active', 'returned')
-       -- A live (booked_out/active) row ALWAYS wins over a returned one,
-       -- regardless of updated_at. Otherwise a stale returned row whose
-       -- updated_at gets bumped by a background pass (sync / fleet-status /
-       -- dedup) after a fresh book-out masks the live rows and the van
-       -- wrongly reads as "already checked in" (RX24SZG, jobs 15429→15781,
-       -- 27 May 2026). Only fall back to a returned row when none are live.
+         AND (
+           vha.status IN ('booked_out', 'active', 'returned')
+           -- A van swapped OUT mid-hire still needs a final check-in when it
+           -- comes back (planned upgrade = back at the handover; breakdown =
+           -- back from the garage later). Its row stays 'swapped' for the
+           -- audit and never gets checked_in_at until that final check-in, so
+           -- a swapped row with checked_in_at IS NULL is "awaiting check-in".
+           OR (vha.status = 'swapped' AND vha.checked_in_at IS NULL)
+         )
+       -- Precedence: a live (booked_out/active) row ALWAYS wins, regardless of
+       -- updated_at. Otherwise a stale returned row whose updated_at gets bumped
+       -- by a background pass (sync / fleet-status / dedup) after a fresh book-out
+       -- masks the live rows and the van wrongly reads as "already checked in"
+       -- (RX24SZG, jobs 15429→15781, 27 May 2026). A swapped-out-pending row
+       -- ranks above a finished (returned) one so the final check-in is offered.
        ORDER BY
-         CASE WHEN vha.status IN ('booked_out', 'active') THEN 0 ELSE 1 END,
+         CASE
+           WHEN vha.status IN ('booked_out', 'active') THEN 0
+           WHEN vha.status = 'swapped' THEN 1
+           ELSE 2
+         END,
          vha.updated_at DESC
        LIMIT 1`,
       [vehicleReg]
@@ -2179,6 +2254,7 @@ router.get('/check-in-eligibility', async (req: AuthRequest, res: Response) => {
         checkInDate: null,
         assignmentId: null,
         hirehopJob: null,
+        swapped: false,
       });
       return;
     }
@@ -2191,6 +2267,23 @@ router.get('/check-in-eligibility', async (req: AuthRequest, res: Response) => {
         checkInDate: null,
         assignmentId: row.id,
         hirehopJob: row.hirehop_job_id,
+        swapped: false,
+      });
+      return;
+    }
+
+    // status === 'swapped' AND checked_in_at IS NULL — the outgoing van of a
+    // swap, back and awaiting its final check-in. Eligible; CheckInPage stamps
+    // against this hirehop_job and the save-event side-effect records the
+    // check-in WITHOUT un-swapping the row (preserves the swap audit).
+    if (row.status === 'swapped') {
+      res.json({
+        eligible: true,
+        reason: null,
+        checkInDate: null,
+        assignmentId: row.id,
+        hirehopJob: row.hirehop_job_id,
+        swapped: true,
       });
       return;
     }
@@ -2205,6 +2298,7 @@ router.get('/check-in-eligibility', async (req: AuthRequest, res: Response) => {
       checkInDate,
       assignmentId: row.id,
       hirehopJob: row.hirehop_job_id,
+      swapped: false,
     });
   } catch (err) {
     console.error('[vehicles/check-in-eligibility] Error:', err);
@@ -2508,11 +2602,11 @@ router.post('/save-event', async (req: FlexibleVehicleRequest, res: Response) =>
             }
           }
 
+          const userId = req.user?.id || null;
+          const mileageIn = event.mileage ? Number(event.mileage) : null;
+          const fuelIn = event.fuelLevel || null;
+          const hasDamage = event.hasDamage === true;
           if (matchedRows.length > 0) {
-            const userId = req.user?.id || null;
-            const mileageIn = event.mileage ? Number(event.mileage) : null;
-            const fuelIn = event.fuelLevel || null;
-            const hasDamage = event.hasDamage === true;
             for (const row of matchedRows) {
               await query(
                 `UPDATE vehicle_hire_assignments
@@ -2530,7 +2624,41 @@ router.post('/save-event', async (req: FlexibleVehicleRequest, res: Response) =>
               );
             }
           } else {
-            console.log(`[vehicles/events] check-in: no matching booked_out assignment for ${reg} / HH#${hhJob} — no assignment state flip`);
+            // No live (booked_out/active) row — but this may be the FINAL
+            // check-in of a van that was swapped OUT mid-hire (planned upgrade
+            // or breakdown returning from the garage). Record the check-in on
+            // the swapped row WITHOUT flipping it to 'returned': the row stays
+            // 'swapped' to preserve the swap audit, and checked_in_at marks the
+            // final check-in done so eligibility stops offering it. The fleet
+            // hire_status is recomputed by the final reconcile below.
+            const swappedMatch = await query(
+              `SELECT vha.id
+                 FROM vehicle_hire_assignments vha
+                 JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+                WHERE fv.reg = $1
+                  AND vha.hirehop_job_id = $2
+                  AND vha.status = 'swapped'
+                  AND vha.checked_in_at IS NULL
+                ORDER BY vha.swapped_at DESC NULLS LAST
+                LIMIT 1`,
+              [reg, hhJob]
+            );
+            if (swappedMatch.rows.length > 0) {
+              await query(
+                `UPDATE vehicle_hire_assignments
+                 SET checked_in_at = COALESCE(checked_in_at, NOW()),
+                     checked_in_by = COALESCE(checked_in_by, $1),
+                     mileage_in = COALESCE(mileage_in, $2),
+                     fuel_level_in = COALESCE(fuel_level_in, $3),
+                     has_damage = COALESCE(has_damage, $4),
+                     updated_at = NOW()
+                 WHERE id = $5`,
+                [userId, mileageIn, fuelIn, hasDamage, swappedMatch.rows[0].id]
+              );
+              console.log(`[vehicles/events] check-in: final check-in recorded on swapped-out row for ${reg} / HH#${hhJob} (status kept 'swapped')`);
+            } else {
+              console.log(`[vehicles/events] check-in: no matching booked_out/swapped assignment for ${reg} / HH#${hhJob} — no assignment state flip`);
+            }
           }
 
           // The van is back — cancel any stale van allocations on this
@@ -2704,12 +2832,103 @@ router.post('/save-prep', async (req: AuthRequest, res: Response) => {
       console.warn('[vehicles/prep] Failed to update needs_external_wash:', err);
     }
 
+    // Low tyre tread alert. The prep checklist is where the change decision is
+    // made, so the vehicle manager is bell+emailed at prep (NOT book-out — too
+    // late to plan a swap by then) whenever any tyre is at/below the amber
+    // threshold. ONE email per prep listing all the low corners. Non-blocking.
+    try {
+      await notifyLowTreadAtPrep(reg, data);
+    } catch (err) {
+      console.warn('[vehicles/prep] Low-tread notify failed:', err);
+    }
+
     res.json({ success: true, eventId });
   } catch (error) {
     console.error('[vehicles/prep] save-prep error:', error);
     res.status(500).json({ error: 'Failed to save prep session' });
   }
 });
+
+/**
+ * Scan a saved prep session for low tyre tread and, if any corner is at/below
+ * the amber threshold, fire ONE alert (bell to the vehicle manager + email to
+ * info@/will@) listing all the low corners. Best-effort — never throws to the
+ * caller.
+ */
+async function notifyLowTreadAtPrep(reg: string, data: any): Promise<void> {
+  const thresholdRaw = await getSystemSetting('tyre_tread_amber_threshold');
+  const threshold = (() => {
+    const n = parseFloat(thresholdRaw || '');
+    return Number.isFinite(n) && n > 0 ? n : DEFAULT_TYRE_TREAD_AMBER_MM;
+  })();
+
+  const sections: any[] = Array.isArray(data?.sections) ? data.sections : [];
+  const low: { corner: string; depth: number }[] = [];
+  for (const sec of sections) {
+    const items: any[] = Array.isArray(sec?.items) ? sec.items : [];
+    for (const it of items) {
+      if (it?.unit !== 'mm') continue;
+      const depth = parseFloat(it?.value);
+      if (!Number.isFinite(depth) || depth <= 0) continue;
+      if (depth <= threshold) {
+        // "Front left tyre tread depth" → "Front left"
+        const corner = String(it?.name || '')
+          .replace(/\s*tyre tread depth\s*/i, '')
+          .trim() || String(it?.name || '');
+        low.push({ corner, depth });
+      }
+    }
+  }
+
+  if (low.length === 0) return;
+
+  const lowTyres = low.map(l => `${l.corner} (${l.depth}mm)`).join(', ');
+  const frontendUrl = process.env.FRONTEND_URL || 'https://staff.oooshtours.co.uk';
+  const vehicleId = data?.vehicleId || null;
+  const vehicleUrl = vehicleId
+    ? `${frontendUrl}/vehicles/fleet/${vehicleId}`
+    : `${frontendUrl}/vehicles`;
+
+  const { getVehicleNotificationTargets } = await import('../services/vehicle-notify');
+  const targets = await getVehicleNotificationTargets();
+
+  try {
+    await emailService.send('low_tread_alert', {
+      to: targets.to,
+      cc: targets.cc,
+      variables: {
+        vehicleReg: reg,
+        preparedBy: data?.preparedBy || 'staff',
+        amberThreshold: String(threshold),
+        lowTyres,
+        mileage: data?.mileage != null ? String(data.mileage) : 'not recorded',
+        vehicleUrl,
+      },
+    });
+  } catch (emailErr) {
+    console.warn('[vehicles/prep] Low-tread email failed:', (emailErr as Error).message);
+  }
+
+  // Bell for the vehicle manager. email_sent_at set so the escalation
+  // scheduler doesn't fire a duplicate. Best-effort per recipient.
+  for (const userId of targets.bellUserIds) {
+    try {
+      await query(
+        `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, priority, action_url, email_sent_at)
+         VALUES ($1, 'compliance', $2, $3, 'fleet_vehicles', $4, 'normal', $5, NOW())`,
+        [
+          userId,
+          `Low tyre tread — ${reg}`,
+          `Prepped by ${data?.preparedBy || 'staff'}. Low: ${lowTyres}`,
+          vehicleId,
+          vehicleId ? `/vehicles/fleet/${vehicleId}` : '/vehicles',
+        ],
+      );
+    } catch (bellErr) {
+      console.warn('[vehicles/prep] Low-tread bell failed:', (bellErr as Error).message);
+    }
+  }
+}
 
 /**
  * GET /api/vehicles/get-prep-history?vehicleReg=XXX&limit=10
@@ -2762,6 +2981,122 @@ router.get('/get-prep-history', async (req: AuthRequest, res: Response) => {
   } catch (error) {
     console.error('[vehicles/prep] get-prep-history error:', error);
     res.status(500).json({ error: 'Failed to load prep history' });
+  }
+});
+
+/**
+ * GET /api/vehicles/prep-pdf?vehicleReg=XXX&eventId=YYY
+ * Branded per-prep PDF export (all readings + flags + photos) for
+ * insurers / clients. Reads the prep-session JSON from R2, loads any
+ * flagged-item photos from the public bucket, and streams the PDF back
+ * as an attachment.
+ */
+router.get('/prep-pdf', async (req: AuthRequest, res: Response) => {
+  try {
+    const vehicleReg = req.query.vehicleReg as string | undefined;
+    const eventId = req.query.eventId as string | undefined;
+    if (!vehicleReg || !eventId) {
+      res.status(400).json({ error: 'vehicleReg and eventId are required' });
+      return;
+    }
+
+    const reg = vehicleReg.toUpperCase();
+    const session = await readR2Json<any>(`prep-sessions/${reg}/${eventId}.json`);
+    if (!session) {
+      res.status(404).json({ error: 'Prep session not found' });
+      return;
+    }
+
+    // Load flagged-item photos from the PUBLIC bucket. Prep photos are
+    // written to events/{eventId}/{SAFE-REG}/*.jpg (same prefix as
+    // condition photos). Listing the prefix is more robust than trusting
+    // the stored photoKeys (historical sessions had a key mismatch).
+    const r2PublicBase = process.env.R2_PUBLIC_URL || '';
+    const photos: Array<{ label: string; base64: string; r2Url?: string }> = [];
+    if (isR2Configured()) {
+      try {
+        const safeReg = reg.replace(/\s+/g, '-');
+        const photoObjects = await listPublicR2Objects(`events/${eventId}/${safeReg}/`);
+        for (const obj of photoObjects) {
+          if (!obj.Key) continue;
+          try {
+            const photoResp = await getFromPublicR2(obj.Key);
+            const stream = photoResp.Body as NodeJS.ReadableStream;
+            const chunks: Buffer[] = [];
+            for await (const chunk of stream) chunks.push(Buffer.from(chunk as Uint8Array));
+            photos.push({
+              label: 'Prep photo',
+              base64: Buffer.concat(chunks).toString('base64'),
+              r2Url: r2PublicBase ? `${r2PublicBase}/${obj.Key}` : undefined,
+            });
+          } catch (err) {
+            console.warn(`[vehicles/prep-pdf] Failed to load photo ${obj.Key}:`, err);
+          }
+        }
+      } catch (err) {
+        console.warn('[vehicles/prep-pdf] Photo listing failed:', err);
+      }
+    }
+
+    const { pdfBytes, filename } = await buildPrepReportPdf(session, photos);
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(Buffer.from(pdfBytes));
+  } catch (error) {
+    console.error('[vehicles/prep] prep-pdf error:', error);
+    res.status(500).json({ error: 'Failed to generate prep PDF' });
+  }
+});
+
+/**
+ * GET /api/vehicles/fleet/:id/forecast
+ * Deterministic forward-looking health picture (tyres, mileage pace, service-due,
+ * compliance runway, fluid frequency, cost trajectory, recurring issues) plus the
+ * latest cached AI assessment. Drives the Vehicle > Forecast tab.
+ */
+router.get('/fleet/:id/forecast', async (req: AuthRequest, res: Response) => {
+  try {
+    const { buildVehicleForecast } = await import('../services/vehicle-forecast');
+    const { getLatestAssessment } = await import('../services/vehicle-forecast-ai');
+    const forecast = await buildVehicleForecast(String(req.params.id));
+    if (!forecast) {
+      res.status(404).json({ error: 'Vehicle not found' });
+      return;
+    }
+    const assessment = await getLatestAssessment(String(req.params.id));
+    res.json({ forecast, assessment });
+  } catch (error) {
+    console.error('[vehicles/forecast] error:', error);
+    res.status(500).json({ error: 'Failed to build vehicle forecast' });
+  }
+});
+
+/**
+ * POST /api/vehicles/fleet/:id/forecast/assess
+ * Generate a fresh AI health assessment on demand ("Regenerate" button).
+ * Scheduled regeneration runs 3x/week — see config/scheduler.ts.
+ */
+router.post('/fleet/:id/forecast/assess', async (req: AuthRequest, res: Response) => {
+  try {
+    const { isAnthropicConfigured } = await import('../config/anthropic');
+    if (!isAnthropicConfigured()) {
+      res.status(503).json({ error: 'AI assessment is not configured (ANTHROPIC_API_KEY missing)' });
+      return;
+    }
+    const { generateVehicleAssessment } = await import('../services/vehicle-forecast-ai');
+    const assessment = await generateVehicleAssessment(String(req.params.id), {
+      trigger: 'manual',
+      userId: req.user?.id ?? null,
+    });
+    if (!assessment) {
+      res.status(404).json({ error: 'Vehicle not found' });
+      return;
+    }
+    res.json({ assessment });
+  } catch (error) {
+    console.error('[vehicles/forecast] assess error:', error);
+    res.status(500).json({ error: 'Failed to generate assessment' });
   }
 });
 
@@ -3462,6 +3797,279 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
   const jobPart = data.hireHopJob ? '-Job' + data.hireHopJob : '';
   const docType = isInterim ? 'interim' : isCheckIn ? 'check-in' : 'book-out';
   const filename = `${safeReg}-${ddmmyy}${jobPart}-${docType}.pdf`;
+
+  return { pdfBytes, filename };
+}
+
+/**
+ * Build a per-prep branded PDF from a prep-session document
+ * (prep-sessions/{REG}/{eventId}.json). Mirrors buildConditionReportPdf's
+ * jsPDF pattern (navy header + logo + filled-rect bullets, no Unicode glyphs
+ * → no WinAnsi crash). Used by GET /prep-pdf for insurer/client exports.
+ *
+ * `data` is the prep-session JSON. `photos` is the pre-loaded flagged-item
+ * photo set (base64 + optional public r2Url for "View full size" links).
+ */
+async function buildPrepReportPdf(
+  data: any,
+  photos: Array<{ label: string; base64: string; r2Url?: string }>,
+): Promise<{ pdfBytes: Uint8Array; filename: string }> {
+  const jspdfModule = await import('jspdf');
+  const JsPDF = (jspdfModule as any).jsPDF
+    ?? (jspdfModule as any).default?.jsPDF
+    ?? (jspdfModule as any).default;
+  if (!JsPDF) throw new Error('jsPDF constructor not found in module exports');
+
+  const pdf: any = new JsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+  const pageWidth = 210;
+  const margin = 15;
+  const contentWidth = pageWidth - margin * 2;
+  let y = margin;
+
+  const addText = (
+    text: string,
+    x: number,
+    yPos: number,
+    opts?: { size?: number; bold?: boolean; color?: [number, number, number]; align?: 'left' | 'center' | 'right' },
+  ) => {
+    pdf.setFontSize(opts?.size || 10);
+    pdf.setFont('helvetica', opts?.bold ? 'bold' : 'normal');
+    const c = opts?.color || [51, 51, 51];
+    pdf.setTextColor(c[0], c[1], c[2]);
+    const xPos = opts?.align === 'center' ? pageWidth / 2
+      : opts?.align === 'right' ? pageWidth - margin : x;
+    pdf.text(text, xPos, yPos, opts?.align ? { align: opts.align } : undefined);
+  };
+
+  const addLine = (yPos: number) => {
+    pdf.setDrawColor(200, 200, 200);
+    pdf.setLineWidth(0.3);
+    pdf.line(margin, yPos, pageWidth - margin, yPos);
+  };
+
+  const addRow = (label: string, value: string, yPos: number) => {
+    addText(label, margin, yPos, { size: 9, color: [120, 120, 120] });
+    addText(value || '-', margin + 50, yPos, { size: 10, bold: true });
+    return yPos + 6;
+  };
+
+  const checkNewPage = (needed: number) => {
+    if (y + needed > 280) { pdf.addPage(); y = margin; }
+  };
+
+  // -- Header with logo --
+  pdf.setFillColor(27, 42, 78);
+  pdf.rect(0, 0, pageWidth, 38, 'F');
+
+  const logoDataUri = await fetchLogoDataUri();
+  if (logoDataUri) {
+    try {
+      pdf.addImage(logoDataUri, 'PNG', 12, 4, 30, 30);
+    } catch (e) {
+      console.warn('[vehicles/prep-pdf] Logo embed failed:', e instanceof Error ? e.message : e);
+    }
+  }
+
+  addText('VEHICLE PREP REPORT', 0, 15, { size: 18, bold: true, color: [255, 255, 255], align: 'center' });
+  addText('Pre-Hire Preparation Record', 0, 23, { size: 11, color: [180, 190, 210], align: 'center' });
+
+  const timestamp = formatFullDateTime(data.completedAt || data.startedAt || data.date);
+  addText(timestamp, 0, 31, { size: 8, color: [140, 150, 170], align: 'center' });
+
+  y = 48;
+
+  // -- Vehicle Details --
+  addText('VEHICLE DETAILS', margin, y, { size: 11, bold: true, color: [27, 42, 78] });
+  y += 3; addLine(y); y += 6;
+  y = addRow('Registration', data.vehicleReg, y);
+  y = addRow('Type', data.vehicleType || '-', y);
+  y += 4;
+
+  // -- Prep Details --
+  addText('PREP DETAILS', margin, y, { size: 11, bold: true, color: [27, 42, 78] });
+  y += 3; addLine(y); y += 6;
+  y = addRow('Prepared by', data.preparedBy || '-', y);
+  if (data.mileage != null) y = addRow('Mileage', Number(data.mileage).toLocaleString('en-GB') + ' miles', y);
+  if (data.fuelLevel) y = addRow('Fuel', String(data.fuelLevel), y);
+  if (data.durationMinutes != null) y = addRow('Duration', `${data.durationMinutes} min`, y);
+  y = addRow('Date', formatDayDate(data.date), y);
+  if (data.overallStatus) y = addRow('Overall status', String(data.overallStatus), y);
+  y += 4;
+
+  // -- Checklist sections --
+  const sections: any[] = Array.isArray(data.sections) ? data.sections : [];
+  for (const sec of sections) {
+    const items: any[] = Array.isArray(sec.items) ? sec.items : [];
+    checkNewPage(14 + items.length * 5);
+    addText(String(sec.name || 'Section').toUpperCase(), margin, y, { size: 11, bold: true, color: [27, 42, 78] });
+    y += 3; addLine(y); y += 6;
+
+    for (const item of items) {
+      checkNewPage(6);
+      const isFlagged = item.flagged === true
+        || String(item.value || '').toLowerCase().includes('problem');
+      const valueText = `${item.value || '-'}${item.unit ? ` ${item.unit}` : ''}`;
+      addText(String(item.name || ''), margin, y, { size: 9, color: [120, 120, 120] });
+      addText(valueText, margin + 90, y, {
+        size: 9, bold: true, color: isFlagged ? [202, 138, 4] : [51, 51, 51],
+      });
+      y += 5;
+      if (item.detail) {
+        const detailLines = pdf.splitTextToSize(String(item.detail), contentWidth - 94) as string[];
+        for (const line of detailLines) {
+          checkNewPage(4);
+          addText(line, margin + 90, y, { size: 8, color: [140, 140, 140] });
+          y += 4;
+        }
+      }
+    }
+
+    if (sec.notes && String(sec.notes).trim()) {
+      checkNewPage(8);
+      const noteLines = pdf.splitTextToSize(`Notes: ${sec.notes}`, contentWidth) as string[];
+      for (const line of noteLines) {
+        checkNewPage(5);
+        addText(line, margin, y, { size: 8, color: [146, 64, 14] });
+        y += 4;
+      }
+    }
+    y += 4;
+  }
+
+  // -- Flagged items --
+  const flagged: any[] = Array.isArray(data.flaggedItems) ? data.flaggedItems : [];
+  if (flagged.length > 0) {
+    checkNewPage(14 + flagged.length * 10);
+    addText('FLAGGED ITEMS', margin, y, { size: 11, bold: true, color: [27, 42, 78] });
+    y += 3; addLine(y); y += 6;
+
+    for (let fi = 0; fi < flagged.length; fi++) {
+      const f = flagged[fi];
+      checkNewPage(12);
+      const sevColor: [number, number, number] =
+        String(f.severity).toLowerCase() === 'critical' ? [220, 38, 38] :
+        String(f.severity).toLowerCase() === 'major' ? [234, 88, 12] :
+        [202, 138, 4];
+      const heading = `${fi + 1}. ${f.checklistItem || 'Item'}${f.selectedOption ? ` — ${f.selectedOption}` : ''}`;
+      addText(heading, margin, y, { size: 10, bold: true, color: [80, 80, 80] });
+      if (f.severity) {
+        pdf.setFontSize(8);
+        pdf.setTextColor(sevColor[0], sevColor[1], sevColor[2]);
+        pdf.text(String(f.severity), pageWidth - margin, y, { align: 'right' });
+      }
+      y += 5;
+      if (f.description) {
+        const descLines = pdf.splitTextToSize(String(f.description), contentWidth - 8) as string[];
+        for (const line of descLines) {
+          checkNewPage(5);
+          addText(line, margin + 4, y, { size: 9, color: [80, 80, 80] });
+          y += 4;
+        }
+      }
+      y += 3;
+    }
+    y += 2;
+  }
+
+  // -- Photos --
+  checkNewPage(20);
+  addText('PHOTOS', margin, y, { size: 11, bold: true, color: [27, 42, 78] });
+  y += 3; addLine(y); y += 6;
+
+  if (photos.length > 0) {
+    const colWidth = contentWidth / 2 - 2;
+    const maxPhotoH = 55;
+    const getImageDims = (base64: string): { w: number; h: number } => {
+      try {
+        const props = pdf.getImageProperties(base64);
+        return { w: props.width || 4, h: props.height || 3 };
+      } catch {
+        return { w: 4, h: 3 };
+      }
+    };
+    const fitImage = (imgW: number, imgH: number, maxW: number, maxH: number) => {
+      const ratio = imgW / imgH;
+      let w = maxW;
+      let h = w / ratio;
+      if (h > maxH) { h = maxH; w = h * ratio; }
+      return { w, h };
+    };
+
+    for (let i = 0; i < photos.length; i += 2) {
+      const leftFit = fitImage(...Object.values(getImageDims(photos[i].base64)) as [number, number], colWidth, maxPhotoH);
+      let rowH = leftFit.h;
+      let rightFit = { w: 0, h: 0 };
+      if (i + 1 < photos.length) {
+        rightFit = fitImage(...Object.values(getImageDims(photos[i + 1].base64)) as [number, number], colWidth, maxPhotoH);
+        rowH = Math.max(leftFit.h, rightFit.h);
+      }
+      checkNewPage(rowH + 12);
+
+      const leftX = margin;
+      try {
+        pdf.addImage(photos[i].base64, 'JPEG', leftX, y, leftFit.w, leftFit.h, undefined, 'FAST');
+      } catch {
+        pdf.setDrawColor(200, 200, 200);
+        pdf.setFillColor(245, 245, 245);
+        pdf.roundedRect(leftX, y, colWidth, rowH, 2, 2, 'FD');
+      }
+      const rightX = margin + colWidth + 4;
+      if (i + 1 < photos.length) {
+        try {
+          pdf.addImage(photos[i + 1].base64, 'JPEG', rightX, y, rightFit.w, rightFit.h, undefined, 'FAST');
+        } catch {
+          pdf.setDrawColor(200, 200, 200);
+          pdf.setFillColor(245, 245, 245);
+          pdf.roundedRect(rightX, y, colWidth, rowH, 2, 2, 'FD');
+        }
+      }
+
+      const labelY = y + rowH + 4;
+      addText(photos[i].label, leftX, labelY, { size: 7, color: [120, 120, 120] });
+      if (photos[i].r2Url) {
+        pdf.setFontSize(6);
+        pdf.setTextColor(27, 42, 78);
+        pdf.textWithLink('View full size', leftX, labelY + 4, { url: photos[i].r2Url });
+      }
+      if (i + 1 < photos.length) {
+        addText(photos[i + 1].label, rightX, labelY, { size: 7, color: [120, 120, 120] });
+        if (photos[i + 1].r2Url) {
+          pdf.setFontSize(6);
+          pdf.setTextColor(27, 42, 78);
+          pdf.textWithLink('View full size', rightX, labelY + 4, { url: photos[i + 1].r2Url });
+        }
+      }
+      y += rowH + 12;
+    }
+    addText(`${photos.length} photo${photos.length === 1 ? '' : 's'} captured`, margin, y, { size: 8, color: [120, 120, 120] });
+    y += 6;
+  } else {
+    addText('No photos captured', margin, y, { size: 9, color: [180, 180, 180] });
+    y += 6;
+  }
+
+  // -- Footer on every page --
+  const pageCount = pdf.getNumberOfPages();
+  for (let p = 1; p <= pageCount; p++) {
+    pdf.setPage(p);
+    pdf.setFontSize(7);
+    pdf.setTextColor(160, 160, 160);
+    const generated = new Date().toISOString().split('T')[0];
+    pdf.text(
+      'Ooosh Tours Ltd - Vehicle Prep Report - Generated ' + generated,
+      pageWidth / 2, 292, { align: 'center' },
+    );
+    pdf.text('Page ' + p + ' of ' + pageCount, pageWidth - margin, 292, { align: 'right' });
+  }
+
+  const pdfArrayBuffer = pdf.output('arraybuffer') as ArrayBuffer;
+  const pdfBytes = new Uint8Array(pdfArrayBuffer);
+
+  const eventDateStr = String(data.date || new Date().toISOString().slice(0, 10));
+  const dp = eventDateStr.split('-'); // YYYY-MM-DD
+  const ddmmyy = dp.length === 3 ? dp[2] + dp[1] + dp[0].slice(2) : eventDateStr;
+  const safeReg = String(data.vehicleReg || 'unknown').replace(/\s+/g, '-');
+  const filename = `${safeReg}-${ddmmyy}-prep.pdf`;
 
   return { pdfBytes, filename };
 }

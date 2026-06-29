@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
+import { hasManagerRole } from '../../../lib/roles'
 import { useParams, useSearchParams, Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { vmPath } from '../config/route-paths'
@@ -7,8 +8,10 @@ import { apiFetch } from '../config/api-config'
 import { useVehicleTracker, useUpdateTrackerAssignment } from '../hooks/useTrackerAssignments'
 import { VehicleLocationTab } from '../components/tracking/VehicleLocationTab'
 import { PrepHistoryTab } from '../components/prep/PrepHistoryTab'
+import { ForecastTab } from '../components/forecast/ForecastTab'
 import ServiceHistoryTab from '../components/service/ServiceHistoryTab'
 import { VehicleEventsHistory } from '../components/events/VehicleEventsHistory'
+import { Pcn, PcnStatusPill, pcnTrafficLight, PCN_LIGHT_DOT, FINE_TYPE_LABEL, fmtPcnDate, fmtPcnMoney } from '../../../components/pcn/format'
 import { updateVehicle, correctCurrentMileage, fetchComplianceSettings, DEFAULT_COMPLIANCE, uploadVehicleFile, deleteVehicleFile, markVehicleWashed } from '../lib/fleet-api'
 import { checkMileagePlausibility } from '../lib/mileage-sanity'
 import { getRossettsStatus, URGENCY_DOT, URGENCY_TEXT } from '../lib/service-status'
@@ -238,17 +241,34 @@ export function VehicleDetailPage() {
   })
   const cs = complianceSettings || DEFAULT_COMPLIANCE
   const [searchParams] = useSearchParams()
-  const validTabs = ['details', 'service', 'issues', 'history', 'location', 'preps'] as const
-  type TabName = typeof validTabs[number]
-  const initialTab = validTabs.includes(searchParams.get('tab') as TabName) ? (searchParams.get('tab') as TabName) : 'details'
-  const [activeTab, setActiveTab] = useState<TabName>(initialTab)
+  // Top-level tabs. Service / Events / Preps / Issues / PCNs are grouped under
+  // a single "History" parent with its own sub-tab bar; Details + Location
+  // stay top-level. `?tab=` deep-links still accept the child names (and the
+  // legacy `history` = Events alias) and resolve to History + the right sub-tab.
+  const TOP_TABS = ['details', 'history', 'forecast', 'location'] as const
+  type TopTab = typeof TOP_TABS[number]
+  const HISTORY_SUBS = ['service', 'events', 'preps', 'issues', 'pcns'] as const
+  type HistorySub = typeof HISTORY_SUBS[number]
+
+  function parseTabParam(raw: string | null): { top: TopTab; sub?: HistorySub } {
+    if (raw === 'location') return { top: 'location' }
+    if (raw === 'forecast') return { top: 'forecast' }
+    if (raw === 'history') return { top: 'history', sub: 'events' } // legacy: history = Events
+    if (raw && (HISTORY_SUBS as readonly string[]).includes(raw)) return { top: 'history', sub: raw as HistorySub }
+    return { top: 'details' }
+  }
+
+  const parsed = parseTabParam(searchParams.get('tab'))
+  const [activeTab, setActiveTab] = useState<TopTab>(parsed.top)
+  const [historySub, setHistorySub] = useState<HistorySub>(parsed.sub ?? 'service')
 
   // Reset tab when switching vehicles — component instance is reused
   // across /vehicles/fleet/A → /B so without this the active tab
   // "drags across".
   useEffect(() => {
-    const urlTab = searchParams.get('tab')
-    setActiveTab(validTabs.includes(urlTab as TabName) ? (urlTab as TabName) : 'details')
+    const p = parseTabParam(searchParams.get('tab'))
+    setActiveTab(p.top)
+    setHistorySub(p.sub ?? 'service')
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id])
   const [editingTracker, setEditingTracker] = useState(false)
@@ -256,7 +276,7 @@ export function VehicleDetailPage() {
   const [washing, setWashing] = useState(false)
   const queryClient = useQueryClient()
   const opAuth = getOpAuthState()
-  const isAdmin = opAuth?.userRole === 'admin' || opAuth?.userRole === 'manager'
+  const isAdmin = hasManagerRole(opAuth?.userRole)
   const canEditMileage = isAdmin || opAuth?.userRole === 'weekend_manager'
   // Finance is stricter than the page's admin/manager gate — admin only.
   const isStrictAdmin = opAuth?.userRole === 'admin'
@@ -456,9 +476,9 @@ export function VehicleDetailPage() {
         </div>
       )}
 
-      {/* Tab bar */}
+      {/* Tab bar — Details | History | Location */}
       <div className="flex gap-1 rounded-lg bg-gray-100 p-1">
-        {(['details', 'service', 'issues', 'history', 'preps', 'location'] as const).map(tab => (
+        {TOP_TABS.map(tab => (
           <button
             key={tab}
             type="button"
@@ -469,35 +489,61 @@ export function VehicleDetailPage() {
                 : 'text-gray-500 hover:text-gray-700'
             }`}
           >
-            {tab === 'details' ? 'Details' : tab === 'service' ? 'Service' : tab === 'issues' ? 'Issues' : tab === 'history' ? 'Events' : tab === 'preps' ? 'Preps' : 'Location'}
+            {tab === 'details' ? 'Details' : tab === 'history' ? 'History' : tab === 'forecast' ? 'Forecast' : 'Location'}
           </button>
         ))}
       </div>
+
+      {/* Forecast tab — forward-looking health + AI assessment */}
+      {activeTab === 'forecast' && (
+        <ForecastTab vehicleId={vehicle.id} />
+      )}
 
       {/* Location tab */}
       {activeTab === 'location' && (
         <VehicleLocationTab reg={vehicle.reg} />
       )}
 
-      {/* Service History tab */}
-      {activeTab === 'service' && (
-        <ServiceHistoryTab vehicleId={vehicle.id} currentMileage={(vehicle as unknown as { currentMileage?: number | null }).currentMileage ?? null} lastMileageUpdate={vehicle.lastMileageUpdate ?? null} />
-      )}
-
-      {/* Issues tab — OP job_issues backed, open issues surfaced by default */}
-      {activeTab === 'issues' && (
-        <VehicleIssuesSectionOp vehicleId={vehicle.id} />
-      )}
-
-      {/* Events tab — book-outs, check-ins, preps. Book-out/check-in rows
-          link through to the full "life of a hire" comparison page. */}
+      {/* History tab — sub-tab bar (Service / Events / Preps / Issues / PCNs) */}
       {activeTab === 'history' && (
-        <VehicleEventsHistory vehicleReg={vehicle.reg} vehicleId={vehicle.id} />
-      )}
+        <div className="space-y-4">
+          <div className="flex gap-1 overflow-x-auto rounded-lg bg-gray-100 p-1 scrollbar-hide">
+            {HISTORY_SUBS.map(sub => (
+              <button
+                key={sub}
+                type="button"
+                onClick={() => setHistorySub(sub)}
+                className={`shrink-0 whitespace-nowrap rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+                  historySub === sub
+                    ? 'bg-white text-ooosh-navy shadow-sm'
+                    : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                {sub === 'service' ? 'Service' : sub === 'events' ? 'Events' : sub === 'preps' ? 'Preps' : sub === 'issues' ? 'Issues' : 'PCNs'}
+              </button>
+            ))}
+          </div>
 
-      {/* Prep History tab */}
-      {activeTab === 'preps' && (
-        <PrepHistoryTab vehicleReg={vehicle.reg} />
+          {historySub === 'service' && (
+            <ServiceHistoryTab vehicleId={vehicle.id} currentMileage={(vehicle as unknown as { currentMileage?: number | null }).currentMileage ?? null} lastMileageUpdate={vehicle.lastMileageUpdate ?? null} />
+          )}
+          {/* Events — book-outs, check-ins, preps. Rows link through to the
+              full "life of a hire" comparison page. */}
+          {historySub === 'events' && (
+            <VehicleEventsHistory vehicleReg={vehicle.reg} vehicleId={vehicle.id} />
+          )}
+          {historySub === 'preps' && (
+            <PrepHistoryTab vehicleReg={vehicle.reg} />
+          )}
+          {/* OP job_issues backed, open issues surfaced by default */}
+          {historySub === 'issues' && (
+            <VehicleIssuesSectionOp vehicleId={vehicle.id} />
+          )}
+          {/* OP pcns backed, penalty charge notices against this reg */}
+          {historySub === 'pcns' && (
+            <VehiclePcnsSectionOp vehicleId={vehicle.id} />
+          )}
+        </div>
       )}
 
       {/* Details tab */}
@@ -1467,6 +1513,95 @@ function OpIssueRowCard({ issue }: { issue: OpIssueRow }) {
             {new Date(issue.updated_at).toLocaleDateString('en-GB')}
           </div>
         </div>
+      </div>
+    </Link>
+  )
+}
+
+// ── PCNs (OP pcns-backed, mirrors the Issues section above) ──────────────
+const PCN_RESOLVED = new Set(['paid_by_driver', 'paid_recharged', 'internal_ooosh', 'internal_freelancer', 'closed'])
+
+function VehiclePcnsSectionOp({ vehicleId }: { vehicleId: string }) {
+  const [showResolved, setShowResolved] = useState(false)
+
+  const { data: pcns = [], isLoading } = useQuery({
+    queryKey: ['op-vehicle-pcns', vehicleId],
+    enabled: Boolean(vehicleId),
+    queryFn: async (): Promise<Pcn[]> => {
+      const resp = await apiFetch(`/api/pcns/by-vehicle/${vehicleId}`)
+      if (!resp.ok) throw new Error(`Failed to fetch PCNs: ${resp.status}`)
+      const body = await resp.json() as { data: Pcn[] }
+      return body.data || []
+    },
+    staleTime: 60_000,
+  })
+
+  const open = pcns.filter(p => !PCN_RESOLVED.has(p.status))
+  const resolved = pcns.filter(p => PCN_RESOLVED.has(p.status))
+
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white p-4">
+      <div className="mb-2 flex items-center justify-between">
+        <h3 className="text-sm font-semibold uppercase tracking-wide text-gray-500">
+          PCNs {pcns.length > 0 && <span className="normal-case text-gray-400">({pcns.length})</span>}
+        </h3>
+        <Link to="/vehicles/pcns" className="text-xs font-medium text-blue-600">All PCNs →</Link>
+      </div>
+
+      {isLoading ? (
+        <p className="text-sm text-gray-400 text-center py-4">Loading…</p>
+      ) : pcns.length === 0 ? (
+        <p className="text-sm text-gray-400 text-center py-4">No penalty charge notices</p>
+      ) : (
+        <div className="space-y-2">
+          {open.length > 0 && (
+            <>
+              <p className="text-[11px] font-medium uppercase tracking-wide text-amber-600">In flight ({open.length})</p>
+              {open.map(p => <OpPcnRowCard key={p.id} pcn={p} />)}
+            </>
+          )}
+          {resolved.length > 0 && (
+            <>
+              <button
+                type="button"
+                onClick={() => setShowResolved(!showResolved)}
+                className="mt-1 flex w-full items-center justify-between text-[11px] font-medium uppercase tracking-wide text-green-600"
+              >
+                <span>Resolved ({resolved.length})</span>
+                <span className="text-gray-400">{showResolved ? 'Hide' : 'Show'}</span>
+              </button>
+              {showResolved && resolved.map(p => <OpPcnRowCard key={p.id} pcn={p} />)}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function OpPcnRowCard({ pcn }: { pcn: Pcn }) {
+  const light = pcnTrafficLight(pcn)
+  const sub = [
+    pcn.offence_at ? `${fmtPcnDate(pcn.offence_at)}${pcn.offence_time_text ? ` ${pcn.offence_time_text}` : ''}` : null,
+    pcn.hh_job_number ? `J-${pcn.hh_job_number}` : null,
+    pcn.client_organisation_name || null,
+    pcn.fine_amount != null ? fmtPcnMoney(pcn.fine_amount) : null,
+  ].filter(Boolean).join(' · ')
+  return (
+    <Link
+      to={`/vehicles/pcns/${pcn.id}`}
+      className="block rounded border border-gray-200 bg-white px-2.5 py-2 text-sm hover:border-ooosh-300 hover:bg-ooosh-50/40"
+    >
+      <div className="flex items-start gap-2">
+        <span className={`mt-1.5 h-2 w-2 rounded-full shrink-0 ${PCN_LIGHT_DOT[light]}`} title={light} />
+        <div className="min-w-0 flex-1">
+          <div className="font-medium text-gray-900 truncate">
+            {pcn.reference || '(no reference)'}
+            <span className="ml-1.5 text-[10px] text-gray-400">{FINE_TYPE_LABEL[pcn.fine_type] || pcn.fine_type}</span>
+          </div>
+          {sub && <div className="text-[10px] text-gray-500 mt-0.5">{sub}</div>}
+        </div>
+        <PcnStatusPill status={pcn.status} />
       </div>
     </Link>
   )

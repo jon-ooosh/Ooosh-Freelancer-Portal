@@ -240,13 +240,28 @@ router.patch('/status/:requirementId', async (req: AuthRequest, res: Response) =
     const result = await query(
       `UPDATE job_requirements SET status = $1, updated_at = NOW()
        WHERE id = $2 AND requirement_type = 'backline'
-       RETURNING id, status`,
+       RETURNING id, status, job_id, phase, notes`,
       [status, requirementId]
     );
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Backline requirement not found' });
     }
-    res.json({ data: result.rows[0] });
+
+    // Problem status → make sure a register issue exists (deduped per job
+    // inside the helper). Same hook as the requirements PATCH path.
+    const updated = result.rows[0];
+    if (status === 'blocked' && updated.job_id) {
+      const { ensureBacklineProblemIssue } = await import('../services/job-issues');
+      ensureBacklineProblemIssue({
+        jobId: updated.job_id,
+        requirementId: updated.id,
+        phase: updated.phase,
+        notes: updated.notes,
+        actorUserId: req.user!.id,
+      }).catch((err) => console.warn('[backline] issue hook failed:', err));
+    }
+
+    res.json({ data: { id: updated.id, status: updated.status } });
   } catch (err) {
     console.error('Error updating backline status:', err);
     res.status(500).json({ error: 'Failed to update status' });

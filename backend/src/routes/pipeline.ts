@@ -1,7 +1,7 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
-import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
+import { authenticate, authorize, AuthRequest, STAFF_ROLES, MANAGER_ROLES } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
 import { writeBackStatusToHireHop, writeBackJobNameToHireHop } from '../services/hirehop-writeback';
@@ -11,10 +11,13 @@ import emailService from '../services/email-service';
 import { getFrontendUrl } from '../config/app-urls';
 import {
   triggerHireFormEmailOnConfirmation,
+  triggerCarnetFormOnConfirmation,
   hireFormResultIsAnomaly,
   sendConfirmationSilentSkipAlert,
 } from '../services/confirmation-hooks';
 import { reactivateAutoCancelledRequirements } from '../services/requirement-cleanup';
+import { pushDepositToHH, reverseDepositOnHH, getMethodForBankId } from '../services/hh-deposit';
+import { getJobBillingFacts, getNetHireDepositTotal, HireDeposit } from '../services/hh-billing-deposits';
 
 const router = Router();
 router.use(authenticate);
@@ -269,11 +272,12 @@ router.get('/managers', async (_req: AuthRequest, res: Response) => {
     const result = await query(`
       SELECT DISTINCT p.id, p.first_name, p.last_name
       FROM people p
-      WHERE p.id IN (
-        SELECT manager1_person_id FROM jobs WHERE is_deleted = false AND manager1_person_id IS NOT NULL
-        UNION
-        SELECT manager2_person_id FROM jobs WHERE is_deleted = false AND manager2_person_id IS NOT NULL
-      )
+      WHERE p.is_deleted = false
+        AND p.id IN (
+          SELECT manager1_person_id FROM jobs WHERE is_deleted = false AND manager1_person_id IS NOT NULL
+          UNION
+          SELECT manager2_person_id FROM jobs WHERE is_deleted = false AND manager2_person_id IS NOT NULL
+        )
       ORDER BY p.first_name, p.last_name
     `);
     res.json({ data: result.rows });
@@ -950,6 +954,7 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
       (async () => {
         try {
           const hfResult = await triggerHireFormEmailOnConfirmation(jobId);
+          triggerCarnetFormOnConfirmation(jobId).catch(() => {}); // best-effort, gated internally
           const anomaly = hireFormResultIsAnomaly(hfResult);
           if (anomaly) {
             const jobRow = await query(
@@ -987,6 +992,7 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
              WHERE qa.quote_id IN (SELECT id FROM quotes WHERE job_id = $1 AND is_deleted = false)
                AND qa.status NOT IN ('cancelled', 'declined')
                AND qa.is_ooosh_crew = false
+               AND p.is_deleted = false
                AND p.email IS NOT NULL`,
           [jobId]
         );
@@ -2113,6 +2119,469 @@ router.post('/:id/push-dates-to-hh', async (req: AuthRequest, res: Response) => 
     res.status(500).json({ error: 'Failed to update dates on HireHop' });
   }
 });
+
+// ============================================================================
+// COMBINE BOOKINGS — merge two same-client pre-hire bookings into one
+//
+// The survivor keeps its identity (and gains the combined date range); the
+// other booking is retired as `cancelled` (combined_into_job_id set, £0 fee,
+// £0 refund) and its deposit(s) are re-attributed to the survivor in HireHop
+// (reverse on the absorbed job + recreate on the survivor, same bank — a clean
+// Xero wash). No client emails fire. See CLAUDE.md "Combine bookings".
+// ============================================================================
+
+const COMBINABLE_STATUSES = ['new_enquiry', 'quoting', 'paused', 'provisional', 'confirmed', 'prepped', 'prepping'];
+
+// Survivor preference: the more-committed booking continues. Excess money is the
+// strongest pull (we never want to move it), then status progression (a confirmed
+// booking outranks a provisional outranks an enquiry), then holding a deposit
+// (minimise what has to move), then earlier start as the final tiebreak.
+function combineStatusRank(s: string): number {
+  if (['confirmed', 'prepped', 'prepping'].includes(s)) return 3;
+  if (s === 'provisional') return 2;
+  return 1; // new_enquiry / quoting / paused
+}
+function survivorScore(c: CombineCandidateFacts): number {
+  return (c.excessHeld ? 1000 : 0)
+    + combineStatusRank(c.job.pipeline_status) * 10
+    + (c.hireDepositTotal > 0 ? 1 : 0);
+}
+
+interface CombineCandidateFacts {
+  job: any;
+  hireDeposits: HireDeposit[];
+  hireDepositTotal: number;
+  hasInvoices: boolean;
+  excessHeld: boolean;        // real excess money taken/held on this job
+  activeQuotes: number;       // live transport/crew quotes
+}
+
+async function loadCombineCandidate(jobId: string): Promise<CombineCandidateFacts | null> {
+  const jr = await query(`SELECT * FROM jobs WHERE id = $1 AND is_deleted = false`, [jobId]);
+  if (jr.rows.length === 0) return null;
+  const job = jr.rows[0];
+
+  let hireDeposits: HireDeposit[] = [];
+  let hireDepositTotal = 0;
+  let hasInvoices = false;
+  if (job.hh_job_number) {
+    const facts = await getJobBillingFacts(Number(job.hh_job_number));
+    hireDeposits = facts.hireDeposits;
+    hireDepositTotal = facts.hireDepositTotal;
+    hasInvoices = facts.hasInvoices;
+  }
+
+  // Real excess money on the job (a `needed`/`pending` derivation stub is fine —
+  // it just gets cleaned up; only collected/held money blocks the merge).
+  const xs = await query(
+    `SELECT COALESCE(SUM(COALESCE(excess_amount_taken,0) + COALESCE(amount_held,0)),0) AS held
+       FROM job_excess WHERE job_id = $1`,
+    [jobId]
+  );
+  const excessHeld = Number(xs.rows[0]?.held || 0) > 0;
+
+  const q = await query(
+    `SELECT COUNT(*)::int AS n FROM quotes
+      WHERE job_id = $1 AND is_deleted = false AND status NOT IN ('cancelled', 'completed')`,
+    [jobId]
+  );
+  const activeQuotes = Number(q.rows[0]?.n || 0);
+
+  return { job, hireDeposits, hireDepositTotal, hasInvoices, excessHeld, activeQuotes };
+}
+
+/**
+ * Decide which job should survive (default earlier start) and surface blocks.
+ * The survivor MUST be the excess-holder when exactly one side holds excess —
+ * combining onto it means no excess has to move. Returns the recommended
+ * survivor/absorbed split plus any hard blocks (combine refused if non-empty).
+ */
+function assessCombine(a: CombineCandidateFacts, b: CombineCandidateFacts): {
+  survivor: CombineCandidateFacts;
+  absorbed: CombineCandidateFacts;
+  blocks: string[];
+} {
+  const blocks: string[] = [];
+
+  // Same client.
+  if (!a.job.client_id || !b.job.client_id || a.job.client_id !== b.job.client_id) {
+    blocks.push('The two bookings are for different clients — combine only works within one client.');
+  }
+  // Both pre-on-hire.
+  for (const c of [a, b]) {
+    if (!COMBINABLE_STATUSES.includes(c.job.pipeline_status)) {
+      blocks.push(`"${c.job.job_name || c.job.id}" is "${c.job.pipeline_status}" — only pre-hire bookings (enquiry up to prepped) can be combined.`);
+    }
+  }
+
+  // Survivor = the more-committed booking (see survivorScore); earlier start
+  // breaks a tie. So an enquiry folds INTO a confirmed booking, not vice versa.
+  let survivor: CombineCandidateFacts;
+  let absorbed: CombineCandidateFacts;
+  const sa = survivorScore(a), sb = survivorScore(b);
+  if (sa !== sb) {
+    if (sa > sb) { survivor = a; absorbed = b; } else { survivor = b; absorbed = a; }
+  } else {
+    const aStart = new Date(a.job.job_date || a.job.out_date || 0).getTime();
+    const bStart = new Date(b.job.job_date || b.job.out_date || 0).getTime();
+    if (bStart < aStart) { survivor = b; absorbed = a; } else { survivor = a; absorbed = b; }
+  }
+
+  if (a.excessHeld && b.excessHeld) {
+    blocks.push('Both bookings hold insurance excess money — resolve one before combining so the excess doesn\'t need moving.');
+  }
+
+  // Only the SURVIVOR must be HH-linked (dates + reattributed deposit are pushed
+  // there). An un-pushed enquiry being absorbed has no deposit to move anyway —
+  // deposits are read from HireHop — so it can fold in without an HH number.
+  if (!survivor.job.hh_job_number) {
+    blocks.push(`The booking being kept ("${survivor.job.job_name || survivor.job.id}") isn't linked to HireHop — link it to HireHop first so the dates and deposit can be pushed.`);
+  }
+  // Absorbed-side blocks (the side being retired).
+  if (absorbed.hasInvoices) {
+    blocks.push(`Job #${absorbed.job.hh_job_number} has an invoice raised — combine doesn't unwind invoiced money. Resolve the invoice first.`);
+  }
+  if (absorbed.activeQuotes > 0) {
+    blocks.push(`Job #${absorbed.job.hh_job_number || absorbed.job.job_name} has transport/crew quotes — move or cancel those before combining (this tool only moves the deposit).`);
+  }
+
+  return { survivor, absorbed, blocks };
+}
+
+// Combined date range = earliest out/start, latest end/return across both.
+function combinedDates(survivor: any, absorbed: any) {
+  const min = (x: any, y: any) => {
+    const xt = x ? new Date(x).getTime() : Infinity;
+    const yt = y ? new Date(y).getTime() : Infinity;
+    return xt <= yt ? x : y;
+  };
+  const max = (x: any, y: any) => {
+    const xt = x ? new Date(x).getTime() : -Infinity;
+    const yt = y ? new Date(y).getTime() : -Infinity;
+    return xt >= yt ? x : y;
+  };
+  return {
+    out_date: min(survivor.out_date, absorbed.out_date),
+    job_date: min(survivor.job_date, absorbed.job_date),
+    job_end: max(survivor.job_end, absorbed.job_end),
+    return_date: max(survivor.return_date, absorbed.return_date),
+  };
+}
+
+// GET candidates — same-client pre-on-hire bookings to combine THIS job with.
+// Drives the modal's default picker list (search fallback handled client-side).
+router.get('/:id/combine-candidates', async (req: AuthRequest, res: Response) => {
+  try {
+    const jobId = req.params.id as string;
+    const cur = await query(
+      `SELECT id, client_id, client_name FROM jobs WHERE id = $1 AND is_deleted = false`,
+      [jobId]
+    );
+    if (cur.rows.length === 0) { res.status(404).json({ error: 'Job not found' }); return; }
+    const clientId = cur.rows[0].client_id;
+    if (!clientId) { res.json({ data: [], client_name: cur.rows[0].client_name }); return; }
+
+    const rows = await query(
+      `SELECT id, hh_job_number, job_name, pipeline_status,
+              out_date, job_date, job_end, return_date, job_value
+         FROM jobs
+        WHERE client_id = $1
+          AND id <> $2
+          AND is_deleted = false
+          AND combined_into_job_id IS NULL
+          AND pipeline_status = ANY($3::text[])
+        ORDER BY job_date ASC NULLS LAST`,
+      [clientId, jobId, COMBINABLE_STATUSES]
+    );
+    res.json({ data: rows.rows, client_name: cur.rows[0].client_name });
+  } catch (error: any) {
+    console.error('Combine candidates error:', error);
+    res.status(500).json({ error: error?.message || 'Failed to load candidates' });
+  }
+});
+
+// GET preview — eligibility + figures for the modal. ?with=<otherJobId>
+router.get('/:id/combine-preview', async (req: AuthRequest, res: Response) => {
+  try {
+    const aId = req.params.id as string;
+    const bId = String(req.query.with || '');
+    if (!bId) { res.status(400).json({ error: 'Missing ?with=<jobId>' }); return; }
+    if (aId === bId) { res.status(400).json({ error: 'Cannot combine a booking with itself' }); return; }
+
+    const [a, b] = await Promise.all([loadCombineCandidate(aId), loadCombineCandidate(bId)]);
+    if (!a || !b) { res.status(404).json({ error: 'One or both jobs not found' }); return; }
+
+    const { survivor, absorbed, blocks } = assessCombine(a, b);
+    const dates = combinedDates(survivor.job, absorbed.job);
+
+    const summarise = (c: CombineCandidateFacts) => ({
+      id: c.job.id,
+      hh_job_number: c.job.hh_job_number,
+      job_name: c.job.job_name,
+      client_name: c.job.client_name,
+      pipeline_status: c.job.pipeline_status,
+      out_date: c.job.out_date, job_date: c.job.job_date,
+      job_end: c.job.job_end, return_date: c.job.return_date,
+      deposit_total: c.hireDepositTotal,
+      deposits: c.hireDeposits.map(d => ({ amount: d.amount, bank: d.bankName, date: d.date })),
+    });
+
+    res.json({
+      can_combine: blocks.length === 0,
+      blocks,
+      survivor: summarise(survivor),
+      absorbed: summarise(absorbed),
+      combined_dates: dates,
+      deposit_to_move: absorbed.hireDepositTotal,
+    });
+  } catch (error: any) {
+    console.error('Combine preview error:', error);
+    res.status(500).json({ error: error?.message || 'Failed to build combine preview' });
+  }
+});
+
+const combineSchema = z.object({
+  absorb_job_id: z.string().uuid(),
+  out_date: z.string(),
+  job_date: z.string(),
+  job_end: z.string(),
+  return_date: z.string(),
+});
+
+// POST combine — survivor = :id, absorb_job_id retired into it.
+router.post(
+  '/:id/combine',
+  authorize(...MANAGER_ROLES),
+  validate(combineSchema),
+  async (req: AuthRequest, res: Response) => {
+    const survivorId = req.params.id as string;
+    const { absorb_job_id, out_date, job_date, job_end, return_date } = req.body;
+    const userId = req.user!.id;
+    const userEmail = req.user!.email || userId;
+
+    if (survivorId === absorb_job_id) {
+      res.status(400).json({ error: 'Cannot combine a booking with itself' });
+      return;
+    }
+
+    try {
+      // Re-load + re-assess server-side (never trust the client's eligibility).
+      const [sCand, aCand] = await Promise.all([
+        loadCombineCandidate(survivorId),
+        loadCombineCandidate(absorb_job_id),
+      ]);
+      if (!sCand || !aCand) { res.status(404).json({ error: 'One or both jobs not found' }); return; }
+
+      const assessment = assessCombine(sCand, aCand);
+      if (assessment.blocks.length > 0) {
+        res.status(400).json({ error: 'Cannot combine these bookings', blocks: assessment.blocks });
+        return;
+      }
+      // The endpoint's :id MUST be the assessed survivor — the frontend resolves
+      // this from the preview, but guard against a stale/forced call.
+      if (assessment.survivor.job.id !== survivorId) {
+        res.status(400).json({
+          error: `Survivor mismatch — booking #${assessment.survivor.job.hh_job_number} must be the one kept (it holds the excess or starts first). Re-open the combine dialog from that booking.`,
+        });
+        return;
+      }
+
+      const survivor = sCand.job;
+      const absorbed = aCand.job;
+      const hhWarnings: string[] = [];
+
+      // ── 1. Re-attribute each deposit: recreate on survivor FIRST, then reverse
+      // on the absorbed job. This order means a mid-failure leaves money
+      // double-counted (visible, recoverable) rather than vanished.
+      let depositMoved = 0;
+      for (const dep of aCand.hireDeposits) {
+        const method = getMethodForBankId(dep.bankId);
+        const recreate = await pushDepositToHH({
+          hhJobNumber: Number(survivor.hh_job_number),
+          amount: dep.amount,
+          paymentMethod: method,
+          bankId: dep.bankId,
+          paymentType: 'deposit',
+          notes: `reallocated from job #${absorbed.hh_job_number} (bookings combined)`,
+        });
+        if (recreate.error) {
+          // Nothing reversed yet for this leg — abort cleanly.
+          res.status(502).json({
+            error: `Couldn't recreate the £${dep.amount.toFixed(2)} deposit on HireHop job #${survivor.hh_job_number}: ${recreate.error}. No money moved — nothing changed.`,
+            deposit_moved: depositMoved,
+          });
+          return;
+        }
+        const reverse = await reverseDepositOnHH({
+          hhJobNumber: Number(absorbed.hh_job_number),
+          hhDepositId: dep.id,
+          amount: dep.amount,
+          bankId: dep.bankId,
+          movedToHhJob: Number(survivor.hh_job_number),
+          notes: dep.description || null,
+        });
+        if (reverse.error) {
+          // Recreate succeeded but reversal failed → double-counted. Loud warning,
+          // keep going (the survivor has the money; staff must remove the stray
+          // positive on the absorbed job manually).
+          hhWarnings.push(`Deposit £${dep.amount.toFixed(2)} was added to #${survivor.hh_job_number} but the reversal on #${absorbed.hh_job_number} failed (${reverse.error}). Remove £${dep.amount.toFixed(2)} from #${absorbed.hh_job_number} in HireHop manually.`);
+        }
+        depositMoved += dep.amount;
+
+        // Audit both legs in job_payments (write-path log, not display source).
+        await query(
+          `INSERT INTO job_payments (job_id, payment_type, amount, payment_method, payment_status, hirehop_deposit_id, notes, recorded_by)
+           VALUES ($1, 'deposit', $2, $3, 'completed', $4, $5, $6)`,
+          [survivorId, dep.amount, method, recreate.hhDepositId || null,
+           `Reallocated from job #${absorbed.hh_job_number} (bookings combined)`, userId]
+        ).catch(e => console.warn('[Combine] survivor job_payments log failed:', e));
+      }
+
+      // ── 1b. Sanity read-back: re-read the absorbed job's NET hire deposits.
+      // If anything still shows there, a reversal silently didn't apply — turn
+      // that into a loud warning (money insurance) rather than trusting the
+      // per-leg success flags alone.
+      if (aCand.hireDeposits.length > 0) {
+        try {
+          const residual = await getNetHireDepositTotal(Number(absorbed.hh_job_number));
+          if (residual > 0.01) {
+            hhWarnings.push(`Verify: HireHop job #${absorbed.hh_job_number} still shows £${residual.toFixed(2)} of hire deposits after the move — a reversal may not have applied. Remove the residual on #${absorbed.hh_job_number} in HireHop manually.`);
+          }
+        } catch (e) {
+          hhWarnings.push(`Couldn't verify the deposit move on #${absorbed.hh_job_number} (HireHop read-back failed) — please double-check the deposit cleared there.`);
+        }
+      }
+
+      // ── 2. Extend the survivor's dates to the combined range, push to HH.
+      const datedJob = {
+        ...survivor,
+        out_date, job_date, job_end, return_date,
+      };
+      const dtError = validateJobDateTimes(datedJob);
+      if (dtError) {
+        hhWarnings.push(`Combined dates not pushed to HireHop (${dtError}) — set them manually on #${survivor.hh_job_number}.`);
+      } else {
+        await query(
+          `UPDATE jobs SET out_date = $1, job_date = $2, job_end = $3, return_date = $4, updated_at = NOW()
+            WHERE id = $5`,
+          [out_date, job_date, job_end, return_date, survivorId]
+        );
+        if (survivor.hh_job_number) {
+          const { out, start, end, to, duration } = buildHHJobDateTimes(datedJob);
+          const dateParams: Record<string, unknown> = { job: survivor.hh_job_number, no_webhook: 1 };
+          if (out) dateParams.out = out;
+          if (start) dateParams.start = start;
+          if (end) dateParams.end = end;
+          if (to) dateParams.to = to;
+          if (duration) {
+            dateParams.duration_days = duration.duration_days;
+            dateParams.duration_hrs = duration.duration_hrs;
+            dateParams.duration_locked = duration.duration_locked;
+          }
+          const dr = await hhBroker.post('/api/save_job.php', dateParams, { priority: 'high' });
+          if (!dr.success) {
+            hhWarnings.push(`Combined dates saved in OP but the HireHop push failed — set them manually on #${survivor.hh_job_number}.`);
+          }
+        }
+      }
+
+      // ── 3. Retire the absorbed booking (cancelled, but a merge — £0/£0).
+      await query(
+        `UPDATE jobs SET
+           pipeline_status = 'cancelled',
+           pipeline_status_changed_at = NOW(),
+           combined_into_job_id = $2,
+           cancelled_at = NOW(),
+           cancelled_by = $3,
+           cancellation_reason = 'Combined into another booking',
+           cancellation_notes = $4,
+           cancellation_fee = 0,
+           cancellation_refund = 0,
+           next_chase_date = NULL,
+           updated_at = NOW()
+         WHERE id = $1`,
+        [absorb_job_id, survivorId, userId,
+         `Combined into job #${survivor.hh_job_number}. Deposit £${depositMoved.toFixed(2)} reallocated.`]
+      );
+
+      // Cancel open requirements on the absorbed job (lost/cancelled pattern).
+      await query(
+        `UPDATE job_requirements
+            SET status = 'cancelled',
+                notes = COALESCE(notes, '') || ' [Cancelled — combined into another booking]',
+                updated_at = NOW()
+          WHERE job_id = $1 AND status NOT IN ('done', 'cancelled') AND keep_after_close = false`,
+        [absorb_job_id]
+      );
+
+      // Soft-cancel vehicle assignments on the absorbed job + resync fleet status.
+      const sweptVha = await query(
+        `UPDATE vehicle_hire_assignments
+            SET status = 'cancelled', status_changed_at = NOW(),
+                notes = COALESCE(notes, '') || E'\n[Auto-cancelled: combined into another booking]',
+                updated_at = NOW()
+          WHERE (job_id = $1 OR (job_id IS NULL AND hirehop_job_id = $2::integer))
+            AND status NOT IN ('cancelled', 'returned', 'swapped')
+          RETURNING id, vehicle_id`,
+        [absorb_job_id, absorbed.hh_job_number ?? null]
+      );
+      if (sweptVha.rows.length > 0) {
+        const { syncFleetHireStatus } = await import('../services/fleet-hire-status-sync');
+        const seen = new Set<string>();
+        for (const r of sweptVha.rows) {
+          if (r.vehicle_id && !seen.has(r.vehicle_id)) {
+            seen.add(r.vehicle_id);
+            await syncFleetHireStatus(r.vehicle_id).catch(e => console.warn('[Combine] fleet status resync failed:', e));
+          }
+        }
+      }
+
+      // Waive derivation excess stubs on the absorbed job (no money — guarded above).
+      await query(
+        `UPDATE job_excess
+            SET excess_status = 'waived', excess_amount_required = 0,
+                notes = COALESCE(notes, '') || ' [Waived — combined into another booking]',
+                updated_at = NOW()
+          WHERE job_id = $1
+            AND excess_status IN ('needed', 'pending')
+            AND COALESCE(excess_amount_taken,0) = 0 AND COALESCE(amount_held,0) = 0`,
+        [absorb_job_id]
+      );
+
+      // HH write-back: absorbed → Cancelled (9).
+      writeBackStatusToHireHop(absorb_job_id, 'cancelled', userEmail)
+        .catch(err => console.error('[Combine] HH write-back error:', err));
+
+      // ── 4. Timeline interactions both sides.
+      await query(
+        `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
+         VALUES ('note', $1, $2, $3, $4)`,
+        [`🔀 Combined booking #${absorbed.hh_job_number} into this one. Dates extended; deposit £${depositMoved.toFixed(2)} reallocated from #${absorbed.hh_job_number}.`,
+         survivorId, userId, survivor.pipeline_status]
+      ).catch(e => console.warn('[Combine] survivor interaction failed:', e));
+      await query(
+        `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
+         VALUES ('status_transition', $1, $2, $3, 'cancelled')`,
+        [`🔀 Combined into booking #${survivor.hh_job_number} by ${userEmail}. No cancellation fee — bookings merged. Deposit £${depositMoved.toFixed(2)} reallocated to #${survivor.hh_job_number}.`,
+         absorb_job_id, userId]
+      ).catch(e => console.warn('[Combine] absorbed interaction failed:', e));
+
+      await logAudit(userId, 'jobs', absorb_job_id, 'update', aCand.job, { combined_into_job_id: survivorId, action: 'combined_into_booking' });
+
+      res.json({
+        success: true,
+        survivor_id: survivorId,
+        absorbed_id: absorb_job_id,
+        deposit_moved: depositMoved,
+        deposit_count: aCand.hireDeposits.length,
+        hh_warnings: hhWarnings,
+      });
+    } catch (error: any) {
+      console.error('Combine bookings error:', error);
+      res.status(500).json({ error: error?.message || 'Failed to combine bookings' });
+    }
+  }
+);
 
 // ============================================================================
 // PUSH TO HIREHOP — Create a new HireHop job from an Ooosh-native enquiry

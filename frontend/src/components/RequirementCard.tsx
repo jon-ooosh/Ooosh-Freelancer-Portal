@@ -12,7 +12,9 @@
  */
 
 import { useState, useEffect, useRef } from 'react';
+import { Link } from 'react-router-dom';
 import { api } from '../services/api';
+import { STEP_PHASE, FUTURE_STEP } from './CarnetSection';
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -87,6 +89,7 @@ interface EmailContact {
 }
 
 interface HireFormDriver {
+  driver_id: string | null;
   driver_name: string | null;
   status: string;
   created_at: string;
@@ -175,6 +178,8 @@ export default function RequirementCard({
   onRemove,
   onVanAndDriverToggle,
   onSlotModeChange,
+  selfDriveVanOverride,
+  onVehicleCountOverride,
   onReload,
 }: {
   req: JobRequirement;
@@ -189,6 +194,8 @@ export default function RequirementCard({
   onRemove: (reqId: string, reason?: string) => void;
   onVanAndDriverToggle?: () => void;
   onSlotModeChange?: (itemId: number, slotIndex: number, mode: VehicleSlotMode) => void;
+  selfDriveVanOverride?: number | null;
+  onVehicleCountOverride?: (count: number | null) => void;
   onReload?: () => void;
 }) {
   const [showStatusMenu, setShowStatusMenu] = useState(false);
@@ -216,11 +223,33 @@ export default function RequirementCard({
   // Hire form submissions + excess data (loaded for nested cards)
   const [hireFormDrivers, setHireFormDrivers] = useState<HireFormDriver[]>([]);
   const [excessInfo, setExcessInfo] = useState<ExcessInfo | null>(null);
+  // Carnet — read-only reflection of the real lifecycle (managed in Operations)
+  const [carnet, setCarnet] = useState<{ id: string; mode: string; status: string } | null>(null);
 
-  const isSuspendedByVD = req.notes?.includes('[Suspended: Van & Driver]') || false;
+  // Suspension marker — set by the derivation engine when the hire chain is
+  // not required on this job (every van slot is Van & Driver, or the job is
+  // marked Internal). Variable keeps its historic name; it now covers both.
+  const suspensionReason = req.notes?.match(/\[Suspended: (Van & Driver|Internal)\]/)?.[1] || null;
+  const isSuspendedByVD = suspensionReason !== null;
   const statusConfig = PREP_STATUS_CONFIG[req.status] || PREP_STATUS_CONFIG.not_started;
   const typeLabels = TYPE_STATUS_LABELS[req.requirement_type];
+  // The `vehicle` type_label is the static "Vehicle (Self-Drive)" from the
+  // requirement-type picklist. Override it with a mode-aware suffix computed
+  // from the live derived slot modes so a V&D (or mixed) job reads honestly.
+  const vehicleModeSuffix = (() => {
+    if (req.requirement_type !== 'vehicle' || req.custom_label) return null;
+    const sd = derivedFlags?.self_drive_count ?? 0;
+    const vd = derivedFlags?.van_and_driver_count ?? 0;
+    if (sd === 0 && vd === 0) return null; // no slot data — leave static label
+    if (sd > 0 && vd > 0) return `Mixed — ${sd} self-drive, ${vd} van & driver`;
+    return vd > 0 ? 'Van & Driver' : 'Self-Drive';
+  })();
   const label = req.custom_label || req.type_label;
+  // When the vehicle card carries a mode suffix, render the base "Vehicle" word
+  // in the (strikethrough-on-done) title and the mode as a separate, never-struck
+  // qualifier — otherwise a completed V&D vehicle shows "Vehicle (Van & Driver)"
+  // crossed out, which reads as "mode cancelled" rather than "prep done".
+  const titleBase = vehicleModeSuffix ? 'Vehicle' : label;
 
   // Load hire form and excess data for nested cards
   useEffect(() => {
@@ -235,6 +264,11 @@ export default function RequirementCard({
         .then(d => {
           if (d?.data?.totals) setExcessInfo(d.data);
         })
+        .catch(() => {});
+    }
+    if (req.requirement_type === 'carnet' && jobId) {
+      api.get<{ data: { id: string; mode: string; status: string } | null }>(`/carnets/by-job/${jobId}`)
+        .then(d => setCarnet(d?.data || null))
         .catch(() => {});
     }
   }, [req.requirement_type, hhJobNumber, jobId]);
@@ -340,7 +374,11 @@ export default function RequirementCard({
   // is read-only like the vehicle card — hand-setting it would just be overwritten.
   const isContextualStatus = (isNested && (req.requirement_type === 'hire_forms' || req.requirement_type === 'excess'))
     || req.requirement_type === 'vehicle'
-    || req.requirement_type === 'merch';
+    || req.requirement_type === 'merch'
+    // Carnet status is the real lifecycle (managed in Operations); the card is a
+    // read-only reflection — hand-setting the generic 4-state status would be
+    // misleading against the 9-state lifecycle.
+    || req.requirement_type === 'carnet';
 
   // Click outside to dismiss status dropdown
   const statusMenuRef = useRef<HTMLDivElement>(null);
@@ -366,8 +404,13 @@ export default function RequirementCard({
           <span className="text-lg flex-shrink-0">{isNested ? '↳' : ''} {req.type_icon}</span>
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
-              <span className={`font-medium ${req.status === 'done' ? 'text-gray-400 line-through' : 'text-gray-900'}`}>
-                {label}
+              <span className="font-medium">
+                <span className={req.status === 'done' ? 'text-gray-400 line-through' : 'text-gray-900'}>
+                  {titleBase}
+                </span>
+                {vehicleModeSuffix && (
+                  <span className="text-gray-500"> ({vehicleModeSuffix})</span>
+                )}
               </span>
               {req.is_auto && req.source === 'hirehop_sync' && (
                 <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-500 border border-blue-200 font-medium">HH</span>
@@ -441,6 +484,47 @@ export default function RequirementCard({
                     )}
                   </div>
                 )}
+                {/* Sequential-swap structure control — only on multi-van
+                    self-drive jobs. HH qty-2 can mean one van swapped mid-hire
+                    (per-item going-out dates in HireHop), not two vans out at
+                    once. The override caps the count that drives excess + the
+                    additional-driver charge (£1,200 not £2,400). vehicle_slots
+                    still shows both physical vans. */}
+                {onVehicleCountOverride && derivedFlags.vehicle_slots
+                  && derivedFlags.vehicle_slots.filter(s => s.mode === 'self_drive').length > 1 && (() => {
+                  const physicalSelfDrive = derivedFlags.vehicle_slots.filter(s => s.mode === 'self_drive').length;
+                  const isSwap = selfDriveVanOverride !== null && selfDriveVanOverride !== undefined;
+                  return (
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="text-gray-500">Structure:</span>
+                      <button
+                        onClick={() => onVehicleCountOverride(null)}
+                        className={`px-2 py-0.5 rounded text-[10px] font-medium border transition-colors ${
+                          !isSwap
+                            ? 'bg-indigo-100 text-indigo-700 border-indigo-300'
+                            : 'bg-gray-100 text-gray-500 border-gray-200 hover:bg-gray-200'
+                        }`}
+                        title="Both vans out at the same time"
+                      >
+                        {physicalSelfDrive} simultaneous
+                      </button>
+                      <button
+                        onClick={() => onVehicleCountOverride(1)}
+                        className={`px-2 py-0.5 rounded text-[10px] font-medium border transition-colors ${
+                          isSwap
+                            ? 'bg-amber-100 text-amber-700 border-amber-300'
+                            : 'bg-gray-100 text-gray-500 border-gray-200 hover:bg-gray-200'
+                        }`}
+                        title="One van swapped mid-hire (per-item dates in HireHop) — excess + charges for one van"
+                      >
+                        🔄 1 van, swapped
+                      </button>
+                      {isSwap && (
+                        <span className="text-amber-600">— excess + charges treated as 1 van (£1,200)</span>
+                      )}
+                    </div>
+                  );
+                })()}
                 {derivedFlags.seat_config && (
                   <div className={derivedFlags.seat_config === 'forward_facing' ? 'text-amber-600' : 'text-green-600'}>
                     {derivedFlags.seat_config === 'forward_facing' ? '⬆️ Forward-facing seats' : '🔄 Round a table'}
@@ -458,9 +542,11 @@ export default function RequirementCard({
               </div>
             )}
 
-            {/* Suspended by Van & Driver banner */}
+            {/* Suspended (Van & Driver / Internal) banner */}
             {isSuspendedByVD && (req.requirement_type === 'hire_forms' || req.requirement_type === 'excess') && (
-              <div className="mt-1 text-xs text-gray-400 italic">Not required — Van & Driver mode</div>
+              <div className="mt-1 text-xs text-gray-400 italic">
+                {suspensionReason === 'Internal' ? 'Not required — Internal job' : 'Not required — Van & Driver mode'}
+              </div>
             )}
 
             {/* Hire Forms — show driver submissions + send button */}
@@ -468,8 +554,14 @@ export default function RequirementCard({
               <div className="mt-1 space-y-1">
                 {/* Summary counts */}
                 {(() => {
+                  // "Received" = a customer actually submitted a hire form,
+                  // which is what links a driver (driver_id set by
+                  // POST /api/hire-forms). A driverless row is a staff
+                  // allocation placeholder, NOT a received form — counting it
+                  // claimed "1 received" on jobs where no form had arrived.
                   const received = hireFormDrivers.filter(d =>
-                    d.status === 'confirmed' || d.status === 'booked_out' || d.status === 'active'
+                    d.driver_id &&
+                    (d.status === 'confirmed' || d.status === 'booked_out' || d.status === 'active')
                   ).length;
                   const referralCount = hireFormDrivers.filter(d => d.requires_referral).length;
                   // Parse all "sent" entries from the notes — each line was
@@ -518,25 +610,32 @@ export default function RequirementCard({
                   );
                 })()}
 
-                {/* Individual driver list */}
-                {hireFormDrivers.length > 0 ? (
-                  <div className="space-y-0.5">
-                    {hireFormDrivers.map((d, i) => (
-                      <div key={i} className="flex items-center gap-2 text-xs">
-                        <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
-                          d.status === 'confirmed' || d.status === 'booked_out' || d.status === 'active' ? 'bg-green-500' :
-                          d.status === 'soft' ? 'bg-amber-400' : 'bg-gray-300'
-                        }`} />
-                        <span className="text-gray-700">{d.driver_name || 'Unknown driver'}</span>
-                        {d.requires_referral && (
-                          <span className="text-[10px] px-1 py-0.5 rounded bg-red-50 text-red-600 border border-red-200">Referral</span>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="text-xs text-gray-400">No hire forms submitted yet</div>
-                )}
+                {/* Individual driver list — only rows with a real submitted
+                    form (driver_id set). Driverless allocation placeholders
+                    belong to the vehicle/allocation layer, not the hire-form
+                    card, and showing them here as "Unknown driver" with a
+                    green dot misrepresented an un-submitted form as received. */}
+                {(() => {
+                  const submittedForms = hireFormDrivers.filter(d => d.driver_id);
+                  return submittedForms.length > 0 ? (
+                    <div className="space-y-0.5">
+                      {submittedForms.map((d, i) => (
+                        <div key={i} className="flex items-center gap-2 text-xs">
+                          <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+                            d.status === 'confirmed' || d.status === 'booked_out' || d.status === 'active' ? 'bg-green-500' :
+                            d.status === 'soft' ? 'bg-amber-400' : 'bg-gray-300'
+                          }`} />
+                          <span className="text-gray-700">{d.driver_name || 'Unknown driver'}</span>
+                          {d.requires_referral && (
+                            <span className="text-[10px] px-1 py-0.5 rounded bg-red-50 text-red-600 border border-red-200">Referral</span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-xs text-gray-400">No hire forms submitted yet</div>
+                  );
+                })()}
                 {/* Always available — staff legitimately need this when:
                     - 0 received: original email went to spam, wrong contact,
                       need to send to a different person, etc.
@@ -643,6 +742,32 @@ export default function RequirementCard({
                 {derivedFlags.prep_time_by_category.rehearsals > 0 && (
                   <span> — est. {formatPrepTime(derivedFlags.prep_time_by_category.rehearsals)} prep</span>
                 )}
+              </div>
+            )}
+
+            {/* Carnet — read-only lifecycle reflection + link to Operations (where it's managed) */}
+            {req.requirement_type === 'carnet' && (
+              <div className="mt-2">
+                <div className="flex flex-wrap items-center gap-1 mb-2">
+                  {(carnet?.mode === 'client_arranges'
+                    ? [['requested', 'Requested'], ['spreadsheet_sent', 'Sent'], ['done', 'Done']]
+                    : [['detected', 'Detected'], ['form_sent', 'Form'], ['info_received', 'Info'], ['applied', 'Applied'], ['received', 'Received'], ['with_client', 'With client'], ['returned', 'Returned'], ['discharged', 'Discharged'], ['closed', 'Closed']]
+                  ).map(([key, lbl], i, arr) => {
+                    const curIdx = arr.findIndex((s) => s[0] === (carnet?.status || 'detected'));
+                    const done = i < curIdx;
+                    const active = i === curIdx;
+                    const phase = STEP_PHASE[key];
+                    const cls = active ? phase.active : done ? phase.done : FUTURE_STEP;
+                    return (
+                      <span key={key} className={`px-2 py-0.5 rounded text-xs ${cls}`}>
+                        {lbl}
+                      </span>
+                    );
+                  })}
+                </div>
+                <Link to={carnet?.id ? `/operations/carnets/${carnet.id}` : '/operations/carnets'} className="text-xs text-purple-600 hover:text-purple-800 font-medium">
+                  Manage carnet in Operations →
+                </Link>
               </div>
             )}
 
@@ -836,8 +961,9 @@ export default function RequirementCard({
         </div>
       </div>
 
-      {/* Multi-step progress bar — not for merch (derived pip, never advances steps) */}
-      {req.type_steps && req.requirement_type !== 'merch' && (
+      {/* Multi-step progress bar — not for merch (derived pip) or carnet (its own
+          lifecycle reflection + Operations link replace the generic 6-step bar) */}
+      {req.type_steps && req.requirement_type !== 'merch' && req.requirement_type !== 'carnet' && (
         <div className="mt-3 flex gap-1">
           {req.type_steps.map((step: string, i: number) => {
             const currentIdx = req.current_step ? req.type_steps!.indexOf(req.current_step) : -1;

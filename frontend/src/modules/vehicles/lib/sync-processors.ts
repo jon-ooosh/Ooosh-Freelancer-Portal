@@ -13,7 +13,7 @@ import { createVehicleEvent } from './events-api'
 import { uploadAllPhotos } from './photo-upload'
 import { updateFleetHireStatus } from './fleet-status'
 import { saveCollection } from './collection-api'
-import { generateConditionReportPdf, sendConditionReportEmail, blobToBase64 } from './pdf-email'
+import { sendConditionReport, blobToBase64, resizeImageForPdf } from './pdf-email'
 import { withRetry } from './retry'
 import type { CapturedPhoto, CollectionData } from '../types/vehicle-event'
 
@@ -97,7 +97,11 @@ export async function processBookOutSubmission(
     const photoBase64s: Array<{ angle: string; label: string; base64: string; r2Url?: string }> = []
     for (const p of photos) {
       try {
-        const base64 = await blobToBase64(p.blob)
+        // Capture-time PDF thumbnail when present; resized fallback for
+        // pre-thumbnail queue items. (Previously this embedded the FULL-SIZE
+        // base64 — a 16-photo replay shipped a ~10MB payload.) Sequential —
+        // never Promise.all (memory rules).
+        const base64 = p.pdfBase64 || (await resizeImageForPdf(p.blob))
         const photoKey = `events/${eventId}/${safeReg}/${p.angle}.jpg`
         const r2Url = r2PublicBase ? `${r2PublicBase}/${photoKey}` : undefined
         photoBase64s.push({ angle: p.angle, label: p.label, base64, r2Url })
@@ -115,38 +119,30 @@ export async function processBookOutSubmission(
       }
     }
 
-    const pdfResult = await withRetry(
-      () =>
-        generateConditionReportPdf({
-          vehicleReg,
-          vehicleType: formData.vehicleType as string,
-          driverName,
-          clientEmail: clientEmail || undefined,
-          hireHopJob: hireHopJob || undefined,
-          mileage: isNaN(mileageNum) ? null : mileageNum,
-          fuelLevel: fuelLevel as import('../types/vehicle-event').FuelLevel | null,
-          eventDate,
-          eventDateTime,
-          photos: photoBase64s,
-          briefingItems: [],
-          signatureBase64,
-        }),
-      'Offline sync: PDF generation',
-    )
-
-    if (pdfResult.success && pdfResult.data && clientEmail) {
+    // Single server-side call: builds + emails the PDF without round-tripping
+    // it through the device. Falls back to the job-level address book chain
+    // when no client email is on file (same as the live book-out flow).
+    if (clientEmail || hireHopJob) {
       await withRetry(
         () =>
-          sendConditionReportEmail({
-            to: clientEmail,
-            vehicleReg,
-            driverName,
-            eventDate,
-            pdfBase64: pdfResult.data!.pdf,
-            pdfFilename: pdfResult.data!.filename,
-            hireHopJob: hireHopJob || null,
-          }),
-        'Offline sync: Email',
+          sendConditionReport(
+            {
+              vehicleReg,
+              vehicleType: formData.vehicleType as string,
+              driverName,
+              clientEmail: clientEmail || undefined,
+              hireHopJob: hireHopJob || undefined,
+              mileage: isNaN(mileageNum) ? null : mileageNum,
+              fuelLevel: fuelLevel as import('../types/vehicle-event').FuelLevel | null,
+              eventDate,
+              eventDateTime,
+              photos: photoBase64s,
+              briefingItems: [],
+              signatureBase64,
+            },
+            [{ driverName, email: clientEmail || null }],
+          ),
+        'Offline sync: PDF + email',
       )
     }
   } catch (err) {
@@ -250,7 +246,8 @@ export async function processCollectionSubmission(
     const photoBase64s: Array<{ angle: string; label: string; base64: string; r2Url?: string }> = []
     for (const p of photos) {
       try {
-        const base64 = await blobToBase64(p.blob)
+        // Thumbnail first; resized fallback (see book-out processor note).
+        const base64 = p.pdfBase64 || (await resizeImageForPdf(p.blob))
         const photoKey = `events/${eventId}/${safeReg}/${p.angle}.jpg`
         const r2Url = r2PublicBase ? `${r2PublicBase}/${photoKey}` : undefined
         photoBase64s.push({ angle: p.angle, label: p.label, base64, r2Url })
@@ -262,39 +259,28 @@ export async function processCollectionSubmission(
       try { signatureBase64 = await blobToBase64(signatureBlob) } catch { /* skip */ }
     }
 
-    const pdfResult = await withRetry(
-      () =>
-        generateConditionReportPdf({
-          vehicleReg,
-          vehicleType: formData.vehicleType as string,
-          driverName,
-          clientEmail: clientEmail || undefined,
-          hireHopJob: hireHopJob || undefined,
-          mileage: isNaN(mileageNum) ? null : mileageNum,
-          fuelLevel: fuelLevel as import('../types/vehicle-event').FuelLevel | null,
-          eventDate,
-          eventDateTime,
-          photos: photoBase64s,
-          briefingItems: [],
-          signatureBase64,
-          isCheckIn: false,
-        }),
-      'Offline sync: Collection PDF',
-    )
-
-    if (pdfResult.success && pdfResult.data && clientEmail) {
+    if (clientEmail || hireHopJob) {
       await withRetry(
         () =>
-          sendConditionReportEmail({
-            to: clientEmail,
-            vehicleReg,
-            driverName,
-            eventDate,
-            pdfBase64: pdfResult.data!.pdf,
-            pdfFilename: pdfResult.data!.filename,
-            hireHopJob: hireHopJob || null,
-          }),
-        'Offline sync: Collection email',
+          sendConditionReport(
+            {
+              vehicleReg,
+              vehicleType: formData.vehicleType as string,
+              driverName,
+              clientEmail: clientEmail || undefined,
+              hireHopJob: hireHopJob || undefined,
+              mileage: isNaN(mileageNum) ? null : mileageNum,
+              fuelLevel: fuelLevel as import('../types/vehicle-event').FuelLevel | null,
+              eventDate,
+              eventDateTime,
+              photos: photoBase64s,
+              briefingItems: [],
+              signatureBase64,
+              isCheckIn: false,
+            },
+            [{ driverName, email: clientEmail || null }],
+          ),
+        'Offline sync: Collection PDF + email',
       )
     }
   } catch {
@@ -370,7 +356,8 @@ export async function processCheckInSubmission(
     const photoBase64s: Array<{ angle: string; label: string; base64: string; r2Url?: string }> = []
     for (const p of photos) {
       try {
-        const base64 = await blobToBase64(p.blob)
+        // Thumbnail first; resized fallback (see book-out processor note).
+        const base64 = p.pdfBase64 || (await resizeImageForPdf(p.blob))
         const photoKey = `events/${eventId}/${safeReg}/${p.angle}.jpg`
         const r2Url = r2PublicBase ? `${r2PublicBase}/${photoKey}` : undefined
         photoBase64s.push({ angle: p.angle, label: p.label, base64, r2Url })
@@ -385,43 +372,35 @@ export async function processCheckInSubmission(
     const clientEmail = formData.bookOutClientEmail as string | null
     const driverName = formData.bookOutDriverName as string || 'Unknown'
 
-    const pdfResult = await withRetry(
-      () =>
-        generateConditionReportPdf({
-          vehicleReg,
-          vehicleType: formData.vehicleType as string,
-          driverName,
-          clientEmail: clientEmail || undefined,
-          mileage: isNaN(mileageNum) ? null : mileageNum,
-          fuelLevel: fuelLevel as import('../types/vehicle-event').FuelLevel | null,
-          eventDate,
-          eventDateTime,
-          photos: photoBase64s,
-          briefingItems: [],
-          signatureBase64,
-          isCheckIn: true,
-          damageItems: damageItems.map(d => ({
-            location: d.location,
-            severity: d.severity as 'Critical' | 'Major' | 'Minor',
-            description: d.description,
-          })),
-        }),
-      'Offline sync: Check-in PDF',
-    )
-
-    if (pdfResult.success && pdfResult.data && clientEmail) {
+    const checkInHireHopJob = (formData.bookOutHireHopJob as string) || ''
+    if (clientEmail || checkInHireHopJob) {
       await withRetry(
         () =>
-          sendConditionReportEmail({
-            to: clientEmail,
-            vehicleReg,
-            driverName,
-            eventDate,
-            pdfBase64: pdfResult.data!.pdf,
-            pdfFilename: pdfResult.data!.filename,
-            hireHopJob: (formData.bookOutHireHopJob as string) || null,
-          }),
-        'Offline sync: Check-in email',
+          sendConditionReport(
+            {
+              vehicleReg,
+              vehicleType: formData.vehicleType as string,
+              driverName,
+              clientEmail: clientEmail || undefined,
+              hireHopJob: checkInHireHopJob || undefined,
+              mileage: isNaN(mileageNum) ? null : mileageNum,
+              fuelLevel: fuelLevel as import('../types/vehicle-event').FuelLevel | null,
+              eventDate,
+              eventDateTime,
+              photos: photoBase64s,
+              briefingItems: [],
+              signatureBase64,
+              isCheckIn: true,
+              damageItems: damageItems.map(d => ({
+                location: d.location,
+                severity: d.severity as 'Critical' | 'Major' | 'Minor',
+                description: d.description,
+              })),
+            },
+            [{ driverName, email: clientEmail || null }],
+            { damageCount: damageItems.length },
+          ),
+        'Offline sync: Check-in PDF + email',
       )
     }
   } catch {

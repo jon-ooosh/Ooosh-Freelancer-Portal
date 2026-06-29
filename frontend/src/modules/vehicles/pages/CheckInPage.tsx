@@ -18,6 +18,7 @@ import { checkMileagePlausibility } from '../lib/mileage-sanity'
 import { knotsToMph } from '../types/traccar'
 import type { IssueLocation } from '../types/issue'
 import { withRetry } from '../lib/retry'
+import OohCheckInPrompt from '../../../components/OohCheckInPrompt'
 import { mapSeverityToOpSeverity } from '../lib/op-issue-mapping'
 import { VehicleIssuesSurfaceBanner } from '../components/issues/VehicleIssuesSurfaceBanner'
 import { sendConditionReport, blobToBase64, resizeImageForPdf } from '../lib/pdf-email'
@@ -319,12 +320,41 @@ export function CheckInPage() {
 
         setCheckInStatus(ciStatus)
 
+        // The van's CURRENT hire comes from the DB assignment (authoritative),
+        // NOT the latest R2 book-out event. They diverge when a book-out flips
+        // the assignment status but its history event never landed — the event
+        // query then returns a STALE book-out from a previous hire, and we'd
+        // otherwise stamp this check-in against the wrong job (RX73TBZ 16057↔
+        // 16149, Jun 2026: the Unpeople return got recorded against the prior
+        // Ritchie Prior hire). Prefer the eligibility job whenever present.
+        // Coerce to string to match the existing book-out job pipeline
+        // (form.bookOutHireHopJob + getCollection are string-typed; the
+        // eligibility endpoint returns the job as a number).
+        const authoritativeJob =
+          !ciStatus.alreadyCheckedIn && ciStatus.hirehopJob != null
+            ? String(ciStatus.hirehopJob)
+            : null
+
         if (bookOut) {
+          if (
+            authoritativeJob != null &&
+            bookOut.hireHopJob != null &&
+            authoritativeJob !== bookOut.hireHopJob
+          ) {
+            console.warn(
+              `[check-in] Book-out event job (${bookOut.hireHopJob}) disagrees ` +
+                `with the van's open assignment (${authoritativeJob}) for ` +
+                `${form.vehicleReg} — using the assignment job. The book-out ` +
+                `history event for the live hire is likely stale or missing.`,
+            )
+          }
+          const resolvedJob = authoritativeJob ?? bookOut.hireHopJob
+
           // Fetch photos from R2 + collection data (if exists)
           const [photos, collection] = await Promise.all([
             fetchBookOutPhotos(bookOut.id, form.vehicleReg),
-            bookOut.hireHopJob
-              ? getCollection(form.vehicleReg, bookOut.hireHopJob)
+            resolvedJob
+              ? getCollection(form.vehicleReg, resolvedJob)
               : Promise.resolve(null),
           ])
           if (cancelled) return
@@ -340,7 +370,7 @@ export function CheckInPage() {
             bookOutMileage: bookOut.mileage,
             bookOutFuelLevel: bookOut.fuelLevel,
             bookOutDriverName: bookOut.driverName,
-            bookOutHireHopJob: bookOut.hireHopJob,
+            bookOutHireHopJob: resolvedJob,
             bookOutClientEmail: bookOut.clientEmail,
             bookOutNotes: bookOut.notes,
             bookOutPhotos: photos,
@@ -587,6 +617,13 @@ export function CheckInPage() {
               severity: mapSeverityToOpSeverity(damage.severity),
               summary: `${damage.location}: ${damage.description}`.slice(0, 250),
               description: locationNote,
+              // Link the issue to the job — resolved to the OP UUID
+              // server-side. Without this, check-in damage issues were
+              // vehicle-only: invisible on the Job Detail issues panel
+              // and the "Has issues" filter.
+              hirehop_job_number: form.bookOutHireHopJob
+                ? (parseInt(form.bookOutHireHopJob, 10) || null)
+                : null,
               r2_photo_keys: damagePhotoKeys.length > 0 ? damagePhotoKeys : undefined,
               reflag_context: {
                 source: 'checkin',
@@ -1020,6 +1057,12 @@ export function CheckInPage() {
             {form.vehicleReg} checked in
           </p>
         </div>
+
+        {/* OOH return compliance capture — renders only if this was an OOH return */}
+        <OohCheckInPrompt
+          reg={form.vehicleReg}
+          hhJobNumber={form.bookOutHireHopJob ? (parseInt(form.bookOutHireHopJob, 10) || null) : null}
+        />
 
         {opResults.length > 0 && (
           <div className="space-y-2">

@@ -171,15 +171,27 @@ router.get('/jobs', async (req: AuthRequest, res: Response) => {
       whereClause += ` AND (jobs.manager1_person_id = $${params.length} OR jobs.manager2_person_id = $${params.length})`;
     }
 
-    // Has-issues filter — only jobs with at least one OPEN issue (problem
-    // register row). Drives the "Issues" filter pill on the Jobs and Returns
-    // pages. NULL has_issues param = no filter.
+    // Has-issues filter — jobs with at least one OPEN problem-register row
+    // (job_issues — Stage 2 storage, migration 075) OR any requirement
+    // stuck in "Problem" (blocked) status, e.g. backline flagged at
+    // de-prep before the register hook existed. The old query checked
+    // requirement_type='issue' which migration 075 retired (all rows
+    // soft-cancelled), so it could never match anything.
+    // V&D-suspended requirements carry status='blocked' but are "not
+    // required", not problems — excluded per the suspension convention.
     if (has_issues === 'true' || has_issues === '1') {
-      whereClause += ` AND EXISTS (
-        SELECT 1 FROM job_requirements jr
-        WHERE jr.job_id = jobs.id
-          AND jr.requirement_type = 'issue'
-          AND jr.status NOT IN ('done', 'cancelled')
+      whereClause += ` AND (
+        EXISTS (
+          SELECT 1 FROM job_issues ji
+          WHERE ji.job_id = jobs.id
+            AND ji.status NOT IN ('resolved', 'written_off', 'cancelled')
+        )
+        OR EXISTS (
+          SELECT 1 FROM job_requirements jr
+          WHERE jr.job_id = jobs.id
+            AND jr.status = 'blocked'
+            AND (jr.notes IS NULL OR jr.notes NOT LIKE '%[Suspended: Van & Driver]%')
+        )
       )`;
     }
 
@@ -509,8 +521,8 @@ router.get('/jobs/:jobId/derived-flags', authenticate, async (req: AuthRequest, 
     const isUuid = /^[0-9a-f]{8}-/.test(jobId);
     const jobResult = await query(
       isUuid
-        ? `SELECT hh_derived_flags, line_items_synced_at, is_van_and_driver, vehicle_slot_modes FROM jobs WHERE id = $1`
-        : `SELECT hh_derived_flags, line_items_synced_at, is_van_and_driver, vehicle_slot_modes FROM jobs WHERE hh_job_number = $1`,
+        ? `SELECT hh_derived_flags, line_items_synced_at, is_van_and_driver, vehicle_slot_modes, self_drive_van_override FROM jobs WHERE id = $1`
+        : `SELECT hh_derived_flags, line_items_synced_at, is_van_and_driver, vehicle_slot_modes, self_drive_van_override FROM jobs WHERE hh_job_number = $1`,
       [isUuid ? jobId : parseInt(jobId, 10)]
     );
 
@@ -534,6 +546,10 @@ router.get('/jobs/:jobId/derived-flags', authenticate, async (req: AuthRequest, 
       flags,
       lastSynced: job.line_items_synced_at,
       vehicleSlotModes: job.vehicle_slot_modes || {},
+      // Sequential-swap override: the staff-declared real simultaneous
+      // self-drive van count (null = use HH-derived). Drives the structure
+      // control on the vehicle requirement card.
+      selfDriveVanOverride: job.self_drive_van_override ?? null,
       // Legacy field — kept for one release for any lingering clients
       isVanAndDriver: flags?.has_vehicle && flags?.self_drive_count === 0,
       seatAvailability,
@@ -596,6 +612,41 @@ router.patch('/jobs/:jobId/vehicle-slot-mode', authenticate, async (req: AuthReq
   }
 });
 
+// PATCH /api/hirehop/jobs/:jobId/vehicle-count-override — declare the real
+// simultaneous self-drive van count for a sequential-swap hire (HH lists
+// qty-2 but it's one van swapped mid-hire). count=null clears the override
+// (back to HH-derived). Re-derives so excess + requirements update.
+router.patch('/jobs/:jobId/vehicle-count-override', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const jobId = req.params.jobId as string;
+    const { count, note } = req.body as { count?: number | null; note?: string };
+
+    if (count !== null && count !== undefined && (!Number.isInteger(count) || count < 0)) {
+      res.status(400).json({ error: 'count must be a non-negative integer or null' });
+      return;
+    }
+
+    const exists = await query(`SELECT id FROM jobs WHERE id = $1`, [jobId]);
+    if (exists.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
+    await query(
+      `UPDATE jobs SET self_drive_van_override = $1, vehicle_structure_note = $2, updated_at = NOW() WHERE id = $3`,
+      [count ?? null, note ?? null, jobId]
+    );
+
+    const { deriveRequirementsForJob } = await import('../services/hh-requirement-derivation');
+    const derivation = await deriveRequirementsForJob(jobId);
+
+    res.json({ success: true, selfDriveVanOverride: count ?? null, derivation });
+  } catch (error) {
+    console.error('Vehicle count override error:', error);
+    res.status(500).json({ error: 'Failed to update' });
+  }
+});
+
 // PATCH /api/hirehop/jobs/:jobId/van-and-driver — legacy job-level toggle (kept for transitional clients)
 // Applies the chosen mode to every current vehicle slot.
 router.patch('/jobs/:jobId/van-and-driver', authenticate, async (req: AuthRequest, res: Response) => {
@@ -636,6 +687,66 @@ router.patch('/jobs/:jobId/van-and-driver', authenticate, async (req: AuthReques
     res.json({ success: true, isVanAndDriver: !!isVanAndDriver, vehicleSlotModes: modes, derivation });
   } catch (error) {
     console.error('Van & driver toggle error:', error);
+    res.status(500).json({ error: 'Failed to update' });
+  }
+});
+
+// PATCH /api/hirehop/jobs/:jobId/internal — mark a job as internal (garage
+// visits, MOTs, our own vehicle movements booked in HH to keep stock
+// accurate). Mutes the client-facing chain: hire forms + excess requirements
+// are soft-suspended, the job drops out of /money/overview aggregates, the
+// hire-form auto-emailer and last-minute booking alert skip it. Crew &
+// Transport, vehicle allocation, and the Turnaround Schedule stay live.
+router.patch('/jobs/:jobId/internal', async (req: AuthRequest, res: Response) => {
+  try {
+    const jobId = req.params.jobId as string;
+    const isInternal = !!req.body.isInternal;
+
+    const updated = await query(
+      `UPDATE jobs SET is_internal = $1, updated_at = NOW()
+       WHERE id = $2 AND is_deleted = false
+       RETURNING id, is_internal`,
+      [isInternal, jobId]
+    );
+    if (updated.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
+    // Audit trail — the toggle changes money reporting, so log who flipped it.
+    // Logged before the re-derivation so the timeline entry survives even if
+    // derivation hits a transient error.
+    try {
+      await query(
+        `INSERT INTO interactions (type, content, job_id, created_by)
+         VALUES ('note', $1, $2, $3)`,
+        [
+          isInternal
+            ? '🔧 Job marked as Internal — hire forms, excess and money tracking muted (crew & transport unaffected)'
+            : 'Job un-marked as Internal — hire forms, excess and money tracking re-enabled',
+          jobId,
+          req.user!.id,
+        ]
+      );
+    } catch (logErr) {
+      console.warn('Internal toggle: timeline log failed (non-fatal):', logErr);
+    }
+
+    // Re-derive so hire_forms/excess suspend (or restore) immediately rather
+    // than waiting for the next 30-min sync. The flag update above is the
+    // primary action — a derivation failure shouldn't make the toggle look
+    // like it didn't happen (the scheduled sync re-derives within 30 min).
+    let derivation = null;
+    try {
+      const { deriveRequirementsForJob } = await import('../services/hh-requirement-derivation');
+      derivation = await deriveRequirementsForJob(jobId);
+    } catch (deriveErr) {
+      console.error('Internal toggle: re-derivation failed (flag saved, sync will catch up):', deriveErr);
+    }
+
+    res.json({ success: true, isInternal, derivation });
+  } catch (error) {
+    console.error('Internal job toggle error:', error);
     res.status(500).json({ error: 'Failed to update' });
   }
 });

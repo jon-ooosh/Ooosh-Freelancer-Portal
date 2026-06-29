@@ -9,6 +9,7 @@ import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { getPaymentState, PAYMENT_STATE_LABELS, PAYMENT_STATE_CLASSES } from '../services/paymentState';
 import ExcessPaymentModal, { statusLabel, statusColor } from './ExcessPaymentModal';
+import CostCaptureModal from './CostCaptureModal';
 import type { JobExcess } from '../../../shared/types';
 
 interface MoneyTabProps {
@@ -138,7 +139,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
 
   // Record payment form
   const [showPaymentForm, setShowPaymentForm] = useState(false);
-  const [payType, setPayType] = useState('deposit');
+  const [payType] = useState('deposit');
   const [payAmount, setPayAmount] = useState('');
   const [payMethod, setPayMethod] = useState('worldpay');
   const [payRef, setPayRef] = useState('');
@@ -170,6 +171,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   // Job costs (Cost Capture) — quoted-vs-actual variance + extra/recharge list.
   const [jobCosts, setJobCosts] = useState<JobCostLite[]>([]);
   const [jobQuotes, setJobQuotes] = useState<JobQuoteLite[]>([]);
+  const [showAddCost, setShowAddCost] = useState(false);
 
   const openRefundModal = (dep: FinancialData['financial']['deposits'][number]) => {
     setRefundingDep(dep);
@@ -484,6 +486,25 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
       alert(err.message || 'Failed to create excess record');
     } finally {
       setLinkLoading(false);
+    }
+  }
+
+  // Create a manual excess record (£1,200 standard floor) and drop straight into
+  // the Manage modal, where the full lifecycle lives — payment, pre-auth hold,
+  // waive, rollover. This is the only "create from scratch" path now the Money
+  // tab's Record Payment form is hire-payments-only; it's only surfaced when the
+  // job has no excess record yet (derivation auto-creates one for self-drive).
+  async function handleAddExcessRecord() {
+    try {
+      const res = await api.post<{ data: JobExcess }>('/excess/create', {
+        job_id: jobId,
+        excess_amount_required: 1200,
+        excess_calculation_basis: 'Manual entry from Money tab',
+      });
+      await loadData();
+      setActionExcess(res.data);
+    } catch (err: any) {
+      alert(err.message || 'Failed to create excess record');
     }
   }
 
@@ -822,9 +843,15 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
             ))}
           </div>
         ) : (
-          <p className="text-sm text-gray-500">
-            No excess tracked yet. Use "Record Payment" above and toggle to "Insurance Excess" to log excess against this job.
-          </p>
+          <div className="text-sm text-gray-500">
+            <p className="mb-3">No insurance excess tracked for this job yet.</p>
+            <button
+              onClick={handleAddExcessRecord}
+              className="px-3 py-1.5 text-xs font-medium text-ooosh-600 hover:text-ooosh-800 border border-ooosh-200 rounded-md hover:bg-ooosh-50"
+            >
+              + Add excess record
+            </button>
+          </div>
         )}
 
         {/* Unmatched HH excess deposits — need manual linking */}
@@ -1009,7 +1036,14 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
       </div>
 
       {/* Job costs vs quotes (Cost Capture) */}
-      <JobCostsPanel costs={jobCosts} quotes={jobQuotes} />
+      <JobCostsPanel costs={jobCosts} quotes={jobQuotes} onAddCost={() => setShowAddCost(true)} />
+      {showAddCost && (
+        <CostCaptureModal
+          presetJobId={jobId}
+          onClose={() => setShowAddCost(false)}
+          onSaved={() => { setShowAddCost(false); loadJobCosts(); }}
+        />
+      )}
 
       {/* Record Payment Form */}
       {showPaymentForm && (() => {
@@ -1018,11 +1052,9 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
         const remaining = financial.balance_outstanding;
         const minDeposit = total < 400 ? total : Math.max(total * 0.25, 100);
         const halfPayment = Math.round(total * 0.5);
-        const isExcessMode = payType === 'excess';
-
-        // Quick amounts (only for hire payments, not excess)
+        // Quick amounts for hire payments (deposit / balance)
         const quickAmounts: { label: string; amount: number }[] = [];
-        if (!isExcessMode && total > 0) {
+        if (total > 0) {
           if (!financial.deposit_paid && total >= 400) {
             quickAmounts.push({ label: `Min. Deposit (25%) - £${minDeposit.toFixed(2)}`, amount: minDeposit });
             if (halfPayment > minDeposit && halfPayment < remaining) {
@@ -1038,7 +1070,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
         }
 
         // Auto-detect type: if deposit not yet paid, it's a deposit; otherwise balance
-        const autoType = isExcessMode ? 'excess' : (!financial.deposit_paid ? 'deposit' : 'balance');
+        const autoType = !financial.deposit_paid ? 'deposit' : 'balance';
 
         return (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setShowPaymentForm(false)}>
@@ -1046,91 +1078,10 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
               <h3 className="text-lg font-semibold text-gray-900 mb-4">Record Payment</h3>
 
               <div className="space-y-3">
-                {/* Toggle: Hire Payment vs Insurance Excess */}
-                <div className="flex bg-gray-100 rounded-lg p-0.5 mb-1">
-                  <button
-                    onClick={() => { setPayType('deposit'); setPayAmount(''); }}
-                    className={`flex-1 px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
-                      !isExcessMode ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500'
-                    }`}
-                  >
-                    Hire Payment
-                  </button>
-                  <button
-                    onClick={() => { setPayType('excess'); setPayAmount(''); }}
-                    className={`flex-1 px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
-                      isExcessMode ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500'
-                    }`}
-                  >
-                    Insurance Excess
-                  </button>
-                </div>
-
-                {/* Excess: link to existing record or create new.
-                    Show ALL records on the job regardless of status — including
-                    'taken' records, so staff can record a top-up against an
-                    excess that was thought to be fully collected. The previous
-                    filter excluded everything except needed/partially_paid,
-                    which led the modal to falsely promise auto-creation when
-                    a record already existed. */}
-                {isExcessMode && (() => {
-                  const allRecords = excess.records;
-
-                  if (allRecords.length === 0) {
-                    // Genuinely no excess records — backend will auto-create.
-                    return (
-                      <div className="px-3 py-2 text-xs bg-blue-50 border border-blue-200 rounded-md text-blue-700">
-                        No excess record exists for this job yet. One will be created automatically when you record this payment.
-                        It will be logged against: <strong>{job.client_name || job.company_name || 'this job'}</strong>
-                      </div>
-                    );
-                  }
-
-                  // Auto-select: prefer pre-collection records, then most recent.
-                  const sortedRecords = [...allRecords].sort((a, b) => {
-                    const aPriority = ['needed', 'pending', 'partially_paid', 'partial'].includes(a.excess_status) ? 0 : 1;
-                    const bPriority = ['needed', 'pending', 'partially_paid', 'partial'].includes(b.excess_status) ? 0 : 1;
-                    if (aPriority !== bPriority) return aPriority - bPriority;
-                    return new Date(b.updated_at || b.created_at || 0).getTime()
-                         - new Date(a.updated_at || a.created_at || 0).getTime();
-                  });
-                  if (allRecords.length === 1 && !payExcessId) {
-                    const rec = sortedRecords[0]!;
-                    setTimeout(() => {
-                      setPayExcessId(rec.id);
-                      setPayAmount(String(Math.max(0, Number(rec.excess_amount_required || 0) - Number(rec.excess_amount_taken || 0)).toFixed(2)));
-                    }, 0);
-                  }
-
-                  return (
-                    <div>
-                      <label className="block text-xs font-medium text-gray-600 mb-1">Excess Record</label>
-                      {allRecords.length === 1 ? (
-                        <div className="px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-md text-gray-700">
-                          {sortedRecords[0]!.driver_name || sortedRecords[0]!.client_name || 'Unknown'} — £{Number(sortedRecords[0]!.excess_amount_required || 0).toFixed(2)}
-                          {' '}({statusLabel(sortedRecords[0]!.excess_status)})
-                        </div>
-                      ) : (
-                        <select
-                          value={payExcessId}
-                          onChange={(e) => {
-                            setPayExcessId(e.target.value);
-                            const rec = excess.records.find(r => r.id === e.target.value);
-                            if (rec) setPayAmount(String(Math.max(0, Number(rec.excess_amount_required || 0) - Number(rec.excess_amount_taken || 0)).toFixed(2)));
-                          }}
-                          className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
-                        >
-                          <option value="">Select excess record...</option>
-                          {sortedRecords.map(r => (
-                            <option key={r.id} value={r.id}>
-                              {r.driver_name || r.client_name || 'Unknown'} — £{Number(r.excess_amount_required || 0).toFixed(2)} ({statusLabel(r.excess_status)})
-                            </option>
-                          ))}
-                        </select>
-                      )}
-                    </div>
-                  );
-                })()}
+                {/* Excess collection lives in the Insurance Excess section below
+                    (Manage on a record, or "+ Add excess record" when none) so the
+                    full lifecycle — including pre-auth holds — sits in one place.
+                    This form records hire payments only. */}
 
                 {/* Quick amount buttons */}
                 {quickAmounts.length > 0 && (
@@ -1193,9 +1144,6 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                     {PAYMENT_METHODS_BASE.map((m) => (
                       <option key={m.value} value={m.value}>{m.label}</option>
                     ))}
-                    {client_balance_on_account > 0 && isExcessMode && (
-                      <option value="rolled_over">Applied from Account Balance (£{client_balance_on_account.toFixed(2)} available)</option>
-                    )}
                   </select>
                 </div>
 
@@ -1245,11 +1193,11 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
 
                 <div className="flex gap-2 pt-2">
                   <button
-                    onClick={() => handleRecordPayment(isExcessMode ? 'excess' : autoType)}
+                    onClick={() => handleRecordPayment(autoType)}
                     disabled={payLoading}
                     className="flex-1 px-4 py-2 text-sm font-medium text-white bg-ooosh-600 hover:bg-ooosh-700 rounded-md disabled:opacity-50"
                   >
-                    {payLoading ? 'Recording...' : `Record ${isExcessMode ? 'Excess' : 'Payment'}`}
+                    {payLoading ? 'Recording...' : 'Record Payment'}
                   </button>
                   <button
                     onClick={() => { setShowPaymentForm(false); setPayError(''); setPayHHPushError(null); }}
@@ -1551,11 +1499,27 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
 // expected transport/crew cost. "Actuals" sums the quote_actual costs. Extra
 // costs are listed separately (eligible for client recharge). Hidden when the
 // job has neither costs nor quotes.
-function JobCostsPanel({ costs, quotes }: { costs: JobCostLite[]; quotes: JobQuoteLite[] }) {
+function JobCostsPanel({ costs, quotes, onAddCost }: { costs: JobCostLite[]; quotes: JobQuoteLite[]; onAddCost: () => void }) {
   const m = (n: number) => `£${n.toFixed(2)}`;
   const num = (n: number | null | undefined) => Number(n || 0);
 
-  if (!costs.length && !quotes.length) return null;
+  const AddBtn = (
+    <button onClick={onAddCost} className="text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-md px-3 py-1.5">
+      + Add cost
+    </button>
+  );
+
+  if (!costs.length && !quotes.length) {
+    return (
+      <div className="bg-white border border-gray-200 rounded-lg p-6 mb-6">
+        <div className="flex items-center justify-between">
+          <h3 className="text-lg font-semibold text-gray-900">Job Costs</h3>
+          {AddBtn}
+        </div>
+        <p className="text-sm text-gray-500 mt-2">No supplier costs, fuel, or freelancer invoices logged against this job yet.</p>
+      </div>
+    );
+  }
 
   const liveQuotes = quotes.filter((q) => q.status !== 'cancelled');
   const quotedCost = liveQuotes.reduce((s, q) => s + num(q.freelancer_fee_rounded ?? q.freelancer_fee), 0);
@@ -1580,9 +1544,12 @@ function JobCostsPanel({ costs, quotes }: { costs: JobCostLite[]; quotes: JobQuo
 
   return (
     <div className="bg-white border border-gray-200 rounded-lg p-6 mb-6">
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex items-center justify-between mb-4 gap-3">
         <h3 className="text-lg font-semibold text-gray-900">Job Costs</h3>
-        <a href="/money/costs" className="text-sm text-purple-700 hover:underline">Costs hub →</a>
+        <div className="flex items-center gap-3">
+          <a href="/money/costs" className="text-sm text-purple-700 hover:underline">Costs hub →</a>
+          {AddBtn}
+        </div>
       </div>
 
       {/* Quoted vs actual */}

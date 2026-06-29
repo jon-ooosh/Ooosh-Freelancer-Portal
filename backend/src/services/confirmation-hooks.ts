@@ -25,6 +25,7 @@ import { getFrontendUrl } from '../config/app-urls';
 export type HireFormTriggerReason =
   | 'sent'
   | 'van_and_driver'
+  | 'internal'
   | 'no_hh_job'
   | 'no_job_date'
   | 'too_far_out'
@@ -51,15 +52,17 @@ export async function triggerHireFormEmailOnConfirmation(
   jobId: string
 ): Promise<HireFormTriggerResult> {
   const jobData = await query(
-    `SELECT job_date, is_van_and_driver, hh_job_number FROM jobs WHERE id = $1`,
+    `SELECT job_date, is_van_and_driver, is_internal, hh_job_number FROM jobs WHERE id = $1`,
     [jobId]
   );
   if (jobData.rows.length === 0) {
     return { sent: 0, reason: 'error', context: 'job row not found' };
   }
-  const { job_date, is_van_and_driver, hh_job_number } = jobData.rows[0];
+  const { job_date, is_van_and_driver, is_internal, hh_job_number } = jobData.rows[0];
 
   if (is_van_and_driver) return { sent: 0, reason: 'van_and_driver' };
+  // Internal jobs (garage / our own vehicle movements) never get hire forms
+  if (is_internal) return { sent: 0, reason: 'internal' };
   if (!hh_job_number) return { sent: 0, reason: 'no_hh_job' };
   if (!job_date) return { sent: 0, reason: 'no_job_date' };
 
@@ -137,6 +140,47 @@ export async function triggerHireFormEmailOnConfirmation(
   const sent = await sendHireFormEmailForJob(jobRow.rows[0], false);
   if (sent === 0) return { sent: 0, reason: 'no_contacts', hasSelfDrive };
   return { sent, reason: 'sent', hasSelfDrive };
+}
+
+/**
+ * Called when a job transitions to 'confirmed'. Sends the carnet request form
+ * immediately if the job has a we-supply carnet still 'detected' and within the
+ * 28-day window — rather than waiting for the daily scheduler. Best-effort:
+ * ensures the carnet record exists (derives once if the 30-min sync hasn't
+ * created it yet), then delegates to the shared sender (which applies the
+ * lost/cancelled + internal gates + email routing). Never throws.
+ */
+export async function triggerCarnetFormOnConfirmation(jobId: string): Promise<number> {
+  try {
+    const jobData = await query(
+      `SELECT is_internal, hh_job_number FROM jobs WHERE id = $1`,
+      [jobId]
+    );
+    if (jobData.rows.length === 0) return 0;
+    const { is_internal, hh_job_number } = jobData.rows[0];
+    if (is_internal || !hh_job_number) return 0;
+
+    // Ensure the carnet record exists. Common case: the 30-min sync already
+    // created it, so no derivation needed. Only derive when it's missing.
+    const existing = await query(
+      `SELECT 1 FROM job_carnets WHERE job_id = $1 AND mode = 'we_supply' AND status = 'detected' LIMIT 1`,
+      [jobId]
+    );
+    if (existing.rows.length === 0) {
+      try {
+        const { deriveRequirementsForJob } = await import('./hh-requirement-derivation');
+        await deriveRequirementsForJob(jobId);
+      } catch (err) {
+        console.error(`[confirmation-hooks] carnet derivation failed for job ${jobId}:`, err);
+      }
+    }
+
+    const { sendCarnetFormForJob } = await import('./carnet-auto-email');
+    return await sendCarnetFormForJob(jobId);
+  } catch (err) {
+    console.error(`[confirmation-hooks] carnet on-confirmation failed for job ${jobId}:`, err);
+    return 0;
+  }
 }
 
 export type SilentSkipIssueKind = 'hire_form_email' | 'payment_email';

@@ -31,7 +31,7 @@ import type { OperationsData, BacklineOverview } from '../types';
  * ──────────────────────────────────────────────────────────────────────
  */
 
-export type SectionId = 'needs' | 'ontoday' | 'today' | 'up' | 'ops' | 'pipeline' | 'activity';
+export type SectionId = 'needs' | 'ontoday' | 'oohreturns' | 'today' | 'up' | 'ops' | 'pipeline' | 'activity';
 
 export interface DashboardSectionProps {
   data: OperationsData;

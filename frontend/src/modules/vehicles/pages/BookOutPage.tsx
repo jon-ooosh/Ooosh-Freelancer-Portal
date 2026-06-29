@@ -8,7 +8,7 @@ import { uploadAllPhotos } from '../lib/photo-upload'
 import { updateFleetHireStatus } from '../lib/fleet-status'
 import { getAllocations, saveAllocations } from '../lib/allocations-api'
 import { withRetry } from '../lib/retry'
-import { checkMileagePlausibility } from '../lib/mileage-sanity'
+import { checkMileagePlausibility, resolveMileageFloor } from '../lib/mileage-sanity'
 import { sendConditionReport, blobToBase64, resizeImageForPdf } from '../lib/pdf-email'
 import { PhotoCapture } from '../components/book-out/PhotoCapture'
 import { TimeInput } from '../../../components/TimeInput'
@@ -107,7 +107,7 @@ export function BookOutPage() {
   const [opResults, setOpResults] = useState<OpResult[]>([])
   const signatureRef = useRef<SignatureCaptureHandle>(null!)
   const isOnline = useOnlineStatus()
-  const [lastKnownMileage, setLastKnownMileage] = useState<number | null>(null)
+  const [lastEventMileage, setLastEventMileage] = useState<number | null>(null)
   const [queuedOffline, setQueuedOffline] = useState(false)
 
   // Form autosave to IndexedDB
@@ -190,12 +190,12 @@ export function BookOutPage() {
   // Fetch last known mileage when vehicle is selected
   useEffect(() => {
     if (!form.vehicleReg) {
-      setLastKnownMileage(null)
+      setLastEventMileage(null)
       return
     }
     fetchLastEventForVehicle(form.vehicleReg).then(event => {
-      setLastKnownMileage(event?.mileage ?? null)
-    }).catch(() => setLastKnownMileage(null))
+      setLastEventMileage(event?.mileage ?? null)
+    }).catch(() => setLastEventMileage(null))
   }, [form.vehicleReg])
 
   // Freelancer auto-redirect after clean submit: hands them back to the
@@ -222,6 +222,15 @@ export function BookOutPage() {
     () => (allVehicles || []).filter(v => !v.isOldSold),
     [allVehicles],
   )
+
+  // Mileage floor for the hard-block + high-jump baseline. Prefer the canonical
+  // fleet current_mileage (a manager can correct it DOWN to undo a bad high
+  // reading) over the last raw event — otherwise a corrected van stays blocked
+  // because the bad event still sits in history. See resolveMileageFloor.
+  const lastKnownMileage = useMemo(() => {
+    const veh = vehicles.find(v => v.id === form.vehicleId)
+    return resolveMileageFloor({ currentMileage: veh?.currentMileage, lastEventMileage })
+  }, [vehicles, form.vehicleId, lastEventMileage])
 
   // V&D mode: seed mode + assignment ID into form state once V&D is
   // confirmed (either via URL ?mode= or via auto-detect from slot data).
@@ -900,6 +909,7 @@ export function BookOutPage() {
           body: JSON.stringify({
             assignment_id: leadEntry.id,
             certificate_number: form.ve103b,
+            source: 'book_out',
           }),
         })
         if (response.ok) {
@@ -1690,7 +1700,7 @@ function Ve103bDeskGate({
       const resp = await apiFetch('/api/ve103b/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ assignment_id: leadEntry.id, certificate_number: form.ve103b }),
+        body: JSON.stringify({ assignment_id: leadEntry.id, certificate_number: form.ve103b, source: 'book_out' }),
       })
       if (resp.ok) {
         const data = await resp.json()
@@ -2674,7 +2684,9 @@ function StepVehicleState({
         )}
         {isBelowLast && (
           <p className="mt-1 text-xs font-medium text-red-600">
-            Mileage cannot be lower than the last recorded reading ({lastKnownMileage!.toLocaleString()} mi)
+            That's below the recorded mileage ({lastKnownMileage!.toLocaleString()} mi). If the odometer
+            really reads this, a manager can correct the vehicle's recorded mileage on the vehicle page,
+            then this will save.
           </p>
         )}
         {highJump.level === 'high' && (

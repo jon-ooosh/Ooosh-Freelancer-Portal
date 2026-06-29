@@ -56,6 +56,46 @@ router.put('/', authorize('admin', 'manager'), validate(updateSchema), async (re
   }
 });
 
+// ── TEMPORARY: SMS connectivity test ─────────────────────────────────
+// Powers the "Send test SMS" button in the OOH Settings section. Confirms the
+// Twilio credentials work end-to-end without waiting for a van to approach base.
+// In test mode (SMS_MODE=test) the message redirects to SMS_TEST_REDIRECT
+// regardless of the number entered.
+// REMOVE this route + the Settings button + smsService.sendTest() once go-live
+// is confirmed. Tracked in the GitHub reminder issue.
+router.post('/test-sms', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { smsService } = await import('../services/sms-service');
+    const supplied = typeof req.body?.to === 'string' ? req.body.to.trim() : '';
+    const to = supplied || process.env.SMS_TEST_REDIRECT || '';
+    if (!to) {
+      return res.status(400).json({ error: 'No number supplied and SMS_TEST_REDIRECT is not set.' });
+    }
+    const result = await smsService.sendTest(to);
+    if (!result.success) {
+      return res.status(result.skipped ? 503 : 502).json({ error: result.error || 'SMS send failed' });
+    }
+    res.json({ success: true, redirectedTo: result.redirectedTo || null });
+  } catch (error) {
+    console.error('[system-settings] test-sms error:', error);
+    res.status(500).json({ error: 'Test SMS failed' });
+  }
+});
+
+// TEMPORARY: run the OOH approach geofence scan on demand (the cron only runs
+// 17:00–08:59). Lets staff test the geofence in daylight. REMOVE with the test
+// SMS button after go-live. Tracked in the GitHub reminder issue.
+router.post('/run-ooh-scan', authorize('admin', 'manager'), async (_req: AuthRequest, res: Response) => {
+  try {
+    const { runOohApproachScan } = await import('../services/ooh-sms-approach');
+    const summary = await runOohApproachScan();
+    res.json({ success: true, ...summary });
+  } catch (error) {
+    console.error('[system-settings] run-ooh-scan error:', error);
+    res.status(500).json({ error: 'Scan failed' });
+  }
+});
+
 export default router;
 
 // ── Helper for backend code that needs to read settings ──────────────

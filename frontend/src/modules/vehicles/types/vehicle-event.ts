@@ -109,12 +109,15 @@ export const LEGACY_WINDSCREEN_ANGLE = 'windscreen'
  *
  * `extra_${number}` is the canonical shape for an optional book-out
  * extra: a unique angle per capture so a check-in retake can target the
- * same slot without colliding with sibling extras. `'other'` / `'damage'`
- * / `damage_${number}` are kept for backwards compatibility with legacy
- * data and the in-progress damage flow on check-in.
+ * same slot without colliding with sibling extras. `flag_${number}` is the
+ * equivalent for prep flag photos — each flagged checklist item gets a
+ * unique angle so multiple flag photos don't overwrite each other in R2
+ * (they all used to share `'other'`). `'other'` / `'damage'` /
+ * `damage_${number}` are kept for backwards compatibility with legacy data
+ * and the in-progress damage flow on check-in.
  */
 export interface CapturedPhoto {
-  angle: PhotoAngle | 'damage' | 'other' | `damage_${number}` | `extra_${number}`
+  angle: PhotoAngle | 'damage' | 'other' | `damage_${number}` | `extra_${number}` | `flag_${number}`
   label: string
   blobUrl: string        // Object URL for preview
   blob: Blob             // Actual image data

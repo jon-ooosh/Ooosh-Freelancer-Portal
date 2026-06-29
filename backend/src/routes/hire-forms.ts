@@ -17,7 +17,7 @@ import {
   type FlexibleVehicleRequest,
 } from '../middleware/freelancer-bookout-auth';
 import { validate } from '../middleware/validate';
-import { generateHireFormPdf, fetchLogo, type HireFormData } from '../services/hire-form-pdf';
+import { generateHireFormPdf, fetchLogo, composeMakeModel, type HireFormData } from '../services/hire-form-pdf';
 import { uploadToR2, getFromR2 } from '../config/r2';
 import { emailService } from '../services/email-service';
 import { getFrontendUrl } from '../config/app-urls';
@@ -710,7 +710,7 @@ router.get('/by-job/:hirehopJobId', authenticateVehicleFlexible, async (req: Fle
       LEFT JOIN job_excess je ON je.assignment_id = vha.id
       WHERE vha.hirehop_job_id = $1
         AND vha.assignment_type = 'self_drive'
-        AND vha.status != 'cancelled'
+        AND vha.status NOT IN ('cancelled', 'swapped')
       ORDER BY vha.van_requirement_index ASC`,
       [hirehopJobId]
     );
@@ -977,19 +977,35 @@ router.post('/quick-assign', authenticate, validate(quickAssignSchema), async (r
     // back to 1 if the derivation engine hasn't run yet for this job
     // (e.g. freshly-created OP-native job).
     const flagsResult = await query(
-      `SELECT hh_derived_flags FROM jobs WHERE id = $1`,
+      `SELECT hh_derived_flags, is_internal FROM jobs WHERE id = $1`,
       [f.job_id]
     );
     const flags = flagsResult.rows[0]?.hh_derived_flags as { self_drive_count?: number } | null;
     const vanCount = Math.max(flags?.self_drive_count || 1, 1);
+    const isInternalJob = flagsResult.rows[0]?.is_internal === true;
+
+    // Internal jobs (garage visits / our own vehicle movements) never charge
+    // excess — record the assignment as not_required (£0) for audit and skip
+    // the orphan/top-N logic entirely. Without this gate, quick-assign would
+    // create (or un-waive) a £1,200 record on a job with no client to charge.
+    if (isInternalJob) {
+      await query(
+        `INSERT INTO job_excess (assignment_id, job_id, hirehop_job_id, excess_amount_required, excess_calculation_basis, excess_status, created_by)
+         VALUES ($1, $2, $3, 0, 'Internal job — excess not applicable', 'not_required', $4)`,
+        [assignment.id, f.job_id, hhJobId, req.user!.id]
+      );
+      console.log(`[hire-forms] Quick-assign on internal job: assignment ${assignment.id} recorded with not_required excess`);
+    } else {
 
     // Try to absorb an orphan record created by the derivation engine.
+    // 'waived' is excluded — a waived record (staff decision, V&D cascade or
+    // internal-job cascade) must never be silently flipped back to 'pending'.
     // 'released' is terminal (migration 087) — absorbing one resurrects a dead
     // pre-auth to 'pending' with stale amount_held (job 15934 incident, Jun 2026).
     const orphanExcess = await query(
       `SELECT id FROM job_excess
        WHERE job_id = $1 AND assignment_id IS NULL
-         AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required', 'released')
+         AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required', 'waived', 'released')
        ORDER BY created_at ASC LIMIT 1`,
       [f.job_id]
     );
@@ -1042,6 +1058,7 @@ router.post('/quick-assign', authenticate, validate(quickAssignSchema), async (r
         console.log(`[hire-forms] Quick-assign additional driver: assignment ${assignment.id} (driver ${activeCount + 1} on ${vanCount}-van job, not_required)`);
       }
     }
+    } // end !isInternalJob
 
     console.log(`[hire-forms] Quick assignment created: ${assignment.id} (driver ${f.driver_id} → vehicle ${f.vehicle_id || 'unassigned'} on job ${f.job_id}, van_count=${vanCount})`);
 
@@ -1276,6 +1293,25 @@ function firePostBookOutHooks(opts: {
     });
   }
 
+  // Multi-van fan-out: every OTHER self-drive driver on the job also gets a
+  // hire agreement for THIS van — the "everyone drives everything" paperwork,
+  // so each driver holds proof of eligibility for every van. No-op on
+  // single-van jobs (no other-van drivers). Idempotent per (driver, van) via
+  // the hire_form_documents UNIQUE constraint.
+  setImmediate(() => {
+    runHookWithRecovery(
+      {
+        hookLabel: 'Multi-van hire form fan-out',
+        jobId,
+        hhJobNumber,
+        assignmentId,
+      },
+      () => fanOutVanHireForms({ jobId, hhJobNumber, vanVehicleId: vehicleId })
+    ).catch((err) => {
+      console.error(`[hire-forms] Multi-van fan-out failed for van ${vehicleId} on job ${jobId ?? hhJobNumber}:`, err);
+    });
+  });
+
   // Out-of-hours return info email (function dedupes per-assignment via
   // ooh_info_sent_at, so safe to call when only some vans on the job are OOH).
   if (returnOvernight === true && jobId) {
@@ -1393,6 +1429,36 @@ router.patch('/:id', authenticateVehicleFlexible, validate(patchSchema), async (
       }
     }
 
+    // Guard: never let a vehicle-link or book-out write land on a TERMINAL row
+    // (swapped / returned / cancelled). After a swap, by-job used to surface the
+    // swapped original alongside the replacement; the BookOutPage writeback loop
+    // then stamped the replacement van's reg + status='booked_out' onto the
+    // swapped row, resurrecting it as a duplicate booked_out row and leaving the
+    // outgoing van with no live assignment (job 15828, RX21UOB→RX24SZE, Jun 2026
+    // — the same class as RX73TBZ). by-job no longer returns swapped rows, but
+    // this is the belt-and-braces stop for any other caller: a stale tab, an
+    // offline-queue replay, or a direct API call. No-op (200) rather than 4xx so
+    // the writeback loop treats it as success and moves on without corrupting it.
+    const wantsVehicleChange = updates.vehicle_id !== undefined;
+    const wantsBookOut = updates.status === 'booked_out';
+    if (wantsVehicleChange || wantsBookOut) {
+      const cur = await query(
+        `SELECT status FROM vehicle_hire_assignments WHERE id = $1`,
+        [id]
+      );
+      if (cur.rows.length === 0) {
+        return res.status(404).json({ error: 'Hire form not found' });
+      }
+      const curStatus = cur.rows[0].status as string;
+      if (curStatus === 'swapped' || curStatus === 'returned' || curStatus === 'cancelled') {
+        console.warn(
+          `[hire-forms] PATCH ignored on terminal row ${id} (status=${curStatus}); ` +
+          `refusing vehicle-link/book-out write (wantsVehicleChange=${wantsVehicleChange}, wantsBookOut=${wantsBookOut})`
+        );
+        return res.json({ data: { id, no_op: true, reason: 'terminal_status' } });
+      }
+    }
+
     // Overlap check when a vehicle is being linked/changed. We only run the
     // check if vehicle_id is being SET to a non-null value; unlinking (null)
     // is always allowed. Self-assignment (same vehicle) is excluded via the
@@ -1449,6 +1515,28 @@ router.patch('/:id', authenticateVehicleFlexible, validate(patchSchema), async (
 
     if (updates.status) {
       setClauses.push(`status_changed_at = NOW()`);
+    }
+
+    // Stamp booked_out_at (and booked_out_by) on the booked_out transition.
+    // Without this, a book-out driven purely through this PATCH — the
+    // BookOutPage writeback loop that flips every hire form on the van — leaves
+    // booked_out_at NULL. Only the SEPARATE save-event vehicle event ever set
+    // it. When that event fails to land (transient error, abandoned walkaround,
+    // offline-queue not flushed), the row reads as booked_out with no timestamp
+    // and no history card, which then fools the check-in job-resolver into
+    // picking a stale book-out from a PREVIOUS hire (RX73TBZ, jobs 16057↔16149,
+    // Jun 2026 — the Unpeople return got stamped against the prior Ritchie Prior
+    // hire). COALESCE keeps it idempotent on PATCH retries and never overwrites
+    // a real walkaround timestamp. Freelancer book-outs (no req.user) still get
+    // booked_out_at; they just don't stamp booked_out_by.
+    if (updates.status === 'booked_out') {
+      setClauses.push(`booked_out_at = COALESCE(booked_out_at, NOW())`);
+      const bookedOutActor = req.user?.id || null;
+      if (bookedOutActor) {
+        setClauses.push(`booked_out_by = COALESCE(booked_out_by, $${paramIdx})`);
+        values.push(bookedOutActor);
+        paramIdx++;
+      }
     }
 
     setClauses.push('updated_at = NOW()');
@@ -1999,6 +2087,156 @@ async function generateAndEmailHireFormPdf(assignmentId: string, trigger: string
   }
 }
 
+/**
+ * Fan a just-booked-out van's hire agreement out to every OTHER self-drive
+ * driver on the job (drivers not on this van get a PDF for it too, so on a
+ * multi-van hire every driver ends up holding an agreement for every van).
+ *
+ * No-op on single-van jobs: the only drivers are on the booked-out van, so
+ * the target set is empty. Each (driver, van) PDF is generated + emailed
+ * exactly once — the hire_form_documents UNIQUE(assignment_id, vehicle_id)
+ * constraint serialises concurrent book-out hooks (a multi-driver van fires
+ * this once per driver) so nobody is emailed twice. Throws if any cross-van
+ * email failed, so runHookWithRecovery retries just the failed ones (a failed
+ * leg drops its claim row, the succeeded ones short-circuit on re-run).
+ */
+async function fanOutVanHireForms(ctx: {
+  jobId: string | null;
+  hhJobNumber: number | null;
+  vanVehicleId: string;
+}): Promise<void> {
+  const { jobId, hhJobNumber, vanVehicleId } = ctx;
+
+  // Target = signed self-drive drivers on the job NOT on the booked-out van
+  // (those get this van's agreement via their own-van column path). One row
+  // per driver. `IS DISTINCT FROM` keeps not-yet-allocated (NULL vehicle_id)
+  // drivers in the target set too.
+  const targets = await query(
+    `SELECT DISTINCT ON (vha.driver_id) vha.id
+       FROM vehicle_hire_assignments vha
+      WHERE (($1::uuid IS NOT NULL AND vha.job_id = $1)
+             OR ($2::int IS NOT NULL AND vha.hirehop_job_id = $2))
+        AND vha.assignment_type = 'self_drive'
+        AND vha.driver_id IS NOT NULL
+        AND vha.status NOT IN ('cancelled', 'swapped')
+        AND vha.vehicle_id IS DISTINCT FROM $3
+      ORDER BY vha.driver_id, vha.created_at`,
+    [jobId, hhJobNumber, vanVehicleId]
+  );
+  if (targets.rows.length === 0) return;
+
+  let anyFailed = false;
+  for (const t of targets.rows) {
+    const status = await generateAndEmailCrossVanHireForm(t.id as string, vanVehicleId, { jobId, hhJobNumber });
+    if (status === 'failed') anyFailed = true;
+  }
+  if (anyFailed) {
+    throw new Error('one or more cross-van hire form emails failed — will retry');
+  }
+}
+
+/**
+ * Generate + email ONE driver a hire agreement for a van that is NOT their
+ * own assigned van (the cross-van leg of fanOutVanHireForms). Same driver
+ * data + dates as their own agreement, with the other van's reg/model swapped
+ * in — the PDF builder already takes a single reg, so no builder change.
+ *
+ * Idempotency: claim-first INSERT against UNIQUE(assignment_id, vehicle_id).
+ * Loser of a concurrent race gets 0 rows → 'skipped' (never emails). On email
+ * failure the claim is dropped so a later book-out can retry cleanly.
+ */
+async function generateAndEmailCrossVanHireForm(
+  driverAssignmentId: string,
+  vanVehicleId: string,
+  ctx: { jobId: string | null; hhJobNumber: number | null },
+): Promise<'sent' | 'skipped' | 'failed'> {
+  const claim = await query(
+    `INSERT INTO hire_form_documents (assignment_id, vehicle_id, driver_id, job_id, hirehop_job_id)
+     SELECT $1, $2, vha.driver_id, $3, $4
+       FROM vehicle_hire_assignments vha WHERE vha.id = $1
+     ON CONFLICT (assignment_id, vehicle_id) DO NOTHING
+     RETURNING id`,
+    [driverAssignmentId, vanVehicleId, ctx.jobId, ctx.hhJobNumber],
+  );
+  if (claim.rows.length === 0) return 'skipped';
+  const docId = claim.rows[0].id as string;
+
+  try {
+    const formData = await loadHireFormData(driverAssignmentId);
+    if (!formData) {
+      await query(`DELETE FROM hire_form_documents WHERE id = $1`, [docId]);
+      return 'failed';
+    }
+
+    const van = await query(`SELECT reg, vehicle_type, make, model FROM fleet_vehicles WHERE id = $1`, [vanVehicleId]);
+    const vanReg = van.rows[0]?.reg as string | undefined;
+    const vanModel = (van.rows[0]?.vehicle_type as string | undefined) || '';
+    if (!vanReg || vanReg === 'TBC') {
+      await query(`DELETE FROM hire_form_documents WHERE id = $1`, [docId]);
+      return 'failed';
+    }
+
+    // Swap in the cross van — everything else stays the driver's own.
+    formData.vehicleReg = vanReg;
+    formData.vehicleModel = vanModel;
+    formData.vehicleMakeModel = composeMakeModel(van.rows[0]?.make, van.rows[0]?.model) || undefined;
+
+    const { pdfBytes, filename } = await generateHireFormPdf(formData);
+    const r2Key = `hire-forms/${driverAssignmentId}/${filename}`;
+    await uploadToR2(r2Key, Buffer.from(pdfBytes), 'application/pdf');
+
+    const target = await resolveHireFormEmailTarget(driverAssignmentId, formData.email);
+    if (target.kind === 'none') {
+      // No recipient — keep the PDF + record (proof of authorisation) but leave
+      // emailed_at NULL. Won't auto-retry; staff can resend if a contact lands.
+      await query(
+        `UPDATE hire_form_documents SET vehicle_reg = $1, pdf_r2_key = $2 WHERE id = $3`,
+        [vanReg, r2Key, docId],
+      );
+      console.warn(`[hire-forms] cross-van: no recipient for ${driverAssignmentId} van ${vanReg}; PDF stored, not emailed`);
+      return 'skipped';
+    }
+
+    const emailResult = await emailService.send('hire_form', {
+      to: target.to,
+      cc: target.cc.length > 0 ? target.cc : undefined,
+      prependBanner: target.kind === 'fallback' ? target.banner : undefined,
+      variables: {
+        driverName: formData.driverName,
+        vehicleReg: vanReg,
+        vehicleModel: vanModel || 'TBC',
+        hireStart: fmtDate(formData.hireStartDate),
+        hireEnd: fmtDate(formData.hireEndDate),
+        jobNumber: formData.hhJobNumber || '',
+        multiVanNote: 'yes',
+      },
+      attachments: [{ filename, content: Buffer.from(pdfBytes), contentType: 'application/pdf' }],
+    });
+
+    if (!emailResult.success) {
+      await query(`DELETE FROM hire_form_documents WHERE id = $1`, [docId]);
+      console.warn(`[hire-forms] cross-van: email failed for ${driverAssignmentId} van ${vanReg}`);
+      return 'failed';
+    }
+
+    await query(
+      `UPDATE hire_form_documents
+         SET vehicle_reg = $1, pdf_r2_key = $2, email_to = $3, emailed_at = NOW()
+       WHERE id = $4`,
+      [vanReg, r2Key, target.to, docId],
+    );
+    if (target.kind === 'fallback' && target.jobId) {
+      await logFallbackToTimeline({ jobId: target.jobId, templateId: 'hire_form' });
+    }
+    console.log(`[hire-forms] cross-van: ${vanReg} agreement sent to ${target.to} for assignment ${driverAssignmentId}`);
+    return 'sent';
+  } catch (err) {
+    await query(`DELETE FROM hire_form_documents WHERE id = $1`, [docId]).catch(() => {});
+    console.error(`[hire-forms] cross-van: error for ${driverAssignmentId} van ${vanVehicleId}:`, err);
+    return 'failed';
+  }
+}
+
 // ── Helper: load full data for PDF generation ──
 
 async function loadHireFormData(assignmentId: string): Promise<HireFormData | null> {
@@ -2023,6 +2261,8 @@ async function loadHireFormData(assignmentId: string): Promise<HireFormData | nu
       COALESCE(j.hh_job_number, vha.hirehop_job_id) AS resolved_hh_job_number,
       fv.reg AS vehicle_reg,
       fv.vehicle_type AS vehicle_model,
+      fv.make AS vehicle_make,
+      fv.model AS vehicle_make_model,
       d.full_name AS driver_name,
       d.email AS driver_email,
       d.phone AS driver_phone,
@@ -2160,6 +2400,7 @@ async function loadHireFormData(assignmentId: string): Promise<HireFormData | nu
     datePassedTest: toISODate(row.driver_date_passed_test),
     vehicleReg: row.vehicle_reg || '',
     vehicleModel: row.vehicle_model || '',
+    vehicleMakeModel: composeMakeModel(row.vehicle_make, row.vehicle_make_model) || undefined,
     hireStartDate: toISODate(row.resolved_hire_start),
     hireStartTime: row.resolved_start_time ? String(row.resolved_start_time) : undefined,
     hireEndDate: toISODate(row.resolved_hire_end),
@@ -2762,10 +3003,24 @@ async function processAdditionalDriverCharge(hhJobId: number, jobId: string | nu
     }
   }
 
-  const freeDrivers = vehicleCount * DRIVERS_PER_VEHICLE;
+  // Sequential-swap override: if staff have declared the real simultaneous
+  // van count (HH lists qty-2 but it's one van swapped mid-hire), use that for
+  // the free-driver allowance (2 free per real van) instead of the raw HH qty.
+  // Otherwise an undercharge: a 1-van swap with 3 drivers would read 4 free
+  // (2 vans x 2) and bill nobody, when 1 should be chargeable. Same column the
+  // derivation reads for excess; capped so the override can only REDUCE.
+  const overrideRow = jobId
+    ? await query(`SELECT self_drive_van_override FROM jobs WHERE id = $1`, [jobId])
+    : await query(`SELECT self_drive_van_override FROM jobs WHERE hh_job_number = $1`, [hhJobId]);
+  const vanOverride = overrideRow.rows[0]?.self_drive_van_override;
+  const effectiveVanCount = (vanOverride !== null && vanOverride !== undefined)
+    ? Math.min(Number(vanOverride), vehicleCount)
+    : vehicleCount;
+
+  const freeDrivers = effectiveVanCount * DRIVERS_PER_VEHICLE;
   const chargeableDrivers = Math.max(0, driverCount - freeDrivers);
   const newChargesNeeded = Math.max(0, chargeableDrivers - existingCharges);
-  console.log(`[processAdditionalDriverCharge] HH job ${hhJobId}: drivers=${driverCount}, vehicles=${vehicleCount}, free=${freeDrivers}, chargeable=${chargeableDrivers}, existing=${existingCharges}, new=${newChargesNeeded}`);
+  console.log(`[processAdditionalDriverCharge] HH job ${hhJobId}: drivers=${driverCount}, vehicles=${vehicleCount}, effectiveVans=${effectiveVanCount}, free=${freeDrivers}, chargeable=${chargeableDrivers}, existing=${existingCharges}, new=${newChargesNeeded}`);
 
   if (newChargesNeeded <= 0) {
     return { driverCount, vehicleCount, freeDrivers, existingCharges, chargesAdded: 0, message: 'No additional charges needed' };

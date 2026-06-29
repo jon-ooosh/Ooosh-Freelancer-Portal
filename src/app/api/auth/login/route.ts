@@ -7,6 +7,7 @@ import {
   FREELANCER_COLUMNS
 } from '@/lib/monday'
 import { isOpMode, loginToOP, reportFallback, mondayFallbackAllowed } from '@/lib/op-api'
+import { checkRateLimit, recordFailedAttempt, clearFailedAttempts } from '@/lib/login-rate-limit'
 
 // Session secret for JWT signing
 const getSessionSecret = () => {
@@ -17,47 +18,19 @@ const getSessionSecret = () => {
   return new TextEncoder().encode(secret)
 }
 
-// Rate limiting storage (in production, use Redis or similar)
-const loginAttempts = new Map<string, { count: number; lastAttempt: number }>()
+// Shown when the account is already locked out (15-min cooldown). Steers the
+// user to the reset flow rather than letting them keep hammering a 429.
+const LOCKOUT_MESSAGE =
+  'Sign-in is paused after too many attempts. Please reset your password using "Forgot your password?" below, or try again in 15 minutes.'
 
-const MAX_ATTEMPTS = 5
-const LOCKOUT_DURATION = 15 * 60 * 1000 // 15 minutes
-
-function checkRateLimit(email: string): { allowed: boolean; remainingAttempts?: number } {
-  const now = Date.now()
-  const attempts = loginAttempts.get(email)
-
-  if (!attempts) {
-    return { allowed: true, remainingAttempts: MAX_ATTEMPTS }
+// Wrong-password copy. As the user approaches the lockout we tell them how many
+// attempts remain and, on the final one, point them straight at Forgot Password.
+function wrongPasswordMessage(remainingAttempts: number): string {
+  if (remainingAttempts <= 0) {
+    return 'Incorrect password. For security we\'ve paused sign-in for this account — please reset your password using "Forgot your password?" below.'
   }
-
-  // Reset if lockout period has passed
-  if (now - attempts.lastAttempt > LOCKOUT_DURATION) {
-    loginAttempts.delete(email)
-    return { allowed: true, remainingAttempts: MAX_ATTEMPTS }
-  }
-
-  // Check if locked out
-  if (attempts.count >= MAX_ATTEMPTS) {
-    return { allowed: false }
-  }
-
-  return { allowed: true, remainingAttempts: MAX_ATTEMPTS - attempts.count }
-}
-
-function recordFailedAttempt(email: string) {
-  const now = Date.now()
-  const attempts = loginAttempts.get(email)
-
-  if (!attempts) {
-    loginAttempts.set(email, { count: 1, lastAttempt: now })
-  } else {
-    loginAttempts.set(email, { count: attempts.count + 1, lastAttempt: now })
-  }
-}
-
-function clearFailedAttempts(email: string) {
-  loginAttempts.delete(email)
+  const attempts = remainingAttempts === 1 ? '1 attempt' : `${remainingAttempts} attempts`
+  return `Incorrect password — ${attempts} left before you'll need to reset your password.`
 }
 
 export async function POST(request: NextRequest) {
@@ -79,7 +52,7 @@ export async function POST(request: NextRequest) {
     const rateLimit = checkRateLimit(normalizedEmail)
     if (!rateLimit.allowed) {
       return NextResponse.json(
-        { error: 'Too many login attempts. Please try again in 15 minutes.' },
+        { error: LOCKOUT_MESSAGE },
         { status: 429 }
       )
     }
@@ -135,9 +108,9 @@ export async function POST(request: NextRequest) {
         // 500. If a freelancer genuinely only exists in Monday they should
         // use Forgot Password to register on OP.
         if (opResult.status === 401) {
-          recordFailedAttempt(normalizedEmail)
+          const remaining = recordFailedAttempt(normalizedEmail)
           return NextResponse.json(
-            { error: "Incorrect password — please try again, or use \"Forgot your password?\" below if you've forgotten it." },
+            { error: wrongPasswordMessage(remaining) },
             { status: 401 }
           )
         }
@@ -168,9 +141,9 @@ export async function POST(request: NextRequest) {
 
     if (!freelancer) {
       console.log('Login: Freelancer not found in Monday.com:', normalizedEmail)
-      recordFailedAttempt(normalizedEmail)
+      const remaining = recordFailedAttempt(normalizedEmail)
       return NextResponse.json(
-        { error: "Incorrect password — please try again, or use \"Forgot your password?\" below if you've forgotten it." },
+        { error: wrongPasswordMessage(remaining) },
         { status: 401 }
       )
     }
@@ -197,9 +170,9 @@ export async function POST(request: NextRequest) {
 
     if (!passwordValid) {
       console.log('Login: Password mismatch for:', normalizedEmail)
-      recordFailedAttempt(normalizedEmail)
+      const remaining = recordFailedAttempt(normalizedEmail)
       return NextResponse.json(
-        { error: "Incorrect password — please try again, or use \"Forgot your password?\" below if you've forgotten it." },
+        { error: wrongPasswordMessage(remaining) },
         { status: 401 }
       )
     }

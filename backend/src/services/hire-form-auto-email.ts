@@ -46,6 +46,7 @@ export async function sendAutoHireFormEmails(): Promise<AutoEmailResult> {
        JOIN job_requirements jr ON jr.job_id = j.id AND jr.requirement_type = 'hire_forms'
        WHERE j.is_deleted = false
          AND j.is_van_and_driver = false
+         AND COALESCE(j.is_internal, false) = false
          AND j.hh_job_number IS NOT NULL
          AND j.job_date IS NOT NULL
          AND jr.status = 'not_started'
@@ -83,6 +84,7 @@ export async function sendAutoHireFormEmails(): Promise<AutoEmailResult> {
        JOIN job_requirements jr ON jr.job_id = j.id AND jr.requirement_type = 'hire_forms'
        WHERE j.is_deleted = false
          AND j.is_van_and_driver = false
+         AND COALESCE(j.is_internal, false) = false
          AND j.hh_job_number IS NOT NULL
          AND j.job_date IS NOT NULL
          AND jr.status IN ('not_started', 'in_progress')

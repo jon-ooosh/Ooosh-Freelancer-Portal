@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import type { DashboardSectionProps } from '../sections';
+import type { PcnAttentionItem } from '../../types';
 import { Card } from '../primitives';
 import { api } from '../../../../services/api';
 
@@ -208,6 +209,14 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
   };
 
   // Secondary row (amber/blue/purple)
+  const carnets: NABucket = {
+    key: 'carnets',
+    title: 'Carnets',
+    accent: 'amber',
+    count: na.carnet_count || 0,
+    items: [],
+    viewAllHref: '/operations/carnets',
+  };
   const referrals: NABucket = {
     key: 'referrals',
     title: 'Referrals',
@@ -276,6 +285,17 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
       href: r.job_uuid ? `/jobs/${r.job_uuid}` : '/money/excess',
     })),
     viewAllHref: '/money/excess',
+  };
+  // Company-card (COT) purchases with no receipt attached, older than the 3-day
+  // grace. The daily chaser nudges each holder; this is the fleet-wide backlog.
+  // Amber — action-needed (bookkeeping audit), not time-critical.
+  const cotReceipts: NABucket = {
+    key: 'cot_receipts',
+    title: 'COT Receipts',
+    accent: 'amber',
+    count: na.cot_receipts_outstanding_count || 0,
+    items: [],
+    viewAllHref: '/money/costs?missing_receipt=1',
   };
 
   // Transport arrangements to action — quotes in next 7 days on a
@@ -360,12 +380,60 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
     viewAllHref: '/operations/problems',
   };
 
+  // ── PCN buckets (Step 8) — internal surfacing only, never client comms ──
+  // Three red (time-critical: police NIP / ready-to-transfer / deadline near)
+  // + one amber (awaiting a path). Only non-empty ones are appended to the
+  // secondary row, so clean PCN state adds nothing to the dashboard.
+  const today0 = new Date(); today0.setHours(0, 0, 0, 0);
+  const deadlineLabel = (d: string | null) => {
+    if (!d) return undefined;
+    const days = Math.round((new Date(d).getTime() - today0.getTime()) / 86400000);
+    return days < 0 ? `${-days}d overdue` : days === 0 ? 'today' : days === 1 ? 'tomorrow' : `in ${days}d`;
+  };
+  const nipDaysLeft = (offenceAt: string | null) => {
+    if (!offenceAt) return 'respond ASAP';
+    const left = 28 - Math.floor((Date.now() - new Date(offenceAt).getTime()) / 86400000);
+    return left <= 0 ? 'window passed' : `${left}d of 28 left`;
+  };
+  const pcnItem = (p: PcnAttentionItem, age?: string): NACardItem => ({
+    id: p.id,
+    label: `${p.reference || '(no ref)'}${p.reg ? ` · ${p.reg}` : ''}`.slice(0, 80),
+    age,
+    sub: p.hh_job_number ? `job #${p.hh_job_number}` : undefined,
+    href: `/vehicles/pcns/${p.id}`,
+  });
+  const pcnNip: NABucket = {
+    key: 'pcn_nip', title: 'Police NIP — respond now', accent: 'red',
+    count: na.pcn_nip_urgent?.length || 0,
+    items: (na.pcn_nip_urgent || []).map((p) => pcnItem(p, nipDaysLeft(p.offence_at))),
+    viewAllHref: '/vehicles/pcns?fine_type=police_nip',
+  };
+  const pcnTransfer: NABucket = {
+    key: 'pcn_transfer', title: 'PCN — ready to transfer', accent: 'red',
+    count: na.pcn_ready_to_transfer?.length || 0,
+    items: (na.pcn_ready_to_transfer || []).map((p) => pcnItem(p, 'chased, no proof')),
+    viewAllHref: '/vehicles/pcns?status=driver_notified_pay',
+  };
+  const pcnDeadline: NABucket = {
+    key: 'pcn_deadline', title: 'PCN deadline approaching', accent: 'red',
+    count: na.pcn_deadline_approaching?.length || 0,
+    items: (na.pcn_deadline_approaching || []).map((p) => pcnItem(p, deadlineLabel(p.issuer_deadline))),
+    viewAllHref: '/vehicles/pcns',
+  };
+  const pcnAwaiting: NABucket = {
+    key: 'pcn_awaiting', title: 'PCNs awaiting action', accent: 'amber',
+    count: na.pcn_awaiting_action?.length || 0,
+    items: (na.pcn_awaiting_action || []).map((p) => pcnItem(p)),
+    viewAllHref: '/vehicles/pcns?status=received',
+  };
+  const pcnBuckets = [pcnNip, pcnTransfer, pcnDeadline, pcnAwaiting].filter((b) => b.count > 0);
+
   const allClear = overdueTotal === 0;
   const overdueBuckets = [departures, completions, backline, transport];
   // expiringHolds leads the secondary row — red accent, time-critical (hold
   // auto-voids at day 5). Sits ahead of the amber/blue/purple buckets so it
   // catches the eye when present.
-  const secondaryBuckets = [expiringHolds, receiptsOutstanding, referrals, excess, transportArrangements, fleetBucket, problemsBucket];
+  const secondaryBuckets = [expiringHolds, receiptsOutstanding, cotReceipts, ...pcnBuckets, carnets, referrals, excess, transportArrangements, fleetBucket, problemsBucket];
   const secondaryAny = secondaryBuckets.some(b => b.count > 0);
 
   return (

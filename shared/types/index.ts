@@ -10,7 +10,10 @@ export interface FileAttachment {
   label?: string;
   comment?: string;
   url: string;
-  type: 'document' | 'image' | 'other';
+  // 'link' = an external URL (Dropbox, WeTransfer, Google Drive, etc.) rather
+  // than a file stored in R2. `url` holds the http(s) address; no bytes are
+  // hosted by us. Rendered with a distinct chip and opened in a new tab.
+  type: 'document' | 'image' | 'other' | 'link';
   uploaded_at: string;
   uploaded_by: string;
   share_with_freelancer?: boolean;
@@ -998,6 +1001,14 @@ export type CostApprovalState = 'submitted' | 'verified' | 'approved' | 'paid';
 export type CostXeroSyncState = 'pending' | 'bill_created' | 'attached' | 'reconciled' | 'error';
 export type CostStatus = 'draft' | 'confirmed' | 'resolved';
 
+// Supplier payment terms → bill due date. 'default' source = no stored terms
+// (flat invoice + 30). See docs/COSTS-PAYMENT-AUTOMATION-SPEC.md.
+export interface SupplierPaymentTerms {
+  basis: 'invoice_date' | 'end_of_invoice_month';
+  days: number;
+  source: 'manual' | 'xero' | 'default' | 'freelancer';
+}
+
 export interface Cost {
   id: string;
   uploaded_by: string | null;
@@ -1010,6 +1021,10 @@ export interface Cost {
   amount_net: number | null;
   vat_treatment?: 'standard' | 'reclaim_split';
   invoice_number?: string | null;
+  xero_contact_id?: string | null;
+  // Computed server-side from the supplier's payment terms (list + get-one).
+  due_date?: string | null;
+  terms?: SupplierPaymentTerms;
   currency: string;
   description: string | null;
   category: string | null;
@@ -1046,6 +1061,8 @@ export interface Cost {
   xero_payment_id: string | null;
   xero_synced_at: string | null;
   xero_error: string | null;
+  /** Set when an already-pushed cost is edited with a Xero-affecting field; cleared on re-sync. */
+  xero_stale?: boolean;
   status: CostStatus;
   notes: string | null;
   created_at: string;
@@ -1168,6 +1185,14 @@ export interface HeldItem {
   job_name?: string | null;
   found_vehicle_reg?: string | null;
   received_by_name?: string | null;
+
+  // Count of discussion-thread interactions on this item (SELECT_WITH_JOINS).
+  discussion_count?: number;
+
+  // Computed chase fields (lost property) — derived in SELECT_WITH_JOINS so the
+  // list, detail card and review queue all agree. null for non-lost-property.
+  next_chase_due?: string | null;
+  chase_state?: 'none' | 'paused' | 'due' | 'scheduled' | null;
 }
 
 // API response wrappers

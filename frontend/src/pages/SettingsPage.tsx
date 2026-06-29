@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { hasManagerRole } from '../lib/roles';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { Navigate } from 'react-router-dom';
@@ -72,7 +73,7 @@ function getPasswordStrength(pw: string): { score: number; label: string; color:
 export default function SettingsPage() {
   const user = useAuthStore((s) => s.user);
 
-  if (user?.role !== 'admin' && user?.role !== 'manager') {
+  if (!hasManagerRole(user?.role)) {
     return <Navigate to="/" replace />;
   }
 
@@ -471,7 +472,7 @@ function SettingsContent() {
                   <div className="flex items-center gap-3">
                     {u.avatar_url ? (
                       <img
-                        src={`/api/files/download?key=${encodeURIComponent(u.avatar_url)}`}
+                        src={`/api/auth/avatar/${u.avatar_url.split('/').pop()}`}
                         alt=""
                         className="w-9 h-9 rounded-full object-cover flex-shrink-0"
                       />
@@ -530,11 +531,16 @@ function SettingsContent() {
       {/* Out-of-Hours return settings — admin & manager */}
       <OohSettingsSection />
 
+      <CarnetSettingsSection />
+
       {/* Xero bank account mapping — admin & manager */}
       <XeroBankAccountsSection />
 
       {/* Vehicle Issues settings — admin & manager */}
       <VehicleIssueSettingsSection />
+
+      {/* COT card register — admin only */}
+      {currentUser?.role === 'admin' && <CotCardRegisterSection />}
 
       {/* Email Service section — admin only */}
       {currentUser?.role === 'admin' && <EmailSection />}
@@ -1113,6 +1119,112 @@ interface SystemSetting {
   sort_order: number;
 }
 
+function CarnetSettingsSection() {
+  const [settings, setSettings] = useState<SystemSetting[]>([]);
+  const [vals, setVals] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+  const [sigSrc, setSigSrc] = useState<string | null>(null);
+
+  const TEXT_KEYS = ['carnet_ooosh_signatory_name', 'carnet_ooosh_signatory_role', 'carnet_company_address'];
+
+  useEffect(() => { load(); }, []);
+
+  async function load() {
+    try {
+      const res = await api.get<{ data: SystemSetting[] }>('/system-settings?category=carnets');
+      setSettings(res.data);
+      const v: Record<string, string> = {};
+      for (const s of res.data) v[s.key] = s.value ?? '';
+      setVals(v);
+      const sigKey = res.data.find(s => s.key === 'carnet_ooosh_signature_url')?.value;
+      if (sigKey) {
+        try {
+          const { blob } = await api.blob(`/files/download?key=${encodeURIComponent(sigKey)}`);
+          setSigSrc(URL.createObjectURL(blob));
+        } catch { setSigSrc(null); }
+      } else setSigSrc(null);
+    } catch {
+      setError('Could not load carnet settings (has migration 141 run?).');
+    } finally { setLoading(false); }
+  }
+
+  async function saveText() {
+    setSaving(true); setError(''); setSuccess('');
+    try {
+      const changed: Record<string, string | null> = {};
+      for (const k of TEXT_KEYS) {
+        const orig = settings.find(s => s.key === k)?.value ?? '';
+        if (orig !== (vals[k] ?? '')) changed[k] = vals[k] === '' ? null : vals[k];
+      }
+      if (Object.keys(changed).length > 0) { await api.put('/system-settings', { settings: changed }); setSuccess('Saved.'); }
+      load();
+    } catch (e) { setError(e instanceof Error ? e.message : 'Save failed'); }
+    finally { setSaving(false); }
+  }
+
+  async function uploadSignature(file: File) {
+    setUploading(true); setError(''); setSuccess('');
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('attachment_only', 'true');
+      const up = await api.upload<{ r2_key: string }>('/files/upload', fd);
+      await api.put('/system-settings', { settings: { carnet_ooosh_signature_url: up.r2_key } });
+      setSuccess('Signature uploaded.');
+      load();
+    } catch (e) { setError(e instanceof Error ? e.message : 'Upload failed'); }
+    finally { setUploading(false); }
+  }
+
+  if (loading) return null;
+
+  return (
+    <div className="bg-white rounded-lg shadow p-6 mb-6">
+      <h2 className="text-lg font-semibold text-gray-900 mb-1">Carnet — Letter of Authorisation</h2>
+      <p className="text-sm text-gray-500 mb-4">The Ooosh signatory + signature stamped onto the carnet Letter of Authorisation.</p>
+      {error && <div className="mb-3 text-sm text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2">{error}</div>}
+      {success && <div className="mb-3 text-sm text-green-700 bg-green-50 border border-green-200 rounded px-3 py-2">{success}</div>}
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
+        <label className="text-sm">
+          <span className="text-gray-500 text-xs">Signatory name</span>
+          <input className="mt-1 w-full border rounded px-2 py-1" value={vals.carnet_ooosh_signatory_name || ''} onChange={(e) => setVals({ ...vals, carnet_ooosh_signatory_name: e.target.value })} />
+        </label>
+        <label className="text-sm">
+          <span className="text-gray-500 text-xs">Signatory role / designation</span>
+          <input className="mt-1 w-full border rounded px-2 py-1" value={vals.carnet_ooosh_signatory_role || ''} onChange={(e) => setVals({ ...vals, carnet_ooosh_signatory_role: e.target.value })} />
+        </label>
+        <label className="text-sm sm:col-span-2">
+          <span className="text-gray-500 text-xs">Company address (letter header — comma separated)</span>
+          <input className="mt-1 w-full border rounded px-2 py-1" value={vals.carnet_company_address || ''} onChange={(e) => setVals({ ...vals, carnet_company_address: e.target.value })} />
+        </label>
+      </div>
+      <button onClick={saveText} disabled={saving} className="px-3 py-1.5 bg-purple-600 text-white rounded text-sm disabled:opacity-50 mb-5">
+        {saving ? 'Saving…' : 'Save details'}
+      </button>
+
+      <div className="border-t pt-4">
+        <span className="text-gray-500 text-xs">Signature image</span>
+        <div className="flex items-center gap-4 mt-2">
+          {sigSrc
+            ? <img src={sigSrc} alt="Ooosh signature" className="h-16 border rounded bg-white object-contain px-2" />
+            : <span className="text-sm text-gray-400">No signature uploaded yet</span>}
+          <label className="px-3 py-1.5 bg-gray-100 hover:bg-gray-200 rounded text-sm cursor-pointer">
+            {uploading ? 'Uploading…' : sigSrc ? 'Replace' : 'Upload signature'}
+            <input type="file" accept="image/png,image/jpeg" className="hidden" disabled={uploading}
+              onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadSignature(f); }} />
+          </label>
+        </div>
+        <p className="text-xs text-gray-400 mt-2">PNG or JPG. A transparent-background PNG looks best on the letter.</p>
+      </div>
+    </div>
+  );
+}
+
 function OohSettingsSection() {
   const [settings, setSettings] = useState<SystemSetting[]>([]);
   const [editValues, setEditValues] = useState<Record<string, string>>({});
@@ -1121,6 +1233,12 @@ function OohSettingsSection() {
   const [editing, setEditing] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  // TEMPORARY: SMS connectivity test (remove after go-live — see GH reminder issue)
+  const [testNumber, setTestNumber] = useState('');
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState('');
+  const [scanning, setScanning] = useState(false);
+  const [scanResult, setScanResult] = useState('');
 
   useEffect(() => {
     loadSettings();
@@ -1177,6 +1295,44 @@ function OohSettingsSection() {
     setEditValues(vals);
     setEditing(false);
     setError('');
+  }
+
+  // TEMPORARY: SMS connectivity test (remove after go-live — see GH reminder issue)
+  async function sendTestSms() {
+    setTesting(true);
+    setTestResult('');
+    try {
+      const res = await api.post<{ success: boolean; redirectedTo: string | null }>(
+        '/system-settings/test-sms',
+        { to: testNumber.trim() || undefined },
+      );
+      setTestResult(
+        res.redirectedTo
+          ? `Sent (test mode → redirected to ${res.redirectedTo}). Check that phone.`
+          : 'Sent. Check the phone.',
+      );
+    } catch (err) {
+      setTestResult(err instanceof Error ? err.message : 'Test SMS failed');
+    } finally {
+      setTesting(false);
+    }
+  }
+
+  // TEMPORARY: run the geofence scan now (remove after go-live — see GH reminder issue)
+  async function runOohScan() {
+    setScanning(true);
+    setScanResult('');
+    try {
+      const res = await api.post<{ checked: number; texted: number; skipped: number }>(
+        '/system-settings/run-ooh-scan',
+        {},
+      );
+      setScanResult(`Scan done — checked ${res.checked}, texted ${res.texted}, skipped ${res.skipped}.`);
+    } catch (err) {
+      setScanResult(err instanceof Error ? err.message : 'Scan failed');
+    } finally {
+      setScanning(false);
+    }
   }
 
   if (loading) return null;
@@ -1272,6 +1428,49 @@ function OohSettingsSection() {
             </div>
           );
         })}
+      </div>
+
+      {/* TEMPORARY: SMS connectivity test — remove after go-live (see GH reminder issue). */}
+      <div className="mt-4 bg-amber-50 border border-amber-200 rounded-lg p-4">
+        <p className="text-sm font-medium text-amber-900">Send test SMS (temporary)</p>
+        <p className="text-xs text-amber-700 mt-0.5 mb-2">
+          Fires one text via Twilio to confirm the setup. While SMS_MODE=test it redirects to
+          SMS_TEST_REDIRECT regardless of the number entered. Remove this once go-live is confirmed.
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            type="tel"
+            value={testNumber}
+            onChange={e => setTestNumber(e.target.value)}
+            placeholder="+447… (blank = test redirect)"
+            className="border border-gray-300 rounded px-2 py-1 text-sm w-64 max-w-full"
+          />
+          <button
+            onClick={sendTestSms}
+            disabled={testing}
+            className="px-4 py-2 text-sm bg-amber-600 text-white rounded font-medium hover:bg-amber-700 disabled:opacity-50"
+          >
+            {testing ? 'Sending…' : 'Send test SMS'}
+          </button>
+        </div>
+        {testResult && <p className="text-xs text-amber-800 mt-2">{testResult}</p>}
+
+        <div className="mt-3 pt-3 border-t border-amber-200">
+          <p className="text-sm font-medium text-amber-900">Run geofence scan now (temporary)</p>
+          <p className="text-xs text-amber-700 mt-0.5 mb-2">
+            The approach scan normally only runs 17:00–08:59. Use this to test in daylight: needs an
+            OOH-flagged, booked-out van with a recent Traccar fix within the radius. In test mode any
+            text redirects to SMS_TEST_REDIRECT.
+          </p>
+          <button
+            onClick={runOohScan}
+            disabled={scanning}
+            className="px-4 py-2 text-sm bg-amber-600 text-white rounded font-medium hover:bg-amber-700 disabled:opacity-50"
+          >
+            {scanning ? 'Scanning…' : 'Run OOH scan now'}
+          </button>
+          {scanResult && <p className="text-xs text-amber-800 mt-2">{scanResult}</p>}
+        </div>
       </div>
     </div>
   );
@@ -1542,6 +1741,122 @@ function VehicleIssueSettingsSection() {
         >
           {saving ? 'Saving…' : 'Save'}
         </button>
+      </div>
+    </div>
+  );
+}
+
+// ── COT card register (admin only) ──────────────────────────────────────────
+// Admin sets each staff member's company card (last 4 + a friendly label). The
+// cost-capture flow stamps the card holder + last 4 from here server-side, so
+// staff never type card details when logging a company-card purchase.
+
+interface CotCardRow {
+  id: string;
+  email: string;
+  is_active: boolean;
+  first_name: string | null;
+  last_name: string | null;
+  cot_card_last4: string | null;
+  cot_card_label: string | null;
+}
+
+function CotCardRegisterSection() {
+  const [rows, setRows] = useState<CotCardRow[]>([]);
+  const [drafts, setDrafts] = useState<Record<string, { last4: string; label: string }>>({});
+  const [loading, setLoading] = useState(true);
+  const [savingId, setSavingId] = useState<string | null>(null);
+  const [error, setError] = useState('');
+  const [savedId, setSavedId] = useState<string | null>(null);
+
+  useEffect(() => {
+    api.get<{ data: CotCardRow[] }>('/users/cot-cards')
+      .then((res) => {
+        setRows(res.data);
+        const d: Record<string, { last4: string; label: string }> = {};
+        res.data.forEach((r) => { d[r.id] = { last4: r.cot_card_last4 || '', label: r.cot_card_label || '' }; });
+        setDrafts(d);
+      })
+      .catch((err) => { console.error('Failed to load COT cards:', err); setError('Could not load staff.'); })
+      .finally(() => setLoading(false));
+  }, []);
+
+  async function save(id: string) {
+    const draft = drafts[id];
+    if (draft.last4 && !/^\d{4}$/.test(draft.last4)) { setError('Last 4 must be exactly 4 digits.'); return; }
+    setError('');
+    setSavingId(id);
+    try {
+      await api.patch(`/users/${id}/cot-card`, {
+        cot_card_last4: draft.last4 || null,
+        cot_card_label: draft.label.trim() || null,
+      });
+      setRows((prev) => prev.map((r) => r.id === id ? { ...r, cot_card_last4: draft.last4 || null, cot_card_label: draft.label.trim() || null } : r));
+      setSavedId(id);
+      setTimeout(() => setSavedId((s) => s === id ? null : s), 2500);
+    } catch (err) {
+      console.error('Save COT card failed:', err);
+      setError(err instanceof Error ? err.message : 'Save failed.');
+    } finally {
+      setSavingId(null);
+    }
+  }
+
+  const name = (r: CotCardRow) => [r.first_name, r.last_name].filter(Boolean).join(' ') || r.email;
+  const dirty = (r: CotCardRow) => (drafts[r.id]?.last4 || '') !== (r.cot_card_last4 || '') || (drafts[r.id]?.label.trim() || '') !== (r.cot_card_label || '');
+
+  if (loading) {
+    return (
+      <div className="bg-white rounded-xl border border-gray-200 p-6">
+        <h2 className="text-lg font-semibold text-gray-900 mb-2">COT Card Register</h2>
+        <p className="text-sm text-gray-500">Loading…</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-white rounded-xl border border-gray-200 p-6">
+      <h2 className="text-lg font-semibold text-gray-900 mb-1">COT Card Register</h2>
+      <p className="text-xs text-gray-500 mb-4">
+        Set each staff member's company card. The cost-capture form stamps the card holder + last 4 from here automatically — staff never type card details.
+      </p>
+      {error && <div className="mb-3 bg-red-50 border border-red-200 text-red-700 text-sm rounded-md px-3 py-2">{error}</div>}
+      <div className="overflow-x-auto">
+        <table className="min-w-full text-sm">
+          <thead>
+            <tr className="text-left text-gray-500 border-b border-gray-200">
+              <th className="py-2 pr-3 font-medium">Staff</th>
+              <th className="py-2 px-3 font-medium">Card last 4</th>
+              <th className="py-2 px-3 font-medium">Card label</th>
+              <th className="py-2 pl-3 font-medium text-right">&nbsp;</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.id} className={`border-b border-gray-100 ${r.is_active ? '' : 'opacity-50'}`}>
+                <td className="py-2 pr-3 text-gray-800">{name(r)}{!r.is_active && <span className="text-xs text-gray-400"> (inactive)</span>}</td>
+                <td className="py-2 px-3">
+                  <input value={drafts[r.id]?.last4 ?? ''} inputMode="numeric" maxLength={4}
+                    onChange={(e) => setDrafts((d) => ({ ...d, [r.id]: { ...d[r.id], last4: e.target.value.replace(/\D/g, '').slice(0, 4) } }))}
+                    placeholder="1234" className="w-20 border border-gray-300 rounded-md px-2 py-1 text-sm" />
+                </td>
+                <td className="py-2 px-3">
+                  <input value={drafts[r.id]?.label ?? ''} maxLength={60}
+                    onChange={(e) => setDrafts((d) => ({ ...d, [r.id]: { ...d[r.id], label: e.target.value } }))}
+                    placeholder="e.g. Amex ·1234" className="w-40 border border-gray-300 rounded-md px-2 py-1 text-sm" />
+                </td>
+                <td className="py-2 pl-3 text-right">
+                  {savedId === r.id ? <span className="text-xs text-green-600">Saved ✓</span> : (
+                    <button onClick={() => save(r.id)} disabled={savingId === r.id || !dirty(r)}
+                      className="px-3 py-1 text-xs text-white bg-purple-600 hover:bg-purple-700 rounded-md disabled:opacity-40">
+                      {savingId === r.id ? '…' : 'Save'}
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     </div>
   );

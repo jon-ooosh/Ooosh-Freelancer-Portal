@@ -665,6 +665,8 @@ Replaces the prominent "+ Assign Driver" Quick Assign button with per-card next-
 - [x] Quick Assign demoted: prominent primary button → subtle "+ Add driver manually" text link, gated to admin/manager only, tooltip explains when to use. Modal flow itself unchanged — still `/api/hire-forms/quick-assign` on the backend.
 - [x] Send / Chase hire form button untouched (lives on Job Requirements vehicle card, mid-tour use case preserved).
 
+**Staggered multi-van job discovery (Jun 2026).** A job with more than one van whose vans leave on **different days** must stay reachable in the book-out + allocation pickers after the first van has gone out. The trap: a job has a single `out_date`, so once van 1 leaves, `out_date` is in the past — and both job-discovery endpoints (`GET /api/vehicles/jobs/going-out` → Fleet ▸ Van ▸ Book Out picker; `GET /api/vehicles/jobs/upcoming` → Allocations "Going Out") window strictly on `out_date >= today`, dropping the job and making the remaining van unbookable except via the BookOutPage "enter job # manually" escape hatch. **Incident: job 15411 (Jabir – HLR & HLU), Jun 2026** — RO23HLR out day 1, RO23HLU collected day 2, only HLR showed. The recent multi-van work was all in the slot/assignment layer (assignment rows, allocation cascade, per-card buttons), which operates on a job you can already *see*; this is one layer upstream in job discovery, which had assumed a job goes out on one day. **Fix:** both endpoints also retain a job that has already started (`out_date < today`), isn't back yet (`COALESCE(return_date, job_end) >= today`), is still `ACTIVE_STATUSES`, AND still has a van slot in a pre-book-out state — a `soft`/`confirmed` `vehicle_hire_assignments` row found via the **dual-match join** (`vha.job_id = j.id OR vha.hirehop_job_id = j.hh_job_number`, because staff-allocation rows carry only `hirehop_job_id` until a hire form is submitted). Mirrors the `/jobs/upcoming-due-back` widening pattern. **Don't re-window these queries to a plain `out_date >= today`** or you reintroduce the bug. Limitation: this keys off an *existing* un-booked-out assignment row for the late van (the common case — vans are pre-allocated/hire-formed); a started multi-van job where the second van has *no* assignment row at all still relies on the manual-entry fallback. The "enter job # manually" field stays as belt-and-braces.
+
 **Deferred from this pass:**
 - [ ] **Inline "Allocate Van" modal scoped to job** — replaces the AllocationsPage hop with a focused job-context picker, conflicts hidden rather than warned, single-modal sibling cascade. Decided 28 Apr 2026 the AllocationsPage hop is acceptable for now (`?job=` auto-expand makes it close to one click). Revisit when the inline experience starts hurting.
 - [ ] **Slot-grouped cards (one card per van with sibling drivers nested)** — captured below as the Allocations van-centric rebuild item. The Job Detail cockpit currently still renders one card per driver-bearing assignment row, which over-counts when multiple drivers share a van. Both Allocations and Job Detail should pick up the same slot-shaped rebuild together.
@@ -1088,6 +1090,8 @@ Gates live on `routes/excess.ts`: a router-level `authorize(...STAFF_ROLES)` clo
 
 **Coverage rule (updated 087):** a held pre-auth counts as covered for dispatch / requirement-done purposes — we have collateral against damage even though no money has moved. `coverage = excess_amount_taken + amount_held`. `released` does NOT count (hold ended, nothing kept). Applied in `services/excess-requirement-sync.ts`, `routes/money.ts` `/excess-info` + `/summary`, and the `assignments.ts` dispatch select. The `deriveExcessStatus` PROTECTED set includes `released`.
 
+**Dispatch gate is lifecycle-bound — suppressed on finished hires (Jun 2026):** `GET /api/assignments/dispatch-check/:jobId` (which feeds the Drivers & Vehicles `ExcessGateBanner` "Insurance Excess Not Collected" + the `referral_pending` banner) raises `excess_pending` / `referral_pending` blockers ONLY while the hire could still go out. It looks up the job's `pipeline_status` and suppresses BOTH blocker types once `pipeline_status IN ('returned_incomplete','returned','completed','cancelled')` (`hireFinished`). On-hire (`dispatched`) jobs still show the gate — a genuine "exposed while out" signal — so the cut is from `returned_incomplete` onward. **Why this exists:** a `released` pre-auth (hold expired uncaptured — not "collected" per the coverage rule above, but nothing to chase on a returned van) kept the red banner up on Completed jobs, sending staff down a "did we take an excess? do I owe a reimbursement?" rabbit hole (job 16057, Ritchie Prior, Jun 2026). **Do NOT "fix" this by adding `released` to the dispatch-check covered list** — on an UPCOMING hire a `released` record genuinely should nag ("re-take the hold before they drive off"), so the suppression must stay lifecycle-bound, not status-bound. Post-hire excess money tasks live on the `excess_resolve` close-out card (which already treats `released` as resolved). The underlying `job_excess` record is untouched — this only gates whether the readiness banner renders.
+
 **Stripe integration (`config/stripe.ts`):** singleton client behind `getStripeClient()` + `isStripeConfigured()` guard (routes 503 cleanly if `STRIPE_SECRET_KEY` missing rather than throwing). `isStripeError()` type guard. SDK uses bundled `LatestApiVersion`. OP is now the staff-facing control surface for capture/refund/void; the Payment Portal stays the client-facing collection surface. Env: `STRIPE_SECRET_KEY` (restricted key — PaymentIntents R/W, Refunds R/W, Charges R, Disputes R), `STRIPE_WEBHOOK_SECRET` (for PR 4).
 
 **UI (PR 2, `ExcessPaymentModal` + `MoneyTab` + `ExcessLedgerPage` + dashboard):** Manage modal shows Capture/Release for held records (replaces Claim/Reimburse, which apply to taken money). Money tab + ledger show Held vs Collected vs Released distinctly with an expiry countdown. Dashboard NeedsAttention "Pre-auth Holds Expiring" bucket (red, holds within 2 days of auto-void) — backend `needs_attention.expiring_holds` / `expiring_holds_count`.
@@ -1145,6 +1149,12 @@ OP is now the staff control surface for the FULL post-collection money loop. Ini
 - [x] `/money/excess` — Insurance excess ledger (client balances, all records, drill-down)
 - [x] `/money/overview` — Global financial dashboard (deposits pending, balances outstanding, excess held, pending refunds) — *replaces Stream 6 dashboard widget*. **SHIPPED (Jun 2026).** Data strategy "Option C": money figures cached into a dedicated `job_financials` table (NOT bolted onto `jobs`), populated two ways — (a) write-through whenever the Money tab `/summary` runs for a job (self-heals operationally-live jobs as staff open them), and (b) a nightly 03:00 slow-burn (`services/job-financials-backfill.ts` + `scripts/backfill-job-financials.ts`, drives the live `/summary` endpoint over localhost so there's one computation path — zero drift). Dashboard reads OP only → instant, with a `last_synced_at` freshness stamp. Admin+manager gated, per-row drill-through. Excess Held is split **upcoming vs to-return** (finished-hire backlog), and the table is search + click-to-sort with pipeline-aligned status colours. Excess Held reads the canonical `v_excess_held` view (see below) so it agrees with `/money/excess`.
 - [x] **Balance overrides — "ignore this outstanding balance" (Jun 2026, migration 117).** Business-level resolution of an HH-derived hire balance that the business (via Xero) considers settled. **Staff treat HireHop as truth; the business treats Xero as truth, and they legitimately diverge** — a payment applied in Xero that never fed back to HH, an internal / 100%-discounted job not zeroed in HH, a since-corrected HH↔Xero error still showing in HH, or a plain write-off. The override is a **pure OP annotation — it touches neither HireHop nor Xero.** Storage: dedicated `job_balance_overrides` table (`job_id` PK, `reason`, `notes`, `resolved_by`, `resolved_at`) — deliberately separate from `job_financials` so the financials write-through / nightly backfill can never clobber a business decision. **Reasons:** `xero_settled | internal_discounted | hh_xero_corrected | write_off | other`. **Effect:** resolved jobs drop out of `/money/overview` active Balances Outstanding list + headline total, surfaced in a collapsible "Resolved (N) · £X ignored" section (reason / who / when / Undo). The raw HH-derived figure is preserved (not zeroed). **Per-job Money tab** still shows the live HH balance (staff truth) with a grey "Balance resolved (business adjustment)" banner so staff understand why HH shows money owed; admin can Resolve / Undo from there too. **Endpoints (admin only):** `POST /api/money/:jobId/resolve-balance` (reason+notes, upsert), `DELETE /api/money/:jobId/resolve-balance` (undo), `POST /api/money/balances/bulk-resolve` (`{ job_ids[] }` or `{ finished_before: YYYY-MM-DD }` for the old 2022/2023 backlog sweep). All audit-logged (`resolve_balance` / `unresolve_balance` / `bulk_resolve_balance`). This is the hire-balance sibling of the excess `mark-externally-resolved` action — same "OP knows the figure but the business settled it elsewhere" model.
+- [x] **Overview filters + balance chase tracker (Jun 2026, PR #706, migration 120).**
+  - **Timing pills** (All / Finished / Upcoming) on the Balances + Excess tabs — finished = hire end date (`job_end || return_date`) before today. The **Balances headline card follows the filter** (total + count match the visible list, with a "· finished only" hint). View prefs (tab, speculative toggle, timing filters, group-by-client) persist in localStorage (`ooosh_money_overview_prefs`).
+  - **Ageing badge** "Nd ago" on finished hires: grey ≤30d, amber 31-90d, red >90d.
+  - **Group by client** toggle — one expandable row per client (job count, total outstanding, worst-age badge), biggest debt first.
+  - **Debt-chase tracker** (`job_balance_chases` table, migration 120): 📣 button per balance row — click logs a chase (+1), hover shows last chased date + who, toast Undo deletes the latest row. One row per chase event = audit + undo for free. Deliberately a SEPARATE table (same reasoning as `job_balance_overrides`) so the financials cache can't clobber it, and deliberately INDEPENDENT of the pipeline enquiry-chase machinery (`next_chase_date` / chase interactions) — this tracks DEBT chasing on confirmed/finished jobs, no pipeline state touched. Endpoints: `POST`/`DELETE /api/money/:jobId/chase` (admin/manager).
+  - **⚠️ LIMIT lesson (the job-15758 incident):** the overview originally ran ONE balances query (`LIMIT 400`, ordered by balance DESC) and split active vs override-resolved rows client-side. Once 293 resolved + 107 active hit the cap, small genuine balances (15758's £14.40) silently vanished from the list. Active and resolved are now SEPARATE queries with their own limits. When adding any future list that splits one query's rows into buckets client-side, check the LIMIT can't starve one bucket.
 - [ ] `/money/payments` — All recorded payments across all jobs (future)
 
 ##### Canonical "excess held" — single source of truth (migration 109, Jun 2026)
@@ -1372,6 +1382,26 @@ Full cancellation workflow distinguishing **lost enquiries** (never confirmed) f
 - [ ] Early return calculator frontend integration (clause 7.3 — backend built, UI not yet)
 - [ ] Partial cancellation / scope reduction (deferred — noted for future)
 
+#### Combine Bookings (Jun 2026)
+
+Merge two **same-client pre-hire** bookings into one — the "client wants their two separate hires to become one continuous hire" case (e.g. 15–22 Jul + 29 Jul–1 Aug → 15 Jul–1 Aug). Technically a cancellation of one booking, but a no-fee one that works in our favour (van tied up longer = more charge), so it does NOT run the normal cancellation/fee/refund path. Migration **125** added `jobs.combined_into_job_id`.
+
+**Where:** "🔀 Combine" button in the Job Detail header (2×2 control grid: Sync HH / Pre-Hire Review on top, Combine / Mark Internal below). `MANAGER_ROLES`, pre-hire jobs only. Opens `CombineBookingsModal` — lists the same client's other pre-hire bookings (search fallback) → preview (kept / retired / combined dates / deposit-to-move + any blocks) → type-the-retired-HH-number to confirm.
+
+**Survivor (kept) booking is server-decided**, never the browser's call (`assessCombine` in `routes/pipeline.ts`): excess-holder wins (so the held excess never has to move), then status progression (confirmed > provisional > enquiry — an enquiry folds INTO a confirmed booking), then deposit-holder, then earlier start. The endpoint refuses if the call's `:id` ≠ the assessed survivor. If the survivor differs from where staff opened the modal, the frontend navigates there on success.
+
+**The deposit move is the only hard part** — HireHop has no "move deposit between jobs" and **rejects negative deposits** (a rejected row never reaches Xero — this was the first-cut bug). So each deposit is re-attributed the same way an excess reimbursement works: **recreate on the survivor first** (`pushDepositToHH` with explicit `bankId` = original bank), **then refund-against-the-original-deposit on the absorbed job** (`reverseDepositOnHH` → `billing_payments_save.php` with `deposit=<id>, OWNER=0, paid=<amount>` + `post_payment` Xero sync — NOT `billing_deposit_save.php`). Recreate-first ordering means a mid-failure double-counts the money (visible, recoverable) rather than losing it. Same bank + same day = a clean refund-out/receipt-in wash in Xero (stray lines reconcile trivially). **No client emails fire** — it's accounting only.
+
+**Sanity read-back:** after the move, `getNetHireDepositTotal(absorbedHhJob)` (in `services/hh-billing-deposits.ts`) re-reads the absorbed job's NET hire deposits (gross `kind=6` minus `kind=3` refund-against-deposit rows — a gross read would false-positive since the refund is a separate row). Residual > £0.01 → loud `hh_warnings` line telling staff exactly what to remove manually. The modal alerts any `hh_warnings`.
+
+**Eligibility blocks** (re-checked server-side, never trusted from the browser; clear message bounces to a manager): different clients, absorbed job invoiced, both holding real excess money, absorbed job has active transport/crew quotes, survivor not HH-linked, or either job past pre-hire.
+
+**Absorbed job retirement:** `pipeline_status='cancelled'` + `combined_into_job_id` set, £0 fee/£0 refund, `next_chase_date=NULL`; open requirements cancelled, vehicle assignments soft-cancelled (+ fleet status resync), derivation excess stubs (`needed`/`pending`, no money) waived; HH write-back status 9; timeline interactions both sides. Job Detail shows an **indigo "Combined into another booking → View"** banner (links to survivor) INSTEAD of the red cancelled banner (gated on `combined_into_job_id`). **Cancellation analytics must EXCLUDE `combined_into_job_id IS NOT NULL`** — these aren't lost revenue, the money moved sideways.
+
+**Endpoints** (`routes/pipeline.ts`): `GET /:id/combine-candidates` (picker list), `GET /:id/combine-preview?with=<id>` (eligibility + figures), `POST /:id/combine` (survivor = `:id`, `MANAGER_ROLES`). Helpers: `reverseDepositOnHH` + `getMethodForBankId` (`services/hh-deposit.ts`), `getJobBillingFacts` / `getNetHireDepositTotal` (`services/hh-billing-deposits.ts`), `CombineBookingsModal.tsx`.
+
+**Deferred:** moving a *held excess* across (combine forces survivor = excess-holder for now, so it never needs to); multi-deposit edge cases beyond the clean single-deposit hire; combining a job with active crew (blocked — move/cancel the quotes first).
+
 #### Lost / Cancelled cleanup pattern (28 Apr 2026)
 
 **Cross-cutting rule for ALL requirement types** — current and future. When a job moves to `lost` or `cancelled`, every open requirement on the job (reminders, hire forms, excess records, vehicle prep, backline, rehearsal, sub-hires, custom — anything in `job_requirements`) is auto-cancelled UNLESS the user has explicitly opted to keep it alive past close-out.
@@ -1521,12 +1551,29 @@ Backline detection is HH-derived (items in backline categories auto-create the r
 Post-hire backline + vehicle requirement creation (`hh-requirement-derivation.ts:529`) and the frontend Pre/Post toggle default (`JobDetailPage.tsx`) both gate on **OP `pipeline_status` ∈ {`dispatched`, `returned_incomplete`, `returned`, `completed`}** — not HH status. HH jumps to 4/5 the moment items get checked out, but OP holds at `prepped` until staff explicitly mark the job dispatched. Earlier code used `hhStatus >= 4` with a "more reliable than pipeline_status which can lag behind" comment — that reasoning is real but the trade-off was wrong here: surfacing post-hire cards before staff are meant to be working post-hire led to misclicks (job 15738 had pre-hire backline at `in_progress` and post-hire backline at `done` 5 seconds apart, classic toggle-confusion). The frontend toggle default also includes `cancelled` (cancelled jobs land on post-hire view for close-out work). The closeout-specific requirements (`invoice`, `payment_reconcile`, `client_followup`, `excess_resolve`, `freelancer_followup`, `damage_review`) keep their **HH-status gate** (`isReturnPhase = hhStatus >= 6`, `isFullyReturned = hhStatus >= 7`) — they're about physical return + auto-resolve on Returned, not the toggle. Don't conflate the two.
 
 **Van & Driver suspension convention (May 2026):**
-Requirements with `[Suspended: Van & Driver]` in `notes` (auto-derived `hire_forms` / `excess` rows soft-suspended when every van slot is V&D — see `suspendRequirementForVanAndDriver`) carry `status='blocked'` in the DB but are **not actually blocked** — they're "not required" on this job. Filter them out of any count/aggregate over `job_requirements`:
+Requirements with `[Suspended: Van & Driver]` in `notes` (auto-derived `hire_forms` / `excess` rows soft-suspended when every van slot is V&D — see `suspendRequirement` in `hh-requirement-derivation.ts`, reason-parameterised since the Jun 2026 internal-job work) carry `status='blocked'` in the DB but are **not actually blocked** — they're "not required" on this job. Filter them out of any count/aggregate over `job_requirements`:
 - Pre-Hire progress counter (`JobDetailPage.tsx`) — drops them from `totalCount` / `doneCount` / `blockedCount` so the bar/meter doesn't go red.
 - Dashboard Today strip SQL (`routes/dashboard.ts`) — `WHERE notes IS NULL OR notes NOT LIKE '%[Suspended: Van & Driver]%'` so they don't render as red `prob` pips.
 - Jobs page + Returns page progress bars (`routes/requirements.ts` `/bulk` and `/closeout-progress` endpoints) — same SQL filter on the bulk count queries that feed the per-row mini progress bars.
 
 The cards still render in the requirements list as greyed "Not required — Van & Driver mode" stubs (`RequirementCard.tsx` already detects via `isSuspendedByVD`), they just don't move meters or fire alerts. Match this filter when adding any new count/aggregate or pip rendering over `job_requirements` — otherwise V&D-only jobs will look like they have unresolved problems on whatever surface you're building.
+
+**Internal job convention (Jun 2026):**
+Staff book vans onto HH jobs for garage visits / MOTs / our own vehicle movements — keeps HH stock accurate for last-minute quoting and gives a planning record, but everything client-shaped is noise on those jobs. `jobs.is_internal` (column existed since migration 002, activated Jun 2026 — no migration needed) is the one flag that mutes the client-facing chain. Set via the **"🔧 Mark Internal" toggle** on the Job Detail header (`PATCH /api/hirehop/jobs/:jobId/internal`, STAFF_ROLES, logs a timeline interaction, re-derives inline so cards suspend/restore immediately).
+
+What `is_internal = true` mutes:
+- **Derivation engine** (`hh-requirement-derivation.ts`): hire_forms + excess requirements soft-suspended with `[Suspended: Internal]` marker (same mechanism as V&D — restore on toggle-off is marker-gated, previous status preserved); derivation-created `job_excess` records cascade-waived (only when no money attached); close-out cards `invoice` / `payment_reconcile` / `client_followup` / `excess_resolve` NOT created on return (and the HH billing auto-detect fetch is skipped).
+- **Hire-form auto-emailer** (`hire-form-auto-email.ts` both windows) + the on-confirmation hook (`confirmation-hooks.ts`, reason code `'internal'` — intentional skip, no silent-skip alert).
+- **Money overview** (`routes/money.ts` `/overview`): excluded from Balances Outstanding, Deposits Pending and Excess Held lists + headline totals.
+- **Last-minute booking alert** (`money-emails.ts` `sendLastMinuteAlert`).
+- **Stale-enquiry auto-loser** (`config/scheduler.ts`).
+- **Scheduled pre-hire review emails** (`pre-hire-briefing.ts` `findEligibleJobs` — the T-5/T-3/T-1 cron sends). The manual "Pre-Hire Review" button on Job Detail still works on internal jobs — explicit staff action, occasionally useful for a crewed garage run.
+- **"No client email" amber banner** on Job Detail (frontend gate).
+- **Quick-assign excess** (`routes/hire-forms.ts` `/quick-assign`): on internal jobs the per-driver record is created as `not_required` £0 — no orphan absorption, no top-N charge. (Same fix also added `'waived'` to the orphan-absorption exclusion list so quick-assign can never silently un-waive a staff-waived / V&D-waived / internal-waived record on ANY job.)
+
+What it deliberately KEEPS (jon's call, Jun 2026): **Crew & Transport — everything** (quotes, arranging chaser, freelancer assignments, completion chasers — getting the van to the garage is often a local D&C run); vehicle requirement card + allocation + Turnaround Schedule; post-hire vehicle check-in / backline de-prep / `freelancer_followup` / `damage_review` cards; Going Out / Returning Today dashboard visibility; org hire history; the HH booking itself (stock accuracy). Grey "Internal" badge renders next to the status pill on Job Detail.
+
+**The suspension marker filters are now generic:** every count/aggregate filter matches `notes NOT LIKE '%[Suspended:%'` (covers both `[Suspended: Van & Driver]` and `[Suspended: Internal]`) — `routes/dashboard.ts` strip SQL, `routes/requirements.ts` `/bulk` + `/closeout-progress`, `pre-hire-briefing.ts`, `JobDetailPage.tsx` counter, `RequirementCard.tsx` (which renders "Not required — Internal job" vs "— Van & Driver mode" per the reason). Use the generic form in any new filter. When adding a new client-facing scanner/aggregate, gate on `COALESCE(j.is_internal, false) = false` alongside the usual lost/cancelled gates. The suspend/restore helpers in `hh-requirement-derivation.ts` are now `suspendRequirement(client, jobId, type, reason)` / `suspendJobExcess(client, jobId, reason)` / `restoreJobExcessFromSuspension` — reason-parameterised, restore matches either marker.
 
 **Known issue — OP ↔ HH status sync gap:**
 Many jobs confirmed in HH before webhook integration went live (Mar 2026) have stale `pipeline_status` in OP. The backline page works around this by using `jobs.status` (HH integer) as primary filter. Potential fixes for the broader platform:
@@ -1623,10 +1670,23 @@ Global operational view for what's currently happening / about to happen with tr
   - **Tidy.** `GET /get-checklist-settings` and `GET /get-events` added to `FREELANCER_BOOKOUT_ALLOW`. `/get-events` gains a scope check that clamps the query to the session's allocated reg (no fleet-wide enumeration). Kills the 403 console noise the freelancer was hitting on every walkaround load.
   - **Still TODO (Round 5+):** Vehicle swap mid-hire (Phase D3 — UI; soft check-in primitive shipped May 2026, see `docs/VAN-SWAP-AND-SOFT-CHECKIN-SPEC.md`). Multi-van D&C (drivers × vans expansion of the resolve merge). Freelancer-led interim check-in (reuses the soft check-in primitive).
 
-##### Carnets (inline on Prep Checklist, with global overview)
-- [ ] Carnet fields on `job_requirements` with step tracking: applied → received → items listed → stamped out → returned → closed
-- [ ] Global carnet overview page (`/operations/carnets`) — outstanding carnets, post-hire returns pending
-- [ ] Reminder automation: chase for return after hire ends
+##### Carnets ✅ COMPLETE (Jun 2026) — see `docs/CARNET-SPEC.md`
+Full ATA Carnet module replacing the Monday board + Jotform request form. Dedicated `job_carnets` + `carnet_gmrs` tables (NOT just a requirement card — promoted to a module like job_issues/storage because of the GMR children, custody chain, client form + signed authority, and document storage). Two modes on one record: `we_supply` (HH-detected via sale item **575** "Arrangement fee - provision of ATA Carnet", £750 — mirrors VE103B detection exactly) and `client_arranges` (manual lightweight "thing to do"). Per-job scope. Money stays in HireHop (item 575 → Money tab). GMRs tracked requested → made → sent, with number + uploaded QR image for forwarding to clients.
+- [x] **Slice 1 (migration 135 + HH detection):** `job_carnets` + `carnet_gmrs` tables; derivation engine detects item 575 → auto-creates `carnet` requirement card + `job_carnets` (we_supply/detected); read-only `/api/carnets`. Stale-cleanup wired (`carnet` added to DETECTABLE_TYPES, + untouched `job_carnets` rows self-delete when no longer detected). **Detection MUST match `LIST_ID === 575 AND CATEGORY_ID === 355` (Misc Sale)** — HireHop's asset & sale-item stock-ID spaces are separate, so a rental asset can also be stock 575; LIST_ID alone false-fired the carnet on jobs 16142/16007/15828 (Jun 2026). Same latent risk applies to VE103B (item 1023) — left as-is for now since no collision reported.
+- [x] **Slice 3 (staff backend + cockpit component):** backend write endpoints on `/api/carnets` (POST create, PATCH with status→custody/timestamp side-effects + timeline interaction, cancel, GMR CRUD, files JSONB). `CarnetSection` rich cockpit built (lifecycle stepper, custody, detail edit, GMR mgmt incl. QR upload, documents, soft cancel). **Job View keeps only the thin `carnet` requirement-card tracker** — the rich card was briefly on Job Detail then pulled (too heavy + duplicated the tracker). `CarnetSection` retained unmounted, reused for the Operations tab.
+- [x] **Slice 4 (auto-send + email routing):** `services/carnet-auto-email.ts` (daily 09:15) — initial send at T-28 days of needed-by on confirmed jobs (mints token + emails the form), chase at T-14 if not back (`form_reminder_sent_at` dedup); gated on lost/cancelled + internal. New **`carnet` email-routing bucket** (`carnet_request`/`carnet_request_chase` mapped) so the Job-View "who gets emails" picker controls the carnet send.
+- [x] **Slice 5 (Operations tab + cohesion):** `/operations/carnets` list page + dedicated `/operations/carnets/:id` detail page (one carnet per page — `CarnetDetailPage` renders the rich `CarnetSection` cockpit; list rows + the Job-View link both navigate there) + Operations nav. Job-View `carnet` requirement card is now a read-only reflection — generic dropdown + 6-step bar suppressed, replaced by a live lifecycle stepper + "Manage carnet in Operations →" link (deep-links to the carnet's detail page). `syncCarnetRequirementStatus` maps `job_carnets.status → carnet` requirement status on PATCH/cancel (keeps the prep counter honest). Overview + detail surface **Needed by** (`COALESCE(carnet_start_date, out_date, job_date)`) + **Return by** (`carnet_expiry_date + 7 days` — discharge deadline = 7 days after validity ends, we_supply only; NOT the job end date) with colour-coded countdowns (`CarnetCountdown`).
+- [x] **Slice 2 — Letter of Authorisation PDF + signature + public client form:** `services/carnet-authority-pdf.ts` (pdf-lib, two-signature letter; logo via `fetchLogo`; Ooosh signature + name/role/address from `system_settings` category `carnets`, migration 141). `POST /:id/generate-authority` (staff, on-demand). **Settings → Carnet** (`CarnetSettingsSection`) uploads the signature (→ R2, key into `carnet_ooosh_signature_url`) + edits signatory details. **Public client request form** (`CarnetFormPage` at `/carnet-form/:token`, no Layout — port of the Jotform: length/start/EU+non-EU countries/lead+additional names/GMR crossings/T&Cs/signature pad): public `GET /carnets/form/:token` + `POST /carnets/form/:token/submit` (before the auth gate) — on submit stores fields, computes expiry+18mo liability, seeds GMRs from crossings, flips to `info_received`, generates the final two-signature PDF (client sig + Ooosh sig), emails the signed copy to the client + `info@`. Staff `POST /:id/send-form` mints the token + "Send request form to client" / "Copy form link" on the cockpit. Templates: `carnet_request`, `carnet_request_chase`, `carnet_authority_copy`, `carnet_authority_received_internal`.
+- [x] **Final polish (Jun 2026):** client form — all fields required (front+back), start date defaults to the job's outgoing date, must scroll the terms before accepting. Cockpit + Job-View card — **letter-of-authority tracking** ("✓ Received" = `form_submitted_at` set, i.e. client signed via the form), **soft gate** (advancing to `applied`+ without a signed authority pops an amber "OK to continue?" confirm — warning, not a block), **phase-coloured stepper** (`STEP_PHASE` in `CarnetSection`, shared with `RequirementCard`). Manual `client_arranges` create on `/operations/carnets` (job-search modal). Dashboard **"Carnets" NeedsAttention bucket** (amber, secondary row): we_supply open carnets approaching/overdue + not obtained, out-with-client past discharge deadline, or returned-not-discharged.
+
+**Conventions worth remembering:**
+- **Detection** must match `LIST_ID === 575 AND CATEGORY_ID === 355` (asset/sale stock-ID namespaces overlap — see Slice 1).
+- **"We have the letter of authority"** = `job_carnets.form_submitted_at` is set (client signed). A staff-generated draft via `/generate-authority` sets `signed_authority_url` but is NOT the same as a received authority — the soft gate keys off `form_submitted_at`.
+- **Email routing:** carnet client emails go through `resolveClientEmailTarget(jobId, 'carnet_request')` → the `carnet` bucket in `email-routing.ts`. Any new carnet client template should be mapped to that bucket so the Job-View picker controls it.
+- **Return-by** = `carnet_expiry_date + 7 days` (discharge deadline), NOT the job end date. **Needed-by** = `COALESCE(carnet_start_date, out_date, job_date)`.
+- **GMR forward-to-client:** `POST /api/carnets/:id/gmrs/:gmrId/email` (`carnet_gmr_details` template) emails the GMR number + attaches the QR image (from R2) then marks the GMR sent. Recipient = carnet `lead_email`, else `resolveClientEmailTarget(jobId)`. "✉ Email to client" per-GMR button on the cockpit.
+- **Instant on-confirmation send:** `triggerCarnetFormOnConfirmation(jobId)` (confirmation-hooks.ts) fires from the same 3 confirmation entry points as the hire-form hook (pipeline.ts, money.ts, webhooks.ts) — sends the request form immediately if a we-supply carnet is `detected` within 28 days (derives once if the 30-min sync hasn't created the record yet). Shares `sendCarnetFormForJob` with the daily scheduler; the `form_sent_at` gate makes the two paths idempotent.
+- Lifecycle (we_supply): detected → form_sent → info_received → applied → received → with_client → returned → discharged → closed. `format='digital'` carnets skip physical custody/discharge steps. Warnings-not-gates throughout.
 
 **Parallelisation notes:** Streams 2-7 can all run simultaneously — they touch different tables, routes, and pages. Stream 1 + the HH-Derived Requirements Engine are the foundation and should complete first, as all other streams plug into it.
 
@@ -2205,15 +2265,16 @@ Standalone OP-native module replacing the Monday.com "Storage Clients" board. Oo
 - **T&Cs:** versioned (`storage_tcs_versions`, one current), public accept-link + e-signature → `storage_tcs_agreements` (signature PNG to R2).
 
 **Deferred (noted, not built):**
-- **Door-code encryption** — `storage_rooms.access_code` is plaintext for now (STAFF_ROLES-gated + audited). Moves to the planned `services/encryption.ts` PII layer once it lands (jon: ~within a week of this build). See spec §9.
+- ~~**Door-code encryption**~~ — done (migration 128, Jun 2026). The per-tenancy `storage_tenancies.access_code` is encrypted at rest via `services/encryption.ts` (AES-256-GCM), same dual-column pattern as driver PII: ciphertext in `access_code_encrypted`, plaintext column nulled on write (`prepAccessCode`/`revealAccessCode`/`stripAccessCode` in `routes/storage.ts`). Decrypted ONLY in the single-tenancy detail response (list views strip it). Falls back to plaintext if `ENCRYPTION_KEY` is unset. Backfill: `scripts/encrypt-storage-access-codes.ts` (dry-run default, `--commit`). NOTE: `storage_rooms.access_code` (the dead 093-era column, superseded by the per-tenancy field in round 2) is NOT encrypted — it's unused; drop it in a future migration if tidying.
 - **Xero recurring-invoice tracking** — follow-on from the broader Xero integration work. The manual `invoice sent` log + reminders are the interim value.
 - ~~**Dashboard surface**~~ — done in round 2 as the general "On Today" section (not a NeedsAttention bucket). `/api/storage/overview` still returns counts if a header widget is ever wanted.
-- **Address-book "Storage" tab** on Org/Person detail (mirrors Hire History / Excess History pattern).
-- **Waiting-list → vacancy matching** suggestions on move-out.
-- **Signed T&Cs snapshot PDF** (acceptance + signature image recorded; PDF generation not yet wired).
+- ~~**Address-book "Storage" tab**~~ — done in round 3. `StorageHistorySection.tsx` (current + past tenancies + waiting-list entries) mounted as a "Storage" tab on Org + Person detail, backed by `GET /api/storage/by-organisation/:id` and `/by-person/:id`. Mirrors the Hire/Excess/Held section pattern.
+- ~~**Waiting-list → vacancy matching**~~ — done in round 3. `GET /api/storage/waiting-list/matches?size=` returns waiting clients fitting a freed room's size (exact / `any` / null, exact-match first). Surfaced via a `VacancyMatchModal` at move-out (uses the freed room's size) and a "Find tenant →" button on available room cards. One click marks a waiting entry offered.
+- ~~**Signed T&Cs snapshot PDF**~~ — done (round 5). `services/storage-tcs-pdf.ts` (pdf-lib + Roboto via shared `pdf-fonts`) renders the version text (HTML→text) + acceptance metadata (who/when/IP) + signature image. Generated best-effort at acceptance time in the public accept endpoint, stored in R2 (`storage_tcs_agreements.pdf_r2_key`). Surfaced as a "📄 Download signed T&Cs" link on the tenancy detail (`tcs_pdf_key` on the detail payload, fetched via authenticated `/api/files/download`).
+- **Round 4–5 tenancy editability + contact picker (Jun 2026):** the tenancy detail modal gained an **Edit details** form (`EditTenancyForm`) covering every mutable field post-move-in (access type/code/key location, billing mode, cadence, next invoice + rate-review dates, lead contact, org, move-in date, status, notes) via the existing `PUT /tenancies/:id`; weekly rate stays on Change rate (history) and room is fixed. Access is **always shown** in the read view (was hidden when no code set). The lead-contact picker is now an org-scoped `ContactPicker` backed by **`GET /api/organisations/:id/contact-candidates`** — active roles only (`por.status='active'`; ended roles are `status='historical'` and must never surface) expanded across related orgs via `organisation_relationships` (Org>Org & Org>person, mirroring the New Enquiry job cascade). Falls back to global people search.
 - Temp storage / incoming deliveries — deliberately NOT here; belongs with the Holding module (Step 10).
 
-#### Step 10: Holding Module — "Held for Clients" / "Lost Property" / temp storage ← MOSTLY BUILT (Jun 2026)
+#### Step 10: Holding Module — "Held for Clients" / "Lost Property" / temp storage ← FEATURE-COMPLETE (Jun 2026)
 
 The unified "things we're temporarily holding for a client" module. **One engine** (`held_items`), one
 `kind` discriminator (`incoming` / `lost_property` / `temp_storage`) that drives behaviour + display
@@ -2257,33 +2318,308 @@ not the dashboard strip — add a slot if wanted). NOT touched by the HH derivat
 temp_storage + lost_property are NOT on the ticker — they're **right-sidebar FYI** on the Job View
 ("📦 Also holding (FYI)", client-wide via org).
 
-**Remaining (next chat):**
-- **Pre-hire review email heads-up** — add a Holding summary to `services/pre-hire-briefing.ts`
-  (`JobBriefing.holding` field + `buildBriefing` query + render block in
-  `email-templates/pre-hire-briefing.ts`). Phrasings: "2 packages here to give to the client",
-  "3 boxes were expected, nothing marked as arrived yet", + temp/lost aide-mémoire. Email-critical
-  file — integrate carefully.
-- **Stage 8 — lost-property chase**: review page (human-gated; `GET /holding/chases/review` ready),
-  daily scan that ASSEMBLES the batch (never auto-sends), gradient wk1/wk2/wk3 `holding_chase`
-  templates. Per spec §7B (a human approves the send — the Monday lesson: never auto-fire a
-  "we'll dispose of your stuff" email).
-- **Stage 9 — Storage-client "Packages held"** cross-link tab (Amazon-deluge case).
-- Desktop CreateModal search-first dedupe nudge; shared-UI refactor (3 copies of location/photo
-  capture); `merch` dashboard-strip slot. All low priority.
+**Smart linking + notify + ship-back (PRs #690/#692/#695):** HH job number is the primary capture
+field — `POST /holding` + `/link` derive `job_id` + client org from it (`resolveJobContext`), live
+`GET /holding/job-lookup/:n` confirms the client in the form, `GET /holding/org-jobs/:orgId`
+reverse-links when staff know the band not the job. `/:id/notify` takes a multi-recipient picker
+(`recipients[]` + `GET /:id/notify-contacts`), branches template by kind, **attaches item photos**
+(compressed client-side ~1600px before upload so emails stay small), enriches the incoming email with
+the description; fires post-save on the Quick Log for incoming + lost. Ship-back forwards postage +
+tracking (`holding_shipped_back`). `locationLabel()` surfaces the "Somewhere else" typed text. Shared
+FE primitives in `components/holding/`.
 
-**Branch:** `claude/zen-allen-V8knQ` (PR #666). Deploy adds the `qrcode` dep (run `npm install`) and
-migrations 113/115/116.
+**Lost-property chase + temp hold-until (PR #698, migration 119):** human-gated chase ladder — NEVER
+auto-fires to clients. `POST /:id/chase` sends the gradient email for the current tier
+(`holding_chase_1/2/3`, wk1 friendly → wk2 firm → wk3 final; job # in subject, staff signature via
+`users.person_id → people`) then bumps the level, only on successful send (422 no email / 502 fail,
+record untouched). `ChaseReviewPanel` on the Lost Property page (Send / Snooze / Skip), opened from
+the digest deep-link `?review=1`. Two timers on the detail card (Last contacted / Next chase due).
+`expected_collection_date` (future = chases paused, doubles as snooze, excluded from review + scan);
+`hold_until` on temp storage (staff reminded 3 days before). `services/holding-reminders.ts` runs
+daily **09:25 Europe/London** — assembles the chase digest (staff bell + info@ email to the review
+queue, NO client emails fired here) + hold-until reminders, per-cycle dedup via
+`hold_until_reminder_sent_for`.
+
+**Briefing + Stage 9 + merch strip (PRs #700/#701):** pre-hire briefing gains a "Things we're holding
+for this client" block (`JobBriefing.holding`, try/catch-guarded). Storage tenancy detail shows the
+client's held items (`HeldItemsSection entityType=organisation`). `merch` is now a slot in
+`job-progress-strip.ts` (+ FE mirror + briefing strip) so the pip shows on the dashboard Today strip.
+
+**Merch card + panel combined (PR #703):** the standalone Overview "Held for Clients" panel was
+duplicating the inert merch checklist pip. Now ONE surface — the merch requirement card in
+`JobPrepChecklist` carries its incoming-items detail + Send Merch Form nested beneath it (same pattern
+as the vehicle card nesting hire_forms/excess); the requirement row is untouched so the prep counter /
+dashboard strip / briefing roll-ups keep working. Merch is item-gated (no items → no requirement), so
+when nothing's logged a plain "Held for Clients" entry card renders instead (preserving the Send-Merch-
+Form entry point + empty state). Pre-hire only; standalone Overview panel removed.
+
+**At-a-glance chase columns + unified capture form + notify-at-create (Jun 2026):** two related
+upgrades after first-live feedback that the chase/notify state was buried behind a row-click.
+- **Lost Property list is now chase-focused at a glance.** The `lost_property` view table gained four
+  click-to-sort columns — **Last contacted · Chases · Next chase due · Expected collection** (the
+  "Found in" column folded into a sub-line under Item; Location dropped from the list — it's on the
+  detail card). Default sort is **Next chase due ascending** so whatever's due floats to the top.
+  "Next chase due" is **colour-coded** (red = due, blue ⏸ = paused by an expected-collection date,
+  grey = none/scheduled). **Single source of truth:** `next_chase_due` + `chase_state`
+  (`none`/`paused`/`due`/`scheduled`) are computed columns in `SELECT_WITH_JOINS` (`routes/holding.ts`)
+  that MIRROR the daily scan in `services/holding-reminders.ts` — the list, the detail card's two
+  timers, and the chase digest can never disagree. Any future "is this due a chase" surface should read
+  these fields rather than re-deriving (the old detail-card `addDays` derivation was replaced).
+- **One shared capture form** (`components/holding/HeldItemForm.tsx`) now backs BOTH the desktop
+  `CreateModal` (HoldingPage) and the mobile `QuickLogSheet` (`/quick`). They were two drifting copies
+  — notify-at-create only existed on mobile. `variant: 'desktop' | 'mobile'` switches styling + trims a
+  couple of secondary incoming fields on mobile; field set + save payload + notify logic are identical.
+  Add new capture fields HERE, not in either page.
+- **Notify-at-create across the board.** The form carries a "✉ Notify client now" checkbox (default
+  ON, hidden when owner unknown or item handed straight to client). On save it hands straight into
+  `NotifyClientModal` mid-flow — pick recipients (resolved from job#/org/person, or free-enter
+  name+email), or untick to just log without emailing. Applies to lost property AND incoming/merch.
+
+**Remaining / open:**
+- IRL feedback from the chase + hold-until flows (staff trialling over the following weeks).
+
+**Migrations:** 113/115/116 (initial) + 119 (chase/hold). `qrcode` dep added at the initial build.
 
 ### External Tools (already built, need repointing from Monday.com → Ooosh API)
 
 These are existing standalone tools that currently push to Monday.com. They need repointing to our status-transition API when ready (Step 5 above):
 
 - **Payment Portal** — Stripe payment processing, currently updates Monday.com. HIGH PRIORITY to repoint (after Steps 1-4).
-- **Staging Calculator** — stage/riser quoting tool (standalone, low priority)
-- **Backline Matcher** — match client requirements to inventory (standalone, low priority)
+- **Staging Calculator** — ✅ **INTEGRATED into OP (Jun 2026)** — see "Staging Calculator Integration" below.
+- **Backline Matcher** — ✅ **INTEGRATED into OP (Jun 2026)** — see "Backline Matcher Integration" below.
+- **PCN Manager** — ✅ **INTEGRATED into OP (Jun 2026)** — see "PCN Manager Integration" below.
 - **Cold Lead Finder** — Ticketmaster API integration (standalone, low priority)
 
+#### PCN Manager Integration (Jun 2026)
+
+Penalty Charge Notice module, re-homed from the standalone `PCN-Management-System`
+Netlify app (Monday PCN Tracker board + PCN Settings board + Jotform/extraction
+flow) into OP under Vehicles. **Spec:** `docs/PCN-MODULE-SPEC.md`. Migrations
+130/131/136/138/**140**.
+
+**Storage:** `pcns` (the tracker record, replaces the Monday board) + `pcn_events`
+(typed audit timeline) + `documents` JSONB (multi-doc: notice front/back,
+correspondence, responses, receipts — migration 136). Settings live in
+`system_settings` (category `pcn`), replacing the Monday PCN Settings board.
+
+**Build order (spec §12) — all shipped:** CRUD + `/match` + AI `/extract`
+(`pcn-extract.ts`, Claude Haiku via `config/anthropic.ts`); list (`PcnsPage`) +
+detail (`PcnDetailPage`) + Vehicles nav; extraction-first Log PCN modal +
+`/quick` tile; pay-direct flow + public receipt upload (`PcnReceiptUploadPage`,
+`mobile_upload_tokens` `pcn_receipt` purpose); receipt-chase scheduler
+(`pcn-chase.ts`, runs in `scheduler.ts`) + deadline/NIP nudges (`pcn-attention.ts`,
+silent info@ alerts); `PcnHistorySection` (Vehicle/Driver/Org/**Person**) +
+conditional Job Detail card; dashboard NeedsAttention buckets; all 8 email
+templates + the conditional £35+VAT HireHop handling charge (`pcn-actions.ts`,
+item `b1744`). **RBAC:** money-moving actions (transfer_liability, pay_recharge)
+are MANAGER_ROLES; pay-direct / ID-request / internal / query are STAFF_ROLES.
+
+**Monday import (`scripts/migrate-monday-pcns.ts`):** one-pass importer modelled
+on `migrate-monday-driver-files.ts`. Paginates the PCN Tracker board
+(`18390180140`), maps columns → `pcns` scalars (column IDs lifted from the legacy
+`create-pcn.js`), downloads the attached notice scan(s) via each asset's
+`public_url` → R2 (`files/pcn-documents/<uuid>/`) → `documents` JSONB. Email-silent
+(direct DB writes, never the action endpoints; historical deadlines are in the
+past so the info@-only nudges don't fire). Idempotent: upsert on `reference`, fills
+NULL gaps only, skips docs whose Monday asset-id is already present (`--force` to
+re-import). Best-effort anchoring: vehicle (reg parsed from the notice filename →
+`fleet_vehicles`), job (`JOB_NUMBER` → `jobs.hh_job_number`). Reports unmapped
+status/type/action labels so the enum maps can be extended before committing.
+**First live run: 67 PCNs imported with scans.** NB: any new script that needs the
+Monday token must `import dotenv` + `dotenv.config()` — importers that only import
+`pg` never load the backend `.env` and `MONDAY_API_TOKEN` reads as unset (the PCN
+import worked only because it transitively imports `config/r2`, which calls
+`dotenv.config()`).
+
+**Driver backfill (`scripts/backfill-pcn-drivers.ts`):** the import couldn't anchor
+drivers — OP `drivers.monday_item_id` comes from the global driver board
+(`9798399405`) but the PCN board's driver link points at the Driver Hire Form board
+(`841453886`), different pulse-id spaces. The PCN board's `board_relation` turned
+out to be an **empty mirror**, so the backfill matches by **name/email** against a
+text column (`--name-column <colId>` — jon copied the mirrored names into
+`text_mm4fh7s4`): drivers table first (email → name), then freelancer **people**
+(→ `driver_person_id`). Dry-run default, `--commit`, sets `driver_id`/
+`driver_person_id` only where both are NULL, logs a `matched` event.
+
+**Assign-driver-after-the-fact (this session):** a PCN's responsible driver can be
+set/changed/unassigned from `PcnDetailPage` after creation (multi-driver jobs,
+"which of three freelancers was in the van"). Migration **140** added
+`pcns.driver_person_id` (FK → `people`) so the driver can be a **freelancer/crew
+person** with no `drivers` row, alongside the existing `driver_id` (client
+self-drive). Exactly one of the two is set; the picker clears the other. Picker
+sources: drivers + crew candidates who were on the job around the offence date
+(from `/pcns/match` `crew_candidates`), plus a **Drivers | Freelancers** search
+toggle (`/drivers` / `/people?is_freelancer=true`). PATCH `/pcns/:id` accepts both
+ids and logs a `matched` event on change. List + detail render the person (with a
+"crew" tag, link to `/people/:id`); the Person PCN tab (`by-person`, gated to
+freelancers) shows their PCN history.
+
+**List UX (this session):** click-to-sort column headers (a `<field>_asc/_desc`
+pair per column in the `/pcns` SORTS whitelist) + last-used sort/filter persisted
+to localStorage (`ooosh_pcns_prefs`; dashboard deep-link URL params still win on
+load).
+
+**Pay & recharge (Jun 2026):** `pay_recharge` now recharges the actual fine amount
+to the client as a **custom-priced HireHop billable line** (`services/pcn-recharge.ts`
+`addPcnFineLine`, stock id from `pcn_hh_charge_item`, mirrors the proven
+`cost-recharge-hh.ts` add-line→price dance), alongside the separate £35+VAT handling
+charge. Because it's a real HH billable line it **auto-surfaces on the Money tab**
+(which reads HH billing live) — no extra Money-tab wiring. Tracked on
+`pcns.fine_recharge_amount / fine_recharged_at / fine_recharge_hh_item_id`
+(migration **143**, idempotent — won't double-recharge). VAT: the fine line uses the
+same stock item as the handling fee (1744, 20%-rated via `vat_rate:0` → HH derives),
+so a recharged fine carries the same treatment as the admin fee; point at a dedicated
+stock item if a fine should ever be zero-rated/disbursement. **Closed-job handling:**
+`addPcnFineLine` reads `job_data.php` at push time — pushes if the job is open; if it's
+`LOCKED` or terminally closed (Cancelled 9 / Not Interested 10 / Completed 11) it
+returns `manualActionRequired` advising staff to recharge manually in HireHop or raise
+a separate invoice (status + email still proceed; the email won't claim the fine
+landed). Deliberately LOOSER than cost-recharge's `[7,9,10,11]` block — PCNs typically
+arrive after the hire RETURNS (status 7, invoice usually still open), so Returned jobs
+are allowed to attempt; `LOCKED` is the real gate. The `pcn_pay_recharge` email states
+what actually landed. Only fires for `pay_recharge` (transfer_liability doesn't — there
+Ooosh never pays the issuer).
+
+**Shared extractor (Jun 2026):** `services/document-extract.ts` is the common
+Claude-vision primitive (prompt-cached system prompt, json_schema structured output,
+image/PDF blocks single or multi-page, parse-with-fence-fallback, cache telemetry).
+`pcn-extract.ts` + `cost-receipt-extract.ts` call `extractDocument<T>()` and keep only
+their prompt/schema/post-processing; the deferred vehicle service-record extractor
+reuses it.
+
+#### Staging Calculator Integration (Jun 2026)
+
+Brought into OP from `ooosh-utilities` (was a static page + 4 Netlify functions). It had
+**zero Monday dependency** — purely HireHop-driven — so this was a host-it-in-OP job, not a
+Monday repoint.
+
+**Approach: embed, don't rewrite.** The calculator is ~114KB of working vanilla JS + a 42KB
+three.js 3D viewer. Rather than port to React, the static assets live in `frontend/public/`
+(`staging-calculator.{html,css,js}`, `stage-view.html`) and are served same-origin. It's
+launched in an **iframe modal** from the **Job Requirements → "🛠 Tools" dropdown** (which
+replaced the dead manual requirement-add picker — templates + individual types were never used;
+"+ Reminder" stayed). Same-origin means the embedded app reuses the OP staff JWT
+(`localStorage.ooosh_access_token`) and calls `/api/staging/*`.
+
+- **Backend:** `routes/staging.ts` (mounted `/api/staging`) + `services/staging-stock.ts` (the
+  HireHop bulk-export parse, ported verbatim). Endpoints: `GET /stock`, `GET /job?job=<hh>`
+  (reads OP `jobs`, no HH round-trip), `POST /availability`, `POST /push`, `GET/PATCH/DELETE
+  /plans/:id`, and **public** `GET /plan/:slug` (no auth — the 3D viewer link clients open).
+  API-token calls go through the broker; the stock export uses its own export ID+key (direct fetch).
+- **The gaffa-tape bug — FIXED.** The old push hardcoded the `b` (hire) prefix on every item, so
+  the gaffa tape (`hirehopId: 740`, a *consumable*) pushed as `b740` = a Pioneer DJM900 (rental
+  stock #740). Consumables live in HireHop's consumables table, addressed with `s<id>`. The
+  calculator now tags consumables `saleItem: true` (gaffa tape #740 + velcro hook tape #1013) and
+  the push builds `s<id>` for them, `b<id>` for hire. **⚠️ The sale prefix `s` is the documented
+  convention but was NOT live-verified — do ONE test push of just the gaffa tape (and velcro) to a
+  scratch job and confirm it adds the tape, not a random hire item, before trusting it. The knob is
+  `SALE_ITEM_PREFIX` in `routes/staging.ts`.**
+- **Short 3D links (migration 121, `staging_plans`).** The old 3D viewer link encoded the whole
+  stage config in the URL (huge + ugly). Now `POST /push` stores the config and mints a short slug;
+  the link is `/stage-view.html?p=<slug>`, resolved via the public `GET /plan/:slug`. `stage-view.html`
+  still decodes legacy `?c=`/`?config=` inline links for backward-compat. The HH job note uses the
+  short link.
+- **Staging tab on Job Detail** — conditional (only appears once a `staging_plans` row exists for
+  the job). Lists each plan's short link with **Open / Copy / Share-with-freelancer / Delete**
+  (delete is a hard delete behind a confirm — disposable calc artefact, not hire-tracking). Share
+  toggles `share_with_freelancer` (same methodology as files-to-share; portal surfacing is a
+  follow-up — the flag is stored, the portal read isn't wired yet). On push-complete the embedded
+  app `postMessage`s the parent, which reveals + switches to the Staging tab.
+- **Deploy requirement:** `HIREHOP_EXPORT_ID` (+ the stock-export `HIREHOP_EXPORT_KEY` value) must
+  be set on the server `.env` — copy both from the retired ooosh-utilities Netlify env. The stock
+  endpoint 502s with a clear message until they're set.
+- **Live config (confirmed Jun 2026, on prod `.env`):** `HIREHOP_EXPORT_ID=2346` (the NUMERIC id
+  only — NOT the full URL), `HIREHOP_EXPORT_KEY=3tsdqih9hpj9` (the stock-export key; the code prefers
+  a dedicated `HIREHOP_STOCK_EXPORT_KEY` and falls back to `HIREHOP_EXPORT_KEY`). `services/staging-stock.ts`
+  fetches `modules/stock/export_data.php?id=…&key=…&depot=1&cat=444&sidx=TITLE&sord=asc` — i.e. the
+  **STAGING parent category 444 with `depot=1`** (a no-cat or no-depot fetch returns a truncated/empty
+  list — proven during go-live). It then splits children by CATEGORY_ID (445 decks / 446 legs+hardware /
+  447 screwjacks / 448 accessories). `[Staging] export id=… returned N items` logs aid diagnosis.
+- **Asset cache-busting:** `staging-calculator.html` loads the JS/CSS with a manual `?v=N` query
+  (currently `?v=2.6`). **Bump it on every edit to `staging-calculator.{js,css}`** or browsers serve
+  the stale cached copy (cost us a confused deploy — new code on server, old code in browser).
+- **⚠️ OUTSTANDING — gaffa tape (consumable) not landing in HireHop.** Diagnosed live 16 Jun 2026.
+  The DJM900 bug is fixed (no longer `b740`). The tape now pushes as **`s740`** and the log confirms
+  `itemsMap: {"b1708":1,"b1518":4,"b801":4,"s740":1}` is sent and `save_job` returns
+  `{"success":true,…}` — but the `b…` hire items land while **`s740` is silently ignored**. So the
+  `s` (sale/consumable) prefix is NOT how HireHop's `save_job.php` `items` adds a consumable. There's
+  no prior working example (the old utilities tool always pushed `b740` = wrong item), so the correct
+  syntax must be found from HireHop API docs / support, or by inspecting how the **backline matcher**
+  (`alternative-hirehop-stock`) adds sale stock. **Next-session steps:** (1) determine HireHop's
+  consumable add-to-job mechanism — likely either a different `items` key prefix, or consumables go on
+  **billing** (`billing_*.php` sale line) not the supply list; (2) set `SALE_ITEM_PREFIX` in
+  `routes/staging.ts` accordingly, or branch sale items to a billing call. Tape ID **740 is correct**
+  ("MagTape white gaffa tape", consumables table) — ID 21 is a *different* tape (ProGaff, cat 338),
+  don't use it. Velcro #1013 has the same issue. **Interim:** staff add the tape to the job manually
+  in HireHop. The calc's "Short 1 / owned 0" on the tape is cosmetic (tape is cat 338, outside the
+  staging 444 stock fetch — no stock lookup, hardcoded "needs ordering").
+- **Job note endpoint (fixed 16 Jun 2026):** the post-push HH job note (carrying the short 3D link)
+  was hitting `/api/job_note.php` which 404s; repointed to `/php_functions/notes_save.php`
+  (`main_id`/`type=1`/`note`, POST) — the endpoint the original `staging-push.js` used. NB: the
+  additional-driver-charge flow in `hire-forms.ts` still uses `/api/job_note.php` (best-effort) — it
+  may be silently 404ing there too and should likely move to `notes_save.php` as well.
+- **Deferred:** UX/UI polish of the (admittedly cramped) calculator layout — second pass once it's
+  live and jon's clicked around. Portal surfacing of shared staging links. Full React rewrite (only
+  if it earns its keep — low frequency).
+
+#### Backline Matcher Integration (Jun 2026)
+
+Brought into OP from the standalone `alternative-hirehop-stock` Netlify app
+(2 functions + a vanilla-JS `app.html`, password / `?hubToken=` auth). Like the
+Staging Calculator it had **no Monday _read_ dependency** — it pulled stock from
+the same HireHop bulk-export endpoint OP already wraps — but it _wrote_ every
+search to a Monday demand board, which Monday's shutdown was killing. So this was
+a host-in-OP + replace-the-Monday-write job. **Native React, not an iframe** (the
+UI is a textarea + result cards — trivial to rebuild, and going native gets OP's
+JWT auth for free, which is what locks out the old direct-URL access).
+
+- **Where:** Operations submenu → "Backline Matcher" (`/operations/backline-matcher`)
+  AND the Job Detail "🛠 Tools" dropdown (`BacklineMatcherModal`, job number
+  pre-filled so availability checks against the real hire dates).
+- **Backend:** `routes/backline-matcher.ts` (`/api/backline-matcher/*`, STAFF_ROLES) +
+  `services/backline-stock.ts` (export fetch, mirrors `staging-stock.ts` — same
+  `HIREHOP_EXPORT_ID`/`HIREHOP_EXPORT_KEY`; fetches the 5 backline parent cats
+  372/379/385/399/406 with `depot=1`, deduped) + `services/backline-matcher.ts`
+  (the Claude call). Endpoints: `POST /match`, `GET /stock`, `GET /demand`,
+  `PATCH /demand/:id`.
+- **Matcher upgrades over the original:** Claude returns **structured JSON**
+  (have-it verdict + ranked alternatives carrying `stock_id`) via the
+  `output_config` json_schema pattern (same as `cost-receipt-extract.ts`), so the
+  UI renders proper cards with availability pills instead of a markdown blob. The
+  well-tuned domain prompt (FT/RT/BD abbreviations, "different model number ≠
+  variant" precision) is ported verbatim. **Prompt caching** on the system prompt.
+  Model: `claude-sonnet-4-6`. When a HH job is attached, per-item availability is
+  checked via the broker (`items_picklist_avail.php`, chunked 50s, cached) and
+  folded into the prompt so Claude prioritises what's free for the dates.
+- **Demand tracker** (migration 137, `backline_demand`): replaces Monday board
+  2227909940. Every `/match` upserts on the normalised request — bumps count, adds
+  potential hire-days, records the job ref, stores Claude's have-it verdict. The
+  verdict is a **per-search snapshot** (last-known), NOT live truth — live
+  availability happens at search time inside `/match`; the table never re-polls
+  HireHop. Surfaced as a sortable/searchable table on the Operations page
+  (most-requested / do-we-stock-it / hire-days) = purchasing intelligence.
+- **Monday pull:** `scripts/migrate-monday-backline-demand.ts` (dry-run default,
+  `--commit`) pulls the ~30 board rows into `backline_demand`. Idempotent (counts
+  SET from Monday, not incremented). Needs `MONDAY_API_TOKEN`; board id defaults
+  to 2227909940 (`MONDAY_BOARD_ID_BACKLINE_DEMAND` overrides).
+- **Lock-down (in `alternative-hirehop-stock` repo):** both Netlify functions
+  return **410 Gone**; `app.html`/`index.html` are meta-refresh redirects to the
+  OP route; `netlify.toml` 301s `/app` + `/app.html`. Kills the
+  `?hubToken=...backline-matcher...` deep-link — everyone comes through OP's JWT.
+- **Deploy requirement:** `ANTHROPIC_API_KEY` (already on prod — PCN + cost
+  extraction use it) + `HIREHOP_EXPORT_ID`/`HIREHOP_EXPORT_KEY` (already on prod
+  for Staging). No new server config beyond running migration 137.
+- **Deferred:** stock deep-links from alternatives to HireHop (uncertain stock-item
+  URL — left out rather than guess); availability-into-prompt for the no-job case
+  (skipped — only checks when a job is attached). Cross-link demand → Fill-a-Gap /
+  purchasing if it earns its keep.
+
 ### Future Enhancements (captured, not scheduled)
+
+- **Client-facing interactivity on rack / staging view-only links (Jun 2026, spitballed, parked for quiet-time)** — both the Rack Planner and Staging Calculator already publish a public, token/slug-based view-only link sent to clients (rack = a 2D React Flow page `RackPlanPublicPage.tsx`; staging = the vanilla-JS 3D viewer `stage-view.html`). Two phased enhancements discussed with jon and deliberately deferred:
+  - **Phase 1 — "Approve" button (both tools).** Client opens the link, clicks Approve, optionally types their name + a comment. Backend stamps `approved_at` / `approved_by_name` / `comment`; staff see a green "✅ Approved by [name] on [date]" badge on the Overview card + a bell notification. Link is public/unauthenticated so "who approved" is self-declared — fine for a visual sign-off (low stakes, name + timestamp give the audit trail). Decision left open: keep purely informational (badge only, edits stay free) vs lock the plan from edits once approved with an "unlock to revise" override — jon leaned informational to start. Needs a public write endpoint (rate-limited, token-scoped) + the badge + notification. ~1 day.
+  - **Phase 2 — text-only annotation on the rack 2D link ONLY.** NOT freehand drawing (messy to store, hard for staff to action) and NOT on the 3D staging viewer (WebGL, no natural 2D canvas — out of scope). Model: pin-comments — client clicks a spot on the rack canvas, drops a numbered pin + types a note ("can this rack move stage-left?"). Structured, actionable, renders back to staff and clears once resolved. Needs a public write endpoint + a staff-side surface to read/clear annotations. Revisit only if Approve (Phase 1) proves it's wanted.
+  Skip freehand drawing and skip 3D-staging markup entirely.
 
 - **Cancellation analytics dashboard (May 2026)** — every cancellation already captures `cancellation_reason`, `cancellation_tier`, `cancellation_notice_days`, `cancellation_fee` + `cancellation_refund` on `jobs`. No more data needed. Build a dashboard widget / `/jobs/lost-cancelled` summary that aggregates: (a) cancelled-job count + £ retained per month, segmented by `cancellation_reason`; (b) lost vs cancelled split (different concepts, see Step 4c spec); (c) average notice period by reason — flags whether "Client cancelled" trends short-notice (revenue-protecting tier work) or long-notice (signals quote-stage friction); (d) £ refunded YTD vs £ retained YTD as a "cancellation P&L" line. Could surface as a tab on the Lost & Cancelled page (`/jobs/lost-cancelled`) above the existing list, with a date range picker. Pie chart of reasons + a small `<Sparkline>` over the last 12 weeks would be enough — no new infrastructure, just a SQL aggregate endpoint and a new widget that follows the dashboard section registry pattern (`frontend/src/components/dashboard/v2/`). Discussed in cancellation-modal-cleanup session, parked because the dataset is still small and the calculator/email work was higher value.
 
@@ -2383,7 +2719,7 @@ These are existing standalone tools that currently push to Monday.com. They need
 - **Book-out/check-in submit-speed pipeline (Jun 2026) — SHIPPED.** jon's own book-out (Scene Queen, HH 15736 / RX24SZG, 10 Jun 2026) validated a ~2-minute submit via the journal: ~7.5s photo upload (NOT the bottleneck — 16 photos, ~470ms cadence, 140-320ms server-side each), **~75s of client-side sequential PDF-thumbnail resizing** ("Preparing photos for PDF…", ~4.7s/photo on the phone), and ~32s of PDF/email round-trips (each driver's 7-9MB base64 condition-report PDF downloaded from `/generate-pdf` then re-uploaded to `/send-email` — per driver, identical except the name). Plus a capture-time UX gap: `compressImage` of the raw camera original takes 3-5s with no loading state on the photo tile, so staff retake photos thinking they "didn't take". Three fixes shipped together:
   1. **Capture spinner** — `PhotoCapture.tsx` (book-out) + `PhotoComparison.tsx` (check-in) show a "Processing…" tile on the slot while compression runs; double-trigger guarded.
   2. **Capture-time PDF thumbnails** — `compressImageWithThumb()` in `lib/image-utils.ts` produces the stored 2048px blob AND the ~800px PDF thumbnail (`CapturedPhoto.pdfBase64`) in ONE decode pass at capture, deleting the entire 75s submit-time resize stage. The thumbnail persists through the IndexedDB autosave draft (`db.ts` + `useFormAutosave`); submit falls back to `resizeImageForPdf()` for photos restored from pre-thumbnail drafts. The May 2026 memory rules (single decode alive, objectURL revoked after draw) are preserved — the thumb is drawn from the already-downscaled main canvas.
-  3. **Server-side condition-report send** — `POST /api/vehicles/send-condition-report` (in `FREELANCER_BOOKOUT_ALLOW`, so the freelancer backdoor flow is covered) takes the pdfData + a `recipients[]` list, builds each driver's PDF server-side (`buildConditionReportPdf`), and emails directly — the PDFs never round-trip through the phone. Per-recipient email resolution follows the `/send-email` fallback chain (explicit email → `resolveClientEmailTarget` → info@ with amber banner + timeline interaction). Email HTML/subject ported to `backend/src/services/condition-report-email.ts` — keep in sync with the legacy frontend builder in `lib/pdf-email.ts` until CollectionPage + offline `sync-processors.ts` migrate off the old two-step `/generate-pdf` + `/send-email` flow (both legacy endpoints intentionally retained for them + `events/:id/regenerate-pdf`). Behaviour note: check-in now uses the same no-client-email fallback as book-out (previously it silently skipped the email); a check-in with no email AND no HH job skips cleanly with an informational result line. Expected submit time after this work: ~10-15s. The "Background upload during walkaround" idea was evaluated and parked — upload wasn't the bottleneck; it remains relevant only to the low-signal hardening item above.
+  3. **Server-side condition-report send** — `POST /api/vehicles/send-condition-report` (in `FREELANCER_BOOKOUT_ALLOW`, so the freelancer backdoor flow is covered) takes the pdfData + a `recipients[]` list, builds each driver's PDF server-side (`buildConditionReportPdf`), and emails directly — the PDFs never round-trip through the phone. Per-recipient email resolution follows the `/send-email` fallback chain (explicit email → `resolveClientEmailTarget` → info@ with amber banner + timeline interaction). Email HTML/subject lives in `backend/src/services/condition-report-email.ts` (the frontend copy was deleted when CollectionPage + offline `sync-processors.ts` migrated to the same endpoint, Jun 2026 follow-up — the offline replays were previously embedding FULL-SIZE base64 photos in the PDF payload, ~10MB per 16-photo replay, now thumbnail-first with a resize fallback for pre-thumbnail queue items). The legacy `/generate-pdf` + `/send-email` backend endpoints are intentionally retained for pre-deploy tabs still running the old bundle and for `events/:id/regenerate-pdf` — don't delete them until a quiet period confirms nothing hits them. Same follow-up bumped the pg pool `connectionTimeoutMillis` 2s → 10s in `config/database.ts`: two simultaneous book-outs' post-hooks + server-side PDF builds briefly saturated the pool on 10 Jun 2026 and 2s waiters errored (`vehicle requirement sync failed: timeout exceeded`) instead of queueing; the proper fix remains the post-hook outbox pattern (see Future Enhancements). Behaviour note: check-in now uses the same no-client-email fallback as book-out (previously it silently skipped the email); a check-in with no email AND no HH job skips cleanly with an informational result line. Expected submit time after this work: ~10-15s. The "Background upload during walkaround" idea was evaluated and parked — upload wasn't the bottleneck; it remains relevant only to the low-signal hardening item above.
 
 - **Non-SDH book-out — D&C / delivery / collection mode (Phase 1B).** V&D shipped May 2026 (see entry above); the same pattern can extend to delivery / collection / D&C book-outs (freelancer collects van from base → delivers to customer site, or the reverse on collection). The schema already supports `assignment_type` values of `delivery` and `collection`, and the BookOutPage mode switch is positioned to add these — the picker would still pull from the job's crew assignments, the PDF + email flow stays the same, and the only new wiring is the assignment_type promotion at submit time. Trigger from Crew & Transport ops cards / Allocations page when slot is non-self-drive non-V&D. Defer until V&D is proven in live use across more hires.
 
@@ -2643,6 +2979,8 @@ await syncFleetHireStatusByReg(reg);
 
 Centralised two-step HireHop deposit push (`billing_deposit_save.php` + Xero sync via `accounting/tasks.php`). Used by `POST /api/money/:jobId/record-payment` and `POST /api/excess/:id/payment`. Returns a structured `{hhDepositId, xeroSynced, error}` so callers can surface failures rather than silently logging "non-fatal".
 
+`pushDepositToHH` accepts an optional explicit `bankId` (overrides the method→bank mapping) so a deposit can be recreated on the exact original bank. **`reverseDepositOnHH`** (same file) is the "out" leg for moving a deposit off a job (Combine Bookings): it does NOT post a negative deposit — HireHop rejects those and the rejected row never reaches Xero — it posts a **refund payment application** against the specific deposit (`billing_payments_save.php` with `deposit=<id>, OWNER=0, paid=<amount>`) + `post_payment` Xero sync, exactly like excess reimbursement. To reduce/remove a HireHop deposit from anywhere, use a payment application, never a negative deposit. `getMethodForBankId` is the inverse of the bank map for recreating a deposit read back from billing.
+
 **Why this exists:** Before May 2026 the Money tab's Record Payment endpoint had its own inline HH push, and the Excess Manage modal's `/payment` endpoint had no HH push at all — excesses recorded via Manage never appeared in HireHop billing. Job 15624 incident: £1200 worldpay was recorded twice via the Manage modal, doubling the OP-side `excess_amount_taken` to £2400, while HireHop showed nothing for the excess. The shared helper closes both gaps and standardises the failure-surfacing contract.
 
 **Failure surfacing contract:** any caller hitting this helper should bubble `error` back to the client as `hh_push_error: string | null` in the JSON response. Frontend renders an amber "Saved in OP — HireHop push failed" banner that keeps the modal open so staff can decide whether to retry or record manually in HH and use Manage > Link to HH. Three failure modes covered:
@@ -2685,6 +3023,17 @@ as either **Spend Money** (paid-now methods) or an **AUTHORISED Bill** (pay-late
 methods). Engine: `services/cost-xero-push.ts`; routes: `routes/costs.ts`; UI:
 `components/CostCaptureModal.tsx` + `pages/CostsPage.tsx`.
 
+**Feedback-round additions (Jun 2026)** — all in `docs/COST-CAPTURE-RECHARGE-SPEC.md`:
+- **Bundled-invoice allocation split** (`cost_allocations`, migration 092): split one cost across jobs via `PUT /costs/:id/allocations` — `CostAllocationModal`, surfaced both as a `⑂` row action AND a "Split across multiple jobs" tick at capture time (`onSavedAndSplit`).
+- **Edit-after-push → manual re-sync** (migration 147, `costs.xero_stale`): editing a Xero-affecting field on an already-pushed cost flags it stale (amber "Re-sync" pill) rather than silently diverging or auto-mutating a reconciled object. `POST /costs/:id/resync-xero` updates the Xero object IN PLACE (`updateBill`/`updateSpendMoney`, POST-with-ID, never duplicates); 409 + dismiss for Xero-locked (paid/reconciled). **Delete is OP-only — it does NOT delete the Xero bill/txn** (the delete confirm warns when `xero_object_id` is set; void in Xero separately).
+- **COT receipt chaser** (migration 148): weekly digest (Wed 12:00 London) to each card-holder about company-card costs missing a receipt (3-day grace), `services/cost-receipt-chaser.ts`; `?missing_receipt=1[&mine=1]` list filter + "COT Receipts" dashboard bucket.
+- **COT card register** (migration 148, `users.cot_card_label`): admin-managed card per staff (Settings → COT Card Register, `GET /users/cot-cards` + `PATCH /users/:id/cot-card`); capture stamps holder + last4 server-side, staff never type card details.
+- **Supplier terms pull-through fix**: `costs.xero_contact_id` was never persisted (the bill was created by contact *name*), so Xero terms never seeded. `pushBill` now resolves the contact first, writes the id back, seeds terms, then computes the due date + creates the bill by `contactId`. Skipped for `reimburse_me`.
+- **Freelancer Friday terms**: `freelancerDueDate(approvedAt)` = first Friday on/after (approval + 7 days), overriding supplier/Xero terms for `cost_type='freelancer_invoice'` (list display, bill push, re-sync). Xero can't model this. `SupplierTerms.source` gained `'freelancer'`.
+- **Bills-to-Pay UX**: sortable Due column + Overdue / This Friday / Next Friday / This week / Next 7 days filter pills (client-side over server `due_date` — format dates in LOCAL time, not `toISOString()`, or BST shifts the exact-Friday match) + a per-supplier dropdown. The Xero-status cell collapses status+sync into one clickable pill so row actions don't get pushed off-screen.
+- **Xero reconciliation probe** ("in Xero, not in OP"): `GET /api/costs/reconcile/xero-cot?days=N` (admin/manager) reads SPEND bank transactions on the mapped COT account (`xero_bank_cot_card`) and flags each matched (pushed `xero_object_id`, else amount+near-date) vs unmatched. `XeroCotProbe` panel on the Reconcile tab. Verified live (Jun 2026): unreconciled bank-feed transactions ARE API-readable, so a full matcher is viable — currently kept as an on-demand probe (0 orphans); promote to always-on (dashboard count / chaser / dismiss list) only if orphans recur. Caveat: a truly raw/uncoded statement line won't surface until coded in Xero.
+- **Extraction date guard**: `normaliseCostDate()` in `cost-receipt-extract.ts` — implausibly-future extracted dates (> today + 7d) try the day/month swap and take it if it lands a valid past date (downgrading confidence), else keep + downgrade. Catches the UK-vs-US misread (11/06 → 6 Nov). Prompt is UK day-first; capture modal shows an amber future-date hint.
+
 **Push concurrency — per-cost advisory lock (DO NOT REMOVE).** The push is
 triggered from FIVE sites — create / update / approve / pay / the Push-Now
 button — and four are fire-and-forget (`pushCostToXeroBackground` → `setImmediate`).
@@ -2723,10 +3072,23 @@ modal surfaces it but never blocks the save. Partial case-insensitive index
 **Cost ↔ vehicle service-log unification (Jun 2026).** `CostCaptureModal` is
 dual-purpose — it captures a cost AND/OR a `vehicle_service_log` record in one
 entry, so a garage invoice is entered once:
-- Pick a van → an "Also add to <REG>'s service history" toggle appears,
-  **defaulted ON** ("ask per cost, default yes"), revealing the service fields
-  (type / mileage / garage→defaults to supplier / status / next-due /
-  apply-to-vehicle).
+- Pick a van on a **servicing/repair-category** cost → an "Also add to <REG>'s
+  service history" toggle appears, **defaulted ON** ("ask per cost, default yes"),
+  revealing the service fields (type / mileage / garage→defaults to supplier /
+  status / next-due / apply-to-vehicle). The offer is whitelisted to genuine
+  service-event categories (Vehicle servicing `406`, Vehicle repairs `409`) —
+  **fuel / parking / PCN costs keep their reg link on the cost row (the
+  charge-back sanity check) but never create a service record**, or the history
+  clogs instantly (`SERVICE_HISTORY_CATEGORY_CODES` in `CostCaptureModal.tsx`,
+  Jun 2026). Whitelist not blacklist, so a future non-service vehicle category
+  can't slip through.
+- The offer also appears **in edit mode** when a cost has a van link but no
+  `vehicle_service_log_id` yet — covers the "van link added in a later edit"
+  hole where the unification only used to fire at create time, so the cost showed
+  as linked on `/money/costs` but was invisible in Service History (Hi-Q
+  Portslade / RX22SYV incident, Jun 2026). Edit-mode opens unticked with an amber
+  hint; the vehicle picker auto-ticks when the edit itself adds the link. An edit
+  never re-touches an already-linked service record.
 - On save it creates the cost, then POSTs to the existing
   `POST /vehicles/fleet/:id/service-log` endpoint (reusing ALL its side-effects —
   mileage-log, fleet live-figure updates, upward-only mileage ratchet), attaches
@@ -2743,6 +3105,22 @@ entry, so a garage invoice is entered once:
   carries a single receipt (multi-file-at-add deferred).
 
 Migration 118 (`invoice_number` + `vat_treatment`) is in `run.ts`.
+
+**June 2026 polish round (PR #706):**
+- **Invoice number → Xero Reference.** `xeroReference()` helper in `cost-xero-push.ts` — the Xero `Reference` field on bills, spend-money AND bill payments carries `invoice_number` (fallback: supplier name). Previously it redundantly sent the supplier name (already the Contact).
+- **AI extraction hardening** (`cost-receipt-extract.ts`): `invoice_number` is now in the prompt + schema (it was simply never asked for — the field post-dated the extractor). Explicit gross-vs-net prompt rules, plus a deterministic post-parse `normaliseAmounts()` repair: net + VAT must equal gross; obvious swaps fixed, confidence downgraded to `medium` on any real correction so the modal banner prompts a human check. If accuracy complaints persist, the next lever is swapping `MODEL_ID` from Haiku to Sonnet (~10x cost, still <1p/receipt).
+- **Capture modal uses the document's actual figures.** When extracted VAT isn't 20% of net, the modal lands in Manual mode with all three figures verbatim — it previously force-recomputed net from gross at 20%, mangling correct extractions (a real source of staff gross/net complaints).
+- **Category is required on save** (except service-record-only saves, which create no cost row). A missing category = missing `xero_account_code` = guaranteed push failure ("Missing xero_account_code" incident, Jun 2026). The push error message now tells staff to Edit → pick category (PATCH auto-retries the push).
+- **Approve = push.** It always did (the `/approve` endpoint fires the background push) but the UI implied a second manual step: unapproved bills now show a passive "Syncs on approval" instead of a no-op "Push now", and Approve triggers a delayed table re-refresh so the "Bill created" pill appears on its own.
+- **Xero reconcile sync** (`services/cost-xero-reconcile-sync.ts`, daily 07:45 Europe/London): polls Xero `BankTransactions` (chunked `IsReconciled==true` Guid-OR filter, 1-3 calls/day) for pushed spend-money costs still in `bill_created`/`attached` and flips them to `reconciled`. This is what makes the `/money/costs` Reconcile tab a true exception list that self-empties — anything still on it days after the bank feed landed = unmatched payment / missing receipt, worth chasing. Voided/deleted Xero txns are left alone (state stays, visible on the tab).
+- **Costs table UX:** click-to-sort headers (Date/Supplier/Description/Gross/Type/Status), truncated Type + Description with hover tooltips, "Uploaded by" column only on the All costs tab (tooltip elsewhere), icon Edit/Delete, Linked column links through to Job Detail / Vehicle Detail. Mark-paid modal shows invoice number + due date (invoice date + 30, mirroring `addDaysISO` in the push) and defaults to `lloyds_transfer`.
+
+**Receipt extraction — vehicle reg + mileage + service type (Jun 2026, PR #869).** Garage/vehicle invoices put the reg, odometer and the work done in a labelled header, so the AI extractor now reads them and ties the cost to the van automatically:
+- `cost-receipt-extract.ts` schema/prompt gained `vehicle_reg`, `mileage` and `service_type` (enum matching the service-log pills: service / repair / mot / insurance / tax / tyre / other). `normaliseVehicle()` cleans the reg (uppercase, no spaces, 2–8 chars) and clamps mileage to a sane positive integer (`>0`, `<1,000,000`), dropping misreads.
+- **Auto-link the van** (`CostCaptureModal.tsx`): an exact match against the loaded active fleet (`normReg` both sides) auto-links the vehicle so the mileage/garage pre-fill has somewhere to land; an unrecognised reg surfaces an amber "not in active fleet" note. Mirrors the "📎 Looks like job #12345" pattern. Never overrides an existing/preset link.
+- **⚠️ Match in an effect, NOT inline in the async handler.** The first cut matched inline inside `extractReceipt`, which captured `fleet` in the handler's closure — if the `/vehicles/fleet` fetch was still in flight when the multi-second Claude call returned, it matched against an empty list and false-reported "not in fleet" (live bug on RO23HLR, which IS in the fleet). Fixed by stashing the extracted reg in `pendingVehicleReg` and matching in a `useEffect` keyed on `[pendingVehicleReg, fleet, ...]` so it waits for the fleet to load. Any future "match extracted value against an async-loaded list" must do the same — don't match against a list inside the async extract closure.
+- **Pre-fills** (all suggestions, flagged by the existing confidence banner): `serviceMileage` from `mileage` (the service endpoint's upward-only ratchet still guards the live odometer), `serviceGarage` from supplier (same entity on a garage invoice), `serviceType` from the extracted classification, and the service-history toggle auto-ticks for 406/409 categories.
+- **Xero-sync transparency note** in the modal footer: paid-now costs already auto-push to Xero (Spend Money) on save via `pushCostToXeroBackground` in the create handler — there's no "Approve & save" for them because they skip the approval gate. The footer now states this explicitly (and that pay-later bills wait for approval) so the auto-sync isn't invisible. No behaviour change — `costs.ts:663` always fired the push; only the UI was silent. The CostsPage row's Xero pill (+ `/costs/:id/sync-xero` retry) remains the surface for sync status/failures.
 
 ### PII Encryption ✅ COMPLETE (PR 3, May 2026)
 
@@ -2768,6 +3146,7 @@ Application-level AES-256-GCM encryption for fields that must never sit in the d
 **Retrofit checklist (apply on jon's timeline — build once, encrypt incrementally):**
 - [x] Client bank details (reimbursement) — done in PR 3
 - [~] Driver PII — **Phase 1 SHIPPED (Jun 2026, migration 103)**: `date_of_birth`, `dvla_check_code`, `address_line1`, `address_line2`, `address_full`, `licence_address` on `drivers`. Dual-write (plaintext kept + `*_encrypted` companions), reads prefer encrypted with plaintext fallback (`services/driver-pii.ts` — `encryptDriverPiiInto`/`decryptDriverRow`). Backfill: `scripts/encrypt-driver-pii.ts` (dry-run default, `--commit`, `--verify` key round-trip). Live backfill done (246 drivers / 900 fields, 0 remaining). **`licence_number` + `postcode` deliberately NOT encrypted** — used in live ILIKE/exact search; need a blind-index to encrypt (separate follow-up). **Phase 2 STILL TODO** (no rush — Phase 1 is correct, plaintext just still co-exists): (a) convert the two ALIASED hire-form PDF read paths (`hire-forms.ts` ~1110 + ~2028 — `d.date_of_birth AS driver_dob` etc., which `decryptDriverRow` can't match; inventoried in the `driver-pii.ts` header), then (b) a migration to null the plaintext columns + stop the plaintext write. Passport expiry + the searched fields are later slices.
+- [x] Storage door codes — done (migration 128). `storage_tenancies.access_code` → `access_code_encrypted`; see Step 9 Client Storage notes + `scripts/encrypt-storage-access-codes.ts`.
 - [ ] Card-machine receipt scan storage (the scan files themselves; metadata flag already on `job_excess`)
 - [ ] Freelancer PII (held in `people` / `drivers`)
 
@@ -2951,6 +3330,18 @@ This was a real bug: `hire-forms.ts` PDF generation at lines 1173 + 1424 was usi
 
 Book-out is the canonical moment dates get LOCKED on the assignment. Before book-out, `hire_start/hire_end` are tentative (mirror job dates if not set). At book-out, staff can adjust them on the BookOutPage form. Mid-tour drivers added after book-out get THEIR own `hire_start = NOW()`.
 
+### Book-out / check-in lifecycle invariants (Jun 2026)
+
+Two invariants that, when broken, silently strand a hire and mis-attribute its check-in to the wrong job. Learned the hard way via **RX73TBZ (jobs 16057↔16149)** — read before touching any book-out or check-in path.
+
+**1. Any path that sets `vehicle_hire_assignments.status = 'booked_out'` MUST also stamp `booked_out_at`.** A "real" book-out used to be split across two writes: the status flip (`PATCH /api/hire-forms/:id` — the BookOutPage per-driver writeback loop) AND a *separate* `save-event` vehicle event (which wrote the R2 history card and stamped `booked_out_at`). The PATCH path did NOT stamp `booked_out_at` — only the event did. So when the event failed to land (transient error, abandoned walkaround, offline-queue not flushed), the row read as `booked_out` with `booked_out_at = NULL` and no history card. Fixed Jun 2026: `hire-forms.ts` PATCH now stamps `booked_out_at = COALESCE(booked_out_at, NOW())` (+ `booked_out_by` for staff) on the transition. The other paths (`assignments.ts` `/book-out`, `vehicles.ts` save-event, `hire-forms.ts` add-to-hire) already stamped it. **Any NEW book-out path must stamp it too — a `booked_out` row without `booked_out_at` is a bug.**
+
+**2. Check-in resolves the hire from the authoritative assignment, NOT the latest R2 book-out event.** `CheckInPage` used to read the van's most-recent book-out *event* and key the whole check-in (the R2 card's `hireHopJob` AND the backend's assignment-flip) off it. When invariant 1 was broken, the live hire had no book-out event, so the event query returned a STALE book-out from a *previous* hire — and the check-in got stamped against that wrong job, leaving the real hire stuck `booked_out` (the prior hire even got a duplicate check-in card). Fixed Jun 2026: `GET /api/vehicles/check-in-eligibility` already returned `hirehopJob` (the open assignment's job, straight from the DB); `checkAlreadyCheckedIn` now threads it through and `CheckInPage` prefers it over the event's job (logs a `console.warn` on disagreement). **The DB assignment is the source of truth for "which hire is this van on" — never resolve it solely from R2 event history.**
+
+**Tripwire:** `runBookedOutNoTimestampScan` (`services/sanity-check-scanner.ts`, wired into the 15-min sanity cron) flags any `booked_out` row with `booked_out_at IS NULL` for > 3h — impossible post-fix, so a hit means a new path has regressed invariant 1. One alert per job to info@, deduped via a `[Tripwire: …]` notes marker (stamp-first, like the other scans).
+
+**Historical backlog (cleared Jun 2026):** `16149`, `15769` (×4), `15738` — hires booked out via the PATCH path before the fix that never got a proper check-in, leaving rows stuck `booked_out` on already-`completed` jobs (and the van wrongly reading "Check In available" / `fleet_vehicles.hire_status='On Hire'`). Flipped to `returned` by hand. The fleet-wide finder for any future occurrence: `booked_out`/`active` assignments whose linked job is already `returned`/`completed`/`cancelled`/`lost` (dual job-match on `job_id` OR `hh_job_number`). Flipping the assignment does NOT recompute `fleet_vehicles.hire_status` (raw SQL skips `syncFleetHireStatus`), so correct the cached fleet status separately if the stale row was pinning the van `On Hire`.
+
 ### Per-job contacts (`job_contacts`)
 
 **The convention:** each hire has its own contact list — who's actually involved in THIS booking — distinct from the org-wide "who works at this company" model in `person_organisation_roles`. Rounds 1-6 (May 2026) built this end-to-end: the storage layer, the routing graduation, the management UI, and the HH push enrichment. **All new client-facing email senders, and any new HH push surface, MUST follow this convention.**
@@ -3038,6 +3429,7 @@ Layered on top of `job_contacts`. The base behaviour ("every client email goes t
 | `bookings_payments` | Bookings & payments | `booking_confirmed_deposit`, `payment_received`, `last_minute_booking`, `job_cancelled_client` |
 | `send_invoice` | Send invoice | **Reserved** — HH/Xero send invoices today, no template currently mapped. Picker shows the slot so a future OP-driven invoice template lands cleanly. |
 | `hire_forms` | Hire forms & driver | `hire_form_request`, `hire_form_chase` |
+| `carnet` | Carnet | `carnet_request`, `carnet_request_chase` |
 | `excess` | Insurance excess | Every active lifecycle template (`excess_payment_confirmed`, `excess_preauth_confirmed`, `excess_preauth_released`, `excess_partial_received`, `excess_reimbursed`, `excess_partially_reimbursed`, `excess_claimed`, `excess_rolled_over_applied`) |
 | `delivery_on_day` | Delivery / on-the-day | `delivery_note`, `collection_confirmation`, `vehicle_checked_in` |
 
@@ -3092,7 +3484,7 @@ Pattern for safety-net warning emails that previously fired inline and spammed s
 **Authentication & Authorization:**
 - [x] JWT access tokens (15 min) + refresh tokens (7 days)
 - [x] Bcrypt password hashing (12 salt rounds)
-- [x] RBAC middleware (`authorize()`) on sensitive routes — 6 roles: `admin`, `manager`, `staff`, `general_assistant`, `weekend_manager`, `freelancer`. **For staff-wide gates** (anything the whole non-freelancer team needs), use the shared `STAFF_ROLES` constant from `middleware/auth.ts` and spread it: `router.use(authorize(...STAFF_ROLES))`. Do NOT hardcode `authorize('admin', 'manager', 'staff')` — it silently locks out `weekend_manager` and `general_assistant` (this caused a live bug on `/pipeline` + `/requirements` post-go-live, fixed 26 Apr 2026). **For manager-tier gates** (money out the door, hard-gate overrides, PII reads), use the `MANAGER_ROLES` constant (admin + manager + weekend_manager) — don't hardcode `authorize('admin', 'manager')`, which silently locks out the weekend manager from actions they should be able to take when admin/manager are off. Use `authorize('admin')` alone only for absolute / irreversible decisions (e.g. waiving an excess to £0). For other narrower gates, keep the explicit role list.
+- [x] RBAC middleware (`authorize()`) on sensitive routes — 6 roles: `admin`, `manager`, `staff`, `general_assistant`, `weekend_manager`, `freelancer`. **For staff-wide gates** (anything the whole non-freelancer team needs), use the shared `STAFF_ROLES` constant from `middleware/auth.ts` and spread it: `router.use(authorize(...STAFF_ROLES))`. Do NOT hardcode `authorize('admin', 'manager', 'staff')` — it silently locks out `weekend_manager` and `general_assistant` (this caused a live bug on `/pipeline` + `/requirements` post-go-live, fixed 26 Apr 2026). **For manager-tier gates** (money out the door, hard-gate overrides, PII reads), use the `MANAGER_ROLES` constant (admin + manager + weekend_manager) — don't hardcode `authorize('admin', 'manager')`, which silently locks out the weekend manager from actions they should be able to take when admin/manager are off. Use `authorize('admin')` alone only for absolute / irreversible decisions (e.g. waiving an excess to £0). For other narrower gates, keep the explicit role list. **`weekend_manager` ≡ `manager` (one privilege level, jon Jun 2026).** The backend enforces this STRUCTURALLY: `authorize()` (`middleware/auth.ts`) accepts a `weekend_manager` anywhere `manager` is allowed, so you **never** need to list `weekend_manager` alongside `manager` — `authorize('admin', 'manager')` already grants the weekend manager. The only thing that excludes a weekend manager is a gate that omits `manager` entirely (e.g. `authorize('admin')`). **Frontend mirrors this:** use `hasManagerRole(role)` / `roleAllowed(role, [...])` from `frontend/src/lib/roles.ts` for any manager-tier UI gate — NEVER bare `role === 'manager'` (that silently hides manager UI from the weekend manager). When adding a new manager-tier role in future, update those two chokepoints (backend `authorize` alias + the frontend helper) rather than every call site.
 - [x] Account locking — `is_active = false` nulls refresh token via DB trigger, locks user out within 15 min (access token expiry)
 - [x] Optimistic locking — `version` column on people, organisations, venues, jobs tables. PUT requests can send `version` to detect concurrent edits (409 Conflict if stale). Backwards compatible — omitting `version` skips the check.
 - [x] JWT_SECRET required via env var (no default fallback) — app won't start without it
@@ -3301,6 +3693,7 @@ Self-drive hires require an insurance excess. The amount is calculated by the dr
 | OOH return reminders | Daily at 10:00 | Send T-1 day reminder for vehicles with `return_overnight=true` and `hire_end=tomorrow`. See "Out-of-Hours Returns" section. |
 | Pre-auth expiry reconciliation | Daily at 09:40 (Europe/London) | Scan `job_excess` with `excess_status='pre_auth'` past `held_expires_at`. Stripe holds → release only if Stripe reports the PI `canceled`; card-machine/cash holds → release after the 5-day window. SILENT (no emails/bells) — dashboard bucket is the surface. Shipped PR 4 (May 2026). |
 | Stale enquiry auto-lose | Daily at 09:00 | Mark unconfirmed enquiries / provisional as lost when `job_date::date < CURRENT_DATE`, `pipeline_status IN ('new_enquiry', 'quoting', 'paused', 'provisional')`, `status < 2`. Runs at office start so staff don't open the day to phantom enquiries cluttering operational lists (backline prep, overdue departures, etc.). Also pushes status 10 (Not Interested) to HireHop. Was 10:00 pre-May 2026 — moved to 09:00 to land before staff start their day. |
+| Carnet request-form auto-email | Daily at 09:15 | We-supply carnets: initial send at T-28 days of needed-by on confirmed jobs, chase at T-14 if not back. Obeys the `carnet` email-routing bucket + lost/cancelled/internal gates. `services/carnet-auto-email.ts`. |
 
 ## HireHop Integration
 

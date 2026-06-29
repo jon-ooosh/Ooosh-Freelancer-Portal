@@ -21,13 +21,13 @@ import { renderBriefingHtml, buildSubject } from './email-templates/pre-hire-bri
 import { resolveHireFormContacts, ResolvedContact } from './hire-form-contacts';
 import { calculateVatAdjustment } from './vat-adjustment';
 
-/** Match the OP-wide convention pinned in CLAUDE.md: requirements with this
- *  marker in `notes` are V&D-suspended (status='blocked' in the DB but
- *  semantically "not required on this job"). Filter them out of every
- *  aggregate / count / render so the email matches Dashboard / JobsPage /
- *  Job Detail behaviour. */
+/** Match the OP-wide convention pinned in CLAUDE.md: requirements with a
+ *  `[Suspended: <reason>]` marker in `notes` (Van & Driver or Internal) are
+ *  suspended (status='blocked' in the DB but semantically "not required on
+ *  this job"). Filter them out of every aggregate / count / render so the
+ *  email matches Dashboard / JobsPage / Job Detail behaviour. */
 function isSuspendedByVD(notes: string | null | undefined): boolean {
-  return !!notes && notes.includes('[Suspended: Van & Driver]');
+  return !!notes && notes.includes('[Suspended:');
 }
 
 // SYSTEM_USER_ID matches the value used elsewhere for system-attributed
@@ -1037,6 +1037,7 @@ export async function findEligibleJobs(): Promise<EligibleJob[]> {
        FROM jobs j
       WHERE j.is_deleted = false
         AND j.pipeline_status = 'confirmed'
+        AND COALESCE(j.is_internal, false) = false
         AND COALESCE(j.out_date::date, j.job_date::date) IS NOT NULL
         AND COALESCE(j.out_date::date, j.job_date::date) BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '5 days'`,
     [],

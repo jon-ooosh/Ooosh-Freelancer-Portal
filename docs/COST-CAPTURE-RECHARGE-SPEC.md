@@ -757,3 +757,275 @@ double scrollbar.
 
 No migration. Backend: `cost-receipt-extract.ts` (schema + prompt),
 `xero-broker.ts` (tax-type resolver), `cost-xero-push.ts` (TaxType on lines).
+
+---
+
+## Build notes — Approve-on-upload + entry points (Jun 2026)
+
+**Approve & save (one-click).** The capture modal shows a green "Approve & save"
+button alongside "Save cost" for a payable (pay-later method) when the user is
+admin/manager — creates the cost AND advances it straight to `approved` (which
+fires the bill push for pay-later methods), skipping the separate approve step.
+"Save cost" still logs-without-approving for "not ready to approve yet".
+`POST /api/costs` accepts an `approve: true` control flag, honoured only for an
+approver + a payable. **`/approve` widened from admin-only to admin+manager**
+(per jon: a manager uploading an invoice should be able to approve it). **Mark
+paid stays admin-only** (money actually leaving + the Xero payment).
+
+**Entry points.** "+ Add cost" now mounts the capture modal from two more
+surfaces beyond the Costs hub:
+- **Job Detail → Money tab** → "Job Costs" panel (preset job; panel now always
+  renders with the button even when empty).
+- **Issue Detail (Problems)** → header button (preset issue + vehicle + job, so
+  the category/links default sensibly for a repair cost).
+The Vehicle entry point already exists via the Service History tab.
+
+No migration.
+
+---
+
+## Build notes — HireHop recharge push (Jun 2026)
+
+The last piece of the original "capture → recharge" promise: an `extra` cost
+flagged for recharge can now be pushed to its HireHop job as a billable hire
+line, from the **Recharges** view ("Push to HireHop" button). Explicit staff
+action — never auto-fires. Idempotent (a cost already recharged is a no-op,
+guarded by `recharged_to_hh_at`).
+
+**Mechanism** (`services/cost-recharge-hh.ts`) — mirrors the proven quotes→HH
+pattern, adapted for HIRE items: `save_job.php` adds the line (`b<stockId>`,
+qty 1), then `items_save.php` (kind 2) sets a custom **unit price = the NET
+amount** with the stock's own nominal. The recharge stock items are 20%-rated,
+so HireHop adds the VAT on top — matching the "net of VAT, VAT added at HH"
+design. Full recharge → the cost's `amount_net`; partial → the entered
+`recharge_amount`. `vat_rate:0` in items_save means "derive from the stock's tax
+rules" (same as the quotes push), so lines bill at 20%.
+
+**Category → HH stock map** (jon's stock IDs, all hire items @ 20%):
+
+| OP category (Xero code) | HH stock | ID | nominal |
+|---|---|---|---|
+| Fuel (410) | Fuel recharge | 1325 | 31 |
+| Parking (411) / Travel (325) | Travel cost | 1772 | 29 |
+| Parking fines / PCNs (399) | PCN / fine handling | 1744 | 22 |
+| Vehicle repairs (409) | Vehicle damage cost | 1741 | 3 |
+| Everything else | Cost / fee / recharge (catch-all) | 1796 | 22 |
+
+Hardcoded in the service (stable; move to system_settings + a Settings UI if
+they ever churn).
+
+**Closed-job handling.** `job_data.php` checked first; a locked job or HH status
+in {7,9,10,11} returns `manualActionRequired` with a message — the cost is left
+un-recharged so it stays in the Recharges view as a known-unresolved item. HH
+errors are surfaced (the broker's nested-error extraction names validation
+issues).
+
+**On success:** stamps `recharged_to_hh_at` + `recharge_hh_item_id`, posts an HH
+job note, and the cost drops out of the Recharges-pending list.
+
+**Endpoint:** `POST /api/costs/:id/push-recharge` (STAFF_ROLES). The legacy
+`/recharge` stays the flag-setter (sets mode/amount); the push is the separate
+explicit action.
+
+⚠️ **Needs one live-test pass** (like the bill flow): the hire-item add +
+price-edit is modelled on the working labour-item path but virtual hire items
+may have HH-specific nuances. Push a real `extra` cost to a scratch job and
+confirm the line + price + 20% VAT land correctly; the surfaced HH errors will
+name anything off.
+
+---
+
+## Build notes — Bundled-invoice allocation split UI (Jun 2026)
+
+Wires a UI to the long-existing `PUT /api/costs/:id/allocations` backend. One
+cost (e.g. a freelancer's bundled invoice covering several jobs) splits across
+those jobs — a `cost_allocations` row per line.
+
+- **`CostAllocationModal.tsx`** — add jobs (search picker), enter an amount per
+  line, optional per-line `recharge` flag. Each line shows that job's expected
+  crew/transport cost (sum of its quote freelancer fees) inline as a sanity
+  check. A running reconciliation bar enforces "allocated total = cost gross"
+  (±1p) before Save is enabled; saving with no lines clears the split.
+- **CostsPage** — a `⑂` "Split across jobs" row action opens it; the icon shows
+  the allocation count + turns purple when a cost is already split. The list
+  query now returns `allocation_count`.
+- **Backend** — `allocationSchema` now allows an empty array (to clear a split);
+  the `PUT` was already a transactional delete-all + re-insert.
+
+No migration (`cost_allocations` shipped in 092). Allocation is metadata for
+per-job cost attribution/reporting — it does not change the cost's own `job_id`
+or its Xero push.
+
+---
+
+## Build notes — Edit-after-push: warn + manual re-sync (Jun 2026)
+
+Closed the gap where editing a cost that's **already in Xero** (fixing the
+account code/amount/supplier after a bill or spend-money was created) left Xero
+stale — the PATCH only ever re-pushed costs that weren't yet in Xero.
+
+- **Migration 147** — `costs.xero_stale BOOLEAN`. Set by the PATCH handler when
+  an already-pushed cost (`xero_object_id` + `bill_created`/`attached`/`reconciled`)
+  is edited with a **Xero-affecting field** (amount net/vat/gross, account code,
+  supplier, description, vat_treatment, cost_date, payment_method, invoice_number).
+  Non-Xero edits (notes, payment_status) don't flag it. We deliberately do NOT
+  auto-re-push — a reconciled object mustn't be silently mutated.
+- **`XeroCell`** shows an amber **"Xero out of date · Re-sync"** pill (takes
+  precedence over the synced pills).
+- **`POST /api/costs/:id/resync-xero`** → `resyncCostToXero()` updates the
+  existing Xero object IN PLACE (`updateBill` / `updateSpendMoney` — POST with the
+  object ID, never a fresh create, so it can't duplicate). Shares the per-cost
+  advisory lock. **Hard refusals (409):** a PAID bill (amounts locked once a
+  payment exists) and a RECONCILED spend-money — Xero won't allow the edit. The
+  frontend then offers a **dismiss** (`{ dismiss: true }` → clears `xero_stale`
+  without touching Xero) for "I've fixed it directly in Xero".
+- **Broker:** added `updateBill` / `updateSpendMoney` (POST-with-ID) to
+  `xero-broker.ts`.
+
+> ⚠️ The in-place update path (POST-with-ID for Invoices / BankTransactions)
+> follows Xero's documented semantics but wasn't live-verified at build time —
+> confirm one real re-sync of each kind (an unpaid AUTHORISED bill and an
+> unreconciled spend-money) before relying on it. Worst case is a clean error +
+> the stale flag staying put, never a duplicate or a corrupted object.
+
+---
+
+## Build notes — COT receipt chaser + admin card register (Jun 2026)
+
+Third of the three nice-to-haves. Migration **148**.
+
+### Receipt chaser (OP-side)
+Company-card (COT) purchases are already in Xero via the bank feed — the one
+thing OP needs is the receipt. `services/cost-receipt-chaser.ts` runs **weekly,
+Wednesday 12:00 Europe/London**, and sends ONE digest per card-holder
+summarising their own cot_card costs (older than a 3-day grace) still missing a
+receipt, deep-linked to `/money/costs?missing_receipt=1&mine=1`. The weekly
+cadence is the throttle — no per-cost dedup; `costs.receipt_chase_sent_at` is
+stamped only as a "last chased" record. It looks at ALL outstanding costs (it
+backfills), but as a single weekly digest a bigger backlog just means a higher
+count, never more emails. A cost drops out the moment `receipt_r2_key` is set.
+The cost list gained
+`?missing_receipt=1` (+ `&mine=1`) filters and a clearable banner. A fleet-wide
+**"COT Receipts"** amber NeedsAttention bucket surfaces the backlog
+(`cot_receipts_outstanding_count` on `/api/dashboard/operations`).
+
+> OP-side only — chases what staff logged in OP. Purchases never logged at all
+> are the job of the future Xero-matched reconciliation (Component 4c).
+
+### Admin card register
+`users.cot_card_label` added alongside the existing `cot_card_last4`. **Admin**
+manages both from **Settings → COT Card Register** (`GET /api/users/cot-cards`,
+`PATCH /api/users/:id/cot-card`, admin-only). The capture flow already stamps the
+holder + last 4 server-side from the user's record, so **staff never type card
+details** — the register is purely admin-set. The capture hint now points staff
+at an admin rather than their own Profile.
+
+---
+
+## Build notes — feedback round 2 (Jun 2026)
+
+Batch of fixes/improvements off the first live week of the cost hub. No migration.
+
+### Supplier terms pull-through fix (the real bug)
+Xero supplier terms never applied because **`costs.xero_contact_id` was never
+populated** — `createBill` took a contact *name* and the returned bill never wrote
+the Xero ContactID back, so `seedTermsFromXeroIfMissing` had nothing to work with
+and terms always fell back to invoice+30. Fix in `pushBill`: resolve/create the
+Xero contact FIRST, persist its id onto the cost, seed terms from it, THEN compute
+the due date and create the bill against the contact id (`createBill` gained an
+optional `contactId`). Skipped for `reimburse_me` (the "contact" there is the
+staff member). Establishes the link on first push, so terms pull through on this
+and every future bill for the supplier.
+
+### Freelancer Friday terms (Xero can't model this)
+Ooosh pays freelancers "the first Friday one week after approval". New
+`freelancerDueDate(approvedAt)` = first Friday on/after (approval + 7 days). Used
+for any `cost_type='freelancer_invoice'` bill, overriding supplier/Xero terms — in
+the costs list display (once approved), the Xero bill push, and the re-sync path.
+Lands payment 7–13 days out, matching the published terms. (The 30-day "overdue"
+threshold in the T&Cs is a dispute nuance, not modelled — "overdue" in the UI is
+simply past the Friday due date.)
+
+### Capture-time split
+The "split across jobs" allocation modal now surfaces at capture: a **"Split
+across multiple jobs"** tick in the capture modal footer (new-cost only) hands the
+saved cost straight to the allocation modal via a new `onSavedAndSplit` callback.
+
+### Bills to Pay — sortable Due + filters
+The Due column is now click-to-sort, and the payable view gained due-date filter
+pills: **Overdue / This Friday / This week / Next 7 days** (client-side over the
+server-computed `due_date`; undated bills sort last ascending).
+
+### UI fix
+The Xero-status cell got `whitespace-nowrap` so the "In Xero" pill no longer wraps
+to two lines now the split button shares the row.
+
+---
+
+## Build notes — feedback round 3 (Jun 2026)
+
+- **"This Friday" filter fix**: the due-date filters formatted dates with
+  `toISOString()` (UTC), so under BST (UTC+1) local midnight shifted to the
+  previous UTC day — the range filters (this week / next 7) still matched but the
+  exact-match `friday` filter compared against Thursday and returned nothing. Now
+  formats in local time.
+- **Two new filters**: "Next Friday" (the pay-run one cycle out) + a per-supplier
+  dropdown (distinct suppliers from the loaded rows; applies across all views).
+- **Xero-status cell de-squish**: actionable states (stale / error / not-synced /
+  pending) now render as ONE clickable pill ("Re-sync" / "Sync failed — retry" /
+  "Sync now") instead of a status pill + a separate button. The extra button was
+  widening the column and pushing the row actions (incl. delete) off-screen.
+- **Delete warns about Xero**: deleting a cost that's in Xero (`xero_object_id`
+  set) now warns it removes the cost from OP only — the Xero bill/txn must be
+  voided separately. (Edits DO push to Xero; deletes don't.)
+
+---
+
+## Build notes — Xero-matched reconciliation, step 1: the probe (Jun 2026)
+
+Closing the "in Xero but not in OP" gap for the COT card. The OP-side chaser only
+sees costs staff logged; this catches card spend that was never logged at all.
+
+The unknown (spec §"Open verification items" #1) is the **Codat→Xero shape**: do
+COT purchases land in Xero as readable `BankTransactions` (SPEND), or as raw
+unreconciled bank-statement lines (which the standard Accounting API does NOT
+expose until coded/reconciled)? Matching is only viable in the former case.
+
+So step 1 is a **read-only probe** rather than a built matcher:
+`GET /api/costs/reconcile/xero-cot?days=N` (admin/manager) reads SPEND bank
+transactions on the mapped COT account (`xero_bank_cot_card` system setting) over
+the window and flags each as matched (OP cost via pushed `xero_object_id`, else
+amount+near-date) or **unmatched** (in Xero, not in OP). Surfaced on the Reconcile
+tab via `XeroCotProbe` ("Check Xero" button) — shows fetched / matched / not-in-OP
+counts + a table of the unmatched.
+
+**What the result tells us:**
+- Transactions come back (matched + unmatched) → the feed lands as readable
+  BankTransactions; build the full matcher (auto-surface unmatched as action
+  items, "log in OP" prefill, dismiss list, optional chase).
+- Zero come back but Xero shows card spend for the period → the purchases are raw
+  statement lines; the standard API can't read them, so we need the
+  statement-lines route (restricted endpoint / partner feed / or rely on the
+  bookkeeper coding them first, then they appear as BankTransactions).
+
+No migration; no writes. Next step is decided by what the probe returns on the
+live org.
+
+---
+
+## Build notes — extraction date sanity check (Jun 2026)
+
+The probe (above) confirmed live: COT bank-feed transactions show as
+**Unreconciled** in Xero but ARE readable via `GET /BankTransactions` (33 fetched
+/ 33 matched / 0 orphans on the first run). So the full matcher is viable — no
+statement-line workaround needed.
+
+Date fix off the same session: a fuel receipt dated 11/06 (11 June) was extracted
+as 6 November — a US-style MM/DD misread that landed it months in the future.
+`normaliseCostDate()` in `cost-receipt-extract.ts` now post-checks the extracted
+date: anything implausibly future (> today + 7d) tries the day/month swap and, if
+that lands a valid past date, takes it (downgrading confidence so the modal flags
+it); otherwise keeps the date but still downgrades. Prompt also strengthened to
+"UK day-first; when ambiguous read 11/06 as 11 June not 6 November; normally today
+or in the recent past". The capture modal shows an amber "this date is in the
+future" hint for manual entry too.

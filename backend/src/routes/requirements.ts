@@ -5,6 +5,7 @@ import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware
 import { validate } from '../middleware/validate';
 import { hhBroker } from '../services/hirehop-broker';
 import { writeBackStatusToHireHop } from '../services/hirehop-writeback';
+import { ensureBacklineProblemIssue } from '../services/job-issues';
 
 const router = Router();
 router.use(authenticate);
@@ -64,7 +65,7 @@ router.post('/bulk', async (req: AuthRequest, res: Response) => {
       `SELECT jr.job_id, jr.status, jr.requirement_type
        FROM job_requirements jr
        WHERE jr.job_id = ANY($1) ${phaseFilter}
-         AND (jr.notes IS NULL OR jr.notes NOT LIKE '%[Suspended: Van & Driver]%')`,
+         AND (jr.notes IS NULL OR jr.notes NOT LIKE '%[Suspended:%')`,
       [ids]
     );
     // Group by job_id for easy lookup
@@ -103,7 +104,7 @@ router.post('/closeout-progress', async (req: AuthRequest, res: Response) => {
        FROM job_requirements jr
        JOIN requirement_type_definitions rtd ON rtd.type = jr.requirement_type
        WHERE jr.job_id = ANY($1) AND jr.phase = 'post_hire'
-         AND (jr.notes IS NULL OR jr.notes NOT LIKE '%[Suspended: Van & Driver]%')
+         AND (jr.notes IS NULL OR jr.notes NOT LIKE '%[Suspended:%')
        ORDER BY rtd.sort_order`,
       [ids]
     );
@@ -404,6 +405,21 @@ router.patch('/:id', validate(updateRequirementSchema), async (req: AuthRequest,
           [updated.job_id]
         );
       }
+    }
+
+    // ── Backline flagged as Problem → register issue ────────────────────────
+    // A backline requirement in "Problem" (blocked) status is a real
+    // operational issue (damaged/missing kit) — make sure it exists in the
+    // problems register so it surfaces on the "Has issues" filter and gets
+    // worked through. Deduped per job inside the helper. Best-effort.
+    if (updated.requirement_type === 'backline' && updates.status === 'blocked' && updated.job_id) {
+      ensureBacklineProblemIssue({
+        jobId: updated.job_id,
+        requirementId: updated.id,
+        phase: updated.phase,
+        notes: updated.notes,
+        actorUserId: req.user!.id,
+      }).catch((err) => console.warn('[requirements] backline issue hook failed:', err));
     }
 
     // ── Auto-transition confirmed → prepping ────────────────────────────────

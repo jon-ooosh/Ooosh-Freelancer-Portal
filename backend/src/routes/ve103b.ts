@@ -23,6 +23,9 @@ router.use(authenticate);
 const generateSchema = z.object({
   assignment_id: z.string().uuid(),
   certificate_number: z.string().min(1).max(20),
+  // How the cert was generated, for audit/display. Defaults to the board's
+  // "From Assignment" path; the book-out flow passes 'book_out'.
+  source: z.enum(['book_out', 've103b_board']).optional(),
 });
 
 router.post('/generate', async (req: AuthRequest, res) => {
@@ -156,8 +159,8 @@ router.post('/generate', async (req: AuthRequest, res) => {
       `INSERT INTO ve103b_certificates (
         certificate_number, assignment_id, vehicle_id, driver_id, job_id,
         vehicle_reg, driver_name, driver_address, hire_start, hire_end,
-        hirehop_job_number, pdf_r2_key, pdf_filename, generated_by
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        hirehop_job_number, pdf_r2_key, pdf_filename, generated_by, generated_via
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
       RETURNING id, created_at, date_certificate_supplied`,
       [
         body.certificate_number,
@@ -174,6 +177,7 @@ router.post('/generate', async (req: AuthRequest, res) => {
         pdfR2Key,
         filename,
         req.user!.id,
+        body.source ?? null,
       ],
     );
 
@@ -372,13 +376,13 @@ router.post('/test-generate', async (req: AuthRequest, res) => {
     const insertResult = await query(
       `INSERT INTO ve103b_certificates (
         certificate_number, vehicle_id, vehicle_reg, driver_name, driver_address,
-        hire_start, hire_end, pdf_r2_key, pdf_filename, generated_by
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        hire_start, hire_end, pdf_r2_key, pdf_filename, generated_by, generated_via
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
       RETURNING id, created_at, date_certificate_supplied`,
       [
         body.certificate_number, body.vehicle_id, v.reg, body.driver_name,
         body.driver_address || null, body.hire_start || null, body.hire_end || null,
-        pdfR2Key, filename, req.user!.id,
+        pdfR2Key, filename, req.user!.id, 've103b_board_manual',
       ],
     );
 
@@ -453,6 +457,92 @@ router.post('/:id/void', async (req: AuthRequest, res) => {
     }
     console.error('[VE103B] Void error:', err);
     res.status(500).json({ error: 'Failed to void certificate' });
+  }
+});
+
+// ── POST /:id/reactivate — Free a voided cert's number for reuse ──────
+// For the "misgenerated but the physical cert is fine" case: a cert was voided
+// (e.g. wrong reg) but the £9 BVRLA form itself is unspoiled and can be
+// reprinted. This frees the certificate number for re-issue and removes the
+// row from the BVRLA report — distinct from Void, which is for genuinely
+// spoiled certs that should stay reserved + reported as VOID.
+//
+// Implementation: the row is deleted (there's a UNIQUE INDEX on
+// certificate_number, so the number can't be re-issued while any row holds it).
+// A full snapshot is preserved in audit_log so the misgeneration history isn't
+// lost. The orphaned (wrong-reg) PDF left in R2 is harmless.
+
+const reactivateSchema = z.object({
+  reason: z.string().max(500).optional(),
+});
+
+router.post('/:id/reactivate', async (req: AuthRequest, res) => {
+  try {
+    const { id } = req.params;
+    const body = reactivateSchema.parse(req.body);
+
+    // Only a voided cert can be reactivated. An issued cert is in active use —
+    // void it first if it really needs freeing.
+    const certResult = await query(
+      `SELECT * FROM ve103b_certificates WHERE id = $1`,
+      [id],
+    );
+    if (certResult.rows.length === 0) {
+      res.status(404).json({ error: 'Certificate not found' });
+      return;
+    }
+    const cert = certResult.rows[0];
+    if (cert.status !== 'void') {
+      res.status(409).json({
+        error: 'Certificate is not voided',
+        message: 'Only a voided certificate can be reactivated for reuse. Void it first if it needs freeing.',
+      });
+      return;
+    }
+
+    // Clear the stale ve103b_ref on the originating assignment if it still
+    // points at this cert number, so the (wrong-reg) assignment doesn't keep a
+    // dangling reference to a number that's now free for reuse.
+    if (cert.assignment_id) {
+      await query(
+        `UPDATE vehicle_hire_assignments
+         SET ve103b_ref = NULL, updated_at = NOW()
+         WHERE id = $1 AND ve103b_ref = $2`,
+        [cert.assignment_id, cert.certificate_number],
+      );
+    }
+
+    // Audit trail — full snapshot of the deleted row.
+    await query(
+      `INSERT INTO audit_log (user_id, entity_type, entity_id, action, previous_values, new_values)
+       VALUES ($1, 've103b_certificate', $2, 've103b_reactivate', $3, $4)`,
+      [
+        req.user!.id,
+        id,
+        JSON.stringify(cert),
+        JSON.stringify({
+          certificate_number: cert.certificate_number,
+          freed_for_reuse: true,
+          reactivate_reason: body.reason || null,
+        }),
+      ],
+    ).catch(err => console.warn('[VE103B] Reactivate audit insert failed:', err));
+
+    // Delete the row — frees the certificate number for re-issue.
+    await query(`DELETE FROM ve103b_certificates WHERE id = $1`, [id]);
+
+    res.json({
+      success: true,
+      certificate_number: cert.certificate_number,
+      message: `Certificate ${cert.certificate_number} is now free to re-issue.`,
+    });
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      res.status(400).json({ error: 'Validation failed', details: err.errors });
+      return;
+    }
+    console.error('[VE103B] Reactivate error:', err);
+    res.status(500).json({ error: 'Failed to reactivate certificate' });
   }
 });
 

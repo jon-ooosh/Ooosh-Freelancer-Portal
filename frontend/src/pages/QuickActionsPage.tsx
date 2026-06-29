@@ -11,15 +11,10 @@ import { useEffect, useState, ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
-import { EntitySearch } from '../components/holding/EntitySearch';
-import { JobNumberField } from '../components/holding/JobNumberField';
-import { NotifyClientModal } from '../components/holding/NotifyClientModal';
-import { OrgJobSuggestions } from '../components/holding/OrgJobSuggestions';
-import { uploadHeldItemPhotos } from '../components/holding/photo-upload';
+import { HeldItemForm } from '../components/holding/HeldItemForm';
 import { locationLabel } from '../components/holding/format';
 import type { HeldItem, HeldItemLocation } from '../../../shared/types';
 
-const PURPLE = '#7B5EA7';
 const inputCls = 'w-full border border-slate-300 rounded-xl px-4 py-3 text-base';
 
 type Action = 'package' | 'lost' | 'handover';
@@ -39,6 +34,7 @@ export default function QuickActionsPage() {
     { id: 'package', emoji: '📦', label: 'Package arrived', onClick: () => setActive('package'), tone: 'bg-[#7B5EA7]' },
     { id: 'lost', emoji: '🔍', label: 'Lost property', onClick: () => setActive('lost'), tone: 'bg-amber-600' },
     { id: 'handover', emoji: '✅', label: 'Handover / collected', onClick: () => setActive('handover'), tone: 'bg-green-600' },
+    { id: 'pcn', emoji: '🅿️', label: 'Log PCN', onClick: () => navigate('/vehicles/pcns?new=1'), tone: 'bg-rose-700' },
     { id: 'receipt', emoji: '🧾', label: 'Upload receipt', onClick: () => navigate('/money/costs?capture=1'), tone: 'bg-slate-700' },
     { id: 'checkin', emoji: '↩️', label: 'Check vehicle in', onClick: () => navigate('/vehicles/check-in'), tone: 'bg-blue-700' },
   ];
@@ -95,13 +91,6 @@ function Sheet({ title, onClose, children }: { title: string; onClose: () => voi
       <div className="flex-1 overflow-y-auto p-4">{children}</div>
     </div>
   );
-}
-
-async function uploadPhotos(files: FileList | null, onDone: (a: { name: string; url: string; type: string }[]) => void, onErr: (m: string) => void, setBusy: (b: boolean) => void) {
-  if (!files || files.length === 0) return;
-  setBusy(true);
-  try { onDone(await uploadHeldItemPhotos(files)); }
-  catch (e) { onErr(e instanceof Error ? e.message : 'Upload failed'); } finally { setBusy(false); }
 }
 
 // ── Package arrived — search FIRST (receive an expected/known one), then create ──
@@ -162,128 +151,13 @@ function PackageArrivedSheet({ locations, onClose, onSaved }: { locations: HeldI
 }
 
 // ── Package arrived / Lost property ─────────────────────────────────────────
+// Thin wrapper around the shared HeldItemForm (the desktop HoldingPage uses the
+// same component) so the two capture flows stay in lockstep — same fields, same
+// notify-at-create step.
 function QuickLogSheet({ kind, locations, onClose, onSaved }: { kind: 'incoming' | 'lost_property'; locations: HeldItemLocation[]; onClose: () => void; onSaved: () => void }) {
-  const [f, setF] = useState({
-    description: '', box_count: '', client_name_text: '',
-    owner_organisation_id: null as string | null, org_name: '',
-    owner_person_id: null as string | null, person_name: '',
-    owner_unknown: false, hh_job_number: '',
-    found_in: 'van', found_location_text: '', storage_location_id: '', storage_location_text: '', notes: '',
-  });
-  const [photos, setPhotos] = useState<{ name: string; url: string; type: string }[]>([]);
-  const [uploading, setUploading] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [err, setErr] = useState('');
-  // After saving lost property we offer to notify the client (§7 / §11).
-  const [savedItem, setSavedItem] = useState<HeldItem | null>(null);
-  const GIVEN = '__given__';
-  const givenStraight = f.storage_location_id === GIVEN;
-  const somewhereElse = locations.find((l) => l.id === f.storage_location_id)?.name === 'Somewhere else';
-
-  async function save() {
-    setSaving(true); setErr('');
-    try {
-      const r = await api.post<{ data: HeldItem }>('/holding', {
-        kind,
-        owner_unknown: f.owner_unknown,
-        description: f.description || null,
-        box_count: kind === 'incoming' && f.box_count ? Number(f.box_count) : null,
-        owner_organisation_id: f.owner_unknown ? null : f.owner_organisation_id,
-        owner_person_id: f.owner_unknown ? null : f.owner_person_id,
-        client_name_text: f.owner_unknown ? null : (f.client_name_text || null),
-        hh_job_number: f.hh_job_number ? Number(f.hh_job_number) : null,
-        found_in: kind === 'lost_property' ? f.found_in : null,
-        found_location_text: kind === 'lost_property' ? (f.found_location_text || null) : null,
-        storage_location_id: givenStraight ? null : (f.storage_location_id || null),
-        storage_location_text: somewhereElse ? (f.storage_location_text || null) : null,
-        status: givenStraight ? 'given_to_client' : undefined,
-        notes: f.notes || null,
-        photos,
-      });
-      // Not handed straight over → offer to notify the client now (works for
-      // both "package arrived" and "lost property" - picker + photos attached).
-      if (!givenStraight && r.data) { setSavedItem(r.data); setSaving(false); return; }
-      onSaved();
-    } catch (e) { setErr(e instanceof Error ? e.message : 'Save failed'); } finally { setSaving(false); }
-  }
-
-  if (savedItem) {
-    return (
-      <NotifyClientModal item={savedItem}
-        onClose={onSaved}
-        onSent={() => onSaved()} />
-    );
-  }
-
   return (
     <Sheet title={kind === 'incoming' ? '📦 Package arrived' : '🔍 Lost property'} onClose={onClose}>
-      <div className="space-y-4 max-w-md mx-auto">
-        <div><label className="block text-sm text-slate-500 mb-1">What is it?</label>
-          <input autoFocus className={inputCls} value={f.description} onChange={(e) => setF({ ...f, description: e.target.value })}
-            placeholder={kind === 'incoming' ? 'e.g. 3 merch boxes' : 'e.g. black rucksack'} /></div>
-
-        {kind === 'incoming' && (
-          <div><label className="block text-sm text-slate-500 mb-1">How many boxes/items?</label>
-            <input className={inputCls} type="number" inputMode="numeric" value={f.box_count} onChange={(e) => setF({ ...f, box_count: e.target.value })} /></div>
-        )}
-
-        {kind === 'lost_property' && (
-          <div className="grid grid-cols-2 gap-3">
-            <div><label className="block text-sm text-slate-500 mb-1">Found in</label>
-              <select className={inputCls} value={f.found_in} onChange={(e) => setF({ ...f, found_in: e.target.value })}>
-                <option value="van">Van</option><option value="rehearsal">Rehearsal room</option><option value="backline">Backline</option><option value="elsewhere">Somewhere else</option>
-              </select></div>
-            {f.found_in === 'van' && <div><label className="block text-sm text-slate-500 mb-1">Van reg</label>
-              <input className={inputCls} value={f.found_location_text} onChange={(e) => setF({ ...f, found_location_text: e.target.value.toUpperCase() })} placeholder="RX22SXL" /></div>}
-          </div>
-        )}
-
-        {/* Owner — HireHop job # first; we derive the client from it */}
-        <div className="border border-slate-200 rounded-xl p-3 space-y-3">
-          <label className="flex items-center gap-2 text-sm text-slate-600">
-            <input type="checkbox" className="w-5 h-5" checked={f.owner_unknown} onChange={(e) => setF({ ...f, owner_unknown: e.target.checked })} />
-            Don't know whose it is (link later)
-          </label>
-          {!f.owner_unknown && (
-            <>
-              <JobNumberField value={f.hh_job_number} onChange={(v) => setF({ ...f, hh_job_number: v })} compact />
-              <EntitySearch kind="organisations" label="Client / band" value={f.org_name} compact onPick={(id, name) => setF({ ...f, owner_organisation_id: id, org_name: name })} />
-              <OrgJobSuggestions orgId={f.owner_organisation_id} hasNumber={!!f.hh_job_number} onPick={(n) => setF({ ...f, hh_job_number: n })} compact />
-              <EntitySearch kind="people" label="Or a person" value={f.person_name} compact onPick={(id, name) => setF({ ...f, owner_person_id: id, person_name: name })} />
-              <input className={inputCls} value={f.client_name_text} onChange={(e) => setF({ ...f, client_name_text: e.target.value })} placeholder="…or just a name (free text)" />
-            </>
-          )}
-        </div>
-
-        <div><label className="block text-sm text-slate-500 mb-1">Where are you putting it?</label>
-          <select className={inputCls} value={f.storage_location_id} onChange={(e) => setF({ ...f, storage_location_id: e.target.value })}>
-            <option value="">—</option>
-            <option value={GIVEN}>✋ Given straight to client</option>
-            {locations.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
-          </select>
-          {somewhereElse && <input className={`${inputCls} mt-2`} value={f.storage_location_text} onChange={(e) => setF({ ...f, storage_location_text: e.target.value })} placeholder="Where exactly?" />}
-        </div>
-
-        <div>
-          <label className="block text-sm text-slate-500 mb-1">Photo</label>
-          <div className="flex flex-wrap gap-2 mb-2">
-            {photos.map((p, idx) => (
-              <span key={idx} className="inline-flex items-center gap-1 text-xs bg-slate-100 rounded px-2 py-1">📷 {p.name}
-                <button type="button" onClick={() => setPhotos((c) => c.filter((_, j) => j !== idx))} className="text-red-500">×</button></span>
-            ))}
-          </div>
-          <label className="block w-full border-2 border-dashed border-slate-300 rounded-xl py-4 text-center text-slate-500 text-sm">
-            📸 Take a photo
-            <input type="file" accept="image/*" capture="environment" multiple className="hidden"
-              onChange={(e) => uploadPhotos(e.target.files, (a) => setPhotos((p) => [...p, ...a]), setErr, setUploading)} />
-          </label>
-          {uploading && <p className="text-xs text-slate-400 mt-1">Uploading…</p>}
-        </div>
-
-        {err && <p className="text-red-600 text-sm">{err}</p>}
-        <button onClick={save} disabled={saving || uploading} style={{ backgroundColor: PURPLE }}
-          className="w-full text-white rounded-xl py-4 text-lg font-semibold disabled:opacity-50">{saving ? 'Saving…' : 'Log it'}</button>
-      </div>
+      <HeldItemForm variant="mobile" kinds={[kind]} locations={locations} onDone={onSaved} onCancel={onClose} />
     </Sheet>
   );
 }

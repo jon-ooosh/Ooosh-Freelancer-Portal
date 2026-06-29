@@ -15,17 +15,46 @@ import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import rateLimit from 'express-rate-limit';
 import { randomBytes } from 'node:crypto';
-import { query } from '../config/database';
-import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
+import { query, getClient } from '../config/database';
+import { authenticate, authorize, AuthRequest, STAFF_ROLES, MANAGER_ROLES } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
 import { isR2Configured, uploadToR2 } from '../config/r2';
 import { emailService } from '../services/email-service';
 import { getFrontendUrl } from '../config/app-urls';
+import { encrypt, tryDecrypt, isEncryptionConfigured } from '../services/encryption';
 
 const router = Router();
 
-const ADMIN_MANAGER = ['admin', 'manager'] as const;
+// Storage management actions (rooms create/edit/reorder, tenancy reorder, rate
+// changes, T&Cs versions). Manager tier = admin + manager + weekend_manager so
+// the weekend team isn't blocked when admin/manager are off.
+const ADMIN_MANAGER = MANAGER_ROLES;
+
+// ── Door-code encryption (migration 121, see docs/STORAGE-CLIENTS-SPEC.md §9) ──
+// Encrypt-at-rest for the per-tenancy access_code. When the key is configured
+// we store ONLY the ciphertext (plaintext column nulled); otherwise we fall
+// back to plaintext so nothing breaks pre-key.
+function prepAccessCode(code: string | null | undefined): { plain: string | null; enc: string | null } {
+  if (!code) return { plain: null, enc: null };
+  if (isEncryptionConfigured()) return { plain: null, enc: encrypt(code) };
+  return { plain: code, enc: null };
+}
+// Decrypt for the response + strip the ciphertext column so it never leaves the API.
+function revealAccessCode(row: Record<string, unknown>): Record<string, unknown> {
+  if (row['access_code_encrypted']) {
+    row['access_code'] = tryDecrypt(row['access_code_encrypted'] as string) ?? row['access_code'] ?? null;
+  }
+  delete row['access_code_encrypted'];
+  return row;
+}
+// Strip both code fields from a row entirely (list views — the code is only
+// ever exposed via the single-tenancy detail endpoint).
+function stripAccessCode(row: Record<string, unknown>): Record<string, unknown> {
+  delete row['access_code'];
+  delete row['access_code_encrypted'];
+  return row;
+}
 
 // ════════════════════════════════════════════════════════════════════════
 // PUBLIC — T&Cs accept (token, no JWT). MUST be before the staff auth gate.
@@ -80,8 +109,11 @@ router.post('/tcs/by-token/:token/accept', publicLimiter, validate(acceptSchema)
   const { accepted_by_name, signature } = req.body as z.infer<typeof acceptSchema>;
 
   const tenancyRes = await query(
-    `SELECT t.id, t.tcs_agreement_id, v.id AS version_id
+    `SELECT t.id, t.tcs_agreement_id, v.id AS version_id, v.version, v.body,
+            r.name AS room_name, o.name AS org_name
      FROM storage_tenancies t
+     JOIN storage_rooms r ON r.id = t.room_id
+     LEFT JOIN organisations o ON o.id = t.organisation_id
      LEFT JOIN storage_tcs_versions v ON v.is_current = true
      WHERE t.tcs_token = $1`,
     [token]
@@ -96,37 +128,51 @@ router.post('/tcs/by-token/:token/accept', publicLimiter, validate(acceptSchema)
     return;
   }
 
-  // Persist signature image to R2 if supplied
+  // Persist signature image to R2 if supplied (keep the buffer for the PDF too)
   let signatureKey: string | null = null;
-  if (signature && signature.startsWith('data:image') && isR2Configured()) {
+  let signatureBuf: Buffer | null = null;
+  if (signature && signature.startsWith('data:image')) {
     try {
-      const base64 = signature.split(',')[1] || '';
-      const buf = Buffer.from(base64, 'base64');
-      signatureKey = `files/storage/tcs/${tenancy.id}/signature-${Date.now()}.png`;
-      await uploadToR2(signatureKey, buf, 'image/png');
+      signatureBuf = Buffer.from(signature.split(',')[1] || '', 'base64');
+      if (isR2Configured()) {
+        signatureKey = `files/storage/tcs/${tenancy.id}/signature-${Date.now()}.png`;
+        await uploadToR2(signatureKey, signatureBuf, 'image/png');
+      }
     } catch (err) {
       console.warn('[storage] T&Cs signature upload failed:', err);
     }
   }
 
+  const acceptedAt = new Date();
+  const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.ip || null;
   const agreement = await query(
     `INSERT INTO storage_tcs_agreements
        (tenancy_id, version_id, accepted_by_name, signature_r2_key, ip_address, user_agent)
      VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-    [
-      tenancy.id,
-      tenancy.version_id || null,
-      accepted_by_name,
-      signatureKey,
-      (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.ip || null,
-      req.headers['user-agent'] || null,
-    ]
+    [tenancy.id, tenancy.version_id || null, accepted_by_name, signatureKey, ip, req.headers['user-agent'] || null]
   );
 
   await query(
     `UPDATE storage_tenancies SET tcs_agreement_id = $1, tcs_token = NULL, updated_at = NOW() WHERE id = $2`,
     [agreement.rows[0].id, tenancy.id]
   );
+
+  // Generate the signed-agreement PDF snapshot (best-effort — never block acceptance).
+  if (isR2Configured()) {
+    try {
+      const { generateStorageTcsPdf } = await import('../services/storage-tcs-pdf');
+      const pdfBytes = await generateStorageTcsPdf({
+        orgName: tenancy.org_name, roomName: tenancy.room_name, version: tenancy.version,
+        bodyHtml: tenancy.body || '', acceptedByName: accepted_by_name, acceptedAt,
+        signaturePng: signatureBuf, ip,
+      });
+      const pdfKey = `files/storage/tcs/${tenancy.id}/agreement-${agreement.rows[0].id}.pdf`;
+      await uploadToR2(pdfKey, Buffer.from(pdfBytes), 'application/pdf');
+      await query(`UPDATE storage_tcs_agreements SET pdf_r2_key = $1 WHERE id = $2`, [pdfKey, agreement.rows[0].id]);
+    } catch (err) {
+      console.warn('[storage] T&Cs PDF generation failed (acceptance still recorded):', err);
+    }
+  }
 
   res.json({ data: { accepted: true } });
 });
@@ -198,9 +244,33 @@ router.get('/rooms', async (req: AuthRequest, res: Response) => {
   let i = 1;
   if (status) { sql += ` AND r.status = $${i++}`; params.push(status); }
   if (search) { sql += ` AND r.name ILIKE $${i++}`; params.push(`%${search}%`); }
-  sql += ` ORDER BY r.name`;
+  sql += ` ORDER BY COALESCE(r.sort_order, 2147483647), r.name`;
   const result = await query(sql, params);
   res.json({ data: result.rows });
+});
+
+// Persist a manual room order. Drives both the Rooms tab and (since tenancies
+// are keyed off rooms) the Tenancies tab. Admin/manager only.
+router.post('/rooms/reorder', authorize(...ADMIN_MANAGER), async (req: AuthRequest, res: Response) => {
+  const ids = (req.body?.ordered_ids ?? []) as unknown[];
+  if (!Array.isArray(ids) || ids.length === 0 || !ids.every((x) => typeof x === 'string')) {
+    res.status(400).json({ error: 'ordered_ids must be a non-empty array of room ids' });
+    return;
+  }
+  const client = await getClient();
+  try {
+    await client.query('BEGIN');
+    for (let idx = 0; idx < ids.length; idx++) {
+      await client.query(`UPDATE storage_rooms SET sort_order = $1, updated_at = NOW() WHERE id = $2`, [(idx + 1) * 10, ids[idx]]);
+    }
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+  res.json({ data: { reordered: ids.length } });
 });
 
 router.get('/rooms/:id', async (req: AuthRequest, res: Response) => {
@@ -276,9 +346,33 @@ router.get('/tenancies', async (req: AuthRequest, res: Response) => {
   if (status === 'live') { sql += ` AND t.status IN ('active','notice','reserved')`; }
   else if (status) { sql += ` AND t.status = $${i++}`; params.push(status); }
   if (search) { sql += ` AND (o.name ILIKE $${i} OR r.name ILIKE $${i})`; params.push(`%${search}%`); i++; }
-  sql += ` ORDER BY (t.status = 'ended'), r.name`;
+  sql += ` ORDER BY (t.status = 'ended'), COALESCE(t.sort_order, 2147483647), r.name`;
   const result = await query(sql, params);
-  res.json({ data: result.rows });
+  res.json({ data: result.rows.map(stripAccessCode) });
+});
+
+// Persist a manual tenancy order for the Tenancies tab. Independent of room
+// order (migration 133). Admin/manager only.
+router.post('/tenancies/reorder', authorize(...ADMIN_MANAGER), async (req: AuthRequest, res: Response) => {
+  const ids = (req.body?.ordered_ids ?? []) as unknown[];
+  if (!Array.isArray(ids) || ids.length === 0 || !ids.every((x) => typeof x === 'string')) {
+    res.status(400).json({ error: 'ordered_ids must be a non-empty array of tenancy ids' });
+    return;
+  }
+  const client = await getClient();
+  try {
+    await client.query('BEGIN');
+    for (let idx = 0; idx < ids.length; idx++) {
+      await client.query(`UPDATE storage_tenancies SET sort_order = $1, updated_at = NOW() WHERE id = $2`, [(idx + 1) * 10, ids[idx]]);
+    }
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+  res.json({ data: { reordered: ids.length } });
 });
 
 router.get('/tenancies/:id', async (req: AuthRequest, res: Response) => {
@@ -286,7 +380,7 @@ router.get('/tenancies/:id', async (req: AuthRequest, res: Response) => {
     `SELECT t.*, r.name AS room_name, r.size_category, r.location_type,
             o.name AS organisation_name,
             p.first_name || ' ' || p.last_name AS lead_contact_name,
-            a.accepted_at AS tcs_accepted_at, a.accepted_by_name AS tcs_accepted_by
+            a.accepted_at AS tcs_accepted_at, a.accepted_by_name AS tcs_accepted_by, a.pdf_r2_key AS tcs_pdf_key
      FROM storage_tenancies t
      JOIN storage_rooms r ON r.id = t.room_id
      LEFT JOIN organisations o ON o.id = t.organisation_id
@@ -303,7 +397,7 @@ router.get('/tenancies/:id', async (req: AuthRequest, res: Response) => {
            WHERE al.tenancy_id = $1 ORDER BY al.added_at DESC`, [req.params.id]),
     query(`SELECT * FROM storage_invoice_log WHERE tenancy_id = $1 ORDER BY sent_at DESC`, [req.params.id]),
   ]);
-  res.json({ data: { ...t.rows[0], rate_history: rateHistory.rows, access_list: accessList.rows, invoices: invoices.rows } });
+  res.json({ data: { ...revealAccessCode(t.rows[0]), rate_history: rateHistory.rows, access_list: accessList.rows, invoices: invoices.rows } });
 });
 
 const tenancySchema = z.object({
@@ -330,24 +424,25 @@ const tenancySchema = z.object({
 router.post('/tenancies', validate(tenancySchema), async (req: AuthRequest, res: Response) => {
   const b = req.body as z.infer<typeof tenancySchema>;
   try {
+    const ac = prepAccessCode(b.access_code);
     const result = await query(
       `INSERT INTO storage_tenancies
         (room_id, organisation_id, lead_contact_person_id, status, move_in_date, weekly_rate,
-         access_type, access_code, key_location,
+         access_type, access_code, access_code_encrypted, key_location,
          billing_mode, billing_cadence, next_bill_date, bill_reminder_person_id,
          bill_reminder_lead_days, bill_overdue_grace_days, rate_review_cadence, next_rate_review_date,
          notes, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,COALESCE($14,7),COALESCE($15,5),$16,$17,$18,$19) RETURNING *`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,COALESCE($15,7),COALESCE($16,5),$17,$18,$19,$20) RETURNING *`,
       [b.room_id, b.organisation_id ?? null, b.lead_contact_person_id ?? null, b.status, b.move_in_date ?? null,
-       b.weekly_rate, b.access_type, b.access_code ?? null, b.key_location ?? null,
+       b.weekly_rate, b.access_type, ac.plain, ac.enc, b.key_location ?? null,
        b.billing_mode, b.billing_cadence, b.next_bill_date ?? null, b.bill_reminder_person_id ?? null,
        b.bill_reminder_lead_days ?? null, b.bill_overdue_grace_days ?? null, b.rate_review_cadence,
        b.next_rate_review_date ?? null, b.notes ?? null, req.user!.id]
     );
     // Reflect occupancy on the room
     await query(`UPDATE storage_rooms SET status = 'occupied', updated_at = NOW() WHERE id = $1 AND status != 'out_of_use'`, [b.room_id]);
-    await logAudit(req.user!.id, 'storage_tenancies', result.rows[0].id, 'create', null, result.rows[0]);
-    res.status(201).json({ data: result.rows[0] });
+    await logAudit(req.user!.id, 'storage_tenancies', result.rows[0].id, 'create', null, stripAccessCode({ ...result.rows[0] }));
+    res.status(201).json({ data: revealAccessCode(result.rows[0]) });
   } catch (err: unknown) {
     if ((err as { code?: string }).code === '23505') {
       res.status(409).json({ error: 'This room already has a live tenancy. End it before adding a new one.' });
@@ -367,6 +462,12 @@ router.put('/tenancies/:id', validate(tenancySchema.partial()), async (req: Auth
   let i = 1;
   for (const [k, v] of Object.entries(req.body)) {
     if (!allowed.includes(k)) continue;
+    if (k === 'access_code') {
+      const ac = prepAccessCode(v as string | null);
+      fields.push(`access_code = $${i++}`); params.push(ac.plain);
+      fields.push(`access_code_encrypted = $${i++}`); params.push(ac.enc);
+      continue;
+    }
     fields.push(`${k} = $${i++}`);
     params.push(v);
   }
@@ -374,8 +475,8 @@ router.put('/tenancies/:id', validate(tenancySchema.partial()), async (req: Auth
   params.push(req.params.id);
   const result = await query(`UPDATE storage_tenancies SET ${fields.join(', ')}, updated_at = NOW() WHERE id = $${i} RETURNING *`, params);
   if (result.rows.length === 0) { res.status(404).json({ error: 'Tenancy not found' }); return; }
-  await logAudit(req.user!.id, 'storage_tenancies', req.params.id as string, 'update', null, result.rows[0]);
-  res.json({ data: result.rows[0] });
+  await logAudit(req.user!.id, 'storage_tenancies', req.params.id as string, 'update', null, stripAccessCode({ ...result.rows[0] }));
+  res.json({ data: revealAccessCode(result.rows[0]) });
 });
 
 // Rate change (writes history)
@@ -707,6 +808,60 @@ router.post('/tcs-versions', authorize(...ADMIN_MANAGER), validate(tcsVersionSch
     [b.version, b.body, b.effective_date ?? null, !!b.make_current, req.user!.id]
   );
   res.status(201).json({ data: result.rows[0] });
+});
+
+// ════════════════════════ ADDRESS-BOOK READS ════════════════════════
+// Storage tab on Org / Person detail. Returns current + past tenancies plus
+// any waiting-list entries for the entity. Mirrors the Hire/Excess history
+// reusable-section pattern.
+
+const tenancyForEntitySelect = `
+  SELECT t.id, t.status, t.move_in_date, t.move_out_date, t.weekly_rate,
+         t.billing_mode, t.billing_cadence, t.next_bill_date, t.next_rate_review_date,
+         t.access_type, t.tcs_agreement_id,
+         r.name AS room_name, r.size_category, r.location_type,
+         o.name AS organisation_name,
+         p.first_name || ' ' || p.last_name AS lead_contact_name,
+         a.accepted_at AS tcs_accepted_at
+  FROM storage_tenancies t
+  JOIN storage_rooms r ON r.id = t.room_id
+  LEFT JOIN organisations o ON o.id = t.organisation_id
+  LEFT JOIN people p ON p.id = t.lead_contact_person_id
+  LEFT JOIN storage_tcs_agreements a ON a.id = t.tcs_agreement_id`;
+
+router.get('/by-organisation/:id', async (req: AuthRequest, res: Response) => {
+  const [tenancies, waiting] = await Promise.all([
+    query(`${tenancyForEntitySelect} WHERE t.organisation_id = $1 ORDER BY (t.status = 'ended'), t.move_in_date DESC NULLS LAST`, [req.params.id]),
+    query(`SELECT * FROM storage_waiting_list WHERE organisation_id = $1 AND status NOT IN ('converted','withdrawn') ORDER BY date_requested`, [req.params.id]),
+  ]);
+  res.json({ data: { tenancies: tenancies.rows, waiting: waiting.rows } });
+});
+
+router.get('/by-person/:id', async (req: AuthRequest, res: Response) => {
+  const [tenancies, waiting] = await Promise.all([
+    query(`${tenancyForEntitySelect} WHERE t.lead_contact_person_id = $1 ORDER BY (t.status = 'ended'), t.move_in_date DESC NULLS LAST`, [req.params.id]),
+    query(`SELECT * FROM storage_waiting_list WHERE person_id = $1 AND status NOT IN ('converted','withdrawn') ORDER BY date_requested`, [req.params.id]),
+  ]);
+  res.json({ data: { tenancies: tenancies.rows, waiting: waiting.rows } });
+});
+
+// ════════════════════════ VACANCY MATCHING ════════════════════════
+// Waiting-list entries that fit a freed room's size (exact, or 'any'/null).
+// Drives the "room freed — who wants it?" prompt at move-out + the Find-tenant
+// button on available room cards.
+router.get('/waiting-list/matches', async (req: AuthRequest, res: Response) => {
+  const size = req.query.size ? String(req.query.size) : null;
+  const result = await query(
+    `SELECT w.*, o.name AS organisation_name, p.first_name || ' ' || p.last_name AS person_name
+     FROM storage_waiting_list w
+     LEFT JOIN organisations o ON o.id = w.organisation_id
+     LEFT JOIN people p ON p.id = w.person_id
+     WHERE w.status = 'waiting'
+       AND ($1::text IS NULL OR w.preferred_size IS NULL OR w.preferred_size IN ('any', $1))
+     ORDER BY (w.preferred_size = $1) DESC, w.date_requested ASC`,
+    [size]
+  );
+  res.json({ data: result.rows });
 });
 
 export default router;

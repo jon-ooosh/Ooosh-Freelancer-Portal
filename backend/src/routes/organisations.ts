@@ -151,7 +151,7 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
         ) ORDER BY por.status, p.last_name)
         FROM person_organisation_roles por
         JOIN people p ON p.id = por.person_id
-        WHERE por.organisation_id = o.id
+        WHERE por.organisation_id = o.id AND p.is_deleted = false
         ) as people,
         (SELECT json_agg(json_build_object('id', sub.id, 'name', sub.name, 'type', sub.type))
          FROM organisations sub WHERE sub.parent_id = o.id AND sub.is_deleted = false
@@ -214,6 +214,55 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
     res.json(org);
   } catch (error) {
     console.error('Get organisation error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /api/organisations/:id/contact-candidates
+// Active contact people for an org, expanded across related orgs (Org>Org via
+// organisation_relationships — e.g. a band's management company). Mirrors the
+// New Enquiry job cascade (/pipeline/:jobId/contacts) but org-scoped. Used by
+// the storage lead-contact picker. ACTIVE roles only (por.status='active') —
+// ended roles carry status='historical' and must NOT surface.
+router.get('/:id/contact-candidates', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await query(
+      `WITH related AS (
+         SELECT $1::uuid AS org_id, 0 AS priority
+         UNION
+         SELECT CASE WHEN r.from_org_id = $1 THEN r.to_org_id ELSE r.from_org_id END, 1
+         FROM organisation_relationships r
+         WHERE (r.from_org_id = $1 OR r.to_org_id = $1) AND r.status = 'active'
+       )
+       SELECT DISTINCT ON (p.id)
+              p.id AS person_id, p.first_name, p.last_name, p.email, p.phone,
+              por.role, por.is_primary AS is_org_primary,
+              o.id AS source_org_id, o.name AS source_org_name, rel.priority
+       FROM related rel
+       JOIN person_organisation_roles por ON por.organisation_id = rel.org_id AND por.status = 'active'
+       JOIN organisations o ON o.id = rel.org_id AND o.is_deleted = false
+       JOIN people p ON p.id = por.person_id AND p.is_deleted = false
+       ORDER BY p.id, rel.priority, por.is_primary DESC`,
+      [req.params.id]
+    );
+    const candidates = result.rows
+      .map((r: Record<string, unknown>) => ({
+        person_id: r.person_id,
+        name: `${r.first_name || ''} ${r.last_name || ''}`.trim(),
+        email: r.email,
+        role: r.role,
+        is_org_primary: r.is_org_primary,
+        source_org_id: r.source_org_id,
+        source_org_name: r.source_org_name,
+        own_org: r.priority === 0,
+      }))
+      // Display order: own-org first, then org-primary, then name
+      .sort((a, b) => Number(b.own_org) - Number(a.own_org)
+        || Number(b.is_org_primary) - Number(a.is_org_primary)
+        || a.name.localeCompare(b.name));
+    res.json({ data: candidates });
+  } catch (error) {
+    console.error('Get org contact candidates error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -451,18 +500,48 @@ router.put('/:orgId/relationships/:relId', validate(updateRelationshipSchema), a
 });
 
 // DELETE /api/organisations/:orgId/relationships/:relId
+// Soft-end: marks the relationship historical (status + end_date) rather than
+// destroying the row, so "Future Agency used to manage this band" survives as
+// an audit trail. Falls back to a hard delete only when a historical twin of
+// the same (from, to, type) already exists — the unique constraint
+// uq_org_relationship would block the soft-end, and the audit is already
+// preserved by that existing historical row.
 router.delete('/:orgId/relationships/:relId', async (req: AuthRequest, res: Response) => {
   try {
     const result = await query(
-      'DELETE FROM organisation_relationships WHERE id = $1 RETURNING *',
+      `UPDATE organisation_relationships
+       SET status = 'historical', end_date = NOW(), updated_at = NOW()
+       WHERE id = $1 AND status = 'active'
+       RETURNING *`,
       [req.params.relId]
     );
+
     if (result.rows.length === 0) {
-      res.status(404).json({ error: 'Relationship not found' });
-      return;
+      // Either it doesn't exist, or it's already historical — confirm which.
+      const existing = await query(
+        'SELECT id FROM organisation_relationships WHERE id = $1',
+        [req.params.relId]
+      );
+      if (existing.rows.length === 0) {
+        res.status(404).json({ error: 'Relationship not found' });
+        return;
+      }
+      // Already historical — idempotent no-op.
     }
+
     res.status(204).send();
-  } catch (error) {
+  } catch (error: any) {
+    // Unique-constraint clash: a historical twin already exists. The audit is
+    // preserved by that row, so hard-delete this active duplicate.
+    if (error?.code === '23505') {
+      try {
+        await query('DELETE FROM organisation_relationships WHERE id = $1', [req.params.relId]);
+        res.status(204).send();
+        return;
+      } catch (delErr) {
+        console.error('Delete org relationship fallback error:', delErr);
+      }
+    }
     console.error('Delete org relationship error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }

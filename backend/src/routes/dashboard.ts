@@ -23,14 +23,15 @@ router.post('/job-progress', async (req: AuthRequest, res: Response) => {
 
     if (ids.length === 0) return res.json({ data: {} });
 
-    // Exclude VD-suspended requirements (hire_forms / excess auto-suspended
-    // when every van slot is Van & Driver) — they're "not required" on this
-    // job, not a problem, so they shouldn't render as a red prob pill.
+    // Exclude suspended requirements (hire_forms / excess auto-suspended when
+    // every van slot is Van & Driver, or the job is marked Internal) —
+    // they're "not required" on this job, not a problem, so they shouldn't
+    // render as a red prob pill.
     const result = await query(
       `SELECT job_id, requirement_type, status, phase
        FROM job_requirements
        WHERE job_id = ANY($1)
-         AND (notes IS NULL OR notes NOT LIKE '%[Suspended: Van & Driver]%')`,
+         AND (notes IS NULL OR notes NOT LIKE '%[Suspended:%')`,
       [ids],
     );
 
@@ -653,6 +654,36 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         ORDER BY je.updated_at DESC
         LIMIT 10
       `),
+
+      // 27. Carnets needing attention (we_supply, open): approaching/overdue and
+      // not yet obtained, or out with the client past the discharge deadline, or
+      // returned-but-not-discharged. Non-blocking amber bucket.
+      query(`
+        SELECT COUNT(*) AS count
+        FROM job_carnets c JOIN jobs j ON j.id = c.job_id
+        WHERE c.mode = 'we_supply'
+          AND c.status NOT IN ('discharged', 'closed', 'cancelled')
+          AND j.is_deleted = false
+          AND COALESCE(j.is_internal, false) = false
+          AND j.pipeline_status NOT IN ('lost', 'cancelled')
+          AND (
+            (c.status IN ('detected','form_sent','info_received','applied')
+              AND COALESCE(c.carnet_start_date, j.out_date, j.job_date)::date <= CURRENT_DATE + INTERVAL '14 days')
+            OR (c.status = 'with_client' AND c.carnet_expiry_date IS NOT NULL AND (c.carnet_expiry_date + 7) < CURRENT_DATE)
+            OR (c.status = 'returned')
+          )
+      `),
+
+      // 28. COT receipts outstanding: company-card costs with no receipt
+      // attached, older than the 3-day grace. The daily chaser nudges each
+      // card-holder; this surfaces the fleet-wide backlog as an amber bucket.
+      query(`
+        SELECT COUNT(*) AS count
+        FROM costs c
+        WHERE c.payment_method = 'cot_card'
+          AND c.receipt_r2_key IS NULL
+          AND c.cost_date <= CURRENT_DATE - INTERVAL '3 days'
+      `),
     ]);
 
     const [
@@ -670,6 +701,7 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       pendingReferralsResult, pendingExcessResult,
       prepTimeResult, onHireSparkResult, deprepTimeResult,
       expiringHoldsResult, receiptsOutstandingResult,
+      carnetCountResult, cotReceiptsResult,
     ] = results;
 
     // Build the 14-day on-hire series — oldest day first, today last.
@@ -767,6 +799,20 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       console.warn('Dashboard on_today (storage) skipped:', (err as Error).message);
     }
 
+    // ── PCN needs-attention buckets (Step 8) ──────────────────────────────
+    // Defensive (pre-migration env / missing table can't 500 the dashboard).
+    // Shares the exact classification the deadline-nudge scheduler uses.
+    let pcnAttention = {
+      nip_urgent: [] as unknown[], ready_to_transfer: [] as unknown[],
+      deadline_approaching: [] as unknown[], awaiting_action: [] as unknown[],
+    };
+    try {
+      const { getPcnAttentionBuckets } = await import('../services/pcn-attention');
+      pcnAttention = await getPcnAttentionBuckets();
+    } catch (err) {
+      console.warn('Dashboard PCN attention skipped:', (err as Error).message);
+    }
+
     res.json({
       stat_cards: { ...statCardsResult.rows[0], on_hire_spark: onHireSpark },
       on_today: onToday,
@@ -810,6 +856,8 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
           + overdueBacklineResult.rows.length
           + overdueTransportOpsResult.rows.length,
         client_intros: clientIntrosResult.rows,
+        carnet_count: parseInt(carnetCountResult.rows[0].count as string),
+        cot_receipts_outstanding_count: parseInt(cotReceiptsResult.rows[0].count as string),
         referral_count: parseInt(referralCountResult.rows[0].count as string),
         referrals: pendingReferralsResult.rows,
         // ── Excess (semantics changed Apr 2026) ──
@@ -829,6 +877,11 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         // attached. Amber to-do, non-blocking.
         receipts_outstanding_count: receiptsOutstandingResult.rows.length,
         receipts_outstanding: receiptsOutstandingResult.rows,
+        // ── PCN buckets (Step 8) — internal-only surfacing, never client comms ──
+        pcn_nip_urgent: pcnAttention.nip_urgent,
+        pcn_ready_to_transfer: pcnAttention.ready_to_transfer,
+        pcn_deadline_approaching: pcnAttention.deadline_approaching,
+        pcn_awaiting_action: pcnAttention.awaiting_action,
       },
       transport_ops: {
         summary: transportOpsSummary,

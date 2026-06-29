@@ -41,6 +41,11 @@ import fillGapRouter from './fill-gap';
 import costsRouter from './costs';
 import storageRouter from './storage';
 import holdingRouter from './holding';
+import pcnsRouter from './pcns';
+import rackPlansRouter from './rack-plans';
+import stagingRouter from './staging';
+import carnetsRouter from './carnets';
+import backlineMatcherRouter from './backline-matcher';
 
 const router = Router();
 
@@ -68,6 +73,7 @@ router.use('/excess', excessRouter);
 router.use('/money', moneyRouter);
 router.use('/ve103b', ve103bRouter);
 router.use('/backline', backlineRouter);
+router.use('/backline-matcher', backlineMatcherRouter);  // AI equipment matcher + demand tracker (replaces alternative-hirehop-stock Netlify app)
 router.use('/cancellations', cancellationsRouter);
 router.use('/fill-gap', fillGapRouter);  // Replacement candidates for cancelled / lost jobs (Phase 1 — SQL only)
 router.use('/issues', issuesRouter);
@@ -75,6 +81,10 @@ router.use('/problems', problemsRouter);  // Job-level problems register (damage
 router.use('/costs', costsRouter);  // Cost Capture & Recharge — staff-facing receipt/cost workflow
 router.use('/storage', storageRouter);  // Client Storage — rooms/tenancies/access/waiting list (+ public T&Cs accept by token)
 router.use('/holding', holdingRouter);  // Holding — Held for Clients / Lost Property / temp storage (held_items engine)
+router.use('/pcns', pcnsRouter);  // PCN module — Penalty Charge Notice management (Vehicles), replaces Monday PCN boards
+router.use('/rack-plans', rackPlansRouter);  // Rack Planner — how a rack/system is supplied (pull-only from HireHop) + public view-token
+router.use('/staging', stagingRouter);  // Staging Calculator — stock/availability/push + 3D plan short-links (embedded vanilla-JS tool)
+router.use('/carnets', carnetsRouter);  // ATA Carnet management (HH-derived item 575) — read-only in slice 1
 router.use('/hire-forms', hireFormsRouter);
 router.use('/requirements', requirementsRouter);
 router.use('/portal', portalRouter);  // Freelancer portal — own JWT auth (not OP staff JWT)

@@ -37,6 +37,23 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  vehicle_swapped: {
+    variant: 'client',
+    preheader: 'A quick update about the vehicle on your hire',
+    subject: 'Vehicle update for your hire{{#if jobNumber}} (#{{jobNumber}}){{/if}}',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Vehicle update</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Hi {{clientName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        {{#if planned}}As arranged, the vehicle for your hire{{/if}}{{#if unplanned}}We've had to change the vehicle on your hire{{/if}}
+        <strong>{{jobName}}</strong>{{#if jobNumber}} (job <strong>#{{jobNumber}}</strong>){{/if}} is now
+        <strong>{{newReg}}</strong>{{#if oldReg}} (previously {{oldReg}}){{/if}}.
+      </p>
+      {{#if planned}}<p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">Everything else about your booking stays the same.</p>{{/if}}{{#if unplanned}}<p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">Apologies for the change - the rest of your booking is unaffected and we've made sure the replacement is ready to go.</p>{{/if}}
+      <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">Any questions, just reply to this email or call us on +44 1273 911382.</p>
+    `,
+  },
+
   holding_lost_property_found: {
     variant: 'client',
     preheader: 'We found some lost property after your hire',
@@ -159,6 +176,91 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  carnet_request: {
+    variant: 'client',
+    preheader: 'We need a few details to arrange your ATA Carnet',
+    subject: 'ATA Carnet details needed - {{jobName}} (job #{{jobNumber}})',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">ATA Carnet request</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Hi {{clientName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        We're arranging an ATA Carnet for <strong>{{jobName}}</strong> (job <strong>#{{jobNumber}}</strong>).
+        Please complete the short form below — it gathers the countries you're visiting, the names to go on
+        the carnet, and the signed authority we need to apply on your behalf.
+      </p>
+      <p style="margin:0 0 24px;">
+        <a href="{{formUrl}}" style="display:inline-block;background-color:#7B5EA7;color:#ffffff;text-decoration:none;padding:12px 22px;border-radius:8px;font-size:15px;font-weight:600;">Complete the carnet form →</a>
+      </p>
+      <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">Any questions, just reply to this email.</p>
+    `,
+  },
+
+  carnet_request_chase: {
+    variant: 'client',
+    preheader: 'Reminder: we still need your ATA Carnet details',
+    subject: 'Reminder: ATA Carnet details needed - {{jobName}} (job #{{jobNumber}})',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">A quick reminder</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Hi {{clientName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        We still need a few details to arrange the ATA Carnet for <strong>{{jobName}}</strong>
+        (job <strong>#{{jobNumber}}</strong>). The carnet takes time to issue, so please complete the form
+        as soon as you can.
+      </p>
+      <p style="margin:0 0 24px;">
+        <a href="{{formUrl}}" style="display:inline-block;background-color:#7B5EA7;color:#ffffff;text-decoration:none;padding:12px 22px;border-radius:8px;font-size:15px;font-weight:600;">Complete the carnet form →</a>
+      </p>
+      <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">Any questions, just reply to this email.</p>
+    `,
+  },
+
+  carnet_gmr_details: {
+    variant: 'client',
+    preheader: 'Your GMR for the UK border',
+    subject: 'Your GMR - {{jobName}} (job #{{jobNumber}})',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Your GMR{{crossingSuffix}}</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Hi {{clientName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Here's the GMR (Goods Movement Reference) you'll need at the UK border for
+        <strong>{{jobName}}</strong> (job <strong>#{{jobNumber}}</strong>):
+      </p>
+      <p style="margin:0 0 16px;font-size:18px;color:#1e293b;"><strong>GMR: {{gmrNumber}}</strong>{{crossingLine}}</p>
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.6;">
+        The QR code is attached{{qrNote}} — have it ready to show at check-in.
+      </p>
+      <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">Any questions, just reply to this email.</p>
+    `,
+  },
+
+  carnet_authority_copy: {
+    variant: 'client',
+    preheader: 'Your signed Letter of Authorisation',
+    subject: 'Your ATA Carnet authority (job #{{jobNumber}})',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Thank you, {{leadName}}</h2>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        We've received your ATA Carnet details for job <strong>#{{jobNumber}}</strong>. A copy of the signed
+        Letter of Authorisation is attached for your records. We'll be in touch as your carnet progresses.
+      </p>
+      <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">Any questions, just reply to this email.</p>
+    `,
+  },
+
+  carnet_authority_received_internal: {
+    variant: 'internal',
+    preheader: 'Carnet authority received',
+    subject: 'Carnet authority signed - {{clientName}} (job #{{jobNumber}})',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:18px;color:#1e293b;">Carnet request form submitted</h2>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.6;">
+        <strong>{{leadName}}</strong> has completed the carnet request form for <strong>{{clientName}}</strong>
+        (job <strong>#{{jobNumber}}</strong>). The signed Letter of Authorisation is attached, and the carnet
+        has moved to "Info received" — ready to apply.
+      </p>
+    `,
+  },
+
   merch_label: {
     variant: 'client',
     preheader: 'Your delivery labels are attached',
@@ -272,6 +374,32 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  low_tread_alert: {
+    variant: 'internal',
+    subject: 'Low tyre tread at prep — {{vehicleReg}}',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Low Tyre Tread Flagged at Prep</h2>
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
+        <strong>{{vehicleReg}}</strong> was prepped by {{preparedBy}} and one or more tyres
+        are at or below {{amberThreshold}}mm. Plan a tyre change before the next hire.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#fffbeb;border-radius:8px;border:1px solid #fde68a;">
+            <p style="margin:0 0 4px;font-size:12px;color:#92400e;">Low tyres</p>
+            <p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">{{lowTyres}}</p>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0 0 16px;font-size:13px;color:#64748b;">
+        Mileage at prep: {{mileage}}
+      </p>
+      <p style="margin:0;font-size:14px;color:#334155;">
+        <a href="{{vehicleUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">View vehicle in Ooosh &rarr;</a>
+      </p>
+    `,
+  },
+
   chase_reminder: {
     variant: 'internal',
     subject: 'Chase Due — {{jobName}} ({{jobNumber}})',
@@ -373,6 +501,18 @@ const templates: Record<string, EmailTemplate> = {
           </td>
         </tr>
       </table>
+      {{#if multiVanNote}}
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#f3effa;border-radius:8px;border:1px solid #d8cdef;">
+            <p style="margin:0;font-size:14px;color:#4c3a6b;line-height:1.6;">
+              This is one of the vehicles on your hire. As more than one van is booked,
+              you'll receive a separate agreement for each — please keep them all for your records.
+            </p>
+          </td>
+        </tr>
+      </table>
+      {{/if}}
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
         Please retain the attached document for your records.
       </p>
@@ -1415,6 +1555,33 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  vehicle_damage_logged: {
+    variant: 'internal',
+    subject: '🚐 Vehicle issue logged: {{vehicleReg}} — {{summary}}',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#991b1b;">⚠️ Vehicle issue logged</h2>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.6;">
+        A <strong>{{category}}</strong> issue ({{severity}}) has been {{eventVerb}} on
+        <strong>{{vehicleReg}}</strong>{{#if jobRef}} during job <strong>{{jobRef}}</strong>{{/if}}.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#fef2f2;border-radius:8px;border:1px solid #fecaca;">
+            <p style="margin:0 0 4px;font-size:13px;color:#64748b;">Issue</p>
+            <p style="margin:0 0 8px;font-size:14px;color:#1e293b;font-weight:600;">{{summary}}</p>
+            {{#if description}}<p style="margin:0 0 8px;font-size:13px;color:#334155;line-height:1.5;">{{description}}</p>{{/if}}
+            <p style="margin:0 0 4px;font-size:13px;color:#64748b;">Reported by</p>
+            <p style="margin:0 0 8px;font-size:14px;color:#1e293b;">{{reportedBy}}</p>
+            {{#if photoLine}}<p style="margin:0;font-size:13px;color:#334155;">{{photoLine}}</p>{{/if}}
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0;font-size:14px;color:#334155;">
+        <a href="{{issueUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Open issue in Ooosh →</a>
+      </p>
+    `,
+  },
+
   ooh_return_received_internal: {
     variant: 'internal',
     subject: 'OOH return logged: {{vehicleReg}} — job #{{jobNumber}}',
@@ -1518,6 +1685,189 @@ const templates: Record<string, EmailTemplate> = {
       </p>
     `,
   },
+
+  // ── PCN module (penalty charge notices) ──────────────────────────────────
+
+  pcn_transfer_liability: {
+    variant: 'client',
+    preheader: 'Action required — parking/traffic charge notice',
+    subject: 'Parking/Traffic Charge Notice — {{vehicleReg}} ({{jobRef}})',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Parking / Traffic Charge Notice</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Dear {{driverName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        We've received a charge notice for a vehicle that was hired to you at the time of the alleged offence{{jobRefSentence}}. Details below:
+      </p>
+      <table role="presentation" width="100%" style="margin:0 0 16px;border-collapse:collapse;font-size:14px;color:#1e293b;">
+        <tr><td style="padding:4px 0;color:#64748b;">Reference</td><td style="padding:4px 0;font-weight:600;">{{pcnReference}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Issuing authority</td><td style="padding:4px 0;">{{issuer}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Vehicle</td><td style="padding:4px 0;">{{vehicleReg}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Date / time</td><td style="padding:4px 0;">{{offenceDateTime}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Location</td><td style="padding:4px 0;">{{location}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Fine</td><td style="padding:4px 0;">{{fineLine}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Final deadline</td><td style="padding:4px 0;">{{finalDeadline}}</td></tr>
+      </table>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        As the driver at the time, liability for this notice rests with you. Please either pay the issuing authority directly using the reference above, or appeal directly with them if you believe it was issued in error. {{handlingSentence}}
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">A copy of the notice is attached — please refer to it for the issuing authority's accepted payment methods and options.</p>
+      <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">Any queries, reply to this email or call {{oooshPhone}}.</p>
+    `,
+  },
+
+  pcn_pay_direct: {
+    variant: 'client',
+    preheader: 'Please pay this charge directly within 48 hours',
+    subject: 'Parking/Traffic Charge Notice — {{vehicleReg}} — please action ({{jobRef}})',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Parking / Traffic Charge Notice</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Dear {{driverName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        We've received a charge notice for a vehicle hired to you at the time of the alleged offence{{jobRefSentence}}:
+      </p>
+      <table role="presentation" width="100%" style="margin:0 0 16px;border-collapse:collapse;font-size:14px;color:#1e293b;">
+        <tr><td style="padding:4px 0;color:#64748b;">Reference</td><td style="padding:4px 0;font-weight:600;">{{pcnReference}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Issuing authority</td><td style="padding:4px 0;">{{issuer}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Vehicle</td><td style="padding:4px 0;">{{vehicleReg}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Date / time</td><td style="padding:4px 0;">{{offenceDateTime}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Location</td><td style="padding:4px 0;">{{location}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Fine</td><td style="padding:4px 0;">{{fineLine}}</td></tr>
+      </table>
+      <p style="margin:0 0 16px;padding:12px 14px;background-color:#fef3c7;border-radius:8px;font-size:15px;color:#92400e;line-height:1.6;">
+        <strong>If you wish to pay the fine directly</strong>, please do so within <strong>48 hours</strong> and forward us a receipt as proof for our records. <strong>If you wish to appeal</strong>, or we don't receive proof of payment, we'll transfer liability into your name with an administration fee of <strong>{{handlingFee}}+VAT</strong>.
+      </p>
+      {{#if receiptUploadUrl}}
+      <table role="presentation" width="100%" style="margin:0 0 16px;"><tr><td align="center">
+        <a href="{{receiptUploadUrl}}" style="display:inline-block;padding:12px 28px;background-color:#7B5EA7;color:#ffffff;font-size:15px;font-weight:600;text-decoration:none;border-radius:8px;">Upload proof of payment</a>
+      </td></tr></table>
+      <p style="margin:0 0 16px;font-size:13px;color:#64748b;line-height:1.6;text-align:center;">Tap the button to upload your receipt — quickest way to keep this off your account.</p>
+      {{/if}}
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">You can also reply with your receipt or send it to <a href="mailto:{{oooshEmail}}" style="color:#7B5EA7;text-decoration:none;">{{oooshEmail}}</a>. A copy of the notice is attached — please refer to it for the issuer's payment options.</p>
+      <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">Any queries, reply to this email or call {{oooshPhone}}.</p>
+    `,
+  },
+
+  pcn_receipt_received_alert: {
+    variant: 'internal',
+    subject: 'PCN proof of payment received — {{vehicleReg}} ({{pcnReference}})',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:18px;color:#1e293b;">Driver uploaded proof of payment</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        <strong>{{driverName}}</strong> has uploaded a receipt for PCN <strong>{{pcnReference}}</strong> (vehicle {{vehicleReg}}{{#if jobNumber}}, job #{{jobNumber}}{{/if}}).
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        The PCN is now marked <strong>Paid by Driver</strong>. Please verify the receipt and close it off.
+      </p>
+      <p style="margin:0;font-size:14px;"><a href="{{pcnUrl}}" style="color:#7B5EA7;">Open the PCN →</a></p>
+    `,
+  },
+
+  pcn_chase_alert: {
+    variant: 'internal',
+    subject: '{{subjectLine}}',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:18px;color:#1e293b;">Pay-direct chase {{level}} of {{total}} sent</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        <strong>{{driverName}}</strong> still hasn't sent proof of payment for PCN <strong>{{pcnReference}}</strong> (vehicle {{vehicleReg}}) — now <strong>{{daysPast}} days</strong> past the pay-direct deadline. Reminder #{{level}} has just been re-sent.
+      </p>
+      {{#if escalate}}
+      <p style="margin:0 0 16px;padding:12px 14px;background-color:#fee2e2;border-radius:8px;font-size:15px;color:#991b1b;line-height:1.6;">
+        <strong>This was the final chase.</strong> Consider transferring liability into the driver's name (adds the handling fee) — open the PCN and use the "Transfer liability" action.
+      </p>
+      {{/if}}
+      <p style="margin:0;font-size:14px;"><a href="{{pcnUrl}}" style="color:#7B5EA7;">Open the PCN →</a></p>
+    `,
+  },
+
+  pcn_deadline_alert: {
+    variant: 'internal',
+    subject: '{{subjectLine}}',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:18px;color:#1e293b;">{{#if urgent}}URGENT — Police NIP still unactioned{{else}}PCN deadline approaching{{/if}}</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        PCN <strong>{{pcnReference}}</strong> (vehicle <strong>{{vehicleReg}}</strong>) is still <strong>{{statusLabel}}</strong> — {{deadlineLabel}}.
+      </p>
+      {{#if urgent}}
+      <p style="margin:0 0 16px;padding:12px 14px;background-color:#fee2e2;border-radius:8px;font-size:15px;color:#991b1b;line-height:1.6;">
+        We're legally required to identify the driver to the police within 28 days of the offence. Action this now — request driver ID from the client, or transfer liability.
+      </p>
+      {{else}}
+      <p style="margin:0 0 16px;padding:12px 14px;background-color:#fef3c7;border-radius:8px;font-size:15px;color:#92400e;line-height:1.6;">
+        Action this before the deadline to keep the reduced rate / avoid escalation — choose a path on the PCN.
+      </p>
+      {{/if}}
+      <p style="margin:0;font-size:14px;"><a href="{{pcnUrl}}" style="color:#7B5EA7;">Open the PCN →</a></p>
+    `,
+  },
+
+  pcn_request_driver_id: {
+    variant: 'client',
+    preheader: 'Driver identification required',
+    subject: 'Driver Identification Required — {{vehicleReg}} — {{offenceDate}} ({{jobRef}})',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Driver Identification Required</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Dear {{clientName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        We've received a charge notice for vehicle <strong>{{vehicleReg}}</strong>, which was on hire to you at the time{{jobRefSentence}}.
+      </p>
+      <table role="presentation" width="100%" style="margin:0 0 16px;border-collapse:collapse;font-size:14px;color:#1e293b;">
+        <tr><td style="padding:4px 0;color:#64748b;">Date / time</td><td style="padding:4px 0;">{{offenceDateTime}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Location</td><td style="padding:4px 0;">{{location}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Reference</td><td style="padding:4px 0;">{{pcnReference}}</td></tr>
+      </table>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Our records show more than one driver was authorised on this hire{{driverListSentence}}. To transfer liability to the issuing authority, we need to confirm who was driving at the above time. Please reply with the full name and contact details of the driver.
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        If we don't hear from you within 7 days, we may be unable to transfer liability and the charge (plus an administration fee) will be applied to your account.
+      </p>
+      <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">Any queries, reply to this email or call {{oooshPhone}}.</p>
+    `,
+  },
+
+  pcn_police_nip_urgent: {
+    variant: 'client',
+    preheader: 'URGENT — police notice, driver details required',
+    subject: 'URGENT: Police Notice — Driver Identification Required — {{vehicleReg}} ({{jobRef}})',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#b91c1c;">URGENT — Notice of Intended Prosecution</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Dear {{clientName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        We've received a Notice of Intended Prosecution (NIP) from the police for vehicle <strong>{{vehicleReg}}</strong>, which was on hire to you at the time of the alleged offence{{jobRefSentence}}.
+      </p>
+      <table role="presentation" width="100%" style="margin:0 0 16px;border-collapse:collapse;font-size:14px;color:#1e293b;">
+        <tr><td style="padding:4px 0;color:#64748b;">Date / time</td><td style="padding:4px 0;">{{offenceDateTime}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Location</td><td style="padding:4px 0;">{{location}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Reference</td><td style="padding:4px 0;">{{pcnReference}}</td></tr>
+      </table>
+      <p style="margin:0 0 16px;padding:12px 14px;background-color:#fee2e2;border-radius:8px;font-size:15px;color:#991b1b;line-height:1.6;">
+        We're legally required to provide driver details to the police within <strong>28 days</strong> of the offence. Failure to do so is a criminal offence. Please reply <strong>URGENTLY</strong> with the full name, address and date of birth of the person driving at the above time.
+      </p>
+      <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">If you have any questions, call us immediately on {{oooshPhone}}.</p>
+    `,
+  },
+
+  pcn_pay_recharge: {
+    variant: 'client',
+    preheader: 'Charge notice paid on your behalf',
+    subject: 'Charge Notice — {{vehicleReg}} — Paid on Your Behalf ({{jobRef}})',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Charge Notice — Paid on Your Behalf</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Dear {{clientName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        We've received a charge notice for vehicle <strong>{{vehicleReg}}</strong>, on hire to you at the time{{jobRefSentence}}. To avoid the charge escalating, we've paid it on your behalf and will recharge it to your account.
+      </p>
+      <table role="presentation" width="100%" style="margin:0 0 16px;border-collapse:collapse;font-size:14px;color:#1e293b;">
+        <tr><td style="padding:4px 0;color:#64748b;">Reference</td><td style="padding:4px 0;font-weight:600;">{{pcnReference}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Issuing authority</td><td style="padding:4px 0;">{{issuer}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Date / time</td><td style="padding:4px 0;">{{offenceDateTime}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Fine paid</td><td style="padding:4px 0;">{{fineLine}}</td></tr>
+      </table>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">{{handlingSentence}} A copy of the notice is attached.</p>
+      <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">Any queries, reply to this email or call {{oooshPhone}}.</p>
+    `,
+  },
+
 };
 
 export default templates;

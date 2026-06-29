@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
+import { hasManagerRole, roleAllowed } from '../lib/roles';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { api } from '../services/api';
@@ -40,10 +41,12 @@ const navItems: NavItem[] = [
       { path: '/quick', label: '⚡ Quick Log (mobile)' },
       { path: '/operations/transport', label: 'Crew & Transport' },
       { path: '/operations/backline', label: 'Backline' },
+      { path: '/operations/backline-matcher', label: 'Backline Matcher' },
       { path: '/storage', label: 'Storage' },
       { path: '/holding', label: 'Held for Clients' },
       { path: '/holding/lost-property', label: 'Lost Property' },
       { path: '/warehouse/collections', label: 'Warehouse Collections' },
+      { path: '/operations/carnets', label: 'Carnets' },
       { path: '/operations/problems', label: 'Problems' },
       { path: '/operations/issues', label: 'Issues' },
     ],
@@ -59,6 +62,7 @@ const navItems: NavItem[] = [
       { path: '/vehicles/prep', label: 'Prep' },
       { path: '/vehicles/issues', label: 'Issues' },
       { path: '/vehicles/ve103b', label: 'VE103B Certs' },
+      { path: '/vehicles/pcns', label: 'PCNs' },
       { path: '/vehicles/fleet-map', label: 'Fleet Map' },
       { path: '/vehicles/settings', label: 'Settings' },
     ],
@@ -77,7 +81,7 @@ const navItems: NavItem[] = [
 function NavDropdown({ item, isActive, userRole }: { item: NavItem; isActive: boolean; userRole?: string }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
-  const visibleChildren = item.children?.filter(c => !c.roles || (userRole && c.roles.includes(userRole)));
+  const visibleChildren = item.children?.filter(c => !c.roles || roleAllowed(userRole, c.roles));
 
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
@@ -149,7 +153,7 @@ function UserMenu() {
   const navigate = useNavigate();
   const user = useAuthStore((s) => s.user);
   const logout = useAuthStore((s) => s.logout);
-  const isAdmin = user?.role === 'admin' || user?.role === 'manager';
+  const isAdmin = hasManagerRole(user?.role);
 
   const loadInboxCount = useCallback(async () => {
     try {
@@ -374,7 +378,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                 >
                   My Profile
                 </Link>
-                {(user?.role === 'admin' || user?.role === 'manager') && (
+                {hasManagerRole(user?.role) && (
                   <Link
                     to="/settings"
                     onClick={() => setMobileMenuOpen(false)}

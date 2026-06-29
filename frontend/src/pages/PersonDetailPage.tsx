@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { hasManagerRole } from '../lib/roles';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
@@ -9,6 +10,8 @@ import ActivityTimeline from '../components/ActivityTimeline';
 import ExcessHistorySection from '../components/ExcessHistorySection';
 import HireHistoryTab from '../components/HireHistoryTab';
 import HeldItemsSection from '../components/HeldItemsSection';
+import StorageHistorySection from '../components/StorageHistorySection';
+import { PcnHistorySection } from '../components/PcnHistorySection';
 import { PERSON_ORG_ROLES } from '@shared/index';
 
 interface FileAttachment {
@@ -84,14 +87,14 @@ export default function PersonDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const user = useAuthStore((s) => s.user);
-  const isAdmin = user?.role === 'admin' || user?.role === 'manager';
+  const isAdmin = hasManagerRole(user?.role);
 
   const [person, setPerson] = useState<PersonDetail | null>(null);
   const [dnoReason, setDnoReason] = useState('');
   const [showDnoForm, setShowDnoForm] = useState(false);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'timeline' | 'hire_history' | 'details' | 'relationships' | 'excess' | 'held'>('timeline');
+  const [activeTab, setActiveTab] = useState<'timeline' | 'hire_history' | 'details' | 'relationships' | 'excess' | 'held' | 'storage' | 'pcn'>('timeline');
 
   // Edit panel
   const [showEdit, setShowEdit] = useState(false);
@@ -473,13 +476,18 @@ export default function PersonDetailPage() {
       {/* Tabs */}
       <div className="border-b border-gray-200 mb-6">
         <nav className="flex gap-6">
-          {(['timeline', 'hire_history', 'details', 'relationships', 'excess', 'held'] as const).map((tab) => {
+          {([
+            'timeline', 'hire_history', 'details', 'relationships', 'excess', 'held', 'storage',
+            ...(isFreelancer ? (['pcn'] as const) : []),
+          ] as const).map((tab) => {
             const totalOrgs = (person.organisations || []).length;
             const label = tab === 'timeline' ? 'Activity Timeline'
               : tab === 'hire_history' ? 'Hire History'
               : tab === 'details' ? 'Details'
               : tab === 'excess' ? 'Excess History'
               : tab === 'held' ? 'Held Items'
+              : tab === 'storage' ? 'Storage'
+              : tab === 'pcn' ? 'PCNs'
               : `Relationships${totalOrgs ? ` (${totalOrgs})` : ''}`;
             return (
               <button
@@ -950,6 +958,14 @@ export default function PersonDetailPage() {
 
       {activeTab === 'held' && id && (
         <HeldItemsSection entityType="person" entityId={id} />
+      )}
+
+      {activeTab === 'storage' && id && (
+        <StorageHistorySection entityType="person" entityId={id} />
+      )}
+
+      {activeTab === 'pcn' && id && (
+        <PcnHistorySection entityType="person" entityId={id} heading="🅿️ Penalty Charge Notices" />
       )}
 
       {/* Edit Panel */}

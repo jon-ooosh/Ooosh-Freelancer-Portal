@@ -145,6 +145,22 @@ export interface CheckInStatus {
   checkInDate?: string
   /** Specific reason the gate is blocking, so the UI can show a sensible message. */
   reason?: 'already_checked_in' | 'never_booked_out'
+  /**
+   * Authoritative HH job number of the van's open (booked_out/active)
+   * assignment, straight from `vehicle_hire_assignments` — NOT from R2 event
+   * history. This is the source of truth for which hire is being checked in.
+   * The check-in flow must prefer this over the latest book-out event's job,
+   * because a book-out whose history event never landed leaves the event query
+   * returning a STALE book-out from a previous hire (RX73TBZ 16057↔16149).
+   */
+  hirehopJob?: number | null
+  /**
+   * True when this eligible check-in is the FINAL check-in of a van that was
+   * swapped OUT mid-hire (its assignment row is status='swapped', awaiting
+   * check-in). The flow is otherwise identical; the flag lets the UI show
+   * context ("this van was swapped out on …").
+   */
+  swapped?: boolean
 }
 
 /**
@@ -168,10 +184,12 @@ export async function checkAlreadyCheckedIn(
       eligible: boolean
       reason: 'already_checked_in' | 'never_booked_out' | null
       checkInDate: string | null
+      hirehopJob: number | null
+      swapped?: boolean
     }
 
     if (data.eligible) {
-      return { alreadyCheckedIn: false }
+      return { alreadyCheckedIn: false, hirehopJob: data.hirehopJob, swapped: data.swapped === true }
     }
 
     return {
