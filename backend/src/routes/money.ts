@@ -471,7 +471,7 @@ const refundPaymentSchema = z.object({
   notes: z.string().max(1000).nullable().optional(),
   // When set, an existing OP `job_payments` pending-refund IOU (e.g. created by
   // a cancellation) is marked completed instead of inserting a new refund row.
-  pending_refund_id: z.number().int().positive().nullable().optional(),
+  pending_refund_id: z.string().uuid().nullable().optional(),
 });
 
 // ── GET /api/money/job-lookup/:hhJobNumber — Look up OP job by HireHop job number ──
