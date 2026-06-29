@@ -131,7 +131,7 @@ const WRITABLE = [
   'description', 'category', 'xero_account_code', 'cost_type', 'payment_method',
   'cot_card_holder', 'cot_card_last4', 'payment_status', 'job_id', 'vehicle_id',
   'quote_assignment_id', 'platform_issue_id', 'vehicle_service_log_id', 'vehicle_fuel_log_id',
-  'recharge_mode', 'recharge_amount', 'cost_intent', 'receipt_r2_key', 'receipt_filename', 'status', 'notes',
+  'recharge_mode', 'recharge_amount', 'recharge_status', 'cost_intent', 'receipt_r2_key', 'receipt_filename', 'status', 'notes',
 ] as const;
 
 // A quote_actual cost is already billed via its quote — it can never carry a
@@ -141,6 +141,22 @@ function coerceRechargeForIntent(data: Record<string, unknown>) {
   if (data.cost_intent === 'quote_actual') {
     data.recharge_mode = 'none';
     data.recharge_amount = null;
+  }
+}
+
+// Keep recharge_status in step with recharge_mode on the generic create/update
+// path. The terminal states (recharged_hh / recharged_external / absorbed) are
+// only ever set by the push/resolve endpoints — here we only toggle between
+// 'pending' (flagged) and NULL (not a recharge). recharge_status is stripped from
+// user input by the Zod schemas, so this is the only thing that sets it on write.
+const TERMINAL_RECHARGE = new Set(['recharged_hh', 'recharged_external', 'absorbed']);
+function deriveRechargeStatusForWrite(data: Record<string, unknown>, current?: string | null) {
+  if (data.recharge_mode === undefined) return; // recharge not being touched
+  if (data.recharge_mode === 'none') {
+    data.recharge_status = null;
+  } else if (!current || !TERMINAL_RECHARGE.has(current)) {
+    // Flagging (or re-flagging) for recharge and not already resolved → pending.
+    data.recharge_status = 'pending';
   }
 }
 
@@ -179,7 +195,8 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     if (view === 'payable') {
       conditions.push(`c.payment_status <> 'paid'`);
     } else if (view === 'recharge') {
-      conditions.push(`c.recharge_mode <> 'none' AND c.recharged_to_hh_at IS NULL`);
+      // Pending = flagged for recharge and not yet resolved (pushed/external/absorbed).
+      conditions.push(`c.recharge_mode <> 'none' AND COALESCE(c.recharge_status, 'pending') = 'pending'`);
     } else if (view === 'reconcile') {
       conditions.push(`c.payment_method = 'cot_card' AND c.xero_sync_state <> 'reconciled'`);
     }
@@ -253,7 +270,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     const stats = await query(`
       SELECT
         COUNT(*) FILTER (WHERE payment_status <> 'paid')::int AS payable,
-        COUNT(*) FILTER (WHERE recharge_mode <> 'none' AND recharged_to_hh_at IS NULL)::int AS recharge_pending,
+        COUNT(*) FILTER (WHERE recharge_mode <> 'none' AND COALESCE(recharge_status, 'pending') = 'pending')::int AS recharge_pending,
         COUNT(*) FILTER (WHERE payment_method = 'cot_card' AND xero_sync_state <> 'reconciled')::int AS reconcile_pending,
         COALESCE(SUM(amount_gross) FILTER (WHERE payment_status <> 'paid'), 0)::numeric AS payable_total
       FROM costs
@@ -279,8 +296,12 @@ async function listBy(column: string, value: string, res: Response) {
     [value],
   );
   // Outstanding = anything not fully resolved (powers the close-out flag).
+  // A recharge is unresolved while flagged but still 'pending' (not pushed to HH,
+  // billed externally, or absorbed).
   const outstanding = result.rows.filter(
-    (r) => r.status !== 'resolved' || (r.recharge_mode !== 'none' && !r.recharged_to_hh_at) || r.payment_status !== 'paid',
+    (r) => r.status !== 'resolved'
+      || (r.recharge_mode !== 'none' && (r.recharge_status ?? 'pending') === 'pending')
+      || r.payment_status !== 'paid',
   ).length;
   res.json({ data: result.rows, outstanding });
 }
@@ -322,6 +343,18 @@ router.get('/check-invoice', async (req: AuthRequest, res: Response) => {
     res.json({ data: { duplicate: r.rows.length > 0, match: r.rows[0] || null } });
   } catch (err) {
     console.error('[costs] check-invoice error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Default recharge markup config (ex VAT) — drives the resolve modal's
+// pre-filled suggestion. Multi-segment so it doesn't collide with /:id below.
+router.get('/recharge-defaults', async (_req: AuthRequest, res: Response) => {
+  try {
+    const { getRechargeMarkupDefaults } = await import('../services/cost-recharge-markup');
+    res.json({ data: await getRechargeMarkupDefaults() });
+  } catch (err) {
+    console.error('[costs] recharge-defaults error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -615,6 +648,7 @@ router.post('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respon
     if (!parse.success) { res.status(400).json({ error: 'Invalid input', issues: parse.error.issues }); return; }
     const data = parse.data as Record<string, unknown>;
     coerceRechargeForIntent(data);
+    deriveRechargeStatusForWrite(data);
 
     // A payable (anything not already paid) enters the approval workflow. If the
     // booker is uploading it, they vouch for it inline → 'verified'. An approver
@@ -686,6 +720,13 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
     if (!parse.success) { res.status(400).json({ error: 'Invalid input', issues: parse.error.issues }); return; }
     const data = parse.data as Record<string, unknown>;
     coerceRechargeForIntent(data);
+
+    // Keep recharge_status in step if recharge_mode is being changed — but never
+    // clobber a terminal resolution (already pushed/absorbed) back to pending.
+    if (data.recharge_mode !== undefined) {
+      const cur = await query('SELECT recharge_status FROM costs WHERE id = $1', [req.params.id]);
+      deriveRechargeStatusForWrite(data, cur.rows[0]?.recharge_status ?? null);
+    }
 
     const sets: string[] = [];
     const vals: unknown[] = [];
@@ -810,9 +851,11 @@ router.post('/:id/recharge', authorize(...STAFF_ROLES), async (req: AuthRequest,
     }
 
     const amount = recharge_mode === 'full' ? (cost.amount_gross ?? recharge_amount) : recharge_amount;
+    // Flagging (or re-flagging) → pending, unless already in a terminal state.
+    const nextStatus = TERMINAL_RECHARGE.has(cost.recharge_status) ? cost.recharge_status : 'pending';
     const result = await query(
-      `UPDATE costs SET recharge_mode = $1, recharge_amount = $2 WHERE id = $3 RETURNING *`,
-      [recharge_mode, amount, req.params.id],
+      `UPDATE costs SET recharge_mode = $1, recharge_amount = $2, recharge_status = $3 WHERE id = $4 RETURNING *`,
+      [recharge_mode, amount, nextStatus, req.params.id],
     );
     await audit(req.user!.id, req.params.id as string, 'recharge_flag',
       { recharge_mode: cost.recharge_mode, recharge_amount: cost.recharge_amount },
@@ -824,21 +867,116 @@ router.post('/:id/recharge', authorize(...STAFF_ROLES), async (req: AuthRequest,
   }
 });
 
+// Persist the recharge base/markup/final figures the resolve modal computed.
+// recharge_amount is the FINAL net (post-markup) figure that bills; the markup
+// columns record how it was reached (audit). Coerces recharge_mode→'full' when a
+// base is given but no mode, so an unflagged `extra` cost can be billed in one step.
+const MARKUP_TYPES = ['greater_of', 'percent', 'fixed', 'none'] as const;
+const rechargeFiguresSchema = z.object({
+  recharge_mode: z.enum(['full', 'partial']).optional(),
+  recharge_amount: money.optional().nullable(),        // final net to bill
+  recharge_base_amount: money.optional().nullable(),   // net before markup
+  recharge_markup_type: z.enum(MARKUP_TYPES).optional().nullable(),
+  recharge_markup_value: money.optional().nullable(),
+});
+
+async function persistRechargeFigures(costId: string, figures: z.infer<typeof rechargeFiguresSchema>) {
+  const sets: string[] = [];
+  const vals: unknown[] = [];
+  const push = (col: string, v: unknown) => { vals.push(v); sets.push(`${col} = $${vals.length}`); };
+  if (figures.recharge_mode !== undefined) push('recharge_mode', figures.recharge_mode);
+  else if (figures.recharge_amount != null) push('recharge_mode', 'full'); // base given, no mode → treat as full
+  if (figures.recharge_amount !== undefined) push('recharge_amount', figures.recharge_amount);
+  if (figures.recharge_base_amount !== undefined) push('recharge_base_amount', figures.recharge_base_amount);
+  if (figures.recharge_markup_type !== undefined) push('recharge_markup_type', figures.recharge_markup_type);
+  if (figures.recharge_markup_value !== undefined) push('recharge_markup_value', figures.recharge_markup_value);
+  if (!sets.length) return;
+  vals.push(costId);
+  await query(`UPDATE costs SET ${sets.join(', ')} WHERE id = $${vals.length}`, vals);
+}
+
 // Push the flagged recharge to HireHop as a billable hire line. Explicit staff
 // action (never auto-fires). Idempotent — a cost already recharged is a no-op.
+// Optional body carries the resolve modal's final figure + markup breakdown.
 router.post('/:id/push-recharge', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
   try {
+    const costId = String(req.params.id);
+    const figures = rechargeFiguresSchema.safeParse(req.body || {});
+    if (figures.success) await persistRechargeFigures(costId, figures.data);
+
     const { pushRechargeToHH } = await import('../services/cost-recharge-hh');
-    const result = await pushRechargeToHH(String(req.params.id));
+    const result = await pushRechargeToHH(costId);
     if (result.pushed) {
-      await audit(req.user!.id, req.params.id as string, 'recharge_pushed', null,
+      await audit(req.user!.id, costId, 'recharge_pushed', null,
         { hh_job: result.hhJobNumber, amount: result.amount, stock: result.stockLabel });
+      // Refresh the post-hire close-out card now this recharge is resolved.
+      const job = await query('SELECT job_id FROM costs WHERE id = $1', [costId]);
+      if (job.rows[0]?.job_id) {
+        const { syncCostResolveRequirementStatus } = await import('../services/cost-requirement-sync');
+        await syncCostResolveRequirementStatus(job.rows[0].job_id).catch(() => { /* non-fatal */ });
+      }
     }
-    const after = await query('SELECT * FROM costs WHERE id = $1', [req.params.id]);
+    const after = await query('SELECT * FROM costs WHERE id = $1', [costId]);
     res.json({ data: after.rows[0] || null, result });
   } catch (err) {
     console.error('[costs] push-recharge error:', err);
     res.status(500).json({ error: 'Internal server error', detail: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// Resolve a recharge WITHOUT a HireHop push: either billed by another means
+// (recharged_external — typically the HH job was closed, so a direct Xero invoice
+// etc.) or deliberately not billed (absorbed / written off, reason required).
+// Terminal — clears the cost out of the Recharges-pending bucket and lets the
+// post-hire cost_resolve card go green. Reason is auditable for the "we keep
+// absorbing £20 refuels" review.
+const resolveRechargeSchema = rechargeFiguresSchema.extend({
+  resolution: z.enum(['recharged_external', 'absorbed']),
+  note: z.string().trim().max(2000).optional().nullable(),
+});
+
+router.post('/:id/resolve-recharge', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const parse = resolveRechargeSchema.safeParse(req.body);
+    if (!parse.success) { res.status(400).json({ error: 'Invalid input', issues: parse.error.issues }); return; }
+    const { resolution, note, ...figures } = parse.data;
+    if (resolution === 'absorbed' && !note?.trim()) {
+      res.status(400).json({ error: 'A reason is required to absorb / write off a recharge.' }); return;
+    }
+    const costId = String(req.params.id);
+    const existing = await query('SELECT * FROM costs WHERE id = $1', [costId]);
+    if (!existing.rows.length) { res.status(404).json({ error: 'Cost not found' }); return; }
+    const before = existing.rows[0];
+    if (before.cost_intent === 'quote_actual') {
+      res.status(400).json({ error: 'This cost is part of a quote (already billed via the quote) — it has no recharge to resolve.' }); return;
+    }
+
+    await persistRechargeFigures(costId, figures);
+    // Flag for recharge if it wasn't already (so an unflagged extra cost can be
+    // resolved in one step), then stamp the terminal resolution.
+    const result = await query(
+      `UPDATE costs SET
+         recharge_mode = CASE WHEN recharge_mode = 'none' OR recharge_mode IS NULL THEN 'full' ELSE recharge_mode END,
+         recharge_status = $1,
+         recharge_resolution_note = $2,
+         recharge_resolved_by = $3,
+         recharge_resolved_at = NOW()
+       WHERE id = $4 RETURNING *`,
+      [resolution, note?.trim() || null, req.user!.id, costId],
+    );
+    await audit(req.user!.id, costId, 'recharge_resolved',
+      { recharge_status: before.recharge_status },
+      { recharge_status: resolution, note: note?.trim() || null });
+
+    // Refresh the post-hire close-out card.
+    if (result.rows[0]?.job_id) {
+      const { syncCostResolveRequirementStatus } = await import('../services/cost-requirement-sync');
+      await syncCostResolveRequirementStatus(result.rows[0].job_id).catch(() => { /* non-fatal */ });
+    }
+    res.json({ data: result.rows[0] });
+  } catch (err) {
+    console.error('[costs] resolve-recharge error:', err);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 

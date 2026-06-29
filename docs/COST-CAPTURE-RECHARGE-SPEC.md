@@ -1084,27 +1084,38 @@ the markup control that was missing, plus the "absorb" audit jon wants for the
 
 ### 1. Markup on the recharge amount
 
+**Everything here is ex-VAT.** The base, the markup, and the final figure are all net.
+The final amount pushes to HH as the NET line; HH's 20%-rated recharge stock items add
+the VAT on top (unchanged from today's "net of VAT, VAT added at HH" design). So a
+£20.95 fuel net → £30.95 net pushed → HH bills £37.14 inc VAT.
+
 Today the pushed amount is `amount_net` (full) or `recharge_amount` (partial) — no
 markup. New model keeps `recharge_mode` as the **base selector** and layers markup on
 top:
 
-- **Base** = `full` (the cost's `amount_net`) or `partial` (a staff-entered base).
-- **Markup** = `none | percent | fixed`, with a value.
-- **Final recharge amount** = `base + markup`, shown broken-down and **editable**
-  before confirm (extraction-error-style: suggest, let staff override).
+- **Base** = `full` (the cost's `amount_net`) or `partial` (a staff-entered net base).
+- **Markup** = one of `greater_of | percent | fixed | none`:
+  - `greater_of` (**the default**) — markup = `max(base × percent%, floor)`. The agreed
+    default is **max(20% of base, £10)** — so a £20.95 refuel gets +£10 (20% = £4.19,
+    floored to £10 → £30.95); a £200 cost gets +£40 (20% beats the £10 floor). This is
+    the "minimum £10 or 20%, whichever is greater" rule.
+  - `percent` — markup = `base × percent%` (no floor).
+  - `fixed` — markup = a flat amount (e.g. always +£15).
+  - `none` — no markup.
+- **Final recharge amount** = `base + markup`, shown broken-down and **editable** before
+  confirm (extraction-error style: suggest, let staff override the final figure directly).
 
-The final amount is what pushes to HH as the NET line; HH's 20%-rated recharge stock
-items add VAT on top (unchanged from today's "net of VAT, VAT added at HH" design).
-
-**Default markup** lives in `system_settings` (category `cost_recharge`), e.g.
-`cost_recharge_default_markup_type` + `cost_recharge_default_markup_value`. The confirm
-modal pre-fills from it; staff can change type/value per push. **Per-category default
-markups** (fuel vs damage vs travel could differ) are a noted future refinement — ship
-one global default first, don't over-build.
+**Default markup** lives in `system_settings` (category `cost_recharge`):
+`cost_recharge_default_markup_type` (`greater_of`), `cost_recharge_default_markup_percent`
+(`20`), `cost_recharge_default_markup_floor` (`10`). The confirm modal pre-fills from
+these; staff can change type/value per push. **Per-category default markups** (fuel vs
+damage vs travel could differ) are a noted future refinement — ship one global default
+first, don't over-build.
 
 New columns (migration 150) for transparency/audit of how the figure was reached:
-`recharge_base_amount`, `recharge_markup_type`, `recharge_markup_value`. `recharge_amount`
-stays the final (post-markup) figure the push bills.
+`recharge_base_amount`, `recharge_markup_type`, `recharge_markup_value` (the percent or
+fixed value used; the floor for `greater_of` is implicit from settings/recomputable from
+base+final). `recharge_amount` stays the final (post-markup, ex-VAT) figure the push bills.
 
 ### 2. Resolution lifecycle
 
