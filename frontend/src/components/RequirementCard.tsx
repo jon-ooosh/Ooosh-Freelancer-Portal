@@ -135,6 +135,7 @@ const TYPE_STATUS_LABELS: Record<string, Record<string, string>> = {
   invoice: { not_started: 'Not Invoiced', in_progress: 'Generated', done: 'Sent', blocked: 'Problem' },
   payment_reconcile: { not_started: 'Outstanding', in_progress: 'Partial', done: 'Reconciled', blocked: 'Dispute' },
   excess_resolve: { not_started: 'Pending', in_progress: 'In Progress', done: 'Resolved', blocked: 'Dispute' },
+  cost_resolve: { not_started: 'Pending', in_progress: 'To Resolve', done: 'Resolved', blocked: 'Dispute' },
   freelancer_followup: { not_started: 'Not Contacted', in_progress: 'Chased', done: 'Done', blocked: 'Overdue' },
   client_followup: { not_started: 'Not Contacted', in_progress: 'In Progress', done: 'Done', blocked: 'No Response' },
   reminder: { not_started: 'To Do', in_progress: 'In Progress', done: 'Done', blocked: 'Blocked' },

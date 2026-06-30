@@ -16,6 +16,7 @@ import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import CostCaptureModal from '../components/CostCaptureModal';
 import CostAllocationModal from '../components/CostAllocationModal';
+import RechargeResolveModal, { RechargeStatusPill } from '../components/RechargeResolveModal';
 import type { Cost, SupplierPaymentTerms } from '../../../shared/types';
 
 type ViewMode = 'all' | 'payable' | 'recharge' | 'reconcile';
@@ -140,6 +141,9 @@ export default function CostsPage() {
   const [payTarget, setPayTarget] = useState<CostRow | null>(null);
   const [termsTarget, setTermsTarget] = useState<CostRow | null>(null);
   const [preview, setPreview] = useState<CostRow | null>(null);
+  const [resolving, setResolving] = useState<CostRow | null>(null);
+  // Recharge view slice: '' = pending (default), or a terminal state / 'all' for the audit view.
+  const [rechargeStatusFilter, setRechargeStatusFilter] = useState<string>('');
   const [actionBusy, setActionBusy] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<SortKey | null>(null);
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
@@ -210,6 +214,7 @@ export default function CostsPage() {
       if (searchDebounced) params.set('search', searchDebounced);
       if (missingReceipt) params.set('missing_receipt', '1');
       if (mineOnly) params.set('mine', '1');
+      if (view === 'recharge' && rechargeStatusFilter) params.set('recharge_status', rechargeStatusFilter);
       const res = await api.get<{ data: CostRow[]; stats: Stats }>(`/costs?${params.toString()}`);
       setRows(res.data);
       setStats(res.stats);
@@ -218,7 +223,7 @@ export default function CostsPage() {
     } finally {
       if (!quiet) setLoading(false);
     }
-  }, [view, typeFilter, searchDebounced, missingReceipt, mineOnly]);
+  }, [view, typeFilter, searchDebounced, missingReceipt, mineOnly, rechargeStatusFilter]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -318,27 +323,6 @@ export default function CostsPage() {
     }
   }
 
-  // Push the flagged recharge to HireHop as a billable line. Surfaces HH's own
-  // message on failure (closed job, validation, etc.) so staff know what to do.
-  async function confirmRecharge(c: CostRow) {
-    if (!confirm(`Add a £${Number(c.recharge_amount ?? c.amount_gross ?? 0).toFixed(2)} recharge line (+ VAT) to HireHop${c.hh_job_number ? ` job #${c.hh_job_number}` : ''}?`)) return;
-    setActionBusy(c.id + 'recharge');
-    try {
-      const r = await api.post<{ result: { pushed?: boolean; error?: string; skipped?: string; manualActionRequired?: boolean; amount?: number; stockLabel?: string } }>(
-        `/costs/${c.id}/push-recharge`, {},
-      );
-      const res = r.result || {};
-      if (res.pushed) alert(`Recharged to HireHop: ${res.stockLabel} £${Number(res.amount || 0).toFixed(2)} + VAT added to the job.`);
-      else if (res.error) alert(`Recharge ${res.manualActionRequired ? 'needs manual action' : 'failed'}: ${res.error}`);
-      else if (res.skipped) alert(`Skipped: ${res.skipped}`);
-      await load(true);
-    } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to push recharge to HireHop');
-    } finally {
-      setActionBusy(null);
-    }
-  }
-
   const tabs: { key: ViewMode; label: string; badge?: number }[] = [
     { key: 'all', label: 'All costs' },
     { key: 'payable', label: 'Bills to Pay', badge: stats?.payable },
@@ -427,6 +411,26 @@ export default function CostsPage() {
         </div>
       )}
 
+      {view === 'recharge' && (
+        <div className="flex flex-wrap items-center gap-1.5 mb-4">
+          <span className="text-xs text-gray-400 mr-1">Status:</span>
+          {([
+            ['', 'Pending'],
+            ['recharged_hh', 'Recharged (HH)'],
+            ['recharged_external', 'Billed externally'],
+            ['absorbed', 'Absorbed'],
+            ['all', 'All'],
+          ] as [string, string][]).map(([key, label]) => (
+            <button key={key || 'pending'} onClick={() => setRechargeStatusFilter(key)}
+              className={`px-2.5 py-1 text-xs rounded-full border ${rechargeStatusFilter === key
+                ? 'bg-purple-600 border-purple-600 text-white'
+                : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'}`}>
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
+
       {view === 'reconcile' && isManager && <XeroCotProbe />}
 
       {/* Table */}
@@ -505,9 +509,7 @@ export default function CostsPage() {
                       <span className="text-xs text-gray-500">{c.payment_status.replace('_', ' ')}</span>
                     )}
                     {c.recharge_mode !== 'none' && (
-                      <span className="ml-1 px-2 py-0.5 text-xs rounded-full bg-blue-50 text-blue-700">
-                        recharge{c.recharged_to_hh_at ? ' ✓' : ''}
-                      </span>
+                      <span className="ml-1"><RechargeStatusPill status={c.recharge_status} mode={c.recharge_mode} /></span>
                     )}
                   </td>
                   <td className="px-2.5 py-2 whitespace-nowrap">
@@ -519,10 +521,10 @@ export default function CostsPage() {
                       {view === 'payable' && (
                         <PayableActions cost={c} isManager={isManager} isAdmin={isAdmin} busy={actionBusy} onAction={runAction} onPay={() => setPayTarget(c)} />
                       )}
-                      {view === 'recharge' && !c.recharged_to_hh_at && (
-                        <button disabled={actionBusy === c.id + 'recharge'} onClick={() => confirmRecharge(c)}
-                          className="px-2 py-1 text-xs text-white bg-blue-600 hover:bg-blue-700 rounded disabled:opacity-50">
-                          {actionBusy === c.id + 'recharge' ? '…' : 'Push to HireHop'}
+                      {c.recharge_mode !== 'none' && (c.recharge_status ?? 'pending') === 'pending' && (
+                        <button onClick={() => setResolving(c)}
+                          className="px-2 py-1 text-xs text-white bg-blue-600 hover:bg-blue-700 rounded">
+                          Resolve
                         </button>
                       )}
                       <button onClick={() => setAllocating(c)} title="Split across jobs"
@@ -575,6 +577,13 @@ export default function CostsPage() {
           busy={actionBusy === payTarget.id + 'pay'}
           onClose={() => setPayTarget(null)}
           onSubmit={(date, method) => payCost(payTarget.id, date, method)}
+        />
+      )}
+      {resolving && (
+        <RechargeResolveModal
+          cost={resolving}
+          onClose={() => setResolving(null)}
+          onResolved={() => { setResolving(null); load(true); }}
         />
       )}
       {termsTarget && (

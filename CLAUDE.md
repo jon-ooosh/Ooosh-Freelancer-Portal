@@ -1140,6 +1140,7 @@ OP is now the staff control surface for the FULL post-collection money loop. Ini
 - [x] **Hire `refund-payment` Xero two-step fix (Jun 2026)** — the hire-side refund endpoint pushed `billing_payments_save.php` but never fired the `accounting/tasks.php` `post_payment` task, so OP refunds landed in HireHop billing but **never posted to Xero**. Every other money-out path (excess reimburse/claim/capture, deposit record) already did the two-step — this was the only miss. Now fires `post_payment` after the HH push (best-effort, mirrors the excess path). Caught via job 16043 (Oz Touring double £720 deposit refund).
 - [x] **Deposit-refund display fix (Jun 2026)** — the Money tab reader mis-bucketed a deposit refund (a `kind=3` row booked against a deposit, so it carries `OWNER_DEPOSIT`) as "deposit applied to invoice" and never subtracted it → job showed full pre-refund deposits + negative outstanding. Fix: within the `OWNER_DEPOSIT` branch, a negative-credit row with `OWNER = 0` (no invoice) is a deposit refund → subtract from `totalHireDeposits` + surface as a refund line. Genuine deposit→invoice applications have `OWNER` = the invoice id (non-zero) and are untouched. Proven against job 15577 (`OWNER=11648`) vs 16043 (`OWNER=0`). Also fixes OP's own refund button (its push produces the same `OWNER:0` shape). Money tab reads HH live, so affected jobs self-heal on next load.
 - [x] **Process pending cancellation refunds (Jun 2026)** — cancellations create a bare `job_payments` IOU (`payment_type='refund'`, `payment_status='pending'`, no HH/Stripe link) that nothing ever actioned. Now: `/summary` returns `financial.pending_refunds`; `/refund-payment` accepts an optional `pending_refund_id` that validates the IOU (belongs to job + still pending, **before** any money moves) then marks it `completed` in place (reusing the Stripe + HH + Xero path) rather than inserting a duplicate. MoneyTab renders pending refunds as an amber "Awaiting refund" row with a "Process refund" button → modal with a deposit picker + an explicit **"When you confirm:"** panel (Stripe auto-refund vs record-only, HH+Xero paperwork, IOU marked complete).
+- [x] **Clear (dismiss) pending refunds without moving money (Jun 2026)** — the "Process refund" path above moves money via Stripe/HH; but some IOUs never need processing through OP (already refunded out-of-band directly in HireHop / Stripe / bank, pre-refund-tracking artifacts, wrong amount / duplicate). The IOU was previously un-clearable — and "Process refund" is disabled when there's no deposit on the job to refund against (e.g. job 15840 showed £93 owing when £150 had already been refunded direct in HH, leaving staff stuck). Sibling of the balance `resolve-balance` + excess `mark-externally-resolved` actions. `POST /api/money/:jobId/dismiss-refund` (`{ refund_id, reason, notes? }`, MANAGER_ROLES) validates the IOU belongs to the job + is still pending, flips `payment_status='cancelled'`, annotates `notes`, logs a job-timeline interaction + audit. **Touches NO money / HireHop / Stripe / Xero.** `POST /api/money/refunds/bulk-dismiss` (`{ reason, notes?, refund_ids[] | logged_before: YYYY-MM-DD }`, admin) for the pre-refund-tracking backlog sweep (mirrors `balances/bulk-resolve`). Dismissed IOUs drop out of the `/overview` Pending Refunds list + per-job MoneyTab (both filter `payment_status='pending'`). UI: "Clear" link beside "Process refund" on the MoneyTab pending-refund row + per-row "Clear" / "Bulk clear old refunds…" on the `/money/overview` Refunds tab. Reasons: `refunded_externally | not_required | duplicate | other`.
 
 **Still future:**
 - [ ] **Initial card collection from OP** (PaymentIntent create). "Take Card Payment" button on Money tab → amount → Stripe payment link or embedded checkout → portal-style flow without leaving OP.
@@ -1358,7 +1359,7 @@ Full cancellation workflow distinguishing **lost enquiries** (never confirmed) f
 - [x] Migration 047: cancellation fields on jobs table (`cancelled_at`, `cancelled_by`, `cancellation_reason`, `cancellation_fee`, `cancellation_refund`, `cancellation_notice_days`, `cancellation_notes`, `cancellation_tier`, `reopened_from_job_id`, `reopened_to_job_id`)
 - [x] `cancelled` added to `PipelineStatus` type, config, writeback mapping, pipeline labels
 - [x] HH status mapping split: `cancelled → 9`, `lost → 10` (was both → lost)
-- [x] `cancellation-calculator.ts`: T&Cs clause 7.1 (pre-hire) + 7.3 (early return), three hire types, £25+VAT minimum
+- [x] `cancellation-calculator.ts`: T&Cs clause 7.1 (pre-hire) + 7.3 (early return), three hire types, £25+VAT minimum. **The whole calculator works in EX-VAT** — `totalHireCost` is ex-VAT, the 10%/25% tiers apply to it, and callers/email add 20% for display. So `MIN_CANCELLATION_FEE` MUST be the **ex-VAT** figure `25` (= £30 inc-VAT), NOT `30`. Until Jun 2026 it was hardcoded `30`, so when the minimum applied (the common case for small jobs) the fee became £25+VAT+VAT = £36 inc-VAT — VAT counted twice. Reported on job 16114 (showed £36 retained / £165.60 refund; correct is £30 / £171.60). Don't reintroduce £30 as the minimum.
 - [x] `cancellations.ts` route: calculate, process, transport-crew, list, reopen endpoints
 - [x] Cancellation workflow: status update, timeline log, requirements marked done, vehicle assignments cancelled, crew cancelled + emailed, excess flagged, pending refund created, HH write-back
 - [x] `CancellationModal.tsx`: calculator display, transport/crew summary, manual override, RBAC
@@ -2486,6 +2487,55 @@ image/PDF blocks single or multi-page, parse-with-fence-fallback, cache telemetr
 `pcn-extract.ts` + `cost-receipt-extract.ts` call `extractDocument<T>()` and keep only
 their prompt/schema/post-processing; the deferred vehicle service-record extractor
 reuses it.
+
+**Hire-agreement PCN compliance (Jun 2026).** Councils began rejecting PCN
+liability-transfer representations because the hire form didn't name the vehicle's
+exact make + model — which is a **prescribed statutory particular** of a valid
+"hiring agreement" (Sch 2, Road Traffic (Owner Liability) Regs 2000 **SI 2000/2546**,
+cross-referenced by RTOA 1988 s66(8); and SI 2005/2757 reg 5(2) for bus lanes outside
+London). A missing applicable particular is "fatal to the hire agreement" — liability
+stays with us (London Tribunals, *Camden v Europcar*). Two pieces shipped:
+- **Make/model on the hire form PDF.** `hire-form-pdf.ts` vehicle line is now
+  `reg - type - make/model` (e.g. `RX73TCJ - PREMIUM LWB (M) - MERCEDES-BENZ SPRINTER
+  317`), wrapping if long, each segment included only if present (records without
+  make/model fall back to the old `reg - type`). `composeMakeModel(make, model)` helper
+  (dedupes when model already leads with make); `HireFormData.vehicleMakeModel`
+  populated from `fleet_vehicles.make`/`.model` in `loadHireFormData` + the cross-van
+  path. Takes effect on newly-generated PDFs only.
+- **Transfer-liability soft pre-flight** (`services/pcn-transfer-check.ts`,
+  `GET /api/pcns/:id/transfer-check`, surfaced in `PcnActionChooser` when staff pick
+  "Transfer liability"). **Advisory only — never blocks.** Warns when a representation
+  is likely to be rejected so staff can fall back to Pay & recharge: no driver linked,
+  no signed hire agreement on file, **make/model missing on the fleet record**, missing
+  driver particulars (DOB/address/licence), offence date outside the recorded hire
+  window, or a **London bus-lane PCN** (can't be transferred at all — London Local
+  Authorities Act 1996 lacuna; outside London bus lanes transfer fine via SI 2005/2757).
+  Bus-lane + London detection is a keyword heuristic (free-text `issuing_authority`,
+  `fine_type` doesn't separate bus lanes from other council PCNs).
+
+**⏳ PENDING — hire-form T&Cs wording tweaks (jon to action in a quiet window, not
+mid-busy-period).** The full T&Cs (embedded in `hire-form-pdf.ts` `TERMS_AND_CONDITIONS`
++ live at oooshtours.co.uk/files/Ooosh_vehicle_hire_terms.pdf) are substantively strong
+— §4.2 already covers fine transfer + £35+VAT handling fee + **post-hire liability**
+("some fines may not be received… until after your hire has ended: you remain liable
+regardless"), §10.1 covers data protection comprehensively, and the page-1 declaration
+cites s66 RTOA 1988 / Sch 6 RTA 1991 / TMA 2004 / POFA 2012. Belt-and-braces tweaks to
+make when convenient (legal text — worth a solicitor / BVRLA-template check first):
+  1. **Name the modern charge types explicitly** in the page-1 liability declaration and
+     §4.2 — currently "parking or traffic fines / penalty charge notice" (a fair
+     catch-all). Add **Congestion Charge, ULEZ / Clean Air Zone, and tolls (Dart Charge,
+     Mersey Gateway, foreign vignettes)** by name to shut down "that's not a parking fine".
+  2. **Add an s172 driver-identification clause** — hirer authorises us to disclose their
+     identity to police/authority as the driver for camera/speeding NIPs, and remains
+     responsible for the consequences. Not currently explicit.
+  3. *(Optional polish)* Lift the road-traffic statement of liability out of the insurance
+     proposal declaration into its own clearly-headed, separately-signed block. The
+     current version is signed and cites the statutes, so substance is fine — only worth it
+     if reprinting the form anyway.
+NB the substitute-vehicle statutory particulars (Sch 2 B3–B5) and "actual return date/time"
+(B10) need NO form change: each van swap generates a fresh self-contained agreement naming
+its own reg+make/model, and B10 is a firm's-copy particular already captured at check-in
+(don't re-issue/re-email a form post-hire).
 
 #### Staging Calculator Integration (Jun 2026)
 

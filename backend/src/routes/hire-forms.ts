@@ -17,7 +17,7 @@ import {
   type FlexibleVehicleRequest,
 } from '../middleware/freelancer-bookout-auth';
 import { validate } from '../middleware/validate';
-import { generateHireFormPdf, fetchLogo, type HireFormData } from '../services/hire-form-pdf';
+import { generateHireFormPdf, fetchLogo, composeMakeModel, type HireFormData } from '../services/hire-form-pdf';
 import { uploadToR2, getFromR2 } from '../config/r2';
 import { emailService } from '../services/email-service';
 import { getFrontendUrl } from '../config/app-urls';
@@ -489,7 +489,7 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
       `SELECT id, excess_amount_taken, excess_status, payment_method, payment_reference, payment_date, hh_deposit_id
        FROM job_excess
        WHERE job_id = $1 AND assignment_id IS NULL
-         AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required')
+         AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required', 'released')
        ORDER BY created_at DESC LIMIT 1`,
       [jobId]
     ) : { rows: [] };
@@ -561,7 +561,7 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
       const countResult = jobId ? await client.query(
         `SELECT COUNT(*)::int AS count FROM job_excess
          WHERE job_id = $1 AND assignment_id IS NOT NULL
-           AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required', 'waived')`,
+           AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required', 'waived', 'released')`,
         [jobId]
       ) : { rows: [{ count: 0 }] };
       const activeCount = countResult.rows[0].count;
@@ -1000,10 +1000,12 @@ router.post('/quick-assign', authenticate, validate(quickAssignSchema), async (r
     // Try to absorb an orphan record created by the derivation engine.
     // 'waived' is excluded — a waived record (staff decision, V&D cascade or
     // internal-job cascade) must never be silently flipped back to 'pending'.
+    // 'released' is terminal (migration 087) — absorbing one resurrects a dead
+    // pre-auth to 'pending' with stale amount_held (job 15934 incident, Jun 2026).
     const orphanExcess = await query(
       `SELECT id FROM job_excess
        WHERE job_id = $1 AND assignment_id IS NULL
-         AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required', 'waived')
+         AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required', 'waived', 'released')
        ORDER BY created_at ASC LIMIT 1`,
       [f.job_id]
     );
@@ -1034,7 +1036,7 @@ router.post('/quick-assign', authenticate, validate(quickAssignSchema), async (r
       const countResult = await query(
         `SELECT COUNT(*)::int AS count FROM job_excess
          WHERE job_id = $1 AND assignment_id IS NOT NULL
-           AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required', 'waived')`,
+           AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required', 'waived', 'released')`,
         [f.job_id]
       );
       const activeCount = countResult.rows[0].count;
@@ -2166,7 +2168,7 @@ async function generateAndEmailCrossVanHireForm(
       return 'failed';
     }
 
-    const van = await query(`SELECT reg, vehicle_type FROM fleet_vehicles WHERE id = $1`, [vanVehicleId]);
+    const van = await query(`SELECT reg, vehicle_type, make, model FROM fleet_vehicles WHERE id = $1`, [vanVehicleId]);
     const vanReg = van.rows[0]?.reg as string | undefined;
     const vanModel = (van.rows[0]?.vehicle_type as string | undefined) || '';
     if (!vanReg || vanReg === 'TBC') {
@@ -2177,6 +2179,7 @@ async function generateAndEmailCrossVanHireForm(
     // Swap in the cross van — everything else stays the driver's own.
     formData.vehicleReg = vanReg;
     formData.vehicleModel = vanModel;
+    formData.vehicleMakeModel = composeMakeModel(van.rows[0]?.make, van.rows[0]?.model) || undefined;
 
     const { pdfBytes, filename } = await generateHireFormPdf(formData);
     const r2Key = `hire-forms/${driverAssignmentId}/${filename}`;
@@ -2258,6 +2261,8 @@ async function loadHireFormData(assignmentId: string): Promise<HireFormData | nu
       COALESCE(j.hh_job_number, vha.hirehop_job_id) AS resolved_hh_job_number,
       fv.reg AS vehicle_reg,
       fv.vehicle_type AS vehicle_model,
+      fv.make AS vehicle_make,
+      fv.model AS vehicle_make_model,
       d.full_name AS driver_name,
       d.email AS driver_email,
       d.phone AS driver_phone,
@@ -2395,6 +2400,7 @@ async function loadHireFormData(assignmentId: string): Promise<HireFormData | nu
     datePassedTest: toISODate(row.driver_date_passed_test),
     vehicleReg: row.vehicle_reg || '',
     vehicleModel: row.vehicle_model || '',
+    vehicleMakeModel: composeMakeModel(row.vehicle_make, row.vehicle_make_model) || undefined,
     hireStartDate: toISODate(row.resolved_hire_start),
     hireStartTime: row.resolved_start_time ? String(row.resolved_start_time) : undefined,
     hireEndDate: toISODate(row.resolved_hire_end),

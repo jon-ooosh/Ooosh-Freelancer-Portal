@@ -313,8 +313,22 @@ const WE_SUPPLY_STATUSES = [
 const CLIENT_ARRANGES_STATUSES = ['requested', 'spreadsheet_sent', 'done', 'cancelled'];
 const CUSTODY_VALUES = ['ooosh', 'client', 'issuer'];
 
-function addMonthsISO(dateStr: string, months: number): string {
-  const [y, m, d] = String(dateStr).slice(0, 10).split('-').map(Number);
+// Normalise a date value to a YYYY-MM-DD string. Accepts an ISO/date string
+// (from the request body) OR a JS Date (node-postgres returns DATE columns as
+// Date objects at LOCAL midnight — so read the local components, NOT
+// toISOString(), which would shift a day under BST).
+function toISODate(input: unknown): string {
+  if (input instanceof Date) {
+    const y = input.getFullYear();
+    const m = String(input.getMonth() + 1).padStart(2, '0');
+    const d = String(input.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+  return String(input).slice(0, 10);
+}
+
+function addMonthsISO(dateInput: unknown, months: number): string {
+  const [y, m, d] = toISODate(dateInput).split('-').map(Number);
   return new Date(Date.UTC(y, (m - 1) + months, d)).toISOString().slice(0, 10);
 }
 
@@ -433,7 +447,7 @@ router.patch('/:id', async (req: AuthRequest, res: Response) => {
     const length = 'carnet_length_months' in b ? b.carnet_length_months : carnet.carnet_length_months;
     const start = 'carnet_start_date' in b ? b.carnet_start_date : carnet.carnet_start_date;
     if (length && start) {
-      const expiry = addMonthsISO(String(start), Number(length));
+      const expiry = addMonthsISO(start, Number(length));
       set('carnet_expiry_date', expiry);
       set('liability_until', addMonthsISO(expiry, 18));
     }

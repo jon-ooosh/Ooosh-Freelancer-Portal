@@ -7,9 +7,11 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
+import { hasManagerRole } from '../lib/roles';
 import { getPaymentState, PAYMENT_STATE_LABELS, PAYMENT_STATE_CLASSES } from '../services/paymentState';
 import ExcessPaymentModal, { statusLabel, statusColor } from './ExcessPaymentModal';
 import CostCaptureModal from './CostCaptureModal';
+import RechargeResolveModal, { RechargeStatusPill } from './RechargeResolveModal';
 import type { JobExcess } from '../../../shared/types';
 
 interface MoneyTabProps {
@@ -113,10 +115,12 @@ interface JobCostLite {
   description: string | null;
   category: string | null;
   amount_gross: number | null;
+  amount_net: number | null;
   cost_intent: 'quote_actual' | 'extra' | null;
   recharge_mode: 'none' | 'full' | 'partial';
   recharge_amount: number | null;
   recharged_to_hh_at: string | null;
+  recharge_status: string | null;
 }
 interface JobQuoteLite {
   id: string;
@@ -130,7 +134,9 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   const [data, setData] = useState<FinancialData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const isAdmin = useAuthStore((s) => s.user?.role) === 'admin';
+  const role = useAuthStore((s) => s.user?.role);
+  const isAdmin = role === 'admin';
+  const canManage = hasManagerRole(role);
   const [showResolveBalance, setShowResolveBalance] = useState(false);
   const [balReason, setBalReason] = useState('xero_settled');
   const [balNotes, setBalNotes] = useState('');
@@ -249,6 +255,41 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
     setRefundError('');
     setRefundResult(null);
     if (refundResult) loadData();
+  };
+
+  // Dismiss-pending-refund — clears an OP IOU WITHOUT moving money, for refunds
+  // already done out-of-band (HireHop / Stripe / bank direct) or artifacts.
+  // Distinct from "Process refund" which actually sends money.
+  const [dismissRefund, setDismissRefund] = useState<NonNullable<FinancialData['financial']['pending_refunds']>[number] | null>(null);
+  const [dismissReason, setDismissReason] = useState('refunded_externally');
+  const [dismissNotes, setDismissNotes] = useState('');
+  const [dismissLoading, setDismissLoading] = useState(false);
+  const [dismissError, setDismissError] = useState('');
+
+  const openDismissRefundModal = (pr: NonNullable<FinancialData['financial']['pending_refunds']>[number]) => {
+    setDismissRefund(pr);
+    setDismissReason('refunded_externally');
+    setDismissNotes('');
+    setDismissError('');
+  };
+
+  const submitDismissRefund = async () => {
+    if (!dismissRefund) return;
+    setDismissLoading(true);
+    setDismissError('');
+    try {
+      await api.post(`/money/${jobId}/dismiss-refund`, {
+        refund_id: dismissRefund.id,
+        reason: dismissReason,
+        notes: dismissNotes.trim() || null,
+      });
+      setDismissRefund(null);
+      loadData();
+    } catch (e) {
+      setDismissError(e instanceof Error ? e.message : 'Failed to clear refund');
+    } finally {
+      setDismissLoading(false);
+    }
   };
 
   // When the staff member changes the deposit to refund against, default the
@@ -1027,6 +1068,15 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                     >
                       Process refund
                     </button>
+                    {canManage && (
+                      <button
+                        onClick={() => openDismissRefundModal(pr)}
+                        title="Clear this IOU without moving money (already refunded out-of-band, or shouldn't have been logged)"
+                        className="text-xs font-medium text-amber-700 hover:text-amber-900 underline"
+                      >
+                        Clear
+                      </button>
+                    )}
                   </div>
                 </div>
               ))}
@@ -1036,7 +1086,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
       </div>
 
       {/* Job costs vs quotes (Cost Capture) */}
-      <JobCostsPanel costs={jobCosts} quotes={jobQuotes} onAddCost={() => setShowAddCost(true)} />
+      <JobCostsPanel costs={jobCosts} quotes={jobQuotes} onAddCost={() => setShowAddCost(true)} onChanged={loadJobCosts} />
       {showAddCost && (
         <CostCaptureModal
           presetJobId={jobId}
@@ -1360,6 +1410,53 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
         </div>
       )}
 
+      {/* Clear (dismiss) pending refund modal — no money moves */}
+      {dismissRefund && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setDismissRefund(null)}>
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full" onClick={(e) => e.stopPropagation()}>
+            <div className="px-5 py-4 border-b border-gray-200">
+              <h3 className="text-lg font-semibold text-gray-900">Clear Pending Refund</h3>
+              <p className="text-xs text-gray-500 mt-0.5">
+                £{Number(dismissRefund.amount).toFixed(2)} — clears the IOU without moving any money. Doesn't touch HireHop / Stripe / Xero.
+                To actually send a refund, use "Process refund" instead.
+              </p>
+            </div>
+            <div className="px-5 py-4 space-y-3">
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Reason</label>
+                <select
+                  value={dismissReason}
+                  onChange={(e) => setDismissReason(e.target.value)}
+                  className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md"
+                >
+                  <option value="refunded_externally">Already refunded outside OP (HireHop / Stripe / bank)</option>
+                  <option value="not_required">Not required (artifact / superseded)</option>
+                  <option value="duplicate">Duplicate record</option>
+                  <option value="other">Other</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Notes (optional)</label>
+                <textarea
+                  value={dismissNotes}
+                  onChange={(e) => setDismissNotes(e.target.value)}
+                  rows={2}
+                  placeholder="e.g. refunded £150 in full direct in HireHop"
+                  className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md resize-y"
+                />
+              </div>
+              {dismissError && <p className="text-xs text-red-600">{dismissError}</p>}
+              <div className="flex justify-end gap-2">
+                <button onClick={() => setDismissRefund(null)} className="px-4 py-2 text-sm font-medium text-gray-700 border border-gray-300 rounded-md hover:bg-gray-50">Cancel</button>
+                <button onClick={submitDismissRefund} disabled={dismissLoading} className="px-4 py-2 text-sm font-medium text-white bg-amber-600 hover:bg-amber-700 rounded-md disabled:opacity-50">
+                  {dismissLoading ? 'Clearing…' : 'Clear refund'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Process pending refund modal (e.g. cancellation IOU) */}
       {pendingRefund && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={closePendingRefundModal}>
@@ -1499,9 +1596,10 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
 // expected transport/crew cost. "Actuals" sums the quote_actual costs. Extra
 // costs are listed separately (eligible for client recharge). Hidden when the
 // job has neither costs nor quotes.
-function JobCostsPanel({ costs, quotes, onAddCost }: { costs: JobCostLite[]; quotes: JobQuoteLite[]; onAddCost: () => void }) {
+function JobCostsPanel({ costs, quotes, onAddCost, onChanged }: { costs: JobCostLite[]; quotes: JobQuoteLite[]; onAddCost: () => void; onChanged: () => void }) {
   const m = (n: number) => `£${n.toFixed(2)}`;
   const num = (n: number | null | undefined) => Number(n || 0);
+  const [resolving, setResolving] = useState<JobCostLite | null>(null);
 
   const AddBtn = (
     <button onClick={onAddCost} className="text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-md px-3 py-1.5">
@@ -1581,21 +1679,34 @@ function JobCostsPanel({ costs, quotes, onAddCost }: { costs: JobCostLite[]; quo
             <span className="text-sm font-semibold text-gray-900">{m(extraTotal)}</span>
           </div>
           <ul className="space-y-1">
-            {extraCosts.map((c) => (
-              <li key={c.id} className="flex items-center justify-between text-sm">
-                <span className="text-gray-600 truncate">{c.supplier_name || c.description || c.category || 'Cost'}</span>
-                <span className="flex items-center gap-2">
-                  <span className="text-gray-900">{m(num(c.amount_gross))}</span>
-                  {c.recharge_mode !== 'none' && (
-                    <span className="px-2 py-0.5 text-xs rounded-full bg-blue-50 text-blue-700">
-                      recharge{c.recharged_to_hh_at ? ' ✓' : ' pending'}
-                    </span>
-                  )}
-                </span>
-              </li>
-            ))}
+            {extraCosts.map((c) => {
+              const pending = c.recharge_mode !== 'none' && (c.recharge_status ?? 'pending') === 'pending';
+              return (
+                <li key={c.id} className="flex items-center justify-between text-sm gap-2">
+                  <span className="text-gray-600 truncate">{c.supplier_name || c.description || c.category || 'Cost'}</span>
+                  <span className="flex items-center gap-2 shrink-0">
+                    <span className="text-gray-900">{m(num(c.amount_gross))}</span>
+                    {c.recharge_mode !== 'none' && <RechargeStatusPill status={c.recharge_status} mode={c.recharge_mode} />}
+                    {pending && (
+                      <button onClick={() => setResolving(c)}
+                        className="px-2 py-0.5 text-xs text-white bg-blue-600 hover:bg-blue-700 rounded">
+                        Resolve
+                      </button>
+                    )}
+                  </span>
+                </li>
+              );
+            })}
           </ul>
         </div>
+      )}
+
+      {resolving && (
+        <RechargeResolveModal
+          cost={resolving}
+          onClose={() => setResolving(null)}
+          onResolved={() => { setResolving(null); onChanged(); }}
+        />
       )}
 
       {unclassified.length > 0 && (

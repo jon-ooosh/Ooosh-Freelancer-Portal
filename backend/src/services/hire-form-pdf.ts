@@ -30,6 +30,11 @@ export interface HireFormData {
   // Hire details
   vehicleReg?: string;
   vehicleModel?: string;
+  // Exact make + model from the fleet record (e.g. "MERCEDES-BENZ SPRINTER
+  // 317"). Surfaced alongside reg + type on the agreement so the document
+  // names the precise vehicle — councils have rejected PCN appeals where the
+  // hire form didn't show the make/model.
+  vehicleMakeModel?: string;
   hireStartDate?: string;
   hireStartTime?: string;
   hireEndDate?: string;
@@ -396,6 +401,23 @@ async function embedImage(pdfDoc: PDFDocument, imageBuffer: Buffer) {
   }
 }
 
+/**
+ * Combine a vehicle's make + model into a single display string for the
+ * hire agreement (e.g. "MERCEDES-BENZ SPRINTER 317"). Councils have rejected
+ * PCN appeals where the form didn't name the exact make/model, so this is
+ * surfaced on the agreement alongside reg + type. Dedupes the case where the
+ * stored model already leads with the make.
+ */
+export function composeMakeModel(make?: string | null, model?: string | null): string {
+  const mk = (make || '').trim();
+  const md = (model || '').trim();
+  if (!mk && !md) return '';
+  if (!mk) return md;
+  if (!md) return mk;
+  if (md.toUpperCase().startsWith(mk.toUpperCase())) return md;
+  return `${mk} ${md}`;
+}
+
 function wrapText(text: string, font: PDFFont, fontSize: number, maxWidth: number): string[] {
   if (!text) return [''];
   const words = text.split(/\s+/);
@@ -452,6 +474,7 @@ export async function generateHireFormPdf(data: HireFormData): Promise<GenerateP
   const datePassedTest = formatDate(data.datePassedTest);
   const vehicleReg = data.vehicleReg || '';
   const vehicleModel = data.vehicleModel || '';
+  const vehicleMakeModel = data.vehicleMakeModel || '';
   const hireStartDate = formatDate(data.hireStartDate);
   const hireStartTime = formatTime(data.hireStartTime);
   const hireEndDate = formatDate(data.hireEndDate);
@@ -583,11 +606,25 @@ export async function generateHireFormPdf(data: HireFormData): Promise<GenerateP
   y -= 20;
 
   // === VEHICLE AND HIRE DETAILS ===
-  const vehicleDisplay = vehicleReg && vehicleModel ? `${vehicleReg} - ${vehicleModel}` : (vehicleReg || vehicleModel || 'TBC');
+  // Reg - type - make/model, e.g. "RX73TCJ - PREMIUM LWB (M) - MERCEDES-BENZ
+  // SPRINTER 317". Make/model is the PCN-compliance addition (councils reject
+  // appeals where the exact make/model isn't named). Each segment is included
+  // only if present, so older records without make/model still render cleanly.
+  const vehicleParts = [vehicleReg, vehicleModel, vehicleMakeModel]
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const vehicleDisplay = vehicleParts.length ? vehicleParts.join(' - ') : 'TBC';
 
   page1.drawText('Vehicle registration and model:', { x: leftColX, y, size: 10, font: boldFont });
-  page1.drawText(vehicleDisplay, { x: 200, y, size: 10, font: mainFont });
-  y -= 18;
+  // Wrap onto extra lines if the combined string is too wide to fit the value
+  // column — the full make/model must never be clipped (it's the whole point).
+  const vehicleValueX = 200;
+  const vehicleValueMaxWidth = PAGE_WIDTH - MARGIN - vehicleValueX;
+  const vehicleLines = wrapText(vehicleDisplay, mainFont, 10, vehicleValueMaxWidth);
+  vehicleLines.forEach((vline, idx) => {
+    page1.drawText(vline, { x: vehicleValueX, y: y - idx * 12, size: 10, font: mainFont });
+  });
+  y -= 18 + (vehicleLines.length - 1) * 12;
 
   page1.drawText('Hire starts:', { x: leftColX, y, size: 10, font: boldFont });
   page1.drawText(`${hireStartDate} ${hireStartTime}`, { x: 200, y, size: 10, font: mainFont });

@@ -17,6 +17,27 @@ interface OutstandingInvoice {
   date: string | null;
 }
 
+interface CrossJobGroup {
+  hh_job_number: number;
+  job_name: string | null;
+  invoices: OutstandingInvoice[];
+}
+
+// HireHop bank accounts (id → label) for the confirmable bank field. Mirrors
+// HH_BANK_IDS in backend services/hh-deposit.ts.
+const HH_BANKS: Array<{ id: number; label: string }> = [
+  { id: 265, label: 'Wise — Current Account (BACS)' },
+  { id: 169, label: 'Worldpay (all cards except Amex)' },
+  { id: 165, label: 'Amex' },
+  { id: 267, label: 'Stripe GBP' },
+  { id: 170, label: 'Lloyds Bank' },
+  { id: 168, label: 'Till (Cash)' },
+  { id: 173, label: 'PayPal' },
+];
+const PAYMENT_METHOD_TO_BANK: Record<string, number> = {
+  wise_bacs: 265, worldpay: 169, amex: 165, stripe_gbp: 267, lloyds_bank: 170, till_cash: 168, paypal: 173,
+};
+
 type ModalAction = 'payment' | 'claim' | 'reimburse' | 'waive' | 'rollover' | 'rollover_apply' | 'move' | 'edit_required' | 'unlink_deposit' | 'capture' | 'release' | 'record_preauth' | 'upload_receipt' | 'mark_externally_resolved';
 
 const CAPTURE_METHODS = [
@@ -157,6 +178,12 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
     suggestion_reason: string;
   } | null>(null);
   const [acknowledgeChainBreak, setAcknowledgeChainBreak] = useState(false);
+  // Loud-fail guard: backend returns 422 when reimbursing via Stripe but the
+  // record has no PaymentIntent to refund against. We surface the message +
+  // require an explicit "already refunded in Stripe, record only" tick before
+  // re-submitting with acknowledge_no_stripe_refund.
+  const [noStripePiWarning, setNoStripePiWarning] = useState<string | null>(null);
+  const [acknowledgeNoStripePi, setAcknowledgeNoStripePi] = useState(false);
 
   // Claim form
   const [claimAmount, setClaimAmount] = useState('');
@@ -165,6 +192,22 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
   const [outstandingInvoices, setOutstandingInvoices] = useState<OutstandingInvoice[]>([]);
   const [loadingInvoices, setLoadingInvoices] = useState(false);
   const [invoicesError, setInvoicesError] = useState('');
+
+  // Cross-job apply (CROSS-JOB-EXCESS-APPLY-SPEC): apply this excess to a
+  // same-client invoice on ANOTHER job. targetHhJob is set when the chosen
+  // invoice lives off-job (null = invoice on the excess's own job).
+  const [crossJobOpen, setCrossJobOpen] = useState(false);
+  const [crossJobData, setCrossJobData] = useState<CrossJobGroup[]>([]);
+  const [loadingCrossJob, setLoadingCrossJob] = useState(false);
+  const [crossJobError, setCrossJobError] = useState('');
+  const [targetHhJob, setTargetHhJob] = useState<number | null>(null);
+  const [manualJobNum, setManualJobNum] = useState('');
+  const [manualJobResult, setManualJobResult] = useState<CrossJobGroup & { same_client: boolean } | null>(null);
+  const [manualJobError, setManualJobError] = useState('');
+  // Confirmable bank attribution for the application — defaults to the source
+  // deposit's likely bank (mapped from payment_method); '' = let the server
+  // resolve from the original deposit. Replaces the old hardcoded Worldpay.
+  const [claimBank, setClaimBank] = useState<number | ''>('');
 
   // Lazy-load outstanding invoices when the claim action opens. We only fetch
   // for HH-linked excess records (no point asking HH for invoices on an OP-only
@@ -194,6 +237,56 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [action, isHhLinked]);
+
+  // Default the confirmable bank from the source deposit's payment method (the
+  // server still resolves authoritatively when '' is sent, but pre-filling a
+  // concrete bank makes the attribution visible + correctable up front).
+  useEffect(() => {
+    if (action !== 'claim') return;
+    const m = (excess as { payment_method?: string }).payment_method;
+    setClaimBank(m && PAYMENT_METHOD_TO_BANK[m] != null ? PAYMENT_METHOD_TO_BANK[m] : '');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [action]);
+
+  // Lazy-load same-client cross-job invoices when the section is first opened.
+  const loadCrossJobInvoices = () => {
+    if (crossJobData.length > 0 || loadingCrossJob) return;
+    setLoadingCrossJob(true);
+    setCrossJobError('');
+    api.get<{ data: { jobs: CrossJobGroup[] } }>(`/excess/${excess.id}/cross-job-invoices`)
+      .then((r) => setCrossJobData(r.data.jobs || []))
+      .catch((err: any) => setCrossJobError(err.message || 'Failed to load other jobs'))
+      .finally(() => setLoadingCrossJob(false));
+  };
+
+  // Targeted "enter a job number" lookup.
+  const lookupManualJob = () => {
+    const n = parseInt(manualJobNum.trim(), 10);
+    if (!n) { setManualJobError('Enter a job number'); return; }
+    setManualJobError('');
+    setManualJobResult(null);
+    api.get<{ data: CrossJobGroup & { same_client: boolean } }>(`/excess/${excess.id}/job-invoices/${n}`)
+      .then((r) => {
+        if (!r.data.invoices || r.data.invoices.length === 0) {
+          setManualJobError(`No outstanding invoices on job ${n}.`);
+        } else {
+          setManualJobResult(r.data);
+        }
+      })
+      .catch((err: any) => setManualJobError(err.message || 'Lookup failed'));
+  };
+
+  // Select an invoice that lives on another job (sets both the invoice id and
+  // the target job so the claim records the cross-job link). Clears any
+  // this-job selection so only one invoice is ever chosen.
+  const selectCrossJobInvoice = (hhJob: number, invId: number) => {
+    setClaimInvoiceId(invId);
+    setTargetHhJob(hhJob);
+  };
+  const selectOwnJobInvoice = (invId: number | null) => {
+    setClaimInvoiceId(invId);
+    setTargetHhJob(null);
+  };
 
   // Available balance: same formula as amountHeld below (kept in sync). Used by
   // the claim form to show running balance and validate before submission.
@@ -463,6 +556,8 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
             amount: claimAmountNum,
             invoice_id: claimInvoiceId,
             notes: claimNotes || null,
+            ...(targetHhJob != null ? { target_hh_job: targetHhJob } : {}),
+            ...(claimBank !== '' ? { bank: claimBank } : {}),
           });
           break;
         }
@@ -488,16 +583,31 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
                 : { iban: bankIban.trim(), swiftBic: bankSwift.trim() || undefined, bankCountry: bankCountry.trim() || undefined }),
             };
           }
-          const resp = await api.post<{ data: any; warning?: string }>(
-            `/excess/${excess.id}/reimburse`,
-            {
-              amount: parseFloat(reimburseAmount),
-              method: reimburseMethod,
-              bank_details: bankDetails,
-              // Only meaningful when a residual remains (backend guards anyway).
-              retain_residual: reimburseResidual > 0.005 ? retainResidual : false,
+          let resp: { data: any; warning?: string };
+          try {
+            resp = await api.post<{ data: any; warning?: string }>(
+              `/excess/${excess.id}/reimburse`,
+              {
+                amount: parseFloat(reimburseAmount),
+                method: reimburseMethod,
+                bank_details: bankDetails,
+                // Only meaningful when a residual remains (backend guards anyway).
+                retain_residual: reimburseResidual > 0.005 ? retainResidual : false,
+                // Explicit "already refunded in Stripe — record only" override
+                // for the no-PaymentIntent loud-fail (see noStripePiWarning).
+                acknowledge_no_stripe_refund: acknowledgeNoStripePi,
+              }
+            );
+          } catch (err: any) {
+            // No-PaymentIntent loud fail: surface as a warning + acknowledgement
+            // tick rather than a dead-end error, so staff can proceed record-only.
+            if (err?.status === 422 && /No Stripe PaymentIntent/i.test(err?.message || '')) {
+              setNoStripePiWarning(err.message);
+              setLoading(false);
+              return;
             }
-          );
+            throw err;
+          }
           if (resp.warning) {
             setError(resp.warning);
             setMadeChange(true); // refresh on close, not mid-flow (see handleClose)
@@ -1024,7 +1134,7 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
                     route correctly without OP needing to know about nominals. */}
                 {isHhLinked && (
                   <div>
-                    <label className="block text-xs font-medium text-gray-600 mb-1">Apply to invoice</label>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Apply to invoice (this job)</label>
                     {loadingInvoices ? (
                       <div className="text-xs text-gray-500 py-2">Loading outstanding invoices...</div>
                     ) : invoicesError ? (
@@ -1033,12 +1143,12 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
                       <div className="text-xs bg-amber-50 border border-amber-200 rounded-md p-3 text-amber-900">
                         <strong>No outstanding invoices on this HireHop job.</strong>
                         <br />
-                        Create the invoice in HireHop first (with the appropriate nominal — e.g. Vehicle damage, Misc income, extra hire), then come back to record the claim.
+                        Create the invoice in HireHop first (with the appropriate nominal — e.g. Vehicle damage, Misc income, extra hire), or apply to another of this client's jobs below.
                       </div>
                     ) : (
                       <select
-                        value={claimInvoiceId ?? ''}
-                        onChange={(e) => setClaimInvoiceId(e.target.value ? Number(e.target.value) : null)}
+                        value={targetHhJob == null ? (claimInvoiceId ?? '') : ''}
+                        onChange={(e) => selectOwnJobInvoice(e.target.value ? Number(e.target.value) : null)}
                         className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
                       >
                         <option value="">-- Pick an invoice --</option>
@@ -1049,6 +1159,112 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
                         ))}
                       </select>
                     )}
+                  </div>
+                )}
+
+                {/* Cross-job apply (same client) — CROSS-JOB-EXCESS-APPLY-SPEC.
+                    Scoped to the same client (the correctness + size boundary). */}
+                {isHhLinked && (
+                  <div className="border border-gray-200 rounded-md">
+                    <button
+                      type="button"
+                      onClick={() => { const next = !crossJobOpen; setCrossJobOpen(next); if (next) loadCrossJobInvoices(); }}
+                      className="w-full flex items-center justify-between px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                    >
+                      <span>Apply to another job (same client)</span>
+                      <span className="text-gray-400">{crossJobOpen ? '▾' : '▸'}</span>
+                    </button>
+                    {crossJobOpen && (
+                      <div className="px-3 pb-3 space-y-3 border-t border-gray-100 pt-3">
+                        {loadingCrossJob ? (
+                          <div className="text-xs text-gray-500">Loading this client's other jobs…</div>
+                        ) : crossJobError ? (
+                          <div className="text-xs text-red-600">{crossJobError}</div>
+                        ) : crossJobData.length === 0 ? (
+                          <div className="text-xs text-gray-500">No other jobs with an outstanding balance for this client. Use the job-number lookup below if you know the job.</div>
+                        ) : (
+                          <div className="space-y-2">
+                            {crossJobData.map((grp) => (
+                              <div key={grp.hh_job_number}>
+                                <div className="text-xs font-semibold text-gray-700">#{grp.hh_job_number}{grp.job_name ? ` — ${grp.job_name}` : ''}</div>
+                                {grp.invoices.map((inv) => (
+                                  <label key={inv.id} className="flex items-center gap-2 text-xs py-0.5 cursor-pointer">
+                                    <input
+                                      type="radio"
+                                      name="crossJobInvoice"
+                                      checked={targetHhJob === grp.hh_job_number && claimInvoiceId === inv.id}
+                                      onChange={() => selectCrossJobInvoice(grp.hh_job_number, inv.id)}
+                                    />
+                                    <span>{inv.number} · £{inv.owing.toFixed(2)} owing · {inv.description.substring(0, 50)}</span>
+                                  </label>
+                                ))}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        <div className="pt-1">
+                          <label className="block text-xs font-medium text-gray-600 mb-1">…or enter a job number</label>
+                          <div className="flex gap-2">
+                            <input
+                              type="number"
+                              value={manualJobNum}
+                              onChange={(e) => setManualJobNum(e.target.value)}
+                              placeholder="e.g. 15278"
+                              className="flex-1 text-sm border border-gray-300 rounded-md px-3 py-1.5"
+                            />
+                            <button type="button" onClick={lookupManualJob} className="px-3 py-1.5 text-xs font-medium text-white bg-ooosh-600 hover:bg-ooosh-700 rounded-md">Look up</button>
+                          </div>
+                          {manualJobError && <div className="text-xs text-red-600 mt-1">{manualJobError}</div>}
+                          {manualJobResult && (
+                            <div className="mt-2 space-y-1">
+                              {!manualJobResult.same_client && (
+                                <div className="text-xs bg-red-50 border border-red-200 rounded p-2 text-red-700">⚠ Different client — applying one client's excess to another's invoice is almost always wrong. A manager override is required.</div>
+                              )}
+                              <div className="text-xs font-semibold text-gray-700">#{manualJobResult.hh_job_number}{manualJobResult.job_name ? ` — ${manualJobResult.job_name}` : ''}</div>
+                              {manualJobResult.invoices.map((inv) => (
+                                <label key={inv.id} className="flex items-center gap-2 text-xs py-0.5 cursor-pointer">
+                                  <input
+                                    type="radio"
+                                    name="crossJobInvoice"
+                                    checked={targetHhJob === manualJobResult.hh_job_number && claimInvoiceId === inv.id}
+                                    onChange={() => selectCrossJobInvoice(manualJobResult.hh_job_number, inv.id)}
+                                  />
+                                  <span>{inv.number} · £{inv.owing.toFixed(2)} owing · {inv.description.substring(0, 50)}</span>
+                                </label>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Confirmable bank attribution — defaults to the source deposit's
+                    likely bank; the server resolves authoritatively if left on
+                    "Auto". Replaces the old hardcoded Worldpay (which mis-attributed
+                    e.g. a Wise-collected excess). */}
+                {isHhLinked && (
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Bank attribution (HireHop/Xero)</label>
+                    <select
+                      value={claimBank}
+                      onChange={(e) => setClaimBank(e.target.value ? Number(e.target.value) : '')}
+                      className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
+                    >
+                      <option value="">Auto — resolve from original deposit</option>
+                      {HH_BANKS.map((b) => (
+                        <option key={b.id} value={b.id}>{b.label}</option>
+                      ))}
+                    </select>
+                    <p className="text-xs text-gray-400 mt-1">No cash moves — this only sets which bank the reallocation is attributed to. Confirm it matches how the excess was originally collected.</p>
+                  </div>
+                )}
+
+                {targetHhJob != null && (
+                  <div className="text-xs bg-blue-50 border border-blue-200 rounded p-2 text-blue-800">
+                    Applying to an invoice on <strong>job #{targetHhJob}</strong> (different job, same client). Job #{targetHhJob} will read it as settled; this excess records the claim.
                   </div>
                 )}
 
@@ -1117,6 +1333,31 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
                     ))}
                   </select>
                 </div>
+
+                {/* No-PaymentIntent loud fail: OP can't fire the Stripe refund
+                    because this record has no PI stored. Staff must refund in the
+                    Stripe dashboard and tick to record it, rather than OP silently
+                    recording a refund that never reaches Stripe. */}
+                {noStripePiWarning && reimburseMethod === 'stripe_gbp' && (
+                  <div className="border border-amber-300 bg-amber-50 rounded-md p-3 space-y-2">
+                    <p className="text-xs font-semibold text-amber-900">
+                      OP can’t refund this in Stripe automatically
+                    </p>
+                    <p className="text-xs text-amber-800">{noStripePiWarning}</p>
+                    <label className="flex items-start gap-2 text-xs text-amber-900 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={acknowledgeNoStripePi}
+                        onChange={(e) => setAcknowledgeNoStripePi(e.target.checked)}
+                        className="mt-0.5"
+                      />
+                      <span>
+                        I’ve <strong>already refunded this in the Stripe dashboard</strong> —
+                        record it in OP only (no Stripe API refund will be sent).
+                      </span>
+                    </label>
+                  </div>
+                )}
 
                 {/* Residual handling — only when refunding less than the held
                     balance. Forces a conscious choice so the remainder doesn't

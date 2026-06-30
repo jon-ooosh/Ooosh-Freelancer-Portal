@@ -929,6 +929,51 @@ export function startScheduler() {
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: Pre-auth expiry reconciliation scheduled daily at 09:40 Europe/London');
 
+  // ── Stripe reimbursement silent-failure detector ────────────────────────
+  // Daily at 09:42 Europe/London. Safety net for the "no silent failures"
+  // principle: catch any stripe_gbp reimbursement recorded in OP that has NO
+  // resolution leg — i.e. neither a real Stripe refund (ref stripe_refund_*) nor
+  // an explicit record-only acknowledgement (ref recorded_only). Such a record
+  // means OP/HH/email claimed a refund the Stripe API never saw (the Jun 2026
+  // silent-swallow bug). Post-fix this should never fire — if it does, something
+  // regressed. Internal-only nudge to info@ (consistent with money-alert routing).
+  cron.schedule('42 9 * * *', async () => {
+    try {
+      const rows = await query(
+        `SELECT je.id, je.hirehop_job_id, je.client_name,
+                je.reimbursement_amount, je.reimbursement_date,
+                je.stripe_payment_intent_id, je.payment_reference
+         FROM job_excess je
+         WHERE je.reimbursement_method = 'stripe_gbp'
+           AND je.reimbursement_amount > 0
+           AND je.reimbursement_date >= NOW() - INTERVAL '3 days'
+           AND NOT EXISTS (
+             SELECT 1 FROM jsonb_array_elements(COALESCE(je.refund_legs, '[]'::jsonb)) leg
+             WHERE leg->>'ref' LIKE 'stripe_refund_%' OR leg->>'ref' = 'recorded_only'
+           )
+         ORDER BY je.reimbursement_date DESC`
+      );
+
+      if (rows.rows.length === 0) return;
+
+      const list = rows.rows.map((r: Record<string, any>) =>
+        `<li>Job <strong>#${r.hirehop_job_id ?? '?'}</strong> — ${r.client_name || 'Unknown'} — £${Number(r.reimbursement_amount).toFixed(2)} on ${new Date(r.reimbursement_date).toISOString().split('T')[0]} (PI: ${r.stripe_payment_intent_id || r.payment_reference || 'none on record'})</li>`
+      ).join('');
+
+      await emailService.sendRaw({
+        to: 'info@oooshtours.co.uk',
+        subject: `⚠️ ${rows.rows.length} Stripe excess reimbursement(s) may not have refunded`,
+        html: `<p>The following excess reimbursement(s) were recorded as <strong>stripe_gbp</strong> in the last 3 days but have <strong>no Stripe refund leg and no record-only acknowledgement</strong> — meaning OP may have recorded a refund that never actually fired in Stripe.</p>
+               <ul>${list}</ul>
+               <p>Check each PaymentIntent in the Stripe dashboard. If the money is still there, refund it manually. If it was refunded out-of-band, re-record the reimbursement via Manage → Reimburse (it will stamp a record-only leg and silence this alert).</p>`,
+      });
+      console.log(`Scheduler: Stripe reimbursement detector flagged ${rows.rows.length} record(s) → info@`);
+    } catch (err) {
+      console.error('Scheduler: Stripe reimbursement detector failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: Stripe reimbursement silent-failure detector scheduled daily at 09:42 Europe/London');
+
   // ── Cost ↔ Xero reconciliation sync — daily 07:45 Europe/London ─────────
   // Closes the spend-money loop: when the bookkeeper reconciles our pushed
   // Spend Money against the bank-feed line IN XERO, flip the OP cost to

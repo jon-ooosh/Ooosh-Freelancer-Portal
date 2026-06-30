@@ -297,6 +297,17 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
     items: [],
     viewAllHref: '/money/costs?missing_receipt=1',
   };
+  // Client recharges flagged but not yet resolved (pushed to HH / billed
+  // externally / absorbed) on active or finished hires. Amber — money we could
+  // be billing back that's sitting unactioned. Deep-links to the Recharges tab.
+  const rechargesToResolve: NABucket = {
+    key: 'recharges_to_resolve',
+    title: 'Recharges to Resolve',
+    accent: 'amber',
+    count: na.recharges_to_resolve_count || 0,
+    items: [],
+    viewAllHref: '/money/costs?view=recharge',
+  };
 
   // Transport arrangements to action — quotes in next 7 days on a
   // confirmed/pre-dispatch job where any arranging pill (client intro /
@@ -433,7 +444,7 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
   // expiringHolds leads the secondary row — red accent, time-critical (hold
   // auto-voids at day 5). Sits ahead of the amber/blue/purple buckets so it
   // catches the eye when present.
-  const secondaryBuckets = [expiringHolds, receiptsOutstanding, cotReceipts, ...pcnBuckets, carnets, referrals, excess, transportArrangements, fleetBucket, problemsBucket];
+  const secondaryBuckets = [expiringHolds, receiptsOutstanding, cotReceipts, rechargesToResolve, ...pcnBuckets, carnets, referrals, excess, transportArrangements, fleetBucket, problemsBucket];
   const secondaryAny = secondaryBuckets.some(b => b.count > 0);
 
   return (

@@ -426,6 +426,22 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────
+// Transfer-liability pre-flight (soft advisory — never blocks the action).
+// Surfaced when staff pick "Transfer liability" so they can fall back to
+// Pay & recharge if the representation is likely to be rejected.
+// ─────────────────────────────────────────────────────────────────────────
+router.get('/:id/transfer-check', async (req: AuthRequest, res: Response) => {
+  try {
+    const { assessTransferReadiness } = await import('../services/pcn-transfer-check');
+    const readiness = await assessTransferReadiness(String(req.params.id));
+    res.json({ data: readiness });
+  } catch (err) {
+    console.error('[pcns] transfer-check error:', err);
+    res.status(500).json({ error: 'Transfer check failed' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────
 // Create
 // ─────────────────────────────────────────────────────────────────────────
 
