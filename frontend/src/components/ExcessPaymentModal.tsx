@@ -178,6 +178,12 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
     suggestion_reason: string;
   } | null>(null);
   const [acknowledgeChainBreak, setAcknowledgeChainBreak] = useState(false);
+  // Loud-fail guard: backend returns 422 when reimbursing via Stripe but the
+  // record has no PaymentIntent to refund against. We surface the message +
+  // require an explicit "already refunded in Stripe, record only" tick before
+  // re-submitting with acknowledge_no_stripe_refund.
+  const [noStripePiWarning, setNoStripePiWarning] = useState<string | null>(null);
+  const [acknowledgeNoStripePi, setAcknowledgeNoStripePi] = useState(false);
 
   // Claim form
   const [claimAmount, setClaimAmount] = useState('');
@@ -577,16 +583,31 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
                 : { iban: bankIban.trim(), swiftBic: bankSwift.trim() || undefined, bankCountry: bankCountry.trim() || undefined }),
             };
           }
-          const resp = await api.post<{ data: any; warning?: string }>(
-            `/excess/${excess.id}/reimburse`,
-            {
-              amount: parseFloat(reimburseAmount),
-              method: reimburseMethod,
-              bank_details: bankDetails,
-              // Only meaningful when a residual remains (backend guards anyway).
-              retain_residual: reimburseResidual > 0.005 ? retainResidual : false,
+          let resp: { data: any; warning?: string };
+          try {
+            resp = await api.post<{ data: any; warning?: string }>(
+              `/excess/${excess.id}/reimburse`,
+              {
+                amount: parseFloat(reimburseAmount),
+                method: reimburseMethod,
+                bank_details: bankDetails,
+                // Only meaningful when a residual remains (backend guards anyway).
+                retain_residual: reimburseResidual > 0.005 ? retainResidual : false,
+                // Explicit "already refunded in Stripe — record only" override
+                // for the no-PaymentIntent loud-fail (see noStripePiWarning).
+                acknowledge_no_stripe_refund: acknowledgeNoStripePi,
+              }
+            );
+          } catch (err: any) {
+            // No-PaymentIntent loud fail: surface as a warning + acknowledgement
+            // tick rather than a dead-end error, so staff can proceed record-only.
+            if (err?.status === 422 && /No Stripe PaymentIntent/i.test(err?.message || '')) {
+              setNoStripePiWarning(err.message);
+              setLoading(false);
+              return;
             }
-          );
+            throw err;
+          }
           if (resp.warning) {
             setError(resp.warning);
             setMadeChange(true); // refresh on close, not mid-flow (see handleClose)
@@ -1312,6 +1333,31 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
                     ))}
                   </select>
                 </div>
+
+                {/* No-PaymentIntent loud fail: OP can't fire the Stripe refund
+                    because this record has no PI stored. Staff must refund in the
+                    Stripe dashboard and tick to record it, rather than OP silently
+                    recording a refund that never reaches Stripe. */}
+                {noStripePiWarning && reimburseMethod === 'stripe_gbp' && (
+                  <div className="border border-amber-300 bg-amber-50 rounded-md p-3 space-y-2">
+                    <p className="text-xs font-semibold text-amber-900">
+                      OP can’t refund this in Stripe automatically
+                    </p>
+                    <p className="text-xs text-amber-800">{noStripePiWarning}</p>
+                    <label className="flex items-start gap-2 text-xs text-amber-900 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={acknowledgeNoStripePi}
+                        onChange={(e) => setAcknowledgeNoStripePi(e.target.checked)}
+                        className="mt-0.5"
+                      />
+                      <span>
+                        I’ve <strong>already refunded this in the Stripe dashboard</strong> —
+                        record it in OP only (no Stripe API refund will be sent).
+                      </span>
+                    </label>
+                  </div>
+                )}
 
                 {/* Residual handling — only when refunding less than the held
                     balance. Forces a conscious choice so the remainder doesn't
