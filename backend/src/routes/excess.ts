@@ -178,6 +178,13 @@ const reimburseSchema = z.object({
   // OP told the client "£30 retained" but never recorded it as a claim, so the
   // canonical held formula kept showing the £30 (e.g. job 14871).
   retain_residual: z.boolean().optional(),
+  // Escape hatch for the Stripe loud-fail guard. When method='stripe_gbp' but the
+  // record carries no PaymentIntent we can refund against, the endpoint REFUSES
+  // (422) rather than silently recording-and-emailing a refund that never reaches
+  // Stripe (the silent-swallow bug behind jobs 15433/15489/15544/… — Jun 2026).
+  // Setting this true is staff explicitly saying "I've already refunded this in
+  // the Stripe dashboard, just record it in OP" — a deliberate record-only path.
+  acknowledge_no_stripe_refund: z.boolean().optional(),
 });
 
 const waiveSchema = z.object({
@@ -2301,7 +2308,7 @@ router.post('/:id/claim', validate(claimSchema), async (req: AuthRequest, res: R
 router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
-    const { amount, method, bank_details, retain_residual } = req.body;
+    const { amount, method, bank_details, retain_residual, acknowledge_no_stripe_refund } = req.body;
 
     // Get the current excess record to determine partial vs full
     const currentResult = await query(`SELECT * FROM job_excess WHERE id = $1`, [id]);
@@ -2344,8 +2351,34 @@ router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSch
     // API. Closes the "OP first" loop so staff don't have to bounce out to the
     // Stripe dashboard or the portal. For other methods (BACS, cash, etc.)
     // skipped — the real-world money movement happens off-system. ─────────────
+    //
+    // PI resolution: the dedicated stripe_payment_intent_id column is the canonical
+    // source, but the portal's straight-charge path historically only wrote the PI
+    // into payment_reference (NOT the column) — so fall back to payment_reference
+    // when it's a pi_ value. Without this fallback the refund silently no-op'd and
+    // OP/HH/email all claimed a refund Stripe never saw (jobs 15433/15489/15544/
+    // 15781/15235/15358/15503/15996 — Jun 2026).
+    const looksLikeStripePi = (v: unknown): v is string =>
+      typeof v === 'string' && /^pi_[A-Za-z0-9]+$/.test(v.trim());
+    const resolvedPi: string | null =
+      (looksLikeStripePi(current.stripe_payment_intent_id) ? current.stripe_payment_intent_id.trim() : null) ||
+      (looksLikeStripePi(current.payment_reference) ? current.payment_reference.trim() : null);
+
     let stripeRefundId: string | null = null;
-    const stripeRefundPath = method === 'stripe_gbp' && current.stripe_payment_intent_id;
+    const stripeRefundPath = method === 'stripe_gbp' && !!resolvedPi;
+
+    // Loud-fail guard (no silent swallows): a Stripe reimbursement with no PI to
+    // refund against MUST NOT silently record + email a refund that never fires.
+    // Refuse unless staff explicitly acknowledge they've already refunded in the
+    // Stripe dashboard (record-only). Mirrors the missing-HH-deposit loud fail.
+    if (method === 'stripe_gbp' && !resolvedPi && !acknowledge_no_stripe_refund) {
+      res.status(422).json({
+        error: 'No Stripe PaymentIntent on this record',
+        code: 'no_stripe_pi',
+        detail: 'This excess has no Stripe PaymentIntent stored, so OP cannot issue the refund via the Stripe API. Refund it in the Stripe dashboard, then tick "Already refunded in Stripe — record only", or link the PaymentIntent to this record and try again.',
+      });
+      return;
+    }
 
     if (stripeRefundPath) {
       if (!isStripeConfigured()) {
@@ -2358,11 +2391,11 @@ router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSch
       try {
         const stripe = getStripeClient();
         const refund = await stripe.refunds.create({
-          payment_intent: current.stripe_payment_intent_id,
+          payment_intent: resolvedPi as string,
           amount: Math.round(amount * 100),
         });
         stripeRefundId = refund.id;
-        console.log(`[excess] Stripe refund created: ${refund.id} (£${amount.toFixed(2)} on PI ${current.stripe_payment_intent_id})`);
+        console.log(`[excess] Stripe refund created: ${refund.id} (£${amount.toFixed(2)} on PI ${resolvedPi})`);
       } catch (err) {
         const msg = isStripeError(err) ? err.message : (err instanceof Error ? err.message : 'Unknown error');
         console.error('[excess] Stripe refund failed:', msg);
@@ -2501,6 +2534,9 @@ router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSch
         reimbursement_date = NOW(),
         reimbursement_method = $3,
         claim_amount = $5,
+        -- Backfill the canonical PI column when we resolved it from
+        -- payment_reference, so the charge.refunded webhook + future ops match.
+        stripe_payment_intent_id = COALESCE(stripe_payment_intent_id, $7),
         notes = CASE WHEN $6::numeric > 0
                   THEN COALESCE(notes, '') || ' [£' || to_char($6::numeric, 'FM999990.00')
                        || ' residual retained as claim ' || to_char(NOW(), 'YYYY-MM-DD') || ']'
@@ -2508,7 +2544,7 @@ router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSch
         updated_at = NOW()
       WHERE id = $4
       RETURNING *`,
-      [resolvedStatus, amount, method, id, newClaimAmount, retainResidual ? residual : 0]
+      [resolvedStatus, amount, method, id, newClaimAmount, retainResidual ? residual : 0, stripeRefundPath ? resolvedPi : null]
     );
 
     const excess = result.rows[0];
@@ -2604,6 +2640,27 @@ router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSch
           id,
         ]
       ).catch(e => console.error('[excess] Refund leg append failed (non-fatal):', e));
+    } else if (method === 'stripe_gbp') {
+      // Record-only path: staff acknowledged they refunded in the Stripe dashboard
+      // (no PI on record to fire the API). Stamp a leg so the silent-failure
+      // detector (scheduler) treats this as resolved, not a swallowed refund.
+      await query(
+        `UPDATE job_excess
+         SET refund_legs = COALESCE(refund_legs, '[]'::jsonb) || $1::jsonb,
+             notes = COALESCE(notes, '') || $3,
+             updated_at = NOW()
+         WHERE id = $2`,
+        [
+          JSON.stringify([{
+            source: 'manual',
+            ref: 'recorded_only',
+            amount,
+            at: new Date().toISOString(),
+          }]),
+          id,
+          ` [${new Date().toISOString().split('T')[0]} Stripe refund recorded only — done manually in Stripe dashboard, not via OP]`,
+        ]
+      ).catch(e => console.error('[excess] Record-only leg append failed (non-fatal):', e));
     }
 
     res.json({
@@ -2611,6 +2668,7 @@ router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSch
       ...(isHhLinked ? {} : { op_only: true }),
       ...(bankDetailsWarning ? { warning: bankDetailsWarning } : {}),
       ...(stripeRefundId ? { stripe_refund_id: stripeRefundId } : {}),
+      ...(!stripeRefundId && method === 'stripe_gbp' ? { stripe_recorded_only: true } : {}),
       ...(hhPushError ? { hh_push_error: hhPushError } : {}),
     });
   } catch (error) {

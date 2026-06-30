@@ -2510,10 +2510,20 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
             END,
             payment_method = $2,
             payment_reference = $3,
+            -- Populate the canonical PI column at collection time so a later
+            -- Stripe reimbursement can fire via the API. Prefer the explicit PI,
+            -- else lift it from payment_reference when it's a pi_ value. Without
+            -- this, straight-charge excesses landed with a NULL column and the
+            -- reimburse path silently no-op'd (jobs 15433/15489/… — Jun 2026).
+            stripe_payment_intent_id = COALESCE(
+              stripe_payment_intent_id,
+              $5,
+              CASE WHEN $3 LIKE 'pi_%' THEN $3 ELSE NULL END
+            ),
             payment_date = NOW(),
             updated_at = NOW()
           WHERE id = $4`,
-          [amount, effectiveMethod, payment_reference || null, resolvedExcessId]
+          [amount, effectiveMethod, payment_reference || null, resolvedExcessId, stripe_payment_intent || null]
         );
       }
 
