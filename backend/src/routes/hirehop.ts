@@ -751,6 +751,53 @@ router.patch('/jobs/:jobId/internal', async (req: AuthRequest, res: Response) =>
   }
 });
 
+// PATCH /api/hirehop/jobs/:jobId/recharge-running-costs — declare (or clear)
+// that a job recharges its running costs post-hire. The lightweight entry point
+// (the per-quote expense toggle is the rich one). Drives the cost auto-inherit +
+// the standing "Recharge running costs" card. Set TRUE is also done automatically
+// on quote save; this is the manual on/off switch (the only off switch).
+router.patch('/jobs/:jobId/recharge-running-costs', async (req: AuthRequest, res: Response) => {
+  try {
+    const jobId = req.params.jobId as string;
+    const flag = !!req.body.rechargeRunningCosts;
+    const note = typeof req.body.note === 'string' ? req.body.note.trim().slice(0, 2000) : null;
+
+    const updated = await query(
+      `UPDATE jobs SET recharge_running_costs = $1, recharge_running_costs_note = $2, updated_at = NOW()
+       WHERE id = $3 AND is_deleted = false
+       RETURNING id, recharge_running_costs`,
+      [flag, note, jobId]
+    );
+    if (updated.rows.length === 0) { res.status(404).json({ error: 'Job not found' }); return; }
+
+    try {
+      await query(
+        `INSERT INTO interactions (type, content, job_id, created_by) VALUES ('note', $1, $2, $3)`,
+        [
+          flag
+            ? '⛽ Job marked "recharge running costs" — fuel/parking/etc. billed to the client at actual + markup post-hire'
+            : 'Job un-marked "recharge running costs"',
+          jobId, req.user!.id,
+        ]
+      );
+    } catch (logErr) { console.warn('Recharge-running-costs toggle: timeline log failed (non-fatal):', logErr); }
+
+    // Re-derive so the standing card appears/clears immediately (if in return phase).
+    let derivation = null;
+    try {
+      const { deriveRequirementsForJob } = await import('../services/hh-requirement-derivation');
+      derivation = await deriveRequirementsForJob(jobId);
+    } catch (deriveErr) {
+      console.error('Recharge-running-costs toggle: re-derivation failed (flag saved):', deriveErr);
+    }
+
+    res.json({ success: true, rechargeRunningCosts: flag, derivation });
+  } catch (error) {
+    console.error('Recharge-running-costs toggle error:', error);
+    res.status(500).json({ error: 'Failed to update' });
+  }
+});
+
 // GET /api/hirehop/mappings — show synced records
 router.get('/mappings', async (_req: AuthRequest, res: Response) => {
   try {

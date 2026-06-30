@@ -220,7 +220,10 @@ const calculateSchema = z.object({
     type: z.string(),
     description: z.string(),
     amount: z.number().min(0),
-    includedInCharge: z.boolean(),
+    // Legacy binary — optional now that chargeMode is the source of truth.
+    includedInCharge: z.boolean().optional(),
+    // Three-state: included | not_included | recharge (recharge = bill actual post-hire).
+    chargeMode: z.enum(['included', 'not_included', 'recharge']).optional(),
   })).default([]),
 });
 
@@ -267,6 +270,11 @@ const saveQuoteSchema = calculateSchema.extend({
   // calculation below, never to the stored value.
   arrivalTime: z.string().optional().nullable(),
 });
+
+// Does any expense line declare a post-hire recharge?
+function quoteHasRechargeLine(expenses: unknown): boolean {
+  return Array.isArray(expenses) && expenses.some((e) => (e as { chargeMode?: string })?.chargeMode === 'recharge');
+}
 
 // Insert one quote row. Used twice when creating delivery + collection siblings.
 async function insertQuoteRow(
@@ -465,6 +473,17 @@ router.post('/', validate(saveQuoteSchema), async (req: AuthRequest, res: Respon
       await dbClient.query(
         `UPDATE quotes SET paired_quote_id = $1 WHERE id = $2`,
         [primaryId, collectionId],
+      );
+    }
+
+    // If any expense line is set to recharge post-hire, mark the job as a
+    // recharge-running-costs job. Set-only — removing the last recharge line
+    // doesn't auto-clear the mode (staff may already be logging costs against
+    // it); the Tools-menu toggle is the off switch.
+    if (req.body.jobId && quoteHasRechargeLine(req.body.expenses)) {
+      await dbClient.query(
+        `UPDATE jobs SET recharge_running_costs = true WHERE id = $1 AND recharge_running_costs = false`,
+        [req.body.jobId],
       );
     }
 
@@ -726,6 +745,13 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
           : null,
         expenses: Array.isArray(updatedQuote.expenses) ? updatedQuote.expenses : (updatedQuote.expenses ? JSON.parse(updatedQuote.expenses) : []),
       };
+      // Editing in a recharge line flags the job (set-only, mirrors create).
+      if (updatedQuote.job_id && quoteHasRechargeLine(reInput.expenses)) {
+        await query(
+          `UPDATE jobs SET recharge_running_costs = true WHERE id = $1 AND recharge_running_costs = false`,
+          [updatedQuote.job_id],
+        );
+      }
       const newCrewCount = (reInput.jobType === 'crewed' && Number(updatedQuote.crew_count) > 1) ? Number(updatedQuote.crew_count) : 1;
       const recalc = applyCrewMultiplier(calculateCosts(reInput, settings), newCrewCount);
       const recalcUpdate = await query(

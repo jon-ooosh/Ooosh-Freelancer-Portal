@@ -35,7 +35,7 @@ The Crew & Transport calculator already has an **Expenses ticklist** (Fuel / Par
 ### Data model
 
 - `QuoteExpenseItem.charge_mode: 'included' | 'not_included' | 'recharge'` — replaces `included: boolean`. `expenses` is a JSONB array on `quotes`, so **no migration for the expense shape**; just the shared type, the calculator's expense maths (`crew-transport-calculator.ts` — `recharge` lines excluded from `client_charge_expenses` / total, surfaced in a new `recharge_expenses` breakdown), and the UI. Keep reading legacy `included` as `charge_mode = included ? 'included' : 'not_included'` for back-compat.
-- **Migration 151** — `jobs.recharge_running_costs BOOLEAN NOT NULL DEFAULT FALSE` (+ `recharge_running_costs_note TEXT`). The canonical "this job recharges running costs" flag. Set TRUE automatically whenever a quote on the job declares any `charge_mode='recharge'` line, OR manually via the lightweight toggle (below). The standing card + the cost auto-default key off this boolean, so both entry points converge.
+- **Migration 152** — `jobs.recharge_running_costs BOOLEAN NOT NULL DEFAULT FALSE` (+ `recharge_running_costs_note TEXT`). The canonical "this job recharges running costs" flag. Set TRUE automatically whenever a quote on the job declares any `charge_mode='recharge'` line, OR manually via the lightweight toggle (below). The standing card + the cost auto-default key off this boolean, so both entry points converge.
 
 ## The expected-vs-actual loop (this implements the deferred Component 5)
 
@@ -98,7 +98,7 @@ This is the genuinely valuable side-gain jon flagged. Phase it after the core, b
 
 **Phase A — core signal loop:**
 1. **Three-state expenses** — `QuoteExpenseItem.charge_mode` (shared type + back-compat read), calculator maths (`recharge` excluded from total, new `recharge_expenses` breakdown), TransportCalculator UI (the three-state selector + relocated/reworded helper text), `routes/quotes.ts` persist.
-2. **Migration 151** — `jobs.recharge_running_costs` (+ note); set TRUE on quote save when any `recharge` line exists.
+2. **Migration 152** — `jobs.recharge_running_costs` (+ note); set TRUE on quote save when any `recharge` line exists.
 3. **Cost auto-inherit + capture-modal awareness** — `routes/costs.ts` create defaults running-cost costs to `extra` + recharge-pending on flagged jobs; `CostCaptureModal` defaults + hint when the linked job is flagged (see "Cost-capture / ingestion tweaks").
 4. **Standing card** — `recharge_running_costs` requirement type (migration row), forward-looking: check-in fuel-baseline prompt, expected/actual tracking + freelancer-invoice chase, "close, no further costs" action. Kept distinct from `cost_resolve` (two cards: standing tracks *expected*, `cost_resolve` tracks *logged*).
 5. **Lightweight toggle** — Job Detail Tools-menu + Money-tab switch (`jobs.recharge_running_costs`).

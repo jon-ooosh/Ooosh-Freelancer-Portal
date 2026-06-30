@@ -147,6 +147,7 @@ function buildCalculatorInput(fd: FormData): CalculatorInput {
       description: e.label + (e.description ? `: ${e.description}` : ''),
       amount: e.category === 'pd' && e.pdDays ? e.amount * e.pdDays : e.amount,
       includedInCharge: e.included,
+      chargeMode: e.chargeMode ?? (e.included ? 'included' : 'not_included'),
     }));
 
   // Setup time/premium only count when the "includes setup work" box is ticked.
@@ -1144,7 +1145,6 @@ export default function TransportCalculator({
               {((step === 3 && !isCrewedJob) || (step === 4 && isCrewedJob)) && (
                 <div className="space-y-6">
                   <h3 className="text-lg font-semibold text-gray-900">💷 Expenses</h3>
-                  <p className="text-sm text-gray-500">Check to include in quote. Unchecked = client pays separately.</p>
 
                   {!isCrewedJob && (
                     <div className="p-4 bg-gray-50 rounded-lg">
@@ -1157,12 +1157,17 @@ export default function TransportCalculator({
 
                   {isDC && costs && <OOHDisplay costs={costs} formData={formData} onToggleOverride={() => updateField('oohManualOverride', !formData.oohManualOverride)} onChangeEarly={(v) => updateField('earlyStartMinutes', v)} onChangeLate={(v) => updateField('lateFinishMinutes', v)} />}
 
+                  <p className="text-sm text-gray-500">
+                    Per line: <span className="font-medium">In quote</span> = client pays it now ·{' '}
+                    <span className="font-medium">Client pays</span> = they sort it separately ·{' '}
+                    <span className="font-medium text-amber-700">Recharge after</span> = we bill the actual + markup post-hire (amount is just an estimate).
+                  </p>
                   <div className="border rounded-lg divide-y">
                     <div className="px-4 py-3 bg-gray-50 flex items-center gap-3">
-                      <div className="w-4" />
                       <div className="flex-1 text-sm font-medium text-gray-700">Category</div>
                       <div className="w-28 text-sm font-medium text-gray-700 text-right">Amount</div>
-                      <div className="w-16" />
+                      <div className="w-32 text-sm font-medium text-gray-700">Charge</div>
+                      <div className="w-10" />
                     </div>
                     <div className="px-4">
                       {formData.expenses.map((expense) => (
@@ -1204,6 +1209,13 @@ export default function TransportCalculator({
                   {isCrewedJob && formData.crewCount > 1 && (
                     <div className="text-sm px-4 py-3 rounded-lg bg-purple-50 text-purple-700 border border-purple-200">
                       👥 {formData.crewCount} crew — costs below are the total for all {formData.crewCount} crew members
+                    </div>
+                  )}
+
+                  {/* Recharge-post-hire notice — these are NOT in the quote total */}
+                  {costs.expensesRecharge > 0 && (
+                    <div className="text-sm px-4 py-3 rounded-lg bg-amber-50 text-amber-800 border border-amber-200">
+                      ⛽ Plus running costs recharged post-hire (~&pound;{costs.expensesRecharge.toFixed(2)} est.) — billed at actual + 20%, not included in the quote total above. This job will be flagged "recharge running costs".
                     </div>
                   )}
 
@@ -1360,17 +1372,16 @@ function ExpenseRow({ expense, fuelCost, numberOfDays, onChange, onRemove }: {
   }, [isPD, numberOfDays]);
 
   const displayAmount = isFuel ? (fuelCost || 0) : expense.amount;
+  const mode: 'included' | 'not_included' | 'recharge' = expense.chargeMode ?? (expense.included ? 'included' : 'not_included');
+  const labelColour = mode === 'included' ? 'text-gray-900' : mode === 'recharge' ? 'text-amber-700' : 'text-gray-400';
 
   return (
     <div className="flex items-center gap-3 py-2 border-b border-gray-100 last:border-0">
-      <label className="flex items-center">
-        <input type="checkbox" checked={expense.included} onChange={(e) => onChange({ ...expense, included: e.target.checked })} className="w-4 h-4 text-ooosh-600 rounded" />
-      </label>
       <div className="flex-1 min-w-0">
         {isOther ? (
           <input type="text" value={expense.description || ''} onChange={(e) => onChange({ ...expense, description: e.target.value })} placeholder="Description..." className="w-full px-2 py-1 text-sm border border-gray-200 rounded" />
         ) : (
-          <span className={`text-sm ${expense.included ? 'text-gray-900' : 'text-gray-400'}`}>{expense.label}</span>
+          <span className={`text-sm ${labelColour}`}>{expense.label}</span>
         )}
       </div>
       <div className="w-28">
@@ -1389,7 +1400,21 @@ function ExpenseRow({ expense, fuelCost, numberOfDays, onChange, onRemove }: {
           </div>
         )}
       </div>
-      <div className="w-16 text-right">
+      <div className="w-32">
+        <select
+          value={mode}
+          onChange={(e) => {
+            const m = e.target.value as 'included' | 'not_included' | 'recharge';
+            onChange({ ...expense, chargeMode: m, included: m === 'included' });
+          }}
+          className={`w-full px-1.5 py-1 text-xs border rounded ${mode === 'recharge' ? 'border-amber-300 bg-amber-50 text-amber-800' : 'border-gray-200 text-gray-700'}`}
+        >
+          <option value="included">In quote</option>
+          <option value="not_included">Client pays</option>
+          <option value="recharge">Recharge after</option>
+        </select>
+      </div>
+      <div className="w-10 text-right">
         {isPD && expense.amount > 0 && expense.pdDays && expense.pdDays > 1 && (
           <span className="text-xs text-gray-500">&times;{expense.pdDays}</span>
         )}

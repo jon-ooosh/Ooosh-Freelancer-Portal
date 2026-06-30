@@ -722,6 +722,30 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
         if (parseInt(rechargeCount.rows[0]?.cnt || '0') > 0) {
           await ensureCloseout('cost_resolve', 'Resolve all client recharges (bill to HireHop, bill externally, or absorb)');
         }
+
+        // Standing "recharge running costs" card — forward-looking, on jobs
+        // declared to recharge their running costs (a quote recharge line or the
+        // Tools toggle). Created amber regardless of whether costs have landed
+        // yet (the whole point: it says "expect the freelancer's fuel/parking
+        // invoice, recharge it"). Manual close via "no further costs".
+        const rrc = await client.query(
+          `SELECT recharge_running_costs FROM jobs WHERE id = $1`,
+          [jobId]
+        );
+        if (rrc.rows[0]?.recharge_running_costs) {
+          const exists = await client.query(
+            `SELECT id FROM job_requirements WHERE job_id = $1 AND requirement_type = 'recharge_running_costs' AND phase = 'post_hire'`,
+            [jobId]
+          );
+          if (exists.rows.length === 0) {
+            await client.query(
+              `INSERT INTO job_requirements (job_id, requirement_type, status, notes, is_auto, source, phase)
+               VALUES ($1, 'recharge_running_costs', 'in_progress', $2, true, 'auto_post_hire', 'post_hire')`,
+              [jobId, 'Running costs recharged at actual + 20%. Log the freelancer/supplier invoices as they land, recharge each to the client, then mark done when no further costs are expected.']
+            );
+            result.requirementsCreated.push('recharge_running_costs (post_hire)');
+          }
+        }
       }
 
       // Conditional: freelancer follow-up — only if crew assignments exist
