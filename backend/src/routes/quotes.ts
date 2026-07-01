@@ -223,7 +223,7 @@ const calculateSchema = z.object({
     // Legacy binary — optional now that chargeMode is the source of truth.
     includedInCharge: z.boolean().optional(),
     // Three-state: included | not_included | recharge (recharge = bill actual post-hire).
-    chargeMode: z.enum(['included', 'not_included', 'recharge']).optional(),
+    chargeMode: z.enum(['included', 'not_included', 'recharge', 'na']).optional(),
   })).default([]),
 });
 
@@ -629,7 +629,7 @@ const editQuoteSchema = z.object({
     description: z.string().optional().default(''),
     amount: z.number().min(0).optional().default(0),
     includedInCharge: z.boolean().optional(),
-    chargeMode: z.enum(['included', 'not_included', 'recharge']).optional(),
+    chargeMode: z.enum(['included', 'not_included', 'recharge', 'na']).optional(),
   })).optional(),
 });
 
