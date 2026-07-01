@@ -251,6 +251,8 @@ export default function RequirementCard({
   const [excessInfo, setExcessInfo] = useState<ExcessInfo | null>(null);
   // Carnet — read-only reflection of the real lifecycle (managed in Operations)
   const [carnet, setCarnet] = useState<{ id: string; mode: string; status: string } | null>(null);
+  // Rehearsal — per-evening studio-sitter coverage (managed on the Studio Sitters roster)
+  const [rehearsalCoverage, setRehearsalCoverage] = useState<Record<string, { status: string; assignee: { id: string; name: string } | null }>>({});
 
   // Suspension marker — set by the derivation engine when the hire chain is
   // not required on this job (every van slot is Van & Driver, or the job is
@@ -295,6 +297,15 @@ export default function RequirementCard({
     if (req.requirement_type === 'carnet' && jobId) {
       api.get<{ data: { id: string; mode: string; status: string } | null }>(`/carnets/by-job/${jobId}`)
         .then(d => setCarnet(d?.data || null))
+        .catch(() => {});
+    }
+    if (req.requirement_type === 'rehearsal' && jobId) {
+      api.get<{ data: { date: string; status: string; assignee: { id: string; name: string } | null }[] }>(`/studio-sitters/job/${jobId}/coverage`)
+        .then(d => {
+          const map: Record<string, { status: string; assignee: { id: string; name: string } | null }> = {};
+          (d?.data ?? []).forEach(e => { map[e.date] = { status: e.status, assignee: e.assignee }; });
+          setRehearsalCoverage(map);
+        })
         .catch(() => {});
     }
   }, [req.requirement_type, hhJobNumber, jobId]);
@@ -797,11 +808,14 @@ export default function RequirementCard({
                   {/* Evening chips — one sitter covers the site per night */}
                   {sitterNights.length > 0 && (
                     <div className="flex flex-wrap gap-1">
-                      {sitterNights.map((e) => (
-                        <span key={e.date} className="px-2 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200">
-                          {formatEveningDate(e.date)} · unassigned
-                        </span>
-                      ))}
+                      {sitterNights.map((e) => {
+                        const assignee = rehearsalCoverage[e.date]?.assignee;
+                        return (
+                          <span key={e.date} className={`px-2 py-0.5 rounded border ${assignee ? 'bg-green-50 text-green-700 border-green-200' : 'bg-amber-50 text-amber-700 border-amber-200'}`}>
+                            {formatEveningDate(e.date)} · {assignee ? assignee.name : 'unassigned'}
+                          </span>
+                        );
+                      })}
                     </div>
                   )}
                 </div>
