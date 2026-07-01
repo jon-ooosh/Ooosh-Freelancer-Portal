@@ -622,6 +622,15 @@ const editQuoteSchema = z.object({
   freelancer_notes: z.string().optional().nullable(),
   client_charge_rounded: z.coerce.number().min(0).optional().nullable(),
   freelancer_fee_rounded: z.coerce.number().min(0).optional().nullable(),
+  // Expense charge-mode edits (three-state). When present, the quote recalcs
+  // from the new states — see the PUT handler.
+  expenses: z.array(z.object({
+    type: z.string(),
+    description: z.string().optional().default(''),
+    amount: z.number().min(0).optional().default(0),
+    includedInCharge: z.boolean().optional(),
+    chargeMode: z.enum(['included', 'not_included', 'recharge']).optional(),
+  })).optional(),
 });
 
 router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Response) => {
@@ -682,6 +691,16 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
         params.push(fields[field] === '' ? null : fields[field]);
         idx++;
       }
+    }
+
+    // Expense charge-mode edits — persist the JSONB and force a recalc so the
+    // client total (recharge lines drop out) + the recharge flag reflect the new
+    // states. Local quotes have no calculator expenses, so skip.
+    if (!oldQuote.is_local && fields.expenses !== undefined) {
+      updates.push(`expenses = $${idx}`);
+      params.push(JSON.stringify(fields.expenses));
+      idx++;
+      recalcNeeded = true;
     }
 
     // Fee overrides (available for all quote types). When recalc is happening,
