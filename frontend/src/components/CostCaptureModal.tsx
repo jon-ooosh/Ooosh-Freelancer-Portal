@@ -100,6 +100,18 @@ type ExistingRow = (Cost & { hh_job_number?: number | null; job_name?: string | 
 export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, existing, presetJobId, presetVehicleId, presetIssueId }: Props) {
   const existingRow = existing as ExistingRow;
   const { user } = useAuthStore();
+  // The cached login user can be stale if an admin set this staff member's COT
+  // card in Settings AFTER they logged in. Read the card status fresh on open so
+  // the "no card on file" hint reflects reality (the save already stamps it
+  // server-side from the DB regardless).
+  const [freshCardLast4, setFreshCardLast4] = useState<string | null | undefined>(user?.cot_card_last4);
+  useEffect(() => {
+    let cancelled = false;
+    api.get<{ cot_card_last4?: string | null }>('/auth/me')
+      .then((r) => { if (!cancelled) setFreshCardLast4(r?.cot_card_last4 ?? null); })
+      .catch(() => { /* keep the cached value */ });
+    return () => { cancelled = true; };
+  }, []);
   const isEdit = Boolean(existing);
 
   // ── Form state ───────────────────────────────────────────────────────────
@@ -1154,7 +1166,7 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
               </div>
             </div>
 
-            {paymentMethod === 'cot_card' && !user?.cot_card_last4 && (
+            {paymentMethod === 'cot_card' && !freshCardLast4 && (
               <p className="text-xs text-gray-500 italic">
                 No company card on file for you — ask an admin to add it in Settings → COT Card Register (enables Xero reconciliation matching).
               </p>
