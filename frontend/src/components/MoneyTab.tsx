@@ -9,7 +9,7 @@ import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
 import { getPaymentState, PAYMENT_STATE_LABELS, PAYMENT_STATE_CLASSES } from '../services/paymentState';
-import ExcessPaymentModal, { statusLabel, statusColor } from './ExcessPaymentModal';
+import ExcessPaymentModal, { statusLabel, statusColor, computeHireDays } from './ExcessPaymentModal';
 import CostCaptureModal from './CostCaptureModal';
 import RechargeResolveModal, { RechargeStatusPill } from './RechargeResolveModal';
 import type { JobExcess } from '../../../shared/types';
@@ -158,6 +158,11 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
 
   // Excess action modal
   const [actionExcess, setActionExcess] = useState<JobExcess | null>(null);
+
+  // Rollover chains — "follow the thread" of a rolled-over excess. Keyed by
+  // excess record id → ordered chain of records sharing the HH deposit.
+  type ChainEntry = { id: string; excess_status: string; hh_job_number: number | null; job_name: string | null };
+  const [rolloverChains, setRolloverChains] = useState<Record<string, ChainEntry[]>>({});
 
   // Link deposit state
   const [linkingDeposit, setLinkingDeposit] = useState<{ hh_deposit_id: number; amount: number } | null>(null);
@@ -373,6 +378,26 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   };
 
   useEffect(() => { loadData(); }, [loadData]);
+
+  // Fetch rollover chains for any record that's part of one (rolled over, or
+  // came in via rollover). Lazy + best-effort; only records that need the thread.
+  useEffect(() => {
+    const records = data?.excess?.records || [];
+    const needChain = records.filter((r: JobExcess) =>
+      r.excess_status === 'rolled_over' || (r as { payment_method?: string }).payment_method === 'rolled_over'
+    );
+    needChain.forEach((r: JobExcess) => {
+      if (rolloverChains[r.id]) return;
+      api.get<{ data: { chain: ChainEntry[] } }>(`/excess/${r.id}/rollover-chain`)
+        .then((resp) => {
+          if (resp.data.chain && resp.data.chain.length > 1) {
+            setRolloverChains((prev) => ({ ...prev, [r.id]: resp.data.chain }));
+          }
+        })
+        .catch(() => {});
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data]);
 
   // Job costs + quotes for the quoted-vs-actual panel. Best-effort, non-blocking.
   const loadJobCosts = useCallback(async () => {
@@ -856,6 +881,25 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                       )}
                     </p>
                   )}
+                  {/* Rollover chain — "follow the thread". Shows the money's
+                      journey across jobs (#A → #B → #C), current job highlighted,
+                      until it's finally reimbursed/claimed. */}
+                  {rolloverChains[record.id] && rolloverChains[record.id].length > 1 && (
+                    <p className="text-xs text-purple-700 mt-0.5 flex flex-wrap items-center gap-1">
+                      <span className="font-medium">↪ Rollover thread:</span>
+                      {rolloverChains[record.id].map((link, i) => (
+                        <span key={link.id} className="flex items-center gap-1">
+                          {i > 0 && <span className="text-purple-300">→</span>}
+                          <span
+                            className={link.id === record.id ? 'font-semibold underline decoration-dotted' : ''}
+                            title={link.job_name || undefined}
+                          >
+                            #{link.hh_job_number ?? '—'} <span className="text-purple-400">({statusLabel(link.excess_status as Parameters<typeof statusLabel>[0])})</span>
+                          </span>
+                        </span>
+                      ))}
+                    </p>
+                  )}
                   {record.excess_status === 'pre_auth' && record.held_expires_at && (() => {
                     const daysLeft = Math.ceil((new Date(record.held_expires_at).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
                     const cls = daysLeft <= 1 ? 'text-red-600' : daysLeft <= 2 ? 'text-amber-600' : 'text-sky-600';
@@ -1266,6 +1310,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
       {actionExcess && (
         <ExcessPaymentModal
           excess={actionExcess}
+          hireDays={computeHireDays(job)}
           onClose={() => setActionExcess(null)}
           onUpdated={loadData}
         />

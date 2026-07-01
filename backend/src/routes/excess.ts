@@ -742,6 +742,38 @@ router.get('/:id/available-rollover', async (req: AuthRequest, res: Response) =>
   }
 });
 
+// ── GET /api/excess/:id/rollover-chain ─────────────────────────────────────
+// "Follow the thread" of a rolled-over excess: all records sharing this
+// record's HireHop deposit, ordered oldest→newest, so the UI can render
+// "#15577 → #15865 → #15912 (reimbursed)". Rollover copies the same
+// hh_deposit_id forward, so a shared deposit id IS the chain. Returns just this
+// record (chain length 1) when there's no rollover.
+
+router.get('/:id/rollover-chain', async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const rec = await query(`SELECT hh_deposit_id FROM job_excess WHERE id = $1`, [id]);
+    if (rec.rows.length === 0) { res.status(404).json({ error: 'Excess record not found' }); return; }
+    const depositId = rec.rows[0].hh_deposit_id;
+    if (!depositId) { res.json({ data: { deposit_id: null, current_id: id, chain: [] } }); return; }
+
+    const chain = await query(
+      `SELECT je.id, je.excess_status,
+              je.excess_amount_taken, je.claim_amount, je.reimbursement_amount, je.amount_held,
+              je.created_at, j.hh_job_number, j.job_name
+         FROM job_excess je LEFT JOIN jobs j ON j.id = je.job_id
+        WHERE je.hh_deposit_id = $1
+        ORDER BY je.created_at ASC`,
+      [depositId]
+    );
+    res.json({ data: { deposit_id: depositId, current_id: id, chain: chain.rows } });
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error('[excess] Rollover chain error:', errMsg);
+    res.status(500).json({ error: 'Failed to load rollover chain', detail: errMsg });
+  }
+});
+
 // ── GET /api/excess/ledger — Client excess ledger ──
 
 router.get('/ledger', authorize(...MANAGER_ROLES), async (_req: AuthRequest, res: Response) => {
