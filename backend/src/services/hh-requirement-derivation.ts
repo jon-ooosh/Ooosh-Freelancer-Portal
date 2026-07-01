@@ -21,6 +21,7 @@ import { syncCostResolveRequirementStatus } from './cost-requirement-sync';
 import { hhBroker } from './hirehop-broker';
 import { calculateVatAdjustment } from './vat-adjustment';
 import { BACKLINE_CATEGORY_IDS } from './backline-categories';
+import { computeRehearsalDetail, buildRehearsalSummary, type RehearsalDetail } from './rehearsal-plan';
 
 // ── HH Category IDs ──────────────────────────────────────────────────────
 // Source: HireHop categories_list.php, verified 9 Apr 2026
@@ -111,6 +112,10 @@ export interface DerivedFlags {
     rehearsals: number;
     other: number;
   };
+  // Studio-sitter detection intelligence (rooms + flavour + sitter-needed
+  // evenings). Populated in deriveRequirementsForJob (needs job dates), NOT in
+  // deriveFlags (item-only). Optional — absent on item-only deriveFlags calls.
+  rehearsal_detail?: RehearsalDetail | null;
 }
 
 // ── Derive flags from line items ─────────────────────────────────────────
@@ -286,9 +291,14 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
     mismatchesFlagged: [],
   };
 
-  // Load job with line items
+  // Load job with line items. Rehearsal date columns are extracted in
+  // Europe/London so the finish-on-the-day rule (see rehearsal-plan.ts) keys off
+  // the real local hour regardless of server timezone.
   const jobResult = await query(
-    `SELECT id, hh_job_number, client_name, line_items, hh_derived_flags, is_van_and_driver, vehicle_slot_modes, is_internal, self_drive_van_override
+    `SELECT id, hh_job_number, client_name, line_items, hh_derived_flags, is_van_and_driver, vehicle_slot_modes, is_internal, self_drive_van_override,
+       (COALESCE(job_date, out_date) AT TIME ZONE 'Europe/London')::date::text AS reh_start_date,
+       (COALESCE(job_end, return_date) AT TIME ZONE 'Europe/London')::date::text AS reh_end_date,
+       EXTRACT(HOUR FROM (COALESCE(job_end, return_date) AT TIME ZONE 'Europe/London'))::int AS reh_end_hour
      FROM jobs WHERE id = $1 AND is_deleted = false`,
     [jobId]
   );
@@ -327,6 +337,19 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
     if (Number.isFinite(ov) && ov >= 0) {
       flags.self_drive_count = Math.min(ov, flags.self_drive_count);
     }
+  }
+  // ── Rehearsal detection intelligence (Phase A) ──
+  // Needs job dates, so computed here rather than in the item-only deriveFlags().
+  // Attaching to `flags` persists it in hh_derived_flags and surfaces it on the
+  // requirement card via the derived-flags read. See services/rehearsal-plan.ts.
+  if (flags.has_rehearsal) {
+    flags.rehearsal_detail = computeRehearsalDetail(items, {
+      startDate: job.reh_start_date ?? null,
+      endDate: job.reh_end_date ?? null,
+      endHour: job.reh_end_hour ?? null,
+    });
+  } else {
+    flags.rehearsal_detail = null;
   }
   result.flags = flags;
 
@@ -496,7 +519,7 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
     // ── Rehearsal ──
     if (flags.has_rehearsal) {
       await upsertAutoRequirement(client, jobId, 'rehearsal', flags, previousFlags, result, {
-        notes: 'Rehearsal space detected from HireHop items',
+        notes: buildRehearsalSummary(flags.rehearsal_detail ?? null),
         snapshot: items.filter(i => i.CATEGORY_ID === REHEARSAL_CATEGORY),
       });
     }
