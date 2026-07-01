@@ -13,7 +13,8 @@ import { z } from 'zod';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
 import {
   getRoster, getJobCoverage, assignSitter, unassignSitter,
-  bulkAssign, createManualShift, listSitters,
+  assignMany, createManualShift, removeManualCover, listSitters,
+  getDefaultSitterFee, setDefaultSitterFee,
 } from '../services/studio-sitter';
 
 const router = Router();
@@ -92,18 +93,73 @@ router.post('/unassign', async (req: AuthRequest, res: Response) => {
   }
 });
 
-// POST /api/studio-sitters/bulk-assign — one person over every unassigned night in range
-const bulkSchema = z.object({ from: dateStr, to: dateStr, person_id: z.string().uuid() });
+// POST /api/studio-sitters/bulk-assign — one person over selected dates, or every
+// unassigned needed night in [from,to] when no explicit dates are given.
+const bulkSchema = z.object({
+  person_id: z.string().uuid(),
+  dates: z.array(dateStr).min(1).max(400).optional(),
+  from: dateStr.optional(),
+  to: dateStr.optional(),
+});
 router.post('/bulk-assign', async (req: AuthRequest, res: Response) => {
   const parsed = bulkSchema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: 'Invalid input' }); return; }
-  if (parsed.data.to < parsed.data.from) { res.status(400).json({ error: 'to must be on or after from' }); return; }
+  const { person_id, dates, from, to } = parsed.data;
   try {
-    const count = await bulkAssign(parsed.data.from, parsed.data.to, parsed.data.person_id, req.user?.id ?? null);
+    let targets: string[];
+    if (dates && dates.length > 0) {
+      targets = dates;
+    } else if (from && to) {
+      if (to < from) { res.status(400).json({ error: 'to must be on or after from' }); return; }
+      const roster = await getRoster(from, to);
+      targets = roster.filter((r) => r.needs_sitter && !r.assignee).map((r) => r.date);
+    } else {
+      res.status(400).json({ error: 'Provide dates[] or from/to' });
+      return;
+    }
+    const count = await assignMany(targets, person_id, req.user?.id ?? null);
     res.json({ data: { assigned: count } });
   } catch (err) {
     console.error('[studio-sitters] bulk-assign error:', err);
     res.status(500).json({ error: 'Failed to bulk-assign' });
+  }
+});
+
+// POST /api/studio-sitters/remove-cover — delete a manual-override cover shift
+router.post('/remove-cover', async (req: AuthRequest, res: Response) => {
+  const parsed = unassignSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: 'Invalid input' }); return; }
+  try {
+    const removed = await removeManualCover(parsed.data.date);
+    if (!removed) { res.status(404).json({ error: 'No manual cover to remove on that date' }); return; }
+    res.json({ data: { ok: true } });
+  } catch (err) {
+    console.error('[studio-sitters] remove-cover error:', err);
+    res.status(500).json({ error: 'Failed to remove cover' });
+  }
+});
+
+// GET /api/studio-sitters/default-fee — current default per-night sitter fee
+router.get('/default-fee', async (_req: AuthRequest, res: Response) => {
+  try {
+    res.json({ data: { fee: await getDefaultSitterFee() } });
+  } catch (err) {
+    console.error('[studio-sitters] default-fee get error:', err);
+    res.status(500).json({ error: 'Failed to read default fee' });
+  }
+});
+
+// PUT /api/studio-sitters/default-fee — set/clear the default fee (manager+)
+const feeSchema = z.object({ fee: z.number().nonnegative().nullable() });
+router.put('/default-fee', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {
+  const parsed = feeSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: 'Invalid fee' }); return; }
+  try {
+    await setDefaultSitterFee(parsed.data.fee);
+    res.json({ data: { fee: parsed.data.fee } });
+  } catch (err) {
+    console.error('[studio-sitters] default-fee put error:', err);
+    res.status(500).json({ error: 'Failed to set default fee' });
   }
 });
 
