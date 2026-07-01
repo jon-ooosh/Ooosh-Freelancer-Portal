@@ -765,9 +765,10 @@ export default function RequirementCard({
             {req.requirement_type === 'rehearsal' && derivedFlags?.has_rehearsal && (() => {
               const detail = derivedFlags.rehearsal_detail;
               const sitterNights = detail?.evenings.filter((e) => e.sitter_needed) ?? [];
+              const summary = req.notes?.split('\n').filter(Boolean).pop() ?? null;
               return (
                 <div className="mt-1.5 text-xs text-gray-600 space-y-1.5">
-                  {/* Room + flavour chips */}
+                  {/* Room + flavour + prep chips */}
                   {detail && detail.rooms.length > 0 ? (
                     <div className="flex flex-wrap items-center gap-1">
                       {detail.rooms.map((r, i) => (
@@ -788,29 +789,19 @@ export default function RequirementCard({
                     </div>
                   )}
 
-                  {/* Flavour-driven sitter state */}
-                  {detail?.needs_review && (
-                    <div className="text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">
-                      ⚠ Base room booked — confirm daytime vs evening so we know if a studio sitter is needed.
-                    </div>
+                  {/* Booking summary — after the prep time (amber when a base room needs classifying) */}
+                  {summary && (
+                    <div className={detail?.needs_review ? 'text-amber-700' : 'text-gray-500'}>{summary}</div>
                   )}
-                  {detail?.daytime_only && (
-                    <div className="text-green-700">Daytime only — no studio sitter required.</div>
-                  )}
+
+                  {/* Evening chips — one sitter covers the site per night */}
                   {sitterNights.length > 0 && (
-                    <div>
-                      <div className="text-gray-500 mb-1">
-                        Studio sitter needed — {sitterNights.length} evening{sitterNights.length !== 1 ? 's' : ''}
-                        <span className="text-gray-400"> (one sitter covers the site per night)</span>
-                      </div>
-                      <div className="flex flex-wrap gap-1">
-                        {sitterNights.map((e) => (
-                          <span key={e.date} className="px-2 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200">
-                            {formatEveningDate(e.date)} · unassigned
-                          </span>
-                        ))}
-                      </div>
-                      <div className="text-gray-400 mt-1">Rota &amp; assignment coming in the Studio Sitter roster.</div>
+                    <div className="flex flex-wrap gap-1">
+                      {sitterNights.map((e) => (
+                        <span key={e.date} className="px-2 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200">
+                          {formatEveningDate(e.date)} · unassigned
+                        </span>
+                      ))}
                     </div>
                   )}
                 </div>
@@ -942,7 +933,7 @@ export default function RequirementCard({
             })()}
 
             {/* Notes (for types without specific rendering) */}
-            {!['vehicle', 'hire_forms', 'backline', 'excess', 'excess_resolve', 'invoice', 'damage_review', 'reminder'].includes(req.requirement_type) && req.notes && (
+            {!['vehicle', 'hire_forms', 'backline', 'excess', 'excess_resolve', 'invoice', 'damage_review', 'reminder', 'rehearsal'].includes(req.requirement_type) && req.notes && (
               <div className="mt-1 text-xs text-gray-400 truncate max-w-md">{req.notes.split('\n').filter(Boolean).pop()}</div>
             )}
 
