@@ -40,11 +40,25 @@ export interface CalculatorSettings {
   expense_variance_threshold: number;  // % threshold for expense variance flagging
 }
 
+// Per-expense charge mode (three-state). Replaces the binary includedInCharge:
+//   included     = in our fixed quote, client pays it now
+//   not_included = client sorts it separately (not our money)
+//   recharge     = we incur it; client billed the ACTUAL + markup post-hire
+//                  (the amount here is an indicative estimate, not the charge)
+export type ExpenseChargeMode = 'included' | 'not_included' | 'recharge';
+
 export interface ExpenseItem {
   type: string;        // fuel, parking, tolls, hotel, per_diem, other
   description: string;
   amount: number;
-  includedInCharge: boolean;  // true = absorbed by us, false = passed to client
+  includedInCharge?: boolean;  // legacy binary — derived from chargeMode for back-compat
+  chargeMode?: ExpenseChargeMode;
+}
+
+// Back-compat: derive the three-state from whichever the caller sent.
+export function expenseChargeMode(e: { chargeMode?: ExpenseChargeMode; includedInCharge?: boolean }): ExpenseChargeMode {
+  if (e.chargeMode) return e.chargeMode;
+  return e.includedInCharge === false ? 'not_included' : 'included';
 }
 
 export interface CalculatorInput {
@@ -88,6 +102,7 @@ export interface CalculatedCosts {
   expectedFuelCost: number;
   expensesIncluded: number;
   expensesNotIncluded: number;
+  expensesRecharge: number;   // declared "recharge post-hire" estimates (billed at actual + markup)
   ourTotalCost: number;
   ourMargin: number;
   estimatedTimeMinutes: number;
@@ -266,14 +281,21 @@ export function calculateCosts(input: CalculatorInput, settings: CalculatorSetti
   const totalHours = totalEngagedMins / 60;
 
   // ── Expenses ──
-  // Exclude fuel from expense sums — fuel is calculated separately from distance
+  // Exclude fuel from expense sums — fuel is calculated separately from distance.
+  // Three-state: 'included' counts toward the client charge; 'not_included' and
+  // 'recharge' are both excluded from the fixed quote (recharge bills at actual
+  // post-hire), but tracked separately so the quote can itemise them.
   const fuelExpense = expenses.find(e => e.type === 'fuel');
-  const fuelIncludedInCharge = fuelExpense?.includedInCharge ?? true;
+  const fuelMode = fuelExpense ? expenseChargeMode(fuelExpense) : 'included';
+  const fuelIncludedInCharge = fuelMode === 'included';
   const expensesIncluded = expenses
-    .filter(e => e.includedInCharge && e.type !== 'fuel')
+    .filter(e => e.type !== 'fuel' && expenseChargeMode(e) === 'included')
     .reduce((sum, e) => sum + e.amount, 0);
   const expensesNotIncluded = expenses
-    .filter(e => !e.includedInCharge && e.type !== 'fuel')
+    .filter(e => e.type !== 'fuel' && expenseChargeMode(e) === 'not_included')
+    .reduce((sum, e) => sum + e.amount, 0);
+  const expensesRecharge = expenses
+    .filter(e => e.type !== 'fuel' && expenseChargeMode(e) === 'recharge')
     .reduce((sum, e) => sum + e.amount, 0);
   const expenseMarkup = expensesIncluded * (settings.expense_markup_percent / 100);
 
@@ -354,6 +376,9 @@ export function calculateCosts(input: CalculatorInput, settings: CalculatorSetti
     expectedFuelCost: round2(fuelCost),
     expensesIncluded: round2(expensesIncluded),
     expensesNotIncluded: round2(expensesNotIncluded),
+    // Recharge estimate total: the recharge-flagged expense lines + fuel when
+    // fuel itself is set to recharge (its estimate is the computed fuel cost).
+    expensesRecharge: round2(expensesRecharge + (fuelMode === 'recharge' ? fuelCost : 0)),
     ourTotalCost: round2(ourTotalCost),
     ourMargin: round2(ourMargin),
     estimatedTimeMinutes: Math.round(totalEngagedMins),

@@ -152,6 +152,9 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
     existing?.cost_intent || (existing?.recharge_mode && existing.recharge_mode !== 'none' ? 'extra' : 'quote_actual'),
   );
   const [intentTouched, setIntentTouched] = useState(isEdit);
+  // True when the linked job is flagged "recharge running costs" — drives the
+  // default (Extra + recharge) + a hint banner.
+  const [jobRechargesRunningCosts, setJobRechargesRunningCosts] = useState(false);
   const [notes, setNotes] = useState(existing?.notes || '');
   const [receiptFile, setReceiptFile] = useState<File | null>(null);
   const [receiptPreview, setReceiptPreview] = useState<string | null>(null);
@@ -298,7 +301,7 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
       try {
         const [quotesRes, costsRes] = await Promise.all([
           api.get<{ data: Array<{ freelancer_fee: number | null; freelancer_fee_rounded: number | null; client_fee: number | null; status: string | null }> }>(`/quotes?job_id=${linkedJobId}`).catch(() => ({ data: [] })),
-          api.get<{ data: Array<{ id: string; amount_gross: number | null; cost_intent: string | null }> }>(`/costs/by-job/${linkedJobId}`).catch(() => ({ data: [] })),
+          api.get<{ data: Array<{ id: string; amount_gross: number | null; cost_intent: string | null }>; recharge_running_costs?: boolean }>(`/costs/by-job/${linkedJobId}`).catch(() => ({ data: [], recharge_running_costs: false })),
         ]);
         if (cancelled) return;
         const quotes = (quotesRes.data || []).filter((q) => q.status !== 'cancelled');
@@ -309,7 +312,18 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
         const actuals = costs.filter((c) => c.cost_intent === 'quote_actual').reduce((s, c) => s + num(c.amount_gross), 0);
         const extra = costs.filter((c) => c.cost_intent === 'extra').reduce((s, c) => s + num(c.amount_gross), 0);
         setJobSummary({ quotedCost, clientQuoted, actuals, extra });
-        if (!intentTouched) setCostIntent(quotes.length > 0 ? 'quote_actual' : 'extra');
+        const flagged = costsRes.recharge_running_costs === true;
+        setJobRechargesRunningCosts(flagged);
+        // A recharge-running-costs job defaults new costs to Extra + recharge;
+        // otherwise fall back to the quote-based default (part-of-quote if quoted).
+        if (!intentTouched) {
+          if (flagged) {
+            setCostIntent('extra');
+            setRechargeMode((m) => (m === 'none' ? 'full' : m));
+          } else {
+            setCostIntent(quotes.length > 0 ? 'quote_actual' : 'extra');
+          }
+        }
       } catch { /* leave defaults */ }
     })();
     return () => { cancelled = true; };
@@ -1127,6 +1141,12 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
             {paymentMethod === 'cot_card' && !user?.cot_card_last4 && (
               <p className="text-xs text-gray-500 italic">
                 No company card on file for you — ask an admin to add it in Settings → COT Card Register (enables Xero reconciliation matching).
+              </p>
+            )}
+
+            {linkedJobId && jobRechargesRunningCosts && (
+              <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1.5">
+                ⛽ This job recharges running costs — defaulted to <strong>Extra + recharge</strong>. Resolve it to the client at actual + 20% post-hire.
               </p>
             )}
 
