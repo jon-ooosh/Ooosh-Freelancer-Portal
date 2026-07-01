@@ -70,6 +70,18 @@ export interface DerivedFlags {
   crew_item_count: number;
   total_prep_time_mins: number;
   prep_time_by_category: { vehicles: number; backline: number; rehearsals: number; other: number };
+  rehearsal_detail?: RehearsalDetail | null;
+}
+
+// Studio-sitter detection (Phase A) — mirrors backend services/rehearsal-plan.ts.
+export interface RehearsalDetail {
+  rooms: { room: string; flavour: 'daytime' | 'evening' | 'lockout' | 'base' | 'unknown'; sitter_needed: boolean; list_id: number }[];
+  needs_review: boolean;
+  sitter_needed: boolean;
+  daytime_only: boolean;
+  first_session_date: string | null;
+  last_session_date: string | null;
+  evenings: { date: string; sitter_needed: boolean }[];
 }
 
 export interface SeatAvailability {
@@ -164,6 +176,18 @@ function formatPrepTime(mins: number): string {
   const m = mins % 60;
   return m > 0 ? `${h}h ${m}m` : `${h}h`;
 }
+
+// "Fri 10 Jul" from a plain YYYY-MM-DD (TZ-free via UTC).
+function formatEveningDate(iso: string): string {
+  const [y, m, d] = iso.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('en-GB', {
+    weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC',
+  });
+}
+
+const REHEARSAL_FLAVOUR_LABEL: Record<string, string> = {
+  daytime: 'Daytime', evening: 'Evening', lockout: 'Lockout', base: 'Room', unknown: 'Room',
+};
 
 // ── Component ──────────────────────────────────────────────────────────
 
@@ -737,15 +761,61 @@ export default function RequirementCard({
               </div>
             )}
 
-            {/* Rehearsal */}
-            {req.requirement_type === 'rehearsal' && derivedFlags?.has_rehearsal && (
-              <div className="mt-1 text-xs text-gray-500">
-                Rehearsal room detected
-                {derivedFlags.prep_time_by_category.rehearsals > 0 && (
-                  <span> — est. {formatPrepTime(derivedFlags.prep_time_by_category.rehearsals)} prep</span>
-                )}
-              </div>
-            )}
+            {/* Rehearsal — studio-sitter detection reflection (Phase A, read-only) */}
+            {req.requirement_type === 'rehearsal' && derivedFlags?.has_rehearsal && (() => {
+              const detail = derivedFlags.rehearsal_detail;
+              const sitterNights = detail?.evenings.filter((e) => e.sitter_needed) ?? [];
+              return (
+                <div className="mt-1.5 text-xs text-gray-600 space-y-1.5">
+                  {/* Room + flavour chips */}
+                  {detail && detail.rooms.length > 0 ? (
+                    <div className="flex flex-wrap items-center gap-1">
+                      {detail.rooms.map((r, i) => (
+                        <span key={i} className="px-2 py-0.5 rounded bg-purple-50 text-purple-700 border border-purple-100">
+                          {r.room}{r.flavour !== 'base' ? ` · ${REHEARSAL_FLAVOUR_LABEL[r.flavour] ?? r.flavour}` : ''}
+                        </span>
+                      ))}
+                      {derivedFlags.prep_time_by_category.rehearsals > 0 && (
+                        <span className="text-gray-400">· est. {formatPrepTime(derivedFlags.prep_time_by_category.rehearsals)} prep</span>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="text-gray-500">
+                      Rehearsal room detected
+                      {derivedFlags.prep_time_by_category.rehearsals > 0 && (
+                        <span> — est. {formatPrepTime(derivedFlags.prep_time_by_category.rehearsals)} prep</span>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Flavour-driven sitter state */}
+                  {detail?.needs_review && (
+                    <div className="text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                      ⚠ Base room booked — confirm daytime vs evening so we know if a studio sitter is needed.
+                    </div>
+                  )}
+                  {detail?.daytime_only && (
+                    <div className="text-green-700">Daytime only — no studio sitter required.</div>
+                  )}
+                  {sitterNights.length > 0 && (
+                    <div>
+                      <div className="text-gray-500 mb-1">
+                        Studio sitter needed — {sitterNights.length} evening{sitterNights.length !== 1 ? 's' : ''}
+                        <span className="text-gray-400"> (one sitter covers the site per night)</span>
+                      </div>
+                      <div className="flex flex-wrap gap-1">
+                        {sitterNights.map((e) => (
+                          <span key={e.date} className="px-2 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200">
+                            {formatEveningDate(e.date)} · unassigned
+                          </span>
+                        ))}
+                      </div>
+                      <div className="text-gray-400 mt-1">Rota &amp; assignment coming in the Studio Sitter roster.</div>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
             {/* Carnet — read-only lifecycle reflection + link to Operations (where it's managed) */}
             {req.requirement_type === 'carnet' && (

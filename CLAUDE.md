@@ -1597,17 +1597,35 @@ These originate outside HH entirely — client sends stuff to us, or items found
 - [ ] Auto-reminder: chase client to collect, flag for disposal after X weeks
 - [ ] Global pages for both: `/operations/deliveries`, `/operations/lost-property`
 
-##### Stream 5: Rehearsals Module
-Rehearsal detection is HH-derived (items in rehearsal category 450 auto-create the requirement). Rehearsal *management* (studio sitter, room prep, handover) lives in OP.
-- [ ] Rehearsal requirement auto-detected from HH line items (category 450)
-- [ ] Rehearsal prep time from `preptimemins` custom field
-- [ ] `rehearsals` table (job_id, venue, date_start, date_end, studio_sitter_id, setup_specs, sound_files, status)
-- [ ] Studio sitter assignment (links to people table, freelancer portal integration)
-- [ ] Room prep method (similar to vehicle prep checklist)
-- [ ] Handover tracking: evening studio sitters → daytime staff
-- [ ] Band setup specs + sound file uploads
-- [ ] Studio schedule global view (`/operations/rehearsals`) — calendar/timeline format
-- [ ] Freelancer portal integration: push rehearsal assignments to studio sitters
+##### Stream 5: Rehearsals / Studio Sitter Module ← SPEC'D (Jun 2026), build pending
+**Full spec: `docs/REHEARSALS-SPEC.md`** — read it before touching rehearsal code. Headlines:
+
+- **Load-bearing model:** the assignment unit is a **SITE-EVENING**, not a job-room-day. One
+  premises, **one sitter per evening** even if both rooms are busy — the sitter looks after the
+  band(s) in Room 1/2 AND closes up the whole building (the end-of-day lock-up). So you assign a
+  freelancer to a `studio_sitter_shift` (one per calendar evening), NOT to a job or a room. The
+  per-job rehearsal card just *reflects* the shared shift's coverage + raises the amber warning.
+- **Detection** (existing `has_rehearsal` path): classify room + flavour by `CATEGORY_ID===450 AND
+  LIST_ID IN (...)`. EVENING (854/857) + LOCKOUT (851/855) ⇒ sitter needed; DAYTIME (853/856) ⇒
+  not. Base room (834/835) is a nested child of the variant — informational, **don't double-count**;
+  bare base room = `needs_review`. Daytime "not needed" can be manually overridden (a subtle
+  "＋ Call a sitter" affordance → shift with `manual_override=true`) for short-staffed weekends.
+- **Timing gotcha:** rehearsals do NOT run 9am→9am like vehicles/backline — they finish on the day
+  they finish. HH's `job_end` carries the phantom 9am-next-morning rollover (Numan "10–16 Jul" is
+  really 10am 10th → 10pm 15th), so the last session evening = `job_end_date − 1` when `job_end`
+  time is an early-morning rollover. Sibling to the `return_date +1 buffer` gotcha.
+- **Tasks** (general ad-hoc/building jobs, built here but entity-general): visibility
+  everyone/assignee-only, notify-on-done + notify-if-not-done-after-X-days, default notify the
+  assignee — **staff via bell/email, freelancers portal-only (no bell/email)**. Staff input/surface
+  on the dashboard top-right (NeedsAttention zone) + "On Today" + sitter portal; Today/Tomorrow/
+  Upcoming/Overdue views.
+- **Portal**, **handover thread** (interactions anchored to shift, scoped out of other timelines),
+  **end-of-day report** (configurable in `system_settings`, ported from the Jotform, no PDF, notes
+  → thread so staff can reply), **shared specs/files** via `share_with_freelancer`, lost-property /
+  held-items via the Holding module. **Shop sales = deferred** (out of scope for now).
+- **Build order:** A detection+model+job-card → B roster page+assign/bulk → C portal surface →
+  D tasks+handover → E end-of-day report+chaser → F calendar endpoint. Migration numbers: take the
+  next free at build time (150 is being taken by parallel work; check `run.ts`).
 
 ##### Stream 6: Payment Tracking (pre-Xero)
 *Merged into Step 3 (Money System).* `job_payments` table, per-job financial summary, payment recording, and client payment terms are all part of the unified Money tab on Job Detail. See Step 3 Phases C-F for full spec.
