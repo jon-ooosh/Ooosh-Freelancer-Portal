@@ -1608,7 +1608,8 @@ These originate outside HH entirely — client sends stuff to us, or items found
 - **Detection** (existing `has_rehearsal` path): classify room + flavour by `CATEGORY_ID===450 AND
   LIST_ID IN (...)`. EVENING (854/857) + LOCKOUT (851/855) ⇒ sitter needed; DAYTIME (853/856) ⇒
   not. Base room (834/835) is a nested child of the variant — informational, **don't double-count**;
-  bare base room = `needs_review`.
+  bare base room = `needs_review`. Daytime "not needed" can be manually overridden (a subtle
+  "＋ Call a sitter" affordance → shift with `manual_override=true`) for short-staffed weekends.
 - **Timing gotcha:** rehearsals do NOT run 9am→9am like vehicles/backline — they finish on the day
   they finish. HH's `job_end` carries the phantom 9am-next-morning rollover (Numan "10–16 Jul" is
   really 10am 10th → 10pm 15th), so the last session evening = `job_end_date − 1` when `job_end`
@@ -1616,7 +1617,8 @@ These originate outside HH entirely — client sends stuff to us, or items found
 - **Tasks** (general ad-hoc/building jobs, built here but entity-general): visibility
   everyone/assignee-only, notify-on-done + notify-if-not-done-after-X-days, default notify the
   assignee — **staff via bell/email, freelancers portal-only (no bell/email)**. Staff input/surface
-  on the dashboard top-right (NeedsAttention zone) + "On Today" + sitter portal.
+  on the dashboard top-right (NeedsAttention zone) + "On Today" + sitter portal; Today/Tomorrow/
+  Upcoming/Overdue views.
 - **Portal**, **handover thread** (interactions anchored to shift, scoped out of other timelines),
   **end-of-day report** (configurable in `system_settings`, ported from the Jotform, no PDF, notes
   → thread so staff can reply), **shared specs/files** via `share_with_freelancer`, lost-property /

@@ -85,6 +85,16 @@ stock-namespace lesson — never `LIST_ID` alone).
 **Sitter-needed flavour rule:** `EVENING` or `LOCKOUT` ⇒ evening cover needed. `DAYTIME` ⇒ no
 sitter (staff here till 17:00).
 
+**Manual daytime override.** Occasionally (short-staffed weekend, both rooms in) staff want a
+sitter in for a **daytime** shift too. Neat, non-cluttered affordance, no new surface:
+- On the job card, a daytime row shows a subtle text link **"＋ Call a sitter for this day"**.
+- On the roster, any date carries a subtle **"＋ Add cover"**.
+Either creates a `studio_sitter_shift` with `manual_override = true` (optional reason). Such a
+shift behaves exactly like an auto one (assignable, reflected on the card, counts toward
+coverage). Removing it cancels the manual shift. This is the ONE way `needs_sitter` gets forced
+on — auto-detected evenings are never toggled off this way; genuinely-not-running days are handled
+by **dismiss** (§3), so the two controls stay distinct and uncluttered.
+
 **Base-room rule (avoids double-count):** the base room (834/835) appears as a **nested child**
 of a chosen variant (e.g. on job 14996 the LOCKOUT parent has "Rehearsal Room 1" as its child —
 the `▶` parent/child / `LFT`/`RGT` nesting). Classify off the **parent variant** and treat the
@@ -144,6 +154,8 @@ shift_date        DATE NOT NULL UNIQUE        -- one shift per calendar evening 
 planned_start     TIME                        -- envelope (earliest needed across rooms)
 planned_end       TIME                        -- envelope (latest needed)
 status            VARCHAR  -- 'needed' | 'assigned' | 'confirmed' | 'covered' | 'closed' | 'cancelled'
+manual_override   BOOLEAN DEFAULT false        -- true = staff forced cover on an otherwise not-needed day (e.g. daytime)
+override_reason   TEXT                          -- optional, for manual_override shifts
 notes             TEXT                         -- staff planning notes (thread is separate)
 report_answers    JSONB                        -- end-of-day report (snapshot of template + answers)
 report_template_version INT                    -- which checklist template was answered
@@ -236,6 +248,8 @@ New page (Operations nav → "Studio Sitters", or under a "Rehearsals" group). T
   surfaced** at pick time (reuse existing freelancer tag + `GET /api/people/skills`); searchable.
 - **Bulk-assign:** "assign all unassigned evenings in range to [person]" (your two-people-cover-
   the-week case).
+- **＋ Add cover (manual):** on any date, force a shift for a day that wasn't auto-flagged (the
+  daytime-override case, §2) — `manual_override=true`, optional reason.
 - **Reassign:** person A → person B in one action (cancel + new assignment, audit-logged).
 - Filter pills: needs-sitter / assigned / confirmed; range presets 7/14/28.
 - Deep-links: band → Job Detail; date → shift detail.
@@ -292,6 +306,8 @@ the entity is **general** (anchorable to a shift, a job, or nothing).
   tasks + things I'm watching.
 - **Due-today tasks** flow into the existing **"On Today"** strip (its payload is already generic
   — union a `tasks` source in).
+- **Views:** the dashboard Tasks card (and any later `/operations/tasks` list) offer
+  **Today / Tomorrow / Upcoming / Overdue** views (bucketed by `due_date`, `status='todo'`).
 - **Sitter portal** shift view shows that sitter's tasks for the night.
 - (Optional later) a fuller `/operations/tasks` list view if volume warrants.
 
