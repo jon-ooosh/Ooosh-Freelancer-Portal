@@ -2507,14 +2507,18 @@ export default function JobDetailPage() {
       }
       const allRows = Array.from(merged.values());
 
-      // Build slot → vehicle_id map from staff allocations (no driver_id,
+      // Build slot → vehicle map from staff allocations (no driver_id,
       // no freelancer_person_id, has vehicle_id). Used to infer the van
-      // for hire-form rows that haven't been cascade-linked yet.
-      const slotVehicleByIndex = new Map<number, string>();
+      // for hire-form rows that haven't been cascade-linked yet. We keep the
+      // reg + type alongside the id so the card header can DISPLAY the van
+      // even before the hire-form row is cascade-linked (otherwise the card
+      // shows a bare 🚐 with no reg — the button knows the van but the
+      // header can't).
+      const slotVehicleByIndex = new Map<number, { id: string; reg: string | null; type: string | null }>();
       for (const r of allRows) {
         const idx = r.van_requirement_index ?? 0;
         if (!r.driver_id && !r.freelancer_person_id && r.vehicle_id && !slotVehicleByIndex.has(idx)) {
-          slotVehicleByIndex.set(idx, r.vehicle_id);
+          slotVehicleByIndex.set(idx, { id: r.vehicle_id, reg: r.vehicle_reg ?? null, type: r.vehicle_type ?? null });
         }
       }
 
@@ -2569,7 +2573,12 @@ export default function JobDetailPage() {
             excess_amount_taken: r.excess_amount_taken,
             dispute_status: r.dispute_status ?? null,
           } : null,
-          effective_vehicle_id: r.vehicle_id || inferred,
+          effective_vehicle_id: r.vehicle_id || inferred?.id || null,
+          // Backfill reg/type from the inferred sibling so the card header
+          // shows the van whenever we know it, not just when this row's own
+          // vehicle_id is set. No-op when the row is already linked.
+          vehicle_reg: r.vehicle_reg || inferred?.reg || null,
+          vehicle_type: r.vehicle_type || inferred?.type || null,
         };
       });
       setVehicleAssignments(shaped);
