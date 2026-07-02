@@ -45,7 +45,8 @@ export interface CalculatorSettings {
 //   not_included = client sorts it separately (not our money)
 //   recharge     = we incur it; client billed the ACTUAL + markup post-hire
 //                  (the amount here is an indicative estimate, not the charge)
-export type ExpenseChargeMode = 'included' | 'not_included' | 'recharge';
+// 'na' = not applicable — excluded from every total (PD defaults to it).
+export type ExpenseChargeMode = 'included' | 'not_included' | 'recharge' | 'na';
 
 export interface ExpenseItem {
   type: string;        // fuel, parking, tolls, hotel, per_diem, other

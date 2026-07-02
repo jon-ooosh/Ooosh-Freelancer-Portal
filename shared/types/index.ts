@@ -531,7 +531,10 @@ export type QuoteWhatIsIt = 'vehicle' | 'equipment' | 'people';
 
 // Per-expense-line billing state (three-state, Jun 2026). `included` is kept in
 // step (true ⇔ 'included') for back-compat with code reading the old boolean.
-export type ExpenseChargeMode = 'included' | 'not_included' | 'recharge';
+// 'na' = not applicable (excluded from every total). PD defaults to 'na' since
+// most jobs (esp. sub-one-day) carry no Per Diem; also usable on any line that
+// simply doesn't apply to a job.
+export type ExpenseChargeMode = 'included' | 'not_included' | 'recharge' | 'na';
 
 export interface QuoteExpenseItem {
   id: string;
