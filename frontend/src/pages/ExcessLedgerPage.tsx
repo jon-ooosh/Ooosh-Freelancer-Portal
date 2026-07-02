@@ -544,6 +544,9 @@ function RecordsTable({
                 <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${statusColor(record.excess_status)}`}>
                   {statusLabel(record.excess_status)}
                 </span>
+                {record.held_on_account && (record.excess_status === 'taken' || record.excess_status === 'partially_paid') && (
+                  <span className="block mt-1 text-[10px] font-semibold text-purple-700" title="Held on account for the client's next hire">Held on account</span>
+                )}
                 {record.dispatch_override && (
                   <span className="block mt-1 text-[10px] text-amber-600">overridden</span>
                 )}
@@ -596,8 +599,13 @@ function RecordsTable({
               </>
             }
             trailing={
-              <span className={`inline-block px-2 py-1 rounded-full text-xs font-medium whitespace-nowrap ${statusColor(record.excess_status)}`}>
-                {statusLabel(record.excess_status)}
+              <span className="flex flex-col items-end gap-1">
+                <span className={`inline-block px-2 py-1 rounded-full text-xs font-medium whitespace-nowrap ${statusColor(record.excess_status)}`}>
+                  {statusLabel(record.excess_status)}
+                </span>
+                {record.held_on_account && (record.excess_status === 'taken' || record.excess_status === 'partially_paid') && (
+                  <span className="text-[10px] font-semibold text-purple-700">Held on account</span>
+                )}
               </span>
             }
             meta={
