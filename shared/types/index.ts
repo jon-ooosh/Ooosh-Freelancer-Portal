@@ -529,12 +529,20 @@ export type QuoteJobType = 'delivery' | 'collection' | 'crewed';
 export type QuoteCalcMode = 'hourly' | 'dayrate';
 export type QuoteWhatIsIt = 'vehicle' | 'equipment' | 'people';
 
+// Per-expense-line billing state (three-state, Jun 2026). `included` is kept in
+// step (true ⇔ 'included') for back-compat with code reading the old boolean.
+// 'na' = not applicable (excluded from every total). PD defaults to 'na' since
+// most jobs (esp. sub-one-day) carry no Per Diem; also usable on any line that
+// simply doesn't apply to a job.
+export type ExpenseChargeMode = 'included' | 'not_included' | 'recharge' | 'na';
+
 export interface QuoteExpenseItem {
   id: string;
   category: string;   // fuel, parking, tolls, transport_out, transport_back, hotel, pd, other
   label: string;
   amount: number;
   included: boolean;
+  chargeMode?: ExpenseChargeMode;
   description?: string;
   pdDays?: number;
 }

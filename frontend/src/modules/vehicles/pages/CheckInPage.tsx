@@ -1647,17 +1647,23 @@ function StepCurrentState({
             </button>
           ))}
         </div>
-        {/* Comparison with book-out */}
-        {form.bookOutFuelLevel && (
-          <p className="mt-1.5 text-xs text-gray-400">
-            Book-out fuel: {form.bookOutFuelLevel}
-            {form.fuelLevel && form.fuelLevel !== form.bookOutFuelLevel && (
-              <span className="ml-1 font-medium text-amber-600">
-                (changed)
-              </span>
-            )}
-          </p>
-        )}
+        {/* Comparison with book-out — active prompt when fuel dropped. */}
+        {form.bookOutFuelLevel && (() => {
+          const outIdx = FUEL_LEVELS.indexOf(form.bookOutFuelLevel as FuelLevel)
+          const inIdx = form.fuelLevel ? FUEL_LEVELS.indexOf(form.fuelLevel) : -1
+          const dropped = inIdx >= 0 && outIdx >= 0 && inIdx < outIdx
+          return (
+            <div className="mt-1.5 text-xs">
+              <span className="text-gray-400">Book-out fuel: {form.bookOutFuelLevel}</span>
+              {form.fuelLevel && form.fuelLevel === form.bookOutFuelLevel && <span className="ml-1 text-gray-400">(unchanged)</span>}
+              {dropped && (
+                <div className="mt-1 rounded border border-amber-200 bg-amber-50 px-2 py-1 text-amber-800">
+                  ⛽ Fuel down ({form.bookOutFuelLevel} → {form.fuelLevel}) — if this hire recharges running costs, the refuel is chargeable. Log the fuel receipt against the job (Money → Costs).
+                </div>
+              )}
+            </div>
+          )
+        })()}
         {form.fuelLevel && (
           <div className="mt-3 overflow-hidden rounded-full bg-gray-100">
             <div

@@ -14,7 +14,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import dotenv from 'dotenv';
 
-dotenv.config();
+dotenv.config({ quiet: true });
 
 let client: Anthropic | null = null;
 

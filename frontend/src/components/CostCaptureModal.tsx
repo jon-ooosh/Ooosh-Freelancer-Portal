@@ -100,6 +100,18 @@ type ExistingRow = (Cost & { hh_job_number?: number | null; job_name?: string | 
 export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, existing, presetJobId, presetVehicleId, presetIssueId }: Props) {
   const existingRow = existing as ExistingRow;
   const { user } = useAuthStore();
+  // The cached login user can be stale if an admin set this staff member's COT
+  // card in Settings AFTER they logged in. Read the card status fresh on open so
+  // the "no card on file" hint reflects reality (the save already stamps it
+  // server-side from the DB regardless).
+  const [freshCardLast4, setFreshCardLast4] = useState<string | null | undefined>(user?.cot_card_last4);
+  useEffect(() => {
+    let cancelled = false;
+    api.get<{ cot_card_last4?: string | null }>('/auth/me')
+      .then((r) => { if (!cancelled) setFreshCardLast4(r?.cot_card_last4 ?? null); })
+      .catch(() => { /* keep the cached value */ });
+    return () => { cancelled = true; };
+  }, []);
   const isEdit = Boolean(existing);
 
   // ── Form state ───────────────────────────────────────────────────────────
@@ -152,6 +164,9 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
     existing?.cost_intent || (existing?.recharge_mode && existing.recharge_mode !== 'none' ? 'extra' : 'quote_actual'),
   );
   const [intentTouched, setIntentTouched] = useState(isEdit);
+  // True when the linked job is flagged "recharge running costs" — drives the
+  // default (Extra + recharge) + a hint banner.
+  const [jobRechargesRunningCosts, setJobRechargesRunningCosts] = useState(false);
   const [notes, setNotes] = useState(existing?.notes || '');
   const [receiptFile, setReceiptFile] = useState<File | null>(null);
   const [receiptPreview, setReceiptPreview] = useState<string | null>(null);
@@ -174,7 +189,7 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
   // against a stale/empty fleet captured in the handler's closure.
   const [pendingVehicleReg, setPendingVehicleReg] = useState<string | null>(null);
   // Compact quote-vs-actuals summary shown when a job is linked.
-  const [jobSummary, setJobSummary] = useState<{ quotedCost: number; clientQuoted: number; actuals: number; extra: number } | null>(null);
+  const [jobSummary, setJobSummary] = useState<{ quotedCost: number; clientQuoted: number; actuals: number; extra: number; rechargeExpected: string[] } | null>(null);
 
   // ── Vehicle link + optional "also log to service history" ────────────────
   // Forward unification: a garage/vehicle cost can ALSO create a vehicle_service_log
@@ -297,19 +312,41 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
     (async () => {
       try {
         const [quotesRes, costsRes] = await Promise.all([
-          api.get<{ data: Array<{ freelancer_fee: number | null; freelancer_fee_rounded: number | null; client_fee: number | null; status: string | null }> }>(`/quotes?job_id=${linkedJobId}`).catch(() => ({ data: [] })),
-          api.get<{ data: Array<{ id: string; amount_gross: number | null; cost_intent: string | null }> }>(`/costs/by-job/${linkedJobId}`).catch(() => ({ data: [] })),
+          api.get<{ data: Array<{ freelancer_fee: number | null; freelancer_fee_rounded: number | null; client_fee: number | null; status: string | null; expenses?: Array<{ type?: string; chargeMode?: string; includedInCharge?: boolean }> | string }> }>(`/quotes?job_id=${linkedJobId}`).catch(() => ({ data: [] })),
+          api.get<{ data: Array<{ id: string; amount_gross: number | null; cost_intent: string | null }>; recharge_running_costs?: boolean }>(`/costs/by-job/${linkedJobId}`).catch(() => ({ data: [], recharge_running_costs: false })),
         ]);
         if (cancelled) return;
         const quotes = (quotesRes.data || []).filter((q) => q.status !== 'cancelled');
         const num = (n: number | null | undefined) => Number(n || 0);
         const quotedCost = quotes.reduce((s, q) => s + num(q.freelancer_fee_rounded ?? q.freelancer_fee), 0);
         const clientQuoted = quotes.reduce((s, q) => s + num(q.client_fee), 0);
+        // Declared recharge lines across the job's quotes → "expecting these back".
+        const EXP_LABELS: Record<string, string> = { fuel: 'Fuel', parking: 'Parking', tolls: 'Tolls', transport_out: 'Transport', transport_back: 'Transport', hotel: 'Hotel', pd: 'Per Diem', other: 'Other' };
+        const rechargeSet = new Set<string>();
+        for (const q of quotes) {
+          const raw = q.expenses;
+          const arr = Array.isArray(raw) ? raw : (typeof raw === 'string' && raw ? JSON.parse(raw) : []);
+          for (const e of arr) {
+            const mode = e?.chargeMode ?? (e?.includedInCharge === false ? 'not_included' : 'included');
+            if (mode === 'recharge') rechargeSet.add(EXP_LABELS[String(e?.type)] || String(e?.type || 'Other'));
+          }
+        }
         const costs = (costsRes.data || []).filter((c) => c.id !== existing?.id);
         const actuals = costs.filter((c) => c.cost_intent === 'quote_actual').reduce((s, c) => s + num(c.amount_gross), 0);
         const extra = costs.filter((c) => c.cost_intent === 'extra').reduce((s, c) => s + num(c.amount_gross), 0);
-        setJobSummary({ quotedCost, clientQuoted, actuals, extra });
-        if (!intentTouched) setCostIntent(quotes.length > 0 ? 'quote_actual' : 'extra');
+        setJobSummary({ quotedCost, clientQuoted, actuals, extra, rechargeExpected: Array.from(rechargeSet) });
+        const flagged = costsRes.recharge_running_costs === true;
+        setJobRechargesRunningCosts(flagged);
+        // A recharge-running-costs job defaults new costs to Extra + recharge;
+        // otherwise fall back to the quote-based default (part-of-quote if quoted).
+        if (!intentTouched) {
+          if (flagged) {
+            setCostIntent('extra');
+            setRechargeMode((m) => (m === 'none' ? 'full' : m));
+          } else {
+            setCostIntent(quotes.length > 0 ? 'quote_actual' : 'extra');
+          }
+        }
       } catch { /* leave defaults */ }
     })();
     return () => { cancelled = true; };
@@ -966,11 +1003,16 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
               )}
             </div>
 
-            {linkedJobId && jobSummary && (jobSummary.clientQuoted > 0 || jobSummary.quotedCost > 0 || jobSummary.actuals > 0 || jobSummary.extra > 0) && (
+            {linkedJobId && jobSummary && (jobSummary.clientQuoted > 0 || jobSummary.quotedCost > 0 || jobSummary.actuals > 0 || jobSummary.extra > 0 || jobRechargesRunningCosts || jobSummary.rechargeExpected.length > 0) && (
               <div className="rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600 space-y-0.5">
                 <div className="font-medium text-gray-700">This job so far</div>
                 {jobSummary.clientQuoted > 0 && <div>Quoted to client: <strong>£{jobSummary.clientQuoted.toFixed(2)}</strong>{jobSummary.quotedCost > 0 && <span className="text-gray-400"> (our cost est. £{jobSummary.quotedCost.toFixed(2)})</span>}</div>}
                 <div>Costs logged against the quote: <strong>£{jobSummary.actuals.toFixed(2)}</strong>{jobSummary.extra > 0 && <span> · extras: <strong>£{jobSummary.extra.toFixed(2)}</strong></span>}</div>
+                {(jobRechargesRunningCosts || jobSummary.rechargeExpected.length > 0) && (
+                  <div className="text-amber-700">
+                    ⛽ Expecting to recharge{jobSummary.rechargeExpected.length > 0 ? <>: <strong>{jobSummary.rechargeExpected.join(', ')}</strong></> : ' running costs'} — billed at actual + 20%. This receipt is likely one of them (set to <strong>Extra</strong>).
+                  </div>
+                )}
                 <div className="text-gray-400">Use this to decide if this cost is covered by the quote (Part of the quote) or above-and-beyond (Extra).</div>
               </div>
             )}
@@ -1124,9 +1166,15 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
               </div>
             </div>
 
-            {paymentMethod === 'cot_card' && !user?.cot_card_last4 && (
+            {paymentMethod === 'cot_card' && !freshCardLast4 && (
               <p className="text-xs text-gray-500 italic">
                 No company card on file for you — ask an admin to add it in Settings → COT Card Register (enables Xero reconciliation matching).
+              </p>
+            )}
+
+            {linkedJobId && jobRechargesRunningCosts && (
+              <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1.5">
+                ⛽ This job recharges running costs — defaulted to <strong>Extra + recharge</strong>. Resolve it to the client at actual + 20% post-hire.
               </p>
             )}
 

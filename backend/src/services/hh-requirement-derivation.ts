@@ -21,6 +21,8 @@ import { syncCostResolveRequirementStatus } from './cost-requirement-sync';
 import { hhBroker } from './hirehop-broker';
 import { calculateVatAdjustment } from './vat-adjustment';
 import { BACKLINE_CATEGORY_IDS } from './backline-categories';
+import { computeRehearsalDetail, buildRehearsalSummary, type RehearsalDetail } from './rehearsal-plan';
+import { syncRehearsalRequirementStatus } from './studio-sitter';
 
 // ── HH Category IDs ──────────────────────────────────────────────────────
 // Source: HireHop categories_list.php, verified 9 Apr 2026
@@ -111,6 +113,10 @@ export interface DerivedFlags {
     rehearsals: number;
     other: number;
   };
+  // Studio-sitter detection intelligence (rooms + flavour + sitter-needed
+  // evenings). Populated in deriveRequirementsForJob (needs job dates), NOT in
+  // deriveFlags (item-only). Optional — absent on item-only deriveFlags calls.
+  rehearsal_detail?: RehearsalDetail | null;
 }
 
 // ── Derive flags from line items ─────────────────────────────────────────
@@ -286,9 +292,14 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
     mismatchesFlagged: [],
   };
 
-  // Load job with line items
+  // Load job with line items. Rehearsal date columns are extracted in
+  // Europe/London so the finish-on-the-day rule (see rehearsal-plan.ts) keys off
+  // the real local hour regardless of server timezone.
   const jobResult = await query(
-    `SELECT id, hh_job_number, client_name, line_items, hh_derived_flags, is_van_and_driver, vehicle_slot_modes, is_internal, self_drive_van_override
+    `SELECT id, hh_job_number, client_name, line_items, hh_derived_flags, is_van_and_driver, vehicle_slot_modes, is_internal, self_drive_van_override,
+       (COALESCE(job_date, out_date) AT TIME ZONE 'Europe/London')::date::text AS reh_start_date,
+       (COALESCE(job_end, return_date) AT TIME ZONE 'Europe/London')::date::text AS reh_end_date,
+       EXTRACT(HOUR FROM (COALESCE(job_end, return_date) AT TIME ZONE 'Europe/London'))::int AS reh_end_hour
      FROM jobs WHERE id = $1 AND is_deleted = false`,
     [jobId]
   );
@@ -327,6 +338,19 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
     if (Number.isFinite(ov) && ov >= 0) {
       flags.self_drive_count = Math.min(ov, flags.self_drive_count);
     }
+  }
+  // ── Rehearsal detection intelligence (Phase A) ──
+  // Needs job dates, so computed here rather than in the item-only deriveFlags().
+  // Attaching to `flags` persists it in hh_derived_flags and surfaces it on the
+  // requirement card via the derived-flags read. See services/rehearsal-plan.ts.
+  if (flags.has_rehearsal) {
+    flags.rehearsal_detail = computeRehearsalDetail(items, {
+      startDate: job.reh_start_date ?? null,
+      endDate: job.reh_end_date ?? null,
+      endHour: job.reh_end_hour ?? null,
+    });
+  } else {
+    flags.rehearsal_detail = null;
   }
   result.flags = flags;
 
@@ -496,7 +520,7 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
     // ── Rehearsal ──
     if (flags.has_rehearsal) {
       await upsertAutoRequirement(client, jobId, 'rehearsal', flags, previousFlags, result, {
-        notes: 'Rehearsal space detected from HireHop items',
+        notes: buildRehearsalSummary(flags.rehearsal_detail ?? null),
         snapshot: items.filter(i => i.CATEGORY_ID === REHEARSAL_CATEGORY),
       });
     }
@@ -722,6 +746,30 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
         if (parseInt(rechargeCount.rows[0]?.cnt || '0') > 0) {
           await ensureCloseout('cost_resolve', 'Resolve all client recharges (bill to HireHop, bill externally, or absorb)');
         }
+
+        // Standing "recharge running costs" card — forward-looking, on jobs
+        // declared to recharge their running costs (a quote recharge line or the
+        // Tools toggle). Created amber regardless of whether costs have landed
+        // yet (the whole point: it says "expect the freelancer's fuel/parking
+        // invoice, recharge it"). Manual close via "no further costs".
+        const rrc = await client.query(
+          `SELECT recharge_running_costs FROM jobs WHERE id = $1`,
+          [jobId]
+        );
+        if (rrc.rows[0]?.recharge_running_costs) {
+          const exists = await client.query(
+            `SELECT id FROM job_requirements WHERE job_id = $1 AND requirement_type = 'recharge_running_costs' AND phase = 'post_hire'`,
+            [jobId]
+          );
+          if (exists.rows.length === 0) {
+            await client.query(
+              `INSERT INTO job_requirements (job_id, requirement_type, status, notes, is_auto, source, phase)
+               VALUES ($1, 'recharge_running_costs', 'in_progress', $2, true, 'auto_post_hire', 'post_hire')`,
+              [jobId, 'Running costs recharged at actual + 20%. Log the freelancer/supplier invoices as they land, recharge each to the client, then mark done when no further costs are expected.']
+            );
+            result.requirementsCreated.push('recharge_running_costs (post_hire)');
+          }
+        }
       }
 
       // Conditional: freelancer follow-up — only if crew assignments exist
@@ -869,6 +917,15 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
   // ── Seat availability (read-only, outside transaction) ──
   if (flags.seat_config && flags.has_vehicle) {
     result.seatAvailability = await checkSeatAvailability(flags, items);
+  }
+
+  // ── Wind the rehearsal requirement status from sitter coverage ──
+  // Coverage-authoritative: adding/removing a sitter-needed evening re-derives
+  // the status (e.g. a new date winds 'done' back to 'in_progress'). Best-effort.
+  if (flags.has_rehearsal) {
+    try { await syncRehearsalRequirementStatus(jobId); } catch (err) {
+      console.error(`[HH Derive] rehearsal status sync failed for job ${jobId}:`, err);
+    }
   }
 
   return result;

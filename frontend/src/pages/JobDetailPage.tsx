@@ -122,6 +122,7 @@ interface JobDetail {
   custom_index: string | null;
   depot_name: string | null;
   is_internal: boolean;
+  recharge_running_costs?: boolean;
   job_value: number | null;
   pipeline_status: string | null;
   likelihood: string | null;

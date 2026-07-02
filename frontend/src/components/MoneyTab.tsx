@@ -1130,7 +1130,8 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
       </div>
 
       {/* Job costs vs quotes (Cost Capture) */}
-      <JobCostsPanel costs={jobCosts} quotes={jobQuotes} onAddCost={() => setShowAddCost(true)} onChanged={loadJobCosts} />
+      <JobCostsPanel costs={jobCosts} quotes={jobQuotes} onAddCost={() => setShowAddCost(true)} onChanged={loadJobCosts}
+        jobId={jobId} rechargeOn={!!job?.recharge_running_costs} onJobChanged={onJobChanged} />
       {showAddCost && (
         <CostCaptureModal
           presetJobId={jobId}
@@ -1641,10 +1642,35 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
 // expected transport/crew cost. "Actuals" sums the quote_actual costs. Extra
 // costs are listed separately (eligible for client recharge). Hidden when the
 // job has neither costs nor quotes.
-function JobCostsPanel({ costs, quotes, onAddCost, onChanged }: { costs: JobCostLite[]; quotes: JobQuoteLite[]; onAddCost: () => void; onChanged: () => void }) {
+function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn, onJobChanged }: { costs: JobCostLite[]; quotes: JobQuoteLite[]; onAddCost: () => void; onChanged: () => void; jobId: string; rechargeOn: boolean; onJobChanged?: () => void }) {
   const m = (n: number) => `£${n.toFixed(2)}`;
   const num = (n: number | null | undefined) => Number(n || 0);
   const [resolving, setResolving] = useState<JobCostLite | null>(null);
+  const [rechargeBusy, setRechargeBusy] = useState(false);
+
+  // Lightweight "recharge running costs" toggle — the flag is normally set by a
+  // Recharge line on a quote; this covers the no-quote / mid-hire case. Sets the
+  // cost auto-inherit + the standing card.
+  async function toggleRecharge() {
+    const turningOn = !rechargeOn;
+    if (turningOn && !window.confirm('Mark this job as "recharge running costs"?\n\nNew running-cost costs (fuel/parking/etc.) logged here will default to recharge (actual + 20%), and a card surfaces at check-in. Usually set via a Recharge line on the quote — use this for jobs without one.')) return;
+    setRechargeBusy(true);
+    try {
+      await api.patch(`/hirehop/jobs/${jobId}/recharge-running-costs`, { rechargeRunningCosts: turningOn });
+      onJobChanged?.();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to update recharge flag');
+    } finally {
+      setRechargeBusy(false);
+    }
+  }
+  const RechargeToggle = (
+    <button onClick={toggleRecharge} disabled={rechargeBusy}
+      title={rechargeOn ? 'Running costs are recharged to the client post-hire. Click to turn off.' : 'Mark this job as recharging its running costs (fuel/parking/etc.) to the client post-hire'}
+      className={`text-xs rounded-md px-2 py-1 border disabled:opacity-50 ${rechargeOn ? 'border-amber-300 bg-amber-50 text-amber-800' : 'border-gray-300 text-gray-500 hover:bg-gray-50'}`}>
+      {rechargeBusy ? '…' : rechargeOn ? '⛽ Recharging running costs ✓' : '⛽ Recharge running costs'}
+    </button>
+  );
 
   const AddBtn = (
     <button onClick={onAddCost} className="text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-md px-3 py-1.5">
@@ -1687,9 +1713,10 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged }: { costs: JobCost
 
   return (
     <div className="bg-white border border-gray-200 rounded-lg p-6 mb-6">
-      <div className="flex items-center justify-between mb-4 gap-3">
+      <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
         <h3 className="text-lg font-semibold text-gray-900">Job Costs</h3>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 flex-wrap">
+          {RechargeToggle}
           <a href="/money/costs" className="text-sm text-purple-700 hover:underline">Costs hub →</a>
           {AddBtn}
         </div>
