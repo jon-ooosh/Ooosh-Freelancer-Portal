@@ -319,6 +319,9 @@ export interface OperationsData {
     /** Pre-auth holds expiring within 2 days (migration 087). */
     expiring_holds_count?: number;
     expiring_holds?: ExpiringHold[];
+    /** Studio-sitter cover gaps — evenings in next 14 days needing a sitter (Rehearsals). */
+    sitter_gap_count?: number;
+    sitter_gaps?: { date: string; jobs: string[] }[];
     /** Card-machine receipt scans outstanding (migration 087 / PR 3). */
     receipts_outstanding_count?: number;
     receipts_outstanding?: ReceiptOutstanding[];

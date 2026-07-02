@@ -1405,7 +1405,10 @@ export default function JobDetailPage() {
     // hire-form chain is suspended). Used to suppress the "no hire form sent"
     // banner, which only applies to self-drive hires.
     allVanAndDriver: boolean;
-  }>({ hireFormsStatus: null, postHireOpenCount: 0, allVanAndDriver: false });
+    // Studio-sitter cover gap — unassigned sitter-needed evenings + the earliest
+    // one's date (for the pre-hire amber banner). Null when fully covered / n/a.
+    rehearsalGap: { unassigned: number; firstDate: string } | null;
+  }>({ hireFormsStatus: null, postHireOpenCount: 0, allVanAndDriver: false, rehearsalGap: null });
   const [assignModalQuoteId, setAssignModalQuoteId] = useState<string | null>(null);
   const [peopleOptions, setPeopleOptions] = useState<PersonOption[]>([]);
   const [peopleSearch, setPeopleSearch] = useState('');
@@ -2062,7 +2065,7 @@ export default function JobDetailPage() {
       setAllocationConflicts([]);
       setDateMismatches([]);
       setJobOrgs([]);
-      setReqSummary({ hireFormsStatus: null, postHireOpenCount: 0, allVanAndDriver: false });
+      setReqSummary({ hireFormsStatus: null, postHireOpenCount: 0, allVanAndDriver: false, rehearsalGap: null });
       setLoading(true);
 
       loadJob();
@@ -2118,6 +2121,17 @@ export default function JobDetailPage() {
       ]);
       const hf = pre.data.find(r => r.requirement_type === 'hire_forms');
       const openPost = post.data.filter(r => r.status !== 'done').length;
+      // Rehearsal studio-sitter cover gap — only when the job has a rehearsal
+      // requirement. Coverage is per-evening; gap = any sitter-needed night
+      // without an assignee. firstDate = earliest such night (drives the banner).
+      let rehearsalGap: { unassigned: number; firstDate: string } | null = null;
+      if (pre.data.some(r => r.requirement_type === 'rehearsal')) {
+        try {
+          const cov = await api.get<{ data: { date: string; assignee: { id: string } | null }[] }>(`/studio-sitters/job/${id}/coverage`);
+          const unassignedDates = (cov.data ?? []).filter(e => !e.assignee).map(e => e.date).sort();
+          if (unassignedDates.length > 0) rehearsalGap = { unassigned: unassignedDates.length, firstDate: unassignedDates[0] };
+        } catch { /* non-fatal */ }
+      }
       // Suppress the self-drive hire-form banner when the job is wholly V&D —
       // either the live derived flags say so (vehicles present, zero self-drive
       // slots) or the hire-form requirement is suspended (notes marker). Reading
@@ -2129,6 +2143,7 @@ export default function JobDetailPage() {
         hireFormsStatus: hf?.status || null,
         postHireOpenCount: openPost,
         allVanAndDriver: flagsVD || reqSuspended,
+        rehearsalGap,
       });
     } catch {
       // non-fatal — alerts just won't fire
@@ -2755,6 +2770,17 @@ export default function JobDetailPage() {
     const daysSinceReturn = daysBetween(todayLocalISO, returnDay);
     if (daysSinceReturn < 7 || reqSummary.postHireOpenCount === 0) return null;
     return { daysSinceReturn, openCount: reqSummary.postHireOpenCount };
+  })();
+
+  // Rehearsal studio-sitter gap — sitter-needed evenings unassigned within the
+  // warning window (7 days) of the earliest such night. Amber, non-blocking.
+  const rehearsalSitterGap: { unassigned: number; daysToFirst: number } | null = (() => {
+    const g = reqSummary.rehearsalGap;
+    if (!g) return null;
+    if (['lost', 'cancelled'].includes(job.pipeline_status || '')) return null;
+    const daysToFirst = daysBetween(g.firstDate, todayLocalISO);
+    if (daysToFirst < 0 || daysToFirst > 7) return null;
+    return { unassigned: g.unassigned, daysToFirst };
   })();
 
   // Crew unassigned + Crew not introduced — gate on EACH QUOTE'S OWN date,
@@ -3429,6 +3455,21 @@ export default function JobDetailPage() {
                 } close-out item${closeOutOverdue.openCount === 1 ? '' : 's'} still open.`}
                 action={{
                   label: 'View Close-Out Items',
+                  onClick: () => setActiveTab('overview'),
+                }}
+              />
+            )}
+            {rehearsalSitterGap && (
+              <JobAlertBanner
+                severity="amber"
+                message={
+                  (rehearsalSitterGap.daysToFirst === 0
+                    ? 'Rehearsal starts today'
+                    : `Rehearsal starts in ${rehearsalSitterGap.daysToFirst} ${rehearsalSitterGap.daysToFirst === 1 ? 'day' : 'days'}`)
+                  + ` — ${rehearsalSitterGap.unassigned} evening${rehearsalSitterGap.unassigned === 1 ? '' : 's'} still without a studio sitter.`
+                }
+                action={{
+                  label: 'View Job Requirements',
                   onClick: () => setActiveTab('overview'),
                 }}
               />
