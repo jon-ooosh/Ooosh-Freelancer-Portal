@@ -182,13 +182,14 @@ function buildCalculatorInput(fd: FormData): CalculatorInput {
 // =============================================================================
 
 const createInitialExpenses = (): QuoteExpenseItem[] => [
-  { id: generateExpenseId(), category: 'fuel', label: 'Fuel', amount: 0, included: true },
-  { id: generateExpenseId(), category: 'parking', label: 'Parking', amount: 0, included: false },
-  { id: generateExpenseId(), category: 'tolls', label: 'Tolls / Crossings', amount: 0, included: false },
-  { id: generateExpenseId(), category: 'transport_out', label: 'Transport (outbound)', amount: 0, included: false },
-  { id: generateExpenseId(), category: 'transport_back', label: 'Transport (return)', amount: 0, included: false },
-  { id: generateExpenseId(), category: 'hotel', label: 'Hotel', amount: 0, included: false },
-  { id: generateExpenseId(), category: 'pd', label: 'Per Diem (PD)', amount: 0, included: false, pdDays: 1 },
+  { id: generateExpenseId(), category: 'fuel', label: 'Fuel', amount: 0, included: true, chargeMode: 'included' },
+  { id: generateExpenseId(), category: 'parking', label: 'Parking', amount: 0, included: false, chargeMode: 'not_included' },
+  { id: generateExpenseId(), category: 'tolls', label: 'Tolls / Crossings', amount: 0, included: false, chargeMode: 'not_included' },
+  { id: generateExpenseId(), category: 'transport_out', label: 'Transport (outbound)', amount: 0, included: false, chargeMode: 'not_included' },
+  { id: generateExpenseId(), category: 'transport_back', label: 'Transport (return)', amount: 0, included: false, chargeMode: 'not_included' },
+  { id: generateExpenseId(), category: 'hotel', label: 'Hotel', amount: 0, included: false, chargeMode: 'not_included' },
+  // Per Diem defaults to N/A — most jobs (esp. sub-one-day) carry no PD.
+  { id: generateExpenseId(), category: 'pd', label: 'Per Diem (PD)', amount: 0, included: false, chargeMode: 'na', pdDays: 1 },
 ];
 
 const INITIAL_FORM: FormData = {
@@ -433,7 +434,7 @@ export default function TransportCalculator({
   }, []);
 
   // Bulk-set every expense line to one charge mode (the "set all" column heads).
-  const setAllChargeMode = useCallback((mode: 'included' | 'not_included' | 'recharge') => {
+  const setAllChargeMode = useCallback((mode: 'na' | 'included' | 'not_included' | 'recharge') => {
     setFormData(prev => ({
       ...prev,
       expenses: prev.expenses.map(exp => ({ ...exp, chargeMode: mode, included: mode === 'included' })),
@@ -1166,6 +1167,7 @@ export default function TransportCalculator({
                   {isDC && costs && <OOHDisplay costs={costs} formData={formData} onToggleOverride={() => updateField('oohManualOverride', !formData.oohManualOverride)} onChangeEarly={(v) => updateField('earlyStartMinutes', v)} onChangeLate={(v) => updateField('lateFinishMinutes', v)} />}
 
                   <p className="text-sm text-gray-500">
+                    <span className="font-medium">N/A</span> = not on this job ·{' '}
                     <span className="font-medium">In quote</span> = client pays it now ·{' '}
                     <span className="font-medium">Client pays</span> = they sort it separately ·{' '}
                     <span className="font-medium text-amber-700">Recharge</span> = we bill the actual + markup post-hire (amount is just an estimate). Tap a column heading to set every line at once.
@@ -1173,15 +1175,16 @@ export default function TransportCalculator({
                   <div className="border rounded-lg divide-y">
                     <div className="px-4 py-3 bg-gray-50 flex items-center gap-2">
                       <div className="flex-1 text-sm font-medium text-gray-700">Category</div>
-                      <div className="w-20 text-sm font-medium text-gray-700 text-right">Amount</div>
+                      <div className="w-16 text-sm font-medium text-gray-700 text-right">Amount</div>
                       {([
+                        ['na', 'N/A'],
                         ['included', 'In quote'],
                         ['not_included', 'Client pays'],
                         ['recharge', 'Recharge'],
-                      ] as ['included' | 'not_included' | 'recharge', string][]).map(([m, label]) => (
+                      ] as ['na' | 'included' | 'not_included' | 'recharge', string][]).map(([m, label]) => (
                         <button key={m} type="button" onClick={() => setAllChargeMode(m)}
                           title={`Set every line to "${label}"`}
-                          className={`w-[70px] text-center text-xs font-medium rounded px-1 py-0.5 hover:underline ${m === 'recharge' ? 'text-amber-700' : 'text-gray-600'}`}>
+                          className={`w-[62px] text-center text-xs font-medium rounded px-0.5 py-0.5 hover:underline ${m === 'recharge' ? 'text-amber-700' : 'text-gray-600'}`}>
                           {label}
                         </button>
                       ))}
@@ -1389,10 +1392,11 @@ function ExpenseRow({ expense, fuelCost, numberOfDays, onChange, onRemove }: {
     if (isPD && expense.pdDays !== numberOfDays) onChange({ ...expense, pdDays: numberOfDays });
   }, [isPD, numberOfDays]);
 
+  type ChargeMode = 'na' | 'included' | 'not_included' | 'recharge';
   const displayAmount = isFuel ? (fuelCost || 0) : expense.amount;
-  const mode: 'included' | 'not_included' | 'recharge' = expense.chargeMode ?? (expense.included ? 'included' : 'not_included');
+  const mode: ChargeMode = (expense.chargeMode as ChargeMode) ?? (expense.included ? 'included' : 'not_included');
   const labelColour = mode === 'included' ? 'text-gray-900' : mode === 'recharge' ? 'text-amber-700' : 'text-gray-400';
-  const setMode = (m: 'included' | 'not_included' | 'recharge') => onChange({ ...expense, chargeMode: m, included: m === 'included' });
+  const setMode = (m: ChargeMode) => onChange({ ...expense, chargeMode: m, included: m === 'included' });
   const radioName = `charge-${expense.id}`;
 
   return (
@@ -1404,24 +1408,24 @@ function ExpenseRow({ expense, fuelCost, numberOfDays, onChange, onRemove }: {
           <span className={`text-sm ${labelColour}`}>{expense.label}</span>
         )}
       </div>
-      <div className="w-20">
+      <div className="w-16">
         {isFuel ? (
-          <div className="px-1.5 py-1 text-sm text-gray-500 bg-gray-50 rounded text-right">&pound;{displayAmount.toFixed(2)}</div>
+          <div className="px-1 py-1 text-xs text-gray-500 bg-gray-50 rounded text-right">&pound;{displayAmount.toFixed(2)}</div>
         ) : isPD ? (
           <div className="flex items-center gap-0.5">
-            <span className="text-gray-500 text-sm">&pound;</span>
-            <input type="number" value={expense.amount || ''} onChange={(e) => onChange({ ...expense, amount: parseFloat(e.target.value) || 0 })} min="0" className="w-11 px-1 py-1 text-sm border border-gray-200 rounded text-right" />
-            <span className="text-gray-500 text-[10px]">/day</span>
+            <span className="text-gray-500 text-xs">&pound;</span>
+            <input type="number" value={expense.amount || ''} onChange={(e) => onChange({ ...expense, amount: parseFloat(e.target.value) || 0 })} min="0" className="w-9 px-1 py-1 text-sm border border-gray-200 rounded text-right" />
+            <span className="text-gray-500 text-[10px]">/d</span>
           </div>
         ) : (
           <div className="flex items-center gap-0.5">
-            <span className="text-gray-500 text-sm">&pound;</span>
-            <input type="number" value={expense.amount || ''} onChange={(e) => onChange({ ...expense, amount: parseFloat(e.target.value) || 0 })} min="0" className="w-full px-1.5 py-1 text-sm border border-gray-200 rounded text-right" />
+            <span className="text-gray-500 text-xs">&pound;</span>
+            <input type="number" value={expense.amount || ''} onChange={(e) => onChange({ ...expense, amount: parseFloat(e.target.value) || 0 })} min="0" className="w-full px-1 py-1 text-sm border border-gray-200 rounded text-right" />
           </div>
         )}
       </div>
-      {(['included', 'not_included', 'recharge'] as const).map((m) => (
-        <div key={m} className="w-[70px] flex justify-center">
+      {(['na', 'included', 'not_included', 'recharge'] as const).map((m) => (
+        <div key={m} className="w-[62px] flex justify-center">
           <input type="radio" name={radioName} checked={mode === m} onChange={() => setMode(m)}
             className={`w-4 h-4 ${m === 'recharge' ? 'accent-amber-600' : 'accent-ooosh-600'}`} />
         </div>

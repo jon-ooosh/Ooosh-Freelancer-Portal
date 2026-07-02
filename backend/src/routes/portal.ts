@@ -28,6 +28,80 @@ import { autoDispatchJob } from '../services/auto-dispatch';
 // can't attribute interactions directly to them).
 const SYSTEM_USER_ID = '00000000-0000-0000-0000-000000000000';
 
+// ── Freelancer "your money on this job" derivation ──────────────────────────
+// Turns a quote's three-state expense lines into plain, freelancer-facing
+// instructions so it's crystal clear what they pay, claim, and get paid — and
+// so we know what to expect when their invoice lands. Per Diem ALWAYS produces
+// a line (incl. "No Per Diems on this job"); other lines only when they apply.
+type CrewMoneyTone = 'ooosh' | 'client' | 'claim' | 'none';
+interface CrewMoneyLine { label: string; message: string; tone: CrewMoneyTone }
+interface CrewMoney { perDiem: CrewMoneyLine; expenses: CrewMoneyLine[] }
+
+const CREW_EXPENSE_LABELS: Record<string, string> = {
+  fuel: 'Fuel', parking: 'Parking', tolls: 'Tolls / crossings',
+  transport_out: 'Travel (outbound)', transport_back: 'Travel (return)',
+  hotel: 'Hotel', other: 'Other',
+};
+const CREW_FRONTED = new Set(['fuel', 'parking', 'tolls']);       // freelancer pays, claims on invoice
+const CREW_PREBOOKED = new Set(['transport_out', 'transport_back', 'hotel']); // Ooosh arranges/pays up front
+
+function crewExpenseMode(e: any): 'included' | 'not_included' | 'recharge' | 'na' {
+  if (e?.chargeMode) return e.chargeMode;
+  return e?.includedInCharge === false ? 'not_included' : 'included';
+}
+
+function deriveCrewMoney(rawExpenses: unknown): CrewMoney {
+  let arr: any[] = [];
+  try {
+    arr = Array.isArray(rawExpenses) ? rawExpenses
+      : (typeof rawExpenses === 'string' && rawExpenses ? JSON.parse(rawExpenses) : []);
+  } catch { arr = []; }
+
+  // Per Diem — always a line.
+  const pd = arr.find((e) => e?.type === 'pd');
+  const pdMode = pd ? crewExpenseMode(pd) : 'na';
+  const pdAmt = Number(pd?.amount || 0);
+  const pdAmtStr = pdAmt > 0 ? ` (£${pdAmt.toFixed(0)})` : '';
+  let perDiem: CrewMoneyLine;
+  if (!pd || pdMode === 'na') {
+    perDiem = { label: 'Per Diem', message: 'No Per Diems on this job.', tone: 'none' };
+  } else if (pdMode === 'not_included') {
+    perDiem = { label: 'Per Diem', message: `The client is paying your Per Diem${pdAmtStr} directly.`, tone: 'client' };
+  } else {
+    perDiem = { label: 'Per Diem', message: `We're paying your Per Diem${pdAmtStr} — please include it on your invoice to us.`, tone: 'ooosh' };
+  }
+
+  // Other expense lines — only when they apply (mode ≠ na and amount > 0).
+  const expenses: CrewMoneyLine[] = [];
+  for (const e of arr) {
+    const type = String(e?.type || '');
+    if (type === 'pd') continue;
+    const mode = crewExpenseMode(e);
+    if (mode === 'na') continue;
+    if (!(Number(e?.amount || 0) > 0)) continue;
+    const label = CREW_EXPENSE_LABELS[type] || (e?.description ? String(e.description) : 'Other');
+    const lower = label.toLowerCase();
+    let message: string; let tone: CrewMoneyTone;
+    if (mode === 'not_included') {
+      message = CREW_PREBOOKED.has(type)
+        ? `The client is arranging & paying the ${lower} directly.`
+        : `The client covers ${lower} directly — nothing for you to pay or claim.`;
+      tone = 'client';
+    } else if (CREW_FRONTED.has(type)) {
+      message = `Pay for the ${lower} yourself and include it on your invoice to us.`;
+      tone = 'claim';
+    } else if (CREW_PREBOOKED.has(type)) {
+      message = `${label} is booked & paid by Ooosh — nothing for you to arrange.`;
+      tone = 'ooosh';
+    } else {
+      message = `Include the ${lower} on your invoice to us.`;
+      tone = 'claim';
+    }
+    expenses.push({ label, message, tone });
+  }
+  return { perDiem, expenses };
+}
+
 const router = Router();
 
 // ── Portal auth middleware (separate from OP staff auth) ──────────────
@@ -1900,6 +1974,8 @@ function formatJobForPortal(row: Record<string, unknown>) {
           .reduce((sum: number, e: any) => sum + (Number(e.amount) || 0), 0);
       } catch { return 0; }
     })(),
+    // Plain-English "your money on this job" for the freelancer (fee is separate).
+    crewMoney: deriveCrewMoney(row.expenses),
   };
 
   if (isCrew) {
