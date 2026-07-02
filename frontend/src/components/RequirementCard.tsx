@@ -839,6 +839,11 @@ export default function RequirementCard({
                     <div className={detail?.needs_review ? 'text-amber-700' : 'text-gray-500'}>{summary}</div>
                   )}
 
+                  {/* Daytime-only / needs-review: no auto sitter, but staff can force cover on the roster */}
+                  {(detail?.daytime_only || detail?.needs_review) && (
+                    <Link to="/operations/studio-sitters" className="text-xs text-purple-600 hover:text-purple-800 font-medium">＋ Call a sitter for a day →</Link>
+                  )}
+
                   {/* Evening chips — click to assign/reassign a sitter (one covers the site per night) */}
                   {sitterNights.length > 0 && (
                     <div className="flex flex-wrap gap-1">
