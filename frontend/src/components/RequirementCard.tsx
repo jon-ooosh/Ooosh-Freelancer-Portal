@@ -251,6 +251,44 @@ export default function RequirementCard({
   const [excessInfo, setExcessInfo] = useState<ExcessInfo | null>(null);
   // Carnet — read-only reflection of the real lifecycle (managed in Operations)
   const [carnet, setCarnet] = useState<{ id: string; mode: string; status: string } | null>(null);
+  // Rehearsal — per-evening studio-sitter coverage (managed on the Studio Sitters roster)
+  const [rehearsalCoverage, setRehearsalCoverage] = useState<Record<string, { status: string; assignee: { id: string; name: string } | null }>>({});
+  const [rehearsalSitters, setRehearsalSitters] = useState<{ id: string; name: string; is_studio_sitter: boolean }[]>([]);
+  const [assignPickerDate, setAssignPickerDate] = useState<string | null>(null);
+  const [rehearsalPickerSearch, setRehearsalPickerSearch] = useState('');
+  const [rehearsalBusy, setRehearsalBusy] = useState(false);
+
+  const loadRehearsalCoverage = () => {
+    if (!jobId) return;
+    api.get<{ data: { date: string; status: string; assignee: { id: string; name: string } | null }[] }>(`/studio-sitters/job/${jobId}/coverage`)
+      .then(d => {
+        const map: Record<string, { status: string; assignee: { id: string; name: string } | null }> = {};
+        (d?.data ?? []).forEach(e => { map[e.date] = { status: e.status, assignee: e.assignee }; });
+        setRehearsalCoverage(map);
+      })
+      .catch(() => {});
+  };
+
+  async function assignRehearsalSitter(date: string, personId: string) {
+    setRehearsalBusy(true);
+    try {
+      await api.post('/studio-sitters/assign', { date, person_id: personId });
+      setAssignPickerDate(null);
+      setRehearsalPickerSearch('');
+      loadRehearsalCoverage();
+      onReload?.();
+    } catch { /* surfaced elsewhere */ } finally { setRehearsalBusy(false); }
+  }
+
+  async function clearRehearsalSitter(date: string) {
+    setRehearsalBusy(true);
+    try {
+      await api.post('/studio-sitters/unassign', { date });
+      setAssignPickerDate(null);
+      loadRehearsalCoverage();
+      onReload?.();
+    } catch { /* noop */ } finally { setRehearsalBusy(false); }
+  }
 
   // Suspension marker — set by the derivation engine when the hire chain is
   // not required on this job (every van slot is Van & Driver, or the job is
@@ -297,6 +335,13 @@ export default function RequirementCard({
         .then(d => setCarnet(d?.data || null))
         .catch(() => {});
     }
+    if (req.requirement_type === 'rehearsal' && jobId) {
+      loadRehearsalCoverage();
+      api.get<{ data: { id: string; name: string; is_studio_sitter: boolean }[] }>('/studio-sitters/sitters')
+        .then(d => setRehearsalSitters(d?.data ?? []))
+        .catch(() => {});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [req.requirement_type, hhJobNumber, jobId]);
 
   // ── Hire Form Email ────────────────────────────────────────────────
@@ -794,15 +839,52 @@ export default function RequirementCard({
                     <div className={detail?.needs_review ? 'text-amber-700' : 'text-gray-500'}>{summary}</div>
                   )}
 
-                  {/* Evening chips — one sitter covers the site per night */}
+                  {/* Evening chips — click to assign/reassign a sitter (one covers the site per night) */}
                   {sitterNights.length > 0 && (
                     <div className="flex flex-wrap gap-1">
-                      {sitterNights.map((e) => (
-                        <span key={e.date} className="px-2 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200">
-                          {formatEveningDate(e.date)} · unassigned
-                        </span>
-                      ))}
+                      {sitterNights.map((e) => {
+                        const assignee = rehearsalCoverage[e.date]?.assignee;
+                        return (
+                          <button key={e.date} type="button" disabled={rehearsalBusy}
+                            onClick={() => { setAssignPickerDate(assignPickerDate === e.date ? null : e.date); setRehearsalPickerSearch(''); }}
+                            title="Assign a studio sitter"
+                            className={`px-2 py-0.5 rounded border transition-colors disabled:opacity-50 ${assignee ? 'bg-green-50 text-green-700 border-green-200 hover:bg-green-100' : 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100'} ${assignPickerDate === e.date ? 'ring-1 ring-purple-400' : ''}`}>
+                            {formatEveningDate(e.date)} · {assignee ? assignee.name : 'unassigned'}
+                          </button>
+                        );
+                      })}
                     </div>
+                  )}
+
+                  {/* Inline sitter picker for the clicked evening */}
+                  {assignPickerDate && (
+                    <div className="mt-1 p-2 rounded-lg border border-purple-200 bg-purple-50/40 max-w-sm">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-gray-700 font-medium">Assign — {formatEveningDate(assignPickerDate)}</span>
+                        <button onClick={() => setAssignPickerDate(null)} className="text-gray-400 hover:text-gray-600">✕</button>
+                      </div>
+                      <input autoFocus value={rehearsalPickerSearch} onChange={(ev) => setRehearsalPickerSearch(ev.target.value)}
+                        placeholder="Search approved freelancers…" className="w-full px-2 py-1 border border-gray-300 rounded text-xs mb-1" />
+                      {rehearsalCoverage[assignPickerDate]?.assignee && (
+                        <button onClick={() => clearRehearsalSitter(assignPickerDate)} disabled={rehearsalBusy}
+                          className="w-full text-left px-2 py-1 rounded text-xs text-red-600 hover:bg-red-50 disabled:opacity-50">Clear sitter</button>
+                      )}
+                      <div className="max-h-40 overflow-y-auto">
+                        {rehearsalSitters
+                          .filter((s) => !rehearsalPickerSearch.trim() || s.name.toLowerCase().includes(rehearsalPickerSearch.toLowerCase()))
+                          .map((s) => (
+                            <button key={s.id} disabled={rehearsalBusy} onClick={() => assignRehearsalSitter(assignPickerDate, s.id)}
+                              className="w-full text-left px-2 py-1 rounded text-xs hover:bg-purple-100 flex items-center gap-1.5 disabled:opacity-50">
+                              {s.is_studio_sitter && <span title="Studio Sitter tag">⭐</span>}{s.name}
+                            </button>
+                          ))}
+                        {rehearsalSitters.length === 0 && <div className="text-xs text-gray-400 px-2 py-1">No approved freelancers.</div>}
+                      </div>
+                    </div>
+                  )}
+
+                  {sitterNights.length > 0 && (
+                    <Link to="/operations/studio-sitters" className="text-xs text-purple-600 hover:text-purple-800 font-medium">Manage on Studio Sitters roster →</Link>
                   )}
                 </div>
               );
