@@ -1628,7 +1628,6 @@ export default function JobDetailPage() {
   const [pushingStatusToHH, setPushingStatusToHH] = useState(false);
   const [prepChecklistKey, setPrepChecklistKey] = useState(0);
   const [internalToggling, setInternalToggling] = useState(false);
-  const [rrcToggling, setRrcToggling] = useState(false);
   const editNameRef = useRef<HTMLInputElement>(null);
   const editHHRef = useRef<HTMLInputElement>(null);
   const clientSearchRef = useRef<HTMLDivElement>(null);
@@ -2356,32 +2355,6 @@ export default function JobDetailPage() {
       alert(err?.message || 'Failed to update internal flag');
     } finally {
       setInternalToggling(false);
-    }
-  }
-
-  /** Toggle "recharge running costs" — fuel/parking/etc. billed to the client at
-   *  actual + markup post-hire. The lightweight switch (per-quote expense lines
-   *  are the rich entry). Lights the standing card + the cost auto-inherit. */
-  async function toggleRechargeRunningCosts() {
-    if (!job || !id) return;
-    const turningOn = !job.recharge_running_costs;
-    if (turningOn) {
-      const ok = window.confirm(
-        'Mark this job as "recharge running costs"?\n\n' +
-        'Use for van+driver / runner jobs where fuel, parking, tolls etc. are billed back to the client after the hire.\n\n' +
-        'New running-cost costs logged on this job will default to recharge (actual + 20%), and a "Recharge running costs" card surfaces at check-in.'
-      );
-      if (!ok) return;
-    }
-    setRrcToggling(true);
-    try {
-      await api.patch(`/hirehop/jobs/${id}/recharge-running-costs`, { rechargeRunningCosts: turningOn });
-      await loadJob();
-      setPrepChecklistKey(k => k + 1);
-    } catch (err: any) {
-      alert(err?.message || 'Failed to update recharge flag');
-    } finally {
-      setRrcToggling(false);
     }
   }
 
@@ -3808,25 +3781,6 @@ export default function JobDetailPage() {
             >
               <span>🔧</span>
               <span>{internalToggling ? 'Saving…' : job.is_internal ? 'Internal Job ✓' : 'Mark Internal'}</span>
-            </button>
-            {/* Recharge running costs toggle — fuel/parking/etc. billed to the
-                client at actual + markup post-hire (runner / van+driver jobs). */}
-            <button
-              onClick={toggleRechargeRunningCosts}
-              disabled={rrcToggling}
-              className={
-                job.recharge_running_costs
-                  ? 'w-full inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-amber-400 bg-amber-100 rounded-lg hover:bg-amber-200 text-amber-800 font-medium disabled:opacity-50 transition-colors'
-                  : 'w-full inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-500 disabled:opacity-50 transition-colors'
-              }
-              title={
-                job.recharge_running_costs
-                  ? 'Running costs are recharged to the client post-hire (actual + markup). Click to turn off.'
-                  : 'Mark this job as recharging its running costs (fuel/parking/etc.) to the client post-hire'
-              }
-            >
-              <span>⛽</span>
-              <span>{rrcToggling ? 'Saving…' : job.recharge_running_costs ? 'Recharge Costs ✓' : 'Recharge Costs'}</span>
             </button>
           </div>
         </div>
