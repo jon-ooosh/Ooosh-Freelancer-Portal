@@ -14,7 +14,7 @@ import BacklineMatcherModal from '../components/BacklineMatcherModal';
 import RequirementCard from '../components/RequirementCard';
 import type { JobRequirement } from '../components/RequirementCard';
 import ExcessGateBanner from '../components/ExcessGateBanner';
-import ExcessPaymentModal from '../components/ExcessPaymentModal';
+import ExcessPaymentModal, { computeHireDays } from '../components/ExcessPaymentModal';
 import OohReturnModal from '../components/OohReturnModal';
 import JobOohReturns from '../components/JobOohReturns';
 import AddToHireModal, { type AddToHireCandidate } from '../components/AddToHireModal';
@@ -5266,6 +5266,7 @@ export default function JobDetailPage() {
         <ExcessPaymentModal
           excess={excessModalRecord}
           initialAction={excessModalInitialAction}
+          hireDays={computeHireDays(job)}
           onClose={() => { setExcessModalRecord(null); setExcessModalInitialAction(undefined); }}
           onUpdated={() => { loadVehicleAssignments(); loadCancelledExcessHeld(); }}
         />
