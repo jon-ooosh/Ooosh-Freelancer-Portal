@@ -2535,6 +2535,17 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
         );
         console.log(`[money] Excess ${resolvedExcessId} set to pre_auth (£${amount} held, expires in 5 days)`);
       } else {
+        // Resolve the canonical PI in JS: prefer the explicit PI, else lift it
+        // from payment_reference when it's a pi_ value. This populates the
+        // column at collection time so a later Stripe reimbursement can fire
+        // via the API (jobs 15433/15489/… — Jun 2026). MUST stay JS-side:
+        // the first cut did the fallback in SQL by reusing $3 in both
+        // `payment_reference = $3` (varchar) and `$3 LIKE 'pi_%'` (text) —
+        // Postgres deduces conflicting parameter types and rejects the whole
+        // UPDATE with 42P08, which 500'd EVERY straight-charge excess
+        // payment-event from deploy until job 16085 surfaced it (1 Jul 2026).
+        const resolvedPi = stripe_payment_intent
+          || (payment_reference && String(payment_reference).startsWith('pi_') ? payment_reference : null);
         const chargeUpdate = await query(
           `UPDATE job_excess SET
             excess_amount_taken = COALESCE(excess_amount_taken, 0) + $1,
@@ -2544,20 +2555,11 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
             END,
             payment_method = $2,
             payment_reference = $3,
-            -- Populate the canonical PI column at collection time so a later
-            -- Stripe reimbursement can fire via the API. Prefer the explicit PI,
-            -- else lift it from payment_reference when it's a pi_ value. Without
-            -- this, straight-charge excesses landed with a NULL column and the
-            -- reimburse path silently no-op'd (jobs 15433/15489/… — Jun 2026).
-            stripe_payment_intent_id = COALESCE(
-              stripe_payment_intent_id,
-              $5,
-              CASE WHEN $3 LIKE 'pi_%' THEN $3 ELSE NULL END
-            ),
+            stripe_payment_intent_id = COALESCE(stripe_payment_intent_id, $5),
             payment_date = NOW(),
             updated_at = NOW()
           WHERE id = $4`,
-          [amount, effectiveMethod, payment_reference || null, resolvedExcessId, stripe_payment_intent || null]
+          [amount, effectiveMethod, payment_reference || null, resolvedExcessId, resolvedPi]
         );
         // Belt-and-braces: the id was validated against this job above, so a
         // 0-row update means something removed the record mid-request. Shout
