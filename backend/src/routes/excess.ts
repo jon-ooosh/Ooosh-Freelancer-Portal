@@ -49,6 +49,7 @@ const updateExcessSchema = z.object({
   xero_contact_id: z.string().max(100).nullable().optional(),
   xero_contact_name: z.string().max(200).nullable().optional(),
   client_name: z.string().max(200).nullable().optional(),
+  held_on_account: z.boolean().optional(),
 });
 
 // Excess payment schema.
@@ -1225,10 +1226,13 @@ router.post('/:id/payment', validate(paymentSchema), async (req: AuthRequest, re
              WHERE id = $2 AND hh_deposit_id IS NULL`,
             [prevRow.hh_deposit_id, id]
           );
-          // Mark the previous record as rolled_over (terminal — cash has moved on).
+          // Mark the previous record as rolled_over (terminal — cash has moved
+          // on to this child). Clear held_on_account: it's no longer parked, it's
+          // been applied to a real hire.
           await query(
             `UPDATE job_excess
              SET excess_status = 'rolled_over',
+                 held_on_account = FALSE,
                  updated_at = NOW()
              WHERE id = $1`,
             [prevRow.id]
@@ -2562,6 +2566,7 @@ router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSch
     const result = await query(
       `UPDATE job_excess SET
         excess_status = $1,
+        held_on_account = FALSE,
         reimbursement_amount = COALESCE(reimbursement_amount, 0) + $2,
         reimbursement_date = NOW(),
         reimbursement_method = $3,
@@ -2764,6 +2769,7 @@ router.post('/:id/mark-externally-resolved', validate(externallyResolvedSchema),
         excess_amount_taken = $1,
         reimbursement_amount = $1,
         excess_status = 'reimbursed',
+        held_on_account = FALSE,
         payment_method = $2,
         payment_reference = $3,
         payment_date = COALESCE(payment_date, NOW()),

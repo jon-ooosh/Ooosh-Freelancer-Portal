@@ -826,6 +826,10 @@ export interface JobExcess {
   dispatch_override_by: string | null;
   dispatch_override_at: string | null;
   suggested_collection_method: 'payment' | 'pre_auth';
+  // "Held on account" (migration 152): parked excess deliberately held for the
+  // client's future hire. Status stays 'taken' (counted, visible, actionable);
+  // this flag just marks intent + drives the badge. Not a status.
+  held_on_account?: boolean;
   person_id: string | null;
   notes: string | null;
   // HH deposit reconciliation (migration 039)

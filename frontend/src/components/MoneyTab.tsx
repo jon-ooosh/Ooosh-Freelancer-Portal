@@ -827,6 +827,11 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                         HH linked
                       </span>
                     )}
+                    {record.held_on_account && (record.excess_status === 'taken' || record.excess_status === 'partially_paid') && (
+                      <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-700" title="Deliberately held on account for the client's next hire — still held, refundable, or applicable to a future hire.">
+                        Held on account
+                      </span>
+                    )}
                     {record.dispatch_override && (
                       <span className="text-[10px] text-amber-600 font-medium">overridden</span>
                     )}

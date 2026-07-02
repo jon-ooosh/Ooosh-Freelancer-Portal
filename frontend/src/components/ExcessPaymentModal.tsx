@@ -656,8 +656,14 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
           break;
         }
         case 'rollover':
+          // "Hold on account for next hire" — keep the money exactly where it is
+          // (status stays 'taken', so it's still counted in Total Held, visible,
+          // and fully actionable). Just toggle the intent flag. It becomes
+          // 'rolled_over' only when actually applied to a real next hire (the
+          // apply-forward flow). Never bury it behind a status change with no
+          // destination (migration 152 / job 16099 incident).
           await api.put(`/excess/${excess.id}`, {
-            excess_status: 'rolled_over',
+            held_on_account: !excess.held_on_account,
           });
           break;
         case 'rollover_apply': {
@@ -829,7 +835,11 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
   if ((s === 'taken' || s === 'partially_paid') && amountHeld > 0) {
     availableActions.push({ action: 'claim', label: 'Apply to Invoice (claim)', icon: '!' });
     availableActions.push({ action: 'reimburse', label: 'Reimburse', icon: '<' });
-    availableActions.push({ action: 'rollover', label: 'Roll Over to Next Hire', icon: '>' });
+    availableActions.push({
+      action: 'rollover',
+      label: excess.held_on_account ? 'Remove Held-on-Account' : 'Hold on Account for Next Hire',
+      icon: '>',
+    });
   }
   // Multi-event model: even after partial reimbursement, more claims can still
   // be applied as long as held balance remains. Same for reimbursing the
@@ -1682,11 +1692,22 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
 
             {action === 'rollover' && (
               <div className="space-y-3">
-                <h3 className="text-sm font-semibold text-gray-900">Roll Over to Next Hire</h3>
-                <p className="text-xs text-gray-500">
-                  Mark £{Number(excess.excess_amount_taken || 0).toFixed(2)} as held on account for the client's next hire.
-                  This amount will appear as a credit on their next excess requirement.
-                </p>
+                {excess.held_on_account ? (
+                  <>
+                    <h3 className="text-sm font-semibold text-gray-900">Remove Held-on-Account</h3>
+                    <p className="text-xs text-gray-500">
+                      Clear the "held on account" earmark on this £{Number(excess.excess_amount_taken || 0).toFixed(2)}. It stays exactly where it is (still held), just no longer flagged as parked for a future hire — so it'll show up as excess awaiting resolution again.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <h3 className="text-sm font-semibold text-gray-900">Hold on Account for Next Hire</h3>
+                    <p className="text-xs text-gray-500">
+                      Mark £{Number(excess.excess_amount_taken || 0).toFixed(2)} as <strong>held on account</strong> for the client's next hire.
+                      It stays here on this job — still shown as held, still refundable — and is offered up as a credit whenever their next hire is booked. Nothing moves until you apply it to a real hire.
+                    </p>
+                  </>
+                )}
               </div>
             )}
 
