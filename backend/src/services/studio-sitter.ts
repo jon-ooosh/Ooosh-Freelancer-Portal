@@ -15,6 +15,27 @@ import { query, getClient } from '../config/database';
 import type { RehearsalDetail } from './rehearsal-plan';
 
 const STUDIO_SITTER_TAG = 'studio sitter'; // matched case-insensitively
+export const STUDIO_SITTER_DEFAULT_FEE_KEY = 'studio_sitter_default_fee';
+
+/** Default per-night sitter fee (stored in system_settings). Applied to new
+ *  assignments so it can surface in the freelancer portal. Read directly (no
+ *  cache) so a fee change takes effect immediately. Null if unset/invalid. */
+export async function getDefaultSitterFee(): Promise<number | null> {
+  const r = await query(`SELECT value FROM system_settings WHERE key = $1`, [STUDIO_SITTER_DEFAULT_FEE_KEY]);
+  const v = r.rows[0]?.value;
+  const n = v != null && v !== '' ? Number(v) : NaN;
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Set (or clear) the default sitter fee. */
+export async function setDefaultSitterFee(fee: number | null): Promise<void> {
+  await query(
+    `INSERT INTO system_settings (key, value, category, updated_at)
+     VALUES ($1, $2, 'studio_sitter', NOW())
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+    [STUDIO_SITTER_DEFAULT_FEE_KEY, fee != null ? String(fee) : '']
+  );
+}
 
 export interface RosterJobEntry {
   job_id: string;
@@ -228,8 +249,10 @@ async function ensureShift(
   return res.rows[0].id;
 }
 
-/** Assign (or reassign) a sitter to an evening. Cancels any existing live row. */
-export async function assignSitter(date: string, personId: string, assignedBy: string | null): Promise<string> {
+/** Assign (or reassign) a sitter to an evening. Cancels any existing live row.
+ *  Fee defaults to the configured default sitter fee (for portal display). */
+export async function assignSitter(date: string, personId: string, assignedBy: string | null, fee?: number | null): Promise<string> {
+  const resolvedFee = fee != null ? fee : await getDefaultSitterFee();
   const client = await getClient();
   try {
     await client.query('BEGIN');
@@ -240,12 +263,13 @@ export async function assignSitter(date: string, personId: string, assignedBy: s
       [shiftId]
     );
     await client.query(
-      `INSERT INTO studio_sitter_shift_assignments (shift_id, person_id, status, assigned_by)
-       VALUES ($1, $2, 'assigned', $3)`,
-      [shiftId, personId, assignedBy]
+      `INSERT INTO studio_sitter_shift_assignments (shift_id, person_id, status, assigned_by, fee)
+       VALUES ($1, $2, 'assigned', $3, $4)`,
+      [shiftId, personId, assignedBy, resolvedFee]
     );
     await client.query(`UPDATE studio_sitter_shifts SET status='assigned', updated_at=NOW() WHERE id=$1`, [shiftId]);
     await client.query('COMMIT');
+    await syncRehearsalStatusForDate(date);
     return shiftId;
   } catch (e) {
     await client.query('ROLLBACK');
@@ -270,6 +294,37 @@ export async function unassignSitter(date: string): Promise<void> {
     );
     await client.query(`UPDATE studio_sitter_shifts SET status='needed', updated_at=NOW() WHERE id=$1`, [shiftId]);
     await client.query('COMMIT');
+    await syncRehearsalStatusForDate(date);
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+/** Remove a manual-override cover shift (the only shift kind staff can delete —
+ *  derived needed nights can't be deleted, they're needed). Returns false if
+ *  the date has no cancellable manual shift. */
+export async function removeManualCover(date: string): Promise<boolean> {
+  const client = await getClient();
+  try {
+    await client.query('BEGIN');
+    const r = await client.query(
+      `SELECT id, manual_override FROM studio_sitter_shifts WHERE shift_date=$1 AND status <> 'cancelled'`,
+      [date]
+    );
+    if (r.rows.length === 0 || !r.rows[0].manual_override) { await client.query('ROLLBACK'); return false; }
+    const shiftId = r.rows[0].id;
+    await client.query(
+      `UPDATE studio_sitter_shift_assignments SET status='cancelled', updated_at=NOW()
+       WHERE shift_id=$1 AND status IN ('assigned','confirmed')`,
+      [shiftId]
+    );
+    await client.query(`UPDATE studio_sitter_shifts SET status='cancelled', updated_at=NOW() WHERE id=$1`, [shiftId]);
+    await client.query('COMMIT');
+    await syncRehearsalStatusForDate(date);
+    return true;
   } catch (e) {
     await client.query('ROLLBACK');
     throw e;
@@ -288,14 +343,50 @@ export async function createManualShift(date: string, reason: string | null, cre
   }
 }
 
-/** Bulk-assign one person to every unassigned needed evening in [from,to]. */
-export async function bulkAssign(from: string, to: string, personId: string, assignedBy: string | null): Promise<number> {
-  const roster = await getRoster(from, to);
-  const targets = roster.filter((r) => r.needs_sitter && !r.assignee).map((r) => r.date);
-  for (const date of targets) {
+/** Assign one person to a specific set of evenings (staff-selected). */
+export async function assignMany(dates: string[], personId: string, assignedBy: string | null): Promise<number> {
+  const unique = Array.from(new Set(dates));
+  for (const date of unique) {
     await assignSitter(date, personId, assignedBy);
   }
-  return targets.length;
+  return unique.length;
+}
+
+// ── Coverage-driven requirement status ─────────────────────────────────────
+// The rehearsal requirement's status is authoritative from coverage between
+// not_started / in_progress / done (like excess_resolve). 'blocked' (Problem) is
+// staff-set and left alone. Winds forward as sitters are assigned and BACK when a
+// date is added or a sitter drops out.
+
+/** Recompute + set the rehearsal requirement status for one job from coverage. */
+export async function syncRehearsalRequirementStatus(jobId: string): Promise<void> {
+  const coverage = await getJobCoverage(jobId);
+  // No sitter-needed evenings (daytime-only / needs_review) — leave status manual
+  // (that card is about room prep, not sitter cover).
+  if (coverage.length === 0) return;
+  const needed = coverage.length;
+  const assigned = coverage.filter((c) => c.assignee).length;
+  const status = assigned === 0 ? 'not_started' : assigned >= needed ? 'done' : 'in_progress';
+  await query(
+    `UPDATE job_requirements SET status=$1, updated_at=NOW()
+     WHERE job_id=$2 AND requirement_type='rehearsal' AND phase='pre_hire' AND status <> 'blocked'`,
+    [status, jobId]
+  );
+}
+
+/** Resync every active rehearsal job whose sitter-needed evenings include a date. */
+export async function syncRehearsalStatusForDate(date: string): Promise<void> {
+  const res = await query(
+    `SELECT id FROM jobs
+     WHERE is_deleted = false
+       AND pipeline_status NOT IN ('lost','cancelled')
+       AND COALESCE(is_internal, false) = false
+       AND hh_derived_flags->'rehearsal_detail'->'evenings' @> $1::jsonb`,
+    [JSON.stringify([{ date, sitter_needed: true }])]
+  );
+  for (const row of res.rows) {
+    await syncRehearsalRequirementStatus(row.id);
+  }
 }
 
 export interface SitterOption {

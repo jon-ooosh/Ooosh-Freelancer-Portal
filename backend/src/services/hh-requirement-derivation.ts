@@ -22,6 +22,7 @@ import { hhBroker } from './hirehop-broker';
 import { calculateVatAdjustment } from './vat-adjustment';
 import { BACKLINE_CATEGORY_IDS } from './backline-categories';
 import { computeRehearsalDetail, buildRehearsalSummary, type RehearsalDetail } from './rehearsal-plan';
+import { syncRehearsalRequirementStatus } from './studio-sitter';
 
 // ── HH Category IDs ──────────────────────────────────────────────────────
 // Source: HireHop categories_list.php, verified 9 Apr 2026
@@ -916,6 +917,15 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
   // ── Seat availability (read-only, outside transaction) ──
   if (flags.seat_config && flags.has_vehicle) {
     result.seatAvailability = await checkSeatAvailability(flags, items);
+  }
+
+  // ── Wind the rehearsal requirement status from sitter coverage ──
+  // Coverage-authoritative: adding/removing a sitter-needed evening re-derives
+  // the status (e.g. a new date winds 'done' back to 'in_progress'). Best-effort.
+  if (flags.has_rehearsal) {
+    try { await syncRehearsalRequirementStatus(jobId); } catch (err) {
+      console.error(`[HH Derive] rehearsal status sync failed for job ${jobId}:`, err);
+    }
   }
 
   return result;
