@@ -3062,6 +3062,8 @@ router.get('/by-person/:personId', async (req: AuthRequest, res: Response) => {
   try {
     const { personId } = req.params;
 
+    // held_amount from v_excess_held — canonical "held" (migration 109), so the
+    // Excess History summary doesn't double-count rolled-over records.
     const result = await query(
       `SELECT je.*,
         vha.hirehop_job_name,
@@ -3069,12 +3071,14 @@ router.get('/by-person/:personId', async (req: AuthRequest, res: Response) => {
         vha.hire_end,
         fv.reg AS vehicle_reg,
         d.full_name AS driver_name,
-        j.job_name
+        j.job_name,
+        COALESCE(h.held_amount, 0) AS held_amount
       FROM job_excess je
       LEFT JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
       LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
       LEFT JOIN drivers d ON d.id = vha.driver_id
       LEFT JOIN jobs j ON j.id = je.job_id
+      LEFT JOIN v_excess_held h ON h.excess_id = je.id
       WHERE je.person_id = $1
          OR vha.driver_id IN (SELECT id FROM drivers WHERE person_id = $1)
       ORDER BY je.created_at DESC`,
@@ -3086,6 +3090,7 @@ router.get('/by-person/:personId', async (req: AuthRequest, res: Response) => {
     const totalTaken = records.reduce((sum: number, r: any) => sum + parseFloat(r.excess_amount_taken || 0), 0);
     const totalClaimed = records.reduce((sum: number, r: any) => sum + parseFloat(r.claim_amount || 0), 0);
     const totalReimbursed = records.reduce((sum: number, r: any) => sum + parseFloat(r.reimbursement_amount || 0), 0);
+    const balanceHeld = records.reduce((sum: number, r: any) => sum + parseFloat(r.held_amount || 0), 0);
     const pendingCount = records.filter((r: any) => r.excess_status === 'needed' || r.excess_status === 'pending').length;
 
     res.json({
@@ -3094,7 +3099,7 @@ router.get('/by-person/:personId', async (req: AuthRequest, res: Response) => {
         total_taken: totalTaken,
         total_claimed: totalClaimed,
         total_reimbursed: totalReimbursed,
-        balance_held: totalTaken - totalClaimed - totalReimbursed,
+        balance_held: balanceHeld,
         pending_count: pendingCount,
       },
       history: records,
@@ -3111,7 +3116,12 @@ router.get('/by-org/:orgId', async (req: AuthRequest, res: Response) => {
   try {
     const { orgId } = req.params;
 
-    // Find excess records where the job's client org matches, or xero_contact matches org's external ID
+    // Find excess records where the job's client org matches, or xero_contact matches org's external ID.
+    // `held_amount` comes from the canonical v_excess_held view — the SINGLE source of
+    // "excess actually held" (migration 109). It excludes rolled_over / released /
+    // not_required, so a rolled-forward £1,200 is NOT counted on both the old and new
+    // record. Summing excess_amount_taken directly (the old behaviour) double-counted
+    // rollovers and produced a phantom "client has £X on account" on the gate banner.
     const result = await query(
       `SELECT je.*,
         vha.hirehop_job_name,
@@ -3119,12 +3129,14 @@ router.get('/by-org/:orgId', async (req: AuthRequest, res: Response) => {
         vha.hire_end,
         fv.reg AS vehicle_reg,
         d.full_name AS driver_name,
-        j.job_name
+        j.job_name,
+        COALESCE(h.held_amount, 0) AS held_amount
       FROM job_excess je
       LEFT JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
       LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
       LEFT JOIN drivers d ON d.id = vha.driver_id
       LEFT JOIN jobs j ON j.id = je.job_id
+      LEFT JOIN v_excess_held h ON h.excess_id = je.id
       WHERE j.client_id = $1
          OR je.xero_contact_id IN (
            SELECT external_id FROM external_id_map
@@ -3138,6 +3150,8 @@ router.get('/by-org/:orgId', async (req: AuthRequest, res: Response) => {
     const totalTaken = records.reduce((sum: number, r: any) => sum + parseFloat(r.excess_amount_taken || 0), 0);
     const totalClaimed = records.reduce((sum: number, r: any) => sum + parseFloat(r.claim_amount || 0), 0);
     const totalReimbursed = records.reduce((sum: number, r: any) => sum + parseFloat(r.reimbursement_amount || 0), 0);
+    // Canonical held — matches /money/excess and client_excess_ledger.balance_held.
+    const balanceHeld = records.reduce((sum: number, r: any) => sum + parseFloat(r.held_amount || 0), 0);
     const pendingCount = records.filter((r: any) => r.excess_status === 'needed' || r.excess_status === 'pending').length;
 
     res.json({
@@ -3146,7 +3160,7 @@ router.get('/by-org/:orgId', async (req: AuthRequest, res: Response) => {
         total_taken: totalTaken,
         total_claimed: totalClaimed,
         total_reimbursed: totalReimbursed,
-        balance_held: totalTaken - totalClaimed - totalReimbursed,
+        balance_held: balanceHeld,
         pending_count: pendingCount,
       },
       history: records,
