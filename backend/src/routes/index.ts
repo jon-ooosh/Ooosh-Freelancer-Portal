@@ -45,6 +45,7 @@ import pcnsRouter from './pcns';
 import rackPlansRouter from './rack-plans';
 import stagingRouter from './staging';
 import carnetsRouter from './carnets';
+import studioSittersRouter from './studio-sitters';
 import backlineMatcherRouter from './backline-matcher';
 import wiseRouter from './wise';
 
@@ -87,6 +88,7 @@ router.use('/pcns', pcnsRouter);  // PCN module — Penalty Charge Notice manage
 router.use('/rack-plans', rackPlansRouter);  // Rack Planner — how a rack/system is supplied (pull-only from HireHop) + public view-token
 router.use('/staging', stagingRouter);  // Staging Calculator — stock/availability/push + 3D plan short-links (embedded vanilla-JS tool)
 router.use('/carnets', carnetsRouter);  // ATA Carnet management (HH-derived item 575) — read-only in slice 1
+router.use('/studio-sitters', studioSittersRouter);  // Rehearsals — studio-sitter roster (site-evening shifts + assignment)
 router.use('/hire-forms', hireFormsRouter);
 router.use('/requirements', requirementsRouter);
 router.use('/portal', portalRouter);  // Freelancer portal — own JWT auth (not OP staff JWT)

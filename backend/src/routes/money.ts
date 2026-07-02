@@ -1365,6 +1365,13 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     if (hhExcessDeposits.length > 0 && job.id) {
       try {
         reconciliationResults = await reconcileExcessDeposits(job.id, hhExcessDeposits);
+        if (reconciliationResults.length > 0) {
+          // Money just landed on a record via auto-match — re-derive the
+          // pre-hire excess requirement card so the gate/checklist agree.
+          syncExcessRequirementStatus(job.id).catch(e =>
+            console.error('[money] syncExcessRequirementStatus failed (reconcile):', e)
+          );
+        }
       } catch (reconcileErr) {
         console.error('[money] Reconciliation failed (non-fatal):', reconcileErr);
       }
@@ -1531,10 +1538,16 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     for (const rec of excessRecords) {
       if (rec.hh_deposit_id) linkedHHDepositIds.add(rec.hh_deposit_id);
     }
-    // Also check job_payments for any HH deposit IDs linked to excess payments
+    // Also check job_payments for any HH deposit IDs linked to excess payments.
+    // Only count rows whose money actually landed on a job_excess record for
+    // this job — a dangling audit row (stale excess_id, nothing applied) must
+    // not hide the deposit from the "unmatched — link manually" banner.
     const jpLinkedResult = await query(
-      `SELECT DISTINCT hirehop_deposit_id FROM job_payments
-       WHERE job_id = $1 AND hirehop_deposit_id IS NOT NULL AND payment_type = 'excess'`,
+      `SELECT DISTINCT jp.hirehop_deposit_id
+       FROM job_payments jp
+       JOIN job_excess je ON je.id = jp.excess_id AND je.job_id = jp.job_id
+       WHERE jp.job_id = $1 AND jp.hirehop_deposit_id IS NOT NULL AND jp.payment_type = 'excess'
+         AND (COALESCE(je.excess_amount_taken, 0) > 0 OR COALESCE(je.amount_held, 0) > 0)`,
       [job.id]
     );
     for (const row of jpLinkedResult.rows) {
@@ -2431,7 +2444,28 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
     let resolvedExcessId = excess_id || null;
 
     if (effectivePaymentType === 'excess') {
-      // If no excess_id provided, try to find or create a job_excess record
+      // Validate a portal-supplied excess_id before trusting it. The Stripe
+      // checkout metadata can carry a stale record UUID (record replaced
+      // between checkout-session creation and webhook) or one belonging to a
+      // different job for the same client. Blindly UPDATEing by that id
+      // matches 0 rows — no error, 200 returned, and the money silently
+      // never lands on the record while the job_payments row (with its
+      // hh_deposit_id) suppresses the unmatched-deposit banner (job 16085,
+      // Jul 2026). Fall back to the find-or-create path instead.
+      if (resolvedExcessId) {
+        const check = await query(
+          `SELECT id FROM job_excess WHERE id = $1 AND job_id = $2`,
+          [resolvedExcessId, job.id]
+        );
+        if (check.rows.length === 0) {
+          console.warn(
+            `[money] payment-event excess_id ${resolvedExcessId} not found on job ${job.id} (HH ${job.hh_job_number}) — stale/mismatched portal metadata, falling back to find-or-create`
+          );
+          resolvedExcessId = null;
+        }
+      }
+
+      // If no (valid) excess_id, try to find or create a job_excess record
       if (!resolvedExcessId) {
         // Look for an existing job_excess record for this job. 'released' is
         // terminal (migration 087): a late/duplicate excess_pre_auth event must
@@ -2501,7 +2535,18 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
         );
         console.log(`[money] Excess ${resolvedExcessId} set to pre_auth (£${amount} held, expires in 5 days)`);
       } else {
-        await query(
+        // Resolve the canonical PI in JS: prefer the explicit PI, else lift it
+        // from payment_reference when it's a pi_ value. This populates the
+        // column at collection time so a later Stripe reimbursement can fire
+        // via the API (jobs 15433/15489/… — Jun 2026). MUST stay JS-side:
+        // the first cut did the fallback in SQL by reusing $3 in both
+        // `payment_reference = $3` (varchar) and `$3 LIKE 'pi_%'` (text) —
+        // Postgres deduces conflicting parameter types and rejects the whole
+        // UPDATE with 42P08, which 500'd EVERY straight-charge excess
+        // payment-event from deploy until job 16085 surfaced it (1 Jul 2026).
+        const resolvedPi = stripe_payment_intent
+          || (payment_reference && String(payment_reference).startsWith('pi_') ? payment_reference : null);
+        const chargeUpdate = await query(
           `UPDATE job_excess SET
             excess_amount_taken = COALESCE(excess_amount_taken, 0) + $1,
             excess_status = CASE
@@ -2510,21 +2555,20 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
             END,
             payment_method = $2,
             payment_reference = $3,
-            -- Populate the canonical PI column at collection time so a later
-            -- Stripe reimbursement can fire via the API. Prefer the explicit PI,
-            -- else lift it from payment_reference when it's a pi_ value. Without
-            -- this, straight-charge excesses landed with a NULL column and the
-            -- reimburse path silently no-op'd (jobs 15433/15489/… — Jun 2026).
-            stripe_payment_intent_id = COALESCE(
-              stripe_payment_intent_id,
-              $5,
-              CASE WHEN $3 LIKE 'pi_%' THEN $3 ELSE NULL END
-            ),
+            stripe_payment_intent_id = COALESCE(stripe_payment_intent_id, $5),
             payment_date = NOW(),
             updated_at = NOW()
           WHERE id = $4`,
-          [amount, effectiveMethod, payment_reference || null, resolvedExcessId, stripe_payment_intent || null]
+          [amount, effectiveMethod, payment_reference || null, resolvedExcessId, resolvedPi]
         );
+        // Belt-and-braces: the id was validated against this job above, so a
+        // 0-row update means something removed the record mid-request. Shout
+        // rather than return a false 200.
+        if (chargeUpdate.rowCount === 0) {
+          console.error(
+            `[money] payment-event excess charge UPDATE matched 0 rows (excess ${resolvedExcessId}, job ${job.id}, HH ${job.hh_job_number}, £${amount}) — money recorded in job_payments but NOT applied to job_excess`
+          );
+        }
       }
 
       // Link HH deposit to excess record for reconciliation
@@ -2768,14 +2812,23 @@ async function reconcileExcessDeposits(
 ): Promise<Array<{ hh_deposit_id: number; excess_id: string; action: string }>> {
   const results: Array<{ hh_deposit_id: number; excess_id: string; action: string }> = [];
 
-  // Get all HH deposit IDs already linked in OP (either on job_excess or job_payments)
+  // Get all HH deposit IDs already linked in OP (either on job_excess or job_payments).
+  // The job_payments check only counts rows whose money actually LANDED on a
+  // job_excess record for this job (taken or held > 0). A dangling audit row
+  // — payment-event arrived but the excess UPDATE hit a stale/mismatched
+  // excess_id and applied nothing (job 16085, Jul 2026) — must NOT suppress
+  // reconciliation, or the deposit can never self-heal.
   const [linkedExcess, linkedPayments] = await Promise.all([
     query(
       `SELECT hh_deposit_id FROM job_excess WHERE job_id = $1 AND hh_deposit_id IS NOT NULL`,
       [jobId]
     ),
     query(
-      `SELECT hirehop_deposit_id FROM job_payments WHERE job_id = $1 AND hirehop_deposit_id IS NOT NULL AND payment_type = 'excess'`,
+      `SELECT jp.hirehop_deposit_id
+       FROM job_payments jp
+       JOIN job_excess je ON je.id = jp.excess_id AND je.job_id = jp.job_id
+       WHERE jp.job_id = $1 AND jp.hirehop_deposit_id IS NOT NULL AND jp.payment_type = 'excess'
+         AND (COALESCE(je.excess_amount_taken, 0) > 0 OR COALESCE(je.amount_held, 0) > 0)`,
       [jobId]
     ),
   ]);
@@ -2793,9 +2846,14 @@ async function reconcileExcessDeposits(
     [jobId]
   );
 
-  // Build a mutable list of available records (not yet linked to an HH deposit)
+  // Build a mutable list of available records (not yet linked to an HH deposit).
+  // 'pending' is the status every hire-form-created record sits in while
+  // awaiting payment (hire-forms.ts insert + absorb paths, quick-assign) —
+  // excluding it meant the safety net skipped the single most common record
+  // state (job 16085, Jul 2026). 'needed' covers derivation/portal-created
+  // records; 'partially_paid' covers top-ups.
   const availableRecords = excessRecords.rows.filter(
-    (r: any) => !r.hh_deposit_id && ['needed', 'partially_paid'].includes(r.excess_status)
+    (r: any) => !r.hh_deposit_id && ['needed', 'pending', 'partially_paid'].includes(r.excess_status)
   );
 
   for (const hhDep of hhExcessDeposits) {

@@ -1,4 +1,4 @@
--- Migration 152: "Held on account" excess — a first-class parked state
+-- Migration 154: "Held on account" excess — a first-class parked state
 -- ============================================================================
 -- Some clients leave their excess with us on account for ages, booking vans as
 -- and when. The old "Roll Over to Next Hire" button flipped the record to
@@ -28,7 +28,7 @@ UPDATE job_excess je
 SET excess_status = 'taken',
     held_on_account = TRUE,
     notes = TRIM(BOTH FROM (COALESCE(je.notes, '') ||
-      E'\n[Migration 152: was parked as rolled_over with no destination — restored to taken + held_on_account so it shows as held.]'))
+      E'\n[Migration 154: was parked as rolled_over with no destination — restored to taken + held_on_account so it shows as held.]'))
 WHERE je.excess_status = 'rolled_over'
   AND je.hh_deposit_id IS NOT NULL
   AND COALESCE(je.excess_amount_taken, 0) > 0

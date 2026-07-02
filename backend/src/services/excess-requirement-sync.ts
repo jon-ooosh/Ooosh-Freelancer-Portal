@@ -73,7 +73,7 @@ export async function syncExcessRequirementStatus(
   // expiry countdown for that case rather than treating it as done.
   // 'blocked' (Dispute) and 'cancelled' are left untouched.
   //
-  // held_on_account (migration 152): a deliberately-parked excess stays 'taken'
+  // held_on_account (migration 154): a deliberately-parked excess stays 'taken'
   // (so it's still counted in Total Held) but IS a resolution of this hire's
   // excess — the money is accounted for, earmarked for the client's future use.
   // Treat it as resolved so a completed job can close out cleanly instead of the

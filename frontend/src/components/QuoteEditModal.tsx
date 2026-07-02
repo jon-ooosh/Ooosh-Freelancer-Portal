@@ -73,6 +73,47 @@ export function QuoteEditModal({
   });
   const [saving, setSaving] = useState(false);
 
+  // Expense charge-mode editing (three-state) — fetched from the quote so both
+  // the Job Detail and Transport Ops entry points behave identically. Stored
+  // engine shape: { type, description, amount, includedInCharge, chargeMode }.
+  type ChargeMode = 'na' | 'included' | 'not_included' | 'recharge';
+  type ExpenseLine = { type: string; description?: string; amount?: number; includedInCharge?: boolean; chargeMode?: ChargeMode };
+  const [expenses, setExpenses] = useState<ExpenseLine[] | null>(null);
+  useEffect(() => {
+    if (isLocal) return; // local D&C quotes have no calculator expenses
+    let cancelled = false;
+    api.get<{ expenses?: ExpenseLine[] | string }>(`/quotes/${quote.id}`)
+      .then((res) => {
+        if (cancelled) return;
+        const raw = res.expenses;
+        const arr = Array.isArray(raw) ? raw : (typeof raw === 'string' && raw ? JSON.parse(raw) : []);
+        setExpenses(arr);
+      })
+      .catch(() => { /* leave null — section just won't render */ });
+    return () => { cancelled = true; };
+  }, [quote.id, isLocal]);
+
+  const expMode = (e: ExpenseLine): ChargeMode =>
+    e.chargeMode ?? (e.includedInCharge === false ? 'not_included' : 'included');
+  const setExpMode = (i: number, m: ChargeMode) =>
+    setExpenses((prev) => prev ? prev.map((e, idx) => idx === i ? { ...e, chargeMode: m, includedInCharge: m === 'included' } : e) : prev);
+  const setAllExpMode = (m: ChargeMode) =>
+    setExpenses((prev) => prev ? prev.map((e) => ({ ...e, chargeMode: m, includedInCharge: m === 'included' })) : prev);
+  const setExpAmount = (i: number, v: number) =>
+    setExpenses((prev) => prev ? prev.map((e, idx) => idx === i ? { ...e, amount: v } : e) : prev);
+  const setExpType = (i: number, t: string) =>
+    setExpenses((prev) => prev ? prev.map((e, idx) => idx === i ? { ...e, type: t } : e) : prev);
+  const addExpense = () =>
+    setExpenses((prev) => [...(prev || []), { type: '', description: '', amount: 0, chargeMode: 'included', includedInCharge: true }]);
+  const removeExpense = (i: number) =>
+    setExpenses((prev) => prev ? prev.filter((_, idx) => idx !== i) : prev);
+  // Known expense types show a fixed label; anything else gets a type picker so a
+  // newly-added line (e.g. a hotel we're now providing) gets the right portal wording.
+  const EXP_TYPE_LABELS: Record<string, string> = {
+    fuel: 'Fuel', parking: 'Parking', tolls: 'Tolls', transport_out: 'Travel (out)',
+    transport_back: 'Travel (back)', hotel: 'Hotel', pd: 'Per Diem',
+  };
+
   const hhStart = parseDateField(quote.out_date ?? null);
   const hhEnd = parseDateField(quote.return_date ?? null);
   const startMismatch = !!(hhStart && form.job_date && form.job_date !== hhStart);
@@ -98,6 +139,8 @@ export function QuoteEditModal({
         freelancer_notes: form.freelancer_notes || null,
         client_charge_rounded: form.client_charge_rounded,
         freelancer_fee_rounded: form.freelancer_fee_rounded,
+        // Only send when we loaded them (recalcs the total + re-flags the job).
+        ...(expenses ? { expenses } : {}),
       });
       await onSaved();
       onClose();
@@ -122,7 +165,7 @@ export function QuoteEditModal({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black/50" onClick={onClose} />
-      <div className="relative bg-white rounded-xl shadow-xl w-full max-w-lg mx-4 p-6 max-h-[90vh] overflow-y-auto">
+      <div className="relative bg-white rounded-xl shadow-xl w-full max-w-xl mx-4 p-6 max-h-[90vh] overflow-y-auto">
         <h3 className="text-lg font-semibold text-gray-900 mb-4">
           Edit {isLocal ? 'Local ' : ''}{titleLabel}
         </h3>
@@ -328,6 +371,68 @@ export function QuoteEditModal({
               />
             </div>
           </div>
+
+          {/* Expenses — three-state charge mode (same control as the calculator).
+              Changing states recalculates the client total + re-flags the job on save. */}
+          {expenses && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Expenses — who pays?</label>
+              <p className="text-xs text-gray-500 mb-2">
+                <span className="text-amber-700 font-medium">Recharge</span> = billed to the client at actual + markup post-hire. Tap a heading to set all. Add a line if the scope changes (e.g. a hotel).
+              </p>
+              <div className="border rounded-lg divide-y text-sm">
+                <div className="px-2 py-2 bg-gray-50 flex items-center gap-1">
+                  <div className="flex-1 font-medium text-gray-700">Item</div>
+                  <div className="w-14 text-center font-medium text-gray-700 text-xs">£</div>
+                  {([['na', 'N/A'], ['included', 'In quote'], ['not_included', 'Client'], ['recharge', 'Recharge']] as [ChargeMode, string][]).map(([m, label]) => (
+                    <button key={m} type="button" onClick={() => setAllExpMode(m)} title={`Set all to "${label}"`}
+                      className={`w-12 text-center text-xs font-medium hover:underline ${m === 'recharge' ? 'text-amber-700' : 'text-gray-600'}`}>{label}</button>
+                  ))}
+                  <div className="w-5" />
+                </div>
+                <div className="px-2">
+                  {expenses.map((e, i) => {
+                    const m = expMode(e);
+                    const known = EXP_TYPE_LABELS[e.type];
+                    return (
+                      <div key={i} className="flex items-center gap-1 py-1.5 border-b border-gray-100 last:border-0">
+                        <div className="flex-1 min-w-0">
+                          {known ? (
+                            <span className={`truncate ${m === 'recharge' ? 'text-amber-700' : m === 'included' ? 'text-gray-800' : 'text-gray-400'}`}>{known}</span>
+                          ) : (
+                            <select value={e.type} onChange={(ev) => setExpType(i, ev.target.value)}
+                              className="w-full border border-gray-200 rounded px-1 py-0.5 text-xs">
+                              <option value="">Type…</option>
+                              <option value="hotel">Hotel</option>
+                              <option value="fuel">Fuel</option>
+                              <option value="parking">Parking</option>
+                              <option value="tolls">Tolls</option>
+                              <option value="transport_out">Travel (out)</option>
+                              <option value="transport_back">Travel (back)</option>
+                              <option value="pd">Per Diem</option>
+                              <option value="other">Other</option>
+                            </select>
+                          )}
+                        </div>
+                        <input type="number" min="0" value={e.amount || ''} onChange={(ev) => setExpAmount(i, parseFloat(ev.target.value) || 0)}
+                          className="w-14 border border-gray-200 rounded px-1 py-0.5 text-xs text-right" />
+                        {(['na', 'included', 'not_included', 'recharge'] as const).map((opt) => (
+                          <div key={opt} className="w-12 flex justify-center">
+                            <input type="radio" name={`exp-${i}`} checked={m === opt} onChange={() => setExpMode(i, opt)}
+                              className={`w-4 h-4 ${opt === 'recharge' ? 'accent-amber-600' : 'accent-ooosh-600'}`} />
+                          </div>
+                        ))}
+                        <button type="button" onClick={() => removeExpense(i)} title="Remove" className="w-5 text-red-400 hover:text-red-600">×</button>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="px-2 py-1.5">
+                  <button type="button" onClick={addExpense} className="text-xs text-ooosh-600 hover:text-ooosh-800">+ Add expense</button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Notes */}
           <div>

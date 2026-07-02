@@ -63,6 +63,9 @@ const PAYMENT_METHODS = [
 const BILL_METHODS = ['not_yet_paid', 'reimburse_me'] as const;
 const PAYMENT_STATUSES = ['paid', 'awaiting_payment', 'awaiting_invoice'] as const;
 const RECHARGE_MODES = ['none', 'full', 'partial'] as const;
+// Xero account codes that count as "running costs" for the recharge auto-inherit
+// on recharge-running-costs jobs: Fuel (410), Parking (411), Travel (325).
+const RUNNING_COST_CODES = new Set(['410', '411', '325']);
 
 const money = z.number().nonnegative().finite();
 
@@ -293,7 +296,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 
 // ── Facet lookups ───────────────────────────────────────────────────────────
 
-async function listBy(column: string, value: string, res: Response) {
+async function listBy(column: string, value: string, res: Response, extra?: Record<string, unknown>) {
   const result = await query(
     `SELECT c.*, CONCAT(up.first_name, ' ', up.last_name) AS uploaded_by_name
      FROM costs c
@@ -311,11 +314,17 @@ async function listBy(column: string, value: string, res: Response) {
       || (r.recharge_mode !== 'none' && (r.recharge_status ?? 'pending') === 'pending')
       || r.payment_status !== 'paid',
   ).length;
-  res.json({ data: result.rows, outstanding });
+  res.json({ data: result.rows, outstanding, ...(extra || {}) });
 }
 
 router.get('/by-job/:jobId', async (req: AuthRequest, res: Response) => {
-  try { await listBy('job_id', req.params.jobId as string, res); }
+  try {
+    const jobId = String(req.params.jobId);
+    // Surface the job's recharge-running-costs flag so the capture modal can
+    // default new running-cost costs to recharge + show the hint.
+    const jf = await query('SELECT recharge_running_costs FROM jobs WHERE id = $1', [jobId]);
+    await listBy('job_id', jobId, res, { recharge_running_costs: jf.rows[0]?.recharge_running_costs ?? false });
+  }
   catch (err) { console.error('[costs] by-job error:', err); res.status(500).json({ error: 'Internal server error' }); }
 });
 
@@ -655,6 +664,20 @@ router.post('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respon
     const parse = createSchema.safeParse(req.body);
     if (!parse.success) { res.status(400).json({ error: 'Invalid input', issues: parse.error.issues }); return; }
     const data = parse.data as Record<string, unknown>;
+
+    // Auto-inherit on "recharge running costs" jobs: a running-cost cost
+    // (fuel/parking/travel) linked to a flagged job defaults to Extra + recharge-
+    // pending, UNLESS the caller set the intent/recharge explicitly. The modal
+    // sends explicit values once it's job-aware; this is the safety net.
+    if (data.job_id && data.cost_intent === undefined && data.recharge_mode === undefined
+        && RUNNING_COST_CODES.has(String(data.xero_account_code ?? ''))) {
+      const jf = await query('SELECT recharge_running_costs FROM jobs WHERE id = $1', [data.job_id]);
+      if (jf.rows[0]?.recharge_running_costs) {
+        data.cost_intent = 'extra';
+        data.recharge_mode = 'full';
+      }
+    }
+
     coerceRechargeForIntent(data);
     deriveRechargeStatusForWrite(data);
 

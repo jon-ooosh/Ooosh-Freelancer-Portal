@@ -65,8 +65,8 @@ const gbp = (n: number | string | null) =>
 type Timing = 'all' | 'finished' | 'upcoming';
 type Tab = 'balances' | 'deposits' | 'excess' | 'refunds';
 const PREFS_KEY = 'ooosh_money_overview_prefs';
-interface OverviewPrefs { tab: Tab; includeSpeculative: boolean; balancesTiming: Timing; excessTiming: Timing; groupByClient: boolean }
-const DEFAULT_PREFS: OverviewPrefs = { tab: 'balances', includeSpeculative: false, balancesTiming: 'all', excessTiming: 'all', groupByClient: false };
+interface OverviewPrefs { tab: Tab; includeSpeculative: boolean; balancesTiming: Timing; excessTiming: Timing; groupByClient: boolean; showResolved: boolean }
+const DEFAULT_PREFS: OverviewPrefs = { tab: 'balances', includeSpeculative: false, balancesTiming: 'all', excessTiming: 'all', groupByClient: false, showResolved: false };
 function loadPrefs(): OverviewPrefs {
   try {
     const raw = localStorage.getItem(PREFS_KEY);
@@ -489,14 +489,97 @@ function GroupedBalances({ rows, isAdmin, onResolve, onChase }: {
 }
 
 type Col = { label: string; sortable?: boolean; align?: 'right' };
-type Row = { key: string; href: string; cells: React.ReactNode[]; sort: (string | number)[]; search: string };
+type AmountField = { key: string; label: string };
+type Row = {
+  key: string; href: string; cells: React.ReactNode[];
+  sort: (string | number)[]; search: string;
+  // Numeric targets for amount-search mode, keyed by AmountField.key.
+  amounts?: Record<string, number>;
+};
 
-function Table({ columns, rows, empty }: { columns: Col[]; rows: Row[]; empty: string }) {
-  const [q, setQ] = useState('');
-  const [sortIdx, setSortIdx] = useState<number | null>(null);
-  const [dir, setDir] = useState<'asc' | 'desc'>('asc');
+// Per-table view state (sort + text search + amount search) persists per tab so
+// staff return to the overview set up the way they left it, and it survives a
+// page refresh. Distinct from the page-level OverviewPrefs (tabs/pills/toggles).
+const TABLE_PREFS_PREFIX = 'ooosh_money_overview_table_';
+interface TableState {
+  q: string; sortIdx: number | null; dir: 'asc' | 'desc';
+  amountMode: boolean; amountStr: string; tolerance: number; fields: string[];
+}
+function loadTableState(key: string | undefined, defaultFields: string[]): TableState {
+  const base: TableState = { q: '', sortIdx: null, dir: 'asc', amountMode: false, amountStr: '', tolerance: 20, fields: defaultFields };
+  if (!key) return base;
+  try {
+    const raw = localStorage.getItem(TABLE_PREFS_PREFIX + key);
+    if (raw) {
+      const p = { ...base, ...JSON.parse(raw) } as TableState;
+      if (!['asc', 'desc'].includes(p.dir)) p.dir = 'asc';
+      if (typeof p.tolerance !== 'number' || isNaN(p.tolerance) || p.tolerance < 0) p.tolerance = 20;
+      if (!Array.isArray(p.fields)) p.fields = defaultFields;
+      return p;
+    }
+  } catch { /* corrupted/blocked storage — fall through to defaults */ }
+  return base;
+}
+
+// Amount-search: covers the "unreferenced PayPal/Wise payment landed — which job
+// does it clear?" case. International transfers arrive shaved by a ~£15 fee plus
+// a little FX drift, so we match within a ±tolerance (default £20) rather than
+// exactly, and surface the nearest matches first with the delta shown.
+function Table({ columns, rows, empty, persistKey, amountSearch }: {
+  columns: Col[]; rows: Row[]; empty: string;
+  persistKey?: string;
+  amountSearch?: { fields: AmountField[] };
+}) {
+  const defaultFields = amountSearch ? [amountSearch.fields[0].key] : [];
+  const [init] = useState(() => loadTableState(persistKey, defaultFields));
+  const [q, setQ] = useState(init.q);
+  const [sortIdx, setSortIdx] = useState<number | null>(init.sortIdx);
+  const [dir, setDir] = useState<'asc' | 'desc'>(init.dir);
+  const [amountMode, setAmountMode] = useState(amountSearch ? init.amountMode : false);
+  const [amountStr, setAmountStr] = useState(init.amountStr);
+  const [tolerance, setTolerance] = useState(init.tolerance);
+  const [fields, setFields] = useState<string[]>(() => {
+    if (!amountSearch) return [];
+    const valid = init.fields.filter((k) => amountSearch.fields.some((f) => f.key === k));
+    return valid.length ? valid : defaultFields;
+  });
+
+  // Persist this table's view state under its tab key.
+  useEffect(() => {
+    if (!persistKey) return;
+    try {
+      localStorage.setItem(
+        TABLE_PREFS_PREFIX + persistKey,
+        JSON.stringify({ q, sortIdx, dir, amountMode, amountStr, tolerance, fields } satisfies TableState),
+      );
+    } catch { /* storage blocked — just won't persist */ }
+  }, [persistKey, q, sortIdx, dir, amountMode, amountStr, tolerance, fields]);
 
   const view = useMemo(() => {
+    // Amount-search mode: keep rows whose chosen amount(s) fall within ±tolerance
+    // of the target, nearest first, annotated with the signed delta.
+    if (amountMode && amountSearch) {
+      const target = parseFloat(amountStr.replace(/[£,\s]/g, ''));
+      const active = amountSearch.fields.filter((f) => fields.includes(f.key));
+      if (isNaN(target)) return rows.map((row) => ({ row, match: null as null | { label: string; delta: number } }));
+      const out: { row: Row; match: { label: string; delta: number } }[] = [];
+      for (const row of rows) {
+        if (!row.amounts) continue;
+        let best: { label: string; delta: number } | null = null;
+        for (const f of active) {
+          const v = row.amounts[f.key];
+          if (v === undefined || v === null) continue;
+          const delta = v - target; // signed: negative = row is below the searched amount
+          if (Math.abs(delta) <= tolerance && (!best || Math.abs(delta) < Math.abs(best.delta))) {
+            best = { label: f.label, delta };
+          }
+        }
+        if (best) out.push({ row, match: best });
+      }
+      out.sort((a, b) => Math.abs(a.match.delta) - Math.abs(b.match.delta));
+      return out;
+    }
+    // Text-search mode (default).
     const needle = q.trim().toLowerCase();
     let out = needle ? rows.filter((r) => r.search.toLowerCase().includes(needle)) : rows.slice();
     if (sortIdx !== null) {
@@ -508,51 +591,120 @@ function Table({ columns, rows, empty }: { columns: Col[]; rows: Row[]; empty: s
         return dir === 'asc' ? cmp : -cmp;
       });
     }
-    return out;
-  }, [rows, q, sortIdx, dir]);
+    return out.map((row) => ({ row, match: null as null | { label: string; delta: number } }));
+  }, [rows, q, sortIdx, dir, amountMode, amountStr, tolerance, fields, amountSearch]);
 
   const clickSort = (i: number) => {
-    if (!columns[i].sortable) return;
+    if (amountMode || !columns[i].sortable) return;
     if (sortIdx === i) setDir(dir === 'asc' ? 'desc' : 'asc');
     else { setSortIdx(i); setDir('asc'); }
   };
 
+  const fmtDelta = (delta: number) => (delta === 0 ? 'exact' : (delta > 0 ? '+' : '−') + gbp(Math.abs(delta)));
+
   return (
     <div>
-      <div className="flex items-center gap-3 px-4 py-3 border-b border-gray-100">
-        <input
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          placeholder="Search job, client…"
-          className="flex-1 max-w-xs px-3 py-1.5 text-sm border border-gray-300 rounded-md"
-        />
-        <span className="text-xs text-gray-400">{view.length} of {rows.length}</span>
+      <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-100 flex-wrap">
+        {amountSearch && (
+          <button
+            type="button"
+            onClick={() => setAmountMode((m) => !m)}
+            title={amountMode ? 'Switch back to text search' : 'Search by amount — find a job whose balance matches a payment (±tolerance for transfer fees)'}
+            className={`px-2.5 py-1.5 text-sm rounded-md border font-medium ${amountMode ? 'bg-ooosh-600 text-white border-ooosh-600' : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'}`}
+          >£</button>
+        )}
+        {amountMode && amountSearch ? (
+          <>
+            <div className="relative">
+              <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400 text-sm pointer-events-none">£</span>
+              <input
+                autoFocus
+                value={amountStr}
+                onChange={(e) => setAmountStr(e.target.value)}
+                inputMode="decimal"
+                placeholder="amount"
+                className="w-28 pl-6 pr-2 py-1.5 text-sm border border-gray-300 rounded-md"
+              />
+            </div>
+            <span className="text-xs text-gray-400">±</span>
+            <div className="relative">
+              <span className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-400 text-sm pointer-events-none">£</span>
+              <input
+                type="number" min={0} step={5}
+                value={tolerance}
+                onChange={(e) => setTolerance(Math.max(0, parseFloat(e.target.value) || 0))}
+                title="Tolerance — how far either side of the amount to match (covers transfer fees + FX drift)"
+                className="w-20 pl-5 pr-1.5 py-1.5 text-sm border border-gray-300 rounded-md"
+              />
+            </div>
+            <div className="inline-flex rounded-md border border-gray-300 overflow-hidden text-xs">
+              {amountSearch.fields.map((f, i) => {
+                const on = fields.includes(f.key);
+                return (
+                  <button
+                    key={f.key} type="button"
+                    title={`Match against ${f.label}${on ? '' : ' too'}`}
+                    onClick={() => setFields((cur) => {
+                      if (cur.includes(f.key)) {
+                        const next = cur.filter((k) => k !== f.key);
+                        return next.length ? next : cur; // always keep at least one
+                      }
+                      return [...cur, f.key];
+                    })}
+                    className={`px-2.5 py-1 ${i > 0 ? 'border-l border-gray-300' : ''} ${on ? 'bg-ooosh-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}
+                  >{f.label}</button>
+                );
+              })}
+            </div>
+          </>
+        ) : (
+          <input
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="Search job, client…"
+            className="flex-1 max-w-xs px-3 py-1.5 text-sm border border-gray-300 rounded-md"
+          />
+        )}
+        <span className="text-xs text-gray-400 ml-auto whitespace-nowrap">{view.length} of {rows.length}</span>
       </div>
       {view.length === 0 ? (
-        <p className="p-6 text-sm text-gray-500">{rows.length === 0 ? empty : 'No matches.'}</p>
+        <p className="p-6 text-sm text-gray-500">
+          {rows.length === 0 ? empty : amountMode ? 'No balances within that range — try widening the ± tolerance.' : 'No matches.'}
+        </p>
       ) : (
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-gray-100 text-left text-xs text-gray-500">
+                {amountMode && <th className="px-4 py-2 font-medium whitespace-nowrap">Match</th>}
                 {columns.map((c, i) => (
                   <th
                     key={c.label}
                     onClick={() => clickSort(i)}
-                    className={`px-4 py-2 font-medium whitespace-nowrap ${c.align === 'right' ? 'text-right' : ''} ${c.sortable ? 'cursor-pointer hover:text-gray-800 select-none' : ''}`}
+                    className={`px-4 py-2 font-medium whitespace-nowrap ${c.align === 'right' ? 'text-right' : ''} ${!amountMode && c.sortable ? 'cursor-pointer hover:text-gray-800 select-none' : ''}`}
                   >
                     {c.label}
-                    {sortIdx === i && <span className="ml-1">{dir === 'asc' ? '▲' : '▼'}</span>}
+                    {!amountMode && sortIdx === i && <span className="ml-1">{dir === 'asc' ? '▲' : '▼'}</span>}
                   </th>
                 ))}
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-50">
-              {view.map((r) => (
-                <tr key={r.key} className="hover:bg-gray-50">
-                  {r.cells.map((cell, i) => (
+              {view.map(({ row, match }) => (
+                <tr key={row.key} className="hover:bg-gray-50">
+                  {amountMode && (
+                    <td className="px-4 py-2.5 align-top whitespace-nowrap">
+                      {match ? (
+                        <span className="text-xs">
+                          <span className="text-gray-500">{match.label}</span>{' '}
+                          <span className={match.delta === 0 ? 'text-green-700 font-medium' : 'text-gray-700'}>{fmtDelta(match.delta)}</span>
+                        </span>
+                      ) : <span className="text-gray-300">—</span>}
+                    </td>
+                  )}
+                  {row.cells.map((cell, i) => (
                     <td key={i} className={`px-4 py-2.5 align-top ${columns[i].align === 'right' ? 'text-right' : ''}`}>
-                      {i === 0 ? <Link to={r.href} className="hover:underline">{cell}</Link> : cell}
+                      {i === 0 ? <Link to={row.href} className="hover:underline">{cell}</Link> : cell}
                     </td>
                   ))}
                 </tr>
@@ -574,7 +726,6 @@ export default function MoneyOverviewPage() {
   const canManage = hasManagerRole(role);
   const [resolveTarget, setResolveTarget] = useState<BalanceRow | 'bulk' | null>(null);
   const [dismissTarget, setDismissTarget] = useState<PendingRefundRow | 'bulk' | null>(null);
-  const [showResolved, setShowResolved] = useState(false);
   const [toast, setToast] = useState<{ msg: string; undo?: () => void } | null>(null);
   // Filters initialise from the last-used prefs and persist on every change.
   const [prefs] = useState(loadPrefs);
@@ -586,12 +737,13 @@ export default function MoneyOverviewPage() {
   const [balancesTiming, setBalancesTiming] = useState<Timing>(prefs.balancesTiming);
   const [excessTiming, setExcessTiming] = useState<Timing>(prefs.excessTiming);
   const [groupByClient, setGroupByClient] = useState(prefs.groupByClient);
+  const [showResolved, setShowResolved] = useState(prefs.showResolved);
 
   useEffect(() => {
     try {
-      localStorage.setItem(PREFS_KEY, JSON.stringify({ tab, includeSpeculative, balancesTiming, excessTiming, groupByClient } satisfies OverviewPrefs));
+      localStorage.setItem(PREFS_KEY, JSON.stringify({ tab, includeSpeculative, balancesTiming, excessTiming, groupByClient, showResolved } satisfies OverviewPrefs));
     } catch { /* storage blocked — prefs just won't persist */ }
-  }, [tab, includeSpeculative, balancesTiming, excessTiming, groupByClient]);
+  }, [tab, includeSpeculative, balancesTiming, excessTiming, groupByClient, showResolved]);
 
   // `quiet` skips the page-level spinner (row actions like chase logging
   // shouldn't unmount the table).
@@ -680,6 +832,7 @@ export default function MoneyOverviewPage() {
   const balanceRows: Row[] = balancesFiltered.map((r) => ({
     key: r.job_id, href: jobHref(r),
     search: `${r.hh_job_number ?? ''} ${r.client_name ?? ''} ${r.job_name ?? ''} ${r.pipeline_status ?? ''}`,
+    amounts: { outstanding: parseFloat(r.balance_outstanding), hire: parseFloat(r.hire_value_inc_vat) },
     sort: [r.hh_job_number ?? 0, r.client_name ?? '', r.pipeline_status ?? '', dateMs(r.job_end || r.return_date), parseFloat(r.hire_value_inc_vat), parseFloat(r.balance_outstanding), dateMs(r.last_chased_at ?? null)],
     cells: [
       <JobRef hh={r.hh_job_number} name={r.job_name} />,
@@ -826,6 +979,8 @@ export default function MoneyOverviewPage() {
                 columns={balanceColumns}
                 empty="No outstanding balances on synced jobs."
                 rows={balanceRows}
+                persistKey="balances"
+                amountSearch={{ fields: [{ key: 'outstanding', label: 'Outstanding' }, { key: 'hire', label: 'Hire value' }] }}
               />
             )}
             {data.balances_resolved.length > 0 && (
@@ -890,6 +1045,7 @@ export default function MoneyOverviewPage() {
             ]}
             empty="No confirmed jobs awaiting a deposit (on synced jobs)."
             rows={depositRows}
+            persistKey="deposits"
           />
         )}
         {tab === 'excess' && (
@@ -906,6 +1062,7 @@ export default function MoneyOverviewPage() {
               ]}
               empty="No excess currently held."
               rows={excessRows}
+              persistKey="excess"
             />
           </>
         )}
@@ -927,6 +1084,7 @@ export default function MoneyOverviewPage() {
               columns={refundColumns}
               empty="No pending refunds."
               rows={refundRows}
+              persistKey="refunds"
             />
           </>
         )}

@@ -661,7 +661,7 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
           // and fully actionable). Just toggle the intent flag. It becomes
           // 'rolled_over' only when actually applied to a real next hire (the
           // apply-forward flow). Never bury it behind a status change with no
-          // destination (migration 152 / job 16099 incident).
+          // destination (migration 154 / job 16099 incident).
           await api.put(`/excess/${excess.id}`, {
             held_on_account: !excess.held_on_account,
           });
