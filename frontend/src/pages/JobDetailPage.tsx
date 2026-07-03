@@ -248,6 +248,36 @@ interface PersonOption {
   current_organisations?: PersonOrgLink[] | null;
 }
 
+/** A distinct van allocated to the job, for the "Vehicles on this job" strip. */
+interface JobAssignedVehicle {
+  vehicle_id: string;
+  reg: string;
+  type: string | null;
+  /** Most-progressed assignment status across all rows on this van. */
+  status: string;
+}
+
+/**
+ * Normalise any van label (fleet `simple_type`, a full `vehicleType` string,
+ * or a HireHop line-item name) to one of the canonical Ooosh van types, so
+ * "detected" slots and "assigned" vehicles can be reconciled to show how many
+ * of each type are still unallocated. Panel is checked first so "Panel Van …"
+ * doesn't fall through to Premium.
+ */
+function normVanType(s: string | null | undefined): string {
+  const t = (s || '').toLowerCase();
+  if (t.includes('panel')) return 'Panel';
+  if (t.includes('basic') || t.includes('mwb')) return 'Basic';
+  if (t.includes('vito')) return 'Vito';
+  if (t.includes('premium') || t.includes('lwb')) return 'Premium';
+  return (s || 'Van').trim() || 'Van';
+}
+
+/** Rank assignment statuses so a van's chip reflects its most-progressed row. */
+const ASSIGNMENT_STATUS_RANK: Record<string, number> = {
+  active: 5, booked_out: 4, confirmed: 3, soft: 2, returned: 1, swapped: 0, cancelled: -1,
+};
+
 interface VehicleAssignment {
   id: string;
   vehicle_id: string;
@@ -760,6 +790,7 @@ function HireFormActions({ assignmentId, pdfKey, pdfGeneratedAt, vehicleId }: {
 }) {
   const [generating, setGenerating] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [open, setOpen] = useState(false);
 
   // Can only generate a meaningful PDF once a vehicle is linked — the PDF
   // needs the reg + model. Before book-out, these buttons are dimmed and
@@ -827,52 +858,71 @@ function HireFormActions({ assignmentId, pdfKey, pdfGeneratedAt, vehicleId }: {
     }
   }
 
+  // Lesser-used hire-form actions collapsed into a single "Hire form ▾" menu
+  // so the card actions row stays uncluttered (the primary Book Out / Check In
+  // / Allocate button is what staff reach for most). A small green dot on the
+  // trigger signals the PDF already exists.
   return (
-    <div className="mt-3 pt-3 border-t border-gray-100">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-1.5 text-xs text-gray-500">
-          <span className="font-medium text-gray-700">Hire Form</span>
-          {pdfGeneratedAt && <span className="text-green-600">PDF ready</span>}
-        </div>
-        <div className="flex items-center gap-1.5">
-          <button
-            onClick={() => generatePdf(false)}
-            disabled={generating || !hasVehicle}
-            title={disabledReason || undefined}
-            className="text-xs px-2.5 py-1.5 bg-gray-100 text-gray-700 rounded hover:bg-gray-200 disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            {generating ? '...' : pdfKey ? 'Regenerate PDF' : 'Generate PDF'}
-          </button>
-          <button
-            onClick={() => generatePdf(true)}
-            disabled={generating || !hasVehicle}
-            title={disabledReason || undefined}
-            className="text-xs px-2.5 py-1.5 bg-ooosh-100 text-ooosh-700 rounded hover:bg-ooosh-200 disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            {generating ? '...' : 'Generate + Email'}
-          </button>
-          {pdfKey && (
-            <>
-              <button
-                onClick={viewPdf}
-                disabled={generating}
-                className="text-xs px-2.5 py-1.5 bg-blue-50 text-blue-700 rounded hover:bg-blue-100 disabled:opacity-50"
-              >
-                View PDF
-              </button>
-              <button
-                onClick={resendEmail}
-                disabled={generating}
-                className="text-xs px-2.5 py-1.5 bg-amber-50 text-amber-700 rounded hover:bg-amber-100 disabled:opacity-50"
-              >
-                Re-send
-              </button>
-            </>
-          )}
-        </div>
-      </div>
+    <div className="relative inline-block">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        disabled={generating}
+        className="inline-flex items-center gap-1.5 text-sm px-3 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 disabled:opacity-50 font-medium"
+      >
+        {generating ? '…' : 'Hire form'}
+        {pdfGeneratedAt && !generating && <span className="w-1.5 h-1.5 rounded-full bg-green-500" title="PDF ready" />}
+        <span className="text-gray-400">▾</span>
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
+          <div className="absolute left-0 mt-1 z-20 w-52 bg-white rounded-lg shadow-lg border border-gray-200 py-1 text-sm">
+            <button
+              type="button"
+              onClick={() => { setOpen(false); generatePdf(false); }}
+              disabled={!hasVehicle}
+              title={disabledReason || undefined}
+              className="w-full text-left px-3 py-2 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {pdfKey ? 'Regenerate PDF' : 'Generate PDF'}
+            </button>
+            <button
+              type="button"
+              onClick={() => { setOpen(false); generatePdf(true); }}
+              disabled={!hasVehicle}
+              title={disabledReason || undefined}
+              className="w-full text-left px-3 py-2 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Generate + Email
+            </button>
+            {pdfKey && (
+              <>
+                <div className="my-1 border-t border-gray-100" />
+                <button
+                  type="button"
+                  onClick={() => { setOpen(false); viewPdf(); }}
+                  className="w-full text-left px-3 py-2 hover:bg-gray-50 text-blue-700"
+                >
+                  View PDF
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setOpen(false); resendEmail(); }}
+                  className="w-full text-left px-3 py-2 hover:bg-gray-50 text-amber-700"
+                >
+                  Re-send email
+                </button>
+              </>
+            )}
+            {!hasVehicle && (
+              <p className="px-3 py-2 text-[11px] text-gray-400 border-t border-gray-100">{disabledReason}</p>
+            )}
+          </div>
+        </>
+      )}
       {message && (
-        <div className={`text-xs px-2 py-1.5 rounded mt-2 ${message.startsWith('Error') ? 'bg-red-50 text-red-700' : 'bg-green-50 text-green-700'}`}>
+        <div className={`absolute left-0 top-full mt-1 z-20 w-64 text-xs px-2 py-1.5 rounded shadow-sm ${message.startsWith('Error') ? 'bg-red-50 text-red-700' : 'bg-green-50 text-green-700'}`}>
           {message}
         </div>
       )}
@@ -1450,6 +1500,13 @@ export default function JobDetailPage() {
 
   // Drivers & Vehicles state
   const [vehicleAssignments, setVehicleAssignments] = useState<VehicleAssignment[]>([]);
+  // Distinct vehicles allocated to this job, deduped across ALL assignment
+  // rows — including driverless staff-allocation rows that are hidden from the
+  // per-driver card list (e.g. a Panel van picked on Allocations before any
+  // driver is bucketed onto its slot). Powers the "Vehicles on this job"
+  // header strip so every allocated van is visible in one place rather than
+  // repeated on (or missing from) individual driver cards.
+  const [jobAssignedVehicles, setJobAssignedVehicles] = useState<JobAssignedVehicle[]>([]);
   const [excessModalRecord, setExcessModalRecord] = useState<JobExcess | null>(null);
   const [excessModalInitialAction, setExcessModalInitialAction] = useState<'edit_required' | 'reimburse' | undefined>(undefined);
   const [excessModalLoadingId, setExcessModalLoadingId] = useState<string | null>(null);
@@ -2061,6 +2118,7 @@ export default function JobDetailPage() {
       setInteractions([]);
       setQuotes([]);
       setVehicleAssignments([]);
+      setJobAssignedVehicles([]);
       setDispatchCheck(null);
       setAllocationConflicts([]);
       setDateMismatches([]);
@@ -2597,6 +2655,26 @@ export default function JobDetailPage() {
         };
       });
       setVehicleAssignments(shaped);
+
+      // Deduped assigned vehicles across ALL rows (incl. driverless staff
+      // allocations that never surface as a driver card) → the header strip.
+      // Keeps the most-progressed status per van so its chip reads right.
+      const vanMap = new Map<string, JobAssignedVehicle>();
+      for (const r of allRows) {
+        if (!r.vehicle_id || r.status === 'cancelled') continue;
+        const existing = vanMap.get(r.vehicle_id);
+        if (!existing) {
+          vanMap.set(r.vehicle_id, {
+            vehicle_id: r.vehicle_id,
+            reg: r.vehicle_reg || '',
+            type: r.vehicle_type ?? null,
+            status: r.status,
+          });
+        } else if ((ASSIGNMENT_STATUS_RANK[r.status] ?? -1) > (ASSIGNMENT_STATUS_RANK[existing.status] ?? -1)) {
+          existing.status = r.status;
+        }
+      }
+      setJobAssignedVehicles(Array.from(vanMap.values()));
 
       // Also load dispatch check
       const check = await api.get<DispatchCheckResult>(`/assignments/dispatch-check/${id}`);
@@ -4235,6 +4313,65 @@ export default function JobDetailPage() {
           {/* Out-of-hours returns — flag/un-flag badly-parked OOH returns per van */}
           <JobOohReturns jobId={job.id} />
 
+          {/* Vehicles on this job — single place all allocated vans are shown
+              (deduped, incl. driverless staff allocations), plus a dashed chip
+              for each HH-detected van type still unallocated. Rare to have >2
+              vans, so no scroll/space concern. */}
+          {(() => {
+            const slots = hhSyncResult?.derivation?.flags?.vehicle_slots || [];
+            // Detected van types minus what's already assigned → "unassigned".
+            const detected = new Map<string, number>();
+            for (const s of slots) detected.set(normVanType(s.item_name), (detected.get(normVanType(s.item_name)) || 0) + 1);
+            const assignedCounts = new Map<string, number>();
+            for (const v of jobAssignedVehicles) assignedCounts.set(normVanType(v.type), (assignedCounts.get(normVanType(v.type)) || 0) + 1);
+            const unassigned: string[] = [];
+            for (const [t, n] of detected) {
+              for (let i = 0; i < n - (assignedCounts.get(t) || 0); i++) unassigned.push(t);
+            }
+            if (jobAssignedVehicles.length === 0 && unassigned.length === 0) return null;
+            const statusChip: Record<string, { label: string; cls: string }> = {
+              active: { label: 'On Hire', cls: 'bg-green-100 text-green-700' },
+              booked_out: { label: 'Booked Out', cls: 'bg-indigo-100 text-indigo-700' },
+              confirmed: { label: 'Allocated', cls: 'bg-blue-100 text-blue-700' },
+              soft: { label: 'Soft', cls: 'bg-gray-100 text-gray-600' },
+              returned: { label: 'Returned', cls: 'bg-teal-100 text-teal-700' },
+              swapped: { label: 'Swapped', cls: 'bg-orange-100 text-orange-700' },
+            };
+            return (
+              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide mr-1">
+                    Vehicles on this job
+                  </span>
+                  {jobAssignedVehicles.map((v) => {
+                    const s = statusChip[v.status] || { label: v.status, cls: 'bg-gray-100 text-gray-600' };
+                    return (
+                      <span
+                        key={v.vehicle_id}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-ooosh-50 border border-ooosh-200"
+                      >
+                        <span aria-hidden>🚐</span>
+                        <span className="font-semibold text-gray-900 text-sm">{v.reg || '—'}</span>
+                        {v.type && <span className="text-xs text-gray-500">{normVanType(v.type)}</span>}
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${s.cls}`}>{s.label}</span>
+                      </span>
+                    );
+                  })}
+                  {unassigned.map((t, i) => (
+                    <span
+                      key={`u-${i}`}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-50 border border-dashed border-amber-300 text-amber-700 text-sm font-medium"
+                      title="Detected on HireHop but no van allocated yet"
+                    >
+                      <span aria-hidden>🚐</span>
+                      {t} — unassigned
+                    </span>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
+
           {vehicleAssignmentsLoading ? (
             <div className="flex justify-center py-12">
               <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-ooosh-600" />
@@ -4305,8 +4442,18 @@ export default function JobDetailPage() {
                     <div className="flex items-start justify-between mb-3">
                       <div className="flex items-center gap-2 flex-wrap">
                         <span className="text-lg">🚐</span>
-                        <span className="font-semibold text-gray-900">{a.vehicle_reg}</span>
-                        {a.vehicle_type && <span className="text-sm text-gray-500">({a.vehicle_type})</span>}
+                        {/* Reg lives in the "Vehicles on this job" strip up top,
+                            not repeated prominently on every card — just a subtle
+                            chip so you can still tell which van THIS driver is on
+                            (useful on multi-van hires). */}
+                        {a.vehicle_reg && (
+                          <span
+                            className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600 font-medium"
+                            title="Van linked to this driver"
+                          >
+                            {a.vehicle_reg}
+                          </span>
+                        )}
                         <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${sc.bg} ${sc.text}`}>
                           {sc.label}
                         </span>
