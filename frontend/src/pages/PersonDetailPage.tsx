@@ -95,6 +95,7 @@ export default function PersonDetailPage() {
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'timeline' | 'hire_history' | 'details' | 'relationships' | 'excess' | 'held' | 'storage' | 'pcn'>('timeline');
+  const [heldCount, setHeldCount] = useState<number | null>(null);
 
   // Edit panel
   const [showEdit, setShowEdit] = useState(false);
@@ -136,6 +137,7 @@ export default function PersonDetailPage() {
   // /people/A → /people/B so without this the active tab "drags across".
   useEffect(() => {
     setActiveTab('timeline');
+    setHeldCount(null);
   }, [id]);
 
   async function loadPerson() {
@@ -485,7 +487,7 @@ export default function PersonDetailPage() {
               : tab === 'hire_history' ? 'Hire History'
               : tab === 'details' ? 'Details'
               : tab === 'excess' ? 'Excess History'
-              : tab === 'held' ? 'Held Items'
+              : tab === 'held' ? (heldCount ? `Held Items (${heldCount})` : 'Held Items')
               : tab === 'storage' ? 'Storage'
               : tab === 'pcn' ? 'PCNs'
               : `Relationships${totalOrgs ? ` (${totalOrgs})` : ''}`;
@@ -957,7 +959,7 @@ export default function PersonDetailPage() {
       )}
 
       {activeTab === 'held' && id && (
-        <HeldItemsSection entityType="person" entityId={id} />
+        <HeldItemsSection entityType="person" entityId={id} onCount={setHeldCount} />
       )}
 
       {activeTab === 'storage' && id && (
