@@ -3907,6 +3907,31 @@ Body: { hirehop_job_id, new_status, trigger, source, metadata }
 
 **HireHop write-back:** Uses `POST status_save.php` with `no_webhook=1` to prevent loops.
 
+## The status-6 no man's land — mid-hire partial returns (Jul 2026)
+
+**Read this before touching anything that keys off "is this job returning".**
+
+HireHop status **6 ("Returned Incomplete")** is ambiguous — it fires in two completely different situations that HH can't distinguish (its status is job-level and binary):
+
+- **(A) Genuine end-of-hire:** the tour's back and staff are checking items in. This IS the start of the returns process.
+- **(B) Mid-hire partial return:** a client hands back ONE element mid-tour (e.g. two keyboard stands) while the rest of the hire stays out for another week. Warehouse checks the returned items in on HireHop (stock accuracy), which flips the whole job to 6 — **but the hire is still on.**
+
+Without a discriminator, case (B) trips the whole returns machinery: OP spins up close-out requirements (invoice / payment-reconcile / client-followup), the daily chase scanner starts nagging you to invoice a job that's still on the road, the dispatch excess/referral gate switches off, and the badge flips to "Checking In".
+
+**The discriminator is the hire-END DATE.** A status-6 job is only "genuinely returning" once its expected return date has arrived (± `HIRE_END_TOLERANCE_DAYS`, default 1 — and `return_date` is already the +1 buffer, so this is effectively "on or after the real job end"). HH status **7 / 8 / 11** mean everything is physically back, so they're always genuinely returned regardless of date.
+
+**Single source of truth:** `backend/src/services/hire-lifecycle.ts` — `hireGenuinelyReturning(hhStatus, returnDate, jobEnd)` (JS) and `hireGenuinelyReturningSql(alias)` (SQL fragment). **Any new surface that decides "is this job in returns" MUST route through one of these** rather than testing `status >= 6` / `status IN (6,7,8)` raw.
+
+**How it's wired (the "hold + reconcile" model):**
+1. **Hold** — the inbound HH webhook (`webhooks.ts handleJobStatusChange`) holds `pipeline_status` at its current out-on-hire value when HH reports 6 but the hire isn't genuinely returning. It only holds a job that's still out (`HELD_OUT_PIPELINE_STATUSES` = dispatched/prepped/prepping) — **never a job already advanced into the returns process**, so a status staff moved manually is never wound back (the "sacred decision" rule). `jobs.status` is still written truthfully to 6. Drops a one-line timeline note on the transition. NB the 30-min polling sync already never touches `pipeline_status`, so a partial arriving via polling is naturally held.
+2. **Gate** — the close-out requirement factory (`hh-requirement-derivation.ts` `isReturnPhase`) and the daily close-out chase scanner (`scheduler.ts`) require `hireGenuinelyReturning`, so no close-out cards / nagging on a mid-hire partial.
+3. **Reconcile** — an hourly scheduler task (`reconcileHeldReturns` in `hire-lifecycle.ts`) advances a held job into the returns process (`pipeline_status='returned_incomplete'` + timeline note + fires derivation) once its return date arrives. **This is load-bearing** — without it a held job would stick "On Hire" forever, because HH already sent its 6 and won't re-send. It's forward-only (never winds back) and also fixes the general webhook-gap case (HH says 6, no returned webhook ever landed).
+4. **List membership** — the Returns page (`/api/hirehop/jobs?genuinely_returning=1`) and the dashboard returns-overview counts drop mid-hire partials, so they stay in Out Now, not Returns.
+
+**Manual override is safe:** staff can move a job to Checking In / Returned early and it sticks — the hold ignores any job already in a returns/terminal `pipeline_status`, and reconcile only ever moves forward. Worst case of the date heuristic is a genuine return recognised a day or two late (close-out cards delayed, self-heals) — the safe error, vs. falsely closing out a live tour.
+
+**NOT surfaced anywhere in OP:** the fact that an item came back early (that lives in HireHop, where warehouse checks it in). A future light "early returns" note on the job would be additive.
+
 ## Pipeline Chase Model (May 2026)
 
 **Read this before touching anything chase-related.** Re-introducing the bug we killed in May 2026 is easy if you don't know the rules.

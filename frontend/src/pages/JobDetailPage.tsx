@@ -4651,6 +4651,24 @@ export default function JobDetailPage() {
 
                     {/* Actions row */}
                     <div className="mt-3 flex flex-wrap items-center gap-2">
+                      {/* Swapped-out van still needs its physical check-in when
+                          it comes back (planned upgrade → returns to base;
+                          breakdown → returns from the garage later). The swap
+                          moved the live hire to the replacement, so this card
+                          otherwise shows a badge only — but the check-in is a
+                          real, supported action (check-in-eligibility recognises
+                          status='swapped' + checked_in_at IS NULL). Hidden once
+                          checked in. */}
+                      {a.status === 'swapped' && !a.checked_in_at && a.vehicle_id && (
+                        <Link
+                          to={`/vehicles/check-in?vehicle=${a.vehicle_id}`}
+                          className="inline-flex items-center gap-1.5 px-3 py-2 bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700 text-sm font-medium"
+                          title="This van was swapped out mid-hire — check it in when it's back at base"
+                        >
+                          ↩️ Check In
+                        </Link>
+                      )}
+
                       {/* Primary next-action — Allocate Van / Book Out / Check In.
                           State-aware: drives the staff cockpit workflow from
                           this card so they don't have to leave Job Detail to

@@ -23,6 +23,7 @@ import { calculateVatAdjustment } from './vat-adjustment';
 import { BACKLINE_CATEGORY_IDS } from './backline-categories';
 import { computeRehearsalDetail, buildRehearsalSummary, type RehearsalDetail } from './rehearsal-plan';
 import { syncRehearsalRequirementStatus } from './studio-sitter';
+import { hireGenuinelyReturning } from './hire-lifecycle';
 
 // ── HH Category IDs ──────────────────────────────────────────────────────
 // Source: HireHop categories_list.php, verified 9 Apr 2026
@@ -694,7 +695,17 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
 
     // ── Auto-generate close-out requirements when job reaches return status ──
     // HH status 6=Returned Incomplete, 7=Returned, 8=Requires Attention, 11=Completed
-    const isReturnPhase = hhStatus >= 6 && hhStatus !== 9 && hhStatus !== 10; // exclude cancelled/not interested
+    //
+    // HH status 6 is ambiguous — it fires on a genuine end-of-hire check-in AND
+    // on a mid-hire partial item return (a client hands back one element while
+    // the rest stays out). Gate on the hire-end date so a mid-hire partial does
+    // NOT prematurely spin up invoice / payment / client-followup close-out
+    // cards (which the chase scanner would then nag about while the tour is
+    // still out). Status 7/8/11 mean everything is physically back → always a
+    // genuine return. See CLAUDE.md → "The status-6 no man's land".
+    const isReturnPhase =
+      hhStatus >= 6 && hhStatus !== 9 && hhStatus !== 10 && // exclude cancelled/not interested
+      hireGenuinelyReturning(hhStatus, jobRow?.return_date, jobRow?.job_end);
     // HH status 7+ means everything is physically back (Returned, Requires Attention, Completed)
     const isFullyReturned = hhStatus >= 7 && hhStatus !== 9 && hhStatus !== 10;
 

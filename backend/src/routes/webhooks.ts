@@ -11,6 +11,7 @@
 import { Router, Request, Response } from 'express';
 import { query } from '../config/database';
 import { HH_TO_PIPELINE } from '../services/hirehop-writeback';
+import { hireGenuinelyReturning, HELD_OUT_PIPELINE_STATUSES } from '../services/hire-lifecycle';
 import { verifyApiKey } from '../middleware/api-key';
 import {
   triggerHireFormEmailOnConfirmation,
@@ -180,7 +181,8 @@ async function handleJobStatusChange(
 
   // Find the job in our database
   const jobResult = await query(
-    `SELECT id, pipeline_status, status as current_hh_status, hh_job_number
+    `SELECT id, pipeline_status, status as current_hh_status, hh_job_number,
+            return_date, job_end
      FROM jobs WHERE hh_job_number = $1 AND is_deleted = false`,
     [Number(jobNumber)],
   );
@@ -200,10 +202,41 @@ async function handleJobStatusChange(
   );
 
   // Map to pipeline status if applicable
-  const newPipelineStatus = HH_TO_PIPELINE[newHHStatus];
+  let newPipelineStatus = HH_TO_PIPELINE[newHHStatus];
   const statusChanges: Record<string, unknown> = {
     hh_status: { from: oldHHStatus, to: newHHStatus },
   };
+
+  // ── Mid-hire partial-return guard ─────────────────────────────────────────
+  // HireHop flips to 6 ("Returned Incomplete") both when a tour genuinely comes
+  // back AND when a client hands back ONE element mid-hire while the rest stays
+  // out. If the job is still on hire and the hire isn't due back yet, HOLD the
+  // pipeline_status where it is — the hire continues. reconcileHeldReturns()
+  // advances it forward automatically once the return date arrives. We only
+  // hold a genuinely-out job; a status staff have already advanced into the
+  // returns process is left untouched (never wound back). See CLAUDE.md →
+  // "The status-6 no man's land".
+  if (
+    newHHStatus === 6 &&
+    HELD_OUT_PIPELINE_STATUSES.includes(job.pipeline_status) &&
+    !hireGenuinelyReturning(6, job.return_date, job.job_end)
+  ) {
+    newPipelineStatus = job.pipeline_status; // hold — no pipeline change
+    // Timeline note (once, on the actual transition into 6 — not repeat echoes).
+    if (oldHHStatus < 6) {
+      const end = job.return_date || job.job_end;
+      const dueStr = end ? new Date(end).toLocaleDateString('en-GB') : 'its scheduled end';
+      await query(
+        `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
+         VALUES ('note', $1, $2, NULL, $3)`,
+        [
+          `📦 HireHop reports items checked in (Returned Incomplete), but this hire isn't due back until ${dueStr} — treating as an early partial return. The hire continues; the job stays on hire.`,
+          job.id,
+          job.pipeline_status,
+        ],
+      );
+    }
+  }
 
   if (newPipelineStatus && newPipelineStatus !== job.pipeline_status) {
     // Update pipeline status too
