@@ -892,7 +892,7 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
 
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
-                Invoice number <span className="text-gray-400 font-normal">(optional — de-dup key)</span>
+                Invoice number <span className="text-gray-400 font-normal">(optional)</span>
               </label>
               <input className={inputCls} value={invoiceNumber} onChange={(e) => setInvoiceNumber(e.target.value)} placeholder="e.g. INV-10472 (leave blank for fuel/till receipts)" />
               {invoiceDup && (

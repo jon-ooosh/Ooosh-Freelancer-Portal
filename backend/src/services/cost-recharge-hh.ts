@@ -50,7 +50,14 @@ export interface RechargePushResult {
   lineId?: string;
 }
 
-const CLOSED_HH_STATUSES = [7, 9, 10, 11];
+// Only truly-terminal HH statuses block a recharge push — Cancelled (9), Not
+// Interested (10), Completed (11). HireHop's own LOCKED flag (checked below) is
+// the real gate for an invoiced/finalised job. Returned (7) must stay pushable:
+// post-hire running-cost recharge happens BY DEFINITION on returned jobs (fuel
+// etc. is tallied once the van's back). Mirrors the PCN recharge guard, which
+// was already loosened for the same reason. Earlier this list included 7, which
+// silently blocked the module's main use case.
+const CLOSED_HH_STATUSES = [9, 10, 11];
 
 export async function pushRechargeToHH(costId: string): Promise<RechargePushResult> {
   const r = await query(
