@@ -1218,7 +1218,7 @@ const FREELANCER_PATCH_ALLOW = new Set([
  * this twice on the same job (e.g. once per cloned assignment in a
  * multi-van add-to-hire) is safe.
  */
-function firePostBookOutHooks(opts: {
+export function firePostBookOutHooks(opts: {
   assignmentId: string;
   vehicleId: string;
   jobId: string | null;
@@ -2025,65 +2025,114 @@ async function resolveHireFormEmailTarget(
  * manual fixing.
  */
 async function generateAndEmailHireFormPdf(assignmentId: string, trigger: string): Promise<void> {
-  const formData = await loadHireFormData(assignmentId);
-  if (!formData) {
-    console.warn(`[hire-forms] ${trigger}: loadHireFormData returned null for ${assignmentId}`);
-    return;
-  }
-  if (!formData.vehicleReg || formData.vehicleReg === 'TBC') {
-    console.warn(`[hire-forms] ${trigger}: skipping PDF for ${assignmentId} — no vehicle assigned`);
-    return;
-  }
-
-  const { pdfBytes, filename } = await generateHireFormPdf(formData);
-  const r2Key = `hire-forms/${assignmentId}/${filename}`;
-  await uploadToR2(r2Key, Buffer.from(pdfBytes), 'application/pdf');
-
-  await query(
+  // Atomic claim. The own-van agreement email can now be triggered by TWO
+  // server-side paths for a single book-out — the PATCH /:id write-back loop
+  // and the POST /save-event condition-report path (added so a freelancer
+  // book-out that only fires save-event still emails the agreement; the Tobi
+  // misfire, HH 15669). With both live, a staff book-out fires both, and the
+  // old read-then-send guard raced (both see hire_form_emailed_at NULL seconds
+  // apart and both email the customer). This conditional UPDATE claims the send
+  // atomically: only one caller wins; the loser (or an already-sent row) skips.
+  // The 10-minute staleness window lets a genuine retry (or a caller whose
+  // process died mid-send) re-claim, while a concurrent duplicate is blocked.
+  const claim = await query(
     `UPDATE vehicle_hire_assignments
-     SET hire_form_pdf_key = $1, hire_form_generated_at = NOW(), updated_at = NOW()
-     WHERE id = $2`,
-    [r2Key, assignmentId]
+        SET hire_form_email_claimed_at = NOW()
+      WHERE id = $1
+        AND hire_form_emailed_at IS NULL
+        AND (hire_form_email_claimed_at IS NULL
+             OR hire_form_email_claimed_at < NOW() - INTERVAL '10 minutes')
+      RETURNING id`,
+    [assignmentId]
   );
-
-  console.log(`[hire-forms] ${trigger}: PDF generated for ${assignmentId} (${pdfBytes.length} bytes)`);
-
-  const target = await resolveHireFormEmailTarget(assignmentId, formData.email);
-  if (target.kind === 'none') {
-    console.warn(`[hire-forms] ${trigger}: no email recipient resolvable for ${assignmentId}; PDF stored but not emailed`);
+  if (claim.rows.length === 0) {
+    console.log(`[hire-forms] ${trigger}: skip ${assignmentId} — already emailed or send in-flight`);
     return;
   }
 
-  const emailResult = await emailService.send('hire_form', {
-    to: target.to,
-    cc: target.cc.length > 0 ? target.cc : undefined,
-    prependBanner: target.kind === 'fallback' ? target.banner : undefined,
-    variables: {
-      driverName: formData.driverName,
-      vehicleReg: formData.vehicleReg || 'TBC',
-      vehicleModel: formData.vehicleModel || 'TBC',
-      hireStart: fmtDate(formData.hireStartDate),
-      hireEnd: fmtDate(formData.hireEndDate),
-      jobNumber: formData.hhJobNumber || '',
-    },
-    attachments: [{
-      filename,
-      content: Buffer.from(pdfBytes),
-      contentType: 'application/pdf',
-    }],
-  });
-
-  if (emailResult.success) {
-    await query(
-      `UPDATE vehicle_hire_assignments SET hire_form_emailed_at = NOW() WHERE id = $1`,
+  // Release the claim so runHookWithRecovery's retry (and any later trigger)
+  // can re-attempt. Guarded on hire_form_emailed_at IS NULL so we never wipe a
+  // claim after a successful send races in.
+  const clearClaim = () =>
+    query(
+      `UPDATE vehicle_hire_assignments
+          SET hire_form_email_claimed_at = NULL
+        WHERE id = $1 AND hire_form_emailed_at IS NULL`,
       [assignmentId]
-    );
-    console.log(`[hire-forms] ${trigger}: email sent to ${target.to} for ${assignmentId}${target.kind === 'fallback' ? ' (fallback to info@)' : ''}`);
-    if (target.kind === 'fallback' && target.jobId) {
-      await logFallbackToTimeline({ jobId: target.jobId, templateId: 'hire_form' });
+    ).catch(() => {});
+
+  try {
+    const formData = await loadHireFormData(assignmentId);
+    if (!formData) {
+      await clearClaim();
+      console.warn(`[hire-forms] ${trigger}: loadHireFormData returned null for ${assignmentId}`);
+      return;
     }
-  } else {
-    console.warn(`[hire-forms] ${trigger}: email failed for ${assignmentId}:`, emailResult);
+    if (!formData.vehicleReg || formData.vehicleReg === 'TBC') {
+      await clearClaim();
+      console.warn(`[hire-forms] ${trigger}: skipping PDF for ${assignmentId} — no vehicle assigned`);
+      return;
+    }
+
+    const { pdfBytes, filename } = await generateHireFormPdf(formData);
+    const r2Key = `hire-forms/${assignmentId}/${filename}`;
+    await uploadToR2(r2Key, Buffer.from(pdfBytes), 'application/pdf');
+
+    await query(
+      `UPDATE vehicle_hire_assignments
+       SET hire_form_pdf_key = $1, hire_form_generated_at = NOW(), updated_at = NOW()
+       WHERE id = $2`,
+      [r2Key, assignmentId]
+    );
+
+    console.log(`[hire-forms] ${trigger}: PDF generated for ${assignmentId} (${pdfBytes.length} bytes)`);
+
+    const target = await resolveHireFormEmailTarget(assignmentId, formData.email);
+    if (target.kind === 'none') {
+      await clearClaim();
+      console.warn(`[hire-forms] ${trigger}: no email recipient resolvable for ${assignmentId}; PDF stored but not emailed`);
+      return;
+    }
+
+    const emailResult = await emailService.send('hire_form', {
+      to: target.to,
+      cc: target.cc.length > 0 ? target.cc : undefined,
+      prependBanner: target.kind === 'fallback' ? target.banner : undefined,
+      variables: {
+        driverName: formData.driverName,
+        vehicleReg: formData.vehicleReg || 'TBC',
+        vehicleModel: formData.vehicleModel || 'TBC',
+        hireStart: fmtDate(formData.hireStartDate),
+        hireEnd: fmtDate(formData.hireEndDate),
+        jobNumber: formData.hhJobNumber || '',
+      },
+      attachments: [{
+        filename,
+        content: Buffer.from(pdfBytes),
+        contentType: 'application/pdf',
+      }],
+    });
+
+    if (emailResult.success) {
+      await query(
+        `UPDATE vehicle_hire_assignments SET hire_form_emailed_at = NOW() WHERE id = $1`,
+        [assignmentId]
+      );
+      console.log(`[hire-forms] ${trigger}: email sent to ${target.to} for ${assignmentId}${target.kind === 'fallback' ? ' (fallback to info@)' : ''}`);
+      if (target.kind === 'fallback' && target.jobId) {
+        await logFallbackToTimeline({ jobId: target.jobId, templateId: 'hire_form' });
+      }
+    } else {
+      // Throw so runHookWithRecovery retries (and ultimately alerts on
+      // permanent failure). Previously this swallowed the failure with a warn
+      // — a silently-dropped agreement, the class of bug this whole change
+      // exists to kill. The catch below releases the claim before the rethrow.
+      const detail = (emailResult as { error?: string }).error || 'send failed';
+      throw new Error(`hire agreement email failed for ${assignmentId}: ${detail}`);
+    }
+  } catch (err) {
+    await clearClaim();
+    throw err;
   }
 }
 

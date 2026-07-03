@@ -2539,6 +2539,53 @@ router.post('/save-event', async (req: FlexibleVehicleRequest, res: Response) =>
           if (matchedIds.length === 0) {
             console.log(`[vehicles/events] book-out: no matching allocated assignment for ${reg} / HH#${hhJob} — no assignment state flip`);
           }
+
+          // Drive the hire-forms side of book-out from HERE too.
+          //
+          // A freelancer book-out fires save-event ONLY — it never runs the
+          // PATCH /api/hire-forms/:id write-back loop that is the sole place
+          // the hire *agreement* PDF+email is scheduled. So the van flipped to
+          // booked_out and the condition report went to the client, but no
+          // driver ever got their agreement (the Tobi misfire, HH 15669, 2 Jul
+          // 2026 — hire_form_emailed_at stayed NULL). Firing firePostBookOutHooks
+          // here makes save-event a source of truth for the book-out: each
+          // flipped driver gets their own-van agreement AND every other driver
+          // on the van gets a cross-van agreement (fanOutVanHireForms), i.e.
+          // the "everyone drives everything" cascade (jon's decision (a)).
+          //
+          // The staff PATCH path still fires the same hooks; double-firing is
+          // safe — the own-van email is serialised by the atomic claim in
+          // generateAndEmailHireFormPdf (migration 155), the cross-van fan-out
+          // by the hire_form_documents UNIQUE constraint, and every other hook
+          // (fleet sync, requirement advance, OOH, auto-dispatch) is idempotent.
+          if (matchedIds.length > 0) {
+            try {
+              const flipped = await query(
+                `SELECT id, vehicle_id, job_id, hirehop_job_id,
+                        return_overnight, hire_form_emailed_at
+                   FROM vehicle_hire_assignments
+                  WHERE id = ANY($1::uuid[])`,
+                [matchedIds]
+              );
+              const { firePostBookOutHooks } = await import('./hire-forms');
+              const isFreelancer = !!req.bookoutSession;
+              for (const row of flipped.rows) {
+                if (!row.vehicle_id) continue; // hooks no-op without a linked van
+                firePostBookOutHooks({
+                  assignmentId: row.id as string,
+                  vehicleId: row.vehicle_id as string,
+                  jobId: row.job_id ?? null,
+                  hhJobNumber: row.hirehop_job_id ?? null,
+                  returnOvernight: row.return_overnight ?? null,
+                  hireFormEmailedAt: row.hire_form_emailed_at ?? null,
+                  actorLabel: isFreelancer ? 'freelancer book-out' : (req.user?.email || 'staff'),
+                  actorUserId: isFreelancer ? null : (req.user?.id || null),
+                });
+              }
+            } catch (hookErr) {
+              console.warn('[vehicles/events] book-out post-hooks failed to schedule:', hookErr);
+            }
+          }
         }
       } catch (err) {
         console.warn('[vehicles/events] book-out side-effect failed:', err);
