@@ -439,12 +439,28 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
   };
   const pcnBuckets = [pcnNip, pcnTransfer, pcnDeadline, pcnAwaiting].filter((b) => b.count > 0);
 
+  // Studio-sitter cover gaps (Rehearsals) — evenings in the next 14 days that
+  // need a sitter but have none assigned. Amber — action-needed planning.
+  const sitterGaps: NABucket = {
+    key: 'sitter_gaps',
+    title: 'Evenings without a sitter',
+    accent: 'amber',
+    count: na.sitter_gap_count || 0,
+    items: (na.sitter_gaps || []).map((g) => ({
+      id: g.date,
+      label: g.jobs.length ? g.jobs.join(', ') : 'Rehearsal',
+      age: new Date(`${g.date}T00:00:00Z`).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' }),
+      href: '/operations/studio-sitters',
+    })),
+    viewAllHref: '/operations/studio-sitters',
+  };
+
   const allClear = overdueTotal === 0;
   const overdueBuckets = [departures, completions, backline, transport];
   // expiringHolds leads the secondary row — red accent, time-critical (hold
   // auto-voids at day 5). Sits ahead of the amber/blue/purple buckets so it
   // catches the eye when present.
-  const secondaryBuckets = [expiringHolds, receiptsOutstanding, cotReceipts, rechargesToResolve, ...pcnBuckets, carnets, referrals, excess, transportArrangements, fleetBucket, problemsBucket];
+  const secondaryBuckets = [expiringHolds, receiptsOutstanding, cotReceipts, rechargesToResolve, ...pcnBuckets, carnets, referrals, excess, sitterGaps, transportArrangements, fleetBucket, problemsBucket];
   const secondaryAny = secondaryBuckets.some(b => b.count > 0);
 
   return (

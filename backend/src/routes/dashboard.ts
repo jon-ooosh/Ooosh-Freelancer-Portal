@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { query } from '../config/database';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { buildProgressStrips, StripPhase } from '../services/job-progress-strip';
+import { getRoster } from '../services/studio-sitter';
 
 const router = Router();
 router.use(authenticate);
@@ -734,6 +735,18 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       (row: { on_hire_count: string | number }) => parseInt(String(row.on_hire_count), 10) || 0,
     );
 
+    // Studio-sitter cover gaps — evenings in the next 14 days needing a sitter
+    // with none assigned (Rehearsals module). Amber dashboard bucket. Non-fatal.
+    let sitterGaps: { date: string; jobs: string[] }[] = [];
+    try {
+      const _from = new Date().toISOString().slice(0, 10);
+      const _toD = new Date(); _toD.setUTCDate(_toD.getUTCDate() + 14);
+      const roster = await getRoster(_from, _toD.toISOString().slice(0, 10));
+      sitterGaps = roster
+        .filter((r) => r.needs_sitter && !r.assignee)
+        .map((r) => ({ date: r.date, jobs: r.jobs.map((j) => j.label).slice(0, 2) }));
+    } catch { /* non-fatal — bucket just won't populate */ }
+
     // Build prep time estimates by day
     const prepEstimates: Record<string, {
       job_count: number; vehicle_count: number;
@@ -901,6 +914,10 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         // collateral evaporates.
         expiring_holds_count: expiringHoldsResult.rows.length,
         expiring_holds: expiringHoldsResult.rows,
+        // ── Studio-sitter cover gaps (Rehearsals) ──
+        // Evenings in the next 14 days needing a sitter with none assigned.
+        sitter_gap_count: sitterGaps.length,
+        sitter_gaps: sitterGaps.slice(0, 5),
         // ── Card-machine receipt scans outstanding (migration 087) ──
         // Excess collected/held on a physical terminal needs a receipt scan
         // attached. Amber to-do, non-blocking.

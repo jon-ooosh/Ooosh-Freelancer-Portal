@@ -49,6 +49,7 @@ const updateExcessSchema = z.object({
   xero_contact_id: z.string().max(100).nullable().optional(),
   xero_contact_name: z.string().max(200).nullable().optional(),
   client_name: z.string().max(200).nullable().optional(),
+  held_on_account: z.boolean().optional(),
 });
 
 // Excess payment schema.
@@ -742,6 +743,38 @@ router.get('/:id/available-rollover', async (req: AuthRequest, res: Response) =>
   }
 });
 
+// ── GET /api/excess/:id/rollover-chain ─────────────────────────────────────
+// "Follow the thread" of a rolled-over excess: all records sharing this
+// record's HireHop deposit, ordered oldest→newest, so the UI can render
+// "#15577 → #15865 → #15912 (reimbursed)". Rollover copies the same
+// hh_deposit_id forward, so a shared deposit id IS the chain. Returns just this
+// record (chain length 1) when there's no rollover.
+
+router.get('/:id/rollover-chain', async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const rec = await query(`SELECT hh_deposit_id FROM job_excess WHERE id = $1`, [id]);
+    if (rec.rows.length === 0) { res.status(404).json({ error: 'Excess record not found' }); return; }
+    const depositId = rec.rows[0].hh_deposit_id;
+    if (!depositId) { res.json({ data: { deposit_id: null, current_id: id, chain: [] } }); return; }
+
+    const chain = await query(
+      `SELECT je.id, je.excess_status,
+              je.excess_amount_taken, je.claim_amount, je.reimbursement_amount, je.amount_held,
+              je.created_at, j.hh_job_number, j.job_name
+         FROM job_excess je LEFT JOIN jobs j ON j.id = je.job_id
+        WHERE je.hh_deposit_id = $1
+        ORDER BY je.created_at ASC`,
+      [depositId]
+    );
+    res.json({ data: { deposit_id: depositId, current_id: id, chain: chain.rows } });
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error('[excess] Rollover chain error:', errMsg);
+    res.status(500).json({ error: 'Failed to load rollover chain', detail: errMsg });
+  }
+});
+
 // ── GET /api/excess/ledger — Client excess ledger ──
 
 router.get('/ledger', authorize(...MANAGER_ROLES), async (_req: AuthRequest, res: Response) => {
@@ -1193,10 +1226,13 @@ router.post('/:id/payment', validate(paymentSchema), async (req: AuthRequest, re
              WHERE id = $2 AND hh_deposit_id IS NULL`,
             [prevRow.hh_deposit_id, id]
           );
-          // Mark the previous record as rolled_over (terminal — cash has moved on).
+          // Mark the previous record as rolled_over (terminal — cash has moved
+          // on to this child). Clear held_on_account: it's no longer parked, it's
+          // been applied to a real hire.
           await query(
             `UPDATE job_excess
              SET excess_status = 'rolled_over',
+                 held_on_account = FALSE,
                  updated_at = NOW()
              WHERE id = $1`,
             [prevRow.id]
@@ -2530,6 +2566,7 @@ router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSch
     const result = await query(
       `UPDATE job_excess SET
         excess_status = $1,
+        held_on_account = FALSE,
         reimbursement_amount = COALESCE(reimbursement_amount, 0) + $2,
         reimbursement_date = NOW(),
         reimbursement_method = $3,
@@ -2732,6 +2769,7 @@ router.post('/:id/mark-externally-resolved', validate(externallyResolvedSchema),
         excess_amount_taken = $1,
         reimbursement_amount = $1,
         excess_status = 'reimbursed',
+        held_on_account = FALSE,
         payment_method = $2,
         payment_reference = $3,
         payment_date = COALESCE(payment_date, NOW()),

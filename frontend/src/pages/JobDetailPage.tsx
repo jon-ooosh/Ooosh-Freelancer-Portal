@@ -14,7 +14,7 @@ import BacklineMatcherModal from '../components/BacklineMatcherModal';
 import RequirementCard from '../components/RequirementCard';
 import type { JobRequirement } from '../components/RequirementCard';
 import ExcessGateBanner from '../components/ExcessGateBanner';
-import ExcessPaymentModal from '../components/ExcessPaymentModal';
+import ExcessPaymentModal, { computeHireDays } from '../components/ExcessPaymentModal';
 import OohReturnModal from '../components/OohReturnModal';
 import JobOohReturns from '../components/JobOohReturns';
 import AddToHireModal, { type AddToHireCandidate } from '../components/AddToHireModal';
@@ -1405,7 +1405,10 @@ export default function JobDetailPage() {
     // hire-form chain is suspended). Used to suppress the "no hire form sent"
     // banner, which only applies to self-drive hires.
     allVanAndDriver: boolean;
-  }>({ hireFormsStatus: null, postHireOpenCount: 0, allVanAndDriver: false });
+    // Studio-sitter cover gap — unassigned sitter-needed evenings + the earliest
+    // one's date (for the pre-hire amber banner). Null when fully covered / n/a.
+    rehearsalGap: { unassigned: number; firstDate: string } | null;
+  }>({ hireFormsStatus: null, postHireOpenCount: 0, allVanAndDriver: false, rehearsalGap: null });
   const [assignModalQuoteId, setAssignModalQuoteId] = useState<string | null>(null);
   const [peopleOptions, setPeopleOptions] = useState<PersonOption[]>([]);
   const [peopleSearch, setPeopleSearch] = useState('');
@@ -1628,7 +1631,6 @@ export default function JobDetailPage() {
   const [pushingStatusToHH, setPushingStatusToHH] = useState(false);
   const [prepChecklistKey, setPrepChecklistKey] = useState(0);
   const [internalToggling, setInternalToggling] = useState(false);
-  const [rrcToggling, setRrcToggling] = useState(false);
   const editNameRef = useRef<HTMLInputElement>(null);
   const editHHRef = useRef<HTMLInputElement>(null);
   const clientSearchRef = useRef<HTMLDivElement>(null);
@@ -2063,7 +2065,7 @@ export default function JobDetailPage() {
       setAllocationConflicts([]);
       setDateMismatches([]);
       setJobOrgs([]);
-      setReqSummary({ hireFormsStatus: null, postHireOpenCount: 0, allVanAndDriver: false });
+      setReqSummary({ hireFormsStatus: null, postHireOpenCount: 0, allVanAndDriver: false, rehearsalGap: null });
       setLoading(true);
 
       loadJob();
@@ -2119,6 +2121,17 @@ export default function JobDetailPage() {
       ]);
       const hf = pre.data.find(r => r.requirement_type === 'hire_forms');
       const openPost = post.data.filter(r => r.status !== 'done').length;
+      // Rehearsal studio-sitter cover gap — only when the job has a rehearsal
+      // requirement. Coverage is per-evening; gap = any sitter-needed night
+      // without an assignee. firstDate = earliest such night (drives the banner).
+      let rehearsalGap: { unassigned: number; firstDate: string } | null = null;
+      if (pre.data.some(r => r.requirement_type === 'rehearsal')) {
+        try {
+          const cov = await api.get<{ data: { date: string; assignee: { id: string } | null }[] }>(`/studio-sitters/job/${id}/coverage`);
+          const unassignedDates = (cov.data ?? []).filter(e => !e.assignee).map(e => e.date).sort();
+          if (unassignedDates.length > 0) rehearsalGap = { unassigned: unassignedDates.length, firstDate: unassignedDates[0] };
+        } catch { /* non-fatal */ }
+      }
       // Suppress the self-drive hire-form banner when the job is wholly V&D —
       // either the live derived flags say so (vehicles present, zero self-drive
       // slots) or the hire-form requirement is suspended (notes marker). Reading
@@ -2130,6 +2143,7 @@ export default function JobDetailPage() {
         hireFormsStatus: hf?.status || null,
         postHireOpenCount: openPost,
         allVanAndDriver: flagsVD || reqSuspended,
+        rehearsalGap,
       });
     } catch {
       // non-fatal — alerts just won't fire
@@ -2359,32 +2373,6 @@ export default function JobDetailPage() {
     }
   }
 
-  /** Toggle "recharge running costs" — fuel/parking/etc. billed to the client at
-   *  actual + markup post-hire. The lightweight switch (per-quote expense lines
-   *  are the rich entry). Lights the standing card + the cost auto-inherit. */
-  async function toggleRechargeRunningCosts() {
-    if (!job || !id) return;
-    const turningOn = !job.recharge_running_costs;
-    if (turningOn) {
-      const ok = window.confirm(
-        'Mark this job as "recharge running costs"?\n\n' +
-        'Use for van+driver / runner jobs where fuel, parking, tolls etc. are billed back to the client after the hire.\n\n' +
-        'New running-cost costs logged on this job will default to recharge (actual + 20%), and a "Recharge running costs" card surfaces at check-in.'
-      );
-      if (!ok) return;
-    }
-    setRrcToggling(true);
-    try {
-      await api.patch(`/hirehop/jobs/${id}/recharge-running-costs`, { rechargeRunningCosts: turningOn });
-      await loadJob();
-      setPrepChecklistKey(k => k + 1);
-    } catch (err: any) {
-      alert(err?.message || 'Failed to update recharge flag');
-    } finally {
-      setRrcToggling(false);
-    }
-  }
-
   /** Push OP pipeline status to HireHop to resolve a mismatch */
   async function pushStatusToHH() {
     if (!job) return;
@@ -2534,14 +2522,18 @@ export default function JobDetailPage() {
       }
       const allRows = Array.from(merged.values());
 
-      // Build slot → vehicle_id map from staff allocations (no driver_id,
+      // Build slot → vehicle map from staff allocations (no driver_id,
       // no freelancer_person_id, has vehicle_id). Used to infer the van
-      // for hire-form rows that haven't been cascade-linked yet.
-      const slotVehicleByIndex = new Map<number, string>();
+      // for hire-form rows that haven't been cascade-linked yet. We keep the
+      // reg + type alongside the id so the card header can DISPLAY the van
+      // even before the hire-form row is cascade-linked (otherwise the card
+      // shows a bare 🚐 with no reg — the button knows the van but the
+      // header can't).
+      const slotVehicleByIndex = new Map<number, { id: string; reg: string | null; type: string | null }>();
       for (const r of allRows) {
         const idx = r.van_requirement_index ?? 0;
         if (!r.driver_id && !r.freelancer_person_id && r.vehicle_id && !slotVehicleByIndex.has(idx)) {
-          slotVehicleByIndex.set(idx, r.vehicle_id);
+          slotVehicleByIndex.set(idx, { id: r.vehicle_id, reg: r.vehicle_reg ?? null, type: r.vehicle_type ?? null });
         }
       }
 
@@ -2596,7 +2588,12 @@ export default function JobDetailPage() {
             excess_amount_taken: r.excess_amount_taken,
             dispute_status: r.dispute_status ?? null,
           } : null,
-          effective_vehicle_id: r.vehicle_id || inferred,
+          effective_vehicle_id: r.vehicle_id || inferred?.id || null,
+          // Backfill reg/type from the inferred sibling so the card header
+          // shows the van whenever we know it, not just when this row's own
+          // vehicle_id is set. No-op when the row is already linked.
+          vehicle_reg: r.vehicle_reg || inferred?.reg || null,
+          vehicle_type: r.vehicle_type || inferred?.type || null,
         };
       });
       setVehicleAssignments(shaped);
@@ -2773,6 +2770,17 @@ export default function JobDetailPage() {
     const daysSinceReturn = daysBetween(todayLocalISO, returnDay);
     if (daysSinceReturn < 7 || reqSummary.postHireOpenCount === 0) return null;
     return { daysSinceReturn, openCount: reqSummary.postHireOpenCount };
+  })();
+
+  // Rehearsal studio-sitter gap — sitter-needed evenings unassigned within the
+  // warning window (7 days) of the earliest such night. Amber, non-blocking.
+  const rehearsalSitterGap: { unassigned: number; daysToFirst: number } | null = (() => {
+    const g = reqSummary.rehearsalGap;
+    if (!g) return null;
+    if (['lost', 'cancelled'].includes(job.pipeline_status || '')) return null;
+    const daysToFirst = daysBetween(g.firstDate, todayLocalISO);
+    if (daysToFirst < 0 || daysToFirst > 7) return null;
+    return { unassigned: g.unassigned, daysToFirst };
   })();
 
   // Crew unassigned + Crew not introduced — gate on EACH QUOTE'S OWN date,
@@ -3451,6 +3459,21 @@ export default function JobDetailPage() {
                 }}
               />
             )}
+            {rehearsalSitterGap && (
+              <JobAlertBanner
+                severity="amber"
+                message={
+                  (rehearsalSitterGap.daysToFirst === 0
+                    ? 'Rehearsal starts today'
+                    : `Rehearsal starts in ${rehearsalSitterGap.daysToFirst} ${rehearsalSitterGap.daysToFirst === 1 ? 'day' : 'days'}`)
+                  + ` — ${rehearsalSitterGap.unassigned} evening${rehearsalSitterGap.unassigned === 1 ? '' : 's'} still without a studio sitter.`
+                }
+                action={{
+                  label: 'View Job Requirements',
+                  onClick: () => setActiveTab('overview'),
+                }}
+              />
+            )}
 
             {/* HireHop status mismatch banner */}
             {hhStatusMismatch && (
@@ -3808,25 +3831,6 @@ export default function JobDetailPage() {
             >
               <span>🔧</span>
               <span>{internalToggling ? 'Saving…' : job.is_internal ? 'Internal Job ✓' : 'Mark Internal'}</span>
-            </button>
-            {/* Recharge running costs toggle — fuel/parking/etc. billed to the
-                client at actual + markup post-hire (runner / van+driver jobs). */}
-            <button
-              onClick={toggleRechargeRunningCosts}
-              disabled={rrcToggling}
-              className={
-                job.recharge_running_costs
-                  ? 'w-full inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-amber-400 bg-amber-100 rounded-lg hover:bg-amber-200 text-amber-800 font-medium disabled:opacity-50 transition-colors'
-                  : 'w-full inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-500 disabled:opacity-50 transition-colors'
-              }
-              title={
-                job.recharge_running_costs
-                  ? 'Running costs are recharged to the client post-hire (actual + markup). Click to turn off.'
-                  : 'Mark this job as recharging its running costs (fuel/parking/etc.) to the client post-hire'
-              }
-            >
-              <span>⛽</span>
-              <span>{rrcToggling ? 'Saving…' : job.recharge_running_costs ? 'Recharge Costs ✓' : 'Recharge Costs'}</span>
             </button>
           </div>
         </div>
@@ -5330,6 +5334,7 @@ export default function JobDetailPage() {
         <ExcessPaymentModal
           excess={excessModalRecord}
           initialAction={excessModalInitialAction}
+          hireDays={computeHireDays(job)}
           onClose={() => { setExcessModalRecord(null); setExcessModalInitialAction(undefined); }}
           onUpdated={() => { loadVehicleAssignments(); loadCancelledExcessHeld(); }}
         />

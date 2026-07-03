@@ -188,6 +188,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '151_backfill_excess_stripe_pi.sql',
         '152_recharge_running_costs.sql',
         '153_studio_sitter_shifts.sql',
+        '154_excess_held_on_account.sql',
       ];
 
       for (const migration of migrations) {

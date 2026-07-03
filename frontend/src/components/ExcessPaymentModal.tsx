@@ -38,6 +38,18 @@ const PAYMENT_METHOD_TO_BANK: Record<string, number> = {
   wise_bacs: 265, worldpay: 169, amex: 165, stripe_gbp: 267, lloyds_bank: 170, till_cash: 168, paypal: 173,
 };
 
+/** Hire length in whole days from a job object, or undefined if dates missing.
+ *  start = job_date||out_date, end = job_end||return_date (mirrors money.ts). */
+export function computeHireDays(job: { job_date?: string | null; out_date?: string | null; job_end?: string | null; return_date?: string | null } | null | undefined): number | undefined {
+  if (!job) return undefined;
+  const start = job.job_date || job.out_date;
+  const end = job.job_end || job.return_date;
+  if (!start || !end) return undefined;
+  const ms = new Date(end).getTime() - new Date(start).getTime();
+  if (isNaN(ms) || ms < 0) return undefined;
+  return Math.max(1, Math.ceil(ms / (1000 * 60 * 60 * 24)));
+}
+
 type ModalAction = 'payment' | 'claim' | 'reimburse' | 'waive' | 'rollover' | 'rollover_apply' | 'move' | 'edit_required' | 'unlink_deposit' | 'capture' | 'release' | 'record_preauth' | 'upload_receipt' | 'mark_externally_resolved';
 
 const CAPTURE_METHODS = [
@@ -72,6 +84,9 @@ interface ExcessPaymentModalProps {
   onClose: () => void;
   onUpdated: () => void;
   initialAction?: ModalAction;
+  /** Hire length in days — when short (< 4), a pre-auth hold is recommended
+   *  over a captured payment, so we surface it first + badge it. */
+  hireDays?: number;
 }
 
 const PAYMENT_METHODS = [
@@ -137,7 +152,10 @@ function statusColor(status: ExcessStatus): string {
 
 export { statusLabel, statusColor };
 
-export default function ExcessPaymentModal({ excess, onClose, onUpdated, initialAction }: ExcessPaymentModalProps) {
+export default function ExcessPaymentModal({ excess, onClose, onUpdated, initialAction, hireDays }: ExcessPaymentModalProps) {
+  // Short hires (< 4 days) are typically covered by a pre-auth HOLD rather than
+  // a captured payment — surface pre-auth first + badge it as recommended.
+  const isShortHire = hireDays != null && hireDays > 0 && hireDays < 4;
   const [action, setAction] = useState<ModalAction | null>(initialAction || null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -638,8 +656,14 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
           break;
         }
         case 'rollover':
+          // "Hold on account for next hire" — keep the money exactly where it is
+          // (status stays 'taken', so it's still counted in Total Held, visible,
+          // and fully actionable). Just toggle the intent flag. It becomes
+          // 'rolled_over' only when actually applied to a real next hire (the
+          // apply-forward flow). Never bury it behind a status change with no
+          // destination (migration 154 / job 16099 incident).
           await api.put(`/excess/${excess.id}`, {
-            excess_status: 'rolled_over',
+            held_on_account: !excess.held_on_account,
           });
           break;
         case 'rollover_apply': {
@@ -771,7 +795,7 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
   }
 
   // Available actions based on current status
-  const availableActions: { action: ModalAction; label: string; icon: string }[] = [];
+  const availableActions: { action: ModalAction; label: string; icon: string; recommended?: boolean }[] = [];
   const s = excess.excess_status;
 
   // Rollover-apply lands at the TOP when available — most natural action when
@@ -780,13 +804,18 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
   if (needsCollection && rolloverInfo?.available) {
     availableActions.push({ action: 'rollover_apply', label: 'Apply Rolled Over Excess', icon: '↻' });
   }
-  if (s === 'needed' || s === 'pending' || s === 'partially_paid') {
-    availableActions.push({ action: 'payment', label: 'Record Payment', icon: '£' });
+  // Pre-auth hold available from a clean "needed" state with no money/hold yet.
+  // For SHORT hires it's the recommended route, so push it FIRST + badge it.
+  const preAuthAvailable = (s === 'needed' || s === 'pending') && preAuthHeld === 0 && Number(excess.excess_amount_taken || 0) === 0;
+  if (preAuthAvailable && isShortHire) {
+    availableActions.push({ action: 'record_preauth', label: 'Record Pre-Auth Hold', icon: '◫', recommended: true });
   }
-  // Record a manual pre-auth hold (e.g. taken on the Worldpay machine). Only
-  // from a clean "needed" state with no money/hold yet — stacking a hold on top
-  // of existing money would be ambiguous (backend enforces the same guard).
-  if ((s === 'needed' || s === 'pending') && preAuthHeld === 0 && Number(excess.excess_amount_taken || 0) === 0) {
+  if (s === 'needed' || s === 'pending' || s === 'partially_paid') {
+    availableActions.push({ action: 'payment', label: 'Record Excess Payment', icon: '£' });
+  }
+  // Non-short hires (or when it wasn't surfaced first): the pre-auth option
+  // still appears here in its usual position.
+  if (preAuthAvailable && !isShortHire) {
     availableActions.push({ action: 'record_preauth', label: 'Record Pre-Auth Hold', icon: '◫' });
   }
   // Pre-auth holds: capture (→ taken). For held money you can't claim/reimburse,
@@ -806,7 +835,11 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
   if ((s === 'taken' || s === 'partially_paid') && amountHeld > 0) {
     availableActions.push({ action: 'claim', label: 'Apply to Invoice (claim)', icon: '!' });
     availableActions.push({ action: 'reimburse', label: 'Reimburse', icon: '<' });
-    availableActions.push({ action: 'rollover', label: 'Roll Over to Next Hire', icon: '>' });
+    availableActions.push({
+      action: 'rollover',
+      label: excess.held_on_account ? 'Remove Held-on-Account' : 'Hold on Account for Next Hire',
+      icon: '>',
+    });
   }
   // Multi-event model: even after partial reimbursement, more claims can still
   // be applied as long as held balance remains. Same for reimbursing the
@@ -1006,10 +1039,19 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
                 <button
                   key={a.action}
                   onClick={() => setAction(a.action)}
-                  className="w-full text-left px-4 py-3 rounded-lg border border-gray-200 hover:border-ooosh-300 hover:bg-ooosh-50 transition-colors"
+                  className={`w-full text-left px-4 py-3 rounded-lg border transition-colors ${
+                    a.recommended
+                      ? 'border-emerald-300 bg-emerald-50 hover:border-emerald-400 hover:bg-emerald-100'
+                      : 'border-gray-200 hover:border-ooosh-300 hover:bg-ooosh-50'
+                  }`}
                 >
-                  <span className="inline-block w-6 text-center text-gray-400 mr-2 font-mono">{a.icon}</span>
+                  <span className={`inline-block w-6 text-center mr-2 font-mono ${a.recommended ? 'text-emerald-600' : 'text-gray-400'}`}>{a.icon}</span>
                   <span className="text-sm font-medium text-gray-900">{a.label}</span>
+                  {a.recommended && (
+                    <span className="ml-2 inline-block text-[10px] font-semibold uppercase tracking-wide text-emerald-700 bg-emerald-100 border border-emerald-200 rounded-full px-2 py-0.5">
+                      Recommended · short hire
+                    </span>
+                  )}
                 </button>
               ))}
             </div>
@@ -1650,11 +1692,22 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
 
             {action === 'rollover' && (
               <div className="space-y-3">
-                <h3 className="text-sm font-semibold text-gray-900">Roll Over to Next Hire</h3>
-                <p className="text-xs text-gray-500">
-                  Mark £{Number(excess.excess_amount_taken || 0).toFixed(2)} as held on account for the client's next hire.
-                  This amount will appear as a credit on their next excess requirement.
-                </p>
+                {excess.held_on_account ? (
+                  <>
+                    <h3 className="text-sm font-semibold text-gray-900">Remove Held-on-Account</h3>
+                    <p className="text-xs text-gray-500">
+                      Clear the "held on account" earmark on this £{Number(excess.excess_amount_taken || 0).toFixed(2)}. It stays exactly where it is (still held), just no longer flagged as parked for a future hire — so it'll show up as excess awaiting resolution again.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <h3 className="text-sm font-semibold text-gray-900">Hold on Account for Next Hire</h3>
+                    <p className="text-xs text-gray-500">
+                      Mark £{Number(excess.excess_amount_taken || 0).toFixed(2)} as <strong>held on account</strong> for the client's next hire.
+                      It stays here on this job — still shown as held, still refundable — and is offered up as a credit whenever their next hire is booked. Nothing moves until you apply it to a real hire.
+                    </p>
+                  </>
+                )}
               </div>
             )}
 

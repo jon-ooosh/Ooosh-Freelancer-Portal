@@ -9,7 +9,7 @@ import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
 import { getPaymentState, PAYMENT_STATE_LABELS, PAYMENT_STATE_CLASSES } from '../services/paymentState';
-import ExcessPaymentModal, { statusLabel, statusColor } from './ExcessPaymentModal';
+import ExcessPaymentModal, { statusLabel, statusColor, computeHireDays } from './ExcessPaymentModal';
 import CostCaptureModal from './CostCaptureModal';
 import RechargeResolveModal, { RechargeStatusPill } from './RechargeResolveModal';
 import type { JobExcess } from '../../../shared/types';
@@ -158,6 +158,11 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
 
   // Excess action modal
   const [actionExcess, setActionExcess] = useState<JobExcess | null>(null);
+
+  // Rollover chains — "follow the thread" of a rolled-over excess. Keyed by
+  // excess record id → ordered chain of records sharing the HH deposit.
+  type ChainEntry = { id: string; excess_status: string; hh_job_number: number | null; job_name: string | null };
+  const [rolloverChains, setRolloverChains] = useState<Record<string, ChainEntry[]>>({});
 
   // Link deposit state
   const [linkingDeposit, setLinkingDeposit] = useState<{ hh_deposit_id: number; amount: number } | null>(null);
@@ -373,6 +378,26 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   };
 
   useEffect(() => { loadData(); }, [loadData]);
+
+  // Fetch rollover chains for any record that's part of one (rolled over, or
+  // came in via rollover). Lazy + best-effort; only records that need the thread.
+  useEffect(() => {
+    const records = data?.excess?.records || [];
+    const needChain = records.filter((r: JobExcess) =>
+      r.excess_status === 'rolled_over' || (r as { payment_method?: string }).payment_method === 'rolled_over'
+    );
+    needChain.forEach((r: JobExcess) => {
+      if (rolloverChains[r.id]) return;
+      api.get<{ data: { chain: ChainEntry[] } }>(`/excess/${r.id}/rollover-chain`)
+        .then((resp) => {
+          if (resp.data.chain && resp.data.chain.length > 1) {
+            setRolloverChains((prev) => ({ ...prev, [r.id]: resp.data.chain }));
+          }
+        })
+        .catch(() => {});
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data]);
 
   // Job costs + quotes for the quoted-vs-actual panel. Best-effort, non-blocking.
   const loadJobCosts = useCallback(async () => {
@@ -802,6 +827,11 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                         HH linked
                       </span>
                     )}
+                    {record.held_on_account && (record.excess_status === 'taken' || record.excess_status === 'partially_paid') && (
+                      <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-700" title="Deliberately held on account for the client's next hire — still held, refundable, or applicable to a future hire.">
+                        Held on account
+                      </span>
+                    )}
                     {record.dispatch_override && (
                       <span className="text-[10px] text-amber-600 font-medium">overridden</span>
                     )}
@@ -854,6 +884,25 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                           {record.reimbursement_method && ` (${record.reimbursement_method.replace(/_/g, ' ')})`}
                         </span>
                       )}
+                    </p>
+                  )}
+                  {/* Rollover chain — "follow the thread". Shows the money's
+                      journey across jobs (#A → #B → #C), current job highlighted,
+                      until it's finally reimbursed/claimed. */}
+                  {rolloverChains[record.id] && rolloverChains[record.id].length > 1 && (
+                    <p className="text-xs text-purple-700 mt-0.5 flex flex-wrap items-center gap-1">
+                      <span className="font-medium">↪ Rollover thread:</span>
+                      {rolloverChains[record.id].map((link, i) => (
+                        <span key={link.id} className="flex items-center gap-1">
+                          {i > 0 && <span className="text-purple-300">→</span>}
+                          <span
+                            className={link.id === record.id ? 'font-semibold underline decoration-dotted' : ''}
+                            title={link.job_name || undefined}
+                          >
+                            #{link.hh_job_number ?? '—'} <span className="text-purple-400">({statusLabel(link.excess_status as Parameters<typeof statusLabel>[0])})</span>
+                          </span>
+                        </span>
+                      ))}
                     </p>
                   )}
                   {record.excess_status === 'pre_auth' && record.held_expires_at && (() => {
@@ -1086,7 +1135,8 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
       </div>
 
       {/* Job costs vs quotes (Cost Capture) */}
-      <JobCostsPanel costs={jobCosts} quotes={jobQuotes} onAddCost={() => setShowAddCost(true)} onChanged={loadJobCosts} />
+      <JobCostsPanel costs={jobCosts} quotes={jobQuotes} onAddCost={() => setShowAddCost(true)} onChanged={loadJobCosts}
+        jobId={jobId} rechargeOn={!!job?.recharge_running_costs} onJobChanged={onJobChanged} />
       {showAddCost && (
         <CostCaptureModal
           presetJobId={jobId}
@@ -1266,6 +1316,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
       {actionExcess && (
         <ExcessPaymentModal
           excess={actionExcess}
+          hireDays={computeHireDays(job)}
           onClose={() => setActionExcess(null)}
           onUpdated={loadData}
         />
@@ -1596,10 +1647,35 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
 // expected transport/crew cost. "Actuals" sums the quote_actual costs. Extra
 // costs are listed separately (eligible for client recharge). Hidden when the
 // job has neither costs nor quotes.
-function JobCostsPanel({ costs, quotes, onAddCost, onChanged }: { costs: JobCostLite[]; quotes: JobQuoteLite[]; onAddCost: () => void; onChanged: () => void }) {
+function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn, onJobChanged }: { costs: JobCostLite[]; quotes: JobQuoteLite[]; onAddCost: () => void; onChanged: () => void; jobId: string; rechargeOn: boolean; onJobChanged?: () => void }) {
   const m = (n: number) => `£${n.toFixed(2)}`;
   const num = (n: number | null | undefined) => Number(n || 0);
   const [resolving, setResolving] = useState<JobCostLite | null>(null);
+  const [rechargeBusy, setRechargeBusy] = useState(false);
+
+  // Lightweight "recharge running costs" toggle — the flag is normally set by a
+  // Recharge line on a quote; this covers the no-quote / mid-hire case. Sets the
+  // cost auto-inherit + the standing card.
+  async function toggleRecharge() {
+    const turningOn = !rechargeOn;
+    if (turningOn && !window.confirm('Mark this job as "recharge running costs"?\n\nNew running-cost costs (fuel/parking/etc.) logged here will default to recharge (actual + 20%), and a card surfaces at check-in. Usually set via a Recharge line on the quote — use this for jobs without one.')) return;
+    setRechargeBusy(true);
+    try {
+      await api.patch(`/hirehop/jobs/${jobId}/recharge-running-costs`, { rechargeRunningCosts: turningOn });
+      onJobChanged?.();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to update recharge flag');
+    } finally {
+      setRechargeBusy(false);
+    }
+  }
+  const RechargeToggle = (
+    <button onClick={toggleRecharge} disabled={rechargeBusy}
+      title={rechargeOn ? 'Running costs are recharged to the client post-hire. Click to turn off.' : 'Mark this job as recharging its running costs (fuel/parking/etc.) to the client post-hire'}
+      className={`text-xs rounded-md px-2 py-1 border disabled:opacity-50 ${rechargeOn ? 'border-amber-300 bg-amber-50 text-amber-800' : 'border-gray-300 text-gray-500 hover:bg-gray-50'}`}>
+      {rechargeBusy ? '…' : rechargeOn ? '⛽ Recharging running costs ✓' : '⛽ Recharge running costs'}
+    </button>
+  );
 
   const AddBtn = (
     <button onClick={onAddCost} className="text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-md px-3 py-1.5">
@@ -1642,9 +1718,10 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged }: { costs: JobCost
 
   return (
     <div className="bg-white border border-gray-200 rounded-lg p-6 mb-6">
-      <div className="flex items-center justify-between mb-4 gap-3">
+      <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
         <h3 className="text-lg font-semibold text-gray-900">Job Costs</h3>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 flex-wrap">
+          {RechargeToggle}
           <a href="/money/costs" className="text-sm text-purple-700 hover:underline">Costs hub →</a>
           {AddBtn}
         </div>
