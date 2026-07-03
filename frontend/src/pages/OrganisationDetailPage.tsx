@@ -125,6 +125,7 @@ export default function OrganisationDetailPage() {
   const [activeTab, setActiveTab] = useState<'people' | 'relationships' | 'hire_history' | 'timeline' | 'details' | 'excess' | 'issues' | 'held' | 'storage' | 'pcns' | 'ooh'>('people');
   const [issuesCount, setIssuesCount] = useState<number | null>(null);
   const [pcnCount, setPcnCount] = useState<number | null>(null);
+  const [heldCount, setHeldCount] = useState<number | null>(null);
 
   // Edit/delete
   const [showEdit, setShowEdit] = useState(false);
@@ -192,6 +193,7 @@ export default function OrganisationDetailPage() {
     setActiveTab('people');
     setIssuesCount(null);
     setPcnCount(null);
+    setHeldCount(null);
   }, [id]);
 
   async function loadOrg() {
@@ -725,7 +727,7 @@ export default function OrganisationDetailPage() {
               : tab === 'timeline' ? 'Activity Timeline'
               : tab === 'excess' ? 'Excess History'
               : tab === 'issues' ? `Issues${issuesCount ? ` (${issuesCount})` : ''}`
-              : tab === 'held' ? 'Held Items'
+              : tab === 'held' ? (heldCount ? `Held Items (${heldCount})` : 'Held Items')
               : tab === 'storage' ? 'Storage'
               : tab === 'pcns' ? (pcnCount ? `PCNs (${pcnCount})` : 'PCNs')
               : tab === 'ooh' ? 'OOH'
@@ -1538,7 +1540,7 @@ export default function OrganisationDetailPage() {
 
       {/* Held Items Tab — Holding module (incoming / temp storage / lost property) */}
       {activeTab === 'held' && id && (
-        <HeldItemsSection entityType="organisation" entityId={id} />
+        <HeldItemsSection entityType="organisation" entityId={id} onCount={setHeldCount} />
       )}
 
       {/* Storage Tab — Client Storage module (recurring storage tenancies) */}
