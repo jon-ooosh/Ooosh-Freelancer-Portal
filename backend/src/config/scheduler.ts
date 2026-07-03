@@ -360,7 +360,15 @@ export function startScheduler() {
           AND jr.status NOT IN ('done', 'blocked', 'cancelled')
           AND jr.due_date IS NOT NULL
           AND jr.due_date::date <= CURRENT_DATE
-          AND j.status IN (6, 7, 8)
+          -- Don't chase close-out on a mid-hire partial return (HH 6 but the
+          -- hire isn't due back yet). See CLAUDE.md → "status-6 no man's land".
+          AND (
+            j.status IN (7, 8)
+            OR (j.status = 6 AND (
+              COALESCE(j.return_date, j.job_end) IS NULL
+              OR COALESCE(j.return_date, j.job_end)::date <= CURRENT_DATE + INTERVAL '1 day'
+            ))
+          )
           AND (
             j.pipeline_status NOT IN ('lost', 'cancelled')
             OR jr.keep_after_close = true
@@ -448,6 +456,26 @@ export function startScheduler() {
     }
   });
   console.log('Scheduler: Close-out requirement chase scanner scheduled daily at 09:30');
+
+  // ── Held-return reconciliation ───────────────────────────────────────────
+  // Hourly — advance jobs that were held on hire after a mid-hire partial item
+  // return (HH status 6, but not due back yet) into the returns process once
+  // their return date has actually arrived. Also catches the general
+  // webhook-gap case (HH says 6, no returned webhook ever landed). Forward-only;
+  // never winds a manually-advanced status back. See CLAUDE.md →
+  // "The status-6 no man's land".
+  cron.schedule('15 * * * *', async () => {
+    try {
+      const { reconcileHeldReturns } = await import('../services/hire-lifecycle');
+      const { reconciled } = await reconcileHeldReturns();
+      if (reconciled > 0) {
+        console.log(`Scheduler: Reconciled ${reconciled} held-return job(s) into the returns process`);
+      }
+    } catch (err) {
+      console.error('Scheduler: Held-return reconciliation failed:', err);
+    }
+  });
+  console.log('Scheduler: Held-return reconciliation scheduled hourly at :15');
 
   // ── Notification Escalation ──────────────────────────────────────────
   // Every 15 minutes — check unread notifications and escalate to email

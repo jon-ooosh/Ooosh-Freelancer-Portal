@@ -6,6 +6,14 @@ import { buildProgressStrips, StripPhase } from '../services/job-progress-strip'
 const router = Router();
 router.use(authenticate);
 
+// SQL fragment: a HireHop-status-6 ("Returned Incomplete") job is only genuinely
+// checking in once its hire is actually due back (return_date within a day, or
+// past). A status-6 job with a future return date is a mid-hire partial item
+// return — still on hire, not a return. See CLAUDE.md → "status-6 no man's land".
+const STATUS6_DUE_BACK =
+  `(COALESCE(j.return_date, j.job_end) IS NULL ` +
+  `OR COALESCE(j.return_date, j.job_end)::date <= CURRENT_DATE + INTERVAL '1 day')`;
+
 // ── POST /api/dashboard/job-progress — bulk per-job progress strips ──
 // Body: { jobs: [{ id: string, phase: 'pre_hire' | 'post_hire' }] }
 // Returns: { data: { [jobId]: { deprep, client, excess, freelancer, invoicing, payment, vehicle } } }
@@ -927,11 +935,14 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
 router.get('/returns-overview', async (req: AuthRequest, res: Response) => {
   try {
     const results = await Promise.all([
-      // 1. Job counts by return status
+      // 1. Job counts by return status.
+      // A HH-status-6 job whose hire isn't due back yet is a mid-hire partial
+      // return, NOT genuinely checking in — exclude it from the returns counts
+      // (it's still on hire). See CLAUDE.md → "The status-6 no man's land".
       query(`
         SELECT
-          COUNT(*) FILTER (WHERE j.status IN (6, 7, 8)) as active_returns,
-          COUNT(*) FILTER (WHERE j.status = 6) as checking_in,
+          COUNT(*) FILTER (WHERE j.status IN (7, 8) OR (j.status = 6 AND ${STATUS6_DUE_BACK})) as active_returns,
+          COUNT(*) FILTER (WHERE j.status = 6 AND ${STATUS6_DUE_BACK}) as checking_in,
           COUNT(*) FILTER (WHERE j.status = 7) as returned,
           COUNT(*) FILTER (WHERE j.status = 8) as requires_attention,
           COUNT(*) FILTER (WHERE j.status IN (4, 5) AND j.return_date::date < CURRENT_DATE) as overdue
@@ -949,7 +960,7 @@ router.get('/returns-overview', async (req: AuthRequest, res: Response) => {
         JOIN jobs j ON j.id = jr.job_id
         WHERE jr.phase = 'post_hire'
           AND j.is_deleted = false
-          AND j.status IN (6, 7, 8)
+          AND (j.status IN (7, 8) OR (j.status = 6 AND ${STATUS6_DUE_BACK}))
         GROUP BY jr.requirement_type, jr.status
       `),
 
@@ -960,7 +971,7 @@ router.get('/returns-overview', async (req: AuthRequest, res: Response) => {
                CURRENT_DATE - j.return_date::date as days_since_return
         FROM jobs j
         WHERE j.is_deleted = false
-          AND j.status IN (6, 7, 8)
+          AND (j.status IN (7, 8) OR (j.status = 6 AND ${STATUS6_DUE_BACK}))
           AND j.return_date IS NOT NULL
         ORDER BY j.return_date ASC
         LIMIT 5
@@ -974,7 +985,7 @@ router.get('/returns-overview', async (req: AuthRequest, res: Response) => {
         JOIN jobs j ON j.id = je.job_id
         WHERE je.excess_status IN ('needed', 'pending', 'taken', 'pre_auth')
           AND j.is_deleted = false
-          AND j.status IN (6, 7, 8)
+          AND (j.status IN (7, 8) OR (j.status = 6 AND ${STATUS6_DUE_BACK}))
       `),
     ]);
 

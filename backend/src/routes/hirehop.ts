@@ -204,6 +204,18 @@ router.get('/jobs', async (req: AuthRequest, res: Response) => {
       whereClause += ` AND return_date::date < CURRENT_DATE AND status != 11`;
     }
 
+    // Genuinely-returning filter — used by the Returns page. Drops jobs whose
+    // HireHop status is 6 ("Returned Incomplete") but whose hire isn't due back
+    // yet (an element returned early mid-hire). Those stay in Out Now, not
+    // Returns. Status 7/8/11 = everything physically back, always kept.
+    // See CLAUDE.md → "The status-6 no man's land".
+    const { genuinely_returning } = req.query;
+    if (genuinely_returning === '1' || genuinely_returning === 'true') {
+      whereClause += ` AND (status <> 6
+        OR COALESCE(return_date, job_end) IS NULL
+        OR COALESCE(return_date, job_end)::date <= CURRENT_DATE + INTERVAL '1 day')`;
+    }
+
     // Has-retro filter — only jobs that have had a "Job retro:" interaction
     // logged. Distinct from has_issues; useful on Returns/Completed to find
     // jobs the team has actually retrospected vs ones still pending one.
