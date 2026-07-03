@@ -88,6 +88,13 @@ export default function RechargeResolveModal({ cost, onClose, onResolved }: {
   const finalNum = finalOverride != null ? Math.max(0, Number(finalOverride) || 0) : computedFinal;
   const incVat = round2(finalNum * 1.2);
 
+  // Safety net: the recharge should always beat what we paid (a marked-up line,
+  // never a loss). If the client-billed inc-VAT figure is at or below the cost's
+  // gross, the base is almost certainly wrong (e.g. net accidentally stripped of
+  // VAT). Warn loudly — but don't hard-block; the rare legit break-even exists.
+  const costGross = round2(Number(cost.amount_gross ?? 0));
+  const belowCost = mode !== 'absorb' && finalNum > 0 && costGross > 0 && incVat <= costGross + 0.005;
+
   const figuresPayload = useCallback(() => ({
     recharge_mode: 'full' as const,
     recharge_amount: finalNum,
@@ -227,6 +234,14 @@ export default function RechargeResolveModal({ cost, onClose, onResolved }: {
                 </span>
               </label>
               <p className="text-xs text-gray-400 text-right">Client billed £{incVat.toFixed(2)} inc VAT</p>
+              {belowCost && (
+                <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded p-2">
+                  ⚠ This recharge (£{incVat.toFixed(2)} inc VAT) is at or below what you paid
+                  (£{costGross.toFixed(2)} inc VAT) — that's a loss, not a markup. Check the
+                  <strong> Base (net)</strong> above: it should be the cost's ex-VAT net
+                  (£{round2(Number(cost.amount_net ?? costGross / 1.2)).toFixed(2)}), not net minus VAT.
+                </div>
+              )}
             </div>
           )}
 
