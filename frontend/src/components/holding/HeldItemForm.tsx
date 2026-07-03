@@ -41,10 +41,15 @@ async function uploadPhotos(
   finally { setBusy(false); }
 }
 
-export function HeldItemForm({ variant, kinds, locations, onDone, onCancel }: {
+export function HeldItemForm({ variant, kinds, locations, initial, onDone, onCancel }: {
   variant: 'desktop' | 'mobile';
   kinds: HeldItemKind[];          // selectable kinds (1 = fixed, >1 = toggle buttons)
   locations: HeldItemLocation[];
+  initial?: {                     // optional prefill (e.g. logging from a job's Overview)
+    hh_job_number?: string;
+    owner_organisation_id?: string | null;
+    org_name?: string;
+  };
   onDone: () => void;             // saved (and notify, if any, finished)
   onCancel: () => void;
 }) {
@@ -58,9 +63,9 @@ export function HeldItemForm({ variant, kinds, locations, onDone, onCancel }: {
     kind: kinds[0],
     description: '', box_count: '',
     owner_unknown: false,
-    owner_organisation_id: null as string | null, org_name: '',
+    owner_organisation_id: (initial?.owner_organisation_id ?? null) as string | null, org_name: initial?.org_name || '',
     owner_person_id: null as string | null, person_name: '',
-    client_name_text: '', hh_job_number: '',
+    client_name_text: '', hh_job_number: initial?.hh_job_number || '',
     found_in: 'van', found_location_text: '',
     storage_location_id: '', storage_location_text: '',
     expected_date: '', import_charge_flag: '', hold_until: '', notes: '',

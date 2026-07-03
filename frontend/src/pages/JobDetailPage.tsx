@@ -8,6 +8,7 @@ import JobProblemsPanel from '../components/JobProblemsPanel';
 import HeldItemsSection from '../components/HeldItemsSection';
 import PcnHistorySection from '../components/PcnHistorySection';
 import SendMerchFormButton from '../components/SendMerchFormButton';
+import AddHeldItemButton from '../components/AddHeldItemButton';
 import TransportCalculator from '../components/TransportCalculator';
 import { StagingCalculatorModal, StagingOverviewCard } from '../components/StagingCalculator';
 import BacklineMatcherModal from '../components/BacklineMatcherModal';
@@ -4160,6 +4161,8 @@ export default function JobDetailPage() {
             jobId={id || ''}
             hhJobNumber={job.hh_job_number}
             pipelineStatus={job.pipeline_status}
+            clientOrgId={job.client_id}
+            clientOrgName={job.client_name}
             derivedFlags={hhSyncResult?.derivation?.flags || null}
             seatAvailability={hhSyncResult?.derivation?.seatAvailability || null}
             hasCrewQuotes={quotes.some(q => (q.job_type === 'crewed' || (q.assignments && q.assignments.length > 0)) && q.status !== 'cancelled')}
@@ -6414,10 +6417,12 @@ function OverviewFinancialStrip({ jobId }: { jobId: string }) {
 }
 
 
-function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, seatAvailability, hasCrewQuotes, hasCrewOnHH, onOpenCrewCalculator, onLaunchStaging, onLaunchRackPlan, onLaunchBacklineMatcher }: {
+function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, clientOrgName, derivedFlags, seatAvailability, hasCrewQuotes, hasCrewOnHH, onOpenCrewCalculator, onLaunchStaging, onLaunchRackPlan, onLaunchBacklineMatcher }: {
   jobId: string;
   hhJobNumber?: number | null;
   pipelineStatus?: string | null;
+  clientOrgId?: string | null;
+  clientOrgName?: string | null;
   derivedFlags?: {
     has_vehicle: boolean; vehicle_count: number; vehicle_types: string[];
     vehicle_slots?: Array<{ item_id: number; slot_index: number; item_name: string; mode: 'self_drive' | 'van_and_driver' }>;
@@ -6558,6 +6563,7 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
 
   // Reminder form state
   const [showReminderForm, setShowReminderForm] = useState(false);
+  const [heldItemsRefreshKey, setHeldItemsRefreshKey] = useState(0);
   const [reminderText, setReminderText] = useState('');
   const [reminderDate, setReminderDate] = useState('');
   const [reminderDelivery, setReminderDelivery] = useState<'both' | 'notification' | 'email'>('both');
@@ -6853,9 +6859,18 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
           <div className="bg-white rounded-xl border border-gray-200 p-4 space-y-3">
             <div className="flex items-center justify-between gap-3">
               <h3 className="text-sm font-semibold text-gray-800">📦 Held for Clients</h3>
-              {hhJobNumber && <SendMerchFormButton jobId={jobId} hhJobNumber={hhJobNumber} />}
+              <div className="flex items-center gap-3">
+                <AddHeldItemButton
+                  hhJobNumber={hhJobNumber}
+                  clientOrgId={clientOrgId}
+                  clientOrgName={clientOrgName}
+                  onSaved={() => { setHeldItemsRefreshKey(k => k + 1); loadAll(); }}
+                />
+                {hhJobNumber && <SendMerchFormButton jobId={jobId} hhJobNumber={hhJobNumber} />}
+              </div>
             </div>
-            <HeldItemsSection entityType="job" entityId={jobId} kinds={['incoming']} bare emptyHint="Nothing held for this job yet." />
+            <HeldItemsSection key={heldItemsRefreshKey} entityType="job" entityId={jobId}
+              kinds={['incoming', 'temp_storage', 'lost_property']} bare emptyHint="Nothing held for this job yet." />
           </div>
         );
         if (!merchReq) return <div className="mt-2">{panel}</div>;
