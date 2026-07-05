@@ -2,9 +2,18 @@ import { Router, Response } from 'express';
 import { query } from '../config/database';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { buildProgressStrips, StripPhase } from '../services/job-progress-strip';
+import { getRoster } from '../services/studio-sitter';
 
 const router = Router();
 router.use(authenticate);
+
+// SQL fragment: a HireHop-status-6 ("Returned Incomplete") job is only genuinely
+// checking in once its hire is actually due back (return_date within a day, or
+// past). A status-6 job with a future return date is a mid-hire partial item
+// return — still on hire, not a return. See CLAUDE.md → "status-6 no man's land".
+const STATUS6_DUE_BACK =
+  `(COALESCE(j.return_date, j.job_end) IS NULL ` +
+  `OR COALESCE(j.return_date, j.job_end)::date <= CURRENT_DATE + INTERVAL '1 day')`;
 
 // ── POST /api/dashboard/job-progress — bulk per-job progress strips ──
 // Body: { jobs: [{ id: string, phase: 'pre_hire' | 'post_hire' }] }
@@ -673,6 +682,33 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
             OR (c.status = 'returned')
           )
       `),
+
+      // 28. COT receipts outstanding: company-card costs with no receipt
+      // attached, older than the 3-day grace. The daily chaser nudges each
+      // card-holder; this surfaces the fleet-wide backlog as an amber bucket.
+      query(`
+        SELECT COUNT(*) AS count
+        FROM costs c
+        WHERE c.payment_method = 'cot_card'
+          AND c.receipt_r2_key IS NULL
+          AND c.cost_date <= CURRENT_DATE - INTERVAL '3 days'
+      `),
+
+      // 29. Recharges to resolve: costs flagged for client recharge that are
+      // still pending (not pushed to HireHop, billed externally, or absorbed).
+      // The "buried" surface the cost lifecycle work is about — staff log a
+      // refuel recharge at check-in and it sits unresolved. Scoped to active /
+      // finished hires so dead enquiries don't surface; internal jobs excluded.
+      query(`
+        SELECT COUNT(*) AS count, COALESCE(SUM(COALESCE(c.recharge_amount, c.amount_net, c.amount_gross, 0)), 0) AS total_amount
+        FROM costs c
+        JOIN jobs j ON j.id = c.job_id
+        WHERE c.recharge_mode <> 'none'
+          AND COALESCE(c.recharge_status, 'pending') = 'pending'
+          AND c.cost_intent IS DISTINCT FROM 'quote_actual'
+          AND COALESCE(j.is_internal, false) = false
+          AND j.pipeline_status NOT IN ('lost', 'cancelled', 'new_enquiry', 'quoting', 'paused', 'provisional')
+      `),
     ]);
 
     const [
@@ -690,13 +726,26 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       pendingReferralsResult, pendingExcessResult,
       prepTimeResult, onHireSparkResult, deprepTimeResult,
       expiringHoldsResult, receiptsOutstandingResult,
-      carnetCountResult,
+      carnetCountResult, cotReceiptsResult,
+      rechargesToResolveResult,
     ] = results;
 
     // Build the 14-day on-hire series — oldest day first, today last.
     const onHireSpark: number[] = onHireSparkResult.rows.map(
       (row: { on_hire_count: string | number }) => parseInt(String(row.on_hire_count), 10) || 0,
     );
+
+    // Studio-sitter cover gaps — evenings in the next 14 days needing a sitter
+    // with none assigned (Rehearsals module). Amber dashboard bucket. Non-fatal.
+    let sitterGaps: { date: string; jobs: string[] }[] = [];
+    try {
+      const _from = new Date().toISOString().slice(0, 10);
+      const _toD = new Date(); _toD.setUTCDate(_toD.getUTCDate() + 14);
+      const roster = await getRoster(_from, _toD.toISOString().slice(0, 10));
+      sitterGaps = roster
+        .filter((r) => r.needs_sitter && !r.assignee)
+        .map((r) => ({ date: r.date, jobs: r.jobs.map((j) => j.label).slice(0, 2) }));
+    } catch { /* non-fatal — bucket just won't populate */ }
 
     // Build prep time estimates by day
     const prepEstimates: Record<string, {
@@ -846,6 +895,11 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
           + overdueTransportOpsResult.rows.length,
         client_intros: clientIntrosResult.rows,
         carnet_count: parseInt(carnetCountResult.rows[0].count as string),
+        cot_receipts_outstanding_count: parseInt(cotReceiptsResult.rows[0].count as string),
+        // Recharges flagged but not yet resolved (push to HH / bill externally /
+        // absorb). Amber bucket — the cost lifecycle "don't let it get buried".
+        recharges_to_resolve_count: parseInt(rechargesToResolveResult.rows[0].count as string),
+        recharges_to_resolve_total: parseFloat(rechargesToResolveResult.rows[0].total_amount as string),
         referral_count: parseInt(referralCountResult.rows[0].count as string),
         referrals: pendingReferralsResult.rows,
         // ── Excess (semantics changed Apr 2026) ──
@@ -860,6 +914,10 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         // collateral evaporates.
         expiring_holds_count: expiringHoldsResult.rows.length,
         expiring_holds: expiringHoldsResult.rows,
+        // ── Studio-sitter cover gaps (Rehearsals) ──
+        // Evenings in the next 14 days needing a sitter with none assigned.
+        sitter_gap_count: sitterGaps.length,
+        sitter_gaps: sitterGaps.slice(0, 5),
         // ── Card-machine receipt scans outstanding (migration 087) ──
         // Excess collected/held on a physical terminal needs a receipt scan
         // attached. Amber to-do, non-blocking.
@@ -894,11 +952,14 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
 router.get('/returns-overview', async (req: AuthRequest, res: Response) => {
   try {
     const results = await Promise.all([
-      // 1. Job counts by return status
+      // 1. Job counts by return status.
+      // A HH-status-6 job whose hire isn't due back yet is a mid-hire partial
+      // return, NOT genuinely checking in — exclude it from the returns counts
+      // (it's still on hire). See CLAUDE.md → "The status-6 no man's land".
       query(`
         SELECT
-          COUNT(*) FILTER (WHERE j.status IN (6, 7, 8)) as active_returns,
-          COUNT(*) FILTER (WHERE j.status = 6) as checking_in,
+          COUNT(*) FILTER (WHERE j.status IN (7, 8) OR (j.status = 6 AND ${STATUS6_DUE_BACK})) as active_returns,
+          COUNT(*) FILTER (WHERE j.status = 6 AND ${STATUS6_DUE_BACK}) as checking_in,
           COUNT(*) FILTER (WHERE j.status = 7) as returned,
           COUNT(*) FILTER (WHERE j.status = 8) as requires_attention,
           COUNT(*) FILTER (WHERE j.status IN (4, 5) AND j.return_date::date < CURRENT_DATE) as overdue
@@ -916,7 +977,7 @@ router.get('/returns-overview', async (req: AuthRequest, res: Response) => {
         JOIN jobs j ON j.id = jr.job_id
         WHERE jr.phase = 'post_hire'
           AND j.is_deleted = false
-          AND j.status IN (6, 7, 8)
+          AND (j.status IN (7, 8) OR (j.status = 6 AND ${STATUS6_DUE_BACK}))
         GROUP BY jr.requirement_type, jr.status
       `),
 
@@ -927,7 +988,7 @@ router.get('/returns-overview', async (req: AuthRequest, res: Response) => {
                CURRENT_DATE - j.return_date::date as days_since_return
         FROM jobs j
         WHERE j.is_deleted = false
-          AND j.status IN (6, 7, 8)
+          AND (j.status IN (7, 8) OR (j.status = 6 AND ${STATUS6_DUE_BACK}))
           AND j.return_date IS NOT NULL
         ORDER BY j.return_date ASC
         LIMIT 5
@@ -941,7 +1002,7 @@ router.get('/returns-overview', async (req: AuthRequest, res: Response) => {
         JOIN jobs j ON j.id = je.job_id
         WHERE je.excess_status IN ('needed', 'pending', 'taken', 'pre_auth')
           AND j.is_deleted = false
-          AND j.status IN (6, 7, 8)
+          AND (j.status IN (7, 8) OR (j.status = 6 AND ${STATUS6_DUE_BACK}))
       `),
     ]);
 

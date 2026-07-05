@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
+import { hasManagerRole } from '../../../lib/roles'
 import { useParams, useSearchParams, Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { vmPath } from '../config/route-paths'
@@ -275,7 +276,7 @@ export function VehicleDetailPage() {
   const [washing, setWashing] = useState(false)
   const queryClient = useQueryClient()
   const opAuth = getOpAuthState()
-  const isAdmin = opAuth?.userRole === 'admin' || opAuth?.userRole === 'manager'
+  const isAdmin = hasManagerRole(opAuth?.userRole)
   const canEditMileage = isAdmin || opAuth?.userRole === 'weekend_manager'
   // Finance is stricter than the page's admin/manager gate — admin only.
   const isStrictAdmin = opAuth?.userRole === 'admin'

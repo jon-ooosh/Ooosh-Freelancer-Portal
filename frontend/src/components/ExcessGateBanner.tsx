@@ -5,6 +5,7 @@
  * Not a hard block — shows a prominent warning with option for manager override.
  */
 import { useState, useEffect } from 'react';
+import { hasManagerRole } from '../lib/roles';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import type { OverrideReason } from '../../../shared/types';
@@ -37,7 +38,7 @@ const OVERRIDE_REASONS: { value: OverrideReason; label: string }[] = [
 
 export default function ExcessGateBanner({ blockers, onOverrideComplete, onNavigateToRequirements, clientId }: ExcessGateBannerProps) {
   const user = useAuthStore((s) => s.user);
-  const canOverride = user?.role === 'admin' || user?.role === 'manager';
+  const canOverride = hasManagerRole(user?.role);
 
   const [showOverrideForm, setShowOverrideForm] = useState<string | null>(null); // excessId being overridden
   const [overrideReason, setOverrideReason] = useState<OverrideReason>('client_on_credit');

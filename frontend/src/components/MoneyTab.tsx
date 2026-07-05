@@ -7,9 +7,11 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
+import { hasManagerRole } from '../lib/roles';
 import { getPaymentState, PAYMENT_STATE_LABELS, PAYMENT_STATE_CLASSES } from '../services/paymentState';
-import ExcessPaymentModal, { statusLabel, statusColor } from './ExcessPaymentModal';
+import ExcessPaymentModal, { statusLabel, statusColor, computeHireDays } from './ExcessPaymentModal';
 import CostCaptureModal from './CostCaptureModal';
+import RechargeResolveModal, { RechargeStatusPill } from './RechargeResolveModal';
 import type { JobExcess } from '../../../shared/types';
 
 interface MoneyTabProps {
@@ -113,10 +115,12 @@ interface JobCostLite {
   description: string | null;
   category: string | null;
   amount_gross: number | null;
+  amount_net: number | null;
   cost_intent: 'quote_actual' | 'extra' | null;
   recharge_mode: 'none' | 'full' | 'partial';
   recharge_amount: number | null;
   recharged_to_hh_at: string | null;
+  recharge_status: string | null;
 }
 interface JobQuoteLite {
   id: string;
@@ -130,7 +134,9 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   const [data, setData] = useState<FinancialData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const isAdmin = useAuthStore((s) => s.user?.role) === 'admin';
+  const role = useAuthStore((s) => s.user?.role);
+  const isAdmin = role === 'admin';
+  const canManage = hasManagerRole(role);
   const [showResolveBalance, setShowResolveBalance] = useState(false);
   const [balReason, setBalReason] = useState('xero_settled');
   const [balNotes, setBalNotes] = useState('');
@@ -152,6 +158,11 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
 
   // Excess action modal
   const [actionExcess, setActionExcess] = useState<JobExcess | null>(null);
+
+  // Rollover chains — "follow the thread" of a rolled-over excess. Keyed by
+  // excess record id → ordered chain of records sharing the HH deposit.
+  type ChainEntry = { id: string; excess_status: string; hh_job_number: number | null; job_name: string | null };
+  const [rolloverChains, setRolloverChains] = useState<Record<string, ChainEntry[]>>({});
 
   // Link deposit state
   const [linkingDeposit, setLinkingDeposit] = useState<{ hh_deposit_id: number; amount: number } | null>(null);
@@ -251,6 +262,41 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
     if (refundResult) loadData();
   };
 
+  // Dismiss-pending-refund — clears an OP IOU WITHOUT moving money, for refunds
+  // already done out-of-band (HireHop / Stripe / bank direct) or artifacts.
+  // Distinct from "Process refund" which actually sends money.
+  const [dismissRefund, setDismissRefund] = useState<NonNullable<FinancialData['financial']['pending_refunds']>[number] | null>(null);
+  const [dismissReason, setDismissReason] = useState('refunded_externally');
+  const [dismissNotes, setDismissNotes] = useState('');
+  const [dismissLoading, setDismissLoading] = useState(false);
+  const [dismissError, setDismissError] = useState('');
+
+  const openDismissRefundModal = (pr: NonNullable<FinancialData['financial']['pending_refunds']>[number]) => {
+    setDismissRefund(pr);
+    setDismissReason('refunded_externally');
+    setDismissNotes('');
+    setDismissError('');
+  };
+
+  const submitDismissRefund = async () => {
+    if (!dismissRefund) return;
+    setDismissLoading(true);
+    setDismissError('');
+    try {
+      await api.post(`/money/${jobId}/dismiss-refund`, {
+        refund_id: dismissRefund.id,
+        reason: dismissReason,
+        notes: dismissNotes.trim() || null,
+      });
+      setDismissRefund(null);
+      loadData();
+    } catch (e) {
+      setDismissError(e instanceof Error ? e.message : 'Failed to clear refund');
+    } finally {
+      setDismissLoading(false);
+    }
+  };
+
   // When the staff member changes the deposit to refund against, default the
   // method to match that deposit (Stripe if it was a Stripe deposit).
   const onPendingDepositChange = (depId: number) => {
@@ -332,6 +378,26 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   };
 
   useEffect(() => { loadData(); }, [loadData]);
+
+  // Fetch rollover chains for any record that's part of one (rolled over, or
+  // came in via rollover). Lazy + best-effort; only records that need the thread.
+  useEffect(() => {
+    const records = data?.excess?.records || [];
+    const needChain = records.filter((r: JobExcess) =>
+      r.excess_status === 'rolled_over' || (r as { payment_method?: string }).payment_method === 'rolled_over'
+    );
+    needChain.forEach((r: JobExcess) => {
+      if (rolloverChains[r.id]) return;
+      api.get<{ data: { chain: ChainEntry[] } }>(`/excess/${r.id}/rollover-chain`)
+        .then((resp) => {
+          if (resp.data.chain && resp.data.chain.length > 1) {
+            setRolloverChains((prev) => ({ ...prev, [r.id]: resp.data.chain }));
+          }
+        })
+        .catch(() => {});
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data]);
 
   // Job costs + quotes for the quoted-vs-actual panel. Best-effort, non-blocking.
   const loadJobCosts = useCallback(async () => {
@@ -761,6 +827,11 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                         HH linked
                       </span>
                     )}
+                    {record.held_on_account && (record.excess_status === 'taken' || record.excess_status === 'partially_paid') && (
+                      <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-700" title="Deliberately held on account for the client's next hire — still held, refundable, or applicable to a future hire.">
+                        Held on account
+                      </span>
+                    )}
                     {record.dispatch_override && (
                       <span className="text-[10px] text-amber-600 font-medium">overridden</span>
                     )}
@@ -813,6 +884,25 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                           {record.reimbursement_method && ` (${record.reimbursement_method.replace(/_/g, ' ')})`}
                         </span>
                       )}
+                    </p>
+                  )}
+                  {/* Rollover chain — "follow the thread". Shows the money's
+                      journey across jobs (#A → #B → #C), current job highlighted,
+                      until it's finally reimbursed/claimed. */}
+                  {rolloverChains[record.id] && rolloverChains[record.id].length > 1 && (
+                    <p className="text-xs text-purple-700 mt-0.5 flex flex-wrap items-center gap-1">
+                      <span className="font-medium">↪ Rollover thread:</span>
+                      {rolloverChains[record.id].map((link, i) => (
+                        <span key={link.id} className="flex items-center gap-1">
+                          {i > 0 && <span className="text-purple-300">→</span>}
+                          <span
+                            className={link.id === record.id ? 'font-semibold underline decoration-dotted' : ''}
+                            title={link.job_name || undefined}
+                          >
+                            #{link.hh_job_number ?? '—'} <span className="text-purple-400">({statusLabel(link.excess_status as Parameters<typeof statusLabel>[0])})</span>
+                          </span>
+                        </span>
+                      ))}
                     </p>
                   )}
                   {record.excess_status === 'pre_auth' && record.held_expires_at && (() => {
@@ -1027,6 +1117,15 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                     >
                       Process refund
                     </button>
+                    {canManage && (
+                      <button
+                        onClick={() => openDismissRefundModal(pr)}
+                        title="Clear this IOU without moving money (already refunded out-of-band, or shouldn't have been logged)"
+                        className="text-xs font-medium text-amber-700 hover:text-amber-900 underline"
+                      >
+                        Clear
+                      </button>
+                    )}
                   </div>
                 </div>
               ))}
@@ -1036,7 +1135,8 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
       </div>
 
       {/* Job costs vs quotes (Cost Capture) */}
-      <JobCostsPanel costs={jobCosts} quotes={jobQuotes} onAddCost={() => setShowAddCost(true)} />
+      <JobCostsPanel costs={jobCosts} quotes={jobQuotes} onAddCost={() => setShowAddCost(true)} onChanged={loadJobCosts}
+        jobId={jobId} rechargeOn={!!job?.recharge_running_costs} onJobChanged={onJobChanged} />
       {showAddCost && (
         <CostCaptureModal
           presetJobId={jobId}
@@ -1216,6 +1316,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
       {actionExcess && (
         <ExcessPaymentModal
           excess={actionExcess}
+          hireDays={computeHireDays(job)}
           onClose={() => setActionExcess(null)}
           onUpdated={loadData}
         />
@@ -1360,6 +1461,53 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
         </div>
       )}
 
+      {/* Clear (dismiss) pending refund modal — no money moves */}
+      {dismissRefund && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setDismissRefund(null)}>
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full" onClick={(e) => e.stopPropagation()}>
+            <div className="px-5 py-4 border-b border-gray-200">
+              <h3 className="text-lg font-semibold text-gray-900">Clear Pending Refund</h3>
+              <p className="text-xs text-gray-500 mt-0.5">
+                £{Number(dismissRefund.amount).toFixed(2)} — clears the IOU without moving any money. Doesn't touch HireHop / Stripe / Xero.
+                To actually send a refund, use "Process refund" instead.
+              </p>
+            </div>
+            <div className="px-5 py-4 space-y-3">
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Reason</label>
+                <select
+                  value={dismissReason}
+                  onChange={(e) => setDismissReason(e.target.value)}
+                  className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md"
+                >
+                  <option value="refunded_externally">Already refunded outside OP (HireHop / Stripe / bank)</option>
+                  <option value="not_required">Not required (artifact / superseded)</option>
+                  <option value="duplicate">Duplicate record</option>
+                  <option value="other">Other</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Notes (optional)</label>
+                <textarea
+                  value={dismissNotes}
+                  onChange={(e) => setDismissNotes(e.target.value)}
+                  rows={2}
+                  placeholder="e.g. refunded £150 in full direct in HireHop"
+                  className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md resize-y"
+                />
+              </div>
+              {dismissError && <p className="text-xs text-red-600">{dismissError}</p>}
+              <div className="flex justify-end gap-2">
+                <button onClick={() => setDismissRefund(null)} className="px-4 py-2 text-sm font-medium text-gray-700 border border-gray-300 rounded-md hover:bg-gray-50">Cancel</button>
+                <button onClick={submitDismissRefund} disabled={dismissLoading} className="px-4 py-2 text-sm font-medium text-white bg-amber-600 hover:bg-amber-700 rounded-md disabled:opacity-50">
+                  {dismissLoading ? 'Clearing…' : 'Clear refund'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Process pending refund modal (e.g. cancellation IOU) */}
       {pendingRefund && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={closePendingRefundModal}>
@@ -1499,9 +1647,35 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
 // expected transport/crew cost. "Actuals" sums the quote_actual costs. Extra
 // costs are listed separately (eligible for client recharge). Hidden when the
 // job has neither costs nor quotes.
-function JobCostsPanel({ costs, quotes, onAddCost }: { costs: JobCostLite[]; quotes: JobQuoteLite[]; onAddCost: () => void }) {
+function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn, onJobChanged }: { costs: JobCostLite[]; quotes: JobQuoteLite[]; onAddCost: () => void; onChanged: () => void; jobId: string; rechargeOn: boolean; onJobChanged?: () => void }) {
   const m = (n: number) => `£${n.toFixed(2)}`;
   const num = (n: number | null | undefined) => Number(n || 0);
+  const [resolving, setResolving] = useState<JobCostLite | null>(null);
+  const [rechargeBusy, setRechargeBusy] = useState(false);
+
+  // Lightweight "recharge running costs" toggle — the flag is normally set by a
+  // Recharge line on a quote; this covers the no-quote / mid-hire case. Sets the
+  // cost auto-inherit + the standing card.
+  async function toggleRecharge() {
+    const turningOn = !rechargeOn;
+    if (turningOn && !window.confirm('Mark this job as "recharge running costs"?\n\nNew running-cost costs (fuel/parking/etc.) logged here will default to recharge (actual + 20%), and a card surfaces at check-in. Usually set via a Recharge line on the quote — use this for jobs without one.')) return;
+    setRechargeBusy(true);
+    try {
+      await api.patch(`/hirehop/jobs/${jobId}/recharge-running-costs`, { rechargeRunningCosts: turningOn });
+      onJobChanged?.();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to update recharge flag');
+    } finally {
+      setRechargeBusy(false);
+    }
+  }
+  const RechargeToggle = (
+    <button onClick={toggleRecharge} disabled={rechargeBusy}
+      title={rechargeOn ? 'Running costs are recharged to the client post-hire. Click to turn off.' : 'Mark this job as recharging its running costs (fuel/parking/etc.) to the client post-hire'}
+      className={`text-xs rounded-md px-2 py-1 border disabled:opacity-50 ${rechargeOn ? 'border-amber-300 bg-amber-50 text-amber-800' : 'border-gray-300 text-gray-500 hover:bg-gray-50'}`}>
+      {rechargeBusy ? '…' : rechargeOn ? '⛽ Recharging running costs ✓' : '⛽ Recharge running costs'}
+    </button>
+  );
 
   const AddBtn = (
     <button onClick={onAddCost} className="text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-md px-3 py-1.5">
@@ -1544,9 +1718,10 @@ function JobCostsPanel({ costs, quotes, onAddCost }: { costs: JobCostLite[]; quo
 
   return (
     <div className="bg-white border border-gray-200 rounded-lg p-6 mb-6">
-      <div className="flex items-center justify-between mb-4 gap-3">
+      <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
         <h3 className="text-lg font-semibold text-gray-900">Job Costs</h3>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 flex-wrap">
+          {RechargeToggle}
           <a href="/money/costs" className="text-sm text-purple-700 hover:underline">Costs hub →</a>
           {AddBtn}
         </div>
@@ -1581,21 +1756,34 @@ function JobCostsPanel({ costs, quotes, onAddCost }: { costs: JobCostLite[]; quo
             <span className="text-sm font-semibold text-gray-900">{m(extraTotal)}</span>
           </div>
           <ul className="space-y-1">
-            {extraCosts.map((c) => (
-              <li key={c.id} className="flex items-center justify-between text-sm">
-                <span className="text-gray-600 truncate">{c.supplier_name || c.description || c.category || 'Cost'}</span>
-                <span className="flex items-center gap-2">
-                  <span className="text-gray-900">{m(num(c.amount_gross))}</span>
-                  {c.recharge_mode !== 'none' && (
-                    <span className="px-2 py-0.5 text-xs rounded-full bg-blue-50 text-blue-700">
-                      recharge{c.recharged_to_hh_at ? ' ✓' : ' pending'}
-                    </span>
-                  )}
-                </span>
-              </li>
-            ))}
+            {extraCosts.map((c) => {
+              const pending = c.recharge_mode !== 'none' && (c.recharge_status ?? 'pending') === 'pending';
+              return (
+                <li key={c.id} className="flex items-center justify-between text-sm gap-2">
+                  <span className="text-gray-600 truncate">{c.supplier_name || c.description || c.category || 'Cost'}</span>
+                  <span className="flex items-center gap-2 shrink-0">
+                    <span className="text-gray-900">{m(num(c.amount_gross))}</span>
+                    {c.recharge_mode !== 'none' && <RechargeStatusPill status={c.recharge_status} mode={c.recharge_mode} />}
+                    {pending && (
+                      <button onClick={() => setResolving(c)}
+                        className="px-2 py-0.5 text-xs text-white bg-blue-600 hover:bg-blue-700 rounded">
+                        Resolve
+                      </button>
+                    )}
+                  </span>
+                </li>
+              );
+            })}
           </ul>
         </div>
+      )}
+
+      {resolving && (
+        <RechargeResolveModal
+          cost={resolving}
+          onClose={() => setResolving(null)}
+          onResolved={() => { setResolving(null); onChanged(); }}
+        />
       )}
 
       {unclassified.length > 0 && (

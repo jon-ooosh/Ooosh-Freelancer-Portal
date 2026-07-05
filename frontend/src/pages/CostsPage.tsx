@@ -10,10 +10,13 @@
  * Capture is manual (CostCaptureModal); AI extraction is a fast-follow.
  */
 import { useState, useEffect, useCallback, useMemo } from 'react';
+import { hasManagerRole } from '../lib/roles';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import CostCaptureModal from '../components/CostCaptureModal';
+import CostAllocationModal from '../components/CostAllocationModal';
+import RechargeResolveModal, { RechargeStatusPill } from '../components/RechargeResolveModal';
 import type { Cost, SupplierPaymentTerms } from '../../../shared/types';
 
 type ViewMode = 'all' | 'payable' | 'recharge' | 'reconcile';
@@ -23,6 +26,8 @@ interface CostRow extends Cost {
   hh_job_number?: number | null;
   job_name?: string | null;
   vehicle_reg?: string | null;
+  allocation_count?: number;
+  due_date?: string | null;
 }
 
 interface Stats {
@@ -88,6 +93,7 @@ function dueInfo(c: { due_date?: string | null; cost_date: string | null }) {
 // Human description of a supplier's terms for the Due cell tooltip.
 function termsLabel(t?: SupplierPaymentTerms): string {
   if (!t || t.source === 'default') return `invoice + ${DEFAULT_TERMS_DAYS}d (default)`;
+  if (t.source === 'freelancer') return 'freelancer — first Friday +1wk after approval';
   const base = t.basis === 'end_of_invoice_month' ? 'end of invoice month' : 'invoice date';
   return `${base} + ${t.days}d${t.source === 'xero' ? ' · from Xero' : ''}`;
 }
@@ -100,9 +106,12 @@ const APPROVAL_COLOURS: Record<string, string> = {
 };
 
 // Client-side column sort. null = server order (newest captured first).
-type SortKey = 'date' | 'supplier' | 'description' | 'gross' | 'type' | 'status';
-const SORT_VALUE: Record<SortKey, (c: { cost_date: string | null; supplier_name: string | null; description: string | null; amount_gross: number | null; category: string | null; cost_type: string; approval_state: string | null; payment_status: string }) => string | number> = {
+type SortKey = 'date' | 'due' | 'supplier' | 'description' | 'gross' | 'type' | 'status';
+type DueFilter = 'all' | 'overdue' | 'friday' | 'next_friday' | 'this_week' | 'next_7';
+const SORT_VALUE: Record<SortKey, (c: { cost_date: string | null; due_date?: string | null; supplier_name: string | null; description: string | null; amount_gross: number | null; category: string | null; cost_type: string; approval_state: string | null; payment_status: string }) => string | number> = {
   date: (c) => c.cost_date || '',
+  // Undated bills sort last under ascending (the common "what's due soonest" view).
+  due: (c) => c.due_date || '9999-12-31',
   supplier: (c) => (c.supplier_name || '').toLowerCase(),
   description: (c) => (c.description || '').toLowerCase(),
   gross: (c) => Number(c.amount_gross || 0),
@@ -114,10 +123,12 @@ export default function CostsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const { user } = useAuthStore();
   const role = user?.role || '';
-  const isManager = role === 'admin' || role === 'manager';
+  const isManager = hasManagerRole(role);
   const isAdmin = role === 'admin';
 
   const [view, setView] = useState<ViewMode>((searchParams.get('view') as ViewMode) || 'all');
+  const missingReceipt = searchParams.get('missing_receipt') === '1';
+  const mineOnly = searchParams.get('mine') === '1';
   const [rows, setRows] = useState<CostRow[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [loading, setLoading] = useState(true);
@@ -126,22 +137,61 @@ export default function CostsPage() {
   const [typeFilter, setTypeFilter] = useState('');
   const [showCapture, setShowCapture] = useState(false);
   const [editing, setEditing] = useState<CostRow | null>(null);
+  const [allocating, setAllocating] = useState<CostRow | null>(null);
   const [payTarget, setPayTarget] = useState<CostRow | null>(null);
   const [termsTarget, setTermsTarget] = useState<CostRow | null>(null);
   const [preview, setPreview] = useState<CostRow | null>(null);
+  const [resolving, setResolving] = useState<CostRow | null>(null);
+  // Recharge view slice: '' = pending (default), or a terminal state / 'all' for the audit view.
+  const [rechargeStatusFilter, setRechargeStatusFilter] = useState<string>('');
   const [actionBusy, setActionBusy] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<SortKey | null>(null);
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
+  const [dueFilter, setDueFilter] = useState<DueFilter>('all');
+  const [supplierFilter, setSupplierFilter] = useState('');
 
   const sortedRows = useMemo(() => {
-    if (!sortKey) return rows;
+    let base = rows;
+    if (supplierFilter) base = base.filter((c) => (c.supplier_name || '') === supplierFilter);
+    // Due-date filters only apply in the Bills to Pay view.
+    if (view === 'payable' && dueFilter !== 'all') {
+      const today = new Date(); today.setHours(0, 0, 0, 0);
+      // Format in LOCAL time — toISOString() is UTC and shifts the day under BST,
+      // which broke the exact-match "This Friday" filter.
+      const fmt = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      const todayStr = fmt(today);
+      // End of this week = upcoming Sunday (Mon-start week).
+      const endOfWeek = new Date(today); endOfWeek.setDate(today.getDate() + ((7 - today.getDay()) % 7 || 7));
+      // Next Friday on/after today (today if it's a Friday); the one after = +7.
+      const friday = new Date(today); friday.setDate(today.getDate() + ((5 - today.getDay() + 7) % 7));
+      const nextFriday = new Date(friday); nextFriday.setDate(friday.getDate() + 7);
+      const next7 = new Date(today); next7.setDate(today.getDate() + 7);
+      base = base.filter((c) => {
+        if (c.payment_status === 'paid' || !c.due_date) return false;
+        const d = c.due_date.slice(0, 10);
+        switch (dueFilter) {
+          case 'overdue':     return d < todayStr;
+          case 'friday':      return d === fmt(friday);
+          case 'next_friday': return d === fmt(nextFriday);
+          case 'this_week':   return d >= todayStr && d <= fmt(endOfWeek);
+          case 'next_7':      return d >= todayStr && d <= fmt(next7);
+          default:            return true;
+        }
+      });
+    }
+    if (!sortKey) return base;
     const val = SORT_VALUE[sortKey];
-    return [...rows].sort((a, b) => {
+    return [...base].sort((a, b) => {
       const av = val(a); const bv = val(b);
       const cmp = typeof av === 'number' && typeof bv === 'number' ? av - bv : String(av).localeCompare(String(bv));
       return sortDir === 'asc' ? cmp : -cmp;
     });
-  }, [rows, sortKey, sortDir]);
+  }, [rows, sortKey, sortDir, view, dueFilter, supplierFilter]);
+
+  const supplierOptions = useMemo(
+    () => Array.from(new Set(rows.map((r) => r.supplier_name).filter((s): s is string => !!s))).sort((a, b) => a.localeCompare(b)),
+    [rows],
+  );
 
   const clickSort = (key: SortKey) => {
     if (sortKey === key) setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
@@ -162,6 +212,9 @@ export default function CostsPage() {
       if (view !== 'all') params.set('view', view);
       if (typeFilter) params.set('cost_type', typeFilter);
       if (searchDebounced) params.set('search', searchDebounced);
+      if (missingReceipt) params.set('missing_receipt', '1');
+      if (mineOnly) params.set('mine', '1');
+      if (view === 'recharge' && rechargeStatusFilter) params.set('recharge_status', rechargeStatusFilter);
       const res = await api.get<{ data: CostRow[]; stats: Stats }>(`/costs?${params.toString()}`);
       setRows(res.data);
       setStats(res.stats);
@@ -170,7 +223,7 @@ export default function CostsPage() {
     } finally {
       if (!quiet) setLoading(false);
     }
-  }, [view, typeFilter, searchDebounced]);
+  }, [view, typeFilter, searchDebounced, missingReceipt, mineOnly, rechargeStatusFilter]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -221,13 +274,36 @@ export default function CostsPage() {
       alert('This cost is reconciled in Xero and is locked — void it in Xero rather than deleting here.');
       return;
     }
-    if (!confirm(`Delete this cost${c.supplier_name ? ` from ${c.supplier_name}` : ''}? This cannot be undone.`)) return;
+    const inXero = !!c.xero_object_id;
+    const xeroNote = inXero
+      ? '\n\n⚠️ This removes the cost from OP only — it will NOT delete the bill/transaction in Xero. Void it in Xero separately if needed.'
+      : '';
+    if (!confirm(`Delete this cost${c.supplier_name ? ` from ${c.supplier_name}` : ''}? This cannot be undone.${xeroNote}`)) return;
     setActionBusy(c.id + 'delete');
     try {
       await api.delete(`/costs/${c.id}`);
       await load(true);
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to delete');
+    } finally {
+      setActionBusy(null);
+    }
+  }
+
+  async function resyncStale(c: CostRow) {
+    setActionBusy(c.id + 'resync');
+    try {
+      const r = await api.post<{ result?: { error?: string; skipped?: string } }>(`/costs/${c.id}/resync-xero`, {});
+      if (r.result?.error) alert(`Re-sync: ${r.result.error}`);
+      await load(true);
+    } catch (err) {
+      // 409 = Xero has it locked (paid bill / reconciled txn). Offer to clear the
+      // flag since staff will fix it directly in Xero.
+      const msg = err instanceof Error ? err.message : 'Failed to re-sync';
+      if (confirm(`${msg}\n\nMark as resolved here? (only do this once you've fixed it in Xero)`)) {
+        try { await api.post(`/costs/${c.id}/resync-xero`, { dismiss: true }); await load(true); }
+        catch (e2) { alert(e2 instanceof Error ? e2.message : 'Failed to clear flag'); }
+      }
     } finally {
       setActionBusy(null);
     }
@@ -242,27 +318,6 @@ export default function CostsPage() {
       await load(true);
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to retry sync');
-    } finally {
-      setActionBusy(null);
-    }
-  }
-
-  // Push the flagged recharge to HireHop as a billable line. Surfaces HH's own
-  // message on failure (closed job, validation, etc.) so staff know what to do.
-  async function confirmRecharge(c: CostRow) {
-    if (!confirm(`Add a £${Number(c.recharge_amount ?? c.amount_gross ?? 0).toFixed(2)} recharge line (+ VAT) to HireHop${c.hh_job_number ? ` job #${c.hh_job_number}` : ''}?`)) return;
-    setActionBusy(c.id + 'recharge');
-    try {
-      const r = await api.post<{ result: { pushed?: boolean; error?: string; skipped?: string; manualActionRequired?: boolean; amount?: number; stockLabel?: string } }>(
-        `/costs/${c.id}/push-recharge`, {},
-      );
-      const res = r.result || {};
-      if (res.pushed) alert(`Recharged to HireHop: ${res.stockLabel} £${Number(res.amount || 0).toFixed(2)} + VAT added to the job.`);
-      else if (res.error) alert(`Recharge ${res.manualActionRequired ? 'needs manual action' : 'failed'}: ${res.error}`);
-      else if (res.skipped) alert(`Skipped: ${res.skipped}`);
-      await load(true);
-    } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to push recharge to HireHop');
     } finally {
       setActionBusy(null);
     }
@@ -307,6 +362,13 @@ export default function CostsPage() {
       </div>
 
       {/* Filters */}
+      {missingReceipt && (
+        <div className="flex items-center justify-between gap-2 mb-4 bg-amber-50 border border-amber-200 text-amber-800 rounded-md px-3 py-2 text-sm">
+          <span>Showing company-card costs with no receipt attached{mineOnly ? ' (yours)' : ''}. Open each one to attach its receipt.</span>
+          <button onClick={() => { searchParams.delete('missing_receipt'); searchParams.delete('mine'); setSearchParams(searchParams, { replace: true }); }}
+            className="text-amber-700 hover:underline whitespace-nowrap">Clear filter</button>
+        </div>
+      )}
       <div className="flex flex-wrap gap-2 mb-4">
         <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search supplier / description"
           className="border border-gray-300 rounded-md px-3 py-1.5 text-sm flex-1 min-w-[200px]" />
@@ -320,7 +382,56 @@ export default function CostsPage() {
           <option value="parts">Parts</option>
           <option value="freelancer_invoice">Freelancer invoice</option>
         </select>
+        <select value={supplierFilter} onChange={(e) => setSupplierFilter(e.target.value)}
+          className="border border-gray-300 rounded-md px-3 py-1.5 text-sm max-w-[180px]">
+          <option value="">All suppliers</option>
+          {supplierOptions.map((s) => <option key={s} value={s}>{s}</option>)}
+        </select>
       </div>
+
+      {/* Due-date filters — Bills to Pay only */}
+      {view === 'payable' && (
+        <div className="flex flex-wrap items-center gap-1.5 mb-4">
+          <span className="text-xs text-gray-400 mr-1">Due:</span>
+          {([
+            ['all', 'All'],
+            ['overdue', 'Overdue'],
+            ['friday', 'This Friday'],
+            ['next_friday', 'Next Friday'],
+            ['this_week', 'This week'],
+            ['next_7', 'Next 7 days'],
+          ] as [DueFilter, string][]).map(([key, label]) => (
+            <button key={key} onClick={() => setDueFilter(key)}
+              className={`px-2.5 py-1 text-xs rounded-full border ${dueFilter === key
+                ? (key === 'overdue' ? 'bg-red-600 border-red-600 text-white' : 'bg-purple-600 border-purple-600 text-white')
+                : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'}`}>
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {view === 'recharge' && (
+        <div className="flex flex-wrap items-center gap-1.5 mb-4">
+          <span className="text-xs text-gray-400 mr-1">Status:</span>
+          {([
+            ['', 'Pending'],
+            ['recharged_hh', 'Recharged (HH)'],
+            ['recharged_external', 'Billed externally'],
+            ['absorbed', 'Absorbed'],
+            ['all', 'All'],
+          ] as [string, string][]).map(([key, label]) => (
+            <button key={key || 'pending'} onClick={() => setRechargeStatusFilter(key)}
+              className={`px-2.5 py-1 text-xs rounded-full border ${rechargeStatusFilter === key
+                ? 'bg-purple-600 border-purple-600 text-white'
+                : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'}`}>
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {view === 'reconcile' && isManager && <XeroCotProbe />}
 
       {/* Table */}
       {loading ? (
@@ -333,7 +444,7 @@ export default function CostsPage() {
             <thead className="bg-gray-50 text-gray-600">
               <tr>
                 <SortableTh label="Date" k="date" sortKey={sortKey} sortDir={sortDir} onSort={clickSort} />
-                {view === 'payable' && <th className="px-2.5 py-2 text-left font-medium">Due</th>}
+                {view === 'payable' && <SortableTh label="Due" k="due" sortKey={sortKey} sortDir={sortDir} onSort={clickSort} />}
                 <SortableTh label="Supplier" k="supplier" sortKey={sortKey} sortDir={sortDir} onSort={clickSort} />
                 <SortableTh label="Description" k="description" sortKey={sortKey} sortDir={sortDir} onSort={clickSort} />
                 <SortableTh label="Gross" k="gross" sortKey={sortKey} sortDir={sortDir} onSort={clickSort} align="right" />
@@ -398,25 +509,28 @@ export default function CostsPage() {
                       <span className="text-xs text-gray-500">{c.payment_status.replace('_', ' ')}</span>
                     )}
                     {c.recharge_mode !== 'none' && (
-                      <span className="ml-1 px-2 py-0.5 text-xs rounded-full bg-blue-50 text-blue-700">
-                        recharge{c.recharged_to_hh_at ? ' ✓' : ''}
-                      </span>
+                      <span className="ml-1"><RechargeStatusPill status={c.recharge_status} mode={c.recharge_mode} /></span>
                     )}
                   </td>
-                  <td className="px-2.5 py-2">
-                    <XeroCell cost={c} busy={actionBusy === c.id + 'sync'} onRetry={() => retrySync(c)} />
+                  <td className="px-2.5 py-2 whitespace-nowrap">
+                    <XeroCell cost={c} busy={actionBusy === c.id + 'sync'} onRetry={() => retrySync(c)}
+                      resyncBusy={actionBusy === c.id + 'resync'} onResync={() => resyncStale(c)} />
                   </td>
                   <td className="px-2.5 py-2 text-right whitespace-nowrap">
                     <div className="flex items-center justify-end gap-2">
                       {view === 'payable' && (
                         <PayableActions cost={c} isManager={isManager} isAdmin={isAdmin} busy={actionBusy} onAction={runAction} onPay={() => setPayTarget(c)} />
                       )}
-                      {view === 'recharge' && !c.recharged_to_hh_at && (
-                        <button disabled={actionBusy === c.id + 'recharge'} onClick={() => confirmRecharge(c)}
-                          className="px-2 py-1 text-xs text-white bg-blue-600 hover:bg-blue-700 rounded disabled:opacity-50">
-                          {actionBusy === c.id + 'recharge' ? '…' : 'Push to HireHop'}
+                      {c.recharge_mode !== 'none' && (c.recharge_status ?? 'pending') === 'pending' && (
+                        <button onClick={() => setResolving(c)}
+                          className="px-2 py-1 text-xs text-white bg-blue-600 hover:bg-blue-700 rounded">
+                          Resolve
                         </button>
                       )}
+                      <button onClick={() => setAllocating(c)} title="Split across jobs"
+                        className={`px-1.5 py-1 text-sm rounded hover:bg-gray-100 ${c.allocation_count ? 'text-purple-700' : 'text-gray-500 hover:text-gray-800'}`}>
+                        ⑂{c.allocation_count ? <span className="text-[10px] align-top">{c.allocation_count}</span> : ''}
+                      </button>
                       <button onClick={() => setEditing(c)} title="Edit"
                         className="px-1.5 py-1 text-sm text-gray-500 hover:text-gray-800 hover:bg-gray-100 rounded">
                         ✎
@@ -440,6 +554,7 @@ export default function CostsPage() {
         <CostCaptureModal
           onClose={() => setShowCapture(false)}
           onSaved={() => { setShowCapture(false); load(); }}
+          onSavedAndSplit={(c) => { setShowCapture(false); load(); setAllocating(c as CostRow); }}
         />
       )}
       {editing && (
@@ -449,12 +564,26 @@ export default function CostsPage() {
           onSaved={() => { setEditing(null); load(); }}
         />
       )}
+      {allocating && (
+        <CostAllocationModal
+          cost={allocating}
+          onClose={() => setAllocating(null)}
+          onSaved={() => { setAllocating(null); load(true); }}
+        />
+      )}
       {payTarget && (
         <PayModal
           cost={payTarget}
           busy={actionBusy === payTarget.id + 'pay'}
           onClose={() => setPayTarget(null)}
           onSubmit={(date, method) => payCost(payTarget.id, date, method)}
+        />
+      )}
+      {resolving && (
+        <RechargeResolveModal
+          cost={resolving}
+          onClose={() => setResolving(null)}
+          onResolved={() => { setResolving(null); load(true); }}
         />
       )}
       {termsTarget && (
@@ -773,8 +902,19 @@ function ActionBtn({ busy, onClick, label }: { busy: boolean; onClick: () => voi
   );
 }
 
-function XeroCell({ cost, busy, onRetry }: { cost: Cost; busy: boolean; onRetry: () => void }) {
+function XeroCell({ cost, busy, onRetry, resyncBusy, onResync }: { cost: Cost; busy: boolean; onRetry: () => void; resyncBusy?: boolean; onResync?: () => void }) {
   const isBill = cost.payment_method === 'not_yet_paid' || cost.payment_method === 'reimburse_me';
+  // Edited after it was pushed → Xero is out of date. Takes precedence over the
+  // synced pills; offer a manual re-sync.
+  if (cost.xero_stale && cost.xero_object_id) {
+    return onResync ? (
+      <button disabled={resyncBusy} onClick={onResync}
+        title="Edited after it was pushed — Xero is out of date. Click to re-sync."
+        className="px-2 py-0.5 text-xs rounded-full bg-amber-100 text-amber-800 hover:bg-amber-200 disabled:opacity-50 whitespace-nowrap">
+        {resyncBusy ? '…' : 'Re-sync'}
+      </button>
+    ) : <span className="px-2 py-0.5 text-xs rounded-full bg-amber-100 text-amber-800">Out of date</span>;
+  }
   // Paid-now costs have nothing to push until they're paid. Bills push on
   // approval, so show their state regardless of payment status.
   if (!isBill && cost.payment_status !== 'paid') {
@@ -801,39 +941,32 @@ function XeroCell({ cost, busy, onRetry }: { cost: Cost; busy: boolean; onRetry:
   if (cost.xero_sync_state === 'bill_created') {
     return <span className="px-2 py-0.5 text-xs rounded-full bg-blue-100 text-blue-800" title="In Xero; receipt attach pending">{isBill ? 'Bill created' : 'Sent'}</span>;
   }
+  // Actionable states collapse the status + sync button into ONE clickable pill
+  // (the button used to widen the column and push the row actions off-screen).
   if (cost.xero_sync_state === 'error') {
     return (
-      <div className="flex items-center gap-2">
-        <span className="px-2 py-0.5 text-xs rounded-full bg-red-100 text-red-800" title={cost.xero_error || ''}>Failed</span>
-        <button disabled={busy} onClick={onRetry} className="text-xs text-purple-700 hover:underline disabled:opacity-50">
-          {busy ? '…' : 'Retry'}
-        </button>
-      </div>
+      <button disabled={busy} onClick={onRetry} title={`Push failed — click to retry.${cost.xero_error ? ' ' + cost.xero_error : ''}`}
+        className="px-2 py-0.5 text-xs rounded-full bg-red-100 text-red-800 hover:bg-red-200 disabled:opacity-50 whitespace-nowrap">
+        {busy ? '…' : 'Sync failed — retry'}
+      </button>
     );
   }
-  // pending + advisory xero_error → soft "Not synced" pill. Push now stays
-  // available so staff can re-trigger after fixing the underlying gap (e.g.
-  // they've just set the bank-account mapping).
+  // pending + advisory xero_error → soft "Sync now". Re-triggerable after staff
+  // fix the underlying gap (e.g. they've just set the bank-account mapping).
   if (cost.xero_error) {
     return (
-      <div className="flex items-center gap-2">
-        <span className="px-2 py-0.5 text-xs rounded-full bg-gray-100 text-gray-600" title={cost.xero_error}>
-          Not synced
-        </span>
-        <button disabled={busy} onClick={onRetry} className="text-xs text-purple-700 hover:underline disabled:opacity-50">
-          {busy ? '…' : 'Push now'}
-        </button>
-      </div>
+      <button disabled={busy} onClick={onRetry} title={`Not synced — click to push to Xero.${cost.xero_error ? ' ' + cost.xero_error : ''}`}
+        className="px-2 py-0.5 text-xs rounded-full bg-gray-100 text-gray-600 hover:bg-gray-200 disabled:opacity-50 whitespace-nowrap">
+        {busy ? '…' : 'Sync now'}
+      </button>
     );
   }
   // pending (paid but not yet pushed — likely scheduler just queued it)
   return (
-    <div className="flex items-center gap-2">
-      <span className="px-2 py-0.5 text-xs rounded-full bg-gray-100 text-gray-700">Pending</span>
-      <button disabled={busy} onClick={onRetry} className="text-xs text-purple-700 hover:underline disabled:opacity-50">
-        {busy ? '…' : 'Push now'}
-      </button>
-    </div>
+    <button disabled={busy} onClick={onRetry} title="Queued for Xero — click to push now."
+      className="px-2 py-0.5 text-xs rounded-full bg-gray-100 text-gray-700 hover:bg-gray-200 disabled:opacity-50 whitespace-nowrap">
+      {busy ? '…' : 'Sync now'}
+    </button>
   );
 }
 
@@ -849,6 +982,127 @@ function StatCard({ label, value, sub, color }: { label: string; value: string; 
       <div className="text-xs text-gray-500">{label}</div>
       <div className="text-xl font-bold text-gray-900">{value}</div>
       {sub && <div className="text-xs text-gray-500">{sub}</div>}
+    </div>
+  );
+}
+
+// ── Xero COT probe ──────────────────────────────────────────────────────────
+// "What's on the company card in Xero that isn't in OP." Reads SPEND bank
+// transactions on the mapped COT account and lists the ones with no matching
+// OP cost. Also the verification tool for the Codat→Xero feed — if it returns
+// transactions we can read + match the card; if it returns nothing the
+// purchases aren't landing as readable BankTransactions yet.
+interface CotProbeTxn {
+  bank_transaction_id: string | null;
+  date: string | null;
+  total: number;
+  reference: string | null;
+  contact_name: string | null;
+  is_reconciled: boolean;
+  status: string | null;
+}
+interface CotProbeResult {
+  configured: boolean;
+  message?: string;
+  account_id?: string;
+  window?: { days: number; from: string };
+  fetched?: number;
+  matched?: number;
+  unmatched_count?: number;
+  unmatched?: CotProbeTxn[];
+}
+
+function XeroCotProbe() {
+  const [days, setDays] = useState(30);
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<CotProbeResult | null>(null);
+  const [error, setError] = useState('');
+
+  async function run() {
+    setLoading(true); setError(''); setResult(null);
+    try {
+      const r = await api.get<{ data: CotProbeResult }>(`/costs/reconcile/xero-cot?days=${days}`);
+      setResult(r.data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Probe failed');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="mb-4 border border-gray-200 rounded-lg p-4 bg-gray-50">
+      <div className="flex flex-wrap items-center gap-3">
+        <div>
+          <h3 className="text-sm font-semibold text-gray-800">Company card in Xero, not in OP</h3>
+          <p className="text-xs text-gray-500">Reads card spend from Xero and lists anything with no matching OP cost.</p>
+        </div>
+        <div className="ml-auto flex items-center gap-2">
+          <select value={days} onChange={(e) => setDays(Number(e.target.value))}
+            className="border border-gray-300 rounded-md px-2 py-1 text-sm">
+            <option value={14}>Last 14 days</option>
+            <option value={30}>Last 30 days</option>
+            <option value={60}>Last 60 days</option>
+            <option value={90}>Last 90 days</option>
+          </select>
+          <button onClick={run} disabled={loading}
+            className="px-3 py-1.5 text-sm text-white bg-purple-600 hover:bg-purple-700 rounded-md disabled:opacity-50">
+            {loading ? 'Checking…' : 'Check Xero'}
+          </button>
+        </div>
+      </div>
+
+      {error && <div className="mt-3 bg-red-50 border border-red-200 text-red-700 text-sm rounded-md px-3 py-2">{error}</div>}
+
+      {result && !result.configured && (
+        <div className="mt-3 bg-amber-50 border border-amber-200 text-amber-800 text-sm rounded-md px-3 py-2">{result.message}</div>
+      )}
+
+      {result && result.configured && (
+        <div className="mt-3">
+          <p className="text-sm text-gray-700 mb-2">
+            Fetched <strong>{result.fetched}</strong> card transaction{result.fetched === 1 ? '' : 's'} from the last {result.window?.days} days ·{' '}
+            <span className="text-green-700">{result.matched} matched</span> ·{' '}
+            <span className={result.unmatched_count ? 'text-amber-700 font-medium' : 'text-gray-500'}>{result.unmatched_count} not in OP</span>
+          </p>
+          {result.fetched === 0 && (
+            <p className="text-xs text-gray-500 italic">
+              No card transactions came back. Either there genuinely weren't any, or the card's purchases are sitting in Xero as raw
+              (unreconciled) bank-statement lines, which the API doesn't expose until they're coded/reconciled. If you can see card spend
+              in Xero for this period but nothing shows here, it's the latter — tell me and we'll take the statement-line route.
+            </p>
+          )}
+          {result.unmatched && result.unmatched.length > 0 && (
+            <div className="overflow-x-auto">
+              <table className="min-w-full text-sm">
+                <thead>
+                  <tr className="text-left text-gray-500 border-b border-gray-200">
+                    <th className="py-1.5 pr-3 font-medium">Date</th>
+                    <th className="py-1.5 px-3 font-medium text-right">Amount</th>
+                    <th className="py-1.5 px-3 font-medium">Reference / payee</th>
+                    <th className="py-1.5 pl-3 font-medium">In Xero</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {result.unmatched.map((t, i) => (
+                    <tr key={t.bank_transaction_id || i} className="border-b border-gray-100">
+                      <td className="py-1.5 pr-3 whitespace-nowrap text-gray-700">{t.date || '—'}</td>
+                      <td className="py-1.5 px-3 text-right font-medium text-gray-900">£{t.total.toFixed(2)}</td>
+                      <td className="py-1.5 px-3 text-gray-600">{t.reference || t.contact_name || '—'}</td>
+                      <td className="py-1.5 pl-3">
+                        <span className={`text-xs px-2 py-0.5 rounded-full ${t.is_reconciled ? 'bg-emerald-100 text-emerald-800' : 'bg-gray-100 text-gray-600'}`}>
+                          {t.is_reconciled ? 'reconciled' : t.status?.toLowerCase() || 'unreconciled'}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p className="text-xs text-gray-400 mt-2">These are card payments in Xero with no matching cost in OP — log them (and attach the receipt) so they reconcile.</p>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

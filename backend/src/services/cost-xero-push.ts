@@ -113,6 +113,8 @@ interface CostRow {
   payment_method: string | null;
   payment_status: string;
   approval_state: string | null;
+  approved_at: string | null;
+  cost_type: string | null;
   amount_gross: string | number | null;
   amount_vat: string | number | null;
   amount_net: string | number | null;
@@ -339,13 +341,45 @@ async function pushBill(cost: CostRow): Promise<PushResult> {
     const description = (isReimburse && cost.supplier_name ? `${cost.supplier_name} — ${baseDesc}` : baseDesc).slice(0, 4000);
 
     const { lineItems, lineAmountTypes } = await buildCostLineItems(cost, description);
-    const { resolveTermsForSupplier, computeDueDate } = await import('./supplier-terms');
-    const billTerms = await resolveTermsForSupplier(cost.xero_contact_id, cost.supplier_name);
-    const billDueDate = computeDueDate(dateOnly(cost.cost_date), billTerms) ?? addDaysISO(dateOnly(cost.cost_date), 30);
+    const { resolveTermsForSupplier, computeDueDate, freelancerDueDate, seedTermsFromXeroIfMissing } = await import('./supplier-terms');
+
+    // Resolve the Xero contact FIRST so we can (a) persist its id back on the
+    // cost — which is what lets Xero supplier terms seed + pull through on this
+    // and future bills (the link was previously never saved) — and (b) create
+    // the bill against the contact id directly. Skipped for reimburse_me, where
+    // the "contact" is the staff member, not a supplier whose terms we'd want.
+    let contactId: string | undefined;
+    if (!isReimburse) {
+      try {
+        const contact = await xeroBroker.getOrCreateContact(contactName);
+        contactId = contact.ContactID;
+        if (contactId && contactId !== cost.xero_contact_id) {
+          await query(`UPDATE costs SET xero_contact_id=$1 WHERE id=$2`, [contactId, cost.id]);
+          cost.xero_contact_id = contactId;
+        }
+        await seedTermsFromXeroIfMissing(contactId, cost.supplier_name);
+      } catch (err) {
+        if (isScopeError(err)) { await recordAdvisory(cost.id, SCOPE_ADVISORY); return { pushed: false, skipped: 'Contacts scope not granted' }; }
+        // Non-fatal — fall back to creating the bill by contact name.
+        console.warn('[cost-xero-push] contact resolve failed, using name:', (err as Error).message);
+      }
+    }
+
+    // Freelancer invoices use Ooosh terms (first Friday +1wk after approval),
+    // overriding any supplier/Xero terms; everything else uses resolved terms.
+    let billDueDate: string | undefined;
+    if (cost.cost_type === 'freelancer_invoice') {
+      billDueDate = freelancerDueDate(cost.approved_at) ?? addDaysISO(dateOnly(cost.cost_date), 30) ?? dateOnly(cost.cost_date);
+    } else {
+      const billTerms = await resolveTermsForSupplier(cost.xero_contact_id, cost.supplier_name);
+      billDueDate = computeDueDate(dateOnly(cost.cost_date), billTerms) ?? addDaysISO(dateOnly(cost.cost_date), 30);
+    }
+
     let invoiceID: string;
     try {
       const bill = await xeroBroker.createBill({
         contactName,
+        contactId,
         date: dateOnly(cost.cost_date),
         dueDate: billDueDate,
         reference: xeroReference(cost),
@@ -486,4 +520,113 @@ export function pushCostToXeroBackground(costId: string): void {
       console.error('[cost-xero-push] background push failed:', costId, err);
     });
   });
+}
+
+/**
+ * Re-sync an already-pushed cost to Xero IN PLACE after it was edited (the
+ * "Re-sync to Xero" button behind the xero_stale flag). Updates the existing
+ * Xero object rather than creating a new one — so it never duplicates.
+ *
+ * Hard refusals (returned as { locked: true }) — Xero won't let us mutate these,
+ * and we must not try: a PAID bill (amounts locked once a payment exists) and a
+ * RECONCILED spend-money. Staff fix those directly in Xero. Anything else
+ * (AUTHORISED unpaid bill, unreconciled spend-money) is updated and xero_stale
+ * cleared. Shares the per-cost advisory lock with pushCostToXero.
+ */
+export async function resyncCostToXero(costId: string): Promise<PushResult & { locked?: boolean }> {
+  if (!isXeroConfigured()) return { pushed: false, skipped: 'Xero not configured' };
+  const client = await getClient();
+  const key = `cost-push:${costId}`;
+  try {
+    await client.query('SELECT pg_advisory_lock(hashtext($1)::bigint)', [key]);
+    return await resyncCostToXeroLocked(costId);
+  } finally {
+    try { await client.query('SELECT pg_advisory_unlock(hashtext($1)::bigint)', [key]); }
+    catch (err) { console.error('[cost-xero-push] advisory unlock failed:', costId, err); }
+    client.release();
+  }
+}
+
+async function resyncCostToXeroLocked(costId: string): Promise<PushResult & { locked?: boolean }> {
+  const cost = await loadCost(costId);
+  if (!cost) return { pushed: false, skipped: 'Cost not found' };
+
+  // Not in Xero yet → there's nothing to update; fall back to a normal push.
+  if (!cost.xero_object_id || !PUSHED_STATES.includes(cost.xero_sync_state)) {
+    return pushCostToXeroLocked(costId);
+  }
+  if (!cost.amount_gross || Number(cost.amount_gross) <= 0) {
+    return { pushed: false, error: 'Gross amount required' };
+  }
+  if (!cost.xero_account_code) {
+    return { pushed: false, error: MISSING_CATEGORY_MSG };
+  }
+
+  const isBill = Boolean(cost.payment_method) && (BILL_METHODS as readonly string[]).includes(cost.payment_method!);
+
+  try {
+    if (isBill) {
+      // A bill with a recorded payment / marked paid has locked amounts in Xero.
+      if (cost.xero_payment_id || cost.payment_status === 'paid') {
+        return { pushed: false, locked: true, error: 'This bill is paid in Xero — its amounts are locked. Edit it directly in Xero.' };
+      }
+      const isReimburse = cost.payment_method === 'reimburse_me';
+      const contactName = isReimburse
+        ? (cost.uploaded_by_name?.trim() || 'Staff reimbursement')
+        : (cost.supplier_name || 'Unknown supplier').toString().slice(0, 500);
+      const baseDesc = (cost.description || cost.category || 'Cost').toString();
+      const description = (isReimburse && cost.supplier_name ? `${cost.supplier_name} — ${baseDesc}` : baseDesc).slice(0, 4000);
+      const { lineItems, lineAmountTypes } = await buildCostLineItems(cost, description);
+      const { resolveTermsForSupplier, computeDueDate, freelancerDueDate } = await import('./supplier-terms');
+      let billDueDate: string | undefined;
+      if (cost.cost_type === 'freelancer_invoice') {
+        billDueDate = freelancerDueDate(cost.approved_at) ?? addDaysISO(dateOnly(cost.cost_date), 30) ?? dateOnly(cost.cost_date);
+      } else {
+        const billTerms = await resolveTermsForSupplier(cost.xero_contact_id, cost.supplier_name);
+        billDueDate = computeDueDate(dateOnly(cost.cost_date), billTerms) ?? addDaysISO(dateOnly(cost.cost_date), 30);
+      }
+      await xeroBroker.updateBill(cost.xero_object_id, {
+        contactName,
+        date: dateOnly(cost.cost_date),
+        dueDate: billDueDate,
+        reference: xeroReference(cost),
+        status: 'AUTHORISED',
+        lineAmountTypes,
+        lineItems,
+      });
+    } else {
+      // Spend-money: Xero blocks edits once reconciled.
+      if (cost.xero_sync_state === 'reconciled') {
+        return { pushed: false, locked: true, error: 'This transaction is reconciled in Xero — it can no longer be changed here. Update it directly in Xero.' };
+      }
+      const bankAccountId = await getSystemSetting(`xero_bank_${cost.payment_method}`);
+      if (!bankAccountId) {
+        return { pushed: false, error: `No Xero bank account mapped for "${cost.payment_method}".` };
+      }
+      const description = (cost.description || cost.category || cost.supplier_name || 'Cost').toString().slice(0, 4000);
+      const { lineItems, lineAmountTypes } = await buildCostLineItems(cost, description);
+      await xeroBroker.updateSpendMoney(cost.xero_object_id, {
+        bankAccountId,
+        contactName: (cost.supplier_name || 'Unknown supplier').toString().slice(0, 500),
+        date: dateOnly(cost.cost_date),
+        reference: xeroReference(cost),
+        lineItems,
+        lineAmountTypes,
+      });
+    }
+  } catch (err) {
+    if (isScopeError(err)) {
+      await recordAdvisory(cost.id, SCOPE_ADVISORY);
+      return { pushed: false, skipped: 'Bills scope not granted' };
+    }
+    const msg = err instanceof XeroApiError ? `Xero: ${err.message}` : err instanceof Error ? err.message : String(err);
+    await recordError(cost.id, msg);
+    return { pushed: false, error: msg };
+  }
+
+  await query(
+    `UPDATE costs SET xero_stale=FALSE, xero_synced_at=NOW(), xero_error=NULL WHERE id=$1`,
+    [cost.id]
+  );
+  return { pushed: true, invoiceID: cost.xero_object_id };
 }

@@ -18,7 +18,7 @@ import { connectRedis } from './config/redis';
 import { startScheduler } from './config/scheduler';
 import { handleStripeWebhook } from './services/stripe-webhook';
 
-dotenv.config();
+dotenv.config({ quiet: true });
 
 // ── Startup validation ──────────────────────────────────────────────────────
 const REQUIRED_ENV = ['JWT_SECRET', 'DATABASE_URL'];

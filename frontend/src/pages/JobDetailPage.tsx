@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { hasManagerRole } from '../lib/roles';
 import { useParams, useNavigate, Link, useLocation, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { getPaymentState, PAYMENT_STATE_LABELS, PAYMENT_STATE_CLASSES } from '../services/paymentState';
@@ -7,13 +8,14 @@ import JobProblemsPanel from '../components/JobProblemsPanel';
 import HeldItemsSection from '../components/HeldItemsSection';
 import PcnHistorySection from '../components/PcnHistorySection';
 import SendMerchFormButton from '../components/SendMerchFormButton';
+import AddHeldItemButton from '../components/AddHeldItemButton';
 import TransportCalculator from '../components/TransportCalculator';
 import { StagingCalculatorModal, StagingOverviewCard } from '../components/StagingCalculator';
 import BacklineMatcherModal from '../components/BacklineMatcherModal';
 import RequirementCard from '../components/RequirementCard';
 import type { JobRequirement } from '../components/RequirementCard';
 import ExcessGateBanner from '../components/ExcessGateBanner';
-import ExcessPaymentModal from '../components/ExcessPaymentModal';
+import ExcessPaymentModal, { computeHireDays } from '../components/ExcessPaymentModal';
 import OohReturnModal from '../components/OohReturnModal';
 import JobOohReturns from '../components/JobOohReturns';
 import AddToHireModal, { type AddToHireCandidate } from '../components/AddToHireModal';
@@ -121,6 +123,7 @@ interface JobDetail {
   custom_index: string | null;
   depot_name: string | null;
   is_internal: boolean;
+  recharge_running_costs?: boolean;
   job_value: number | null;
   pipeline_status: string | null;
   likelihood: string | null;
@@ -245,6 +248,36 @@ interface PersonOption {
   is_approved: boolean;
   current_organisations?: PersonOrgLink[] | null;
 }
+
+/** A distinct van allocated to the job, for the "Vehicles on this job" strip. */
+interface JobAssignedVehicle {
+  vehicle_id: string;
+  reg: string;
+  type: string | null;
+  /** Most-progressed assignment status across all rows on this van. */
+  status: string;
+}
+
+/**
+ * Normalise any van label (fleet `simple_type`, a full `vehicleType` string,
+ * or a HireHop line-item name) to one of the canonical Ooosh van types, so
+ * "detected" slots and "assigned" vehicles can be reconciled to show how many
+ * of each type are still unallocated. Panel is checked first so "Panel Van …"
+ * doesn't fall through to Premium.
+ */
+function normVanType(s: string | null | undefined): string {
+  const t = (s || '').toLowerCase();
+  if (t.includes('panel')) return 'Panel';
+  if (t.includes('basic') || t.includes('mwb')) return 'Basic';
+  if (t.includes('vito')) return 'Vito';
+  if (t.includes('premium') || t.includes('lwb')) return 'Premium';
+  return (s || 'Van').trim() || 'Van';
+}
+
+/** Rank assignment statuses so a van's chip reflects its most-progressed row. */
+const ASSIGNMENT_STATUS_RANK: Record<string, number> = {
+  active: 5, booked_out: 4, confirmed: 3, soft: 2, returned: 1, swapped: 0, cancelled: -1,
+};
 
 interface VehicleAssignment {
   id: string;
@@ -486,6 +519,11 @@ function SwapVehicleButton({ assignmentId, vehicleId, currentVehicleReg, onSwapp
   const [showForm, setShowForm] = useState(false);
   const [vehicles, setVehicles] = useState<{ id: string; reg: string; simpleType: string }[]>([]);
   const [selectedVehicle, setSelectedVehicle] = useState('');
+  // 'breakdown' = van out of service (→ Not Ready + Problems issue + interim
+  // assessment). 'planned' = deliberate change (e.g. client upgrading vans);
+  // the outgoing van is fine and just gets a normal check-in when it's back.
+  const [swapKind, setSwapKind] = useState<'breakdown' | 'planned'>('breakdown');
+  const planned = swapKind === 'planned';
   const [reasonCode, setReasonCode] = useState('breakdown');
   const [reasonDetails, setReasonDetails] = useState('');
   // Soft check-in of the van being swapped out
@@ -525,7 +563,8 @@ function SwapVehicleButton({ assignmentId, vehicleId, currentVehicleReg, onSwapp
 
   const handleSwap = async () => {
     if (!selectedVehicle || !reasonDetails.trim()) return;
-    if (issueChoice === 'new' && !newIssueSummary.trim()) {
+    // Issue is only required for a breakdown swap. Planned swaps don't log one.
+    if (!planned && issueChoice === 'new' && !newIssueSummary.trim()) {
       setError('Give the new issue a short summary, or link an existing one.');
       return;
     }
@@ -535,6 +574,7 @@ function SwapVehicleButton({ assignmentId, vehicleId, currentVehicleReg, onSwapp
       const reasonLabel = SWAP_REASONS.find(r => r.code === reasonCode)?.label || reasonCode;
       const payload: any = {
         new_vehicle_id: selectedVehicle,
+        swap_kind: swapKind,
         swap_reason: `${reasonLabel}: ${reasonDetails.trim()}`,
       };
       const softCheckin: any = {};
@@ -544,20 +584,23 @@ function SwapVehicleButton({ assignmentId, vehicleId, currentVehicleReg, onSwapp
       if (checkinNotes.trim()) softCheckin.notes = checkinNotes.trim();
       if (Object.keys(softCheckin).length > 0) payload.soft_checkin = softCheckin;
 
-      if (issueChoice === 'new') {
-        payload.issue_link = {
-          new_issue: {
-            category: reasonCode === 'accident' ? 'damaged' : reasonCode === 'client_request' ? 'other' : 'breakdown',
-            severity: 'urgent',
-            summary: newIssueSummary.trim(),
-            description: reasonDetails.trim() || null,
-          },
-        };
-      } else if (issueChoice !== 'none') {
-        payload.issue_link = { existing_issue_id: issueChoice };
+      // Problem record is breakdown-only. A planned change isn't a fault.
+      if (!planned) {
+        if (issueChoice === 'new') {
+          payload.issue_link = {
+            new_issue: {
+              category: reasonCode === 'accident' ? 'damaged' : reasonCode === 'client_request' ? 'other' : 'breakdown',
+              severity: 'urgent',
+              summary: newIssueSummary.trim(),
+              description: reasonDetails.trim() || null,
+            },
+          };
+        } else if (issueChoice !== 'none') {
+          payload.issue_link = { existing_issue_id: issueChoice };
+        }
       }
 
-      const resp = await api.post<{ data: { redirect_to?: string; ve103b_regen_needed?: boolean; ve103b_reg?: string | null; swapped_count?: number } }>(
+      const resp = await api.post<{ data: { redirect_to?: string; ve103b_regen_needed?: boolean; ve103b_reg?: string | null; swapped_count?: number; outgoing_check_in_needed?: boolean; outgoing_reg?: string } }>(
         `/assignments/${assignmentId}/swap-vehicle`, payload,
       );
       const data = resp.data;
@@ -567,6 +610,14 @@ function SwapVehicleButton({ assignmentId, vehicleId, currentVehicleReg, onSwapp
           `Vehicle swapped. NOTE: the original had a VE103B certificate — ` +
           `generate a new VE103B for ${data.ve103b_reg || 'the replacement'} from the VE103B page ` +
           `(a new certificate number is required, so this can't be done automatically).`
+        );
+      }
+
+      if (data?.outgoing_check_in_needed) {
+        alert(
+          `Planned swap done. When ${data.outgoing_reg || currentVehicleReg} is back, ` +
+          `check it in as normal (Drivers & Vehicles tab → Check In) to capture its ` +
+          `return mileage and condition and free it for the next hire.`
         );
       }
 
@@ -602,6 +653,32 @@ function SwapVehicleButton({ assignmentId, vehicleId, currentVehicleReg, onSwapp
       <p className="text-xs font-medium text-orange-800">
         Swap <strong>{currentVehicleReg}</strong> — moves every driver on this van to the replacement.
       </p>
+
+      {/* Swap kind — breakdown (out of service) vs planned (van's fine) */}
+      <div className="space-y-1">
+        <label className="block text-[11px] font-semibold text-gray-600 uppercase tracking-wide">Type of swap</label>
+        <div className="flex gap-1">
+          <button
+            type="button"
+            onClick={() => { setSwapKind('breakdown'); if (reasonCode === 'client_request') { setReasonCode('breakdown'); setNewIssueSummary(`${currentVehicleReg}: Breakdown`); } }}
+            className={`flex-1 rounded px-2 py-1.5 text-xs font-medium border ${!planned ? 'bg-orange-600 text-white border-orange-600' : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'}`}
+          >
+            🛠 Breakdown / fault
+          </button>
+          <button
+            type="button"
+            onClick={() => { setSwapKind('planned'); setReasonCode('client_request'); }}
+            className={`flex-1 rounded px-2 py-1.5 text-xs font-medium border ${planned ? 'bg-ooosh-600 text-white border-ooosh-600' : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'}`}
+          >
+            📋 Planned change
+          </button>
+        </div>
+        <p className="text-[11px] text-gray-500">
+          {planned
+            ? `${currentVehicleReg} is fine — it'll take a normal check-in to Available when it's back. No fault logged.`
+            : `${currentVehicleReg} goes out of service (Not Ready) with a problem record.`}
+        </p>
+      </div>
 
       {/* Reason */}
       <div className="space-y-1">
@@ -651,10 +728,15 @@ function SwapVehicleButton({ assignmentId, vehicleId, currentVehicleReg, onSwapp
         </div>
         <input type="text" value={location} onChange={e => setLocation(e.target.value)} placeholder="Where is it? (garage / tow truck / venue)" className="w-full text-sm border border-gray-300 rounded px-2 py-1.5" />
         <input type="text" value={checkinNotes} onChange={e => setCheckinNotes(e.target.value)} placeholder="Condition notes" className="w-full text-sm border border-gray-300 rounded px-2 py-1.5" />
-        <p className="text-[11px] text-gray-500">{currentVehicleReg} will be marked <strong>Not Ready</strong> — full check-in when it's back at base.</p>
+        <p className="text-[11px] text-gray-500">
+          {planned
+            ? <>Optional — the proper check-in on return captures the full state.</>
+            : <>{currentVehicleReg} will be marked <strong>Not Ready</strong> — full check-in when it's back at base.</>}
+        </p>
       </div>
 
-      {/* Issue link/create */}
+      {/* Issue link/create — breakdown only; a planned change isn't a fault */}
+      {!planned && (
       <div className="space-y-1">
         <label className="block text-[11px] font-semibold text-gray-600 uppercase tracking-wide">Problem record</label>
         <select
@@ -678,6 +760,7 @@ function SwapVehicleButton({ assignmentId, vehicleId, currentVehicleReg, onSwapp
           />
         )}
       </div>
+      )}
 
       {error && <p className="text-xs text-red-600">{error}</p>}
       <div className="flex gap-2 pt-1">
@@ -708,6 +791,7 @@ function HireFormActions({ assignmentId, pdfKey, pdfGeneratedAt, vehicleId }: {
 }) {
   const [generating, setGenerating] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [open, setOpen] = useState(false);
 
   // Can only generate a meaningful PDF once a vehicle is linked — the PDF
   // needs the reg + model. Before book-out, these buttons are dimmed and
@@ -775,52 +859,71 @@ function HireFormActions({ assignmentId, pdfKey, pdfGeneratedAt, vehicleId }: {
     }
   }
 
+  // Lesser-used hire-form actions collapsed into a single "Hire form ▾" menu
+  // so the card actions row stays uncluttered (the primary Book Out / Check In
+  // / Allocate button is what staff reach for most). A small green dot on the
+  // trigger signals the PDF already exists.
   return (
-    <div className="mt-3 pt-3 border-t border-gray-100">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-1.5 text-xs text-gray-500">
-          <span className="font-medium text-gray-700">Hire Form</span>
-          {pdfGeneratedAt && <span className="text-green-600">PDF ready</span>}
-        </div>
-        <div className="flex items-center gap-1.5">
-          <button
-            onClick={() => generatePdf(false)}
-            disabled={generating || !hasVehicle}
-            title={disabledReason || undefined}
-            className="text-xs px-2.5 py-1.5 bg-gray-100 text-gray-700 rounded hover:bg-gray-200 disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            {generating ? '...' : pdfKey ? 'Regenerate PDF' : 'Generate PDF'}
-          </button>
-          <button
-            onClick={() => generatePdf(true)}
-            disabled={generating || !hasVehicle}
-            title={disabledReason || undefined}
-            className="text-xs px-2.5 py-1.5 bg-ooosh-100 text-ooosh-700 rounded hover:bg-ooosh-200 disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            {generating ? '...' : 'Generate + Email'}
-          </button>
-          {pdfKey && (
-            <>
-              <button
-                onClick={viewPdf}
-                disabled={generating}
-                className="text-xs px-2.5 py-1.5 bg-blue-50 text-blue-700 rounded hover:bg-blue-100 disabled:opacity-50"
-              >
-                View PDF
-              </button>
-              <button
-                onClick={resendEmail}
-                disabled={generating}
-                className="text-xs px-2.5 py-1.5 bg-amber-50 text-amber-700 rounded hover:bg-amber-100 disabled:opacity-50"
-              >
-                Re-send
-              </button>
-            </>
-          )}
-        </div>
-      </div>
+    <div className="relative inline-block">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        disabled={generating}
+        className="inline-flex items-center gap-1.5 text-sm px-3 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 disabled:opacity-50 font-medium"
+      >
+        {generating ? '…' : 'Hire form'}
+        {pdfGeneratedAt && !generating && <span className="w-1.5 h-1.5 rounded-full bg-green-500" title="PDF ready" />}
+        <span className="text-gray-400">▾</span>
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
+          <div className="absolute left-0 mt-1 z-20 w-52 bg-white rounded-lg shadow-lg border border-gray-200 py-1 text-sm">
+            <button
+              type="button"
+              onClick={() => { setOpen(false); generatePdf(false); }}
+              disabled={!hasVehicle}
+              title={disabledReason || undefined}
+              className="w-full text-left px-3 py-2 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {pdfKey ? 'Regenerate PDF' : 'Generate PDF'}
+            </button>
+            <button
+              type="button"
+              onClick={() => { setOpen(false); generatePdf(true); }}
+              disabled={!hasVehicle}
+              title={disabledReason || undefined}
+              className="w-full text-left px-3 py-2 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Generate + Email
+            </button>
+            {pdfKey && (
+              <>
+                <div className="my-1 border-t border-gray-100" />
+                <button
+                  type="button"
+                  onClick={() => { setOpen(false); viewPdf(); }}
+                  className="w-full text-left px-3 py-2 hover:bg-gray-50 text-blue-700"
+                >
+                  View PDF
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setOpen(false); resendEmail(); }}
+                  className="w-full text-left px-3 py-2 hover:bg-gray-50 text-amber-700"
+                >
+                  Re-send email
+                </button>
+              </>
+            )}
+            {!hasVehicle && (
+              <p className="px-3 py-2 text-[11px] text-gray-400 border-t border-gray-100">{disabledReason}</p>
+            )}
+          </div>
+        </>
+      )}
       {message && (
-        <div className={`text-xs px-2 py-1.5 rounded mt-2 ${message.startsWith('Error') ? 'bg-red-50 text-red-700' : 'bg-green-50 text-green-700'}`}>
+        <div className={`absolute left-0 top-full mt-1 z-20 w-64 text-xs px-2 py-1.5 rounded shadow-sm ${message.startsWith('Error') ? 'bg-red-50 text-red-700' : 'bg-green-50 text-green-700'}`}>
           {message}
         </div>
       )}
@@ -1349,7 +1452,14 @@ export default function JobDetailPage() {
   const [reqSummary, setReqSummary] = useState<{
     hireFormsStatus: string | null;
     postHireOpenCount: number;
-  }>({ hireFormsStatus: null, postHireOpenCount: 0 });
+    // True when the job has vehicles but every slot is Van & Driver (or the
+    // hire-form chain is suspended). Used to suppress the "no hire form sent"
+    // banner, which only applies to self-drive hires.
+    allVanAndDriver: boolean;
+    // Studio-sitter cover gap — unassigned sitter-needed evenings + the earliest
+    // one's date (for the pre-hire amber banner). Null when fully covered / n/a.
+    rehearsalGap: { unassigned: number; firstDate: string } | null;
+  }>({ hireFormsStatus: null, postHireOpenCount: 0, allVanAndDriver: false, rehearsalGap: null });
   const [assignModalQuoteId, setAssignModalQuoteId] = useState<string | null>(null);
   const [peopleOptions, setPeopleOptions] = useState<PersonOption[]>([]);
   const [peopleSearch, setPeopleSearch] = useState('');
@@ -1391,6 +1501,13 @@ export default function JobDetailPage() {
 
   // Drivers & Vehicles state
   const [vehicleAssignments, setVehicleAssignments] = useState<VehicleAssignment[]>([]);
+  // Distinct vehicles allocated to this job, deduped across ALL assignment
+  // rows — including driverless staff-allocation rows that are hidden from the
+  // per-driver card list (e.g. a Panel van picked on Allocations before any
+  // driver is bucketed onto its slot). Powers the "Vehicles on this job"
+  // header strip so every allocated van is visible in one place rather than
+  // repeated on (or missing from) individual driver cards.
+  const [jobAssignedVehicles, setJobAssignedVehicles] = useState<JobAssignedVehicle[]>([]);
   const [excessModalRecord, setExcessModalRecord] = useState<JobExcess | null>(null);
   const [excessModalInitialAction, setExcessModalInitialAction] = useState<'edit_required' | 'reimburse' | undefined>(undefined);
   const [excessModalLoadingId, setExcessModalLoadingId] = useState<string | null>(null);
@@ -2002,11 +2119,12 @@ export default function JobDetailPage() {
       setInteractions([]);
       setQuotes([]);
       setVehicleAssignments([]);
+      setJobAssignedVehicles([]);
       setDispatchCheck(null);
       setAllocationConflicts([]);
       setDateMismatches([]);
       setJobOrgs([]);
-      setReqSummary({ hireFormsStatus: null, postHireOpenCount: 0 });
+      setReqSummary({ hireFormsStatus: null, postHireOpenCount: 0, allVanAndDriver: false, rehearsalGap: null });
       setLoading(true);
 
       loadJob();
@@ -2053,15 +2171,38 @@ export default function JobDetailPage() {
   async function loadRequirementsSummary() {
     if (!id) return;
     try {
-      const [pre, post] = await Promise.all([
+      const [pre, post, flagsRes] = await Promise.all([
         api.get<{ data: JobRequirement[] }>(`/requirements/job/${id}?phase=pre_hire`),
         api.get<{ data: JobRequirement[] }>(`/requirements/job/${id}?phase=post_hire`),
+        api.get<{ flags?: { has_vehicle?: boolean; self_drive_count?: number } }>(
+          `/hirehop/jobs/${id}/derived-flags`
+        ).catch(() => ({ flags: undefined })),
       ]);
       const hf = pre.data.find(r => r.requirement_type === 'hire_forms');
       const openPost = post.data.filter(r => r.status !== 'done').length;
+      // Rehearsal studio-sitter cover gap — only when the job has a rehearsal
+      // requirement. Coverage is per-evening; gap = any sitter-needed night
+      // without an assignee. firstDate = earliest such night (drives the banner).
+      let rehearsalGap: { unassigned: number; firstDate: string } | null = null;
+      if (pre.data.some(r => r.requirement_type === 'rehearsal')) {
+        try {
+          const cov = await api.get<{ data: { date: string; assignee: { id: string } | null }[] }>(`/studio-sitters/job/${id}/coverage`);
+          const unassignedDates = (cov.data ?? []).filter(e => !e.assignee).map(e => e.date).sort();
+          if (unassignedDates.length > 0) rehearsalGap = { unassigned: unassignedDates.length, firstDate: unassignedDates[0] };
+        } catch { /* non-fatal */ }
+      }
+      // Suppress the self-drive hire-form banner when the job is wholly V&D —
+      // either the live derived flags say so (vehicles present, zero self-drive
+      // slots) or the hire-form requirement is suspended (notes marker). Reading
+      // the flags keeps the banner honest even if the requirement state lags.
+      const flags = flagsRes?.flags;
+      const flagsVD = !!(flags?.has_vehicle && (flags?.self_drive_count ?? 1) === 0);
+      const reqSuspended = typeof hf?.notes === 'string' && hf.notes.includes('[Suspended:');
       setReqSummary({
         hireFormsStatus: hf?.status || null,
         postHireOpenCount: openPost,
+        allVanAndDriver: flagsVD || reqSuspended,
+        rehearsalGap,
       });
     } catch {
       // non-fatal — alerts just won't fire
@@ -2440,14 +2581,18 @@ export default function JobDetailPage() {
       }
       const allRows = Array.from(merged.values());
 
-      // Build slot → vehicle_id map from staff allocations (no driver_id,
+      // Build slot → vehicle map from staff allocations (no driver_id,
       // no freelancer_person_id, has vehicle_id). Used to infer the van
-      // for hire-form rows that haven't been cascade-linked yet.
-      const slotVehicleByIndex = new Map<number, string>();
+      // for hire-form rows that haven't been cascade-linked yet. We keep the
+      // reg + type alongside the id so the card header can DISPLAY the van
+      // even before the hire-form row is cascade-linked (otherwise the card
+      // shows a bare 🚐 with no reg — the button knows the van but the
+      // header can't).
+      const slotVehicleByIndex = new Map<number, { id: string; reg: string | null; type: string | null }>();
       for (const r of allRows) {
         const idx = r.van_requirement_index ?? 0;
         if (!r.driver_id && !r.freelancer_person_id && r.vehicle_id && !slotVehicleByIndex.has(idx)) {
-          slotVehicleByIndex.set(idx, r.vehicle_id);
+          slotVehicleByIndex.set(idx, { id: r.vehicle_id, reg: r.vehicle_reg ?? null, type: r.vehicle_type ?? null });
         }
       }
 
@@ -2502,10 +2647,35 @@ export default function JobDetailPage() {
             excess_amount_taken: r.excess_amount_taken,
             dispute_status: r.dispute_status ?? null,
           } : null,
-          effective_vehicle_id: r.vehicle_id || inferred,
+          effective_vehicle_id: r.vehicle_id || inferred?.id || null,
+          // Backfill reg/type from the inferred sibling so the card header
+          // shows the van whenever we know it, not just when this row's own
+          // vehicle_id is set. No-op when the row is already linked.
+          vehicle_reg: r.vehicle_reg || inferred?.reg || null,
+          vehicle_type: r.vehicle_type || inferred?.type || null,
         };
       });
       setVehicleAssignments(shaped);
+
+      // Deduped assigned vehicles across ALL rows (incl. driverless staff
+      // allocations that never surface as a driver card) → the header strip.
+      // Keeps the most-progressed status per van so its chip reads right.
+      const vanMap = new Map<string, JobAssignedVehicle>();
+      for (const r of allRows) {
+        if (!r.vehicle_id || r.status === 'cancelled') continue;
+        const existing = vanMap.get(r.vehicle_id);
+        if (!existing) {
+          vanMap.set(r.vehicle_id, {
+            vehicle_id: r.vehicle_id,
+            reg: r.vehicle_reg || '',
+            type: r.vehicle_type ?? null,
+            status: r.status,
+          });
+        } else if ((ASSIGNMENT_STATUS_RANK[r.status] ?? -1) > (ASSIGNMENT_STATUS_RANK[existing.status] ?? -1)) {
+          existing.status = r.status;
+        }
+      }
+      setJobAssignedVehicles(Array.from(vanMap.values()));
 
       // Also load dispatch check
       const check = await api.get<DispatchCheckResult>(`/assignments/dispatch-check/${id}`);
@@ -2663,6 +2833,7 @@ export default function JobDetailPage() {
   const hireFormMissing: { daysToOut: number } | null = (() => {
     if (!['confirmed', 'prepped'].includes(job.pipeline_status || '')) return null;
     if (!outDay) return null;
+    if (reqSummary.allVanAndDriver) return null; // V&D hire — no customer hire form needed
     if (reqSummary.hireFormsStatus !== 'not_started') return null;
     const daysToOut = daysBetween(outDay, todayLocalISO);
     if (daysToOut < 0 || daysToOut > 5) return null;
@@ -2678,6 +2849,17 @@ export default function JobDetailPage() {
     const daysSinceReturn = daysBetween(todayLocalISO, returnDay);
     if (daysSinceReturn < 7 || reqSummary.postHireOpenCount === 0) return null;
     return { daysSinceReturn, openCount: reqSummary.postHireOpenCount };
+  })();
+
+  // Rehearsal studio-sitter gap — sitter-needed evenings unassigned within the
+  // warning window (7 days) of the earliest such night. Amber, non-blocking.
+  const rehearsalSitterGap: { unassigned: number; daysToFirst: number } | null = (() => {
+    const g = reqSummary.rehearsalGap;
+    if (!g) return null;
+    if (['lost', 'cancelled'].includes(job.pipeline_status || '')) return null;
+    const daysToFirst = daysBetween(g.firstDate, todayLocalISO);
+    if (daysToFirst < 0 || daysToFirst > 7) return null;
+    return { unassigned: g.unassigned, daysToFirst };
   })();
 
   // Crew unassigned + Crew not introduced — gate on EACH QUOTE'S OWN date,
@@ -2856,7 +3038,7 @@ export default function JobDetailPage() {
                 >
                   Already reopened &rarr; View new booking
                 </Link>
-              ) : (user?.role === 'admin' || user?.role === 'manager') ? (
+              ) : hasManagerRole(user?.role) ? (
                 <button
                   onClick={async () => {
                     if (!window.confirm('Re-open this cancelled job as a new booking? The original job will stay cancelled for audit purposes.')) return;
@@ -3356,6 +3538,21 @@ export default function JobDetailPage() {
                 }}
               />
             )}
+            {rehearsalSitterGap && (
+              <JobAlertBanner
+                severity="amber"
+                message={
+                  (rehearsalSitterGap.daysToFirst === 0
+                    ? 'Rehearsal starts today'
+                    : `Rehearsal starts in ${rehearsalSitterGap.daysToFirst} ${rehearsalSitterGap.daysToFirst === 1 ? 'day' : 'days'}`)
+                  + ` — ${rehearsalSitterGap.unassigned} evening${rehearsalSitterGap.unassigned === 1 ? '' : 's'} still without a studio sitter.`
+                }
+                action={{
+                  label: 'View Job Requirements',
+                  onClick: () => setActiveTab('overview'),
+                }}
+              />
+            )}
 
             {/* HireHop status mismatch banner */}
             {hhStatusMismatch && (
@@ -3654,7 +3851,7 @@ export default function JobDetailPage() {
             )}
             {/* Pre-Hire Review — admin/manager only, confirmed/prepping/prepped.
                 Faded grey when sent within the last 24h (still clickable). */}
-            {(user?.role === 'admin' || user?.role === 'manager')
+            {hasManagerRole(user?.role)
               && (job.pipeline_status === 'confirmed'
                   || job.pipeline_status === 'prepping'
                   || job.pipeline_status === 'prepped') && (() => {
@@ -3964,6 +4161,8 @@ export default function JobDetailPage() {
             jobId={id || ''}
             hhJobNumber={job.hh_job_number}
             pipelineStatus={job.pipeline_status}
+            clientOrgId={job.client_id}
+            clientOrgName={job.client_name}
             derivedFlags={hhSyncResult?.derivation?.flags || null}
             seatAvailability={hhSyncResult?.derivation?.seatAvailability || null}
             hasCrewQuotes={quotes.some(q => (q.job_type === 'crewed' || (q.assignments && q.assignments.length > 0)) && q.status !== 'cancelled')}
@@ -4117,6 +4316,65 @@ export default function JobDetailPage() {
           {/* Out-of-hours returns — flag/un-flag badly-parked OOH returns per van */}
           <JobOohReturns jobId={job.id} />
 
+          {/* Vehicles on this job — single place all allocated vans are shown
+              (deduped, incl. driverless staff allocations), plus a dashed chip
+              for each HH-detected van type still unallocated. Rare to have >2
+              vans, so no scroll/space concern. */}
+          {(() => {
+            const slots = hhSyncResult?.derivation?.flags?.vehicle_slots || [];
+            // Detected van types minus what's already assigned → "unassigned".
+            const detected = new Map<string, number>();
+            for (const s of slots) detected.set(normVanType(s.item_name), (detected.get(normVanType(s.item_name)) || 0) + 1);
+            const assignedCounts = new Map<string, number>();
+            for (const v of jobAssignedVehicles) assignedCounts.set(normVanType(v.type), (assignedCounts.get(normVanType(v.type)) || 0) + 1);
+            const unassigned: string[] = [];
+            for (const [t, n] of detected) {
+              for (let i = 0; i < n - (assignedCounts.get(t) || 0); i++) unassigned.push(t);
+            }
+            if (jobAssignedVehicles.length === 0 && unassigned.length === 0) return null;
+            const statusChip: Record<string, { label: string; cls: string }> = {
+              active: { label: 'On Hire', cls: 'bg-green-100 text-green-700' },
+              booked_out: { label: 'Booked Out', cls: 'bg-indigo-100 text-indigo-700' },
+              confirmed: { label: 'Allocated', cls: 'bg-blue-100 text-blue-700' },
+              soft: { label: 'Soft', cls: 'bg-gray-100 text-gray-600' },
+              returned: { label: 'Returned', cls: 'bg-teal-100 text-teal-700' },
+              swapped: { label: 'Swapped', cls: 'bg-orange-100 text-orange-700' },
+            };
+            return (
+              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide mr-1">
+                    Vehicles on this job
+                  </span>
+                  {jobAssignedVehicles.map((v) => {
+                    const s = statusChip[v.status] || { label: v.status, cls: 'bg-gray-100 text-gray-600' };
+                    return (
+                      <span
+                        key={v.vehicle_id}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-ooosh-50 border border-ooosh-200"
+                      >
+                        <span aria-hidden>🚐</span>
+                        <span className="font-semibold text-gray-900 text-sm">{v.reg || '—'}</span>
+                        {v.type && <span className="text-xs text-gray-500">{normVanType(v.type)}</span>}
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${s.cls}`}>{s.label}</span>
+                      </span>
+                    );
+                  })}
+                  {unassigned.map((t, i) => (
+                    <span
+                      key={`u-${i}`}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-50 border border-dashed border-amber-300 text-amber-700 text-sm font-medium"
+                      title="Detected on HireHop but no van allocated yet"
+                    >
+                      <span aria-hidden>🚐</span>
+                      {t} — unassigned
+                    </span>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
+
           {vehicleAssignmentsLoading ? (
             <div className="flex justify-center py-12">
               <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-ooosh-600" />
@@ -4187,8 +4445,18 @@ export default function JobDetailPage() {
                     <div className="flex items-start justify-between mb-3">
                       <div className="flex items-center gap-2 flex-wrap">
                         <span className="text-lg">🚐</span>
-                        <span className="font-semibold text-gray-900">{a.vehicle_reg}</span>
-                        {a.vehicle_type && <span className="text-sm text-gray-500">({a.vehicle_type})</span>}
+                        {/* Reg lives in the "Vehicles on this job" strip up top,
+                            not repeated prominently on every card — just a subtle
+                            chip so you can still tell which van THIS driver is on
+                            (useful on multi-van hires). */}
+                        {a.vehicle_reg && (
+                          <span
+                            className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600 font-medium"
+                            title="Van linked to this driver"
+                          >
+                            {a.vehicle_reg}
+                          </span>
+                        )}
                         <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${sc.bg} ${sc.text}`}>
                           {sc.label}
                         </span>
@@ -4386,6 +4654,24 @@ export default function JobDetailPage() {
 
                     {/* Actions row */}
                     <div className="mt-3 flex flex-wrap items-center gap-2">
+                      {/* Swapped-out van still needs its physical check-in when
+                          it comes back (planned upgrade → returns to base;
+                          breakdown → returns from the garage later). The swap
+                          moved the live hire to the replacement, so this card
+                          otherwise shows a badge only — but the check-in is a
+                          real, supported action (check-in-eligibility recognises
+                          status='swapped' + checked_in_at IS NULL). Hidden once
+                          checked in. */}
+                      {a.status === 'swapped' && !a.checked_in_at && a.vehicle_id && (
+                        <Link
+                          to={`/vehicles/check-in?vehicle=${a.vehicle_id}`}
+                          className="inline-flex items-center gap-1.5 px-3 py-2 bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700 text-sm font-medium"
+                          title="This van was swapped out mid-hire — check it in when it's back at base"
+                        >
+                          ↩️ Check In
+                        </Link>
+                      )}
+
                       {/* Primary next-action — Allocate Van / Book Out / Check In.
                           State-aware: drives the staff cockpit workflow from
                           this card so they don't have to leave Job Detail to
@@ -5198,6 +5484,7 @@ export default function JobDetailPage() {
         <ExcessPaymentModal
           excess={excessModalRecord}
           initialAction={excessModalInitialAction}
+          hireDays={computeHireDays(job)}
           onClose={() => { setExcessModalRecord(null); setExcessModalInitialAction(undefined); }}
           onUpdated={() => { loadVehicleAssignments(); loadCancelledExcessHeld(); }}
         />
@@ -5677,11 +5964,15 @@ export default function JobDetailPage() {
       {/* Client trading history sidebar (desktop only) */}
       {showClientHistory && (
         <div className="hidden lg:block w-72 shrink-0">
-          {/* Holding FYI — temp storage + lost property we hold for this client.
+          {/* Holding FYI — anything we're still holding for this client that
+              arrived for a DIFFERENT job (incoming/merch held for a future
+              hire, temp storage, lost property). excludeJobId drops items tied
+              to THIS job — those already show in the merch card on Overview.
               Informational only (not on the prep ticker). Hidden when empty. */}
           {job.client_id && (
             <div className="mb-4">
-              <HeldItemsSection entityType="organisation" entityId={job.client_id} kinds={['temp_storage', 'lost_property']}
+              <HeldItemsSection entityType="organisation" entityId={job.client_id}
+                kinds={['incoming', 'temp_storage', 'lost_property']} excludeJobId={job.id}
                 openOnly hideWhenEmpty heading="📦 Also holding (FYI)" />
             </div>
           )}
@@ -6126,10 +6417,12 @@ function OverviewFinancialStrip({ jobId }: { jobId: string }) {
 }
 
 
-function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, seatAvailability, hasCrewQuotes, hasCrewOnHH, onOpenCrewCalculator, onLaunchStaging, onLaunchRackPlan, onLaunchBacklineMatcher }: {
+function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, clientOrgName, derivedFlags, seatAvailability, hasCrewQuotes, hasCrewOnHH, onOpenCrewCalculator, onLaunchStaging, onLaunchRackPlan, onLaunchBacklineMatcher }: {
   jobId: string;
   hhJobNumber?: number | null;
   pipelineStatus?: string | null;
+  clientOrgId?: string | null;
+  clientOrgName?: string | null;
   derivedFlags?: {
     has_vehicle: boolean; vehicle_count: number; vehicle_types: string[];
     vehicle_slots?: Array<{ item_id: number; slot_index: number; item_name: string; mode: 'self_drive' | 'van_and_driver' }>;
@@ -6158,6 +6451,9 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
   const [loading, setLoading] = useState(true);
   const [showAddMenu, setShowAddMenu] = useState(false);
   const [isVanAndDriver, setIsVanAndDriver] = useState(false);
+  // Sequential-swap override: staff-declared real simultaneous self-drive van
+  // count (null = HH-derived). Drives the structure control on the vehicle card.
+  const [selfDriveVanOverride, setSelfDriveVanOverride] = useState<number | null>(null);
   // Local copy of derived flags so per-slot toggles can update the UI without a page refresh.
   // Seeded from the parent prop; refreshed from the PATCH response on every slot/toggle change.
   const [localFlags, setLocalFlags] = useState<typeof derivedFlags>(derivedFlags);
@@ -6194,8 +6490,8 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
   useEffect(() => {
     loadAll();
     // Load van & driver flag
-    api.get<{ isVanAndDriver: boolean }>(`/hirehop/jobs/${jobId}/derived-flags`)
-      .then(d => setIsVanAndDriver(d.isVanAndDriver || false))
+    api.get<{ isVanAndDriver: boolean; selfDriveVanOverride: number | null }>(`/hirehop/jobs/${jobId}/derived-flags`)
+      .then(d => { setIsVanAndDriver(d.isVanAndDriver || false); setSelfDriveVanOverride(d.selfDriveVanOverride ?? null); })
       .catch(() => {});
   }, [jobId, phase]);
 
@@ -6252,8 +6548,22 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
     }
   }
 
+  async function changeVehicleCountOverride(count: number | null) {
+    try {
+      const data = await api.patch<{ selfDriveVanOverride: number | null; derivation?: { flags?: typeof derivedFlags } }>(
+        `/hirehop/jobs/${jobId}/vehicle-count-override`,
+        { count }
+      );
+      setSelfDriveVanOverride(data.selfDriveVanOverride ?? null);
+      await applyDerivationResult(data.derivation);
+    } catch (err) {
+      console.error('Failed to set vehicle count override:', err);
+    }
+  }
+
   // Reminder form state
   const [showReminderForm, setShowReminderForm] = useState(false);
+  const [heldItemsRefreshKey, setHeldItemsRefreshKey] = useState(0);
   const [reminderText, setReminderText] = useState('');
   const [reminderDate, setReminderDate] = useState('');
   const [reminderDelivery, setReminderDelivery] = useState<'both' | 'notification' | 'email'>('both');
@@ -6501,6 +6811,8 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
                   onRemove={removeRequirement}
                   onVanAndDriverToggle={req.requirement_type === 'vehicle' ? toggleVanAndDriver : undefined}
                   onSlotModeChange={req.requirement_type === 'vehicle' ? changeSlotMode : undefined}
+                  selfDriveVanOverride={selfDriveVanOverride}
+                  onVehicleCountOverride={req.requirement_type === 'vehicle' ? changeVehicleCountOverride : undefined}
                   onReload={loadAll}
                 />
               );
@@ -6547,9 +6859,18 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
           <div className="bg-white rounded-xl border border-gray-200 p-4 space-y-3">
             <div className="flex items-center justify-between gap-3">
               <h3 className="text-sm font-semibold text-gray-800">📦 Held for Clients</h3>
-              {hhJobNumber && <SendMerchFormButton jobId={jobId} hhJobNumber={hhJobNumber} />}
+              <div className="flex items-center gap-3">
+                <AddHeldItemButton
+                  hhJobNumber={hhJobNumber}
+                  clientOrgId={clientOrgId}
+                  clientOrgName={clientOrgName}
+                  onSaved={() => { setHeldItemsRefreshKey(k => k + 1); loadAll(); }}
+                />
+                {hhJobNumber && <SendMerchFormButton jobId={jobId} hhJobNumber={hhJobNumber} />}
+              </div>
             </div>
-            <HeldItemsSection entityType="job" entityId={jobId} kinds={['incoming']} bare emptyHint="Nothing held for this job yet." />
+            <HeldItemsSection key={heldItemsRefreshKey} entityType="job" entityId={jobId}
+              kinds={['incoming', 'temp_storage', 'lost_property']} bare emptyHint="Nothing held for this job yet." />
           </div>
         );
         if (!merchReq) return <div className="mt-2">{panel}</div>;

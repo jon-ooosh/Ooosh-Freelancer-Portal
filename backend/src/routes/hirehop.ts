@@ -204,6 +204,18 @@ router.get('/jobs', async (req: AuthRequest, res: Response) => {
       whereClause += ` AND return_date::date < CURRENT_DATE AND status != 11`;
     }
 
+    // Genuinely-returning filter — used by the Returns page. Drops jobs whose
+    // HireHop status is 6 ("Returned Incomplete") but whose hire isn't due back
+    // yet (an element returned early mid-hire). Those stay in Out Now, not
+    // Returns. Status 7/8/11 = everything physically back, always kept.
+    // See CLAUDE.md → "The status-6 no man's land".
+    const { genuinely_returning } = req.query;
+    if (genuinely_returning === '1' || genuinely_returning === 'true') {
+      whereClause += ` AND (status <> 6
+        OR COALESCE(return_date, job_end) IS NULL
+        OR COALESCE(return_date, job_end)::date <= CURRENT_DATE + INTERVAL '1 day')`;
+    }
+
     // Has-retro filter — only jobs that have had a "Job retro:" interaction
     // logged. Distinct from has_issues; useful on Returns/Completed to find
     // jobs the team has actually retrospected vs ones still pending one.
@@ -521,8 +533,8 @@ router.get('/jobs/:jobId/derived-flags', authenticate, async (req: AuthRequest, 
     const isUuid = /^[0-9a-f]{8}-/.test(jobId);
     const jobResult = await query(
       isUuid
-        ? `SELECT hh_derived_flags, line_items_synced_at, is_van_and_driver, vehicle_slot_modes FROM jobs WHERE id = $1`
-        : `SELECT hh_derived_flags, line_items_synced_at, is_van_and_driver, vehicle_slot_modes FROM jobs WHERE hh_job_number = $1`,
+        ? `SELECT hh_derived_flags, line_items_synced_at, is_van_and_driver, vehicle_slot_modes, self_drive_van_override FROM jobs WHERE id = $1`
+        : `SELECT hh_derived_flags, line_items_synced_at, is_van_and_driver, vehicle_slot_modes, self_drive_van_override FROM jobs WHERE hh_job_number = $1`,
       [isUuid ? jobId : parseInt(jobId, 10)]
     );
 
@@ -546,6 +558,10 @@ router.get('/jobs/:jobId/derived-flags', authenticate, async (req: AuthRequest, 
       flags,
       lastSynced: job.line_items_synced_at,
       vehicleSlotModes: job.vehicle_slot_modes || {},
+      // Sequential-swap override: the staff-declared real simultaneous
+      // self-drive van count (null = use HH-derived). Drives the structure
+      // control on the vehicle requirement card.
+      selfDriveVanOverride: job.self_drive_van_override ?? null,
       // Legacy field — kept for one release for any lingering clients
       isVanAndDriver: flags?.has_vehicle && flags?.self_drive_count === 0,
       seatAvailability,
@@ -604,6 +620,41 @@ router.patch('/jobs/:jobId/vehicle-slot-mode', authenticate, async (req: AuthReq
     res.json({ success: true, vehicleSlotModes: modes, derivation });
   } catch (error) {
     console.error('Vehicle slot mode error:', error);
+    res.status(500).json({ error: 'Failed to update' });
+  }
+});
+
+// PATCH /api/hirehop/jobs/:jobId/vehicle-count-override — declare the real
+// simultaneous self-drive van count for a sequential-swap hire (HH lists
+// qty-2 but it's one van swapped mid-hire). count=null clears the override
+// (back to HH-derived). Re-derives so excess + requirements update.
+router.patch('/jobs/:jobId/vehicle-count-override', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const jobId = req.params.jobId as string;
+    const { count, note } = req.body as { count?: number | null; note?: string };
+
+    if (count !== null && count !== undefined && (!Number.isInteger(count) || count < 0)) {
+      res.status(400).json({ error: 'count must be a non-negative integer or null' });
+      return;
+    }
+
+    const exists = await query(`SELECT id FROM jobs WHERE id = $1`, [jobId]);
+    if (exists.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
+    await query(
+      `UPDATE jobs SET self_drive_van_override = $1, vehicle_structure_note = $2, updated_at = NOW() WHERE id = $3`,
+      [count ?? null, note ?? null, jobId]
+    );
+
+    const { deriveRequirementsForJob } = await import('../services/hh-requirement-derivation');
+    const derivation = await deriveRequirementsForJob(jobId);
+
+    res.json({ success: true, selfDriveVanOverride: count ?? null, derivation });
+  } catch (error) {
+    console.error('Vehicle count override error:', error);
     res.status(500).json({ error: 'Failed to update' });
   }
 });
@@ -708,6 +759,53 @@ router.patch('/jobs/:jobId/internal', async (req: AuthRequest, res: Response) =>
     res.json({ success: true, isInternal, derivation });
   } catch (error) {
     console.error('Internal job toggle error:', error);
+    res.status(500).json({ error: 'Failed to update' });
+  }
+});
+
+// PATCH /api/hirehop/jobs/:jobId/recharge-running-costs — declare (or clear)
+// that a job recharges its running costs post-hire. The lightweight entry point
+// (the per-quote expense toggle is the rich one). Drives the cost auto-inherit +
+// the standing "Recharge running costs" card. Set TRUE is also done automatically
+// on quote save; this is the manual on/off switch (the only off switch).
+router.patch('/jobs/:jobId/recharge-running-costs', async (req: AuthRequest, res: Response) => {
+  try {
+    const jobId = req.params.jobId as string;
+    const flag = !!req.body.rechargeRunningCosts;
+    const note = typeof req.body.note === 'string' ? req.body.note.trim().slice(0, 2000) : null;
+
+    const updated = await query(
+      `UPDATE jobs SET recharge_running_costs = $1, recharge_running_costs_note = $2, updated_at = NOW()
+       WHERE id = $3 AND is_deleted = false
+       RETURNING id, recharge_running_costs`,
+      [flag, note, jobId]
+    );
+    if (updated.rows.length === 0) { res.status(404).json({ error: 'Job not found' }); return; }
+
+    try {
+      await query(
+        `INSERT INTO interactions (type, content, job_id, created_by) VALUES ('note', $1, $2, $3)`,
+        [
+          flag
+            ? '⛽ Job marked "recharge running costs" — fuel/parking/etc. billed to the client at actual + markup post-hire'
+            : 'Job un-marked "recharge running costs"',
+          jobId, req.user!.id,
+        ]
+      );
+    } catch (logErr) { console.warn('Recharge-running-costs toggle: timeline log failed (non-fatal):', logErr); }
+
+    // Re-derive so the standing card appears/clears immediately (if in return phase).
+    let derivation = null;
+    try {
+      const { deriveRequirementsForJob } = await import('../services/hh-requirement-derivation');
+      derivation = await deriveRequirementsForJob(jobId);
+    } catch (deriveErr) {
+      console.error('Recharge-running-costs toggle: re-derivation failed (flag saved):', deriveErr);
+    }
+
+    res.json({ success: true, rechargeRunningCosts: flag, derivation });
+  } catch (error) {
+    console.error('Recharge-running-costs toggle error:', error);
     res.status(500).json({ error: 'Failed to update' });
   }
 });

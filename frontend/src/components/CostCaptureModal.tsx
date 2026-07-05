@@ -13,6 +13,7 @@
  * Net / VAT / Gross auto-calculate at 20% (toggle off to edit manually).
  */
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { hasManagerRole } from '../lib/roles';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import type { Cost, CostType, CostPaymentMethod, CostPaymentStatus, CostRechargeMode, CostIntent } from '../../../shared/types';
@@ -21,6 +22,9 @@ interface Props {
   onClose: () => void;
   // null when a vehicle service record was saved with no cost (service-only).
   onSaved: (cost: Cost | null) => void;
+  // When set + the user ticked "covers multiple jobs", called instead of onSaved
+  // so the parent can open the allocation/split modal for the new cost.
+  onSavedAndSplit?: (cost: Cost) => void;
   existing?: Cost | null;
   presetJobId?: string | null;
   presetVehicleId?: string | null;
@@ -86,14 +90,28 @@ const PAYMENT_STATUSES: { value: CostPaymentStatus; label: string }[] = [
 
 const SPLIT_KEY = 'ooosh_cost_modal_split_pct';
 const round2 = (n: number) => Math.round(n * 100) / 100;
+// Normalise a UK reg for comparison — strip spaces/punctuation, uppercase.
+const normReg = (s: string) => s.replace(/[^a-z0-9]/gi, '').toUpperCase();
 
 interface XeroContactLite { ContactID: string; Name: string }
 interface JobSuggestion { id: string; type: string; name: string; subtitle?: string }
 type ExistingRow = (Cost & { hh_job_number?: number | null; job_name?: string | null }) | null | undefined;
 
-export default function CostCaptureModal({ onClose, onSaved, existing, presetJobId, presetVehicleId, presetIssueId }: Props) {
+export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, existing, presetJobId, presetVehicleId, presetIssueId }: Props) {
   const existingRow = existing as ExistingRow;
   const { user } = useAuthStore();
+  // The cached login user can be stale if an admin set this staff member's COT
+  // card in Settings AFTER they logged in. Read the card status fresh on open so
+  // the "no card on file" hint reflects reality (the save already stamps it
+  // server-side from the DB regardless).
+  const [freshCardLast4, setFreshCardLast4] = useState<string | null | undefined>(user?.cot_card_last4);
+  useEffect(() => {
+    let cancelled = false;
+    api.get<{ cot_card_last4?: string | null }>('/auth/me')
+      .then((r) => { if (!cancelled) setFreshCardLast4(r?.cot_card_last4 ?? null); })
+      .catch(() => { /* keep the cached value */ });
+    return () => { cancelled = true; };
+  }, []);
   const isEdit = Boolean(existing);
 
   // ── Form state ───────────────────────────────────────────────────────────
@@ -146,6 +164,9 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
     existing?.cost_intent || (existing?.recharge_mode && existing.recharge_mode !== 'none' ? 'extra' : 'quote_actual'),
   );
   const [intentTouched, setIntentTouched] = useState(isEdit);
+  // True when the linked job is flagged "recharge running costs" — drives the
+  // default (Extra + recharge) + a hint banner.
+  const [jobRechargesRunningCosts, setJobRechargesRunningCosts] = useState(false);
   const [notes, setNotes] = useState(existing?.notes || '');
   const [receiptFile, setReceiptFile] = useState<File | null>(null);
   const [receiptPreview, setReceiptPreview] = useState<string | null>(null);
@@ -157,8 +178,18 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
   // AI-spotted job number (suggestion only — staff confirm to link).
   const [suggestedJobNumber, setSuggestedJobNumber] = useState<string | null>(null);
   const [linkingSuggestion, setLinkingSuggestion] = useState(false);
+  // AI-spotted vehicle reg feedback: matched=true → we auto-linked the van
+  // (still flag it for a sanity check); matched=false → reg seen but not in the
+  // active fleet, so the user links manually.
+  const [vehicleRegNote, setVehicleRegNote] = useState<{ reg: string; matched: boolean } | null>(null);
+  // Reg extracted from the receipt, awaiting a fleet match. Held in state (not
+  // matched inline in the async handler) so the match runs in an effect once the
+  // fleet list has actually loaded — the fleet fetch can still be in flight when
+  // the multi-second AI extraction returns, and an inline match would compare
+  // against a stale/empty fleet captured in the handler's closure.
+  const [pendingVehicleReg, setPendingVehicleReg] = useState<string | null>(null);
   // Compact quote-vs-actuals summary shown when a job is linked.
-  const [jobSummary, setJobSummary] = useState<{ quotedCost: number; clientQuoted: number; actuals: number; extra: number } | null>(null);
+  const [jobSummary, setJobSummary] = useState<{ quotedCost: number; clientQuoted: number; actuals: number; extra: number; rechargeExpected: string[] } | null>(null);
 
   // ── Vehicle link + optional "also log to service history" ────────────────
   // Forward unification: a garage/vehicle cost can ALSO create a vehicle_service_log
@@ -185,6 +216,7 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
   const [applyToVehicle, setApplyToVehicle] = useState(true);
 
   const [saving, setSaving] = useState(false);
+  const [splitAfterSave, setSplitAfterSave] = useState(false);
   const [error, setError] = useState('');
 
   // ── Supplier autocomplete (Xero contact search) ──────────────────────────
@@ -227,6 +259,26 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Match an AI-extracted reg against the fleet once the fleet has loaded.
+  // Done here (not inline in the async extract handler) so a fleet fetch still
+  // in flight when extraction returns doesn't cause a false "not in fleet". An
+  // exact match auto-links the van (it's our plate) so the mileage/garage
+  // pre-fill has somewhere to land; an unrecognised reg is surfaced as a note.
+  useEffect(() => {
+    if (!pendingVehicleReg || fleet.length === 0) return;
+    if (vehicleId) { setPendingVehicleReg(null); return; }
+    const wanted = normReg(pendingVehicleReg);
+    const match = fleet.find((v) => normReg(v.reg) === wanted);
+    if (match) {
+      setVehicleId(match.id);
+      if (SERVICE_HISTORY_CATEGORY_CODES.has(categoryCode)) setLogService(true);
+      setVehicleRegNote({ reg: match.reg, matched: true });
+    } else {
+      setVehicleRegNote({ reg: pendingVehicleReg, matched: false });
+    }
+    setPendingVehicleReg(null);
+  }, [pendingVehicleReg, fleet, vehicleId, categoryCode]);
+
   const vehicleLabel = (v: FleetLite | undefined) =>
     v ? `${v.reg}${v.make || v.model ? ` — ${[v.make, v.model].filter(Boolean).join(' ')}` : v.simple_type ? ` — ${v.simple_type}` : ''}` : '';
   const selectedVehicle = fleet.find((v) => v.id === vehicleId);
@@ -260,19 +312,41 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
     (async () => {
       try {
         const [quotesRes, costsRes] = await Promise.all([
-          api.get<{ data: Array<{ freelancer_fee: number | null; freelancer_fee_rounded: number | null; client_fee: number | null; status: string | null }> }>(`/quotes?job_id=${linkedJobId}`).catch(() => ({ data: [] })),
-          api.get<{ data: Array<{ id: string; amount_gross: number | null; cost_intent: string | null }> }>(`/costs/by-job/${linkedJobId}`).catch(() => ({ data: [] })),
+          api.get<{ data: Array<{ freelancer_fee: number | null; freelancer_fee_rounded: number | null; client_fee: number | null; status: string | null; expenses?: Array<{ type?: string; chargeMode?: string; includedInCharge?: boolean }> | string }> }>(`/quotes?job_id=${linkedJobId}`).catch(() => ({ data: [] })),
+          api.get<{ data: Array<{ id: string; amount_gross: number | null; cost_intent: string | null }>; recharge_running_costs?: boolean }>(`/costs/by-job/${linkedJobId}`).catch(() => ({ data: [], recharge_running_costs: false })),
         ]);
         if (cancelled) return;
         const quotes = (quotesRes.data || []).filter((q) => q.status !== 'cancelled');
         const num = (n: number | null | undefined) => Number(n || 0);
         const quotedCost = quotes.reduce((s, q) => s + num(q.freelancer_fee_rounded ?? q.freelancer_fee), 0);
         const clientQuoted = quotes.reduce((s, q) => s + num(q.client_fee), 0);
+        // Declared recharge lines across the job's quotes → "expecting these back".
+        const EXP_LABELS: Record<string, string> = { fuel: 'Fuel', parking: 'Parking', tolls: 'Tolls', transport_out: 'Transport', transport_back: 'Transport', hotel: 'Hotel', pd: 'Per Diem', other: 'Other' };
+        const rechargeSet = new Set<string>();
+        for (const q of quotes) {
+          const raw = q.expenses;
+          const arr = Array.isArray(raw) ? raw : (typeof raw === 'string' && raw ? JSON.parse(raw) : []);
+          for (const e of arr) {
+            const mode = e?.chargeMode ?? (e?.includedInCharge === false ? 'not_included' : 'included');
+            if (mode === 'recharge') rechargeSet.add(EXP_LABELS[String(e?.type)] || String(e?.type || 'Other'));
+          }
+        }
         const costs = (costsRes.data || []).filter((c) => c.id !== existing?.id);
         const actuals = costs.filter((c) => c.cost_intent === 'quote_actual').reduce((s, c) => s + num(c.amount_gross), 0);
         const extra = costs.filter((c) => c.cost_intent === 'extra').reduce((s, c) => s + num(c.amount_gross), 0);
-        setJobSummary({ quotedCost, clientQuoted, actuals, extra });
-        if (!intentTouched) setCostIntent(quotes.length > 0 ? 'quote_actual' : 'extra');
+        setJobSummary({ quotedCost, clientQuoted, actuals, extra, rechargeExpected: Array.from(rechargeSet) });
+        const flagged = costsRes.recharge_running_costs === true;
+        setJobRechargesRunningCosts(flagged);
+        // A recharge-running-costs job defaults new costs to Extra + recharge;
+        // otherwise fall back to the quote-based default (part-of-quote if quoted).
+        if (!intentTouched) {
+          if (flagged) {
+            setCostIntent('extra');
+            setRechargeMode((m) => (m === 'none' ? 'full' : m));
+          } else {
+            setCostIntent(quotes.length > 0 ? 'quote_actual' : 'extra');
+          }
+        }
       } catch { /* leave defaults */ }
     })();
     return () => { cancelled = true; };
@@ -445,6 +519,7 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
     setExtracting(true);
     setExtractError('');
     setAiPrefilled(false);
+    setVehicleRegNote(null);
     try {
       const fd = new FormData();
       fd.append('file', receiptFile);
@@ -458,6 +533,9 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
           vat_treatment: 'standard' | 'no_vat';
           invoice_number: string | null;
           job_number: string | null;
+          vehicle_reg: string | null;
+          mileage: number | null;
+          service_type: 'service' | 'repair' | 'mot' | 'insurance' | 'tax' | 'tyre' | 'other' | null;
           description: string | null;
           category_code: string | null;
           confidence: 'high' | 'medium' | 'low';
@@ -503,6 +581,19 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
       }
       // Job number is a suggestion only — staff confirm before it links.
       setSuggestedJobNumber(!linkedJobId && ex.job_number ? ex.job_number.replace(/\D/g, '') || null : null);
+      // Vehicle reg → hand off to the fleet-match effect (waits for the fleet
+      // list to load before matching). Never overrides an existing link.
+      if (ex.vehicle_reg && !vehicleId) setPendingVehicleReg(ex.vehicle_reg);
+      // Service type → pre-select the matching pill when the AI classified the
+      // work (e.g. a tyres-only invoice → "tyre"). Mixed invoices come back as
+      // "service"/"other"; staff adjust. Suggestion only.
+      if (ex.service_type) setServiceType(ex.service_type);
+      // Mileage → pre-fill the service-history mileage field (suggestion only;
+      // confirmed before save, and the service endpoint's upward-only ratchet
+      // still guards the van's live odometer).
+      if (ex.mileage != null) setServiceMileage(String(ex.mileage));
+      // Garage is the supplier on a garage invoice — pre-fill if not set.
+      if (ex.supplier && !serviceGarage.trim()) setServiceGarage(ex.supplier);
       setAiPrefilled(true);
       setAiConfidence(ex.confidence);
     } catch (err) {
@@ -655,7 +746,11 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
           return;
         }
       }
-      onSaved(res.data);
+      if (splitAfterSave && !isEdit && onSavedAndSplit && res.data) {
+        onSavedAndSplit(res.data);
+      } else {
+        onSaved(res.data);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save cost');
     } finally {
@@ -712,6 +807,16 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
                     className="mt-2 w-full px-3 py-2 text-xs text-left rounded-md border border-purple-200 bg-purple-50 text-purple-800 hover:bg-purple-100 disabled:opacity-50">
                     📎 Looks like <strong>job #{suggestedJobNumber}</strong> on this invoice — {linkingSuggestion ? 'linking…' : 'tap to link it'}
                   </button>
+                )}
+                {vehicleRegNote?.matched && (
+                  <div className="mt-2 px-3 py-2 text-xs rounded-md border border-purple-200 bg-purple-50 text-purple-800">
+                    🚐 Linked <strong>{vehicleRegNote.reg}</strong> from the receipt — check it&apos;s the right van before saving.
+                  </div>
+                )}
+                {vehicleRegNote && !vehicleRegNote.matched && (
+                  <div className="mt-2 px-3 py-2 text-xs rounded-md border border-amber-200 bg-amber-50 text-amber-800">
+                    🚐 Receipt shows reg <strong>{vehicleRegNote.reg}</strong> — not in the active fleet. Link a vehicle manually below if needed.
+                  </div>
                 )}
                 {extractError && (
                   <div className="mt-2 px-3 py-2 text-xs bg-red-50 border border-red-200 text-red-700 rounded-md">
@@ -779,12 +884,15 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Date</label>
                 <input type="date" className={inputCls} value={costDate} onChange={(e) => setCostDate(e.target.value)} />
+                {costDate && costDate > new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10) && (
+                  <p className="text-xs text-amber-600 mt-1">⚠️ This date is in the future — is that right? Receipt dates are usually today or earlier (UK day/month).</p>
+                )}
               </div>
             </div>
 
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
-                Invoice number <span className="text-gray-400 font-normal">(optional — de-dup key)</span>
+                Invoice number <span className="text-gray-400 font-normal">(optional)</span>
               </label>
               <input className={inputCls} value={invoiceNumber} onChange={(e) => setInvoiceNumber(e.target.value)} placeholder="e.g. INV-10472 (leave blank for fuel/till receipts)" />
               {invoiceDup && (
@@ -895,11 +1003,16 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
               )}
             </div>
 
-            {linkedJobId && jobSummary && (jobSummary.clientQuoted > 0 || jobSummary.quotedCost > 0 || jobSummary.actuals > 0 || jobSummary.extra > 0) && (
+            {linkedJobId && jobSummary && (jobSummary.clientQuoted > 0 || jobSummary.quotedCost > 0 || jobSummary.actuals > 0 || jobSummary.extra > 0 || jobRechargesRunningCosts || jobSummary.rechargeExpected.length > 0) && (
               <div className="rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600 space-y-0.5">
                 <div className="font-medium text-gray-700">This job so far</div>
                 {jobSummary.clientQuoted > 0 && <div>Quoted to client: <strong>£{jobSummary.clientQuoted.toFixed(2)}</strong>{jobSummary.quotedCost > 0 && <span className="text-gray-400"> (our cost est. £{jobSummary.quotedCost.toFixed(2)})</span>}</div>}
                 <div>Costs logged against the quote: <strong>£{jobSummary.actuals.toFixed(2)}</strong>{jobSummary.extra > 0 && <span> · extras: <strong>£{jobSummary.extra.toFixed(2)}</strong></span>}</div>
+                {(jobRechargesRunningCosts || jobSummary.rechargeExpected.length > 0) && (
+                  <div className="text-amber-700">
+                    ⛽ Expecting to recharge{jobSummary.rechargeExpected.length > 0 ? <>: <strong>{jobSummary.rechargeExpected.join(', ')}</strong></> : ' running costs'} — billed at actual + 20%. This receipt is likely one of them (set to <strong>Extra</strong>).
+                  </div>
+                )}
                 <div className="text-gray-400">Use this to decide if this cost is covered by the quote (Part of the quote) or above-and-beyond (Extra).</div>
               </div>
             )}
@@ -915,7 +1028,7 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
                     {vehicleLabel(selectedVehicle) || '(linked vehicle)'}
                   </span>
                   <button type="button"
-                    onClick={() => { setVehicleId(null); setVehicleSearch(''); setLogService(false); }}
+                    onClick={() => { setVehicleId(null); setVehicleSearch(''); setLogService(false); setVehicleRegNote(null); }}
                     className="text-xs text-red-600 hover:underline">
                     Remove link
                   </button>
@@ -1053,9 +1166,15 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
               </div>
             </div>
 
-            {paymentMethod === 'cot_card' && !user?.cot_card_last4 && (
+            {paymentMethod === 'cot_card' && !freshCardLast4 && (
               <p className="text-xs text-gray-500 italic">
-                Set your COT card last 4 in Profile to enable Xero reconciliation matching.
+                No company card on file for you — ask an admin to add it in Settings → COT Card Register (enables Xero reconciliation matching).
+              </p>
+            )}
+
+            {linkedJobId && jobRechargesRunningCosts && (
+              <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1.5">
+                ⛽ This job recharges running costs — defaulted to <strong>Extra + recharge</strong>. Resolve it to the client at actual + 20% post-hire.
               </p>
             )}
 
@@ -1113,9 +1232,34 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
           </div>
         </div>
 
-        <div className="flex justify-end gap-2 px-6 py-4 border-t border-gray-200">
+        <div className="px-6 py-4 border-t border-gray-200 space-y-3">
+          {/* Xero transparency: paid costs sync automatically on save (Spend
+              Money); pay-later bills wait for approval before they post. Makes
+              the behaviour visible — the push itself is unchanged. */}
+          {(() => {
+            const serviceOnlySave = serviceOnlyEligible && (vatMode === 'reclaim' ? Number(amountNet) <= 0 : Number(amountGross) <= 0);
+            if (serviceOnlySave) return null;
+            const isBillMethod = BILL_METHODS.includes(paymentMethod);
+            return (
+              <p className="text-xs text-gray-500">
+                {isBillMethod ? (
+                  <>💡 <strong>Save cost</strong> records this bill awaiting approval; <strong>Approve &amp; save</strong> posts it to Xero now.</>
+                ) : (
+                  <>✓ This paid cost syncs to Xero automatically on save (Spend Money). The Xero status shows on its row in the Costs list.</>
+                )}
+              </p>
+            );
+          })()}
+          <div className="flex items-center justify-between gap-2">
+          {!isEdit && onSavedAndSplit ? (
+            <label className="flex items-center gap-2 text-sm text-gray-600 cursor-pointer" title="One invoice covering several jobs — split the amount across them after saving">
+              <input type="checkbox" checked={splitAfterSave} onChange={(e) => setSplitAfterSave(e.target.checked)} />
+              Split across multiple jobs
+            </label>
+          ) : <span />}
+          <div className="flex gap-2">
           <button onClick={onClose} className="px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded-md">Cancel</button>
-          {!isEdit && paymentStatus !== 'paid' && (user?.role === 'admin' || user?.role === 'manager') && (
+          {!isEdit && paymentStatus !== 'paid' && hasManagerRole(user?.role) && (
             <button onClick={() => handleSave(true)} disabled={saving}
               className="px-4 py-2 text-sm text-white bg-green-600 hover:bg-green-700 rounded-md disabled:opacity-50"
               title="Save this bill and approve it in one step (skips the separate approve step)">
@@ -1126,6 +1270,8 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
             className="px-4 py-2 text-sm text-white bg-purple-600 hover:bg-purple-700 rounded-md disabled:opacity-50">
             {saving ? 'Saving…' : isEdit ? (wantsService ? 'Save changes + service record' : 'Save changes') : serviceOnlyEligible && (vatMode === 'reclaim' ? Number(amountNet) <= 0 : Number(amountGross) <= 0) ? 'Save service record' : wantsService ? 'Save cost + service record' : 'Save cost'}
           </button>
+          </div>
+          </div>
         </div>
       </div>
     </div>

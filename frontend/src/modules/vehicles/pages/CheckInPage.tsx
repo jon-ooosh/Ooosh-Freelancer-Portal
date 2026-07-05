@@ -320,12 +320,41 @@ export function CheckInPage() {
 
         setCheckInStatus(ciStatus)
 
+        // The van's CURRENT hire comes from the DB assignment (authoritative),
+        // NOT the latest R2 book-out event. They diverge when a book-out flips
+        // the assignment status but its history event never landed — the event
+        // query then returns a STALE book-out from a previous hire, and we'd
+        // otherwise stamp this check-in against the wrong job (RX73TBZ 16057↔
+        // 16149, Jun 2026: the Unpeople return got recorded against the prior
+        // Ritchie Prior hire). Prefer the eligibility job whenever present.
+        // Coerce to string to match the existing book-out job pipeline
+        // (form.bookOutHireHopJob + getCollection are string-typed; the
+        // eligibility endpoint returns the job as a number).
+        const authoritativeJob =
+          !ciStatus.alreadyCheckedIn && ciStatus.hirehopJob != null
+            ? String(ciStatus.hirehopJob)
+            : null
+
         if (bookOut) {
+          if (
+            authoritativeJob != null &&
+            bookOut.hireHopJob != null &&
+            authoritativeJob !== bookOut.hireHopJob
+          ) {
+            console.warn(
+              `[check-in] Book-out event job (${bookOut.hireHopJob}) disagrees ` +
+                `with the van's open assignment (${authoritativeJob}) for ` +
+                `${form.vehicleReg} — using the assignment job. The book-out ` +
+                `history event for the live hire is likely stale or missing.`,
+            )
+          }
+          const resolvedJob = authoritativeJob ?? bookOut.hireHopJob
+
           // Fetch photos from R2 + collection data (if exists)
           const [photos, collection] = await Promise.all([
             fetchBookOutPhotos(bookOut.id, form.vehicleReg),
-            bookOut.hireHopJob
-              ? getCollection(form.vehicleReg, bookOut.hireHopJob)
+            resolvedJob
+              ? getCollection(form.vehicleReg, resolvedJob)
               : Promise.resolve(null),
           ])
           if (cancelled) return
@@ -341,7 +370,7 @@ export function CheckInPage() {
             bookOutMileage: bookOut.mileage,
             bookOutFuelLevel: bookOut.fuelLevel,
             bookOutDriverName: bookOut.driverName,
-            bookOutHireHopJob: bookOut.hireHopJob,
+            bookOutHireHopJob: resolvedJob,
             bookOutClientEmail: bookOut.clientEmail,
             bookOutNotes: bookOut.notes,
             bookOutPhotos: photos,
@@ -1618,17 +1647,23 @@ function StepCurrentState({
             </button>
           ))}
         </div>
-        {/* Comparison with book-out */}
-        {form.bookOutFuelLevel && (
-          <p className="mt-1.5 text-xs text-gray-400">
-            Book-out fuel: {form.bookOutFuelLevel}
-            {form.fuelLevel && form.fuelLevel !== form.bookOutFuelLevel && (
-              <span className="ml-1 font-medium text-amber-600">
-                (changed)
-              </span>
-            )}
-          </p>
-        )}
+        {/* Comparison with book-out — active prompt when fuel dropped. */}
+        {form.bookOutFuelLevel && (() => {
+          const outIdx = FUEL_LEVELS.indexOf(form.bookOutFuelLevel as FuelLevel)
+          const inIdx = form.fuelLevel ? FUEL_LEVELS.indexOf(form.fuelLevel) : -1
+          const dropped = inIdx >= 0 && outIdx >= 0 && inIdx < outIdx
+          return (
+            <div className="mt-1.5 text-xs">
+              <span className="text-gray-400">Book-out fuel: {form.bookOutFuelLevel}</span>
+              {form.fuelLevel && form.fuelLevel === form.bookOutFuelLevel && <span className="ml-1 text-gray-400">(unchanged)</span>}
+              {dropped && (
+                <div className="mt-1 rounded border border-amber-200 bg-amber-50 px-2 py-1 text-amber-800">
+                  ⛽ Fuel down ({form.bookOutFuelLevel} → {form.fuelLevel}) — if this hire recharges running costs, the refuel is chargeable. Log the fuel receipt against the job (Money → Costs).
+                </div>
+              )}
+            </div>
+          )
+        })()}
         {form.fuelLevel && (
           <div className="mt-3 overflow-hidden rounded-full bg-gray-100">
             <div

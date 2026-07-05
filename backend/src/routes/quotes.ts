@@ -220,7 +220,10 @@ const calculateSchema = z.object({
     type: z.string(),
     description: z.string(),
     amount: z.number().min(0),
-    includedInCharge: z.boolean(),
+    // Legacy binary — optional now that chargeMode is the source of truth.
+    includedInCharge: z.boolean().optional(),
+    // Three-state: included | not_included | recharge (recharge = bill actual post-hire).
+    chargeMode: z.enum(['included', 'not_included', 'recharge', 'na']).optional(),
   })).default([]),
 });
 
@@ -267,6 +270,11 @@ const saveQuoteSchema = calculateSchema.extend({
   // calculation below, never to the stored value.
   arrivalTime: z.string().optional().nullable(),
 });
+
+// Does any expense line declare a post-hire recharge?
+function quoteHasRechargeLine(expenses: unknown): boolean {
+  return Array.isArray(expenses) && expenses.some((e) => (e as { chargeMode?: string })?.chargeMode === 'recharge');
+}
 
 // Insert one quote row. Used twice when creating delivery + collection siblings.
 async function insertQuoteRow(
@@ -468,6 +476,17 @@ router.post('/', validate(saveQuoteSchema), async (req: AuthRequest, res: Respon
       );
     }
 
+    // If any expense line is set to recharge post-hire, mark the job as a
+    // recharge-running-costs job. Set-only — removing the last recharge line
+    // doesn't auto-clear the mode (staff may already be logging costs against
+    // it); the Tools-menu toggle is the off switch.
+    if (req.body.jobId && quoteHasRechargeLine(req.body.expenses)) {
+      await dbClient.query(
+        `UPDATE jobs SET recharge_running_costs = true WHERE id = $1 AND recharge_running_costs = false`,
+        [req.body.jobId],
+      );
+    }
+
     await dbClient.query('COMMIT');
 
     res.status(201).json({
@@ -603,6 +622,15 @@ const editQuoteSchema = z.object({
   freelancer_notes: z.string().optional().nullable(),
   client_charge_rounded: z.coerce.number().min(0).optional().nullable(),
   freelancer_fee_rounded: z.coerce.number().min(0).optional().nullable(),
+  // Expense charge-mode edits (three-state). When present, the quote recalcs
+  // from the new states — see the PUT handler.
+  expenses: z.array(z.object({
+    type: z.string(),
+    description: z.string().optional().default(''),
+    amount: z.number().min(0).optional().default(0),
+    includedInCharge: z.boolean().optional(),
+    chargeMode: z.enum(['included', 'not_included', 'recharge', 'na']).optional(),
+  })).optional(),
 });
 
 router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Response) => {
@@ -663,6 +691,16 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
         params.push(fields[field] === '' ? null : fields[field]);
         idx++;
       }
+    }
+
+    // Expense charge-mode edits — persist the JSONB and force a recalc so the
+    // client total (recharge lines drop out) + the recharge flag reflect the new
+    // states. Local quotes have no calculator expenses, so skip.
+    if (!oldQuote.is_local && fields.expenses !== undefined) {
+      updates.push(`expenses = $${idx}`);
+      params.push(JSON.stringify(fields.expenses));
+      idx++;
+      recalcNeeded = true;
     }
 
     // Fee overrides (available for all quote types). When recalc is happening,
@@ -726,6 +764,13 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
           : null,
         expenses: Array.isArray(updatedQuote.expenses) ? updatedQuote.expenses : (updatedQuote.expenses ? JSON.parse(updatedQuote.expenses) : []),
       };
+      // Editing in a recharge line flags the job (set-only, mirrors create).
+      if (updatedQuote.job_id && quoteHasRechargeLine(reInput.expenses)) {
+        await query(
+          `UPDATE jobs SET recharge_running_costs = true WHERE id = $1 AND recharge_running_costs = false`,
+          [updatedQuote.job_id],
+        );
+      }
       const newCrewCount = (reInput.jobType === 'crewed' && Number(updatedQuote.crew_count) > 1) ? Number(updatedQuote.crew_count) : 1;
       const recalc = applyCrewMultiplier(calculateCosts(reInput, settings), newCrewCount);
       const recalcUpdate = await query(

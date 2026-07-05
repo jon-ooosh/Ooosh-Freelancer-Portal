@@ -64,6 +64,8 @@ export interface XeroLineItem {
 
 export interface CreateBillInput {
   contactName: string;
+  /** When known, used directly (skips the name-based get-or-create lookup). */
+  contactId?: string;
   reference?: string;
   date?: string;          // YYYY-MM-DD
   dueDate?: string;       // YYYY-MM-DD
@@ -419,7 +421,7 @@ class XeroBroker {
 
   /** Create an unpaid supplier bill (ACCPAY invoice). */
   async createBill(input: CreateBillInput): Promise<{ InvoiceID: string; InvoiceNumber?: string }> {
-    const contact = await this.getOrCreateContact(input.contactName);
+    const contactID = input.contactId ?? (await this.getOrCreateContact(input.contactName)).ContactID;
     const r = await this.request<{ Invoices: Array<{ InvoiceID: string; InvoiceNumber?: string }> }>(
       'PUT',
       '/Invoices',
@@ -428,7 +430,7 @@ class XeroBroker {
           Invoices: [
             {
               Type: 'ACCPAY',
-              Contact: { ContactID: contact.ContactID },
+              Contact: { ContactID: contactID },
               Reference: input.reference,
               Date: input.date,
               DueDate: input.dueDate,
@@ -492,6 +494,73 @@ class XeroBroker {
         body: {
           BankTransactions: [
             {
+              Type: 'SPEND',
+              Contact: { ContactID: contactID },
+              BankAccount: bankAccount,
+              Date: input.date,
+              Reference: input.reference,
+              LineAmountTypes: input.lineAmountTypes || 'Inclusive',
+              LineItems: input.lineItems,
+            },
+          ],
+        },
+      }
+    );
+    return r.BankTransactions[0];
+  }
+
+  /**
+   * Update an existing ACCPAY bill in place (POST with InvoiceID). Used by the
+   * edit-after-push re-sync. Xero rejects amount changes on a PAID invoice, so
+   * the caller must gate on payment state before calling. Line items are
+   * REPLACED with what we send.
+   */
+  async updateBill(invoiceId: string, input: CreateBillInput): Promise<{ InvoiceID: string }> {
+    const contact = await this.getOrCreateContact(input.contactName);
+    const r = await this.request<{ Invoices: Array<{ InvoiceID: string }> }>(
+      'POST',
+      '/Invoices',
+      {
+        body: {
+          Invoices: [
+            {
+              InvoiceID: invoiceId,
+              Type: 'ACCPAY',
+              Contact: { ContactID: contact.ContactID },
+              Reference: input.reference,
+              Date: input.date,
+              DueDate: input.dueDate,
+              LineAmountTypes: input.lineAmountTypes || 'Inclusive',
+              Status: input.status || 'AUTHORISED',
+              LineItems: input.lineItems,
+            },
+          ],
+        },
+        billsScope: true,
+      }
+    );
+    return r.Invoices[0];
+  }
+
+  /**
+   * Update an existing Spend Money transaction in place (POST with
+   * BankTransactionID). Xero rejects edits to a RECONCILED transaction, so the
+   * caller must gate on reconciled state. Line items are REPLACED.
+   */
+  async updateSpendMoney(bankTransactionId: string, input: CreateSpendMoneyInput): Promise<{ BankTransactionID: string }> {
+    const contactID = input.contactId
+      ?? (await this.getOrCreateContact(input.contactName ?? 'Unknown supplier')).ContactID;
+    const bankAccount = input.bankAccountId
+      ? { AccountID: input.bankAccountId }
+      : { Code: input.bankAccountCode };
+    const r = await this.request<{ BankTransactions: Array<{ BankTransactionID: string }> }>(
+      'POST',
+      '/BankTransactions',
+      {
+        body: {
+          BankTransactions: [
+            {
+              BankTransactionID: bankTransactionId,
               Type: 'SPEND',
               Contact: { ContactID: contactID },
               BankAccount: bankAccount,

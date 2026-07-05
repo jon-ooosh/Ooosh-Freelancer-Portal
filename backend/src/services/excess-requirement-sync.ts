@@ -72,6 +72,12 @@ export async function syncExcessRequirementStatus(
   // (a capture-or-release decision is still pending) — the card surfaces a blue
   // expiry countdown for that case rather than treating it as done.
   // 'blocked' (Dispute) and 'cancelled' are left untouched.
+  //
+  // held_on_account (migration 154): a deliberately-parked excess stays 'taken'
+  // (so it's still counted in Total Held) but IS a resolution of this hire's
+  // excess — the money is accounted for, earmarked for the client's future use.
+  // Treat it as resolved so a completed job can close out cleanly instead of the
+  // excess_resolve card nagging amber forever on money that's parked on purpose.
   await run(
     `UPDATE job_requirements jr
      SET status = CASE WHEN rs.resolved THEN 'done' ELSE 'in_progress' END,
@@ -81,6 +87,7 @@ export async function syncExcessRequirementStatus(
          NOT EXISTS (
            SELECT 1 FROM job_excess je
            WHERE je.job_id = $1
+             AND COALESCE(je.held_on_account, false) = false
              AND je.excess_status NOT IN
                ('reimbursed','fully_claimed','waived','rolled_over','not_required','released')
          ) AS resolved,

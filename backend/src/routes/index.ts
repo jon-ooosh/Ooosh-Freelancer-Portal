@@ -45,7 +45,9 @@ import pcnsRouter from './pcns';
 import rackPlansRouter from './rack-plans';
 import stagingRouter from './staging';
 import carnetsRouter from './carnets';
+import studioSittersRouter from './studio-sitters';
 import backlineMatcherRouter from './backline-matcher';
+import wiseRouter from './wise';
 import autoChaseRouter from './auto-chase';
 
 const router = Router();
@@ -75,6 +77,7 @@ router.use('/money', moneyRouter);
 router.use('/ve103b', ve103bRouter);
 router.use('/backline', backlineRouter);
 router.use('/backline-matcher', backlineMatcherRouter);  // AI equipment matcher + demand tracker (replaces alternative-hirehop-stock Netlify app)
+router.use('/wise', wiseRouter);  // Wise supplier payments — scaffolding (read-only health check; spec Part 2)
 router.use('/cancellations', cancellationsRouter);
 router.use('/fill-gap', fillGapRouter);  // Replacement candidates for cancelled / lost jobs (Phase 1 — SQL only)
 router.use('/issues', issuesRouter);
@@ -86,6 +89,7 @@ router.use('/pcns', pcnsRouter);  // PCN module — Penalty Charge Notice manage
 router.use('/rack-plans', rackPlansRouter);  // Rack Planner — how a rack/system is supplied (pull-only from HireHop) + public view-token
 router.use('/staging', stagingRouter);  // Staging Calculator — stock/availability/push + 3D plan short-links (embedded vanilla-JS tool)
 router.use('/carnets', carnetsRouter);  // ATA Carnet management (HH-derived item 575) — read-only in slice 1
+router.use('/studio-sitters', studioSittersRouter);  // Rehearsals — studio-sitter roster (site-evening shifts + assignment)
 router.use('/auto-chase', autoChaseRouter);  // Auto-Chase Phase 1 — Gmail ingestion status/manual-run (inert until GMAIL_* env set)
 router.use('/hire-forms', hireFormsRouter);
 router.use('/requirements', requirementsRouter);

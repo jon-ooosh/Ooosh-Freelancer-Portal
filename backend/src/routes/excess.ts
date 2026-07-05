@@ -49,6 +49,7 @@ const updateExcessSchema = z.object({
   xero_contact_id: z.string().max(100).nullable().optional(),
   xero_contact_name: z.string().max(200).nullable().optional(),
   client_name: z.string().max(200).nullable().optional(),
+  held_on_account: z.boolean().optional(),
 });
 
 // Excess payment schema.
@@ -82,6 +83,16 @@ const claimSchema = z.object({
   amount: z.number().positive(),
   invoice_id: z.number().int().positive().nullable().optional(), // HH invoice ID (required for HH-linked records)
   notes: z.string().nullable().optional(),
+  // Cross-job apply (CROSS-JOB-EXCESS-APPLY-SPEC): the invoice may live on a
+  // DIFFERENT same-client job than the excess. When set, used for the audit
+  // memo + the same-client guard. Omitted = invoice is on the excess's own job.
+  target_hh_job: z.number().int().positive().nullable().optional(),
+  // Bank the application is attributed to in HireHop/Xero. Confirmable in the UI,
+  // defaulted from the source deposit's real bank. Omitted → resolved server-side
+  // (see resolveDepositBankId). NOT hardcoded to Worldpay any more.
+  bank: z.number().int().positive().nullable().optional(),
+  // Manager-only escape hatch for the rare genuine cross-CLIENT apply.
+  allow_cross_client: z.boolean().optional(),
 });
 
 // Capture-a-pre-auth schema (migration 087). Converts held money → taken money.
@@ -168,6 +179,13 @@ const reimburseSchema = z.object({
   // OP told the client "£30 retained" but never recorded it as a claim, so the
   // canonical held formula kept showing the £30 (e.g. job 14871).
   retain_residual: z.boolean().optional(),
+  // Escape hatch for the Stripe loud-fail guard. When method='stripe_gbp' but the
+  // record carries no PaymentIntent we can refund against, the endpoint REFUSES
+  // (422) rather than silently recording-and-emailing a refund that never reaches
+  // Stripe (the silent-swallow bug behind jobs 15433/15489/15544/… — Jun 2026).
+  // Setting this true is staff explicitly saying "I've already refunded this in
+  // the Stripe dashboard, just record it in OP" — a deliberate record-only path.
+  acknowledge_no_stripe_refund: z.boolean().optional(),
 });
 
 const waiveSchema = z.object({
@@ -519,6 +537,110 @@ router.get('/:id/outstanding-invoices', async (req: AuthRequest, res: Response) 
   }
 });
 
+// Shared: fetch a HireHop job's open (owing > 0) invoices via billing_list.php.
+type OpenInvoice = { id: number; number: string; description: string; amount: number; owing: number; date: string | null };
+async function fetchOpenInvoicesForJob(hhJobId: number | string): Promise<OpenInvoice[]> {
+  const billingRes = await hhBroker.get('/php_functions/billing_list.php',
+    { main_id: hhJobId, type: 1 }, { priority: 'low', cacheTTL: 30 });
+  if (!billingRes.success || !billingRes.data) return [];
+  const bl = billingRes.data as Record<string, any>;
+  const invoices: OpenInvoice[] = [];
+  for (const row of bl.rows || []) {
+    if (parseInt(row.kind ?? '0') !== 1) continue;
+    const owing = Number(row.owing ?? row.data?.owing ?? 0);
+    if (owing <= 0.005) continue;
+    const invoiceId = parseInt(row.data?.ID || row.number || String(row.id).replace('b', '') || '0');
+    if (!invoiceId) continue;
+    invoices.push({
+      id: invoiceId,
+      number: String(row.data?.NUMBER || row.number || ''),
+      description: String(row.data?.DESCRIPTION || row.desc || ''),
+      amount: Number(row.data?.NET ?? row.debit ?? 0) + Number(row.data?.TAX ?? 0),
+      owing,
+      date: row.data?.TAX_POINT || row.date || null,
+    });
+  }
+  return invoices;
+}
+
+// ── GET /api/excess/:id/cross-job-invoices ─────────────────────────────────
+// Same-client open invoices on OTHER jobs, for the cross-job apply picker
+// (CROSS-JOB-EXCESS-APPLY-SPEC). Scoped to the excess's client_id — the
+// correctness boundary AND the size bound. Pre-filtered via the job_financials
+// cache (balance_outstanding > 0) so we only hit HH billing for jobs that
+// actually owe; capped at 25 jobs. Lazy-load this only when staff expand the
+// "apply to another job" section.
+
+router.get('/:id/cross-job-invoices', async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const excess = await query(
+      `SELECT je.hirehop_job_id, j.client_id, j.client_name
+         FROM job_excess je LEFT JOIN jobs j ON j.id = je.job_id WHERE je.id = $1`,
+      [id]
+    );
+    if (excess.rows.length === 0) { res.status(404).json({ error: 'Excess record not found' }); return; }
+    const { hirehop_job_id, client_id } = excess.rows[0];
+    if (!client_id) { res.json({ data: { jobs: [], reason: 'no_client' } }); return; }
+
+    // Candidate same-client jobs with a cached outstanding balance (excluding
+    // this excess's own job). job_financials is the fast pre-filter; we only
+    // fetch live HH billing for these few.
+    const candidates = await query(
+      `SELECT j.hh_job_number, j.job_name, jf.balance_outstanding
+         FROM jobs j JOIN job_financials jf ON jf.job_id = j.id
+        WHERE j.client_id = $1
+          AND j.hh_job_number IS NOT NULL
+          AND ($2::int IS NULL OR j.hh_job_number <> $2)
+          AND jf.balance_outstanding > 0.01
+          AND COALESCE(j.is_deleted, false) = false
+        ORDER BY jf.balance_outstanding DESC
+        LIMIT 25`,
+      [client_id, hirehop_job_id || null]
+    );
+
+    const jobs: Array<{ hh_job_number: number; job_name: string | null; invoices: OpenInvoice[] }> = [];
+    for (const c of candidates.rows) {
+      const invoices = await fetchOpenInvoicesForJob(c.hh_job_number);
+      if (invoices.length > 0) jobs.push({ hh_job_number: c.hh_job_number, job_name: c.job_name || null, invoices });
+    }
+    res.json({ data: { jobs, capped: candidates.rows.length >= 25 } });
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error('[excess] Cross-job invoices error:', errMsg);
+    res.status(500).json({ error: 'Failed to load cross-job invoices', detail: errMsg });
+  }
+});
+
+// ── GET /api/excess/:id/job-invoices/:hhJobNumber ──────────────────────────
+// Targeted lookup: open invoices on a SPECIFIC job (the "or enter a job number"
+// fallback). Returns a same_client flag so the UI can warn before a manager
+// override, rather than hard-blocking the lookup itself.
+
+router.get('/:id/job-invoices/:hhJobNumber', async (req: AuthRequest, res: Response) => {
+  try {
+    const { id, hhJobNumber } = req.params;
+    const hhNum = parseInt(String(hhJobNumber), 10);
+    if (!hhNum) { res.status(400).json({ error: 'Invalid job number' }); return; }
+
+    const ctx = await query(
+      `SELECT
+         (SELECT j.client_id FROM job_excess je JOIN jobs j ON j.id = je.job_id WHERE je.id = $1) AS src_client,
+         (SELECT client_id FROM jobs WHERE hh_job_number = $2) AS tgt_client,
+         (SELECT job_name FROM jobs WHERE hh_job_number = $2) AS tgt_job_name`,
+      [id, hhNum]
+    );
+    const { src_client, tgt_client, tgt_job_name } = ctx.rows[0] || {};
+    const sameClient = !!src_client && !!tgt_client && String(src_client) === String(tgt_client);
+    const invoices = await fetchOpenInvoicesForJob(hhNum);
+    res.json({ data: { hh_job_number: hhNum, job_name: tgt_job_name || null, same_client: sameClient, invoices } });
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error('[excess] Job invoices lookup error:', errMsg);
+    res.status(500).json({ error: 'Failed to load job invoices', detail: errMsg });
+  }
+});
+
 // ── GET /api/excess/:id/available-rollover ─────────────────────────────────
 // "Does this client have a rolled-over excess balance available to apply to
 // THIS excess record?" — drives the "Apply Rolled Over Excess" action in the
@@ -618,6 +740,38 @@ router.get('/:id/available-rollover', async (req: AuthRequest, res: Response) =>
     const errMsg = error instanceof Error ? error.message : String(error);
     console.error('[excess] Available rollover error:', errMsg);
     res.status(500).json({ error: 'Failed to check rollover availability', detail: errMsg });
+  }
+});
+
+// ── GET /api/excess/:id/rollover-chain ─────────────────────────────────────
+// "Follow the thread" of a rolled-over excess: all records sharing this
+// record's HireHop deposit, ordered oldest→newest, so the UI can render
+// "#15577 → #15865 → #15912 (reimbursed)". Rollover copies the same
+// hh_deposit_id forward, so a shared deposit id IS the chain. Returns just this
+// record (chain length 1) when there's no rollover.
+
+router.get('/:id/rollover-chain', async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const rec = await query(`SELECT hh_deposit_id FROM job_excess WHERE id = $1`, [id]);
+    if (rec.rows.length === 0) { res.status(404).json({ error: 'Excess record not found' }); return; }
+    const depositId = rec.rows[0].hh_deposit_id;
+    if (!depositId) { res.json({ data: { deposit_id: null, current_id: id, chain: [] } }); return; }
+
+    const chain = await query(
+      `SELECT je.id, je.excess_status,
+              je.excess_amount_taken, je.claim_amount, je.reimbursement_amount, je.amount_held,
+              je.created_at, j.hh_job_number, j.job_name
+         FROM job_excess je LEFT JOIN jobs j ON j.id = je.job_id
+        WHERE je.hh_deposit_id = $1
+        ORDER BY je.created_at ASC`,
+      [depositId]
+    );
+    res.json({ data: { deposit_id: depositId, current_id: id, chain: chain.rows } });
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error('[excess] Rollover chain error:', errMsg);
+    res.status(500).json({ error: 'Failed to load rollover chain', detail: errMsg });
   }
 });
 
@@ -775,6 +929,43 @@ function deriveExcessStatus(currentStatus: string, required: number, taken: numb
   if (taken >= required) return 'taken';
   if (taken > 0) return 'partially_paid';
   return 'needed';
+}
+
+/**
+ * Resolve which HireHop bank a held deposit actually sits on, for use as the
+ * (metadata-only) bank on a deposit→invoice application. Replaces the old
+ * hardcoded `bank: 169` (Worldpay) which mis-attributed every claim — surfaced
+ * by the cross-job apply proof (a Wise-collected excess showed as Worldpay).
+ *
+ * The bank id is NOT load-bearing in OP (classification is keyword-based), but
+ * it drives the HH/Xero bank attribution + the displayed bank name, so it
+ * should be right. Resolution order:
+ *   1. The record's own payment_method, if it's a real bank method.
+ *   2. Walk the rollover chain by hh_deposit_id to the ORIGINATING record (the
+ *      one that first took the money — its method is the true bank; a
+ *      'rolled_over' method is NOT, it always maps to 265 regardless).
+ *   3. null → caller decides (and the UI surfaces a confirmable field so a
+ *      human catches it).
+ * A `bank` passed explicitly from the confirmable UI field always wins over this.
+ */
+async function resolveDepositBankId(record: {
+  payment_method?: string | null;
+  hh_deposit_id?: number | null;
+}): Promise<number | null> {
+  const isReal = (m?: string | null) => !!m && m !== 'rolled_over' && HH_BANK_IDS[m] != null;
+  if (isReal(record.payment_method)) return HH_BANK_IDS[record.payment_method as string];
+
+  if (record.hh_deposit_id) {
+    const origin = await query(
+      `SELECT payment_method FROM job_excess
+       WHERE hh_deposit_id = $1 AND payment_method IS NOT NULL AND payment_method <> 'rolled_over'
+       ORDER BY created_at ASC LIMIT 1`,
+      [record.hh_deposit_id]
+    );
+    const m = origin.rows[0]?.payment_method as string | undefined;
+    if (isReal(m)) return HH_BANK_IDS[m as string];
+  }
+  return null;
 }
 
 router.put('/:id', validate(updateExcessSchema), async (req: AuthRequest, res: Response) => {
@@ -1035,10 +1226,13 @@ router.post('/:id/payment', validate(paymentSchema), async (req: AuthRequest, re
              WHERE id = $2 AND hh_deposit_id IS NULL`,
             [prevRow.hh_deposit_id, id]
           );
-          // Mark the previous record as rolled_over (terminal — cash has moved on).
+          // Mark the previous record as rolled_over (terminal — cash has moved
+          // on to this child). Clear held_on_account: it's no longer parked, it's
+          // been applied to a real hire.
           await query(
             `UPDATE job_excess
              SET excess_status = 'rolled_over',
+                 held_on_account = FALSE,
                  updated_at = NOW()
              WHERE id = $1`,
             [prevRow.id]
@@ -1942,7 +2136,7 @@ router.post('/:id/release', validate(releaseSchema), async (req: AuthRequest, re
 router.post('/:id/claim', validate(claimSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
-    const { amount, invoice_id, notes } = req.body;
+    const { amount, invoice_id, notes, target_hh_job, bank, allow_cross_client } = req.body;
 
     const currentResult = await query(`SELECT * FROM job_excess WHERE id = $1`, [id]);
     if (currentResult.rows.length === 0) {
@@ -1985,25 +2179,57 @@ router.post('/:id/claim', validate(claimSchema), async (req: AuthRequest, res: R
         return;
       }
 
-      // ── Push the application to HireHop ──────────────────────────────
-      // bank=169 (Worldpay default) is just metadata — no real cash moves; the
-      // deposit is already in the bank, this just reallocates it from
-      // "deposit liability" → "invoice paid" (which the invoice line item's
-      // ACC_NOMINAL_ID then routes to the right Xero revenue account).
-      const currentDate = new Date().toISOString().split('T')[0];
-      const description = `${current.hirehop_job_id} - Excess applied to invoice`;
-      const memo = notes
-        ? `Excess claim — ${notes} (recorded via Ooosh OP)`
-        : `Excess claim — applied to invoice (recorded via Ooosh OP)`;
+      // ── Cross-job apply: same-client guard ───────────────────────────
+      // When the invoice lives on a different job (target_hh_job set + differs
+      // from the excess's own job), it MUST be the same client unless a manager
+      // explicitly overrides. The picker enforces this, but the endpoint is the
+      // real boundary — applying one client's money to another's invoice is the
+      // dangerous case. See CROSS-JOB-EXCESS-APPLY-SPEC.
+      const isCrossJob = target_hh_job != null && Number(target_hh_job) !== Number(current.hirehop_job_id);
+      if (isCrossJob && !allow_cross_client) {
+        const clientCheck = await query(
+          `SELECT
+             (SELECT client_id FROM jobs WHERE hh_job_number = $1) AS src_client,
+             (SELECT client_id FROM jobs WHERE hh_job_number = $2) AS tgt_client`,
+          [current.hirehop_job_id, target_hh_job]
+        );
+        const { src_client, tgt_client } = clientCheck.rows[0] || {};
+        if (!src_client || !tgt_client || String(src_client) !== String(tgt_client)) {
+          res.status(409).json({
+            error: 'Cross-client apply blocked',
+            detail: `The target invoice (job ${target_hh_job}) belongs to a different client than this excess (job ${current.hirehop_job_id}). Applying one client's money to another client's invoice is almost always wrong. A manager can override with allow_cross_client if this is genuinely intended.`,
+            code: 'cross_client_blocked',
+          });
+          return;
+        }
+      }
 
-      console.log(`[excess] Claim: applying £${amount} of deposit ${current.hh_deposit_id} to invoice ${invoice_id} on job ${current.hirehop_job_id}`);
+      // ── Push the application to HireHop ──────────────────────────────
+      // The application's `bank` is metadata only — no real cash moves; the
+      // deposit is already in the bank, this just reallocates it from
+      // "deposit liability" → "invoice paid" (the invoice line's ACC_NOMINAL_ID
+      // routes it to the right Xero revenue account). It still drives the HH/Xero
+      // bank attribution + displayed bank name, so resolve it from the source
+      // deposit's real bank (confirmable `bank` from the UI wins). Never the old
+      // hardcoded Worldpay default.
+      const resolvedBank = (bank as number | undefined) ?? (await resolveDepositBankId(current)) ?? 169;
+      const currentDate = new Date().toISOString().split('T')[0];
+      const description = isCrossJob
+        ? `${current.hirehop_job_id} - Excess applied to invoice (cross-job → ${target_hh_job})`
+        : `${current.hirehop_job_id} - Excess applied to invoice`;
+      const crossJobTag = isCrossJob ? ` (cross-job → job ${target_hh_job})` : '';
+      const memo = notes
+        ? `Excess claim — ${notes}${crossJobTag} (recorded via Ooosh OP)`
+        : `Excess claim — applied to invoice${crossJobTag} (recorded via Ooosh OP)`;
+
+      console.log(`[excess] Claim: applying £${amount} of deposit ${current.hh_deposit_id} (bank ${resolvedBank}) to invoice ${invoice_id}${isCrossJob ? ` on job ${target_hh_job} (cross-job)` : ` on job ${current.hirehop_job_id}`}`);
       const hhResult = await hhBroker.post('/php_functions/billing_payments_save.php', {
         id: 0,
         date: currentDate,
         desc: description,
         paid: amount,
         memo: memo,
-        bank: 169, // Worldpay default — metadata only, no real bank movement
+        bank: resolvedBank,
         OWNER: invoice_id,
         deposit: current.hh_deposit_id,
         correction: 0,
@@ -2054,9 +2280,12 @@ router.post('/:id/claim', validate(claimSchema), async (req: AuthRequest, res: R
       : current.excess_status;
 
     const dateStr = new Date().toISOString().split('T')[0];
+    const crossJobNote = target_hh_job != null && Number(target_hh_job) !== Number(current.hirehop_job_id)
+      ? ` → job ${target_hh_job} invoice`
+      : '';
     const noteEntry = notes
-      ? `[${dateStr}] £${amount.toFixed(2)}: ${notes}`
-      : `[${dateStr}] £${amount.toFixed(2)} claim`;
+      ? `[${dateStr}] £${amount.toFixed(2)}${crossJobNote}: ${notes}`
+      : `[${dateStr}] £${amount.toFixed(2)} claim${crossJobNote}`;
     const newNotes = current.claim_notes
       ? `${current.claim_notes}\n${noteEntry}`
       : noteEntry;
@@ -2115,7 +2344,7 @@ router.post('/:id/claim', validate(claimSchema), async (req: AuthRequest, res: R
 router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
-    const { amount, method, bank_details, retain_residual } = req.body;
+    const { amount, method, bank_details, retain_residual, acknowledge_no_stripe_refund } = req.body;
 
     // Get the current excess record to determine partial vs full
     const currentResult = await query(`SELECT * FROM job_excess WHERE id = $1`, [id]);
@@ -2158,8 +2387,34 @@ router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSch
     // API. Closes the "OP first" loop so staff don't have to bounce out to the
     // Stripe dashboard or the portal. For other methods (BACS, cash, etc.)
     // skipped — the real-world money movement happens off-system. ─────────────
+    //
+    // PI resolution: the dedicated stripe_payment_intent_id column is the canonical
+    // source, but the portal's straight-charge path historically only wrote the PI
+    // into payment_reference (NOT the column) — so fall back to payment_reference
+    // when it's a pi_ value. Without this fallback the refund silently no-op'd and
+    // OP/HH/email all claimed a refund Stripe never saw (jobs 15433/15489/15544/
+    // 15781/15235/15358/15503/15996 — Jun 2026).
+    const looksLikeStripePi = (v: unknown): v is string =>
+      typeof v === 'string' && /^pi_[A-Za-z0-9]+$/.test(v.trim());
+    const resolvedPi: string | null =
+      (looksLikeStripePi(current.stripe_payment_intent_id) ? current.stripe_payment_intent_id.trim() : null) ||
+      (looksLikeStripePi(current.payment_reference) ? current.payment_reference.trim() : null);
+
     let stripeRefundId: string | null = null;
-    const stripeRefundPath = method === 'stripe_gbp' && current.stripe_payment_intent_id;
+    const stripeRefundPath = method === 'stripe_gbp' && !!resolvedPi;
+
+    // Loud-fail guard (no silent swallows): a Stripe reimbursement with no PI to
+    // refund against MUST NOT silently record + email a refund that never fires.
+    // Refuse unless staff explicitly acknowledge they've already refunded in the
+    // Stripe dashboard (record-only). Mirrors the missing-HH-deposit loud fail.
+    if (method === 'stripe_gbp' && !resolvedPi && !acknowledge_no_stripe_refund) {
+      res.status(422).json({
+        error: 'No Stripe PaymentIntent on this record',
+        code: 'no_stripe_pi',
+        detail: 'This excess has no Stripe PaymentIntent stored, so OP cannot issue the refund via the Stripe API. Refund it in the Stripe dashboard, then tick "Already refunded in Stripe — record only", or link the PaymentIntent to this record and try again.',
+      });
+      return;
+    }
 
     if (stripeRefundPath) {
       if (!isStripeConfigured()) {
@@ -2172,11 +2427,11 @@ router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSch
       try {
         const stripe = getStripeClient();
         const refund = await stripe.refunds.create({
-          payment_intent: current.stripe_payment_intent_id,
+          payment_intent: resolvedPi as string,
           amount: Math.round(amount * 100),
         });
         stripeRefundId = refund.id;
-        console.log(`[excess] Stripe refund created: ${refund.id} (£${amount.toFixed(2)} on PI ${current.stripe_payment_intent_id})`);
+        console.log(`[excess] Stripe refund created: ${refund.id} (£${amount.toFixed(2)} on PI ${resolvedPi})`);
       } catch (err) {
         const msg = isStripeError(err) ? err.message : (err instanceof Error ? err.message : 'Unknown error');
         console.error('[excess] Stripe refund failed:', msg);
@@ -2311,10 +2566,14 @@ router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSch
     const result = await query(
       `UPDATE job_excess SET
         excess_status = $1,
+        held_on_account = FALSE,
         reimbursement_amount = COALESCE(reimbursement_amount, 0) + $2,
         reimbursement_date = NOW(),
         reimbursement_method = $3,
         claim_amount = $5,
+        -- Backfill the canonical PI column when we resolved it from
+        -- payment_reference, so the charge.refunded webhook + future ops match.
+        stripe_payment_intent_id = COALESCE(stripe_payment_intent_id, $7),
         notes = CASE WHEN $6::numeric > 0
                   THEN COALESCE(notes, '') || ' [£' || to_char($6::numeric, 'FM999990.00')
                        || ' residual retained as claim ' || to_char(NOW(), 'YYYY-MM-DD') || ']'
@@ -2322,7 +2581,7 @@ router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSch
         updated_at = NOW()
       WHERE id = $4
       RETURNING *`,
-      [resolvedStatus, amount, method, id, newClaimAmount, retainResidual ? residual : 0]
+      [resolvedStatus, amount, method, id, newClaimAmount, retainResidual ? residual : 0, stripeRefundPath ? resolvedPi : null]
     );
 
     const excess = result.rows[0];
@@ -2418,6 +2677,27 @@ router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSch
           id,
         ]
       ).catch(e => console.error('[excess] Refund leg append failed (non-fatal):', e));
+    } else if (method === 'stripe_gbp') {
+      // Record-only path: staff acknowledged they refunded in the Stripe dashboard
+      // (no PI on record to fire the API). Stamp a leg so the silent-failure
+      // detector (scheduler) treats this as resolved, not a swallowed refund.
+      await query(
+        `UPDATE job_excess
+         SET refund_legs = COALESCE(refund_legs, '[]'::jsonb) || $1::jsonb,
+             notes = COALESCE(notes, '') || $3,
+             updated_at = NOW()
+         WHERE id = $2`,
+        [
+          JSON.stringify([{
+            source: 'manual',
+            ref: 'recorded_only',
+            amount,
+            at: new Date().toISOString(),
+          }]),
+          id,
+          ` [${new Date().toISOString().split('T')[0]} Stripe refund recorded only — done manually in Stripe dashboard, not via OP]`,
+        ]
+      ).catch(e => console.error('[excess] Record-only leg append failed (non-fatal):', e));
     }
 
     res.json({
@@ -2425,6 +2705,7 @@ router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSch
       ...(isHhLinked ? {} : { op_only: true }),
       ...(bankDetailsWarning ? { warning: bankDetailsWarning } : {}),
       ...(stripeRefundId ? { stripe_refund_id: stripeRefundId } : {}),
+      ...(!stripeRefundId && method === 'stripe_gbp' ? { stripe_recorded_only: true } : {}),
       ...(hhPushError ? { hh_push_error: hhPushError } : {}),
     });
   } catch (error) {
@@ -2488,6 +2769,7 @@ router.post('/:id/mark-externally-resolved', validate(externallyResolvedSchema),
         excess_amount_taken = $1,
         reimbursement_amount = $1,
         excess_status = 'reimbursed',
+        held_on_account = FALSE,
         payment_method = $2,
         payment_reference = $3,
         payment_date = COALESCE(payment_date, NOW()),
@@ -2780,6 +3062,8 @@ router.get('/by-person/:personId', async (req: AuthRequest, res: Response) => {
   try {
     const { personId } = req.params;
 
+    // held_amount from v_excess_held — canonical "held" (migration 109), so the
+    // Excess History summary doesn't double-count rolled-over records.
     const result = await query(
       `SELECT je.*,
         vha.hirehop_job_name,
@@ -2787,12 +3071,14 @@ router.get('/by-person/:personId', async (req: AuthRequest, res: Response) => {
         vha.hire_end,
         fv.reg AS vehicle_reg,
         d.full_name AS driver_name,
-        j.job_name
+        j.job_name,
+        COALESCE(h.held_amount, 0) AS held_amount
       FROM job_excess je
       LEFT JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
       LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
       LEFT JOIN drivers d ON d.id = vha.driver_id
       LEFT JOIN jobs j ON j.id = je.job_id
+      LEFT JOIN v_excess_held h ON h.excess_id = je.id
       WHERE je.person_id = $1
          OR vha.driver_id IN (SELECT id FROM drivers WHERE person_id = $1)
       ORDER BY je.created_at DESC`,
@@ -2804,6 +3090,7 @@ router.get('/by-person/:personId', async (req: AuthRequest, res: Response) => {
     const totalTaken = records.reduce((sum: number, r: any) => sum + parseFloat(r.excess_amount_taken || 0), 0);
     const totalClaimed = records.reduce((sum: number, r: any) => sum + parseFloat(r.claim_amount || 0), 0);
     const totalReimbursed = records.reduce((sum: number, r: any) => sum + parseFloat(r.reimbursement_amount || 0), 0);
+    const balanceHeld = records.reduce((sum: number, r: any) => sum + parseFloat(r.held_amount || 0), 0);
     const pendingCount = records.filter((r: any) => r.excess_status === 'needed' || r.excess_status === 'pending').length;
 
     res.json({
@@ -2812,7 +3099,7 @@ router.get('/by-person/:personId', async (req: AuthRequest, res: Response) => {
         total_taken: totalTaken,
         total_claimed: totalClaimed,
         total_reimbursed: totalReimbursed,
-        balance_held: totalTaken - totalClaimed - totalReimbursed,
+        balance_held: balanceHeld,
         pending_count: pendingCount,
       },
       history: records,
@@ -2829,7 +3116,12 @@ router.get('/by-org/:orgId', async (req: AuthRequest, res: Response) => {
   try {
     const { orgId } = req.params;
 
-    // Find excess records where the job's client org matches, or xero_contact matches org's external ID
+    // Find excess records where the job's client org matches, or xero_contact matches org's external ID.
+    // `held_amount` comes from the canonical v_excess_held view — the SINGLE source of
+    // "excess actually held" (migration 109). It excludes rolled_over / released /
+    // not_required, so a rolled-forward £1,200 is NOT counted on both the old and new
+    // record. Summing excess_amount_taken directly (the old behaviour) double-counted
+    // rollovers and produced a phantom "client has £X on account" on the gate banner.
     const result = await query(
       `SELECT je.*,
         vha.hirehop_job_name,
@@ -2837,12 +3129,14 @@ router.get('/by-org/:orgId', async (req: AuthRequest, res: Response) => {
         vha.hire_end,
         fv.reg AS vehicle_reg,
         d.full_name AS driver_name,
-        j.job_name
+        j.job_name,
+        COALESCE(h.held_amount, 0) AS held_amount
       FROM job_excess je
       LEFT JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
       LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
       LEFT JOIN drivers d ON d.id = vha.driver_id
       LEFT JOIN jobs j ON j.id = je.job_id
+      LEFT JOIN v_excess_held h ON h.excess_id = je.id
       WHERE j.client_id = $1
          OR je.xero_contact_id IN (
            SELECT external_id FROM external_id_map
@@ -2856,6 +3150,8 @@ router.get('/by-org/:orgId', async (req: AuthRequest, res: Response) => {
     const totalTaken = records.reduce((sum: number, r: any) => sum + parseFloat(r.excess_amount_taken || 0), 0);
     const totalClaimed = records.reduce((sum: number, r: any) => sum + parseFloat(r.claim_amount || 0), 0);
     const totalReimbursed = records.reduce((sum: number, r: any) => sum + parseFloat(r.reimbursement_amount || 0), 0);
+    // Canonical held — matches /money/excess and client_excess_ledger.balance_held.
+    const balanceHeld = records.reduce((sum: number, r: any) => sum + parseFloat(r.held_amount || 0), 0);
     const pendingCount = records.filter((r: any) => r.excess_status === 'needed' || r.excess_status === 'pending').length;
 
     res.json({
@@ -2864,7 +3160,7 @@ router.get('/by-org/:orgId', async (req: AuthRequest, res: Response) => {
         total_taken: totalTaken,
         total_claimed: totalClaimed,
         total_reimbursed: totalReimbursed,
-        balance_held: totalTaken - totalClaimed - totalReimbursed,
+        balance_held: balanceHeld,
         pending_count: pendingCount,
       },
       history: records,

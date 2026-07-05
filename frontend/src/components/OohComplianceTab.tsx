@@ -9,6 +9,7 @@
  * Part 2 of docs/OOH-SMS-AND-COMPLIANCE-SPEC.md.
  */
 import { useEffect, useState, useCallback } from 'react';
+import { hasManagerRole } from '../lib/roles';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 
@@ -44,7 +45,7 @@ const TYPE_LABELS: Record<string, string> = {
 
 export default function OohComplianceTab({ driverId }: { driverId: string }) {
   const role = useAuthStore(s => s.user?.role);
-  const isManager = role === 'admin' || role === 'manager' || role === 'weekend_manager';
+  const isManager = hasManagerRole(role);
   const isAdmin = role === 'admin';
 
   const [data, setData] = useState<Compliance | null>(null);

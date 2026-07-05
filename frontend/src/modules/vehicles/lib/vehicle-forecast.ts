@@ -22,7 +22,7 @@ export interface ForecastCorner {
 }
 
 export interface VehicleForecast {
-  vehicle: { id: string; reg: string; currentMileage: number | null; simpleType: string | null }
+  vehicle: { id: string; reg: string; currentMileage: number | null; simpleType: string | null; ulezCompliant?: boolean | null }
   mileage: { perDay: number | null; perWeek: number | null; annualProjected: number | null; readings: number }
   service: {
     nextDueMileage: number | null
@@ -35,11 +35,14 @@ export interface VehicleForecast {
   compliance: Array<{ kind: string; due: string | null; days: number | null; status: 'ok' | 'soon' | 'overdue' | 'unknown' }>
   fluids: Array<{ key: string; label: string; topUps: number; preps: number; milesBetween: number | null; status: 'ok' | 'watch' }>
   tyres: { corners: ForecastCorner[]; prepsWithTread: number }
+  tyreEvents: Array<{ date: string | null; mileage: number | null; corners: Array<'FL' | 'FR' | 'RL' | 'RR'>; description: string }>
   costs: {
     last12mTotal: number
     perMile: number | null
     serviceTotal: number
     fuelTotal: number
+    prior12mTotal: number | null
+    byCategory: Array<{ type: string; total: number; count: number }>
     recent: Array<{ date: string | null; type: string; name: string; cost: number | null; garage: string | null }>
   }
   recurringIssues: Array<{ label: string; count: number; lastDate: string | null }>

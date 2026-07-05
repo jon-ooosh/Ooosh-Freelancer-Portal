@@ -50,7 +50,14 @@ export interface RechargePushResult {
   lineId?: string;
 }
 
-const CLOSED_HH_STATUSES = [7, 9, 10, 11];
+// Only truly-terminal HH statuses block a recharge push — Cancelled (9), Not
+// Interested (10), Completed (11). HireHop's own LOCKED flag (checked below) is
+// the real gate for an invoiced/finalised job. Returned (7) must stay pushable:
+// post-hire running-cost recharge happens BY DEFINITION on returned jobs (fuel
+// etc. is tallied once the van's back). Mirrors the PCN recharge guard, which
+// was already loosened for the same reason. Earlier this list included 7, which
+// silently blocked the module's main use case.
+const CLOSED_HH_STATUSES = [9, 10, 11];
 
 export async function pushRechargeToHH(costId: string): Promise<RechargePushResult> {
   const r = await query(
@@ -68,11 +75,13 @@ export async function pushRechargeToHH(costId: string): Promise<RechargePushResu
   if (cost.cost_intent === 'quote_actual') return { pushed: false, skipped: 'Cost is part of a quote — not rechargeable' };
   if (!cost.job_id || !cost.hh_job_number) return { pushed: false, error: 'Cost must be linked to a HireHop job to recharge' };
 
-  // NET amount to bill (HH adds 20% VAT). Full → the cost's net (ex-VAT cost to
-  // us); partial → the staff-entered recharge_amount (entered net of VAT).
-  const net = cost.recharge_mode === 'full'
-    ? Number(cost.amount_net ?? cost.amount_gross ?? 0)
-    : Number(cost.recharge_amount ?? 0);
+  // NET amount to bill (HH adds 20% VAT). recharge_amount is the FINAL net figure
+  // the resolve modal computed (base + markup), so it's authoritative for both
+  // full and partial. Legacy full-mode rows that pre-date markup (no
+  // recharge_amount) fall back to the cost's own net.
+  const net = Number(cost.recharge_amount
+    ?? (cost.recharge_mode === 'full' ? (cost.amount_net ?? cost.amount_gross) : 0)
+    ?? 0);
   if (!(net > 0)) return { pushed: false, error: 'Recharge amount must be greater than zero' };
 
   const stock = stockForCost(cost.xero_account_code);
@@ -137,9 +146,10 @@ export async function pushRechargeToHH(costId: string): Promise<RechargePushResu
     return { pushed: false, error: `Recharge line added but pricing it failed: ${editRes?.error || 'unknown error'}. Set the price manually in HireHop.` };
   }
 
-  // Stamp the cost as recharged
+  // Stamp the cost as recharged (terminal lifecycle state + the HH stamps)
   await query(
-    `UPDATE costs SET recharged_to_hh_at = NOW(), recharge_hh_item_id = $1 WHERE id = $2`,
+    `UPDATE costs SET recharged_to_hh_at = NOW(), recharge_hh_item_id = $1,
+       recharge_status = 'recharged_hh' WHERE id = $2`,
     [String(newItem.ID), costId],
   );
 

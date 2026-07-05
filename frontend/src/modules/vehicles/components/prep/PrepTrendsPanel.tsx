@@ -17,11 +17,13 @@ import {
   ratePer1000,
   type CornerTrend,
   type Projection,
+  type TyreServiceEvent,
 } from '../../lib/prep-trends'
 import { TYRE_TREAD_RED_MM, TYRE_TREAD_AMBER_MM, TYRE_TREAD_CAP_MM } from '../../lib/tyre-sanity'
 
 interface Props {
   sessions: PrepHistorySession[]
+  tyreEvents?: TyreServiceEvent[]
 }
 
 const STATUS_STYLES: Record<CornerTrend['status'], { dot: string; text: string }> = {
@@ -140,10 +142,16 @@ function CornerCard({ trend }: { trend: CornerTrend }) {
         <ProjectionLine label="To 4mm (replace)" projection={trend.projectionTo4mm} colour="text-red-600" />
       </div>
 
-      {trend.resetCount > 0 && (
+      {trend.awaitingReadingAfterChange && (
         <div className="mt-2 flex items-center gap-1 text-[10px] text-sky-600">
           <span className="h-1.5 w-1.5 rounded-full bg-sky-500" />
-          New tyre detected {formatDate(trend.lastResetDate)}
+          New tyre fitted {formatDate(trend.lastResetDate)} — awaiting first tread reading
+        </div>
+      )}
+      {!trend.awaitingReadingAfterChange && trend.resetCount > 0 && (
+        <div className="mt-2 flex items-center gap-1 text-[10px] text-sky-600">
+          <span className="h-1.5 w-1.5 rounded-full bg-sky-500" />
+          {trend.lastResetSource === 'service' ? 'New tyre fitted (service record)' : 'New tyre detected'} {formatDate(trend.lastResetDate)}
           {trend.resetCount > 1 && <span className="text-gray-400">(+{trend.resetCount - 1} earlier)</span>}
         </div>
       )}
@@ -151,9 +159,9 @@ function CornerCard({ trend }: { trend: CornerTrend }) {
   )
 }
 
-export function PrepTrendsPanel({ sessions }: Props) {
+export function PrepTrendsPanel({ sessions, tyreEvents }: Props) {
   const [open, setOpen] = useState(true)
-  const trends = useMemo(() => computePrepTrends(sessions), [sessions])
+  const trends = useMemo(() => computePrepTrends(sessions, tyreEvents ?? []), [sessions, tyreEvents])
 
   if (!trends.hasData) return null
 

@@ -54,6 +54,11 @@ interface Job {
   pdArrangement?: string              // Per diem arrangement
   pdAmount?: number                   // Per diem daily rate
   files?: VenueFile[]                 // Shared job-level files (OP only)
+  // Plain-English pay/reimburse breakdown for the freelancer (OP only).
+  crewMoney?: {
+    perDiem: { label: string; message: string; tone: 'ooosh' | 'client' | 'claim' | 'none' }
+    expenses: { label: string; message: string; tone: 'ooosh' | 'client' | 'claim' | 'none' }[]
+  }
 }
 
 interface Venue {
@@ -744,7 +749,7 @@ function CrewJobDetail({ job, venue }: { job: Job; venue: Venue | null }) {
         </div>
 
         {/* Fee & Expenses — combined section */}
-        {(fee && fee > 0) || job.expenseBreakdown ? (
+        {(fee && fee > 0) || job.expenseBreakdown || job.crewMoney ? (
           <>
             <hr className="my-4 border-gray-100" />
             <div className="space-y-3">
@@ -759,24 +764,48 @@ function CrewJobDetail({ job, venue }: { job: Job; venue: Venue | null }) {
                 </div>
               )}
 
-              {/* Expense summary amounts */}
-              {job.expensesIncluded !== undefined && job.expensesIncluded > 0 && (
-                <div className="flex items-center gap-3">
-                  <span className="text-gray-400 w-6 text-center">✓</span>
-                  <div>
-                    <p className="text-sm text-gray-500">Expenses included in fee</p>
-                    <p className="font-medium text-gray-900">£{job.expensesIncluded.toFixed(0)}</p>
-                  </div>
+              {/* Your money on this job — plain-English pay/reimburse breakdown */}
+              {job.crewMoney ? (
+                <div className="mt-1 rounded-lg border border-gray-200 p-3">
+                  <p className="mb-2 text-sm font-medium text-gray-700">Expenses &amp; Per Diem — what to do</p>
+                  <ul className="space-y-1.5">
+                    {[job.crewMoney.perDiem, ...job.crewMoney.expenses].map((line, i) => {
+                      const tone = line.tone === 'claim' ? 'text-amber-700'
+                        : line.tone === 'ooosh' ? 'text-green-700'
+                        : line.tone === 'client' ? 'text-gray-600' : 'text-gray-400'
+                      const icon = line.tone === 'claim' ? '🧾' : line.tone === 'ooosh' ? '💷'
+                        : line.tone === 'client' ? '👤' : '—'
+                      return (
+                        <li key={i} className="flex items-start gap-2 text-sm">
+                          <span className="w-5 shrink-0 text-center">{icon}</span>
+                          <span><span className="font-medium text-gray-800">{line.label}:</span>{' '}
+                            <span className={tone}>{line.message}</span></span>
+                        </li>
+                      )
+                    })}
+                  </ul>
                 </div>
-              )}
-              {job.expensesNotIncluded !== undefined && job.expensesNotIncluded > 0 && (
-                <div className="flex items-center gap-3">
-                  <span className="text-gray-400 w-6 text-center">+</span>
-                  <div>
-                    <p className="text-sm text-gray-500">Additional expenses (on top)</p>
-                    <p className="font-medium text-orange-600">£{job.expensesNotIncluded.toFixed(0)}</p>
-                  </div>
-                </div>
+              ) : (
+                <>
+                  {job.expensesIncluded !== undefined && job.expensesIncluded > 0 && (
+                    <div className="flex items-center gap-3">
+                      <span className="text-gray-400 w-6 text-center">✓</span>
+                      <div>
+                        <p className="text-sm text-gray-500">Expenses included in fee</p>
+                        <p className="font-medium text-gray-900">£{job.expensesIncluded.toFixed(0)}</p>
+                      </div>
+                    </div>
+                  )}
+                  {job.expensesNotIncluded !== undefined && job.expensesNotIncluded > 0 && (
+                    <div className="flex items-center gap-3">
+                      <span className="text-gray-400 w-6 text-center">+</span>
+                      <div>
+                        <p className="text-sm text-gray-500">Additional expenses (on top)</p>
+                        <p className="font-medium text-orange-600">£{job.expensesNotIncluded.toFixed(0)}</p>
+                      </div>
+                    </div>
+                  )}
+                </>
               )}
 
               {/* Expense breakdown detail */}

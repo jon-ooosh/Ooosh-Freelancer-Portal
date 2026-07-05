@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
+import { hasManagerRole } from '../lib/roles';
 import { CANCELLATION_REASON_OPTIONS } from '../../../shared/types';
 import { api } from '../services/api';
 import CancelOpenRequirementsSection from './CancelOpenRequirementsSection';
@@ -109,7 +110,7 @@ export default function CancellationModal({
   const today = isoDate(new Date());
   const minDate = isoDate(new Date(Date.now() - 30 * 24 * 60 * 60 * 1000));
 
-  const canAction = userRole === 'admin' || userRole === 'manager';
+  const canAction = hasManagerRole(userRole);
 
   // Effective hire value: prefer live Money summary (ex-VAT, post-international-VAT-adjustment)
   // and fall back to the cached job.job_value if the summary couldn't be fetched.
@@ -318,7 +319,7 @@ export default function CancellationModal({
                   )}
 
                   {calcResult.minimumApplied && (
-                    <p className="text-xs text-red-600 mt-1">Minimum fee of £30 (£25+VAT) applied</p>
+                    <p className="text-xs text-red-600 mt-1">Minimum fee of £25 + VAT (£30 inc-VAT) applied</p>
                   )}
 
                   {/* Source / freshness so staff know what they're acting on */}

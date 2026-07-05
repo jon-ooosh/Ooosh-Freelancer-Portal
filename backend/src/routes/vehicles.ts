@@ -184,7 +184,16 @@ router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) =
       customer_driver_email: string | null;
     };
 
-    async function fetchAllocatedVehicleRow(): Promise<VhaRow | null> {
+    // Discriminated outcome so the caller can tell apart "no van allocated"
+    // from "van allocated but no signed hire form to book against" — they
+    // need different messages, and the latter is now a hard block (see the
+    // freelancer gate note below).
+    type ResolveOutcome =
+      | { kind: 'ok'; row: VhaRow }
+      | { kind: 'no_allocation' }
+      | { kind: 'no_hire_form' };
+
+    async function fetchAllocatedVehicleRow(): Promise<ResolveOutcome> {
       // Pull all currently-active rows on the job once and pick from them
       // in JS — we need to inspect the set as a whole to decide whether to
       // merge, and a single result row hides that.
@@ -202,13 +211,13 @@ router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) =
         [jobId, hhJobNumber]
       );
       const rows = result.rows as Array<VhaRow & { created_at: string; van_requirement_index: number | null }>;
-      if (rows.length === 0) return null;
+      if (rows.length === 0) return { kind: 'no_allocation' };
 
       // First preference: a row that already has BOTH vehicle and driver —
       // this is the post-merge steady state, or a job that was created the
       // tidy way from the start. Just use it.
       const merged = rows.find(r => r.vehicle_id && r.driver_id);
-      if (merged) return merged;
+      if (merged) return { kind: 'ok', row: merged };
 
       // Second preference: smart-merge candidate. Find the freelancer's
       // allocation row (vehicle, no driver) and the customer's hire-form
@@ -281,17 +290,26 @@ router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) =
             LIMIT 1`,
           [customerRow.assignment_id]
         );
-        return (reread.rows[0] as VhaRow) || null;
+        const rereadRow = reread.rows[0] as VhaRow | undefined;
+        return rereadRow ? { kind: 'ok', row: rereadRow } : { kind: 'no_hire_form' };
       }
 
-      // Fallback: no merge possible. Hand back the most recent row with a
-      // vehicle so book-out can still proceed (legacy behaviour). Common in
-      // staff-test scenarios where there's no customer hire form yet.
-      return rows.find(r => r.vehicle_id) || null;
+      // No merge possible. A freelancer must NOT be able to hand a van over
+      // without a signed customer hire agreement — there's no named driver,
+      // no excess, and nothing to put on the condition-report PDF. So the
+      // old "hand back any vehicle row so book-out can proceed" fallback is
+      // gone. If a van is allocated but no driver-linked hire-form row
+      // exists, block with a distinct reason; otherwise it's a plain
+      // no-allocation. (Staff book-out doesn't use this endpoint — they go
+      // through the normal allocations flow with its own soft guidance.)
+      if (rows.some(r => r.vehicle_id)) {
+        return { kind: 'no_hire_form' };
+      }
+      return { kind: 'no_allocation' };
     }
 
-    const vha = await fetchAllocatedVehicleRow();
-    if (!vha) {
+    const outcome = await fetchAllocatedVehicleRow();
+    if (outcome.kind === 'no_allocation') {
       console.warn('[freelancer-bookout] No allocated vehicle for job', { jobId, hhJobNumber });
       res.status(409).json({
         error: 'No vehicle allocated for this job yet',
@@ -300,6 +318,16 @@ router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) =
       });
       return;
     }
+    if (outcome.kind === 'no_hire_form') {
+      console.warn('[freelancer-bookout] Van allocated but no signed hire form for job', { jobId, hhJobNumber });
+      res.status(409).json({
+        error: 'Customer hire form not received yet',
+        code: 'no_hire_form',
+        hint: 'The customer must complete and sign their hire form before this van can be booked out. Please contact the Ooosh office.',
+      });
+      return;
+    }
+    const vha = outcome.row;
     console.log('[freelancer-bookout] Vehicle resolved', {
       assignmentId: vha.assignment_id,
       registration: vha.registration,
@@ -1592,15 +1620,32 @@ router.get('/jobs/going-out', async (req: AuthRequest, res: Response) => {
     const today = new Date().toISOString().split('T')[0];
     const tomorrow = new Date(Date.now() + 86400000).toISOString().split('T')[0];
 
+    // The third OR clause keeps STAGGERED MULTI-VAN jobs visible: a job with
+    // more than one van whose vans leave on different days. Once the first
+    // van goes out, the job's out_date is in the past and the plain window
+    // drops it — making the remaining van unbookable from this picker
+    // (job 15411, Jun 2026: HLR left day 1, HLU collected day 2, only HLR
+    // showed). We retain a job that has already started, isn't back yet, and
+    // still has a van slot in a pre-book-out state. Dual-match join
+    // (job_id OR hirehop_job_id) because staff-allocation rows carry only
+    // hirehop_job_id — job_id stays NULL until a hire form is submitted.
     const result = await query(
-      `SELECT * FROM jobs
-       WHERE is_deleted = false
-         AND status = ANY($1)
+      `SELECT DISTINCT j.* FROM jobs j
+       LEFT JOIN vehicle_hire_assignments vha
+         ON (vha.job_id = j.id OR vha.hirehop_job_id = j.hh_job_number)
+         AND vha.status IN ('soft', 'confirmed')
+       WHERE j.is_deleted = false
+         AND j.status = ANY($1)
          AND (
-           (out_date IS NOT NULL AND out_date::date >= $2::date AND out_date::date <= $3::date)
-           OR (out_date IS NULL AND job_date IS NOT NULL AND job_date::date >= $2::date AND job_date::date <= $3::date)
+           (j.out_date IS NOT NULL AND j.out_date::date >= $2::date AND j.out_date::date <= $3::date)
+           OR (j.out_date IS NULL AND j.job_date IS NOT NULL AND j.job_date::date >= $2::date AND j.job_date::date <= $3::date)
+           OR (
+             vha.id IS NOT NULL
+             AND COALESCE(j.out_date, j.job_date)::date < $2::date
+             AND COALESCE(j.return_date, j.job_end)::date >= $2::date
+           )
          )
-       ORDER BY out_date ASC NULLS LAST, job_date ASC NULLS LAST`,
+       ORDER BY j.out_date ASC NULLS LAST, j.job_date ASC NULLS LAST`,
       [ACTIVE_STATUSES, today, tomorrow]
     );
 
@@ -1649,15 +1694,27 @@ router.get('/jobs/upcoming', async (req: AuthRequest, res: Response) => {
     const today = new Date().toISOString().split('T')[0];
     const endDate = new Date(Date.now() + days * 86400000).toISOString().split('T')[0];
 
+    // See /jobs/going-out above for the staggered multi-van rationale. Same
+    // shape here so the Allocations page (which reads /jobs/upcoming) keeps a
+    // part-way-through multi-van job visible — the second van can be
+    // allocated and booked out even after the first has gone out.
     const result = await query(
-      `SELECT * FROM jobs
-       WHERE is_deleted = false
-         AND status = ANY($1)
+      `SELECT DISTINCT j.* FROM jobs j
+       LEFT JOIN vehicle_hire_assignments vha
+         ON (vha.job_id = j.id OR vha.hirehop_job_id = j.hh_job_number)
+         AND vha.status IN ('soft', 'confirmed')
+       WHERE j.is_deleted = false
+         AND j.status = ANY($1)
          AND (
-           (out_date IS NOT NULL AND out_date::date >= $2::date AND out_date::date <= $3::date)
-           OR (out_date IS NULL AND job_date IS NOT NULL AND job_date::date >= $2::date AND job_date::date <= $3::date)
+           (j.out_date IS NOT NULL AND j.out_date::date >= $2::date AND j.out_date::date <= $3::date)
+           OR (j.out_date IS NULL AND j.job_date IS NOT NULL AND j.job_date::date >= $2::date AND j.job_date::date <= $3::date)
+           OR (
+             vha.id IS NOT NULL
+             AND COALESCE(j.out_date, j.job_date)::date < $2::date
+             AND COALESCE(j.return_date, j.job_end)::date >= $2::date
+           )
          )
-       ORDER BY out_date ASC NULLS LAST, job_date ASC NULLS LAST`,
+       ORDER BY j.out_date ASC NULLS LAST, j.job_date ASC NULLS LAST`,
       [ACTIVE_STATUSES, today, endDate]
     );
 
@@ -2160,19 +2217,31 @@ router.get('/check-in-eligibility', async (req: AuthRequest, res: Response) => {
 
     const result = await query(
       `SELECT vha.id, vha.status, vha.checked_in_at, vha.booked_out_at,
-              vha.status_changed_at, vha.hirehop_job_id, vha.updated_at
+              vha.status_changed_at, vha.swapped_at, vha.hirehop_job_id, vha.updated_at
        FROM vehicle_hire_assignments vha
        JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
        WHERE fv.reg = $1
-         AND vha.status IN ('booked_out', 'active', 'returned')
-       -- A live (booked_out/active) row ALWAYS wins over a returned one,
-       -- regardless of updated_at. Otherwise a stale returned row whose
-       -- updated_at gets bumped by a background pass (sync / fleet-status /
-       -- dedup) after a fresh book-out masks the live rows and the van
-       -- wrongly reads as "already checked in" (RX24SZG, jobs 15429→15781,
-       -- 27 May 2026). Only fall back to a returned row when none are live.
+         AND (
+           vha.status IN ('booked_out', 'active', 'returned')
+           -- A van swapped OUT mid-hire still needs a final check-in when it
+           -- comes back (planned upgrade = back at the handover; breakdown =
+           -- back from the garage later). Its row stays 'swapped' for the
+           -- audit and never gets checked_in_at until that final check-in, so
+           -- a swapped row with checked_in_at IS NULL is "awaiting check-in".
+           OR (vha.status = 'swapped' AND vha.checked_in_at IS NULL)
+         )
+       -- Precedence: a live (booked_out/active) row ALWAYS wins, regardless of
+       -- updated_at. Otherwise a stale returned row whose updated_at gets bumped
+       -- by a background pass (sync / fleet-status / dedup) after a fresh book-out
+       -- masks the live rows and the van wrongly reads as "already checked in"
+       -- (RX24SZG, jobs 15429→15781, 27 May 2026). A swapped-out-pending row
+       -- ranks above a finished (returned) one so the final check-in is offered.
        ORDER BY
-         CASE WHEN vha.status IN ('booked_out', 'active') THEN 0 ELSE 1 END,
+         CASE
+           WHEN vha.status IN ('booked_out', 'active') THEN 0
+           WHEN vha.status = 'swapped' THEN 1
+           ELSE 2
+         END,
          vha.updated_at DESC
        LIMIT 1`,
       [vehicleReg]
@@ -2185,6 +2254,7 @@ router.get('/check-in-eligibility', async (req: AuthRequest, res: Response) => {
         checkInDate: null,
         assignmentId: null,
         hirehopJob: null,
+        swapped: false,
       });
       return;
     }
@@ -2197,6 +2267,23 @@ router.get('/check-in-eligibility', async (req: AuthRequest, res: Response) => {
         checkInDate: null,
         assignmentId: row.id,
         hirehopJob: row.hirehop_job_id,
+        swapped: false,
+      });
+      return;
+    }
+
+    // status === 'swapped' AND checked_in_at IS NULL — the outgoing van of a
+    // swap, back and awaiting its final check-in. Eligible; CheckInPage stamps
+    // against this hirehop_job and the save-event side-effect records the
+    // check-in WITHOUT un-swapping the row (preserves the swap audit).
+    if (row.status === 'swapped') {
+      res.json({
+        eligible: true,
+        reason: null,
+        checkInDate: null,
+        assignmentId: row.id,
+        hirehopJob: row.hirehop_job_id,
+        swapped: true,
       });
       return;
     }
@@ -2211,6 +2298,7 @@ router.get('/check-in-eligibility', async (req: AuthRequest, res: Response) => {
       checkInDate,
       assignmentId: row.id,
       hirehopJob: row.hirehop_job_id,
+      swapped: false,
     });
   } catch (err) {
     console.error('[vehicles/check-in-eligibility] Error:', err);
@@ -2451,6 +2539,72 @@ router.post('/save-event', async (req: FlexibleVehicleRequest, res: Response) =>
           if (matchedIds.length === 0) {
             console.log(`[vehicles/events] book-out: no matching allocated assignment for ${reg} / HH#${hhJob} — no assignment state flip`);
           }
+
+          // Drive the hire-forms side of book-out from HERE too.
+          //
+          // A freelancer book-out fires save-event ONLY — it never runs the
+          // PATCH /api/hire-forms/:id write-back loop that is the sole place
+          // the hire *agreement* PDF+email is scheduled. So the van flipped to
+          // booked_out and the condition report went to the client, but no
+          // driver ever got their agreement (the Tobi misfire, HH 15669, 2 Jul
+          // 2026 — hire_form_emailed_at stayed NULL). Firing firePostBookOutHooks
+          // here makes save-event a source of truth for the book-out: each
+          // flipped driver gets their own-van agreement AND every other driver
+          // on the van gets a cross-van agreement (fanOutVanHireForms), i.e.
+          // the "everyone drives everything" cascade (jon's decision (a)).
+          //
+          // The staff PATCH path still fires the same hooks; double-firing is
+          // safe — the own-van email is serialised by the atomic claim in
+          // generateAndEmailHireFormPdf (migration 155), the cross-van fan-out
+          // by the hire_form_documents UNIQUE constraint, and every other hook
+          // (fleet sync, requirement advance, OOH, auto-dispatch) is idempotent.
+          if (matchedIds.length > 0) {
+            try {
+              const flipped = await query(
+                `SELECT id, vehicle_id, job_id, hirehop_job_id,
+                        return_overnight, hire_form_emailed_at
+                   FROM vehicle_hire_assignments
+                  WHERE id = ANY($1::uuid[])`,
+                [matchedIds]
+              );
+              const { firePostBookOutHooks } = await import('./hire-forms');
+              const isFreelancer = !!req.bookoutSession;
+              for (const row of flipped.rows) {
+                if (!row.vehicle_id) continue; // hooks no-op without a linked van
+                firePostBookOutHooks({
+                  assignmentId: row.id as string,
+                  vehicleId: row.vehicle_id as string,
+                  jobId: row.job_id ?? null,
+                  hhJobNumber: row.hirehop_job_id ?? null,
+                  returnOvernight: row.return_overnight ?? null,
+                  hireFormEmailedAt: row.hire_form_emailed_at ?? null,
+                  actorLabel: isFreelancer ? 'freelancer book-out' : (req.user?.email || 'staff'),
+                  actorUserId: isFreelancer ? null : (req.user?.id || null),
+                });
+              }
+            } catch (hookErr) {
+              console.warn('[vehicles/events] book-out post-hooks failed to schedule:', hookErr);
+            }
+          }
+
+          // Leg-based completion: a freelancer book-out completes the VAN leg
+          // of the portal quote. Stamp it + try to close the quote server-side
+          // so a van-only delivery closes the moment the van leaves — no
+          // cross-domain return hop to /complete required (the Tobi nag, HH
+          // 15669). For a "both" job the quote only closes once the equipment
+          // leg also lands. Keyed on the freelancer session's quoteId; staff
+          // book-outs have no portal quote and are skipped.
+          if (req.bookoutSession?.quoteId) {
+            const quoteId = req.bookoutSession.quoteId;
+            const actor = req.bookoutSession.freelancerEmail || 'freelancer book-out';
+            try {
+              const { stampQuoteLeg, maybeCloseQuote } = await import('../services/quote-completion');
+              await stampQuoteLeg(quoteId, 'van');
+              await maybeCloseQuote(quoteId, { triggeringLeg: 'van', actorLabel: actor });
+            } catch (legErr) {
+              console.warn(`[vehicles/events] van-leg completion failed for quote ${quoteId}:`, legErr);
+            }
+          }
         }
       } catch (err) {
         console.warn('[vehicles/events] book-out side-effect failed:', err);
@@ -2514,11 +2668,11 @@ router.post('/save-event', async (req: FlexibleVehicleRequest, res: Response) =>
             }
           }
 
+          const userId = req.user?.id || null;
+          const mileageIn = event.mileage ? Number(event.mileage) : null;
+          const fuelIn = event.fuelLevel || null;
+          const hasDamage = event.hasDamage === true;
           if (matchedRows.length > 0) {
-            const userId = req.user?.id || null;
-            const mileageIn = event.mileage ? Number(event.mileage) : null;
-            const fuelIn = event.fuelLevel || null;
-            const hasDamage = event.hasDamage === true;
             for (const row of matchedRows) {
               await query(
                 `UPDATE vehicle_hire_assignments
@@ -2536,7 +2690,41 @@ router.post('/save-event', async (req: FlexibleVehicleRequest, res: Response) =>
               );
             }
           } else {
-            console.log(`[vehicles/events] check-in: no matching booked_out assignment for ${reg} / HH#${hhJob} — no assignment state flip`);
+            // No live (booked_out/active) row — but this may be the FINAL
+            // check-in of a van that was swapped OUT mid-hire (planned upgrade
+            // or breakdown returning from the garage). Record the check-in on
+            // the swapped row WITHOUT flipping it to 'returned': the row stays
+            // 'swapped' to preserve the swap audit, and checked_in_at marks the
+            // final check-in done so eligibility stops offering it. The fleet
+            // hire_status is recomputed by the final reconcile below.
+            const swappedMatch = await query(
+              `SELECT vha.id
+                 FROM vehicle_hire_assignments vha
+                 JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+                WHERE fv.reg = $1
+                  AND vha.hirehop_job_id = $2
+                  AND vha.status = 'swapped'
+                  AND vha.checked_in_at IS NULL
+                ORDER BY vha.swapped_at DESC NULLS LAST
+                LIMIT 1`,
+              [reg, hhJob]
+            );
+            if (swappedMatch.rows.length > 0) {
+              await query(
+                `UPDATE vehicle_hire_assignments
+                 SET checked_in_at = COALESCE(checked_in_at, NOW()),
+                     checked_in_by = COALESCE(checked_in_by, $1),
+                     mileage_in = COALESCE(mileage_in, $2),
+                     fuel_level_in = COALESCE(fuel_level_in, $3),
+                     has_damage = COALESCE(has_damage, $4),
+                     updated_at = NOW()
+                 WHERE id = $5`,
+                [userId, mileageIn, fuelIn, hasDamage, swappedMatch.rows[0].id]
+              );
+              console.log(`[vehicles/events] check-in: final check-in recorded on swapped-out row for ${reg} / HH#${hhJob} (status kept 'swapped')`);
+            } else {
+              console.log(`[vehicles/events] check-in: no matching booked_out/swapped assignment for ${reg} / HH#${hhJob} — no assignment state flip`);
+            }
           }
 
           // The van is back — cancel any stale van allocations on this

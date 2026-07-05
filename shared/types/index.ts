@@ -529,12 +529,20 @@ export type QuoteJobType = 'delivery' | 'collection' | 'crewed';
 export type QuoteCalcMode = 'hourly' | 'dayrate';
 export type QuoteWhatIsIt = 'vehicle' | 'equipment' | 'people';
 
+// Per-expense-line billing state (three-state, Jun 2026). `included` is kept in
+// step (true ⇔ 'included') for back-compat with code reading the old boolean.
+// 'na' = not applicable (excluded from every total). PD defaults to 'na' since
+// most jobs (esp. sub-one-day) carry no Per Diem; also usable on any line that
+// simply doesn't apply to a job.
+export type ExpenseChargeMode = 'included' | 'not_included' | 'recharge' | 'na';
+
 export interface QuoteExpenseItem {
   id: string;
   category: string;   // fuel, parking, tolls, transport_out, transport_back, hotel, pd, other
   label: string;
   amount: number;
   included: boolean;
+  chargeMode?: ExpenseChargeMode;
   description?: string;
   pdDays?: number;
 }
@@ -826,6 +834,10 @@ export interface JobExcess {
   dispatch_override_by: string | null;
   dispatch_override_at: string | null;
   suggested_collection_method: 'payment' | 'pre_auth';
+  // "Held on account" (migration 154): parked excess deliberately held for the
+  // client's future hire. Status stays 'taken' (counted, visible, actionable);
+  // this flag just marks intent + drives the badge. Not a status.
+  held_on_account?: boolean;
   person_id: string | null;
   notes: string | null;
   // HH deposit reconciliation (migration 039)
@@ -993,6 +1005,12 @@ export type CostPaymentMethod =
   | 'reimburse_me' | 'not_yet_paid';
 export type CostPaymentStatus = 'paid' | 'awaiting_payment' | 'awaiting_invoice';
 export type CostRechargeMode = 'none' | 'full' | 'partial';
+// Recharge resolution lifecycle (Phase D). pending = flagged, not yet resolved;
+// recharged_hh = pushed to HireHop; recharged_external = billed another way
+// (closed HH job → direct Xero invoice etc.); absorbed = written off (reason kept).
+export type CostRechargeStatus = 'pending' | 'recharged_hh' | 'recharged_external' | 'absorbed';
+// Markup applied to the recharge net (ex VAT). greater_of = max(percent, floor).
+export type CostMarkupType = 'greater_of' | 'percent' | 'fixed' | 'none';
 // Job-linked costs only. quote_actual = part of an existing quote (track, never
 // recharge — already billed via the quote); extra = above-and-beyond, eligible
 // for client recharge. NULL on overhead/vehicle costs with no job.
@@ -1006,7 +1024,7 @@ export type CostStatus = 'draft' | 'confirmed' | 'resolved';
 export interface SupplierPaymentTerms {
   basis: 'invoice_date' | 'end_of_invoice_month';
   days: number;
-  source: 'manual' | 'xero' | 'default';
+  source: 'manual' | 'xero' | 'default' | 'freelancer';
 }
 
 export interface Cost {
@@ -1045,6 +1063,14 @@ export interface Cost {
   cost_intent: CostIntent | null;
   recharged_to_hh_at: string | null;
   recharge_hh_item_id: string | null;
+  /** Resolution lifecycle: pending | recharged_hh | recharged_external | absorbed. NULL when recharge_mode='none'. */
+  recharge_status: CostRechargeStatus | null;
+  recharge_base_amount: number | null;
+  recharge_markup_type: CostMarkupType | null;
+  recharge_markup_value: number | null;
+  recharge_resolution_note: string | null;
+  recharge_resolved_by: string | null;
+  recharge_resolved_at: string | null;
   approval_state: CostApprovalState | null;
   verified_by: string | null;
   verified_at: string | null;
@@ -1061,6 +1087,8 @@ export interface Cost {
   xero_payment_id: string | null;
   xero_synced_at: string | null;
   xero_error: string | null;
+  /** Set when an already-pushed cost is edited with a Xero-affecting field; cleared on re-sync. */
+  xero_stale?: boolean;
   status: CostStatus;
   notes: string | null;
   created_at: string;
@@ -1183,6 +1211,9 @@ export interface HeldItem {
   job_name?: string | null;
   found_vehicle_reg?: string | null;
   received_by_name?: string | null;
+
+  // Count of discussion-thread interactions on this item (SELECT_WITH_JOINS).
+  discussion_count?: number;
 
   // Computed chase fields (lost property) — derived in SELECT_WITH_JOINS so the
   // list, detail card and review queue all agree. null for non-lost-property.

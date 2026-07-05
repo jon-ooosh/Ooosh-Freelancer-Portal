@@ -422,6 +422,150 @@ router.post('/balances/bulk-resolve', authorize('admin'), validate(bulkResolveSc
   }
 });
 
+// ── Dismiss / clear a pending refund (migration-less — status flip) ──
+//
+// Pending refunds are OP-only `job_payments` IOUs created by a cancellation
+// (payment_type='refund', status='pending'). The normal action is to PROCESS
+// them via /refund-payment (moves money via Stripe/HH). But some never need
+// processing through OP:
+//   - already refunded out-of-band (directly in HireHop / Stripe / bank), or
+//   - artifacts from before the refund-tracking work was finished, or
+//   - the wrong amount / a duplicate.
+// This action CLEARS the IOU without moving any money — sibling of the
+// excess "mark externally resolved" + balance "resolve" actions. It sets
+// payment_status='cancelled' so the row drops out of the Pending Refunds list
+// and the Money tab IOU, leaving an annotated audit trail. It does NOT touch
+// HireHop, Stripe, or Xero.
+const DISMISS_REFUND_REASONS = [
+  'refunded_externally',  // already refunded directly in HireHop / Stripe / bank
+  'not_required',         // refund not actually due (artifact / superseded)
+  'duplicate',            // duplicate IOU
+  'other',
+] as const;
+const DISMISS_REASON_LABELS: Record<string, string> = {
+  refunded_externally: 'Already refunded outside OP',
+  not_required: 'Not required',
+  duplicate: 'Duplicate record',
+  other: 'Other',
+};
+
+const dismissRefundSchema = z.object({
+  refund_id: z.string().uuid(),
+  reason: z.enum(DISMISS_REFUND_REASONS),
+  notes: z.string().max(1000).nullable().optional(),
+});
+
+// POST /api/money/:jobId/dismiss-refund — clear one pending refund IOU.
+router.post('/:jobId/dismiss-refund', authorize('admin', 'manager'), validate(dismissRefundSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const jobUuid = await resolveJobUuid(String(req.params.jobId));
+    if (!jobUuid) { res.status(404).json({ error: 'Job not found' }); return; }
+    const { refund_id, reason, notes } = req.body as { refund_id: string; reason: string; notes?: string | null };
+
+    // Validate it belongs to this job and is still a pending refund.
+    const check = await query(
+      `SELECT id, amount FROM job_payments
+       WHERE id = $1 AND job_id = $2 AND payment_type = 'refund' AND payment_status = 'pending'`,
+      [refund_id, jobUuid]
+    );
+    if (check.rows.length === 0) {
+      res.status(404).json({ error: 'Pending refund not found, not on this job, or already processed' });
+      return;
+    }
+
+    const reasonLabel = DISMISS_REASON_LABELS[reason] || reason;
+    const stamp = `[Dismissed: ${reasonLabel}${notes ? ` — ${notes}` : ''} — by ${req.user!.email} on ${new Date().toISOString().split('T')[0]}]`;
+    const updated = await query(
+      `UPDATE job_payments
+         SET payment_status = 'cancelled',
+             notes = COALESCE(notes, '') || E'\n' || $2,
+             recorded_by = $3,
+             updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [refund_id, stamp, req.user!.id]
+    );
+
+    // Timeline note so the dismissal is visible on the job's Activity Timeline.
+    await query(
+      `INSERT INTO interactions (type, content, job_id, created_by)
+       VALUES ('note', $1, $2, $3)`,
+      [`Pending refund of £${parseFloat(check.rows[0].amount).toFixed(2)} cleared — ${reasonLabel}${notes ? ` (${notes})` : ''}. No money moved through OP.`, jobUuid, req.user!.id]
+    ).catch((e) => console.error('[money] dismiss-refund timeline note failed (non-fatal):', e));
+
+    await query(
+      `INSERT INTO audit_log (user_id, entity_type, entity_id, action, after_json)
+       VALUES ($1, 'job_payments', $2, 'dismiss_refund', $3::jsonb)`,
+      [req.user!.id, jobUuid, JSON.stringify({ refund_id, reason, notes: notes ?? null })]
+    ).catch((e) => console.error('[money] audit_log insert failed (dismiss_refund):', e));
+
+    res.json({ data: updated.rows[0], message: 'Pending refund cleared' });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error('[money] dismiss-refund error:', msg);
+    res.status(500).json({ error: 'Failed to clear pending refund', detail: msg });
+  }
+});
+
+const bulkDismissRefundSchema = z.object({
+  reason: z.enum(DISMISS_REFUND_REASONS),
+  notes: z.string().max(1000).nullable().optional(),
+  refund_ids: z.array(z.string().uuid()).max(500).optional(),
+  // YYYY-MM-DD — clear every pending refund logged before this date. For the
+  // pre-refund-tracking backlog sweep.
+  logged_before: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+}).refine((d) => (d.refund_ids && d.refund_ids.length > 0) || d.logged_before, {
+  message: 'Provide refund_ids or logged_before',
+});
+
+// POST /api/money/refunds/bulk-dismiss — clear many pending refunds at once
+// (multi-select, or "everything logged before <date>" for the old backlog).
+router.post('/refunds/bulk-dismiss', authorize('admin'), validate(bulkDismissRefundSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { reason, notes, refund_ids, logged_before } = req.body as {
+      reason: string; notes?: string | null; refund_ids?: string[]; logged_before?: string;
+    };
+    const reasonLabel = DISMISS_REASON_LABELS[reason] || reason;
+    const stamp = `[Dismissed (bulk): ${reasonLabel}${notes ? ` — ${notes}` : ''} — by ${req.user!.email} on ${new Date().toISOString().split('T')[0]}]`;
+
+    const conds: string[] = [`payment_type = 'refund'`, `payment_status = 'pending'`];
+    const params: unknown[] = [stamp, req.user!.id];
+    let p = 3;
+    if (refund_ids && refund_ids.length > 0) {
+      conds.push(`id = ANY($${p}::uuid[])`);
+      params.push(refund_ids);
+      p++;
+    } else if (logged_before) {
+      conds.push(`payment_date::date < $${p}::date`);
+      params.push(logged_before);
+      p++;
+    }
+
+    const result = await query(
+      `UPDATE job_payments
+         SET payment_status = 'cancelled',
+             notes = COALESCE(notes, '') || E'\n' || $1,
+             recorded_by = $2,
+             updated_at = NOW()
+       WHERE ${conds.join(' AND ')}
+       RETURNING id`,
+      params
+    );
+
+    await query(
+      `INSERT INTO audit_log (user_id, entity_type, entity_id, action, after_json)
+       VALUES ($1, 'job_payments', NULL, 'bulk_dismiss_refund', $2::jsonb)`,
+      [req.user!.id, JSON.stringify({ reason, notes: notes ?? null, count: result.rows.length, logged_before: logged_before ?? null })]
+    ).catch((e) => console.error('[money] audit_log insert failed (bulk_dismiss_refund):', e));
+
+    res.json({ dismissed: result.rows.length, message: `Cleared ${result.rows.length} pending refund(s)` });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error('[money] bulk-dismiss-refund error:', msg);
+    res.status(500).json({ error: 'Failed to bulk-clear pending refunds', detail: msg });
+  }
+});
+
 // ── HireHop bank account labels (for emails) ──
 const PAYMENT_METHODS_LABELS: Record<string, string> = {
   stripe_gbp: 'Stripe GBP',
@@ -471,7 +615,7 @@ const refundPaymentSchema = z.object({
   notes: z.string().max(1000).nullable().optional(),
   // When set, an existing OP `job_payments` pending-refund IOU (e.g. created by
   // a cancellation) is marked completed instead of inserting a new refund row.
-  pending_refund_id: z.number().int().positive().nullable().optional(),
+  pending_refund_id: z.string().uuid().nullable().optional(),
 });
 
 // ── GET /api/money/job-lookup/:hhJobNumber — Look up OP job by HireHop job number ──
@@ -1221,6 +1365,13 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     if (hhExcessDeposits.length > 0 && job.id) {
       try {
         reconciliationResults = await reconcileExcessDeposits(job.id, hhExcessDeposits);
+        if (reconciliationResults.length > 0) {
+          // Money just landed on a record via auto-match — re-derive the
+          // pre-hire excess requirement card so the gate/checklist agree.
+          syncExcessRequirementStatus(job.id).catch(e =>
+            console.error('[money] syncExcessRequirementStatus failed (reconcile):', e)
+          );
+        }
       } catch (reconcileErr) {
         console.error('[money] Reconciliation failed (non-fatal):', reconcileErr);
       }
@@ -1387,10 +1538,16 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     for (const rec of excessRecords) {
       if (rec.hh_deposit_id) linkedHHDepositIds.add(rec.hh_deposit_id);
     }
-    // Also check job_payments for any HH deposit IDs linked to excess payments
+    // Also check job_payments for any HH deposit IDs linked to excess payments.
+    // Only count rows whose money actually landed on a job_excess record for
+    // this job — a dangling audit row (stale excess_id, nothing applied) must
+    // not hide the deposit from the "unmatched — link manually" banner.
     const jpLinkedResult = await query(
-      `SELECT DISTINCT hirehop_deposit_id FROM job_payments
-       WHERE job_id = $1 AND hirehop_deposit_id IS NOT NULL AND payment_type = 'excess'`,
+      `SELECT DISTINCT jp.hirehop_deposit_id
+       FROM job_payments jp
+       JOIN job_excess je ON je.id = jp.excess_id AND je.job_id = jp.job_id
+       WHERE jp.job_id = $1 AND jp.hirehop_deposit_id IS NOT NULL AND jp.payment_type = 'excess'
+         AND (COALESCE(je.excess_amount_taken, 0) > 0 OR COALESCE(je.amount_held, 0) > 0)`,
       [job.id]
     );
     for (const row of jpLinkedResult.rows) {
@@ -2287,12 +2444,37 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
     let resolvedExcessId = excess_id || null;
 
     if (effectivePaymentType === 'excess') {
-      // If no excess_id provided, try to find or create a job_excess record
+      // Validate a portal-supplied excess_id before trusting it. The Stripe
+      // checkout metadata can carry a stale record UUID (record replaced
+      // between checkout-session creation and webhook) or one belonging to a
+      // different job for the same client. Blindly UPDATEing by that id
+      // matches 0 rows — no error, 200 returned, and the money silently
+      // never lands on the record while the job_payments row (with its
+      // hh_deposit_id) suppresses the unmatched-deposit banner (job 16085,
+      // Jul 2026). Fall back to the find-or-create path instead.
+      if (resolvedExcessId) {
+        const check = await query(
+          `SELECT id FROM job_excess WHERE id = $1 AND job_id = $2`,
+          [resolvedExcessId, job.id]
+        );
+        if (check.rows.length === 0) {
+          console.warn(
+            `[money] payment-event excess_id ${resolvedExcessId} not found on job ${job.id} (HH ${job.hh_job_number}) — stale/mismatched portal metadata, falling back to find-or-create`
+          );
+          resolvedExcessId = null;
+        }
+      }
+
+      // If no (valid) excess_id, try to find or create a job_excess record
       if (!resolvedExcessId) {
-        // Look for an existing job_excess record for this job
+        // Look for an existing job_excess record for this job. 'released' is
+        // terminal (migration 087): a late/duplicate excess_pre_auth event must
+        // NOT re-arm a released record (it stomps amount_released bookkeeping —
+        // job 15934 incident, Jun 2026); a genuinely fresh hold after a release
+        // gets a fresh record via the auto-create below.
         const existingExcess = await query(
           `SELECT id, excess_status FROM job_excess
-           WHERE job_id = $1 AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required')
+           WHERE job_id = $1 AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required', 'released')
            ORDER BY created_at DESC LIMIT 1`,
           [job.id]
         );
@@ -2353,7 +2535,18 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
         );
         console.log(`[money] Excess ${resolvedExcessId} set to pre_auth (£${amount} held, expires in 5 days)`);
       } else {
-        await query(
+        // Resolve the canonical PI in JS: prefer the explicit PI, else lift it
+        // from payment_reference when it's a pi_ value. This populates the
+        // column at collection time so a later Stripe reimbursement can fire
+        // via the API (jobs 15433/15489/… — Jun 2026). MUST stay JS-side:
+        // the first cut did the fallback in SQL by reusing $3 in both
+        // `payment_reference = $3` (varchar) and `$3 LIKE 'pi_%'` (text) —
+        // Postgres deduces conflicting parameter types and rejects the whole
+        // UPDATE with 42P08, which 500'd EVERY straight-charge excess
+        // payment-event from deploy until job 16085 surfaced it (1 Jul 2026).
+        const resolvedPi = stripe_payment_intent
+          || (payment_reference && String(payment_reference).startsWith('pi_') ? payment_reference : null);
+        const chargeUpdate = await query(
           `UPDATE job_excess SET
             excess_amount_taken = COALESCE(excess_amount_taken, 0) + $1,
             excess_status = CASE
@@ -2362,11 +2555,20 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
             END,
             payment_method = $2,
             payment_reference = $3,
+            stripe_payment_intent_id = COALESCE(stripe_payment_intent_id, $5),
             payment_date = NOW(),
             updated_at = NOW()
           WHERE id = $4`,
-          [amount, effectiveMethod, payment_reference || null, resolvedExcessId]
+          [amount, effectiveMethod, payment_reference || null, resolvedExcessId, resolvedPi]
         );
+        // Belt-and-braces: the id was validated against this job above, so a
+        // 0-row update means something removed the record mid-request. Shout
+        // rather than return a false 200.
+        if (chargeUpdate.rowCount === 0) {
+          console.error(
+            `[money] payment-event excess charge UPDATE matched 0 rows (excess ${resolvedExcessId}, job ${job.id}, HH ${job.hh_job_number}, £${amount}) — money recorded in job_payments but NOT applied to job_excess`
+          );
+        }
       }
 
       // Link HH deposit to excess record for reconciliation
@@ -2610,14 +2812,23 @@ async function reconcileExcessDeposits(
 ): Promise<Array<{ hh_deposit_id: number; excess_id: string; action: string }>> {
   const results: Array<{ hh_deposit_id: number; excess_id: string; action: string }> = [];
 
-  // Get all HH deposit IDs already linked in OP (either on job_excess or job_payments)
+  // Get all HH deposit IDs already linked in OP (either on job_excess or job_payments).
+  // The job_payments check only counts rows whose money actually LANDED on a
+  // job_excess record for this job (taken or held > 0). A dangling audit row
+  // — payment-event arrived but the excess UPDATE hit a stale/mismatched
+  // excess_id and applied nothing (job 16085, Jul 2026) — must NOT suppress
+  // reconciliation, or the deposit can never self-heal.
   const [linkedExcess, linkedPayments] = await Promise.all([
     query(
       `SELECT hh_deposit_id FROM job_excess WHERE job_id = $1 AND hh_deposit_id IS NOT NULL`,
       [jobId]
     ),
     query(
-      `SELECT hirehop_deposit_id FROM job_payments WHERE job_id = $1 AND hirehop_deposit_id IS NOT NULL AND payment_type = 'excess'`,
+      `SELECT jp.hirehop_deposit_id
+       FROM job_payments jp
+       JOIN job_excess je ON je.id = jp.excess_id AND je.job_id = jp.job_id
+       WHERE jp.job_id = $1 AND jp.hirehop_deposit_id IS NOT NULL AND jp.payment_type = 'excess'
+         AND (COALESCE(je.excess_amount_taken, 0) > 0 OR COALESCE(je.amount_held, 0) > 0)`,
       [jobId]
     ),
   ]);
@@ -2635,9 +2846,14 @@ async function reconcileExcessDeposits(
     [jobId]
   );
 
-  // Build a mutable list of available records (not yet linked to an HH deposit)
+  // Build a mutable list of available records (not yet linked to an HH deposit).
+  // 'pending' is the status every hire-form-created record sits in while
+  // awaiting payment (hire-forms.ts insert + absorb paths, quick-assign) —
+  // excluding it meant the safety net skipped the single most common record
+  // state (job 16085, Jul 2026). 'needed' covers derivation/portal-created
+  // records; 'partially_paid' covers top-ups.
   const availableRecords = excessRecords.rows.filter(
-    (r: any) => !r.hh_deposit_id && ['needed', 'partially_paid'].includes(r.excess_status)
+    (r: any) => !r.hh_deposit_id && ['needed', 'pending', 'partially_paid'].includes(r.excess_status)
   );
 
   for (const hhDep of hhExcessDeposits) {

@@ -360,7 +360,15 @@ export function startScheduler() {
           AND jr.status NOT IN ('done', 'blocked', 'cancelled')
           AND jr.due_date IS NOT NULL
           AND jr.due_date::date <= CURRENT_DATE
-          AND j.status IN (6, 7, 8)
+          -- Don't chase close-out on a mid-hire partial return (HH 6 but the
+          -- hire isn't due back yet). See CLAUDE.md → "status-6 no man's land".
+          AND (
+            j.status IN (7, 8)
+            OR (j.status = 6 AND (
+              COALESCE(j.return_date, j.job_end) IS NULL
+              OR COALESCE(j.return_date, j.job_end)::date <= CURRENT_DATE + INTERVAL '1 day'
+            ))
+          )
           AND (
             j.pipeline_status NOT IN ('lost', 'cancelled')
             OR jr.keep_after_close = true
@@ -449,6 +457,26 @@ export function startScheduler() {
   });
   console.log('Scheduler: Close-out requirement chase scanner scheduled daily at 09:30');
 
+  // ── Held-return reconciliation ───────────────────────────────────────────
+  // Hourly — advance jobs that were held on hire after a mid-hire partial item
+  // return (HH status 6, but not due back yet) into the returns process once
+  // their return date has actually arrived. Also catches the general
+  // webhook-gap case (HH says 6, no returned webhook ever landed). Forward-only;
+  // never winds a manually-advanced status back. See CLAUDE.md →
+  // "The status-6 no man's land".
+  cron.schedule('15 * * * *', async () => {
+    try {
+      const { reconcileHeldReturns } = await import('../services/hire-lifecycle');
+      const { reconciled } = await reconcileHeldReturns();
+      if (reconciled > 0) {
+        console.log(`Scheduler: Reconciled ${reconciled} held-return job(s) into the returns process`);
+      }
+    } catch (err) {
+      console.error('Scheduler: Held-return reconciliation failed:', err);
+    }
+  });
+  console.log('Scheduler: Held-return reconciliation scheduled hourly at :15');
+
   // ── Notification Escalation ──────────────────────────────────────────
   // Every 15 minutes — check unread notifications and escalate to email
   cron.schedule('*/15 * * * *', async () => {
@@ -482,14 +510,15 @@ export function startScheduler() {
   // migration 102) guarantee at most ONE email per transition.
   cron.schedule('*/15 * * * *', async () => {
     try {
-      const { runDispatchSanityScan, runReturnedBookedOutScan } = await import('../services/sanity-check-scanner');
-      const [dispatch, returned] = await Promise.all([
+      const { runDispatchSanityScan, runReturnedBookedOutScan, runBookedOutNoTimestampScan } = await import('../services/sanity-check-scanner');
+      const [dispatch, returned, noTs] = await Promise.all([
         runDispatchSanityScan(),
         runReturnedBookedOutScan(),
+        runBookedOutNoTimestampScan(),
       ]);
-      if (dispatch.warned > 0 || returned.warned > 0) {
+      if (dispatch.warned > 0 || returned.warned > 0 || noTs.warned > 0) {
         console.log(
-          `Scheduler: Sanity scans — dispatch ${dispatch.warned}/${dispatch.checked}, returned ${returned.warned}/${returned.checked}`
+          `Scheduler: Sanity scans — dispatch ${dispatch.warned}/${dispatch.checked}, returned ${returned.warned}/${returned.checked}, booked_out-no-ts ${noTs.warned}/${noTs.checked}`
         );
       }
     } catch (err) {
@@ -810,14 +839,28 @@ export function startScheduler() {
       console.error('Scheduler: Holding reminders failed:', err);
     }
   }, { timezone: 'Europe/London' });
+
+  // COT receipt chase — WEEKLY, Wednesday 12:00 Europe/London. One digest per
+  // card-holder summarising their company-card purchases still missing a receipt
+  // (older than the 3-day grace). See services/cost-receipt-chaser.ts.
+  cron.schedule('0 12 * * 3', async () => {
+    try {
+      const { runCostReceiptChase } = await import('../services/cost-receipt-chaser');
+      const r = await runCostReceiptChase();
+      if (r.holdersNudged) {
+        console.log(`Scheduler: COT receipt chase — nudged ${r.holdersNudged} staff about ${r.costsChased} missing receipts`);
+      }
+    } catch (err) {
+      console.error('Scheduler: COT receipt chase failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
   console.log('Scheduler: Holding reminders scheduled daily at 09:25 Europe/London');
 
   // ── Vehicle forecast AI assessments ──────────────────────────────────────
-  // 3x/week: Sunday 18:00 (ready for Monday AM), Wednesday + Friday 07:00, all
-  // Europe/London. Regenerates the cached AI health narrative for every active
-  // van (deterministic forecast cards are computed live, not here). On-demand
-  // regeneration is the Forecast tab "Regenerate" button. See
-  // services/vehicle-forecast-ai.ts.
+  // Weekly: Sunday 18:00 Europe/London (ready for Monday AM). Regenerates the
+  // cached AI health narrative for every active van (deterministic forecast
+  // cards are computed live, not here). On-demand regeneration is the Forecast
+  // tab "Regenerate" button. See services/vehicle-forecast-ai.ts.
   const runForecastBatch = async () => {
     try {
       const { runScheduledForecastAssessments } = await import('../services/vehicle-forecast-ai');
@@ -828,8 +871,7 @@ export function startScheduler() {
     }
   };
   cron.schedule('0 18 * * 0', runForecastBatch, { timezone: 'Europe/London' });
-  cron.schedule('0 7 * * 3,5', runForecastBatch, { timezone: 'Europe/London' });
-  console.log('Scheduler: Vehicle forecast assessments scheduled Sun 18:00 + Wed/Fri 07:00 Europe/London');
+  console.log('Scheduler: Vehicle forecast assessments scheduled weekly Sun 18:00 Europe/London');
 
   // ── PCN pay-direct chase ladder ──────────────────────────────────────────
   // Daily at 09:35 Europe/London. Chases drivers who were told to pay a charge
@@ -914,6 +956,51 @@ export function startScheduler() {
     }
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: Pre-auth expiry reconciliation scheduled daily at 09:40 Europe/London');
+
+  // ── Stripe reimbursement silent-failure detector ────────────────────────
+  // Daily at 09:42 Europe/London. Safety net for the "no silent failures"
+  // principle: catch any stripe_gbp reimbursement recorded in OP that has NO
+  // resolution leg — i.e. neither a real Stripe refund (ref stripe_refund_*) nor
+  // an explicit record-only acknowledgement (ref recorded_only). Such a record
+  // means OP/HH/email claimed a refund the Stripe API never saw (the Jun 2026
+  // silent-swallow bug). Post-fix this should never fire — if it does, something
+  // regressed. Internal-only nudge to info@ (consistent with money-alert routing).
+  cron.schedule('42 9 * * *', async () => {
+    try {
+      const rows = await query(
+        `SELECT je.id, je.hirehop_job_id, je.client_name,
+                je.reimbursement_amount, je.reimbursement_date,
+                je.stripe_payment_intent_id, je.payment_reference
+         FROM job_excess je
+         WHERE je.reimbursement_method = 'stripe_gbp'
+           AND je.reimbursement_amount > 0
+           AND je.reimbursement_date >= NOW() - INTERVAL '3 days'
+           AND NOT EXISTS (
+             SELECT 1 FROM jsonb_array_elements(COALESCE(je.refund_legs, '[]'::jsonb)) leg
+             WHERE leg->>'ref' LIKE 'stripe_refund_%' OR leg->>'ref' = 'recorded_only'
+           )
+         ORDER BY je.reimbursement_date DESC`
+      );
+
+      if (rows.rows.length === 0) return;
+
+      const list = rows.rows.map((r: Record<string, any>) =>
+        `<li>Job <strong>#${r.hirehop_job_id ?? '?'}</strong> — ${r.client_name || 'Unknown'} — £${Number(r.reimbursement_amount).toFixed(2)} on ${new Date(r.reimbursement_date).toISOString().split('T')[0]} (PI: ${r.stripe_payment_intent_id || r.payment_reference || 'none on record'})</li>`
+      ).join('');
+
+      await emailService.sendRaw({
+        to: 'info@oooshtours.co.uk',
+        subject: `⚠️ ${rows.rows.length} Stripe excess reimbursement(s) may not have refunded`,
+        html: `<p>The following excess reimbursement(s) were recorded as <strong>stripe_gbp</strong> in the last 3 days but have <strong>no Stripe refund leg and no record-only acknowledgement</strong> — meaning OP may have recorded a refund that never actually fired in Stripe.</p>
+               <ul>${list}</ul>
+               <p>Check each PaymentIntent in the Stripe dashboard. If the money is still there, refund it manually. If it was refunded out-of-band, re-record the reimbursement via Manage → Reimburse (it will stamp a record-only leg and silence this alert).</p>`,
+      });
+      console.log(`Scheduler: Stripe reimbursement detector flagged ${rows.rows.length} record(s) → info@`);
+    } catch (err) {
+      console.error('Scheduler: Stripe reimbursement detector failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: Stripe reimbursement silent-failure detector scheduled daily at 09:42 Europe/London');
 
   // ── Cost ↔ Xero reconciliation sync — daily 07:45 Europe/London ─────────
   // Closes the spend-money loop: when the bookkeeper reconciles our pushed

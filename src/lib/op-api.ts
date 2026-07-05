@@ -308,6 +308,23 @@ export async function submitCompletionToOP(
 }
 
 /**
+ * Declare which legs a D&C job involves (van and/or equipment), from the
+ * /start wizard selection. Lets OP close the quote server-side when the last
+ * required leg lands, instead of depending on the browser returning to
+ * /complete across the OP↔portal domain boundary.
+ */
+export async function declareLegsOP(
+  sessionToken: string,
+  quoteId: string,
+  legs: { van: boolean; equipment: boolean }
+): Promise<{ success: boolean }> {
+  return opFetch<{ success: boolean }>(`/jobs/${quoteId}/legs`, sessionToken, {
+    method: 'POST',
+    body: JSON.stringify(legs),
+  })
+}
+
+/**
  * Login to OP portal (create session).
  */
 export async function loginToOP(

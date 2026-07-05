@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { hasManagerRole } from '../lib/roles';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { Navigate } from 'react-router-dom';
@@ -72,7 +73,7 @@ function getPasswordStrength(pw: string): { score: number; label: string; color:
 export default function SettingsPage() {
   const user = useAuthStore((s) => s.user);
 
-  if (user?.role !== 'admin' && user?.role !== 'manager') {
+  if (!hasManagerRole(user?.role)) {
     return <Navigate to="/" replace />;
   }
 
@@ -537,6 +538,9 @@ function SettingsContent() {
 
       {/* Vehicle Issues settings — admin & manager */}
       <VehicleIssueSettingsSection />
+
+      {/* COT card register — admin only */}
+      {currentUser?.role === 'admin' && <CotCardRegisterSection />}
 
       {/* Email Service section — admin only */}
       {currentUser?.role === 'admin' && <EmailSection />}
@@ -1737,6 +1741,122 @@ function VehicleIssueSettingsSection() {
         >
           {saving ? 'Saving…' : 'Save'}
         </button>
+      </div>
+    </div>
+  );
+}
+
+// ── COT card register (admin only) ──────────────────────────────────────────
+// Admin sets each staff member's company card (last 4 + a friendly label). The
+// cost-capture flow stamps the card holder + last 4 from here server-side, so
+// staff never type card details when logging a company-card purchase.
+
+interface CotCardRow {
+  id: string;
+  email: string;
+  is_active: boolean;
+  first_name: string | null;
+  last_name: string | null;
+  cot_card_last4: string | null;
+  cot_card_label: string | null;
+}
+
+function CotCardRegisterSection() {
+  const [rows, setRows] = useState<CotCardRow[]>([]);
+  const [drafts, setDrafts] = useState<Record<string, { last4: string; label: string }>>({});
+  const [loading, setLoading] = useState(true);
+  const [savingId, setSavingId] = useState<string | null>(null);
+  const [error, setError] = useState('');
+  const [savedId, setSavedId] = useState<string | null>(null);
+
+  useEffect(() => {
+    api.get<{ data: CotCardRow[] }>('/users/cot-cards')
+      .then((res) => {
+        setRows(res.data);
+        const d: Record<string, { last4: string; label: string }> = {};
+        res.data.forEach((r) => { d[r.id] = { last4: r.cot_card_last4 || '', label: r.cot_card_label || '' }; });
+        setDrafts(d);
+      })
+      .catch((err) => { console.error('Failed to load COT cards:', err); setError('Could not load staff.'); })
+      .finally(() => setLoading(false));
+  }, []);
+
+  async function save(id: string) {
+    const draft = drafts[id];
+    if (draft.last4 && !/^\d{4}$/.test(draft.last4)) { setError('Last 4 must be exactly 4 digits.'); return; }
+    setError('');
+    setSavingId(id);
+    try {
+      await api.patch(`/users/${id}/cot-card`, {
+        cot_card_last4: draft.last4 || null,
+        cot_card_label: draft.label.trim() || null,
+      });
+      setRows((prev) => prev.map((r) => r.id === id ? { ...r, cot_card_last4: draft.last4 || null, cot_card_label: draft.label.trim() || null } : r));
+      setSavedId(id);
+      setTimeout(() => setSavedId((s) => s === id ? null : s), 2500);
+    } catch (err) {
+      console.error('Save COT card failed:', err);
+      setError(err instanceof Error ? err.message : 'Save failed.');
+    } finally {
+      setSavingId(null);
+    }
+  }
+
+  const name = (r: CotCardRow) => [r.first_name, r.last_name].filter(Boolean).join(' ') || r.email;
+  const dirty = (r: CotCardRow) => (drafts[r.id]?.last4 || '') !== (r.cot_card_last4 || '') || (drafts[r.id]?.label.trim() || '') !== (r.cot_card_label || '');
+
+  if (loading) {
+    return (
+      <div className="bg-white rounded-xl border border-gray-200 p-6">
+        <h2 className="text-lg font-semibold text-gray-900 mb-2">COT Card Register</h2>
+        <p className="text-sm text-gray-500">Loading…</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-white rounded-xl border border-gray-200 p-6">
+      <h2 className="text-lg font-semibold text-gray-900 mb-1">COT Card Register</h2>
+      <p className="text-xs text-gray-500 mb-4">
+        Set each staff member's company card. The cost-capture form stamps the card holder + last 4 from here automatically — staff never type card details.
+      </p>
+      {error && <div className="mb-3 bg-red-50 border border-red-200 text-red-700 text-sm rounded-md px-3 py-2">{error}</div>}
+      <div className="overflow-x-auto">
+        <table className="min-w-full text-sm">
+          <thead>
+            <tr className="text-left text-gray-500 border-b border-gray-200">
+              <th className="py-2 pr-3 font-medium">Staff</th>
+              <th className="py-2 px-3 font-medium">Card last 4</th>
+              <th className="py-2 px-3 font-medium">Card label</th>
+              <th className="py-2 pl-3 font-medium text-right">&nbsp;</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.id} className={`border-b border-gray-100 ${r.is_active ? '' : 'opacity-50'}`}>
+                <td className="py-2 pr-3 text-gray-800">{name(r)}{!r.is_active && <span className="text-xs text-gray-400"> (inactive)</span>}</td>
+                <td className="py-2 px-3">
+                  <input value={drafts[r.id]?.last4 ?? ''} inputMode="numeric" maxLength={4}
+                    onChange={(e) => setDrafts((d) => ({ ...d, [r.id]: { ...d[r.id], last4: e.target.value.replace(/\D/g, '').slice(0, 4) } }))}
+                    placeholder="1234" className="w-20 border border-gray-300 rounded-md px-2 py-1 text-sm" />
+                </td>
+                <td className="py-2 px-3">
+                  <input value={drafts[r.id]?.label ?? ''} maxLength={60}
+                    onChange={(e) => setDrafts((d) => ({ ...d, [r.id]: { ...d[r.id], label: e.target.value } }))}
+                    placeholder="e.g. Amex ·1234" className="w-40 border border-gray-300 rounded-md px-2 py-1 text-sm" />
+                </td>
+                <td className="py-2 pl-3 text-right">
+                  {savedId === r.id ? <span className="text-xs text-green-600">Saved ✓</span> : (
+                    <button onClick={() => save(r.id)} disabled={savingId === r.id || !dirty(r)}
+                      className="px-3 py-1 text-xs text-white bg-purple-600 hover:bg-purple-700 rounded-md disabled:opacity-40">
+                      {savingId === r.id ? '…' : 'Save'}
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     </div>
   );

@@ -179,7 +179,19 @@ async function runMigrations(direction: 'up' | 'down') {
         '142_vehicle_forecast_assessments.sql',
         '143_pcn_fine_recharge.sql',
   '144_hire_form_documents.sql',
-        '155_gmail_ingestion.sql',
+        '145_pcn_issued_date.sql',
+        '146_self_drive_van_override.sql',
+        '147_cost_xero_stale.sql',
+        '148_cot_card_register_and_receipt_chase.sql',
+        '149_interactions_held_item.sql',
+        '150_cost_recharge_lifecycle.sql',
+        '151_backfill_excess_stripe_pi.sql',
+        '152_recharge_running_costs.sql',
+        '153_studio_sitter_shifts.sql',
+        '154_excess_held_on_account.sql',
+        '155_hire_form_email_claim.sql',
+        '156_quote_legs.sql',
+        '157_gmail_ingestion.sql',
       ];
 
       for (const migration of migrations) {

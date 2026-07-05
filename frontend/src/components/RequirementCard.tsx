@@ -70,6 +70,18 @@ export interface DerivedFlags {
   crew_item_count: number;
   total_prep_time_mins: number;
   prep_time_by_category: { vehicles: number; backline: number; rehearsals: number; other: number };
+  rehearsal_detail?: RehearsalDetail | null;
+}
+
+// Studio-sitter detection (Phase A) — mirrors backend services/rehearsal-plan.ts.
+export interface RehearsalDetail {
+  rooms: { room: string; flavour: 'daytime' | 'evening' | 'lockout' | 'base' | 'unknown'; sitter_needed: boolean; list_id: number }[];
+  needs_review: boolean;
+  sitter_needed: boolean;
+  daytime_only: boolean;
+  first_session_date: string | null;
+  last_session_date: string | null;
+  evenings: { date: string; sitter_needed: boolean }[];
 }
 
 export interface SeatAvailability {
@@ -89,6 +101,7 @@ interface EmailContact {
 }
 
 interface HireFormDriver {
+  driver_id: string | null;
   driver_name: string | null;
   status: string;
   created_at: string;
@@ -134,6 +147,8 @@ const TYPE_STATUS_LABELS: Record<string, Record<string, string>> = {
   invoice: { not_started: 'Not Invoiced', in_progress: 'Generated', done: 'Sent', blocked: 'Problem' },
   payment_reconcile: { not_started: 'Outstanding', in_progress: 'Partial', done: 'Reconciled', blocked: 'Dispute' },
   excess_resolve: { not_started: 'Pending', in_progress: 'In Progress', done: 'Resolved', blocked: 'Dispute' },
+  cost_resolve: { not_started: 'Pending', in_progress: 'To Resolve', done: 'Resolved', blocked: 'Dispute' },
+  recharge_running_costs: { not_started: 'Declared', in_progress: 'Expect invoices', done: 'No further costs', blocked: 'Issue' },
   freelancer_followup: { not_started: 'Not Contacted', in_progress: 'Chased', done: 'Done', blocked: 'Overdue' },
   client_followup: { not_started: 'Not Contacted', in_progress: 'In Progress', done: 'Done', blocked: 'No Response' },
   reminder: { not_started: 'To Do', in_progress: 'In Progress', done: 'Done', blocked: 'Blocked' },
@@ -162,6 +177,18 @@ function formatPrepTime(mins: number): string {
   return m > 0 ? `${h}h ${m}m` : `${h}h`;
 }
 
+// "Fri 10 Jul" from a plain YYYY-MM-DD (TZ-free via UTC).
+function formatEveningDate(iso: string): string {
+  const [y, m, d] = iso.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('en-GB', {
+    weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC',
+  });
+}
+
+const REHEARSAL_FLAVOUR_LABEL: Record<string, string> = {
+  daytime: 'Daytime', evening: 'Evening', lockout: 'Lockout', base: 'Room', unknown: 'Room',
+};
+
 // ── Component ──────────────────────────────────────────────────────────
 
 export default function RequirementCard({
@@ -177,6 +204,8 @@ export default function RequirementCard({
   onRemove,
   onVanAndDriverToggle,
   onSlotModeChange,
+  selfDriveVanOverride,
+  onVehicleCountOverride,
   onReload,
 }: {
   req: JobRequirement;
@@ -191,6 +220,8 @@ export default function RequirementCard({
   onRemove: (reqId: string, reason?: string) => void;
   onVanAndDriverToggle?: () => void;
   onSlotModeChange?: (itemId: number, slotIndex: number, mode: VehicleSlotMode) => void;
+  selfDriveVanOverride?: number | null;
+  onVehicleCountOverride?: (count: number | null) => void;
   onReload?: () => void;
 }) {
   const [showStatusMenu, setShowStatusMenu] = useState(false);
@@ -220,6 +251,44 @@ export default function RequirementCard({
   const [excessInfo, setExcessInfo] = useState<ExcessInfo | null>(null);
   // Carnet — read-only reflection of the real lifecycle (managed in Operations)
   const [carnet, setCarnet] = useState<{ id: string; mode: string; status: string } | null>(null);
+  // Rehearsal — per-evening studio-sitter coverage (managed on the Studio Sitters roster)
+  const [rehearsalCoverage, setRehearsalCoverage] = useState<Record<string, { status: string; assignee: { id: string; name: string } | null }>>({});
+  const [rehearsalSitters, setRehearsalSitters] = useState<{ id: string; name: string; is_studio_sitter: boolean }[]>([]);
+  const [assignPickerDate, setAssignPickerDate] = useState<string | null>(null);
+  const [rehearsalPickerSearch, setRehearsalPickerSearch] = useState('');
+  const [rehearsalBusy, setRehearsalBusy] = useState(false);
+
+  const loadRehearsalCoverage = () => {
+    if (!jobId) return;
+    api.get<{ data: { date: string; status: string; assignee: { id: string; name: string } | null }[] }>(`/studio-sitters/job/${jobId}/coverage`)
+      .then(d => {
+        const map: Record<string, { status: string; assignee: { id: string; name: string } | null }> = {};
+        (d?.data ?? []).forEach(e => { map[e.date] = { status: e.status, assignee: e.assignee }; });
+        setRehearsalCoverage(map);
+      })
+      .catch(() => {});
+  };
+
+  async function assignRehearsalSitter(date: string, personId: string) {
+    setRehearsalBusy(true);
+    try {
+      await api.post('/studio-sitters/assign', { date, person_id: personId });
+      setAssignPickerDate(null);
+      setRehearsalPickerSearch('');
+      loadRehearsalCoverage();
+      onReload?.();
+    } catch { /* surfaced elsewhere */ } finally { setRehearsalBusy(false); }
+  }
+
+  async function clearRehearsalSitter(date: string) {
+    setRehearsalBusy(true);
+    try {
+      await api.post('/studio-sitters/unassign', { date });
+      setAssignPickerDate(null);
+      loadRehearsalCoverage();
+      onReload?.();
+    } catch { /* noop */ } finally { setRehearsalBusy(false); }
+  }
 
   // Suspension marker — set by the derivation engine when the hire chain is
   // not required on this job (every van slot is Van & Driver, or the job is
@@ -228,7 +297,23 @@ export default function RequirementCard({
   const isSuspendedByVD = suspensionReason !== null;
   const statusConfig = PREP_STATUS_CONFIG[req.status] || PREP_STATUS_CONFIG.not_started;
   const typeLabels = TYPE_STATUS_LABELS[req.requirement_type];
+  // The `vehicle` type_label is the static "Vehicle (Self-Drive)" from the
+  // requirement-type picklist. Override it with a mode-aware suffix computed
+  // from the live derived slot modes so a V&D (or mixed) job reads honestly.
+  const vehicleModeSuffix = (() => {
+    if (req.requirement_type !== 'vehicle' || req.custom_label) return null;
+    const sd = derivedFlags?.self_drive_count ?? 0;
+    const vd = derivedFlags?.van_and_driver_count ?? 0;
+    if (sd === 0 && vd === 0) return null; // no slot data — leave static label
+    if (sd > 0 && vd > 0) return `Mixed — ${sd} self-drive, ${vd} van & driver`;
+    return vd > 0 ? 'Van & Driver' : 'Self-Drive';
+  })();
   const label = req.custom_label || req.type_label;
+  // When the vehicle card carries a mode suffix, render the base "Vehicle" word
+  // in the (strikethrough-on-done) title and the mode as a separate, never-struck
+  // qualifier — otherwise a completed V&D vehicle shows "Vehicle (Van & Driver)"
+  // crossed out, which reads as "mode cancelled" rather than "prep done".
+  const titleBase = vehicleModeSuffix ? 'Vehicle' : label;
 
   // Load hire form and excess data for nested cards
   useEffect(() => {
@@ -250,6 +335,13 @@ export default function RequirementCard({
         .then(d => setCarnet(d?.data || null))
         .catch(() => {});
     }
+    if (req.requirement_type === 'rehearsal' && jobId) {
+      loadRehearsalCoverage();
+      api.get<{ data: { id: string; name: string; is_studio_sitter: boolean }[] }>('/studio-sitters/sitters')
+        .then(d => setRehearsalSitters(d?.data ?? []))
+        .catch(() => {});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [req.requirement_type, hhJobNumber, jobId]);
 
   // ── Hire Form Email ────────────────────────────────────────────────
@@ -383,8 +475,13 @@ export default function RequirementCard({
           <span className="text-lg flex-shrink-0">{isNested ? '↳' : ''} {req.type_icon}</span>
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
-              <span className={`font-medium ${req.status === 'done' ? 'text-gray-400 line-through' : 'text-gray-900'}`}>
-                {label}
+              <span className="font-medium">
+                <span className={req.status === 'done' ? 'text-gray-400 line-through' : 'text-gray-900'}>
+                  {titleBase}
+                </span>
+                {vehicleModeSuffix && (
+                  <span className="text-gray-500"> ({vehicleModeSuffix})</span>
+                )}
               </span>
               {req.is_auto && req.source === 'hirehop_sync' && (
                 <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-500 border border-blue-200 font-medium">HH</span>
@@ -458,6 +555,47 @@ export default function RequirementCard({
                     )}
                   </div>
                 )}
+                {/* Sequential-swap structure control — only on multi-van
+                    self-drive jobs. HH qty-2 can mean one van swapped mid-hire
+                    (per-item going-out dates in HireHop), not two vans out at
+                    once. The override caps the count that drives excess + the
+                    additional-driver charge (£1,200 not £2,400). vehicle_slots
+                    still shows both physical vans. */}
+                {onVehicleCountOverride && derivedFlags.vehicle_slots
+                  && derivedFlags.vehicle_slots.filter(s => s.mode === 'self_drive').length > 1 && (() => {
+                  const physicalSelfDrive = derivedFlags.vehicle_slots.filter(s => s.mode === 'self_drive').length;
+                  const isSwap = selfDriveVanOverride !== null && selfDriveVanOverride !== undefined;
+                  return (
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="text-gray-500">Structure:</span>
+                      <button
+                        onClick={() => onVehicleCountOverride(null)}
+                        className={`px-2 py-0.5 rounded text-[10px] font-medium border transition-colors ${
+                          !isSwap
+                            ? 'bg-indigo-100 text-indigo-700 border-indigo-300'
+                            : 'bg-gray-100 text-gray-500 border-gray-200 hover:bg-gray-200'
+                        }`}
+                        title="Both vans out at the same time"
+                      >
+                        {physicalSelfDrive} simultaneous
+                      </button>
+                      <button
+                        onClick={() => onVehicleCountOverride(1)}
+                        className={`px-2 py-0.5 rounded text-[10px] font-medium border transition-colors ${
+                          isSwap
+                            ? 'bg-amber-100 text-amber-700 border-amber-300'
+                            : 'bg-gray-100 text-gray-500 border-gray-200 hover:bg-gray-200'
+                        }`}
+                        title="One van swapped mid-hire (per-item dates in HireHop) — excess + charges for one van"
+                      >
+                        🔄 1 van, swapped
+                      </button>
+                      {isSwap && (
+                        <span className="text-amber-600">— excess + charges treated as 1 van (£1,200)</span>
+                      )}
+                    </div>
+                  );
+                })()}
                 {derivedFlags.seat_config && (
                   <div className={derivedFlags.seat_config === 'forward_facing' ? 'text-amber-600' : 'text-green-600'}>
                     {derivedFlags.seat_config === 'forward_facing' ? '⬆️ Forward-facing seats' : '🔄 Round a table'}
@@ -487,8 +625,14 @@ export default function RequirementCard({
               <div className="mt-1 space-y-1">
                 {/* Summary counts */}
                 {(() => {
+                  // "Received" = a customer actually submitted a hire form,
+                  // which is what links a driver (driver_id set by
+                  // POST /api/hire-forms). A driverless row is a staff
+                  // allocation placeholder, NOT a received form — counting it
+                  // claimed "1 received" on jobs where no form had arrived.
                   const received = hireFormDrivers.filter(d =>
-                    d.status === 'confirmed' || d.status === 'booked_out' || d.status === 'active'
+                    d.driver_id &&
+                    (d.status === 'confirmed' || d.status === 'booked_out' || d.status === 'active')
                   ).length;
                   const referralCount = hireFormDrivers.filter(d => d.requires_referral).length;
                   // Parse all "sent" entries from the notes — each line was
@@ -537,25 +681,32 @@ export default function RequirementCard({
                   );
                 })()}
 
-                {/* Individual driver list */}
-                {hireFormDrivers.length > 0 ? (
-                  <div className="space-y-0.5">
-                    {hireFormDrivers.map((d, i) => (
-                      <div key={i} className="flex items-center gap-2 text-xs">
-                        <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
-                          d.status === 'confirmed' || d.status === 'booked_out' || d.status === 'active' ? 'bg-green-500' :
-                          d.status === 'soft' ? 'bg-amber-400' : 'bg-gray-300'
-                        }`} />
-                        <span className="text-gray-700">{d.driver_name || 'Unknown driver'}</span>
-                        {d.requires_referral && (
-                          <span className="text-[10px] px-1 py-0.5 rounded bg-red-50 text-red-600 border border-red-200">Referral</span>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="text-xs text-gray-400">No hire forms submitted yet</div>
-                )}
+                {/* Individual driver list — only rows with a real submitted
+                    form (driver_id set). Driverless allocation placeholders
+                    belong to the vehicle/allocation layer, not the hire-form
+                    card, and showing them here as "Unknown driver" with a
+                    green dot misrepresented an un-submitted form as received. */}
+                {(() => {
+                  const submittedForms = hireFormDrivers.filter(d => d.driver_id);
+                  return submittedForms.length > 0 ? (
+                    <div className="space-y-0.5">
+                      {submittedForms.map((d, i) => (
+                        <div key={i} className="flex items-center gap-2 text-xs">
+                          <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+                            d.status === 'confirmed' || d.status === 'booked_out' || d.status === 'active' ? 'bg-green-500' :
+                            d.status === 'soft' ? 'bg-amber-400' : 'bg-gray-300'
+                          }`} />
+                          <span className="text-gray-700">{d.driver_name || 'Unknown driver'}</span>
+                          {d.requires_referral && (
+                            <span className="text-[10px] px-1 py-0.5 rounded bg-red-50 text-red-600 border border-red-200">Referral</span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-xs text-gray-400">No hire forms submitted yet</div>
+                  );
+                })()}
                 {/* Always available — staff legitimately need this when:
                     - 0 received: original email went to spam, wrong contact,
                       need to send to a different person, etc.
@@ -655,15 +806,94 @@ export default function RequirementCard({
               </div>
             )}
 
-            {/* Rehearsal */}
-            {req.requirement_type === 'rehearsal' && derivedFlags?.has_rehearsal && (
-              <div className="mt-1 text-xs text-gray-500">
-                Rehearsal room detected
-                {derivedFlags.prep_time_by_category.rehearsals > 0 && (
-                  <span> — est. {formatPrepTime(derivedFlags.prep_time_by_category.rehearsals)} prep</span>
-                )}
-              </div>
-            )}
+            {/* Rehearsal — studio-sitter detection reflection (Phase A, read-only) */}
+            {req.requirement_type === 'rehearsal' && derivedFlags?.has_rehearsal && (() => {
+              const detail = derivedFlags.rehearsal_detail;
+              const sitterNights = detail?.evenings.filter((e) => e.sitter_needed) ?? [];
+              const summary = req.notes?.split('\n').filter(Boolean).pop() ?? null;
+              return (
+                <div className="mt-1.5 text-xs text-gray-600 space-y-1.5">
+                  {/* Room + flavour + prep chips */}
+                  {detail && detail.rooms.length > 0 ? (
+                    <div className="flex flex-wrap items-center gap-1">
+                      {detail.rooms.map((r, i) => (
+                        <span key={i} className="px-2 py-0.5 rounded bg-purple-50 text-purple-700 border border-purple-100">
+                          {r.room}{r.flavour !== 'base' ? ` · ${REHEARSAL_FLAVOUR_LABEL[r.flavour] ?? r.flavour}` : ''}
+                        </span>
+                      ))}
+                      {derivedFlags.prep_time_by_category.rehearsals > 0 && (
+                        <span className="text-gray-400">· est. {formatPrepTime(derivedFlags.prep_time_by_category.rehearsals)} prep</span>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="text-gray-500">
+                      Rehearsal room detected
+                      {derivedFlags.prep_time_by_category.rehearsals > 0 && (
+                        <span> — est. {formatPrepTime(derivedFlags.prep_time_by_category.rehearsals)} prep</span>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Booking summary — after the prep time (amber when a base room needs classifying) */}
+                  {summary && (
+                    <div className={detail?.needs_review ? 'text-amber-700' : 'text-gray-500'}>{summary}</div>
+                  )}
+
+                  {/* Daytime-only / needs-review: no auto sitter, but staff can force cover on the roster */}
+                  {(detail?.daytime_only || detail?.needs_review) && (
+                    <Link to="/operations/studio-sitters" className="text-xs text-purple-600 hover:text-purple-800 font-medium">＋ Call a sitter for a day →</Link>
+                  )}
+
+                  {/* Evening chips — click to assign/reassign a sitter (one covers the site per night) */}
+                  {sitterNights.length > 0 && (
+                    <div className="flex flex-wrap gap-1">
+                      {sitterNights.map((e) => {
+                        const assignee = rehearsalCoverage[e.date]?.assignee;
+                        return (
+                          <button key={e.date} type="button" disabled={rehearsalBusy}
+                            onClick={() => { setAssignPickerDate(assignPickerDate === e.date ? null : e.date); setRehearsalPickerSearch(''); }}
+                            title="Assign a studio sitter"
+                            className={`px-2 py-0.5 rounded border transition-colors disabled:opacity-50 ${assignee ? 'bg-green-50 text-green-700 border-green-200 hover:bg-green-100' : 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100'} ${assignPickerDate === e.date ? 'ring-1 ring-purple-400' : ''}`}>
+                            {formatEveningDate(e.date)} · {assignee ? assignee.name : 'unassigned'}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* Inline sitter picker for the clicked evening */}
+                  {assignPickerDate && (
+                    <div className="mt-1 p-2 rounded-lg border border-purple-200 bg-purple-50/40 max-w-sm">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-gray-700 font-medium">Assign — {formatEveningDate(assignPickerDate)}</span>
+                        <button onClick={() => setAssignPickerDate(null)} className="text-gray-400 hover:text-gray-600">✕</button>
+                      </div>
+                      <input autoFocus value={rehearsalPickerSearch} onChange={(ev) => setRehearsalPickerSearch(ev.target.value)}
+                        placeholder="Search approved freelancers…" className="w-full px-2 py-1 border border-gray-300 rounded text-xs mb-1" />
+                      {rehearsalCoverage[assignPickerDate]?.assignee && (
+                        <button onClick={() => clearRehearsalSitter(assignPickerDate)} disabled={rehearsalBusy}
+                          className="w-full text-left px-2 py-1 rounded text-xs text-red-600 hover:bg-red-50 disabled:opacity-50">Clear sitter</button>
+                      )}
+                      <div className="max-h-40 overflow-y-auto">
+                        {rehearsalSitters
+                          .filter((s) => !rehearsalPickerSearch.trim() || s.name.toLowerCase().includes(rehearsalPickerSearch.toLowerCase()))
+                          .map((s) => (
+                            <button key={s.id} disabled={rehearsalBusy} onClick={() => assignRehearsalSitter(assignPickerDate, s.id)}
+                              className="w-full text-left px-2 py-1 rounded text-xs hover:bg-purple-100 flex items-center gap-1.5 disabled:opacity-50">
+                              {s.is_studio_sitter && <span title="Studio Sitter tag">⭐</span>}{s.name}
+                            </button>
+                          ))}
+                        {rehearsalSitters.length === 0 && <div className="text-xs text-gray-400 px-2 py-1">No approved freelancers.</div>}
+                      </div>
+                    </div>
+                  )}
+
+                  {sitterNights.length > 0 && (
+                    <Link to="/operations/studio-sitters" className="text-xs text-purple-600 hover:text-purple-800 font-medium">Manage on Studio Sitters roster →</Link>
+                  )}
+                </div>
+              );
+            })()}
 
             {/* Carnet — read-only lifecycle reflection + link to Operations (where it's managed) */}
             {req.requirement_type === 'carnet' && (
@@ -790,7 +1020,7 @@ export default function RequirementCard({
             })()}
 
             {/* Notes (for types without specific rendering) */}
-            {!['vehicle', 'hire_forms', 'backline', 'excess', 'excess_resolve', 'invoice', 'damage_review', 'reminder'].includes(req.requirement_type) && req.notes && (
+            {!['vehicle', 'hire_forms', 'backline', 'excess', 'excess_resolve', 'invoice', 'damage_review', 'reminder', 'rehearsal'].includes(req.requirement_type) && req.notes && (
               <div className="mt-1 text-xs text-gray-400 truncate max-w-md">{req.notes.split('\n').filter(Boolean).pop()}</div>
             )}
 

@@ -4,7 +4,7 @@
  * Takes the deterministic forecast (vehicle-forecast.ts) plus recent
  * unstructured prep/service notes and asks Claude for a plain-English health
  * narrative + a prioritised "watch / do" list. Cached in
- * vehicle_forecast_assessments; regenerated 3x/week by the scheduler and
+ * vehicle_forecast_assessments; regenerated weekly by the scheduler and
  * on-demand via the Forecast tab "Regenerate" button.
  *
  * The deterministic numbers stay authoritative — the AI's job is synthesis
@@ -21,15 +21,18 @@ import { buildVehicleForecast, type VehicleForecast } from './vehicle-forecast';
 const MODEL_ID = 'claude-sonnet-4-6';
 const MAX_TOKENS = 1200;
 
-const SYSTEM_PROMPT = `You are a fleet maintenance analyst for Ooosh Tours, a UK music-tour vehicle hire company. You are given a single van's forward-looking health data — tyre wear projections, mileage pace, service-due, MOT/Tax/Insurance/TFL compliance runway, fluid top-up frequency, 12-month running costs, recurring issues, and recent free-text prep/service notes.
+const SYSTEM_PROMPT = `You are a fleet maintenance analyst for Ooosh Tours, a UK music-tour vehicle hire company. You are given a single van's forward-looking health data — tyre wear projections, mileage pace, service-due, MOT/Tax/TFL compliance runway, ULEZ status, fluid top-up frequency, 12-month running costs, recurring issues, and recent free-text prep/service notes.
 
 Write a concise, practical assessment for the warehouse/ops team. Be specific and grounded ONLY in the data given — never invent figures. Prefer the across-signals story (e.g. "tyres are fine but oil top-ups are climbing and there's a recurring nearside light fault") over restating each number.
 
 Rules:
 - Tyre thresholds: plan replacement at 5mm, replace at 4mm. Never reference the 1.6mm legal limit as a target — Ooosh acts well before legal.
 - Fronts and rears wear at different rates; call out the worst corner/axle.
+- A corner showing no current tread with a recent tyre replacement just means a new tyre was fitted and not yet measured — note it positively ("rears replaced, awaiting first reading"), do NOT flag it as a problem. Only treat wheel/alignment/balancing work as a tyre change if new tyres were actually fitted.
 - If a fluid is topped up frequently (a "watch" status), flag possible consumption worth a mechanic's eye.
-- Compliance: anything overdue is urgent; anything within ~30 days is worth booking.
+- Compliance: only items listed under COMPLIANCE are tracked, each with a real date. Anything overdue is urgent; anything within ~30 days is worth booking. Do NOT flag missing compliance items — insurance is a blanket fleet policy (not tracked per-van), and an absent TFL line just means that van isn't registered (e.g. a 6-seater that can't claim the discount). Never recommend "set/confirm the insurance date" or "confirm TFL status".
+- ULEZ: a van shown as "ULEZ compliant: yes" needs no action. Only mention ULEZ if it is explicitly non-compliant.
+- Costs: call out a repair that recurs in the service records (e.g. the same component fixed 2+ times) as a watch item — it often signals an underlying fault worth investigating rather than re-patching. Flag a clear year-on-year cost jump, and an unusually high single category, only when material. Don't restate the totals if nothing stands out.
 - Keep watch_items and recommendations SHORT and actionable. Empty arrays are fine for a healthy van.
 - overall_status: "good" (nothing pressing), "watch" (a few things to keep an eye on), "attention" (something needs booking/doing soon).
 - Return ONLY valid JSON matching the schema. No markdown, no commentary.`;
@@ -100,15 +103,30 @@ function forecastToPrompt(f: VehicleForecast): string {
     lines.push(`  ${c.corner} (${c.label}): ${c.currentTread}mm [${c.status}]${c.wearRatePer1000 != null ? `, wearing ${c.wearRatePer1000}mm/1000mi` : ', wear rate unknown'}${proj.length ? ', ' + proj.join(', ') : ''}${c.resetCount > 0 ? `, ${c.resetCount} tyre change(s) detected` : ''}`);
   }
 
+  if (f.tyreEvents.length) {
+    lines.push('\nTYRE REPLACEMENTS (from service records — already used to reset the wear baselines above):');
+    for (const e of f.tyreEvents.slice(-8)) {
+      const where = e.corners.length === 4 ? 'all corners' : e.corners.join('/');
+      lines.push(`  ${e.date || '?'}${e.mileage != null ? ` @ ${e.mileage}mi` : ''}: ${where} — ${e.description}`);
+    }
+  }
+
   lines.push('\nSERVICE:');
   if (f.service.nextDueMileage != null) {
     lines.push(`  Next service due at ${f.service.nextDueMileage} mi (${f.service.milesUntil != null ? `${f.service.milesUntil} mi away` : 'distance unknown'}${f.service.etaWeeks != null ? `, ~${f.service.etaWeeks} weeks at current pace` : ''}) [${f.service.status}]`);
   } else lines.push('  Next service mileage not set');
   if (f.service.lastServiceDate) lines.push(`  Last service: ${f.service.lastServiceDate}${f.service.lastServiceMileage != null ? ` at ${f.service.lastServiceMileage} mi` : ''}`);
 
-  lines.push('\nCOMPLIANCE:');
-  for (const c of f.compliance) {
-    lines.push(`  ${c.kind}: ${c.due || 'not set'}${c.days != null ? ` (${c.days} days)` : ''} [${c.status}]`);
+  lines.push('\nCOMPLIANCE (only tracked items with a real date are listed):');
+  if (f.compliance.length) {
+    for (const c of f.compliance) {
+      lines.push(`  ${c.kind}: ${c.due}${c.days != null ? ` (${c.days} days)` : ''} [${c.status}]`);
+    }
+  } else {
+    lines.push('  No tracked compliance dates on file.');
+  }
+  if (f.vehicle.ulezCompliant != null) {
+    lines.push(`  ULEZ compliant: ${f.vehicle.ulezCompliant ? 'yes' : 'NO — not compliant'}`);
   }
 
   lines.push('\nFLUIDS (top-up frequency):');
@@ -119,6 +137,20 @@ function forecastToPrompt(f: VehicleForecast): string {
 
   lines.push('\nCOSTS (last 12 months):');
   lines.push(`  Total £${f.costs.last12mTotal} (service £${f.costs.serviceTotal} + fuel £${f.costs.fuelTotal})${f.costs.perMile != null ? `, ~£${f.costs.perMile}/mile` : ''}`);
+  if (f.costs.prior12mTotal != null) {
+    const delta = Math.round((f.costs.last12mTotal - f.costs.prior12mTotal) * 100) / 100;
+    const dir = delta > 0 ? `up £${delta}` : delta < 0 ? `down £${Math.abs(delta)}` : 'flat';
+    lines.push(`  Prior 12 months: £${f.costs.prior12mTotal} (${dir} year-on-year)`);
+  }
+  if (f.costs.byCategory.length) {
+    lines.push(`  Service spend by category: ${f.costs.byCategory.map((c) => `${c.type} £${c.total} (${c.count})`).join(', ')}`);
+  }
+  if (f.costs.recent.length) {
+    lines.push('\nRECENT SERVICE RECORDS (newest first — look for repeated repairs to the same component):');
+    for (const r of f.costs.recent) {
+      lines.push(`  ${r.date || '?'} [${r.type}]${r.cost != null ? ` £${r.cost}` : ''}: ${r.name || '(no description)'}${r.garage ? ` @ ${r.garage}` : ''}`);
+    }
+  }
 
   if (f.recurringIssues.length) {
     lines.push('\nRECURRING ISSUES:');
@@ -189,13 +221,23 @@ export async function generateVehicleAssessment(
 
 /** Latest cached assessment for a vehicle, or null. */
 export async function getLatestAssessment(vehicleId: string): Promise<VehicleAssessment | null> {
-  const res = await query(
-    `SELECT id, vehicle_id, headline, summary, watch_items, recommendations, overall_status, model, trigger, generated_at
-       FROM vehicle_forecast_assessments
-      WHERE vehicle_id = $1 ORDER BY generated_at DESC LIMIT 1`,
-    [vehicleId],
-  );
-  return res.rows[0] ? (res.rows[0] as VehicleAssessment) : null;
+  try {
+    const res = await query(
+      `SELECT id, vehicle_id, headline, summary, watch_items, recommendations, overall_status, model, trigger, generated_at
+         FROM vehicle_forecast_assessments
+        WHERE vehicle_id = $1 ORDER BY generated_at DESC LIMIT 1`,
+      [vehicleId],
+    );
+    return res.rows[0] ? (res.rows[0] as VehicleAssessment) : null;
+  } catch (err) {
+    // Degrade gracefully if the table doesn't exist yet (migration 142 not run) —
+    // the deterministic forecast still loads; the assessment panel just shows empty.
+    if ((err as { code?: string })?.code === '42P01') {
+      console.warn('[vehicle-forecast] vehicle_forecast_assessments missing — run migration 142');
+      return null;
+    }
+    throw err;
+  }
 }
 
 /** Active fleet vehicle ids for the scheduled batch. */

@@ -17,8 +17,13 @@
 import { query, getClient } from '../config/database';
 import type { HHLineItem } from './hirehop-job-sync';
 import { syncExcessRequirementStatus } from './excess-requirement-sync';
+import { syncCostResolveRequirementStatus } from './cost-requirement-sync';
 import { hhBroker } from './hirehop-broker';
 import { calculateVatAdjustment } from './vat-adjustment';
+import { BACKLINE_CATEGORY_IDS } from './backline-categories';
+import { computeRehearsalDetail, buildRehearsalSummary, type RehearsalDetail } from './rehearsal-plan';
+import { syncRehearsalRequirementStatus } from './studio-sitter';
+import { hireGenuinelyReturning } from './hire-lifecycle';
 
 // ── HH Category IDs ──────────────────────────────────────────────────────
 // Source: HireHop categories_list.php, verified 9 Apr 2026
@@ -29,35 +34,11 @@ const REHEARSAL_CATEGORY = 450;         // Rehearsal Rooms
 const STORAGE_CATEGORY = 449;           // Storage Space
 
 // "Backline" in Ooosh's operational context = ALL equipment the warehouse preps.
-// This includes instruments, PA/sound, DJ, lighting, staging, power, video, accessories.
-// Essentially everything EXCEPT: vehicles (370-371), rehearsal rooms (450), storage (449).
-// We use an inclusive approach: any category >= 372 that isn't a vehicle/rehearsal/storage.
-const BACKLINE_CATEGORIES = [
-  // Guitars (372-378)
-  372, 373, 374, 375, 376, 377, 378,
-  // Basses (379-384)
-  379, 380, 381, 382, 383, 384,
-  // Drums (385-398)
-  385, 386, 387, 388, 389, 390, 391, 392, 393, 394, 395, 396, 397, 398,
-  // Keyboards (399-404)
-  399, 400, 401, 402, 403, 404,
-  // Woodwind (405)
-  405,
-  // Backline accessories — stands, cases, fans, valves (406-410)
-  406, 407, 408, 409, 410,
-  // PA / Sound (411-428)
-  411, 412, 413, 414, 415, 416, 417, 418, 419, 420, 421, 422, 423, 424, 425, 426, 427, 428,
-  // DJ (429-431)
-  429, 430, 431,
-  // Lighting (432-438)
-  432, 433, 434, 435, 436, 437, 438,
-  // Power (439-443)
-  439, 440, 441, 442, 443,
-  // Staging (444-448)
-  444, 445, 446, 447, 448,
-  // Video (451-453)
-  451, 452, 453,
-];
+// Single source of truth in `backline-categories.ts` (shared with the Backline
+// Matcher). Includes instruments, PA/sound, DJ, lighting, staging, power, video,
+// accessories. Everything EXCEPT vehicles (370-371), rehearsal rooms (450),
+// storage (449).
+const BACKLINE_CATEGORIES = BACKLINE_CATEGORY_IDS;
 
 // Keep separate arrays for sanity-check flags (has_pa, has_lighting, etc.)
 const PA_CATEGORIES = [411, 412, 413, 414, 415, 416, 417, 418, 419, 420, 421, 422, 423, 424, 425, 426, 427, 428];
@@ -133,6 +114,10 @@ export interface DerivedFlags {
     rehearsals: number;
     other: number;
   };
+  // Studio-sitter detection intelligence (rooms + flavour + sitter-needed
+  // evenings). Populated in deriveRequirementsForJob (needs job dates), NOT in
+  // deriveFlags (item-only). Optional — absent on item-only deriveFlags calls.
+  rehearsal_detail?: RehearsalDetail | null;
 }
 
 // ── Derive flags from line items ─────────────────────────────────────────
@@ -308,9 +293,14 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
     mismatchesFlagged: [],
   };
 
-  // Load job with line items
+  // Load job with line items. Rehearsal date columns are extracted in
+  // Europe/London so the finish-on-the-day rule (see rehearsal-plan.ts) keys off
+  // the real local hour regardless of server timezone.
   const jobResult = await query(
-    `SELECT id, hh_job_number, client_name, line_items, hh_derived_flags, is_van_and_driver, vehicle_slot_modes, is_internal
+    `SELECT id, hh_job_number, client_name, line_items, hh_derived_flags, is_van_and_driver, vehicle_slot_modes, is_internal, self_drive_van_override,
+       (COALESCE(job_date, out_date) AT TIME ZONE 'Europe/London')::date::text AS reh_start_date,
+       (COALESCE(job_end, return_date) AT TIME ZONE 'Europe/London')::date::text AS reh_end_date,
+       EXTRACT(HOUR FROM (COALESCE(job_end, return_date) AT TIME ZONE 'Europe/London'))::int AS reh_end_hour
      FROM jobs WHERE id = $1 AND is_deleted = false`,
     [jobId]
   );
@@ -336,6 +326,32 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
     }
     flags.van_and_driver_count = flags.vehicle_slots.length;
     flags.self_drive_count = 0;
+  }
+  // Sequential-swap override (Option X): when staff have declared the real
+  // simultaneous self-drive van count (e.g. HH lists qty-2 but it's one van
+  // swapped mid-hire), cap self_drive_count to that. vehicle_slots is left
+  // intact so the card still shows both physical vans (with a "treated as N"
+  // label) — only the COUNT that drives excess + top-N + additional-driver
+  // charge is corrected. The existing excess mismatch logic then either
+  // auto-updates an uncollected record or flags one with money taken.
+  if (job.self_drive_van_override !== null && job.self_drive_van_override !== undefined) {
+    const ov = Number(job.self_drive_van_override);
+    if (Number.isFinite(ov) && ov >= 0) {
+      flags.self_drive_count = Math.min(ov, flags.self_drive_count);
+    }
+  }
+  // ── Rehearsal detection intelligence (Phase A) ──
+  // Needs job dates, so computed here rather than in the item-only deriveFlags().
+  // Attaching to `flags` persists it in hh_derived_flags and surfaces it on the
+  // requirement card via the derived-flags read. See services/rehearsal-plan.ts.
+  if (flags.has_rehearsal) {
+    flags.rehearsal_detail = computeRehearsalDetail(items, {
+      startDate: job.reh_start_date ?? null,
+      endDate: job.reh_end_date ?? null,
+      endHour: job.reh_end_hour ?? null,
+    });
+  } else {
+    flags.rehearsal_detail = null;
   }
   result.flags = flags;
 
@@ -505,7 +521,7 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
     // ── Rehearsal ──
     if (flags.has_rehearsal) {
       await upsertAutoRequirement(client, jobId, 'rehearsal', flags, previousFlags, result, {
-        notes: 'Rehearsal space detected from HireHop items',
+        notes: buildRehearsalSummary(flags.rehearsal_detail ?? null),
         snapshot: items.filter(i => i.CATEGORY_ID === REHEARSAL_CATEGORY),
       });
     }
@@ -679,7 +695,17 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
 
     // ── Auto-generate close-out requirements when job reaches return status ──
     // HH status 6=Returned Incomplete, 7=Returned, 8=Requires Attention, 11=Completed
-    const isReturnPhase = hhStatus >= 6 && hhStatus !== 9 && hhStatus !== 10; // exclude cancelled/not interested
+    //
+    // HH status 6 is ambiguous — it fires on a genuine end-of-hire check-in AND
+    // on a mid-hire partial item return (a client hands back one element while
+    // the rest stays out). Gate on the hire-end date so a mid-hire partial does
+    // NOT prematurely spin up invoice / payment / client-followup close-out
+    // cards (which the chase scanner would then nag about while the tour is
+    // still out). Status 7/8/11 mean everything is physically back → always a
+    // genuine return. See CLAUDE.md → "The status-6 no man's land".
+    const isReturnPhase =
+      hhStatus >= 6 && hhStatus !== 9 && hhStatus !== 10 && // exclude cancelled/not interested
+      hireGenuinelyReturning(hhStatus, jobRow?.return_date, jobRow?.job_end);
     // HH status 7+ means everything is physically back (Returned, Requires Attention, Completed)
     const isFullyReturned = hhStatus >= 7 && hhStatus !== 9 && hhStatus !== 10;
 
@@ -718,6 +744,42 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
         );
         if (parseInt(excessCount.rows[0]?.cnt || '0') > 0) {
           await ensureCloseout('excess_resolve', 'Resolve all insurance excess (reimburse, claim, or waive)');
+        }
+      }
+
+      // Conditional: cost recharge resolution — only if the job has any cost
+      // flagged for client recharge. Skipped on internal jobs (no client to bill).
+      if (!isInternal) {
+        const rechargeCount = await client.query(
+          `SELECT COUNT(*) AS cnt FROM costs WHERE job_id = $1 AND recharge_mode <> 'none'`,
+          [jobId]
+        );
+        if (parseInt(rechargeCount.rows[0]?.cnt || '0') > 0) {
+          await ensureCloseout('cost_resolve', 'Resolve all client recharges (bill to HireHop, bill externally, or absorb)');
+        }
+
+        // Standing "recharge running costs" card — forward-looking, on jobs
+        // declared to recharge their running costs (a quote recharge line or the
+        // Tools toggle). Created amber regardless of whether costs have landed
+        // yet (the whole point: it says "expect the freelancer's fuel/parking
+        // invoice, recharge it"). Manual close via "no further costs".
+        const rrc = await client.query(
+          `SELECT recharge_running_costs FROM jobs WHERE id = $1`,
+          [jobId]
+        );
+        if (rrc.rows[0]?.recharge_running_costs) {
+          const exists = await client.query(
+            `SELECT id FROM job_requirements WHERE job_id = $1 AND requirement_type = 'recharge_running_costs' AND phase = 'post_hire'`,
+            [jobId]
+          );
+          if (exists.rows.length === 0) {
+            await client.query(
+              `INSERT INTO job_requirements (job_id, requirement_type, status, notes, is_auto, source, phase)
+               VALUES ($1, 'recharge_running_costs', 'in_progress', $2, true, 'auto_post_hire', 'post_hire')`,
+              [jobId, 'Running costs recharged at actual + 20%. Log the freelancer/supplier invoices as they land, recharge each to the client, then mark done when no further costs are expected.']
+            );
+            result.requirementsCreated.push('recharge_running_costs (post_hire)');
+          }
         }
       }
 
@@ -768,6 +830,9 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
       // 'in_progress' — including demoting a card staff marked Resolved while
       // money's still in limbo. Replaces the old forward-only autoResolve.
       await syncExcessRequirementStatus(jobId, client);
+      // Same treatment for the cost_resolve card — green only when every
+      // recharge-flagged cost on the job is resolved (pushed/external/absorbed).
+      await syncCostResolveRequirementStatus(jobId, client);
 
       // Client follow-up: check if any interaction exists after return_date
       const postReturnInteraction = await client.query(
@@ -863,6 +928,15 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
   // ── Seat availability (read-only, outside transaction) ──
   if (flags.seat_config && flags.has_vehicle) {
     result.seatAvailability = await checkSeatAvailability(flags, items);
+  }
+
+  // ── Wind the rehearsal requirement status from sitter coverage ──
+  // Coverage-authoritative: adding/removing a sitter-needed evening re-derives
+  // the status (e.g. a new date winds 'done' back to 'in_progress'). Best-effort.
+  if (flags.has_rehearsal) {
+    try { await syncRehearsalRequirementStatus(jobId); } catch (err) {
+      console.error(`[HH Derive] rehearsal status sync failed for job ${jobId}:`, err);
+    }
   }
 
   return result;
@@ -978,10 +1052,17 @@ async function upsertAutoRequirement(
 type SuspensionReason = 'Van & Driver' | 'Internal';
 
 async function suspendRequirement(client: any, jobId: string, requirementType: string, reason: SuspensionReason): Promise<void> {
-  // Only suspend auto-created pre_hire requirements that aren't already suspended
+  // Suspend the pre_hire requirement of this type regardless of how it was
+  // created. Only ever called for hire_forms / excess, both of which are fully
+  // V&D-/Internal-governed — when the job is wholly Van & Driver (or internal)
+  // they aren't needed no matter their origin. NB: the enquiry-form
+  // "Self-drive van" quick-select inserts these with is_auto=false (column
+  // default), so filtering on is_auto=true here silently skipped them and left
+  // the hire-form/excess chain live on V&D jobs.
   const existing = await client.query(
     `SELECT id, status, notes FROM job_requirements
-     WHERE job_id = $1 AND requirement_type = $2 AND is_auto = true AND phase = 'pre_hire'`,
+     WHERE job_id = $1 AND requirement_type = $2 AND phase = 'pre_hire'
+       AND status NOT IN ('cancelled', 'done')`,
     [jobId, requirementType]
   );
   if (existing.rows.length === 0) return;
@@ -1059,9 +1140,12 @@ async function restoreJobExcessFromSuspension(client: any, jobId: string): Promi
  * toggle. Puts it back to its previous status.
  */
 async function restoreSuspendedRequirement(client: any, jobId: string, requirementType: string): Promise<void> {
+  // Mirror suspendRequirement: marker-gated, origin-agnostic (no is_auto filter)
+  // so a manually-created (enquiry-form) hire_forms/excess requirement that was
+  // suspended on V&D gets restored when the job flips back to self-drive.
   const existing = await client.query(
     `SELECT id, notes FROM job_requirements
-     WHERE job_id = $1 AND requirement_type = $2 AND is_auto = true AND status = 'blocked' AND phase = 'pre_hire'`,
+     WHERE job_id = $1 AND requirement_type = $2 AND status = 'blocked' AND phase = 'pre_hire'`,
     [jobId, requirementType]
   );
   if (existing.rows.length === 0) return;

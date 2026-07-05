@@ -11,12 +11,15 @@
  * history — so the natural "fronts wear slower than rears" difference falls out
  * of the data rather than being hard-coded. Display groups by axle.
  *
- * Tyre replacement is detected as a tread JUMP UP between consecutive preps
- * (a worn tyre can't gain depth), which resets the wear-rate baseline so a
- * fresh tyre doesn't inherit the old one's projection.
+ * Tyre replacement is detected two ways, both of which reset the wear-rate
+ * baseline so a fresh tyre doesn't inherit the old one's projection:
+ *   1. a tread JUMP UP between consecutive preps (a worn tyre can't gain depth)
+ *   2. a service record that fitted new tyres (passed in as `tyreEvents`, derived
+ *      + classified server-side so the panel and the AI narrator agree)
  *
- * Service-record cross-referencing is deliberately out of scope (Tier 3) —
- * prep forms are the only data source here.
+ * When a replacement is newer than the latest tread reading, the current reading
+ * is the OLD tyre, so the corner reports "awaiting reading" rather than showing a
+ * stale low figure as if the new tyre were already worn.
  */
 
 import type { PrepHistorySession } from './prep-history'
@@ -25,8 +28,30 @@ import { TYRE_TREAD_CAP_MM, TYRE_TREAD_RED_MM, TYRE_TREAD_AMBER_MM } from './tyr
 /** A jump UP of more than this between consecutive preps = a new/swapped tyre. */
 const TREAD_RESET_JUMP_MM = 1.5
 
+/**
+ * Minimum wear rate (mm lost per mile) we treat as a real, measurable signal.
+ * 0.05 mm per 1,000 miles. Below this the least-squares slope is indistinguishable
+ * from measurement noise on near-flat tread readings — a tyre with effectively no
+ * wear would otherwise "read" a rate of ~0.000001 mm/mile (which rounds to "0 mm /
+ * 1,000 mi" on screen) yet still divide into a projection of hundreds of thousands
+ * of miles: the trillion-mile "to the sun and back" bug. Below the floor we report
+ * no usable rate, so the wear rate shows "not enough data" and projections show "—".
+ */
+const MIN_WEAR_RATE_PER_MILE = 0.00005
+
+/** Cap on how far ahead we'll project. Beyond this it's noise, not a forecast. */
+const MAX_PROJECTION_MILES = 150_000
+
 export type Corner = 'FL' | 'FR' | 'RL' | 'RR'
 export type Axle = 'front' | 'rear'
+
+/** A tyre replacement detected in a service record (classified server-side). */
+export interface TyreServiceEvent {
+  date: string | null
+  mileage: number | null
+  corners: Corner[]
+  description: string
+}
 
 const CORNER_AXLE: Record<Corner, Axle> = { FL: 'front', FR: 'front', RL: 'rear', RR: 'rear' }
 const CORNER_LABEL: Record<Corner, string> = {
@@ -63,6 +88,10 @@ export interface CornerTrend {
   /** Number of tyre changes detected across the whole history. */
   resetCount: number
   lastResetDate: string | null
+  /** Where the most recent reset came from — a tread jump ('prep') or a service record. */
+  lastResetSource: 'prep' | 'service' | null
+  /** A replacement was logged AFTER the latest reading — current reading is the old tyre. */
+  awaitingReadingAfterChange: boolean
   /** Points contributing to the current wear-rate segment. */
   segmentPoints: number
   projectionTo5mm: Projection | null
@@ -137,7 +166,7 @@ function wearRate(points: TreadPoint[]): number | null {
   if (denom === 0) return null
   const slope = (n * sxy - sx * sy) / denom // mm per mile (negative as miles rise)
   const loss = -slope // flip so positive = wearing down
-  return loss > 0 ? loss : null // not measurably wearing → no usable rate
+  return loss >= MIN_WEAR_RATE_PER_MILE ? loss : null // below the noise floor → no usable rate
 }
 
 function projectTo(
@@ -147,7 +176,7 @@ function projectTo(
   ratePerMile: number | null,
   milesPerDay: number | null,
 ): Projection | null {
-  if (currentTread == null || ratePerMile == null || ratePerMile <= 0) return null
+  if (currentTread == null || ratePerMile == null || ratePerMile < MIN_WEAR_RATE_PER_MILE) return null
   if (currentTread <= threshold) {
     // Already at/below the threshold.
     return {
@@ -157,13 +186,21 @@ function projectTo(
     }
   }
   const milesRemaining = Math.round((currentTread - threshold) / ratePerMile)
+  // Defence-in-depth: a wear rate that scrapes past the floor on a near-flat
+  // series can still yield an implausibly distant date. Beyond this horizon the
+  // projection isn't a useful planning signal — show "—" rather than a number.
+  if (milesRemaining > MAX_PROJECTION_MILES) return null
   const reachedAtMileage = currentMileage != null ? currentMileage + milesRemaining : null
   let estimatedDate: string | null = null
-  if (milesPerDay != null && milesPerDay > 0) {
-    const days = milesRemaining / milesPerDay
-    const d = new Date()
-    d.setDate(d.getDate() + Math.round(days))
-    estimatedDate = d.toISOString().slice(0, 10)
+  if (milesPerDay != null && milesPerDay > 0 && Number.isFinite(milesRemaining)) {
+    const days = Math.round(milesRemaining / milesPerDay)
+    // Guard against absurd projections (tiny wear rate → millions of days) that
+    // overflow the JS Date and make toISOString() throw "Invalid time value".
+    if (days >= 0 && days < 36500) {
+      const d = new Date()
+      d.setDate(d.getDate() + days)
+      if (!Number.isNaN(d.getTime())) estimatedDate = d.toISOString().slice(0, 10)
+    }
   }
   return { milesRemaining, reachedAtMileage, estimatedDate }
 }
@@ -176,7 +213,10 @@ function bandFor(tread: number | null): CornerTrend['status'] {
 }
 
 /** Build the full per-corner trend picture from the prep sessions (newest-first). */
-export function computePrepTrends(sessions: PrepHistorySession[]): PrepTrends {
+export function computePrepTrends(
+  sessions: PrepHistorySession[],
+  tyreEvents: TyreServiceEvent[] = [],
+): PrepTrends {
   // Work chronologically (oldest → newest).
   const ordered = [...(sessions || [])].reverse()
 
@@ -202,24 +242,48 @@ export function computePrepTrends(sessions: PrepHistorySession[]): PrepTrends {
       allPoints.push({ date: s.date, mileage: parseMileage(s.mileage), tread, isReset: false })
     }
 
-    // Detect tyre changes (tread jumps UP) and mark segment boundaries.
-    let resetCount = 0
-    let lastResetDate: string | null = null
-    let segmentStart = 0
+    // Reset boundaries: a new tyre resets the wear baseline. Two sources — a tread
+    // JUMP UP between preps, or a service record that fitted new tyres on this corner.
+    const resetSource = new Map<number, 'prep' | 'service'>()
     for (let i = 1; i < allPoints.length; i++) {
-      if (allPoints[i]!.tread - allPoints[i - 1]!.tread > TREAD_RESET_JUMP_MM) {
-        allPoints[i]!.isReset = true
-        resetCount++
-        lastResetDate = allPoints[i]!.date
-        segmentStart = i
+      if (allPoints[i]!.tread - allPoints[i - 1]!.tread > TREAD_RESET_JUMP_MM) resetSource.set(i, 'prep')
+    }
+    let changedAfter = false
+    for (const e of tyreEvents.filter(ev => ev.corners.includes(corner))) {
+      let idx = -1
+      for (let i = 0; i < allPoints.length; i++) {
+        const p = allPoints[i]!
+        const byMileage = e.mileage != null && p.mileage != null && p.mileage >= e.mileage
+        const byDate = e.mileage == null && e.date != null && p.date >= e.date
+        if (byMileage || byDate) { idx = i; break }
       }
+      if (idx >= 0) { if (!resetSource.has(idx)) resetSource.set(idx, 'service') }
+      else if (allPoints.length > 0) changedAfter = true // tyre fitted since the last reading
+    }
+    for (const i of resetSource.keys()) allPoints[i]!.isReset = true
+
+    const resetIdxs = [...resetSource.keys()].sort((a, b) => a - b)
+    const segmentStart = resetIdxs.length ? resetIdxs[resetIdxs.length - 1]! : 0
+    const resetCount = resetSource.size + (changedAfter ? 1 : 0)
+    let lastResetDate: string | null = null
+    let lastResetSource: 'prep' | 'service' | null = null
+    if (changedAfter) {
+      const ev = tyreEvents.filter(e => e.corners.includes(corner)).slice(-1)[0]
+      lastResetDate = ev?.date ?? null
+      lastResetSource = 'service'
+    } else if (resetIdxs.length) {
+      const li = resetIdxs[resetIdxs.length - 1]!
+      lastResetDate = allPoints[li]!.date
+      lastResetSource = resetSource.get(li)!
     }
 
-    const segment = allPoints.slice(segmentStart)
-    const latest = allPoints.length ? allPoints[allPoints.length - 1]! : null
+    // A replacement newer than every reading → the latest reading is the OLD tyre;
+    // report unknown rather than showing a stale low figure on a fresh tyre.
+    const segment = changedAfter ? [] : allPoints.slice(segmentStart)
+    const latest = changedAfter || !allPoints.length ? null : allPoints[allPoints.length - 1]!
     const currentTread = latest?.tread ?? null
     const currentMileage = latest?.mileage ?? null
-    const rate = wearRate(segment)
+    const rate = changedAfter ? null : wearRate(segment)
 
     return {
       corner,
@@ -231,6 +295,8 @@ export function computePrepTrends(sessions: PrepHistorySession[]): PrepTrends {
       wearRatePerMile: rate,
       resetCount,
       lastResetDate,
+      lastResetSource,
+      awaitingReadingAfterChange: changedAfter,
       segmentPoints: segment.length,
       projectionTo5mm: projectTo(TYRE_TREAD_AMBER_MM, currentTread, currentMileage, rate, milesPerDay),
       projectionTo4mm: projectTo(TYRE_TREAD_RED_MM, currentTread, currentMileage, rate, milesPerDay),

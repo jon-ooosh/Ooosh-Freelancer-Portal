@@ -1,5 +1,5 @@
 -- ============================================================================
--- 145: Auto-Chase Phase 1 — Gmail ingestion foundation
+-- 157: Auto-Chase Phase 1 — Gmail ingestion foundation
 -- ============================================================================
 -- Spec: docs/AUTO-CHASE-SPEC.md §5, §12.
 --

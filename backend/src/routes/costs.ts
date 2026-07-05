@@ -63,6 +63,9 @@ const PAYMENT_METHODS = [
 const BILL_METHODS = ['not_yet_paid', 'reimburse_me'] as const;
 const PAYMENT_STATUSES = ['paid', 'awaiting_payment', 'awaiting_invoice'] as const;
 const RECHARGE_MODES = ['none', 'full', 'partial'] as const;
+// Xero account codes that count as "running costs" for the recharge auto-inherit
+// on recharge-running-costs jobs: Fuel (410), Parking (411), Travel (325).
+const RUNNING_COST_CODES = new Set(['410', '411', '325']);
 
 const money = z.number().nonnegative().finite();
 
@@ -113,13 +116,14 @@ const rechargeSchema = z.object({
 });
 
 const allocationSchema = z.object({
+  // Empty array clears the split (deletes all allocations for the cost).
   allocations: z.array(z.object({
     job_id: z.string().uuid().optional().nullable(),
     quote_assignment_id: z.string().uuid().optional().nullable(),
     amount: money,
     recharge: z.boolean().optional(),
     notes: z.string().trim().max(2000).optional().nullable(),
-  })).min(1),
+  })),
 });
 
 // Columns a staff member may set directly via create/update (whitelist —
@@ -130,7 +134,7 @@ const WRITABLE = [
   'description', 'category', 'xero_account_code', 'cost_type', 'payment_method',
   'cot_card_holder', 'cot_card_last4', 'payment_status', 'job_id', 'vehicle_id',
   'quote_assignment_id', 'platform_issue_id', 'vehicle_service_log_id', 'vehicle_fuel_log_id',
-  'recharge_mode', 'recharge_amount', 'cost_intent', 'receipt_r2_key', 'receipt_filename', 'status', 'notes',
+  'recharge_mode', 'recharge_amount', 'recharge_status', 'cost_intent', 'receipt_r2_key', 'receipt_filename', 'status', 'notes',
 ] as const;
 
 // A quote_actual cost is already billed via its quote — it can never carry a
@@ -140,6 +144,22 @@ function coerceRechargeForIntent(data: Record<string, unknown>) {
   if (data.cost_intent === 'quote_actual') {
     data.recharge_mode = 'none';
     data.recharge_amount = null;
+  }
+}
+
+// Keep recharge_status in step with recharge_mode on the generic create/update
+// path. The terminal states (recharged_hh / recharged_external / absorbed) are
+// only ever set by the push/resolve endpoints — here we only toggle between
+// 'pending' (flagged) and NULL (not a recharge). recharge_status is stripped from
+// user input by the Zod schemas, so this is the only thing that sets it on write.
+const TERMINAL_RECHARGE = new Set(['recharged_hh', 'recharged_external', 'absorbed']);
+function deriveRechargeStatusForWrite(data: Record<string, unknown>, current?: string | null) {
+  if (data.recharge_mode === undefined) return; // recharge not being touched
+  if (data.recharge_mode === 'none') {
+    data.recharge_status = null;
+  } else if (!current || !TERMINAL_RECHARGE.has(current)) {
+    // Flagging (or re-flagging) for recharge and not already resolved → pending.
+    data.recharge_status = 'pending';
   }
 }
 
@@ -160,15 +180,34 @@ async function audit(userId: string, costId: string, action: string, prev: unkno
 
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
-    const { view, cost_type, status, payment_status, job_id, vehicle_id, search, limit = '200' } = req.query;
+    const { view, cost_type, status, payment_status, job_id, vehicle_id, search, missing_receipt, mine, recharge_status, limit = '200' } = req.query;
 
     const conditions: string[] = [];
     const params: unknown[] = [];
 
+    // COT receipt chase: company-card costs with no receipt attached. `mine`
+    // scopes to the logged-in card-holder (used by the chase notification link).
+    if (missing_receipt === '1' || missing_receipt === 'true') {
+      conditions.push(`c.payment_method = 'cot_card' AND c.receipt_r2_key IS NULL`);
+    }
+    if ((mine === '1' || mine === 'true') && req.user?.id) {
+      params.push(req.user.id);
+      conditions.push(`c.uploaded_by = $${params.length}`);
+    }
+
     if (view === 'payable') {
       conditions.push(`c.payment_status <> 'paid'`);
     } else if (view === 'recharge') {
-      conditions.push(`c.recharge_mode <> 'none' AND c.recharged_to_hh_at IS NULL`);
+      // Default = pending (flagged, not yet resolved). A recharge_status param
+      // ('all' or a specific terminal state) drives the absorb/recharged audit slice.
+      if (recharge_status === 'all') {
+        conditions.push(`c.recharge_mode <> 'none'`);
+      } else if (typeof recharge_status === 'string' && recharge_status) {
+        params.push(recharge_status);
+        conditions.push(`c.recharge_mode <> 'none' AND c.recharge_status = $${params.length}`);
+      } else {
+        conditions.push(`c.recharge_mode <> 'none' AND COALESCE(c.recharge_status, 'pending') = 'pending'`);
+      }
     } else if (view === 'reconcile') {
       conditions.push(`c.payment_method = 'cot_card' AND c.xero_sync_state <> 'reconciled'`);
     }
@@ -205,7 +244,8 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       SELECT c.*,
         CONCAT(up.first_name, ' ', up.last_name) AS uploaded_by_name,
         j.hh_job_number, j.job_name,
-        fv.reg AS vehicle_reg
+        fv.reg AS vehicle_reg,
+        (SELECT COUNT(*)::int FROM cost_allocations a WHERE a.cost_id = c.id) AS allocation_count
       FROM costs c
       LEFT JOIN users u   ON u.id = c.uploaded_by
       LEFT JOIN people up ON up.id = u.person_id
@@ -221,11 +261,18 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     // due date (+ the terms that produced it) to each row. Single source of
     // truth for the bill due date — the list, mark-paid modal and Xero push all
     // read these. See docs/COSTS-PAYMENT-AUTOMATION-SPEC.md.
-    const { buildTermsResolver, computeDueDate } = await import('../services/supplier-terms');
+    const { buildTermsResolver, computeDueDate, freelancerDueDate } = await import('../services/supplier-terms');
     const resolve = await buildTermsResolver(
       result.rows.map((r) => ({ xeroContactId: r.xero_contact_id, supplierName: r.supplier_name })),
     );
     const rows = result.rows.map((r) => {
+      // Freelancer invoices follow Ooosh terms (first Friday +1wk after approval),
+      // not supplier/Xero terms. The Friday date only exists once approved — until
+      // then we fall back to the standard terms display.
+      if (r.cost_type === 'freelancer_invoice' && r.approved_at) {
+        const terms = { basis: 'invoice_date' as const, days: 0, source: 'freelancer' as const };
+        return { ...r, terms, due_date: freelancerDueDate(r.approved_at) };
+      }
       const terms = resolve({ xeroContactId: r.xero_contact_id, supplierName: r.supplier_name });
       return { ...r, terms, due_date: computeDueDate(r.cost_date, terms) };
     });
@@ -234,7 +281,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     const stats = await query(`
       SELECT
         COUNT(*) FILTER (WHERE payment_status <> 'paid')::int AS payable,
-        COUNT(*) FILTER (WHERE recharge_mode <> 'none' AND recharged_to_hh_at IS NULL)::int AS recharge_pending,
+        COUNT(*) FILTER (WHERE recharge_mode <> 'none' AND COALESCE(recharge_status, 'pending') = 'pending')::int AS recharge_pending,
         COUNT(*) FILTER (WHERE payment_method = 'cot_card' AND xero_sync_state <> 'reconciled')::int AS reconcile_pending,
         COALESCE(SUM(amount_gross) FILTER (WHERE payment_status <> 'paid'), 0)::numeric AS payable_total
       FROM costs
@@ -249,7 +296,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 
 // ── Facet lookups ───────────────────────────────────────────────────────────
 
-async function listBy(column: string, value: string, res: Response) {
+async function listBy(column: string, value: string, res: Response, extra?: Record<string, unknown>) {
   const result = await query(
     `SELECT c.*, CONCAT(up.first_name, ' ', up.last_name) AS uploaded_by_name
      FROM costs c
@@ -260,14 +307,24 @@ async function listBy(column: string, value: string, res: Response) {
     [value],
   );
   // Outstanding = anything not fully resolved (powers the close-out flag).
+  // A recharge is unresolved while flagged but still 'pending' (not pushed to HH,
+  // billed externally, or absorbed).
   const outstanding = result.rows.filter(
-    (r) => r.status !== 'resolved' || (r.recharge_mode !== 'none' && !r.recharged_to_hh_at) || r.payment_status !== 'paid',
+    (r) => r.status !== 'resolved'
+      || (r.recharge_mode !== 'none' && (r.recharge_status ?? 'pending') === 'pending')
+      || r.payment_status !== 'paid',
   ).length;
-  res.json({ data: result.rows, outstanding });
+  res.json({ data: result.rows, outstanding, ...(extra || {}) });
 }
 
 router.get('/by-job/:jobId', async (req: AuthRequest, res: Response) => {
-  try { await listBy('job_id', req.params.jobId as string, res); }
+  try {
+    const jobId = String(req.params.jobId);
+    // Surface the job's recharge-running-costs flag so the capture modal can
+    // default new running-cost costs to recharge + show the hint.
+    const jf = await query('SELECT recharge_running_costs FROM jobs WHERE id = $1', [jobId]);
+    await listBy('job_id', jobId, res, { recharge_running_costs: jf.rows[0]?.recharge_running_costs ?? false });
+  }
   catch (err) { console.error('[costs] by-job error:', err); res.status(500).json({ error: 'Internal server error' }); }
 });
 
@@ -307,6 +364,18 @@ router.get('/check-invoice', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// Default recharge markup config (ex VAT) — drives the resolve modal's
+// pre-filled suggestion. Multi-segment so it doesn't collide with /:id below.
+router.get('/recharge-defaults', async (_req: AuthRequest, res: Response) => {
+  try {
+    const { getRechargeMarkupDefaults } = await import('../services/cost-recharge-markup');
+    res.json({ data: await getRechargeMarkupDefaults() });
+  } catch (err) {
+    console.error('[costs] recharge-defaults error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // ── Xero diagnostics (Custom Connection) ─────────────────────────────────────
 // Lets staff verify the Xero creds the moment they're set in .env, before any
 // of the sync/bill-create flows land. Multi-segment paths so they don't collide
@@ -320,6 +389,99 @@ router.get('/xero/health', authorize(...VERIFY_ROLES), async (_req: AuthRequest,
   } catch (err) {
     console.error('[costs] xero health error:', err);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Reconcile probe — "what's on the COT card in Xero that ISN'T in OP".
+// Reads SPEND bank transactions on the mapped COT bank account over a window
+// and flags which have a matching OP cost (by pushed BankTransactionID, else by
+// amount + near date). Doubles as the verification tool for the Codat→Xero feed:
+// if this returns transactions, OP can read the COT card and matching is viable;
+// if it returns nothing, the card's purchases aren't landing as readable
+// BankTransactions (they're sitting as raw, unreconciled statement lines) and we
+// need a different route. Read-only, admin/manager.
+router.get('/reconcile/xero-cot', authorize(...VERIFY_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const { isXeroConfigured } = await import('../config/xero');
+    if (!isXeroConfigured()) {
+      return res.status(503).json({ error: 'Xero not configured (XERO_CLIENT_ID / XERO_CLIENT_SECRET missing)' });
+    }
+    const { getSystemSetting } = await import('./system-settings');
+    const accountId = await getSystemSetting('xero_bank_cot_card');
+    if (!accountId) {
+      return res.json({
+        data: { configured: false, message: 'No Xero bank account mapped for the COT card. Set it in Settings → Xero Bank Accounts (the "Company card (COT)" row) first.' },
+      });
+    }
+
+    const days = Math.min(Math.max(parseInt(String(req.query.days ?? '30'), 10) || 30, 1), 180);
+    const start = new Date(); start.setUTCDate(start.getUTCDate() - days);
+    const y = start.getUTCFullYear(), m = start.getUTCMonth() + 1, d = start.getUTCDate();
+    const where = `BankAccount.AccountID==Guid("${accountId}") AND Type=="SPEND" AND Date>=DateTime(${y},${m},${d})`;
+
+    const { xeroBroker } = await import('../services/xero-broker');
+    const raw = await xeroBroker.getBankTransactions(where);
+
+    // Parse the fields we need, defensively (Xero Date can be /Date(ms)/ or ISO).
+    const parseXeroDate = (v: unknown): string | null => {
+      if (typeof v !== 'string') return null;
+      const ms = v.match(/\/Date\((\d+)/);
+      if (ms) return new Date(parseInt(ms[1], 10)).toISOString().slice(0, 10);
+      const t = Date.parse(v);
+      return Number.isNaN(t) ? null : new Date(t).toISOString().slice(0, 10);
+    };
+    type XTxn = { BankTransactionID?: string; Date?: string; Total?: number; Reference?: string; IsReconciled?: boolean; Status?: string; Contact?: { Name?: string } };
+    const txns = (raw as XTxn[]).map((t) => ({
+      bank_transaction_id: t.BankTransactionID ?? null,
+      date: parseXeroDate(t.Date),
+      total: typeof t.Total === 'number' ? t.Total : Number(t.Total ?? 0),
+      reference: t.Reference ?? null,
+      contact_name: t.Contact?.Name ?? null,
+      is_reconciled: t.IsReconciled === true,
+      status: t.Status ?? null,
+    }));
+
+    // OP costs to match against: anything pushed (xero_object_id) + every COT
+    // card cost in the window (for amount/date fallback matching).
+    const opRows = (await query(
+      `SELECT id, xero_object_id, amount_gross, cost_date, supplier_name
+         FROM costs
+        WHERE xero_object_id IS NOT NULL
+           OR (payment_method = 'cot_card' AND cost_date >= (CURRENT_DATE - ($1 || ' days')::interval))`,
+      [String(days)],
+    )).rows as Array<{ id: string; xero_object_id: string | null; amount_gross: string | number | null; cost_date: string | null; supplier_name: string | null }>;
+
+    const byXeroId = new Map(opRows.filter((r) => r.xero_object_id).map((r) => [r.xero_object_id as string, r]));
+    const daysBetween = (a: string, b: string) => Math.abs((Date.parse(a) - Date.parse(b)) / 86400000);
+
+    const results = txns.map((tx) => {
+      let match: { cost_id: string; matched_by: 'xero_id' | 'amount_date' } | null = null;
+      if (tx.bank_transaction_id && byXeroId.has(tx.bank_transaction_id)) {
+        match = { cost_id: byXeroId.get(tx.bank_transaction_id)!.id, matched_by: 'xero_id' };
+      } else if (tx.date) {
+        const cand = opRows.find((r) =>
+          r.cost_date && Math.abs(Number(r.amount_gross ?? 0) - tx.total) <= 0.01 && daysBetween(r.cost_date.slice(0, 10), tx.date!) <= 4,
+        );
+        if (cand) match = { cost_id: cand.id, matched_by: 'amount_date' };
+      }
+      return { ...tx, op_match: match };
+    });
+
+    const unmatched = results.filter((r) => !r.op_match);
+    res.json({
+      data: {
+        configured: true,
+        account_id: accountId,
+        window: { days, from: start.toISOString().slice(0, 10) },
+        fetched: results.length,
+        matched: results.length - unmatched.length,
+        unmatched_count: unmatched.length,
+        unmatched,
+      },
+    });
+  } catch (err) {
+    console.error('[costs] xero-cot probe error:', err);
+    res.status(502).json({ error: 'Xero request failed', detail: err instanceof Error ? err.message : String(err) });
   }
 });
 
@@ -502,7 +664,22 @@ router.post('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respon
     const parse = createSchema.safeParse(req.body);
     if (!parse.success) { res.status(400).json({ error: 'Invalid input', issues: parse.error.issues }); return; }
     const data = parse.data as Record<string, unknown>;
+
+    // Auto-inherit on "recharge running costs" jobs: a running-cost cost
+    // (fuel/parking/travel) linked to a flagged job defaults to Extra + recharge-
+    // pending, UNLESS the caller set the intent/recharge explicitly. The modal
+    // sends explicit values once it's job-aware; this is the safety net.
+    if (data.job_id && data.cost_intent === undefined && data.recharge_mode === undefined
+        && RUNNING_COST_CODES.has(String(data.xero_account_code ?? ''))) {
+      const jf = await query('SELECT recharge_running_costs FROM jobs WHERE id = $1', [data.job_id]);
+      if (jf.rows[0]?.recharge_running_costs) {
+        data.cost_intent = 'extra';
+        data.recharge_mode = 'full';
+      }
+    }
+
     coerceRechargeForIntent(data);
+    deriveRechargeStatusForWrite(data);
 
     // A payable (anything not already paid) enters the approval workflow. If the
     // booker is uploading it, they vouch for it inline → 'verified'. An approver
@@ -575,6 +752,13 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
     const data = parse.data as Record<string, unknown>;
     coerceRechargeForIntent(data);
 
+    // Keep recharge_status in step if recharge_mode is being changed — but never
+    // clobber a terminal resolution (already pushed/absorbed) back to pending.
+    if (data.recharge_mode !== undefined) {
+      const cur = await query('SELECT recharge_status FROM costs WHERE id = $1', [req.params.id]);
+      deriveRechargeStatusForWrite(data, cur.rows[0]?.recharge_status ?? null);
+    }
+
     const sets: string[] = [];
     const vals: unknown[] = [];
     for (const c of WRITABLE) {
@@ -589,10 +773,21 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
     );
     if (!result.rows.length) { res.status(404).json({ error: 'Cost not found' }); return; }
 
-    // Background push to Xero if the cost isn't already attached/reconciled.
-    // The push service itself guards on state — safe to call unconditionally.
     const updated = result.rows[0];
-    if (!updated.xero_object_id || updated.xero_sync_state === 'error' || updated.xero_sync_state === 'pending') {
+    const alreadyPushed = Boolean(updated.xero_object_id) && ['bill_created', 'attached', 'reconciled'].includes(updated.xero_sync_state);
+
+    if (alreadyPushed) {
+      // Already in Xero — we can't silently re-push (it may be reconciled). If a
+      // Xero-affecting field changed, flag it stale so the UI warns + offers a
+      // manual "Re-sync to Xero". Non-Xero edits (notes, payment_status) leave it alone.
+      const XERO_AFFECTING = ['amount_net', 'amount_vat', 'amount_gross', 'xero_account_code',
+        'supplier_name', 'description', 'vat_treatment', 'cost_date', 'payment_method', 'invoice_number'];
+      if (XERO_AFFECTING.some((f) => data[f] !== undefined) && !updated.xero_stale) {
+        const s = await query(`UPDATE costs SET xero_stale=TRUE WHERE id=$1 RETURNING xero_stale`, [updated.id]);
+        updated.xero_stale = s.rows[0]?.xero_stale ?? true;
+      }
+    } else if (!updated.xero_object_id || updated.xero_sync_state === 'error' || updated.xero_sync_state === 'pending') {
+      // Not yet in Xero — background push (the service guards on state).
       const { pushCostToXeroBackground } = await import('../services/cost-xero-push');
       pushCostToXeroBackground(updated.id);
     }
@@ -623,6 +818,31 @@ router.post('/:id/sync-xero', authorize(...STAFF_ROLES), async (req: AuthRequest
     res.json({ data: after.rows[0], result });
   } catch (err) {
     console.error('[costs] sync-xero error:', err);
+    res.status(500).json({ error: 'Internal server error', detail: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// Re-sync an edited, already-pushed cost to Xero IN PLACE (updates the existing
+// object, never duplicates). Behind the xero_stale flag's "Re-sync to Xero"
+// button. 409 if Xero has the object locked (paid bill / reconciled txn).
+router.post('/:id/resync-xero', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    // dismiss: staff fixed a Xero-locked cost (paid bill / reconciled txn)
+    // directly in Xero — just clear the stale flag, don't touch Xero.
+    if (req.body?.dismiss === true) {
+      const r = await query(`UPDATE costs SET xero_stale=FALSE WHERE id=$1 RETURNING *`, [id]);
+      if (!r.rows.length) return res.status(404).json({ error: 'Cost not found' });
+      return res.json({ data: r.rows[0], result: { pushed: false, skipped: 'Marked resolved' } });
+    }
+    const { resyncCostToXero } = await import('../services/cost-xero-push');
+    const result = await resyncCostToXero(id);
+    const after = await query('SELECT * FROM costs WHERE id = $1', [id]);
+    if (!after.rows.length) return res.status(404).json({ error: 'Cost not found' });
+    if (result.locked) return res.status(409).json({ error: result.error, data: after.rows[0], result });
+    res.json({ data: after.rows[0], result });
+  } catch (err) {
+    console.error('[costs] resync-xero error:', err);
     res.status(500).json({ error: 'Internal server error', detail: err instanceof Error ? err.message : String(err) });
   }
 });
@@ -662,9 +882,11 @@ router.post('/:id/recharge', authorize(...STAFF_ROLES), async (req: AuthRequest,
     }
 
     const amount = recharge_mode === 'full' ? (cost.amount_gross ?? recharge_amount) : recharge_amount;
+    // Flagging (or re-flagging) → pending, unless already in a terminal state.
+    const nextStatus = TERMINAL_RECHARGE.has(cost.recharge_status) ? cost.recharge_status : 'pending';
     const result = await query(
-      `UPDATE costs SET recharge_mode = $1, recharge_amount = $2 WHERE id = $3 RETURNING *`,
-      [recharge_mode, amount, req.params.id],
+      `UPDATE costs SET recharge_mode = $1, recharge_amount = $2, recharge_status = $3 WHERE id = $4 RETURNING *`,
+      [recharge_mode, amount, nextStatus, req.params.id],
     );
     await audit(req.user!.id, req.params.id as string, 'recharge_flag',
       { recharge_mode: cost.recharge_mode, recharge_amount: cost.recharge_amount },
@@ -676,21 +898,116 @@ router.post('/:id/recharge', authorize(...STAFF_ROLES), async (req: AuthRequest,
   }
 });
 
+// Persist the recharge base/markup/final figures the resolve modal computed.
+// recharge_amount is the FINAL net (post-markup) figure that bills; the markup
+// columns record how it was reached (audit). Coerces recharge_mode→'full' when a
+// base is given but no mode, so an unflagged `extra` cost can be billed in one step.
+const MARKUP_TYPES = ['greater_of', 'percent', 'fixed', 'none'] as const;
+const rechargeFiguresSchema = z.object({
+  recharge_mode: z.enum(['full', 'partial']).optional(),
+  recharge_amount: money.optional().nullable(),        // final net to bill
+  recharge_base_amount: money.optional().nullable(),   // net before markup
+  recharge_markup_type: z.enum(MARKUP_TYPES).optional().nullable(),
+  recharge_markup_value: money.optional().nullable(),
+});
+
+async function persistRechargeFigures(costId: string, figures: z.infer<typeof rechargeFiguresSchema>) {
+  const sets: string[] = [];
+  const vals: unknown[] = [];
+  const push = (col: string, v: unknown) => { vals.push(v); sets.push(`${col} = $${vals.length}`); };
+  if (figures.recharge_mode !== undefined) push('recharge_mode', figures.recharge_mode);
+  else if (figures.recharge_amount != null) push('recharge_mode', 'full'); // base given, no mode → treat as full
+  if (figures.recharge_amount !== undefined) push('recharge_amount', figures.recharge_amount);
+  if (figures.recharge_base_amount !== undefined) push('recharge_base_amount', figures.recharge_base_amount);
+  if (figures.recharge_markup_type !== undefined) push('recharge_markup_type', figures.recharge_markup_type);
+  if (figures.recharge_markup_value !== undefined) push('recharge_markup_value', figures.recharge_markup_value);
+  if (!sets.length) return;
+  vals.push(costId);
+  await query(`UPDATE costs SET ${sets.join(', ')} WHERE id = $${vals.length}`, vals);
+}
+
 // Push the flagged recharge to HireHop as a billable hire line. Explicit staff
 // action (never auto-fires). Idempotent — a cost already recharged is a no-op.
+// Optional body carries the resolve modal's final figure + markup breakdown.
 router.post('/:id/push-recharge', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
   try {
+    const costId = String(req.params.id);
+    const figures = rechargeFiguresSchema.safeParse(req.body || {});
+    if (figures.success) await persistRechargeFigures(costId, figures.data);
+
     const { pushRechargeToHH } = await import('../services/cost-recharge-hh');
-    const result = await pushRechargeToHH(String(req.params.id));
+    const result = await pushRechargeToHH(costId);
     if (result.pushed) {
-      await audit(req.user!.id, req.params.id as string, 'recharge_pushed', null,
+      await audit(req.user!.id, costId, 'recharge_pushed', null,
         { hh_job: result.hhJobNumber, amount: result.amount, stock: result.stockLabel });
+      // Refresh the post-hire close-out card now this recharge is resolved.
+      const job = await query('SELECT job_id FROM costs WHERE id = $1', [costId]);
+      if (job.rows[0]?.job_id) {
+        const { syncCostResolveRequirementStatus } = await import('../services/cost-requirement-sync');
+        await syncCostResolveRequirementStatus(job.rows[0].job_id).catch(() => { /* non-fatal */ });
+      }
     }
-    const after = await query('SELECT * FROM costs WHERE id = $1', [req.params.id]);
+    const after = await query('SELECT * FROM costs WHERE id = $1', [costId]);
     res.json({ data: after.rows[0] || null, result });
   } catch (err) {
     console.error('[costs] push-recharge error:', err);
     res.status(500).json({ error: 'Internal server error', detail: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// Resolve a recharge WITHOUT a HireHop push: either billed by another means
+// (recharged_external — typically the HH job was closed, so a direct Xero invoice
+// etc.) or deliberately not billed (absorbed / written off, reason required).
+// Terminal — clears the cost out of the Recharges-pending bucket and lets the
+// post-hire cost_resolve card go green. Reason is auditable for the "we keep
+// absorbing £20 refuels" review.
+const resolveRechargeSchema = rechargeFiguresSchema.extend({
+  resolution: z.enum(['recharged_external', 'absorbed']),
+  note: z.string().trim().max(2000).optional().nullable(),
+});
+
+router.post('/:id/resolve-recharge', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const parse = resolveRechargeSchema.safeParse(req.body);
+    if (!parse.success) { res.status(400).json({ error: 'Invalid input', issues: parse.error.issues }); return; }
+    const { resolution, note, ...figures } = parse.data;
+    if (resolution === 'absorbed' && !note?.trim()) {
+      res.status(400).json({ error: 'A reason is required to absorb / write off a recharge.' }); return;
+    }
+    const costId = String(req.params.id);
+    const existing = await query('SELECT * FROM costs WHERE id = $1', [costId]);
+    if (!existing.rows.length) { res.status(404).json({ error: 'Cost not found' }); return; }
+    const before = existing.rows[0];
+    if (before.cost_intent === 'quote_actual') {
+      res.status(400).json({ error: 'This cost is part of a quote (already billed via the quote) — it has no recharge to resolve.' }); return;
+    }
+
+    await persistRechargeFigures(costId, figures);
+    // Flag for recharge if it wasn't already (so an unflagged extra cost can be
+    // resolved in one step), then stamp the terminal resolution.
+    const result = await query(
+      `UPDATE costs SET
+         recharge_mode = CASE WHEN recharge_mode = 'none' OR recharge_mode IS NULL THEN 'full' ELSE recharge_mode END,
+         recharge_status = $1,
+         recharge_resolution_note = $2,
+         recharge_resolved_by = $3,
+         recharge_resolved_at = NOW()
+       WHERE id = $4 RETURNING *`,
+      [resolution, note?.trim() || null, req.user!.id, costId],
+    );
+    await audit(req.user!.id, costId, 'recharge_resolved',
+      { recharge_status: before.recharge_status },
+      { recharge_status: resolution, note: note?.trim() || null });
+
+    // Refresh the post-hire close-out card.
+    if (result.rows[0]?.job_id) {
+      const { syncCostResolveRequirementStatus } = await import('../services/cost-requirement-sync');
+      await syncCostResolveRequirementStatus(result.rows[0].job_id).catch(() => { /* non-fatal */ });
+    }
+    res.json({ data: result.rows[0] });
+  } catch (err) {
+    console.error('[costs] resolve-recharge error:', err);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
