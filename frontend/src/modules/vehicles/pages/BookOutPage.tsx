@@ -11,6 +11,7 @@ import { withRetry } from '../lib/retry'
 import { checkMileagePlausibility, resolveMileageFloor } from '../lib/mileage-sanity'
 import { sendConditionReport, blobToBase64, resizeImageForPdf } from '../lib/pdf-email'
 import { PhotoCapture } from '../components/book-out/PhotoCapture'
+import { FreelancerLinkError } from '../components/FreelancerLinkError'
 import { TimeInput } from '../../../components/TimeInput'
 import { SignatureCapture } from '../components/book-out/SignatureCapture'
 import type { SignatureCaptureHandle } from '../components/book-out/SignatureCapture'
@@ -80,7 +81,7 @@ const INITIAL_FORM: BookOutFormState = {
 
 export function BookOutPage() {
   const [searchParams] = useSearchParams()
-  const { scope, freelancerContext } = useAuth()
+  const { scope, freelancerContext, freelancerError } = useAuth()
   const isFreelancer = scope === 'freelancer'
   // Van & Driver soft book-out: Ooosh supplies the driver (one of our
   // freelancers) — no customer hire form, no customer signature, no customer
@@ -1045,6 +1046,15 @@ export function BookOutPage() {
       setUploadProgress(null)
       setIsSubmitting(false)
     }
+  }
+
+  // Freelancer token exchange failed (bad/expired token, not on the crew, no
+  // van allocated, hire form not received, backend blip). Show a friendly
+  // fallback with a retry + office number instead of a dead-end blank/login
+  // screen (Lewis, HH 15933). freelancerError is only ever set when a
+  // freelancerToken was present in the URL, so this never fires for staff.
+  if (freelancerError) {
+    return <FreelancerLinkError message={freelancerError} action="book-out" />
   }
 
   // Freelancer mode: van-confirm gate. Driver must tap "yes this is my van"

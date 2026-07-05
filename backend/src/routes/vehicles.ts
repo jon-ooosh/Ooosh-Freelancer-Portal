@@ -82,33 +82,90 @@ router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) =
     const { quoteId, freelancerEmail } = verified;
     console.log('[freelancer-bookout] Token verified', { quoteId, freelancerEmail });
 
-    // Check the freelancer is actually assigned to this quote.
-    const personResult = await query(
+    // Load the quote + its job context. All crew on the quote share the same
+    // job, so we resolve the job from the quote itself rather than from a
+    // specific crew row.
+    const quoteResult = await query(
+      `SELECT q.job_id, q.job_type, q.venue_name, j.hh_job_number
+         FROM quotes q
+         LEFT JOIN jobs j ON j.id = q.job_id
+        WHERE q.id = $1 AND q.is_deleted = false
+        LIMIT 1`,
+      [quoteId]
+    );
+    if (quoteResult.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found', code: 'quote_not_found' });
+      return;
+    }
+    const { job_id: jobId, hh_job_number: hhJobNumber, venue_name: venueName } = quoteResult.rows[0];
+
+    // Authorise the freelancer against the quote's CREW, not a single email.
+    //
+    // The freelancer's identity is proven by the HMAC-signed token
+    // (freelancerEmail, minted by the portal AFTER portal-auth). But the login
+    // email doesn't always join cleanly to quote_assignments.person_id —
+    // freelancers accumulate duplicate people records / multiple emails, so the
+    // crew row can point at a different record than the one they logged in with
+    // (Lewis, hoadleyguitartech@live.com, HH 15933, 2 Jul — stranded because the
+    // strict person_id match failed). We match by id → email → unique name so a
+    // legitimate freelancer on the crew is recognised regardless of which email
+    // they logged in with.
+    const crewResult = await query(
+      `SELECT qa.person_id, p.email, p.first_name, p.last_name
+         FROM quote_assignments qa
+         JOIN people p ON p.id = qa.person_id
+        WHERE qa.quote_id = $1
+          AND qa.status NOT IN ('declined', 'cancelled')`,
+      [quoteId]
+    );
+    if (crewResult.rows.length === 0) {
+      res.status(403).json({ error: 'You are not assigned to this job', code: 'not_assigned' });
+      return;
+    }
+
+    // Login person (for the session + display name). Usually present — portal
+    // login requires a people row — but handled gracefully if absent.
+    const loginPersonResult = await query(
       `SELECT id, first_name, last_name FROM people WHERE LOWER(email) = LOWER($1) LIMIT 1`,
       [freelancerEmail]
     );
-    if (personResult.rows.length === 0) {
-      res.status(403).json({ error: 'Freelancer not recognised' });
-      return;
-    }
-    const person = personResult.rows[0];
+    const loginPerson = loginPersonResult.rows[0] as
+      | { id: string; first_name: string; last_name: string }
+      | undefined;
 
-    const assignmentCheck = await query(
-      `SELECT qa.id AS quote_assignment_id, q.job_id, q.job_type, q.venue_name, j.hh_job_number
-         FROM quote_assignments qa
-         JOIN quotes q ON q.id = qa.quote_id
-         LEFT JOIN jobs j ON j.id = q.job_id
-         WHERE qa.quote_id = $1
-           AND qa.person_id = $2
-           AND q.is_deleted = false
-         LIMIT 1`,
-      [quoteId, person.id]
-    );
-    if (assignmentCheck.rows.length === 0) {
-      res.status(403).json({ error: 'You are not assigned to this job' });
+    const norm = (s: string | null | undefined) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const loginEmailLc = freelancerEmail.toLowerCase();
+    const loginName = loginPerson ? norm(`${loginPerson.first_name} ${loginPerson.last_name}`) : '';
+
+    let matchedCrew =
+      (loginPerson && crewResult.rows.find((c) => c.person_id === loginPerson.id)) ||
+      crewResult.rows.find((c) => (c.email || '').toLowerCase() === loginEmailLc);
+    if (!matchedCrew && loginName) {
+      const nameMatches = crewResult.rows.filter((c) => norm(`${c.first_name} ${c.last_name}`) === loginName);
+      if (nameMatches.length === 1) {
+        matchedCrew = nameMatches[0];
+        console.warn('[freelancer-bookout] Authorised via NAME match (id/email mismatch)', {
+          quoteId,
+          freelancerEmail,
+          matchedPersonId: matchedCrew.person_id,
+        });
+      }
+    }
+    if (!matchedCrew) {
+      console.warn('[freelancer-bookout] Freelancer not on quote crew', {
+        quoteId,
+        freelancerEmail,
+        crewSize: crewResult.rows.length,
+      });
+      res.status(403).json({ error: 'You are not assigned to this job', code: 'not_assigned' });
       return;
     }
-    const { job_id: jobId, hh_job_number: hhJobNumber, venue_name: venueName } = assignmentCheck.rows[0];
+
+    // Session identity: prefer the login person; fall back to the matched crew
+    // member so freelancerPersonId is always a valid people id.
+    const person = loginPerson
+      ? loginPerson
+      : { id: matchedCrew.person_id, first_name: matchedCrew.first_name, last_name: matchedCrew.last_name };
 
     // Find the vehicle_hire_assignment for this job. The trust chain for a
     // freelancer doing a delivery is: their row on quote_assignments
