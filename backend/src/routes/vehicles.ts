@@ -2586,6 +2586,25 @@ router.post('/save-event', async (req: FlexibleVehicleRequest, res: Response) =>
               console.warn('[vehicles/events] book-out post-hooks failed to schedule:', hookErr);
             }
           }
+
+          // Leg-based completion: a freelancer book-out completes the VAN leg
+          // of the portal quote. Stamp it + try to close the quote server-side
+          // so a van-only delivery closes the moment the van leaves — no
+          // cross-domain return hop to /complete required (the Tobi nag, HH
+          // 15669). For a "both" job the quote only closes once the equipment
+          // leg also lands. Keyed on the freelancer session's quoteId; staff
+          // book-outs have no portal quote and are skipped.
+          if (req.bookoutSession?.quoteId) {
+            const quoteId = req.bookoutSession.quoteId;
+            const actor = req.bookoutSession.freelancerEmail || 'freelancer book-out';
+            try {
+              const { stampQuoteLeg, maybeCloseQuote } = await import('../services/quote-completion');
+              await stampQuoteLeg(quoteId, 'van');
+              await maybeCloseQuote(quoteId, { triggeringLeg: 'van', actorLabel: actor });
+            } catch (legErr) {
+              console.warn(`[vehicles/events] van-leg completion failed for quote ${quoteId}:`, legErr);
+            }
+          }
         }
       } catch (err) {
         console.warn('[vehicles/events] book-out side-effect failed:', err);

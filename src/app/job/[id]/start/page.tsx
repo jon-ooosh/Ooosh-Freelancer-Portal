@@ -84,11 +84,35 @@ export default function StartDeliveryPage() {
     }
   }, [jobId, router])
 
-  // Handle vehicle book-out
+  // Declare which legs this job involves so OP can close the quote server-side
+  // when the last required leg lands (no cross-domain return hop needed).
+  // Best-effort: never block the freelancer starting if this call fails — the
+  // legacy return-hop flow still works, we just lose the server-close safety net.
+  const declareLegs = async (van: boolean, equipment: boolean) => {
+    try {
+      await fetch(`/api/jobs/${jobId}/legs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ van, equipment }),
+      })
+    } catch (err) {
+      console.warn('Declare legs failed (non-blocking):', err)
+    }
+  }
+
+  // Backline only → equipment leg, no van. Declare then go to the checklist.
+  const handleBacklineOnly = async () => {
+    await declareLegs(false, true)
+    router.push(`/job/${jobId}/complete`)
+  }
+
+  // Handle vehicle book-out. vanOnly=true → van only; vanOnly=false → "both"
+  // (van book-out first, then equipment checklist).
   const handleBookout = async (vanOnly: boolean) => {
     setBookoutLoading(true)
     setBookoutError(null)
     try {
+      await declareLegs(true, !vanOnly)
       const res = await fetch(`/api/jobs/${jobId}/bookout-token`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -182,16 +206,17 @@ export default function StartDeliveryPage() {
           </button>
 
           {/* Backline only */}
-          <Link
-            href={`/job/${jobId}/complete`}
-            className="w-full flex items-center gap-4 p-5 rounded-xl border-2 border-gray-200 bg-white hover:border-purple-400 hover:bg-purple-50 transition-colors text-left shadow-sm"
+          <button
+            onClick={handleBacklineOnly}
+            disabled={bookoutLoading}
+            className="w-full flex items-center gap-4 p-5 rounded-xl border-2 border-gray-200 bg-white hover:border-purple-400 hover:bg-purple-50 transition-colors text-left disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
           >
             <span className="text-3xl">🎸</span>
             <div className="flex-1">
               <p className="font-semibold text-gray-900">Backline only</p>
               <p className="text-sm text-gray-500">Equipment checklist &amp; sign-off</p>
             </div>
-          </Link>
+          </button>
 
           {/* Both */}
           <button
