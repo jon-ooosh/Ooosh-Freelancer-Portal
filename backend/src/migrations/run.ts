@@ -190,6 +190,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '153_studio_sitter_shifts.sql',
         '154_excess_held_on_account.sql',
         '155_hire_form_email_claim.sql',
+        '156_quote_legs.sql',
       ];
 
       for (const migration of migrations) {

@@ -21,7 +21,6 @@ import { emailService } from '../services/email-service';
 import { resolveClientEmailTarget, buildFallbackBanner, logFallbackToTimeline } from '../services/money-emails';
 import { uploadToR2, isR2Configured, getPresignedDownloadUrl } from '../config/r2';
 import { generateDeliveryNotePdf, DeliveryNoteItem } from '../services/delivery-note-pdf';
-import { autoDispatchJob } from '../services/auto-dispatch';
 
 // Stable UUID seeded by migration 031 — used as created_by for portal-driven
 // auto-actions (the freelancer is a `people` row, not a `users` row, so we
@@ -1315,6 +1314,67 @@ router.get('/jobs/:quoteId/equipment', async (req: PortalRequest, res: Response)
   }
 });
 
+// ── POST /api/portal/jobs/:quoteId/legs — declare which legs the job has ──
+//
+// The /start wizard ("van only / backline only / both") is the declaration of
+// which legs a D&C job involves. The portal calls this as the freelancer picks,
+// so OP can close the quote server-side the moment the last required leg lands
+// (van book-out and/or equipment /complete) — no cross-domain return hop needed.
+// Idempotent; safe to re-send.
+
+const legsSchema = z.object({
+  van: z.preprocess((v) => v === 'true' || v === true, z.boolean()),
+  equipment: z.preprocess((v) => v === 'true' || v === true, z.boolean()),
+});
+
+router.post('/jobs/:quoteId/legs', async (req: PortalRequest, res: Response) => {
+  try {
+    const personId = req.portalUser!.id;
+    const isStaffShared = req.portalUser!.isStaffShared;
+    const quoteId = req.params.quoteId;
+
+    if (!isUuidLike(quoteId)) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
+    const parsed = legsSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Invalid legs payload', details: parsed.error.issues });
+      return;
+    }
+    const { van, equipment } = parsed.data;
+
+    // Access check — same rule as /complete (freelancer on the quote, or the
+    // shared staff account for is_ooosh_crew quotes).
+    const access = await query(
+      `SELECT q.id
+         FROM quote_assignments qa
+         JOIN quotes q ON q.id = qa.quote_id
+        WHERE qa.quote_id = $1
+          AND (qa.person_id = $2 OR (qa.is_ooosh_crew = true AND $3 = true))
+          AND q.is_deleted = false`,
+      [quoteId, personId, isStaffShared]
+    );
+    if (access.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
+    await query(
+      `UPDATE quotes
+          SET requires_van_leg = $1, requires_equipment_leg = $2, updated_at = NOW()
+        WHERE id = $3`,
+      [van, equipment, quoteId]
+    );
+
+    res.json({ success: true, legs: { van, equipment } });
+  } catch (error) {
+    console.error('[portal] declare legs error:', error);
+    res.status(500).json({ error: 'Failed to record job legs' });
+  }
+});
+
 // ── POST /api/portal/jobs/:quoteId/complete — completion submission ──
 
 const completionUpload = multer({
@@ -1470,20 +1530,21 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
     const completionName = staffName || req.portalUser!.name;
 
     // ── Persist to DB ──────────────────────────────────────────────
-    // Also bump commercial status to 'completed' so Job Detail's Crew &
-    // Transport card stops showing "Confirmed + Complete button" once the
-    // job is actually finished. Keeps transport-ops page and job-detail
-    // in lock-step.
+    // Store the equipment-handover record + stamp the EQUIPMENT leg done. The
+    // quote's ops_status/status/completed_at are NOT flipped here — that's
+    // maybeCloseQuote's job (below), which only closes once every required leg
+    // (van and/or equipment, per the /start declaration) is in. For a
+    // backline-only or a "both" job where the van already booked out, this call
+    // closes it; for a "both" whose van is still pending it stays open (and the
+    // chaser keeps nagging, correctly).
     await query(
       `UPDATE quotes SET
-        ops_status = 'completed',
-        status = CASE WHEN status IN ('draft', 'confirmed') THEN 'completed' ELSE status END,
-        completed_at = NOW(),
         completed_by = $1,
         completion_notes = $2,
         completion_signature = $3,
         completion_photos = $4::jsonb,
         customer_present = $5,
+        equipment_leg_done_at = COALESCE(equipment_leg_done_at, NOW()),
         updated_at = NOW()
        WHERE id = $6`,
       [
@@ -1501,6 +1562,12 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
        WHERE quote_id = $1 AND (person_id = $2 OR (is_ooosh_crew = true AND $3 = true))`,
       [quoteId, personId, isStaffShared]
     );
+
+    // Close the quote server-side if all required legs are done. This is the
+    // same helper the van book-out calls, so the last-mover auto-dispatch (and
+    // the chaser stopping) fires exactly once, whichever leg is last.
+    const { maybeCloseQuote } = await import('../services/quote-completion');
+    await maybeCloseQuote(quoteId as string, { triggeringLeg: 'equipment', actorLabel: completedBy });
 
     if (checklistData) {
       await query(
@@ -1707,53 +1774,11 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
         }
       }
 
-      // ── Last-mover dispatch flip ───────────────────────────────────
-      // When the FINAL outstanding delivery quote on a job completes, push
-      // the job to pipeline_status='dispatched' + HH status 5. Mirrors the
-      // warehouse module's auto-dispatch but at quote-aggregate level.
-      //
-      // Carve-outs:
-      //   - Only delivery quotes count. Collections + crewed don't trigger.
-      //   - Only fires if pipeline_status is currently confirmed/prepped/prepping
-      //     — never regresses a job already past dispatch (returned, completed, etc).
-      //   - Subsequent deliveries added later (e.g. mid-tour bass amp swap) won't
-      //     un-dispatch the job; the writeback's "skip if already at target" guard
-      //     + the pipeline_status whitelist make this naturally idempotent.
-      try {
-        if (ctx.job_id && ctx.job_type === 'delivery') {
-          const remaining = await query(
-            `SELECT COUNT(*)::int AS remaining
-             FROM quotes
-             WHERE job_id = $1
-               AND id != $2
-               AND job_type = 'delivery'
-               AND is_deleted = false
-               AND COALESCE(ops_status, 'todo') NOT IN ('completed', 'cancelled')
-               AND status NOT IN ('completed', 'cancelled')`,
-            [ctx.job_id, quoteId]
-          );
-
-          if (remaining.rows[0].remaining === 0) {
-            // Auto-dispatch (shared helper): OP pipeline → 'dispatched' +
-            // HH writeback to 5 + under-dispatched sanity-check email when
-            // HH is still pre-Dispatched. The whitelist
-            // ['confirmed','prepped','prepping'] is enforced inside the helper.
-            try {
-              await autoDispatchJob({
-                jobId: ctx.job_id,
-                source: 'portal',
-                actorLabel: req.portalUser!.email,
-                actorUserId: null,
-                interactionContent: `🚚 Job dispatched — final delivery completed by ${completionName} via freelancer portal.`,
-              });
-            } catch (err) {
-              console.error('[portal completion] auto-dispatch error:', err);
-            }
-          }
-        }
-      } catch (err) {
-        console.error('[portal completion] Dispatch flip error:', err);
-      }
+      // Last-mover auto-dispatch now lives in maybeCloseQuote (services/
+      // quote-completion.ts), called above — it fires when the quote actually
+      // closes, whichever leg is last, so a van-only delivery closed by the
+      // book-out and a "both" closed by this /complete both dispatch exactly
+      // once. Nothing to do here.
     })().catch(err => console.error('[portal completion] Background task error:', err));
   } catch (error) {
     console.error('Portal completion error:', error);
