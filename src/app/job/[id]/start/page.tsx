@@ -106,26 +106,30 @@ export default function StartDeliveryPage() {
     router.push(`/job/${jobId}/complete`)
   }
 
-  // Handle vehicle book-out. vanOnly=true → van only; vanOnly=false → "both"
-  // (van book-out first, then equipment checklist).
-  const handleBookout = async (vanOnly: boolean) => {
+  // Handle the VAN leg. For a delivery this is a book-out; for a collection
+  // it's a check-in / return (the Lewis mis-route fix — collections used to be
+  // sent through book-out). vanOnly=true → van only; vanOnly=false → "both"
+  // (van leg first, then equipment checklist).
+  const handleVanLeg = async (vanOnly: boolean) => {
     setBookoutLoading(true)
     setBookoutError(null)
     try {
       await declareLegs(true, !vanOnly)
-      const res = await fetch(`/api/jobs/${jobId}/bookout-token`, {
+      const isCollection = job?.type === 'collection'
+      const endpoint = isCollection ? 'checkin-token' : 'bookout-token'
+      const res = await fetch(`/api/jobs/${jobId}/${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ vanOnly }),
       })
       const data = await res.json()
       if (!res.ok || !data.success) {
-        throw new Error(data.error || 'Failed to start book-out')
+        throw new Error(data.error || `Failed to start ${isCollection ? 'check-in' : 'book-out'}`)
       }
-      window.location.href = data.bookoutUrl
+      window.location.href = isCollection ? data.checkinUrl : data.bookoutUrl
     } catch (err) {
-      console.error('Book-out error:', err)
-      setBookoutError(err instanceof Error ? err.message : 'Failed to start book-out')
+      console.error('Van leg error:', err)
+      setBookoutError(err instanceof Error ? err.message : 'Failed to start')
       setBookoutLoading(false)
     }
   }
@@ -191,14 +195,14 @@ export default function StartDeliveryPage() {
         <div className="space-y-3">
           {/* Van only */}
           <button
-            onClick={() => handleBookout(true)}
+            onClick={() => handleVanLeg(true)}
             disabled={bookoutLoading}
             className="w-full flex items-center gap-4 p-5 rounded-xl border-2 border-gray-200 bg-white hover:border-blue-400 hover:bg-blue-50 transition-colors text-left disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
           >
             <span className="text-3xl">🚐</span>
             <div className="flex-1">
               <p className="font-semibold text-gray-900">Van only</p>
-              <p className="text-sm text-gray-500">Vehicle book-out process</p>
+              <p className="text-sm text-gray-500">{isDelivery ? 'Vehicle book-out process' : 'Vehicle check-in / return process'}</p>
             </div>
             {bookoutLoading && (
               <div className="w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
@@ -220,14 +224,14 @@ export default function StartDeliveryPage() {
 
           {/* Both */}
           <button
-            onClick={() => handleBookout(false)}
+            onClick={() => handleVanLeg(false)}
             disabled={bookoutLoading}
             className="w-full flex items-center gap-4 p-5 rounded-xl border-2 border-gray-200 bg-white hover:border-green-400 hover:bg-green-50 transition-colors text-left disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
           >
             <span className="text-3xl">🚐🎸</span>
             <div className="flex-1">
               <p className="font-semibold text-gray-900">Both</p>
-              <p className="text-sm text-gray-500">Vehicle book-out, then equipment checklist</p>
+              <p className="text-sm text-gray-500">{isDelivery ? 'Vehicle book-out, then equipment checklist' : 'Vehicle check-in, then equipment checklist'}</p>
             </div>
             {bookoutLoading && (
               <div className="w-5 h-5 border-2 border-green-500 border-t-transparent rounded-full animate-spin"></div>

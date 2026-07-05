@@ -126,12 +126,13 @@ export async function resolveFreelancerToken(
   opBaseUrl: string,
   hmacToken: string,
   returnUrl: string | null,
+  resolvePath: 'freelancer-bookout/resolve' | 'freelancer-checkin/resolve' = 'freelancer-bookout/resolve',
 ): Promise<
   | { ok: true; token: string; context: FreelancerBookoutContext }
   | { ok: false; error: string; code?: string }
 > {
   try {
-    const response = await fetch(`${opBaseUrl}/freelancer-bookout/resolve`, {
+    const response = await fetch(`${opBaseUrl}/${resolvePath}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token: hmacToken }),
@@ -187,4 +188,17 @@ export async function resolveFreelancerToken(
       error: err instanceof Error ? err.message : 'Network error contacting OP backend',
     }
   }
+}
+
+/**
+ * Resolve a COLLECTION (check-in) token — same shape as book-out, but hits the
+ * check-in resolver, which targets the van currently OUT on the job and mints a
+ * checkin-mode session (soft check-in, no 'returned' flip).
+ */
+export function resolveFreelancerCheckinToken(
+  opBaseUrl: string,
+  hmacToken: string,
+  returnUrl: string | null,
+) {
+  return resolveFreelancerToken(opBaseUrl, hmacToken, returnUrl, 'freelancer-checkin/resolve')
 }

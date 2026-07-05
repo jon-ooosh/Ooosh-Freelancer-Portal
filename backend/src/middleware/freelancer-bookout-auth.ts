@@ -25,6 +25,14 @@ export interface FreelancerBookoutSession {
   quoteId: string;
   freelancerEmail: string;
   freelancerPersonId: string;
+  /**
+   * Which side of the hire this session is for. 'bookout' (default) = a
+   * delivery hand-over; 'checkin' = a collection / soft check-in. The token
+   * format + scope are shared; the resolve ENDPOINT sets the mode, and
+   * endpoints that behave differently on collection (soft check-in, no
+   * 'returned' flip) branch on it. Absent on pre-existing sessions → 'bookout'.
+   */
+  mode?: 'bookout' | 'checkin';
 }
 
 export interface FreelancerBookoutRequest extends Request {
@@ -153,6 +161,7 @@ export function authenticateFreelancerBookout(
       quoteId: decoded.quoteId,
       freelancerEmail: decoded.freelancerEmail,
       freelancerPersonId: decoded.freelancerPersonId,
+      mode: decoded.mode ?? 'bookout',
     };
     next();
   } catch {
@@ -216,6 +225,7 @@ export function authenticateVehicleFlexible(
       quoteId: fb.quoteId,
       freelancerEmail: fb.freelancerEmail,
       freelancerPersonId: fb.freelancerPersonId,
+      mode: fb.mode ?? 'bookout',
     };
     next();
     return;

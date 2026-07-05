@@ -62,7 +62,10 @@ export function CollectionPage() {
   const { scope, freelancerContext } = useAuth()
   const isFreelancer = scope === 'freelancer'
   const { data: allVehicles, isLoading: vehiclesLoading } = useVehicles()
-  const { data: allAllocations } = useAllocations()
+  // Staff-only data hooks — a freelancer collection session isn't allowed to
+  // reach these endpoints (403 via the freelancer allowlist) and doesn't need
+  // them: the van + job + customer come pre-filled from the resolve context.
+  const { data: allAllocations } = useAllocations({ enabled: !isFreelancer })
   const [step, setStep] = useState(0)
   const [form, setForm] = useState<CollectionFormState>(INITIAL_FORM)
   const [isSubmitting, setIsSubmitting] = useState(false)
@@ -138,11 +141,11 @@ export function CollectionPage() {
     preSelectedJobId && !form.hireHopJob ? parseInt(preSelectedJobId, 10) : null,
   )
 
-  // Driver hire forms for this job
-  const { data: hireForms } = useDriverHireForms(form.hireHopJob || null)
+  // Driver hire forms for this job (staff only — see note above)
+  const { data: hireForms } = useDriverHireForms(isFreelancer ? null : (form.hireHopJob || null))
 
-  // Known issues for selected vehicle
-  const { data: vehicleIssues } = useVehicleIssues(form.vehicleReg || undefined)
+  // Known issues for selected vehicle (staff only — see note above)
+  const { data: vehicleIssues } = useVehicleIssues(isFreelancer ? undefined : (form.vehicleReg || undefined))
   const openIssues = useMemo(
     () => (vehicleIssues || []).filter(i => i.status !== 'Resolved'),
     [vehicleIssues],

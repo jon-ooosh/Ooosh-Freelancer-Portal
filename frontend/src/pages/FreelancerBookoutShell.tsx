@@ -25,6 +25,7 @@ import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { BookOutPage } from '../modules/vehicles/pages/BookOutPage'
+import { FreelancerLinkError } from '../modules/vehicles/components/FreelancerLinkError'
 import {
   clearFreelancerSession,
   getFreelancerSession,
@@ -102,11 +103,18 @@ export default function FreelancerBookoutShell() {
   }
 
   if (state.kind === 'error') {
-    return <ErrorScreen message={state.message} returnUrl={state.returnUrl} />
+    return <FreelancerLinkError message={state.message} returnUrl={state.returnUrl} action="book-out" />
   }
 
   if (state.kind === 'expired') {
-    return <ExpiredScreen returnUrl={state.returnUrl} />
+    clearFreelancerSession()
+    return (
+      <FreelancerLinkError
+        message="Your book-out session has ended (sessions last 4 hours). Head back to the freelancer portal and click “Start delivery” again to resume."
+        returnUrl={state.returnUrl}
+        action="book-out"
+      />
+    )
   }
 
   // Freelancer session is live — render BookOutPage. It reads scope +
@@ -130,49 +138,3 @@ function LoadingScreen() {
   )
 }
 
-function ErrorScreen({ message, returnUrl }: { message: string; returnUrl: string | null }) {
-  return (
-    <div className="flex min-h-screen items-center justify-center bg-gray-50 px-4">
-      <div className="max-w-md rounded-lg border border-red-200 bg-white p-6 shadow-sm">
-        <h1 className="text-lg font-semibold text-red-700">Couldn&apos;t start book-out</h1>
-        <p className="mt-2 text-sm text-gray-700">{message}</p>
-        <p className="mt-4 text-xs text-gray-500">
-          Go back to the freelancer portal and try starting the delivery again. If this keeps
-          happening, ask Ooosh Tours to check the allocation.
-        </p>
-        {returnUrl && (
-          <a
-            href={returnUrl}
-            className="mt-4 inline-block rounded-lg bg-ooosh-navy px-4 py-2 text-sm font-semibold text-white"
-          >
-            Back to portal
-          </a>
-        )}
-      </div>
-    </div>
-  )
-}
-
-function ExpiredScreen({ returnUrl }: { returnUrl: string | null }) {
-  // Wipe any stale scraps just in case.
-  clearFreelancerSession()
-  return (
-    <div className="flex min-h-screen items-center justify-center bg-gray-50 px-4">
-      <div className="max-w-md rounded-lg border border-amber-200 bg-white p-6 shadow-sm">
-        <h1 className="text-lg font-semibold text-amber-700">Session expired</h1>
-        <p className="mt-2 text-sm text-gray-700">
-          Your book-out session has ended (sessions last 4 hours). Head back to the freelancer
-          portal and click &ldquo;Start delivery&rdquo; again to resume.
-        </p>
-        {returnUrl && (
-          <a
-            href={returnUrl}
-            className="mt-4 inline-block rounded-lg bg-ooosh-navy px-4 py-2 text-sm font-semibold text-white"
-          >
-            Back to portal
-          </a>
-        )}
-      </div>
-    </div>
-  )
-}
