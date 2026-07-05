@@ -191,6 +191,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '154_excess_held_on_account.sql',
         '155_hire_form_email_claim.sql',
         '156_quote_legs.sql',
+        '157_gmail_ingestion.sql',
       ];
 
       for (const migration of migrations) {
