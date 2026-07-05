@@ -189,6 +189,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '152_recharge_running_costs.sql',
         '153_studio_sitter_shifts.sql',
         '154_excess_held_on_account.sql',
+        '155_hire_form_email_claim.sql',
       ];
 
       for (const migration of migrations) {
