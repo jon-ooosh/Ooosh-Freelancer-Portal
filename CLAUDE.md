@@ -2683,6 +2683,29 @@ JWT auth for free, which is what locks out the old direct-URL access).
   (skipped — only checks when a job is attached). Cross-link demand → Fill-a-Gap /
   purchasing if it earns its keep.
 
+#### Auto-Chase — Phase 1: Gmail ingestion (Jul 2026, PR #919)
+
+The foundation of the auto-chase feature — ingest the `info@oooshtours.co.uk` inbox (Google Workspace domain-wide delegation) and log client emails onto job timelines as `interactions`, which feeds the existing Pipeline Chase Model for free. **Full spec: `docs/AUTO-CHASE-SPEC.md`** (read §13.1 "Phase 1 — as built" before touching this). Branch `claude/auto-chase-feature-design-tiknf2`.
+
+**Deployed INERT until configured.** Everything is gated on `isGmailConfigured()` (`Boolean(GMAIL_SERVICE_ACCOUNT_JSON && GMAIL_DELEGATED_USER)`). Without those env vars the scheduler crons are skipped and every endpoint returns `configured: false` cleanly — the migration + code are safe to deploy ahead of the Google setup. Mirrors the `isStripeConfigured()` / `isAnthropicConfigured()` guard pattern.
+
+**What's built:**
+- `config/gmail.ts` — DWD JWT (`google-auth-library`, cached per mailbox, scope `gmail.readonly`, `subject` = impersonated mailbox), then plain `fetch` against the Gmail REST API (deliberately avoids the heavy `googleapis` package). `loadServiceAccountKey()` **auto-detects inline JSON vs a filesystem path** — a value starting with `{` is treated as inline JSON, anything else as a path to read.
+- `services/email-matcher.ts` — `matchEmailToJob()`, deterministic only: HH job# in attached PDF filename → HH job# in subject/body (validated against `jobs.hh_job_number`) → sender/recipient email → single OPEN job. No match ⇒ `gmail_unmatched_inbound` review queue. **Never guess-attach.** AI fuzzy layer deferred.
+- `services/gmail-ingestion.ts` — first run establishes a baseline `historyId` and ingests NOTHING historic (starts from go-live forward); thereafter incremental via the Gmail History API. Dedup on RFC822 Message-ID (partial-unique index) so the same email across future manager mailboxes = one interaction. Matched → `interactions` (`type='email'`, `created_by=SYSTEM_USER_ID`); unmatched → review queue.
+- `services/email-retention.ts` — weekly sweep strips bodies older than `system_settings.email_retention_months` (default 24), keeps metadata + `body_stripped_at`, idempotent.
+- `routes/auto-chase.ts` (`/api/auto-chase`) — `GET /status`, `POST /ingest`, `POST /retention-sweep`, `GET /unmatched`.
+- **Migration 157** — email metadata + dedup index on `interactions`; `gmail_sync_state` (per-mailbox `historyId` cursor); `gmail_unmatched_inbound`; `jobs.auto_chase_mode/count/last_at`; seeds `chase_voice_instructions` / `email_retention_months` / `auto_chase_max_silent` (category `chase`).
+- **Scheduler crons** (both `isGmailConfigured()`-guarded): ingestion `*/10 * * * *`, retention sweep weekly `0 4 * * 0` (Europe/London).
+
+**⚠️ The `.env`-as-file gotcha:** systemd/dotenv can't parse multi-line JSON — pasting the raw service-account JSON straight into `.env` fails (`Ignoring invalid environment assignment`, `injected env (0)`). Store it as a FILE: `/var/www/ooosh-portal/backend/gmail-sa.json` (`chmod 600`), and set `GMAIL_SERVICE_ACCOUNT_JSON=<that path>`. The loader auto-detects. `gmail-sa.json` / `backend/gmail-sa.json` / `*-sa.json` are git-ignored.
+
+**⚠️ Credential hygiene:** the private key pasted into chat during setup is compromised — it must be revoked in GCP (delete key) and reissued. Domain-wide-delegation consent survives a key rotation (it's tied to the Client ID). Never paste a service-account private key into chat/logs.
+
+**Jon's locked-in design decisions** (all in `system_settings`, tunable without a deploy): retention = 24 months full body then strip (`email_retention_months`); cold dead-end = 3 silent chases then escalate to a human (`auto_chase_max_silent`); multi-mailbox staleness accepted as a Phase 1 cost (draft-not-send is the mitigation, fast manager-mailbox rollout is the fix — NO "always CC info@" mandate).
+
+**What's next (deferred phases, see spec):** Phase 1.5 manager mailboxes (dedup already handles it); Phase 2 AI-drafted chases as Gmail drafts (ChaseModal Off/Draft/Send, `auto_chase_mode` column already there); Phase 2 AI fuzzy matcher (layer 4 in `email-matcher.ts`); attachment→R2 harvest; Phase 4 dispute helper (NL query over the ingested chain) + line-item diff history.
+
 ### Future Enhancements (captured, not scheduled)
 
 - **Client-facing interactivity on rack / staging view-only links (Jun 2026, spitballed, parked for quiet-time)** — both the Rack Planner and Staging Calculator already publish a public, token/slug-based view-only link sent to clients (rack = a 2D React Flow page `RackPlanPublicPage.tsx`; staging = the vanilla-JS 3D viewer `stage-view.html`). Two phased enhancements discussed with jon and deliberately deferred:

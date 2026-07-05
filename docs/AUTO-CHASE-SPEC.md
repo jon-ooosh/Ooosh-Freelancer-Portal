@@ -1,6 +1,6 @@
 # AUTO-CHASE-SPEC.md — Operational Awareness Layer & Auto-Chase
 
-**Status:** Design (Jun 2026). Not yet built. Written for review + tweak before implementation. Expect this to span several sessions.
+**Status:** Phase 1 BUILT + merged (Jul 2026, PR #919) — deployed **inert** until the `GMAIL_*` env vars are set on the server (see §13.1 below). Phases 1.5 → 4 are design. Written for review + tweak; expect this to span several sessions.
 
 **Branch:** `claude/auto-chase-feature-design-tiknf2`
 
@@ -225,6 +225,25 @@ Reuse: `job_contacts` for recipient resolution (a chase goes to the primary cont
 4. **Phase 3 — Opt-in auto-send** behind the §10 suppression gate.
 5. **Phase 4 — Dispute helper** (NL query over the chain) **+ line-item diff history** for the auto-assembled audit trail. Website-form enquiry auto-create can land here or alongside Phase 1's matcher.
 6. **Later** — multi-step cadences, cold-lead escalation surfaces, send-time tuning.
+
+### 13.1 Phase 1 — as built (Jul 2026, PR #919)
+
+Merged to main on `claude/auto-chase-feature-design-tiknf2`. **Everything is inert until `GMAIL_SERVICE_ACCOUNT_JSON` + `GMAIL_DELEGATED_USER` are set** — `isGmailConfigured()` gates the scheduler crons and every endpoint degrades cleanly (`configured: false`). Safe to deploy ahead of the Google config.
+
+**Files:**
+- `backend/src/config/gmail.ts` — `isGmailConfigured()`, `getPrimaryMailbox()`, `loadServiceAccountKey()` (**auto-detects inline JSON vs a file PATH** — value starting with `{` is inline, else read from disk), `getGmailAuthClient(mailbox)` (domain-wide-delegation JWT via `google-auth-library`, cached per mailbox, scope `gmail.readonly`, `subject` = impersonated mailbox), `gmailApiGet()`, `getGmailProfile()`.
+- `backend/src/services/email-matcher.ts` — `matchEmailToJob()`: deterministic layers only (HH job# in PDF filename → HH job# in subject/body validated against `jobs.hh_job_number` → sender/recipient email → single OPEN job). No match ⇒ unmatched queue. Layer 4 (AI fuzzy) deferred.
+- `backend/src/services/gmail-ingestion.ts` — `runIngestionForPrimaryMailbox()` (first run establishes a baseline `historyId` and ingests nothing historic; thereafter incremental via the History API, dedup on RFC822 Message-ID, matched → `interactions` row `type='email'` `created_by=SYSTEM_USER_ID`, unmatched → `gmail_unmatched_inbound`), `getGmailIngestionStatus()`.
+- `backend/src/services/email-retention.ts` — `runEmailRetentionSweep()` (strips bodies older than `system_settings.email_retention_months`, default 24; keeps metadata; idempotent via `body_stripped_at`).
+- `backend/src/routes/auto-chase.ts` — `GET /status` (admin/manager), `POST /ingest` (admin), `POST /retention-sweep` (admin), `GET /unmatched` (admin/manager). Mounted at `/api/auto-chase`.
+- **Migration 157** (`157_gmail_ingestion.sql`) — email metadata + dedup index on `interactions`; `gmail_sync_state`; `gmail_unmatched_inbound`; `jobs.auto_chase_mode/count/last_at`; seeds `chase_voice_instructions` / `email_retention_months` / `auto_chase_max_silent` into `system_settings` (category `chase`).
+- **Scheduler** (`config/scheduler.ts`) — ingestion `*/10 * * * *`, retention sweep weekly `0 4 * * 0` (Europe/London), both guarded by `isGmailConfigured()`.
+- Dependency: `google-auth-library` (chosen over the heavy `googleapis` package; we hit the Gmail REST API with plain `fetch`).
+
+**Go-live (Google side) — outstanding:**
+1. **⚠️ The service-account private key pasted into chat during setup is COMPROMISED — delete that key in GCP and issue a fresh one** (project `op-gmail-ingest`, #395184500010). Domain-wide-delegation consent survives (it's tied to the Client ID, not the key), so only the key needs re-issuing.
+2. **Store the JSON as a FILE, not inline in `.env`** — systemd/dotenv can't parse multi-line JSON (`Ignoring invalid environment assignment`). Put it at `/var/www/ooosh-portal/backend/gmail-sa.json` (`chmod 600`), set `GMAIL_SERVICE_ACCOUNT_JSON=/var/www/ooosh-portal/backend/gmail-sa.json` and `GMAIL_DELEGATED_USER=info@oooshtours.co.uk`. `gmail-sa.json` is git-ignored.
+3. Test: `GET /api/auto-chase/status` → `configured:true` + profile; `POST /api/auto-chase/ingest` → `baselineEstablished:true`; then email `info@` mentioning a real HH job# and re-run `/ingest` → interaction lands on that job's timeline.
 
 ## 14. Open decisions (carried into build)
 
