@@ -89,16 +89,37 @@ Match in priority order (per jon: no consistency in client subject conventions, 
 - Attachments: harvest to R2 + append to `jobs.files` (see §8 "attachment harvesting"). Store the Gmail attachment part reference so we can re-fetch the original PDF for a chase (§8.4).
 - **This auto-bumps `next_chase_date`** via the existing contact-interaction rule (§3). Inbound client emails should bump; our own outbound auto-chase should NOT bump (pass `skip_chase_bump` — the chase already reschedules itself).
 
-### 5.6 Privacy / GDPR
+### 5.6 Privacy / GDPR + retention window
 
 - `info@` is shared/transactional — clean to ingest. Logging client emails as interactions is legitimate business interest, already within the relationship.
-- Storing bodies is a deliberate choice (needed for disputes). Note it in the data-retention gap already tracked in CLAUDE.md Security. Consider a retention window on `type='email'` interaction bodies down the line.
+- Storing bodies is a deliberate choice (needed for disputes). This is the first place OP holds a large volume of free-text client PII, so it needs an explicit retention window (CLAUDE.md Security already flags "Data retention/expiry policy for PII" as an open gap).
+
+**Proposed retention (jon deferred to this, Jun 2026):**
+
+| Age of `type='email'` interaction | What we keep |
+|---|---|
+| **0 – 24 months** | Full body text + metadata + summary. Covers the realistic dispute / "where's X??" window — a hire's dispute tail almost always closes inside two years, and repeat-client history stays rich. |
+| **> 24 months** | **Strip the body**, keep metadata (`gmail_message_id`, `thread_id`, from/to, subject, date, `has_attachments`) + the AI summary. The thread is still *visible* on the timeline ("Sarah emailed re: the quote, 3 Jun 2024, summary: …") and dedup/audit still work, but the raw personal-data payload is gone. |
+
+- **Why strip-not-delete:** deleting the interaction row entirely would leave holes in the timeline and lose the audit that a conversation happened at all. Keeping metadata + summary preserves the operational history (client relationship, "we did talk to them") while discharging the GDPR data-minimisation duty on the bulk PII (the verbatim body). The summary is our own derived artefact, not raw client data.
+- **Mechanism:** a low-frequency scheduled task (weekly is ample) `UPDATE interactions SET content = NULL, body_stripped_at = NOW() WHERE type='email' AND created_at < NOW() - INTERVAL '24 months' AND body_stripped_at IS NULL`. Cheap, idempotent, and reversible in policy (extend the window later without a migration). Attachments harvested to `jobs.files` (§8) follow the file-retention policy separately — they're operational documents, not conversational PII, so they are NOT auto-stripped by this task.
+- The window is a `system_settings` value (`email_retention_months`, default 24) so it's tunable without a deploy if legal/ops want it shorter or longer.
 
 ## 6. Phase 1.5 — Manager mailboxes (feasible; deferred until `info@` proven)
 
 - **Feasibility: yes.** Domain-wide delegation (§5.1) scales trivially to the 5 managers' `@oooshtours.co.uk` accounts — admin consents once, no per-manager OAuth.
 - **The real work is dedup, not access** — §5.4 already handles it via `Message-ID`. Adding mailboxes = adding delegated users to the poll loop; each message still logs once.
 - **Prove on `info@` first**, then roll out. GDPR is a staff-comfort question, not a legal blocker (company property, legitimate interest).
+
+### 6.1 The staleness cost of `info@`-only (jon, Jun 2026)
+
+Confirmed: staff genuinely do start or carry threads on their own `@oooshtours.co.uk` addresses — a client likes to reply to their usual point of contact, and we shouldn't break that relationship by forcing everything through `info@`. So an `info@`-only Phase 1 has a real blind spot: a quote thread that has moved on entirely on Sarah's personal mailbox looks *silent* to the auto-chase, and a chase could fire over the top of a live conversation OP simply can't see.
+
+**We accept this as a known cost of the first cut, deliberately, rather than paper over it:**
+
+- **No "always CC info@" mandate.** Forcing a CC would clutter the shared inbox and still wouldn't catch client-*initiated* threads (the client won't CC us). Not worth breaking the relationship for imperfect coverage.
+- **Draft-not-send is the mitigation.** Because Phase 1/2 default to *drafts* (§9.4), the human glancing at the draft in `info@` is the backstop — they know if they've been talking to the client on their own address and just bin the draft. The staleness cost only bites hard once auto-send (Phase 3) is on, which is exactly why auto-send stays per-quote opt-in and manually judged.
+- **It sharpens the case for §6 (manager mailboxes), which becomes the priority follow-up rather than a "someday".** Every mailbox we add shrinks the blind spot. The plan is: prove ingestion on `info@`, then roll the 5 manager mailboxes in *quickly* — the dedup (§5.4) is already built for it, so it's low-effort, high-coverage. Treat manager-mailbox rollout as Phase 1.5 proper, not a deferred nicety.
 
 ## 7. Gmail's native summary + the dispute dream
 
@@ -210,8 +231,9 @@ Reuse: `job_contacts` for recipient resolution (a chase goes to the primary cont
 - **Thread-latch vs new email:** confirmed jon prefers latching onto the original quote thread; new-email-with-PDF is second-best. Latching is free once matched (§8.4), so the effort is all in the matcher.
 - **Sending identity:** confirm `info@` is the only quoting identity, or whether staff sometimes quote from personal `@oooshtours.co.uk` addresses (affects where §6 looks for threads *and* where drafts should land). Assume `info@`-only for Phase 1/2.
 - **Auto-send trust threshold:** manual per-quote for now (no £-value or service-type rules). Revisit if volume justifies rules.
-- **Retention window** on `type='email'` interaction bodies (GDPR housekeeping) — decide before Phase 1 ships.
-- **Cold-dead-end N:** how many silent chases before escalate-to-human. Start at 3, tune.
+- **Retention window** on `type='email'` interaction bodies — **DECIDED (jon, Jun 2026): 24 months full body, then strip body + keep metadata/summary.** See §5.6. Stored as `system_settings.email_retention_months` (default 24) so it's tunable without a deploy.
+- **Cold-dead-end N:** **DECIDED (jon, Jun 2026): 3 silent chases**, then escalate to a human ("call them or drop it?") rather than firing chase #4. Stored as `system_settings.auto_chase_max_silent` (default 3) so it's tunable.
+- **Multi-mailbox staleness:** **ACCEPTED as a Phase 1 cost (jon, Jun 2026)** — see §6.1. Draft-not-send is the mitigation; fast manager-mailbox rollout (Phase 1.5) is the fix. No "always CC info@" mandate.
 
 ## 15. What we're explicitly NOT doing
 

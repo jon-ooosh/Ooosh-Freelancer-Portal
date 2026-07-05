@@ -933,6 +933,54 @@ export function startScheduler() {
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: Cost Xero reconcile sync scheduled daily at 07:45 Europe/London');
 
+  // ── Gmail ingestion (Auto-Chase Phase 1) ────────────────────────────
+  // Every 10 minutes — poll the info@ mailbox, log new client emails onto job
+  // timelines as interactions, drop the residue into the review queue. Inert
+  // until GMAIL_* env vars are set (the service no-ops cleanly), so this is
+  // safe to leave scheduled ahead of Jon provisioning the service account.
+  // See docs/AUTO-CHASE-SPEC.md §5.
+  {
+    const { isGmailConfigured } = require('./gmail') as typeof import('./gmail');
+    if (!isGmailConfigured()) {
+      console.log('Scheduler: Gmail not configured — auto-chase ingestion disabled');
+    } else {
+      cron.schedule('*/10 * * * *', async () => {
+        try {
+          const { runIngestionForPrimaryMailbox } = await import('../services/gmail-ingestion');
+          const r = await runIngestionForPrimaryMailbox();
+          if (r.baselineEstablished) {
+            console.log(`Scheduler: Gmail ingestion — baseline established for ${r.mailbox}`);
+          } else if (r.error) {
+            console.error(`Scheduler: Gmail ingestion error (${r.mailbox}): ${r.error}`);
+          } else if (r.logged > 0 || r.unmatched > 0) {
+            console.log(
+              `Scheduler: Gmail ingestion — ${r.logged} logged, ${r.unmatched} unmatched, ${r.duplicates} dupes (fetched ${r.fetched})`,
+            );
+          }
+        } catch (err) {
+          console.error('Scheduler: Gmail ingestion failed:', err);
+        }
+      });
+      console.log('Scheduler: Gmail ingestion scheduled every 10 minutes');
+
+      // Weekly (Sun 04:00 Europe/London) — strip email bodies past the
+      // retention window (default 24 months), keep metadata + snippet. Runs
+      // after the nightly backup/retention chores. Idempotent + cheap.
+      cron.schedule('0 4 * * 0', async () => {
+        try {
+          const { runEmailRetentionSweep } = await import('../services/email-retention');
+          const r = await runEmailRetentionSweep();
+          if (r.stripped > 0) {
+            console.log(`Scheduler: Email retention sweep — stripped ${r.stripped} bodies (>${r.windowMonths}mo)`);
+          }
+        } catch (err) {
+          console.error('Scheduler: Email retention sweep failed:', err);
+        }
+      }, { timezone: 'Europe/London' });
+      console.log('Scheduler: Email retention sweep scheduled Sun 04:00 Europe/London');
+    }
+  }
+
   // ── Job financials backfill — nightly 03:00 Europe/London ────────────
   // Slow-burn fills the job_financials cache (powering /money/overview) for
   // jobs whose Money tab hasn't been opened recently. Drives the live
