@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import { api } from '../services/api';
 import DatePicker from './DatePicker';
+import { hasManagerRole } from '../lib/roles';
+import { useAuthStore } from '../hooks/useAuthStore';
 
 interface ChaseableJob {
   id: string;
@@ -48,6 +50,12 @@ export default function ChaseModal({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
+  const user = useAuthStore(s => s.user);
+  const canDraftChase = hasManagerRole(user?.role);
+  const [drafting, setDrafting] = useState(false);
+  const [draftResult, setDraftResult] = useState<{ to: string; subject: string; threaded: boolean } | null>(null);
+  const [draftError, setDraftError] = useState('');
+
   useEffect(() => {
     if (isOpen && job) {
       setNextChaseDate(addDaysToDate(5));
@@ -59,6 +67,9 @@ export default function ChaseModal({
       setChaseAlertUserId(job.chase_alert_user_id || '');
       setDelivery(job.chase_alert_delivery || 'none');
       setError('');
+      setDraftResult(null);
+      setDraftError('');
+      setDrafting(false);
     }
   }, [isOpen, job]);
 
@@ -114,6 +125,24 @@ export default function ChaseModal({
     }
   };
 
+  const handleDraftChase = async () => {
+    if (!job) return;
+    setDrafting(true);
+    setDraftError('');
+    setDraftResult(null);
+    try {
+      const res = await api.post<{ data: { to: string; subject: string; threaded: boolean } }>(
+        `/auto-chase/create-draft/${job.id}`,
+        {},
+      );
+      setDraftResult({ to: res.data.to, subject: res.data.subject, threaded: res.data.threaded });
+    } catch (err) {
+      setDraftError(err instanceof Error ? err.message : 'Failed to draft chase');
+    } finally {
+      setDrafting(false);
+    }
+  };
+
   const isReschedule = mode === 'reschedule';
 
   return (
@@ -127,6 +156,37 @@ export default function ChaseModal({
           {job.job_name} — {job.company_name || job.client_name}
           {!isReschedule && job.chase_count > 0 && <span className="ml-2 text-gray-400">(chase #{job.chase_count + 1})</span>}
         </p>
+
+        {/* AI chase-draft — creates a Gmail draft in info@ for review. Manager tier. */}
+        {canDraftChase && (
+          <div className="mb-4 p-3 rounded-lg border border-indigo-200 bg-indigo-50/60">
+            {draftResult ? (
+              <div className="text-xs text-indigo-900">
+                <p className="font-medium">✓ Draft created in info@</p>
+                <p className="mt-0.5 text-indigo-700">
+                  To {draftResult.to}{draftResult.threaded ? ' (replying in their thread)' : ' (new email)'} — review &amp; send from Gmail Drafts.
+                </p>
+                <p className="mt-0.5 text-indigo-500 truncate" title={draftResult.subject}>“{draftResult.subject}”</p>
+              </div>
+            ) : (
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-xs text-indigo-800">
+                  <p className="font-medium">Draft a chase email</p>
+                  <p className="text-indigo-600">AI-drafts a “just checking in” email as a Gmail draft in info@ — nothing sends.</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleDraftChase}
+                  disabled={drafting}
+                  className="shrink-0 px-3 py-1.5 text-xs font-medium bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50"
+                >
+                  {drafting ? 'Drafting…' : '✨ Draft chase'}
+                </button>
+              </div>
+            )}
+            {draftError && <p className="mt-2 text-xs text-red-600">{draftError}</p>}
+          </div>
+        )}
 
         {/* Mode toggle */}
         <div className="inline-flex p-0.5 mb-4 bg-gray-100 rounded-lg text-xs">
