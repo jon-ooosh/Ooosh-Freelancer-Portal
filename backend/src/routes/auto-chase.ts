@@ -12,6 +12,8 @@ import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { getGmailIngestionStatus, runIngestionForPrimaryMailbox } from '../services/gmail-ingestion';
 import { runEmailRetentionSweep } from '../services/email-retention';
+import { draftChaseEmail } from '../services/chase-draft';
+import { isAnthropicConfigured } from '../config/anthropic';
 
 const router = Router();
 router.use(authenticate);
@@ -67,6 +69,25 @@ router.get('/unmatched', authorize('admin', 'manager'), async (req: AuthRequest,
   } catch (error) {
     console.error('[auto-chase] unmatched list error:', error);
     res.status(500).json({ error: 'Failed to load unmatched inbound queue' });
+  }
+});
+
+// POST /api/auto-chase/preview-draft/:jobId — generate an AI chase draft for a
+// job and return it as JSON WITHOUT creating a Gmail draft. Lets us judge draft
+// quality on real jobs before the Gmail `compose` scope + draft-creation slice
+// lands. Admin/manager. Needs ANTHROPIC_API_KEY (already on prod).
+router.post('/preview-draft/:jobId', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {
+  if (!isAnthropicConfigured()) {
+    return res.status(503).json({ error: 'Chase drafting unavailable — ANTHROPIC_API_KEY not configured.' });
+  }
+  try {
+    const { draft, context } = await draftChaseEmail(String(req.params.jobId));
+    res.json({ data: { draft, context } });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/not found/i.test(message)) return res.status(404).json({ error: message });
+    console.error('[auto-chase] preview-draft error:', error);
+    res.status(500).json({ error: 'Failed to draft chase' });
   }
 });
 
