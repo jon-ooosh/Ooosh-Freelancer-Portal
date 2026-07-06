@@ -13,7 +13,9 @@ import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { getGmailIngestionStatus, runIngestionForPrimaryMailbox } from '../services/gmail-ingestion';
 import { runEmailRetentionSweep } from '../services/email-retention';
 import { draftChaseEmail } from '../services/chase-draft';
+import { createChaseDraftForJob } from '../services/gmail-draft';
 import { isAnthropicConfigured } from '../config/anthropic';
+import { isGmailConfigured } from '../config/gmail';
 
 const router = Router();
 router.use(authenticate);
@@ -88,6 +90,29 @@ router.post('/preview-draft/:jobId', authorize('admin', 'manager'), async (req: 
     if (/not found/i.test(message)) return res.status(404).json({ error: message });
     console.error('[auto-chase] preview-draft error:', error);
     res.status(500).json({ error: 'Failed to draft chase' });
+  }
+});
+
+// POST /api/auto-chase/create-draft/:jobId — generate the AI chase AND create it
+// as a real Gmail draft in info@ (threaded onto the client's conversation if we
+// have one, else standalone to the primary contact). Staff review + send from
+// Gmail; OP never sends. Admin/manager. Needs Gmail compose scope + Anthropic.
+router.post('/create-draft/:jobId', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {
+  if (!isGmailConfigured()) {
+    return res.status(503).json({ error: 'Gmail not configured — cannot create drafts.' });
+  }
+  if (!isAnthropicConfigured()) {
+    return res.status(503).json({ error: 'Chase drafting unavailable — ANTHROPIC_API_KEY not configured.' });
+  }
+  try {
+    const result = await createChaseDraftForJob(String(req.params.jobId));
+    res.json({ data: result });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/not found/i.test(message)) return res.status(404).json({ error: message });
+    if (/no client email/i.test(message)) return res.status(422).json({ error: message });
+    console.error('[auto-chase] create-draft error:', error);
+    res.status(500).json({ error: message || 'Failed to create chase draft' });
   }
 });
 
