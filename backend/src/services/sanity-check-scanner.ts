@@ -31,6 +31,100 @@ import { emailService } from './email-service';
 import { getFrontendUrl } from '../config/app-urls';
 import { HH_STATUS_LABELS } from './auto-dispatch';
 import { buildAndSendReturnedBookedOutAlert } from './vehicle-emails';
+import { isWithinBusinessHours } from './completion-chaser';
+
+// Grace window before a started-but-not-completed van leg is flagged. A
+// book-out / collection walkaround is ~30 min; 3h means something's genuinely
+// stalled (or the freelancer bounced off the handoff — the Lewis case).
+const STALLED_LEG_HOURS = 3;
+
+/**
+ * "Started but not completed" scanner (§7.3). Finds quotes where a freelancer
+ * RESOLVED a book-out / check-in token (van_leg_started_at stamped) but no
+ * vehicle event ever completed the van leg (van_leg_done_at still NULL) after
+ * the grace window. Alerts info@ ONCE per quote (deduped via
+ * van_leg_alert_sent_at) so staff learn before an 11am client chase (Lewis, HH
+ * 15933). Business hours only. info@-only, matching the sibling scanners (no
+ * bell fanout — deliberate, to avoid the spam pattern those replaced).
+ */
+export async function runFreelancerLegStalledScan(): Promise<{ checked: number; warned: number }> {
+  if (!isWithinBusinessHours()) return { checked: 0, warned: 0 };
+
+  const candidates = await query(
+    `SELECT q.id, q.job_type, q.venue_name, q.van_leg_started_at,
+            j.id AS job_id, j.hh_job_number, j.job_name,
+            p.first_name, p.last_name, p.email AS freelancer_email
+       FROM quotes q
+       LEFT JOIN jobs j ON j.id = q.job_id
+       LEFT JOIN LATERAL (
+         SELECT pe.first_name, pe.last_name, pe.email
+           FROM quote_assignments qa
+           JOIN people pe ON pe.id = qa.person_id
+          WHERE qa.quote_id = q.id AND qa.status NOT IN ('declined', 'cancelled')
+          ORDER BY qa.created_at
+          LIMIT 1
+       ) p ON true
+      WHERE q.van_leg_started_at IS NOT NULL
+        AND q.van_leg_done_at IS NULL
+        AND q.van_leg_alert_sent_at IS NULL
+        AND COALESCE(q.ops_status, 'todo') NOT IN ('completed', 'cancelled')
+        AND q.is_deleted = false
+        AND q.van_leg_started_at < NOW() - INTERVAL '${STALLED_LEG_HOURS} hours'
+      ORDER BY q.van_leg_started_at ASC
+      LIMIT 50`
+  );
+
+  let warned = 0;
+  const frontendUrl = getFrontendUrl();
+
+  for (const row of candidates.rows) {
+    try {
+      const jobRef = row.hh_job_number
+        ? `J-${row.hh_job_number}`
+        : (row.job_name || row.venue_name || 'Unknown job');
+      const freelancer = `${row.first_name || ''} ${row.last_name || ''}`.trim()
+        || row.freelancer_email || 'a freelancer';
+      const hoursAgo = Math.round((Date.now() - new Date(row.van_leg_started_at).getTime()) / (1000 * 60 * 60));
+      const direction = row.job_type === 'collection' ? 'collection (check-in)' : 'delivery (book-out)';
+      const opJobUrl = row.job_id ? `${frontendUrl}/jobs/${row.job_id}` : frontendUrl;
+
+      // Stamp marker FIRST (stamp-first, like the sibling scanners) so a
+      // transient send-failure doesn't re-fire on the next scan.
+      await query(
+        `UPDATE quotes SET van_leg_alert_sent_at = NOW(), updated_at = NOW() WHERE id = $1`,
+        [row.id]
+      );
+
+      const result = await emailService.sendRaw({
+        to: 'info@oooshtours.co.uk',
+        subject: `[Ops] Van ${direction} started but not completed — ${jobRef}`,
+        html: `
+          <h2 style="margin:0 0 12px;font-size:18px;color:#b45309;">Van leg started but not completed</h2>
+          <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.5;">
+            <strong>${freelancer}</strong> started the ${direction} for
+            <strong>${jobRef}</strong>${row.venue_name ? ` (${row.venue_name})` : ''}
+            about <strong>${hoursAgo}h</strong> ago, but the van hasn't been
+            ${row.job_type === 'collection' ? 'checked in' : 'booked out'} yet.
+          </p>
+          <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.5;">
+            They may have bounced off the handoff or hit a problem. Worth a quick
+            call before the client chases.
+          </p>
+          <p style="margin:0;font-size:13px;">
+            <a href="${opJobUrl}" style="color:#7B5EA7;">Open the job in OP</a>
+          </p>
+        `,
+        variant: 'internal',
+      });
+      if (result.success) warned++;
+      else console.warn(`[sanity-scanner] stalled-leg alert send failed for ${jobRef}:`, result);
+    } catch (err) {
+      console.error(`[sanity-scanner] stalled-leg scan error for quote ${row.id}:`, err);
+    }
+  }
+
+  return { checked: candidates.rows.length, warned };
+}
 
 /**
  * Find dispatched jobs whose HH status is still pre-Dispatched (< 5)

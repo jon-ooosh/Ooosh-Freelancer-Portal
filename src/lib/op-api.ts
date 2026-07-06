@@ -155,6 +155,32 @@ export function isOpClientError(err: unknown): err is OpApiError {
 }
 
 /**
+ * fetch with a hard timeout via AbortController. Portal POSTs (login,
+ * completion, legs, register/reset) previously had NO timeout — a genuinely
+ * slow / hung OP backend left the freelancer staring at an indefinite spinner
+ * mid-handover. On timeout we throw a friendly, retryable message instead.
+ * Default 20s for JSON POSTs; callers pass a longer window for uploads.
+ */
+async function fetchWithTimeout(
+  url: string,
+  options: RequestInit = {},
+  timeoutMs = 20_000,
+): Promise<Response> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await fetch(url, { ...options, signal: controller.signal })
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      throw new Error('The server is taking too long to respond. Please check your signal and try again.')
+    }
+    throw err
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
  * Make an authenticated request to the OP backend portal API.
  * Forwards the session cookie from the incoming request.
  *
@@ -184,7 +210,7 @@ async function opFetch<T>(
   let lastError: unknown
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      const response = await fetch(url, fetchOptions)
+      const response = await fetchWithTimeout(url, fetchOptions)
 
       if (!response.ok) {
         const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }))
@@ -291,13 +317,15 @@ export async function submitCompletionToOP(
 ): Promise<{ success: boolean; message?: string }> {
   const url = `${getOpUrl()}/api/portal/jobs/${quoteId}/complete`
 
-  const response = await fetch(url, {
+  // 60s window — completion carries photo + signature uploads which can be
+  // legitimately slow on site, so a longer ceiling than the JSON default.
+  const response = await fetchWithTimeout(url, {
     method: 'POST',
     headers: {
       'Cookie': `session=${sessionToken}`,
     },
     body: formData, // multipart/form-data (photos + signature)
-  })
+  }, 60_000)
 
   if (!response.ok) {
     const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }))
@@ -333,7 +361,7 @@ export async function loginToOP(
 ): Promise<{ success: boolean; user?: { id: string; name: string; email: string }; sessionToken?: string; error?: string; status?: number }> {
   const url = `${getOpUrl()}/api/portal/auth/login`
 
-  const response = await fetch(url, {
+  const response = await fetchWithTimeout(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email, password }),
@@ -362,7 +390,7 @@ export async function loginToOP(
 
 async function opPostJson<T>(path: string, body: Record<string, unknown>): Promise<T> {
   const url = `${getOpUrl()}/api/portal${path}`
-  const response = await fetch(url, {
+  const response = await fetchWithTimeout(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
