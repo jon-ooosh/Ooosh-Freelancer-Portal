@@ -182,6 +182,7 @@ When a chase comes due (existing `next_chase_date` + `is_chasing` model), and th
 - Keep the model on a tight leash: it's a "just checking in, any thoughts?" email, NOT a renegotiation. Short, warm, references the quote concretely, tone varies by relationship.
 - **Prompt structure lives in code** (the "checking-in not renegotiating" rails, grounding instructions, output constraints). Staff can't break these.
 - **"Chase voice" surfaceable setting** — a free-text value in `system_settings` (category `chase`, e.g. `chase_voice_instructions`), edited from the Settings page, **appended** to the code prompt. This is jon's "more of this / less of that" knob, editable without a deploy. (Uses the existing `getSystemSetting()` helper + 60s cache.)
+- **Ground on OP structured data, not just the email thread (Jul 2026, live-feedback fix).** The draft cross-references OP's own fields as a sanity layer over the (possibly sparse) email history. First instance: **hire-date proximity drives tone** — `chase-draft.ts` computes `daysUntilStart` from `out_date` and hard-rules the register (a hire days away must NOT read "no rush"; only >1 week away gets the relaxed tone). A live draft for a hire starting *tomorrow* had said "no rush" because the prompt pulled the dates but never reasoned about them. This is the pattern to keep extending — cross-referencing OP data (dates, pipeline status, deposit/payment state, hire history) both grounds the draft and surfaces contradictions worth flagging to staff.
 
 ### 9.3 Feedback loops → eventual auto-send
 
