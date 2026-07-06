@@ -192,6 +192,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '155_hire_form_email_claim.sql',
         '156_quote_legs.sql',
         '157_gmail_ingestion.sql',
+        '158_soft_checked_in_at.sql',
       ];
 
       for (const migration of migrations) {
