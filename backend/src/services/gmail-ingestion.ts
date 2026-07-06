@@ -48,13 +48,20 @@ const SYSTEM_USER_ID = '00000000-0000-0000-0000-000000000000';
 // Stable, so a constant. Extend here if we ever quote from another owned domain.
 const INTERNAL_SENDER_DOMAINS = ['oooshtours.co.uk'];
 
-// EXCEPTION to the internal/automated skip: website enquiry-form emails arrive
-// via Resend and MAY carry a From on our own domain (e.g. enquiries@oooshtours.co.uk),
-// which the domain rule below would otherwise skip. We don't build enquiry
-// auto-create until Phase 4 (§11), so skipping them now is harmless — but list
-// the exact enquiry-form From address(es) here to keep them flowing the moment
-// extraction lands. Matched addresses bypass BOTH the internal-domain and
-// automated guards. Empty until we confirm the sender. Lowercase, full address.
+// EXCEPTION to the internal/automated skip, for a sender we DO want to ingest
+// despite it being on our own domain. Matched addresses bypass BOTH guards.
+// Empty by design — see below.
+//
+// ⚠️ The website enquiry form sends From `info@oooshtours.co.uk` (via Resend /
+// send.oooshtours.co.uk) with the real client in reply-to. Do NOT put `info@`
+// here: `info@` is ALSO the address staff reply to clients from in the shared
+// inbox, so allowlisting it would ingest our own outbound as fake client mail.
+// The initial enquiry email being skipped is harmless in Phase 1 anyway (a new
+// enquiry has no job to attach to — it'd only hit the unmatched queue). The
+// RIGHT home for enquiry-auto-create (Phase 4, §11) is a DIRECT form→OP webhook
+// (we control the enquiry-form repo) carrying structured fields — not
+// email-scraping. Keep this list for a genuinely distinct enquiry sender if one
+// ever exists. Lowercase, full address.
 const ENQUIRY_SOURCE_ADDRESSES: string[] = [];
 
 function isEnquirySource(from: string | null): boolean {
