@@ -8,12 +8,13 @@
  */
 
 import { useState, useEffect, Suspense } from 'react'
-import { useSearchParams } from 'next/navigation'
+import { useSearchParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
 import Image from 'next/image'
 
 function ResetPasswordForm() {
   const searchParams = useSearchParams()
+  const router = useRouter()
   const token = searchParams.get('token')
   
   const [password, setPassword] = useState('')
@@ -28,6 +29,18 @@ function ResetPasswordForm() {
   const [loggedIn, setLoggedIn] = useState(false)
   const [loading, setLoading] = useState(false)
   const [tokenValid, setTokenValid] = useState<boolean | null>(null)
+
+  // Auto-drop the freelancer straight into the dashboard once the reset has
+  // logged them in (OP mode sets a session cookie). Stops the Lewis
+  // double-reset loop where landing back on a login screen prompted another
+  // reset. The success card shows for a beat first, and the button remains as a
+  // fallback if the redirect is blocked.
+  useEffect(() => {
+    if (success && loggedIn) {
+      const t = setTimeout(() => router.replace('/dashboard'), 1200)
+      return () => clearTimeout(t)
+    }
+  }, [success, loggedIn, router])
 
   // Validate token on mount
   useEffect(() => {

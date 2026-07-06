@@ -137,6 +137,20 @@ async function authoriseFreelancerOnQuote(
   return { ok: true, person, jobId, hhJobNumber, venueName };
 }
 
+// Best-effort "the freelancer has started the van leg" stamp (§7.3). Never
+// throws — a stamping failure must not block the resolve response.
+async function stampVanLegStarted(quoteId: string): Promise<void> {
+  try {
+    await query(
+      `UPDATE quotes SET van_leg_started_at = COALESCE(van_leg_started_at, NOW()), updated_at = NOW()
+        WHERE id = $1`,
+      [quoteId]
+    );
+  } catch (err) {
+    console.warn('[freelancer-resolve] stampVanLegStarted failed for quote', quoteId, err);
+  }
+}
+
 // ── Public: Freelancer book-out token redemption ────────────────────
 //
 // The portal deep-links freelancers here with an HMAC token. This
@@ -413,6 +427,11 @@ router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) =
       freelancerPersonId: person.id,
     });
 
+    // Mark the van leg as "started" (§7.3) — the freelancer has arrived on OP
+    // to do the book-out. The stalled-leg scanner alerts staff if no vehicle
+    // event lands after this. Best-effort; never block the response.
+    await stampVanLegStarted(quoteId);
+
     res.json({
       success: true,
       sessionToken,
@@ -527,6 +546,9 @@ router.post('/freelancer-checkin/resolve', async (req: Request, res: Response) =
       freelancerPersonId: person.id,
       mode: 'checkin',
     });
+
+    // Mark the van leg as "started" (§7.3) — see the book-out resolver.
+    await stampVanLegStarted(quoteId);
 
     res.json({
       success: true,
