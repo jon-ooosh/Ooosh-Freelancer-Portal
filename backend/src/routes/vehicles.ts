@@ -48,6 +48,95 @@ const router = Router();
 // frontend TYRE_TREAD_AMBER_MM constant in lib/tyre-sanity.ts.
 const DEFAULT_TYRE_TREAD_AMBER_MM = 5;
 
+// Shared crew-authorisation for the freelancer resolve endpoints (book-out +
+// check-in). The token's freelancerEmail is HMAC-proven (portal-minted after
+// portal-auth), but it doesn't always join cleanly to quote_assignments.person_id
+// — freelancers accumulate duplicate people records / multiple emails, so the
+// crew row can point at a different record than the one they logged in with
+// (Lewis, hoadleyguitartech@live.com, HH 15933). We authorise against the
+// quote's crew by id → email → unique-name. The name-widening only decides
+// WHICH crew row, never grants new access (the token is the auth).
+type FreelancerAuthResult =
+  | {
+      ok: true;
+      person: { id: string; first_name: string; last_name: string };
+      jobId: string | null;
+      hhJobNumber: number | null;
+      venueName: string | null;
+    }
+  | { ok: false; status: number; body: Record<string, unknown> };
+
+async function authoriseFreelancerOnQuote(
+  quoteId: string,
+  freelancerEmail: string
+): Promise<FreelancerAuthResult> {
+  const quoteResult = await query(
+    `SELECT q.job_id, q.job_type, q.venue_name, j.hh_job_number
+       FROM quotes q
+       LEFT JOIN jobs j ON j.id = q.job_id
+      WHERE q.id = $1 AND q.is_deleted = false
+      LIMIT 1`,
+    [quoteId]
+  );
+  if (quoteResult.rows.length === 0) {
+    return { ok: false, status: 404, body: { error: 'Job not found', code: 'quote_not_found' } };
+  }
+  const { job_id: jobId, hh_job_number: hhJobNumber, venue_name: venueName } = quoteResult.rows[0];
+
+  const crewResult = await query(
+    `SELECT qa.person_id, p.email, p.first_name, p.last_name
+       FROM quote_assignments qa
+       JOIN people p ON p.id = qa.person_id
+      WHERE qa.quote_id = $1
+        AND qa.status NOT IN ('declined', 'cancelled')`,
+    [quoteId]
+  );
+  if (crewResult.rows.length === 0) {
+    return { ok: false, status: 403, body: { error: 'You are not assigned to this job', code: 'not_assigned' } };
+  }
+
+  const loginPersonResult = await query(
+    `SELECT id, first_name, last_name FROM people WHERE LOWER(email) = LOWER($1) LIMIT 1`,
+    [freelancerEmail]
+  );
+  const loginPerson = loginPersonResult.rows[0] as
+    | { id: string; first_name: string; last_name: string }
+    | undefined;
+
+  const norm = (s: string | null | undefined) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  const loginEmailLc = freelancerEmail.toLowerCase();
+  const loginName = loginPerson ? norm(`${loginPerson.first_name} ${loginPerson.last_name}`) : '';
+
+  let matchedCrew =
+    (loginPerson && crewResult.rows.find((c) => c.person_id === loginPerson.id)) ||
+    crewResult.rows.find((c) => (c.email || '').toLowerCase() === loginEmailLc);
+  if (!matchedCrew && loginName) {
+    const nameMatches = crewResult.rows.filter((c) => norm(`${c.first_name} ${c.last_name}`) === loginName);
+    if (nameMatches.length === 1) {
+      matchedCrew = nameMatches[0];
+      console.warn('[freelancer-resolve] Authorised via NAME match (id/email mismatch)', {
+        quoteId,
+        freelancerEmail,
+        matchedPersonId: matchedCrew.person_id,
+      });
+    }
+  }
+  if (!matchedCrew) {
+    console.warn('[freelancer-resolve] Freelancer not on quote crew', {
+      quoteId,
+      freelancerEmail,
+      crewSize: crewResult.rows.length,
+    });
+    return { ok: false, status: 403, body: { error: 'You are not assigned to this job', code: 'not_assigned' } };
+  }
+
+  const person = loginPerson
+    ? loginPerson
+    : { id: matchedCrew.person_id, first_name: matchedCrew.first_name, last_name: matchedCrew.last_name };
+
+  return { ok: true, person, jobId, hhJobNumber, venueName };
+}
+
 // ── Public: Freelancer book-out token redemption ────────────────────
 //
 // The portal deep-links freelancers here with an HMAC token. This
@@ -82,33 +171,14 @@ router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) =
     const { quoteId, freelancerEmail } = verified;
     console.log('[freelancer-bookout] Token verified', { quoteId, freelancerEmail });
 
-    // Check the freelancer is actually assigned to this quote.
-    const personResult = await query(
-      `SELECT id, first_name, last_name FROM people WHERE LOWER(email) = LOWER($1) LIMIT 1`,
-      [freelancerEmail]
-    );
-    if (personResult.rows.length === 0) {
-      res.status(403).json({ error: 'Freelancer not recognised' });
+    // Authorise the freelancer against the quote's crew (shared helper — see
+    // its rationale for the id/email/name matching).
+    const auth = await authoriseFreelancerOnQuote(quoteId, freelancerEmail);
+    if (!auth.ok) {
+      res.status(auth.status).json(auth.body);
       return;
     }
-    const person = personResult.rows[0];
-
-    const assignmentCheck = await query(
-      `SELECT qa.id AS quote_assignment_id, q.job_id, q.job_type, q.venue_name, j.hh_job_number
-         FROM quote_assignments qa
-         JOIN quotes q ON q.id = qa.quote_id
-         LEFT JOIN jobs j ON j.id = q.job_id
-         WHERE qa.quote_id = $1
-           AND qa.person_id = $2
-           AND q.is_deleted = false
-         LIMIT 1`,
-      [quoteId, person.id]
-    );
-    if (assignmentCheck.rows.length === 0) {
-      res.status(403).json({ error: 'You are not assigned to this job' });
-      return;
-    }
-    const { job_id: jobId, hh_job_number: hhJobNumber, venue_name: venueName } = assignmentCheck.rows[0];
+    const { person, jobId, hhJobNumber, venueName } = auth;
 
     // Find the vehicle_hire_assignment for this job. The trust chain for a
     // freelancer doing a delivery is: their row on quote_assignments
@@ -384,6 +454,106 @@ router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) =
   }
 });
 
+// ── Public: Freelancer check-in / collection token redemption ────────
+//
+// Mirror of the book-out resolver for the COLLECTION side (fixes the Lewis
+// mis-route, HH 15933 — a collection is a check-in, not a book-out). Same HMAC
+// token format + shared crew-authorisation; the differences are: (1) we resolve
+// the van currently OUT on the job (booked_out/active), not a pre-book-out
+// allocation, and (2) the session mode is 'checkin', which makes the save-event
+// handler treat the submission as a SOFT check-in — records interim state +
+// closes the collection quote, but does NOT flip the assignment to 'returned'
+// (the warehouse still owns the final check-in + damage adjudication).
+router.post('/freelancer-checkin/resolve', async (req: Request, res: Response) => {
+  try {
+    const token = (req.body?.token || req.query?.token) as string | undefined;
+    if (!token) {
+      res.status(400).json({ error: 'Missing token' });
+      return;
+    }
+    const verified = verifyFreelancerBookoutToken(token);
+    if (!verified) {
+      res.status(401).json({ error: 'Invalid or expired token' });
+      return;
+    }
+    const { quoteId, freelancerEmail } = verified;
+    console.log('[freelancer-checkin] Token verified', { quoteId, freelancerEmail });
+
+    const auth = await authoriseFreelancerOnQuote(quoteId, freelancerEmail);
+    if (!auth.ok) {
+      res.status(auth.status).json(auth.body);
+      return;
+    }
+    const { person, jobId, hhJobNumber, venueName } = auth;
+
+    // Resolve the van currently OUT on this job. Most-progressed status first
+    // (active > booked_out), then most-recently booked out. Dual job-match
+    // because staff-allocation rows carry only hirehop_job_id.
+    const outResult = await query(
+      `SELECT vha.id AS assignment_id, vha.vehicle_id, vha.status,
+              fv.reg AS registration, fv.make, fv.model, fv.vehicle_type,
+              d.full_name AS customer_driver_name, d.email AS customer_driver_email
+         FROM vehicle_hire_assignments vha
+         LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+         LEFT JOIN drivers d ON d.id = vha.driver_id
+        WHERE (vha.job_id = $1 OR vha.hirehop_job_id = $2)
+          AND vha.status IN ('booked_out', 'active')
+          AND vha.vehicle_id IS NOT NULL
+        ORDER BY CASE vha.status WHEN 'active' THEN 0 WHEN 'booked_out' THEN 1 ELSE 2 END,
+                 vha.booked_out_at DESC NULLS LAST
+        LIMIT 1`,
+      [jobId, hhJobNumber]
+    );
+    if (outResult.rows.length === 0) {
+      console.warn('[freelancer-checkin] No van currently out for job', { jobId, hhJobNumber });
+      res.status(409).json({
+        error: 'No van is currently out for this job',
+        code: 'no_out_vehicle',
+        hint: 'This collection can only be done once the van has been booked out. Please contact the Ooosh office.',
+      });
+      return;
+    }
+    const vha = outResult.rows[0];
+    console.log('[freelancer-checkin] Vehicle resolved', {
+      assignmentId: vha.assignment_id,
+      registration: vha.registration,
+      status: vha.status,
+    });
+
+    const sessionToken = mintFreelancerBookoutSession({
+      assignmentId: vha.assignment_id,
+      quoteId,
+      freelancerEmail,
+      freelancerPersonId: person.id,
+      mode: 'checkin',
+    });
+
+    res.json({
+      success: true,
+      sessionToken,
+      assignment: {
+        id: vha.assignment_id,
+        vehicleId: vha.vehicle_id,
+        registration: vha.registration,
+        makeModel: [vha.make, vha.model].filter(Boolean).join(' '),
+        vehicleType: vha.vehicle_type || null,
+        status: vha.status,
+        customerDriver: vha.customer_driver_name
+          ? { name: vha.customer_driver_name, email: vha.customer_driver_email || null }
+          : null,
+      },
+      job: { id: jobId, hhJobNumber, venueName },
+      driver: {
+        name: `${person.first_name} ${person.last_name}`.trim(),
+        email: freelancerEmail,
+      },
+    });
+  } catch (err) {
+    console.error('[freelancer-checkin] Resolve crashed:', err instanceof Error ? err.stack || err.message : err);
+    res.status(500).json({ error: 'Failed to resolve check-in token' });
+  }
+});
+
 // Vehicle routes accept EITHER a staff JWT or a freelancer book-out
 // session JWT. The flexible middleware populates req.user (staff) XOR
 // req.bookoutSession (freelancer). A follow-up gate restricts freelancer
@@ -414,6 +584,11 @@ const FREELANCER_BOOKOUT_ALLOW: Array<{ method: string; pattern: RegExp }> = [
   // (below) clamps the freelancer's events query to their own vehicle reg.
   { method: 'GET',   pattern: /^\/get-checklist-settings$/ },
   { method: 'GET',   pattern: /^\/get-events$/ },
+  // Collection / soft check-in flow (checkin-mode sessions). save-event is
+  // already allowed above; these cover the CollectionPage data + eligibility.
+  { method: 'POST',  pattern: /^\/save-collection$/ },
+  { method: 'GET',   pattern: /^\/get-collection$/ },
+  { method: 'GET',   pattern: /^\/check-in-eligibility$/ },
 ];
 
 router.use((req: FlexibleVehicleRequest, res: Response, next) => {
@@ -2321,8 +2496,12 @@ router.post('/save-event', async (req: FlexibleVehicleRequest, res: Response) =>
 
     const reg = (event.vehicleReg as string).toUpperCase();
 
-    // Freelancer: event MUST target their assignment. Allow only book-out
-    // events (check-in is a separate future flow and isn't enabled yet).
+    // Freelancer: event MUST target their assignment, and the event TYPE must
+    // match the session mode — a 'bookout' session may only fire book-out
+    // events; a 'checkin' session may only fire SOFT check-in events (interim /
+    // soft-check-in). A checkin session is deliberately NOT allowed to fire a
+    // full 'check-in' (which flips the assignment to 'returned') — the
+    // warehouse owns the final check-in + damage adjudication.
     if (isFreelancerBookout(req)) {
       const scope = await getBookoutScope(req);
       if (!scope) {
@@ -2338,10 +2517,20 @@ router.post('/save-event', async (req: FlexibleVehicleRequest, res: Response) =>
         res.status(403).json({ error: 'Event does not target your job' });
         return;
       }
-      const et = String(event.eventType || '').toLowerCase();
-      if (et !== 'book-out' && et !== 'book out' && et !== 'bookout') {
-        res.status(403).json({ error: 'Only book-out events allowed for freelancer session' });
-        return;
+      const et = String(event.eventType || '').toLowerCase().replace(/[\s_]+/g, '-');
+      const mode = req.bookoutSession?.mode ?? 'bookout';
+      if (mode === 'checkin') {
+        const isSoftCheckin = et === 'soft-check-in' || et === 'interim-check-in';
+        if (!isSoftCheckin) {
+          res.status(403).json({ error: 'Only soft check-in events allowed for this session' });
+          return;
+        }
+      } else {
+        const isBookout = et === 'book-out' || et === 'bookout';
+        if (!isBookout) {
+          res.status(403).json({ error: 'Only book-out events allowed for freelancer session' });
+          return;
+        }
       }
     }
 
@@ -2763,15 +2952,45 @@ router.post('/save-event', async (req: FlexibleVehicleRequest, res: Response) =>
     // recomputing to 'On Hire' / 'Prep Needed'. No HH writeback, no close-out
     // requirements — the hire continues (on a replacement van for the swap
     // case). Mileage is logged generically above (the reading is real).
-    if (normalisedEventType === 'soft-check-in') {
+    // 'interim-check-in' is the eventType CollectionPage fires ("Interim Check
+    // In"); 'soft-check-in' is the van-swap primitive. Both are soft — van goes
+    // Not Ready, hire continues, no assignment status flip.
+    if (normalisedEventType === 'soft-check-in' || normalisedEventType === 'interim-check-in') {
       try {
         await query(
           `UPDATE fleet_vehicles SET hire_status = 'Not Ready', updated_at = NOW() WHERE reg = $1`,
           [reg]
         );
-        console.log(`[vehicles/events] soft check-in: ${reg} → Not Ready (interim — hire continues elsewhere, no assignment flip)`);
+        console.log(`[vehicles/events] soft check-in: ${reg} → Not Ready (interim — hire continues, no assignment flip)`);
       } catch (err) {
         console.warn('[vehicles/events] soft check-in side-effect failed:', err);
+      }
+
+      // Freelancer collection: stamp soft_checked_in_at on the session's
+      // assignment (marks "collected, awaiting warehouse final check-in" — NO
+      // 'returned' flip) and close the collection quote's VAN leg server-side,
+      // so the quote completes the moment the van is collected without the
+      // freelancer's browser having to return to the portal (the Tobi/Lewis
+      // cross-domain gap). Keyed on the freelancer checkin session.
+      if (req.bookoutSession?.mode === 'checkin' && req.bookoutSession.assignmentId) {
+        const assignmentId = req.bookoutSession.assignmentId;
+        const quoteId = req.bookoutSession.quoteId;
+        const actor = req.bookoutSession.freelancerEmail || 'freelancer collection';
+        try {
+          await query(
+            `UPDATE vehicle_hire_assignments
+                SET soft_checked_in_at = COALESCE(soft_checked_in_at, NOW()), updated_at = NOW()
+              WHERE id = $1`,
+            [assignmentId]
+          );
+          if (quoteId) {
+            const { stampQuoteLeg, maybeCloseQuote } = await import('../services/quote-completion');
+            await stampQuoteLeg(quoteId, 'van');
+            await maybeCloseQuote(quoteId, { triggeringLeg: 'van', actorLabel: actor });
+          }
+        } catch (err) {
+          console.warn('[vehicles/events] freelancer soft check-in completion failed:', err);
+        }
       }
     }
 
@@ -2794,6 +3013,57 @@ router.post('/save-event', async (req: FlexibleVehicleRequest, res: Response) =>
   } catch (error) {
     console.error('[vehicles/events] Failed to save event:', error);
     res.status(500).json({ error: 'Failed to save event' });
+  }
+});
+
+// ── Collection data — R2-backed, pre-populates the staff final check-in ──
+//
+// A freelancer collection (soft check-in) records the van's state at pickup.
+// The definitive lifecycle effect (Not Ready, soft_checked_in_at, quote close,
+// interim PDF) rides on the save-event soft-check-in above; this stores the
+// captured figures/photos so the warehouse's later CheckInPage can pre-fill.
+// Keyed by (reg, hh job). Accepts a freelancer checkin session (save) or staff
+// (get, during final check-in). Non-fatal on the client if it fails.
+
+router.post('/save-collection', async (req: FlexibleVehicleRequest, res: Response) => {
+  try {
+    const { collection } = req.body as { collection?: { vehicleReg?: string; hireHopJob?: string | number } };
+    if (!collection?.vehicleReg || collection.hireHopJob == null) {
+      res.status(400).json({ error: 'collection with vehicleReg and hireHopJob is required' });
+      return;
+    }
+    // Freelancer scope: can only write collection data for their own van.
+    if (isFreelancerBookout(req)) {
+      const scope = await getBookoutScope(req);
+      if (!scope || String(collection.vehicleReg).toUpperCase() !== scope.registration) {
+        res.status(403).json({ error: 'Collection does not target your vehicle' });
+        return;
+      }
+    }
+    const reg = String(collection.vehicleReg).toUpperCase();
+    const job = String(collection.hireHopJob);
+    await writeR2Json(`collections/${reg}/${job}.json`, collection);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[vehicles/save-collection] Failed:', error);
+    res.status(500).json({ error: 'Failed to save collection data' });
+  }
+});
+
+router.get('/get-collection', async (req: FlexibleVehicleRequest, res: Response) => {
+  try {
+    const vehicleReg = req.query.vehicleReg as string | undefined;
+    const jobId = req.query.jobId as string | undefined;
+    if (!vehicleReg || !jobId) {
+      res.status(400).json({ error: 'vehicleReg and jobId are required' });
+      return;
+    }
+    const reg = vehicleReg.toUpperCase();
+    const data = await readR2Json(`collections/${reg}/${jobId}.json`);
+    res.json({ collection: data ?? null });
+  } catch (error) {
+    console.error('[vehicles/get-collection] Failed:', error);
+    res.status(500).json({ error: 'Failed to load collection data' });
   }
 });
 

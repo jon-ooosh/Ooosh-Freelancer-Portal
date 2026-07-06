@@ -35,6 +35,7 @@ import InboxPage from './pages/InboxPage';
 import LostCancelledPage from './pages/LostCancelledPage';
 import FillGapPage from './pages/FillGapPage';
 import FreelancerBookoutShell from './pages/FreelancerBookoutShell';
+import FreelancerCheckinShell from './pages/FreelancerCheckinShell';
 import StoragePage from './pages/StoragePage';
 import StorageTcsAcceptPage from './pages/StorageTcsAcceptPage';
 import CarnetFormPage from './pages/CarnetFormPage';
@@ -54,6 +55,7 @@ import WarehouseCollectionDetailPage from './pages/WarehouseCollectionDetailPage
 import Layout from './components/Layout';
 import { VehicleRoutes, initVehicleModule } from './modules/vehicles';
 import { BookOutPage as StaffBookOutPage } from './modules/vehicles/pages/BookOutPage';
+import { CheckInPage as StaffCheckInPage } from './modules/vehicles/pages/CheckInPage';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { sharedRefreshToken } from './services/api';
 import { getFreelancerSession, isFreelancerSessionActive } from './modules/vehicles/adapters/freelancer-session';
@@ -131,12 +133,38 @@ function BookOutEntry() {
   );
 }
 
+/**
+ * Check-in entry point — mirror of BookOutEntry for the COLLECTION side.
+ * Freelancer mode (portal handoff for a collection) → FreelancerCheckinShell
+ * (renders CollectionPage). Staff mode → the normal protected CheckInPage.
+ * This makes `/vehicles/check-in` a public entry (like book-out); staff still
+ * reach the same page through it, freelancers get the soft-check-in flow.
+ */
+function CheckInEntry() {
+  const [params] = useSearchParams();
+  const hasFreelancerToken = params.has('freelancerToken') || isFreelancerSessionActive();
+  if (hasFreelancerToken) {
+    return <FreelancerCheckinShell />;
+  }
+  return (
+    <ProtectedRoute>
+      <Layout>
+        <QueryClientProvider client={staffBookOutQueryClient}>
+          <StaffCheckInPage />
+        </QueryClientProvider>
+      </Layout>
+    </ProtectedRoute>
+  );
+}
+
 export default function App() {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
       {/* Public freelancer book-out entry — bypasses ProtectedRoute */}
       <Route path="/vehicles/book-out" element={<BookOutEntry />} />
+      {/* Public freelancer check-in / collection entry — bypasses ProtectedRoute */}
+      <Route path="/vehicles/check-in" element={<CheckInEntry />} />
       {/* Public OOH parking-confirmation form — token-authenticated, no Layout wrapper */}
       <Route path="/return-parking/:token" element={<OohReturnParkingPage />} />
       {/* Public mobile receipt capture (QR handoff) — token-authenticated, no Layout wrapper */}
