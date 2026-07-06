@@ -48,6 +48,20 @@ const SYSTEM_USER_ID = '00000000-0000-0000-0000-000000000000';
 // Stable, so a constant. Extend here if we ever quote from another owned domain.
 const INTERNAL_SENDER_DOMAINS = ['oooshtours.co.uk'];
 
+// EXCEPTION to the internal/automated skip: website enquiry-form emails arrive
+// via Resend and MAY carry a From on our own domain (e.g. enquiries@oooshtours.co.uk),
+// which the domain rule below would otherwise skip. We don't build enquiry
+// auto-create until Phase 4 (§11), so skipping them now is harmless — but list
+// the exact enquiry-form From address(es) here to keep them flowing the moment
+// extraction lands. Matched addresses bypass BOTH the internal-domain and
+// automated guards. Empty until we confirm the sender. Lowercase, full address.
+const ENQUIRY_SOURCE_ADDRESSES: string[] = [];
+
+function isEnquirySource(from: string | null): boolean {
+  const addr = extractEmailAddress(from);
+  return addr != null && ENQUIRY_SOURCE_ADDRESSES.includes(addr);
+}
+
 function senderDomain(from: string | null): string | null {
   const addr = extractEmailAddress(from);
   if (!addr) return null;
@@ -235,7 +249,7 @@ async function processMessage(
   // auto-generated mail (bounces / OOO / bulk) is noise. Skip entirely: don't
   // log to a timeline, don't queue. The cursor advances past it so it won't
   // reappear. (See INTERNAL_SENDER_DOMAINS note above.)
-  if (isInternalSender(from) || looksAutomated(headers)) {
+  if (!isEnquirySource(from) && (isInternalSender(from) || looksAutomated(headers))) {
     counters.skipped++;
     return;
   }

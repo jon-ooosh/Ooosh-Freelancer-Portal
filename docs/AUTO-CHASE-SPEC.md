@@ -93,6 +93,8 @@ Match in priority order (per jon: no consistency in client subject conventions, 
 
 **Decision (jon, Jul 2026):** filter smartly rather than move internal mail off `info@`. Staff rely on seeing those alerts in the shared inbox, and the sender filter is lower blast-radius and reversible. Extend `INTERNAL_SENDER_DOMAINS` if we ever quote/send client mail from another owned domain.
 
+**Enquiry carve-out (`ENQUIRY_SOURCE_ADDRESSES`):** website enquiry-form emails arrive via **Resend** and may carry a From on our own domain — which the internal rule would skip, killing the Phase 4 enquiry-auto-create idea (§11). An allowlist of exact enquiry-form From addresses bypasses BOTH guards. It's **empty until we confirm the enquiry From address** (open item — see §14); harmless while empty because enquiry auto-create isn't built yet. When Phase 4 lands, drop the address in and the enquiry stream flows straight through the matcher as a recognised source.
+
 ### 5.5 What gets stored
 
 - `interactions` row: `type='email'`, `job_id`, `content` = **full body text** (plus a short snippet for previews), `direction` (inbound/outbound), `created_by = SYSTEM_USER_ID`, plus new metadata (see §9): Gmail `message_id`, `thread_id`, `from`, `to`, `subject`, `has_attachments`.
@@ -263,6 +265,7 @@ Merged to main on `claude/auto-chase-feature-design-tiknf2`. **Everything is ine
 - **Retention window** on `type='email'` interaction bodies — **DECIDED (jon, Jun 2026): 24 months full body, then strip body + keep metadata/summary.** See §5.6. Stored as `system_settings.email_retention_months` (default 24) so it's tunable without a deploy.
 - **Cold-dead-end N:** **DECIDED (jon, Jun 2026): 3 silent chases**, then escalate to a human ("call them or drop it?") rather than firing chase #4. Stored as `system_settings.auto_chase_max_silent` (default 3) so it's tunable.
 - **Multi-mailbox staleness:** **ACCEPTED as a Phase 1 cost (jon, Jun 2026)** — see §6.1. Draft-not-send is the mitigation; fast manager-mailbox rollout (Phase 1.5) is the fix. No "always CC info@" mandate.
+- **Website enquiry From address (Resend):** what From does the website enquiry form actually send with? If `@oooshtours.co.uk`, it's currently caught by the internal-sender filter (harmless now, but must go in `ENQUIRY_SOURCE_ADDRESSES` before Phase 4 enquiry auto-create). If a non-owned domain (e.g. `resend.dev` or the customer's own address), it flows to the unmatched queue already. **Determine before building Phase 4** (or now — jon to confirm).
 
 ## 15. What we're explicitly NOT doing
 
