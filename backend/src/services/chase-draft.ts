@@ -32,8 +32,9 @@ const MAX_TOKENS = 800;
 const SYSTEM_PROMPT = `You draft short chase emails for Ooosh Tours, a music & event transport / backline / rehearsal hire company. A quote went out to a client and we've heard nothing back; you write a brief, warm "just checking in" nudge.
 
 HARD RULES — never break these:
-- This is a gentle CHECK-IN, never a renegotiation. Do NOT invent discounts, change prices, add urgency/deadlines, or offer anything not already in the quote.
+- This is a gentle CHECK-IN, never a renegotiation. Do NOT invent discounts, change prices, or offer anything not already in the quote.
 - Ground every concrete detail (band, dates, what's being hired, job number) ONLY in the data provided. If a detail isn't given, don't mention it. Never guess or fabricate.
+- MATCH THE URGENCY TO HOW SOON THE HIRE STARTS (given below as "days until hire"). NEVER say "no rush" / "no hurry" / "whenever suits" or imply there's plenty of time unless the hire is more than a week away. If the hire is days away (or today/past), be warm but clearly convey we need to hear back soon to lock it in — do not sound relaxed about an imminent booking.
 - Keep it SHORT — 2 short paragraphs max, ideally 3-5 sentences total. Busy people skim.
 - Warm and human, not corporate or pushy. One light question that invites a reply ("any thoughts on the quote?" / "happy to tweak anything?").
 - British English. Sign off as "Ooosh" / "the Ooosh team" (no fake individual name).
@@ -66,6 +67,7 @@ export interface ChaseContext {
   outDate: string | null;
   jobEnd: string | null;
   pipelineStatus: string | null;
+  daysUntilStart: number | null; // days from today to out_date (negative = past)
   itemsSummary: string[];      // human-readable list of what's being hired
   priorChaseCount: number;     // how many times we've chased already
   isRepeatClient: boolean;     // client has prior jobs with us
@@ -119,7 +121,9 @@ export async function gatherChaseContext(jobId: string): Promise<ChaseContext | 
     jobValue: j.job_value != null ? Number(j.job_value) : null,
     outDate: j.out_date ? new Date(j.out_date).toISOString().slice(0, 10) : null,
     jobEnd: j.job_end ? new Date(j.job_end).toISOString().slice(0, 10) : null,
+    // daysUntilStart set below once outDate is known.
     pipelineStatus: j.pipeline_status ?? null,
+    daysUntilStart: null,
     itemsSummary: summariseItems(j.line_items),
     priorChaseCount: Number(j.auto_chase_count) || 0,
     isRepeatClient: false,
@@ -127,6 +131,17 @@ export async function gatherChaseContext(jobId: string): Promise<ChaseContext | 
     threadText: null,
     hasThread: false,
   };
+
+  // Days until the hire starts — drives the draft's urgency/tone (a hire days
+  // away must NOT read "no rush"). Computed from out_date against today.
+  if (ctx.outDate) {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const start = new Date(`${ctx.outDate}T00:00:00`);
+    if (!Number.isNaN(start.getTime())) {
+      ctx.daysUntilStart = Math.round((start.getTime() - today.getTime()) / 86_400_000);
+    }
+  }
 
   // Repeat-client signal — prior jobs for the same client org (best-effort).
   if (j.client_id) {
@@ -183,6 +198,22 @@ function buildUserPrompt(ctx: ChaseContext): string {
   if (ctx.hhJobNumber) lines.push(`Job number: #${ctx.hhJobNumber}`);
   if (ctx.clientName) lines.push(`Client: ${ctx.clientName}`);
   if (ctx.outDate) lines.push(`Hire dates: ${ctx.outDate}${ctx.jobEnd && ctx.jobEnd !== ctx.outDate ? ` to ${ctx.jobEnd}` : ''}`);
+  if (ctx.daysUntilStart != null) {
+    const d = ctx.daysUntilStart;
+    let urgency: string;
+    if (d < 0) {
+      urgency = `⚠ Days until hire: the start date was ${Math.abs(d)} day(s) AGO and this is still unconfirmed — time-critical. Do NOT imply there's time to spare; we urgently need to hear back or understand if it's still happening.`;
+    } else if (d === 0) {
+      urgency = `⚠ Days until hire: STARTS TODAY and unconfirmed — treat as urgent. Warm, but make clear we need to hear back right away to lock it in. NEVER say "no rush".`;
+    } else if (d <= 2) {
+      urgency = `⚠ Days until hire: ${d} — very soon and unconfirmed. Convey we need to confirm/finalise urgently. NEVER say "no rush" or imply there's plenty of time.`;
+    } else if (d <= 7) {
+      urgency = `Days until hire: ${d} — coming up soon. Convey gentle time-pressure and that we'd like to lock it in. Avoid "no rush".`;
+    } else {
+      urgency = `Days until hire: ${d} — comfortably ahead; a relaxed, low-pressure check-in is fine.`;
+    }
+    lines.push(urgency);
+  }
   if (ctx.jobValue != null) lines.push(`Quote value: £${ctx.jobValue.toFixed(2)} (do NOT state the price in the email unless it was already discussed in the thread — reference "the quote")`);
   if (ctx.itemsSummary.length) lines.push(`What they're hiring: ${ctx.itemsSummary.join(', ')}`);
   lines.push(
