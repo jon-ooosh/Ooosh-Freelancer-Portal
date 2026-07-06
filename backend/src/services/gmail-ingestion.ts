@@ -28,6 +28,52 @@ import { matchEmailToJob, extractEmailAddress } from './email-matcher';
 
 const SYSTEM_USER_ID = '00000000-0000-0000-0000-000000000000';
 
+// ── Internal / automated sender filtering ───────────────────────────────────
+// info@ is a firehose of our OWN mail: every internal notification / alert /
+// reminder is sent from notifications@ or a staff address (all @oooshtours.co.uk),
+// and MANY of them carry a HH job number (referral alerts, pre-hire briefings,
+// the client-no-email fallback, chase/holding digests, …). Left unfiltered those
+// would match a real job via the matcher's job-number layer and pollute the job
+// timeline with our own notifications masquerading as client replies.
+//
+// The rule: an inbound email FROM our own domain is internal/automated — skip it
+// (don't log, don't queue). Client replies are always from external domains, so
+// this is a clean cut. It also correctly drops our own SENT copies (Phase 2 owns
+// draft-vs-sent capture) and the client-no-email fallback (which is really our
+// bounced OUTBOUND, not a client reply). Stays correct into Phase 1.5 manager
+// mailboxes: a client replying to Sarah is still external (kept); Sarah's outbound
+// is from our domain (skipped). Only loss: a staff FORWARD of a client thread into
+// info@ — acceptable, that's manager-mailbox territory.
+//
+// Stable, so a constant. Extend here if we ever quote from another owned domain.
+const INTERNAL_SENDER_DOMAINS = ['oooshtours.co.uk'];
+
+function senderDomain(from: string | null): string | null {
+  const addr = extractEmailAddress(from);
+  if (!addr) return null;
+  const at = addr.lastIndexOf('@');
+  return at === -1 ? null : addr.slice(at + 1);
+}
+
+function isInternalSender(from: string | null): boolean {
+  const domain = senderDomain(from);
+  if (!domain) return false;
+  return INTERNAL_SENDER_DOMAINS.some((d) => domain === d || domain.endsWith(`.${d}`));
+}
+
+/**
+ * Belt-and-braces guard for EXTERNAL automated mail (bounces, out-of-office,
+ * newsletters) so it doesn't clog the unmatched queue. Conservative — keys off
+ * headers only auto-generated mail sets, so a genuine client reply never trips it.
+ */
+function looksAutomated(headers: GmailHeader[] | undefined): boolean {
+  const autoSubmitted = (headerValue(headers, 'Auto-Submitted') || '').toLowerCase();
+  if (autoSubmitted && autoSubmitted !== 'no') return true; // auto-generated / auto-replied
+  const precedence = (headerValue(headers, 'Precedence') || '').toLowerCase();
+  if (precedence === 'bulk' || precedence === 'list' || precedence === 'junk') return true;
+  return false;
+}
+
 // ── Gmail REST payload shapes (only the fields we read) ─────────────────────
 interface GmailHeader { name: string; value: string }
 interface GmailPart {
@@ -63,6 +109,8 @@ export interface IngestionSummary {
   logged: number;
   unmatched: number;
   duplicates: number;
+  /** Internal (own-domain) or automated (bounce/OOO/bulk) mail skipped entirely. */
+  skipped: number;
   error?: string;
 }
 
@@ -157,7 +205,7 @@ async function recordError(mailbox: string, message: string): Promise<void> {
 async function processMessage(
   mailbox: string,
   messageId: string,
-  counters: { logged: number; unmatched: number; duplicates: number },
+  counters: { logged: number; unmatched: number; duplicates: number; skipped: number },
 ): Promise<void> {
   // Dedup up front — cheap and avoids a Gmail fetch when we already have it.
   const rfcIdProbe = await query(
@@ -181,6 +229,17 @@ async function processMessage(
   const from = headerValue(headers, 'From');
   const to = headerValue(headers, 'To');
   const subject = headerValue(headers, 'Subject');
+
+  // Internal / automated guard — before matching. An email from our own domain
+  // is a notification/alert/our-own-sent-copy, not a client reply; external
+  // auto-generated mail (bounces / OOO / bulk) is noise. Skip entirely: don't
+  // log to a timeline, don't queue. The cursor advances past it so it won't
+  // reappear. (See INTERNAL_SENDER_DOMAINS note above.)
+  if (isInternalSender(from) || looksAutomated(headers)) {
+    counters.skipped++;
+    return;
+  }
+
   const { body, attachmentFilenames, hasAttachments } = extractBodyAndAttachments(msg.payload);
 
   // Authoritative dedup on the RFC822 Message-ID (unique across mailboxes).
@@ -287,6 +346,7 @@ export async function runIngestionForPrimaryMailbox(): Promise<IngestionSummary>
     logged: 0,
     unmatched: 0,
     duplicates: 0,
+    skipped: 0,
   };
   if (!summary.configured) return summary;
 
@@ -304,7 +364,7 @@ export async function runIngestionForPrimaryMailbox(): Promise<IngestionSummary>
     const { ids, newHistoryId } = await fetchAddedMessageIds(mailbox, state.history_id);
     summary.fetched = ids.length;
 
-    const counters = { logged: 0, unmatched: 0, duplicates: 0 };
+    const counters = { logged: 0, unmatched: 0, duplicates: 0, skipped: 0 };
     for (const id of ids) {
       try {
         await processMessage(mailbox, id, counters);
@@ -316,6 +376,7 @@ export async function runIngestionForPrimaryMailbox(): Promise<IngestionSummary>
     summary.logged = counters.logged;
     summary.unmatched = counters.unmatched;
     summary.duplicates = counters.duplicates;
+    summary.skipped = counters.skipped;
 
     await advanceCursor(mailbox, newHistoryId, ids.length);
     return summary;

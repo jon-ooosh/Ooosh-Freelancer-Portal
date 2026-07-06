@@ -83,6 +83,16 @@ Match in priority order (per jon: no consistency in client subject conventions, 
 
 - Dedup on the RFC822 `Message-ID` header (globally unique per message). One interaction per unique message regardless of how many mailboxes surface it (critical once §6 adds manager inboxes and the same email appears 4×).
 
+### 5.4a Internal / automated sender filter (BUILT — critical, added Jul 2026)
+
+`info@` receives a large volume of **our own** mail, not just client replies: every internal notification / alert / reminder is sent from `notifications@` or a staff address (all `@oooshtours.co.uk`), and **many carry a HH job number** — referral alerts, pre-hire briefings (T-5/3/1), chase & holding digests, hire-form fallback alerts, and especially the **client-no-email fallback** (our *outbound* client message redirected into `info@` with the job ref embedded, so staff can forward it). Left unfiltered, every one of those would match a real job via the matcher's job-number layer (§5.3.2/3), land in the inbox (so `direction='inbound'`), and get logged onto the job timeline as a fake "client reply."
+
+**The rule (in `gmail-ingestion.ts` `processMessage`, before matching):** skip entirely — no interaction, no unmatched-queue row — any inbound whose From is on our own domain (`INTERNAL_SENDER_DOMAINS = ['oooshtours.co.uk']`), OR that looks automated (`Auto-Submitted` header ≠ `no`; `Precedence: bulk/list/junk`). The skipped count surfaces on the `/ingest` summary. The history cursor advances past skipped messages so they never reappear.
+
+**Why the domain cut is clean:** client replies are always from external domains; clients are never on our domain. It also correctly drops our own SENT copies (Phase 2 owns draft-vs-sent capture) and the client-no-email fallback (which is bounced OUTBOUND, not a reply). It stays correct into §6 manager mailboxes — a client replying to Sarah is still external (kept); Sarah's outbound is from our domain (skipped). The only loss is a staff member *forwarding* a client thread into `info@` (from a staff address), which is acceptable and is manager-mailbox territory anyway.
+
+**Decision (jon, Jul 2026):** filter smartly rather than move internal mail off `info@`. Staff rely on seeing those alerts in the shared inbox, and the sender filter is lower blast-radius and reversible. Extend `INTERNAL_SENDER_DOMAINS` if we ever quote/send client mail from another owned domain.
+
 ### 5.5 What gets stored
 
 - `interactions` row: `type='email'`, `job_id`, `content` = **full body text** (plus a short snippet for previews), `direction` (inbound/outbound), `created_by = SYSTEM_USER_ID`, plus new metadata (see §9): Gmail `message_id`, `thread_id`, `from`, `to`, `subject`, `has_attachments`.
