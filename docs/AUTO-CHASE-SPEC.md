@@ -257,6 +257,14 @@ Merged to main on `claude/auto-chase-feature-design-tiknf2`. **Everything is ine
 2. **Store the JSON as a FILE, not inline in `.env`** — systemd/dotenv can't parse multi-line JSON (`Ignoring invalid environment assignment`). Put it at `/var/www/ooosh-portal/backend/gmail-sa.json` (`chmod 600`), set `GMAIL_SERVICE_ACCOUNT_JSON=/var/www/ooosh-portal/backend/gmail-sa.json` and `GMAIL_DELEGATED_USER=info@oooshtours.co.uk`. `gmail-sa.json` is git-ignored.
 3. Test: `GET /api/auto-chase/status` → `configured:true` + profile; `POST /api/auto-chase/ingest` → `baselineEstablished:true`; then email `info@` mentioning a real HH job# and re-run `/ingest` → interaction lands on that job's timeline.
 
+### 13.2 Phase 2 — progress (Jul 2026)
+
+**Slice 1 SHIPPED — AI chase-draft generation + preview.** `services/chase-draft.ts` (`gatherChaseContext()` + `draftChaseEmail()`) drafts the chase with Claude Sonnet 5, forced tool-use, prompt-cached code rails + appended `chase_voice_instructions` (§9.2). `POST /api/auto-chase/preview-draft/:jobId` returns `{ draft: {subject, body}, context }` as JSON **without** touching Gmail — so draft quality is judgeable on real jobs before any Gmail write. Grounds on `jobs.line_items`, repeat-vs-first-contact hire history, prior ingested email thread (degrades gracefully when Phase 1 has ingested nothing yet), and `auto_chase_count`.
+
+**GATE for the next slice — Gmail scope upgrade.** Creating the actual Gmail draft (§9.1 step 2, threaded onto the original quote email) needs `gmail.compose` — the service account is currently `gmail.readonly`. jon: add `https://www.googleapis.com/auth/gmail.compose` to the domain-wide-delegation client authorization in the Workspace admin console; then the scope goes into the JWT in `config/gmail.ts` and a `gmailApiPost` draft-create helper (`POST /users/{mailbox}/drafts` with a raw RFC822 message + `threadId`) lands.
+
+**Remaining Phase 2 slices:** (a) Gmail draft-creation helper + wire into the 08:00 chase-due trigger for jobs with `auto_chase_mode='draft'`; (b) ChaseModal Off/Draft/Auto-send toggle (§9.4) persisting `auto_chase_mode`; (c) chase-voice Settings UI editing `chase_voice_instructions`; (d) passive draft-vs-sent diff capture (§9.3).
+
 ## 14. Open decisions (carried into build)
 
 - **Thread-latch vs new email:** confirmed jon prefers latching onto the original quote thread; new-email-with-PDF is second-best. Latching is free once matched (§8.4), so the effort is all in the matcher.
