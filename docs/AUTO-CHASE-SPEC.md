@@ -1,6 +1,6 @@
 # AUTO-CHASE-SPEC.md — Operational Awareness Layer & Auto-Chase
 
-**Status:** Design (Jun 2026). Not yet built. Written for review + tweak before implementation. Expect this to span several sessions.
+**Status:** Phase 1 BUILT + merged (Jul 2026, PR #919) — deployed **inert** until the `GMAIL_*` env vars are set on the server (see §13.1 below). Phases 1.5 → 4 are design. Written for review + tweak; expect this to span several sessions.
 
 **Branch:** `claude/auto-chase-feature-design-tiknf2`
 
@@ -82,6 +82,18 @@ Match in priority order (per jon: no consistency in client subject conventions, 
 ### 5.4 Dedup
 
 - Dedup on the RFC822 `Message-ID` header (globally unique per message). One interaction per unique message regardless of how many mailboxes surface it (critical once §6 adds manager inboxes and the same email appears 4×).
+
+### 5.4a Internal / automated sender filter (BUILT — critical, added Jul 2026)
+
+`info@` receives a large volume of **our own** mail, not just client replies: every internal notification / alert / reminder is sent from `notifications@` or a staff address (all `@oooshtours.co.uk`), and **many carry a HH job number** — referral alerts, pre-hire briefings (T-5/3/1), chase & holding digests, hire-form fallback alerts, and especially the **client-no-email fallback** (our *outbound* client message redirected into `info@` with the job ref embedded, so staff can forward it). Left unfiltered, every one of those would match a real job via the matcher's job-number layer (§5.3.2/3), land in the inbox (so `direction='inbound'`), and get logged onto the job timeline as a fake "client reply."
+
+**The rule (in `gmail-ingestion.ts` `processMessage`, before matching):** skip entirely — no interaction, no unmatched-queue row — any inbound whose From is on our own domain (`INTERNAL_SENDER_DOMAINS = ['oooshtours.co.uk']`), OR that looks automated (`Auto-Submitted` header ≠ `no`; `Precedence: bulk/list/junk`). The skipped count surfaces on the `/ingest` summary. The history cursor advances past skipped messages so they never reappear.
+
+**Why the domain cut is clean:** client replies are always from external domains; clients are never on our domain. It also correctly drops our own SENT copies (Phase 2 owns draft-vs-sent capture) and the client-no-email fallback (which is bounced OUTBOUND, not a reply). It stays correct into §6 manager mailboxes — a client replying to Sarah is still external (kept); Sarah's outbound is from our domain (skipped). The only loss is a staff member *forwarding* a client thread into `info@` (from a staff address), which is acceptable and is manager-mailbox territory anyway.
+
+**Decision (jon, Jul 2026):** filter smartly rather than move internal mail off `info@`. Staff rely on seeing those alerts in the shared inbox, and the sender filter is lower blast-radius and reversible. Extend `INTERNAL_SENDER_DOMAINS` if we ever quote/send client mail from another owned domain.
+
+**Enquiry carve-out (`ENQUIRY_SOURCE_ADDRESSES`) — RESOLVED (Jul 2026): don't use it for enquiries.** The website enquiry form was confirmed to send **From `info@oooshtours.co.uk`** (via Resend / `send.oooshtours.co.uk`), real client in **reply-to**. So the internal filter skips it — but that's fine: a brand-new enquiry has no job to attach to, so it'd only hit the unmatched queue anyway. And `info@` is **NOT** a safe allowlist entry, because it's also the address staff reply to clients from in the shared inbox — allowlisting it would ingest our own outbound as fake client mail. **The right home for enquiry-auto-create (Phase 4, §11) is a DIRECT form→OP webhook** — since we control the enquiry-form repo, POST structured fields (band / service / client email from reply-to / message) straight to an OP endpoint rather than scraping the email. `ENQUIRY_SOURCE_ADDRESSES` stays empty; keep it only for a genuinely distinct future enquiry sender.
 
 ### 5.5 What gets stored
 
@@ -226,6 +238,33 @@ Reuse: `job_contacts` for recipient resolution (a chase goes to the primary cont
 5. **Phase 4 — Dispute helper** (NL query over the chain) **+ line-item diff history** for the auto-assembled audit trail. Website-form enquiry auto-create can land here or alongside Phase 1's matcher.
 6. **Later** — multi-step cadences, cold-lead escalation surfaces, send-time tuning.
 
+### 13.1 Phase 1 — as built (Jul 2026, PR #919)
+
+Merged to main on `claude/auto-chase-feature-design-tiknf2`. **Everything is inert until `GMAIL_SERVICE_ACCOUNT_JSON` + `GMAIL_DELEGATED_USER` are set** — `isGmailConfigured()` gates the scheduler crons and every endpoint degrades cleanly (`configured: false`). Safe to deploy ahead of the Google config.
+
+**Files:**
+- `backend/src/config/gmail.ts` — `isGmailConfigured()`, `getPrimaryMailbox()`, `loadServiceAccountKey()` (**auto-detects inline JSON vs a file PATH** — value starting with `{` is inline, else read from disk), `getGmailAuthClient(mailbox)` (domain-wide-delegation JWT via `google-auth-library`, cached per mailbox, scope `gmail.readonly`, `subject` = impersonated mailbox), `gmailApiGet()`, `getGmailProfile()`.
+- `backend/src/services/email-matcher.ts` — `matchEmailToJob()`: deterministic layers only (HH job# in PDF filename → HH job# in subject/body validated against `jobs.hh_job_number` → sender/recipient email → single OPEN job). No match ⇒ unmatched queue. Layer 4 (AI fuzzy) deferred.
+- `backend/src/services/gmail-ingestion.ts` — `runIngestionForPrimaryMailbox()` (first run establishes a baseline `historyId` and ingests nothing historic; thereafter incremental via the History API, dedup on RFC822 Message-ID, matched → `interactions` row `type='email'` `created_by=SYSTEM_USER_ID`, unmatched → `gmail_unmatched_inbound`), `getGmailIngestionStatus()`.
+- `backend/src/services/email-retention.ts` — `runEmailRetentionSweep()` (strips bodies older than `system_settings.email_retention_months`, default 24; keeps metadata; idempotent via `body_stripped_at`).
+- `backend/src/routes/auto-chase.ts` — `GET /status` (admin/manager), `POST /ingest` (admin), `POST /retention-sweep` (admin), `GET /unmatched` (admin/manager). Mounted at `/api/auto-chase`.
+- **Migration 157** (`157_gmail_ingestion.sql`) — email metadata + dedup index on `interactions`; `gmail_sync_state`; `gmail_unmatched_inbound`; `jobs.auto_chase_mode/count/last_at`; seeds `chase_voice_instructions` / `email_retention_months` / `auto_chase_max_silent` into `system_settings` (category `chase`).
+- **Scheduler** (`config/scheduler.ts`) — ingestion `*/10 * * * *`, retention sweep weekly `0 4 * * 0` (Europe/London), both guarded by `isGmailConfigured()`.
+- Dependency: `google-auth-library` (chosen over the heavy `googleapis` package; we hit the Gmail REST API with plain `fetch`).
+
+**Go-live (Google side) — outstanding:**
+1. **⚠️ The service-account private key pasted into chat during setup is COMPROMISED — delete that key in GCP and issue a fresh one** (project `op-gmail-ingest`, #395184500010). Domain-wide-delegation consent survives (it's tied to the Client ID, not the key), so only the key needs re-issuing.
+2. **Store the JSON as a FILE, not inline in `.env`** — systemd/dotenv can't parse multi-line JSON (`Ignoring invalid environment assignment`). Put it at `/var/www/ooosh-portal/backend/gmail-sa.json` (`chmod 600`), set `GMAIL_SERVICE_ACCOUNT_JSON=/var/www/ooosh-portal/backend/gmail-sa.json` and `GMAIL_DELEGATED_USER=info@oooshtours.co.uk`. `gmail-sa.json` is git-ignored.
+3. Test: `GET /api/auto-chase/status` → `configured:true` + profile; `POST /api/auto-chase/ingest` → `baselineEstablished:true`; then email `info@` mentioning a real HH job# and re-run `/ingest` → interaction lands on that job's timeline.
+
+### 13.2 Phase 2 — progress (Jul 2026)
+
+**Slice 1 SHIPPED — AI chase-draft generation + preview.** `services/chase-draft.ts` (`gatherChaseContext()` + `draftChaseEmail()`) drafts the chase with Claude Sonnet 5, forced tool-use, prompt-cached code rails + appended `chase_voice_instructions` (§9.2). `POST /api/auto-chase/preview-draft/:jobId` returns `{ draft: {subject, body}, context }` as JSON **without** touching Gmail — so draft quality is judgeable on real jobs before any Gmail write. Grounds on `jobs.line_items`, repeat-vs-first-contact hire history, prior ingested email thread (degrades gracefully when Phase 1 has ingested nothing yet), and `auto_chase_count`.
+
+**GATE for the next slice — Gmail scope upgrade.** Creating the actual Gmail draft (§9.1 step 2, threaded onto the original quote email) needs `gmail.compose` — the service account is currently `gmail.readonly`. jon: add `https://www.googleapis.com/auth/gmail.compose` to the domain-wide-delegation client authorization in the Workspace admin console; then the scope goes into the JWT in `config/gmail.ts` and a `gmailApiPost` draft-create helper (`POST /users/{mailbox}/drafts` with a raw RFC822 message + `threadId`) lands.
+
+**Remaining Phase 2 slices:** (a) Gmail draft-creation helper + wire into the 08:00 chase-due trigger for jobs with `auto_chase_mode='draft'`; (b) ChaseModal Off/Draft/Auto-send toggle (§9.4) persisting `auto_chase_mode`; (c) chase-voice Settings UI editing `chase_voice_instructions`; (d) passive draft-vs-sent diff capture (§9.3).
+
 ## 14. Open decisions (carried into build)
 
 - **Thread-latch vs new email:** confirmed jon prefers latching onto the original quote thread; new-email-with-PDF is second-best. Latching is free once matched (§8.4), so the effort is all in the matcher.
@@ -234,6 +273,7 @@ Reuse: `job_contacts` for recipient resolution (a chase goes to the primary cont
 - **Retention window** on `type='email'` interaction bodies — **DECIDED (jon, Jun 2026): 24 months full body, then strip body + keep metadata/summary.** See §5.6. Stored as `system_settings.email_retention_months` (default 24) so it's tunable without a deploy.
 - **Cold-dead-end N:** **DECIDED (jon, Jun 2026): 3 silent chases**, then escalate to a human ("call them or drop it?") rather than firing chase #4. Stored as `system_settings.auto_chase_max_silent` (default 3) so it's tunable.
 - **Multi-mailbox staleness:** **ACCEPTED as a Phase 1 cost (jon, Jun 2026)** — see §6.1. Draft-not-send is the mitigation; fast manager-mailbox rollout (Phase 1.5) is the fix. No "always CC info@" mandate.
+- **Website enquiry From address (Resend):** what From does the website enquiry form actually send with? If `@oooshtours.co.uk`, it's currently caught by the internal-sender filter (harmless now, but must go in `ENQUIRY_SOURCE_ADDRESSES` before Phase 4 enquiry auto-create). If a non-owned domain (e.g. `resend.dev` or the customer's own address), it flows to the unmatched queue already. **Determine before building Phase 4** (or now — jon to confirm).
 
 ## 15. What we're explicitly NOT doing
 
