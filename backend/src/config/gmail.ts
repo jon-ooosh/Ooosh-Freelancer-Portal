@@ -28,9 +28,13 @@
 import { readFileSync } from 'fs';
 import { JWT } from 'google-auth-library';
 
-// Read-only Gmail scope. Modify scope (for creating drafts) comes in Phase 2 —
-// a separate scope so the read-only ingestion can't accidentally send anything.
+// Read-only Gmail scope — used by the ingestion path (§5). Kept on its own JWT
+// client so ingestion physically cannot create or send anything.
 const GMAIL_READONLY_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
+// Compose scope — Phase 2 draft creation only (§9). Allows create/read/update
+// of drafts (and send, which we deliberately DON'T call — staff send from Gmail).
+// On its own client so the two capabilities stay separated.
+const GMAIL_COMPOSE_SCOPE = 'https://www.googleapis.com/auth/gmail.compose';
 
 const GMAIL_API_BASE = 'https://gmail.googleapis.com/gmail/v1';
 
@@ -79,12 +83,15 @@ function loadServiceAccountKey(): ServiceAccountKey {
   return key;
 }
 
-// One JWT client per impersonated mailbox (the `subject` differs per mailbox).
+// One JWT client per (impersonated mailbox × scope-set). The `subject` differs
+// per mailbox; readonly vs compose are separate clients so the two capabilities
+// don't bleed together.
 const jwtClients = new Map<string, JWT>();
+const composeClients = new Map<string, JWT>();
 
 /**
- * Build (or reuse) a domain-wide-delegation JWT client impersonating `mailbox`.
- * Defaults to the primary info@ mailbox.
+ * Build (or reuse) a READ-ONLY domain-wide-delegation JWT client impersonating
+ * `mailbox`. Defaults to the primary info@ mailbox.
  */
 export function getGmailAuthClient(mailbox: string = getPrimaryMailbox()): JWT {
   const existing = jwtClients.get(mailbox);
@@ -98,6 +105,26 @@ export function getGmailAuthClient(mailbox: string = getPrimaryMailbox()): JWT {
     subject: mailbox, // impersonate this mailbox (domain-wide delegation)
   });
   jwtClients.set(mailbox, client);
+  return client;
+}
+
+/**
+ * Build (or reuse) a COMPOSE-scope JWT client impersonating `mailbox` — used
+ * ONLY for draft creation (§9). Requires `gmail.compose` on the DWD client
+ * authorization in the Workspace admin console.
+ */
+export function getGmailComposeClient(mailbox: string = getPrimaryMailbox()): JWT {
+  const existing = composeClients.get(mailbox);
+  if (existing) return existing;
+
+  const key = loadServiceAccountKey();
+  const client = new JWT({
+    email: key.client_email,
+    key: key.private_key,
+    scopes: [GMAIL_COMPOSE_SCOPE],
+    subject: mailbox,
+  });
+  composeClients.set(mailbox, client);
   return client;
 }
 
@@ -126,6 +153,34 @@ export async function gmailApiGet<T = unknown>(
     throw new Error(`Gmail API ${resp.status} on ${path}: ${body.slice(0, 300)}`);
   }
   return (await resp.json()) as T;
+}
+
+/**
+ * Create a Gmail DRAFT in `mailbox` (compose scope). `raw` is a base64url-encoded
+ * RFC822 message; pass `threadId` to latch the draft onto an existing thread.
+ * Returns the created draft's id + message/thread ids. Staff send it from Gmail —
+ * OP never calls the send endpoint.
+ */
+export async function createGmailDraft(
+  mailbox: string,
+  message: { raw: string; threadId?: string },
+): Promise<{ id: string; message?: { id: string; threadId: string } }> {
+  const client = getGmailComposeClient(mailbox);
+  const token = await client.getAccessToken();
+  if (!token || !token.token) {
+    throw new Error(`Gmail: failed to obtain compose access token for ${mailbox}`);
+  }
+  const url = `${GMAIL_API_BASE}/users/${encodeURIComponent(mailbox)}/drafts`;
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token.token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message }),
+  });
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => '');
+    throw new Error(`Gmail draft create ${resp.status}: ${body.slice(0, 300)}`);
+  }
+  return (await resp.json()) as { id: string; message?: { id: string; threadId: string } };
 }
 
 /**
