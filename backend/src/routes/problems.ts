@@ -375,8 +375,8 @@ router.post('/', validate(createSchema), async (req: AuthRequest, res: Response)
     // Skipped for vehicle-only issues (no job to anchor against).
     if (body.job_id) {
       await query(
-        `INSERT INTO interactions (type, content, job_id, created_by)
-         VALUES ('note', $1, $2, $3)`,
+        `INSERT INTO interactions (type, content, job_id, created_by, source)
+         VALUES ('note', $1, $2, $3, 'system')`,
         [
           `⚠️ Issue logged (${body.category}${body.severity === 'urgent' ? ', urgent' : ''}): ${body.summary}`,
           body.job_id, req.user!.id,
@@ -691,8 +691,8 @@ router.post('/auto-create', validate(autoCreateSchema), async (req: AuthRequest,
     // matches the manual POST / behaviour.
     if (jobId) {
       await query(
-        `INSERT INTO interactions (type, content, job_id, created_by)
-         VALUES ('note', $1, $2, $3)`,
+        `INSERT INTO interactions (type, content, job_id, created_by, source)
+         VALUES ('note', $1, $2, $3, 'system')`,
         [
           `⚠️ Issue logged (${body.category}${body.severity === 'urgent' ? ', urgent' : ''}): ${body.summary}`,
           jobId, req.user!.id,

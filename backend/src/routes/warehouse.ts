@@ -615,8 +615,8 @@ router.post('/collections/:jobId/complete', async (req: WarehouseRequest, res: R
 
     try {
       await query(
-        `INSERT INTO interactions (id, type, content, job_id, created_by, created_at, pipeline_status_at_creation)
-         VALUES ($1, 'note', $2, $3, $4, $5, 'dispatched')`,
+        `INSERT INTO interactions (id, type, content, job_id, created_by, created_at, pipeline_status_at_creation, source)
+         VALUES ($1, 'note', $2, $3, $4, $5, 'dispatched', 'system')`,
         [uuid(), content, jobId, actorId(req), completedAtIso]
       );
     } catch (err) {

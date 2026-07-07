@@ -227,8 +227,8 @@ async function handleJobStatusChange(
       const end = job.return_date || job.job_end;
       const dueStr = end ? new Date(end).toLocaleDateString('en-GB') : 'its scheduled end';
       await query(
-        `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
-         VALUES ('note', $1, $2, NULL, $3)`,
+        `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation, source)
+         VALUES ('note', $1, $2, NULL, $3, 'system')`,
         [
           `📦 HireHop reports items checked in (Returned Incomplete), but this hire isn't due back until ${dueStr} — treating as an early partial return. The hire continues; the job stays on hire.`,
           job.id,
@@ -287,8 +287,8 @@ async function handleJobStatusChange(
 
     // Log as interaction (status transition)
     await query(
-      `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
-       VALUES ('status_transition', $1, $2, NULL, $3)`,
+      `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation, source)
+       VALUES ('status_transition', $1, $2, NULL, $3, 'system')`,
       [
         `Status changed via HireHop: ${fromLabel} → ${toLabel}`,
         job.id,
@@ -566,8 +566,8 @@ router.post('/external/status-transition', async (req: Request, res: Response) =
     const toLabel = PIPELINE_LABELS[newPipelineStatus] || newPipelineStatus;
 
     await query(
-      `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
-       VALUES ('status_transition', $1, $2, NULL, $3)`,
+      `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation, source)
+       VALUES ('status_transition', $1, $2, NULL, $3, 'system')`,
       [
         `Status changed via ${source || 'external'}: ${fromLabel} → ${toLabel}${trigger ? ` (${trigger})` : ''}`,
         job.id,

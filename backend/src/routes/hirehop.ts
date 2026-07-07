@@ -730,8 +730,8 @@ router.patch('/jobs/:jobId/internal', async (req: AuthRequest, res: Response) =>
     // derivation hits a transient error.
     try {
       await query(
-        `INSERT INTO interactions (type, content, job_id, created_by)
-         VALUES ('note', $1, $2, $3)`,
+        `INSERT INTO interactions (type, content, job_id, created_by, source)
+         VALUES ('note', $1, $2, $3, 'system')`,
         [
           isInternal
             ? '🔧 Job marked as Internal — hire forms, excess and money tracking muted (crew & transport unaffected)'
@@ -784,7 +784,7 @@ router.patch('/jobs/:jobId/recharge-running-costs', async (req: AuthRequest, res
 
     try {
       await query(
-        `INSERT INTO interactions (type, content, job_id, created_by) VALUES ('note', $1, $2, $3)`,
+        `INSERT INTO interactions (type, content, job_id, created_by, source) VALUES ('note', $1, $2, $3, 'system')`,
         [
           flag
             ? '⛽ Job marked "recharge running costs" — fuel/parking/etc. billed to the client at actual + markup post-hire'

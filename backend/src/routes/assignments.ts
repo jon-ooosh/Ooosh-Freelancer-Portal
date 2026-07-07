@@ -1690,8 +1690,8 @@ router.post(
     // 7. Job timeline interaction — the swap story on the Activity Timeline.
     if (orig.job_id) {
       await query(
-        `INSERT INTO interactions (type, content, job_id, created_by)
-         VALUES ('note', $1, $2, $3)`,
+        `INSERT INTO interactions (type, content, job_id, created_by, source)
+         VALUES ('note', $1, $2, $3, 'system')`,
         [
           `🔄 Vehicle swapped${isPlanned ? ' (planned)' : ''}: ${orig.vehicle_reg || 'unknown'} → ${newVehicle.reg} ` +
           `(${swapped.length} driver(s)). Reason: ${swap_reason}.` +

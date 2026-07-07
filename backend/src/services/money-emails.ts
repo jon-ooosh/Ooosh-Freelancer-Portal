@@ -311,7 +311,7 @@ export async function logFallbackToTimeline(opts: {
   const content = `Automated email (${opts.templateId}) could not be addressed — no client email on file. Redirected to info@ so the team can forward manually and update the address book.${amountPart}`;
   try {
     await query(
-      `INSERT INTO interactions (type, content, job_id) VALUES ('email', $1, $2)`,
+      `INSERT INTO interactions (type, content, job_id, source) VALUES ('email', $1, $2, 'system')`,
       [content, opts.jobId]
     );
   } catch (err) {
