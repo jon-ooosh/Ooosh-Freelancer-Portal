@@ -34,6 +34,7 @@ const SYSTEM_PROMPT = `You draft short chase emails for Ooosh Tours, a music & e
 HARD RULES — never break these:
 - This is a gentle CHECK-IN, never a renegotiation. Do NOT invent discounts, change prices, or offer anything not already in the quote.
 - Ground every concrete detail (band, dates, what's being hired, job number) ONLY in the data provided. If a detail isn't given, don't mention it. Never guess or fabricate.
+- The dates given below are the ACTUAL hire days (the "inside" dates). If an end date is given it is the LAST hire day — the client returns the next morning, which is NOT a hire day. NEVER describe the hire as running to the return/drop-off date, and never add a day to the range.
 - MATCH THE URGENCY TO HOW SOON THE HIRE STARTS (given below as "days until hire"). NEVER say "no rush" / "no hurry" / "whenever suits" or imply there's plenty of time unless the hire is more than a week away. If the hire is days away (or today/past), be warm but clearly convey we need to hear back soon to lock it in — do not sound relaxed about an imminent booking.
 - Keep it SHORT — 2 short paragraphs max, ideally 3-5 sentences total. Busy people skim.
 - Warm and human, not corporate or pushy. One light question that invites a reply ("any thoughts on the quote?" / "happy to tweak anything?").
@@ -68,6 +69,7 @@ export interface ChaseContext {
   jobEnd: string | null;
   pipelineStatus: string | null;
   daysUntilStart: number | null; // days from today to out_date (negative = past)
+  hireSpanDays: number | null;   // calendar days out_date→job_end (0/1 = single-day-ish)
   itemsSummary: string[];      // human-readable list of what's being hired
   priorChaseCount: number;     // how many times we've chased already
   isRepeatClient: boolean;     // client has prior jobs with us
@@ -104,7 +106,7 @@ function summariseItems(lineItems: HHLineItem[] | null): string[] {
 export async function gatherChaseContext(jobId: string): Promise<ChaseContext | null> {
   const jobRes = await query(
     `SELECT id, hh_job_number, job_name, client_name, client_id, job_value,
-            out_date, job_end, pipeline_status, line_items,
+            out_date, job_date, job_end, pipeline_status, line_items,
             COALESCE(auto_chase_count, 0) AS auto_chase_count
        FROM jobs
       WHERE id = $1 AND is_deleted = false`,
@@ -113,17 +115,41 @@ export async function gatherChaseContext(jobId: string): Promise<ChaseContext | 
   if (jobRes.rows.length === 0) return null;
   const j = jobRes.rows[0];
 
+  // ── Derive the INSIDE hire dates (what the client is actually hiring) ───────
+  // Hire START = job_date (the chargeable start), falling back to out_date.
+  // Last hire DAY = job_end MINUS Ooosh's phantom "return morning" rollover:
+  // job_end is booked as ~09:00 the morning AFTER the last hire day (a hire to
+  // the 15th shows job_end = 16th 09:00; the 16th is the return, NOT a hire day).
+  // So when job_end's time-of-day is early morning, the last hire day is the day
+  // before. OP's own "N days" figure is computed the same way. We must NEVER tell
+  // a client their hire runs to the return date.
+  const hireStart =
+    j.job_date || j.out_date ? new Date(j.job_date || j.out_date).toISOString().slice(0, 10) : null;
+
+  let lastHireDay: string | null = null;
+  if (j.job_end) {
+    const rawEnd = new Date(j.job_end);
+    if (!Number.isNaN(rawEnd.getTime())) {
+      const endDate = new Date(`${rawEnd.toISOString().slice(0, 10)}T00:00:00Z`);
+      // Morning time-of-day (< 12:00 UTC — covers Ooosh's 09:00 marker in both
+      // BST and GMT) ⇒ the stored date is the return morning; last hire day = −1.
+      if (rawEnd.getUTCHours() < 12) endDate.setUTCDate(endDate.getUTCDate() - 1);
+      lastHireDay = endDate.toISOString().slice(0, 10);
+      if (hireStart && lastHireDay < hireStart) lastHireDay = hireStart; // never before start
+    }
+  }
+
   const ctx: ChaseContext = {
     jobId: j.id,
     hhJobNumber: j.hh_job_number ?? null,
     jobName: j.job_name ?? null,
     clientName: j.client_name ?? null,
     jobValue: j.job_value != null ? Number(j.job_value) : null,
-    outDate: j.out_date ? new Date(j.out_date).toISOString().slice(0, 10) : null,
-    jobEnd: j.job_end ? new Date(j.job_end).toISOString().slice(0, 10) : null,
-    // daysUntilStart set below once outDate is known.
+    outDate: hireStart,   // hire START (inside date)
+    jobEnd: lastHireDay,  // LAST HIRE DAY (rollover stripped — NOT the return date)
     pipelineStatus: j.pipeline_status ?? null,
     daysUntilStart: null,
+    hireSpanDays: null,
     itemsSummary: summariseItems(j.line_items),
     priorChaseCount: Number(j.auto_chase_count) || 0,
     isRepeatClient: false,
@@ -132,14 +158,21 @@ export async function gatherChaseContext(jobId: string): Promise<ChaseContext | 
     hasThread: false,
   };
 
-  // Days until the hire starts — drives the draft's urgency/tone (a hire days
-  // away must NOT read "no rush"). Computed from out_date against today.
+  // Days until the hire starts (urgency/tone) + hire span in calendar days.
   if (ctx.outDate) {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const start = new Date(`${ctx.outDate}T00:00:00`);
     if (!Number.isNaN(start.getTime())) {
       ctx.daysUntilStart = Math.round((start.getTime() - today.getTime()) / 86_400_000);
+      // jobEnd is now the TRUE last hire day (rollover already stripped), so
+      // span 0 = single-day hire, >= 1 = genuinely multi-day. No inflation left.
+      if (ctx.jobEnd) {
+        const end = new Date(`${ctx.jobEnd}T00:00:00`);
+        if (!Number.isNaN(end.getTime())) {
+          ctx.hireSpanDays = Math.round((end.getTime() - start.getTime()) / 86_400_000);
+        }
+      }
     }
   }
 
@@ -197,7 +230,18 @@ function buildUserPrompt(ctx: ChaseContext): string {
   if (ctx.jobName) lines.push(`Job: ${ctx.jobName}`);
   if (ctx.hhJobNumber) lines.push(`Job number: #${ctx.hhJobNumber}`);
   if (ctx.clientName) lines.push(`Client: ${ctx.clientName}`);
-  if (ctx.outDate) lines.push(`Hire dates: ${ctx.outDate}${ctx.jobEnd && ctx.jobEnd !== ctx.outDate ? ` to ${ctx.jobEnd}` : ''}`);
+  if (ctx.outDate) {
+    // jobEnd is the TRUE last hire day (return-morning rollover already stripped).
+    // Span 0 = single-day; >= 1 = genuine multi-day.
+    if (ctx.hireSpanDays != null && ctx.hireSpanDays >= 1 && ctx.jobEnd && ctx.jobEnd !== ctx.outDate) {
+      const nDays = ctx.hireSpanDays + 1;
+      lines.push(
+        `Hire dates: ${ctx.outDate} to ${ctx.jobEnd} — ${nDays} hire days. ${ctx.jobEnd} is the LAST hire day; the client returns the vehicle/kit the following morning, which is NOT a hire day. Never say or imply the hire runs beyond ${ctx.jobEnd}.`,
+      );
+    } else {
+      lines.push(`Hire date: ${ctx.outDate} — a SINGLE-DAY hire. Refer to "your hire on ${ctx.outDate}"; do NOT describe it as spanning multiple days.`);
+    }
+  }
   if (ctx.daysUntilStart != null) {
     const d = ctx.daysUntilStart;
     let urgency: string;
