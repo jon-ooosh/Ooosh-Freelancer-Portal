@@ -533,6 +533,9 @@ function SettingsContent() {
 
       <CarnetSettingsSection />
 
+      {/* Auto-chase draft voice — admin & manager */}
+      <ChaseVoiceSettingsSection />
+
       {/* Xero bank account mapping — admin & manager */}
       <XeroBankAccountsSection />
 
@@ -1220,6 +1223,69 @@ function CarnetSettingsSection() {
           </label>
         </div>
         <p className="text-xs text-gray-400 mt-2">PNG or JPG. A transparent-background PNG looks best on the letter.</p>
+      </div>
+    </div>
+  );
+}
+
+// ── Auto-Chase draft voice ───────────────────────────────────────────────────
+
+function ChaseVoiceSettingsSection() {
+  const [orig, setOrig] = useState('');
+  const [val, setVal] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+
+  useEffect(() => { load(); }, []);
+
+  async function load() {
+    try {
+      const res = await api.get<{ data: SystemSetting[] }>('/system-settings?category=chase');
+      const v = res.data.find(s => s.key === 'chase_voice_instructions')?.value ?? '';
+      setOrig(v);
+      setVal(v);
+    } catch {
+      setError('Could not load chase settings (has migration 157 run?).');
+    } finally { setLoading(false); }
+  }
+
+  async function save() {
+    setSaving(true); setError(''); setSuccess('');
+    try {
+      await api.put('/system-settings', { settings: { chase_voice_instructions: val.trim() === '' ? null : val } });
+      setOrig(val);
+      setSuccess('Saved. New drafts will use this voice.');
+    } catch (e) { setError(e instanceof Error ? e.message : 'Save failed'); }
+    finally { setSaving(false); }
+  }
+
+  if (loading) return null;
+
+  return (
+    <div className="bg-white rounded-lg shadow p-6 mb-6">
+      <h2 className="text-lg font-semibold text-gray-900 mb-1">Auto-Chase — draft voice</h2>
+      <p className="text-sm text-gray-500 mb-4">
+        Extra tone guidance appended to the AI chase-draft prompt (the “Draft chase” button on enquiries).
+        Your steer on “more of this / less of that” — takes effect on the next draft, no deploy needed.
+        The hard rules (checking-in not renegotiating, never fabricate, urgency matched to the hire date) can’t be overridden here.
+      </p>
+      {error && <div className="mb-3 text-sm text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2">{error}</div>}
+      {success && <div className="mb-3 text-sm text-green-700 bg-green-50 border border-green-200 rounded px-3 py-2">{success}</div>}
+
+      <textarea
+        value={val}
+        onChange={(e) => { setVal(e.target.value); setSuccess(''); }}
+        rows={6}
+        placeholder={'e.g. Keep it really casual and friendly — we\'re a small team, not a corporate. Avoid exclamation marks. Sign off as "Cheers, the Ooosh team". Never mention the exact price.'}
+        className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 resize-y min-h-[120px]"
+      />
+      <div className="flex items-center gap-3 mt-3">
+        <button onClick={save} disabled={saving || val === orig} className="px-3 py-1.5 bg-ooosh-600 text-white rounded text-sm disabled:opacity-50">
+          {saving ? 'Saving…' : 'Save voice'}
+        </button>
+        {val !== orig && <button onClick={() => setVal(orig)} className="text-sm text-gray-500 hover:text-gray-700">Reset</button>}
       </div>
     </div>
   );
