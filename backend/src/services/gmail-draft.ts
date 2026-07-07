@@ -21,7 +21,7 @@
  *   3. No resolvable client email → throw (staff addresses it manually).
  */
 import { query } from '../config/database';
-import { getPrimaryMailbox, createGmailDraft, isGmailConfigured } from '../config/gmail';
+import { getPrimaryMailbox, createGmailDraft, gmailSearchMessageIds, isGmailConfigured } from '../config/gmail';
 import { draftChaseEmail } from './chase-draft';
 import { extractEmailAddress } from './email-matcher';
 
@@ -104,7 +104,11 @@ async function resolveRecipient(jobId: string): Promise<RecipientResolution | nu
     }
   }
 
-  // 2. Fall back to the job's primary contact email (standalone draft).
+  // 2. Fall back to the job's primary contact email. For the "silent quote"
+  //    case (client never replied, so nothing ingested), still try to latch onto
+  //    the original sent-quote thread by searching the mailbox for the job
+  //    number — so the chase threads into the conversation rather than arriving
+  //    as a cold new email.
   const contactRow = await query(
     `SELECT p.email
        FROM job_contacts jc
@@ -116,12 +120,22 @@ async function resolveRecipient(jobId: string): Promise<RecipientResolution | nu
       LIMIT 1`,
     [jobId],
   );
-  if (contactRow.rows.length > 0) {
-    const to = extractEmailAddress(contactRow.rows[0].email) || String(contactRow.rows[0].email).trim();
-    if (to) return { to, threadId: null, inReplyTo: null };
-  }
+  if (contactRow.rows.length === 0) return null;
+  const to = extractEmailAddress(contactRow.rows[0].email) || String(contactRow.rows[0].email).trim();
+  if (!to) return null;
 
-  return null;
+  let threadId: string | null = null;
+  const jobRow = await query(`SELECT hh_job_number FROM jobs WHERE id = $1`, [jobId]);
+  const hh = jobRow.rows[0]?.hh_job_number;
+  if (hh) {
+    try {
+      const found = await gmailSearchMessageIds(getPrimaryMailbox(), `"${hh}"`, 10);
+      if (found.length > 0) threadId = found[0].threadId; // Gmail's most-relevant thread
+    } catch {
+      /* non-fatal — fall back to a standalone draft */
+    }
+  }
+  return { to, threadId, inReplyTo: null };
 }
 
 /**
