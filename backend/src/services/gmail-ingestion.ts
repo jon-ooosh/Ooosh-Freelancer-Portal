@@ -105,7 +105,7 @@ interface GmailPart {
   body?: { size?: number; data?: string; attachmentId?: string };
   parts?: GmailPart[];
 }
-interface GmailMessage {
+export interface GmailMessage {
   id: string;
   threadId: string;
   snippet?: string;
@@ -223,45 +223,39 @@ async function recordError(mailbox: string, message: string): Promise<void> {
 }
 
 // ── Per-message processing ──────────────────────────────────────────────────
-async function processMessage(
+
+export type IngestOutcome = 'logged' | 'skipped' | 'duplicate' | 'unmatched';
+
+/**
+ * Ingest a single Gmail message: internal/automated skip → RFC822 dedup →
+ * attach to a job (matcher, or a forced known job for the backfill) or park in
+ * the unmatched queue. Idempotent (dedup on the RFC822 Message-ID).
+ *
+ * opts.forceJobId — attach to this job WITHOUT running the matcher (the backfill
+ *   already knows the job from the job-number search, so client replies that
+ *   don't themselves mention the number still land on the right timeline).
+ * opts.prefetched — a full message already in hand (e.g. from threads.get) to
+ *   avoid a redundant messages.get.
+ */
+export async function ingestGmailMessage(
   mailbox: string,
   messageId: string,
-  counters: { logged: number; unmatched: number; duplicates: number; skipped: number },
-): Promise<void> {
-  // Dedup up front — cheap and avoids a Gmail fetch when we already have it.
-  const rfcIdProbe = await query(
-    `SELECT 1 FROM interactions WHERE gmail_message_id = $1
-     UNION ALL
-     SELECT 1 FROM gmail_unmatched_inbound WHERE gmail_message_id = $1
-     LIMIT 1`,
-    [messageId],
-  );
-  // NB: we dedup on the Gmail message resource id here as a fast pre-check; the
-  // authoritative dedup is the RFC822 Message-ID stored below (globally unique
-  // across mailboxes). Gmail's per-mailbox id is stable enough for the fast path.
-  if (rfcIdProbe.rows.length > 0) {
-    counters.duplicates++;
-    return;
-  }
-
-  const msg = await gmailApiGet<GmailMessage>(`/messages/${messageId}?format=full`, mailbox);
+  opts: { forceJobId?: string; prefetched?: GmailMessage } = {},
+): Promise<IngestOutcome> {
+  const msg =
+    opts.prefetched ?? (await gmailApiGet<GmailMessage>(`/messages/${messageId}?format=full`, mailbox));
   const headers = msg.payload?.headers;
   const rfcMessageId = headerValue(headers, 'Message-ID') || `gmail:${msg.id}`;
   const from = headerValue(headers, 'From');
   const to = headerValue(headers, 'To');
   const subject = headerValue(headers, 'Subject');
 
-  // Internal / automated guard — before matching. An email from our own domain
-  // is a notification/alert/our-own-sent-copy, not a client reply; external
-  // auto-generated mail (bounces / OOO / bulk) is noise. Skip entirely: don't
-  // log to a timeline, don't queue. The cursor advances past it so it won't
-  // reappear. (See INTERNAL_SENDER_DOMAINS note above.)
+  // Internal / automated guard — an email from our own domain is a
+  // notification/alert/our-own-sent-copy, not a client reply; external
+  // auto-generated mail (bounces / OOO / bulk) is noise. Skip entirely.
   if (!isEnquirySource(from) && (isInternalSender(from) || looksAutomated(headers))) {
-    counters.skipped++;
-    return;
+    return 'skipped';
   }
-
-  const { body, attachmentFilenames, hasAttachments } = extractBodyAndAttachments(msg.payload);
 
   // Authoritative dedup on the RFC822 Message-ID (unique across mailboxes).
   const dupe = await query(
@@ -271,55 +265,56 @@ async function processMessage(
      LIMIT 1`,
     [rfcMessageId],
   );
-  if (dupe.rows.length > 0) {
-    counters.duplicates++;
-    return;
-  }
+  if (dupe.rows.length > 0) return 'duplicate';
 
+  const { body, attachmentFilenames, hasAttachments } = extractBodyAndAttachments(msg.payload);
   // Direction: SENT label → outbound (our reply), else inbound (client email).
   const direction = (msg.labelIds || []).includes('SENT') ? 'outbound' : 'inbound';
   const snippet = (msg.snippet || body).slice(0, 500);
 
-  const match = await matchEmailToJob({ from, to, subject, body, attachmentFilenames });
+  // Resolve the job: forced (backfill) or via the deterministic matcher (live).
+  let jobId: string | null = opts.forceJobId ?? null;
+  if (!jobId) {
+    const match = await matchEmailToJob({ from, to, subject, body, attachmentFilenames });
+    jobId = match?.jobId ?? null;
+  }
 
-  if (match) {
-    // Log as a job-timeline interaction. Inbound client emails feed the
-    // chase-model auto-bump; our own outbound replies do NOT (the auto-chase
-    // reschedules itself) — but note the auto-bump lives in the interactions
-    // ROUTE, not the raw table INSERT, so a direct INSERT here does not bump.
-    // Phase 2's chase logic owns the bump explicitly; foundation just records.
+  if (jobId) {
+    // Note: the chase-model auto-bump lives in the interactions ROUTE, not this
+    // raw INSERT — Phase 2's chase logic owns the bump; this just records.
     await query(
       `INSERT INTO interactions
          (type, content, job_id, created_by,
           gmail_message_id, gmail_thread_id, email_from, email_to, email_subject,
           email_snippet, email_direction, has_attachments)
        VALUES ('email', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-      [
-        body || snippet || '(no body)',
-        match.jobId,
-        SYSTEM_USER_ID,
-        rfcMessageId,
-        msg.threadId,
-        from,
-        to,
-        subject,
-        snippet,
-        direction,
-        hasAttachments,
-      ],
+      [body || snippet || '(no body)', jobId, SYSTEM_USER_ID, rfcMessageId, msg.threadId,
+       from, to, subject, snippet, direction, hasAttachments],
     );
-    counters.logged++;
-  } else {
-    await query(
-      `INSERT INTO gmail_unmatched_inbound
-         (mailbox, gmail_message_id, gmail_thread_id, email_from, email_to,
-          email_subject, email_snippet, has_attachments, received_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
-       ON CONFLICT (gmail_message_id) DO NOTHING`,
-      [mailbox, rfcMessageId, msg.threadId, from, to, subject, snippet, hasAttachments],
-    );
-    counters.unmatched++;
+    return 'logged';
   }
+
+  await query(
+    `INSERT INTO gmail_unmatched_inbound
+       (mailbox, gmail_message_id, gmail_thread_id, email_from, email_to,
+        email_subject, email_snippet, has_attachments, received_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+     ON CONFLICT (gmail_message_id) DO NOTHING`,
+    [mailbox, rfcMessageId, msg.threadId, from, to, subject, snippet, hasAttachments],
+  );
+  return 'unmatched';
+}
+
+async function processMessage(
+  mailbox: string,
+  messageId: string,
+  counters: { logged: number; unmatched: number; duplicates: number; skipped: number },
+): Promise<void> {
+  const outcome = await ingestGmailMessage(mailbox, messageId);
+  if (outcome === 'logged') counters.logged++;
+  else if (outcome === 'unmatched') counters.unmatched++;
+  else if (outcome === 'duplicate') counters.duplicates++;
+  else counters.skipped++;
 }
 
 // ── History-delta fetch ─────────────────────────────────────────────────────

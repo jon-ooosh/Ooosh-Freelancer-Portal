@@ -14,6 +14,7 @@ import { getGmailIngestionStatus, runIngestionForPrimaryMailbox } from '../servi
 import { runEmailRetentionSweep } from '../services/email-retention';
 import { draftChaseEmail } from '../services/chase-draft';
 import { createChaseDraftForJob } from '../services/gmail-draft';
+import { backfillOpenPipelineThreads } from '../services/gmail-backfill';
 import { isAnthropicConfigured } from '../config/anthropic';
 import { isGmailConfigured } from '../config/gmail';
 
@@ -90,6 +91,24 @@ router.post('/preview-draft/:jobId', authorize('admin', 'manager'), async (req: 
     if (/not found/i.test(message)) return res.status(404).json({ error: message });
     console.error('[auto-chase] preview-draft error:', error);
     res.status(500).json({ error: 'Failed to draft chase' });
+  }
+});
+
+// POST /api/auto-chase/backfill — one-off cold-start pass: search the mailbox
+// for each open-pipeline job's HH number and ingest the matching thread(s) onto
+// that job. Idempotent (RFC822 dedup), so safe to run repeatedly a limit at a
+// time. Body: { limit?: number (default 50, max 200), dryRun?: boolean }. Admin.
+router.post('/backfill', authorize('admin'), async (req: AuthRequest, res: Response) => {
+  if (!isGmailConfigured()) {
+    return res.status(503).json({ error: 'Gmail not configured — nothing to backfill.' });
+  }
+  try {
+    const body = (req.body || {}) as { limit?: number; dryRun?: boolean };
+    const summary = await backfillOpenPipelineThreads({ limit: body.limit, dryRun: body.dryRun });
+    res.json({ data: summary });
+  } catch (error) {
+    console.error('[auto-chase] backfill error:', error);
+    res.status(500).json({ error: 'Backfill run failed' });
   }
 });
 

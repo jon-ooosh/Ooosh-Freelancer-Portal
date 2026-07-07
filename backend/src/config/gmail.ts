@@ -184,6 +184,23 @@ export async function createGmailDraft(
 }
 
 /**
+ * Search a mailbox (read-only) with a Gmail query string (`messages.list?q=`).
+ * Returns matching message stubs (id + threadId). Used by the thread-latch +
+ * cold-start backfill (§13.1 / §8.4) — e.g. q = `"15800"` finds the quote thread.
+ */
+export async function gmailSearchMessageIds(
+  mailbox: string,
+  q: string,
+  maxResults = 25,
+): Promise<{ id: string; threadId: string }[]> {
+  const res = await gmailApiGet<{ messages?: { id: string; threadId: string }[] }>(
+    `/messages?q=${encodeURIComponent(q)}&maxResults=${maxResults}`,
+    mailbox,
+  );
+  return res.messages ?? [];
+}
+
+/**
  * Lightweight connectivity probe used by the status endpoint. Returns the
  * mailbox's current profile (email + historyId) — proves the delegation +
  * scopes are working end-to-end without ingesting anything.
