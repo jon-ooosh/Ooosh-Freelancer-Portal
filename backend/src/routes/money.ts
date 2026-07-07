@@ -1096,10 +1096,24 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     // get-job-details-v2.js. Must run before the main loop so the set is complete
     // regardless of row order.
     const excessDepositIds = new Set<string>();
+    // Pre-pass: collect THIS job's own invoice IDs (kind=1). A deposit→invoice
+    // application (kind=3) carries the invoice in OWNER. Testing whether OWNER
+    // belongs to this job is how we distinguish a same-job application (credit
+    // this job's hire) from a CROSS-JOB one (excess/credit applied to another
+    // job's invoice — must NOT credit this job's hire). Description-independent
+    // (deposit-side twins are blank), so it's the reliable signal. Proven via
+    // job 15577→15278 cross-job excess apply (app 11962).
+    const thisJobInvoiceIds = new Set<string>();
     if (bl?.rows && Array.isArray(bl.rows)) {
       for (const row of bl.rows) {
-        if (parseInt(row.kind ?? '0') !== 6) continue;
+        const kind = parseInt(row.kind ?? '0');
         const data = row.data || {};
+        if (kind === 1) {
+          const invId = parseInt(data.ID || row.number || String(row.id).replace('b', '') || '0');
+          if (invId > 0) thisJobInvoiceIds.add(String(invId));
+          continue;
+        }
+        if (kind !== 6) continue;
         const creditAmount = parseFloat(row.credit || data.credit || '0');
         if (creditAmount <= 0) continue; // deposits only, skip refunds/negatives
         const desc = String(data.DESCRIPTION || row.desc || '');
@@ -1227,18 +1241,21 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
               // Proven against job 15577 (application: OWNER=11648, INVOICE_NUMBER
               // set) vs job 16043 (refund: OWNER=0, INVOICE_NUMBER=""). Excess
               // kind=3 rows are left untouched here (handled by the excess flows).
-              const appliedToInvoice = data.OWNER != null && parseInt(String(data.OWNER)) > 0;
+              const ownerInvoiceId = data.OWNER != null ? parseInt(String(data.OWNER)) : 0;
+              const appliedToInvoice = ownerInvoiceId > 0;
+              // Is the target invoice on THIS job, or another job's (cross-job apply)?
+              const appliedToThisJobInvoice = appliedToInvoice && thisJobInvoiceIds.has(String(ownerInvoiceId));
+              const appliedToOtherJobInvoice = appliedToInvoice && !thisJobInvoiceIds.has(String(ownerInvoiceId));
               const isFromExcessDeposit = excessDepositIds.has(String(ownerDepositId));
               if (isFromExcessDeposit) {
                 // kind=3 sourced from an EXCESS deposit (membership in the kind=6
                 // pre-pass set, NOT the empty description on this twin).
-                if (appliedToInvoice) {
-                  // Excess money applied to the hire invoice = excess paying down the
-                  // hire. Credit it to hire deposits so the balance reflects it, AND
-                  // record it as applied-to-invoice so the reconciliation gap below
-                  // doesn't ALSO count it as a direct invoice payment (double-count).
-                  // Surfaced as a hire payment line for transparency (matches the
-                  // portal's "Excess Usage" line). Proven against job 15607 (£450).
+                if (appliedToThisJobInvoice) {
+                  // Excess money applied to THIS hire's invoice = excess paying down
+                  // the hire. Credit it to hire deposits so the balance reflects it,
+                  // AND record it as applied-to-invoice so the reconciliation gap
+                  // below doesn't ALSO count it as a direct invoice payment. Surfaced
+                  // for transparency. Proven against job 15607 (£450).
                   totalHireDeposits += absAmount;
                   hireDepositAppliedToInvoices += absAmount;
                   deposits.push({
@@ -1252,8 +1269,44 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
                     bank_name: getBankName(data.ACC_ACCOUNT_ID),
                     entered_by: data.CREATE_USER_NAME || null,
                   });
+                } else if (appliedToOtherJobInvoice) {
+                  // CROSS-JOB: this job's excess applied to ANOTHER job's invoice.
+                  // The money left this job — do NOT credit this hire's balance.
+                  // Surface an informational line only. (Fixes the source-side
+                  // over-credit; proven via 15577's excess → 15278's invoice.)
+                  deposits.push({
+                    id: appId,
+                    amount: absAmount,
+                    date: data.DATE || row.date || '',
+                    description: 'Excess applied to another job’s invoice',
+                    memo: memo || null,
+                    is_excess: true,
+                    is_refund: false,
+                    bank_name: getBankName(data.ACC_ACCOUNT_ID),
+                    entered_by: data.CREATE_USER_NAME || null,
+                  });
                 }
                 // OWNER=0 (excess refund / release) → left to the excess flow, untouched.
+              } else if (isExcess && appliedToThisJobInvoice) {
+                // CROSS-JOB (target side): excess held on ANOTHER hire applied to
+                // THIS job's invoice. The source deposit isn't in this job's excess
+                // set, and the description carries "Excess" + the source job. Credit
+                // this hire's balance (+ mark applied so reconciliation doesn't also
+                // count it) and surface where it came from. Proven via 15278.
+                totalHireDeposits += absAmount;
+                hireDepositAppliedToInvoices += absAmount;
+                const srcJobMatch = /^(\d+)\s*-/.exec(description);
+                deposits.push({
+                  id: appId,
+                  amount: absAmount,
+                  date: data.DATE || row.date || '',
+                  description: srcJobMatch ? `Excess applied from hire #${srcJobMatch[1]}` : 'Excess applied from another hire',
+                  memo: memo || null,
+                  is_excess: false,
+                  is_refund: false,
+                  bank_name: getBankName(data.ACC_ACCOUNT_ID),
+                  entered_by: data.CREATE_USER_NAME || null,
+                });
               } else if (!isExcess && creditAmount < 0 && !appliedToInvoice) {
                 deposits.push({
                   id: appId,
@@ -1267,6 +1320,23 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
                   entered_by: data.CREATE_USER_NAME || null,
                 });
                 totalHireDeposits -= absAmount;
+              } else if (!isExcess && appliedToOtherJobInvoice) {
+                // CROSS-JOB (source side, non-excess): a non-excess deposit/credit
+                // on THIS job applied to ANOTHER job's invoice. Money left this
+                // job — do NOT credit this hire (would over-pay). Informational
+                // line only. (Phase 2 non-excess cross-job apply; harmless today
+                // since no such data exists until that ships.)
+                deposits.push({
+                  id: appId,
+                  amount: absAmount,
+                  date: data.DATE || row.date || '',
+                  description: 'Credit applied to another job’s invoice',
+                  memo: memo || null,
+                  is_excess: false,
+                  is_refund: false,
+                  bank_name: getBankName(data.ACC_ACCOUNT_ID),
+                  entered_by: data.CREATE_USER_NAME || null,
+                });
               } else if (!isExcess) {
                 hireDepositAppliedToInvoices += absAmount;
               }
