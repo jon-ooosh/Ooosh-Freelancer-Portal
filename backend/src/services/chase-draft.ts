@@ -68,6 +68,7 @@ export interface ChaseContext {
   jobEnd: string | null;
   pipelineStatus: string | null;
   daysUntilStart: number | null; // days from today to out_date (negative = past)
+  hireSpanDays: number | null;   // calendar days out_date→job_end (0/1 = single-day-ish)
   itemsSummary: string[];      // human-readable list of what's being hired
   priorChaseCount: number;     // how many times we've chased already
   isRepeatClient: boolean;     // client has prior jobs with us
@@ -124,6 +125,7 @@ export async function gatherChaseContext(jobId: string): Promise<ChaseContext | 
     // daysUntilStart set below once outDate is known.
     pipelineStatus: j.pipeline_status ?? null,
     daysUntilStart: null,
+    hireSpanDays: null,
     itemsSummary: summariseItems(j.line_items),
     priorChaseCount: Number(j.auto_chase_count) || 0,
     isRepeatClient: false,
@@ -140,6 +142,17 @@ export async function gatherChaseContext(jobId: string): Promise<ChaseContext | 
     const start = new Date(`${ctx.outDate}T00:00:00`);
     if (!Number.isNaN(start.getTime())) {
       ctx.daysUntilStart = Math.round((start.getTime() - today.getTime()) / 86_400_000);
+      // Hire span in calendar days. HireHop stores a 1-day hire's job_end as the
+      // NEXT morning (phantom rollover — see CLAUDE.md rehearsals/return_date
+      // gotchas), so out_date→job_end of 1 day is really a single-day hire. We
+      // only treat >= 2 as genuinely multi-day; otherwise the draft says "your
+      // hire on <date>" rather than overstating a range (the 1-day-as-2-day bug).
+      if (ctx.jobEnd) {
+        const end = new Date(`${ctx.jobEnd}T00:00:00`);
+        if (!Number.isNaN(end.getTime())) {
+          ctx.hireSpanDays = Math.round((end.getTime() - start.getTime()) / 86_400_000);
+        }
+      }
     }
   }
 
@@ -197,7 +210,17 @@ function buildUserPrompt(ctx: ChaseContext): string {
   if (ctx.jobName) lines.push(`Job: ${ctx.jobName}`);
   if (ctx.hhJobNumber) lines.push(`Job number: #${ctx.hhJobNumber}`);
   if (ctx.clientName) lines.push(`Client: ${ctx.clientName}`);
-  if (ctx.outDate) lines.push(`Hire dates: ${ctx.outDate}${ctx.jobEnd && ctx.jobEnd !== ctx.outDate ? ` to ${ctx.jobEnd}` : ''}`);
+  if (ctx.outDate) {
+    // Only present a range for a genuine multi-day hire (span >= 2). A span of
+    // 0/1 is a single-day hire (job_end may be the next-morning rollover), so we
+    // give just the start date — referring to it as "your hire on <date>" — to
+    // avoid overstating a 1-day hire as two days.
+    if (ctx.hireSpanDays != null && ctx.hireSpanDays >= 2 && ctx.jobEnd) {
+      lines.push(`Hire dates: ${ctx.outDate} to ${ctx.jobEnd} (a multi-day hire — reference the range as given).`);
+    } else {
+      lines.push(`Hire date: ${ctx.outDate} (a SINGLE-DAY hire — refer to "your hire on ${ctx.outDate}"; do NOT describe it as spanning multiple days).`);
+    }
+  }
   if (ctx.daysUntilStart != null) {
     const d = ctx.daysUntilStart;
     let urgency: string;
