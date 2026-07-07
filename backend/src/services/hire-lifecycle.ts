@@ -117,8 +117,8 @@ export async function reconcileHeldReturns(): Promise<{ reconciled: number }> {
       [job.id],
     );
     await query(
-      `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
-       VALUES ('status_transition', $1, $2, NULL, $3)`,
+      `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation, source)
+       VALUES ('status_transition', $1, $2, NULL, $3, 'system')`,
       [
         'Hire now due back — moved to Checking In (was held on hire after an item was checked in early mid-hire).',
         job.id,

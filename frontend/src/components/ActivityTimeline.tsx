@@ -14,6 +14,7 @@ interface Interaction {
   type: string;
   content: string;
   created_at: string;
+  created_by?: string | null;
   created_by_name: string | null;
   mentioned_user_ids: string[];
   job_status_at_creation?: number | null;
@@ -24,6 +25,10 @@ interface Interaction {
   files?: InteractionAttachment[];
   // Lightweight emoji reactions (migration 077)
   reactions?: ReactionsMap;
+  // Human ('user') vs auto-generated ('system') entry (migration 160).
+  source?: 'user' | 'system' | null;
+  // Note editing (migration 160)
+  edited_at?: string | null;
 }
 
 const JOB_STATUS_MAP: Record<number, string> = {
@@ -95,6 +100,36 @@ function formatDateTime(dateStr: string) {
   });
 }
 
+// Compact timestamp for receded system rows — day + time, no year.
+function formatCompact(dateStr: string) {
+  return new Date(dateStr).toLocaleString('en-GB', {
+    day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
+  });
+}
+
+// Day-bucket a timestamp for the section headers (mirrors the Inbox).
+function dayBucket(dateStr: string): { key: string; label: string } {
+  const d = new Date(dateStr);
+  const startOfDay = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diff = Math.round((startOfDay(new Date()) - startOfDay(d)) / 86400000);
+  if (diff <= 0) return { key: 'today', label: 'Today' };
+  if (diff === 1) return { key: 'yesterday', label: 'Yesterday' };
+  if (diff <= 7) return { key: 'week', label: 'Earlier this week' };
+  if (diff <= 31) return { key: 'month', label: 'Earlier this month' };
+  return { key: `m${d.getFullYear()}-${d.getMonth()}`, label: d.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' }) };
+}
+
+// Icon for an automated/system row, keyed loosely off the first glyph of the
+// content (many system notes are emoji-prefixed) then interaction type.
+function systemIcon(i: Interaction): string {
+  const c = (i.content || '').trim();
+  const first = Array.from(c)[0] || '';
+  if (/[\u{1F000}-\u{1FAFF}☀-➿ℹ]/u.test(first)) return first;
+  if (i.type === 'status_transition') return '⚙';
+  if (i.type === 'email') return '✉';
+  return '⚙';
+}
+
 export default function ActivityTimeline({ entityType, entityId, interactions, onInteractionAdded }: ActivityTimelineProps) {
   const user = useAuthStore((s) => s.user);
 
@@ -145,6 +180,21 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
       const next = new Set(prev);
       if (next.has(rootId)) next.delete(rootId);
       else next.add(rootId);
+      return next;
+    });
+  }
+
+  // ── Timeline filters (migration 160) ─────────────────────────────────────
+  // viewMode 'all' shows everything with automated entries receded/collapsed;
+  // 'conversation' hides automated (source='system') entries entirely.
+  // typeFilter narrows to one conversation type and always hides automated.
+  const [viewMode, setViewMode] = useState<'all' | 'conversation'>('all');
+  const [typeFilter, setTypeFilter] = useState<'all' | 'note' | 'call' | 'meeting' | 'chase'>('all');
+  const [expandedSysGroups, setExpandedSysGroups] = useState<Set<string>>(new Set());
+  function toggleSysGroup(key: string) {
+    setExpandedSysGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
       return next;
     });
   }
@@ -515,6 +565,203 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
     }));
   }
 
+  // Turn filtered thread groups into a render list: date-section headers,
+  // full cards for human entries, and receded lines for automated ones — with
+  // runs of 3+ consecutive automated entries collapsed into one expander.
+  type RenderNode =
+    | { kind: 'day'; key: string; label: string }
+    | { kind: 'user'; group: ThreadGroup }
+    | { kind: 'sys'; item: Interaction }
+    | { kind: 'sysgroup'; key: string; items: Interaction[] };
+
+  function buildRenderNodes(groups: ThreadGroup[]): RenderNode[] {
+    const nodes: RenderNode[] = [];
+    let curDay = '';
+    let sysRun: Interaction[] = [];
+    const flushSys = () => {
+      if (sysRun.length === 0) return;
+      if (sysRun.length >= 3) nodes.push({ kind: 'sysgroup', key: sysRun[0].id, items: sysRun });
+      else for (const it of sysRun) nodes.push({ kind: 'sys', item: it });
+      sysRun = [];
+    };
+    for (const g of groups) {
+      const b = dayBucket(g.root.created_at);
+      if (b.key !== curDay) { flushSys(); nodes.push({ kind: 'day', key: b.key, label: b.label }); curDay = b.key; }
+      if (g.root.source === 'system') sysRun.push(g.root);
+      else { flushSys(); nodes.push({ kind: 'user', group: g }); }
+    }
+    flushSys();
+    return nodes;
+  }
+
+  // A single automated/system row — receded, one line, not a card.
+  function SystemRow({ item }: { item: Interaction }) {
+    return (
+      <div className="flex items-center gap-2.5 px-3 py-1.5 rounded-lg bg-gray-50 border border-gray-100 text-gray-500">
+        <span className="w-5 h-5 grid place-items-center text-gray-400 text-xs flex-shrink-0">{systemIcon(item)}</span>
+        <span className="flex-1 min-w-0 text-xs truncate" title={item.content}>{renderContent(item.content)}</span>
+        <span className="text-[11px] text-gray-400 whitespace-nowrap flex-shrink-0">{formatCompact(item.created_at)}</span>
+      </div>
+    );
+  }
+
+  // Filter, then build the render list.
+  const filteredGroups = groupIntoThreads(interactions).filter((g) => {
+    const isSys = g.root.source === 'system';
+    if (viewMode === 'conversation' && isSys) return false;
+    if (typeFilter !== 'all') {
+      if (isSys) return false;
+      if (typeFilter === 'call') return g.root.type === 'call' || g.root.type === 'email';
+      return g.root.type === typeFilter;
+    }
+    return true;
+  });
+  const renderNodes = buildRenderNodes(filteredGroups);
+
+  // Full-card render for a human thread (root + replies + reply composer).
+  // Extracted so the node walker can call it; closes over component state.
+  function renderUserGroup(group: ThreadGroup) {
+    const interaction = group.root;
+    const replies = group.replies;
+    const replyCount = replies.length;
+    const expanded = expandedThreads.has(interaction.id);
+    const COLLAPSE_THRESHOLD = 2;
+    const visibleReplies = (replyCount > COLLAPSE_THRESHOLD && !expanded) ? replies.slice(-1) : replies;
+
+    return (
+      <div key={interaction.id} className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+        <InteractionRow
+          interaction={interaction}
+          isReply={false}
+          currentUserId={user?.id}
+          onEdited={onInteractionAdded}
+          movingId={movingId}
+          onStartMove={() => startMove(interaction.id)}
+          onCancelMove={() => setMovingId(null)}
+          moveSearch={moveSearch}
+          moveResults={moveResults}
+          moveLoading={moveLoading}
+          onSearchEntities={searchEntities}
+          onConfirmMove={(target) => confirmMove(interaction.id, target)}
+          renderContent={renderContent}
+        />
+
+        {replyCount > 0 && (
+          <div className="mt-3 ml-11 border-l-2 border-gray-100 pl-3 space-y-3">
+            {replyCount > COLLAPSE_THRESHOLD && !expanded && (
+              <button type="button" onClick={() => toggleThread(interaction.id)} className="text-xs text-ooosh-600 hover:text-ooosh-800">
+                Show {replyCount - 1} earlier {replyCount - 1 === 1 ? 'reply' : 'replies'}
+              </button>
+            )}
+            {visibleReplies.map((r) => (
+              <InteractionRow
+                key={r.id}
+                interaction={r}
+                isReply
+                currentUserId={user?.id}
+                onEdited={onInteractionAdded}
+                movingId={null}
+                onStartMove={() => {}}
+                onCancelMove={() => {}}
+                moveSearch=""
+                moveResults={[]}
+                moveLoading={false}
+                onSearchEntities={() => {}}
+                onConfirmMove={() => {}}
+                renderContent={renderContent}
+              />
+            ))}
+            {expanded && replyCount > COLLAPSE_THRESHOLD && (
+              <button type="button" onClick={() => toggleThread(interaction.id)} className="text-xs text-gray-400 hover:text-gray-600">
+                Collapse thread
+              </button>
+            )}
+          </div>
+        )}
+
+        {replyParentId === interaction.id ? (
+          <form
+            onSubmit={handleReplySubmit}
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={(e) => { e.preventDefault(); if (e.dataTransfer.files && e.dataTransfer.files.length > 0) handleFiles(e.dataTransfer.files, 'reply'); }}
+            className="mt-3 ml-11 bg-gray-50 rounded-lg border border-gray-200 p-3"
+          >
+            <div className="relative">
+              <textarea
+                ref={replyTextareaRef}
+                value={replyContent}
+                onChange={handleReplyContentChange}
+                onKeyDown={handleReplyKeyDown}
+                onPaste={(e) => handlePaste(e, 'reply')}
+                placeholder="Write a reply… (type @ to mention, paste a screenshot, or drop a file)"
+                rows={2}
+                autoFocus
+                className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 resize-y min-h-[64px]"
+              />
+              {replyShowMentions && replyFilteredUsers.length > 0 && (
+                <div className="absolute left-0 right-0 bottom-full mb-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-48 overflow-y-auto z-50">
+                  {replyFilteredUsers.map((u, i) => (
+                    <button
+                      key={u.id}
+                      type="button"
+                      onClick={() => insertReplyMention(u)}
+                      className={`w-full text-left px-3 py-2 text-sm flex items-center gap-2 ${i === replyMentionIndex ? 'bg-ooosh-50 text-ooosh-700' : 'hover:bg-gray-50'}`}
+                    >
+                      <span className="w-6 h-6 rounded-full bg-ooosh-100 text-ooosh-700 flex items-center justify-center text-xs font-bold flex-shrink-0">
+                        {(u.first_name || u.email)[0].toUpperCase()}
+                      </span>
+                      <span>
+                        <span className="font-medium">{u.first_name && u.last_name ? `${u.first_name} ${u.last_name}` : u.email}</span>
+                        {u.first_name && (<span className="text-gray-400 text-xs ml-1.5">{u.email}</span>)}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+            {replyMentionedIds.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
+                {replyMentionedIds.map((uid) => {
+                  const u = users.find((x) => x.id === uid);
+                  if (!u) return null;
+                  return (
+                    <span key={uid} className="inline-flex items-center gap-1 bg-pink-50 text-pink-700 text-xs px-2 py-0.5 rounded-full">
+                      @{u.first_name || u.email}
+                      <button type="button" onClick={() => setReplyMentionedIds(replyMentionedIds.filter((id) => id !== uid))} className="hover:text-pink-900">&times;</button>
+                    </span>
+                  );
+                })}
+              </div>
+            )}
+            <PendingAttachmentStrip items={replyAttach.pending} onRemove={(id) => removeAttachment(id, 'reply')} />
+            <div className="flex justify-between items-center mt-2">
+              <label className="inline-flex items-center gap-1 text-xs text-gray-500 hover:text-ooosh-700 cursor-pointer">
+                📎 Attach
+                <input type="file" multiple className="hidden" onChange={(e) => { if (e.target.files) handleFiles(e.target.files, 'reply'); e.target.value = ''; }} />
+              </label>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => { replyAttach.clear(); setReplyContent(''); setReplyMentionedIds([]); setReplyShowMentions(false); setReplyParentId(null); }}
+                  className="text-xs text-gray-500 hover:text-gray-700 px-2 py-1"
+                >Cancel</button>
+                <button type="submit" disabled={!replyContent.trim() || replySubmitting || replyAttach.hasInFlight} className="bg-ooosh-600 text-white px-3 py-1 rounded text-xs font-medium hover:bg-ooosh-700 disabled:opacity-50">
+                  {replySubmitting ? 'Posting…' : 'Reply'}
+                </button>
+              </div>
+            </div>
+          </form>
+        ) : (
+          ['note', 'mention', 'email', 'call', 'meeting', 'chase'].includes(interaction.type) && (
+            <button type="button" onClick={() => setReplyParentId(interaction.id)} className="mt-2 ml-11 text-xs text-gray-400 hover:text-ooosh-700">
+              ↩ Reply
+            </button>
+          )
+        )}
+      </div>
+    );
+  }
+
   return (
     <div>
       {/* Add interaction form */}
@@ -744,202 +991,101 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
         </div>
       </form>
 
+      {/* Timeline toolbar — type filters + view switch (migration 160) */}
+      {interactions.length > 0 && (
+        <div className="flex items-center justify-between gap-3 flex-wrap mb-3">
+          <div className="flex gap-1.5 flex-wrap">
+            {([
+              { k: 'all', label: 'All types' },
+              { k: 'note', label: 'Notes' },
+              { k: 'call', label: 'Calls & emails' },
+              { k: 'meeting', label: 'Meetings' },
+              { k: 'chase', label: 'Chase' },
+            ] as const).map((f) => (
+              <button
+                key={f.k}
+                type="button"
+                onClick={() => setTypeFilter(f.k)}
+                className={`px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
+                  typeFilter === f.k
+                    ? 'bg-ooosh-50 text-ooosh-700 border-ooosh-200'
+                    : 'bg-white text-gray-500 border-gray-200 hover:border-ooosh-200'
+                }`}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
+          <div className="inline-flex bg-gray-100 rounded-lg p-0.5" title="Conversation hides automated updates (status changes, edits, syncs)">
+            {([
+              { k: 'all', label: 'All activity' },
+              { k: 'conversation', label: 'Conversation' },
+            ] as const).map((v) => (
+              <button
+                key={v.k}
+                type="button"
+                onClick={() => setViewMode(v.k)}
+                className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
+                  viewMode === v.k ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                {v.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Timeline */}
       {interactions.length === 0 ? (
         <p className="text-center text-sm text-gray-400 py-8">No activity yet. Add a note above to get started.</p>
+      ) : renderNodes.length === 0 ? (
+        <p className="text-center text-sm text-gray-400 py-8">
+          Nothing to show with these filters.{' '}
+          <button
+            type="button"
+            className="text-ooosh-600 hover:underline"
+            onClick={() => { setTypeFilter('all'); setViewMode('all'); }}
+          >
+            Clear filters
+          </button>
+        </p>
       ) : (
-        <div className="space-y-4">
-          {groupIntoThreads(interactions).map((group) => {
-            const interaction = group.root;
-            const replies = group.replies;
-            const replyCount = replies.length;
-            const expanded = expandedThreads.has(interaction.id);
-            const COLLAPSE_THRESHOLD = 2;
-            const visibleReplies = (replyCount > COLLAPSE_THRESHOLD && !expanded)
-              ? replies.slice(-1) // show just the most recent when collapsed
-              : replies;
-
-            return (
-              <div key={interaction.id} className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
-                <InteractionRow
-                  interaction={interaction}
-                  isReply={false}
-                  movingId={movingId}
-                  onStartMove={() => startMove(interaction.id)}
-                  onCancelMove={() => setMovingId(null)}
-                  moveSearch={moveSearch}
-                  moveResults={moveResults}
-                  moveLoading={moveLoading}
-                  onSearchEntities={searchEntities}
-                  onConfirmMove={(target) => confirmMove(interaction.id, target)}
-                  renderContent={renderContent}
-                />
-
-                {/* Replies — nested, indented */}
-                {replyCount > 0 && (
-                  <div className="mt-3 ml-11 border-l-2 border-gray-100 pl-3 space-y-3">
-                    {replyCount > COLLAPSE_THRESHOLD && !expanded && (
-                      <button
-                        type="button"
-                        onClick={() => toggleThread(interaction.id)}
-                        className="text-xs text-ooosh-600 hover:text-ooosh-800"
-                      >
-                        Show {replyCount - 1} earlier {replyCount - 1 === 1 ? 'reply' : 'replies'}
-                      </button>
-                    )}
-                    {visibleReplies.map((r) => (
-                      <InteractionRow
-                        key={r.id}
-                        interaction={r}
-                        isReply
-                        movingId={null}
-                        onStartMove={() => {}}
-                        onCancelMove={() => {}}
-                        moveSearch=""
-                        moveResults={[]}
-                        moveLoading={false}
-                        onSearchEntities={() => {}}
-                        onConfirmMove={() => {}}
-                        renderContent={renderContent}
-                      />
-                    ))}
-                    {expanded && replyCount > COLLAPSE_THRESHOLD && (
-                      <button
-                        type="button"
-                        onClick={() => toggleThread(interaction.id)}
-                        className="text-xs text-gray-400 hover:text-gray-600"
-                      >
-                        Collapse thread
-                      </button>
-                    )}
-                  </div>
-                )}
-
-                {/* Reply composer (inline, when active for this thread) */}
-                {replyParentId === interaction.id ? (
-                  <form
-                    onSubmit={handleReplySubmit}
-                    onDragOver={(e) => e.preventDefault()}
-                    onDrop={(e) => {
-                      e.preventDefault();
-                      if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-                        handleFiles(e.dataTransfer.files, 'reply');
-                      }
-                    }}
-                    className="mt-3 ml-11 bg-gray-50 rounded-lg border border-gray-200 p-3"
+        <div className="space-y-3">
+          {renderNodes.map((node) => {
+            if (node.kind === 'day') {
+              return (
+                <div key={`day-${node.key}`} className="flex items-center gap-3 pt-2 first:pt-0">
+                  <span className="text-[11px] uppercase tracking-wide font-semibold text-gray-400">{node.label}</span>
+                  <span className="flex-1 h-px bg-gray-100" />
+                </div>
+              );
+            }
+            if (node.kind === 'sys') {
+              return <SystemRow key={node.item.id} item={node.item} />;
+            }
+            if (node.kind === 'sysgroup') {
+              const open = expandedSysGroups.has(node.key);
+              return (
+                <div key={`grp-${node.key}`} className="border border-dashed border-gray-200 rounded-lg overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => toggleSysGroup(node.key)}
+                    className="w-full flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-gray-500 bg-gray-50 hover:bg-gray-100"
                   >
-                    <div className="relative">
-                      <textarea
-                        ref={replyTextareaRef}
-                        value={replyContent}
-                        onChange={handleReplyContentChange}
-                        onKeyDown={handleReplyKeyDown}
-                        onPaste={(e) => handlePaste(e, 'reply')}
-                        placeholder="Write a reply… (type @ to mention, paste a screenshot, or drop a file)"
-                        rows={2}
-                        autoFocus
-                        className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 resize-y min-h-[64px]"
-                      />
-                      {replyShowMentions && replyFilteredUsers.length > 0 && (
-                        <div className="absolute left-0 right-0 bottom-full mb-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-48 overflow-y-auto z-50">
-                          {replyFilteredUsers.map((u, i) => (
-                            <button
-                              key={u.id}
-                              type="button"
-                              onClick={() => insertReplyMention(u)}
-                              className={`w-full text-left px-3 py-2 text-sm flex items-center gap-2 ${
-                                i === replyMentionIndex ? 'bg-ooosh-50 text-ooosh-700' : 'hover:bg-gray-50'
-                              }`}
-                            >
-                              <span className="w-6 h-6 rounded-full bg-ooosh-100 text-ooosh-700 flex items-center justify-center text-xs font-bold flex-shrink-0">
-                                {(u.first_name || u.email)[0].toUpperCase()}
-                              </span>
-                              <span>
-                                <span className="font-medium">
-                                  {u.first_name && u.last_name ? `${u.first_name} ${u.last_name}` : u.email}
-                                </span>
-                                {u.first_name && (
-                                  <span className="text-gray-400 text-xs ml-1.5">{u.email}</span>
-                                )}
-                              </span>
-                            </button>
-                          ))}
-                        </div>
-                      )}
+                    <span className="text-gray-400">⚙</span>
+                    {node.items.length} automated updates
+                    <span className={`ml-auto transition-transform ${open ? 'rotate-90' : ''}`}>›</span>
+                  </button>
+                  {open && (
+                    <div className="p-1.5 space-y-1">
+                      {node.items.map((it) => <SystemRow key={it.id} item={it} />)}
                     </div>
-                    {replyMentionedIds.length > 0 && (
-                      <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
-                        {replyMentionedIds.map((uid) => {
-                          const u = users.find((x) => x.id === uid);
-                          if (!u) return null;
-                          return (
-                            <span key={uid} className="inline-flex items-center gap-1 bg-pink-50 text-pink-700 text-xs px-2 py-0.5 rounded-full">
-                              @{u.first_name || u.email}
-                              <button
-                                type="button"
-                                onClick={() => setReplyMentionedIds(replyMentionedIds.filter((id) => id !== uid))}
-                                className="hover:text-pink-900"
-                              >
-                                &times;
-                              </button>
-                            </span>
-                          );
-                        })}
-                      </div>
-                    )}
-                    <PendingAttachmentStrip items={replyAttach.pending} onRemove={(id) => removeAttachment(id, 'reply')} />
-                    <div className="flex justify-between items-center mt-2">
-                      <label className="inline-flex items-center gap-1 text-xs text-gray-500 hover:text-ooosh-700 cursor-pointer">
-                        📎 Attach
-                        <input
-                          type="file"
-                          multiple
-                          className="hidden"
-                          onChange={(e) => {
-                            if (e.target.files) handleFiles(e.target.files, 'reply');
-                            e.target.value = '';
-                          }}
-                        />
-                      </label>
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            replyAttach.clear();
-                            setReplyContent('');
-                            setReplyMentionedIds([]);
-                            setReplyShowMentions(false);
-                            setReplyParentId(null);
-                          }}
-                          className="text-xs text-gray-500 hover:text-gray-700 px-2 py-1"
-                        >
-                          Cancel
-                        </button>
-                        <button
-                          type="submit"
-                          disabled={!replyContent.trim() || replySubmitting || replyAttach.hasInFlight}
-                          className="bg-ooosh-600 text-white px-3 py-1 rounded text-xs font-medium hover:bg-ooosh-700 disabled:opacity-50"
-                        >
-                          {replySubmitting ? 'Posting…' : 'Reply'}
-                        </button>
-                      </div>
-                    </div>
-                  </form>
-                ) : (
-                  // Reply trigger — only on note/mention/email/call/meeting types
-                  // (not on status_transition / system events).
-                  ['note', 'mention', 'email', 'call', 'meeting', 'chase'].includes(interaction.type) && (
-                    <button
-                      type="button"
-                      onClick={() => setReplyParentId(interaction.id)}
-                      className="mt-2 ml-11 text-xs text-gray-400 hover:text-ooosh-700"
-                    >
-                      ↩ Reply
-                    </button>
-                  )
-                )}
-              </div>
-            );
+                  )}
+                </div>
+              );
+            }
+            return renderUserGroup(node.group);
           })}
         </div>
       )}
@@ -955,6 +1101,8 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
 interface InteractionRowProps {
   interaction: Interaction;
   isReply: boolean;
+  currentUserId?: string;
+  onEdited: () => void;
   movingId: string | null;
   onStartMove: () => void;
   onCancelMove: () => void;
@@ -967,9 +1115,32 @@ interface InteractionRowProps {
 }
 
 function InteractionRow({
-  interaction, isReply, movingId, onStartMove, onCancelMove,
+  interaction, isReply, currentUserId, onEdited, movingId, onStartMove, onCancelMove,
   moveSearch, moveResults, moveLoading, onSearchEntities, onConfirmMove, renderContent,
 }: InteractionRowProps) {
+  // Creator-only editing of human notes. Automated (source='system') entries
+  // are immutable; the backend enforces both rules regardless of the UI.
+  const [editing, setEditing] = useState(false);
+  const [editValue, setEditValue] = useState(interaction.content);
+  const [savingEdit, setSavingEdit] = useState(false);
+  const canEdit = interaction.source !== 'system'
+    && !!currentUserId && interaction.created_by === currentUserId;
+
+  async function saveEdit() {
+    const trimmed = editValue.trim();
+    if (!trimmed || savingEdit) return;
+    setSavingEdit(true);
+    try {
+      await api.patch(`/interactions/${interaction.id}`, { content: trimmed });
+      setEditing(false);
+      onEdited();
+    } catch (err) {
+      console.error('Edit interaction failed:', err);
+    } finally {
+      setSavingEdit(false);
+    }
+  }
+
   return (
     <>
       <div className="flex items-start gap-3">
@@ -991,23 +1162,66 @@ function InteractionRow({
               )}
               <span>&middot;</span>
               <span>{formatDateTime(interaction.created_at)}</span>
+              {interaction.edited_at && <span className="italic text-gray-400">· edited</span>}
             </div>
-            {!isReply && (
-              <button
-                type="button"
-                onClick={onStartMove}
-                className={`text-xs px-2 py-0.5 rounded transition-colors ${
-                  movingId === interaction.id
-                    ? 'bg-ooosh-100 text-ooosh-700'
-                    : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'
-                }`}
-                title="Move to another record"
-              >
-                Move
-              </button>
-            )}
+            <div className="flex items-center gap-1 flex-shrink-0">
+              {canEdit && !editing && (
+                <button
+                  type="button"
+                  onClick={() => { setEditValue(interaction.content); setEditing(true); }}
+                  className="text-xs px-2 py-0.5 rounded text-gray-400 hover:text-ooosh-700 hover:bg-gray-100 transition-colors"
+                  title="Edit this note"
+                >
+                  Edit
+                </button>
+              )}
+              {!isReply && (
+                <button
+                  type="button"
+                  onClick={onStartMove}
+                  className={`text-xs px-2 py-0.5 rounded transition-colors ${
+                    movingId === interaction.id
+                      ? 'bg-ooosh-100 text-ooosh-700'
+                      : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'
+                  }`}
+                  title="Move to another record"
+                >
+                  Move
+                </button>
+              )}
+            </div>
           </div>
-          <p className="mt-1 text-sm text-gray-800 whitespace-pre-wrap">{renderContent(interaction.content)}</p>
+          {editing ? (
+            <div className="mt-1.5">
+              <textarea
+                value={editValue}
+                onChange={(e) => setEditValue(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Escape') setEditing(false); }}
+                rows={3}
+                autoFocus
+                className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 resize-y min-h-[64px]"
+              />
+              <div className="flex items-center gap-2 mt-1.5">
+                <button
+                  type="button"
+                  onClick={saveEdit}
+                  disabled={!editValue.trim() || savingEdit}
+                  className="bg-ooosh-600 text-white px-3 py-1 rounded text-xs font-medium hover:bg-ooosh-700 disabled:opacity-50"
+                >
+                  {savingEdit ? 'Saving…' : 'Save'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEditing(false)}
+                  className="text-xs text-gray-500 hover:text-gray-700 px-2 py-1"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <p className="mt-1 text-sm text-gray-800 whitespace-pre-wrap">{renderContent(interaction.content)}</p>
+          )}
           <AttachmentList files={interaction.files} />
           <Reactions interactionId={interaction.id} reactions={interaction.reactions} />
         </div>

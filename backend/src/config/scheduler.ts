@@ -287,8 +287,8 @@ export function startScheduler() {
           try {
             // Log activity timeline entry
             await query(
-              `INSERT INTO interactions (type, content, job_id)
-               VALUES ('status_transition', $1, $2)`,
+              `INSERT INTO interactions (type, content, job_id, source)
+               VALUES ('status_transition', $1, $2, 'system')`,
               [
                 `Auto-marked as Lost — start date ${new Date(job.job_date as string).toLocaleDateString('en-GB')} has passed without confirmation`,
                 job.id,

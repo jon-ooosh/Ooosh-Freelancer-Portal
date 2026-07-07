@@ -234,8 +234,8 @@ router.post(
       ].filter(Boolean).join('\n');
 
       await query(
-        `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
-         VALUES ('status_transition', $1, $2, $3, 'cancelled')`,
+        `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation, source)
+         VALUES ('status_transition', $1, $2, $3, 'cancelled', 'system')`,
         [timelineContent, jobId, userId]
       );
 
@@ -486,8 +486,8 @@ router.post(
       // the deliberate decision — not just an email that silently didn't send.
       if (send_client_email === false) {
         await query(
-          `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
-           VALUES ('note', $1, $2, $3, 'cancelled')`,
+          `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation, source)
+           VALUES ('note', $1, $2, $3, 'cancelled', 'system')`,
           [
             `Client cancellation email skipped (opt-out at cancellation by ${req.user!.email}).`,
             jobId,
@@ -887,13 +887,13 @@ router.post(
       const newNote = `Rebooking from cancelled job ${job.hh_job_number ? `J-${job.hh_job_number}` : jobId}`;
 
       await query(
-        `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
-         VALUES ('note', $1, $2, $3, 'cancelled')`,
+        `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation, source)
+         VALUES ('note', $1, $2, $3, 'cancelled', 'system')`,
         [origNote, jobId, req.user!.id]
       );
       await query(
-        `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
-         VALUES ('note', $1, $2, $3, 'new_enquiry')`,
+        `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation, source)
+         VALUES ('note', $1, $2, $3, 'new_enquiry', 'system')`,
         [newNote, newJob.id, req.user!.id]
       );
 

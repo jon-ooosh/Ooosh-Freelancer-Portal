@@ -337,8 +337,8 @@ export async function createJobIssue(opts: {
 
   if (opts.echoToJobTimeline && opts.jobId) {
     await run(
-      `INSERT INTO interactions (type, content, job_id, created_by)
-       VALUES ('note', $1, $2, $3)`,
+      `INSERT INTO interactions (type, content, job_id, created_by, source)
+       VALUES ('note', $1, $2, $3, 'system')`,
       [
         `⚠️ Issue logged (${opts.category}${severity === 'urgent' ? ', urgent' : ''}): ${opts.summary}`,
         opts.jobId, opts.reportedByUserId,

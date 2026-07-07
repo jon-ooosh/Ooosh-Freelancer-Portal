@@ -99,8 +99,8 @@ export async function autoDispatchJob(opts: AutoDispatchOptions): Promise<AutoDi
 
     try {
       await query(
-        `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
-         VALUES ('note', $1, $2, $3, 'dispatched')`,
+        `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation, source)
+         VALUES ('note', $1, $2, $3, 'dispatched', 'system')`,
         [
           opts.interactionContent,
           opts.jobId,

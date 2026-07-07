@@ -1571,8 +1571,8 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
 
     if (checklistData) {
       await query(
-        `INSERT INTO interactions (type, notes, related_type, related_id, created_by, metadata)
-         VALUES ('completion', $1, 'quote', $2, $3, $4)`,
+        `INSERT INTO interactions (type, notes, related_type, related_id, created_by, metadata, source)
+         VALUES ('completion', $1, 'quote', $2, $3, $4, 'system')`,
         [
           `Job completed by ${completionName}`,
           quoteId,

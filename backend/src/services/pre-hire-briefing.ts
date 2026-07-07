@@ -888,8 +888,8 @@ export async function sendBriefingEmail(
   try {
     const trigger = triggeredBy ? 'manual' : 'scheduled';
     await query(
-      `INSERT INTO interactions (type, content, job_id, created_by)
-       VALUES ('note', $1, $2, $3)`,
+      `INSERT INTO interactions (type, content, job_id, created_by, source)
+       VALUES ('note', $1, $2, $3, 'system')`,
       [
         `📧 Pre-Hire Review email sent to ${actualRecipient} (${trigger}). Subject: "${subject}"`,
         jobId,
