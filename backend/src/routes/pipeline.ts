@@ -485,8 +485,8 @@ router.post('/enquiry', validate(createEnquirySchema), async (req: AuthRequest, 
 
     // Log creation as an interaction on the job timeline
     await query(
-      `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
-       VALUES ('status_transition', $1, $2, $3, 'new_enquiry')`,
+      `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation, source)
+       VALUES ('status_transition', $1, $2, $3, 'new_enquiry', 'system')`,
       [`New enquiry created: ${finalJobName}`, result.rows[0].id, req.user!.id]
     );
 
@@ -770,8 +770,8 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
       : `Status changed: ${fromLabel} → ${toLabel}`;
 
     await query(
-      `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
-       VALUES ('status_transition', $1, $2, $3, $4)`,
+      `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation, source)
+       VALUES ('status_transition', $1, $2, $3, $4, 'system')`,
       [transitionContent, jobId, req.user!.id, fromStatus]
     );
 
@@ -1835,9 +1835,22 @@ router.patch('/:id/edit', validate(editJobSchema), async (req: AuthRequest, res:
       if (field in fields) {
         const oldVal = currentJob[field];
         const newVal = fields[field];
-        // Track what actually changed for the interaction log
-        if (String(oldVal ?? '') !== String(newVal ?? '')) {
-          changedFields.push(`${fieldLabels[field] || field}: ${formatLogValue(field, oldVal)} → ${formatLogValue(field, newVal)}`);
+        // Track what actually changed for the interaction log. For date/time
+        // fields compare the DISPLAY value, not the raw DB representation: the
+        // DB stores dates as full timestamps (2026-06-26T00:00:00.000Z) and
+        // times as HH:MM:SS, while the edit form sends '2026-06-26' / 'HH:MM'.
+        // A naive string compare flags an unchanged date as changed and floods
+        // the timeline with "26 Jun 2026 → 26 Jun 2026" lines. Other fields
+        // keep the raw compare. (Only the LOG is affected — the UPDATE below
+        // still writes every provided field, and HireHop write-back has its
+        // own separate check, so nothing downstream changes.)
+        const isDateTime = dateFields.has(field) || timeFields.has(field);
+        const changedForLog = isDateTime
+          ? formatLogValue(field, oldVal) !== formatLogValue(field, newVal)
+          : String(oldVal ?? '') !== String(newVal ?? '');
+        if (changedForLog) {
+          // Tighter phrasing — just the new value (e.g. "Job end → 12 Jul 2026").
+          changedFields.push(`${fieldLabels[field] || field} → ${formatLogValue(field, newVal)}`);
         }
         updates.push(`${field} = $${pIdx}`);
         params.push(newVal ?? null);
@@ -1860,8 +1873,8 @@ router.patch('/:id/edit', validate(editJobSchema), async (req: AuthRequest, res:
     if (changedFields.length > 0) {
       const content = `Job details updated: ${changedFields.join('; ')}`;
       await query(
-        `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
-         VALUES ('note', $1, $2, $3, $4)`,
+        `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation, source)
+         VALUES ('note', $1, $2, $3, $4, 'system')`,
         [content, jobId, req.user!.id, currentJob.pipeline_status]
       );
     }
@@ -2554,14 +2567,14 @@ router.post(
 
       // ── 4. Timeline interactions both sides.
       await query(
-        `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
-         VALUES ('note', $1, $2, $3, $4)`,
+        `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation, source)
+         VALUES ('note', $1, $2, $3, $4, 'system')`,
         [`🔀 Combined booking #${absorbed.hh_job_number} into this one. Dates extended; deposit £${depositMoved.toFixed(2)} reallocated from #${absorbed.hh_job_number}.`,
          survivorId, userId, survivor.pipeline_status]
       ).catch(e => console.warn('[Combine] survivor interaction failed:', e));
       await query(
-        `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
-         VALUES ('status_transition', $1, $2, $3, 'cancelled')`,
+        `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation, source)
+         VALUES ('status_transition', $1, $2, $3, 'cancelled', 'system')`,
         [`🔀 Combined into booking #${survivor.hh_job_number} by ${userEmail}. No cancellation fee — bookings merged. Deposit £${depositMoved.toFixed(2)} reallocated to #${survivor.hh_job_number}.`,
          absorb_job_id, userId]
       ).catch(e => console.warn('[Combine] absorbed interaction failed:', e));
@@ -2916,8 +2929,8 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
 
     // Log as interaction
     await query(
-      `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
-       VALUES ('note', $1, $2, $3, $4)`,
+      `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation, source)
+       VALUES ('note', $1, $2, $3, $4, 'system')`,
       [`Created HireHop job #${hhJobNumber}${contactSyncNote}`, jobId, req.user!.id, job.pipeline_status]
     );
 
@@ -3101,8 +3114,8 @@ router.post('/:id/sync-client-to-hh', async (req: AuthRequest, res: Response) =>
 
     // Log as interaction on the job
     await query(
-      `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
-       VALUES ('note', $1, $2, $3, $4)`,
+      `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation, source)
+       VALUES ('note', $1, $2, $3, $4, 'system')`,
       [
         `Synced client "${nameForHh}" to HireHop job #${job.hh_job_number} (contact details: ${syncedFields.join(', ')})`,
         jobId,

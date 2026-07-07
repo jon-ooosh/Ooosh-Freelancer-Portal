@@ -671,6 +671,58 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
   }
 });
 
+// PATCH /api/interactions/:id — edit a note's content (creator only)
+//
+// Only genuine human-authored entries (source='user') can be edited, and only
+// by their author. Automated/audit entries (source='system' — status changes,
+// "Job details updated", etc.) are immutable. We record edited_at/edited_by
+// for the "· edited" marker but deliberately DON'T keep the previous text —
+// corrections by anyone else go via a reply, not a silent rewrite.
+const editInteractionSchema = z.object({
+  content: z.string().min(1).max(20000),
+});
+
+router.patch('/:id', validate(editInteractionSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { content } = req.body;
+    const existing = await query(
+      'SELECT id, created_by, source, type FROM interactions WHERE id = $1',
+      [req.params.id]
+    );
+    if (existing.rows.length === 0) {
+      res.status(404).json({ error: 'Interaction not found' });
+      return;
+    }
+    const row = existing.rows[0];
+
+    if (row.source === 'system') {
+      res.status(403).json({ error: 'Automated timeline entries can’t be edited. Add a reply to correct or clarify.' });
+      return;
+    }
+    if (row.created_by !== req.user!.id) {
+      res.status(403).json({ error: 'Only the author can edit this note. Add a reply to correct or clarify.' });
+      return;
+    }
+
+    const result = await query(
+      `UPDATE interactions
+         SET content = $1, edited_at = NOW(), edited_by = $2
+       WHERE id = $3
+       RETURNING *,
+         (SELECT CONCAT(p.first_name, ' ', p.last_name)
+            FROM users u LEFT JOIN people p ON p.id = u.person_id
+           WHERE u.id = interactions.created_by) AS created_by_name`,
+      [content.trim(), req.user!.id, req.params.id]
+    );
+
+    await logAudit(req.user!.id, 'interactions', String(req.params.id), 'update', row, result.rows[0]);
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Edit interaction error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // PUT /api/interactions/:id/move — move an interaction to a different entity
 const moveInteractionSchema = z.object({
   target_type: z.enum(['person_id', 'organisation_id', 'venue_id']),

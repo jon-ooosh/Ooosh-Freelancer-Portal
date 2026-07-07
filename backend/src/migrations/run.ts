@@ -194,6 +194,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '157_gmail_ingestion.sql',
         '158_soft_checked_in_at.sql',
         '159_quote_van_leg_started.sql',
+        '160_interaction_source_and_edit.sql',
       ];
 
       for (const migration of migrations) {

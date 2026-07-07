@@ -144,8 +144,8 @@ router.post('/upload', upload.single('file'), async (req: AuthRequest, res: Resp
     if (fkColumn) {
       const displayName = label && label.trim() ? `${label.trim()} (${req.file.originalname})` : req.file.originalname;
       await query(
-        `INSERT INTO interactions (id, type, content, ${fkColumn}, created_by, created_at)
-         VALUES ($1, 'note', $2, $3, $4, NOW())`,
+        `INSERT INTO interactions (id, type, content, ${fkColumn}, created_by, created_at, source)
+         VALUES ($1, 'note', $2, $3, $4, NOW(), 'system')`,
         [uuid(), `📎 Uploaded file: ${displayName}`, entity_id, req.user!.id]
       );
     }
@@ -257,8 +257,8 @@ router.delete('/delete', async (req: AuthRequest, res: Response) => {
     const fkColumn = getEntityFk(entity_type);
     if (fkColumn) {
       await query(
-        `INSERT INTO interactions (id, type, content, ${fkColumn}, created_by, created_at)
-         VALUES ($1, 'note', $2, $3, $4, NOW())`,
+        `INSERT INTO interactions (id, type, content, ${fkColumn}, created_by, created_at, source)
+         VALUES ($1, 'note', $2, $3, $4, NOW(), 'system')`,
         [uuid(), `🗑️ Deleted file: ${deletedFileName}`, entity_id, req.user!.id]
       );
     }
@@ -374,8 +374,8 @@ router.post('/add-link', async (req: AuthRequest, res: Response) => {
     if (fkColumn) {
       const display = label && String(label).trim() ? `${String(label).trim()} (${displayName})` : displayName;
       await query(
-        `INSERT INTO interactions (id, type, content, ${fkColumn}, created_by, created_at)
-         VALUES ($1, 'note', $2, $3, $4, NOW())`,
+        `INSERT INTO interactions (id, type, content, ${fkColumn}, created_by, created_at, source)
+         VALUES ($1, 'note', $2, $3, $4, NOW(), 'system')`,
         [uuid(), `🔗 Added link: ${display}`, entity_id, req.user!.id]
       );
     }
@@ -551,8 +551,8 @@ router.post('/email', authorize(...STAFF_ROLES), validate(sendFileEmailSchema), 
       const content = `📎 Sent file "${fileName}"${fileLabel} to ${sentEmails.join(', ')}`;
       try {
         await query(
-          `INSERT INTO interactions (id, type, content, ${fkColumn}, created_by, created_at)
-           VALUES ($1, 'email', $2, $3, $4, NOW())`,
+          `INSERT INTO interactions (id, type, content, ${fkColumn}, created_by, created_at, source)
+           VALUES ($1, 'email', $2, $3, $4, NOW(), 'system')`,
           [uuid(), content, entity_id, req.user!.id]
         );
       } catch (err) {

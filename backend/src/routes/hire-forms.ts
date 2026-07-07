@@ -1872,8 +1872,8 @@ router.post(
         const regList = affected.map(a => a.vehicle_reg).join(', ');
         const driverDisplay = source.driver_name || 'Driver';
         await dbClient.query(
-          `INSERT INTO interactions (type, content, job_id, created_by)
-           VALUES ('note', $1, $2, $3)`,
+          `INSERT INTO interactions (type, content, job_id, created_by, source)
+           VALUES ('note', $1, $2, $3, 'system')`,
           [
             `🚐 ${driverDisplay} added mid-hire to ${regList} (hire window inherited from existing booking; hire start set to ${new Date().toLocaleString('en-GB')}).`,
             source.job_id,
@@ -3235,8 +3235,8 @@ router.post('/send-email', authenticate, validate(sendHireFormEmailSchema), asyn
     if (sent > 0) {
       const recipientList = results.filter(r => r.success).map(r => r.email).join(', ');
       await query(
-        `INSERT INTO interactions (type, content, job_id, created_by)
-         VALUES ('email', $1, $2, $3)`,
+        `INSERT INTO interactions (type, content, job_id, created_by, source)
+         VALUES ('email', $1, $2, $3, 'system')`,
         [
           `Hire form ${isChase ? 'reminder' : 'link'} sent to ${recipientList}`,
           jobId,

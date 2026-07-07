@@ -447,8 +447,8 @@ router.patch('/:id', validate(updateRequirementSchema), async (req: AuthRequest,
           [updated.job_id]
         );
         await query(
-          `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
-           VALUES ('status_transition', $1, $2, $3, 'confirmed')`,
+          `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation, source)
+           VALUES ('status_transition', $1, $2, $3, 'confirmed', 'system')`,
           [
             `Status changed: Confirmed → Prepping (auto — ${updated.requirement_type} marked Working On It)`,
             updated.job_id,
@@ -510,8 +510,8 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
       ? `Removed requirement: ${reqData.type_label || reqData.requirement_type} — Reason: ${reason}`
       : `Removed requirement: ${reqData.type_label || reqData.requirement_type}`;
     await query(
-      `INSERT INTO interactions (type, content, job_id, created_by)
-       VALUES ('note', $1, $2, $3)`,
+      `INSERT INTO interactions (type, content, job_id, created_by, source)
+       VALUES ('note', $1, $2, $3, 'system')`,
       [content, reqData.job_id, req.user!.id]
     );
 

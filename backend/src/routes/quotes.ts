@@ -1320,8 +1320,8 @@ router.post(
       if (quote.job_id) {
         const venueLabel = quote.venue_name || quote.job_name || 'quote';
         await query(
-          `INSERT INTO interactions (type, content, job_id, created_by)
-           VALUES ('status_transition', $1, $2, $3)`,
+          `INSERT INTO interactions (type, content, job_id, created_by, source)
+           VALUES ('status_transition', $1, $2, $3, 'system')`,
           [
             `Transport quote manually marked complete (${venueLabel}) — reason: ${reason.trim()}` +
               (notes && notes.trim() ? `. Notes: ${notes.trim()}` : ''),

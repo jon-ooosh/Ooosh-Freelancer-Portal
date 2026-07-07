@@ -30,7 +30,7 @@ const JOB_GATE = `
 
 async function logInteraction(jobId: string, content: string) {
   try {
-    await query(`INSERT INTO interactions (job_id, type, content, created_by) VALUES ($1, 'note', $2, $3)`, [jobId, content, SYSTEM_USER_ID]);
+    await query(`INSERT INTO interactions (job_id, type, content, created_by, source) VALUES ($1, 'note', $2, $3, 'system')`, [jobId, content, SYSTEM_USER_ID]);
   } catch (e) { console.error('[carnet-auto-email] interaction log failed:', e); }
 }
 

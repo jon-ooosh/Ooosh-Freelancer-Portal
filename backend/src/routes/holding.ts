@@ -90,7 +90,7 @@ router.post('/public/merch-form', publicLimiter, validate(merchFormSchema), asyn
   if (jobId) {
     try {
       await query(
-        `INSERT INTO interactions (type, content, job_id, created_by) VALUES ('note', $1, $2, $3)`,
+        `INSERT INTO interactions (type, content, job_id, created_by, source) VALUES ('note', $1, $2, $3, 'system')`,
         [`📦 Incoming delivery declared via merch form: ${description} from ${b.band_name}`, jobId, SYSTEM_USER_ID]
       );
       await syncMerchRequirementStatus(jobId);
@@ -982,7 +982,7 @@ async function logToJobTimeline(item: Record<string, unknown>, userId: string, v
     const kindLabel = item.kind === 'lost_property' ? 'Lost property' : item.kind === 'incoming' ? 'Incoming delivery' : 'Held item';
     const desc = (item.description as string) || `${item.box_count || ''} item(s)`.trim();
     await query(
-      `INSERT INTO interactions (type, content, job_id, created_by) VALUES ('note', $1, $2, $3)`,
+      `INSERT INTO interactions (type, content, job_id, created_by, source) VALUES ('note', $1, $2, $3, 'system')`,
       [`📦 ${kindLabel} ${verb}: ${desc}`.trim(), item.job_id, userId]
     );
   } catch (err) {
