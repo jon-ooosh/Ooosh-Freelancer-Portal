@@ -14,6 +14,17 @@ import CostCaptureModal from './CostCaptureModal';
 import RechargeResolveModal, { RechargeStatusPill } from './RechargeResolveModal';
 import type { JobExcess } from '../../../shared/types';
 
+// HireHop bank accounts (id → label) for the cross-job apply bank field.
+const HH_BANKS: Array<{ id: number; label: string }> = [
+  { id: 265, label: 'Wise — Current Account (BACS)' },
+  { id: 169, label: 'Worldpay (all cards except Amex)' },
+  { id: 165, label: 'Amex' },
+  { id: 267, label: 'Stripe GBP' },
+  { id: 170, label: 'Lloyds Bank' },
+  { id: 168, label: 'Till (Cash)' },
+  { id: 173, label: 'PayPal' },
+];
+
 interface MoneyTabProps {
   jobId: string;
   job: any; // Job object from parent
@@ -52,6 +63,11 @@ interface FinancialData {
       id: number; amount: number; date: string;
       description: string | null; memo: string | null;
       is_excess: boolean; is_refund: boolean;
+      /** True for real kind:6 deposits (refundable + cross-job applicable);
+       *  absent on application lines (excess/credit applied to invoice). */
+      is_deposit?: boolean;
+      /** HireHop bank account id — default for the cross-job apply bank field. */
+      acc_account_id?: number | null;
       bank_name: string | null; entered_by: string | null;
       /** Original Stripe PaymentIntent (when OP has a matching job_payments row).
        *  Presence enables OP-initiated Stripe refund on the row. */
@@ -178,6 +194,52 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   const [refundLoading, setRefundLoading] = useState(false);
   const [refundError, setRefundError] = useState('');
   const [refundResult, setRefundResult] = useState<{ stripe_refund_id?: string; hh_push_error?: string | null } | null>(null);
+
+  // Cross-job "Apply credit to another job" (Phase 2 CROSS-JOB-EXCESS-APPLY-SPEC).
+  type ApplyInvoice = { id: number; number: string; description: string; owing: number };
+  type ApplyGroup = { hh_job_number: number; job_name: string | null; invoices: ApplyInvoice[] };
+  const [applyingDep, setApplyingDep] = useState<FinancialData['financial']['deposits'][number] | null>(null);
+  const [applyAmount, setApplyAmount] = useState('');
+  const [applyBank, setApplyBank] = useState<number | ''>('');
+  const [applyGroups, setApplyGroups] = useState<ApplyGroup[]>([]);
+  const [applyTarget, setApplyTarget] = useState<{ hhJob: number; invoiceId: number } | null>(null);
+  const [applyLoadingInv, setApplyLoadingInv] = useState(false);
+  const [applyLoading, setApplyLoading] = useState(false);
+  const [applyError, setApplyError] = useState('');
+
+  const openApplyModal = (dep: FinancialData['financial']['deposits'][number]) => {
+    setApplyingDep(dep);
+    setApplyAmount(String(dep.amount));
+    setApplyBank(dep.acc_account_id ?? '');
+    setApplyTarget(null);
+    setApplyGroups([]);
+    setApplyError('');
+    setApplyLoadingInv(true);
+    api.get<{ data: { jobs: ApplyGroup[] } }>(`/money/${jobId}/cross-job-invoices`)
+      .then((r) => setApplyGroups(r.data.jobs || []))
+      .catch((e: any) => setApplyError(e.message || 'Failed to load other jobs'))
+      .finally(() => setApplyLoadingInv(false));
+  };
+  const submitApply = async () => {
+    if (!applyingDep || !applyTarget) { setApplyError('Pick an invoice on another job'); return; }
+    const amt = parseFloat(applyAmount);
+    if (isNaN(amt) || amt <= 0) { setApplyError('Enter a valid amount'); return; }
+    if (amt > Number(applyingDep.amount) + 0.005) { setApplyError(`Amount exceeds this deposit (£${Number(applyingDep.amount).toFixed(2)})`); return; }
+    setApplyLoading(true); setApplyError('');
+    try {
+      await api.post(`/money/${jobId}/apply-credit`, {
+        hh_deposit_id: applyingDep.id,
+        amount: amt,
+        target_hh_job: applyTarget.hhJob,
+        invoice_id: applyTarget.invoiceId,
+        ...(applyBank !== '' ? { bank: applyBank } : {}),
+      });
+      setApplyingDep(null);
+      loadData();
+    } catch (e: any) {
+      setApplyError(e.message || 'Apply failed');
+    } finally { setApplyLoading(false); }
+  };
 
   // Job costs (Cost Capture) — quoted-vs-actual variance + extra/recharge list.
   const [jobCosts, setJobCosts] = useState<JobCostLite[]>([]);
@@ -1086,6 +1148,15 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                         Refund
                       </button>
                     )}
+                    {!dep.is_refund && dep.is_deposit && canManage && (
+                      <button
+                        onClick={() => openApplyModal(dep)}
+                        className="text-xs text-ooosh-600 hover:text-ooosh-700 underline whitespace-nowrap"
+                        title="Apply this credit to a same-client invoice on another job"
+                      >
+                        Apply to another job
+                      </button>
+                    )}
                   </div>
                 </div>
               ))}
@@ -1349,6 +1420,72 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
               <button onClick={submitResolveBalance} disabled={balSaving}
                 className="px-4 py-1.5 text-sm font-medium text-white bg-ooosh-600 rounded-md hover:bg-ooosh-700 disabled:opacity-50">
                 {balSaving ? 'Saving…' : 'Resolve'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Cross-job "Apply credit to another job" modal */}
+      {applyingDep && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setApplyingDep(null)}>
+          <div className="bg-white rounded-lg shadow-xl max-w-lg w-full max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="px-5 py-4 border-b border-gray-200">
+              <h3 className="text-lg font-semibold text-gray-900">Apply Credit to Another Job</h3>
+              <p className="text-xs text-gray-500 mt-1">
+                Apply £{Number(applyingDep.amount).toFixed(2)}{applyingDep.bank_name && ` (${applyingDep.bank_name})`} on this job to a same-client invoice on another job. No cash moves — it reallocates the deposit to the other job's invoice.
+              </p>
+            </div>
+            <div className="px-5 py-4 space-y-4">
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Apply to invoice (same client, another job)</label>
+                {applyLoadingInv ? (
+                  <div className="text-xs text-gray-500 py-2">Loading this client's other jobs…</div>
+                ) : applyGroups.length === 0 ? (
+                  <div className="text-xs text-gray-500 py-2">No other jobs with an outstanding balance for this client.</div>
+                ) : (
+                  <div className="space-y-2 max-h-48 overflow-y-auto border border-gray-200 rounded-md p-2">
+                    {applyGroups.map((grp) => (
+                      <div key={grp.hh_job_number}>
+                        <div className="text-xs font-semibold text-gray-700">#{grp.hh_job_number}{grp.job_name ? ` — ${grp.job_name}` : ''}</div>
+                        {grp.invoices.map((inv) => (
+                          <label key={inv.id} className="flex items-center gap-2 text-xs py-0.5 cursor-pointer">
+                            <input type="radio" name="applyInvoice"
+                              checked={applyTarget?.hhJob === grp.hh_job_number && applyTarget?.invoiceId === inv.id}
+                              onChange={() => setApplyTarget({ hhJob: grp.hh_job_number, invoiceId: inv.id })} />
+                            <span>{inv.number} · £{inv.owing.toFixed(2)} owing · {inv.description.substring(0, 44)}</span>
+                          </label>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Amount</label>
+                <div className="relative">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">£</span>
+                  <input type="number" step="0.01" max={applyingDep.amount} value={applyAmount}
+                    onChange={(e) => setApplyAmount(e.target.value)}
+                    className="w-full pl-7 pr-3 py-2 text-sm border border-gray-300 rounded-md" />
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Bank attribution (HireHop/Xero)</label>
+                <select value={applyBank} onChange={(e) => setApplyBank(e.target.value ? Number(e.target.value) : '')}
+                  className="w-full text-sm border border-gray-300 rounded-md px-3 py-2">
+                  <option value="">Auto — from the source deposit's bank</option>
+                  {HH_BANKS.map((b) => <option key={b.id} value={b.id}>{b.label}</option>)}
+                </select>
+                <p className="text-xs text-gray-400 mt-1">No cash moves — this only sets the bank the reallocation is attributed to. Defaults to the source deposit's bank.</p>
+              </div>
+              {applyError && <div className="text-xs bg-red-50 border border-red-200 rounded p-2 text-red-700">{applyError}</div>}
+            </div>
+            <div className="px-5 py-4 border-t border-gray-200 flex justify-end gap-2">
+              <button onClick={() => setApplyingDep(null)} className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
+              <button onClick={submitApply} disabled={applyLoading || !applyTarget}
+                className="px-4 py-1.5 text-sm font-medium text-white bg-ooosh-600 hover:bg-ooosh-700 rounded-md disabled:opacity-50">
+                {applyLoading ? 'Applying…' : 'Apply'}
               </button>
             </div>
           </div>
