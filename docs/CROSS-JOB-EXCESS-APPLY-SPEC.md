@@ -107,9 +107,12 @@ When excess is applied to Job B, B's Money tab should make the cross-job settlem
 4. **Frontend** "Apply to another job" section in the Apply-to-Invoice flow.
 5. **B-side marker** on the target job's Money tab. **DEFERRED (Jun 2026).** The target job already reads the correct £0 balance via the invoice-reconciliation path (its invoice shows owing=0, so OP infers the £137.62 as paid). But the cross-job excess application is NOT surfaced as a payment-history line on B: it carries "Excess" in its description so `isExcessPayment` is true, while its `OWNER_DEPOSIT` (the deposit on A) is absent from B's own excess-deposit set, so it falls through the `kind=3` branches in `routes/money.ts` without being pushed to `deposits[]`. Adding an explicit "settled from {client} excess held on job #A" line needs a deliberate `kind=3` reader change (detect: `isExcess && OWNER_DEPOSIT set && OWNER non-zero && deposit not in this job's excess set → render as a cross-job settlement line, source job from the description/memo), best built + tested against live billing data. Items 1–4 shipped without it.
 
-**Phase 2 — generalise to non-excess credit:**
-6. **Money-tab apply endpoint** — apply any held deposit/credit on this job to a same-client invoice on another job (pure HH application + `job_payments` audit + B-side marker). Reuses the picker + bank handling from Phase 1.
-7. **Money tab UI** — per-deposit-row "Apply to another job" action.
+**Phase 2 — generalise to non-excess credit:** ✅ SHIPPED (Jul 2026)
+6. **Money-tab apply endpoint** — `POST /api/money/:jobId/apply-credit` (admin/manager): apply a deposit on this job to a same-client invoice on another job (billing_payments_save OWNER=invoice + deposit, Xero post_payment, `job_payments` audit row, same-client guard). `GET /api/money/:jobId/cross-job-invoices` powers the picker.
+7. **Money tab UI** — per-deposit-row "Apply to another job" action (on real kind:6 deposits only, `is_deposit` flag) → modal with same-client invoice picker + confirmable bank (defaults to the deposit's `acc_account_id`).
+8. **money.ts reader** — cross-job-aware on both sides via `thisJobInvoiceIds` + `thisJobDepositIds`: source doesn't credit its hire when applied elsewhere; target credits + surfaces "Credit applied from hire #A". Mirrors the excess handling.
+
+**⚠ Verification note (Jul 2026):** the excess cross-job reader was proven against live billing dumps (15577/15278). The **non-excess** target-side branch is built by analysis (same twin shape, `thisJobDepositIds` distinguishing same-job vs cross-job) but NOT yet verified against a live non-excess cross-job apply. After the first real use, dump both jobs' `billing_list` (as we did for excess) and confirm the target reads £0 + shows "Credit applied from hire #A"; adjust if the twin fields differ.
 
 Keep `scripts/cross-job-excess-apply.ts` as the reference implementation + emergency manual tool throughout.
 

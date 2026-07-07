@@ -14,7 +14,7 @@ import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { verifyApiKey } from '../middleware/api-key';
 import { hhBroker } from '../services/hirehop-broker';
-import { pushDepositToHH, HH_BANK_IDS } from '../services/hh-deposit';
+import { pushDepositToHH, HH_BANK_IDS, getMethodForBankId } from '../services/hh-deposit';
 import { getStripeClient, isStripeConfigured, isStripeError } from '../config/stripe';
 import { sendPaymentEmail, sendExcessEmail, sendLastMinuteAlert } from '../services/money-emails';
 import {
@@ -1043,6 +1043,7 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     const deposits: Array<{
       id: number; amount: number; date: string; description: string | null;
       memo: string | null; is_excess: boolean; is_refund: boolean;
+      is_deposit?: boolean; acc_account_id?: number | null;
       bank_name: string | null; entered_by: string | null;
     }> = [];
     // Track HH excess deposits separately for reconciliation
@@ -1104,6 +1105,11 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     // (deposit-side twins are blank), so it's the reliable signal. Proven via
     // job 15577→15278 cross-job excess apply (app 11962).
     const thisJobInvoiceIds = new Set<string>();
+    // Also collect THIS job's own deposit IDs (kind=6, any type). Used to tell a
+    // same-job deposit→invoice application (deposit already in this job's totals)
+    // from a CROSS-JOB credit-in (deposit lives on another job, so its value is
+    // NOT yet in this job's totals and must be added). Phase 2 non-excess apply.
+    const thisJobDepositIds = new Set<string>();
     if (bl?.rows && Array.isArray(bl.rows)) {
       for (const row of bl.rows) {
         const kind = parseInt(row.kind ?? '0');
@@ -1116,10 +1122,11 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
         if (kind !== 6) continue;
         const creditAmount = parseFloat(row.credit || data.credit || '0');
         if (creditAmount <= 0) continue; // deposits only, skip refunds/negatives
+        const depositId = parseInt(data.ID || row.number || String(row.id).replace('e', '') || '0');
+        if (depositId > 0) thisJobDepositIds.add(String(depositId));
         const desc = String(data.DESCRIPTION || row.desc || '');
         const memo = String(data.MEMO || '');
         if (isExcessPayment(desc + ' ' + memo)) {
-          const depositId = parseInt(data.ID || row.number || String(row.id).replace('e', '') || '0');
           if (depositId > 0) excessDepositIds.add(String(depositId));
         }
       }
@@ -1154,7 +1161,9 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
                 memo: memo || null,
                 is_excess: false,
                 is_refund: isRefund,
+                is_deposit: true, // real kind:6 deposit — can be refunded or applied cross-job
                 bank_name: getBankName(data.ACC_ACCOUNT_ID),
+                acc_account_id: data.ACC_ACCOUNT_ID != null ? Number(data.ACC_ACCOUNT_ID) : null,
                 entered_by: data.CREATE_USER_NAME || null,
               });
             } else if (isExcess && isRefund) {
@@ -1324,13 +1333,34 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
                 // CROSS-JOB (source side, non-excess): a non-excess deposit/credit
                 // on THIS job applied to ANOTHER job's invoice. Money left this
                 // job — do NOT credit this hire (would over-pay). Informational
-                // line only. (Phase 2 non-excess cross-job apply; harmless today
-                // since no such data exists until that ships.)
+                // line only. (Phase 2 non-excess cross-job apply.)
                 deposits.push({
                   id: appId,
                   amount: absAmount,
                   date: data.DATE || row.date || '',
                   description: 'Credit applied to another job’s invoice',
+                  memo: memo || null,
+                  is_excess: false,
+                  is_refund: false,
+                  bank_name: getBankName(data.ACC_ACCOUNT_ID),
+                  entered_by: data.CREATE_USER_NAME || null,
+                });
+              } else if (!isExcess && appliedToThisJobInvoice && !thisJobDepositIds.has(String(ownerDepositId))) {
+                // CROSS-JOB (target side, non-excess): a credit held on ANOTHER
+                // job applied to THIS job's invoice. The source deposit isn't on
+                // this job (not in this job's kind=6 set), so its value isn't yet
+                // in this job's totals — credit the hire (+ mark applied so
+                // reconciliation doesn't also count it) + surface where it came
+                // from. Distinct from a normal same-job deposit application, whose
+                // deposit IS on this job (handled by the catch-all below).
+                totalHireDeposits += absAmount;
+                hireDepositAppliedToInvoices += absAmount;
+                const srcJobMatch = /^(\d+)\s*-/.exec(description);
+                deposits.push({
+                  id: appId,
+                  amount: absAmount,
+                  date: data.DATE || row.date || '',
+                  description: srcJobMatch ? `Credit applied from hire #${srcJobMatch[1]}` : 'Credit applied from another hire',
                   memo: memo || null,
                   is_excess: false,
                   is_refund: false,
@@ -2113,6 +2143,159 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
   } catch (error) {
     console.error('[money] Record payment error:', error);
     res.status(500).json({ error: 'Failed to record payment' });
+  }
+});
+
+// ── Cross-job credit apply (Phase 2 of CROSS-JOB-EXCESS-APPLY-SPEC) ─────────
+// Apply a held credit/overpayment sitting as a deposit on THIS job to an open
+// invoice on ANOTHER same-client job. Same HireHop mechanism as the excess
+// cross-job claim (OWNER=invoice on B, deposit=deposit on A), but the source is
+// a non-excess deposit so there's no job_excess record — OP just pushes the
+// application + logs a job_payments audit row. The Money-tab reader surfaces it
+// on both jobs ("Credit applied to/from another job").
+
+// Small local helper — this job's open (owing>0) invoices via billing_list.
+async function fetchOpenInvoicesForHhJob(hhJobId: number): Promise<Array<{ id: number; number: string; description: string; owing: number }>> {
+  const billingRes = await hhBroker.get('/php_functions/billing_list.php',
+    { main_id: hhJobId, type: 1 }, { priority: 'low', cacheTTL: 30 });
+  if (!billingRes.success || !billingRes.data) return [];
+  const bl = billingRes.data as Record<string, any>;
+  const out: Array<{ id: number; number: string; description: string; owing: number }> = [];
+  for (const row of bl.rows || []) {
+    if (parseInt(row.kind ?? '0') !== 1) continue;
+    const owing = Number(row.owing ?? row.data?.owing ?? 0);
+    if (owing <= 0.005) continue;
+    const id = parseInt(row.data?.ID || row.number || String(row.id).replace('b', '') || '0');
+    if (!id) continue;
+    out.push({ id, number: String(row.data?.NUMBER || row.number || ''), description: String(row.data?.DESCRIPTION || row.desc || ''), owing });
+  }
+  return out;
+}
+
+// GET same-client open invoices on OTHER jobs (for the apply-credit picker).
+router.get('/:jobId/cross-job-invoices', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {
+  try {
+    const jobId = String(req.params.jobId);
+    const isUuid = /^[0-9a-f]{8}-/.test(jobId);
+    const jobRes = await query(
+      isUuid ? `SELECT id, hh_job_number, client_id FROM jobs WHERE id = $1`
+             : `SELECT id, hh_job_number, client_id FROM jobs WHERE hh_job_number = $1`,
+      [isUuid ? jobId : parseInt(jobId)]
+    );
+    if (jobRes.rows.length === 0) { res.status(404).json({ error: 'Job not found' }); return; }
+    const { hh_job_number, client_id } = jobRes.rows[0];
+    if (!client_id) { res.json({ data: { jobs: [], reason: 'no_client' } }); return; }
+
+    const candidates = await query(
+      `SELECT j.hh_job_number, j.job_name
+         FROM jobs j JOIN job_financials jf ON jf.job_id = j.id
+        WHERE j.client_id = $1 AND j.hh_job_number IS NOT NULL
+          AND j.hh_job_number <> $2
+          AND jf.balance_outstanding > 0.01
+          AND COALESCE(j.is_deleted, false) = false
+        ORDER BY jf.balance_outstanding DESC LIMIT 25`,
+      [client_id, hh_job_number]
+    );
+    const jobs: Array<{ hh_job_number: number; job_name: string | null; invoices: any[] }> = [];
+    for (const c of candidates.rows) {
+      const invoices = await fetchOpenInvoicesForHhJob(c.hh_job_number);
+      if (invoices.length > 0) jobs.push({ hh_job_number: c.hh_job_number, job_name: c.job_name || null, invoices });
+    }
+    res.json({ data: { jobs } });
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error('[money] Cross-job invoices error:', errMsg);
+    res.status(500).json({ error: 'Failed to load cross-job invoices', detail: errMsg });
+  }
+});
+
+const applyCreditSchema = z.object({
+  hh_deposit_id: z.number().int().positive(),
+  amount: z.number().positive(),
+  target_hh_job: z.number().int().positive(),
+  invoice_id: z.number().int().positive(),
+  bank: z.number().int().positive().nullable().optional(),
+  notes: z.string().max(1000).nullable().optional(),
+  allow_cross_client: z.boolean().optional(),
+});
+
+// POST apply a deposit on THIS job to an invoice on ANOTHER same-client job.
+router.post('/:jobId/apply-credit', authorize('admin', 'manager'), validate(applyCreditSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const jobId = String(req.params.jobId);
+    const { hh_deposit_id, amount, target_hh_job, invoice_id, bank, notes, allow_cross_client } = req.body;
+
+    const isUuid = /^[0-9a-f]{8}-/.test(jobId);
+    const jobRes = await query(
+      isUuid ? `SELECT id, hh_job_number, client_id, client_name FROM jobs WHERE id = $1`
+             : `SELECT id, hh_job_number, client_id, client_name FROM jobs WHERE hh_job_number = $1`,
+      [isUuid ? jobId : parseInt(jobId)]
+    );
+    if (jobRes.rows.length === 0) { res.status(404).json({ error: 'Job not found' }); return; }
+    const job = jobRes.rows[0];
+    if (Number(target_hh_job) === Number(job.hh_job_number)) {
+      res.status(400).json({ error: 'Target job is the same as the source job — use Record Payment for same-job.' });
+      return;
+    }
+
+    // Same-client guard (the correctness boundary).
+    const tgtRes = await query(`SELECT client_id FROM jobs WHERE hh_job_number = $1`, [target_hh_job]);
+    const tgtClient = tgtRes.rows[0]?.client_id;
+    if (!allow_cross_client && (!job.client_id || !tgtClient || String(job.client_id) !== String(tgtClient))) {
+      res.status(409).json({
+        error: 'Cross-client apply blocked',
+        detail: `Target job ${target_hh_job} belongs to a different client. A manager can override with allow_cross_client if intended.`,
+        code: 'cross_client_blocked',
+      });
+      return;
+    }
+
+    const resolvedBank = (bank as number | undefined) ?? 169;
+    const currentDate = new Date().toISOString().split('T')[0];
+    const description = `${job.hh_job_number} - Credit applied to invoice (cross-job → ${target_hh_job})`;
+    const memo = `Cross-job credit apply from job ${job.hh_job_number} to job ${target_hh_job} invoice${notes ? ` — ${notes}` : ''} (recorded via Ooosh OP)`;
+
+    console.log(`[money] Cross-job credit: applying £${amount} of deposit ${hh_deposit_id} (job ${job.hh_job_number}) to invoice ${invoice_id} on job ${target_hh_job}`);
+    const hhResult = await hhBroker.post('/php_functions/billing_payments_save.php', {
+      id: 0, date: currentDate, desc: description, paid: amount, memo,
+      bank: resolvedBank, OWNER: invoice_id, deposit: hh_deposit_id, correction: 0, no_webhook: 1,
+    }, { priority: 'high' });
+
+    if (!hhResult.success || !hhResult.data) {
+      console.error('[money] HH cross-job credit apply failed:', hhResult.error, hhResult.data);
+      res.status(502).json({
+        error: 'HireHop application failed',
+        detail: hhResult.error || 'HireHop did not accept the deposit-to-invoice application. Nothing recorded. Confirm the target invoice is approved and has an owing balance, then retry.',
+      });
+      return;
+    }
+    const hhAppId = (hhResult.data as any).hh_id || (hhResult.data as any).id || (hhResult.data as any).ID || null;
+
+    if (hhAppId) {
+      try {
+        await hhBroker.post('/php_functions/accounting/tasks.php',
+          { hh_package_type: 1, hh_acc_package_id: 3, hh_task: 'post_payment', hh_id: hhAppId, hh_acc_id: '' },
+          { priority: 'high' });
+      } catch (e) {
+        console.error('[money] Xero sync for cross-job credit failed (non-fatal):', e);
+      }
+    }
+
+    // Audit row on the SOURCE job (money moved off it to another job's invoice).
+    await query(
+      `INSERT INTO job_payments
+        (job_id, hirehop_job_id, payment_type, amount, payment_method, payment_reference,
+         payment_status, source, hirehop_deposit_id, client_name, notes, payment_date)
+       VALUES ($1, $2, 'other', $3, $4, $5, 'completed', 'cross_job_apply', $6, $7, $8, NOW())`,
+      [job.id, job.hh_job_number, amount, getMethodForBankId(resolvedBank), String(hhAppId || ''),
+       hh_deposit_id, job.client_name, `Cross-job credit → job ${target_hh_job} invoice ${invoice_id}${notes ? `: ${notes}` : ''}`]
+    ).catch((e) => console.error('[money] apply-credit audit insert failed (non-fatal):', e.message));
+
+    res.json({ data: { hh_application_id: hhAppId, target_hh_job, invoice_id, amount } });
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error('[money] Apply-credit error:', errMsg, error);
+    res.status(500).json({ error: 'Failed to apply credit', detail: errMsg });
   }
 });
 
