@@ -335,7 +335,7 @@ function addMonthsISO(dateInput: unknown, months: number): string {
 async function logCarnetInteraction(jobId: string, content: string, userId?: string) {
   try {
     await query(
-      `INSERT INTO interactions (job_id, type, content, created_by) VALUES ($1, 'note', $2, $3)`,
+      `INSERT INTO interactions (job_id, type, content, created_by, source) VALUES ($1, 'note', $2, $3, 'system')`,
       [jobId, content, userId || SYSTEM_USER_ID]
     );
   } catch (err) {

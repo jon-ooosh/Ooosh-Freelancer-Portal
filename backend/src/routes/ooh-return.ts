@@ -249,8 +249,8 @@ router.patch(
       if (body.return_overnight === true && body.override) {
         try {
           await query(
-            `INSERT INTO interactions (job_id, type, content, created_by)
-             VALUES ($1, 'note', $2, $3)`,
+            `INSERT INTO interactions (job_id, type, content, created_by, source)
+             VALUES ($1, 'note', $2, $3, 'system')`,
             [
               row.job_id,
               `🌙 OOH block overridden — manager allowed OOH return for a driver who had lost the privilege.`,

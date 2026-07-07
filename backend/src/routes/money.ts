@@ -488,8 +488,8 @@ router.post('/:jobId/dismiss-refund', authorize('admin', 'manager'), validate(di
 
     // Timeline note so the dismissal is visible on the job's Activity Timeline.
     await query(
-      `INSERT INTO interactions (type, content, job_id, created_by)
-       VALUES ('note', $1, $2, $3)`,
+      `INSERT INTO interactions (type, content, job_id, created_by, source)
+       VALUES ('note', $1, $2, $3, 'system')`,
       [`Pending refund of £${parseFloat(check.rows[0].amount).toFixed(2)} cleared — ${reasonLabel}${notes ? ` (${notes})` : ''}. No money moved through OP.`, jobUuid, req.user!.id]
     ).catch((e) => console.error('[money] dismiss-refund timeline note failed (non-fatal):', e));
 
