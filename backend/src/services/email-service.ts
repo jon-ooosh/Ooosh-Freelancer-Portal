@@ -271,6 +271,18 @@ class EmailService {
       throw new Error('SMTP credentials not configured. Set SMTP_USER and SMTP_PASS in .env');
     }
 
+    // POOLED + SERIALISED. Gmail SMTP 535-rejects surplus *concurrent* AUTH
+    // handshakes — proven live 8 Jul 2026: the daily 08:00 batch fired 5 sends
+    // in ~2s and Gmail 535'd 2 of them while sending the other 3, same account,
+    // same (valid) password. A non-pooled transport opens a fresh authenticated
+    // connection per send, so a burst = an auth storm = random 535s.
+    //
+    // pool:true + maxConnections:1 funnels every send through ONE reused,
+    // already-authenticated connection — nodemailer queues messages, so there
+    // is never more than one AUTH in flight. rateLimit keeps us well under
+    // Gmail's per-account rate. Our volume is low (dozens/day) so serialising
+    // costs nothing. This runs in a single systemd process = a single pool;
+    // if the API is ever clustered, each worker gets its own pool (revisit).
     this.transporter = nodemailer.createTransport({
       host: config.smtp.host,
       port: config.smtp.port,
@@ -279,6 +291,14 @@ class EmailService {
         user: config.smtp.user,
         pass: config.smtp.pass,
       },
+      pool: true,
+      maxConnections: 1,   // serialise — never open concurrent AUTH handshakes
+      maxMessages: 50,     // recycle the connection periodically
+      rateLimit: 5,        // ≤5 messages…
+      rateDelta: 1000,     // …per second
+      connectionTimeout: 10000,
+      greetingTimeout: 10000,
+      socketTimeout: 20000,
     });
 
     return this.transporter;
