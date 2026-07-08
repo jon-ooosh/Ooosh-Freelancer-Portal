@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, type ReactNode } from 'react';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import {
@@ -1114,6 +1114,79 @@ interface InteractionRowProps {
   renderContent: (text: string) => React.ReactNode;
 }
 
+// Quoted-reply boundary in an email body: the first '>' quoted line, an
+// "On … wrote:" attribution, or an Outlook/original-message divider. Everything
+// from there is quoted history (redundant — earlier messages are their own
+// ingested interactions), so we collapse it behind a toggle.
+function findQuoteBoundary(lines: string[]): number {
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i];
+    if (/^\s*>/.test(t)) return i;
+    if (/^\s*On\b.{3,140}\bwrote:\s*$/.test(t)) return i;
+    if (/^\s*-{2,}\s*Original Message\s*-{2,}/i.test(t)) return i;
+    if (/^\s*_{10,}\s*$/.test(t)) return i;
+  }
+  return -1;
+}
+
+// Renders interaction content, collapsing (a) an email's quoted reply history,
+// or (b) any very long body, behind a toggle so the timeline stays scannable.
+function InteractionBody({
+  text, isEmail, renderContent,
+}: {
+  text: string;
+  isEmail: boolean;
+  renderContent: (t: string) => ReactNode;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const lines = (text || '').split('\n');
+  const boundary = isEmail ? findQuoteBoundary(lines) : -1;
+
+  // (a) Email with a quoted tail — show the new message, collapse the quote.
+  if (boundary > 0) {
+    const visible = lines.slice(0, boundary).join('\n').replace(/\n{3,}/g, '\n\n').trimEnd();
+    const quoted = lines.slice(boundary).join('\n').trim();
+    return (
+      <div className="mt-1 text-sm text-gray-800 whitespace-pre-wrap break-words">
+        {renderContent(visible || text)}
+        {quoted && (expanded ? (
+          <>
+            <div className="mt-2 pl-2.5 border-l-2 border-gray-200 text-gray-500 text-[13px] whitespace-pre-wrap break-words">
+              {renderContent(quoted)}
+            </div>
+            <button type="button" onClick={() => setExpanded(false)} className="mt-1 text-xs text-ooosh-600 hover:text-ooosh-800">
+              Hide quoted text
+            </button>
+          </>
+        ) : (
+          <button type="button" onClick={() => setExpanded(true)}
+            className="mt-1 inline-flex items-center text-xs text-gray-400 hover:text-gray-600 border border-gray-200 rounded px-1.5 py-0.5"
+            title="Show quoted / earlier thread">
+            ··· show quoted text
+          </button>
+        ))}
+      </div>
+    );
+  }
+
+  // (b) Long body with no quote boundary — clamp to N lines.
+  const MAX_LINES = 12;
+  if (lines.length > MAX_LINES + 4) {
+    const head = lines.slice(0, MAX_LINES).join('\n').trimEnd();
+    return (
+      <div className="mt-1 text-sm text-gray-800 whitespace-pre-wrap break-words">
+        {renderContent(expanded ? text : head)}
+        <button type="button" onClick={() => setExpanded(!expanded)} className="mt-1 block text-xs text-ooosh-600 hover:text-ooosh-800">
+          {expanded ? 'Show less' : `Show more (${lines.length - MAX_LINES} more lines)`}
+        </button>
+      </div>
+    );
+  }
+
+  // (c) Short — as-is.
+  return <p className="mt-1 text-sm text-gray-800 whitespace-pre-wrap break-words">{renderContent(text)}</p>;
+}
+
 function InteractionRow({
   interaction, isReply, currentUserId, onEdited, movingId, onStartMove, onCancelMove,
   moveSearch, moveResults, moveLoading, onSearchEntities, onConfirmMove, renderContent,
@@ -1220,7 +1293,11 @@ function InteractionRow({
               </div>
             </div>
           ) : (
-            <p className="mt-1 text-sm text-gray-800 whitespace-pre-wrap">{renderContent(interaction.content)}</p>
+            <InteractionBody
+              text={interaction.content}
+              isEmail={interaction.type === 'email'}
+              renderContent={renderContent}
+            />
           )}
           <AttachmentList files={interaction.files} />
           <Reactions interactionId={interaction.id} reactions={interaction.reactions} />
