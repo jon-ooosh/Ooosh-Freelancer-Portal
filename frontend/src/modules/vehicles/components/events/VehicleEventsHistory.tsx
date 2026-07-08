@@ -142,7 +142,7 @@ function EventRow({ event, vehicleReg, vehicleId }: { event: EventIndexEntry; ve
               onClick={() => setRegenOpen(true)}
               className="rounded border border-gray-300 bg-white px-3 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50"
             >
-              Regenerate PDF
+              Regenerate {event.eventType} PDF
             </button>
           )}
         </div>
