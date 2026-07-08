@@ -213,10 +213,15 @@ router.post('/merge', async (req: AuthRequest, res: Response) => {
       [keep_id, merge_id]
     );
 
-    // Soft-delete the merged record
+    // Soft-delete the merged record AND clear its email. A soft-deleted twin
+    // that keeps the same email is a landmine: any email->person lookup that
+    // doesn't filter is_deleted (e.g. portal login) can bind to the dead row.
+    // The original email is preserved in the audit note.
+    const mergedOn = new Date().toISOString().split('T')[0];
+    const mergedEmailNote = merge.email ? ` (was ${merge.email})` : '';
     await query(
-      `UPDATE people SET is_deleted = true, notes = COALESCE(notes, '') || $1 WHERE id = $2`,
-      [`\n[Merged into ${keep.first_name} ${keep.last_name} on ${new Date().toISOString().split('T')[0]}]`, merge_id]
+      `UPDATE people SET is_deleted = true, email = NULL, notes = COALESCE(notes, '') || $1 WHERE id = $2`,
+      [`\n[Merged into ${keep.first_name} ${keep.last_name} on ${mergedOn}${mergedEmailNote}]`, merge_id]
     );
 
     // If the merged person had a user account, reassign it
