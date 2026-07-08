@@ -188,7 +188,9 @@ router.post('/auth/login', async (req: Request, res: Response) => {
       `SELECT p.id, p.first_name, p.last_name, p.email, p.portal_password_hash,
               p.is_freelancer, p.is_approved, p.portal_email_verified
        FROM people p
-       WHERE LOWER(p.email) = $1 AND p.is_freelancer = true`,
+       WHERE LOWER(p.email) = $1 AND p.is_freelancer = true AND p.is_deleted = false
+       ORDER BY p.is_approved DESC, p.portal_last_login DESC NULLS LAST
+       LIMIT 1`,
       [normalizedEmail]
     );
 
@@ -293,7 +295,9 @@ router.post('/auth/register/start', async (req: Request, res: Response) => {
     const result = await query(
       `SELECT id, first_name, last_name, email, portal_password_hash, is_approved
        FROM people
-       WHERE LOWER(email) = $1 AND is_freelancer = true`,
+       WHERE LOWER(email) = $1 AND is_freelancer = true AND is_deleted = false
+       ORDER BY is_approved DESC, portal_last_login DESC NULLS LAST
+       LIMIT 1`,
       [email]
     );
 
@@ -500,7 +504,9 @@ router.post('/auth/forgot-password', async (req: Request, res: Response) => {
 
     const result = await query(
       `SELECT id, first_name, email FROM people
-       WHERE LOWER(email) = $1 AND is_freelancer = true AND is_approved = true`,
+       WHERE LOWER(email) = $1 AND is_freelancer = true AND is_approved = true AND is_deleted = false
+       ORDER BY portal_last_login DESC NULLS LAST
+       LIMIT 1`,
       [email]
     );
 
@@ -563,7 +569,8 @@ router.get('/auth/verify-reset-token', async (req: Request, res: Response) => {
          AND t.used_at IS NULL
          AND t.expires_at > NOW()
          AND p.is_freelancer = true
-         AND p.is_approved = true`,
+         AND p.is_approved = true
+         AND p.is_deleted = false`,
       [tokenHash]
     );
     res.json({ valid: result.rows.length > 0 });
@@ -595,7 +602,8 @@ router.post('/auth/reset-password', async (req: Request, res: Response) => {
        JOIN people p ON p.id = t.person_id
        WHERE t.token_hash = $1
          AND t.used_at IS NULL
-         AND t.expires_at > NOW()`,
+         AND t.expires_at > NOW()
+         AND p.is_deleted = false`,
       [tokenHash]
     );
 
