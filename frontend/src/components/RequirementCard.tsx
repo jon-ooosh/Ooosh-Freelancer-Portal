@@ -15,6 +15,11 @@ import { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { STEP_PHASE, FUTURE_STEP } from './CarnetSection';
+import BacklineLocationModal, {
+  BacklineLocation,
+  backlineLocationIcon,
+  backlineLocationLabel,
+} from './BacklineLocationModal';
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -257,6 +262,17 @@ export default function RequirementCard({
   const [assignPickerDate, setAssignPickerDate] = useState<string | null>(null);
   const [rehearsalPickerSearch, setRehearsalPickerSearch] = useState('');
   const [rehearsalBusy, setRehearsalBusy] = useState(false);
+
+  // Backline "where is it?" location (pre-hire cards only)
+  const isBacklinePrehire = req.requirement_type === 'backline' && req.phase === 'pre_hire';
+  const [backlineLocation, setBacklineLocation] = useState<BacklineLocation | null>(null);
+  const [showLocationModal, setShowLocationModal] = useState(false);
+  useEffect(() => {
+    if (!isBacklinePrehire) return;
+    api.get<{ data: { location: BacklineLocation | null } }>(`/backline/location-context/${req.id}`)
+      .then(d => setBacklineLocation(d.data.location))
+      .catch(() => {});
+  }, [isBacklinePrehire, req.id]);
 
   const loadRehearsalCoverage = () => {
     if (!jobId) return;
@@ -806,6 +822,29 @@ export default function RequirementCard({
               </div>
             )}
 
+            {/* Backline location — "where is it?" (pre-hire, once prep has started) */}
+            {isBacklinePrehire && (backlineLocation || req.status !== 'not_started') && (
+              <div className="mt-1.5">
+                {backlineLocation ? (
+                  <button
+                    onClick={() => setShowLocationModal(true)}
+                    className="text-[11px] px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-100 font-medium hover:bg-indigo-100 transition-colors"
+                    title="Edit location"
+                  >
+                    {backlineLocationIcon(backlineLocation)} {backlineLocationLabel(backlineLocation)}
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => setShowLocationModal(true)}
+                    className="text-[11px] text-gray-400 hover:text-indigo-600 font-medium transition-colors"
+                    title="Record where the kit is"
+                  >
+                    ＋ Where is it?
+                  </button>
+                )}
+              </div>
+            )}
+
             {/* Rehearsal — studio-sitter detection reflection (Phase A, read-only) */}
             {req.requirement_type === 'rehearsal' && derivedFlags?.has_rehearsal && (() => {
               const detail = derivedFlags.rehearsal_detail;
@@ -1077,7 +1116,12 @@ export default function RequirementCard({
                     return (
                       <button
                         key={s}
-                        onClick={() => { onStatusChange(req.id, s); setShowStatusMenu(false); }}
+                        onClick={() => {
+                          onStatusChange(req.id, s);
+                          setShowStatusMenu(false);
+                          // Finishing backline prep? Offer to record where it went.
+                          if (isBacklinePrehire && s === 'done') setShowLocationModal(true);
+                        }}
                         className={`w-full text-left px-3 py-1.5 text-xs hover:bg-gray-50 flex items-center gap-2 ${req.status === s ? 'font-bold' : ''}`}
                       >
                         <span className={`w-2 h-2 rounded-full ${sc.bg.replace('100', '500')}`} />
@@ -1371,6 +1415,15 @@ export default function RequirementCard({
             </>
           )}
         </div>
+      )}
+
+      {showLocationModal && (
+        <BacklineLocationModal
+          requirementId={req.id}
+          initialLocation={backlineLocation}
+          onClose={() => setShowLocationModal(false)}
+          onSaved={(loc) => setBacklineLocation(loc)}
+        />
       )}
     </div>
   );
