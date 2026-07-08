@@ -10,7 +10,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
-import { authenticate, authorize, AuthRequest } from '../middleware/auth';
+import { authenticate, authorize, STAFF_ROLES, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { verifyApiKey } from '../middleware/api-key';
 import { hhBroker } from '../services/hirehop-broker';
@@ -318,6 +318,48 @@ router.delete('/:jobId/resolve-balance', authorize('admin'), async (req: AuthReq
     const msg = error instanceof Error ? error.message : String(error);
     console.error('[money] unresolve-balance error:', msg);
     res.status(500).json({ error: 'Failed to remove balance override', detail: msg });
+  }
+});
+
+// ── POST /api/money/:jobId/resend-confirmation ──
+// Manually re-fire the client payment/booking-confirmation email for a job.
+// Reads live data, so it works for ANY confirmed job (incl. ones whose original
+// auto-send failed — the resend does not depend on a stored "failed" flag).
+// Surfaces the send result (incl. SMTP failure) so staff know if it worked.
+router.post('/:jobId/resend-confirmation', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const jobUuid = await resolveJobUuid(String(req.params.jobId));
+    if (!jobUuid) { res.status(404).json({ error: 'Job not found' }); return; }
+
+    // amount: the figure to show in the email. Frontend passes the total hire
+    // deposits it already has from /summary. Falls back to 0 (template still
+    // renders sensibly) if not supplied.
+    const amount = Number(req.body?.amount) || 0;
+    const isConfirmingBooking = req.body?.is_confirming_booking !== false; // default true
+    const bankName = typeof req.body?.bank_name === 'string' ? req.body.bank_name : '';
+
+    const result = await sendPaymentEmail({
+      jobId: jobUuid,
+      amount,
+      bankName,
+      paymentType: 'deposit',
+      isConfirmingBooking,
+    });
+
+    if (!result.sent) {
+      // Not a 500 — the request was valid, the email just didn't go. Report
+      // clearly so the UI can show why (no recipient vs SMTP failure).
+      res.status(200).json({
+        data: { sent: false, reason: result.reason, error: result.error, is_fallback: result.isFallback },
+      });
+      return;
+    }
+
+    res.json({ data: { sent: true, is_fallback: result.isFallback } });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error('[money] resend-confirmation error:', msg);
+    res.status(500).json({ error: 'Failed to resend confirmation email', detail: msg });
   }
 });
 

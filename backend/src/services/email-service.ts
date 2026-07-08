@@ -134,6 +134,125 @@ function substituteVariables(template: string, variables: Record<string, string>
   return result;
 }
 
+// ── Transient-error retry ─────────────────────────────────────────────────
+
+/**
+ * Gmail SMTP on port 587 sporadically rejects auth on a fresh STARTTLS
+ * connection with `535-5.7.8 Username and Password not accepted` even when the
+ * credentials are valid — a well-known flaky behaviour when every send opens a
+ * brand-new authenticated connection (which we do; no pooling). It also throws
+ * connection/timeout errors under load. These are all transient: a retry a few
+ * seconds later almost always succeeds. Distinguish these from PERMANENT
+ * failures (bad recipient 550, message rejected) which must NOT be retried.
+ *
+ * Proven live 8 Jul 2026 (job 16251): same info@ account, same credentials,
+ * two 535s minutes apart while other sends went through fine.
+ *
+ * NOTE: we treat 535 as transient here on the deliberate assumption that the
+ * app password is valid (verified). If the password is ever genuinely revoked,
+ * every send will fail all retries and the outage canary (below) will surface
+ * it — so a truly-dead password is still caught, just after the retries.
+ */
+function isTransientSmtpError(err: unknown): boolean {
+  const e = err as { responseCode?: number; code?: string; message?: string } | undefined;
+  if (!e) return false;
+
+  // SMTP response codes: 421 (service unavailable), 45x (temp failures),
+  // and 535 (Gmail's flaky-auth — treated as transient per note above).
+  const rc = e.responseCode;
+  if (rc === 421 || rc === 535 || (rc !== undefined && rc >= 450 && rc < 460)) return true;
+
+  // Socket / connection level failures.
+  const code = e.code;
+  if (code && ['ECONNECTION', 'ETIMEDOUT', 'ESOCKET', 'ECONNRESET', 'EAI_AGAIN', 'EDNS', 'ETLS'].includes(code)) {
+    return true;
+  }
+
+  // Fallback: match on Gmail's auth-rejection message (some nodemailer paths
+  // surface the 535 in the message without a numeric responseCode).
+  const msg = (e.message || '').toLowerCase();
+  if (msg.includes('username and password not accepted') || msg.includes('badcredentials') || msg.includes('invalid login')) {
+    return true;
+  }
+
+  return false;
+}
+
+const RETRY_BACKOFF_MS = [2000, 5000]; // 3 attempts total: immediate, +2s, +5s
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Send with retry-on-transient. Returns the nodemailer result, or throws the
+ * LAST error if all attempts fail. Permanent errors throw immediately (no retry).
+ */
+async function sendMailWithRetry(
+  transporter: nodemailer.Transporter,
+  mailOptions: Parameters<nodemailer.Transporter['sendMail']>[0],
+  label: string,
+): Promise<{ messageId?: string }> {
+  let lastErr: unknown;
+  const maxAttempts = RETRY_BACKOFF_MS.length + 1;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await transporter.sendMail(mailOptions);
+    } catch (err) {
+      lastErr = err;
+      if (!isTransientSmtpError(err) || attempt === maxAttempts) throw err;
+      const waitMs = RETRY_BACKOFF_MS[attempt - 1];
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[Email] Transient send failure for ${label} (attempt ${attempt}/${maxAttempts}), retrying in ${waitMs}ms: ${msg}`);
+      await sleep(waitMs);
+    }
+  }
+  throw lastErr; // unreachable, but satisfies the type checker
+}
+
+/**
+ * SMTP-INDEPENDENT outage canary. When a send fails AFTER all retries, drop a
+ * bell notification into the admin inbox (DB-backed — does NOT depend on email,
+ * which is the whole point). Deduped to at most one per hour so a burst / total
+ * outage produces a single loud signal, not dozens.
+ *
+ * This is the answer to "if email genuinely broke, how would we know?" — the
+ * failure alert must not travel over the channel that's failing.
+ *
+ * `email_sent_at` is stamped so the notification-escalation scheduler never
+ * tries to *email* this alert (it would fail too, and pointlessly).
+ */
+async function raiseEmailHealthAlert(templateId: string, recipient: string, errorMessage: string): Promise<void> {
+  try {
+    const recent = await query(
+      `SELECT 1 FROM notifications
+       WHERE type = 'system' AND title = 'Email delivery is failing'
+         AND created_at > NOW() - INTERVAL '1 hour'
+       LIMIT 1`,
+    );
+    if (recent.rows.length > 0) return; // already alerted within the last hour
+
+    const admins = await query(`SELECT id FROM users WHERE role = 'admin' AND is_active = true`);
+    if (admins.rows.length === 0) return;
+
+    const content =
+      `An email ("${templateId}" to ${recipient}) failed to send after retries: ${errorMessage}. ` +
+      `Outbound email may be down — check SMTP credentials / Google Workspace. ` +
+      `Further email failures in the next hour are suppressed to avoid noise.`;
+
+    for (const a of admins.rows) {
+      await query(
+        `INSERT INTO notifications (user_id, type, title, content, priority, action_url, email_sent_at)
+         VALUES ($1, 'system', 'Email delivery is failing', $2, 'urgent', '/settings', NOW())`,
+        [a.id, content],
+      );
+    }
+    console.warn(`[Email] Raised email-health bell alert to ${admins.rows.length} admin(s)`);
+  } catch (err) {
+    console.error('[Email] Failed to raise email-health canary:', err instanceof Error ? err.message : err);
+  }
+}
+
 // ── Email Service Class ──────────────────────────────────────────────────
 
 class EmailService {
@@ -152,6 +271,18 @@ class EmailService {
       throw new Error('SMTP credentials not configured. Set SMTP_USER and SMTP_PASS in .env');
     }
 
+    // POOLED + SERIALISED. Gmail SMTP 535-rejects surplus *concurrent* AUTH
+    // handshakes — proven live 8 Jul 2026: the daily 08:00 batch fired 5 sends
+    // in ~2s and Gmail 535'd 2 of them while sending the other 3, same account,
+    // same (valid) password. A non-pooled transport opens a fresh authenticated
+    // connection per send, so a burst = an auth storm = random 535s.
+    //
+    // pool:true + maxConnections:1 funnels every send through ONE reused,
+    // already-authenticated connection — nodemailer queues messages, so there
+    // is never more than one AUTH in flight. rateLimit keeps us well under
+    // Gmail's per-account rate. Our volume is low (dozens/day) so serialising
+    // costs nothing. This runs in a single systemd process = a single pool;
+    // if the API is ever clustered, each worker gets its own pool (revisit).
     this.transporter = nodemailer.createTransport({
       host: config.smtp.host,
       port: config.smtp.port,
@@ -160,6 +291,14 @@ class EmailService {
         user: config.smtp.user,
         pass: config.smtp.pass,
       },
+      pool: true,
+      maxConnections: 1,   // serialise — never open concurrent AUTH handshakes
+      maxMessages: 50,     // recycle the connection periodically
+      rateLimit: 5,        // ≤5 messages…
+      rateDelta: 1000,     // …per second
+      connectionTimeout: 10000,
+      greetingTimeout: 10000,
+      socketTimeout: 20000,
     });
 
     return this.transporter;
@@ -213,14 +352,14 @@ class EmailService {
         contentType: a.contentType,
       }));
 
-      const result = await transporter.sendMail({
+      const result = await sendMailWithRetry(transporter, {
         from: config.smtp.from,
         to: actualRecipient,
         cc: isRedirected ? undefined : options.cc,
         subject: isRedirected ? `[TEST] ${subject}` : subject,
         html,
         attachments: mailAttachments,
-      });
+      }, `"${templateId}" to ${actualRecipient}`);
 
       // Log per-message effective routing, not the env-level mode. A test-mode
       // env where THIS template was allowlisted should log as 'live' so the
@@ -258,7 +397,11 @@ class EmailService {
         mode: isRedirected ? 'test' : 'live',
       });
 
-      console.error(`[Email] Failed to send "${templateId}" to ${actualRecipient}:`, errorMessage);
+      console.error(`[Email] Failed to send "${templateId}" to ${actualRecipient} (after retries):`, errorMessage);
+
+      // SMTP-independent outage canary — bell the admin inbox so a genuine
+      // email outage surfaces even though email itself is down.
+      await raiseEmailHealthAlert(templateId, actualRecipient, errorMessage);
 
       return { success: false, error: errorMessage };
     }
@@ -274,6 +417,11 @@ class EmailService {
     cc?: string[];
     variant?: 'client' | 'internal';
     attachments?: Array<{ filename: string; content: Buffer; contentType: string }>;
+    /** When true, send `html` as-is without wrapping in the Ooosh base layout.
+     *  Use for callers whose html is already a complete, self-contained email
+     *  (e.g. the vehicle condition report). They still get test-mode handling,
+     *  pooling, retry, the outage canary, and audit logging. */
+    skipLayout?: boolean;
   }): Promise<SendEmailResult> {
     const config = getEmailConfig();
     const isTestMode = config.mode === 'test';
@@ -286,11 +434,13 @@ class EmailService {
       bodyHtml = testModeBanner(options.to) + bodyHtml;
     }
 
-    const html = wrapInBaseLayout(bodyHtml, { variant: options.variant || 'internal' });
+    const html = options.skipLayout
+      ? bodyHtml
+      : wrapInBaseLayout(bodyHtml, { variant: options.variant || 'internal' });
 
     try {
       const transporter = this.getTransporter();
-      const result = await transporter.sendMail({
+      const result = await sendMailWithRetry(transporter, {
         from: config.smtp.from,
         to: actualRecipient,
         cc: isTestMode ? undefined : options.cc,
@@ -301,7 +451,7 @@ class EmailService {
           content: a.content,
           contentType: a.contentType,
         })),
-      });
+      }, `raw "${options.subject}" to ${actualRecipient}`);
 
       await this.logEmail({
         template_id: '_raw',
@@ -326,6 +476,9 @@ class EmailService {
         error_message: errorMessage,
         mode: config.mode,
       });
+
+      // SMTP-independent outage canary (see send()).
+      await raiseEmailHealthAlert('_raw', actualRecipient, errorMessage);
 
       return { success: false, error: errorMessage };
     }

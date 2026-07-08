@@ -159,6 +159,10 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   const [balSaving, setBalSaving] = useState(false);
   const [balError, setBalError] = useState('');
 
+  // Resend client confirmation email (manual re-fire, e.g. after an SMTP blip)
+  const [resending, setResending] = useState(false);
+  const [resendMsg, setResendMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
   // Record payment form
   const [showPaymentForm, setShowPaymentForm] = useState(false);
   const [payType] = useState('deposit');
@@ -415,6 +419,44 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
       setLoading(false);
     }
   }, [jobId]);
+
+  // Manually re-send the client's booking/payment confirmation email. Works on
+  // any confirmed job — used when the original auto-send failed (e.g. transient
+  // SMTP failure). Reports the result inline so staff know it actually went.
+  const handleResendConfirmation = async () => {
+    if (!data) return;
+    setResending(true);
+    setResendMsg(null);
+    try {
+      const resp = await api.post<{ data: { sent: boolean; reason?: string; error?: string; is_fallback?: boolean } }>(
+        `/money/${jobId}/resend-confirmation`,
+        {
+          amount: data.financial.total_hire_deposits || 0,
+          is_confirming_booking: true,
+        }
+      );
+      const r = resp.data;
+      if (r.sent) {
+        setResendMsg({
+          ok: true,
+          text: r.is_fallback
+            ? 'Sent — but no client email on file, so it went to info@. Add a contact email and re-send.'
+            : 'Confirmation email sent to the client.',
+        });
+      } else {
+        setResendMsg({
+          ok: false,
+          text: r.reason === 'no_recipient'
+            ? 'Not sent — no client email found. Add a contact email on the client/job first.'
+            : `Not sent — ${r.error || 'email send failed'}. Try again in a moment.`,
+        });
+      }
+    } catch (e) {
+      setResendMsg({ ok: false, text: e instanceof Error ? e.message : 'Failed to resend' });
+    } finally {
+      setResending(false);
+    }
+  };
 
   // Business-level balance override (migration 117) — admin marks the HH-derived
   // balance as settled in Xero / written off. Doesn't touch HireHop or Xero.
@@ -1114,7 +1156,28 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
 
       {/* Payment History */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-        <h3 className="text-lg font-semibold text-gray-900 mb-4">Payment History</h3>
+        <div className="flex items-center justify-between mb-4 gap-3">
+          <h3 className="text-lg font-semibold text-gray-900">Payment History</h3>
+          <button
+            onClick={handleResendConfirmation}
+            disabled={resending}
+            title="Re-send the client's booking/payment confirmation email"
+            className="px-3 py-1.5 text-sm font-medium text-ooosh-700 border border-ooosh-200 hover:bg-ooosh-50 rounded-md disabled:opacity-50 whitespace-nowrap"
+          >
+            {resending ? 'Sending…' : 'Resend confirmation'}
+          </button>
+        </div>
+        {resendMsg && (
+          <div
+            className={`mb-4 text-sm rounded-md px-3 py-2 border ${
+              resendMsg.ok
+                ? 'bg-green-50 border-green-200 text-green-800'
+                : 'bg-amber-50 border-amber-200 text-amber-800'
+            }`}
+          >
+            {resendMsg.text}
+          </div>
+        )}
 
         {/* Payment history — hire payments from HireHop (excess payments tracked in Insurance Excess section above) */}
         {(() => {
