@@ -417,6 +417,11 @@ class EmailService {
     cc?: string[];
     variant?: 'client' | 'internal';
     attachments?: Array<{ filename: string; content: Buffer; contentType: string }>;
+    /** When true, send `html` as-is without wrapping in the Ooosh base layout.
+     *  Use for callers whose html is already a complete, self-contained email
+     *  (e.g. the vehicle condition report). They still get test-mode handling,
+     *  pooling, retry, the outage canary, and audit logging. */
+    skipLayout?: boolean;
   }): Promise<SendEmailResult> {
     const config = getEmailConfig();
     const isTestMode = config.mode === 'test';
@@ -429,7 +434,9 @@ class EmailService {
       bodyHtml = testModeBanner(options.to) + bodyHtml;
     }
 
-    const html = wrapInBaseLayout(bodyHtml, { variant: options.variant || 'internal' });
+    const html = options.skipLayout
+      ? bodyHtml
+      : wrapInBaseLayout(bodyHtml, { variant: options.variant || 'internal' });
 
     try {
       const transporter = this.getTransporter();

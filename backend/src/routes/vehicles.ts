@@ -4958,46 +4958,25 @@ router.post('/send-email', async (req: FlexibleVehicleRequest, res: Response) =>
       contentType: 'application/pdf' as const,
     }] : [];
 
-    // Use the email service's sendRaw for plain emails, or direct nodemailer for attachments
-    if (attachments.length > 0) {
-      const nodemailer = await import('nodemailer');
-      const transporter = nodemailer.createTransport({
-        host: process.env.SMTP_HOST || 'smtp.gmail.com',
-        port: parseInt(process.env.SMTP_PORT || '587', 10),
-        secure: false,
-        auth: {
-          user: process.env.SMTP_USER || '',
-          pass: process.env.SMTP_PASS || '',
-        },
-      });
-
-      const isTestMode = (process.env.EMAIL_MODE || 'test') === 'test';
-      const actualTo = isTestMode && process.env.EMAIL_TEST_REDIRECT
-        ? process.env.EMAIL_TEST_REDIRECT : to;
-
-      const mailResult = await transporter.sendMail({
-        from: process.env.SMTP_FROM || 'Ooosh Tours <notifications@oooshtours.co.uk>',
-        to: actualTo,
-        subject: isTestMode ? `[TEST] ${subject}` : subject,
-        html: (prependBanner || '') + (html || ''),
-        attachments,
-      });
-
-      if (fallbackJobId) {
-        await logFallbackToTimeline({ jobId: fallbackJobId, templateId: 'condition_report' });
-      }
-      res.json({ messageId: mailResult.messageId || 'sent', isFallback: !!fallbackJobId });
-    } else {
-      const result = await emailService.sendRaw({ to, subject, html: (prependBanner || '') + (html || '') });
-      if (!result.success) {
-        res.status(500).json({ error: result.error || 'Email send failed' });
-        return;
-      }
-      if (fallbackJobId) {
-        await logFallbackToTimeline({ jobId: fallbackJobId, templateId: 'condition_report' });
-      }
-      res.json({ messageId: result.messageId || 'sent', isFallback: !!fallbackJobId });
+    // Route EVERYTHING through emailService.sendRaw so it gets the pooled +
+    // retried transport, the outage canary, and audit logging. Attachment
+    // emails (condition reports) carry their own complete HTML, so skip the
+    // base-layout wrap; plain emails keep the wrap.
+    const result = await emailService.sendRaw({
+      to,
+      subject,
+      html: (prependBanner || '') + (html || ''),
+      attachments: attachments.length > 0 ? attachments : undefined,
+      skipLayout: attachments.length > 0,
+    });
+    if (!result.success) {
+      res.status(500).json({ error: result.error || 'Email send failed' });
+      return;
     }
+    if (fallbackJobId) {
+      await logFallbackToTimeline({ jobId: fallbackJobId, templateId: 'condition_report' });
+    }
+    res.json({ messageId: result.messageId || 'sent', isFallback: !!fallbackJobId });
   } catch (error) {
     console.error('[vehicles/email] Send error:', error);
     res.status(500).json({ error: 'Email send failed', details: error instanceof Error ? error.message : 'Unknown error' });
@@ -5077,18 +5056,6 @@ router.post('/send-condition-report', async (req: FlexibleVehicleRequest, res: R
       if (jobLookup.rows.length > 0) fallbackJobId = jobLookup.rows[0].id;
     }
 
-    const nodemailer = await import('nodemailer');
-    const transporter = nodemailer.createTransport({
-      host: process.env.SMTP_HOST || 'smtp.gmail.com',
-      port: parseInt(process.env.SMTP_PORT || '587', 10),
-      secure: false,
-      auth: {
-        user: process.env.SMTP_USER || '',
-        pass: process.env.SMTP_PASS || '',
-      },
-    });
-    const isTestMode = (process.env.EMAIL_MODE || 'test') === 'test';
-
     const results: Array<{
       driverName: string;
       success: boolean;
@@ -5154,20 +5121,23 @@ router.post('/send-condition-report', async (req: FlexibleVehicleRequest, res: R
         const subject = buildConditionReportSubject(emailParams);
         const html = (prependBanner || '') + buildConditionReportEmailHtml(emailParams);
 
-        const actualTo = isTestMode && process.env.EMAIL_TEST_REDIRECT
-          ? process.env.EMAIL_TEST_REDIRECT : to;
-
-        await transporter.sendMail({
-          from: process.env.SMTP_FROM || 'Ooosh Tours <notifications@oooshtours.co.uk>',
-          to: actualTo,
-          subject: isTestMode ? `[TEST] ${subject}` : subject,
+        // Route through the pooled + retried email service (test-mode redirect,
+        // outage canary and audit logging handled inside). skipLayout: the
+        // condition-report HTML is already a complete, self-contained email.
+        const sendResult = await emailService.sendRaw({
+          to,
+          subject,
           html,
+          skipLayout: true,
           attachments: [{
             filename,
             content: Buffer.from(pdfBytes),
             contentType: 'application/pdf' as const,
           }],
         });
+        if (!sendResult.success) {
+          throw new Error(sendResult.error || 'Email send failed');
+        }
 
         if (usedFallback && fallbackJobId) {
           await logFallbackToTimeline({ jobId: fallbackJobId, templateId: 'condition_report' });
