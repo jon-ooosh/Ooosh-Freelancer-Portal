@@ -878,7 +878,7 @@ function HireFormActions({ assignmentId, pdfKey, pdfGeneratedAt, vehicleId }: {
       {open && (
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="absolute left-0 mt-1 z-20 w-52 bg-white rounded-lg shadow-lg border border-gray-200 py-1 text-sm">
+          <div className="absolute right-0 mt-1 z-20 w-52 bg-white rounded-lg shadow-lg border border-gray-200 py-1 text-sm">
             <button
               type="button"
               onClick={() => { setOpen(false); generatePdf(false); }}
@@ -923,7 +923,7 @@ function HireFormActions({ assignmentId, pdfKey, pdfGeneratedAt, vehicleId }: {
         </>
       )}
       {message && (
-        <div className={`absolute left-0 top-full mt-1 z-20 w-64 text-xs px-2 py-1.5 rounded shadow-sm ${message.startsWith('Error') ? 'bg-red-50 text-red-700' : 'bg-green-50 text-green-700'}`}>
+        <div className={`absolute right-0 top-full mt-1 z-20 w-64 max-w-[80vw] text-xs px-2 py-1.5 rounded shadow-sm ${message.startsWith('Error') ? 'bg-red-50 text-red-700' : 'bg-green-50 text-green-700'}`}>
           {message}
         </div>
       )}
