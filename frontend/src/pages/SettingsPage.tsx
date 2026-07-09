@@ -1237,8 +1237,27 @@ function ChaseVoiceSettingsSection() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  // Example-driven voice tuning (§9.3): paste real emails → distil into guidance.
+  const [showLearn, setShowLearn] = useState(false);
+  const [examples, setExamples] = useState('');
+  const [learning, setLearning] = useState(false);
+  const [proposed, setProposed] = useState('');
+  const [learnError, setLearnError] = useState('');
 
   useEffect(() => { load(); }, []);
+
+  async function learnFromExamples() {
+    setLearning(true); setLearnError(''); setProposed('');
+    try {
+      const res = await api.post<{ data: { proposed: string } }>(
+        '/auto-chase/voice/learn',
+        { examples, current: val },
+      );
+      setProposed(res.data.proposed);
+    } catch (e) {
+      setLearnError(e instanceof Error ? e.message : 'Could not learn from these examples');
+    } finally { setLearning(false); }
+  }
 
   async function load() {
     try {
@@ -1286,6 +1305,60 @@ function ChaseVoiceSettingsSection() {
           {saving ? 'Saving…' : 'Save voice'}
         </button>
         {val !== orig && <button onClick={() => setVal(orig)} className="text-sm text-gray-500 hover:text-gray-700">Reset</button>}
+      </div>
+
+      {/* Example-driven voice tuning (§9.3) — teach the voice by showing real
+          emails instead of hand-writing the guidance above. */}
+      <div className="mt-5 border-t border-gray-100 pt-4">
+        <button
+          type="button"
+          onClick={() => setShowLearn((v) => !v)}
+          className="text-sm font-medium text-ooosh-600 hover:text-ooosh-700"
+        >
+          {showLearn ? '▾' : '▸'} Teach the voice from real examples
+        </button>
+        {showLearn && (
+          <div className="mt-3">
+            <p className="text-xs text-gray-500 mb-2">
+              Paste a few real examples — client emails and the actual replies your team sent are ideal.
+              We’ll distil the tone/style into a proposed guidance note, which you can review and drop into
+              the box above before saving. Style only — client names, prices and job details are never baked in.
+            </p>
+            <textarea
+              value={examples}
+              onChange={(e) => setExamples(e.target.value)}
+              rows={7}
+              placeholder={'Paste example emails here, e.g.\n\nCLIENT: Hi, any update on the quote for the two vans?\nOOOSH: Hey! Yep all good to go whenever you are — just give us a shout and we\'ll get it locked in. Cheers, the Ooosh team'}
+              className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 resize-y min-h-[120px]"
+            />
+            {learnError && <div className="mt-2 text-sm text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2">{learnError}</div>}
+            <div className="flex items-center gap-3 mt-2">
+              <button
+                onClick={learnFromExamples}
+                disabled={learning || examples.trim() === ''}
+                className="px-3 py-1.5 bg-purple-600 text-white rounded text-sm disabled:opacity-50"
+              >
+                {learning ? 'Learning…' : '✨ Suggest guidance from these'}
+              </button>
+            </div>
+            {proposed && (
+              <div className="mt-3 rounded-lg border border-purple-200 bg-purple-50/60 p-3">
+                <div className="text-xs font-semibold text-purple-700 mb-1">Proposed voice guidance</div>
+                <p className="text-sm text-gray-700 whitespace-pre-line">{proposed}</p>
+                <div className="flex items-center gap-3 mt-3">
+                  <button
+                    onClick={() => { setVal(proposed); setSuccess(''); setProposed(''); }}
+                    className="px-3 py-1.5 bg-ooosh-600 text-white rounded text-sm"
+                  >
+                    Use this ↑
+                  </button>
+                  <button onClick={() => setProposed('')} className="text-sm text-gray-500 hover:text-gray-700">Discard</button>
+                </div>
+                <p className="mt-2 text-[11px] text-gray-400">“Use this” drops it into the box above — review, tweak, then <strong>Save voice</strong> to apply.</p>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

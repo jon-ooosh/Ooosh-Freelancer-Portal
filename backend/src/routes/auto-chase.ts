@@ -9,11 +9,12 @@
  */
 import { Router, Response } from 'express';
 import { query } from '../config/database';
-import { authenticate, authorize, AuthRequest } from '../middleware/auth';
+import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
 import { getGmailIngestionStatus, runIngestionForPrimaryMailbox } from '../services/gmail-ingestion';
 import { runEmailRetentionSweep } from '../services/email-retention';
-import { draftChaseEmail } from '../services/chase-draft';
+import { draftChaseEmail, learnChaseVoice } from '../services/chase-draft';
 import { createChaseDraftForJob } from '../services/gmail-draft';
+import { getJobCommsSummaryStatus, generateJobCommsSummary } from '../services/comms-summary';
 import { backfillOpenPipelineThreads } from '../services/gmail-backfill';
 import { isAnthropicConfigured } from '../config/anthropic';
 import { isGmailConfigured } from '../config/gmail';
@@ -132,6 +133,59 @@ router.post('/create-draft/:jobId', authorize('admin', 'manager'), async (req: A
     if (/no client email/i.test(message)) return res.status(422).json({ error: message });
     console.error('[auto-chase] create-draft error:', error);
     res.status(500).json({ error: message || 'Failed to create chase draft' });
+  }
+});
+
+// ── Per-job conversation summary (spec §7.1) ────────────────────────────────
+// GET returns the cached summary + computed staleness/availability (no AI call,
+// cheap). POST generates/regenerates synchronously. Any staff role — this is
+// operational context on a job the whole team works from.
+
+// GET /api/auto-chase/job-summary/:jobId — cached summary + staleness flags.
+router.get('/job-summary/:jobId', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const status = await getJobCommsSummaryStatus(String(req.params.jobId));
+    res.json({ data: { ...status, configured: isAnthropicConfigured() } });
+  } catch (error) {
+    console.error('[auto-chase] job-summary status error:', error);
+    res.status(500).json({ error: 'Failed to load conversation summary' });
+  }
+});
+
+// POST /api/auto-chase/job-summary/:jobId — (re)generate the summary. Returns
+// { available:false } when there's nothing ingested to summarise yet.
+router.post('/job-summary/:jobId', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  if (!isAnthropicConfigured()) {
+    return res.status(503).json({ error: 'Summaries unavailable — ANTHROPIC_API_KEY not configured.' });
+  }
+  try {
+    const summary = await generateJobCommsSummary(String(req.params.jobId), req.user?.id ?? null);
+    if (!summary) return res.json({ data: { available: false, summary: null } });
+    res.json({ data: { available: true, summary, stale: false } });
+  } catch (error) {
+    console.error('[auto-chase] job-summary generate error:', error);
+    res.status(500).json({ error: 'Failed to summarise conversation' });
+  }
+});
+
+// POST /api/auto-chase/voice/learn — distil example client emails + our replies
+// into a PROPOSED chase_voice_instructions note (§9.3). Does NOT save — returns
+// the proposal for the human to review + save via the Settings PUT. Manager-tier
+// (this shapes every future client-facing chase). Needs Anthropic.
+router.post('/voice/learn', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {
+  if (!isAnthropicConfigured()) {
+    return res.status(503).json({ error: 'Voice learning unavailable — ANTHROPIC_API_KEY not configured.' });
+  }
+  try {
+    const body = (req.body || {}) as { examples?: string; current?: string };
+    const examples = String(body.examples || '').trim();
+    if (!examples) return res.status(400).json({ error: 'Paste some example emails to learn from.' });
+    const proposed = await learnChaseVoice(examples, body.current ?? null);
+    res.json({ data: { proposed } });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('[auto-chase] voice learn error:', error);
+    res.status(500).json({ error: message || 'Failed to learn chase voice' });
   }
 });
 
