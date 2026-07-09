@@ -21,6 +21,7 @@ import { emailService } from '../services/email-service';
 import { resolveClientEmailTarget, buildFallbackBanner, logFallbackToTimeline } from '../services/money-emails';
 import { uploadToR2, isR2Configured, getPresignedDownloadUrl } from '../config/r2';
 import { generateDeliveryNotePdf, DeliveryNoteItem } from '../services/delivery-note-pdf';
+import { getSitterShifts, getSitterShiftDetail, isSitterAssignedTo } from '../services/studio-sitter';
 
 // Stable UUID seeded by migration 031 — used as created_by for portal-driven
 // auto-actions (the freelancer is a `people` row, not a `users` row, so we
@@ -857,6 +858,53 @@ router.get('/me', async (req: PortalRequest, res: Response) => {
   } catch (error) {
     console.error('Portal me error:', error);
     res.status(500).json({ error: 'Failed to load user' });
+  }
+});
+
+// ── Studio Sitter shifts (Rehearsals — Phase D portal surface) ───────
+//
+// A sitter (freelancer) sees the evenings they've been rostered to, and per
+// evening: who's in each room that night (derived) + the job's shared specs.
+// One sitter per night covers the whole building. Read-only in this slice;
+// handover thread + end-of-day report land in later slices.
+
+const SITTER_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+function addDaysIsoP(iso: string, days: number): string {
+  const [y, m, d] = iso.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + days);
+  return dt.toISOString().slice(0, 10);
+}
+
+// GET /api/portal/studio-sitter/shifts — the sitter's upcoming/recent shifts
+router.get('/studio-sitter/shifts', async (req: PortalRequest, res: Response) => {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    // A small look-back so a sitter can still open last night's shift.
+    const from = addDaysIsoP(today, -3);
+    const to = addDaysIsoP(today, 60);
+    const shifts = await getSitterShifts(req.portalUser!.id, from, to);
+    res.json({ success: true, shifts });
+  } catch (error) {
+    console.error('Portal sitter shifts error:', error);
+    res.status(500).json({ error: 'Failed to load shifts' });
+  }
+});
+
+// GET /api/portal/studio-sitter/shifts/:date — one evening's detail
+router.get('/studio-sitter/shifts/:date', async (req: PortalRequest, res: Response) => {
+  try {
+    const date = String(req.params.date);
+    if (!SITTER_DATE_RE.test(date)) { res.status(400).json({ error: 'Invalid date' }); return; }
+    // Access: the sitter must be rostered to this night (shared staff account
+    // may view any).
+    const allowed = req.portalUser!.isStaffShared || await isSitterAssignedTo(req.portalUser!.id, date);
+    if (!allowed) { res.status(403).json({ error: 'Not rostered to this evening' }); return; }
+    const detail = await getSitterShiftDetail(date);
+    res.json({ success: true, ...detail });
+  } catch (error) {
+    console.error('Portal sitter shift detail error:', error);
+    res.status(500).json({ error: 'Failed to load shift' });
   }
 });
 

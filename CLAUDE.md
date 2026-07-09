@@ -1630,13 +1630,21 @@ These originate outside HH entirely — client sends stuff to us, or items found
   sitter for a day →" link.
 
 **What's left (the spec's Phase C portal / D / E / F):**
-- **Phase D — freelancer portal surface for sitters** (NEXT): sitters see their assigned shifts in
-  the Next.js portal (`src/app/`), shift detail = who's in each room that night (derived) + session
-  times + shared specs/stage-plots (`share_with_freelancer` files) + the day-to-day handover thread.
-  OP backend: new `/api/portal/*` endpoints reusing the portal JWT auth; the sitter's `person_id`
-  → `studio_sitter_shift_assignments`. The **default fee** captured on assignments is meant to
-  display here (not surfaced anywhere yet). Union sitter shifts into the portal so they sit
-  alongside a person's driving jobs.
+- **Phase D — freelancer portal surface for sitters** (IN PROGRESS): sitters see their assigned
+  shifts in the Next.js portal (`src/app/`), shift detail = who's in each room that night (derived)
+  + session times + shared specs/stage-plots (`share_with_freelancer` files) + the day-to-day
+  handover thread. The sitter's `person_id` → `studio_sitter_shift_assignments`. The **default fee**
+  captured on assignments is meant to display here.
+  - **Slice 1 SHIPPED (backend, read-only):** `services/studio-sitter.ts` `getSitterShifts` /
+    `getSitterShiftDetail` / `isSitterAssignedTo`; portal endpoints `GET /api/portal/studio-sitter/shifts`
+    (own rostered nights, −3..+60d) + `GET /api/portal/studio-sitter/shifts/:date` (who's-in +
+    shared job files, presigned; access-gated to the rostered sitter or the shared staff account).
+  - **Slice 2 (NEXT):** the Next.js portal UI — "My Shifts" list + shift detail page (union into the
+    portal so they sit alongside a person's driving jobs); surface the fee.
+  - **Slice 3:** handover thread (needs `interactions.shift_id` migration + the `IS NULL` scoping
+    guard; note freelancer-authored interactions need a created_by workaround — `interactions.created_by`
+    is a `users(id)` FK and sitters are people/freelancers, not users — likely SYSTEM_USER_ID + author
+    name, or a new author column).
 - **General Tasks system** (build with/after D): `tasks` table (anchor to shift/job/nothing),
   visibility everyone/assignee-only, notify-on-done + notify-if-not-done-after-X-days, **staff via
   bell/email, freelancers portal-only (no bell/email)**; dashboard top-right card + "On Today" +
