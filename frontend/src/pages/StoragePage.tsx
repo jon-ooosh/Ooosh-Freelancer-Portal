@@ -32,6 +32,7 @@ interface Tenancy {
   move_in_date: string | null; move_out_date: string | null; weekly_rate: number; billing_mode: string;
   billing_cadence: string; next_bill_date: string | null; next_rate_review_date: string | null;
   billing_custom_interval_value?: number | null; billing_custom_interval_unit?: string | null;
+  bill_reminder_lead_days?: number | null; bill_overdue_grace_days?: number | null;
   last_rate_change_date: string | null; previous_weekly_rate: number | null; tcs_accepted_at: string | null; tcs_pdf_key?: string | null;
   notes: string | null; access_type?: string | null; access_code?: string | null; key_location?: string | null;
   rate_history?: { id: string; effective_date: string; old_rate: number | null; new_rate: number; notes: string | null }[];
@@ -613,6 +614,8 @@ function EditTenancyForm({ t, onCancel, onSaved }: { t: Tenancy; onCancel: () =>
     billing_mode: t.billing_mode, billing_cadence: t.billing_cadence,
     custom_interval_value: t.billing_custom_interval_value != null ? String(t.billing_custom_interval_value) : '',
     custom_interval_unit: t.billing_custom_interval_unit || 'month',
+    bill_reminder_lead_days: t.bill_reminder_lead_days != null ? String(t.bill_reminder_lead_days) : '7',
+    bill_overdue_grace_days: t.bill_overdue_grace_days != null ? String(t.bill_overdue_grace_days) : '5',
     next_bill_date: (t.next_bill_date || '').slice(0, 10),
     next_rate_review_date: (t.next_rate_review_date || '').slice(0, 10),
     move_in_date: (t.move_in_date || '').slice(0, 10),
@@ -630,6 +633,8 @@ function EditTenancyForm({ t, onCancel, onSaved }: { t: Tenancy; onCancel: () =>
         billing_mode: f.billing_mode, billing_cadence: f.billing_cadence,
         billing_custom_interval_value: f.billing_cadence === 'custom' && f.custom_interval_value ? Number(f.custom_interval_value) : null,
         billing_custom_interval_unit: f.billing_cadence === 'custom' && f.custom_interval_value ? f.custom_interval_unit : null,
+        bill_reminder_lead_days: f.bill_reminder_lead_days !== '' ? Number(f.bill_reminder_lead_days) : undefined,
+        bill_overdue_grace_days: f.bill_overdue_grace_days !== '' ? Number(f.bill_overdue_grace_days) : undefined,
         next_bill_date: f.next_bill_date || null, next_rate_review_date: f.next_rate_review_date || null,
         notes: f.notes || null,
       });
@@ -672,6 +677,16 @@ function EditTenancyForm({ t, onCancel, onSaved }: { t: Tenancy; onCancel: () =>
         </div>
       )}
       {f.billing_mode === 'manual' && <div><label className="block text-xs text-slate-500 mb-1">Next invoice due</label><input className={inputCls} type="date" value={f.next_bill_date} onChange={(e) => setF({ ...f, next_bill_date: e.target.value })} /></div>}
+      {f.billing_mode === 'manual' && (
+        <div className="grid grid-cols-2 gap-3">
+          <div><label className="block text-xs text-slate-500 mb-1">Remind me before (days)</label>
+            <input className={inputCls} type="number" min={0} value={f.bill_reminder_lead_days} onChange={(e) => setF({ ...f, bill_reminder_lead_days: e.target.value })} />
+            <p className="text-[11px] text-slate-400 mt-1">"Due soon" nudge this many days before.</p></div>
+          <div><label className="block text-xs text-slate-500 mb-1">Overdue after (days)</label>
+            <input className={inputCls} type="number" min={0} value={f.bill_overdue_grace_days} onChange={(e) => setF({ ...f, bill_overdue_grace_days: e.target.value })} />
+            <p className="text-[11px] text-slate-400 mt-1">Grace period before the "overdue" nudge.</p></div>
+        </div>
+      )}
       <div className="grid grid-cols-2 gap-3">
         <div><label className="block text-xs text-slate-500 mb-1">Next rate review</label><input className={inputCls} type="date" value={f.next_rate_review_date} onChange={(e) => setF({ ...f, next_rate_review_date: e.target.value })} /></div>
         <div><label className="block text-xs text-slate-500 mb-1">Move-in date</label><input className={inputCls} type="date" value={f.move_in_date} onChange={(e) => setF({ ...f, move_in_date: e.target.value })} /></div>
