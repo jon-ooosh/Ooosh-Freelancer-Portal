@@ -22,16 +22,16 @@ const SIG_IMG = 'https://daphnis.wbnusystem.net/~wbplus/websites/AD2903129/image
 // Two company logos live on a signature variant not in this mailbox. Paste the
 // image URLs here (right-click the image in a current signature email →
 // "Copy image address"). Left blank ⇒ that logo is simply not rendered.
-const OOOSH_LOGO_URL = '';        // purple Ooosh disc logo
-const ONE_PERCENT_LOGO_URL = '';  // "1% for the Planet" member logo
+const OOOSH_LOGO_URL = 'https://pub-0e6f101eb29f4f26b299d7a184b5f609.r2.dev/email-assets/ooosh-tours-logo-small.jpg';        // Ooosh disc logo (130x119)
+const ONE_PERCENT_LOGO_URL = 'https://pub-0e6f101eb29f4f26b299d7a184b5f609.r2.dev/email-assets/1percentbanner-ooosh.jpg';  // "1% for the Planet" banner (400x64)
 
 /** The company signature block used in the client base-layout footer. */
 function renderClientSignature(): string {
   const logoCell = OOOSH_LOGO_URL
-    ? `<td style="vertical-align:top;padding-right:18px;"><img src="${OOOSH_LOGO_URL}" alt="Ooosh Tours" width="120" style="display:block;border:0;max-width:120px;"></td>`
+    ? `<td style="vertical-align:top;padding-right:18px;"><img src="${OOOSH_LOGO_URL}" alt="Ooosh Tours" width="120" height="110" style="display:block;border:0;max-width:120px;"></td>`
     : '';
   const onePercentRow = ONE_PERCENT_LOGO_URL
-    ? `<tr><td style="padding:14px 0 0;"><img src="${ONE_PERCENT_LOGO_URL}" alt="1% for the Planet member" width="90" style="display:block;border:0;max-width:90px;"></td></tr>`
+    ? `<tr><td style="padding:16px 0 0;"><img src="${ONE_PERCENT_LOGO_URL}" alt="1% for the Planet member" width="200" height="32" style="display:block;border:0;max-width:200px;"></td></tr>`
     : '';
 
   return `
