@@ -11,6 +11,71 @@ const OOOSH_DARK = '#1e293b';
 // Logo: stored in R2 at assets/ooosh-logo.png but no public URL yet.
 // TODO: Add logo to emails once a public-accessible URL is available.
 
+// ── Email signature (client-facing NEW emails only) ──────────────────────
+// Mirrors the company Gmail signature. Applied to the 'client' base-layout
+// footer only — NOT internal ops alerts, and NOT the auto-chase Gmail drafts
+// (those are plain-text and get Gmail's own signature when a human sends them,
+// so adding ours there would double up). Images are hosted on the existing
+// signature CDN and all carry alt text + explicit dimensions, so the block
+// still reads cleanly if a recipient's mail app blocks images.
+const SIG_IMG = 'https://daphnis.wbnusystem.net/~wbplus/websites/AD2903129/images';
+// Two company logos live on a signature variant not in this mailbox. Paste the
+// image URLs here (right-click the image in a current signature email →
+// "Copy image address"). Left blank ⇒ that logo is simply not rendered.
+const OOOSH_LOGO_URL = '';        // purple Ooosh disc logo
+const ONE_PERCENT_LOGO_URL = '';  // "1% for the Planet" member logo
+
+/** The company signature block used in the client base-layout footer. */
+function renderClientSignature(): string {
+  const logoCell = OOOSH_LOGO_URL
+    ? `<td style="vertical-align:top;padding-right:18px;"><img src="${OOOSH_LOGO_URL}" alt="Ooosh Tours" width="120" style="display:block;border:0;max-width:120px;"></td>`
+    : '';
+  const onePercentRow = ONE_PERCENT_LOGO_URL
+    ? `<tr><td style="padding:14px 0 0;"><img src="${ONE_PERCENT_LOGO_URL}" alt="1% for the Planet member" width="90" style="display:block;border:0;max-width:90px;"></td></tr>`
+    : '';
+
+  return `
+    <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="text-align:left;font-family:Arial,Helvetica,sans-serif;">
+      <tr>
+        <td style="padding:0 0 14px;font-size:13px;color:#334155;line-height:1.5;">
+          <strong style="font-style:italic;">🎸 Have you thought about consumables for your tour or event?</strong><br>
+          Check out our online shop <a href="https://www.thetour.store/" style="color:${OOOSH_PURPLE};text-decoration:none;">The Tour Store</a> for gaffa &amp; fluoro tape, batteries, Sharpies, drum heads, strings and loads more!<br>
+          Collect from us, have delivered with your order, or we can ship worldwide.
+        </td>
+      </tr>
+      <tr>
+        <td style="border-top:1px solid #e4e4e7;padding:16px 0 0;">
+          <table role="presentation" cellpadding="0" cellspacing="0">
+            <tr>
+              ${logoCell}
+              <td style="vertical-align:top;font-size:13px;color:#334155;line-height:1.6;">
+                <div><strong>E:</strong> <a href="mailto:info@oooshtours.co.uk" style="color:${OOOSH_PURPLE};text-decoration:none;">info@oooshtours.co.uk</a></div>
+                <div><strong>P:</strong> +44 (0)1273 911382</div>
+                <div><strong>W:</strong> <a href="https://oooshtours.co.uk" style="color:${OOOSH_PURPLE};text-decoration:none;">oooshtours.co.uk</a></div>
+                <div style="padding-top:10px;">
+                  <a href="https://www.instagram.com/oooshtours/?hl=en" style="text-decoration:none;"><img src="${SIG_IMG}/sm-instagram-50.png" alt="Instagram" width="28" height="28" style="border:0;vertical-align:middle;"></a>&nbsp;&nbsp;
+                  <a href="https://en-gb.facebook.com/OooshToursLtd" style="text-decoration:none;"><img src="${SIG_IMG}/sm-face-50.png" alt="Facebook" width="28" height="28" style="border:0;vertical-align:middle;"></a>
+                </div>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+      ${onePercentRow}
+      <tr>
+        <td style="padding:14px 0 0;font-size:11px;color:#71717a;line-height:1.5;">
+          <strong>Ooosh! Tours Ltd</strong>, Compass House, 7 East Street, Portslade, Brighton, BN41 1DL<br>
+          Registered in England &amp; Wales, company number 07590921 &middot; VAT registration number 114087243
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:10px 0 0;font-size:10px;color:#a1a1aa;line-height:1.4;">
+          This email and any attachments are confidential and intended only for the named recipient. If it's reached you by mistake, please let us know and delete it.
+        </td>
+      </tr>
+    </table>`;
+}
+
 /**
  * Wrap email body content in the branded base layout.
  */
@@ -52,13 +117,10 @@ export function wrapInBaseLayout(
               ${bodyHtml}
             </td>
           </tr>
-          <!-- Footer -->
+          <!-- Footer / signature -->
           <tr>
-            <td style="background-color:#fafafa;padding:20px 32px;border-radius:0 0 12px 12px;border:1px solid #e4e4e7;border-top:none;">
-              <p style="margin:0;font-size:12px;color:#71717a;text-align:center;line-height:1.5;">
-                Ooosh Tours Ltd &bull; Transport - Backline - Rehearsals<br>
-                <a href="https://oooshtours.co.uk" style="color:${OOOSH_PURPLE};text-decoration:none;">oooshtours.co.uk</a>
-              </p>
+            <td style="background-color:#fafafa;padding:24px 32px;border-radius:0 0 12px 12px;border:1px solid #e4e4e7;border-top:none;">
+              ${renderClientSignature()}
             </td>
           </tr>
         </table>
