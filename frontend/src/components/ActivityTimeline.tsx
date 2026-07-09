@@ -8,6 +8,7 @@ import {
   type InteractionAttachment,
 } from './messaging/Attachments';
 import Reactions, { type ReactionsMap } from './messaging/Reactions';
+import ConversationSummary from './ConversationSummary';
 
 interface Interaction {
   id: string;
@@ -764,6 +765,15 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
 
   return (
     <div>
+      {/* AI digest of the ingested email conversation (jobs only). Renders
+          nothing when there are no ingested emails / Anthropic is off. */}
+      {entityType === 'job_id' && (
+        <ConversationSummary
+          jobId={entityId}
+          emailSignal={interactions.filter((i) => i.type === 'email').length}
+        />
+      )}
+
       {/* Add interaction form */}
       <form
         onSubmit={handleSubmit}
