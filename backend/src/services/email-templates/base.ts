@@ -28,10 +28,10 @@ const ONE_PERCENT_LOGO_URL = 'https://pub-0e6f101eb29f4f26b299d7a184b5f609.r2.de
 /** The company signature block used in the client base-layout footer. */
 function renderClientSignature(): string {
   const logoCell = OOOSH_LOGO_URL
-    ? `<td style="vertical-align:top;padding-right:18px;"><img src="${OOOSH_LOGO_URL}" alt="Ooosh Tours" width="120" height="110" style="display:block;border:0;max-width:120px;"></td>`
+    ? `<td style="vertical-align:top;padding-right:18px;"><a href="https://www.oooshtours.co.uk/" style="text-decoration:none;"><img src="${OOOSH_LOGO_URL}" alt="Ooosh Tours" width="120" height="110" style="display:block;border:0;max-width:120px;"></a></td>`
     : '';
   const onePercentRow = ONE_PERCENT_LOGO_URL
-    ? `<tr><td style="padding:16px 0 0;"><img src="${ONE_PERCENT_LOGO_URL}" alt="1% for the Planet member" width="200" height="32" style="display:block;border:0;max-width:200px;"></td></tr>`
+    ? `<tr><td style="padding:16px 0 0;"><a href="https://www.oooshtours.co.uk/contact/about-us" style="text-decoration:none;"><img src="${ONE_PERCENT_LOGO_URL}" alt="1% for the Planet member" width="200" height="32" style="display:block;border:0;max-width:200px;"></a></td></tr>`
     : '';
 
   return `
