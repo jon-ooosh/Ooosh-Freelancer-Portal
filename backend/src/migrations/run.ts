@@ -196,6 +196,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '159_quote_van_leg_started.sql',
         '160_interaction_source_and_edit.sql',
         '161_backline_locations.sql',
+        '162_storage_billing_details.sql',
       ];
 
       for (const migration of migrations) {
