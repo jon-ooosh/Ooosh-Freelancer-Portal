@@ -326,3 +326,95 @@ export async function draftChaseEmail(
   }
   throw new Error('Claude did not return a chase draft');
 }
+
+// ── Example-driven voice tuning (spec §9.3 item 3) ──────────────────────────
+// jon wants to shape the chase voice by SHOWING the AI real examples (client
+// emails + our actual replies) rather than hand-writing the guidance. Rather
+// than store raw few-shot examples (which would bloat every draft's prompt, risk
+// copying specifics, and be opaque), we DISTIL the examples into an updated
+// `chase_voice_instructions` note — transparent (jon reads + edits the result),
+// small at runtime (the existing knob), and fully human-in-the-loop (this only
+// PROPOSES; staff review + save via the normal Settings PUT).
+
+const VOICE_LEARN_MODEL = 'claude-sonnet-5'; // nuance-heavy, infrequent — worth Sonnet
+const VOICE_LEARN_MAX_TOKENS = 700;
+
+const VOICE_LEARN_SYSTEM = `You refine a short "voice guidance" note for an AI that drafts chase / follow-up emails for Ooosh Tours (a music & event transport / backline / rehearsal hire company).
+
+You are shown real examples — typically client emails and the actual replies Ooosh staff sent — and (optionally) the current guidance note. Your job: distil what makes Ooosh's voice recognisable (tone, warmth, formality, phrasing habits, sign-off style, sentence length, punctuation quirks) into an UPDATED concise guidance note.
+
+RULES:
+- Output is TONE / STYLE guidance ONLY. Never encode specific client names, prices, dates, or one-off job details — those belong in each draft's grounding, not the voice note.
+- Do NOT restate the AI's hard rules (it's a check-in not a renegotiation; never fabricate; urgency matched to the hire date) — those are already enforced in code. Focus purely on voice.
+- Keep it SHORT and actionable — a handful of plain "do this / avoid that" lines. This note is appended verbatim to the draft prompt, so brevity matters.
+- If current guidance is provided, MERGE — keep what still holds, refine or add from the examples, drop anything the examples contradict. Don't discard good existing guidance wholesale.
+- British English. Plain text, no markdown headers, no preamble.
+
+Return ONLY the tool call with the proposed guidance.`;
+
+const VOICE_LEARN_SCHEMA = {
+  type: 'object' as const,
+  properties: {
+    guidance: {
+      type: 'string',
+      description: 'The proposed updated voice-guidance note (plain text, a handful of lines).',
+    },
+  },
+  required: ['guidance'],
+  additionalProperties: false,
+};
+
+/**
+ * Distil example client emails + our replies into a proposed
+ * `chase_voice_instructions` note. Does NOT save — the caller returns it for the
+ * human to review + save via the existing Settings PUT. Throws if Anthropic
+ * isn't configured (caller should 503).
+ */
+export async function learnChaseVoice(examples: string, current?: string | null): Promise<string> {
+  if (!isAnthropicConfigured()) {
+    throw new Error('ANTHROPIC_API_KEY not configured — cannot learn chase voice.');
+  }
+  const trimmed = (examples || '').trim();
+  if (!trimmed) throw new Error('No examples provided');
+
+  const parts: string[] = [];
+  if (current && current.trim()) {
+    parts.push('Current voice guidance (merge with / refine from the examples):');
+    parts.push('"""');
+    parts.push(current.trim());
+    parts.push('"""');
+    parts.push('');
+  } else {
+    parts.push('No current voice guidance — build it from the examples below.');
+    parts.push('');
+  }
+  parts.push('Examples (client emails and/or the actual replies Ooosh staff sent):');
+  parts.push('"""');
+  parts.push(trimmed.slice(0, 16000));
+  parts.push('"""');
+
+  const client = getAnthropicClient();
+  const response = await client.messages.create({
+    model: VOICE_LEARN_MODEL,
+    max_tokens: VOICE_LEARN_MAX_TOKENS,
+    system: [{ type: 'text' as const, text: VOICE_LEARN_SYSTEM, cache_control: { type: 'ephemeral' as const } }],
+    messages: [{ role: 'user', content: parts.join('\n') }],
+    tools: [
+      {
+        name: 'report_voice',
+        description: 'Return the proposed voice-guidance note.',
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        input_schema: VOICE_LEARN_SCHEMA as any,
+      },
+    ],
+    tool_choice: { type: 'tool', name: 'report_voice' },
+  });
+
+  const toolBlock = response.content.find((b) => b.type === 'tool_use');
+  if (toolBlock && toolBlock.type === 'tool_use') {
+    const out = toolBlock.input as { guidance?: string };
+    const guidance = (out.guidance || '').trim();
+    if (guidance) return guidance;
+  }
+  throw new Error('Claude did not return voice guidance');
+}
