@@ -54,8 +54,7 @@ function renderClientSignature(): string {
                 <div><strong>W:</strong> <a href="https://oooshtours.co.uk" style="color:${OOOSH_PURPLE};text-decoration:none;">oooshtours.co.uk</a></div>
                 <div style="padding-top:10px;">
                   <a href="https://www.instagram.com/oooshtours/?hl=en" style="text-decoration:none;"><img src="${SIG_IMG}/sm-instagram-50.png" alt="Instagram" width="28" height="28" style="border:0;vertical-align:middle;"></a>&nbsp;&nbsp;
-                  <a href="https://en-gb.facebook.com/OooshToursLtd" style="text-decoration:none;"><img src="${SIG_IMG}/sm-face-50.png" alt="Facebook" width="28" height="28" style="border:0;vertical-align:middle;"></a>&nbsp;&nbsp;
-                  <a href="https://twitter.com/oooshtours?lang=en" style="text-decoration:none;"><img src="${SIG_IMG}/sm-twitter-50.png" alt="Twitter/X" width="28" height="28" style="border:0;vertical-align:middle;"></a>
+                  <a href="https://en-gb.facebook.com/OooshToursLtd" style="text-decoration:none;"><img src="${SIG_IMG}/sm-face-50.png" alt="Facebook" width="28" height="28" style="border:0;vertical-align:middle;"></a>
                 </div>
               </td>
             </tr>
@@ -71,7 +70,7 @@ function renderClientSignature(): string {
       </tr>
       <tr>
         <td style="padding:10px 0 0;font-size:10px;color:#a1a1aa;line-height:1.4;">
-          The information contained in this communication from the sender is confidential. It is intended solely for use by the recipient and others authorised to receive it. If you are not the recipient, you are hereby notified that any disclosure, copying, distribution or taking action in relation to the contents of this information is strictly prohibited and may be unlawful.
+          This email and any attachments are confidential and intended only for the named recipient. If it's reached you by mistake, please let us know and delete it.
         </td>
       </tr>
     </table>`;
