@@ -190,6 +190,7 @@ Two loops, both cheap:
 
 1. **Passive** — capture the diff between the AI draft and what staff actually sent (compare draft body vs the sent message body when the draft's thread gets an outbound message). Over weeks the patterns emerge ("always warmer", "always cut the sign-off") and tune the code prompt. Free training signal.
 2. **Explicit** — the §9.2 chase-voice setting.
+3. **Example-driven voice tuning (jon's request, Jul 2026 — design next).** jon wants to tune the voice by *showing example client replies + our actual replies* so the AI learns Ooosh's tone/style, rather than hand-writing `chase_voice_instructions`. Design: let staff paste (or pick from ingested interactions on a job) a few exemplar in/out pairs → either (a) distil them via Claude into refined `chase_voice_instructions` text, or (b) store them as few-shot examples appended to the draft prompt (a new `chase_voice_examples` setting). Surface as a "learn from this thread" affordance on the timeline and/or a paste box in the chase-voice Settings section. The delivery knob (`chase_voice_instructions`) already exists; this is about *generating* good guidance from real examples. Natural companion to the passive loop (1).
 
 ### 9.4 ChaseModal integration
 
