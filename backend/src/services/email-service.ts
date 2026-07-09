@@ -88,6 +88,12 @@ function getEmailConfig() {
      * sendRaw() is NOT covered by this allowlist (no template ID to match).
      */
     liveTemplates,
+    // Transport provider. 'smtp' (Gmail) is the default so nothing changes
+    // until EMAIL_PROVIDER=resend is set — same deploy-dark pattern as
+    // DATA_BACKEND. Resend sends over the verified oooshtours.co.uk domain via
+    // its own infra, so it's immune to Google account-auth flakiness.
+    provider: (process.env.EMAIL_PROVIDER || 'smtp').toLowerCase(),
+    resendApiKey: process.env.RESEND_API_KEY || '',
     smtp: {
       host: process.env.SMTP_HOST || 'smtp.gmail.com',
       port: parseInt(process.env.SMTP_PORT || '587', 10),
@@ -96,6 +102,12 @@ function getEmailConfig() {
       from: process.env.SMTP_FROM || 'Ooosh Tours <notifications@oooshtours.co.uk>',
     },
   };
+}
+
+/** True when the Resend provider is selected AND an API key is present. */
+export function isResendConfigured(): boolean {
+  const c = getEmailConfig();
+  return c.provider === 'resend' && !!c.resendApiKey;
 }
 
 /**
@@ -154,8 +166,12 @@ function substituteVariables(template: string, variables: Record<string, string>
  * it — so a truly-dead password is still caught, just after the retries.
  */
 function isTransientSmtpError(err: unknown): boolean {
-  const e = err as { responseCode?: number; code?: string; message?: string } | undefined;
+  const e = err as { responseCode?: number; code?: string; message?: string; httpStatus?: number } | undefined;
   if (!e) return false;
+
+  // Resend (HTTP) transient failures: 429 rate-limit, any 5xx.
+  const hs = e.httpStatus;
+  if (hs !== undefined && (hs === 429 || hs >= 500)) return true;
 
   // SMTP response codes: 421 (service unavailable), 45x (temp failures),
   // and 535 (Gmail's flaky-auth — treated as transient per note above).
@@ -185,19 +201,19 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Send with retry-on-transient. Returns the nodemailer result, or throws the
- * LAST error if all attempts fail. Permanent errors throw immediately (no retry).
+ * Run a delivery thunk with retry-on-transient. Returns the result, or throws
+ * the LAST error if all attempts fail. Permanent errors throw immediately (no
+ * retry). Provider-agnostic — the thunk decides SMTP vs Resend.
  */
 async function sendMailWithRetry(
-  transporter: nodemailer.Transporter,
-  mailOptions: Parameters<nodemailer.Transporter['sendMail']>[0],
+  deliver: () => Promise<{ messageId?: string }>,
   label: string,
 ): Promise<{ messageId?: string }> {
   let lastErr: unknown;
   const maxAttempts = RETRY_BACKOFF_MS.length + 1;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      return await transporter.sendMail(mailOptions);
+      return await deliver();
     } catch (err) {
       lastErr = err;
       if (!isTransientSmtpError(err) || attempt === maxAttempts) throw err;
@@ -208,6 +224,65 @@ async function sendMailWithRetry(
     }
   }
   throw lastErr; // unreachable, but satisfies the type checker
+}
+
+/**
+ * Deliver one email via the Resend HTTP API. Maps the nodemailer-shaped
+ * mailOptions we build in send()/sendRaw() onto Resend's payload. Throws on a
+ * non-2xx response with `httpStatus` attached so sendMailWithRetry can classify
+ * 429 / 5xx as transient. No SDK dependency — uses global fetch (Node 18+).
+ */
+async function sendViaResend(
+  mailOptions: nodemailer.SendMailOptions,
+  apiKey: string,
+): Promise<{ messageId?: string }> {
+  const toList = Array.isArray(mailOptions.to) ? mailOptions.to : mailOptions.to ? [mailOptions.to] : [];
+  const ccList = Array.isArray(mailOptions.cc) ? mailOptions.cc : mailOptions.cc ? [mailOptions.cc] : [];
+
+  const attachments = Array.isArray(mailOptions.attachments)
+    ? mailOptions.attachments.map((a) => {
+        const content = Buffer.isBuffer(a.content)
+          ? a.content.toString('base64')
+          : Buffer.from(String(a.content ?? ''), 'utf8').toString('base64');
+        return { filename: a.filename || 'attachment', content };
+      })
+    : undefined;
+
+  const payload: Record<string, unknown> = {
+    from: mailOptions.from,
+    to: toList.map(String),
+    subject: mailOptions.subject,
+    html: mailOptions.html,
+    // Replies land in the info@ inbox (the From address).
+    reply_to: 'info@oooshtours.co.uk',
+  };
+  if (ccList.length > 0) payload.cc = ccList.map(String);
+  if (attachments && attachments.length > 0) payload.attachments = attachments;
+
+  const resp = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!resp.ok) {
+    let detail = '';
+    try {
+      const body = (await resp.json()) as { message?: string; name?: string };
+      detail = body.message || body.name || '';
+    } catch {
+      detail = await resp.text().catch(() => '');
+    }
+    throw Object.assign(new Error(`Resend send failed (${resp.status}): ${detail || 'no detail'}`), {
+      httpStatus: resp.status,
+    });
+  }
+
+  const json = (await resp.json().catch(() => ({}))) as { id?: string };
+  return { messageId: json.id };
 }
 
 /**
@@ -305,6 +380,22 @@ class EmailService {
   }
 
   /**
+   * Deliver ONE email via the configured provider (Resend or SMTP). All the
+   * cross-cutting behaviour — test-mode redirect, retry, outage canary, audit
+   * logging — lives above this in send()/sendRaw(), so it's provider-agnostic.
+   */
+  private async deliver(mailOptions: nodemailer.SendMailOptions): Promise<{ messageId?: string }> {
+    const config = getEmailConfig();
+    if (config.provider === 'resend') {
+      if (!config.resendApiKey) {
+        throw new Error('EMAIL_PROVIDER=resend but RESEND_API_KEY is not set');
+      }
+      return sendViaResend(mailOptions, config.resendApiKey);
+    }
+    return this.getTransporter().sendMail(mailOptions);
+  }
+
+  /**
    * Send an email using a registered template.
    */
   async send(templateId: string, options: SendEmailOptions): Promise<SendEmailResult> {
@@ -345,21 +436,21 @@ class EmailService {
 
     // Send
     try {
-      const transporter = this.getTransporter();
       const mailAttachments = options.attachments?.map(a => ({
         filename: a.filename,
         content: a.content,
         contentType: a.contentType,
       }));
 
-      const result = await sendMailWithRetry(transporter, {
+      const mailOptions: nodemailer.SendMailOptions = {
         from: config.smtp.from,
         to: actualRecipient,
         cc: isRedirected ? undefined : options.cc,
         subject: isRedirected ? `[TEST] ${subject}` : subject,
         html,
         attachments: mailAttachments,
-      }, `"${templateId}" to ${actualRecipient}`);
+      };
+      const result = await sendMailWithRetry(() => this.deliver(mailOptions), `"${templateId}" to ${actualRecipient}`);
 
       // Log per-message effective routing, not the env-level mode. A test-mode
       // env where THIS template was allowlisted should log as 'live' so the
@@ -439,8 +530,7 @@ class EmailService {
       : wrapInBaseLayout(bodyHtml, { variant: options.variant || 'internal' });
 
     try {
-      const transporter = this.getTransporter();
-      const result = await sendMailWithRetry(transporter, {
+      const mailOptions: nodemailer.SendMailOptions = {
         from: config.smtp.from,
         to: actualRecipient,
         cc: isTestMode ? undefined : options.cc,
@@ -451,7 +541,8 @@ class EmailService {
           content: a.content,
           contentType: a.contentType,
         })),
-      }, `raw "${options.subject}" to ${actualRecipient}`);
+      };
+      const result = await sendMailWithRetry(() => this.deliver(mailOptions), `raw "${options.subject}" to ${actualRecipient}`);
 
       await this.logEmail({
         template_id: '_raw',
@@ -510,6 +601,14 @@ class EmailService {
    * Verify SMTP connection (useful for health checks / settings page).
    */
   async verifyConnection(): Promise<{ success: boolean; error?: string }> {
+    const config = getEmailConfig();
+    // Resend has no connection to verify — just confirm the key is present.
+    // The test email itself (sent by the caller after this) is the real check.
+    if (config.provider === 'resend') {
+      return config.resendApiKey
+        ? { success: true }
+        : { success: false, error: 'EMAIL_PROVIDER=resend but RESEND_API_KEY is not set' };
+    }
     try {
       const transporter = this.getTransporter();
       await transporter.verify();
