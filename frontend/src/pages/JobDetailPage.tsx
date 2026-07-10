@@ -1400,8 +1400,11 @@ export default function JobDetailPage() {
   const location = useLocation();
   const [searchParams] = useSearchParams();
   const user = useAuthStore(s => s.user);
+  // `backTo` is retained only as a fallback destination if the job fails to load
+  // (see loadJob's catch). The top-of-page "Back to …" breadcrumb was removed
+  // (Jul 2026) — it was usually wrong, since only Pipeline/Lost&Cancelled passed
+  // `state.from`; every other entry point silently defaulted to "Back to Jobs".
   const backTo = (location.state as { from?: string })?.from || '/jobs';
-  const backLabel = backTo.includes('/returns') ? 'Back to Returns' : backTo.includes('/lost-cancelled') ? 'Back to Lost & Cancelled' : backTo === '/pipeline' ? 'Back to Pipeline' : 'Back to Jobs';
 
   const [job, setJob] = useState<JobDetail | null>(null);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
@@ -2951,11 +2954,6 @@ export default function JobDetailPage() {
   return (
     <div className={showClientHistory ? 'lg:flex lg:gap-6' : ''}>
       <div className={showClientHistory ? 'flex-1 min-w-0' : ''}>
-      {/* Back link */}
-      <Link to={backTo} className="text-sm text-ooosh-600 hover:text-ooosh-700 mb-4 inline-block">
-        &larr; {backLabel}
-      </Link>
-
       {/* Combined banner — absorbed booking folded into another. Replaces the
           red cancelled banner (it's a merge, not a real cancellation). */}
       {job.combined_into_job_id && (
