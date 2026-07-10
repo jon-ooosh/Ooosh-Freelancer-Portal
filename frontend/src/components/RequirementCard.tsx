@@ -199,7 +199,7 @@ const REHEARSAL_FLAVOUR_LABEL: Record<string, string> = {
 export default function RequirementCard({
   req,
   derivedFlags,
-  seatAvailability,
+  assignedVehicleRegs,
   isNested,
   jobId,
   hhJobNumber,
@@ -215,6 +215,12 @@ export default function RequirementCard({
 }: {
   req: JobRequirement;
   derivedFlags?: DerivedFlags | null;
+  /** Regs of vans actually allocated to THIS job — shown on the vehicle
+   *  headline ("Vehicle (Self-Drive) — RO23HLU") once a van is linked. */
+  assignedVehicleRegs?: string[];
+  /** @deprecated The seat-availability fleet cross-reference (which fleet
+   *  vans already have the layout) was removed — staff found the unrelated
+   *  regs confusing. Prop kept in the type so existing callers don't break. */
   seatAvailability?: SeatAvailability | null;
   isNested?: boolean;
   jobId: string;
@@ -498,7 +504,18 @@ export default function RequirementCard({
                 {vehicleModeSuffix && (
                   <span className="text-gray-500"> ({vehicleModeSuffix})</span>
                 )}
+                {/* Allocated van reg(s) on the headline, once we know them. */}
+                {req.requirement_type === 'vehicle' && assignedVehicleRegs && assignedVehicleRegs.length > 0 && (
+                  <span className="text-gray-700"> — {assignedVehicleRegs.join(', ')}</span>
+                )}
               </span>
+              {/* Seat config lives on the headline now (was buried in the body
+                  next to a confusing list of unrelated fleet regs). */}
+              {req.requirement_type === 'vehicle' && derivedFlags?.seat_config && (
+                <span className={`text-[11px] px-1.5 py-0.5 rounded font-medium ${derivedFlags.seat_config === 'forward_facing' ? 'bg-amber-50 text-amber-700' : 'bg-green-50 text-green-700'}`}>
+                  {derivedFlags.seat_config === 'forward_facing' ? '⬆️ Forward-facing' : '🔄 Round a table'}
+                </span>
+              )}
               {req.is_auto && req.source === 'hirehop_sync' && (
                 <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-500 border border-blue-200 font-medium">HH</span>
               )}
@@ -612,17 +629,9 @@ export default function RequirementCard({
                     </div>
                   );
                 })()}
-                {derivedFlags.seat_config && (
-                  <div className={derivedFlags.seat_config === 'forward_facing' ? 'text-amber-600' : 'text-green-600'}>
-                    {derivedFlags.seat_config === 'forward_facing' ? '⬆️ Forward-facing seats' : '🔄 Round a table'}
-                    {seatAvailability?.matchingVans && seatAvailability.matchingVans.length > 0 && (
-                      <span className="text-green-600 ml-1">— {seatAvailability.matchingVans.map(v => v.reg).join(', ')} already set</span>
-                    )}
-                    {seatAvailability?.nonMatchingVans && seatAvailability.nonMatchingVans.length > 0 && (
-                      <span className="text-gray-400 ml-1">— {seatAvailability.nonMatchingVans.map(v => v.reg).join(', ')} need turning</span>
-                    )}
-                  </div>
-                )}
+                {/* Seat config moved to the headline; the "which fleet vans
+                    already have this layout" cross-reference was removed —
+                    staff found the unrelated regs confusing. */}
                 {derivedFlags.prep_time_by_category.vehicles > 0 && (
                   <div>Est. prep: {formatPrepTime(derivedFlags.prep_time_by_category.vehicles)}</div>
                 )}
