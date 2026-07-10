@@ -345,11 +345,6 @@ export function VehicleDetailPage() {
 
   return (
     <div className="space-y-4">
-      {/* Back link */}
-      <Link to={vmPath('/vehicles')} className="inline-flex items-center text-sm text-ooosh-blue hover:underline">
-        &larr; Back to vehicles
-      </Link>
-
       {/* Header card */}
       <div className={`rounded-lg border bg-white p-4 ${vehicle.isOldSold ? 'border-orange-200' : 'border-gray-200'}`}>
         {vehicle.isOldSold && (

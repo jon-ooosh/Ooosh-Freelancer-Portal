@@ -308,11 +308,6 @@ export default function PersonDetailPage() {
 
   return (
     <div>
-      {/* Back link */}
-      <Link to="/people" className="text-sm text-ooosh-600 hover:text-ooosh-700 mb-4 inline-block">
-        &larr; Back to People
-      </Link>
-
       {/* Header */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
         <div className="flex items-start justify-between">
