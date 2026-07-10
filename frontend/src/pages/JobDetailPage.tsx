@@ -4462,19 +4462,13 @@ export default function JobDetailPage() {
                   } p-5`}>
                     <div className="flex items-start justify-between mb-3">
                       <div className="flex items-center gap-2 flex-wrap">
+                        {/* No per-card reg: the "Vehicles on this job" strip up
+                            top is the single source for which vans are on the job.
+                            Every driver can drive any van on the job, so a per-card
+                            reg told you nothing meaningful (and repeated on every
+                            card). Book Out / Check In read the van off the row
+                            internally (effective_vehicle_id), not from here. */}
                         <span className="text-lg">🚐</span>
-                        {/* Reg lives in the "Vehicles on this job" strip up top,
-                            not repeated prominently on every card — just a subtle
-                            chip so you can still tell which van THIS driver is on
-                            (useful on multi-van hires). */}
-                        {a.vehicle_reg && (
-                          <span
-                            className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600 font-medium"
-                            title="Van linked to this driver"
-                          >
-                            {a.vehicle_reg}
-                          </span>
-                        )}
                         <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${sc.bg} ${sc.text}`}>
                           {sc.label}
                         </span>
