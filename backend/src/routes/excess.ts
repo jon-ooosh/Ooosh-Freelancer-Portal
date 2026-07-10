@@ -2113,6 +2113,38 @@ router.post('/:id/release', validate(releaseSchema), async (req: AuthRequest, re
   }
 });
 
+// ── POST /api/excess/:id/reconcile-preauth — Confirm a held pre-auth's true state ──
+//
+// Asks the truth (Stripe for online holds; the 5-day window for card-machine
+// holds) whether a `pre_auth` hold is still live, and flips it to `released` if
+// it's gone. This is what lets the UI show a BINARY held/not-held state instead
+// of guessing about a past-expiry hold.
+//
+// Powers: the "Check hold status" button in the Manage modal, and the
+// opportunistic self-heal on Money-tab / Overview load. Read-only against Stripe
+// (retrieve, never capture) — the only side effect is flipping OP to `released`
+// when Stripe confirms the hold is canceled. Never pre-empts a live hold.
+//
+// Idempotent: a record already `released` (or never a pre_auth) returns
+// `not_preauth` with the current row and changes nothing.
+router.post('/:id/reconcile-preauth', async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    const { reconcileExcessPreauth } = await import('../services/excess-preauth');
+    const reconcile = await reconcileExcessPreauth(id);
+    const updated = await query(`SELECT * FROM job_excess WHERE id = $1`, [id]);
+    if (updated.rows.length === 0) {
+      res.status(404).json({ error: 'Excess record not found' });
+      return;
+    }
+    res.json({ data: updated.rows[0], reconcile });
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error('[excess] reconcile-preauth error:', errMsg, error);
+    res.status(500).json({ error: 'Failed to reconcile pre-auth', detail: errMsg });
+  }
+});
+
 // ── POST /api/excess/:id/claim — Record damage claim (apply deposit to invoice) ──
 //
 // Applies part of the held deposit to a HireHop invoice on the current job. The

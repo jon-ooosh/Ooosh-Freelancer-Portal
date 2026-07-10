@@ -15,6 +15,7 @@ import { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { STEP_PHASE, FUTURE_STEP } from './CarnetSection';
+import { describePreauth } from '../lib/preauth';
 import BacklineLocationModal, {
   BacklineLocation,
   backlineLocationIcon,
@@ -167,7 +168,8 @@ const EXCESS_STATUS_LABELS: Record<string, { label: string; colour: string }> = 
   pending:               { label: 'Required',          colour: 'text-amber-600' },
   partially_paid:        { label: 'Partially Paid',    colour: 'text-amber-600' },
   taken:                 { label: 'Taken',             colour: 'text-green-600' },
-  pre_auth:              { label: 'Pre-auth Taken',    colour: 'text-blue-600' },
+  pre_auth:              { label: 'Pre-auth Held',     colour: 'text-sky-600' },
+  released:              { label: 'Pre-auth Released', colour: 'text-gray-500' },
   waived:                { label: 'Waived',            colour: 'text-gray-500' },
   fully_claimed:         { label: 'Fully Claimed',     colour: 'text-red-600' },
   partially_reimbursed:  { label: 'Partially Reimbursed', colour: 'text-amber-600' },
@@ -319,23 +321,24 @@ export default function RequirementCard({
   const isSuspendedByVD = suspensionReason !== null;
   const statusConfig = PREP_STATUS_CONFIG[req.status] || PREP_STATUS_CONFIG.not_started;
   const typeLabels = TYPE_STATUS_LABELS[req.requirement_type];
-  // The `vehicle` type_label is the static "Vehicle (Self-Drive)" from the
-  // requirement-type picklist. Override it with a mode-aware suffix computed
-  // from the live derived slot modes so a V&D (or mixed) job reads honestly.
+  // Headline mode qualifier. The static `vehicle` type_label is "Vehicle
+  // (Self-Drive)", but each van slot already shows its own Self-Drive / Van &
+  // Driver toggle in the body — so repeating the mode in the headline on a
+  // single-mode job is noise. Only surface a qualifier for MIXED jobs (which
+  // the per-slot toggles don't summarise at a glance).
   const vehicleModeSuffix = (() => {
     if (req.requirement_type !== 'vehicle' || req.custom_label) return null;
     const sd = derivedFlags?.self_drive_count ?? 0;
     const vd = derivedFlags?.van_and_driver_count ?? 0;
-    if (sd === 0 && vd === 0) return null; // no slot data — leave static label
     if (sd > 0 && vd > 0) return `Mixed — ${sd} self-drive, ${vd} van & driver`;
-    return vd > 0 ? 'Van & Driver' : 'Self-Drive';
+    return null;
   })();
   const label = req.custom_label || req.type_label;
-  // When the vehicle card carries a mode suffix, render the base "Vehicle" word
-  // in the (strikethrough-on-done) title and the mode as a separate, never-struck
-  // qualifier — otherwise a completed V&D vehicle shows "Vehicle (Van & Driver)"
-  // crossed out, which reads as "mode cancelled" rather than "prep done".
-  const titleBase = vehicleModeSuffix ? 'Vehicle' : label;
+  // For the vehicle type always render the bare "Vehicle" word (not the static
+  // "Vehicle (Self-Drive)" picklist label) so (a) the mode isn't duplicated with
+  // the per-slot toggles and (b) strikethrough-on-done only crosses "Vehicle",
+  // never a mode qualifier (which would read as "mode cancelled").
+  const titleBase = (req.requirement_type === 'vehicle' && !req.custom_label) ? 'Vehicle' : label;
 
   // Load hire form and excess data for nested cards
   useEffect(() => {
@@ -531,7 +534,11 @@ export default function RequirementCard({
 
             {/* Vehicle */}
             {req.requirement_type === 'vehicle' && derivedFlags?.has_vehicle && (
-              <div className="mt-1 text-xs text-gray-500 space-y-1">
+              <div className="mt-1 text-xs text-gray-500 flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
+                {/* Left column — the vans on the job. The prep estimate sits in
+                    a right column (below) so the card uses its full width rather
+                    than cramming everything into the left third. */}
+                <div className="space-y-1 min-w-0">
                 {/* Per-slot rows (preferred) with fallback to job-level toggle for pre-migration jobs */}
                 {derivedFlags.vehicle_slots && derivedFlags.vehicle_slots.length > 0 ? (
                   <>
@@ -629,11 +636,14 @@ export default function RequirementCard({
                     </div>
                   );
                 })()}
-                {/* Seat config moved to the headline; the "which fleet vans
-                    already have this layout" cross-reference was removed —
-                    staff found the unrelated regs confusing. */}
+                </div>
+                {/* Right column — prep estimate, right-aligned on ≥sm so it
+                    uses the horizontal space. Seat config now lives on the
+                    headline; the confusing fleet-reg cross-reference is gone. */}
                 {derivedFlags.prep_time_by_category.vehicles > 0 && (
-                  <div>Est. prep: {formatPrepTime(derivedFlags.prep_time_by_category.vehicles)}</div>
+                  <div className="shrink-0 sm:text-right whitespace-nowrap">
+                    Est. prep: {formatPrepTime(derivedFlags.prep_time_by_category.vehicles)}
+                  </div>
                 )}
               </div>
             )}
@@ -1034,9 +1044,14 @@ export default function RequirementCard({
                 .map(d => d.held_expires_at)
                 .filter((x): x is string => !!x)
                 .sort()[0];
-              const daysToExpiry = earliestExpiry
-                ? Math.ceil((new Date(earliestExpiry).getTime() - Date.now()) / 86400000)
-                : null;
+              // One source of truth for the pre-auth wording (shared with the
+              // Money tab + Manage modal) — represent the group as one synthetic
+              // held record so the copy can never contradict the other surfaces.
+              const preAuthDesc = describePreauth({
+                excess_status: 'pre_auth',
+                amount_held: preAuthTotal,
+                held_expires_at: earliestExpiry ?? null,
+              });
               if (unresolved.length === 0 && preAuths.length === 0) return null;
               return (
                 <div className="mt-1 space-y-1">
@@ -1054,13 +1069,10 @@ export default function RequirementCard({
                       £{heldAmount.toLocaleString('en-GB', { minimumFractionDigits: 2 })} excess still to resolve — reimburse, claim, roll over or waive.
                     </div>
                   )}
-                  {/* Blue info — live pre-auth, decision pending */}
+                  {/* Sky info — live pre-auth hold (wording shared across surfaces) */}
                   {preAuths.length > 0 && (
-                    <div className="text-xs text-blue-600 bg-blue-50 border border-blue-200 rounded px-2 py-1">
-                      Pre-auth £{preAuthTotal.toLocaleString('en-GB', { minimumFractionDigits: 2 })} held
-                      {daysToExpiry !== null && (daysToExpiry > 0
-                        ? ` — auto-releases in ${daysToExpiry} day${daysToExpiry === 1 ? '' : 's'}`
-                        : ' — releasing imminently')}. Capture now if claiming for damage, otherwise no action needed.
+                    <div className="text-xs text-sky-700 bg-sky-50 border border-sky-200 rounded px-2 py-1">
+                      {preAuthDesc.headline} {preAuthDesc.detail}
                     </div>
                   )}
                 </div>
