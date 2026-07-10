@@ -22,6 +22,29 @@ import { isGmailConfigured } from '../config/gmail';
 const router = Router();
 router.use(authenticate);
 
+/**
+ * First name of the logged-in staff member, for personalising the chase
+ * sign-off. `users` has no name columns — join `people` via person_id. Returns
+ * null on any miss so the draft falls back to "the Ooosh team".
+ */
+async function senderFirstName(userId?: string): Promise<string | null> {
+  if (!userId) return null;
+  try {
+    const r = await query(
+      `SELECT p.first_name, p.last_name
+         FROM users u JOIN people p ON p.id = u.person_id
+        WHERE u.id = $1`,
+      [userId],
+    );
+    const row = r.rows[0];
+    if (!row) return null;
+    const name = String(row.first_name || row.last_name || '').trim();
+    return name || null;
+  } catch {
+    return null;
+  }
+}
+
 // GET /api/auto-chase/status — configuration + connectivity + sync cursor.
 router.get('/status', authorize('admin', 'manager'), async (_req: AuthRequest, res: Response) => {
   try {
@@ -85,7 +108,8 @@ router.post('/preview-draft/:jobId', authorize('admin', 'manager'), async (req: 
     return res.status(503).json({ error: 'Chase drafting unavailable — ANTHROPIC_API_KEY not configured.' });
   }
   try {
-    const { draft, context } = await draftChaseEmail(String(req.params.jobId));
+    const signOffName = await senderFirstName(req.user?.id);
+    const { draft, context } = await draftChaseEmail(String(req.params.jobId), { signOffName });
     res.json({ data: { draft, context } });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -125,7 +149,8 @@ router.post('/create-draft/:jobId', authorize('admin', 'manager'), async (req: A
     return res.status(503).json({ error: 'Chase drafting unavailable — ANTHROPIC_API_KEY not configured.' });
   }
   try {
-    const result = await createChaseDraftForJob(String(req.params.jobId));
+    const signOffName = await senderFirstName(req.user?.id);
+    const result = await createChaseDraftForJob(String(req.params.jobId), signOffName);
     res.json({ data: result });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

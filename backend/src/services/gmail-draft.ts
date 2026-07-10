@@ -143,13 +143,17 @@ async function resolveRecipient(jobId: string): Promise<RecipientResolution | nu
  * Throws with a clear message when Gmail/Anthropic aren't configured, the job
  * isn't found, or no client email is resolvable (caller maps to 4xx/5xx).
  */
-export async function createChaseDraftForJob(jobId: string): Promise<CreatedChaseDraft> {
+export async function createChaseDraftForJob(
+  jobId: string,
+  signOffName?: string | null,
+): Promise<CreatedChaseDraft> {
   if (!isGmailConfigured()) {
     throw new Error('Gmail is not configured — cannot create drafts.');
   }
 
-  // AI draft first (also validates the job exists + is draftable).
-  const { draft } = await draftChaseEmail(jobId);
+  // AI draft first (also validates the job exists + is draftable). Signed off
+  // from the staff member who clicked "Draft chase" (falls back to the team).
+  const { draft } = await draftChaseEmail(jobId, { signOffName });
 
   const recipient = await resolveRecipient(jobId);
   if (!recipient) {
