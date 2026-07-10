@@ -1650,9 +1650,18 @@ These originate outside HH entirely — client sends stuff to us, or items found
     `getSitterShiftDetail` / `isSitterAssignedTo`; portal endpoints `GET /api/portal/studio-sitter/shifts`
     (own rostered nights, −3..+60d) + `GET /api/portal/studio-sitter/shifts/:date` (who's-in +
     shared job files, presigned; access-gated to the rostered sitter or the shared staff account).
-  - **Slice 2 (NEXT):** the Next.js portal UI — "My Shifts" list + shift detail page (union into the
-    portal so they sit alongside a person's driving jobs); surface the fee.
-  - **Slice 3:** handover thread (needs `interactions.shift_id` migration + the `IS NULL` scoping
+  - **Slice 2 SHIPPED (portal UI, read-only):** the sitter's rostered evenings surface on the
+    Next.js portal dashboard (`src/app/dashboard/page.tsx`) as a "🎸 Studio Shifts" section that
+    sits alongside their driving jobs (hidden when they have none — most freelancers aren't
+    sitters), plus a shift detail page (`src/app/shift/[date]/page.tsx`): envelope times, per-night
+    fee, who's in each room, and each job's shared specs (`share_with_freelancer` files, presigned).
+    Wiring: `getSitterShiftsFromOP` / `getSitterShiftDetailFromOP` + `Sitter*` types in
+    `src/lib/op-api.ts`; OP-only Next.js API routes `src/app/api/studio-sitter/shifts/route.ts` +
+    `.../shifts/[date]/route.ts` (empty list outside `DATA_BACKEND=op` — no Monday fallback, sitters
+    are OP-native). Backend `getSitterShiftDetail(date, personId?)` was enriched to also return the
+    shift envelope + the requesting sitter's fee/assignment status so the detail page is
+    self-sufficient on a direct load/refresh (portal route now passes `req.portalUser.id`).
+  - **Slice 3 (NEXT):** handover thread (needs `interactions.shift_id` migration + the `IS NULL` scoping
     guard; note freelancer-authored interactions need a created_by workaround — `interactions.created_by`
     is a `users(id)` FK and sitters are people/freelancers, not users — likely SYSTEM_USER_ID + author
     name, or a new author column).
