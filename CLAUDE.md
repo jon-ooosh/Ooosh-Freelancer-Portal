@@ -1603,8 +1603,63 @@ These originate outside HH entirely — client sends stuff to us, or items found
 - [ ] Auto-reminder: chase client to collect, flag for disposal after X weeks
 - [ ] Global pages for both: `/operations/deliveries`, `/operations/lost-property`
 
-##### Stream 5: Rehearsals / Studio Sitter Module ← SPEC'D (Jun 2026), build pending
-**Full spec: `docs/REHEARSALS-SPEC.md`** — read it before touching rehearsal code. Headlines:
+##### Stream 5: Rehearsals / Studio Sitter Module ← A–C SHIPPED (Jul 2026); portal + tasks + end-of-day PENDING
+**Full spec: `docs/REHEARSALS-SPEC.md`** — read it before touching rehearsal code.
+
+**What's built (staff-side complete):**
+- **Phase A — detection** (`services/rehearsal-plan.ts`): classifies rooms + flavour from HH line
+  items, applies the base-room double-count rule + the finish-on-the-day timing rule, derives
+  per-day sitter-needed evenings. `deriveRequirementsForJob` persists the result on
+  `hh_derived_flags.rehearsal_detail` + sets the rehearsal requirement notes to a live summary.
+- **Phase B — roster + assignment** (migration **153**: `studio_sitter_shifts` [one per date,
+  UNIQUE = two-rooms-same-night jobs share one shift] + `studio_sitter_shift_assignments` [partial
+  unique index = one live sitter per shift]). `services/studio-sitter.ts` (roster derivation,
+  per-job coverage, assign/reassign/unassign, date-selectable bulk, manual-override cover,
+  remove-cover, approved-freelancer list Studio-Sitter-tag-first, **coverage-driven requirement
+  status** — winds Not Started→In Progress→Done, `blocked`/Problem left manual, synced from
+  assign/unassign/remove + the derivation engine, default per-night fee from `system_settings`).
+  `routes/studio-sitters.ts` (`/api/studio-sitters/*`, STAFF_ROLES). Frontend `StudioSittersPage`
+  (Operations → Studio Sitters): roster with 7/14/All range + All/Unassigned/Assigned filter
+  (localStorage-persisted), assign/reassign/clear, tick-nights bulk assign, manual "＋ Add cover" +
+  Remove, manager-editable default fee. `RequirementCard`: evening chips are click-to-assign
+  (inline picker) + "Manage on Studio Sitters roster →" link; shows the assigned sitter per chip.
+- **Phase C — surfacing:** dashboard NeedsAttention "Evenings without a sitter" bucket
+  (`sitter_gap_count`/`sitter_gaps` on `/dashboard/operations`, derived via `getRoster`); Job Detail
+  amber pre-hire banner ("Rehearsal starts in N days — X evenings without a studio sitter", 7-day
+  window hardcoded — promote to `system_settings` if it needs tuning); per-card daytime "＋ Call a
+  sitter for a day →" link.
+
+**What's left (the spec's Phase C portal / D / E / F):**
+- **Phase D — freelancer portal surface for sitters** (IN PROGRESS): sitters see their assigned
+  shifts in the Next.js portal (`src/app/`), shift detail = who's in each room that night (derived)
+  + session times + shared specs/stage-plots (`share_with_freelancer` files) + the day-to-day
+  handover thread. The sitter's `person_id` → `studio_sitter_shift_assignments`. The **default fee**
+  captured on assignments is meant to display here.
+  - **Slice 1 SHIPPED (backend, read-only):** `services/studio-sitter.ts` `getSitterShifts` /
+    `getSitterShiftDetail` / `isSitterAssignedTo`; portal endpoints `GET /api/portal/studio-sitter/shifts`
+    (own rostered nights, −3..+60d) + `GET /api/portal/studio-sitter/shifts/:date` (who's-in +
+    shared job files, presigned; access-gated to the rostered sitter or the shared staff account).
+  - **Slice 2 (NEXT):** the Next.js portal UI — "My Shifts" list + shift detail page (union into the
+    portal so they sit alongside a person's driving jobs); surface the fee.
+  - **Slice 3:** handover thread (needs `interactions.shift_id` migration + the `IS NULL` scoping
+    guard; note freelancer-authored interactions need a created_by workaround — `interactions.created_by`
+    is a `users(id)` FK and sitters are people/freelancers, not users — likely SYSTEM_USER_ID + author
+    name, or a new author column).
+- **General Tasks system** (build with/after D): `tasks` table (anchor to shift/job/nothing),
+  visibility everyone/assignee-only, notify-on-done + notify-if-not-done-after-X-days, **staff via
+  bell/email, freelancers portal-only (no bell/email)**; dashboard top-right card + "On Today" +
+  sitter portal; Today/Tomorrow/Upcoming/Overdue views.
+- **Handover thread**: `interactions` anchored to a new `shift_id` (mirror the `issue_id`/
+  `held_item_id` pattern + the `IS NULL` scoping guard so it doesn't bubble onto other timelines).
+- **End-of-day report** (Phase E): configurable lock-up checklist in `system_settings` (ported from
+  Jotform `203154178314046`, no PDF), notes → shift thread so staff can reply, "continuing tomorrow"
+  gates deep-clean items, lost-property/held-items deep-links, + a "report not submitted"
+  accountability chaser.
+- **Calendar endpoint** (Phase F): `GET /api/studio-sitters/calendar?from&to` for the future
+  calendar project (roster row shape already close).
+- **Shop sales**: deferred, out of scope (substantial, cross-cutting).
+
+Headlines (design invariants — still apply):
 
 - **Load-bearing model:** the assignment unit is a **SITE-EVENING**, not a job-room-day. One
   premises, **one sitter per evening** even if both rooms are busy — the sitter looks after the
@@ -1629,9 +1684,10 @@ These originate outside HH entirely — client sends stuff to us, or items found
   **end-of-day report** (configurable in `system_settings`, ported from the Jotform, no PDF, notes
   → thread so staff can reply), **shared specs/files** via `share_with_freelancer`, lost-property /
   held-items via the Holding module. **Shop sales = deferred** (out of scope for now).
-- **Build order:** A detection+model+job-card → B roster page+assign/bulk → C portal surface →
-  D tasks+handover → E end-of-day report+chaser → F calendar endpoint. Migration numbers: take the
-  next free at build time (150 is being taken by parallel work; check `run.ts`).
+- **Build order / status:** staff-side (detection + roster/assign + dashboard/banner surfacing) is
+  DONE (migration 153). Remaining = portal surface + tasks + handover thread + end-of-day report +
+  calendar endpoint (see "What's left" above). New migrations: take the next free at build time
+  (check `run.ts`).
 
 ##### Stream 6: Payment Tracking (pre-Xero)
 *Merged into Step 3 (Money System).* `job_payments` table, per-job financial summary, payment recording, and client payment terms are all part of the unified Money tab on Job Detail. See Step 3 Phases C-F for full spec.
