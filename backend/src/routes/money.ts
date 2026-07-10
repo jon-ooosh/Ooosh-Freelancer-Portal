@@ -26,6 +26,7 @@ import {
 } from '../services/confirmation-hooks';
 import { calculateVatAdjustment } from '../services/vat-adjustment';
 import { syncExcessRequirementStatus } from '../services/excess-requirement-sync';
+import { reconcileExpiredPreauthsForJob } from '../services/excess-preauth';
 import { emailService } from '../services/email-service';
 import { getFrontendUrl } from '../config/app-urls';
 
@@ -772,6 +773,13 @@ router.get('/:jobId/excess-info', async (req: AuthRequest, res: Response) => {
 
     const job = jobResult.rows[0];
 
+    // Opportunistic self-heal — resolve any past-expiry pre-auth hold on this job
+    // to its true state (Stripe/window) so the Overview card shows a binary
+    // held/released, not a stale guess. Fire-and-forget: never delays this render.
+    void reconcileExpiredPreauthsForJob(job.id).catch((e) =>
+      console.error('[money] excess-info pre-auth self-heal failed:', e)
+    );
+
     // Calculate hire duration
     const startDate = job.job_date || job.out_date;
     const endDate = job.job_end || job.return_date;
@@ -1057,6 +1065,12 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
 
     const job = jobResult.rows[0];
     const hhJobId = job.hh_job_number;
+
+    // Opportunistic self-heal — resolve any past-expiry pre-auth hold to its true
+    // state so the Money tab shows a binary held/released. Fire-and-forget.
+    void reconcileExpiredPreauthsForJob(job.id).catch((e) =>
+      console.error('[money] summary pre-auth self-heal failed:', e)
+    );
 
     // Fetch HireHop billing data (deposits, payments, hire value)
     let hhBilling: any = null;

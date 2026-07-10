@@ -15,6 +15,7 @@ import { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { STEP_PHASE, FUTURE_STEP } from './CarnetSection';
+import { describePreauth } from '../lib/preauth';
 import BacklineLocationModal, {
   BacklineLocation,
   backlineLocationIcon,
@@ -167,7 +168,8 @@ const EXCESS_STATUS_LABELS: Record<string, { label: string; colour: string }> = 
   pending:               { label: 'Required',          colour: 'text-amber-600' },
   partially_paid:        { label: 'Partially Paid',    colour: 'text-amber-600' },
   taken:                 { label: 'Taken',             colour: 'text-green-600' },
-  pre_auth:              { label: 'Pre-auth Taken',    colour: 'text-blue-600' },
+  pre_auth:              { label: 'Pre-auth Held',     colour: 'text-sky-600' },
+  released:              { label: 'Pre-auth Released', colour: 'text-gray-500' },
   waived:                { label: 'Waived',            colour: 'text-gray-500' },
   fully_claimed:         { label: 'Fully Claimed',     colour: 'text-red-600' },
   partially_reimbursed:  { label: 'Partially Reimbursed', colour: 'text-amber-600' },
@@ -1025,9 +1027,14 @@ export default function RequirementCard({
                 .map(d => d.held_expires_at)
                 .filter((x): x is string => !!x)
                 .sort()[0];
-              const daysToExpiry = earliestExpiry
-                ? Math.ceil((new Date(earliestExpiry).getTime() - Date.now()) / 86400000)
-                : null;
+              // One source of truth for the pre-auth wording (shared with the
+              // Money tab + Manage modal) — represent the group as one synthetic
+              // held record so the copy can never contradict the other surfaces.
+              const preAuthDesc = describePreauth({
+                excess_status: 'pre_auth',
+                amount_held: preAuthTotal,
+                held_expires_at: earliestExpiry ?? null,
+              });
               if (unresolved.length === 0 && preAuths.length === 0) return null;
               return (
                 <div className="mt-1 space-y-1">
@@ -1045,13 +1052,10 @@ export default function RequirementCard({
                       £{heldAmount.toLocaleString('en-GB', { minimumFractionDigits: 2 })} excess still to resolve — reimburse, claim, roll over or waive.
                     </div>
                   )}
-                  {/* Blue info — live pre-auth, decision pending */}
+                  {/* Sky info — live pre-auth hold (wording shared across surfaces) */}
                   {preAuths.length > 0 && (
-                    <div className="text-xs text-blue-600 bg-blue-50 border border-blue-200 rounded px-2 py-1">
-                      Pre-auth £{preAuthTotal.toLocaleString('en-GB', { minimumFractionDigits: 2 })} held
-                      {daysToExpiry !== null && (daysToExpiry > 0
-                        ? ` — auto-releases in ${daysToExpiry} day${daysToExpiry === 1 ? '' : 's'}`
-                        : ' — releasing imminently')}. Capture now if claiming for damage, otherwise no action needed.
+                    <div className="text-xs text-sky-700 bg-sky-50 border border-sky-200 rounded px-2 py-1">
+                      {preAuthDesc.headline} {preAuthDesc.detail}
                     </div>
                   )}
                 </div>
