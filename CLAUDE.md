@@ -665,6 +665,8 @@ Replaces the prominent "+ Assign Driver" Quick Assign button with per-card next-
 - [x] Quick Assign demoted: prominent primary button → subtle "+ Add driver manually" text link, gated to admin/manager only, tooltip explains when to use. Modal flow itself unchanged — still `/api/hire-forms/quick-assign` on the backend.
 - [x] Send / Chase hire form button untouched (lives on Job Requirements vehicle card, mid-tour use case preserved).
 
+**Drivers & Vehicles tab — "Vehicles on this job" strip + card layout convention (Jul 2026).** The reg is shown **once**, in a header strip at the top of the tab — NOT repeated prominently on every driver card. The strip (`JobDetailPage.tsx`) lists every distinct van allocated to the job, deduped across **all** assignment rows **including driverless staff-allocation rows** that never surface as a driver card (a van picked on Allocations before a driver is bucketed onto its slot — previously invisible on the job card). Source: `jobAssignedVehicles` state, built in `loadVehicleAssignments` from the raw `allRows` (the shaped/displayed `vehicleAssignments` filters those driverless rows out, so DON'T derive the strip from it). Each HH-detected van type with no van allocated shows a dashed **"<type> — unassigned"** chip (detected slots from `hhSyncResult…vehicle_slots` minus assigned, matched via the `normVanType` helper). Strip chips are links: assigned → `/vehicles/fleet/:id` (Vehicle Detail); unassigned → `/vehicles/allocations?job=<hh>` (a shortcut — allocation itself stays per driver-slot, so a chip can't one-click assign). Per-driver cards therefore only carry a **subtle** reg chip (which van THIS driver is on), lead with the driver name (no "DRIVER" label), and fold the excess (£ / status / Edit / Manage) inline to the right of the name (`flex-col` on mobile so long names don't wrap mid-word, `sm:flex-row` inline on desktop). Hire-form actions (Generate PDF / +Email / View / Re-send) are collapsed into a **"Hire form ▾"** dropdown so the state-aware primary button (Allocate / Book Out / Check In) stays the focus. **Don't re-add a prominent per-card reg** — the strip is the single source. On the **Overview** vehicle requirement card (`RequirementCard.tsx`): the allocated reg(s) + seat config (Round a table / Forward-facing) live on the **headline** ("Vehicle — RO23HLU  🔄 Round a table"), the headline mode qualifier shows **only for mixed jobs** (pure self-drive/V&D rely on the per-slot toggles — don't say "Self-Drive" twice), the prep estimate is right-aligned to use the card's width, and the old "which fleet vans already have this layout / need turning" reg cross-reference was **removed** (staff found the unrelated regs confusing). `RequirementCard` takes `assignedVehicleRegs` (threaded from `JobPrepChecklist`); the legacy `seatAvailability` prop is kept in the type but unused.
+
 **Staggered multi-van job discovery (Jun 2026).** A job with more than one van whose vans leave on **different days** must stay reachable in the book-out + allocation pickers after the first van has gone out. The trap: a job has a single `out_date`, so once van 1 leaves, `out_date` is in the past — and both job-discovery endpoints (`GET /api/vehicles/jobs/going-out` → Fleet ▸ Van ▸ Book Out picker; `GET /api/vehicles/jobs/upcoming` → Allocations "Going Out") window strictly on `out_date >= today`, dropping the job and making the remaining van unbookable except via the BookOutPage "enter job # manually" escape hatch. **Incident: job 15411 (Jabir – HLR & HLU), Jun 2026** — RO23HLR out day 1, RO23HLU collected day 2, only HLR showed. The recent multi-van work was all in the slot/assignment layer (assignment rows, allocation cascade, per-card buttons), which operates on a job you can already *see*; this is one layer upstream in job discovery, which had assumed a job goes out on one day. **Fix:** both endpoints also retain a job that has already started (`out_date < today`), isn't back yet (`COALESCE(return_date, job_end) >= today`), is still `ACTIVE_STATUSES`, AND still has a van slot in a pre-book-out state — a `soft`/`confirmed` `vehicle_hire_assignments` row found via the **dual-match join** (`vha.job_id = j.id OR vha.hirehop_job_id = j.hh_job_number`, because staff-allocation rows carry only `hirehop_job_id` until a hire form is submitted). Mirrors the `/jobs/upcoming-due-back` widening pattern. **Don't re-window these queries to a plain `out_date >= today`** or you reintroduce the bug. Limitation: this keys off an *existing* un-booked-out assignment row for the late van (the common case — vans are pre-allocated/hire-formed); a started multi-van job where the second van has *no* assignment row at all still relies on the manual-entry fallback. The "enter job # manually" field stays as belt-and-braces.
 
 **Deferred from this pass:**
@@ -1181,7 +1183,7 @@ held_amount = max(excess_amount_taken + amount_held − claim_amount − reimbur
               for excess_status NOT IN ('rolled_over','released','not_required')
 ```
 - Excludes `rolled_over` (the cash moved to the forward record — counting both double-counted, the original bug behind the `/money/excess` "Total Held" overstatement) and `released` (pre-auth ended) and `not_required` (top-N £0 loser). `reimbursed`/`fully_claimed` net to 0 naturally; live `pre_auth` holds count via `amount_held`.
-- **Consumers (all read `v_excess_held`):** `client_excess_ledger` view's `balance_held` (migration 109 redefined it to sum from `v_excess_held`; other columns unchanged), `/money/overview` Excess Held card + table, and the dashboard "Unreimbursed Excess" bucket (`routes/dashboard.ts`, which also excludes `pre_auth` since a hold isn't returnable cash). **Any new "how much excess do we hold" surface MUST read `v_excess_held`** rather than re-summing `excess_amount_taken` — that's how the drift happened.
+- **Consumers (all read `v_excess_held`):** `client_excess_ledger` view's `balance_held` (migration 109 redefined it to sum from `v_excess_held`; other columns unchanged), `/money/overview` Excess Held card + table, the dashboard "Unreimbursed Excess" bucket (`routes/dashboard.ts`, which also excludes `pre_auth` since a hold isn't returnable cash), and the address-book **`GET /api/excess/by-org/:orgId` + `/by-person/:personId`** summaries (`summary.balance_held`, Jul 2026 — these feed the `ExcessGateBanner` green "Client has £X on account" note + the Excess History tabs). **Any new "how much excess do we hold" surface MUST read `v_excess_held`** rather than re-summing `excess_amount_taken` — that's how the drift happened. **Incident (Jul 2026, Hoosiers):** `by-org` was naively summing `excess_amount_taken − claims − reimbursements` over EVERY record incl. `rolled_over`, so two rolled-forward £1,200 records showed a phantom "£2,400 on account" on the gate banner while `/money/excess` (canonical) correctly showed £0 held — the banner was double-counting cash that had moved to a forward hire. Both endpoints now `LEFT JOIN v_excess_held` and sum `held_amount`.
 - This only changed AGGREGATION-for-display; the excess lifecycle (collect/claim/reimburse/rollover/pre-auth) is untouched. The view is reversible.
 - **Stale backlog:** `scripts/reconcile-stale-excess.ts` (dry-run default, `--commit`, `--days=N`) clears the historic backlog — finished-hire `taken`/`partially_paid` records with NO claims/holds, marked `reimbursed` (reimbursement_amount topped to taken → held→0). Direct DB update, **no client emails / HH pushes / Stripe calls**. Records with claims or partial reimbursements are reported for manual review, never auto-committed.
 - **Receipts Outstanding bucket** is forward-only from **1 Jun 2026** (migration 110 cleared the migration-087 historic backfill flags; dashboard query also guards `created_at >= 1 Jun` + self-retires once the hire is `completed`). **Pre-auth Holds Expiring bucket** is now action-only (`held_expires_at` between today and +2 days — past-expiry holds, which can't be actioned, are dropped).
@@ -1612,8 +1614,63 @@ These originate outside HH entirely — client sends stuff to us, or items found
 - [ ] Auto-reminder: chase client to collect, flag for disposal after X weeks
 - [ ] Global pages for both: `/operations/deliveries`, `/operations/lost-property`
 
-##### Stream 5: Rehearsals / Studio Sitter Module ← SPEC'D (Jun 2026), build pending
-**Full spec: `docs/REHEARSALS-SPEC.md`** — read it before touching rehearsal code. Headlines:
+##### Stream 5: Rehearsals / Studio Sitter Module ← A–C SHIPPED (Jul 2026); portal + tasks + end-of-day PENDING
+**Full spec: `docs/REHEARSALS-SPEC.md`** — read it before touching rehearsal code.
+
+**What's built (staff-side complete):**
+- **Phase A — detection** (`services/rehearsal-plan.ts`): classifies rooms + flavour from HH line
+  items, applies the base-room double-count rule + the finish-on-the-day timing rule, derives
+  per-day sitter-needed evenings. `deriveRequirementsForJob` persists the result on
+  `hh_derived_flags.rehearsal_detail` + sets the rehearsal requirement notes to a live summary.
+- **Phase B — roster + assignment** (migration **153**: `studio_sitter_shifts` [one per date,
+  UNIQUE = two-rooms-same-night jobs share one shift] + `studio_sitter_shift_assignments` [partial
+  unique index = one live sitter per shift]). `services/studio-sitter.ts` (roster derivation,
+  per-job coverage, assign/reassign/unassign, date-selectable bulk, manual-override cover,
+  remove-cover, approved-freelancer list Studio-Sitter-tag-first, **coverage-driven requirement
+  status** — winds Not Started→In Progress→Done, `blocked`/Problem left manual, synced from
+  assign/unassign/remove + the derivation engine, default per-night fee from `system_settings`).
+  `routes/studio-sitters.ts` (`/api/studio-sitters/*`, STAFF_ROLES). Frontend `StudioSittersPage`
+  (Operations → Studio Sitters): roster with 7/14/All range + All/Unassigned/Assigned filter
+  (localStorage-persisted), assign/reassign/clear, tick-nights bulk assign, manual "＋ Add cover" +
+  Remove, manager-editable default fee. `RequirementCard`: evening chips are click-to-assign
+  (inline picker) + "Manage on Studio Sitters roster →" link; shows the assigned sitter per chip.
+- **Phase C — surfacing:** dashboard NeedsAttention "Evenings without a sitter" bucket
+  (`sitter_gap_count`/`sitter_gaps` on `/dashboard/operations`, derived via `getRoster`); Job Detail
+  amber pre-hire banner ("Rehearsal starts in N days — X evenings without a studio sitter", 7-day
+  window hardcoded — promote to `system_settings` if it needs tuning); per-card daytime "＋ Call a
+  sitter for a day →" link.
+
+**What's left (the spec's Phase C portal / D / E / F):**
+- **Phase D — freelancer portal surface for sitters** (IN PROGRESS): sitters see their assigned
+  shifts in the Next.js portal (`src/app/`), shift detail = who's in each room that night (derived)
+  + session times + shared specs/stage-plots (`share_with_freelancer` files) + the day-to-day
+  handover thread. The sitter's `person_id` → `studio_sitter_shift_assignments`. The **default fee**
+  captured on assignments is meant to display here.
+  - **Slice 1 SHIPPED (backend, read-only):** `services/studio-sitter.ts` `getSitterShifts` /
+    `getSitterShiftDetail` / `isSitterAssignedTo`; portal endpoints `GET /api/portal/studio-sitter/shifts`
+    (own rostered nights, −3..+60d) + `GET /api/portal/studio-sitter/shifts/:date` (who's-in +
+    shared job files, presigned; access-gated to the rostered sitter or the shared staff account).
+  - **Slice 2 (NEXT):** the Next.js portal UI — "My Shifts" list + shift detail page (union into the
+    portal so they sit alongside a person's driving jobs); surface the fee.
+  - **Slice 3:** handover thread (needs `interactions.shift_id` migration + the `IS NULL` scoping
+    guard; note freelancer-authored interactions need a created_by workaround — `interactions.created_by`
+    is a `users(id)` FK and sitters are people/freelancers, not users — likely SYSTEM_USER_ID + author
+    name, or a new author column).
+- **General Tasks system** (build with/after D): `tasks` table (anchor to shift/job/nothing),
+  visibility everyone/assignee-only, notify-on-done + notify-if-not-done-after-X-days, **staff via
+  bell/email, freelancers portal-only (no bell/email)**; dashboard top-right card + "On Today" +
+  sitter portal; Today/Tomorrow/Upcoming/Overdue views.
+- **Handover thread**: `interactions` anchored to a new `shift_id` (mirror the `issue_id`/
+  `held_item_id` pattern + the `IS NULL` scoping guard so it doesn't bubble onto other timelines).
+- **End-of-day report** (Phase E): configurable lock-up checklist in `system_settings` (ported from
+  Jotform `203154178314046`, no PDF), notes → shift thread so staff can reply, "continuing tomorrow"
+  gates deep-clean items, lost-property/held-items deep-links, + a "report not submitted"
+  accountability chaser.
+- **Calendar endpoint** (Phase F): `GET /api/studio-sitters/calendar?from&to` for the future
+  calendar project (roster row shape already close).
+- **Shop sales**: deferred, out of scope (substantial, cross-cutting).
+
+Headlines (design invariants — still apply):
 
 - **Load-bearing model:** the assignment unit is a **SITE-EVENING**, not a job-room-day. One
   premises, **one sitter per evening** even if both rooms are busy — the sitter looks after the
@@ -1638,9 +1695,10 @@ These originate outside HH entirely — client sends stuff to us, or items found
   **end-of-day report** (configurable in `system_settings`, ported from the Jotform, no PDF, notes
   → thread so staff can reply), **shared specs/files** via `share_with_freelancer`, lost-property /
   held-items via the Holding module. **Shop sales = deferred** (out of scope for now).
-- **Build order:** A detection+model+job-card → B roster page+assign/bulk → C portal surface →
-  D tasks+handover → E end-of-day report+chaser → F calendar endpoint. Migration numbers: take the
-  next free at build time (150 is being taken by parallel work; check `run.ts`).
+- **Build order / status:** staff-side (detection + roster/assign + dashboard/banner surfacing) is
+  DONE (migration 153). Remaining = portal surface + tasks + handover thread + end-of-day report +
+  calendar endpoint (see "What's left" above). New migrations: take the next free at build time
+  (check `run.ts`).
 
 ##### Stream 6: Payment Tracking (pre-Xero)
 *Merged into Step 3 (Money System).* `job_payments` table, per-job financial summary, payment recording, and client payment terms are all part of the unified Money tab on Job Detail. See Step 3 Phases C-F for full spec.
