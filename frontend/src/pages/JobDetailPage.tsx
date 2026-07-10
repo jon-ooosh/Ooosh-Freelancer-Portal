@@ -4516,7 +4516,11 @@ export default function JobDetailPage() {
                       <div className={`rounded-lg p-3 mb-3 ${
                         hasReferralBlocker ? 'bg-orange-50' : 'bg-gray-50'
                       }`}>
-                        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
+                        {/* Stack on mobile, inline on ≥sm. Stacking (rather than
+                            flex-wrap) gives the name its own full-width row on a
+                            phone, so a long name doesn't get squeezed against the
+                            excess block and break mid-word. */}
+                        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-x-3 gap-y-1">
                           <div className="min-w-0">
                             {a.driver_name ? (
                               <p className="text-sm font-medium text-gray-900">
