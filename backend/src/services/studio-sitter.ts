@@ -456,8 +456,33 @@ export async function isSitterAssignedTo(personId: string, date: string): Promis
   return r.rows.length > 0;
 }
 
-/** Detail for one evening: who's in each room + that job's shared specs/files. */
-export async function getSitterShiftDetail(date: string): Promise<{ date: string; jobs: SitterShiftJob[] }> {
+export interface SitterShiftDetail {
+  date: string;
+  planned_start: string | null;
+  planned_end: string | null;
+  status: string;                 // shift status, or 'needed' if no shift row exists
+  fee: number | null;             // the requesting sitter's fee (null if unknown / no personId)
+  assignment_status: string | null; // the requesting sitter's assignment status (assigned/confirmed)
+  jobs: SitterShiftJob[];         // who's in that night, with each job's shared specs
+}
+
+/** Detail for one evening: envelope + who's in each room + that job's shared
+ *  specs/files. When `personId` is given, also returns that sitter's fee +
+ *  assignment status so the portal detail page is self-sufficient on a direct
+ *  load (bookmark / refresh) without needing the shifts list for context. */
+export async function getSitterShiftDetail(date: string, personId?: string): Promise<SitterShiftDetail> {
+  const shiftRes = await query(
+    `SELECT s.status, s.planned_start, s.planned_end, a.status AS assignment_status, a.fee
+     FROM studio_sitter_shifts s
+     LEFT JOIN studio_sitter_shift_assignments a
+       ON a.shift_id = s.id AND a.status IN ('assigned','confirmed')
+       AND ($2::uuid IS NULL OR a.person_id = $2)
+     WHERE s.shift_date = $1 AND s.status <> 'cancelled'
+     LIMIT 1`,
+    [date, personId ?? null]
+  );
+  const shift = shiftRes.rows[0];
+
   const jobs = await loadRehearsalJobs(date, date);
   const out: SitterShiftJob[] = [];
   for (const job of jobs) {
@@ -481,7 +506,15 @@ export async function getSitterShiftDetail(date: string): Promise<{ date: string
       files,
     });
   }
-  return { date, jobs: out };
+  return {
+    date,
+    planned_start: shift?.planned_start ?? null,
+    planned_end: shift?.planned_end ?? null,
+    status: shift?.status ?? 'needed',
+    fee: shift?.fee != null ? Number(shift.fee) : null,
+    assignment_status: shift?.assignment_status ?? null,
+    jobs: out,
+  };
 }
 
 export interface SitterOption {

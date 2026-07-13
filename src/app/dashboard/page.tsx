@@ -63,6 +63,30 @@ interface JobsApiResponse {
   error?: string
 }
 
+// Studio sitter shifts (Rehearsals — Phase D portal surface)
+interface ShiftJob {
+  job_id: string
+  hh_job_number: number | null
+  label: string
+  rooms: string[]
+}
+
+interface SitterShift {
+  date: string
+  planned_start: string | null
+  planned_end: string | null
+  status: string
+  assignment_status: string
+  fee: number | null
+  jobs: ShiftJob[]
+}
+
+interface ShiftsApiResponse {
+  success: boolean
+  shifts?: SitterShift[]
+  error?: string
+}
+
 // =============================================================================
 // HELPER FUNCTIONS
 // =============================================================================
@@ -366,6 +390,109 @@ function JobCard({ item, showStartButton = true }: { item: DisplayItem; showStar
 }
 
 /**
+ * Whether a YYYY-MM-DD string is today (local time).
+ */
+function isTodayIso(dateStr: string): boolean {
+  if (!dateStr) return false
+  const now = new Date()
+  const iso = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+  return dateStr === iso
+}
+
+/**
+ * SQL TIME ("17:00:00" / "17:00") → "5:00pm". '' for null/unparseable.
+ */
+function formatShiftTime(timeStr: string | null): string {
+  if (!timeStr) return ''
+  const match = timeStr.match(/(\d{1,2}):(\d{2})/)
+  if (!match) return ''
+  const hours = parseInt(match[1], 10)
+  const minutes = match[2]
+  const ampm = hours >= 12 ? 'pm' : 'am'
+  const displayHours = hours % 12 || 12
+  return `${displayHours}:${minutes}${ampm}`
+}
+
+function formatShiftEnvelope(start: string | null, end: string | null): string {
+  const s = formatShiftTime(start)
+  const e = formatShiftTime(end)
+  if (s && e) return `${s} – ${e}`
+  if (s) return `from ${s}`
+  if (e) return `until ${e}`
+  return ''
+}
+
+/**
+ * Studio Sitter Shift Card — one rostered evening (whole-building night).
+ */
+function ShiftCard({ shift }: { shift: SitterShift }) {
+  const tonight = isTodayIso(shift.date)
+  const envelope = formatShiftEnvelope(shift.planned_start, shift.planned_end)
+  const isConfirmed = shift.assignment_status === 'confirmed'
+
+  return (
+    <div className="bg-white rounded-xl border border-gray-100 p-4 shadow-sm">
+      <div className="flex items-start justify-between">
+        <div className="flex items-center space-x-3">
+          <div className="w-10 h-10 bg-violet-100 rounded-lg flex items-center justify-center">
+            <span className="text-violet-600">🎸</span>
+          </div>
+          <div>
+            <p className="font-medium text-gray-900 flex items-center gap-2">
+              Studio Sitter
+              {tonight && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-violet-100 text-violet-700 font-semibold uppercase tracking-wide">
+                  Tonight
+                </span>
+              )}
+            </p>
+            <p className="text-sm text-gray-500">
+              {formatDate(shift.date)}
+              {envelope && ` · ${envelope}`}
+            </p>
+          </div>
+        </div>
+        <div className="text-right">
+          {shift.fee !== null && shift.fee > 0 && (
+            <span className="text-sm font-medium text-green-600 block">{formatFee(shift.fee)}</span>
+          )}
+          <span
+            className={`inline-block mt-1 text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
+              isConfirmed ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'
+            }`}
+          >
+            {isConfirmed ? 'Confirmed' : 'Assigned'}
+          </span>
+        </div>
+      </div>
+
+      {/* Who's in that night */}
+      {shift.jobs.length > 0 && (
+        <div className="mt-3 pl-13 space-y-1">
+          {shift.jobs.map((job) => (
+            <p key={job.job_id} className="text-xs text-gray-500">
+              {job.label}
+              {job.rooms.length > 0 && (
+                <span className="text-gray-400"> · {job.rooms.join(', ')}</span>
+              )}
+            </p>
+          ))}
+        </div>
+      )}
+
+      <div className="mt-3">
+        <Link
+          href={`/shift/${shift.date}`}
+          className="text-sm font-medium text-ooosh-600 hover:text-ooosh-500"
+        >
+          View details →
+        </Link>
+      </div>
+    </div>
+  )
+}
+
+/**
  * Empty State Component
  */
 function EmptyState({ message }: { message: string }) {
@@ -424,6 +551,29 @@ export default function DashboardPage() {
   const [completedJobs, setCompletedJobs] = useState<DisplayItem[]>([])
   const [cancelledJobs, setCancelledJobs] = useState<DisplayItem[]>([])
 
+  // Studio sitter shifts (only populated for freelancers who are rostered as sitters)
+  const [sitterShifts, setSitterShifts] = useState<SitterShift[]>([])
+
+  /**
+   * Fetch the sitter's rostered studio shifts. Runs alongside the jobs fetch
+   * but independently — a shifts failure never breaks the jobs dashboard, and
+   * the section simply hides when there's nothing to show.
+   */
+  const fetchShifts = useCallback(async () => {
+    try {
+      const response = await fetch('/api/studio-sitter/shifts')
+      const data: ShiftsApiResponse = await response.json()
+      if (response.ok && data.success) {
+        setSitterShifts(data.shifts || [])
+      } else {
+        setSitterShifts([])
+      }
+    } catch (err) {
+      console.error('Failed to fetch studio shifts:', err)
+      setSitterShifts([])
+    }
+  }, [])
+
   /**
    * Fetch jobs from the API
    */
@@ -463,16 +613,18 @@ export default function DashboardPage() {
     }
   }, [router])
 
-  // Fetch jobs on mount
+  // Fetch jobs + shifts on mount
   useEffect(() => {
     fetchJobs()
-  }, [fetchJobs])
+    fetchShifts()
+  }, [fetchJobs, fetchShifts])
 
   /**
    * Handle refresh button click
    */
   const handleRefresh = () => {
     fetchJobs()
+    fetchShifts()
   }
 
   /**
@@ -589,6 +741,22 @@ export default function DashboardPage() {
             <EmptyState message="No jobs scheduled for today" />
           )}
         </section>
+
+        {/* Studio Shifts Section — only for sitters (hidden when empty) */}
+        {sitterShifts.length > 0 && (
+          <section>
+            <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3 flex items-center">
+              <span className="mr-2">🎸</span>
+              Studio Shifts
+              <span className="ml-2 text-ooosh-600">({sitterShifts.length})</span>
+            </h2>
+            <div className="space-y-3">
+              {sitterShifts.map((shift) => (
+                <ShiftCard key={shift.date} shift={shift} />
+              ))}
+            </div>
+          </section>
+        )}
 
         {/* Upcoming Section */}
         <section>

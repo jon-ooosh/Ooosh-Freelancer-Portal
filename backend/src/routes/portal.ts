@@ -900,7 +900,7 @@ router.get('/studio-sitter/shifts/:date', async (req: PortalRequest, res: Respon
     // may view any).
     const allowed = req.portalUser!.isStaffShared || await isSitterAssignedTo(req.portalUser!.id, date);
     if (!allowed) { res.status(403).json({ error: 'Not rostered to this evening' }); return; }
-    const detail = await getSitterShiftDetail(date);
+    const detail = await getSitterShiftDetail(date, req.portalUser!.id);
     res.json({ success: true, ...detail });
   } catch (error) {
     console.error('Portal sitter shift detail error:', error);
