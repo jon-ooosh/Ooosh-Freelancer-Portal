@@ -1530,12 +1530,13 @@ const localQuoteSchema = z.object({
   fee: z.number().min(0).optional().nullable(),
   clientCharge: z.number().min(0).optional().nullable(),
   notes: z.string().optional().nullable(),
+  freelancerNotes: z.string().optional().nullable(),
   whatIsIt: z.enum(['vehicle', 'equipment', 'people']).optional().nullable(),
 });
 
 router.post('/local', validate(localQuoteSchema), async (req: AuthRequest, res: Response) => {
   try {
-    const { jobId, jobType, jobDate, arrivalTime, venueId, venueName, fee, clientCharge, notes, whatIsIt } = req.body;
+    const { jobId, jobType, jobDate, arrivalTime, venueId, venueName, fee, clientCharge, notes, freelancerNotes, whatIsIt } = req.body;
     const feeVal = fee || 0;
     const chargeVal = clientCharge || feeVal;
 
@@ -1545,16 +1546,16 @@ router.post('/local', validate(localQuoteSchema), async (req: AuthRequest, res: 
         venue_id, venue_name, job_date, arrival_time,
         freelancer_fee, freelancer_fee_rounded,
         client_charge_total, client_charge_rounded,
-        what_is_it, internal_notes,
+        what_is_it, internal_notes, freelancer_notes,
         distance_miles, drive_time_mins,
         created_by
-      ) VALUES ($1, $2, true, 'fixed', $3, $4, $5, $6, $7, $7, $8, $8, $9, $10, 0, 0, $11)
+      ) VALUES ($1, $2, true, 'fixed', $3, $4, $5, $6, $7, $7, $8, $8, $9, $10, $11, 0, 0, $12)
       RETURNING id`,
       [
         jobId, jobType, venueId || null, venueName || null,
         jobDate || null, arrivalTime || null,
         feeVal, chargeVal,
-        whatIsIt || null, notes || null,
+        whatIsIt || null, notes || null, freelancerNotes || null,
         req.user!.id,
       ]
     );

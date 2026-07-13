@@ -989,6 +989,20 @@ function CrewJobDetail({ job, venue }: { job: Job; venue: Venue | null }) {
         </div>
       )}
 
+      {/* Key Notes — the quote's freelancer_notes from OP. The D&C layout has
+          always rendered this card; the crew layout never did, so notes staff
+          wrote for crewed jobs were invisible to the freelancer (Jul 2026). */}
+      {job.keyNotes && (
+        <div className="bg-white rounded-xl shadow-sm p-6">
+          <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+            <span>📋</span> Key Notes
+          </h2>
+          <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+            <p className="text-gray-700 whitespace-pre-wrap">{job.keyNotes}</p>
+          </div>
+        </div>
+      )}
+
       {/* Stage Notes */}
       {venue?.stageNotes && venue.stageNotes !== venue.accessNotes && (
         <div className="bg-white rounded-xl shadow-sm p-6">

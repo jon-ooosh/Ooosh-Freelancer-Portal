@@ -1478,6 +1478,7 @@ export default function JobDetailPage() {
     venueName: '',
     jobDate: '',
     arrivalTime: '',
+    freelancerNotes: '',
     notes: '',
     pushToHirehop: true,
   });
@@ -2329,6 +2330,7 @@ export default function JobDetailPage() {
       venueName: job.venue_name || '',
       jobDate: defaultDate,
       arrivalTime: '',
+      freelancerNotes: '',
       notes: '',
       pushToHirehop: true,
     });
@@ -5729,15 +5731,32 @@ export default function JobDetailPage() {
                   </div>
                 </div>
 
-                {/* Notes */}
+                {/* Notes — two fields matching the full calculator convention.
+                    The old single "Notes" field saved to internal_notes, which
+                    the freelancer portal never shows — staff notes meant for
+                    the driver were silently invisible (Jul 2026 bug). */}
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Notes</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Freelancer Notes <span className="font-normal text-gray-400">(shown to the freelancer in the portal)</span>
+                  </label>
+                  <textarea
+                    value={localFormData.freelancerNotes}
+                    onChange={(e) => setLocalFormData({ ...localFormData, freelancerNotes: e.target.value })}
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                    rows={2}
+                    placeholder="What's included, access info, who to ask for..."
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Internal Notes <span className="font-normal text-gray-400">(staff only)</span>
+                  </label>
                   <textarea
                     value={localFormData.notes}
                     onChange={(e) => setLocalFormData({ ...localFormData, notes: e.target.value })}
                     className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
                     rows={2}
-                    placeholder="Optional notes..."
+                    placeholder="Margins, commercial notes..."
                   />
                 </div>
 
@@ -5782,6 +5801,7 @@ export default function JobDetailPage() {
                         jobDate: dateStr,
                         arrivalTime: localFormData.arrivalTime || undefined,
                         notes: localFormData.notes || undefined,
+                        freelancerNotes: localFormData.freelancerNotes || undefined,
                       });
                       // Push to HireHop if toggled on
                       if (localFormData.pushToHirehop && job.hh_job_number && localResult?.id) {
@@ -5792,7 +5812,7 @@ export default function JobDetailPage() {
                         }
                       }
                       setShowLocalForm(false);
-                      setLocalFormData({ jobType: 'delivery', venueId: '', venueName: '', jobDate: '', arrivalTime: '', notes: '', pushToHirehop: true });
+                      setLocalFormData({ jobType: 'delivery', venueId: '', venueName: '', jobDate: '', arrivalTime: '', freelancerNotes: '', notes: '', pushToHirehop: true });
                       loadQuotes();
                     } catch (err) {
                       alert(err instanceof Error ? err.message : 'Failed to create');
