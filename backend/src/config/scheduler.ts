@@ -118,6 +118,26 @@ export function startScheduler() {
       }
     });
     console.log('Scheduler: HireHop job sync scheduled every 30 minutes');
+
+    // ── Job Value Gap-Filler ──────────────────────────────────────────
+    // Hourly at :40 — populate the cached jobs.job_value (drives pipeline,
+    // client-history sidebars, hire-history stats) from HH billing accrued
+    // for HH-linked jobs still showing NULL/£0. The job sync itself no
+    // longer writes job_value (search_list's MONEY field is unreliable and
+    // used to clobber values back to £0 every 30 min). Money tab views
+    // self-heal individual jobs instantly; this catches the rest.
+    cron.schedule('40 * * * *', async () => {
+      try {
+        const { syncMissingJobValues } = await import('../services/job-value-sync');
+        const result = await syncMissingJobValues(20);
+        if (result.updated > 0) {
+          console.log(`Scheduler: Job value gap-filler — populated ${result.updated}/${result.checked} jobs`);
+        }
+      } catch (err) {
+        console.error('Scheduler: Job value gap-filler failed:', err);
+      }
+    });
+    console.log('Scheduler: Job value gap-filler scheduled hourly at :40');
   }
 
   // ── Chase Alert Scanner ───────────────────────────────────────────────

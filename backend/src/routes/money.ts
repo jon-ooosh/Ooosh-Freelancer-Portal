@@ -694,53 +694,14 @@ router.get('/job-lookup/:hhJobNumber', async (req: AuthRequest, res: Response) =
 });
 
 // ── POST /api/money/sync-values — Bulk-update job_value for jobs missing values ──
-// Called on jobs/pipeline page load to populate cached hire values from HH billing
+// On-demand trigger for the job-value gap-filler (same engine as the hourly
+// scheduler task — see services/job-value-sync.ts).
 
 router.post('/sync-values', async (req: AuthRequest, res: Response) => {
   try {
-    // Find HH-linked jobs with no job_value (or job_value = 0)
-    const jobsResult = await query(
-      `SELECT id, hh_job_number FROM jobs
-       WHERE hh_job_number IS NOT NULL
-         AND (job_value IS NULL OR job_value = 0)
-         AND status NOT IN (9, 10, 11)
-       ORDER BY updated_at DESC
-       LIMIT 20`
-    );
-
-    if (jobsResult.rows.length === 0) {
-      res.json({ data: { updated: 0 } });
-      return;
-    }
-
-    let updated = 0;
-    // Process sequentially to avoid rate limiting (billing_list is per-job)
-    for (const job of jobsResult.rows) {
-      try {
-        const billingRes = await hhBroker.get('/php_functions/billing_list.php',
-          { main_id: job.hh_job_number, type: 1 },
-          { priority: 'low', cacheTTL: 300 }
-        );
-
-        if (billingRes.success && billingRes.data) {
-          const bl = billingRes.data as Record<string, any>;
-          if (bl.rows && Array.isArray(bl.rows)) {
-            for (const row of bl.rows) {
-              if (parseInt(row.kind ?? '0') === 0) {
-                const accrued = parseFloat(row.accrued || row.data?.accrued || '0');
-                if (accrued > 0) {
-                  await query(`UPDATE jobs SET job_value = $1 WHERE id = $2`, [accrued, job.id]);
-                  updated++;
-                }
-                break;
-              }
-            }
-          }
-        }
-      } catch { /* skip individual failures */ }
-    }
-
-    res.json({ data: { updated, checked: jobsResult.rows.length } });
+    const { syncMissingJobValues } = await import('../services/job-value-sync');
+    const result = await syncMissingJobValues(20);
+    res.json({ data: result });
   } catch (error) {
     console.error('[money] Sync values error:', error);
     res.status(500).json({ error: 'Failed to sync job values' });

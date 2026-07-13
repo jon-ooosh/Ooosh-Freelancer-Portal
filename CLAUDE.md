@@ -259,10 +259,10 @@ If you need to change Nginx behaviour (new location blocks, proxy rules, headers
 
 ### Phase 2 — In Progress
 
-- [x] **HireHop job sync (read-only pull)** — jobs table, sync service, API routes, job_value sync
+- [x] **HireHop job sync (read-only pull)** — jobs table, sync service, API routes
   - Automated: runs every 30 minutes via `config/scheduler.ts`
   - Logged to `sync_log` table with status tracking
-  - **Known issue:** job_value (money) not populating from HireHop. Fixed falsy check bug. May need `job_data.php` instead of `search_list.php`. Check `[HH Job Sync] Sample MONEY value:` in server logs.
+  - **⚠️ `job_value` is NOT written by the sync (fixed Jul 2026 — do not reintroduce).** HireHop's `MONEY` field from `search_list.php`/`job_data.php`/webhook payloads is empty/0 for most jobs; for months the sync blindly copied it over `jobs.job_value`, clobbering the cached display value back to £0 every 30 minutes (Money-tab visits kept "fixing" it, sync kept re-zeroing — the tug of war behind the "client history values revert to £0" report, Jul 2026). `job_value` is owned by the billing-accrued path: Money tab `/summary` side-effect (instant per-job self-heal) + `services/job-value-sync.ts` gap-filler (hourly scheduler at :40, 20 jobs/pass; also behind `POST /api/money/sync-values`). One-shot repair: `backend/src/scripts/backfill-job-values.ts` (dry-run default, `--commit`). Any future sync/webhook field-mapping work MUST leave `job_value` alone.
 - [x] **Jobs UI** — jobs list page, job detail view, status badges, filtering by status
 - [x] **Enquiry & Sales Pipeline (Phases A–D)** — see docs/PIPELINE-SPEC.md
   - [x] Phase A: Data layer (migrations 003-006, pipeline fields, chase interaction type)
@@ -560,6 +560,7 @@ Existing hire form app is NOT being rebuilt — just repointing its data layer f
   - `POST /api/driver-verification/next-step` — routing engine (replaces `get-next-step.js`)
   - `POST /api/driver-verification/update` — partial driver field updates (upsert, whitelisted fields)
   - `GET /api/driver-verification/check-hire-form` — check if hire form exists for job
+  - `GET /api/driver-verification/driver-by-scan-ref?scan_ref=` — resolve driver email from iDenfy scanRef (Jul 2026, see "iDenfy identity resolution" below)
 - [x] Auth: API key (`X-API-Key`), Bearer JWT (hire_form_session type), shared verification secret
 - [x] Document analysis engine + routing engine ported from `get-next-step.js`
 - [x] Mounted in routes/index.ts at `/driver-verification`
@@ -620,6 +621,11 @@ Netlify functions being repointed with `DATA_BACKEND` feature flag (default: `mo
 - [ ] Mid-tour driver surfacing: badge on Fleet on-hire cards + status on Job Detail Drivers tab
 - [ ] Vehicle swap flow (see Phase D3 below)
 - [ ] Monitor for 1-2 weeks, then remove Monday.com fallback code
+
+**iDenfy identity resolution + same-origin return URLs (Jul 2026, Mae/mae-hill.com incident):**
+Two hire-form-app bugs fixed together — full detail in the hire form repo's CLAUDE.md (`ooosh-driver-verification-`).
+- **Never derive a driver's email from the iDenfy clientId.** The clientId encoding is lossy (strips chars outside `[a-z0-9_]` — hyphens pre-fix, still `+`/apostrophes), so the webhook decoded `team@mae-hill.com` as `team@maehill.com` and find-or-created a **phantom driver record**; the real record never got the licence data and the router looped the driver back into iDenfy forever. Convention now: `create-idenfy-session.js` writes the scanRef onto the OP driver row keyed by the RAW email (via `POST /driver-verification/update`); `idenfy-webhook.js` resolves the authoritative email via `GET /driver-verification/driver-by-scan-ref` (clientId decode kept only as fallback for in-flight sessions / OP outage). Watch for phantom records (same driver, hyphen-stripped email variant) if the fallback ever fires for a dash-domain driver on a pre-fix session.
+- **iDenfy success/error URLs must be same-origin with the driver's browser.** The app serves on BOTH `hireforms.oooshtours.co.uk` (what OP's hire-form emails link to) and `ooosh-driver-verification.netlify.app`, with no redirect between them; the session token lives in per-origin sessionStorage. The return URLs were hardcoded to netlify.app, so hireforms-origin drivers came back tokenless → driver-status 401 loop → the "spinning wheel of death" (ProcessingHub also now stops polling on 401 and offers re-verification, and the processing-hub URL handler validates the session like every other step).
 
 **Phase C5 — VE103B Certificate Generation** ✅ COMPLETE (9 Apr 2026)
 VE103B is a UK document authorising a named driver to take a hired vehicle abroad. Printed as text-only overlay onto pre-printed official forms. Replaces manual process + Google Sheets log.
@@ -887,7 +893,7 @@ The hire form process calculates excess. The principle: charge the excess of the
 - [x] Payment methods match HireHop bank accounts exactly (same names, same IDs)
 - [x] Smart payment form: quick-click amounts (25% deposit, 50%, full/remaining), auto-detect deposit vs balance
 - [x] Deposit calculator: min 25% (floor £100), full payment if <£400
-- [x] Job values populated from HH billing_list accrued (side-effect on Money tab view + bulk sync endpoint)
+- [x] Job values populated from HH billing_list accrued (side-effect on Money tab view + hourly `job-value-sync` gap-filler; the HH job sync/webhook deliberately never write `job_value` — see Phase 2 job-sync note)
 - [x] "Overview" tab (renamed from Job Requirements) with payment progress bar at top
 - [x] Email templates: booking confirmed, payment received, excess received/reimbursed/claimed, last-minute alert
 - [x] Email branding: purple header (#7B5EA7), footer "Transport - Backline - Rehearsals"

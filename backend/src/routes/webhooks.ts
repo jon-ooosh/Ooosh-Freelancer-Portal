@@ -395,7 +395,10 @@ async function handleJobUpdate(
     RETURN_DATE: 'return_date',
     MANAGER: 'manager1_name',
     MANAGER2: 'manager2_name',
-    MONEY: 'job_value',
+    // MONEY deliberately NOT mapped to job_value — HH's MONEY field is
+    // empty/0 for most jobs and used to clobber the cached display value
+    // back to £0. job_value is owned by the billing-accrued path (Money
+    // tab side-effect + services/job-value-sync gap-filler).
   };
 
   // HH search_list / webhook payloads decorate JOB_NAME for sub-jobs as
