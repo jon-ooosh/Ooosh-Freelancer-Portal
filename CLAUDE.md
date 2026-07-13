@@ -259,10 +259,10 @@ If you need to change Nginx behaviour (new location blocks, proxy rules, headers
 
 ### Phase 2 — In Progress
 
-- [x] **HireHop job sync (read-only pull)** — jobs table, sync service, API routes, job_value sync
+- [x] **HireHop job sync (read-only pull)** — jobs table, sync service, API routes
   - Automated: runs every 30 minutes via `config/scheduler.ts`
   - Logged to `sync_log` table with status tracking
-  - **Known issue:** job_value (money) not populating from HireHop. Fixed falsy check bug. May need `job_data.php` instead of `search_list.php`. Check `[HH Job Sync] Sample MONEY value:` in server logs.
+  - **⚠️ `job_value` is NOT written by the sync (fixed Jul 2026 — do not reintroduce).** HireHop's `MONEY` field from `search_list.php`/`job_data.php`/webhook payloads is empty/0 for most jobs; for months the sync blindly copied it over `jobs.job_value`, clobbering the cached display value back to £0 every 30 minutes (Money-tab visits kept "fixing" it, sync kept re-zeroing — the tug of war behind the "client history values revert to £0" report, Jul 2026). `job_value` is owned by the billing-accrued path: Money tab `/summary` side-effect (instant per-job self-heal) + `services/job-value-sync.ts` gap-filler (hourly scheduler at :40, 20 jobs/pass; also behind `POST /api/money/sync-values`). One-shot repair: `backend/src/scripts/backfill-job-values.ts` (dry-run default, `--commit`). Any future sync/webhook field-mapping work MUST leave `job_value` alone.
 - [x] **Jobs UI** — jobs list page, job detail view, status badges, filtering by status
 - [x] **Enquiry & Sales Pipeline (Phases A–D)** — see docs/PIPELINE-SPEC.md
   - [x] Phase A: Data layer (migrations 003-006, pipeline fields, chase interaction type)
@@ -893,7 +893,7 @@ The hire form process calculates excess. The principle: charge the excess of the
 - [x] Payment methods match HireHop bank accounts exactly (same names, same IDs)
 - [x] Smart payment form: quick-click amounts (25% deposit, 50%, full/remaining), auto-detect deposit vs balance
 - [x] Deposit calculator: min 25% (floor £100), full payment if <£400
-- [x] Job values populated from HH billing_list accrued (side-effect on Money tab view + bulk sync endpoint)
+- [x] Job values populated from HH billing_list accrued (side-effect on Money tab view + hourly `job-value-sync` gap-filler; the HH job sync/webhook deliberately never write `job_value` — see Phase 2 job-sync note)
 - [x] "Overview" tab (renamed from Job Requirements) with payment progress bar at top
 - [x] Email templates: booking confirmed, payment received, excess received/reimbursed/claimed, last-minute alert
 - [x] Email branding: purple header (#7B5EA7), footer "Transport - Backline - Rehearsals"
