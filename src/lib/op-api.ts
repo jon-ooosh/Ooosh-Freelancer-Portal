@@ -178,6 +178,41 @@ export async function getSitterShiftDetailFromOP(
   return opFetch<SitterShiftDetailResponse>(`/studio-sitter/shifts/${date}`, sessionToken)
 }
 
+export interface SitterThreadMessage {
+  id: string
+  content: string
+  created_at: string
+  author: string
+  from_staff: boolean
+  mine: boolean
+  files: SitterSharedFile[]
+}
+
+export interface SitterThreadResponse {
+  success: boolean
+  messages: SitterThreadMessage[]
+}
+
+/** Read the handover thread for one evening. */
+export async function getSitterThreadFromOP(
+  sessionToken: string,
+  date: string
+): Promise<SitterThreadResponse> {
+  return opFetch<SitterThreadResponse>(`/studio-sitter/shifts/${date}/thread`, sessionToken)
+}
+
+/** Post a handover note to one evening's thread. */
+export async function postSitterThreadOP(
+  sessionToken: string,
+  date: string,
+  content: string
+): Promise<{ success: boolean; message: SitterThreadMessage }> {
+  return opFetch(`/studio-sitter/shifts/${date}/thread`, sessionToken, {
+    method: 'POST',
+    body: JSON.stringify({ content }),
+  })
+}
+
 // =============================================================================
 // API FUNCTIONS
 // =============================================================================

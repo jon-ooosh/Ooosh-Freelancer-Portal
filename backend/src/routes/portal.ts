@@ -908,6 +908,144 @@ router.get('/studio-sitter/shifts/:date', async (req: PortalRequest, res: Respon
   }
 });
 
+// ── Studio Sitter handover thread (Rehearsals — Phase D slice 3) ─────
+//
+// The sitter ⇄ staff handover notes for one evening. Flat chronological log
+// anchored to the shift via interactions.shift_id (scoped OUT of the person /
+// job / org / venue timelines by the shift_id IS NULL guard). Freelancer-
+// authored messages carry created_by = NULL + author_name (sitters are people,
+// not OP users). Access is gated the same way as the shift detail.
+
+async function resolveOpenShiftId(date: string): Promise<string | null> {
+  const r = await query(
+    `SELECT id FROM studio_sitter_shifts WHERE shift_date = $1 AND status <> 'cancelled' LIMIT 1`,
+    [date]
+  );
+  return r.rows[0]?.id ?? null;
+}
+
+// GET /api/portal/studio-sitter/shifts/:date/thread — read the handover log
+router.get('/studio-sitter/shifts/:date/thread', async (req: PortalRequest, res: Response) => {
+  try {
+    const date = String(req.params.date);
+    if (!SITTER_DATE_RE.test(date)) { res.status(400).json({ error: 'Invalid date' }); return; }
+    const allowed = req.portalUser!.isStaffShared || await isSitterAssignedTo(req.portalUser!.id, date);
+    if (!allowed) { res.status(403).json({ error: 'Not rostered to this evening' }); return; }
+
+    const shiftId = await resolveOpenShiftId(date);
+    if (!shiftId) { res.json({ success: true, messages: [] }); return; }
+
+    const result = await query(
+      `SELECT i.id, i.content, i.created_at, i.files, i.created_by, i.author_name,
+              CONCAT(p.first_name, ' ', p.last_name) AS staff_name
+       FROM interactions i
+       LEFT JOIN users u ON u.id = i.created_by
+       LEFT JOIN people p ON p.id = u.person_id
+       WHERE i.shift_id = $1
+       ORDER BY i.created_at ASC`,
+      [shiftId]
+    );
+
+    const myName = req.portalUser!.name;
+    const messages = await Promise.all(result.rows.map(async (row: any) => {
+      const fromStaff = !!row.created_by;
+      const author = fromStaff
+        ? (String(row.staff_name || '').trim() || 'Ooosh')
+        : (row.author_name || 'Studio sitter');
+      const raw: any[] = Array.isArray(row.files) ? row.files : [];
+      const files = await Promise.all(raw.map(async (x) => {
+        let url: string = x.url || '';
+        if (url && typeof url === 'string' && url.startsWith('files/')) {
+          try { url = await getPresignedDownloadUrl(url); } catch { /* keep raw */ }
+        }
+        return { name: x.name || 'File', url, fileType: x.type || x.fileType || null };
+      }));
+      return {
+        id: row.id,
+        content: row.content,
+        created_at: row.created_at,
+        author,
+        from_staff: fromStaff,
+        mine: !fromStaff && (row.author_name || '') === myName,
+        files,
+      };
+    }));
+
+    res.json({ success: true, messages });
+  } catch (error) {
+    console.error('Portal sitter thread read error:', error);
+    res.status(500).json({ error: 'Failed to load handover notes' });
+  }
+});
+
+const sitterThreadPostSchema = z.object({ content: z.string().trim().min(1).max(4000) });
+
+// POST /api/portal/studio-sitter/shifts/:date/thread — add a handover note
+router.post('/studio-sitter/shifts/:date/thread', async (req: PortalRequest, res: Response) => {
+  try {
+    const date = String(req.params.date);
+    if (!SITTER_DATE_RE.test(date)) { res.status(400).json({ error: 'Invalid date' }); return; }
+    const allowed = req.portalUser!.isStaffShared || await isSitterAssignedTo(req.portalUser!.id, date);
+    if (!allowed) { res.status(403).json({ error: 'Not rostered to this evening' }); return; }
+
+    const parsed = sitterThreadPostSchema.safeParse(req.body);
+    if (!parsed.success) { res.status(400).json({ error: 'A message is required' }); return; }
+    const content = parsed.data.content;
+
+    const shiftId = await resolveOpenShiftId(date);
+    if (!shiftId) { res.status(404).json({ error: 'No shift for this evening' }); return; }
+
+    // Freelancer-authored: created_by NULL + author_name (they aren't OP users).
+    const inserted = await query(
+      `INSERT INTO interactions (type, content, shift_id, created_by, author_name)
+       VALUES ('note', $1, $2, NULL, $3)
+       RETURNING id, created_at`,
+      [content, shiftId, req.portalUser!.name]
+    );
+
+    // Let prior staff participants know a sitter replied — low-priority bell
+    // only (no email), matching the thread re-notify model. Best-effort:
+    // a notification failure must not fail the post.
+    try {
+      const priorStaff = await query(
+        `SELECT DISTINCT created_by FROM interactions
+         WHERE shift_id = $1 AND created_by IS NOT NULL`,
+        [shiftId]
+      );
+      for (const row of priorStaff.rows) {
+        await query(
+          `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority)
+           VALUES ($1, 'system', $2, $3, 'studio_sitter_shifts', $4, '/studio-sitters', 'low')`,
+          [
+            row.created_by,
+            `${req.portalUser!.name} added a handover note`,
+            content.length > 200 ? content.slice(0, 200) + '...' : content,
+            shiftId,
+          ]
+        );
+      }
+    } catch (notifyErr) {
+      console.error('Portal sitter thread notify error (non-fatal):', notifyErr);
+    }
+
+    res.json({
+      success: true,
+      message: {
+        id: inserted.rows[0].id,
+        content,
+        created_at: inserted.rows[0].created_at,
+        author: req.portalUser!.name,
+        from_staff: false,
+        mine: true,
+        files: [],
+      },
+    });
+  } catch (error) {
+    console.error('Portal sitter thread post error:', error);
+    res.status(500).json({ error: 'Failed to post handover note' });
+  }
+});
+
 // ── Notification preferences (mirrors the old Monday-backed shape) ───
 //
 // GET  /api/portal/settings/notifications → current mute status
