@@ -79,6 +79,11 @@ export function QuoteEditModal({
   type ChargeMode = 'na' | 'included' | 'not_included' | 'recharge';
   type ExpenseLine = { type: string; description?: string; amount?: number; includedInCharge?: boolean; chargeMode?: ChargeMode };
   const [expenses, setExpenses] = useState<ExpenseLine[] | null>(null);
+  // Only send expenses to the PUT when the user actually touched them.
+  // Sending them unconditionally forces the backend recalc on EVERY save,
+  // which (a) used to clobber manual fee edits, and (b) reprices the quote
+  // from *current* calculator settings even when only a note was edited.
+  const [expensesDirty, setExpensesDirty] = useState(false);
   useEffect(() => {
     if (isLocal) return; // local D&C quotes have no calculator expenses
     let cancelled = false;
@@ -95,18 +100,30 @@ export function QuoteEditModal({
 
   const expMode = (e: ExpenseLine): ChargeMode =>
     e.chargeMode ?? (e.includedInCharge === false ? 'not_included' : 'included');
-  const setExpMode = (i: number, m: ChargeMode) =>
+  const setExpMode = (i: number, m: ChargeMode) => {
+    setExpensesDirty(true);
     setExpenses((prev) => prev ? prev.map((e, idx) => idx === i ? { ...e, chargeMode: m, includedInCharge: m === 'included' } : e) : prev);
-  const setAllExpMode = (m: ChargeMode) =>
+  };
+  const setAllExpMode = (m: ChargeMode) => {
+    setExpensesDirty(true);
     setExpenses((prev) => prev ? prev.map((e) => ({ ...e, chargeMode: m, includedInCharge: m === 'included' })) : prev);
-  const setExpAmount = (i: number, v: number) =>
+  };
+  const setExpAmount = (i: number, v: number) => {
+    setExpensesDirty(true);
     setExpenses((prev) => prev ? prev.map((e, idx) => idx === i ? { ...e, amount: v } : e) : prev);
-  const setExpType = (i: number, t: string) =>
+  };
+  const setExpType = (i: number, t: string) => {
+    setExpensesDirty(true);
     setExpenses((prev) => prev ? prev.map((e, idx) => idx === i ? { ...e, type: t } : e) : prev);
-  const addExpense = () =>
+  };
+  const addExpense = () => {
+    setExpensesDirty(true);
     setExpenses((prev) => [...(prev || []), { type: '', description: '', amount: 0, chargeMode: 'included', includedInCharge: true }]);
-  const removeExpense = (i: number) =>
+  };
+  const removeExpense = (i: number) => {
+    setExpensesDirty(true);
     setExpenses((prev) => prev ? prev.filter((_, idx) => idx !== i) : prev);
+  };
   // Known expense types show a fixed label; anything else gets a type picker so a
   // newly-added line (e.g. a hotel we're now providing) gets the right portal wording.
   const EXP_TYPE_LABELS: Record<string, string> = {
@@ -139,8 +156,10 @@ export function QuoteEditModal({
         freelancer_notes: form.freelancer_notes || null,
         client_charge_rounded: form.client_charge_rounded,
         freelancer_fee_rounded: form.freelancer_fee_rounded,
-        // Only send when we loaded them (recalcs the total + re-flags the job).
-        ...(expenses ? { expenses } : {}),
+        // Only send when the user actually edited them (triggers the backend
+        // recalc + re-flags the job). Untouched expenses stay off the payload
+        // so a fee/notes-only save never reprices the quote.
+        ...(expenses && expensesDirty ? { expenses } : {}),
       });
       await onSaved();
       onClose();
