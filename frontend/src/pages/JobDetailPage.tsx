@@ -5977,7 +5977,7 @@ export default function JobDetailPage() {
               to THIS job — those already show in the merch card on Overview.
               Informational only (not on the prep ticker). Hidden when empty. */}
           {job.client_id && (
-            <div className="mb-4">
+            <div className="empty:hidden mb-4">
               <HeldItemsSection entityType="organisation" entityId={job.client_id}
                 kinds={['incoming', 'temp_storage', 'lost_property']} excludeJobId={job.id}
                 openOnly hideWhenEmpty heading="📦 Also holding (FYI)" />
