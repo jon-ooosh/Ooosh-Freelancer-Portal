@@ -560,6 +560,7 @@ Existing hire form app is NOT being rebuilt — just repointing its data layer f
   - `POST /api/driver-verification/next-step` — routing engine (replaces `get-next-step.js`)
   - `POST /api/driver-verification/update` — partial driver field updates (upsert, whitelisted fields)
   - `GET /api/driver-verification/check-hire-form` — check if hire form exists for job
+  - `GET /api/driver-verification/driver-by-scan-ref?scan_ref=` — resolve driver email from iDenfy scanRef (Jul 2026, see "iDenfy identity resolution" below)
 - [x] Auth: API key (`X-API-Key`), Bearer JWT (hire_form_session type), shared verification secret
 - [x] Document analysis engine + routing engine ported from `get-next-step.js`
 - [x] Mounted in routes/index.ts at `/driver-verification`
@@ -620,6 +621,11 @@ Netlify functions being repointed with `DATA_BACKEND` feature flag (default: `mo
 - [ ] Mid-tour driver surfacing: badge on Fleet on-hire cards + status on Job Detail Drivers tab
 - [ ] Vehicle swap flow (see Phase D3 below)
 - [ ] Monitor for 1-2 weeks, then remove Monday.com fallback code
+
+**iDenfy identity resolution + same-origin return URLs (Jul 2026, Mae/mae-hill.com incident):**
+Two hire-form-app bugs fixed together — full detail in the hire form repo's CLAUDE.md (`ooosh-driver-verification-`).
+- **Never derive a driver's email from the iDenfy clientId.** The clientId encoding is lossy (strips chars outside `[a-z0-9_]` — hyphens pre-fix, still `+`/apostrophes), so the webhook decoded `team@mae-hill.com` as `team@maehill.com` and find-or-created a **phantom driver record**; the real record never got the licence data and the router looped the driver back into iDenfy forever. Convention now: `create-idenfy-session.js` writes the scanRef onto the OP driver row keyed by the RAW email (via `POST /driver-verification/update`); `idenfy-webhook.js` resolves the authoritative email via `GET /driver-verification/driver-by-scan-ref` (clientId decode kept only as fallback for in-flight sessions / OP outage). Watch for phantom records (same driver, hyphen-stripped email variant) if the fallback ever fires for a dash-domain driver on a pre-fix session.
+- **iDenfy success/error URLs must be same-origin with the driver's browser.** The app serves on BOTH `hireforms.oooshtours.co.uk` (what OP's hire-form emails link to) and `ooosh-driver-verification.netlify.app`, with no redirect between them; the session token lives in per-origin sessionStorage. The return URLs were hardcoded to netlify.app, so hireforms-origin drivers came back tokenless → driver-status 401 loop → the "spinning wheel of death" (ProcessingHub also now stops polling on 401 and offers re-verification, and the processing-hub URL handler validates the session like every other step).
 
 **Phase C5 — VE103B Certificate Generation** ✅ COMPLETE (9 Apr 2026)
 VE103B is a UK document authorising a named driver to take a hired vehicle abroad. Printed as text-only overlay onto pre-printed official forms. Replaces manual process + Google Sheets log.
