@@ -6,9 +6,9 @@
  * Route: /shift/[date]   (date = YYYY-MM-DD)
  *
  * One evening's detail for a rostered studio sitter — the whole-building night:
- * envelope times, the per-night fee, and who's in each room (with each job's
- * shared specs / stage plots). Read-only in this slice; the handover thread and
- * end-of-day lock-up report land in later slices.
+ * envelope times, the per-night fee, who's in each room (with each job's shared
+ * specs / stage plots), and the sitter ⇄ staff handover thread. The end-of-day
+ * lock-up report lands in a later slice.
  */
 
 import { useEffect, useState, useCallback } from 'react'
@@ -43,6 +43,16 @@ interface ShiftDetail {
   assignment_status: string | null
   jobs: ShiftJob[]
   error?: string
+}
+
+interface ThreadMessage {
+  id: string
+  content: string
+  created_at: string
+  author: string
+  from_staff: boolean
+  mine: boolean
+  files: SharedFile[]
 }
 
 // =============================================================================
@@ -84,6 +94,19 @@ function formatFee(amount: number | null): string {
   return `£${amount.toFixed(0)}`
 }
 
+/** ISO timestamp → "Thu 10 Jul, 5:32pm" (short, for handover messages). */
+function formatMessageTime(iso: string): string {
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return ''
+  const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+  const h = d.getHours()
+  const ampm = h >= 12 ? 'pm' : 'am'
+  const hh = h % 12 || 12
+  const mm = String(d.getMinutes()).padStart(2, '0')
+  return `${days[d.getDay()]} ${d.getDate()} ${months[d.getMonth()]}, ${hh}:${mm}${ampm}`
+}
+
 function fileIcon(fileType: string | null): string {
   const t = (fileType || '').toLowerCase()
   if (t.includes('pdf')) return '📄'
@@ -103,6 +126,49 @@ export default function ShiftDetailPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [shift, setShift] = useState<ShiftDetail | null>(null)
+
+  // Handover thread
+  const [messages, setMessages] = useState<ThreadMessage[]>([])
+  const [draft, setDraft] = useState('')
+  const [posting, setPosting] = useState(false)
+  const [postError, setPostError] = useState<string | null>(null)
+
+  const fetchThread = useCallback(async () => {
+    try {
+      const response = await fetch(`/api/studio-sitter/shifts/${date}/thread`)
+      const data = await response.json()
+      if (response.ok && data.success) {
+        setMessages(data.messages || [])
+      }
+    } catch (err) {
+      console.error('Failed to load handover notes:', err)
+    }
+  }, [date])
+
+  const postNote = useCallback(async () => {
+    const content = draft.trim()
+    if (!content || posting) return
+    setPosting(true)
+    setPostError(null)
+    try {
+      const response = await fetch(`/api/studio-sitter/shifts/${date}/thread`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content }),
+      })
+      const data = await response.json()
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || 'Failed to post note')
+      }
+      setMessages((prev) => [...prev, data.message])
+      setDraft('')
+    } catch (err) {
+      console.error('Failed to post note:', err)
+      setPostError(err instanceof Error ? err.message : 'Failed to post note')
+    } finally {
+      setPosting(false)
+    }
+  }, [draft, posting, date])
 
   const fetchShift = useCallback(async () => {
     setLoading(true)
@@ -127,8 +193,11 @@ export default function ShiftDetailPage() {
   }, [date, router])
 
   useEffect(() => {
-    if (date) fetchShift()
-  }, [date, fetchShift])
+    if (date) {
+      fetchShift()
+      fetchThread()
+    }
+  }, [date, fetchShift, fetchThread])
 
   const envelope = shift ? formatEnvelope(shift.planned_start, shift.planned_end) : null
   const isConfirmed = shift?.assignment_status === 'confirmed'
@@ -255,6 +324,84 @@ export default function ShiftDetailPage() {
                   ))}
                 </div>
               )}
+            </section>
+
+            {/* Handover notes (sitter ⇄ staff thread) */}
+            <section>
+              <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-1">
+                Handover notes
+              </h2>
+              <p className="text-xs text-gray-400 mb-3">
+                Anything the next sitter or the office needs to know — jobs for tonight, money owed,
+                things left undone.
+              </p>
+
+              {messages.length > 0 && (
+                <div className="space-y-2 mb-3">
+                  {messages.map((m) => (
+                    <div
+                      key={m.id}
+                      className={`rounded-xl border p-3 shadow-sm ${
+                        m.from_staff
+                          ? 'bg-ooosh-50 border-ooosh-100'
+                          : 'bg-white border-gray-100'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2 mb-1">
+                        <span className="text-xs font-semibold text-gray-700">
+                          {m.mine ? 'You' : m.author}
+                          {m.from_staff && (
+                            <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded-full bg-ooosh-100 text-ooosh-700 font-medium uppercase tracking-wide">
+                              Ooosh office
+                            </span>
+                          )}
+                        </span>
+                        <span className="text-[11px] text-gray-400 shrink-0">
+                          {formatMessageTime(m.created_at)}
+                        </span>
+                      </div>
+                      <p className="text-sm text-gray-800 whitespace-pre-wrap break-words">{m.content}</p>
+                      {m.files && m.files.length > 0 && (
+                        <div className="mt-2 space-y-1">
+                          {m.files.map((file, idx) => (
+                            <a
+                              key={`${m.id}-${idx}`}
+                              href={file.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="flex items-center gap-2 text-sm text-ooosh-600 hover:text-ooosh-500"
+                            >
+                              <span>{fileIcon(file.fileType)}</span>
+                              <span className="truncate">{file.name}</span>
+                            </a>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Composer */}
+              <div className="bg-white rounded-xl border border-gray-100 p-3 shadow-sm">
+                <textarea
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  placeholder="Add a note…"
+                  rows={3}
+                  className="w-full text-sm border border-gray-200 rounded-lg p-2 focus:outline-none focus:ring-2 focus:ring-ooosh-200 focus:border-ooosh-300 resize-y min-h-[64px]"
+                />
+                {postError && <p className="text-xs text-red-600 mt-1">{postError}</p>}
+                <div className="mt-2 flex justify-end">
+                  <button
+                    onClick={postNote}
+                    disabled={!draft.trim() || posting}
+                    className="text-sm font-medium px-4 py-2 rounded-lg bg-ooosh-600 text-white hover:bg-ooosh-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  >
+                    {posting ? 'Posting…' : 'Post note'}
+                  </button>
+                </div>
+              </div>
             </section>
           </>
         ) : null}

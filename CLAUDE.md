@@ -1667,10 +1667,21 @@ These originate outside HH entirely — client sends stuff to us, or items found
     are OP-native). Backend `getSitterShiftDetail(date, personId?)` was enriched to also return the
     shift envelope + the requesting sitter's fee/assignment status so the detail page is
     self-sufficient on a direct load/refresh (portal route now passes `req.portalUser.id`).
-  - **Slice 3 (NEXT):** handover thread (needs `interactions.shift_id` migration + the `IS NULL` scoping
-    guard; note freelancer-authored interactions need a created_by workaround — `interactions.created_by`
-    is a `users(id)` FK and sitters are people/freelancers, not users — likely SYSTEM_USER_ID + author
-    name, or a new author column).
+  - **Slice 3 SHIPPED (handover thread, two-way):** migration **164** adds `interactions.shift_id`
+    (FK → `studio_sitter_shifts`, `ON DELETE SET NULL`) + `interactions.author_name` (display name for
+    non-user authors). Freelancer-authored notes store `created_by = NULL` + `author_name` (sitters are
+    people, not `users`); the read layer prefers `author_name`, else the `users → people` name. The
+    `shift_id IS NULL` scoping guard was added to the person/org/job/venue reads in `routes/interactions.ts`
+    (mirrors `issue_id`), plus a `?shift_id=` filter + INSERT/parent-inherit/entity-wiring support.
+    **Portal:** `GET`/`POST /api/portal/studio-sitter/shifts/:date/thread` (`routes/portal.ts`) — flat
+    chronological log, access-gated (rostered sitter or shared staff account); a sitter post fires a
+    **low-priority bell (no email)** to prior staff participants of that thread. Portal UI: a "Handover
+    notes" section on `src/app/shift/[date]/page.tsx` (read + composer). **Staff:** a per-row "💬 Notes"
+    panel (`ShiftNotes`) on `StudioSittersPage` reading/posting `/api/interactions?shift_id=`.
+    *Deferred:* @mention autocomplete in the staff composer (plain textarea for now — mentions still
+    work via the generic API), file attachments on shift notes, and notifying staff of a sitter's
+    *first* note before any staff have engaged the thread (staff see it via the roster Notes panel).
+  - **Slice 4 (NEXT):** end-of-day lock-up report — Phase E (see below).
 - **General Tasks system** (build with/after D): `tasks` table (anchor to shift/job/nothing),
   visibility everyone/assignee-only, notify-on-done + notify-if-not-done-after-X-days, **staff via
   bell/email, freelancers portal-only (no bell/email)**; dashboard top-right card + "On Today" +
