@@ -179,6 +179,48 @@ router.get('/status', authenticateHireForm, async (req: HireFormRequest, res: Re
 });
 
 // ============================================================================
+// GET /api/driver-verification/driver-by-scan-ref — Resolve email from scanRef
+// ============================================================================
+// The iDenfy webhook resolves the driver's email via the scanRef stored at
+// session-creation time, because the iDenfy clientId encoding is LOSSY
+// (sanitizeEmailForClientId strips hyphens etc. — team@mae-hill.com decoded
+// back as team@maehill.com and created a phantom driver record, Jul 2026).
+// create-idenfy-session.js writes idenfy_scan_ref onto the driver row (keyed
+// by the RAW email) via POST /update; the webhook calls this endpoint to get
+// the authoritative email back. clientId decode remains only as a fallback.
+
+router.get('/driver-by-scan-ref', authenticateHireForm, async (req: HireFormRequest, res: Response) => {
+  try {
+    const scanRef = String(req.query.scan_ref || '').trim();
+    if (!scanRef || scanRef.length > 100) {
+      res.status(400).json({ error: 'scan_ref query parameter required' });
+      return;
+    }
+
+    const result = await query(
+      `SELECT id, email FROM drivers
+       WHERE idenfy_scan_ref = $1 AND is_active = true
+       ORDER BY updated_at DESC LIMIT 1`,
+      [scanRef]
+    );
+
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'No driver found for scan_ref' });
+      return;
+    }
+
+    res.json({
+      success: true,
+      driverId: result.rows[0].id,
+      email: result.rows[0].email,
+    });
+  } catch (error) {
+    console.error('[driver-verification] driver-by-scan-ref error:', error);
+    res.status(500).json({ error: 'Failed to resolve driver by scan_ref' });
+  }
+});
+
+// ============================================================================
 // POST /api/driver-verification/next-step — Routing engine
 // ============================================================================
 
