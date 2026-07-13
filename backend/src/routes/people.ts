@@ -763,4 +763,219 @@ router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// ── Freelancer History (assignment-grained: crew/transport + studio sitter ──
+// ── shifts + driven vehicle assignments — past + upcoming, incl. cancelled) ──
+
+router.get('/:id/freelancer-history', async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const limit = Math.min(parseInt(req.query.limit as string) || 500, 1000);
+    const offset = parseInt(req.query.offset as string) || 0;
+
+    // Three sources, merged in JS (cleaner than a UNION with heavy type
+    // coercion). Deliberately NO status filter — cancelled/declined rows are
+    // the point of this view (contrast: hire-history excludes cancelled crew).
+
+    // 1. Crew / transport assignments (quote_assignments → quotes → jobs).
+    //    LEFT JOIN jobs so local D&C quotes with NULL job_id survive.
+    const crewPromise = query(
+      `SELECT qa.id, qa.role, qa.status AS assignment_status,
+              qa.agreed_rate, qa.rate_type,
+              q.id AS quote_id, q.job_type, q.is_local, q.venue_name, q.client_name,
+              q.job_date::text AS job_date, q.job_finish_date::text AS job_finish_date,
+              q.freelancer_fee, q.freelancer_fee_rounded,
+              q.status AS quote_status, q.ops_status,
+              rg.combined_freelancer_fee AS run_combined_fee,
+              j.id AS job_id, j.hh_job_number, j.job_name, j.pipeline_status
+       FROM quote_assignments qa
+       JOIN quotes q ON q.id = qa.quote_id AND q.is_deleted = false
+       LEFT JOIN run_groups rg ON rg.id = q.run_group
+       LEFT JOIN jobs j ON j.id = q.job_id AND j.is_deleted = false
+       WHERE qa.person_id = $1`,
+      [id]
+    );
+
+    // 2. Studio sitter shifts — ALL assignment statuses (getSitterShifts in
+    //    services/studio-sitter.ts filters out declined/cancelled; here we
+    //    deliberately include them).
+    const sitterPromise = query(
+      `SELECT a.id, a.status AS assignment_status, a.fee,
+              s.shift_date::text AS shift_date, s.planned_start, s.planned_end
+       FROM studio_sitter_shift_assignments a
+       JOIN studio_sitter_shifts s ON s.id = a.shift_id
+       WHERE a.person_id = $1`,
+      [id]
+    );
+
+    // 3. Driven vehicle assignments (V&D etc). Dual-match job join — staff
+    //    allocation rows may carry only hirehop_job_id (see CLAUDE.md).
+    const vehiclePromise = query(
+      `SELECT vha.id, vha.assignment_type, vha.status AS assignment_status,
+              vha.hire_start::text AS hire_start, vha.hire_end::text AS hire_end,
+              fv.reg AS vehicle_reg,
+              j.id AS job_id, j.hh_job_number, j.job_name, j.pipeline_status
+       FROM vehicle_hire_assignments vha
+       LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+       LEFT JOIN jobs j
+         ON ((vha.job_id IS NOT NULL AND j.id = vha.job_id)
+             OR (vha.job_id IS NULL AND j.hh_job_number = vha.hirehop_job_id))
+        AND j.is_deleted = false
+       WHERE vha.freelancer_person_id = $1`,
+      [id]
+    );
+
+    const [crewRes, sitterRes, vehicleRes] = await Promise.all([
+      crewPromise, sitterPromise, vehiclePromise,
+    ]);
+
+    const toNum = (v: any): number | null =>
+      v === null || v === undefined || v === '' ? null : Number(v);
+
+    interface FreelancerHistoryItem {
+      source: 'crew' | 'sitter' | 'vehicle';
+      id: string;
+      title: string;
+      role: string | null;
+      job_type: string | null;
+      is_local: boolean | null;
+      date_start: string | null;
+      date_end: string | null;
+      fee: number | null;
+      assignment_status: string;
+      quote_ops_status: string | null;
+      pipeline_status: string | null;
+      hh_job_number: number | null;
+      job_id: string | null;
+      quote_id: string | null;
+      venue_name: string | null;
+      client_name: string | null;
+      vehicle_reg: string | null;
+      run_combined_fee: number | null;
+    }
+
+    const items: FreelancerHistoryItem[] = [];
+
+    for (const r of crewRes.rows) {
+      // Fee for display: person's agreed rate wins, else quote-level fee.
+      const fee = toNum(r.agreed_rate) ?? toNum(r.freelancer_fee_rounded) ?? toNum(r.freelancer_fee);
+      items.push({
+        source: 'crew',
+        id: r.id,
+        title: r.job_name || r.client_name || r.venue_name || 'Crew / transport job',
+        role: r.role || null,
+        job_type: r.job_type || null,
+        is_local: r.is_local ?? null,
+        date_start: r.job_date || null,
+        date_end: r.job_finish_date || r.job_date || null,
+        fee,
+        assignment_status: r.assignment_status,
+        quote_ops_status: r.ops_status || null,
+        pipeline_status: r.pipeline_status || null,
+        hh_job_number: r.hh_job_number ?? null,
+        job_id: r.job_id || null,
+        quote_id: r.quote_id || null,
+        venue_name: r.venue_name || null,
+        client_name: r.client_name || null,
+        vehicle_reg: null,
+        run_combined_fee: toNum(r.run_combined_fee),
+      });
+    }
+
+    for (const r of sitterRes.rows) {
+      items.push({
+        source: 'sitter',
+        id: r.id,
+        title: 'Studio Sitter',
+        role: 'Studio Sitter',
+        job_type: null,
+        is_local: null,
+        date_start: r.shift_date || null,
+        date_end: r.shift_date || null,
+        fee: toNum(r.fee),
+        assignment_status: r.assignment_status,
+        quote_ops_status: null,
+        pipeline_status: null,
+        hh_job_number: null,
+        job_id: null,
+        quote_id: null,
+        venue_name: null,
+        client_name: null,
+        vehicle_reg: null,
+        run_combined_fee: null,
+      });
+    }
+
+    for (const r of vehicleRes.rows) {
+      items.push({
+        source: 'vehicle',
+        id: r.id,
+        title: r.job_name || r.vehicle_reg || 'Vehicle assignment',
+        role: r.assignment_type || null,
+        job_type: null,
+        is_local: null,
+        date_start: r.hire_start || null,
+        date_end: r.hire_end || r.hire_start || null,
+        fee: null, // driven-assignment pay lives on the crew quote, not the VHA row
+        assignment_status: r.assignment_status,
+        quote_ops_status: null,
+        pipeline_status: r.pipeline_status || null,
+        hh_job_number: r.hh_job_number ?? null,
+        job_id: r.job_id || null,
+        quote_id: null,
+        venue_name: null,
+        client_name: null,
+        vehicle_reg: r.vehicle_reg || null,
+        run_combined_fee: null,
+      });
+    }
+
+    // Sort date_start DESC, nulls last (frontend splits upcoming/past)
+    items.sort((a, b) => {
+      if (!a.date_start && !b.date_start) return 0;
+      if (!a.date_start) return 1;
+      if (!b.date_start) return -1;
+      return b.date_start.localeCompare(a.date_start);
+    });
+
+    // Summary stats over the WHOLE set (not the page).
+    // fees_ytd rule: sum of fee across non-cancelled/non-declined items whose
+    // date_start falls in the current calendar year — past AND booked-ahead
+    // within this year both count (deliberately simple).
+    const DEAD = new Set(['cancelled', 'declined']);
+    const today = new Date().toISOString().slice(0, 10);
+    const yearPrefix = today.slice(0, 4);
+
+    let totalGigs = 0;
+    let upcomingCount = 0;
+    let declinedCount = 0;
+    let cancelledCount = 0;
+    let feesYtd = 0;
+    for (const it of items) {
+      if (it.assignment_status === 'declined') declinedCount++;
+      if (it.assignment_status === 'cancelled') cancelledCount++;
+      if (DEAD.has(it.assignment_status)) continue;
+      totalGigs++;
+      const endDate = it.date_end || it.date_start;
+      if (endDate && endDate >= today) upcomingCount++;
+      if (it.date_start && it.date_start.startsWith(yearPrefix) && it.fee != null) {
+        feesYtd += it.fee;
+      }
+    }
+
+    res.json({
+      summary: {
+        total_gigs: totalGigs,
+        upcoming_count: upcomingCount,
+        declined_count: declinedCount,
+        cancelled_count: cancelledCount,
+        fees_ytd: Math.round(feesYtd * 100) / 100,
+      },
+      items: items.slice(offset, offset + limit),
+    });
+  } catch (error) {
+    console.error('Freelancer history error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 export default router;
