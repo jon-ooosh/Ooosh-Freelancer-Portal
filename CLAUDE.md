@@ -1714,19 +1714,53 @@ These originate outside HH entirely — client sends stuff to us, or items found
     (shared-file) shapes + presigns `files/` keys. Attachment-only notes store `content='(attachment)'`
     (NOT NULL guard) and hide the placeholder on render. Deferred: thumbnail generation (images render
     full-size via presigned URL / auth blob), and per-message read receipts.
-  - **Slice 4 (NEXT):** end-of-day lock-up report — Phase E (see below).
+    **Two post-launch attach fixes (Jul 2026):** (1) the portal `onChange` read `Array.from(e.target.files)`
+    INSIDE the deferred setState updater while `e.target.value=''` ran synchronously first and emptied the
+    FileList → no chip. Capture the array BEFORE the reset (staff `useAttachments` + completion `PhotoCapture`
+    both read synchronously — the pattern to follow). Portal chips now show an image thumbnail (objectURL,
+    revoked on remove/post). (2) The multipart forward used `f instanceof File`, but **`File` is not a global
+    in Netlify's Node runtime** (only `Blob` is) → `ReferenceError` → 502. Iterate `formData` entries as
+    `string | Blob`, treat non-string as a file, materialise each to a fresh `Blob` before re-forwarding.
+    **Convention: never reference the `File` global in a Next.js route handler — use `Blob` / duck-type.**
+    The 3 OP-native sitter Next.js routes also had their `reportFallback` (Monday-fallback telemetry) calls
+    removed — sitters never had a Monday board, so a 5xx firing a "fell back to Monday" alert was wrong.
+  - **Slice 4 (NEXT): end-of-day lock-up report — Phase E (plan locked with jon, Jul 2026).**
+    Port of Jotform `203154178314046`, configurable, soft, no PDF. **Surface:** a dedicated
+    **"🔒 Finish for the night"** sub-page at `/shift/[date]/lockup` on the portal (reached from a button
+    at the bottom of the shift page — mirrors the Start-delivery→finish flow). **Storage:** a small
+    migration adds the 4 `report_*` columns to `studio_sitter_shifts` (`report_answers JSONB`,
+    `report_template_version INT`, `report_submitted_by`, `report_submitted_at`) — the spec §4.1 listed
+    them but migration 153 didn't add them; the `closed` status already exists. **Template + reference
+    photos** live in `system_settings` (category `studio_sitter`), admin-editable in Settings (OOH-returns
+    pattern), seeded with the Jotform content. **"Continuing tomorrow?" is DERIVED, not asked** (jon's
+    call) — compute from the site's rehearsal schedule whether there's a session at the studio the next
+    day, pre-fill + leave overridable; that auto-gates the end-of-booking deep-clean items. **Expected-answer
+    flagging** (jon's enhancement) — each checklist item carries an `expected` value in the template; an
+    off-expected answer (e.g. "doors bolted = No") is flagged, submit shows "N items need attention", and
+    the **staff read-only view highlights only the exceptions**. **On submit:** shift → `closed`; the
+    free-text "anything we need to know / money owed / items taken" posts into the shift handover thread
+    (replyable — the Jotform-dead-end fix); lost property deep-links to Holding; staff get a bell + email.
+    **Staff view:** full read-only answers on the roster / Job Detail card + "submitted ✓ (who/when)",
+    exceptions highlighted. **Not-submitted accountability chaser** (always-fires, like the completion
+    chaser) = fast-follow, can be same PR or next.
 - **General Tasks system** (build with/after D): `tasks` table (anchor to shift/job/nothing),
   visibility everyone/assignee-only, notify-on-done + notify-if-not-done-after-X-days, **staff via
   bell/email, freelancers portal-only (no bell/email)**; dashboard top-right card + "On Today" +
   sitter portal; Today/Tomorrow/Upcoming/Overdue views.
 - **Handover thread**: `interactions` anchored to a new `shift_id` (mirror the `issue_id`/
   `held_item_id` pattern + the `IS NULL` scoping guard so it doesn't bubble onto other timelines).
-- **End-of-day report** (Phase E): configurable lock-up checklist in `system_settings` (ported from
-  Jotform `203154178314046`, no PDF), notes → shift thread so staff can reply, "continuing tomorrow"
-  gates deep-clean items, lost-property/held-items deep-links, + a "report not submitted"
-  accountability chaser.
+- **End-of-day report** (Phase E): see the **"Slice 4 (NEXT)"** bullet above for the locked plan
+  (dedicated `/shift/[date]/lockup` sub-page, `system_settings` template + `report_*` columns migration,
+  DERIVED continuing-tomorrow, expected-answer flagging, notes → thread, staff read-only view + chaser).
 - **Calendar endpoint** (Phase F): `GET /api/studio-sitters/calendar?from&to` for the future
   calendar project (roster row shape already close).
+- **Monday.com teardown (cleanup, Jul 2026 — Monday fully retired):** the `reportFallback` /
+  `DATA_BACKEND` / Monday-fallback machinery across the *legacy* portal routes (jobs, completion, auth,
+  warehouse, etc.) is now dead weight + an alert-noise source (a stray sitter-thread 5xx fired a
+  "[Portal fallback] fell back to Monday" email). A dedicated teardown PR should remove it repo-wide
+  (`src/lib/monday.ts`, the `isOpMode()` branches, `mondayFallbackAllowed`, `reportFallback`, the Monday
+  webhook routes). Immediate silence lever meanwhile: unset `PORTAL_TELEMETRY_SECRET` on Netlify
+  (`reportFallback` no-ops without it). The 3 studio-sitter routes are already clean.
 - **Shop sales**: deferred, out of scope (substantial, cross-cutting).
 - **Rehearsal job info beyond sitters (TODO — jon flagged Jul 2026):** the Rehearsals module
   should grow past studio-sitter cover to be the single place for everything about a studio job.
