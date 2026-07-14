@@ -15,7 +15,7 @@ import { runEmailRetentionSweep } from '../services/email-retention';
 import { draftChaseEmail, learnChaseVoice } from '../services/chase-draft';
 import { createChaseDraftForJob } from '../services/gmail-draft';
 import { getJobCommsSummaryStatus, generateJobCommsSummary } from '../services/comms-summary';
-import { backfillOpenPipelineThreads } from '../services/gmail-backfill';
+import { backfillOpenPipelineThreads, type BackfillScope, type BackfillSummary } from '../services/gmail-backfill';
 import { isAnthropicConfigured } from '../config/anthropic';
 import { isGmailConfigured } from '../config/gmail';
 
@@ -119,22 +119,76 @@ router.post('/preview-draft/:jobId', authorize('admin', 'manager'), async (req: 
   }
 });
 
-// POST /api/auto-chase/backfill — one-off cold-start pass: search the mailbox
-// for each open-pipeline job's HH number and ingest the matching thread(s) onto
-// that job. Idempotent (RFC822 dedup), so safe to run repeatedly a limit at a
-// time. Body: { limit?: number (default 50, max 200), dryRun?: boolean }. Admin.
+// One-off cold-start pass: search the mailbox for each in-scope job's HH number
+// and ingest the matching thread(s) onto that job. Idempotent (RFC822 dedup).
+//
+// A real run over the whole open pipeline fetches hundreds of Gmail threads +
+// ingests thousands of messages — minutes of work, well past nginx's proxy
+// timeout. So a real run executes in the BACKGROUND: POST kicks it off and
+// returns immediately; GET polls live progress. A dry run (search + count, no
+// ingest) is fast, so it stays synchronous. State is in-memory (single process,
+// one-off op — a deploy mid-run just means re-run; dedup makes that safe).
+let backfillState: {
+  running: boolean;
+  startedAt: string;
+  finishedAt: string | null;
+  summary: BackfillSummary;
+} | null = null;
+
+// POST /api/auto-chase/backfill — start a run (or return a dry-run result).
+// Body: { limit?: number (default 500, max 1000), dryRun?: boolean,
+//         scope?: 'enquiries' | 'active' | 'all' (default 'active') }. Admin.
 router.post('/backfill', authorize('admin'), async (req: AuthRequest, res: Response) => {
   if (!isGmailConfigured()) {
     return res.status(503).json({ error: 'Gmail not configured — nothing to backfill.' });
   }
-  try {
-    const body = (req.body || {}) as { limit?: number; dryRun?: boolean };
-    const summary = await backfillOpenPipelineThreads({ limit: body.limit, dryRun: body.dryRun });
-    res.json({ data: summary });
-  } catch (error) {
-    console.error('[auto-chase] backfill error:', error);
-    res.status(500).json({ error: 'Backfill run failed' });
+  const body = (req.body || {}) as { limit?: number; dryRun?: boolean; scope?: BackfillScope };
+
+  // Dry run is fast — count synchronously.
+  if (body.dryRun) {
+    try {
+      const summary = await backfillOpenPipelineThreads({ limit: body.limit, dryRun: true, scope: body.scope });
+      return res.json({ data: summary });
+    } catch (error) {
+      console.error('[auto-chase] backfill dry-run error:', error);
+      return res.status(500).json({ error: 'Backfill dry-run failed' });
+    }
   }
+
+  if (backfillState?.running) {
+    return res.status(409).json({
+      error: 'A backfill is already running — poll GET /api/auto-chase/backfill for progress.',
+      data: { running: true, startedAt: backfillState.startedAt, ...backfillState.summary },
+    });
+  }
+
+  // Start a background run; return immediately with a pollable state.
+  // Initial scope is provisional — the service validates + overwrites it.
+  const summary: BackfillSummary = {
+    configured: true, dryRun: false, scope: body.scope ?? 'active',
+    jobsScanned: 0, jobsWithHits: 0, threadsScanned: 0, logged: 0, skipped: 0, duplicates: 0,
+  };
+  backfillState = { running: true, startedAt: new Date().toISOString(), finishedAt: null, summary };
+  backfillOpenPipelineThreads({ limit: body.limit, scope: body.scope, sink: summary })
+    .catch((err) => { summary.error = err instanceof Error ? err.message : String(err); })
+    .finally(() => {
+      if (backfillState) { backfillState.running = false; backfillState.finishedAt = new Date().toISOString(); }
+    });
+
+  res.json({ data: { started: true, startedAt: backfillState.startedAt, scope: summary.scope } });
+});
+
+// GET /api/auto-chase/backfill — poll the last/current background run's progress.
+router.get('/backfill', authorize('admin', 'manager'), (_req: AuthRequest, res: Response) => {
+  if (!backfillState) return res.json({ data: { running: false, neverRun: true } });
+  res.json({
+    data: {
+      running: backfillState.running,
+      startedAt: backfillState.startedAt,
+      finishedAt: backfillState.finishedAt,
+      ...backfillState.summary,
+    },
+  });
 });
 
 // POST /api/auto-chase/create-draft/:jobId — generate the AI chase AND create it

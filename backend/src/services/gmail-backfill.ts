@@ -24,9 +24,30 @@ import { ingestGmailMessage, type GmailMessage } from './gmail-ingestion';
 
 const MAX_THREADS_PER_JOB = 5; // guard against a runaway thread fan-out per job
 
+// Which pipeline stages to backfill. Lost/cancelled are always excluded.
+//  - enquiries: pre-confirmation only (the original chase-draft use case)
+//  - active:    enquiries + confirmed + upcoming/out hires (default — covers
+//               "confirmed but not yet back" so their threads + summaries land)
+//  - all:       active + finished hires too (fullest dispute history; largest)
+export type BackfillScope = 'enquiries' | 'active' | 'all';
+
+const PIPELINE_SETS: Record<BackfillScope, string[]> = {
+  enquiries: ['new_enquiry', 'quoting', 'paused', 'provisional'],
+  active: [
+    'new_enquiry', 'quoting', 'paused', 'provisional',
+    'confirmed', 'prepped', 'prepping', 'dispatched',
+  ],
+  all: [
+    'new_enquiry', 'quoting', 'paused', 'provisional',
+    'confirmed', 'prepped', 'prepping', 'dispatched',
+    'returned_incomplete', 'returned', 'completed',
+  ],
+};
+
 export interface BackfillSummary {
   configured: boolean;
   dryRun: boolean;
+  scope: BackfillScope;
   jobsScanned: number;
   jobsWithHits: number;
   threadsScanned: number;
@@ -43,15 +64,21 @@ interface GmailThread {
 
 /**
  * Backfill historical email threads onto open-pipeline jobs.
- * @param opts.limit  how many jobs to process this run (default 50, max 200)
+ * @param opts.limit  how many jobs to process this run (default 500, max 1000)
  * @param opts.dryRun search + count threads but ingest nothing
+ * @param opts.scope  which pipeline stages to cover (default 'active')
+ * @param opts.sink   optional summary object to write live progress INTO (so a
+ *                    background caller can poll counters mid-run). If omitted a
+ *                    fresh summary is used. Either way it's returned.
  */
 export async function backfillOpenPipelineThreads(
-  opts: { limit?: number; dryRun?: boolean } = {},
+  opts: { limit?: number; dryRun?: boolean; scope?: BackfillScope; sink?: BackfillSummary } = {},
 ): Promise<BackfillSummary> {
-  const summary: BackfillSummary = {
+  const scope: BackfillScope = opts.scope && PIPELINE_SETS[opts.scope] ? opts.scope : 'active';
+  const summary: BackfillSummary = opts.sink ?? {
     configured: isGmailConfigured(),
     dryRun: Boolean(opts.dryRun),
+    scope,
     jobsScanned: 0,
     jobsWithHits: 0,
     threadsScanned: 0,
@@ -59,23 +86,27 @@ export async function backfillOpenPipelineThreads(
     skipped: 0,
     duplicates: 0,
   };
+  // Keep provided sink's descriptive fields in sync with this run.
+  summary.configured = isGmailConfigured();
+  summary.dryRun = Boolean(opts.dryRun);
+  summary.scope = scope;
   if (!summary.configured) return summary;
 
-  const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
+  const limit = Math.min(Math.max(opts.limit ?? 500, 1), 1000);
   const mailbox = getPrimaryMailbox();
+  const statuses = PIPELINE_SETS[scope];
 
   try {
-    // Open pipeline jobs that have an HH number to search on. Most recently
-    // touched first, so a capped run covers the freshest enquiries.
+    // In-scope jobs with an HH number to search on. Most recently touched first.
     const jobs = await query(
       `SELECT id, hh_job_number
          FROM jobs
         WHERE is_deleted = false
           AND hh_job_number IS NOT NULL
-          AND pipeline_status IN ('new_enquiry','quoting','paused','provisional','confirmed')
+          AND pipeline_status = ANY($1::text[])
         ORDER BY updated_at DESC
-        LIMIT $1`,
-      [limit],
+        LIMIT $2`,
+      [statuses, limit],
     );
 
     for (const job of jobs.rows) {
