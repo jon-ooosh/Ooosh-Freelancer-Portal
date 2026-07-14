@@ -1246,6 +1246,20 @@ function ChaseVoiceSettingsSection() {
   // Master auto-send switch (§10). Off = jobs set to Auto-send only create drafts.
   const [sendEnabled, setSendEnabled] = useState(false);
   const [sendSaving, setSendSaving] = useState(false);
+  // Default sign-off name for AUTOMATED chases (manual drafts use the clicker).
+  const [senderName, setSenderName] = useState('');
+  const [senderOrig, setSenderOrig] = useState('');
+  const [senderSaving, setSenderSaving] = useState(false);
+
+  async function saveSenderName() {
+    setSenderSaving(true);
+    try {
+      await api.put('/system-settings', { settings: { chase_default_sender_name: senderName.trim() === '' ? null : senderName.trim() } });
+      setSenderOrig(senderName.trim());
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not save the sender name');
+    } finally { setSenderSaving(false); }
+  }
 
   useEffect(() => { load(); }, []);
 
@@ -1280,6 +1294,9 @@ function ChaseVoiceSettingsSection() {
       setOrig(v);
       setVal(v);
       setSendEnabled(res.data.find(s => s.key === 'auto_chase_send_enabled')?.value === 'true');
+      const sn = res.data.find(s => s.key === 'chase_default_sender_name')?.value ?? '';
+      setSenderName(sn);
+      setSenderOrig(sn);
     } catch {
       setError('Could not load chase settings (has migration 157 run?).');
     } finally { setLoading(false); }
@@ -1328,6 +1345,32 @@ function ChaseVoiceSettingsSection() {
         >
           <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${sendEnabled ? 'translate-x-6' : 'translate-x-1'}`} />
         </button>
+      </div>
+
+      {/* Default sign-off for AUTOMATED chases (manual "Draft chase" uses the
+          clicker's name; the runner uses the job's manager, then this). */}
+      <div className="mb-5">
+        <label className="block text-sm font-medium text-gray-700 mb-1">Automated chase sign-off</label>
+        <p className="text-xs text-gray-500 mb-2">
+          Name automated chases sign off with when a job has no assigned manager (blank = “the Ooosh team”).
+          Manual drafts always sign off with whoever clicked.
+        </p>
+        <div className="flex items-center gap-2">
+          <input
+            type="text"
+            value={senderName}
+            onChange={(e) => setSenderName(e.target.value)}
+            placeholder="e.g. Will"
+            className="w-48 border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+          />
+          <button
+            onClick={saveSenderName}
+            disabled={senderSaving || senderName.trim() === senderOrig.trim()}
+            className="px-3 py-1.5 bg-ooosh-600 text-white rounded text-sm disabled:opacity-50"
+          >
+            {senderSaving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
       </div>
 
       <textarea
