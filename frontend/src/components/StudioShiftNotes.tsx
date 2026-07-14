@@ -8,8 +8,9 @@
  * (URLs auto-linkified on render); image/PDF attachments land in a follow-up.
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../services/api';
+import { AttachmentList, PendingAttachmentStrip, useAttachments, type InteractionAttachment } from './messaging/Attachments';
 
 interface ShiftMessage {
   id: string;
@@ -18,6 +19,7 @@ interface ShiftMessage {
   created_by: string | null;
   created_by_name: string | null;
   author_name: string | null;
+  files?: InteractionAttachment[];
 }
 
 function formatMessageTime(iso: string): string {
@@ -58,6 +60,8 @@ export default function StudioShiftNotes({ shiftId }: { shiftId: string }) {
   const [draft, setDraft] = useState('');
   const [posting, setPosting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const attach = useAttachments();
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const loadNotes = useCallback(async () => {
     setLoading(true);
@@ -74,14 +78,25 @@ export default function StudioShiftNotes({ shiftId }: { shiftId: string }) {
 
   useEffect(() => { loadNotes(); }, [loadNotes]);
 
+  const attachments = attach.payload();
+  const canPost = (!!draft.trim() || attachments.length > 0) && !posting && !attach.hasInFlight;
+
   async function post() {
     const content = draft.trim();
-    if (!content || posting) return;
+    if ((!content && attachments.length === 0) || posting || attach.hasInFlight) return;
     setPosting(true);
     setErr(null);
     try {
-      await api.post('/interactions', { type: 'note', content, shift_id: shiftId });
+      // Content is required by the interactions schema — fall back to a
+      // placeholder when the message is attachment-only.
+      await api.post('/interactions', {
+        type: 'note',
+        content: content || '(attachment)',
+        shift_id: shiftId,
+        attachments,
+      });
       setDraft('');
+      attach.clear();
       await loadNotes();
     } catch {
       setErr('Could not post note');
@@ -112,22 +127,33 @@ export default function StudioShiftNotes({ shiftId }: { shiftId: string }) {
                   </span>
                   <span className="text-[11px] text-gray-400 shrink-0">{formatMessageTime(m.created_at)}</span>
                 </div>
-                <p className="text-sm text-gray-800 whitespace-pre-wrap break-words"><LinkifiedText text={m.content} /></p>
+                {(m.content && m.content !== '(attachment)') && (
+                  <p className="text-sm text-gray-800 whitespace-pre-wrap break-words"><LinkifiedText text={m.content} /></p>
+                )}
+                {m.files && m.files.length > 0 && (
+                  <div className="mt-1"><AttachmentList files={m.files} /></div>
+                )}
               </div>
             );
           })}
         </div>
       )}
       {err && <div className="text-xs text-red-600 mb-1">{err}</div>}
-      <div className="flex items-end gap-2">
+      <PendingAttachmentStrip items={attach.pending} onRemove={attach.remove} />
+      <div className="flex items-end gap-2 mt-2">
         <textarea
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
+          onPaste={(e) => { if (attach.pasteFromEvent(e)) e.preventDefault(); }}
           placeholder="Add a note for the sitter…"
           rows={2}
           className="flex-1 text-sm border border-gray-300 rounded-lg p-2 resize-y min-h-[44px]"
         />
-        <button onClick={post} disabled={!draft.trim() || posting}
+        <input ref={fileInputRef} type="file" multiple accept="image/*,application/pdf" className="hidden"
+          onChange={(e) => { if (e.target.files) attach.addFiles(e.target.files); e.target.value = ''; }} />
+        <button type="button" onClick={() => fileInputRef.current?.click()} title="Attach image or PDF"
+          className="px-2.5 py-2 text-sm rounded-lg border border-gray-300 text-gray-500 hover:bg-gray-50 shrink-0">📎</button>
+        <button onClick={post} disabled={!canPost}
           className="px-3 py-2 text-sm rounded-lg bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-40 shrink-0">
           {posting ? 'Posting…' : 'Post'}
         </button>

@@ -1702,6 +1702,18 @@ These originate outside HH entirely — client sends stuff to us, or items found
     survive reassign/clear** (the shift row stays; only removing a manual-cover shift hides its notes).
     A "Notes" button only appears once a shift exists (i.e. once assigned / manual cover) — unassigned
     future nights have no shift row yet, so no thread anchor.
+  - **Slice 3 attachments SHIPPED:** images/PDFs on the handover thread, both surfaces. Stored on
+    `interactions.files` in the staff attachment shape (`{r2_key, filename, content_type, size_bytes}`)
+    under the `files/attachments/…` R2 prefix, so staff- and sitter-posted files render alike. **Staff**
+    (`StudioShiftNotes`) reuse the `messaging/Attachments` stack (`useAttachments` + file input +
+    paste + `PendingAttachmentStrip`, render via `AttachmentList`). **Portal:** the thread POST now
+    accepts `multipart/form-data` (multer, 8MB×6, image/PDF only) → uploads to R2 → stores on the
+    interaction; the Next.js route forwards multipart, `op-api` gained `postSitterThreadWithFilesOP`,
+    and the shift page composer has a 📎 attach + inline image render. The thread GET's file mapper
+    (`mapThreadFile` in `routes/portal.ts`) handles BOTH the `r2_key` (staff/sitter) and legacy `url`
+    (shared-file) shapes + presigns `files/` keys. Attachment-only notes store `content='(attachment)'`
+    (NOT NULL guard) and hide the placeholder on render. Deferred: thumbnail generation (images render
+    full-size via presigned URL / auth blob), and per-message read receipts.
   - **Slice 4 (NEXT):** end-of-day lock-up report — Phase E (see below).
 - **General Tasks system** (build with/after D): `tasks` table (anchor to shift/job/nothing),
   visibility everyone/assignee-only, notify-on-done + notify-if-not-done-after-X-days, **staff via
