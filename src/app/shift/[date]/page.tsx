@@ -107,6 +107,24 @@ function formatMessageTime(iso: string): string {
   return `${days[d.getDay()]} ${d.getDate()} ${months[d.getMonth()]}, ${hh}:${mm}${ampm}`
 }
 
+/** Render text with bare URLs turned into clickable links. */
+function Linkified({ text }: { text: string }) {
+  const parts = text.split(/(https?:\/\/[^\s]+)/g)
+  return (
+    <>
+      {parts.map((part, i) =>
+        /^https?:\/\//.test(part) ? (
+          <a key={i} href={part} target="_blank" rel="noopener noreferrer" className="text-ooosh-600 hover:text-ooosh-500 underline break-all">
+            {part}
+          </a>
+        ) : (
+          <span key={i}>{part}</span>
+        )
+      )}
+    </>
+  )
+}
+
 function fileIcon(fileType: string | null): string {
   const t = (fileType || '').toLowerCase()
   if (t.includes('pdf')) return '📄'
@@ -360,7 +378,7 @@ export default function ShiftDetailPage() {
                           {formatMessageTime(m.created_at)}
                         </span>
                       </div>
-                      <p className="text-sm text-gray-800 whitespace-pre-wrap break-words">{m.content}</p>
+                      <p className="text-sm text-gray-800 whitespace-pre-wrap break-words"><Linkified text={m.content} /></p>
                       {m.files && m.files.length > 0 && (
                         <div className="mt-2 space-y-1">
                           {m.files.map((file, idx) => (

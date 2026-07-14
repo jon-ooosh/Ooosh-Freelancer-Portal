@@ -1681,6 +1681,20 @@ These originate outside HH entirely — client sends stuff to us, or items found
     *Deferred:* @mention autocomplete in the staff composer (plain textarea for now — mentions still
     work via the generic API), file attachments on shift notes, and notifying staff of a sitter's
     *first* note before any staff have engaged the thread (staff see it via the roster Notes panel).
+  - **Slice 3 refinements SHIPPED:** (a) **enquiries default-off** — `loadRehearsalJobs`/`getRoster`
+    gained an `includeSpeculative` arg (default false → excludes `new_enquiry`/`quoting`/`paused`/
+    `provisional`); the roster route reads `?speculative=1`, the staff page has an "Include enquiries"
+    toggle + a blue "enquiry" row badge (`row.speculative`). Dashboard sitter-gap + bulk-assign inherit
+    the confirmed-only default; the **portal** enrichment passes `includeSpeculative=true` so a sitter
+    always sees every band booked that night. (b) **Roster look-back** — the staff page adds From/To
+    date inputs (backend already accepted arbitrary `from`/`to`) alongside the 7/14/All quick-sets, so
+    staff can scroll back through history; persisted in the `ooosh_studio_sitters_prefs` localStorage.
+    (c) **Portal window** widened from +60d to **−14d…+365d** so far-future assignments surface.
+    (d) **Job Detail handover card** — `StudioHandoverCard` on the Overview tab (self-hides on
+    non-rehearsal jobs) lists the job's evenings and shows the shared per-evening thread; the roster's
+    `ShiftNotes` was extracted to `components/StudioShiftNotes.tsx` (shared by both, now URL-linkified);
+    reuses the existing `/studio-sitters/job/:jobId/coverage` endpoint (no new backend endpoint). URLs
+    are auto-linkified on the portal thread too. *Still deferred:* image/PDF attachments on the thread.
   - **Slice 4 (NEXT):** end-of-day lock-up report — Phase E (see below).
 - **General Tasks system** (build with/after D): `tasks` table (anchor to shift/job/nothing),
   visibility everyone/assignee-only, notify-on-done + notify-if-not-done-after-X-days, **staff via

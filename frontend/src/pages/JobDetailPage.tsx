@@ -28,6 +28,7 @@ import { useAuthStore } from '../hooks/useAuthStore';
 import MoneyTab from '../components/MoneyTab';
 import RackPlanModal from '../components/rackplan/RackPlanModal';
 import RackPlanOverviewCard from '../components/rackplan/RackPlanOverviewCard';
+import StudioHandoverCard from '../components/StudioHandoverCard';
 import DatePicker from '../components/DatePicker';
 import { TimeInput } from '../components/TimeInput';
 import ChaseModal from '../components/ChaseModal';
@@ -4144,6 +4145,9 @@ export default function JobDetailPage() {
 
           {/* Staging — surfaces once a plan exists (created from Tools → Staging Calculator) */}
           {id && <StagingOverviewCard jobId={id} refreshKey={stagingRefreshKey} />}
+
+          {/* Studio sitter handover — surfaces on rehearsal jobs (self-hides otherwise) */}
+          {id && <StudioHandoverCard jobId={id} />}
 
           {/* PCNs — penalty charge notices on this job. Renders only when rows
               exist (a PCN isn't a per-job prep gate); one row per notice. */}
