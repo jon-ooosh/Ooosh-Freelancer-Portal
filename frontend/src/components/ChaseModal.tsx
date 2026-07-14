@@ -58,6 +58,9 @@ export default function ChaseModal({
   const [drafting, setDrafting] = useState(false);
   const [draftResult, setDraftResult] = useState<{ to: string; subject: string; threaded: boolean } | null>(null);
   const [draftError, setDraftError] = useState('');
+  // Whether auto-SEND is enabled globally — the "Send" option is only offered
+  // when it is, so there's no confusing "Send that secretly only drafts".
+  const [autoSendEnabled, setAutoSendEnabled] = useState(false);
 
   useEffect(() => {
     if (isOpen && job) {
@@ -83,6 +86,14 @@ export default function ChaseModal({
         .catch(() => {});
     }
   }, [isOpen]);
+
+  useEffect(() => {
+    if (isOpen && canDraftChase) {
+      api.get<{ data: { key: string; value: string | null }[] }>('/system-settings?category=chase')
+        .then(res => setAutoSendEnabled(res.data.find(s => s.key === 'auto_chase_send_enabled')?.value === 'true'))
+        .catch(() => {});
+    }
+  }, [isOpen, canDraftChase]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -171,58 +182,70 @@ export default function ChaseModal({
         </div>
 
         <div className="px-6 pb-4 overflow-y-auto flex-1">
-        {/* AI chase-draft — creates a Gmail draft in info@ for review. Manager tier. */}
-        {canDraftChase && (
-          <div className="mb-3 p-2.5 rounded-lg border border-indigo-200 bg-indigo-50/60 space-y-2">
-            {draftResult ? (
-              <p className="text-xs text-indigo-900">
-                <span className="font-medium">✓ Draft in info@</span>{' '}
-                <span className="text-indigo-700">to {draftResult.to}{draftResult.threaded ? ' (in their thread)' : ''} — send it from Gmail.</span>
-              </p>
-            ) : (
-              <div className="flex items-center justify-between gap-3">
-                <p className="text-xs font-medium text-indigo-800">Draft a chase email now</p>
-                <button
-                  type="button"
-                  onClick={handleDraftChase}
-                  disabled={drafting}
-                  className="shrink-0 px-3 py-1.5 text-xs font-medium bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50"
-                >
-                  {drafting ? 'Drafting…' : '✨ Draft chase'}
-                </button>
+        {/* Chase actions — a one-off "chase now" (manual draft) vs setting up
+            auto-chase for the due date. Two clearly-separate things. Manager
+            tier, and only on the "Log a chase" view (irrelevant to rescheduling). */}
+        {canDraftChase && !isReschedule && (
+          <div className="mb-3 rounded-lg border border-indigo-200 bg-indigo-50/60 overflow-hidden">
+            {/* Chase now — immediate, manual. */}
+            <div className="p-2.5 flex items-center justify-between gap-3">
+              <div className="text-xs min-w-0">
+                <p className="font-medium text-indigo-800">Chase now</p>
+                {draftResult ? (
+                  <p className="text-indigo-700 mt-0.5">✓ Draft in info@ to {draftResult.to}{draftResult.threaded ? ' (in their thread)' : ''} — send it from Gmail.</p>
+                ) : (
+                  <p className="text-indigo-600 mt-0.5">Write a chase as a Gmail draft for you to send.</p>
+                )}
+                {draftError && <p className="text-red-600 mt-0.5">{draftError}</p>}
               </div>
-            )}
-            {draftError && <p className="text-xs text-red-600">{draftError}</p>}
-
-            {/* Per-job auto-chase mode — what happens automatically on the due date. */}
-            <div className="flex items-center gap-2 flex-wrap pt-2 border-t border-indigo-100">
-              <span className="text-xs font-medium text-indigo-800">When due, auto:</span>
-              <div className="inline-flex p-0.5 bg-white border border-indigo-200 rounded-lg text-xs">
-                {([
-                  { k: 'off', label: 'Off' },
-                  { k: 'draft', label: 'Draft' },
-                  { k: 'send', label: 'Send' },
-                ] as const).map((m) => (
-                  <button
-                    key={m.k}
-                    type="button"
-                    onClick={() => setAutoChaseMode(m.k)}
-                    className={`px-2.5 py-1 rounded-md transition-colors ${
-                      autoChaseMode === m.k ? 'bg-indigo-600 text-white font-medium' : 'text-indigo-600 hover:bg-indigo-50'
-                    }`}
-                  >
-                    {m.label}
-                  </button>
-                ))}
-              </div>
+              <button
+                type="button"
+                onClick={handleDraftChase}
+                disabled={drafting}
+                className="shrink-0 px-3 py-1.5 text-xs font-medium bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50"
+              >
+                {drafting ? 'Drafting…' : '✨ Draft chase'}
+              </button>
             </div>
-            <p className="text-[11px] text-indigo-500">
-              {autoChaseMode === 'off'
-                ? 'Manual only.'
-                : autoChaseMode === 'draft'
-                ? 'Auto-creates a Gmail draft each time this chase is due — you send it.'
-                : 'Sent automatically. A client reply pauses it; after 3 silent chases it comes back to you.'}
-            </p>
+
+            {/* Auto-chase — what happens automatically on the due date. */}
+            <div className="px-2.5 py-2 border-t border-indigo-100 bg-white/40">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-xs font-medium text-indigo-800">Auto-chase when due</span>
+                <div className="inline-flex p-0.5 bg-white border border-indigo-200 rounded-lg text-xs">
+                  {([
+                    { k: 'off', label: 'Off' },
+                    { k: 'draft', label: 'Draft' },
+                    { k: 'send', label: 'Send' },
+                  ] as const).map((m) => {
+                    const lockedSend = m.k === 'send' && !autoSendEnabled && autoChaseMode !== 'send';
+                    return (
+                      <button
+                        key={m.k}
+                        type="button"
+                        disabled={lockedSend}
+                        title={lockedSend ? 'Turn on auto-send in Settings → Auto-Chase first' : undefined}
+                        onClick={() => setAutoChaseMode(m.k)}
+                        className={`px-2.5 py-1 rounded-md transition-colors ${
+                          autoChaseMode === m.k ? 'bg-indigo-600 text-white font-medium' : 'text-indigo-600 hover:bg-indigo-50'
+                        } ${lockedSend ? 'opacity-40 cursor-not-allowed hover:bg-transparent' : ''}`}
+                      >
+                        {m.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              <p className="text-[11px] text-indigo-500 mt-1.5">
+                {autoChaseMode === 'off'
+                  ? 'Off — you chase it yourself (manually, or with “Chase now” above).'
+                  : autoChaseMode === 'draft'
+                  ? 'On the chase date, a Gmail draft is auto-written for you to review + send.'
+                  : autoSendEnabled
+                  ? 'On the chase date, the chase is auto-written and sent. A client reply pauses it; after 3 silent chases it comes back to you.'
+                  : 'Auto-send is off globally, so this will only draft until you enable it in Settings → Auto-Chase.'}
+              </p>
+            </div>
           </div>
         )}
 

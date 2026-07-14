@@ -1146,6 +1146,14 @@ router.patch('/:id', validate(updatePipelineSchema), async (req: AuthRequest, re
       }
     }
 
+    // Stamp who set the auto-chase, so automated chases can sign off with them
+    // (same logic as a manual "Draft chase"). Only when turning it on.
+    if ('auto_chase_mode' in fields && (fields.auto_chase_mode === 'draft' || fields.auto_chase_mode === 'send')) {
+      updates.push(`auto_chase_set_by = $${pIdx}`);
+      params.push(req.user!.id);
+      pIdx++;
+    }
+
     if (params.length === 0) {
       res.status(400).json({ error: 'No fields to update' });
       return;
