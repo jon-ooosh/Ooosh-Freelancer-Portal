@@ -159,32 +159,29 @@ export default function ChaseModal({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black/30" onClick={onClose} />
-      <div className="relative bg-white rounded-xl shadow-xl p-6 w-full max-w-md mx-4">
-        <h3 className="text-lg font-semibold mb-1">
-          {isReschedule ? 'Reschedule Chase' : 'Log Chase'}
-        </h3>
-        <p className="text-sm text-gray-500 mb-4">
-          {job.job_name} — {job.company_name || job.client_name}
-          {!isReschedule && job.chase_count > 0 && <span className="ml-2 text-gray-400">(chase #{job.chase_count + 1})</span>}
-        </p>
+      <div className="relative bg-white rounded-xl shadow-xl w-full max-w-md mx-4 max-h-[90vh] flex flex-col">
+        <div className="px-6 pt-6 pb-3">
+          <h3 className="text-lg font-semibold mb-1">
+            {isReschedule ? 'Reschedule Chase' : 'Log Chase'}
+          </h3>
+          <p className="text-sm text-gray-500">
+            {job.job_name} — {job.company_name || job.client_name}
+            {!isReschedule && job.chase_count > 0 && <span className="ml-2 text-gray-400">(chase #{job.chase_count + 1})</span>}
+          </p>
+        </div>
 
+        <div className="px-6 pb-4 overflow-y-auto flex-1">
         {/* AI chase-draft — creates a Gmail draft in info@ for review. Manager tier. */}
         {canDraftChase && (
-          <div className="mb-4 p-3 rounded-lg border border-indigo-200 bg-indigo-50/60">
+          <div className="mb-3 p-2.5 rounded-lg border border-indigo-200 bg-indigo-50/60 space-y-2">
             {draftResult ? (
-              <div className="text-xs text-indigo-900">
-                <p className="font-medium">✓ Draft created in info@</p>
-                <p className="mt-0.5 text-indigo-700">
-                  To {draftResult.to}{draftResult.threaded ? ' (replying in their thread)' : ' (new email)'} — review &amp; send from Gmail Drafts.
-                </p>
-                <p className="mt-0.5 text-indigo-500 truncate" title={draftResult.subject}>“{draftResult.subject}”</p>
-              </div>
+              <p className="text-xs text-indigo-900">
+                <span className="font-medium">✓ Draft in info@</span>{' '}
+                <span className="text-indigo-700">to {draftResult.to}{draftResult.threaded ? ' (in their thread)' : ''} — send it from Gmail.</span>
+              </p>
             ) : (
               <div className="flex items-center justify-between gap-3">
-                <div className="text-xs text-indigo-800">
-                  <p className="font-medium">Draft a chase email</p>
-                  <p className="text-indigo-600">AI-drafts a “just checking in” email as a Gmail draft in info@ — nothing sends.</p>
-                </div>
+                <p className="text-xs font-medium text-indigo-800">Draft a chase email now</p>
                 <button
                   type="button"
                   onClick={handleDraftChase}
@@ -195,25 +192,22 @@ export default function ChaseModal({
                 </button>
               </div>
             )}
-            {draftError && <p className="mt-2 text-xs text-red-600">{draftError}</p>}
+            {draftError && <p className="text-xs text-red-600">{draftError}</p>}
 
-            {/* Per-job auto-chase mode — what happens automatically when this
-                chase comes due. Off = manual only. Draft = auto-create a Gmail
-                draft to review. Auto-send = send it (only once auto-send is
-                enabled globally in Settings; until then it just drafts). */}
-            <div className="mt-3 pt-3 border-t border-indigo-100">
-              <p className="text-xs font-medium text-indigo-800 mb-1.5">When the chase date arrives, automatically…</p>
+            {/* Per-job auto-chase mode — what happens automatically on the due date. */}
+            <div className="flex items-center gap-2 flex-wrap pt-2 border-t border-indigo-100">
+              <span className="text-xs font-medium text-indigo-800">When due, auto:</span>
               <div className="inline-flex p-0.5 bg-white border border-indigo-200 rounded-lg text-xs">
                 {([
-                  { k: 'off', label: 'Nothing' },
-                  { k: 'draft', label: 'Draft it' },
-                  { k: 'send', label: 'Send it' },
+                  { k: 'off', label: 'Off' },
+                  { k: 'draft', label: 'Draft' },
+                  { k: 'send', label: 'Send' },
                 ] as const).map((m) => (
                   <button
                     key={m.k}
                     type="button"
                     onClick={() => setAutoChaseMode(m.k)}
-                    className={`px-3 py-1.5 rounded-md transition-colors ${
+                    className={`px-2.5 py-1 rounded-md transition-colors ${
                       autoChaseMode === m.k ? 'bg-indigo-600 text-white font-medium' : 'text-indigo-600 hover:bg-indigo-50'
                     }`}
                   >
@@ -221,14 +215,14 @@ export default function ChaseModal({
                   </button>
                 ))}
               </div>
-              <p className="text-[11px] text-indigo-500 mt-1.5">
-                {autoChaseMode === 'off'
-                  ? 'Manual only — the card just appears in the Chasing pile.'
-                  : autoChaseMode === 'draft'
-                  ? 'A Gmail draft is auto-created in info@ each time this chase is due. You send it.'
-                  : 'The chase is sent automatically (once auto-send is switched on in Settings — until then it just drafts). A client reply pauses it; 3 silent chases hand it back to a human.'}
-              </p>
             </div>
+            <p className="text-[11px] text-indigo-500">
+              {autoChaseMode === 'off'
+                ? 'Manual only.'
+                : autoChaseMode === 'draft'
+                ? 'Auto-creates a Gmail draft each time this chase is due — you send it.'
+                : 'Sent automatically. A client reply pauses it; after 3 silent chases it comes back to you.'}
+            </p>
           </div>
         )}
 
@@ -258,8 +252,7 @@ export default function ChaseModal({
           <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">{error}</div>
         )}
 
-        {/* Fixed min-height prevents the dialog jumping when switching modes */}
-        <div className="space-y-4 min-h-[360px]">
+        <div className="space-y-4">
           {!isReschedule && (
             <>
               <div>
@@ -390,7 +383,9 @@ export default function ChaseModal({
           </div>
         </div>
 
-        <div className="flex gap-3 justify-end mt-6">
+        </div>{/* end scrollable body */}
+
+        <div className="flex gap-3 justify-end px-6 py-4 border-t border-gray-100">
           <button
             onClick={onClose}
             className="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50"
