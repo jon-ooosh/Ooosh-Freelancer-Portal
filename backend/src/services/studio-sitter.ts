@@ -65,6 +65,7 @@ export interface RosterRow {
     override_reason: string | null;
     planned_start: string | null;
     planned_end: string | null;
+    note_count: number;
   } | null;
   assignee: RosterAssignee | null;
 }
@@ -130,7 +131,8 @@ async function loadShifts(from: string, to: string): Promise<Map<string, any>> {
     `SELECT s.id, s.shift_date::text AS shift_date, s.status, s.manual_override, s.override_reason,
             s.planned_start, s.planned_end,
             a.status AS assignment_status, a.person_id,
-            p.first_name, p.last_name, p.tags
+            p.first_name, p.last_name, p.tags,
+            (SELECT COUNT(*) FROM interactions i WHERE i.shift_id = s.id)::int AS note_count
      FROM studio_sitter_shifts s
      LEFT JOIN studio_sitter_shift_assignments a
        ON a.shift_id = s.id AND a.status IN ('assigned','confirmed')
@@ -185,6 +187,7 @@ export async function getRoster(from: string, to: string, includeSpeculative = f
             override_reason: shiftRow.override_reason,
             planned_start: shiftRow.planned_start,
             planned_end: shiftRow.planned_end,
+            note_count: shiftRow.note_count ?? 0,
           }
         : null,
       assignee: shiftRow?.person_id
@@ -206,6 +209,7 @@ export interface JobCoverageEvening {
   shift_id: string | null;
   status: string;                    // shift status, or 'needed' if no shift
   assignee: { id: string; name: string } | null;
+  note_count: number;                // handover-thread messages on this shift
 }
 
 /** Per-job coverage for the job's sitter-needed evenings (drives the card chips). */
@@ -221,7 +225,8 @@ export async function getJobCoverage(jobId: string): Promise<JobCoverageEvening[
   if (dates.length === 0) return [];
 
   const shiftRes = await query(
-    `SELECT s.id, s.shift_date::text AS shift_date, s.status, a.person_id, p.first_name, p.last_name
+    `SELECT s.id, s.shift_date::text AS shift_date, s.status, a.person_id, p.first_name, p.last_name,
+            (SELECT COUNT(*) FROM interactions i WHERE i.shift_id = s.id)::int AS note_count
      FROM studio_sitter_shifts s
      LEFT JOIN studio_sitter_shift_assignments a
        ON a.shift_id = s.id AND a.status IN ('assigned','confirmed')
@@ -242,6 +247,7 @@ export async function getJobCoverage(jobId: string): Promise<JobCoverageEvening[
       shift_id: s?.id ?? null,
       status: s?.status ?? 'needed',
       assignee: s?.person_id ? { id: s.person_id, name: personName(s.first_name, s.last_name) } : null,
+      note_count: s?.note_count ?? 0,
     };
   });
 }

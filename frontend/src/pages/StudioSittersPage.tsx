@@ -34,7 +34,7 @@ interface RosterRow {
   needs_sitter: boolean;
   speculative?: boolean;
   jobs: RosterJobEntry[];
-  shift: { id: string; status: string; manual_override: boolean; override_reason: string | null } | null;
+  shift: { id: string; status: string; manual_override: boolean; override_reason: string | null; note_count?: number } | null;
   assignee: RosterAssignee | null;
 }
 interface SitterOption {
@@ -226,7 +226,6 @@ export default function StudioSittersPage() {
       <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Studio Sitters</h1>
-          <p className="text-sm text-gray-500">One sitter per evening covers the whole building.</p>
         </div>
         <div className="flex items-center gap-2">
           <button onClick={() => setShowAddCover((v) => !v)} className="px-3 py-1.5 text-sm rounded-lg border border-gray-300 hover:bg-gray-50">＋ Add cover</button>
@@ -387,12 +386,17 @@ export default function StudioSittersPage() {
                       <button onClick={() => removeCover(row.date)} disabled={busy}
                         className="px-2.5 py-1 text-xs rounded-lg border border-red-200 text-red-500 hover:bg-red-50 disabled:opacity-40">Remove</button>
                     )}
-                    {row.shift?.id && (
-                      <button onClick={() => toggleNotes(row.shift!.id)}
-                        className={`px-2.5 py-1 text-xs rounded-lg border ${openNotes.has(row.shift.id) ? 'border-purple-300 bg-purple-50 text-purple-700' : 'border-gray-200 text-gray-500 hover:bg-white'}`}>
-                        💬 Notes
-                      </button>
-                    )}
+                    {row.shift?.id && (() => {
+                      const noteCount = row.shift.note_count ?? 0;
+                      const active = openNotes.has(row.shift.id);
+                      const hasNotes = noteCount > 0;
+                      return (
+                        <button onClick={() => toggleNotes(row.shift!.id)}
+                          className={`px-2.5 py-1 text-xs rounded-lg border ${active || hasNotes ? 'border-purple-300 bg-purple-50 text-purple-700' : 'border-gray-200 text-gray-500 hover:bg-white'}`}>
+                          💬 Notes{hasNotes ? ` (${noteCount})` : ''}
+                        </button>
+                      );
+                    })()}
                   </div>
                 </div>
 

@@ -1695,6 +1695,13 @@ These originate outside HH entirely — client sends stuff to us, or items found
     `ShiftNotes` was extracted to `components/StudioShiftNotes.tsx` (shared by both, now URL-linkified);
     reuses the existing `/studio-sitters/job/:jobId/coverage` endpoint (no new backend endpoint). URLs
     are auto-linkified on the portal thread too. *Still deferred:* image/PDF attachments on the thread.
+    (e) **Notes-present indicators** — `getJobCoverage` + the roster's `loadShifts` now return a
+    per-shift `note_count`; the roster "💬 Notes (N)" button highlights when a thread exists, and the
+    Job Detail handover card shows a "💬 N" badge per evening + auto-opens evenings that already have a
+    conversation. Removed the "One sitter per evening…" subtitle. **Notes are shift-anchored, so they
+    survive reassign/clear** (the shift row stays; only removing a manual-cover shift hides its notes).
+    A "Notes" button only appears once a shift exists (i.e. once assigned / manual cover) — unassigned
+    future nights have no shift row yet, so no thread anchor.
   - **Slice 4 (NEXT):** end-of-day lock-up report — Phase E (see below).
 - **General Tasks system** (build with/after D): `tasks` table (anchor to shift/job/nothing),
   visibility everyone/assignee-only, notify-on-done + notify-if-not-done-after-X-days, **staff via
@@ -1709,6 +1716,16 @@ These originate outside HH entirely — client sends stuff to us, or items found
 - **Calendar endpoint** (Phase F): `GET /api/studio-sitters/calendar?from&to` for the future
   calendar project (roster row shape already close).
 - **Shop sales**: deferred, out of scope (substantial, cross-cutting).
+- **Rehearsal job info beyond sitters (TODO — jon flagged Jul 2026):** the Rehearsals module
+  should grow past studio-sitter cover to be the single place for everything about a studio job.
+  Capture + surface, on an **expanded rehearsal card on the Job Detail view** (the natural home):
+  what **PA setup** the band wants; whether they need **backline from us** and how much; how many
+  **cars** the band is bringing (parking/space planning); any **lorry / truck / van drop-off or
+  pickup** arrangements (who's dropping/collecting, when). Some of this is HH-derivable (backline
+  line items already detected), some is free-form intake. Likely a mix of derived flags + a
+  structured "studio job details" record (new columns or a `rehearsal_job_details` table) rendered
+  as a richer rehearsal requirement/overview card. Scope + model this once the studio-sitter side
+  (portal + tasks + end-of-day report) is wrapped. Keep it card-on-Job-Detail, not a new nav.
 
 Headlines (design invariants — still apply):
 
