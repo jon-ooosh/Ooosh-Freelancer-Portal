@@ -13,6 +13,7 @@
 
 import { query, getClient } from '../config/database';
 import type { RehearsalDetail } from './rehearsal-plan';
+import { getPresignedDownloadUrl } from '../config/r2';
 
 const STUDIO_SITTER_TAG = 'studio sitter'; // matched case-insensitively
 export const STUDIO_SITTER_DEFAULT_FEE_KEY = 'studio_sitter_default_fee';
@@ -387,6 +388,133 @@ export async function syncRehearsalStatusForDate(date: string): Promise<void> {
   for (const row of res.rows) {
     await syncRehearsalRequirementStatus(row.id);
   }
+}
+
+// ── Freelancer portal surface (Phase D) ────────────────────────────────────
+
+export interface SitterSharedFile { name: string; url: string; fileType: string | null; }
+export interface SitterShiftJob extends RosterJobEntry { files?: SitterSharedFile[]; }
+export interface SitterShift {
+  date: string;
+  planned_start: string | null;
+  planned_end: string | null;
+  status: string;                 // shift status
+  assignment_status: string;      // assigned / confirmed
+  fee: number | null;
+  jobs: SitterShiftJob[];         // who's in that night
+}
+
+/** Group a job set into per-date "who's in" entries (sitter-needed evenings only). */
+function jobsByDate(jobs: Array<{ id: string; hh_job_number: number | null; job_name: string | null; client_name: string | null; detail: RehearsalDetail }>): Map<string, RosterJobEntry[]> {
+  const map = new Map<string, RosterJobEntry[]>();
+  for (const job of jobs) {
+    const rooms = roomLabels(job.detail);
+    const label = job.job_name || job.client_name || (job.hh_job_number ? `#${job.hh_job_number}` : 'Rehearsal');
+    for (const eve of job.detail.evenings) {
+      if (!eve.sitter_needed) continue;
+      const arr = map.get(eve.date) ?? [];
+      arr.push({ job_id: job.id, hh_job_number: job.hh_job_number, label, rooms });
+      map.set(eve.date, arr);
+    }
+  }
+  return map;
+}
+
+/** A sitter's own live-assigned shifts in [from,to], with who's in each night. */
+export async function getSitterShifts(personId: string, from: string, to: string): Promise<SitterShift[]> {
+  const res = await query(
+    `SELECT s.shift_date::text AS shift_date, s.status, s.planned_start, s.planned_end,
+            a.status AS assignment_status, a.fee
+     FROM studio_sitter_shift_assignments a
+     JOIN studio_sitter_shifts s ON s.id = a.shift_id
+     WHERE a.person_id = $1 AND a.status IN ('assigned','confirmed')
+       AND s.status <> 'cancelled' AND s.shift_date BETWEEN $2 AND $3
+     ORDER BY s.shift_date`,
+    [personId, from, to]
+  );
+  const dateJobs = jobsByDate(await loadRehearsalJobs(from, to));
+  return res.rows.map((r: any) => ({
+    date: r.shift_date,
+    planned_start: r.planned_start,
+    planned_end: r.planned_end,
+    status: r.status,
+    assignment_status: r.assignment_status,
+    fee: r.fee != null ? Number(r.fee) : null,
+    jobs: dateJobs.get(r.shift_date) ?? [],
+  }));
+}
+
+/** True if a person is live-assigned to the shift on `date` (portal access check). */
+export async function isSitterAssignedTo(personId: string, date: string): Promise<boolean> {
+  const r = await query(
+    `SELECT 1 FROM studio_sitter_shift_assignments a
+     JOIN studio_sitter_shifts s ON s.id = a.shift_id
+     WHERE a.person_id = $1 AND a.status IN ('assigned','confirmed')
+       AND s.status <> 'cancelled' AND s.shift_date = $2 LIMIT 1`,
+    [personId, date]
+  );
+  return r.rows.length > 0;
+}
+
+export interface SitterShiftDetail {
+  date: string;
+  planned_start: string | null;
+  planned_end: string | null;
+  status: string;                 // shift status, or 'needed' if no shift row exists
+  fee: number | null;             // the requesting sitter's fee (null if unknown / no personId)
+  assignment_status: string | null; // the requesting sitter's assignment status (assigned/confirmed)
+  jobs: SitterShiftJob[];         // who's in that night, with each job's shared specs
+}
+
+/** Detail for one evening: envelope + who's in each room + that job's shared
+ *  specs/files. When `personId` is given, also returns that sitter's fee +
+ *  assignment status so the portal detail page is self-sufficient on a direct
+ *  load (bookmark / refresh) without needing the shifts list for context. */
+export async function getSitterShiftDetail(date: string, personId?: string): Promise<SitterShiftDetail> {
+  const shiftRes = await query(
+    `SELECT s.status, s.planned_start, s.planned_end, a.status AS assignment_status, a.fee
+     FROM studio_sitter_shifts s
+     LEFT JOIN studio_sitter_shift_assignments a
+       ON a.shift_id = s.id AND a.status IN ('assigned','confirmed')
+       AND ($2::uuid IS NULL OR a.person_id = $2)
+     WHERE s.shift_date = $1 AND s.status <> 'cancelled'
+     LIMIT 1`,
+    [date, personId ?? null]
+  );
+  const shift = shiftRes.rows[0];
+
+  const jobs = await loadRehearsalJobs(date, date);
+  const out: SitterShiftJob[] = [];
+  for (const job of jobs) {
+    if (!job.detail.evenings.some((e) => e.sitter_needed && e.date === date)) continue;
+    const fRes = await query(`SELECT files FROM jobs WHERE id = $1`, [job.id]);
+    const raw: any[] = Array.isArray(fRes.rows[0]?.files) ? fRes.rows[0].files : [];
+    const files: SitterSharedFile[] = [];
+    for (const x of raw) {
+      if (!x?.share_with_freelancer) continue;
+      let url: string = x.url || '';
+      if (url && typeof url === 'string' && url.startsWith('files/')) {
+        try { url = await getPresignedDownloadUrl(url); } catch { /* keep raw */ }
+      }
+      files.push({ name: x.name || 'File', url, fileType: x.type || x.fileType || null });
+    }
+    out.push({
+      job_id: job.id,
+      hh_job_number: job.hh_job_number,
+      label: job.job_name || job.client_name || (job.hh_job_number ? `#${job.hh_job_number}` : 'Rehearsal'),
+      rooms: roomLabels(job.detail),
+      files,
+    });
+  }
+  return {
+    date,
+    planned_start: shift?.planned_start ?? null,
+    planned_end: shift?.planned_end ?? null,
+    status: shift?.status ?? 'needed',
+    fee: shift?.fee != null ? Number(shift.fee) : null,
+    assignment_status: shift?.assignment_status ?? null,
+    jobs: out,
+  };
 }
 
 export interface SitterOption {

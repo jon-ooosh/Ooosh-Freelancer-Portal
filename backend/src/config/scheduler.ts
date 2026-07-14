@@ -118,6 +118,26 @@ export function startScheduler() {
       }
     });
     console.log('Scheduler: HireHop job sync scheduled every 30 minutes');
+
+    // ── Job Value Gap-Filler ──────────────────────────────────────────
+    // Hourly at :40 — populate the cached jobs.job_value (drives pipeline,
+    // client-history sidebars, hire-history stats) from HH billing accrued
+    // for HH-linked jobs still showing NULL/£0. The job sync itself no
+    // longer writes job_value (search_list's MONEY field is unreliable and
+    // used to clobber values back to £0 every 30 min). Money tab views
+    // self-heal individual jobs instantly; this catches the rest.
+    cron.schedule('40 * * * *', async () => {
+      try {
+        const { syncMissingJobValues } = await import('../services/job-value-sync');
+        const result = await syncMissingJobValues(20);
+        if (result.updated > 0) {
+          console.log(`Scheduler: Job value gap-filler — populated ${result.updated}/${result.checked} jobs`);
+        }
+      } catch (err) {
+        console.error('Scheduler: Job value gap-filler failed:', err);
+      }
+    });
+    console.log('Scheduler: Job value gap-filler scheduled hourly at :40');
   }
 
   // ── Chase Alert Scanner ───────────────────────────────────────────────
@@ -920,35 +940,25 @@ export function startScheduler() {
   //     auto-voided it and it can no longer be captured.
   cron.schedule('40 9 * * *', async () => {
     try {
-      const { markExcessReleased } = await import('../services/excess-preauth');
-      const { getStripeClient, isStripeConfigured } = await import('./stripe');
+      // Single-record reconcile engine — shared with the on-demand "Check hold
+      // status" button and the opportunistic self-heal on Money-tab load, so all
+      // three paths behave identically.
+      const { reconcileExcessPreauth } = await import('../services/excess-preauth');
 
       const rows = await query(
-        `SELECT id, payment_method, stripe_payment_intent_id
-         FROM job_excess
+        `SELECT id FROM job_excess
          WHERE excess_status = 'pre_auth'
            AND held_expires_at IS NOT NULL
            AND held_expires_at < NOW()`
       );
 
       let released = 0;
-      for (const r of rows.rows as Array<{ id: string; payment_method: string | null; stripe_payment_intent_id: string | null }>) {
-        if (r.payment_method === 'stripe_gbp' && r.stripe_payment_intent_id) {
-          // Only release if Stripe confirms it's gone — never pre-empt a hold
-          // Stripe still considers live (their auth window can run to ~7 days).
-          if (!isStripeConfigured()) continue;
-          try {
-            const pi = await getStripeClient().paymentIntents.retrieve(r.stripe_payment_intent_id);
-            if (pi.status === 'canceled') {
-              if (await markExcessReleased(r.id, 'Stripe hold expired/canceled (reconciled)')) released++;
-            }
-          } catch (e) {
-            console.error(`Scheduler: Stripe PI retrieve failed for excess ${r.id}:`, e);
-          }
-        } else {
-          // Card-machine / cash: past the 5-day window → auto-void on the
-          // acquirer's clock, can't be captured. Release in OP.
-          if (await markExcessReleased(r.id, 'Card-machine hold expired (5-day window elapsed)')) released++;
+      for (const r of rows.rows as Array<{ id: string }>) {
+        try {
+          const result = await reconcileExcessPreauth(r.id);
+          if (result.changed) released++;
+        } catch (e) {
+          console.error(`Scheduler: Pre-auth reconcile failed for excess ${r.id}:`, e);
         }
       }
       if (released > 0) console.log(`Scheduler: Pre-auth reconciliation released ${released} expired hold(s)`);

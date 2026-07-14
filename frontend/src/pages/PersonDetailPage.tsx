@@ -9,6 +9,7 @@ import FileUpload from '../components/FileUpload';
 import ActivityTimeline from '../components/ActivityTimeline';
 import ExcessHistorySection from '../components/ExcessHistorySection';
 import HireHistoryTab from '../components/HireHistoryTab';
+import FreelancerHistorySection from '../components/FreelancerHistorySection';
 import HeldItemsSection from '../components/HeldItemsSection';
 import StorageHistorySection from '../components/StorageHistorySection';
 import { PcnHistorySection } from '../components/PcnHistorySection';
@@ -94,7 +95,7 @@ export default function PersonDetailPage() {
   const [showDnoForm, setShowDnoForm] = useState(false);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'timeline' | 'hire_history' | 'details' | 'relationships' | 'excess' | 'held' | 'storage' | 'pcn'>('timeline');
+  const [activeTab, setActiveTab] = useState<'timeline' | 'hire_history' | 'freelancer_history' | 'details' | 'relationships' | 'excess' | 'held' | 'storage' | 'pcn'>('timeline');
   const [heldCount, setHeldCount] = useState<number | null>(null);
 
   // Edit panel
@@ -308,11 +309,6 @@ export default function PersonDetailPage() {
 
   return (
     <div>
-      {/* Back link */}
-      <Link to="/people" className="text-sm text-ooosh-600 hover:text-ooosh-700 mb-4 inline-block">
-        &larr; Back to People
-      </Link>
-
       {/* Header */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
         <div className="flex items-start justify-between">
@@ -479,12 +475,15 @@ export default function PersonDetailPage() {
       <div className="border-b border-gray-200 mb-6">
         <nav className="flex gap-6">
           {([
-            'timeline', 'hire_history', 'details', 'relationships', 'excess', 'held', 'storage',
+            'timeline', 'hire_history',
+            ...(isFreelancer ? (['freelancer_history'] as const) : []),
+            'details', 'relationships', 'excess', 'held', 'storage',
             ...(isFreelancer ? (['pcn'] as const) : []),
           ] as const).map((tab) => {
             const totalOrgs = (person.organisations || []).length;
             const label = tab === 'timeline' ? 'Activity Timeline'
               : tab === 'hire_history' ? 'Hire History'
+              : tab === 'freelancer_history' ? 'Freelancer History'
               : tab === 'details' ? 'Details'
               : tab === 'excess' ? 'Excess History'
               : tab === 'held' ? (heldCount ? `Held Items (${heldCount})` : 'Held Items')
@@ -951,6 +950,11 @@ export default function PersonDetailPage() {
       {/* Hire History Tab */}
       {activeTab === 'hire_history' && id && (
         <HireHistoryTab entityType="person" entityId={id} />
+      )}
+
+      {/* Freelancer History Tab (freelancers only) */}
+      {activeTab === 'freelancer_history' && id && isFreelancer && (
+        <FreelancerHistorySection entityId={id} />
       )}
 
       {/* Excess History Tab */}

@@ -8,6 +8,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
+import { describePreauth } from '../lib/preauth';
 import { getPaymentState, PAYMENT_STATE_LABELS, PAYMENT_STATE_CLASSES } from '../services/paymentState';
 import ExcessPaymentModal, { statusLabel, statusColor, computeHireDays } from './ExcessPaymentModal';
 import CostCaptureModal from './CostCaptureModal';
@@ -1009,17 +1010,17 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                       ))}
                     </p>
                   )}
-                  {record.excess_status === 'pre_auth' && record.held_expires_at && (() => {
-                    const daysLeft = Math.ceil((new Date(record.held_expires_at).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
-                    const cls = daysLeft <= 1 ? 'text-red-600' : daysLeft <= 2 ? 'text-amber-600' : 'text-sky-600';
+                  {(record.excess_status === 'pre_auth' || record.excess_status === 'released') && (() => {
+                    // Shared wording — see lib/preauth.ts. Binary held/released,
+                    // never a "maybe"; the server-side self-heal resolves a stuck
+                    // past-expiry hold to its true state on this tab's load.
+                    const d = describePreauth(record);
+                    if (!d.compact) return null;
+                    const cls = d.isHold
+                      ? (d.pastExpiry ? 'text-amber-600' : 'text-sky-600')
+                      : 'text-gray-500';
                     return (
-                      <p className={`text-[11px] mt-0.5 font-medium ${cls}`}>
-                        {daysLeft <= 0
-                          ? 'Hold expired — capture or release'
-                          : daysLeft === 1
-                            ? 'Hold expires tomorrow'
-                            : `Hold expires in ${daysLeft} days`}
-                      </p>
+                      <p className={`text-[11px] mt-0.5 font-medium ${cls}`}>{d.compact}</p>
                     );
                   })()}
                 </div>

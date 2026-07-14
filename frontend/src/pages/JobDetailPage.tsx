@@ -1400,8 +1400,11 @@ export default function JobDetailPage() {
   const location = useLocation();
   const [searchParams] = useSearchParams();
   const user = useAuthStore(s => s.user);
+  // `backTo` is retained only as a fallback destination if the job fails to load
+  // (see loadJob's catch). The top-of-page "Back to …" breadcrumb was removed
+  // (Jul 2026) — it was usually wrong, since only Pipeline/Lost&Cancelled passed
+  // `state.from`; every other entry point silently defaulted to "Back to Jobs".
   const backTo = (location.state as { from?: string })?.from || '/jobs';
-  const backLabel = backTo.includes('/returns') ? 'Back to Returns' : backTo.includes('/lost-cancelled') ? 'Back to Lost & Cancelled' : backTo === '/pipeline' ? 'Back to Pipeline' : 'Back to Jobs';
 
   const [job, setJob] = useState<JobDetail | null>(null);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
@@ -1475,6 +1478,7 @@ export default function JobDetailPage() {
     venueName: '',
     jobDate: '',
     arrivalTime: '',
+    freelancerNotes: '',
     notes: '',
     pushToHirehop: true,
   });
@@ -2326,6 +2330,7 @@ export default function JobDetailPage() {
       venueName: job.venue_name || '',
       jobDate: defaultDate,
       arrivalTime: '',
+      freelancerNotes: '',
       notes: '',
       pushToHirehop: true,
     });
@@ -2951,11 +2956,6 @@ export default function JobDetailPage() {
   return (
     <div className={showClientHistory ? 'lg:flex lg:gap-6' : ''}>
       <div className={showClientHistory ? 'flex-1 min-w-0' : ''}>
-      {/* Back link */}
-      <Link to={backTo} className="text-sm text-ooosh-600 hover:text-ooosh-700 mb-4 inline-block">
-        &larr; {backLabel}
-      </Link>
-
       {/* Combined banner — absorbed booking folded into another. Replaces the
           red cancelled banner (it's a merge, not a real cancellation). */}
       {job.combined_into_job_id && (
@@ -4165,6 +4165,7 @@ export default function JobDetailPage() {
             clientOrgName={job.client_name}
             derivedFlags={hhSyncResult?.derivation?.flags || null}
             seatAvailability={hhSyncResult?.derivation?.seatAvailability || null}
+            assignedVehicleRegs={jobAssignedVehicles.map(v => v.reg).filter(Boolean)}
             hasCrewQuotes={quotes.some(q => (q.job_type === 'crewed' || (q.assignments && q.assignments.length > 0)) && q.status !== 'cancelled')}
             hasCrewOnHH={hhSyncResult?.derivation?.flags?.has_crew_items || false}
             onOpenCrewCalculator={() => { setShowCalculator(true); setActiveTab('transport'); }}
@@ -4346,29 +4347,48 @@ export default function JobDetailPage() {
                   <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide mr-1">
                     Vehicles on this job
                   </span>
+                  {/* Assigned chip → Vehicle Detail (view the van). */}
                   {jobAssignedVehicles.map((v) => {
                     const s = statusChip[v.status] || { label: v.status, cls: 'bg-gray-100 text-gray-600' };
                     return (
-                      <span
+                      <Link
                         key={v.vehicle_id}
-                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-ooosh-50 border border-ooosh-200"
+                        to={`/vehicles/fleet/${v.vehicle_id}`}
+                        title={`View ${v.reg || 'vehicle'}`}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-ooosh-50 border border-ooosh-200 hover:bg-ooosh-100"
                       >
                         <span aria-hidden>🚐</span>
                         <span className="font-semibold text-gray-900 text-sm">{v.reg || '—'}</span>
                         {v.type && <span className="text-xs text-gray-500">{normVanType(v.type)}</span>}
                         <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${s.cls}`}>{s.label}</span>
-                      </span>
+                      </Link>
                     );
                   })}
+                  {/* Unassigned chip → Allocations page for this job (pick a van).
+                      Can't one-click assign from here — allocation is per
+                      driver-slot — so it's a shortcut to the allocations screen,
+                      same destination as the card's "Allocate Van" button. */}
                   {unassigned.map((t, i) => (
-                    <span
-                      key={`u-${i}`}
-                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-50 border border-dashed border-amber-300 text-amber-700 text-sm font-medium"
-                      title="Detected on HireHop but no van allocated yet"
-                    >
-                      <span aria-hidden>🚐</span>
-                      {t} — unassigned
-                    </span>
+                    job.hh_job_number ? (
+                      <Link
+                        key={`u-${i}`}
+                        to={`/vehicles/allocations?job=${job.hh_job_number}`}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-50 border border-dashed border-amber-300 text-amber-700 text-sm font-medium hover:bg-amber-100"
+                        title="No van allocated yet — click to allocate on the Allocations page"
+                      >
+                        <span aria-hidden>🚐</span>
+                        {t} — unassigned <span aria-hidden>→</span>
+                      </Link>
+                    ) : (
+                      <span
+                        key={`u-${i}`}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-50 border border-dashed border-amber-300 text-amber-700 text-sm font-medium"
+                        title="Detected on HireHop but no van allocated yet"
+                      >
+                        <span aria-hidden>🚐</span>
+                        {t} — unassigned
+                      </span>
+                    )
                   ))}
                 </div>
               </div>
@@ -4444,19 +4464,13 @@ export default function JobDetailPage() {
                   } p-5`}>
                     <div className="flex items-start justify-between mb-3">
                       <div className="flex items-center gap-2 flex-wrap">
+                        {/* No per-card reg: the "Vehicles on this job" strip up
+                            top is the single source for which vans are on the job.
+                            Every driver can drive any van on the job, so a per-card
+                            reg told you nothing meaningful (and repeated on every
+                            card). Book Out / Check In read the van off the row
+                            internally (effective_vehicle_id), not from here. */}
                         <span className="text-lg">🚐</span>
-                        {/* Reg lives in the "Vehicles on this job" strip up top,
-                            not repeated prominently on every card — just a subtle
-                            chip so you can still tell which van THIS driver is on
-                            (useful on multi-van hires). */}
-                        {a.vehicle_reg && (
-                          <span
-                            className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600 font-medium"
-                            title="Van linked to this driver"
-                          >
-                            {a.vehicle_reg}
-                          </span>
-                        )}
                         <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${sc.bg} ${sc.text}`}>
                           {sc.label}
                         </span>
@@ -4487,14 +4501,21 @@ export default function JobDetailPage() {
                       </div>
                     </div>
 
-                    {/* Driver info */}
+                    {/* Driver info — name + contact on the left; driver flags
+                        and the excess fold inline on the right, wrapping below
+                        on mobile. The "DRIVER" label is dropped (the name is
+                        self-evidently the driver) and the excess no longer needs
+                        its own full-width row. */}
                     {a.assignment_type === 'self_drive' && (
                       <div className={`rounded-lg p-3 mb-3 ${
                         hasReferralBlocker ? 'bg-orange-50' : 'bg-gray-50'
                       }`}>
-                        <div className="flex items-center justify-between">
-                          <div>
-                            <span className="text-xs font-medium text-gray-500 uppercase">Driver</span>
+                        {/* Stack on mobile, inline on ≥sm. Stacking (rather than
+                            flex-wrap) gives the name its own full-width row on a
+                            phone, so a long name doesn't get squeezed against the
+                            excess block and break mid-word. */}
+                        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-x-3 gap-y-1">
+                          <div className="min-w-0">
                             {a.driver_name ? (
                               <p className="text-sm font-medium text-gray-900">
                                 {a.driver_id ? (
@@ -4511,14 +4532,14 @@ export default function JobDetailPage() {
                               <p className="text-sm text-gray-400 italic">No driver assigned</p>
                             )}
                           </div>
-                          <div className="flex gap-2">
+                          <div className="flex items-center flex-wrap gap-2 text-xs">
                             {hasReferralBlocker && (
-                              <span className="text-xs px-2 py-1 rounded-full bg-orange-100 text-orange-700 font-medium">
+                              <span className="px-2 py-1 rounded-full bg-orange-100 text-orange-700 font-medium">
                                 Referral Pending
                               </span>
                             )}
                             {a.driver_points != null && a.driver_points > 0 && (
-                              <span className={`text-xs px-2 py-1 rounded-full font-medium ${
+                              <span className={`px-2 py-1 rounded-full font-medium ${
                                 a.driver_points >= 10 ? 'bg-red-100 text-red-700' :
                                 a.driver_points >= 7 ? 'bg-orange-100 text-orange-700' :
                                 a.driver_points >= 4 ? 'bg-amber-100 text-amber-700' :
@@ -4527,97 +4548,85 @@ export default function JobDetailPage() {
                                 {a.driver_points} pts
                               </span>
                             )}
+                            {/* Excess — folded inline. Display rule: prefer the
+                                driver's personal liability
+                                (drivers.calculated_excess_amount); the per-job
+                                excess_amount_required is £0 for a driver covered
+                                by a sibling in the top-N slot (correct accounting
+                                but misleading — the person is still liable for
+                                £1,200+ if they damage the van). Falls back to the
+                                per-job amount, then the £1,200 floor. */}
+                            {a.excess && (() => {
+                              const personalLiability = a.driver_calculated_excess
+                                ? Number(a.driver_calculated_excess)
+                                : null;
+                              const perJobRequired = a.excess?.excess_amount_required != null
+                                ? Number(a.excess.excess_amount_required)
+                                : null;
+                              const displayAmount = personalLiability && personalLiability >= 1200
+                                ? personalLiability
+                                : (perJobRequired && perJobRequired > 0 ? perJobRequired : 1200);
+                              return (
+                                <span className="inline-flex items-center gap-1.5">
+                                  <span className="text-gray-400">Excess</span>
+                                  <span className="font-medium text-gray-700">£{displayAmount.toFixed(2)}</span>
+                                  <span className={`px-2 py-0.5 rounded-full font-medium ${
+                                    a.excess.excess_status === 'taken' ? 'bg-green-100 text-green-700' :
+                                    a.excess.excess_status === 'pre_auth' ? 'bg-sky-100 text-sky-700' :
+                                    a.excess.excess_status === 'waived' ? 'bg-blue-100 text-blue-700' :
+                                    a.excess.excess_status === 'reimbursed' ? 'bg-emerald-100 text-emerald-700' :
+                                    a.excess.excess_status === 'partially_reimbursed' ? 'bg-orange-100 text-orange-700' :
+                                    a.excess.excess_status === 'fully_claimed' ? 'bg-red-100 text-red-700' :
+                                    ['needed', 'pending'].includes(a.excess.excess_status) ? 'bg-amber-100 text-amber-700' :
+                                    a.excess.excess_status === 'partially_paid' ? 'bg-yellow-100 text-yellow-700' :
+                                    a.excess.excess_status === 'not_required' ? 'bg-gray-100 text-gray-500' :
+                                    'bg-gray-100 text-gray-600'
+                                  }`}>
+                                    {a.excess.excess_status === 'taken' ? 'Taken' :
+                                     a.excess.excess_status === 'pre_auth' ? 'Pre-auth' :
+                                     a.excess.excess_status === 'waived' ? 'Waived' :
+                                     a.excess.excess_status === 'reimbursed' ? 'Reimbursed' :
+                                     a.excess.excess_status === 'partially_reimbursed' ? 'Part Reimbursed' :
+                                     a.excess.excess_status === 'fully_claimed' ? 'Claimed' :
+                                     ['needed', 'pending'].includes(a.excess.excess_status) ? 'Required' :
+                                     a.excess.excess_status === 'partially_paid' ? 'Part Paid' :
+                                     a.excess.excess_status === 'not_required' ? 'Covered' :
+                                     a.excess.excess_status}
+                                  </span>
+                                  {a.excess.dispute_status && (
+                                    <span className={`px-2 py-0.5 rounded-full font-semibold ${a.excess.dispute_status === 'won' ? 'bg-gray-100 text-gray-600' : 'bg-red-100 text-red-700'}`}>
+                                      {a.excess.dispute_status === 'open' ? '⚠ Chargeback' : `Chargeback ${a.excess.dispute_status}`}
+                                    </span>
+                                  )}
+                                  {/* "Covered" (not_required) rows are the top-N
+                                      losers — £0 sibling of another driver's excess.
+                                      Nothing actionable, so no Edit/Manage. */}
+                                  {a.excess.excess_status !== 'not_required' && (
+                                    <>
+                                      <button
+                                        type="button"
+                                        onClick={() => a.excess && openExcessModal(a.excess.id, 'edit_required')}
+                                        disabled={a.excess && excessModalLoadingId === a.excess.id ? true : false}
+                                        title="Edit required excess amount"
+                                        className="font-medium text-ooosh-700 hover:text-ooosh-900 hover:underline disabled:opacity-50"
+                                      >
+                                        {a.excess && excessModalLoadingId === a.excess.id ? '…' : 'Edit'}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => a.excess && openExcessModal(a.excess.id)}
+                                        disabled={a.excess && excessModalLoadingId === a.excess.id ? true : false}
+                                        className="font-medium text-gray-600 hover:text-gray-900 hover:underline disabled:opacity-50"
+                                      >
+                                        Manage
+                                      </button>
+                                    </>
+                                  )}
+                                </span>
+                              );
+                            })()}
                           </div>
                         </div>
-
-                        {/* Excess status */}
-                        {a.excess && (() => {
-                          // Display rule: prefer the driver's personal
-                          // liability (drivers.calculated_excess_amount).
-                          // The per-job excess_amount_required is the
-                          // REALISATION — it's £0 for drivers covered by a
-                          // sibling in the top-N slot, which is correct
-                          // accounting but misleading on the card (the
-                          // person IS liable for £1,200+ if they damage the
-                          // van; another driver's payment just satisfies it).
-                          // Same fix shape as the /drivers page got in
-                          // migration 065. Falls back to per-job amount for
-                          // pre-fix data, then to the £1,200 floor.
-                          const personalLiability = a.driver_calculated_excess
-                            ? Number(a.driver_calculated_excess)
-                            : null;
-                          const perJobRequired = a.excess?.excess_amount_required != null
-                            ? Number(a.excess.excess_amount_required)
-                            : null;
-                          const displayAmount = personalLiability && personalLiability >= 1200
-                            ? personalLiability
-                            : (perJobRequired && perJobRequired > 0 ? perJobRequired : 1200);
-                          return (
-                          <div className="mt-2 pt-2 border-t border-gray-200">
-                            <div className="flex items-center justify-between text-xs">
-                              <span className="text-gray-500">Insurance Excess</span>
-                              <div className="flex items-center gap-2">
-                                <span className="font-medium text-gray-700">
-                                  £{displayAmount.toFixed(2)}
-                                </span>
-                                <span className={`px-2 py-0.5 rounded-full font-medium ${
-                                  a.excess.excess_status === 'taken' ? 'bg-green-100 text-green-700' :
-                                  a.excess.excess_status === 'pre_auth' ? 'bg-sky-100 text-sky-700' :
-                                  a.excess.excess_status === 'waived' ? 'bg-blue-100 text-blue-700' :
-                                  a.excess.excess_status === 'reimbursed' ? 'bg-emerald-100 text-emerald-700' :
-                                  a.excess.excess_status === 'partially_reimbursed' ? 'bg-orange-100 text-orange-700' :
-                                  a.excess.excess_status === 'fully_claimed' ? 'bg-red-100 text-red-700' :
-                                  ['needed', 'pending'].includes(a.excess.excess_status) ? 'bg-amber-100 text-amber-700' :
-                                  a.excess.excess_status === 'partially_paid' ? 'bg-yellow-100 text-yellow-700' :
-                                  a.excess.excess_status === 'not_required' ? 'bg-gray-100 text-gray-500' :
-                                  'bg-gray-100 text-gray-600'
-                                }`}>
-                                  {a.excess.excess_status === 'taken' ? 'Taken' :
-                                   a.excess.excess_status === 'pre_auth' ? 'Pre-auth' :
-                                   a.excess.excess_status === 'waived' ? 'Waived' :
-                                   a.excess.excess_status === 'reimbursed' ? 'Reimbursed' :
-                                   a.excess.excess_status === 'partially_reimbursed' ? 'Part Reimbursed' :
-                                   a.excess.excess_status === 'fully_claimed' ? 'Claimed' :
-                                   ['needed', 'pending'].includes(a.excess.excess_status) ? 'Required' :
-                                   a.excess.excess_status === 'partially_paid' ? 'Part Paid' :
-                                   a.excess.excess_status === 'not_required' ? 'Covered' :
-                                   a.excess.excess_status}
-                                </span>
-                                {a.excess.dispute_status && (
-                                  <span className={`px-2 py-0.5 rounded-full font-semibold ${a.excess.dispute_status === 'won' ? 'bg-gray-100 text-gray-600' : 'bg-red-100 text-red-700'}`}>
-                                    {a.excess.dispute_status === 'open' ? '⚠ Chargeback' : `Chargeback ${a.excess.dispute_status}`}
-                                  </span>
-                                )}
-                                {/* "Covered" (not_required) rows are the top-N
-                                    losers — £0 sibling of another driver's excess
-                                    on the same hire. Nothing actionable, so no
-                                    Edit/Manage (only dead-end actions would show). */}
-                                {a.excess.excess_status !== 'not_required' && (
-                                  <>
-                                    <button
-                                      type="button"
-                                      onClick={() => a.excess && openExcessModal(a.excess.id, 'edit_required')}
-                                      disabled={a.excess && excessModalLoadingId === a.excess.id ? true : false}
-                                      title="Edit required excess amount"
-                                      className="text-xs font-medium text-ooosh-700 hover:text-ooosh-900 hover:underline disabled:opacity-50"
-                                    >
-                                      {a.excess && excessModalLoadingId === a.excess.id ? '…' : 'Edit'}
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => a.excess && openExcessModal(a.excess.id)}
-                                      disabled={a.excess && excessModalLoadingId === a.excess.id ? true : false}
-                                      className="text-xs font-medium text-gray-600 hover:text-gray-900 hover:underline disabled:opacity-50"
-                                    >
-                                      Manage
-                                    </button>
-                                  </>
-                                )}
-                              </div>
-                            </div>
-                          </div>
-                          );
-                        })()}
                       </div>
                     )}
 
@@ -5722,15 +5731,32 @@ export default function JobDetailPage() {
                   </div>
                 </div>
 
-                {/* Notes */}
+                {/* Notes — two fields matching the full calculator convention.
+                    The old single "Notes" field saved to internal_notes, which
+                    the freelancer portal never shows — staff notes meant for
+                    the driver were silently invisible (Jul 2026 bug). */}
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Notes</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Freelancer Notes <span className="font-normal text-gray-400">(shown to the freelancer in the portal)</span>
+                  </label>
+                  <textarea
+                    value={localFormData.freelancerNotes}
+                    onChange={(e) => setLocalFormData({ ...localFormData, freelancerNotes: e.target.value })}
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                    rows={2}
+                    placeholder="What's included, access info, who to ask for..."
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Internal Notes <span className="font-normal text-gray-400">(staff only)</span>
+                  </label>
                   <textarea
                     value={localFormData.notes}
                     onChange={(e) => setLocalFormData({ ...localFormData, notes: e.target.value })}
                     className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
                     rows={2}
-                    placeholder="Optional notes..."
+                    placeholder="Margins, commercial notes..."
                   />
                 </div>
 
@@ -5775,6 +5801,7 @@ export default function JobDetailPage() {
                         jobDate: dateStr,
                         arrivalTime: localFormData.arrivalTime || undefined,
                         notes: localFormData.notes || undefined,
+                        freelancerNotes: localFormData.freelancerNotes || undefined,
                       });
                       // Push to HireHop if toggled on
                       if (localFormData.pushToHirehop && job.hh_job_number && localResult?.id) {
@@ -5785,7 +5812,7 @@ export default function JobDetailPage() {
                         }
                       }
                       setShowLocalForm(false);
-                      setLocalFormData({ jobType: 'delivery', venueId: '', venueName: '', jobDate: '', arrivalTime: '', notes: '', pushToHirehop: true });
+                      setLocalFormData({ jobType: 'delivery', venueId: '', venueName: '', jobDate: '', arrivalTime: '', freelancerNotes: '', notes: '', pushToHirehop: true });
                       loadQuotes();
                     } catch (err) {
                       alert(err instanceof Error ? err.message : 'Failed to create');
@@ -5970,7 +5997,7 @@ export default function JobDetailPage() {
               to THIS job — those already show in the merch card on Overview.
               Informational only (not on the prep ticker). Hidden when empty. */}
           {job.client_id && (
-            <div className="mb-4">
+            <div className="empty:hidden mb-4">
               <HeldItemsSection entityType="organisation" entityId={job.client_id}
                 kinds={['incoming', 'temp_storage', 'lost_property']} excludeJobId={job.id}
                 openOnly hideWhenEmpty heading="📦 Also holding (FYI)" />
@@ -6417,7 +6444,7 @@ function OverviewFinancialStrip({ jobId }: { jobId: string }) {
 }
 
 
-function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, clientOrgName, derivedFlags, seatAvailability, hasCrewQuotes, hasCrewOnHH, onOpenCrewCalculator, onLaunchStaging, onLaunchRackPlan, onLaunchBacklineMatcher }: {
+function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, clientOrgName, derivedFlags, seatAvailability, assignedVehicleRegs, hasCrewQuotes, hasCrewOnHH, onOpenCrewCalculator, onLaunchStaging, onLaunchRackPlan, onLaunchBacklineMatcher }: {
   jobId: string;
   hhJobNumber?: number | null;
   pipelineStatus?: string | null;
@@ -6440,6 +6467,8 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, cli
     nonMatchingVans: Array<{ reg: string; seat_layout: string | null }>;
     unknownVans: Array<{ reg: string }>;
   } | null;
+  /** Regs allocated to this job — shown on the vehicle requirement headline. */
+  assignedVehicleRegs?: string[];
   hasCrewQuotes?: boolean;
   hasCrewOnHH?: boolean;
   onOpenCrewCalculator?: () => void;
@@ -6803,6 +6832,7 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, cli
                   req={req}
                   derivedFlags={effectiveFlags}
                   seatAvailability={seatAvailability}
+                  assignedVehicleRegs={assignedVehicleRegs}
                   jobId={jobId}
                   hhJobNumber={hhJobNumber}
                   isVanAndDriver={isVanAndDriver}

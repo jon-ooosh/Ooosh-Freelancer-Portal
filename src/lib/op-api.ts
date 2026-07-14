@@ -119,6 +119,101 @@ export interface PortalEquipmentResponse {
 }
 
 // =============================================================================
+// STUDIO SITTER SHIFTS (Rehearsals — Phase D portal surface)
+// =============================================================================
+
+export interface SitterSharedFile {
+  name: string
+  url: string
+  fileType: string | null
+}
+
+export interface SitterShiftJob {
+  job_id: string
+  hh_job_number: number | null
+  label: string          // band / client / job name
+  rooms: string[]        // sitter-needed room labels, e.g. ["Room 1 · Lockout"]
+  files?: SitterSharedFile[]
+}
+
+export interface SitterShift {
+  date: string           // YYYY-MM-DD
+  planned_start: string | null
+  planned_end: string | null
+  status: string         // shift status
+  assignment_status: string // assigned / confirmed
+  fee: number | null
+  jobs: SitterShiftJob[] // who's in that night
+}
+
+export interface SitterShiftsResponse {
+  success: boolean
+  shifts: SitterShift[]
+}
+
+export interface SitterShiftDetail {
+  date: string
+  planned_start: string | null
+  planned_end: string | null
+  status: string
+  fee: number | null
+  assignment_status: string | null
+  jobs: SitterShiftJob[]
+}
+
+export interface SitterShiftDetailResponse extends SitterShiftDetail {
+  success: boolean
+}
+
+/** The sitter's own upcoming/recent rostered evenings. */
+export async function getSitterShiftsFromOP(sessionToken: string): Promise<SitterShiftsResponse> {
+  return opFetch<SitterShiftsResponse>('/studio-sitter/shifts', sessionToken)
+}
+
+/** One evening's detail — who's in each room + that job's shared specs/files. */
+export async function getSitterShiftDetailFromOP(
+  sessionToken: string,
+  date: string
+): Promise<SitterShiftDetailResponse> {
+  return opFetch<SitterShiftDetailResponse>(`/studio-sitter/shifts/${date}`, sessionToken)
+}
+
+export interface SitterThreadMessage {
+  id: string
+  content: string
+  created_at: string
+  author: string
+  from_staff: boolean
+  mine: boolean
+  files: SitterSharedFile[]
+}
+
+export interface SitterThreadResponse {
+  success: boolean
+  messages: SitterThreadMessage[]
+}
+
+/** Read the handover thread for one evening. */
+export async function getSitterThreadFromOP(
+  sessionToken: string,
+  date: string
+): Promise<SitterThreadResponse> {
+  return opFetch<SitterThreadResponse>(`/studio-sitter/shifts/${date}/thread`, sessionToken)
+}
+
+/** Post a handover note to one evening's thread. */
+export async function postSitterThreadOP(
+  sessionToken: string,
+  date: string,
+  content: string
+): Promise<{ success: boolean; message: SitterThreadMessage }> {
+  return opFetch(`/studio-sitter/shifts/${date}/thread`, sessionToken, {
+    method: 'POST',
+    body: JSON.stringify({ content }),
+  })
+}
+
+// =============================================================================
 // API FUNCTIONS
 // =============================================================================
 
