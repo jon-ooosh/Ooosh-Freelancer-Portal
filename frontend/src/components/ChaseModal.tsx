@@ -41,7 +41,6 @@ export default function ChaseModal({
   const [mode, setMode] = useState<Mode>('log');
   const [chaseMethod, setChaseMethod] = useState<string>('phone');
   const [content, setContent] = useState('');
-  const [chaseResponse, setChaseResponse] = useState('');
   const [nextChaseDate, setNextChaseDate] = useState('');
   const [selectedChasePreset, setSelectedChasePreset] = useState<string | null>(null);
   const [chaseAlertUserId, setChaseAlertUserId] = useState('');
@@ -62,7 +61,6 @@ export default function ChaseModal({
       setSelectedChasePreset('5 days');
       setMode('log');
       setContent('');
-      setChaseResponse('');
       setChaseMethod('phone');
       setChaseAlertUserId(job.chase_alert_user_id || '');
       setDelivery(job.chase_alert_delivery || 'none');
@@ -110,7 +108,6 @@ export default function ChaseModal({
           content: content.trim(),
           job_id: job.id,
           chase_method: chaseMethod,
-          chase_response: chaseResponse || undefined,
           next_chase_date: nextChaseDate || undefined,
           chase_alert_user_id: chaseAlertUserId || undefined,
           chase_alert_delivery: delivery,
@@ -136,6 +133,11 @@ export default function ChaseModal({
         {},
       );
       setDraftResult({ to: res.data.to, subject: res.data.subject, threaded: res.data.threaded });
+      // Auto-populate the chase as a logged email (not saved until they click
+      // Log Chase). Keep any note they'd already typed.
+      setMode('log');
+      setChaseMethod('email');
+      setContent((prev) => (prev.trim() ? prev : 'Generated auto-chase email — draft created in info@ for review.'));
     } catch (err) {
       setDraftError(err instanceof Error ? err.message : 'Failed to draft chase');
     } finally {
@@ -244,17 +246,6 @@ export default function ChaseModal({
                   onChange={(e) => setContent(e.target.value)}
                   placeholder="e.g. Called, left voicemail. Will try again Thursday."
                   rows={3}
-                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Response (optional)</label>
-                <input
-                  type="text"
-                  value={chaseResponse}
-                  onChange={(e) => setChaseResponse(e.target.value)}
-                  placeholder="e.g. No answer / Waiting on budget sign-off / Will confirm Friday"
                   className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
                 />
               </div>

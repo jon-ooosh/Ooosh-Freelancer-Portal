@@ -38,7 +38,7 @@ HARD RULES — never break these:
 - MATCH THE URGENCY TO HOW SOON THE HIRE STARTS (given below as "days until hire"). NEVER say "no rush" / "no hurry" / "whenever suits" or imply there's plenty of time unless the hire is more than a week away. If the hire is days away (or today/past), be warm but clearly convey we need to hear back soon to lock it in — do not sound relaxed about an imminent booking.
 - Keep it SHORT — 2 short paragraphs max, ideally 3-5 sentences total. Busy people skim.
 - Warm and human, not corporate or pushy. One light question that invites a reply ("any thoughts on the quote?" / "happy to tweak anything?").
-- British English. Sign off as "Ooosh" / "the Ooosh team" (no fake individual name).
+- British English. Sign off with the SENDER'S name if one is given below (e.g. "Cheers, Jon" / "Best, Jon") — this is the real Ooosh staff member sending it. If no sender name is given, sign off as "the Ooosh team". Never invent an individual name.
 - If a prior email thread is provided, match its tone and reference it naturally; if it's a first contact, keep it friendly-neutral.
 - Plain text only. No markdown, no placeholders like [name], no subject-line clichés ("Just following up!!!").
 
@@ -223,7 +223,7 @@ export async function gatherChaseContext(jobId: string): Promise<ChaseContext | 
 }
 
 /** Render the grounding context into the user prompt. */
-function buildUserPrompt(ctx: ChaseContext): string {
+function buildUserPrompt(ctx: ChaseContext, signOffName?: string | null): string {
   const lines: string[] = [];
   lines.push('Draft a check-in chase for this quote. Grounding data:');
   lines.push('');
@@ -268,6 +268,11 @@ function buildUserPrompt(ctx: ChaseContext): string {
   if (ctx.priorChaseCount > 0) {
     lines.push(`We have already chased ${ctx.priorChaseCount} time(s) with no reply — keep this one light and low-pressure, do not nag.`);
   }
+  if (signOffName && signOffName.trim()) {
+    lines.push(`Sender: ${signOffName.trim()} — sign the email off from them (e.g. "Cheers, ${signOffName.trim()}"). This is the Ooosh staff member sending it.`);
+  } else {
+    lines.push('Sender: not specified — sign off as "the Ooosh team".');
+  }
   lines.push('');
   if (ctx.hasThread && ctx.threadText) {
     lines.push('Prior email thread (most recent last) — match its tone, reply naturally into it:');
@@ -286,6 +291,7 @@ function buildUserPrompt(ctx: ChaseContext): string {
  */
 export async function draftChaseEmail(
   jobId: string,
+  opts: { signOffName?: string | null } = {},
 ): Promise<{ draft: ChaseDraft; context: ChaseContext }> {
   if (!isAnthropicConfigured()) {
     throw new Error('ANTHROPIC_API_KEY not configured — cannot draft chases.');
@@ -307,7 +313,7 @@ export async function draftChaseEmail(
     model: MODEL_ID,
     max_tokens: MAX_TOKENS,
     system,
-    messages: [{ role: 'user', content: buildUserPrompt(context) }],
+    messages: [{ role: 'user', content: buildUserPrompt(context, opts.signOffName ?? null) }],
     tools: [
       {
         name: 'report_draft',
