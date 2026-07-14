@@ -16,6 +16,7 @@ import { draftChaseEmail, learnChaseVoice } from '../services/chase-draft';
 import { createChaseDraftForJob } from '../services/gmail-draft';
 import { getJobCommsSummaryStatus, generateJobCommsSummary } from '../services/comms-summary';
 import { backfillOpenPipelineThreads, type BackfillScope, type BackfillSummary } from '../services/gmail-backfill';
+import { runDueAutoChases } from '../services/auto-chase-runner';
 import { isAnthropicConfigured } from '../config/anthropic';
 import { isGmailConfigured } from '../config/gmail';
 
@@ -212,6 +213,20 @@ router.post('/create-draft/:jobId', authorize('admin', 'manager'), async (req: A
     if (/no client email/i.test(message)) return res.status(422).json({ error: message });
     console.error('[auto-chase] create-draft error:', error);
     res.status(500).json({ error: message || 'Failed to create chase draft' });
+  }
+});
+
+// POST /api/auto-chase/run-due — run the due-auto-chase pass now (admin). Same
+// engine as the daily 08:10 cron — handy for testing without waiting. Honours
+// the per-job auto_chase_mode + the auto_chase_send_enabled master switch, so a
+// manual run can't send anything the scheduled run wouldn't.
+router.post('/run-due', authorize('admin'), async (_req: AuthRequest, res: Response) => {
+  try {
+    const summary = await runDueAutoChases();
+    res.json({ data: summary });
+  } catch (error) {
+    console.error('[auto-chase] run-due error:', error);
+    res.status(500).json({ error: 'Auto-chase run failed' });
   }
 });
 

@@ -21,7 +21,7 @@
  *   3. No resolvable client email → throw (staff addresses it manually).
  */
 import { query } from '../config/database';
-import { getPrimaryMailbox, createGmailDraft, gmailSearchMessageIds, isGmailConfigured } from '../config/gmail';
+import { getPrimaryMailbox, createGmailDraft, sendGmailDraft, gmailSearchMessageIds, isGmailConfigured } from '../config/gmail';
 import { draftChaseEmail } from './chase-draft';
 import { extractEmailAddress } from './email-matcher';
 
@@ -35,6 +35,8 @@ export interface CreatedChaseDraft {
   subject: string;
   threaded: boolean;
   body: string;
+  /** True when the auto-send path actually sent the draft (§10). */
+  sent: boolean;
 }
 
 interface RecipientResolution {
@@ -146,6 +148,7 @@ async function resolveRecipient(jobId: string): Promise<RecipientResolution | nu
 export async function createChaseDraftForJob(
   jobId: string,
   signOffName?: string | null,
+  opts: { send?: boolean } = {},
 ): Promise<CreatedChaseDraft> {
   if (!isGmailConfigured()) {
     throw new Error('Gmail is not configured — cannot create drafts.');
@@ -176,13 +179,25 @@ export async function createChaseDraftForJob(
     ...(recipient.threadId ? { threadId: recipient.threadId } : {}),
   });
 
+  // Opt-in auto-send (§10). The caller only sets send=true once the master
+  // switch + suppression gate have passed; a send failure is fatal to this call
+  // (the draft still exists in info@ for a human to send manually).
+  let sent = false;
+  let threadId = created.message?.threadId ?? recipient.threadId ?? null;
+  if (opts.send) {
+    const result = await sendGmailDraft(mailbox, created.id);
+    sent = true;
+    threadId = result.threadId ?? threadId;
+  }
+
   return {
     draftId: created.id,
     gmailMessageId: created.message?.id ?? null,
-    threadId: created.message?.threadId ?? recipient.threadId ?? null,
+    threadId,
     to: recipient.to,
     subject: draft.subject,
     threaded: Boolean(recipient.threadId),
     body: draft.body,
+    sent,
   };
 }

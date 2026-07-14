@@ -1076,6 +1076,27 @@ export function startScheduler() {
         }
       }, { timezone: 'Europe/London' });
       console.log('Scheduler: Email retention sweep scheduled Sun 04:00 Europe/London');
+
+      // Daily 08:10 Europe/London — process due auto-chases (§9–§10). Finds jobs
+      // opted into auto-chase (auto_chase_mode = draft/send) whose chase is due,
+      // runs the suppression gate, then creates a Gmail draft (draft mode) or
+      // sends it (send mode, only when the auto_chase_send_enabled master switch
+      // is on). Runs just after the 08:00 chase-alert scanner. Needs Anthropic
+      // too (guarded inside the runner). See services/auto-chase-runner.ts.
+      cron.schedule('10 8 * * *', async () => {
+        try {
+          const { runDueAutoChases } = await import('../services/auto-chase-runner');
+          const r = await runDueAutoChases();
+          if (r.due > 0) {
+            console.log(
+              `Scheduler: Auto-chase — ${r.drafted} drafted, ${r.sent} sent, ${r.suppressed} held, ${r.escalated} escalated, ${r.failed} failed (of ${r.due} due; send master ${r.sendMasterOn ? 'ON' : 'off'})`,
+            );
+          }
+        } catch (err) {
+          console.error('Scheduler: Auto-chase runner failed:', err);
+        }
+      }, { timezone: 'Europe/London' });
+      console.log('Scheduler: Auto-chase runner scheduled daily at 08:10 Europe/London');
     }
   }
 

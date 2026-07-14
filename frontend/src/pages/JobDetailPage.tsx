@@ -5571,6 +5571,7 @@ export default function JobDetailPage() {
           next_chase_date: job.next_chase_date,
           chase_alert_user_id: (job as unknown as { chase_alert_user_id?: string | null }).chase_alert_user_id || null,
           chase_alert_delivery: (job as unknown as { chase_alert_delivery?: 'bell' | 'bell_email' | null }).chase_alert_delivery || null,
+          auto_chase_mode: (job as unknown as { auto_chase_mode?: 'off' | 'draft' | 'send' | null }).auto_chase_mode || null,
         } : null}
         onClose={() => setShowChaseModal(false)}
         onChaseLogged={() => { loadJob(); loadInteractions(); }}

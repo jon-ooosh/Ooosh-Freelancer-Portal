@@ -13,7 +13,10 @@ interface ChaseableJob {
   next_chase_date?: string | null;
   chase_alert_user_id?: string | null;
   chase_alert_delivery?: 'bell' | 'bell_email' | 'none' | null;
+  auto_chase_mode?: 'off' | 'draft' | 'send' | null;
 }
+
+type AutoChaseMode = 'off' | 'draft' | 'send';
 
 type Mode = 'reschedule' | 'log';
 type Delivery = 'bell' | 'bell_email' | 'none';
@@ -45,6 +48,7 @@ export default function ChaseModal({
   const [selectedChasePreset, setSelectedChasePreset] = useState<string | null>(null);
   const [chaseAlertUserId, setChaseAlertUserId] = useState('');
   const [delivery, setDelivery] = useState<Delivery>('none');
+  const [autoChaseMode, setAutoChaseMode] = useState<AutoChaseMode>('off');
   const [teamUsers, setTeamUsers] = useState<{ id: string; email: string; first_name: string; last_name: string }[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -64,6 +68,7 @@ export default function ChaseModal({
       setChaseMethod('phone');
       setChaseAlertUserId(job.chase_alert_user_id || '');
       setDelivery(job.chase_alert_delivery || 'none');
+      setAutoChaseMode((job.auto_chase_mode as AutoChaseMode) || 'off');
       setError('');
       setDraftResult(null);
       setDraftError('');
@@ -112,6 +117,10 @@ export default function ChaseModal({
           chase_alert_user_id: chaseAlertUserId || undefined,
           chase_alert_delivery: delivery,
         });
+      }
+      // Persist the per-job auto-chase mode if it changed (manager-tier control).
+      if (canDraftChase && autoChaseMode !== ((job.auto_chase_mode as AutoChaseMode) || 'off')) {
+        await api.patch(`/pipeline/${job.id}`, { auto_chase_mode: autoChaseMode });
       }
       onChaseLogged();
       onClose();
@@ -187,6 +196,39 @@ export default function ChaseModal({
               </div>
             )}
             {draftError && <p className="mt-2 text-xs text-red-600">{draftError}</p>}
+
+            {/* Per-job auto-chase mode — what happens automatically when this
+                chase comes due. Off = manual only. Draft = auto-create a Gmail
+                draft to review. Auto-send = send it (only once auto-send is
+                enabled globally in Settings; until then it just drafts). */}
+            <div className="mt-3 pt-3 border-t border-indigo-100">
+              <p className="text-xs font-medium text-indigo-800 mb-1.5">When the chase date arrives, automatically…</p>
+              <div className="inline-flex p-0.5 bg-white border border-indigo-200 rounded-lg text-xs">
+                {([
+                  { k: 'off', label: 'Nothing' },
+                  { k: 'draft', label: 'Draft it' },
+                  { k: 'send', label: 'Send it' },
+                ] as const).map((m) => (
+                  <button
+                    key={m.k}
+                    type="button"
+                    onClick={() => setAutoChaseMode(m.k)}
+                    className={`px-3 py-1.5 rounded-md transition-colors ${
+                      autoChaseMode === m.k ? 'bg-indigo-600 text-white font-medium' : 'text-indigo-600 hover:bg-indigo-50'
+                    }`}
+                  >
+                    {m.label}
+                  </button>
+                ))}
+              </div>
+              <p className="text-[11px] text-indigo-500 mt-1.5">
+                {autoChaseMode === 'off'
+                  ? 'Manual only — the card just appears in the Chasing pile.'
+                  : autoChaseMode === 'draft'
+                  ? 'A Gmail draft is auto-created in info@ each time this chase is due. You send it.'
+                  : 'The chase is sent automatically (once auto-send is switched on in Settings — until then it just drafts). A client reply pauses it; 3 silent chases hand it back to a human.'}
+              </p>
+            </div>
           </div>
         )}
 

@@ -1243,8 +1243,22 @@ function ChaseVoiceSettingsSection() {
   const [learning, setLearning] = useState(false);
   const [proposed, setProposed] = useState('');
   const [learnError, setLearnError] = useState('');
+  // Master auto-send switch (§10). Off = jobs set to Auto-send only create drafts.
+  const [sendEnabled, setSendEnabled] = useState(false);
+  const [sendSaving, setSendSaving] = useState(false);
 
   useEffect(() => { load(); }, []);
+
+  async function toggleSend() {
+    const next = !sendEnabled;
+    setSendSaving(true);
+    try {
+      await api.put('/system-settings', { settings: { auto_chase_send_enabled: next ? 'true' : 'false' } });
+      setSendEnabled(next);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not update the auto-send switch');
+    } finally { setSendSaving(false); }
+  }
 
   async function learnFromExamples() {
     setLearning(true); setLearnError(''); setProposed('');
@@ -1265,6 +1279,7 @@ function ChaseVoiceSettingsSection() {
       const v = res.data.find(s => s.key === 'chase_voice_instructions')?.value ?? '';
       setOrig(v);
       setVal(v);
+      setSendEnabled(res.data.find(s => s.key === 'auto_chase_send_enabled')?.value === 'true');
     } catch {
       setError('Could not load chase settings (has migration 157 run?).');
     } finally { setLoading(false); }
@@ -1292,6 +1307,28 @@ function ChaseVoiceSettingsSection() {
       </p>
       {error && <div className="mb-3 text-sm text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2">{error}</div>}
       {success && <div className="mb-3 text-sm text-green-700 bg-green-50 border border-green-200 rounded px-3 py-2">{success}</div>}
+
+      {/* Master auto-send switch (§10) — the global backstop on top of per-job
+          Auto-send mode. Off = even Auto-send jobs only create drafts. */}
+      <div className={`mb-5 rounded-lg border p-3 flex items-start justify-between gap-4 ${sendEnabled ? 'border-amber-300 bg-amber-50' : 'border-gray-200 bg-gray-50'}`}>
+        <div>
+          <p className="text-sm font-medium text-gray-900">Auto-send chases {sendEnabled ? '· ON' : '· off (drafts only)'}</p>
+          <p className="text-xs text-gray-500 mt-0.5">
+            Master switch. While off, jobs set to “Auto-send” still only create Gmail drafts — so you can watch what would go out.
+            Turn on to let those jobs actually send automatically (each still passes the suppression check first).
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={toggleSend}
+          disabled={sendSaving}
+          role="switch"
+          aria-checked={sendEnabled}
+          className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 ${sendEnabled ? 'bg-amber-500' : 'bg-gray-300'}`}
+        >
+          <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${sendEnabled ? 'translate-x-6' : 'translate-x-1'}`} />
+        </button>
+      </div>
 
       <textarea
         value={val}
