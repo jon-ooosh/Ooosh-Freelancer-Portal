@@ -150,6 +150,18 @@ Because Phase 1 ingests **full bodies**, the whole email chain is searchable per
 
 **BUILT (Jul 2026).** `services/comms-query.ts` `answerCommsQuery(jobId, question)` answers a natural-language question strictly from a job's ingested `type='email'` interactions — Sonnet 5, forced tool-use → `{ answer }`, grounded (quotes + dates, "can't find it" when absent, never guesses). The email chain is sent as a **prompt-cached** block so repeated questions on the same job in a session reuse it. `POST /api/auto-chase/comms-query/:jobId` (STAFF_ROLES; `available:false` when nothing ingested). Surfaced as a "🔎 Ask about these emails" box folded into `ConversationSummary.tsx` (Activity Timeline, jobs only) — reuses the summary's availability check. The line-item-diff history table (auto-assembled audit trail) is still the deferred Phase 4 companion.
 
+### 7.3 Quote-PDF version diff (jon, Jul 2026 — NEXT-SESSION build, not yet started)
+
+The strongest dispute artefact isn't the email prose, it's the **succession of quote PDFs**. HireHop keeps only the *latest* state of a job (line-item history lives only in its manual archive), so **the versioned quote PDFs we emailed are the real physical trail** of what was on the job when — "snare stands dropped from two to one on the 13 Jun quote". Adds/removals often happen by email but sometimes in person / on the phone, so the PDF a client was sent is frequently the ONLY comparison point.
+
+We already ingest the threads those PDFs are attached to — we just don't harvest the PDFs yet (attachment→R2 is deferred, §8). Proposed build:
+1. **Harvest quote PDFs** from ingested email threads (Gmail `messages.attachments.get`) to R2, keyed by job + received date. Recognise a quote PDF by the HH job number in the filename (the same key the matcher uses; e.g. `TSS Backline Rider 2026.pdf` — refine to the HH quote naming).
+2. **Extract line items** from each PDF via the existing `services/document-extract.ts` (Claude vision, structured output) → a versioned `{ date, items:[{desc, qty, price}] }` snapshot per PDF.
+3. **Store** the snapshots (a `job_quote_versions` table — this IS the "line-item diff history" companion, sourced from the emailed PDFs rather than HH sync snapshots, which is better precisely because HH doesn't keep the trail).
+4. **Diff + surface**: a per-job "quote changes over time" view (added / removed / qty-changed / price-changed between consecutive versions, each dated + linked to the source PDF) AND feed the diffs into the dispute helper so "when did the second snare stand come off?" is answered from the PDF trail, not just the prose.
+
+Complements §7.2: the email chain says what was *discussed*, the PDF diff shows what was actually *quoted*. Cross-referencing the two ("client asked to drop X on the 3rd → gone from the 4 Jun quote PDF") is the near-instant audit trail. Deferred to a dedicated session — it's a real build (attachment harvest + per-PDF vision extraction + versioned store + diff UI), not a quick add.
+
 ## 8. Other gleanings from Gmail ingestion (the suppression smarts + freebies)
 
 These feed §10's suppression checklist and are cheap once ingestion exists:
