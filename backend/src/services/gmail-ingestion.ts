@@ -280,8 +280,6 @@ export async function ingestGmailMessage(
   }
 
   if (jobId) {
-    // Note: the chase-model auto-bump lives in the interactions ROUTE, not this
-    // raw INSERT — Phase 2's chase logic owns the bump; this just records.
     await query(
       `INSERT INTO interactions
          (type, content, job_id, created_by,
@@ -291,6 +289,29 @@ export async function ingestGmailMessage(
       [body || snippet || '(no body)', jobId, SYSTEM_USER_ID, rfcMessageId, msg.threadId,
        from, to, subject, snippet, direction, hasAttachments],
     );
+
+    // Chase auto-unenrol: a LIVE inbound client reply is engagement — push the
+    // next chase forward (sacred-future: only when null/today/past, never shorten
+    // a deliberately future-dated chase) and reset the silent-chase counter so a
+    // job that was heading for cold-dead-end escalation gets a clean slate. Only
+    // for live ingestion — the backfill (opts.forceJobId) replays historical mail
+    // and must not move today's chase dates. Scoped to enquiry stages (chase
+    // dates on confirmed/lost/cancelled are stale anyway). Spec §3, §5.5, §10.
+    if (direction === 'inbound' && !opts.forceJobId) {
+      await query(
+        `UPDATE jobs SET
+           next_chase_date = CASE
+             WHEN next_chase_date IS NULL OR next_chase_date <= CURRENT_DATE
+               THEN (CURRENT_DATE + (COALESCE(chase_interval_days, 5) || ' days')::interval)::date
+             ELSE next_chase_date
+           END,
+           auto_chase_count = 0,
+           updated_at = NOW()
+         WHERE id = $1
+           AND pipeline_status IN ('new_enquiry','quoting','paused','provisional')`,
+        [jobId],
+      );
+    }
     return 'logged';
   }
 
