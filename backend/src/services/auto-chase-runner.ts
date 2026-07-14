@@ -116,17 +116,22 @@ export async function runDueAutoChases(): Promise<AutoChaseRunSummary> {
   if (!summary.configured) return summary;
 
   summary.sendMasterOn = (await getSystemSetting('auto_chase_send_enabled')) === 'true';
+  // Fallback sign-off name for automated chases (no clicker). Per-job manager
+  // wins; this is the catch-all before "the Ooosh team".
+  const defaultSender = ((await getSystemSetting('chase_default_sender_name')) || '').trim() || null;
 
   const due = await query(
-    `SELECT id, hh_job_number, job_name, auto_chase_mode, chase_alert_user_id
-       FROM jobs
-      WHERE is_deleted = false
-        AND COALESCE(is_internal, false) = false
-        AND auto_chase_mode IN ('draft','send')
-        AND next_chase_date IS NOT NULL
-        AND next_chase_date <= CURRENT_DATE
-        AND pipeline_status IN ('new_enquiry','quoting','paused','provisional')
-      ORDER BY next_chase_date ASC
+    `SELECT j.id, j.hh_job_number, j.job_name, j.auto_chase_mode, j.chase_alert_user_id,
+            mp.first_name AS manager_first_name
+       FROM jobs j
+       LEFT JOIN people mp ON mp.id = j.manager1_person_id
+      WHERE j.is_deleted = false
+        AND COALESCE(j.is_internal, false) = false
+        AND j.auto_chase_mode IN ('draft','send')
+        AND j.next_chase_date IS NOT NULL
+        AND j.next_chase_date <= CURRENT_DATE
+        AND j.pipeline_status IN ('new_enquiry','quoting','paused','provisional')
+      ORDER BY j.next_chase_date ASC
       LIMIT 100`,
   );
   summary.due = due.rows.length;
@@ -148,8 +153,10 @@ export async function runDueAutoChases(): Promise<AutoChaseRunSummary> {
       }
 
       const wantSend = job.auto_chase_mode === 'send' && summary.sendMasterOn;
-      // Automated chases sign off as "the Ooosh team" (no logged-in user).
-      const result = await createChaseDraftForJob(job.id, null, { send: wantSend });
+      // Sign off with the job's manager, else the configured default, else the
+      // template falls back to "the Ooosh team".
+      const signOffName = (job.manager_first_name as string | null) || defaultSender;
+      const result = await createChaseDraftForJob(job.id, signOffName, { send: wantSend });
       await advanceAfterChase(job.id);
 
       if (result.sent) {

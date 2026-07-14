@@ -200,6 +200,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '163_job_comms_summary.sql',
         '164_interaction_shift_anchor.sql',
         '165_auto_chase_send_switch.sql',
+        '166_chase_default_sender.sql',
       ];
 
       for (const migration of migrations) {
