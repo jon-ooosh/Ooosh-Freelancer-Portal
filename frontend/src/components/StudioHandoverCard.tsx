@@ -19,6 +19,7 @@ interface CoverageEvening {
   shift_id: string | null;
   status: string;
   assignee: { id: string; name: string } | null;
+  note_count?: number;
 }
 
 function formatDay(iso: string): string {
@@ -36,7 +37,16 @@ export default function StudioHandoverCard({ jobId }: { jobId: string }) {
   useEffect(() => {
     let cancelled = false;
     api.get<{ data: CoverageEvening[] }>(`/studio-sitters/job/${jobId}/coverage`)
-      .then((r) => { if (!cancelled) { const list = r.data ?? []; setEvenings(list); if (list.length === 1) setOpen(new Set([list[0].date])); } })
+      .then((r) => {
+        if (cancelled) return;
+        const list = r.data ?? [];
+        setEvenings(list);
+        // Auto-open evenings that already have a conversation, plus the single-
+        // evening case, so notes aren't hidden behind a click.
+        const toOpen = list.filter((e) => (e.note_count ?? 0) > 0).map((e) => e.date);
+        if (toOpen.length === 0 && list.length === 1) toOpen.push(list[0].date);
+        setOpen(new Set(toOpen));
+      })
       .catch(() => { /* leave empty → card hides */ })
       .finally(() => { if (!cancelled) setLoaded(true); });
     return () => { cancelled = true; };
@@ -72,7 +82,14 @@ export default function StudioHandoverCard({ jobId }: { jobId: string }) {
               onClick={() => toggle(ev.date)}
               className="w-full flex items-center justify-between gap-2 text-left"
             >
-              <span className="text-sm font-medium text-gray-800">{formatDay(ev.date)}</span>
+              <span className="text-sm font-medium text-gray-800 flex items-center gap-1.5">
+                {formatDay(ev.date)}
+                {(ev.note_count ?? 0) > 0 && (
+                  <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-700 font-medium">
+                    💬 {ev.note_count}
+                  </span>
+                )}
+              </span>
               <span className="flex items-center gap-2">
                 {ev.assignee ? (
                   <span className="text-xs px-2 py-0.5 rounded-full bg-green-100 text-green-700">{ev.assignee.name}</span>
