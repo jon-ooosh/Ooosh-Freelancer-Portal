@@ -59,6 +59,30 @@ export default function ConversationSummary({
   const [error, setError] = useState('');
   // Guard against firing auto-generation more than once per (job, signal) state.
   const autoTriedRef = useRef<string>('');
+  // Dispute helper (§7.2): ask a question about the ingested email chain.
+  const [showAsk, setShowAsk] = useState(false);
+  const [question, setQuestion] = useState('');
+  const [asking, setAsking] = useState(false);
+  const [answer, setAnswer] = useState('');
+  const [askError, setAskError] = useState('');
+
+  async function ask() {
+    if (!question.trim()) return;
+    setAsking(true);
+    setAskError('');
+    setAnswer('');
+    try {
+      const res = await api.post<{ data: { available: boolean; answer: string | null } }>(
+        `/auto-chase/comms-query/${jobId}`,
+        { question },
+      );
+      setAnswer(res.data.answer || 'No answer.');
+    } catch (e) {
+      setAskError(e instanceof Error ? e.message : 'Could not answer that');
+    } finally {
+      setAsking(false);
+    }
+  }
 
   const loadStatus = useCallback(async () => {
     try {
@@ -152,6 +176,48 @@ export default function ConversationSummary({
       )}
 
       {error && <p className="mt-2 text-xs text-red-500">{error}</p>}
+
+      {/* Dispute helper — ask a question about the ingested email chain (§7.2). */}
+      <div className="mt-3 border-t border-purple-200/70 pt-2">
+        {!showAsk ? (
+          <button
+            type="button"
+            onClick={() => setShowAsk(true)}
+            className="text-xs font-medium text-purple-600 hover:text-purple-800"
+          >
+            🔎 Ask about these emails
+          </button>
+        ) : (
+          <div>
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={question}
+                onChange={(e) => setQuestion(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter' && !asking) ask(); }}
+                autoFocus
+                placeholder="e.g. When did they confirm the dates? Did they ask to drop anything?"
+                className="flex-1 min-w-0 border border-purple-200 rounded px-2.5 py-1.5 text-sm focus:border-purple-400 focus:outline-none focus:ring-1 focus:ring-purple-300"
+              />
+              <button
+                type="button"
+                onClick={ask}
+                disabled={asking || !question.trim()}
+                className="shrink-0 px-3 py-1.5 text-xs font-medium bg-purple-600 text-white rounded hover:bg-purple-700 disabled:opacity-50"
+              >
+                {asking ? 'Asking…' : 'Ask'}
+              </button>
+            </div>
+            {askError && <p className="mt-2 text-xs text-red-500">{askError}</p>}
+            {answer && (
+              <div className="mt-2 rounded-lg bg-white/70 border border-purple-100 p-2.5">
+                <p className="text-sm text-gray-700 whitespace-pre-line">{answer}</p>
+                <p className="mt-1.5 text-[11px] text-purple-400">Answered from this job's emails — check the timeline for the full messages.</p>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

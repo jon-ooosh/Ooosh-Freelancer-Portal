@@ -15,6 +15,7 @@ import { runEmailRetentionSweep } from '../services/email-retention';
 import { draftChaseEmail, learnChaseVoice } from '../services/chase-draft';
 import { createChaseDraftForJob } from '../services/gmail-draft';
 import { getJobCommsSummaryStatus, generateJobCommsSummary } from '../services/comms-summary';
+import { answerCommsQuery } from '../services/comms-query';
 import { backfillOpenPipelineThreads, type BackfillScope, type BackfillSummary } from '../services/gmail-backfill';
 import { runDueAutoChases } from '../services/auto-chase-runner';
 import { isAnthropicConfigured } from '../config/anthropic';
@@ -259,6 +260,26 @@ router.post('/job-summary/:jobId', authorize(...STAFF_ROLES), async (req: AuthRe
   } catch (error) {
     console.error('[auto-chase] job-summary generate error:', error);
     res.status(500).json({ error: 'Failed to summarise conversation' });
+  }
+});
+
+// POST /api/auto-chase/comms-query/:jobId — dispute helper (§7.2). Answer a
+// natural-language question about a job's ingested email chain. STAFF_ROLES —
+// operational context on a job the whole team works from. Returns
+// { available:false } when there's nothing ingested to query.
+router.post('/comms-query/:jobId', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  if (!isAnthropicConfigured()) {
+    return res.status(503).json({ error: 'Comms query unavailable — ANTHROPIC_API_KEY not configured.' });
+  }
+  try {
+    const question = String((req.body || {}).question || '');
+    if (!question.trim()) return res.status(400).json({ error: 'Ask a question.' });
+    const result = await answerCommsQuery(String(req.params.jobId), question);
+    if (!result) return res.json({ data: { available: false, answer: null } });
+    res.json({ data: { available: true, answer: result.answer } });
+  } catch (error) {
+    console.error('[auto-chase] comms-query error:', error);
+    res.status(500).json({ error: 'Failed to answer the question' });
   }
 });
 
