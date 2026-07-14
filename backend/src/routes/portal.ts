@@ -880,9 +880,12 @@ function addDaysIsoP(iso: string, days: number): string {
 router.get('/studio-sitter/shifts', async (req: PortalRequest, res: Response) => {
   try {
     const today = new Date().toISOString().slice(0, 10);
-    // A small look-back so a sitter can still open last night's shift.
-    const from = addDaysIsoP(today, -3);
-    const to = addDaysIsoP(today, 60);
+    // A short look-back so a sitter can still open a recent past shift, and a
+    // full year forward so far-out assignments (e.g. a September date rota'd in
+    // July) always surface — the query is bounded by the sitter's own
+    // assignments, so a wide window stays cheap.
+    const from = addDaysIsoP(today, -14);
+    const to = addDaysIsoP(today, 365);
     const shifts = await getSitterShifts(req.portalUser!.id, from, to);
     res.json({ success: true, shifts });
   } catch (error) {

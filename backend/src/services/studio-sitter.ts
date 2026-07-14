@@ -43,6 +43,7 @@ export interface RosterJobEntry {
   hh_job_number: number | null;
   label: string;          // band / client / job name
   rooms: string[];        // sitter-needed room labels, e.g. ["Room 1 · Lockout"]
+  speculative?: boolean;  // true = pre-confirmation (enquiry/provisional) job
 }
 
 export interface RosterAssignee {
@@ -55,6 +56,7 @@ export interface RosterAssignee {
 export interface RosterRow {
   date: string;                       // YYYY-MM-DD
   needs_sitter: boolean;              // derived from jobs, or a manual-override shift exists
+  speculative: boolean;              // every rehearsal job that night is pre-confirmation
   jobs: RosterJobEntry[];            // who's in that night
   shift: {
     id: string;
@@ -85,16 +87,25 @@ function isStudioSitterTag(tags: unknown): boolean {
   return Array.isArray(tags) && tags.some((t) => typeof t === 'string' && t.toLowerCase() === STUDIO_SITTER_TAG);
 }
 
-/** Load rehearsal jobs whose sitter-needed evenings intersect [from,to]. */
-async function loadRehearsalJobs(from: string, to: string): Promise<Array<{
-  id: string; hh_job_number: number | null; job_name: string | null; client_name: string | null; detail: RehearsalDetail;
+// Pre-confirmation ("speculative") pipeline statuses. Excluded from the staff
+// roster by default (you can't sensibly assign a sitter to a maybe-booking);
+// staff opt in via the "Include enquiries" toggle for forward planning.
+const SPECULATIVE_STATUSES = new Set(['new_enquiry', 'quoting', 'paused', 'provisional']);
+
+/** Load rehearsal jobs whose sitter-needed evenings intersect [from,to].
+ *  Default excludes speculative (enquiry/provisional) jobs — pass
+ *  includeSpeculative=true to surface them for planning. */
+async function loadRehearsalJobs(from: string, to: string, includeSpeculative = false): Promise<Array<{
+  id: string; hh_job_number: number | null; job_name: string | null; client_name: string | null;
+  pipeline_status: string | null; detail: RehearsalDetail;
 }>> {
   const res = await query(
-    `SELECT id, hh_job_number, job_name, client_name,
+    `SELECT id, hh_job_number, job_name, client_name, pipeline_status,
             hh_derived_flags->'rehearsal_detail' AS rehearsal_detail
      FROM jobs
      WHERE is_deleted = false
        AND pipeline_status NOT IN ('lost','cancelled')
+       ${includeSpeculative ? '' : `AND pipeline_status NOT IN ('new_enquiry','quoting','paused','provisional')`}
        AND COALESCE(is_internal, false) = false
        AND hh_derived_flags->'rehearsal_detail'->>'sitter_needed' = 'true'
        AND (hh_derived_flags->'rehearsal_detail'->>'last_session_date') >= $1
@@ -107,6 +118,7 @@ async function loadRehearsalJobs(from: string, to: string): Promise<Array<{
       hh_job_number: r.hh_job_number ?? null,
       job_name: r.job_name ?? null,
       client_name: r.client_name ?? null,
+      pipeline_status: r.pipeline_status ?? null,
       detail: r.rehearsal_detail as RehearsalDetail,
     }))
     .filter((r: any) => r.detail && Array.isArray(r.detail.evenings));
@@ -135,19 +147,22 @@ async function loadShifts(from: string, to: string): Promise<Map<string, any>> {
   return map;
 }
 
-/** The roster: one row per evening (derived needed nights ∪ manual shifts). */
-export async function getRoster(from: string, to: string): Promise<RosterRow[]> {
-  const [jobs, shifts] = await Promise.all([loadRehearsalJobs(from, to), loadShifts(from, to)]);
+/** The roster: one row per evening (derived needed nights ∪ manual shifts).
+ *  Default excludes speculative (enquiry/provisional) rehearsals; pass
+ *  includeSpeculative=true to surface them for planning. */
+export async function getRoster(from: string, to: string, includeSpeculative = false): Promise<RosterRow[]> {
+  const [jobs, shifts] = await Promise.all([loadRehearsalJobs(from, to, includeSpeculative), loadShifts(from, to)]);
 
   const dateJobs = new Map<string, RosterJobEntry[]>();
   for (const job of jobs) {
     const rooms = roomLabels(job.detail);
     const label = job.job_name || job.client_name || (job.hh_job_number ? `#${job.hh_job_number}` : 'Rehearsal');
+    const speculative = SPECULATIVE_STATUSES.has(job.pipeline_status || '');
     for (const eve of job.detail.evenings) {
       if (!eve.sitter_needed) continue;
       if (eve.date < from || eve.date > to) continue;
       const arr = dateJobs.get(eve.date) ?? [];
-      arr.push({ job_id: job.id, hh_job_number: job.hh_job_number, label, rooms });
+      arr.push({ job_id: job.id, hh_job_number: job.hh_job_number, label, rooms, speculative });
       dateJobs.set(eve.date, arr);
     }
   }
@@ -160,6 +175,7 @@ export async function getRoster(from: string, to: string): Promise<RosterRow[]> 
     rows.push({
       date,
       needs_sitter: jobsForDate.length > 0 || (shiftRow?.manual_override ?? false),
+      speculative: jobsForDate.length > 0 && jobsForDate.every((j) => j.speculative),
       jobs: jobsForDate,
       shift: shiftRow
         ? {
@@ -432,7 +448,8 @@ export async function getSitterShifts(personId: string, from: string, to: string
      ORDER BY s.shift_date`,
     [personId, from, to]
   );
-  const dateJobs = jobsByDate(await loadRehearsalJobs(from, to));
+  // Sitters see every band booked that night (incl. still-provisional ones).
+  const dateJobs = jobsByDate(await loadRehearsalJobs(from, to, true));
   return res.rows.map((r: any) => ({
     date: r.shift_date,
     planned_start: r.planned_start,
@@ -483,7 +500,7 @@ export async function getSitterShiftDetail(date: string, personId?: string): Pro
   );
   const shift = shiftRes.rows[0];
 
-  const jobs = await loadRehearsalJobs(date, date);
+  const jobs = await loadRehearsalJobs(date, date, true);
   const out: SitterShiftJob[] = [];
   for (const job of jobs) {
     if (!job.detail.evenings.some((e) => e.sitter_needed && e.date === date)) continue;
