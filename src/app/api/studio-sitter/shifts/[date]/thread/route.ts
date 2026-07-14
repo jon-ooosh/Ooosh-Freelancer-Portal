@@ -16,7 +16,6 @@ import {
   postSitterThreadWithFilesOP,
   isOpClientError,
   OpApiError,
-  reportFallback,
 } from '@/lib/op-api'
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
@@ -53,7 +52,6 @@ export async function GET(
         return NextResponse.json({ success: false, error: opError.message }, { status })
       }
       console.error('OP sitter thread read error:', opError)
-      reportFallback('sitter-thread-read', opError, { email: user.email })
       return NextResponse.json(
         { success: false, error: 'Unable to load handover notes. Please refresh and try again.' },
         { status: 502 }
@@ -94,14 +92,24 @@ export async function POST(
     try {
       let data
       if (isMultipart) {
-        // Forward content + files to OP as multipart (images/PDFs).
+        // Forward content + files to OP as multipart (images/PDFs). NOTE: do
+        // NOT reference the `File` global here — it is not defined in the
+        // Netlify Node runtime (only `Blob` is), so `x instanceof File` throws
+        // ReferenceError. formData entries are `string | Blob`; anything
+        // non-string is a file. We materialise each to a fresh Blob (concrete
+        // buffer) so the re-forwarded multipart body streams reliably.
         const inForm = await request.formData()
         const outForm = new FormData()
         const content = inForm.get('content')
         if (typeof content === 'string') outForm.append('content', content)
         let fileCount = 0
-        for (const f of inForm.getAll('files')) {
-          if (f instanceof File) { outForm.append('files', f, f.name); fileCount++ }
+        for (const value of inForm.getAll('files')) {
+          if (typeof value === 'string') continue
+          const blob = value as Blob
+          const name = (blob as { name?: string }).name || 'upload'
+          const buf = Buffer.from(await blob.arrayBuffer())
+          outForm.append('files', new Blob([buf], { type: blob.type }), name)
+          fileCount++
         }
         if ((typeof content !== 'string' || !content.trim()) && fileCount === 0) {
           return NextResponse.json({ success: false, error: 'A message or attachment is required' }, { status: 400 })
@@ -123,7 +131,6 @@ export async function POST(
       }
       // POSTs aren't retried by opFetch — surface a clean, retryable error.
       console.error('OP sitter thread post error:', opError)
-      reportFallback('sitter-thread-post', opError, { email: user.email })
       return NextResponse.json(
         { success: false, error: 'Unable to post your note. Please try again.' },
         { status: 502 }

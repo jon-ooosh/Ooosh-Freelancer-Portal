@@ -20,7 +20,6 @@ import {
   getSitterShiftsFromOP,
   isOpClientError,
   OpApiError,
-  reportFallback,
 } from '@/lib/op-api'
 
 export async function GET(request: NextRequest) {
@@ -51,7 +50,6 @@ export async function GET(request: NextRequest) {
       }
       // 5xx / network — alert staff, but degrade gracefully (no Monday fallback exists).
       console.error('OP sitter shifts error:', opError)
-      reportFallback('sitter-shifts', opError, { email: user.email })
       return NextResponse.json(
         { success: false, error: 'Unable to load shifts. Please refresh and try again.' },
         { status: 502 }

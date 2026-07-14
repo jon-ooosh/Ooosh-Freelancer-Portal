@@ -17,7 +17,6 @@ import {
   getSitterShiftDetailFromOP,
   isOpClientError,
   OpApiError,
-  reportFallback,
 } from '@/lib/op-api'
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
@@ -57,7 +56,6 @@ export async function GET(
         return NextResponse.json({ success: false, error: opError.message }, { status })
       }
       console.error('OP sitter shift detail error:', opError)
-      reportFallback('sitter-shift-detail', opError, { email: user.email })
       return NextResponse.json(
         { success: false, error: 'Unable to load this shift. Please refresh and try again.' },
         { status: 502 }
