@@ -122,8 +122,11 @@ export async function runDueAutoChases(): Promise<AutoChaseRunSummary> {
 
   const due = await query(
     `SELECT j.id, j.hh_job_number, j.job_name, j.auto_chase_mode, j.chase_alert_user_id,
+            sp.first_name AS setter_first_name,
             mp.first_name AS manager_first_name
        FROM jobs j
+       LEFT JOIN users su ON su.id = j.auto_chase_set_by
+       LEFT JOIN people sp ON sp.id = su.person_id
        LEFT JOIN people mp ON mp.id = j.manager1_person_id
       WHERE j.is_deleted = false
         AND COALESCE(j.is_internal, false) = false
@@ -153,9 +156,12 @@ export async function runDueAutoChases(): Promise<AutoChaseRunSummary> {
       }
 
       const wantSend = job.auto_chase_mode === 'send' && summary.sendMasterOn;
-      // Sign off with the job's manager, else the configured default, else the
-      // template falls back to "the Ooosh team".
-      const signOffName = (job.manager_first_name as string | null) || defaultSender;
+      // Sign off with whoever set the auto-chase (same as a manual draft), else
+      // the job's manager, else the configured default, else "the Ooosh team".
+      const signOffName =
+        (job.setter_first_name as string | null) ||
+        (job.manager_first_name as string | null) ||
+        defaultSender;
       const result = await createChaseDraftForJob(job.id, signOffName, { send: wantSend });
       await advanceAfterChase(job.id);
 
