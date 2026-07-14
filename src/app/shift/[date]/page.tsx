@@ -11,7 +11,7 @@
  * lock-up report lands in a later slice.
  */
 
-import { useEffect, useState, useCallback, useRef } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
 
@@ -156,7 +156,6 @@ export default function ShiftDetailPage() {
   const [pendingFiles, setPendingFiles] = useState<File[]>([])
   const [posting, setPosting] = useState(false)
   const [postError, setPostError] = useState<string | null>(null)
-  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const fetchThread = useCallback(async () => {
     try {
@@ -442,13 +441,15 @@ export default function ShiftDetailPage() {
                   </div>
                 )}
                 {postError && <p className="text-xs text-red-600 mt-1">{postError}</p>}
-                <input ref={fileInputRef} type="file" multiple accept="image/*,application/pdf" className="hidden"
-                  onChange={(e) => { if (e.target.files) setPendingFiles((prev) => [...prev, ...Array.from(e.target.files!)]); e.target.value = '' }} />
                 <div className="mt-2 flex justify-between items-center">
-                  <button type="button" onClick={() => fileInputRef.current?.click()}
-                    className="text-sm px-3 py-2 rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-50" title="Attach image or PDF">
+                  {/* Native <label> + visually-hidden (NOT display:none) input so
+                      the file picker opens on mobile — iOS/Android silently ignore
+                      a programmatic .click() on a display:none input. */}
+                  <label className="text-sm px-3 py-2 rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-50 cursor-pointer">
                     📎 Attach
-                  </button>
+                    <input type="file" multiple accept="image/*,application/pdf" className="sr-only"
+                      onChange={(e) => { if (e.target.files) setPendingFiles((prev) => [...prev, ...Array.from(e.target.files!)]); e.target.value = '' }} />
+                  </label>
                   <button
                     onClick={postNote}
                     disabled={(!draft.trim() && pendingFiles.length === 0) || posting}
