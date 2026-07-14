@@ -37,7 +37,8 @@ router.get('/roster', async (req: AuthRequest, res: Response) => {
     const from = DATE_RE.test(String(req.query.from)) ? String(req.query.from) : today;
     const to = DATE_RE.test(String(req.query.to)) ? String(req.query.to) : addDaysIso(from, 14);
     if (to < from) { res.status(400).json({ error: 'to must be on or after from' }); return; }
-    const rows = await getRoster(from, to);
+    const includeSpeculative = req.query.speculative === '1' || req.query.speculative === 'true';
+    const rows = await getRoster(from, to, includeSpeculative);
     res.json({ data: rows, range: { from, to } });
   } catch (err) {
     console.error('[studio-sitters] roster error:', err);

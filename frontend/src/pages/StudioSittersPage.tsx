@@ -14,12 +14,14 @@ import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
+import StudioShiftNotes from '../components/StudioShiftNotes';
 
 interface RosterJobEntry {
   job_id: string;
   hh_job_number: number | null;
   label: string;
   rooms: string[];
+  speculative?: boolean;
 }
 interface RosterAssignee {
   id: string;
@@ -30,8 +32,9 @@ interface RosterAssignee {
 interface RosterRow {
   date: string;
   needs_sitter: boolean;
+  speculative?: boolean;
   jobs: RosterJobEntry[];
-  shift: { id: string; status: string; manual_override: boolean; override_reason: string | null } | null;
+  shift: { id: string; status: string; manual_override: boolean; override_reason: string | null; note_count?: number } | null;
   assignee: RosterAssignee | null;
 }
 interface SitterOption {
@@ -43,20 +46,31 @@ interface SitterOption {
 
 type RangeKey = '7' | '14' | 'all';
 type CoverageFilter = 'all' | 'unassigned' | 'assigned';
-interface Prefs { range: RangeKey; filter: CoverageFilter; }
+// from/to are optional custom-range overrides (for looking back through history);
+// when unset the range preset drives a today→+N forward window.
+interface Prefs { range: RangeKey; filter: CoverageFilter; speculative: boolean; from?: string; to?: string; }
 
 const PREFS_KEY = 'ooosh_studio_sitters_prefs';
 const RANGE_DAYS: Record<RangeKey, number> = { '7': 7, '14': 14, all: 730 };
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 function loadPrefs(): Prefs {
   try {
     const raw = localStorage.getItem(PREFS_KEY);
     if (raw) {
       const p = JSON.parse(raw);
-      if (['7', '14', 'all'].includes(p.range) && ['all', 'unassigned', 'assigned'].includes(p.filter)) return p;
+      if (['7', '14', 'all'].includes(p.range) && ['all', 'unassigned', 'assigned'].includes(p.filter)) {
+        return {
+          range: p.range,
+          filter: p.filter,
+          speculative: p.speculative === true,
+          from: DATE_RE.test(p.from) ? p.from : undefined,
+          to: DATE_RE.test(p.to) ? p.to : undefined,
+        };
+      }
     }
   } catch { /* ignore */ }
-  return { range: '14', filter: 'all' };
+  return { range: '14', filter: 'all', speculative: false };
 }
 
 function addDaysIso(iso: string, days: number): string {
@@ -71,112 +85,6 @@ function formatDay(iso: string): string {
   return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('en-GB', {
     weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC',
   });
-}
-
-// ── Handover thread panel (Rehearsals slice 3) ──────────────────────────────
-// The sitter ⇄ staff notes for one evening, anchored to the shift via
-// interactions.shift_id. Freelancer-authored notes come back with created_by
-// NULL + author_name; staff notes derive the name from the users join.
-
-interface ShiftMessage {
-  id: string;
-  content: string;
-  created_at: string;
-  created_by: string | null;
-  created_by_name: string | null;
-  author_name: string | null;
-}
-
-function formatMessageTime(iso: string): string {
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return '';
-  return d.toLocaleString('en-GB', {
-    weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
-  });
-}
-
-function ShiftNotes({ shiftId }: { shiftId: string }) {
-  const [messages, setMessages] = useState<ShiftMessage[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [draft, setDraft] = useState('');
-  const [posting, setPosting] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
-  const loadNotes = useCallback(async () => {
-    setLoading(true);
-    try {
-      const r = await api.get<{ data: ShiftMessage[] }>(`/interactions?shift_id=${shiftId}&limit=100`);
-      // Endpoint returns newest-first; a handover log reads best oldest-first.
-      setMessages([...(r.data ?? [])].reverse());
-    } catch {
-      setErr('Could not load notes');
-    } finally {
-      setLoading(false);
-    }
-  }, [shiftId]);
-
-  useEffect(() => { loadNotes(); }, [loadNotes]);
-
-  async function post() {
-    const content = draft.trim();
-    if (!content || posting) return;
-    setPosting(true);
-    setErr(null);
-    try {
-      await api.post('/interactions', { type: 'note', content, shift_id: shiftId });
-      setDraft('');
-      await loadNotes();
-    } catch {
-      setErr('Could not post note');
-    } finally {
-      setPosting(false);
-    }
-  }
-
-  return (
-    <div className="mt-3 pt-3 border-t border-gray-200">
-      {loading ? (
-        <div className="text-xs text-gray-400 py-2">Loading notes…</div>
-      ) : messages.length === 0 ? (
-        <div className="text-xs text-gray-400 py-1">No handover notes yet.</div>
-      ) : (
-        <div className="space-y-2 mb-2">
-          {messages.map((m) => {
-            const fromStaff = !!m.created_by;
-            const author = fromStaff
-              ? (String(m.created_by_name || '').trim() || 'Ooosh')
-              : (m.author_name || 'Studio sitter');
-            return (
-              <div key={m.id} className={`rounded-lg border p-2 ${fromStaff ? 'bg-white border-gray-200' : 'bg-purple-50 border-purple-100'}`}>
-                <div className="flex items-center justify-between gap-2 mb-0.5">
-                  <span className="text-xs font-semibold text-gray-700">
-                    {author}
-                    {!fromStaff && <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-700 font-medium uppercase tracking-wide">Sitter</span>}
-                  </span>
-                  <span className="text-[11px] text-gray-400 shrink-0">{formatMessageTime(m.created_at)}</span>
-                </div>
-                <p className="text-sm text-gray-800 whitespace-pre-wrap break-words">{m.content}</p>
-              </div>
-            );
-          })}
-        </div>
-      )}
-      {err && <div className="text-xs text-red-600 mb-1">{err}</div>}
-      <div className="flex items-end gap-2">
-        <textarea
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          placeholder="Add a note for the sitter…"
-          rows={2}
-          className="flex-1 text-sm border border-gray-300 rounded-lg p-2 resize-y min-h-[44px]"
-        />
-        <button onClick={post} disabled={!draft.trim() || posting}
-          className="px-3 py-2 text-sm rounded-lg bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-40 shrink-0">
-          {posting ? 'Posting…' : 'Post'}
-        </button>
-      </div>
-    </div>
-  );
 }
 
 export default function StudioSittersPage() {
@@ -215,8 +123,10 @@ export default function StudioSittersPage() {
   const [editingFee, setEditingFee] = useState(false);
   const [feeInput, setFeeInput] = useState('');
 
-  const from = todayIso();
-  const to = addDaysIso(from, RANGE_DAYS[prefs.range]);
+  // Custom from/to (history look-back) override the forward preset window.
+  const from = prefs.from || todayIso();
+  const to = prefs.to || addDaysIso(todayIso(), RANGE_DAYS[prefs.range]);
+  const customRange = !!(prefs.from || prefs.to);
 
   useEffect(() => { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); }, [prefs]);
 
@@ -224,14 +134,15 @@ export default function StudioSittersPage() {
     setLoading(true);
     setError(null);
     try {
-      const r = await api.get<{ data: RosterRow[] }>(`/studio-sitters/roster?from=${from}&to=${to}`);
+      const spec = prefs.speculative ? '&speculative=1' : '';
+      const r = await api.get<{ data: RosterRow[] }>(`/studio-sitters/roster?from=${from}&to=${to}${spec}`);
       setRows(r.data ?? []);
     } catch {
       setError('Failed to load the roster.');
     } finally {
       setLoading(false);
     }
-  }, [from, to]);
+  }, [from, to, prefs.speculative]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
@@ -315,22 +226,35 @@ export default function StudioSittersPage() {
       <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Studio Sitters</h1>
-          <p className="text-sm text-gray-500">One sitter per evening covers the whole building.</p>
         </div>
         <div className="flex items-center gap-2">
           <button onClick={() => setShowAddCover((v) => !v)} className="px-3 py-1.5 text-sm rounded-lg border border-gray-300 hover:bg-gray-50">＋ Add cover</button>
         </div>
       </div>
 
-      {/* Controls: range + coverage filter + default fee */}
+      {/* Controls: range + coverage filter + enquiries + default fee */}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2 mb-4">
         <div className="flex items-center gap-1">
           {(['7', '14', 'all'] as RangeKey[]).map((k) => (
-            <button key={k} onClick={() => setPrefs((p) => ({ ...p, range: k }))}
-              className={`px-3 py-1 text-sm rounded-lg border ${prefs.range === k ? 'bg-purple-50 border-purple-300 text-purple-700' : 'border-gray-200 text-gray-600 hover:bg-gray-50'}`}>
+            <button key={k} onClick={() => setPrefs((p) => ({ ...p, range: k, from: undefined, to: undefined }))}
+              className={`px-3 py-1 text-sm rounded-lg border ${!customRange && prefs.range === k ? 'bg-purple-50 border-purple-300 text-purple-700' : 'border-gray-200 text-gray-600 hover:bg-gray-50'}`}>
               {k === 'all' ? 'All' : `${k} days`}
             </button>
           ))}
+        </div>
+        {/* Custom date range — look back through history */}
+        <div className="flex items-center gap-1.5 text-xs text-gray-500">
+          <input type="date" value={prefs.from || todayIso()}
+            onChange={(e) => setPrefs((p) => ({ ...p, from: DATE_RE.test(e.target.value) ? e.target.value : undefined }))}
+            className={`px-2 py-1 border rounded ${customRange ? 'border-purple-300 text-purple-700' : 'border-gray-300 text-gray-600'}`} title="From" />
+          <span>→</span>
+          <input type="date" value={to}
+            onChange={(e) => setPrefs((p) => ({ ...p, to: DATE_RE.test(e.target.value) ? e.target.value : undefined }))}
+            className={`px-2 py-1 border rounded ${customRange ? 'border-purple-300 text-purple-700' : 'border-gray-300 text-gray-600'}`} title="To" />
+          {customRange && (
+            <button onClick={() => setPrefs((p) => ({ ...p, from: undefined, to: undefined }))}
+              className="text-purple-600 hover:text-purple-800" title="Back to upcoming">Reset</button>
+          )}
         </div>
         <div className="flex items-center gap-1">
           {(['all', 'unassigned', 'assigned'] as CoverageFilter[]).map((f) => (
@@ -340,6 +264,11 @@ export default function StudioSittersPage() {
             </button>
           ))}
         </div>
+        <label className="flex items-center gap-1.5 text-sm text-gray-600 cursor-pointer">
+          <input type="checkbox" checked={prefs.speculative}
+            onChange={(e) => setPrefs((p) => ({ ...p, speculative: e.target.checked }))} />
+          Include enquiries
+        </label>
         <div className="text-sm text-gray-600 ml-auto flex items-center gap-2">
           {editingFee ? (
             <span className="flex items-center gap-1">
@@ -412,6 +341,9 @@ export default function StudioSittersPage() {
                     <div className="min-w-0">
                       <div className="font-semibold text-gray-900">
                         {formatDay(row.date)}
+                        {row.speculative && (
+                          <span className="ml-2 text-[11px] font-normal px-1.5 py-0.5 rounded bg-blue-50 text-blue-600 border border-blue-200" title="Pre-confirmation — enquiry/provisional">enquiry</span>
+                        )}
                         {row.shift?.manual_override && (
                           <span className="ml-2 text-[11px] font-normal px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 border border-gray-200">manual cover</span>
                         )}
@@ -454,17 +386,24 @@ export default function StudioSittersPage() {
                       <button onClick={() => removeCover(row.date)} disabled={busy}
                         className="px-2.5 py-1 text-xs rounded-lg border border-red-200 text-red-500 hover:bg-red-50 disabled:opacity-40">Remove</button>
                     )}
-                    {row.shift?.id && (
-                      <button onClick={() => toggleNotes(row.shift!.id)}
-                        className={`px-2.5 py-1 text-xs rounded-lg border ${openNotes.has(row.shift.id) ? 'border-purple-300 bg-purple-50 text-purple-700' : 'border-gray-200 text-gray-500 hover:bg-white'}`}>
-                        💬 Notes
-                      </button>
-                    )}
+                    {row.shift?.id && (() => {
+                      const noteCount = row.shift.note_count ?? 0;
+                      const active = openNotes.has(row.shift.id);
+                      const hasNotes = noteCount > 0;
+                      return (
+                        <button onClick={() => toggleNotes(row.shift!.id)}
+                          className={`px-2.5 py-1 text-xs rounded-lg border ${active || hasNotes ? 'border-purple-300 bg-purple-50 text-purple-700' : 'border-gray-200 text-gray-500 hover:bg-white'}`}>
+                          💬 Notes{hasNotes ? ` (${noteCount})` : ''}
+                        </button>
+                      );
+                    })()}
                   </div>
                 </div>
 
                 {row.shift?.id && openNotes.has(row.shift.id) && (
-                  <ShiftNotes shiftId={row.shift.id} />
+                  <div className="mt-3 pt-3 border-t border-gray-200">
+                    <StudioShiftNotes shiftId={row.shift.id} />
+                  </div>
                 )}
               </div>
             );

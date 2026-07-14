@@ -880,9 +880,12 @@ function addDaysIsoP(iso: string, days: number): string {
 router.get('/studio-sitter/shifts', async (req: PortalRequest, res: Response) => {
   try {
     const today = new Date().toISOString().slice(0, 10);
-    // A small look-back so a sitter can still open last night's shift.
-    const from = addDaysIsoP(today, -3);
-    const to = addDaysIsoP(today, 60);
+    // A short look-back so a sitter can still open a recent past shift, and a
+    // full year forward so far-out assignments (e.g. a September date rota'd in
+    // July) always surface — the query is bounded by the sitter's own
+    // assignments, so a wide window stays cheap.
+    const from = addDaysIsoP(today, -14);
+    const to = addDaysIsoP(today, 365);
     const shifts = await getSitterShifts(req.portalUser!.id, from, to);
     res.json({ success: true, shifts });
   } catch (error) {
@@ -924,6 +927,48 @@ async function resolveOpenShiftId(date: string): Promise<string | null> {
   return r.rows[0]?.id ?? null;
 }
 
+// Handover-note attachments (images / PDFs). Stored in interactions.files under
+// the same shape as staff interaction attachments so both surfaces render them.
+const sitterNoteUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 8 * 1024 * 1024, files: 6 }, // 8MB per file, 6 files
+  fileFilter: (_req, file, cb) => {
+    if (file.mimetype.startsWith('image/') || file.mimetype === 'application/pdf') {
+      cb(null, true);
+    } else {
+      cb(new Error('Only images and PDFs can be attached'));
+    }
+  },
+}).array('files', 6);
+
+function sitterNoteUploadMw(req: PortalRequest, res: Response, next: NextFunction) {
+  sitterNoteUpload(req, res, (err: unknown) => {
+    if (err) {
+      const msg = err instanceof multer.MulterError ? err.message : (err instanceof Error ? err.message : 'Upload failed');
+      res.status(400).json({ error: msg });
+      return;
+    }
+    next();
+  });
+}
+
+// Map a stored interaction-file blob to the portal display shape, presigning
+// R2 keys. Handles BOTH the staff interaction-attachment shape
+// ({ r2_key, filename, content_type }) and the legacy shared-file shape
+// ({ url, name, type }), so staff- and sitter-posted attachments render alike.
+async function mapThreadFile(x: Record<string, any>): Promise<{ name: string; url: string; fileType: string | null }> {
+  const key: string = x.r2_key || x.url || '';
+  let url = key;
+  if (key && typeof key === 'string' && key.startsWith('files/')) {
+    try { url = await getPresignedDownloadUrl(key); } catch { /* keep raw */ }
+  }
+  return {
+    name: x.filename || x.name || 'File',
+    url,
+    fileType: x.content_type || x.type || x.fileType || null,
+  };
+}
+
 // GET /api/portal/studio-sitter/shifts/:date/thread — read the handover log
 router.get('/studio-sitter/shifts/:date/thread', async (req: PortalRequest, res: Response) => {
   try {
@@ -953,13 +998,7 @@ router.get('/studio-sitter/shifts/:date/thread', async (req: PortalRequest, res:
         ? (String(row.staff_name || '').trim() || 'Ooosh')
         : (row.author_name || 'Studio sitter');
       const raw: any[] = Array.isArray(row.files) ? row.files : [];
-      const files = await Promise.all(raw.map(async (x) => {
-        let url: string = x.url || '';
-        if (url && typeof url === 'string' && url.startsWith('files/')) {
-          try { url = await getPresignedDownloadUrl(url); } catch { /* keep raw */ }
-        }
-        return { name: x.name || 'File', url, fileType: x.type || x.fileType || null };
-      }));
+      const files = await Promise.all(raw.map(mapThreadFile));
       return {
         id: row.id,
         content: row.content,
@@ -978,29 +1017,53 @@ router.get('/studio-sitter/shifts/:date/thread', async (req: PortalRequest, res:
   }
 });
 
-const sitterThreadPostSchema = z.object({ content: z.string().trim().min(1).max(4000) });
-
 // POST /api/portal/studio-sitter/shifts/:date/thread — add a handover note
-router.post('/studio-sitter/shifts/:date/thread', async (req: PortalRequest, res: Response) => {
+// Accepts JSON ({ content }) or multipart/form-data (content + files[] of
+// images/PDFs). Attachments upload to R2 and store on interactions.files.
+router.post('/studio-sitter/shifts/:date/thread', sitterNoteUploadMw, async (req: PortalRequest, res: Response) => {
   try {
     const date = String(req.params.date);
     if (!SITTER_DATE_RE.test(date)) { res.status(400).json({ error: 'Invalid date' }); return; }
     const allowed = req.portalUser!.isStaffShared || await isSitterAssignedTo(req.portalUser!.id, date);
     if (!allowed) { res.status(403).json({ error: 'Not rostered to this evening' }); return; }
 
-    const parsed = sitterThreadPostSchema.safeParse(req.body);
-    if (!parsed.success) { res.status(400).json({ error: 'A message is required' }); return; }
-    const content = parsed.data.content;
+    const content = String(req.body?.content ?? '').trim().slice(0, 4000);
+    const uploaded = (req.files as Express.Multer.File[] | undefined) || [];
+    if (!content && uploaded.length === 0) {
+      res.status(400).json({ error: 'A message or attachment is required' });
+      return;
+    }
 
     const shiftId = await resolveOpenShiftId(date);
     if (!shiftId) { res.status(404).json({ error: 'No shift for this evening' }); return; }
 
+    // Upload attachments to R2 (same shape/prefix as staff interaction
+    // attachments so both surfaces render them identically).
+    const fileBlobs: Array<Record<string, any>> = [];
+    if (uploaded.length > 0 && isR2Configured()) {
+      for (const f of uploaded) {
+        const ext = (f.originalname.match(/\.[a-z0-9]+$/i) || [''])[0].toLowerCase();
+        const key = `files/attachments/portal-${req.portalUser!.id}/${crypto.randomUUID()}${ext}`;
+        await uploadToR2(key, f.buffer, f.mimetype);
+        fileBlobs.push({
+          r2_key: key,
+          filename: f.originalname,
+          content_type: f.mimetype,
+          size_bytes: f.size,
+          uploaded_at: new Date().toISOString(),
+        });
+      }
+    }
+
+    // Content is NOT NULL on interactions; use a placeholder for attachment-only.
+    const storedContent = content || '(attachment)';
+
     // Freelancer-authored: created_by NULL + author_name (they aren't OP users).
     const inserted = await query(
-      `INSERT INTO interactions (type, content, shift_id, created_by, author_name)
-       VALUES ('note', $1, $2, NULL, $3)
+      `INSERT INTO interactions (type, content, shift_id, created_by, author_name, files)
+       VALUES ('note', $1, $2, NULL, $3, $4::jsonb)
        RETURNING id, created_at`,
-      [content, shiftId, req.portalUser!.name]
+      [storedContent, shiftId, req.portalUser!.name, JSON.stringify(fileBlobs)]
     );
 
     // Let prior staff participants know a sitter replied — low-priority bell
@@ -1019,7 +1082,7 @@ router.post('/studio-sitter/shifts/:date/thread', async (req: PortalRequest, res
           [
             row.created_by,
             `${req.portalUser!.name} added a handover note`,
-            content.length > 200 ? content.slice(0, 200) + '...' : content,
+            storedContent.length > 200 ? storedContent.slice(0, 200) + '...' : storedContent,
             shiftId,
           ]
         );
@@ -1028,16 +1091,17 @@ router.post('/studio-sitter/shifts/:date/thread', async (req: PortalRequest, res
       console.error('Portal sitter thread notify error (non-fatal):', notifyErr);
     }
 
+    const files = await Promise.all(fileBlobs.map(mapThreadFile));
     res.json({
       success: true,
       message: {
         id: inserted.rows[0].id,
-        content,
+        content: storedContent,
         created_at: inserted.rows[0].created_at,
         author: req.portalUser!.name,
         from_staff: false,
         mine: true,
-        files: [],
+        files,
       },
     });
   } catch (error) {

@@ -201,7 +201,7 @@ export async function getSitterThreadFromOP(
   return opFetch<SitterThreadResponse>(`/studio-sitter/shifts/${date}/thread`, sessionToken)
 }
 
-/** Post a handover note to one evening's thread. */
+/** Post a handover note to one evening's thread (text only). */
 export async function postSitterThreadOP(
   sessionToken: string,
   date: string,
@@ -211,6 +211,26 @@ export async function postSitterThreadOP(
     method: 'POST',
     body: JSON.stringify({ content }),
   })
+}
+
+/** Post a handover note with attachments (multipart: content + files[]). */
+export async function postSitterThreadWithFilesOP(
+  sessionToken: string,
+  date: string,
+  formData: FormData
+): Promise<{ success: boolean; message: SitterThreadMessage }> {
+  const url = `${getOpUrl()}/api/portal/studio-sitter/shifts/${date}/thread`
+  // 60s — attachments can be slow on site.
+  const response = await fetchWithTimeout(url, {
+    method: 'POST',
+    headers: { 'Cookie': `session=${sessionToken}` },
+    body: formData, // multipart/form-data (content + files)
+  }, 60_000)
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }))
+    throw new OpApiError((body as { error?: string })?.error || `HTTP ${response.status}`, response.status, body)
+  }
+  return response.json()
 }
 
 // =============================================================================

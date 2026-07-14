@@ -1681,6 +1681,39 @@ These originate outside HH entirely — client sends stuff to us, or items found
     *Deferred:* @mention autocomplete in the staff composer (plain textarea for now — mentions still
     work via the generic API), file attachments on shift notes, and notifying staff of a sitter's
     *first* note before any staff have engaged the thread (staff see it via the roster Notes panel).
+  - **Slice 3 refinements SHIPPED:** (a) **enquiries default-off** — `loadRehearsalJobs`/`getRoster`
+    gained an `includeSpeculative` arg (default false → excludes `new_enquiry`/`quoting`/`paused`/
+    `provisional`); the roster route reads `?speculative=1`, the staff page has an "Include enquiries"
+    toggle + a blue "enquiry" row badge (`row.speculative`). Dashboard sitter-gap + bulk-assign inherit
+    the confirmed-only default; the **portal** enrichment passes `includeSpeculative=true` so a sitter
+    always sees every band booked that night. (b) **Roster look-back** — the staff page adds From/To
+    date inputs (backend already accepted arbitrary `from`/`to`) alongside the 7/14/All quick-sets, so
+    staff can scroll back through history; persisted in the `ooosh_studio_sitters_prefs` localStorage.
+    (c) **Portal window** widened from +60d to **−14d…+365d** so far-future assignments surface.
+    (d) **Job Detail handover card** — `StudioHandoverCard` on the Overview tab (self-hides on
+    non-rehearsal jobs) lists the job's evenings and shows the shared per-evening thread; the roster's
+    `ShiftNotes` was extracted to `components/StudioShiftNotes.tsx` (shared by both, now URL-linkified);
+    reuses the existing `/studio-sitters/job/:jobId/coverage` endpoint (no new backend endpoint). URLs
+    are auto-linkified on the portal thread too. *Still deferred:* image/PDF attachments on the thread.
+    (e) **Notes-present indicators** — `getJobCoverage` + the roster's `loadShifts` now return a
+    per-shift `note_count`; the roster "💬 Notes (N)" button highlights when a thread exists, and the
+    Job Detail handover card shows a "💬 N" badge per evening + auto-opens evenings that already have a
+    conversation. Removed the "One sitter per evening…" subtitle. **Notes are shift-anchored, so they
+    survive reassign/clear** (the shift row stays; only removing a manual-cover shift hides its notes).
+    A "Notes" button only appears once a shift exists (i.e. once assigned / manual cover) — unassigned
+    future nights have no shift row yet, so no thread anchor.
+  - **Slice 3 attachments SHIPPED:** images/PDFs on the handover thread, both surfaces. Stored on
+    `interactions.files` in the staff attachment shape (`{r2_key, filename, content_type, size_bytes}`)
+    under the `files/attachments/…` R2 prefix, so staff- and sitter-posted files render alike. **Staff**
+    (`StudioShiftNotes`) reuse the `messaging/Attachments` stack (`useAttachments` + file input +
+    paste + `PendingAttachmentStrip`, render via `AttachmentList`). **Portal:** the thread POST now
+    accepts `multipart/form-data` (multer, 8MB×6, image/PDF only) → uploads to R2 → stores on the
+    interaction; the Next.js route forwards multipart, `op-api` gained `postSitterThreadWithFilesOP`,
+    and the shift page composer has a 📎 attach + inline image render. The thread GET's file mapper
+    (`mapThreadFile` in `routes/portal.ts`) handles BOTH the `r2_key` (staff/sitter) and legacy `url`
+    (shared-file) shapes + presigns `files/` keys. Attachment-only notes store `content='(attachment)'`
+    (NOT NULL guard) and hide the placeholder on render. Deferred: thumbnail generation (images render
+    full-size via presigned URL / auth blob), and per-message read receipts.
   - **Slice 4 (NEXT):** end-of-day lock-up report — Phase E (see below).
 - **General Tasks system** (build with/after D): `tasks` table (anchor to shift/job/nothing),
   visibility everyone/assignee-only, notify-on-done + notify-if-not-done-after-X-days, **staff via
@@ -1695,6 +1728,16 @@ These originate outside HH entirely — client sends stuff to us, or items found
 - **Calendar endpoint** (Phase F): `GET /api/studio-sitters/calendar?from&to` for the future
   calendar project (roster row shape already close).
 - **Shop sales**: deferred, out of scope (substantial, cross-cutting).
+- **Rehearsal job info beyond sitters (TODO — jon flagged Jul 2026):** the Rehearsals module
+  should grow past studio-sitter cover to be the single place for everything about a studio job.
+  Capture + surface, on an **expanded rehearsal card on the Job Detail view** (the natural home):
+  what **PA setup** the band wants; whether they need **backline from us** and how much; how many
+  **cars** the band is bringing (parking/space planning); any **lorry / truck / van drop-off or
+  pickup** arrangements (who's dropping/collecting, when). Some of this is HH-derivable (backline
+  line items already detected), some is free-form intake. Likely a mix of derived flags + a
+  structured "studio job details" record (new columns or a `rehearsal_job_details` table) rendered
+  as a richer rehearsal requirement/overview card. Scope + model this once the studio-sitter side
+  (portal + tasks + end-of-day report) is wrapped. Keep it card-on-Job-Detail, not a new nav.
 
 Headlines (design invariants — still apply):
 
