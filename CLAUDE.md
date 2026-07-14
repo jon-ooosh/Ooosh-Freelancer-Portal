@@ -1620,7 +1620,7 @@ These originate outside HH entirely — client sends stuff to us, or items found
 - [ ] Auto-reminder: chase client to collect, flag for disposal after X weeks
 - [ ] Global pages for both: `/operations/deliveries`, `/operations/lost-property`
 
-##### Stream 5: Rehearsals / Studio Sitter Module ← A–C SHIPPED (Jul 2026); portal + tasks + end-of-day PENDING
+##### Stream 5: Rehearsals / Studio Sitter Module ← A–E SHIPPED (Jul 2026); tasks + calendar + submit-chaser PENDING
 **Full spec: `docs/REHEARSALS-SPEC.md`** — read it before touching rehearsal code.
 
 **What's built (staff-side complete):**
@@ -1724,34 +1724,56 @@ These originate outside HH entirely — client sends stuff to us, or items found
     **Convention: never reference the `File` global in a Next.js route handler — use `Blob` / duck-type.**
     The 3 OP-native sitter Next.js routes also had their `reportFallback` (Monday-fallback telemetry) calls
     removed — sitters never had a Monday board, so a 5xx firing a "fell back to Monday" alert was wrong.
-  - **Slice 4 (NEXT): end-of-day lock-up report — Phase E (plan locked with jon, Jul 2026).**
-    Port of Jotform `203154178314046`, configurable, soft, no PDF. **Surface:** a dedicated
-    **"🔒 Finish for the night"** sub-page at `/shift/[date]/lockup` on the portal (reached from a button
-    at the bottom of the shift page — mirrors the Start-delivery→finish flow). **Storage:** a small
-    migration adds the 4 `report_*` columns to `studio_sitter_shifts` (`report_answers JSONB`,
-    `report_template_version INT`, `report_submitted_by`, `report_submitted_at`) — the spec §4.1 listed
-    them but migration 153 didn't add them; the `closed` status already exists. **Template + reference
-    photos** live in `system_settings` (category `studio_sitter`), admin-editable in Settings (OOH-returns
-    pattern), seeded with the Jotform content. **"Continuing tomorrow?" is DERIVED, not asked** (jon's
-    call) — compute from the site's rehearsal schedule whether there's a session at the studio the next
-    day, pre-fill + leave overridable; that auto-gates the end-of-booking deep-clean items. **Expected-answer
-    flagging** (jon's enhancement) — each checklist item carries an `expected` value in the template; an
-    off-expected answer (e.g. "doors bolted = No") is flagged, submit shows "N items need attention", and
-    the **staff read-only view highlights only the exceptions**. **On submit:** shift → `closed`; the
-    free-text "anything we need to know / money owed / items taken" posts into the shift handover thread
-    (replyable — the Jotform-dead-end fix); lost property deep-links to Holding; staff get a bell + email.
-    **Staff view:** full read-only answers on the roster / Job Detail card + "submitted ✓ (who/when)",
-    exceptions highlighted. **Not-submitted accountability chaser** (always-fires, like the completion
-    chaser) = fast-follow, can be same PR or next.
+  - **Slice 4 SHIPPED (end-of-day lock-up report — Phase E, migration 168):** the
+    **"🔒 Finish for the night"** flow. Port of Jotform `203154178314046`, configurable, soft, no PDF.
+    - **Storage:** migration 168 adds the 4 `report_*` columns to `studio_sitter_shifts`
+      (`report_answers JSONB`, `report_template_version INT`, `report_submitted_by` → `people(id)` since
+      sitters are freelancers not OP users, `report_submitted_at`); submit sets the existing `closed`
+      status (roster/portal/coverage reads all already tolerate `closed`, so no regression to coverage
+      sync or the sitter's own view). **Template + reference photos** live in `system_settings` (category
+      `studio_sitter`, seeded by 168): `studio_sitter_lockup_template` (JSON string) +
+      `studio_sitter_lockup_reference_photos` (JSON array). `services/studio-sitter-lockup.ts` owns
+      parse/read with a hardcoded `DEFAULT_TEMPLATE` fallback (mirrors the seed) so the portal never
+      breaks if the row is missing/corrupt.
+    - **"Continuing tomorrow?" is DERIVED, not asked** — `isStudioInUseOn(nextDay)` queries whether ANY
+      rehearsal job's `[first_session_date, last_session_date]` window (daytime OR evening; excl.
+      lost/cancelled/internal, incl. speculative) spans the next day. Pre-filled + overridable (Yes/No
+      buttons on the form); a `true` value hides the `end_of_booking_only` deep-clean items.
+    - **Expected-answer flagging** — each template item carries an `expected` value; `computeExceptions`
+      flags off-expected `yesno` answers (treats **`na`/`n/a` as non-exception** — not applicable = fine;
+      unanswered ≠ exception). Submit shows "N items need attention"; the staff read-only view highlights
+      ONLY the exceptions (amber), the rest a quiet green/red/grey recap. `report_template_version`
+      records which template version was answered against (bumped on every Settings save).
+    - **On submit** (`submitLockupReport`, one transaction, `FOR UPDATE` on the shift): store answers,
+      set `status='closed'`, and post the free-text note + an exceptions summary line into the shift
+      handover thread (`interactions` with `shift_id`, `created_by=NULL`, `author_name`) so it's
+      **replyable — the Jotform-dead-end fix**. Then fire a staff bell (admins/managers, `email_sent_at`
+      stamped so the escalator doesn't double-email) + an `info@` email (`studio_lockup_submitted`
+      internal template) — both best-effort, never fail the submit. Lost-property prompt deep-links to
+      `/holding/lost-property`.
+    - **Portal:** `/shift/[date]/lockup` sub-page (`src/app/shift/[date]/lockup/page.tsx`), reached from a
+      "🔒 Finish for the night" button at the bottom of the shift page. Reference photos, derived
+      continuing toggle, yesno/text/number items, notes, sticky submit bar, success screen. Endpoints
+      `GET`/`POST /api/portal/studio-sitter/shifts/:date/lockup` (access-gated: rostered sitter or shared
+      staff account); Next.js route `src/app/api/studio-sitter/shifts/[date]/lockup/route.ts`; op-api
+      `getLockupContextFromOP`/`submitLockupReportOP`.
+    - **Staff read-only view:** `GET /api/studio-sitters/report/:date` → `getShiftReport` (full answers +
+      exceptions). Reusable `StudioLockupReport.tsx` mounted on the Studio Sitters roster (🔒 button with
+      green ✓ / amber ⚠N pip, from a `report` summary now on `getRoster`'s shift shape) and the Job Detail
+      `StudioHandoverCard` (🔒 ✓ per-evening badge from `report_submitted_at` on `getJobCoverage`, expands
+      the report inline). **Settings editor** `StudioSitterSettingsSection` (admin/manager, on SettingsPage
+      next to Carnet) edits intro / notes prompt / lost-property prompt / checklist items (label, type,
+      expected, end-of-booking flag, reorder, add/remove) + uploads/removes reference photos.
+    - **Deferred (fast-follow):** the not-submitted accountability chaser (always-fires, like the
+      completion chaser) — not built this PR.
 - **General Tasks system** (build with/after D): `tasks` table (anchor to shift/job/nothing),
   visibility everyone/assignee-only, notify-on-done + notify-if-not-done-after-X-days, **staff via
   bell/email, freelancers portal-only (no bell/email)**; dashboard top-right card + "On Today" +
   sitter portal; Today/Tomorrow/Upcoming/Overdue views.
 - **Handover thread**: `interactions` anchored to a new `shift_id` (mirror the `issue_id`/
   `held_item_id` pattern + the `IS NULL` scoping guard so it doesn't bubble onto other timelines).
-- **End-of-day report** (Phase E): see the **"Slice 4 (NEXT)"** bullet above for the locked plan
-  (dedicated `/shift/[date]/lockup` sub-page, `system_settings` template + `report_*` columns migration,
-  DERIVED continuing-tomorrow, expected-answer flagging, notes → thread, staff read-only view + chaser).
+- **End-of-day report** (Phase E): ✅ SHIPPED (migration 168) — see the **"Slice 4 SHIPPED"** bullet
+  above. Only the not-submitted accountability chaser is still deferred (fast-follow).
 - **Calendar endpoint** (Phase F): `GET /api/studio-sitters/calendar?from&to` for the future
   calendar project (roster row shape already close).
 - **Monday.com teardown (cleanup, Jul 2026 — Monday fully retired):** the `reportFallback` /

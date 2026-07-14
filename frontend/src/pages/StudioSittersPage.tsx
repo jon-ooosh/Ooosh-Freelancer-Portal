@@ -15,6 +15,7 @@ import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
 import StudioShiftNotes from '../components/StudioShiftNotes';
+import StudioLockupReport from '../components/StudioLockupReport';
 
 interface RosterJobEntry {
   job_id: string;
@@ -34,7 +35,10 @@ interface RosterRow {
   needs_sitter: boolean;
   speculative?: boolean;
   jobs: RosterJobEntry[];
-  shift: { id: string; status: string; manual_override: boolean; override_reason: string | null; note_count?: number } | null;
+  shift: {
+    id: string; status: string; manual_override: boolean; override_reason: string | null; note_count?: number;
+    report?: { submitted_at: string; submitted_by_name: string | null; exceptions_count: number } | null;
+  } | null;
   assignee: RosterAssignee | null;
 }
 interface SitterOption {
@@ -110,6 +114,13 @@ export default function StudioSittersPage() {
   const toggleNotes = (id: string) => setOpenNotes((prev) => {
     const next = new Set(prev);
     if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  // Lock-up report read-only panels, keyed by shift date.
+  const [openReports, setOpenReports] = useState<Set<string>>(new Set());
+  const toggleReport = (date: string) => setOpenReports((prev) => {
+    const next = new Set(prev);
+    if (next.has(date)) next.delete(date); else next.add(date);
     return next;
   });
 
@@ -397,12 +408,28 @@ export default function StudioSittersPage() {
                         </button>
                       );
                     })()}
+                    {row.shift?.report && (() => {
+                      const ex = row.shift.report.exceptions_count;
+                      return (
+                        <button onClick={() => toggleReport(row.date)}
+                          className={`px-2.5 py-1 text-xs rounded-lg border ${ex > 0 ? 'border-amber-300 bg-amber-50 text-amber-800' : 'border-green-300 bg-green-50 text-green-700'}`}
+                          title={`Lock-up report submitted${row.shift.report.submitted_by_name ? ` by ${row.shift.report.submitted_by_name}` : ''}`}>
+                          🔒 Lock-up{ex > 0 ? ` (⚠ ${ex})` : ' ✓'}
+                        </button>
+                      );
+                    })()}
                   </div>
                 </div>
 
                 {row.shift?.id && openNotes.has(row.shift.id) && (
                   <div className="mt-3 pt-3 border-t border-gray-200">
                     <StudioShiftNotes shiftId={row.shift.id} />
+                  </div>
+                )}
+
+                {row.shift?.report && openReports.has(row.date) && (
+                  <div className="mt-3 pt-3 border-t border-gray-200">
+                    <StudioLockupReport date={row.date} />
                   </div>
                 )}
               </div>

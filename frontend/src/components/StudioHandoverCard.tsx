@@ -13,6 +13,7 @@ import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import StudioShiftNotes from './StudioShiftNotes';
+import StudioLockupReport from './StudioLockupReport';
 
 interface CoverageEvening {
   date: string;
@@ -20,6 +21,7 @@ interface CoverageEvening {
   status: string;
   assignee: { id: string; name: string } | null;
   note_count?: number;
+  report_submitted_at?: string | null;
 }
 
 function formatDay(iso: string): string {
@@ -89,6 +91,11 @@ export default function StudioHandoverCard({ jobId }: { jobId: string }) {
                     💬 {ev.note_count}
                   </span>
                 )}
+                {ev.report_submitted_at && (
+                  <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-green-100 text-green-700 font-medium" title="Lock-up report submitted">
+                    🔒 ✓
+                  </span>
+                )}
               </span>
               <span className="flex items-center gap-2">
                 {ev.assignee ? (
@@ -100,7 +107,12 @@ export default function StudioHandoverCard({ jobId }: { jobId: string }) {
               </span>
             </button>
             {open.has(ev.date) && (
-              <div className="mt-2">
+              <div className="mt-2 space-y-3">
+                {ev.report_submitted_at && (
+                  <div className="rounded-lg border border-gray-100 bg-gray-50 p-2.5">
+                    <StudioLockupReport date={ev.date} />
+                  </div>
+                )}
                 {ev.shift_id ? (
                   <StudioShiftNotes shiftId={ev.shift_id} />
                 ) : (

@@ -14,6 +14,7 @@
 import { query, getClient } from '../config/database';
 import type { RehearsalDetail } from './rehearsal-plan';
 import { getPresignedDownloadUrl } from '../config/r2';
+import { getLockupTemplate, computeExceptions } from './studio-sitter-lockup';
 
 const STUDIO_SITTER_TAG = 'studio sitter'; // matched case-insensitively
 export const STUDIO_SITTER_DEFAULT_FEE_KEY = 'studio_sitter_default_fee';
@@ -66,6 +67,11 @@ export interface RosterRow {
     planned_start: string | null;
     planned_end: string | null;
     note_count: number;
+    report: {
+      submitted_at: string;
+      submitted_by_name: string | null;
+      exceptions_count: number;
+    } | null;
   } | null;
   assignee: RosterAssignee | null;
 }
@@ -130,6 +136,8 @@ async function loadShifts(from: string, to: string): Promise<Map<string, any>> {
   const res = await query(
     `SELECT s.id, s.shift_date::text AS shift_date, s.status, s.manual_override, s.override_reason,
             s.planned_start, s.planned_end,
+            s.report_submitted_at, s.report_answers,
+            rp.first_name AS report_first, rp.last_name AS report_last,
             a.status AS assignment_status, a.person_id,
             p.first_name, p.last_name, p.tags,
             (SELECT COUNT(*) FROM interactions i WHERE i.shift_id = s.id)::int AS note_count
@@ -137,6 +145,7 @@ async function loadShifts(from: string, to: string): Promise<Map<string, any>> {
      LEFT JOIN studio_sitter_shift_assignments a
        ON a.shift_id = s.id AND a.status IN ('assigned','confirmed')
      LEFT JOIN people p ON p.id = a.person_id
+     LEFT JOIN people rp ON rp.id = s.report_submitted_by
      WHERE s.shift_date BETWEEN $1 AND $2 AND s.status <> 'cancelled'`,
     [from, to]
   );
@@ -154,6 +163,10 @@ async function loadShifts(from: string, to: string): Promise<Map<string, any>> {
  *  includeSpeculative=true to surface them for planning. */
 export async function getRoster(from: string, to: string, includeSpeculative = false): Promise<RosterRow[]> {
   const [jobs, shifts] = await Promise.all([loadRehearsalJobs(from, to, includeSpeculative), loadShifts(from, to)]);
+
+  // Template needed to count exceptions on any submitted lock-up reports in range.
+  const hasReport = Array.from(shifts.values()).some((s: any) => s.report_submitted_at);
+  const lockupTemplate = hasReport ? await getLockupTemplate() : null;
 
   const dateJobs = new Map<string, RosterJobEntry[]>();
   for (const job of jobs) {
@@ -188,6 +201,18 @@ export async function getRoster(from: string, to: string, includeSpeculative = f
             planned_start: shiftRow.planned_start,
             planned_end: shiftRow.planned_end,
             note_count: shiftRow.note_count ?? 0,
+            report: shiftRow.report_submitted_at && lockupTemplate
+              ? {
+                  submitted_at: shiftRow.report_submitted_at,
+                  submitted_by_name: personName(shiftRow.report_first, shiftRow.report_last) === 'Unknown'
+                    ? null : personName(shiftRow.report_first, shiftRow.report_last),
+                  exceptions_count: computeExceptions(
+                    lockupTemplate,
+                    shiftRow.report_answers?.answers ?? {},
+                    shiftRow.report_answers?.continuing_tomorrow ?? false,
+                  ).length,
+                }
+              : null,
           }
         : null,
       assignee: shiftRow?.person_id
@@ -210,6 +235,7 @@ export interface JobCoverageEvening {
   status: string;                    // shift status, or 'needed' if no shift
   assignee: { id: string; name: string } | null;
   note_count: number;                // handover-thread messages on this shift
+  report_submitted_at: string | null; // lock-up report submitted (null if not)
 }
 
 /** Per-job coverage for the job's sitter-needed evenings (drives the card chips). */
@@ -225,7 +251,8 @@ export async function getJobCoverage(jobId: string): Promise<JobCoverageEvening[
   if (dates.length === 0) return [];
 
   const shiftRes = await query(
-    `SELECT s.id, s.shift_date::text AS shift_date, s.status, a.person_id, p.first_name, p.last_name,
+    `SELECT s.id, s.shift_date::text AS shift_date, s.status, s.report_submitted_at,
+            a.person_id, p.first_name, p.last_name,
             (SELECT COUNT(*) FROM interactions i WHERE i.shift_id = s.id)::int AS note_count
      FROM studio_sitter_shifts s
      LEFT JOIN studio_sitter_shift_assignments a
@@ -248,6 +275,7 @@ export async function getJobCoverage(jobId: string): Promise<JobCoverageEvening[
       status: s?.status ?? 'needed',
       assignee: s?.person_id ? { id: s.person_id, name: personName(s.first_name, s.last_name) } : null,
       note_count: s?.note_count ?? 0,
+      report_submitted_at: s?.report_submitted_at ?? null,
     };
   });
 }

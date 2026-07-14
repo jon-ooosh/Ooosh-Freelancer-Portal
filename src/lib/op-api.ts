@@ -234,6 +234,86 @@ export async function postSitterThreadWithFilesOP(
 }
 
 // =============================================================================
+// STUDIO SITTER LOCK-UP REPORT (Rehearsals — Phase E)
+// =============================================================================
+
+export interface LockupItem {
+  id: string
+  label: string
+  type: 'yesno' | 'text' | 'number'
+  expected?: string
+  end_of_booking_only?: boolean
+}
+
+export interface LockupTemplate {
+  version: number
+  intro?: string
+  items: LockupItem[]
+  notes_label?: string
+  lost_property_prompt?: string
+}
+
+export interface LockupReferencePhoto {
+  label: string
+  url: string
+}
+
+export interface LockupStoredReport {
+  answers: Record<string, unknown>
+  notes: string
+  continuing_tomorrow: boolean
+  continuing_overridden: boolean
+  submitted_at: string
+}
+
+export interface LockupContextResponse {
+  success: boolean
+  date: string
+  template: LockupTemplate
+  reference_photos: LockupReferencePhoto[]
+  continuing_tomorrow: boolean
+  continuing_derived: boolean
+  submitted: LockupStoredReport | null
+  has_shift: boolean
+  error?: string
+}
+
+export interface LockupException {
+  id: string
+  label: string
+  answer: string
+  expected: string
+}
+
+export interface LockupSubmitResponse {
+  success: boolean
+  ok: boolean
+  shift_id: string
+  exceptions: LockupException[]
+  error?: string
+}
+
+/** Lock-up sub-page context: template + reference photos + derived continuing + prior submission. */
+export async function getLockupContextFromOP(
+  sessionToken: string,
+  date: string
+): Promise<LockupContextResponse> {
+  return opFetch<LockupContextResponse>(`/studio-sitter/shifts/${date}/lockup`, sessionToken)
+}
+
+/** Submit the lock-up report for one evening. */
+export async function submitLockupReportOP(
+  sessionToken: string,
+  date: string,
+  body: { answers: Record<string, unknown>; notes: string; continuing_tomorrow: boolean }
+): Promise<LockupSubmitResponse> {
+  return opFetch(`/studio-sitter/shifts/${date}/lockup`, sessionToken, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+// =============================================================================
 // API FUNCTIONS
 // =============================================================================
 

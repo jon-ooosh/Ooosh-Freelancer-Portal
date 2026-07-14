@@ -202,6 +202,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '165_auto_chase_send_switch.sql',
         '166_chase_default_sender.sql',
         '167_auto_chase_set_by.sql',
+        '168_studio_sitter_lockup_report.sql',
       ];
 
       for (const migration of migrations) {
