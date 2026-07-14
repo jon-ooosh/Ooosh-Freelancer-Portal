@@ -1610,6 +1610,34 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  // ── Studio-sitter lock-up report submitted (internal) ─────────────────
+  // Fires when a sitter submits the end-of-night lock-up report. Goes to info@
+  // (mirrors the OOH / money / vehicle internal-alert routing). Exceptions +
+  // notes are plain-text (newline-joined), rendered with white-space:pre-line.
+  studio_lockup_submitted: {
+    variant: 'internal',
+    subject: '🔒 Lock-up report — {{date}} ({{sitterName}})',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Lock-up report submitted</h2>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.6;">
+        <strong>{{sitterName}}</strong> has finished for the night and locked up on
+        <strong>{{date}}</strong>.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
+            <p style="margin:0 0 8px;font-size:14px;color:#1e293b;font-weight:600;">{{statusLine}}</p>
+            {{#if exceptionsText}}<p style="margin:0 0 4px;font-size:13px;color:#64748b;">Needs attention</p><p style="margin:0 0 8px;font-size:14px;color:#b45309;white-space:pre-line;">{{exceptionsText}}</p>{{/if}}
+            {{#if notes}}<p style="margin:0 0 4px;font-size:13px;color:#64748b;">Sitter's notes</p><p style="margin:0 0 8px;font-size:14px;color:#1e293b;white-space:pre-line;">{{notes}}</p>{{/if}}
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0;font-size:14px;color:#334155;">
+        <a href="{{rosterUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Open the studio sitters roster →</a>
+      </p>
+    `,
+  },
+
   // ── Generic file resend ───────────────────────────────────────────────
   // Used by the Files tab "Email" action — staff sends an arbitrary
   // attachment (delivery note, hire agreement, condition report, jpg

@@ -479,6 +479,19 @@ export default function ShiftDetailPage() {
                 </div>
               </div>
             </section>
+
+            {/* Finish for the night → end-of-day lock-up report */}
+            <section className="pt-2">
+              <Link
+                href={`/shift/${date}/lockup`}
+                className="flex items-center justify-center gap-2 w-full text-sm font-semibold px-4 py-3 rounded-xl bg-ooosh-600 text-white hover:bg-ooosh-500 transition-colors shadow-sm"
+              >
+                🔒 Finish for the night
+              </Link>
+              <p className="mt-2 text-center text-xs text-gray-400">
+                Quick lock-up checklist before you leave.
+              </p>
+            </section>
           </>
         ) : null}
       </main>

@@ -22,6 +22,7 @@ import { resolveClientEmailTarget, buildFallbackBanner, logFallbackToTimeline } 
 import { uploadToR2, isR2Configured, getPresignedDownloadUrl } from '../config/r2';
 import { generateDeliveryNotePdf, DeliveryNoteItem } from '../services/delivery-note-pdf';
 import { getSitterShifts, getSitterShiftDetail, isSitterAssignedTo } from '../services/studio-sitter';
+import { getLockupContext, submitLockupReport } from '../services/studio-sitter-lockup';
 
 // Stable UUID seeded by migration 031 — used as created_by for portal-driven
 // auto-actions (the freelancer is a `people` row, not a `users` row, so we
@@ -1107,6 +1108,51 @@ router.post('/studio-sitter/shifts/:date/thread', sitterNoteUploadMw, async (req
   } catch (error) {
     console.error('Portal sitter thread post error:', error);
     res.status(500).json({ error: 'Failed to post handover note' });
+  }
+});
+
+// ── Studio Sitter end-of-day lock-up report (Rehearsals — Phase E) ───
+//
+// GET  /api/portal/studio-sitter/shifts/:date/lockup → template + reference
+//        photos + DERIVED "continuing tomorrow?" + any prior submission
+// POST /api/portal/studio-sitter/shifts/:date/lockup → submit the report
+//        (closes the shift, posts the note into the handover thread, alerts
+//        staff). Access-gated the same way as the shift detail / thread.
+
+router.get('/studio-sitter/shifts/:date/lockup', async (req: PortalRequest, res: Response) => {
+  try {
+    const date = String(req.params.date);
+    if (!SITTER_DATE_RE.test(date)) { res.status(400).json({ error: 'Invalid date' }); return; }
+    const allowed = req.portalUser!.isStaffShared || await isSitterAssignedTo(req.portalUser!.id, date);
+    if (!allowed) { res.status(403).json({ error: 'Not rostered to this evening' }); return; }
+    const context = await getLockupContext(date);
+    res.json({ success: true, ...context });
+  } catch (error) {
+    console.error('Portal sitter lock-up context error:', error);
+    res.status(500).json({ error: 'Failed to load lock-up report' });
+  }
+});
+
+router.post('/studio-sitter/shifts/:date/lockup', async (req: PortalRequest, res: Response) => {
+  try {
+    const date = String(req.params.date);
+    if (!SITTER_DATE_RE.test(date)) { res.status(400).json({ error: 'Invalid date' }); return; }
+    const allowed = req.portalUser!.isStaffShared || await isSitterAssignedTo(req.portalUser!.id, date);
+    if (!allowed) { res.status(403).json({ error: 'Not rostered to this evening' }); return; }
+
+    const body = (req.body ?? {}) as { answers?: Record<string, unknown>; notes?: unknown; continuing_tomorrow?: unknown };
+    const answers = body.answers && typeof body.answers === 'object' ? body.answers : {};
+    const result = await submitLockupReport(date, req.portalUser!.id, req.portalUser!.name, {
+      answers,
+      notes: typeof body.notes === 'string' ? body.notes : '',
+      continuing_tomorrow: body.continuing_tomorrow === true || body.continuing_tomorrow === 'true',
+    });
+    res.json({ success: true, ...result });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : 'Failed to submit lock-up report';
+    if (msg === 'No shift for this evening') { res.status(404).json({ error: msg }); return; }
+    console.error('Portal sitter lock-up submit error:', error);
+    res.status(500).json({ error: 'Failed to submit lock-up report' });
   }
 });
 
