@@ -153,7 +153,7 @@ export default function ShiftDetailPage() {
   // Handover thread
   const [messages, setMessages] = useState<ThreadMessage[]>([])
   const [draft, setDraft] = useState('')
-  const [pendingFiles, setPendingFiles] = useState<File[]>([])
+  const [pendingFiles, setPendingFiles] = useState<{ file: File; preview: string | null }[]>([])
   const [posting, setPosting] = useState(false)
   const [postError, setPostError] = useState<string | null>(null)
 
@@ -178,7 +178,7 @@ export default function ShiftDetailPage() {
       // Always multipart (content + any files); the browser sets the boundary.
       const fd = new FormData()
       fd.append('content', content)
-      pendingFiles.forEach((f) => fd.append('files', f, f.name))
+      pendingFiles.forEach((p) => fd.append('files', p.file, p.file.name))
       const response = await fetch(`/api/studio-sitter/shifts/${date}/thread`, {
         method: 'POST',
         body: fd,
@@ -189,6 +189,7 @@ export default function ShiftDetailPage() {
       }
       setMessages((prev) => [...prev, data.message])
       setDraft('')
+      pendingFiles.forEach((p) => { if (p.preview) URL.revokeObjectURL(p.preview) })
       setPendingFiles([])
     } catch (err) {
       console.error('Failed to post note:', err)
@@ -430,12 +431,18 @@ export default function ShiftDetailPage() {
                 />
                 {pendingFiles.length > 0 && (
                   <div className="flex flex-wrap gap-2 mt-2">
-                    {pendingFiles.map((f, idx) => (
+                    {pendingFiles.map((p, idx) => (
                       <span key={idx} className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md border border-gray-200 bg-gray-50 text-xs text-gray-700">
-                        <span>{f.type.startsWith('image/') ? '🖼️' : '📎'}</span>
-                        <span className="max-w-[140px] truncate">{f.name}</span>
-                        <button type="button" onClick={() => setPendingFiles((prev) => prev.filter((_, i) => i !== idx))}
-                          className="hover:text-red-600" aria-label={`Remove ${f.name}`}>×</button>
+                        {p.preview
+                          ? <img src={p.preview} alt={p.file.name} className="w-6 h-6 object-cover rounded" />
+                          : <span>📎</span>}
+                        <span className="max-w-[140px] truncate">{p.file.name}</span>
+                        <button type="button" onClick={() => setPendingFiles((prev) => {
+                          const found = prev[idx]
+                          if (found?.preview) URL.revokeObjectURL(found.preview)
+                          return prev.filter((_, i) => i !== idx)
+                        })}
+                          className="hover:text-red-600" aria-label={`Remove ${p.file.name}`}>×</button>
                       </span>
                     ))}
                   </div>
@@ -448,7 +455,19 @@ export default function ShiftDetailPage() {
                   <label className="text-sm px-3 py-2 rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-50 cursor-pointer">
                     📎 Attach
                     <input type="file" multiple accept="image/*,application/pdf" className="sr-only"
-                      onChange={(e) => { if (e.target.files) setPendingFiles((prev) => [...prev, ...Array.from(e.target.files!)]); e.target.value = '' }} />
+                      onChange={(e) => {
+                        // Capture the FileList into a concrete array NOW — reading
+                        // e.target.files inside the deferred setState updater would
+                        // see it already emptied by the reset below.
+                        const selected = e.target.files ? Array.from(e.target.files) : []
+                        e.target.value = ''
+                        if (selected.length) {
+                          setPendingFiles((prev) => [
+                            ...prev,
+                            ...selected.map((f) => ({ file: f, preview: f.type.startsWith('image/') ? URL.createObjectURL(f) : null })),
+                          ])
+                        }
+                      }} />
                   </label>
                   <button
                     onClick={postNote}
