@@ -13,6 +13,7 @@ import {
   isOpMode,
   getSitterThreadFromOP,
   postSitterThreadOP,
+  postSitterThreadWithFilesOP,
   isOpClientError,
   OpApiError,
   reportFallback,
@@ -87,14 +88,33 @@ export async function POST(
       return NextResponse.json({ success: false, error: 'Session token missing' }, { status: 401 })
     }
 
-    const body = await request.json().catch(() => ({}))
-    const content = typeof body?.content === 'string' ? body.content.trim() : ''
-    if (!content) {
-      return NextResponse.json({ success: false, error: 'A message is required' }, { status: 400 })
-    }
+    const contentType = request.headers.get('content-type') || ''
+    const isMultipart = contentType.includes('multipart/form-data')
 
     try {
-      const data = await postSitterThreadOP(sessionToken, date, content)
+      let data
+      if (isMultipart) {
+        // Forward content + files to OP as multipart (images/PDFs).
+        const inForm = await request.formData()
+        const outForm = new FormData()
+        const content = inForm.get('content')
+        if (typeof content === 'string') outForm.append('content', content)
+        let fileCount = 0
+        for (const f of inForm.getAll('files')) {
+          if (f instanceof File) { outForm.append('files', f, f.name); fileCount++ }
+        }
+        if ((typeof content !== 'string' || !content.trim()) && fileCount === 0) {
+          return NextResponse.json({ success: false, error: 'A message or attachment is required' }, { status: 400 })
+        }
+        data = await postSitterThreadWithFilesOP(sessionToken, date, outForm)
+      } else {
+        const body = await request.json().catch(() => ({}))
+        const content = typeof body?.content === 'string' ? body.content.trim() : ''
+        if (!content) {
+          return NextResponse.json({ success: false, error: 'A message is required' }, { status: 400 })
+        }
+        data = await postSitterThreadOP(sessionToken, date, content)
+      }
       return NextResponse.json(data)
     } catch (opError) {
       if (isOpClientError(opError)) {

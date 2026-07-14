@@ -11,7 +11,7 @@
  * lock-up report lands in a later slice.
  */
 
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
 
@@ -132,6 +132,11 @@ function fileIcon(fileType: string | null): string {
   return '📎'
 }
 
+function isImageFile(file: { name: string; fileType: string | null }): boolean {
+  if ((file.fileType || '').toLowerCase().startsWith('image/')) return true
+  return /\.(jpg|jpeg|png|gif|webp|svg)$/i.test(file.name || '')
+}
+
 // =============================================================================
 // PAGE
 // =============================================================================
@@ -148,8 +153,10 @@ export default function ShiftDetailPage() {
   // Handover thread
   const [messages, setMessages] = useState<ThreadMessage[]>([])
   const [draft, setDraft] = useState('')
+  const [pendingFiles, setPendingFiles] = useState<File[]>([])
   const [posting, setPosting] = useState(false)
   const [postError, setPostError] = useState<string | null>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const fetchThread = useCallback(async () => {
     try {
@@ -165,14 +172,17 @@ export default function ShiftDetailPage() {
 
   const postNote = useCallback(async () => {
     const content = draft.trim()
-    if (!content || posting) return
+    if ((!content && pendingFiles.length === 0) || posting) return
     setPosting(true)
     setPostError(null)
     try {
+      // Always multipart (content + any files); the browser sets the boundary.
+      const fd = new FormData()
+      fd.append('content', content)
+      pendingFiles.forEach((f) => fd.append('files', f, f.name))
       const response = await fetch(`/api/studio-sitter/shifts/${date}/thread`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content }),
+        body: fd,
       })
       const data = await response.json()
       if (!response.ok || !data.success) {
@@ -180,13 +190,14 @@ export default function ShiftDetailPage() {
       }
       setMessages((prev) => [...prev, data.message])
       setDraft('')
+      setPendingFiles([])
     } catch (err) {
       console.error('Failed to post note:', err)
       setPostError(err instanceof Error ? err.message : 'Failed to post note')
     } finally {
       setPosting(false)
     }
-  }, [draft, posting, date])
+  }, [draft, pendingFiles, posting, date])
 
   const fetchShift = useCallback(async () => {
     setLoading(true)
@@ -378,20 +389,29 @@ export default function ShiftDetailPage() {
                           {formatMessageTime(m.created_at)}
                         </span>
                       </div>
-                      <p className="text-sm text-gray-800 whitespace-pre-wrap break-words"><Linkified text={m.content} /></p>
+                      {m.content && m.content !== '(attachment)' && (
+                        <p className="text-sm text-gray-800 whitespace-pre-wrap break-words"><Linkified text={m.content} /></p>
+                      )}
                       {m.files && m.files.length > 0 && (
-                        <div className="mt-2 space-y-1">
+                        <div className="mt-2 space-y-1.5">
                           {m.files.map((file, idx) => (
-                            <a
-                              key={`${m.id}-${idx}`}
-                              href={file.url}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="flex items-center gap-2 text-sm text-ooosh-600 hover:text-ooosh-500"
-                            >
-                              <span>{fileIcon(file.fileType)}</span>
-                              <span className="truncate">{file.name}</span>
-                            </a>
+                            isImageFile(file) ? (
+                              <a key={`${m.id}-${idx}`} href={file.url} target="_blank" rel="noopener noreferrer" className="block">
+                                <img src={file.url} alt={file.name}
+                                  className="max-w-[240px] max-h-[180px] rounded border border-gray-200 object-cover" />
+                              </a>
+                            ) : (
+                              <a
+                                key={`${m.id}-${idx}`}
+                                href={file.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="flex items-center gap-2 text-sm text-ooosh-600 hover:text-ooosh-500"
+                              >
+                                <span>{fileIcon(file.fileType)}</span>
+                                <span className="truncate">{file.name}</span>
+                              </a>
+                            )
                           ))}
                         </div>
                       )}
@@ -409,11 +429,29 @@ export default function ShiftDetailPage() {
                   rows={3}
                   className="w-full text-sm border border-gray-200 rounded-lg p-2 focus:outline-none focus:ring-2 focus:ring-ooosh-200 focus:border-ooosh-300 resize-y min-h-[64px]"
                 />
+                {pendingFiles.length > 0 && (
+                  <div className="flex flex-wrap gap-2 mt-2">
+                    {pendingFiles.map((f, idx) => (
+                      <span key={idx} className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md border border-gray-200 bg-gray-50 text-xs text-gray-700">
+                        <span>{f.type.startsWith('image/') ? '🖼️' : '📎'}</span>
+                        <span className="max-w-[140px] truncate">{f.name}</span>
+                        <button type="button" onClick={() => setPendingFiles((prev) => prev.filter((_, i) => i !== idx))}
+                          className="hover:text-red-600" aria-label={`Remove ${f.name}`}>×</button>
+                      </span>
+                    ))}
+                  </div>
+                )}
                 {postError && <p className="text-xs text-red-600 mt-1">{postError}</p>}
-                <div className="mt-2 flex justify-end">
+                <input ref={fileInputRef} type="file" multiple accept="image/*,application/pdf" className="hidden"
+                  onChange={(e) => { if (e.target.files) setPendingFiles((prev) => [...prev, ...Array.from(e.target.files!)]); e.target.value = '' }} />
+                <div className="mt-2 flex justify-between items-center">
+                  <button type="button" onClick={() => fileInputRef.current?.click()}
+                    className="text-sm px-3 py-2 rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-50" title="Attach image or PDF">
+                    📎 Attach
+                  </button>
                   <button
                     onClick={postNote}
-                    disabled={!draft.trim() || posting}
+                    disabled={(!draft.trim() && pendingFiles.length === 0) || posting}
                     className="text-sm font-medium px-4 py-2 rounded-lg bg-ooosh-600 text-white hover:bg-ooosh-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                   >
                     {posting ? 'Posting…' : 'Post note'}
