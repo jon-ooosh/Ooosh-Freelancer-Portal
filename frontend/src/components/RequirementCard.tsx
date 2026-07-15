@@ -855,10 +855,10 @@ export default function RequirementCard({
                 ) : (
                   <button
                     onClick={() => setShowLocationModal(true)}
-                    className="text-[11px] text-gray-400 hover:text-indigo-600 font-medium transition-colors"
+                    className="text-xs text-gray-400 hover:text-indigo-600 font-medium transition-colors"
                     title="Record where the kit is"
                   >
-                    ＋ Where is it?
+                    <span className="text-sm">＋</span> Where is it?
                   </button>
                 )}
               </div>
