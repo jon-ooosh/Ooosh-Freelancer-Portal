@@ -14,6 +14,7 @@ import { z } from 'zod';
 import multer from 'multer';
 import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
+import { resolveRemittanceContact, getCostForRemittance, sendRemittance } from '../services/remittance';
 
 const router = Router();
 router.use(authenticate);
@@ -1085,6 +1086,39 @@ router.post('/:id/pay', authorize(...ADMIN_ONLY), async (req: AuthRequest, res: 
     res.json({ data: result.rows[0] });
   } catch (err) {
     console.error('[costs] pay error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Remittance advice ───────────────────────────────────────────────────────
+// Optional courtesy email confirming a bill/reimbursement has been (or will be)
+// paid. Decoupled from /pay — a bad email must never block/unwind a payment.
+
+// Resolve the payee + address for pre-filling the mark-paid modal's tickbox.
+router.get('/:id/remittance-contact', authorize(...ADMIN_ONLY), async (req: AuthRequest, res: Response) => {
+  try {
+    const cost = await getCostForRemittance(req.params.id as string);
+    if (!cost) { res.status(404).json({ error: 'Cost not found' }); return; }
+    const contact = await resolveRemittanceContact(cost);
+    res.json({ data: contact });
+  } catch (err) {
+    console.error('[costs] remittance-contact error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+const remittanceSchema = z.object({ email: z.string().trim().email().max(200) });
+
+router.post('/:id/send-remittance', authorize(...ADMIN_ONLY), async (req: AuthRequest, res: Response) => {
+  try {
+    const parse = remittanceSchema.safeParse(req.body ?? {});
+    if (!parse.success) { res.status(400).json({ error: 'A valid recipient email is required' }); return; }
+    const result = await sendRemittance(req.params.id as string, parse.data.email);
+    if (!result.ok) { res.status(502).json({ error: result.error || 'Send failed' }); return; }
+    await audit(req.user!.id, req.params.id as string, 'remittance_sent', null, { email: parse.data.email });
+    res.json({ data: { sent: true, email: parse.data.email } });
+  } catch (err) {
+    console.error('[costs] send-remittance error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

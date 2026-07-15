@@ -672,6 +672,21 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  // ── Remittance advice ─────────────────────────────────────────────────
+  // Subject + body are composed in services/remittance.ts (supplier vs
+  // reimbursement wording, paid-vs-scheduled tense) and passed via
+  // subjectOverride / bodyHtmlOverride. This registration exists so the
+  // client branding, EMAIL_LIVE_TEMPLATES allowlist, and audit log all apply.
+  remittance_advice: {
+    variant: 'client',
+    preheader: 'Remittance advice from Ooosh Tours',
+    subject: 'Remittance Advice',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Remittance Advice</h2>
+      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">This confirms a payment has been made to you.</p>
+    `,
+  },
+
   // ── Excess lifecycle templates ────────────────────────────────────────
 
   excess_payment_confirmed: {
