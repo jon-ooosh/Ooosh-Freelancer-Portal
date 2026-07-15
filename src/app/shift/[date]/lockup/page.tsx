@@ -34,6 +34,7 @@ interface LockupContext {
     exception_notes: Record<string, { text: string }>
     item_notes: Record<string, { text: string }>
     notes: { text: string }
+    submitted_at?: string
   } | null
   has_shift: boolean
   error?: string
@@ -106,6 +107,8 @@ export default function LockupPage() {
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
   const [done, setDone] = useState<{ exceptions: number } | null>(null)
+  const [confirmUnanswered, setConfirmUnanswered] = useState(false)
+  const [resubmitAt, setResubmitAt] = useState<string | null>(null)
 
   // Lost property
   const [lpOpen, setLpOpen] = useState(false)
@@ -146,7 +149,10 @@ export default function LockupPage() {
 
   useEffect(() => { if (date) fetchCtx() }, [date, fetchCtx])
 
-  const setAnswer = (id: string, value: string) => setAnswers((prev) => ({ ...prev, [id]: value }))
+  const setAnswer = (id: string, value: string) => {
+    setAnswers((prev) => ({ ...prev, [id]: value }))
+    setConfirmUnanswered(false) // re-validate after any change
+  }
   const toggleRef = (id: string) => setOpenRef((prev) => {
     const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n
   })
@@ -157,9 +163,14 @@ export default function LockupPage() {
 
   const visibleItems = (ctx?.template.items ?? []).filter((it) => !(it.end_of_booking_only && continuing))
 
-  const submit = useCallback(async () => {
+  const unansweredCount = visibleItems.filter((it) => !String(answers[it.id] ?? '').trim()).length
+
+  const submit = useCallback(async (allowResubmit = false) => {
     if (submitting || !ctx) return
-    setSubmitting(true); setSubmitError(null)
+    // Confirm-on-unanswered: first click just flags it, second click proceeds.
+    const unanswered = visibleItems.filter((it) => !String(answers[it.id] ?? '').trim())
+    if (unanswered.length > 0 && !confirmUnanswered) { setConfirmUnanswered(true); setSubmitError(null); return }
+    setSubmitting(true); setSubmitError(null); setResubmitAt(null)
     try {
       // exception_notes: only for currently-off-expected items WITHOUT a
       // note_prompt (those use the always-on item_notes box instead).
@@ -179,7 +190,7 @@ export default function LockupPage() {
       const fd = new FormData()
       fd.append('payload', JSON.stringify({
         answers, exception_notes: exceptionNotes, item_notes: itemNotesPayload, notes: notesText.trim(),
-        continuing_tomorrow: continuing === true,
+        continuing_tomorrow: continuing === true, allow_resubmit: allowResubmit,
       }))
       for (const it of visibleItems) {
         if (it.note_prompt) {
@@ -192,6 +203,7 @@ export default function LockupPage() {
 
       const response = await fetch(`/api/studio-sitter/shifts/${date}/lockup`, { method: 'POST', body: fd })
       const data = await response.json()
+      if (response.status === 409 && data.already_submitted) { setResubmitAt(String(data.submitted_at || '')); return }
       if (!response.ok || !data.success) throw new Error(data.error || 'Failed to submit')
       setDone({ exceptions: Array.isArray(data.exceptions) ? data.exceptions.length : 0 })
     } catch (err) {
@@ -199,7 +211,7 @@ export default function LockupPage() {
     } finally {
       setSubmitting(false)
     }
-  }, [submitting, ctx, visibleItems, answers, whyNotes, whyPhotos, itemNotes, itemPhotos, notesText, notesPhotos, continuing, date])
+  }, [submitting, ctx, visibleItems, answers, whyNotes, whyPhotos, itemNotes, itemPhotos, notesText, notesPhotos, continuing, confirmUnanswered, date])
 
   const submitLostProperty = useCallback(async () => {
     if (lpSaving || !lpDesc.trim()) return
@@ -412,10 +424,32 @@ export default function LockupPage() {
       {ctx && ctx.has_shift && !loading && (
         <div className="fixed bottom-0 inset-x-0 bg-white border-t border-gray-100 safe-bottom">
           <div className="max-w-lg mx-auto px-4 py-3">
-            <button onClick={submit} disabled={submitting}
+            {confirmUnanswered && unansweredCount > 0 && (
+              <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-2">
+                {unansweredCount} item{unansweredCount !== 1 ? 's' : ''} still unanswered. Tap again to submit anyway.
+              </p>
+            )}
+            <button onClick={() => submit()} disabled={submitting}
               className="w-full text-sm font-semibold px-4 py-3 rounded-lg bg-ooosh-600 text-white hover:bg-ooosh-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
-              {submitting ? 'Submitting…' : '🔒 Submit & finish for the night'}
+              {submitting ? 'Submitting…' : confirmUnanswered && unansweredCount > 0 ? `Submit anyway (${unansweredCount} left)` : '🔒 Submit & finish for the night'}
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Already-submitted guard — a stale tab can't silently overwrite + re-alert the office. */}
+      {resubmitAt !== null && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={() => setResubmitAt(null)}>
+          <div className="max-w-sm w-full bg-white rounded-2xl p-5 shadow-lg" onClick={(e) => e.stopPropagation()}>
+            <h2 className="text-base font-semibold text-gray-900">Already submitted</h2>
+            <p className="mt-2 text-sm text-gray-600">
+              This shift was already submitted{resubmitAt ? ` at ${new Date(resubmitAt).toLocaleString('en-GB', { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short' })}` : ''}. Re-submit and overwrite the previous answers?
+            </p>
+            <div className="mt-4 flex gap-2">
+              <button onClick={() => { setResubmitAt(null); submit(true) }} disabled={submitting}
+                className="flex-1 text-sm font-medium px-4 py-2.5 rounded-lg bg-ooosh-600 text-white hover:bg-ooosh-500 disabled:opacity-50">Re-submit</button>
+              <button onClick={() => setResubmitAt(null)} className="flex-1 text-sm px-4 py-2.5 rounded-lg border border-gray-200 text-gray-600">Cancel</button>
+            </div>
           </div>
         </div>
       )}
