@@ -9,6 +9,7 @@ import {
 } from './messaging/Attachments';
 import Reactions, { type ReactionsMap } from './messaging/Reactions';
 import ConversationSummary from './ConversationSummary';
+import QuoteVersions from './QuoteVersions';
 
 interface Interaction {
   id: string;
@@ -769,6 +770,15 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
           nothing when there are no ingested emails / Anthropic is off. */}
       {entityType === 'job_id' && (
         <ConversationSummary
+          jobId={entityId}
+          emailSignal={interactions.filter((i) => i.type === 'email').length}
+        />
+      )}
+
+      {/* Quote-PDF version diff (jobs only). Renders nothing until the job has
+          harvested quote PDFs. Spec §7.3. */}
+      {entityType === 'job_id' && (
+        <QuoteVersions
           jobId={entityId}
           emailSignal={interactions.filter((i) => i.type === 'email').length}
         />
