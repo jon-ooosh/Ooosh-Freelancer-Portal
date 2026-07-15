@@ -32,12 +32,13 @@ const MAX_TOKENS = 800;
 const SYSTEM_PROMPT = `You draft short chase emails for Ooosh Tours, a music & event transport / backline / rehearsal hire company. A quote went out to a client and we've heard nothing back; you write a brief, warm "just checking in" nudge.
 
 HARD RULES — never break these:
-- This is a gentle CHECK-IN, never a renegotiation. Do NOT invent discounts, change prices, or offer anything not already in the quote.
+- This is a CHECK-IN, never a renegotiation. Do NOT invent discounts, change prices, or offer anything not already in the quote. (Asking whether their requirements have changed, or offering to adjust the quote to suit, is fine — that's not a discount.)
 - Ground every concrete detail (band, dates, what's being hired, job number) ONLY in the data provided. If a detail isn't given, don't mention it. Never guess or fabricate.
 - The dates given below are the ACTUAL hire days (the "inside" dates). If an end date is given it is the LAST hire day — the client returns the next morning, which is NOT a hire day. NEVER describe the hire as running to the return/drop-off date, and never add a day to the range.
 - MATCH THE URGENCY TO HOW SOON THE HIRE STARTS (given below as "days until hire"). NEVER say "no rush" / "no hurry" / "whenever suits" or imply there's plenty of time unless the hire is more than a week away. If the hire is days away (or today/past), be warm but clearly convey we need to hear back soon to lock it in — do not sound relaxed about an imminent booking.
+- SILENCE OVERRIDES RELAXED TONE. If the grounding says we've followed up before with no reply, this is NOT a breezy "no rush" email even when the dates are far off — acknowledge (lightly) that we've reached out, and it's entirely appropriate to ask directly whether they're still interested and to offer them an easy, gracious out ("if you've sorted it elsewhere or no longer need it, no problem at all — just let us know"). Giving them a clean way to say no is welcome, not pushy, and is NOT a renegotiation.
 - Keep it SHORT — 2 short paragraphs max, ideally 3-5 sentences total. Busy people skim.
-- Warm and human, not corporate or pushy. One light question that invites a reply ("any thoughts on the quote?" / "happy to tweak anything?").
+- Warm and human, not corporate or pushy. One light question that invites a reply ("any thoughts on the quote?" / "happy to tweak anything?" / "still looking for this?").
 - British English. Sign off with the SENDER'S name if one is given below (e.g. "Cheers, Jon" / "Best, Jon") — this is the real Ooosh staff member sending it. If no sender name is given, sign off as "the Ooosh team". Never invent an individual name.
 - If a prior email thread is provided, match its tone and reference it naturally; if it's a first contact, keep it friendly-neutral.
 - Plain text only. No markdown, no placeholders like [name], no subject-line clichés ("Just following up!!!").
@@ -71,7 +72,13 @@ export interface ChaseContext {
   daysUntilStart: number | null; // days from today to out_date (negative = past)
   hireSpanDays: number | null;   // calendar days out_date→job_end (0/1 = single-day-ish)
   itemsSummary: string[];      // human-readable list of what's being hired
-  priorChaseCount: number;     // how many times we've chased already
+  priorChaseCount: number;     // auto_chase_count (system auto-chases only)
+  // Real silence signal from ingested mail (needs outbound ingestion, spec §5.4a
+  // revised): how many emails WE'VE sent since the client last replied (or ever,
+  // if they never have). Counts manual + auto chases we actually sent. This is
+  // the honest "we've chased into silence N times" figure.
+  unansweredOutbound: number;
+  clientEverReplied: boolean;
   isRepeatClient: boolean;     // client has prior jobs with us
   priorHireCount: number;
   threadText: string | null;   // concatenated prior email thread (Phase 1), if any
@@ -152,6 +159,8 @@ export async function gatherChaseContext(jobId: string): Promise<ChaseContext | 
     hireSpanDays: null,
     itemsSummary: summariseItems(j.line_items),
     priorChaseCount: Number(j.auto_chase_count) || 0,
+    unansweredOutbound: 0,
+    clientEverReplied: false,
     isRepeatClient: false,
     priorHireCount: 0,
     threadText: null,
@@ -192,6 +201,33 @@ export async function gatherChaseContext(jobId: string): Promise<ChaseContext | 
     } catch {
       /* non-fatal */
     }
+  }
+
+  // Silence signal from ingested mail — how many emails we've sent since the
+  // client last replied (or ever, if never). Needs outbound ingestion to be
+  // meaningful; degrades to 0 (falls back to priorChaseCount downstream).
+  try {
+    const silence = await query(
+      `SELECT
+         COUNT(*) FILTER (WHERE email_direction = 'inbound')::int AS inbound_n,
+         COUNT(*) FILTER (
+           WHERE email_direction = 'outbound'
+             AND (
+               created_at > (SELECT MAX(created_at) FROM interactions
+                              WHERE job_id = $1 AND type = 'email' AND email_direction = 'inbound')
+               OR NOT EXISTS (SELECT 1 FROM interactions
+                              WHERE job_id = $1 AND type = 'email' AND email_direction = 'inbound')
+             )
+         )::int AS unanswered_outbound
+       FROM interactions
+      WHERE job_id = $1 AND type = 'email'`,
+      [jobId],
+    );
+    const s = silence.rows[0] || {};
+    ctx.clientEverReplied = (Number(s.inbound_n) || 0) > 0;
+    ctx.unansweredOutbound = Number(s.unanswered_outbound) || 0;
+  } catch {
+    /* non-fatal */
   }
 
   // Prior email thread from Phase 1 ingestion (may be empty until ingestion runs).
@@ -265,8 +301,19 @@ function buildUserPrompt(ctx: ChaseContext, signOffName?: string | null): string
       ? `Relationship: repeat client (${ctx.priorHireCount} prior hire${ctx.priorHireCount === 1 ? '' : 's'} with us — you can be warmer / more familiar).`
       : 'Relationship: first contact / no prior hires on record — friendly-neutral.',
   );
-  if (ctx.priorChaseCount > 0) {
-    lines.push(`We have already chased ${ctx.priorChaseCount} time(s) with no reply — keep this one light and low-pressure, do not nag.`);
+  // Silence-aware register. The honest figure is unansweredOutbound (real sent
+  // messages with no reply); fall back to priorChaseCount before outbound is
+  // ingested. Persistent silence CHANGES the email — and overrides the "dates
+  // are far so relax" default (a silent client is a silent client).
+  const chasesIntoSilence = Math.max(ctx.unansweredOutbound, ctx.priorChaseCount);
+  if (chasesIntoSilence >= 2) {
+    lines.push(
+      `SILENCE: we've now followed up ${chasesIntoSilence} times on this quote with NO reply. This is a persistent-non-response check-in — it is NOT a relaxed nudge, EVEN IF the hire dates are far off. In this email you should: (1) lightly acknowledge we've reached out a few times and not heard back (no guilt-trip); (2) ask directly whether they're still interested / still need this; (3) offer to adjust the quote or ask if their requirements have changed; (4) give them an easy, gracious OUT — if they've sorted it elsewhere or no longer need it, that's completely fine, we'd just appreciate a quick word either way, and we're always happy to quote anything else coming up. Frame it as "just checking in again". If the dates are ALSO close, add that we'd need to hear back soon to hold it.`,
+    );
+  } else if (chasesIntoSilence === 1) {
+    lines.push(
+      `We've followed up once already with no reply — this is the second nudge. Warm and light, but you can gently acknowledge we'd previously reached out. A soft "still interested / happy to tweak anything?" is the right note.`,
+    );
   }
   if (signOffName && signOffName.trim()) {
     lines.push(`Sender: ${signOffName.trim()} — sign the email off from them (e.g. "Cheers, ${signOffName.trim()}"). This is the Ooosh staff member sending it.`);
