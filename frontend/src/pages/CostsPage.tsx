@@ -822,6 +822,27 @@ function PayModal({ cost, busy, onClose, onSubmit }: {
   const [remittanceEmail, setRemittanceEmail] = useState('');
   const [contactLoaded, setContactLoaded] = useState(false);
   const [contactSource, setContactSource] = useState<string | null>(null);
+  // Person picker — search OP for the payee (freelancers are always in here).
+  const [pickerQuery, setPickerQuery] = useState('');
+  const [pickerResults, setPickerResults] = useState<Array<{ id: string; first_name: string; last_name: string; email: string | null }>>([]);
+  const [pickerOpen, setPickerOpen] = useState(false);
+
+  useEffect(() => {
+    const q = pickerQuery.trim();
+    if (q.length < 2) { setPickerResults([]); return; }
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      try {
+        const res = await api.get<{ data: Array<{ id: string; first_name: string; last_name: string; email: string | null }> }>(
+          `/people?search=${encodeURIComponent(q)}&limit=8`,
+        );
+        if (!cancelled) setPickerResults(res.data || []);
+      } catch {
+        if (!cancelled) setPickerResults([]);
+      }
+    }, 300);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [pickerQuery]);
 
   useEffect(() => {
     let cancelled = false;
@@ -903,11 +924,12 @@ function PayModal({ cost, busy, onClose, onSubmit }: {
             </label>
             {sendRemittance && (
               <div className="mt-2 pl-6">
-                <input type="email" value={remittanceEmail} onChange={(e) => setRemittanceEmail(e.target.value)}
+                <input type="email" value={remittanceEmail}
+                  onChange={(e) => { setRemittanceEmail(e.target.value); setContactSource('manual'); }}
                   placeholder={contactLoaded ? 'name@example.com' : 'Looking up contact…'}
                   className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-purple-500" />
                 {contactLoaded && !remittanceEmail && (
-                  <p className="text-xs text-amber-600 mt-1">No email on file for this payee — enter one to send.</p>
+                  <p className="text-xs text-amber-600 mt-1">No email found for this payee — search OP below or type one.</p>
                 )}
                 {remittanceEmail && !emailValid && (
                   <p className="text-xs text-amber-600 mt-1">That doesn't look like a valid email address.</p>
@@ -915,9 +937,46 @@ function PayModal({ cost, busy, onClose, onSubmit }: {
                 {remittanceEmail && emailValid && contactSource === 'reimbursement_staff' && (
                   <p className="text-xs text-gray-400 mt-1">From their staff profile.</p>
                 )}
-                {remittanceEmail && emailValid && contactSource === 'freelancer_assignment' && (
-                  <p className="text-xs text-gray-400 mt-1">From their freelancer record.</p>
+                {remittanceEmail && emailValid && (contactSource === 'freelancer_assignment' || contactSource === 'person_match') && (
+                  <p className="text-xs text-gray-400 mt-1">From their OP contact record.</p>
                 )}
+                {remittanceEmail && emailValid && contactSource === 'remembered' && (
+                  <p className="text-xs text-gray-400 mt-1">Remembered from a previous remittance.</p>
+                )}
+                {remittanceEmail && emailValid && contactSource === 'supplier_org' && (
+                  <p className="text-xs text-gray-400 mt-1">From the supplier's record.</p>
+                )}
+
+                {/* Person picker — search OP for the payee (freelancers are always here). */}
+                <div className="relative mt-2">
+                  <input type="text" value={pickerQuery}
+                    onChange={(e) => { setPickerQuery(e.target.value); setPickerOpen(true); }}
+                    onFocus={() => setPickerOpen(true)}
+                    placeholder="🔍 Search OP for the payee (name or email)"
+                    className="w-full border border-gray-200 rounded-md px-3 py-1.5 text-sm focus:ring-2 focus:ring-purple-500" />
+                  {pickerOpen && pickerResults.length > 0 && (
+                    <div className="absolute z-10 mt-1 w-full bg-white border border-gray-200 rounded-md shadow-lg max-h-48 overflow-auto">
+                      {pickerResults.map((p) => {
+                        const name = `${p.first_name} ${p.last_name}`.trim();
+                        return (
+                          <button key={p.id} type="button" disabled={!p.email}
+                            onClick={() => {
+                              if (!p.email) return;
+                              setRemittanceEmail(p.email);
+                              setContactSource('person_match');
+                              setPickerQuery('');
+                              setPickerResults([]);
+                              setPickerOpen(false);
+                            }}
+                            className="w-full text-left px-3 py-1.5 text-sm hover:bg-purple-50 disabled:opacity-50 disabled:cursor-not-allowed">
+                            <span className="text-gray-800">{name}</span>
+                            <span className="block text-xs text-gray-400">{p.email || 'no email on file'}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
               </div>
             )}
           </div>
