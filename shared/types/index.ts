@@ -1080,6 +1080,9 @@ export interface Cost {
   paid_at: string | null;
   paid_value_date: string | null;
   paid_method: string | null;
+  /** Remittance advice sent to the payee for this cost (audit + "sent" pip). */
+  remittance_sent_at?: string | null;
+  remittance_email?: string | null;
   receipt_r2_key: string | null;
   receipt_filename: string | null;
   xero_sync_state: CostXeroSyncState;
