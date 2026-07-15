@@ -1806,6 +1806,28 @@ These originate outside HH entirely — client sends stuff to us, or items found
       shows exception whys + their photos, notes with photos; `StudioSitterSettingsSection` gains per-item
       `section` input + a per-item `reference` editor (caption + photo upload/remove via `/files/upload`),
       global photos block removed.
+  - **Slice 4 second feedback round SHIPPED (migration 172):** post-trial tweaks.
+    - **`note_prompt` — always-on note box (`item_notes` channel).** A `LockupItem.note_prompt?: string`
+      shows an optional note+photo box REGARDLESS of the yes/no answer (distinct from the off-expected
+      "why?" box, which it replaces for that item). Seeded on **"clients paid"** ("how did they pay /
+      what's outstanding") + **"kitchen replenished"** ("anything running low"). Stored in a new
+      `report_answers.item_notes[id] = {text, photos[]}` map, kept only for template items that carry a
+      `note_prompt`; the off-expected "why?" box stays `exception_notes`. Portal routes its photos as
+      `item_<id>` multipart fields (alongside `why_<id>` / `notes_photo`). The thread summary surfaces
+      note_prompt notes (even on an expected answer), and an exception on a note_prompt item falls back to
+      its `item_notes` text. Staff read view + Settings editor (per-item "Always-ask note" input) both
+      handle it.
+    - **Lights moved to a final "Lights off & lock up" section** (all lights-off items + front door LAST) —
+      do the substantive work first, sweep the lights on the way out.
+    - **Reference photos: thumbnails + in-page lightbox.** Portal renders reference photos as lazy-loaded
+      `grid-cols-3` thumbnails; tapping opens a full-screen `<img>` lightbox overlay (tap to close) INSTEAD
+      of the old `<a href download>` (which just downloaded the presigned R2 object). Fixes both "slow to
+      load" and "clicking downloads instead of enlarging". Server-side thumbnail generation still deferred
+      (thumbnails are CSS-sized full images for now).
+    - **Bigger section headers** on the portal + staff read view.
+    - Migration 172 re-seeds the template from the updated `DEFAULT_TEMPLATE` (169/170 taken on main, 171 =
+      first real port, 172 = this round). **Lost property already lands in the Holding module** as a
+      `held_items` `kind='lost_property'` row (`logShiftLostProperty` → the `/holding/lost-property` list).
 - **General Tasks system** (build with/after D): `tasks` table (anchor to shift/job/nothing),
   visibility everyone/assignee-only, notify-on-done + notify-if-not-done-after-X-days, **staff via
   bell/email, freelancers portal-only (no bell/email)**; dashboard top-right card + "On Today" +

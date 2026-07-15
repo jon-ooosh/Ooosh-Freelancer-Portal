@@ -1242,6 +1242,7 @@ interface LockupTemplateItem {
   expected?: string;
   end_of_booking_only?: boolean;
   reference?: LockupRef;
+  note_prompt?: string;
 }
 interface LockupTemplateShape {
   version: number;
@@ -1355,6 +1356,7 @@ function StudioSitterSettingsSection() {
           if (it.section?.trim()) out.section = it.section.trim();
           if (it.expected) out.expected = it.expected;
           if (it.end_of_booking_only) out.end_of_booking_only = true;
+          if (it.note_prompt?.trim()) out.note_prompt = it.note_prompt.trim();
           const refText = it.reference?.text?.trim();
           const refPhotos = (it.reference?.photos ?? []).filter(Boolean);
           if (refText || refPhotos.length > 0) out.reference = { text: refText || undefined, photos: refPhotos };
@@ -1470,6 +1472,16 @@ function StudioSitterSettingsSection() {
                     ))}
                   </div>
                 )}
+              </div>
+
+              {/* Always-on note box: prompt shown on the form regardless of answer
+                  (e.g. "how did they pay?"). Empty = no note box for this item. */}
+              <div className="mt-2 border-t border-gray-200 pt-2">
+                <label className="flex items-center gap-2">
+                  <span className="text-[11px] text-gray-500 whitespace-nowrap">Always-ask note</span>
+                  <input className="flex-1 border rounded px-1.5 py-0.5 text-xs" placeholder="e.g. How did they pay? (leave blank for none)"
+                    value={it.note_prompt ?? ''} onChange={(e) => updateItem(idx, { note_prompt: e.target.value })} />
+                </label>
               </div>
             </div>
           ))}

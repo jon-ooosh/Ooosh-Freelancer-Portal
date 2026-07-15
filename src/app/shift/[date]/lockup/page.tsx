@@ -32,6 +32,7 @@ interface LockupContext {
   submitted: {
     answers: Record<string, unknown>
     exception_notes: Record<string, { text: string }>
+    item_notes: Record<string, { text: string }>
     notes: { text: string }
   } | null
   has_shift: boolean
@@ -94,10 +95,13 @@ export default function LockupPage() {
   const [answers, setAnswers] = useState<Record<string, string>>({})
   const [whyNotes, setWhyNotes] = useState<Record<string, string>>({})
   const [whyPhotos, setWhyPhotos] = useState<Record<string, File[]>>({})
+  const [itemNotes, setItemNotes] = useState<Record<string, string>>({})
+  const [itemPhotos, setItemPhotos] = useState<Record<string, File[]>>({})
   const [notesText, setNotesText] = useState('')
   const [notesPhotos, setNotesPhotos] = useState<File[]>([])
   const [continuing, setContinuing] = useState<boolean | null>(null)
   const [openRef, setOpenRef] = useState<Set<string>>(new Set())
+  const [lightbox, setLightbox] = useState<string | null>(null)
 
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
@@ -128,6 +132,9 @@ export default function LockupPage() {
       const seedWhy: Record<string, string> = {}
       if (data.submitted?.exception_notes) for (const [k, v] of Object.entries(data.submitted.exception_notes)) seedWhy[k] = String(v?.text ?? '')
       setWhyNotes(seedWhy)
+      const seedItem: Record<string, string> = {}
+      if (data.submitted?.item_notes) for (const [k, v] of Object.entries(data.submitted.item_notes)) seedItem[k] = String(v?.text ?? '')
+      setItemNotes(seedItem)
       setNotesText(data.submitted?.notes?.text ?? '')
       setContinuing(data.continuing_tomorrow)
     } catch (err) {
@@ -154,21 +161,32 @@ export default function LockupPage() {
     if (submitting || !ctx) return
     setSubmitting(true); setSubmitError(null)
     try {
-      // exception_notes: only for currently-off-expected items.
+      // exception_notes: only for currently-off-expected items WITHOUT a
+      // note_prompt (those use the always-on item_notes box instead).
       const exceptionNotes: Record<string, string> = {}
       for (const it of visibleItems) {
-        if (isOffExpected(it, answers[it.id] ?? '') && (whyNotes[it.id] || '').trim()) {
+        if (!it.note_prompt && isOffExpected(it, answers[it.id] ?? '') && (whyNotes[it.id] || '').trim()) {
           exceptionNotes[it.id] = whyNotes[it.id].trim()
+        }
+      }
+      // item_notes: always-on notes on note_prompt items (any answer).
+      const itemNotesPayload: Record<string, string> = {}
+      for (const it of visibleItems) {
+        if (it.note_prompt && (itemNotes[it.id] || '').trim()) {
+          itemNotesPayload[it.id] = itemNotes[it.id].trim()
         }
       }
       const fd = new FormData()
       fd.append('payload', JSON.stringify({
-        answers, exception_notes: exceptionNotes, notes: notesText.trim(),
+        answers, exception_notes: exceptionNotes, item_notes: itemNotesPayload, notes: notesText.trim(),
         continuing_tomorrow: continuing === true,
       }))
       for (const it of visibleItems) {
-        if (!isOffExpected(it, answers[it.id] ?? '')) continue
-        for (const f of whyPhotos[it.id] ?? []) fd.append(`why_${it.id}`, f, f.name)
+        if (it.note_prompt) {
+          for (const f of itemPhotos[it.id] ?? []) fd.append(`item_${it.id}`, f, f.name)
+        } else if (isOffExpected(it, answers[it.id] ?? '')) {
+          for (const f of whyPhotos[it.id] ?? []) fd.append(`why_${it.id}`, f, f.name)
+        }
       }
       for (const f of notesPhotos) fd.append('notes_photo', f, f.name)
 
@@ -181,7 +199,7 @@ export default function LockupPage() {
     } finally {
       setSubmitting(false)
     }
-  }, [submitting, ctx, visibleItems, answers, whyNotes, whyPhotos, notesText, notesPhotos, continuing, date])
+  }, [submitting, ctx, visibleItems, answers, whyNotes, whyPhotos, itemNotes, itemPhotos, notesText, notesPhotos, continuing, date])
 
   const submitLostProperty = useCallback(async () => {
     if (lpSaving || !lpDesc.trim()) return
@@ -277,7 +295,7 @@ export default function LockupPage() {
                 return (
                   <div key={item.id}>
                     {showSection && (
-                      <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mt-4 mb-1.5">{item.section}</h2>
+                      <h2 className="text-lg font-bold text-gray-800 mt-6 mb-2">{item.section}</h2>
                     )}
                     <div className={`bg-white rounded-xl border p-3.5 shadow-sm ${off ? 'border-amber-300 bg-amber-50/40' : 'border-gray-100'}`}>
                       <p className="text-sm text-gray-900">{item.label}</p>
@@ -291,11 +309,15 @@ export default function LockupPage() {
                           {openRef.has(item.id) && (
                             <div className="mt-2 rounded-lg border border-gray-100 bg-gray-50 p-2">
                               {item.reference.text && <p className="text-xs text-gray-600 mb-2">{item.reference.text}</p>}
-                              <div className="grid grid-cols-2 gap-2">
+                              <div className="grid grid-cols-3 gap-2">
                                 {item.reference.photos.map((p, i) => (
-                                  <a key={i} href={p} target="_blank" rel="noopener noreferrer"><img src={p} alt="reference" className="w-full h-24 object-cover rounded border border-gray-200" /></a>
+                                  <button key={i} type="button" onClick={() => setLightbox(p)} className="block" aria-label="View larger">
+                                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                                    <img src={p} alt="reference" loading="lazy" className="w-full h-20 object-cover rounded border border-gray-200" />
+                                  </button>
                                 ))}
                               </div>
+                              <p className="text-[11px] text-gray-400 mt-1.5">Tap a photo to enlarge.</p>
                             </div>
                           )}
                         </div>
@@ -317,8 +339,17 @@ export default function LockupPage() {
                           className="mt-2 w-full text-sm border border-gray-200 rounded-lg p-2 focus:outline-none focus:ring-2 focus:ring-ooosh-200 focus:border-ooosh-300" />
                       )}
 
-                      {/* Why? (on off-expected) */}
-                      {off && (
+                      {/* note_prompt items: always-on note box. Otherwise the "why?" box on off-expected. */}
+                      {item.note_prompt ? (
+                        <div className="mt-2 rounded-lg border border-gray-200 bg-gray-50 p-2">
+                          <label className="text-xs font-medium text-gray-600">{item.note_prompt}</label>
+                          <textarea value={itemNotes[item.id] ?? ''} onChange={(e) => setItemNotes((p) => ({ ...p, [item.id]: e.target.value }))}
+                            rows={2} placeholder="Optional note…"
+                            className="mt-1 w-full text-sm border border-gray-200 rounded-lg p-2 bg-white focus:outline-none focus:ring-2 focus:ring-ooosh-200" />
+                          <AttachButton onFiles={(f) => setItemPhotos((p) => ({ ...p, [item.id]: [...(p[item.id] ?? []), ...f] }))} />
+                          <FileChips files={itemPhotos[item.id] ?? []} onRemove={(i) => setItemPhotos((p) => ({ ...p, [item.id]: (p[item.id] ?? []).filter((_, idx) => idx !== i) }))} />
+                        </div>
+                      ) : off ? (
                         <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-2">
                           <label className="text-xs font-medium text-amber-800">Why? (optional, but helpful)</label>
                           <textarea value={whyNotes[item.id] ?? ''} onChange={(e) => setWhyNotes((p) => ({ ...p, [item.id]: e.target.value }))}
@@ -327,7 +358,7 @@ export default function LockupPage() {
                           <AttachButton onFiles={(f) => setWhyPhotos((p) => ({ ...p, [item.id]: [...(p[item.id] ?? []), ...f] }))} />
                           <FileChips files={whyPhotos[item.id] ?? []} onRemove={(i) => setWhyPhotos((p) => ({ ...p, [item.id]: (p[item.id] ?? []).filter((_, idx) => idx !== i) }))} />
                         </div>
-                      )}
+                      ) : null}
                     </div>
                   </div>
                 )
@@ -386,6 +417,16 @@ export default function LockupPage() {
               {submitting ? 'Submitting…' : '🔒 Submit & finish for the night'}
             </button>
           </div>
+        </div>
+      )}
+
+      {/* Reference-photo lightbox — tap to enlarge (renders inline, never downloads). */}
+      {lightbox && (
+        <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4" onClick={() => setLightbox(null)}>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={lightbox} alt="reference" className="max-w-full max-h-full object-contain rounded" onClick={(e) => e.stopPropagation()} />
+          <button type="button" onClick={() => setLightbox(null)}
+            className="absolute top-4 right-4 w-9 h-9 rounded-full bg-white/90 text-gray-800 text-lg leading-none flex items-center justify-center" aria-label="Close">×</button>
         </div>
       )}
     </div>

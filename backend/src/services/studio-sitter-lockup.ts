@@ -41,6 +41,9 @@ export interface LockupItem {
   expected?: string;             // the "all good" answer; off-expected is flagged
   end_of_booking_only?: boolean; // hidden when the studio's in use tomorrow
   reference?: LockupReference;   // expandable "what it should look like"
+  note_prompt?: string;          // when set, ALWAYS show an optional note+photo box
+                                 // (regardless of answer) — e.g. "how did they pay?".
+                                 // Replaces the off-expected "why?" box for this item.
 }
 export interface LockupTemplate {
   version: number;
@@ -78,18 +81,15 @@ export const DEFAULT_TEMPLATE: LockupTemplate = {
   items: [
     // ── Upstairs ─────────────────────────────────────────────────────────
     { id: 'clients_out_on_time', section: 'Upstairs', label: 'Were the clients out on time? (if not, note how late & why below)', type: 'yesno', expected: 'yes' },
-    { id: 'clients_paid', section: 'Upstairs', label: 'Have the clients paid? (if so, note how below and put the card receipt in the till)', type: 'yesno', expected: 'yes' },
+    { id: 'clients_paid', section: 'Upstairs', label: 'Have the clients paid? (if so, note how below and put the card receipt in the till)', type: 'yesno', expected: 'yes', note_prompt: 'How did they pay / what’s outstanding? (and pop the card receipt in the till)' },
     { id: 'pas_amps_powered_down', section: 'Upstairs', label: "PAs, amps, client equipment / pedals etc powered down", type: 'yesno', expected: 'yes' },
     { id: 'litter_cleared', section: 'Upstairs', label: 'Cups / glasses / plates cleared away, all litter collected and bin bag changed', type: 'yesno', expected: 'yes' },
     { id: 'crockery_washed', section: 'Upstairs', label: 'All cups / crockery washed or loaded into the downstairs dishwasher', type: 'yesno', expected: 'yes' },
-    { id: 'kitchen_replenished', section: 'Upstairs', label: 'Studio kitchens replenished for the morning (cups, plates, cutlery, kitchen roll, tea, coffee — note below if milk etc needed)', type: 'yesno', expected: 'yes' },
+    { id: 'kitchen_replenished', section: 'Upstairs', label: 'Studio kitchens replenished for the morning (cups, plates, cutlery, kitchen roll, tea, coffee — note below if milk etc needed)', type: 'yesno', expected: 'yes', note_prompt: 'Anything running low? (milk, coffee, kitchen roll, etc.)' },
     { id: 'toilets_stocked', section: 'Upstairs', label: 'Toilets clean, with soap and toilet paper', type: 'yesno', expected: 'yes' },
     { id: 'upstairs_double_door', section: 'Upstairs', label: 'Upstairs double door locked and bolted', type: 'yesno', expected: 'yes' },
     { id: 'kitchen_toilet_windows', section: 'Upstairs', label: 'Kitchen and toilet windows closed', type: 'yesno', expected: 'yes' },
     { id: 'ac_off', section: 'Upstairs', label: 'All AC turned off', type: 'yesno', expected: 'yes' },
-    { id: 'room_lights_off', section: 'Upstairs', label: "Room lights + LEDs off", type: 'yesno', expected: 'yes' },
-    { id: 'kitchen_hall_lights_off', section: 'Upstairs', label: 'Kitchen, toilet and hallway / stairs lights off', type: 'yesno', expected: 'yes' },
-    { id: 'foyer_light_off', section: 'Upstairs', label: 'Foyer light off', type: 'yesno', expected: 'yes' },
     { id: 'side_fire_exit_closed', section: 'Upstairs', label: 'Side fire exit at the bottom of the stairs closed', type: 'yesno', expected: 'yes' },
     { id: 'rooms_vacuumed_bins', section: 'Upstairs', label: 'Rooms clean, vacuumed and bins emptied / new bin bag', type: 'yesno', expected: 'yes', end_of_booking_only: true },
     { id: 'hired_kit_boxed', section: 'Upstairs', label: "All studio-hired mics, cables, 4-ways, DIs etc coiled, taped and put away in the box", type: 'yesno', expected: 'yes', end_of_booking_only: true },
@@ -104,16 +104,20 @@ export const DEFAULT_TEMPLATE: LockupTemplate = {
     { id: 'dishwasher_on', section: 'Downstairs', label: 'Dishwasher loaded with cups / plates from upstairs and down, tablet in, switched on', type: 'yesno', expected: 'yes' },
     { id: 'front_desk_tidy', section: 'Downstairs', label: 'Front desk clear and tidy', type: 'yesno', expected: 'yes' },
     { id: 'lift_returned', section: 'Downstairs', label: 'Lift returned to ground level and switched off', type: 'yesno', expected: 'yes' },
-    { id: 'stockroom_lights_off', section: 'Downstairs', label: 'Stockroom lights off', type: 'yesno', expected: 'yes' },
     { id: 'thermostat_down', section: 'Downstairs', label: 'Downstairs thermostat turned down to 10', type: 'yesno', expected: 'yes' },
     { id: 'rear_fire_exit', section: 'Downstairs', label: 'Rear fire exit door checked', type: 'yesno', expected: 'yes' },
     { id: 'outside_containers_locked', section: 'Downstairs', label: 'Outside containers closed and locked', type: 'yesno', expected: 'yes' },
     { id: 'cupboard_gates_locked', section: 'Downstairs', label: 'Outdoor cupboard and both gates locked', type: 'yesno', expected: 'yes' },
     { id: 'vans_locked', section: 'Downstairs', label: 'All vans locked, nothing left outside', type: 'yesno', expected: 'yes' },
     { id: 'van_keys_safe', section: 'Downstairs', label: 'All van keys in the safe and the safe locked', type: 'yesno', expected: 'yes' },
-    { id: 'downstairs_lights_off', section: 'Downstairs', label: 'Downstairs lights off', type: 'yesno', expected: 'yes' },
+    // ── Lights off & lock up (last — do these on the way out) ─────────────
+    { id: 'room_lights_off', section: 'Lights off & lock up', label: "Room lights + LEDs off", type: 'yesno', expected: 'yes' },
+    { id: 'kitchen_hall_lights_off', section: 'Lights off & lock up', label: 'Kitchen, toilet and hallway / stairs lights off', type: 'yesno', expected: 'yes' },
+    { id: 'foyer_light_off', section: 'Lights off & lock up', label: 'Foyer light off', type: 'yesno', expected: 'yes' },
+    { id: 'stockroom_lights_off', section: 'Lights off & lock up', label: 'Stockroom lights off', type: 'yesno', expected: 'yes' },
+    { id: 'downstairs_lights_off', section: 'Lights off & lock up', label: 'Downstairs lights off', type: 'yesno', expected: 'yes' },
     // Front door LAST — hard to honestly tick until everything else is done.
-    { id: 'front_door_locked', section: 'Downstairs', label: 'Front door padlocked and locked, key placed in the outside key cupboard', type: 'yesno', expected: 'yes' },
+    { id: 'front_door_locked', section: 'Lights off & lock up', label: 'Front door padlocked and locked, key placed in the outside key cupboard', type: 'yesno', expected: 'yes' },
   ],
   notes_label: 'Anything we need to know? Money owed, items taken, jobs for tomorrow, anything left undone.',
   lost_property_prompt: 'Found something a band left behind? Log it here so we can get it back to them.',
@@ -154,6 +158,7 @@ export async function getLockupTemplate(): Promise<LockupTemplate> {
         expected: typeof it.expected === 'string' ? it.expected : undefined,
         end_of_booking_only: it.end_of_booking_only === true || undefined,
         reference: coerceReference(it.reference),
+        note_prompt: typeof it.note_prompt === 'string' && it.note_prompt.trim() ? it.note_prompt : undefined,
       })),
       notes_label: typeof parsed.notes_label === 'string' ? parsed.notes_label : undefined,
       lost_property_prompt: typeof parsed.lost_property_prompt === 'string' ? parsed.lost_property_prompt : undefined,
@@ -266,6 +271,7 @@ async function loadOpenShift(date: string): Promise<ShiftRow | null> {
 export interface StoredReport {
   answers: Record<string, unknown>;
   exception_notes: Record<string, { text: string; photos: UploadedPhoto[] }>;
+  item_notes: Record<string, { text: string; photos: UploadedPhoto[] }>; // always-on note_prompt notes
   notes: { text: string; photos: UploadedPhoto[] };
   continuing_tomorrow: boolean;
   continuing_overridden: boolean;
@@ -284,6 +290,7 @@ function normaliseStored(raw: any, derived: boolean): StoredReport {
   return {
     answers: raw?.answers ?? {},
     exception_notes: raw?.exception_notes ?? {},
+    item_notes: raw?.item_notes ?? {},
     notes: {
       text: String(raw?.notes?.text ?? (typeof raw?.notes === 'string' ? raw.notes : '')),
       photos: Array.isArray(raw?.notes?.photos) ? raw.notes.photos : [],
@@ -336,6 +343,7 @@ export async function getLockupContext(date: string): Promise<LockupContext> {
 export interface SubmitLockupInput {
   answers: Record<string, string>;
   exception_notes: Record<string, { text: string; photos: UploadedPhoto[] }>;
+  item_notes?: Record<string, { text: string; photos: UploadedPhoto[] }>;
   notes: { text: string; photos: UploadedPhoto[] };
   continuing_tomorrow: boolean;
 }
@@ -365,22 +373,36 @@ export async function submitLockupReport(
   const notesText = String(input.notes?.text ?? '').trim().slice(0, 4000);
   const exceptions = computeExceptions(template, input.answers ?? {}, continuing);
 
-  // Keep exception_notes only for items that are actually exceptions this run.
+  // note_prompt items carry an always-on note box (item_notes), NOT the
+  // off-expected "why?" box. Keep exception_notes only for NON-note_prompt items
+  // that are actually exceptions this run; keep item_notes only for the template's
+  // note_prompt items.
+  const notePromptIds = new Set(template.items.filter((i) => i.note_prompt).map((i) => i.id));
   const exceptionIds = new Set(exceptions.map((e) => e.id));
   const exception_notes: Record<string, { text: string; photos: UploadedPhoto[] }> = {};
   for (const [id, v] of Object.entries(input.exception_notes ?? {})) {
-    if (!exceptionIds.has(id)) continue;
+    if (!exceptionIds.has(id) || notePromptIds.has(id)) continue;
     exception_notes[id] = { text: String(v?.text ?? '').trim().slice(0, 2000), photos: v?.photos ?? [] };
+  }
+  const item_notes: Record<string, { text: string; photos: UploadedPhoto[] }> = {};
+  for (const [id, v] of Object.entries(input.item_notes ?? {})) {
+    if (!notePromptIds.has(id)) continue;
+    const text = String(v?.text ?? '').trim().slice(0, 2000);
+    const photos = v?.photos ?? [];
+    if (!text && photos.length === 0) continue;
+    item_notes[id] = { text, photos };
   }
   const notes = { text: notesText, photos: input.notes?.photos ?? [] };
 
-  const payload = { answers: input.answers ?? {}, exception_notes, notes, continuing_tomorrow: continuing, continuing_overridden: overridden };
+  const payload = { answers: input.answers ?? {}, exception_notes, item_notes, notes, continuing_tomorrow: continuing, continuing_overridden: overridden };
 
-  // All photos (why + notes) attach to the single thread summary message.
+  // All photos (why + item notes + notes) attach to the single thread summary message.
   const allPhotos: UploadedPhoto[] = [
     ...Object.values(exception_notes).flatMap((v) => v.photos),
+    ...Object.values(item_notes).flatMap((v) => v.photos),
     ...notes.photos,
   ];
+  const itemLabel = (id: string) => template.items.find((i) => i.id === id)?.label ?? id;
 
   const client = await getClient();
   let shiftId: string;
@@ -405,16 +427,23 @@ export async function submitLockupReport(
       [JSON.stringify(payload), template.version, sitterPersonId, shiftId]
     );
 
-    // Build the thread summary (exceptions + their whys + the general notes).
+    // Build the thread summary (exceptions + their whys, note_prompt notes, then
+    // the general notes). A note_prompt item's "why" lives in item_notes.
     const lines: string[] = [];
     if (exceptions.length > 0) {
       lines.push(`🔒 Lock-up submitted — ${exceptions.length} item${exceptions.length !== 1 ? 's' : ''} need attention:`);
       for (const e of exceptions) {
-        const why = exception_notes[e.id]?.text;
+        const why = exception_notes[e.id]?.text || item_notes[e.id]?.text;
         lines.push(`• ${e.label}: ${e.answer}${why ? ` — ${why}` : ''}`);
       }
     } else {
       lines.push('🔒 Lock-up submitted — all clear.');
+    }
+    // note_prompt notes on items that WEREN'T flagged as exceptions (e.g. paid=Yes
+    // with "card, £120", or "milk running low") — surface them too.
+    for (const [id, v] of Object.entries(item_notes)) {
+      if (exceptionIds.has(id) || !v.text) continue;
+      lines.push(`• ${itemLabel(id)}: ${v.text}`);
     }
     if (notesText) { lines.push(''); lines.push(notesText); }
 
@@ -567,6 +596,7 @@ export interface ShiftReport {
   template: LockupTemplate;
   answers: Record<string, unknown>;
   exception_notes: Record<string, { text: string; photos: ReadPhoto[] }>;
+  item_notes: Record<string, { text: string; photos: ReadPhoto[] }>;
   notes: { text: string; photos: ReadPhoto[] };
   continuing_tomorrow: boolean;
   exceptions: LockupException[];
@@ -600,7 +630,7 @@ export async function getShiftReport(date: string): Promise<ShiftReport> {
   if (!row || !row.report_submitted_at || !row.report_answers) {
     return {
       date, submitted: false, submitted_at: null, submitted_by_name: null, template,
-      answers: {}, exception_notes: {}, notes: { text: '', photos: [] }, continuing_tomorrow: false, exceptions: [],
+      answers: {}, exception_notes: {}, item_notes: {}, notes: { text: '', photos: [] }, continuing_tomorrow: false, exceptions: [],
     };
   }
   const stored = normaliseStored(row.report_answers, false);
@@ -608,6 +638,10 @@ export async function getShiftReport(date: string): Promise<ShiftReport> {
   const exception_notes: Record<string, { text: string; photos: ReadPhoto[] }> = {};
   for (const [id, v] of Object.entries(stored.exception_notes)) {
     exception_notes[id] = { text: v.text, photos: await presignPhotos(v.photos) };
+  }
+  const item_notes: Record<string, { text: string; photos: ReadPhoto[] }> = {};
+  for (const [id, v] of Object.entries(stored.item_notes)) {
+    item_notes[id] = { text: v.text, photos: await presignPhotos(v.photos) };
   }
   const notes = { text: stored.notes.text, photos: await presignPhotos(stored.notes.photos) };
   return {
@@ -618,6 +652,7 @@ export async function getShiftReport(date: string): Promise<ShiftReport> {
     template,
     answers: stored.answers,
     exception_notes,
+    item_notes,
     notes,
     continuing_tomorrow: stored.continuing_tomorrow,
     exceptions: computeExceptions(template, stored.answers, stored.continuing_tomorrow),

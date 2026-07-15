@@ -10,7 +10,7 @@ import { api } from '../services/api';
 
 interface LockupItem {
   id: string; label: string; type: 'yesno' | 'text' | 'number';
-  section?: string; expected?: string; end_of_booking_only?: boolean;
+  section?: string; expected?: string; end_of_booking_only?: boolean; note_prompt?: string;
 }
 interface ReadPhoto { url: string; filename: string; content_type: string | null; }
 interface ShiftReport {
@@ -21,6 +21,7 @@ interface ShiftReport {
   template: { version: number; items: LockupItem[] };
   answers: Record<string, unknown>;
   exception_notes: Record<string, { text: string; photos: ReadPhoto[] }>;
+  item_notes: Record<string, { text: string; photos: ReadPhoto[] }>;
   notes: { text: string; photos: ReadPhoto[] };
   continuing_tomorrow: boolean;
   exceptions: { id: string; label: string; answer: string; expected: string }[];
@@ -110,6 +111,7 @@ export default function StudioLockupReport({ date }: { date: string }) {
           const flagged = exceptionIds.has(it.id);
           const a = answerLabel(report.answers[it.id]);
           const why = report.exception_notes[it.id];
+          const itemNote = report.item_notes?.[it.id];
           const showSection = it.section && it.section !== lastSection;
           if (it.section) lastSection = it.section;
           const toneClass = flagged ? 'text-amber-800'
@@ -118,7 +120,7 @@ export default function StudioLockupReport({ date }: { date: string }) {
             : a.tone === 'na' ? 'text-gray-400' : 'text-gray-700';
           return (
             <div key={it.id}>
-              {showSection && <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wide mt-2 mb-0.5">{it.section}</p>}
+              {showSection && <p className="text-sm font-bold text-gray-700 mt-3 mb-1">{it.section}</p>}
               <div className={`px-2 py-1 rounded ${flagged ? 'bg-amber-50 border border-amber-200' : ''}`}>
                 <div className="flex items-start justify-between gap-3">
                   <span className="text-xs text-gray-700">{flagged && '⚠ '}{it.label}</span>
@@ -128,6 +130,12 @@ export default function StudioLockupReport({ date }: { date: string }) {
                   <div className="mt-1">
                     {why.text && <p className="text-xs text-amber-800 italic">“{why.text}”</p>}
                     <PhotoRow photos={why.photos} />
+                  </div>
+                )}
+                {itemNote && (itemNote.text || (itemNote.photos?.length ?? 0) > 0) && (
+                  <div className="mt-1">
+                    {itemNote.text && <p className="text-xs text-gray-600 italic">“{itemNote.text}”</p>}
+                    <PhotoRow photos={itemNote.photos} />
                   </div>
                 )}
               </div>
