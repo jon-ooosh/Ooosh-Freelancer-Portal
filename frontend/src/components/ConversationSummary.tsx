@@ -57,10 +57,12 @@ export default function ConversationSummary({
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState('');
-  // Collapsible — these boxes can get tall; remember the preference across jobs.
-  const [collapsed, setCollapsed] = useState(
-    () => localStorage.getItem('ooosh_convsummary_collapsed') === '1',
-  );
+  // Collapsible — pre-collapsed by default (the headline in the collapsed row is
+  // enough context to invite a click). Preference is remembered across jobs.
+  const [collapsed, setCollapsed] = useState(() => {
+    const v = localStorage.getItem('ooosh_convsummary_collapsed');
+    return v === null ? true : v === '1';
+  });
   const toggleCollapsed = () =>
     setCollapsed((c) => {
       const next = !c;
