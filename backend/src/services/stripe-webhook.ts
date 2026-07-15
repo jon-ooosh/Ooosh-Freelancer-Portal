@@ -10,6 +10,8 @@
  *   charge.dispute.created/updated/closed → flag the excess + email info@ (chargebacks
  *                                       only ever arrive via webhook).
  *   charge.refunded                  → email info@ (notify only; staff reconcile).
+ *   refund.updated / charge.refund.updated (status=failed) → email info@ (refund
+ *                                       bounced at the issuer — reimburse another way).
  *
  * Idempotency: stripe_events table. A row is inserted on receipt; processed_at is
  * stamped only after the handler succeeds. A failed handler returns 500 so Stripe
@@ -35,6 +37,14 @@ type DisputeObj = {
   status: string | null;
 };
 type RefundListItem = { id: string; amount: number; created: number };
+type RefundObj = {
+  id: string;
+  status: string | null;
+  amount: number;
+  charge: string | { id: string } | null;
+  payment_intent: string | { id: string } | null;
+  failure_reason: string | null;
+};
 type ChargeObj = {
   id: string;
   payment_intent: string | { id: string } | null;
@@ -121,6 +131,28 @@ async function processStripeEvent(event: StripeEventLike): Promise<void> {
           flag === 'open'
             ? `Action needed: respond in the Stripe dashboard before the evidence deadline. The excess record is flagged on the Money tab.`
             : `No further action — recorded for the audit trail.`,
+        ]
+      );
+      break;
+    }
+    // A refund can be accepted by Stripe then FAIL at the issuer (expired/closed
+    // card, or past the card's refund window) — it comes back async as a refund
+    // update with status 'failed'. The money bounces back to us, so staff must
+    // contact the hirer and reimburse another way. Only ever arrives via webhook.
+    case 'refund.updated':
+    case 'refund.failed':
+    case 'charge.refund.updated': {
+      const refund = event.data.object as RefundObj;
+      if (refund.status !== 'failed') break; // only act on the failure transition
+      const ex = await findExcessByPaymentIntent(piId(refund.payment_intent));
+      const amt = (refund.amount / 100).toFixed(2);
+      await alertInfo(
+        `⚠ Stripe refund FAILED — £${amt}`,
+        [
+          `A Stripe refund of £${amt} was accepted but then <strong>failed</strong> at the card issuer — the money has bounced back to us and the customer was NOT refunded.`,
+          `Reason: ${refund.failure_reason || 'unknown'} (this often means the card is expired/closed or the charge is past the card's refund window). Stripe refund id: ${refund.id}.`,
+          `OP excess: ${jobRef(ex)}.`,
+          `Action needed: contact the hirer for alternative reimbursement details and record the reimbursement in OP by another method (e.g. BACS).`,
         ]
       );
       break;

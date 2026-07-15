@@ -8,7 +8,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
-import { describePreauth } from '../lib/preauth';
+import { describePreauth, paymentMethodLabel } from '../lib/preauth';
 import { getPaymentState, PAYMENT_STATE_LABELS, PAYMENT_STATE_CLASSES } from '../services/paymentState';
 import ExcessPaymentModal, { statusLabel, statusColor, computeHireDays } from './ExcessPaymentModal';
 import CostCaptureModal from './CostCaptureModal';
@@ -973,6 +973,16 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                       </>
                     )}
                   </p>
+                  {/* When + how the excess was collected. Pre-auth held/released
+                      records show their own dated line below (describePreauth); this
+                      covers real money taken (taken / reimbursed / claimed). */}
+                  {Number(record.excess_amount_taken || 0) > 0 && (record.payment_date || record.payment_method) && (
+                    <p className="text-xs text-gray-500 mt-0.5">
+                      Collected
+                      {record.payment_date && ` ${new Date(record.payment_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`}
+                      {record.payment_method && ` · ${paymentMethodLabel(record.payment_method)}`}
+                    </p>
+                  )}
                   {/* Resolution breakdown — what actually happened to collected
                       excess. Without this the card showed only collected vs
                       required, hiding claim/reimburse splits (job 15291). */}
@@ -986,7 +996,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                         <span className="text-emerald-700">
                           Reimbursed: £{Number(record.reimbursement_amount).toFixed(2)}
                           {record.reimbursement_date && ` on ${new Date(record.reimbursement_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`}
-                          {record.reimbursement_method && ` (${record.reimbursement_method.replace(/_/g, ' ')})`}
+                          {record.reimbursement_method && ` (${paymentMethodLabel(record.reimbursement_method)})`}
                         </span>
                       )}
                     </p>
@@ -1020,7 +1030,9 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                       ? (d.pastExpiry ? 'text-amber-600' : 'text-sky-600')
                       : 'text-gray-500';
                     return (
-                      <p className={`text-[11px] mt-0.5 font-medium ${cls}`}>{d.compact}</p>
+                      <p className={`text-[11px] mt-0.5 font-medium ${cls}`}>
+                        {d.compact}{record.payment_method ? ` · ${paymentMethodLabel(record.payment_method)}` : ''}
+                      </p>
                     );
                   })()}
                 </div>
