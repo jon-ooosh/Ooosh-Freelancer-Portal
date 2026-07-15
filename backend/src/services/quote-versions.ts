@@ -189,9 +189,13 @@ function diffTwo(prev: VersionRow, curr: VersionRow): QuoteDiffLine[] {
   return lines;
 }
 
+export type QuoteExtractStatus = 'done' | 'pending' | 'failed';
+
 export interface JobQuoteVersionsResult {
   available: boolean;
   configured: boolean; // Gmail + Anthropic both usable
+  /** True while a background harvest/extract run is in flight for this job. */
+  working: boolean;
   versions: Array<{
     id: string;
     receivedAt: string;
@@ -199,47 +203,86 @@ export interface JobQuoteVersionsResult {
     r2Key: string;
     quoteTotal: number | null;
     itemCount: number;
-    extracted: boolean;
+    extractStatus: QuoteExtractStatus;
   }>;
   diffs: QuoteVersionDiff[];
 }
 
+// Harvest (Gmail search + PDF download) and vision-extraction are SLOW and must
+// NOT block the read — the panel needs to appear instantly from cache and fill
+// in as work completes (the frontend polls). So the read returns stored state
+// immediately and kicks a single guarded BACKGROUND run per job.
+//   jobsWorking   — jobs with a background run in flight (dedupes overlapping
+//                   GET/poll calls so we never spawn two runs for one job).
+//   failedVersions— versions whose extraction threw; surfaced as 'failed'
+//                   (not perpetual 'reading…') and skipped until a forced
+//                   refresh clears them. In-memory: a deploy resets it (harmless
+//                   — a reset just re-attempts).
+const jobsWorking = new Set<string>();
+const failedVersions = new Set<string>();
+
+function extractStatusFor(row: VersionRow): QuoteExtractStatus {
+  if (row.items) return 'done';
+  return failedVersions.has(row.id) ? 'failed' : 'pending';
+}
+
+/** Kick a single guarded background harvest+extract run for a job. */
+function kickBackgroundWork(jobId: string, forceHarvest: boolean): void {
+  if (jobsWorking.has(jobId)) return;
+  jobsWorking.add(jobId);
+  setImmediate(async () => {
+    try {
+      if (isGmailConfigured() && (forceHarvest || (await shouldHarvest(jobId)))) {
+        await harvestQuotesForJob(jobId);
+      }
+      if (isAnthropicConfigured()) {
+        const rows = await loadVersionRows(jobId);
+        // Extract newest-first — the latest quote is the most relevant, so it
+        // fills in first. Skip already-failed (until a forced refresh retries).
+        const pending = rows
+          .filter((r) => !r.items && !failedVersions.has(r.id))
+          .reverse()
+          .slice(0, EXTRACT_PER_CALL);
+        for (const row of pending) {
+          try {
+            await extractQuoteVersion(row.id);
+          } catch (err) {
+            console.error(`[quote-versions] extract ${row.id} failed:`, err);
+            failedVersions.add(row.id);
+          }
+        }
+      }
+    } catch (err) {
+      console.error('[quote-versions] background run failed:', err);
+    } finally {
+      jobsWorking.delete(jobId);
+    }
+  });
+}
+
 /**
- * The read path for a job's quote versions. Harvests-if-stale (or forced),
- * lazily extracts un-extracted versions, and returns versions + consecutive
- * diffs. Never throws on a harvest/extract hiccup — returns what it has.
+ * Read path — returns stored versions + diffs IMMEDIATELY (no blocking harvest
+ * or extraction) and kicks a background run when there's work to do. The caller
+ * polls until `working` is false and no version is 'pending'. `forceHarvest`
+ * (the Refresh button) clears failures + re-searches the mailbox.
  */
 export async function getJobQuoteVersions(
   jobId: string,
   opts: { forceHarvest?: boolean } = {},
 ): Promise<JobQuoteVersionsResult> {
   const configured = isGmailConfigured() && isAnthropicConfigured();
+  const rows = await loadVersionRows(jobId);
 
-  // Harvest new PDFs if warranted (best-effort).
-  if (isGmailConfigured()) {
-    try {
-      if (opts.forceHarvest || (await shouldHarvest(jobId))) {
-        await harvestQuotesForJob(jobId);
-      }
-    } catch (err) {
-      console.error('[quote-versions] harvest failed:', err);
-    }
+  // Is there work to do? (a stale/forced harvest, or un-extracted versions).
+  const pendingCount = rows.filter((r) => !r.items && !failedVersions.has(r.id)).length;
+  let needsWork = pendingCount > 0;
+  if (opts.forceHarvest) {
+    rows.forEach((r) => failedVersions.delete(r.id)); // retry failures on refresh
+    needsWork = true;
+  } else if (!needsWork && isGmailConfigured()) {
+    needsWork = await shouldHarvest(jobId);
   }
-
-  let rows = await loadVersionRows(jobId);
-
-  // Lazily extract any un-extracted versions (bounded per call).
-  if (isAnthropicConfigured()) {
-    const pending = rows.filter((r) => !r.items).slice(0, EXTRACT_PER_CALL);
-    for (const row of pending) {
-      try {
-        await extractQuoteVersion(row.id);
-      } catch (err) {
-        console.error(`[quote-versions] extract ${row.id} failed:`, err);
-      }
-    }
-    if (pending.length) rows = await loadVersionRows(jobId);
-  }
+  if (needsWork) kickBackgroundWork(jobId, Boolean(opts.forceHarvest));
 
   const versions = rows.map((r) => ({
     id: r.id,
@@ -248,7 +291,7 @@ export async function getJobQuoteVersions(
     r2Key: r.r2_key,
     quoteTotal: r.items?.quote_total ?? null,
     itemCount: r.items?.items?.length ?? 0,
-    extracted: r.extracted_at != null,
+    extractStatus: extractStatusFor(r),
   }));
 
   // Consecutive diffs, only between pairs where both sides are extracted.
@@ -266,7 +309,7 @@ export async function getJobQuoteVersions(
     });
   }
 
-  return { available: rows.length > 0, configured, versions, diffs };
+  return { available: rows.length > 0, configured, working: jobsWorking.has(jobId), versions, diffs };
 }
 
 /**
