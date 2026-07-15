@@ -1134,8 +1134,9 @@ router.get('/studio-sitter/shifts/:date/lockup', async (req: PortalRequest, res:
 });
 
 // Multipart: `payload` (JSON) + optional photos. Photo field names route the
-// file: `why_<itemId>` → that exception's "why?" photos; `notes_photo` → the
-// final-notes photos. Reuses the same 8MB image/PDF limits as the thread upload.
+// file: `why_<itemId>` → that exception's "why?" photos; `item_<itemId>` → a
+// note_prompt item's always-on note photos; `notes_photo` → the final-notes
+// photos. Reuses the same 8MB image/PDF limits as the thread upload.
 const lockupUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 8 * 1024 * 1024, files: 20 },
@@ -1181,10 +1182,16 @@ router.post('/studio-sitter/shifts/:date/lockup', lockupUploadMw, async (req: Po
     if (parsed.exception_notes && typeof parsed.exception_notes === 'object') {
       for (const [k, v] of Object.entries(parsed.exception_notes)) exceptionNoteText[k] = String(v ?? '');
     }
+    const itemNoteText: Record<string, string> = {};
+    if (parsed.item_notes && typeof parsed.item_notes === 'object') {
+      for (const [k, v] of Object.entries(parsed.item_notes)) itemNoteText[k] = String(v ?? '');
+    }
     const notesText = typeof parsed.notes === 'string' ? parsed.notes : '';
 
-    // Upload photos, routed by field name.
+    // Upload photos, routed by field name: `why_<id>` → exception photos,
+    // `item_<id>` → note_prompt item photos, `notes_photo` → final-notes photos.
     const exceptionPhotos: Record<string, any[]> = {};
+    const itemPhotos: Record<string, any[]> = {};
     const notesPhotos: any[] = [];
     const files = (req.files as Express.Multer.File[] | undefined) || [];
     if (files.length && isR2Configured()) {
@@ -1194,17 +1201,25 @@ router.post('/studio-sitter/shifts/:date/lockup', lockupUploadMw, async (req: Po
         else if (f.fieldname.startsWith('why_')) {
           const id = f.fieldname.slice(4);
           (exceptionPhotos[id] ||= []).push(blob);
+        } else if (f.fieldname.startsWith('item_')) {
+          const id = f.fieldname.slice(5);
+          (itemPhotos[id] ||= []).push(blob);
         }
       }
     }
 
     const exception_notes: Record<string, { text: string; photos: any[] }> = {};
-    const ids = new Set([...Object.keys(exceptionNoteText), ...Object.keys(exceptionPhotos)]);
-    for (const id of ids) exception_notes[id] = { text: exceptionNoteText[id] ?? '', photos: exceptionPhotos[id] ?? [] };
+    const exIds = new Set([...Object.keys(exceptionNoteText), ...Object.keys(exceptionPhotos)]);
+    for (const id of exIds) exception_notes[id] = { text: exceptionNoteText[id] ?? '', photos: exceptionPhotos[id] ?? [] };
+
+    const item_notes: Record<string, { text: string; photos: any[] }> = {};
+    const itIds = new Set([...Object.keys(itemNoteText), ...Object.keys(itemPhotos)]);
+    for (const id of itIds) item_notes[id] = { text: itemNoteText[id] ?? '', photos: itemPhotos[id] ?? [] };
 
     const result = await submitLockupReport(date, req.portalUser!.id, req.portalUser!.name, {
       answers,
       exception_notes,
+      item_notes,
       notes: { text: notesText, photos: notesPhotos },
       continuing_tomorrow: parsed.continuing_tomorrow === true || parsed.continuing_tomorrow === 'true',
     });

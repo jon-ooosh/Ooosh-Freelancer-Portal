@@ -250,6 +250,7 @@ export interface LockupItem {
   expected?: string
   end_of_booking_only?: boolean
   reference?: LockupReference
+  note_prompt?: string
 }
 
 export interface LockupTemplate {
@@ -263,6 +264,7 @@ export interface LockupTemplate {
 export interface LockupStoredReport {
   answers: Record<string, unknown>
   exception_notes: Record<string, { text: string; photos: unknown[] }>
+  item_notes: Record<string, { text: string; photos: unknown[] }>
   notes: { text: string; photos: unknown[] }
   continuing_tomorrow: boolean
   continuing_overridden: boolean
