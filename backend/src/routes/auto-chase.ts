@@ -169,7 +169,8 @@ router.post('/backfill', authorize('admin'), async (req: AuthRequest, res: Respo
   // Initial scope is provisional — the service validates + overwrites it.
   const summary: BackfillSummary = {
     configured: true, dryRun: false, scope: body.scope ?? 'active',
-    jobsScanned: 0, jobsWithHits: 0, threadsScanned: 0, logged: 0, skipped: 0, duplicates: 0,
+    jobsScanned: 0, jobsWithHits: 0, threadsScanned: 0, threadsRejected: 0,
+    logged: 0, skipped: 0, duplicates: 0,
   };
   backfillState = { running: true, startedAt: new Date().toISOString(), finishedAt: null, summary };
   backfillOpenPipelineThreads({ limit: body.limit, scope: body.scope, sink: summary })

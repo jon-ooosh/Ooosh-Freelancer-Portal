@@ -57,6 +57,16 @@ export default function ConversationSummary({
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState('');
+  // Collapsible — these boxes can get tall; remember the preference across jobs.
+  const [collapsed, setCollapsed] = useState(
+    () => localStorage.getItem('ooosh_convsummary_collapsed') === '1',
+  );
+  const toggleCollapsed = () =>
+    setCollapsed((c) => {
+      const next = !c;
+      localStorage.setItem('ooosh_convsummary_collapsed', next ? '1' : '0');
+      return next;
+    });
   // Guard against firing auto-generation more than once per (job, signal) state.
   const autoTriedRef = useRef<string>('');
   // Dispute helper (§7.2): ask a question about the ingested email chain.
@@ -136,12 +146,21 @@ export default function ConversationSummary({
   return (
     <div className="mb-4 rounded-xl border border-purple-200 bg-purple-50/60 p-4">
       <div className="flex items-start justify-between gap-3 mb-1.5">
-        <div className="flex items-center gap-2 text-xs font-semibold text-purple-700">
+        <button
+          type="button"
+          onClick={toggleCollapsed}
+          title={collapsed ? 'Expand' : 'Collapse'}
+          className="flex items-center gap-2 text-xs font-semibold text-purple-700 min-w-0"
+        >
+          <span aria-hidden className="text-purple-400">{collapsed ? '▸' : '▾'}</span>
           <span aria-hidden>✨</span>
           <span>Conversation summary</span>
           <span className="font-normal text-purple-400">· {status.currentEmailCount} email{status.currentEmailCount === 1 ? '' : 's'}</span>
-        </div>
-        {s && (
+          {collapsed && s?.headline && (
+            <span className="font-normal text-gray-500 truncate">— {s.headline}</span>
+          )}
+        </button>
+        {s && !collapsed && (
           <button
             type="button"
             onClick={generate}
@@ -154,7 +173,7 @@ export default function ConversationSummary({
         )}
       </div>
 
-      {showSkeleton ? (
+      {collapsed ? null : showSkeleton ? (
         <div className="animate-pulse space-y-2 py-1">
           <div className="h-3 w-2/3 rounded bg-purple-200/70" />
           <div className="h-2.5 w-full rounded bg-purple-100" />
@@ -175,9 +194,10 @@ export default function ConversationSummary({
         </p>
       )}
 
-      {error && <p className="mt-2 text-xs text-red-500">{error}</p>}
+      {!collapsed && error && <p className="mt-2 text-xs text-red-500">{error}</p>}
 
       {/* Dispute helper — ask a question about the ingested email chain (§7.2). */}
+      {!collapsed && (
       <div className="mt-3 border-t border-purple-200/70 pt-2">
         {!showAsk ? (
           <button
@@ -218,6 +238,7 @@ export default function ConversationSummary({
           </div>
         )}
       </div>
+      )}
     </div>
   );
 }

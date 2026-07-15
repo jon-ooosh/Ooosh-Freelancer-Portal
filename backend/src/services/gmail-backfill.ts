@@ -20,9 +20,68 @@
  */
 import { query } from '../config/database';
 import { getPrimaryMailbox, gmailApiGet, gmailSearchMessageIds, isGmailConfigured } from '../config/gmail';
-import { ingestGmailMessage, type GmailMessage } from './gmail-ingestion';
+import {
+  ingestGmailMessage,
+  parseGmailMessageParts,
+  extractAllEmailAddresses,
+  type GmailMessage,
+} from './gmail-ingestion';
+import { extractReferencedJobNumbers } from './email-matcher';
 
-const MAX_THREADS_PER_JOB = 5; // guard against a runaway thread fan-out per job
+const MAX_THREADS_PER_JOB = 8; // guard against a runaway thread fan-out per job
+
+/**
+ * The Gmail search `q="16274"` is a broad full-text hit — it also matches
+ * UNRELATED threads that happen to contain those digits (eBay order/tracking
+ * numbers, prices, postcodes — the eBay-labels incident). Before force-attaching
+ * a whole thread we require PROOF it genuinely concerns the job: a `Quote (N)`
+ * PDF, an explicit `#N`/`job N`/`quote N` reference in a subject/body, or a
+ * message to/from a known job contact. A bare digit-coincidence is rejected.
+ */
+function threadBelongsToJob(
+  messages: GmailMessage[],
+  jobNumber: number,
+  contactEmails: Set<string>,
+): boolean {
+  const quotePdfRe = new RegExp(`quote\\s*\\(${jobNumber}\\)`, 'i');
+  for (const msg of messages) {
+    const p = parseGmailMessageParts(msg);
+    // 1. A HireHop quote PDF for THIS job attached.
+    if (p.attachmentFilenames.some((f) => quotePdfRe.test(f))) return true;
+    // 2. An explicit job reference in the subject or body (not a bare number).
+    if (extractReferencedJobNumbers(p.subject).includes(jobNumber)) return true;
+    if (extractReferencedJobNumbers(p.body).includes(jobNumber)) return true;
+    // 3. A message to/from a known contact of this job.
+    const addrs = [
+      ...extractAllEmailAddresses(p.from),
+      ...extractAllEmailAddresses(p.to),
+      ...extractAllEmailAddresses(p.cc),
+    ];
+    if (addrs.some((a) => contactEmails.has(a))) return true;
+  }
+  return false;
+}
+
+/** Known client-contact emails for a job (job_contacts + client org people + org email). */
+async function getJobContactEmails(jobId: string): Promise<Set<string>> {
+  const r = await query(
+    `SELECT lower(p.email) AS email
+       FROM job_contacts jc JOIN people p ON p.id = jc.person_id
+      WHERE jc.job_id = $1 AND p.email IS NOT NULL
+     UNION
+     SELECT lower(p.email) AS email
+       FROM jobs j
+       JOIN person_organisation_roles por ON por.organisation_id = j.client_id
+       JOIN people p ON p.id = por.person_id
+      WHERE j.id = $1 AND COALESCE(por.status, 'active') = 'active' AND p.email IS NOT NULL
+     UNION
+     SELECT lower(o.email) AS email
+       FROM jobs j JOIN organisations o ON o.id = j.client_id
+      WHERE j.id = $1 AND o.email IS NOT NULL`,
+    [jobId],
+  );
+  return new Set(r.rows.map((row) => row.email).filter(Boolean));
+}
 
 // Which pipeline stages to backfill. Lost/cancelled are always excluded.
 //  - enquiries: pre-confirmation only (the original chase-draft use case)
@@ -51,6 +110,8 @@ export interface BackfillSummary {
   jobsScanned: number;
   jobsWithHits: number;
   threadsScanned: number;
+  /** Threads the search matched but that didn't prove they belong to the job. */
+  threadsRejected: number;
   logged: number;
   skipped: number;
   duplicates: number;
@@ -82,6 +143,7 @@ export async function backfillOpenPipelineThreads(
     jobsScanned: 0,
     jobsWithHits: 0,
     threadsScanned: 0,
+    threadsRejected: 0,
     logged: 0,
     skipped: 0,
     duplicates: 0,
@@ -123,15 +185,22 @@ export async function backfillOpenPipelineThreads(
       if (found.length === 0) continue;
       summary.jobsWithHits++;
 
+      const contactEmails = await getJobContactEmails(job.id as string);
       const threadIds = [...new Set(found.map((m) => m.threadId))].slice(0, MAX_THREADS_PER_JOB);
       for (const threadId of threadIds) {
         summary.threadsScanned++;
-        if (summary.dryRun) continue;
+        if (summary.dryRun) continue; // fast preview: search + count only, no fetch/validate
         let thread: GmailThread;
         try {
           thread = await gmailApiGet<GmailThread>(`/threads/${threadId}?format=full`, mailbox);
         } catch (err) {
           console.error(`[gmail-backfill] thread ${threadId} fetch failed:`, err);
+          continue;
+        }
+        // Prove the thread belongs to this job before attaching any of it — a
+        // bare digit coincidence (eBay etc.) is rejected, not force-attached.
+        if (!threadBelongsToJob(thread.messages || [], jobNumber, contactEmails)) {
+          summary.threadsRejected++;
           continue;
         }
         for (const msg of thread.messages || []) {

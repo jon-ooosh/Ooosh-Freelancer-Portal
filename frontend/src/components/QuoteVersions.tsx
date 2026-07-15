@@ -55,6 +55,15 @@ export default function QuoteVersions({ jobId, emailSignal }: { jobId: string; e
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
+  const [collapsed, setCollapsed] = useState(
+    () => localStorage.getItem('ooosh_quoteversions_collapsed') === '1',
+  );
+  const toggleCollapsed = () =>
+    setCollapsed((c) => {
+      const next = !c;
+      localStorage.setItem('ooosh_quoteversions_collapsed', next ? '1' : '0');
+      return next;
+    });
 
   const load = useCallback(async () => {
     try {
@@ -101,24 +110,31 @@ export default function QuoteVersions({ jobId, emailSignal }: { jobId: string; e
   return (
     <div className="mb-4 rounded-xl border border-indigo-200 bg-indigo-50/60 p-4">
       <div className="flex items-start justify-between gap-3 mb-2">
-        <div className="flex items-center gap-2 text-xs font-semibold text-indigo-700">
-          <span aria-hidden>📄</span>
-          <span>Quote versions</span>
-          <span className="font-normal text-indigo-400">
-            · {result.versions.length} sent
-          </span>
-        </div>
         <button
           type="button"
-          onClick={refresh}
-          disabled={refreshing}
-          title="Search the mailbox for newer quote PDFs"
-          className="text-xs text-indigo-500 hover:text-indigo-700 disabled:opacity-50 shrink-0"
+          onClick={toggleCollapsed}
+          title={collapsed ? 'Expand' : 'Collapse'}
+          className="flex items-center gap-2 text-xs font-semibold text-indigo-700 min-w-0"
         >
-          {refreshing ? 'Checking…' : '↻ Refresh'}
+          <span aria-hidden className="text-indigo-400">{collapsed ? '▸' : '▾'}</span>
+          <span aria-hidden>📄</span>
+          <span>Quote versions</span>
+          <span className="font-normal text-indigo-400">· {result.versions.length} sent</span>
         </button>
+        {!collapsed && (
+          <button
+            type="button"
+            onClick={refresh}
+            disabled={refreshing}
+            title="Search the mailbox for newer quote PDFs"
+            className="text-xs text-indigo-500 hover:text-indigo-700 disabled:opacity-50 shrink-0"
+          >
+            {refreshing ? 'Checking…' : '↻ Refresh'}
+          </button>
+        )}
       </div>
 
+      {!collapsed && (
       <ol className="space-y-2.5">
         {result.versions.map((v, i) => {
           const diff = diffByTo.get(v.id);
@@ -190,11 +206,14 @@ export default function QuoteVersions({ jobId, emailSignal }: { jobId: string; e
           );
         })}
       </ol>
+      )}
 
-      {error && <p className="mt-2 text-xs text-red-500">{error}</p>}
-      <p className="mt-2 text-[11px] text-indigo-400">
-        Harvested from the emailed quote PDFs · ordered by send time
-      </p>
+      {!collapsed && error && <p className="mt-2 text-xs text-red-500">{error}</p>}
+      {!collapsed && (
+        <p className="mt-2 text-[11px] text-indigo-400">
+          Harvested from the emailed quote PDFs · ordered by send time
+        </p>
+      )}
     </div>
   );
 }
