@@ -19,6 +19,27 @@ import {
   OpApiError,
 } from '@/lib/op-api'
 
+/**
+ * Re-forward an incoming multipart request to OP. NOTE: do NOT reference the
+ * `File` global — it isn't defined in the Netlify Node runtime (only `Blob` is),
+ * so `x instanceof File` throws. formData entries are `string | Blob`; non-string
+ * = a file, materialised to a fresh Blob so the re-forwarded body streams.
+ */
+async function reforwardFormData(request: NextRequest): Promise<FormData> {
+  const inForm = await request.formData()
+  const entries: [string, FormDataEntryValue][] = []
+  inForm.forEach((value, name) => { entries.push([name, value]) })
+  const outForm = new FormData()
+  for (const [name, value] of entries) {
+    if (typeof value === 'string') { outForm.append(name, value); continue }
+    const blob = value as Blob
+    const filename = (blob as { name?: string }).name || 'upload'
+    const buf = Buffer.from(await blob.arrayBuffer())
+    outForm.append(name, new Blob([buf], { type: blob.type }), filename)
+  }
+  return outForm
+}
+
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 
 export async function GET(
@@ -87,16 +108,9 @@ export async function POST(
       return NextResponse.json({ success: false, error: 'Session token missing' }, { status: 401 })
     }
 
-    const body = await request.json().catch(() => ({}))
-    const answers =
-      body?.answers && typeof body.answers === 'object' && !Array.isArray(body.answers)
-        ? (body.answers as Record<string, unknown>)
-        : {}
-    const notes = typeof body?.notes === 'string' ? body.notes : ''
-    const continuing_tomorrow = body?.continuing_tomorrow === true
-
     try {
-      const data = await submitLockupReportOP(sessionToken, date, { answers, notes, continuing_tomorrow })
+      const outForm = await reforwardFormData(request)
+      const data = await submitLockupReportOP(sessionToken, date, outForm)
       return NextResponse.json(data)
     } catch (opError) {
       if (isOpClientError(opError)) {

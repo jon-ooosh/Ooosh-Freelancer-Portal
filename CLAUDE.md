@@ -1766,6 +1766,44 @@ These originate outside HH entirely — client sends stuff to us, or items found
       expected, end-of-booking flag, reorder, add/remove) + uploads/removes reference photos.
     - **Deferred (fast-follow):** the not-submitted accountability chaser (always-fires, like the
       completion chaser) — not built this PR.
+  - **Slice 4 follow-up SHIPPED (real Jotform port + why-boxes + photos + reply-email, migration 169):**
+    two rounds of jon feedback after a live trial. Template model + submit shape changed:
+    - **Real Jotform port (`203154178314046`), "flat + section label + per-item ref" model.** The first
+      cut was an admitted guess; the DEFAULT_TEMPLATE in `services/studio-sitter-lockup.ts` now carries the
+      30 real checklist items with an optional `section` label (rendered as group headers — "Upstairs" /
+      "Downstairs") and an optional per-item `reference` (`{text?, photos: string[]}` = "what it should look
+      like"). **"Front door locked" is the LAST item**; "Alarm set" removed. 3 `end_of_booking_only`
+      deep-clean items (vacuum/bins, hired kit boxed, backline stored). **Migration 169** is a data-only
+      re-seed of `studio_sitter_lockup_template` generated from the compiled DEFAULT_TEMPLATE so seed ==
+      code fallback exactly (overwrites unconditionally — 168's seed was the guess). `LockupItem` gained
+      `section` + `reference`; the global reference-photos block was REMOVED (photos are per-item now).
+    - **Off-expected "why?" capture** — any yes/no answer that trips `computeExceptions` opens an inline
+      "why?" text box + optional photos; stored on `report_answers.exception_notes[id] = {text, photos[]}`,
+      surfaced in the finishing summary and highlighted (amber) in the staff read-only view.
+    - **Photos throughout via multipart.** The portal submit is now `multipart/form-data` (multer `.any()`
+      on `POST /shifts/:date/lockup`): a `payload` JSON part + `notes_photo` / `why_<id>` file parts, routed
+      by fieldname, uploaded to R2 (`files/attachments/…`), stored as blob refs on the report. Notes field
+      supports photos too. The Next.js route re-forwards multipart with the `Blob` duck-type pattern (never
+      the `File` global). `getShiftReport` + `getLockupContext` presign every stored blob + external
+      reference URL for read (`ReadPhoto {url, filename, content_type}`).
+    - **Lost property pushes to the Holding module** (the earlier `/holding/lost-property` deep-link was a
+      bug — that's a staff-only OP route a freelancer can't reach). New portal `POST /shifts/:date/lost-property`
+      + `logShiftLostPropertyOP` → `logShiftLostProperty` creates a `held_items` row (`kind='lost_property'`,
+      `status='stored'`, `owner_unknown=true`, `created_by=SYSTEM_USER_ID`) with description / found location /
+      photos, from an inline capture form on the lockup page.
+    - **Reply-to-sitter email (the other half of "not a dead-end").** The handover thread is date-scoped, so
+      a staff reply the *next* sitter never sees vanished. `routes/interactions.ts` now fires
+      `notifySitterOfStaffReply(shift_id, content, staffUserId)` after any staff post on a `shift_id` thread
+      — resolves the report submitter, emails them via the new `studio_shift_reply` template (link to
+      `/shift/:date`), resolves the staff author name via `users LEFT JOIN people`.
+    - **Status shows "Completed" once submitted** — the shift's existing `closed` status surfaces as
+      "Completed" on both the portal shift card + OP roster once `report_submitted_at` is set. Portal dashboard
+      shift card gets a **"🔒 Lock up" quick action** (like "Start delivery"), gated to tonight + not-yet-completed.
+      No sitter tap-to-confirm surface (dropped per jon — too many surfaces).
+    - **Staff read-only view + settings** rewritten to match: `StudioLockupReport.tsx` groups by section,
+      shows exception whys + their photos, notes with photos; `StudioSitterSettingsSection` gains per-item
+      `section` input + a per-item `reference` editor (caption + photo upload/remove via `/files/upload`),
+      global photos block removed.
 - **General Tasks system** (build with/after D): `tasks` table (anchor to shift/job/nothing),
   visibility everyone/assignee-only, notify-on-done + notify-if-not-done-after-X-days, **staff via
   bell/email, freelancers portal-only (no bell/email)**; dashboard top-right card + "On Today" +

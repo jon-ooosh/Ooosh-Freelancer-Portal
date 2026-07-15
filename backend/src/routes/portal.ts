@@ -22,7 +22,7 @@ import { resolveClientEmailTarget, buildFallbackBanner, logFallbackToTimeline } 
 import { uploadToR2, isR2Configured, getPresignedDownloadUrl } from '../config/r2';
 import { generateDeliveryNotePdf, DeliveryNoteItem } from '../services/delivery-note-pdf';
 import { getSitterShifts, getSitterShiftDetail, isSitterAssignedTo } from '../services/studio-sitter';
-import { getLockupContext, submitLockupReport } from '../services/studio-sitter-lockup';
+import { getLockupContext, submitLockupReport, logShiftLostProperty } from '../services/studio-sitter-lockup';
 
 // Stable UUID seeded by migration 031 — used as created_by for portal-driven
 // auto-actions (the freelancer is a `people` row, not a `users` row, so we
@@ -1133,19 +1133,80 @@ router.get('/studio-sitter/shifts/:date/lockup', async (req: PortalRequest, res:
   }
 });
 
-router.post('/studio-sitter/shifts/:date/lockup', async (req: PortalRequest, res: Response) => {
+// Multipart: `payload` (JSON) + optional photos. Photo field names route the
+// file: `why_<itemId>` → that exception's "why?" photos; `notes_photo` → the
+// final-notes photos. Reuses the same 8MB image/PDF limits as the thread upload.
+const lockupUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 8 * 1024 * 1024, files: 20 },
+  fileFilter: (_req, file, cb) => {
+    if (file.mimetype.startsWith('image/') || file.mimetype === 'application/pdf') cb(null, true);
+    else cb(new Error('Only images and PDFs can be attached'));
+  },
+}).any();
+function lockupUploadMw(req: PortalRequest, res: Response, next: NextFunction) {
+  lockupUpload(req, res, (err: unknown) => {
+    if (err) {
+      const msg = err instanceof multer.MulterError ? err.message : (err instanceof Error ? err.message : 'Upload failed');
+      res.status(400).json({ error: msg }); return;
+    }
+    next();
+  });
+}
+
+/** Upload a multer file to R2 → the interaction-attachment blob shape. */
+async function uploadLockupPhoto(personId: string, f: Express.Multer.File) {
+  const ext = (f.originalname.match(/\.[a-z0-9]+$/i) || [''])[0].toLowerCase();
+  const key = `files/attachments/portal-${personId}/${crypto.randomUUID()}${ext}`;
+  await uploadToR2(key, f.buffer, f.mimetype);
+  return { r2_key: key, filename: f.originalname, content_type: f.mimetype, size_bytes: f.size };
+}
+
+router.post('/studio-sitter/shifts/:date/lockup', lockupUploadMw, async (req: PortalRequest, res: Response) => {
   try {
     const date = String(req.params.date);
     if (!SITTER_DATE_RE.test(date)) { res.status(400).json({ error: 'Invalid date' }); return; }
     const allowed = req.portalUser!.isStaffShared || await isSitterAssignedTo(req.portalUser!.id, date);
     if (!allowed) { res.status(403).json({ error: 'Not rostered to this evening' }); return; }
 
-    const body = (req.body ?? {}) as { answers?: Record<string, unknown>; notes?: unknown; continuing_tomorrow?: unknown };
-    const answers = body.answers && typeof body.answers === 'object' ? body.answers : {};
+    let parsed: any = {};
+    try { parsed = req.body?.payload ? JSON.parse(String(req.body.payload)) : {}; }
+    catch { res.status(400).json({ error: 'Invalid payload' }); return; }
+
+    const answers: Record<string, string> = {};
+    if (parsed.answers && typeof parsed.answers === 'object') {
+      for (const [k, v] of Object.entries(parsed.answers)) answers[k] = String(v ?? '');
+    }
+    const exceptionNoteText: Record<string, string> = {};
+    if (parsed.exception_notes && typeof parsed.exception_notes === 'object') {
+      for (const [k, v] of Object.entries(parsed.exception_notes)) exceptionNoteText[k] = String(v ?? '');
+    }
+    const notesText = typeof parsed.notes === 'string' ? parsed.notes : '';
+
+    // Upload photos, routed by field name.
+    const exceptionPhotos: Record<string, any[]> = {};
+    const notesPhotos: any[] = [];
+    const files = (req.files as Express.Multer.File[] | undefined) || [];
+    if (files.length && isR2Configured()) {
+      for (const f of files) {
+        const blob = await uploadLockupPhoto(req.portalUser!.id, f);
+        if (f.fieldname === 'notes_photo') notesPhotos.push(blob);
+        else if (f.fieldname.startsWith('why_')) {
+          const id = f.fieldname.slice(4);
+          (exceptionPhotos[id] ||= []).push(blob);
+        }
+      }
+    }
+
+    const exception_notes: Record<string, { text: string; photos: any[] }> = {};
+    const ids = new Set([...Object.keys(exceptionNoteText), ...Object.keys(exceptionPhotos)]);
+    for (const id of ids) exception_notes[id] = { text: exceptionNoteText[id] ?? '', photos: exceptionPhotos[id] ?? [] };
+
     const result = await submitLockupReport(date, req.portalUser!.id, req.portalUser!.name, {
       answers,
-      notes: typeof body.notes === 'string' ? body.notes : '',
-      continuing_tomorrow: body.continuing_tomorrow === true || body.continuing_tomorrow === 'true',
+      exception_notes,
+      notes: { text: notesText, photos: notesPhotos },
+      continuing_tomorrow: parsed.continuing_tomorrow === true || parsed.continuing_tomorrow === 'true',
     });
     res.json({ success: true, ...result });
   } catch (error) {
@@ -1153,6 +1214,33 @@ router.post('/studio-sitter/shifts/:date/lockup', async (req: PortalRequest, res
     if (msg === 'No shift for this evening') { res.status(404).json({ error: msg }); return; }
     console.error('Portal sitter lock-up submit error:', error);
     res.status(500).json({ error: 'Failed to submit lock-up report' });
+  }
+});
+
+// POST /api/portal/studio-sitter/shifts/:date/lost-property — log a found item
+// straight into the Holding module (multipart: description/found_location + photos).
+router.post('/studio-sitter/shifts/:date/lost-property', lockupUploadMw, async (req: PortalRequest, res: Response) => {
+  try {
+    const date = String(req.params.date);
+    if (!SITTER_DATE_RE.test(date)) { res.status(400).json({ error: 'Invalid date' }); return; }
+    const allowed = req.portalUser!.isStaffShared || await isSitterAssignedTo(req.portalUser!.id, date);
+    if (!allowed) { res.status(403).json({ error: 'Not rostered to this evening' }); return; }
+
+    const description = String(req.body?.description ?? '').trim();
+    if (!description) { res.status(400).json({ error: 'Please describe the item' }); return; }
+    const found_location = req.body?.found_location ? String(req.body.found_location).trim() : undefined;
+
+    const photos: any[] = [];
+    const files = (req.files as Express.Multer.File[] | undefined) || [];
+    if (files.length && isR2Configured()) {
+      for (const f of files) photos.push(await uploadLockupPhoto(req.portalUser!.id, f));
+    }
+
+    const id = await logShiftLostProperty(date, req.portalUser!.name, { description, found_location, photos });
+    res.json({ success: true, id });
+  } catch (error) {
+    console.error('Portal sitter lost-property error:', error);
+    res.status(500).json({ error: 'Failed to log lost property' });
   }
 });
 
