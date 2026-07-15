@@ -3,17 +3,16 @@ import { api } from '../services/api';
 
 /**
  * Read-only view of a sitter's end-of-night lock-up report (Rehearsals Phase E).
- * Highlights only the exceptions (off-expected answers); the rest is a quiet
- * recap. Shared by the Studio Sitters roster + the Job Detail handover card.
+ * Grouped by section; highlights only the exceptions (off-expected answers) with
+ * their "why?" note + photos. Shared by the Studio Sitters roster + the Job
+ * Detail handover card.
  */
 
 interface LockupItem {
-  id: string;
-  label: string;
-  type: 'yesno' | 'text' | 'number';
-  expected?: string;
-  end_of_booking_only?: boolean;
+  id: string; label: string; type: 'yesno' | 'text' | 'number';
+  section?: string; expected?: string; end_of_booking_only?: boolean;
 }
+interface ReadPhoto { url: string; filename: string; content_type: string | null; }
 interface ShiftReport {
   date: string;
   submitted: boolean;
@@ -21,7 +20,8 @@ interface ShiftReport {
   submitted_by_name: string | null;
   template: { version: number; items: LockupItem[] };
   answers: Record<string, unknown>;
-  notes: string;
+  exception_notes: Record<string, { text: string; photos: ReadPhoto[] }>;
+  notes: { text: string; photos: ReadPhoto[] };
   continuing_tomorrow: boolean;
   exceptions: { id: string; label: string; answer: string; expected: string }[];
 }
@@ -40,6 +40,25 @@ function answerLabel(raw: unknown): { text: string; tone: 'good' | 'bad' | 'na' 
   if (low === 'no') return { text: 'No', tone: 'bad' };
   if (low === 'na' || low === 'n/a') return { text: 'N/A', tone: 'na' };
   return { text: v || '—', tone: 'plain' };
+}
+
+function isImage(p: ReadPhoto): boolean {
+  return (p.content_type || '').startsWith('image/') || /\.(jpg|jpeg|png|gif|webp)$/i.test(p.filename || '');
+}
+
+function PhotoRow({ photos }: { photos: ReadPhoto[] }) {
+  if (!photos || photos.length === 0) return null;
+  return (
+    <div className="flex flex-wrap gap-1.5 mt-1.5">
+      {photos.map((p, i) => (
+        <a key={i} href={p.url} target="_blank" rel="noopener noreferrer" className="block">
+          {isImage(p)
+            ? <img src={p.url} alt={p.filename} className="w-16 h-16 object-cover rounded border border-gray-200" />
+            : <span className="inline-flex items-center gap-1 px-2 py-1 rounded border border-gray-200 bg-gray-50 text-xs text-gray-600">📎 {p.filename}</span>}
+        </a>
+      ))}
+    </div>
+  );
 }
 
 export default function StudioLockupReport({ date }: { date: string }) {
@@ -68,9 +87,9 @@ export default function StudioLockupReport({ date }: { date: string }) {
   if (!report || !report.submitted) return <div className="text-xs text-gray-400">No lock-up report submitted for this evening.</div>;
 
   const exceptionIds = new Set(report.exceptions.map(e => e.id));
-  // Items shown: end-of-booking items hidden when continuing tomorrow (they weren't asked).
   const shownItems = report.template.items.filter(it => !(it.end_of_booking_only && report.continuing_tomorrow));
 
+  let lastSection: string | undefined;
   return (
     <div className="text-sm">
       <div className="flex items-center justify-between flex-wrap gap-2 mb-2">
@@ -90,25 +109,38 @@ export default function StudioLockupReport({ date }: { date: string }) {
         {shownItems.map(it => {
           const flagged = exceptionIds.has(it.id);
           const a = answerLabel(report.answers[it.id]);
-          const toneClass = flagged
-            ? 'text-amber-800'
+          const why = report.exception_notes[it.id];
+          const showSection = it.section && it.section !== lastSection;
+          if (it.section) lastSection = it.section;
+          const toneClass = flagged ? 'text-amber-800'
             : a.tone === 'good' ? 'text-green-700'
             : a.tone === 'bad' ? 'text-red-600'
-            : a.tone === 'na' ? 'text-gray-400'
-            : 'text-gray-700';
+            : a.tone === 'na' ? 'text-gray-400' : 'text-gray-700';
           return (
-            <div key={it.id} className={`flex items-start justify-between gap-3 px-2 py-1 rounded ${flagged ? 'bg-amber-50 border border-amber-200' : ''}`}>
-              <span className="text-xs text-gray-700">{flagged && '⚠ '}{it.label}</span>
-              <span className={`text-xs font-medium shrink-0 ${toneClass}`}>{a.text}</span>
+            <div key={it.id}>
+              {showSection && <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wide mt-2 mb-0.5">{it.section}</p>}
+              <div className={`px-2 py-1 rounded ${flagged ? 'bg-amber-50 border border-amber-200' : ''}`}>
+                <div className="flex items-start justify-between gap-3">
+                  <span className="text-xs text-gray-700">{flagged && '⚠ '}{it.label}</span>
+                  <span className={`text-xs font-medium shrink-0 ${toneClass}`}>{a.text}</span>
+                </div>
+                {flagged && why && (why.text || (why.photos?.length ?? 0) > 0) && (
+                  <div className="mt-1">
+                    {why.text && <p className="text-xs text-amber-800 italic">“{why.text}”</p>}
+                    <PhotoRow photos={why.photos} />
+                  </div>
+                )}
+              </div>
             </div>
           );
         })}
       </div>
 
-      {report.notes && (
+      {(report.notes.text || (report.notes.photos?.length ?? 0) > 0) && (
         <div className="mt-2 pt-2 border-t border-gray-100">
           <p className="text-[11px] text-gray-400 uppercase tracking-wide mb-0.5">Sitter&apos;s notes</p>
-          <p className="text-xs text-gray-700 whitespace-pre-wrap">{report.notes}</p>
+          {report.notes.text && <p className="text-xs text-gray-700 whitespace-pre-wrap">{report.notes.text}</p>}
+          <PhotoRow photos={report.notes.photos} />
         </div>
       )}
     </div>

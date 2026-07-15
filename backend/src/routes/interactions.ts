@@ -383,6 +383,16 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
         chase_method || null, chase_response || null]
     );
 
+    // Staff reply on a studio-sitter shift thread → email the sitter (they have
+    // no portal bell). Best-effort; never blocks the reply. This route is
+    // staff-authenticated, so any shift_id post here is a staff reply.
+    if (shift_id && content && req.user?.id) {
+      const staffUserId = req.user.id;
+      import('../services/studio-sitter-lockup')
+        .then(({ notifySitterOfStaffReply }) => notifySitterOfStaffReply(shift_id as string, content, staffUserId))
+        .catch((err) => console.error('[interactions] sitter reply email failed (non-fatal):', err));
+    }
+
     // Chase side-effects: bump chase_count, set next_chase_date, persist
     // alert preferences. Crucially we DO NOT touch pipeline_status — chasing
     // is a derived view (next_chase_date + pre-confirmed status), not a

@@ -205,6 +205,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '168_studio_sitter_lockup_report.sql',
         '169_cost_remittance.sql',
         '170_job_quote_versions.sql',
+        '171_studio_sitter_lockup_reseed.sql',
       ];
 
       for (const migration of migrations) {

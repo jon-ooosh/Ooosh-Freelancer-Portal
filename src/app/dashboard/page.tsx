@@ -78,6 +78,7 @@ interface SitterShift {
   status: string
   assignment_status: string
   fee: number | null
+  report_submitted_at?: string | null
   jobs: ShiftJob[]
 }
 
@@ -429,6 +430,7 @@ function ShiftCard({ shift }: { shift: SitterShift }) {
   const tonight = isTodayIso(shift.date)
   const envelope = formatShiftEnvelope(shift.planned_start, shift.planned_end)
   const isConfirmed = shift.assignment_status === 'confirmed'
+  const isCompleted = !!shift.report_submitted_at  // locked up = done
 
   return (
     <div className="bg-white rounded-xl border border-gray-100 p-4 shadow-sm">
@@ -458,10 +460,10 @@ function ShiftCard({ shift }: { shift: SitterShift }) {
           )}
           <span
             className={`inline-block mt-1 text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
-              isConfirmed ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'
+              isCompleted ? 'bg-green-100 text-green-700' : isConfirmed ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'
             }`}
           >
-            {isConfirmed ? 'Confirmed' : 'Assigned'}
+            {isCompleted ? 'Completed' : isConfirmed ? 'Confirmed' : 'Assigned'}
           </span>
         </div>
       </div>
@@ -480,13 +482,22 @@ function ShiftCard({ shift }: { shift: SitterShift }) {
         </div>
       )}
 
-      <div className="mt-3">
+      <div className="mt-3 flex items-center justify-between">
         <Link
           href={`/shift/${shift.date}`}
           className="text-sm font-medium text-ooosh-600 hover:text-ooosh-500"
         >
           View details →
         </Link>
+        {/* Lock-up quick action — only on the night, and only until it's done. */}
+        {tonight && !isCompleted && (
+          <Link
+            href={`/shift/${shift.date}/lockup`}
+            className="text-sm font-medium text-green-600 hover:text-green-500 flex items-center gap-1"
+          >
+            🔒 Lock up
+          </Link>
+        )}
       </div>
     </div>
   )

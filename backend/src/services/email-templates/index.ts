@@ -1653,6 +1653,30 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  // ── Studio-sitter handover reply (to the sitter) ──────────────────────
+  // The freelancer portal has no bell, so a staff reply on a shift handover
+  // thread is emailed to the rostered sitter with a link back to that evening.
+  studio_shift_reply: {
+    variant: 'client',
+    subject: 'Reply on your studio night — {{date}}',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Hi {{sitterFirstName}},</h2>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.6;">
+        <strong>{{staffName}}</strong> replied to your handover note for <strong>{{date}}</strong>:
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
+            <p style="margin:0;font-size:14px;color:#1e293b;white-space:pre-line;">{{replyText}}</p>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0;font-size:14px;color:#334155;">
+        <a href="{{shiftUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Open the shift &amp; reply →</a>
+      </p>
+    `,
+  },
+
   // ── Generic file resend ───────────────────────────────────────────────
   // Used by the Files tab "Email" action — staff sends an arbitrary
   // attachment (delivery note, hire agreement, condition report, jpg

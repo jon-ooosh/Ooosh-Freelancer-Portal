@@ -448,9 +448,10 @@ export interface SitterShift {
   date: string;
   planned_start: string | null;
   planned_end: string | null;
-  status: string;                 // shift status
+  status: string;                 // shift status ('closed' once locked up)
   assignment_status: string;      // assigned / confirmed
   fee: number | null;
+  report_submitted_at: string | null; // lock-up submitted → surfaces as "Completed"
   jobs: SitterShiftJob[];         // who's in that night
 }
 
@@ -474,7 +475,7 @@ function jobsByDate(jobs: Array<{ id: string; hh_job_number: number | null; job_
 export async function getSitterShifts(personId: string, from: string, to: string): Promise<SitterShift[]> {
   const res = await query(
     `SELECT s.shift_date::text AS shift_date, s.status, s.planned_start, s.planned_end,
-            a.status AS assignment_status, a.fee
+            s.report_submitted_at, a.status AS assignment_status, a.fee
      FROM studio_sitter_shift_assignments a
      JOIN studio_sitter_shifts s ON s.id = a.shift_id
      WHERE a.person_id = $1 AND a.status IN ('assigned','confirmed')
@@ -491,6 +492,7 @@ export async function getSitterShifts(personId: string, from: string, to: string
     status: r.status,
     assignment_status: r.assignment_status,
     fee: r.fee != null ? Number(r.fee) : null,
+    report_submitted_at: r.report_submitted_at ?? null,
     jobs: dateJobs.get(r.shift_date) ?? [],
   }));
 }
