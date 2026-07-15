@@ -964,6 +964,12 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                       <>
                         {' · '}
                         Collected: £{Number(record.excess_amount_taken || 0).toFixed(2)}
+                        {/* When + how it was collected, inline. Pre-auth held/released
+                            records show their own dated line below (describePreauth). */}
+                        {Number(record.excess_amount_taken || 0) > 0 && record.payment_date &&
+                          ` on ${new Date(record.payment_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`}
+                        {Number(record.excess_amount_taken || 0) > 0 && record.payment_method &&
+                          ` · ${paymentMethodLabel(record.payment_method)}`}
                       </>
                     )}
                     {Number(record.amount_released || 0) > 0 && (
@@ -973,16 +979,6 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                       </>
                     )}
                   </p>
-                  {/* When + how the excess was collected. Pre-auth held/released
-                      records show their own dated line below (describePreauth); this
-                      covers real money taken (taken / reimbursed / claimed). */}
-                  {Number(record.excess_amount_taken || 0) > 0 && (record.payment_date || record.payment_method) && (
-                    <p className="text-xs text-gray-500 mt-0.5">
-                      Collected
-                      {record.payment_date && ` ${new Date(record.payment_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`}
-                      {record.payment_method && ` · ${paymentMethodLabel(record.payment_method)}`}
-                    </p>
-                  )}
                   {/* Resolution breakdown — what actually happened to collected
                       excess. Without this the card showed only collected vs
                       required, hiding claim/reimburse splits (job 15291). */}
