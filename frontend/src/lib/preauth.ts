@@ -48,6 +48,22 @@ export function stripePaymentUrl(pi?: string | null): string | null {
   return pi ? `https://dashboard.stripe.com/payments/${pi}` : null;
 }
 
+/** Human label for a stored excess payment/reimbursement method. */
+const METHOD_LABELS: Record<string, string> = {
+  stripe_gbp: 'Stripe',
+  worldpay: 'Worldpay',
+  amex: 'Amex',
+  wise_bacs: 'Wise / BACS',
+  lloyds_bank: 'Lloyds (bank transfer)',
+  till_cash: 'Cash',
+  paypal: 'PayPal',
+  rolled_over: 'Rolled over from previous hire',
+};
+export function paymentMethodLabel(m?: string | null): string {
+  if (!m) return '';
+  return METHOD_LABELS[m] || m.replace(/_/g, ' ');
+}
+
 const num = (v: unknown): number => {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
