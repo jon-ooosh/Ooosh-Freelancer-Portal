@@ -23,8 +23,8 @@ export interface RemittanceContact {
   email: string | null;
   name: string | null;
   mode: RemittanceMode;
-  /** Where the address came from — drives the modal's pre-fill note. */
-  source: 'reimbursement_staff' | 'freelancer_assignment' | 'supplier_org' | 'none';
+  /** Where the address came from - drives the modal's pre-fill note. */
+  source: 'reimbursement_staff' | 'freelancer_assignment' | 'remembered' | 'person_match' | 'supplier_org' | 'none';
 }
 
 interface CostForRemittance {
@@ -100,6 +100,40 @@ export async function resolveRemittanceContact(cost: CostForRemittance): Promise
     );
     const row = r.rows[0];
     if (row?.email) return { email: cleanName(row.email), name: cleanName(row.name), mode, source: 'freelancer_assignment' };
+  }
+
+  // Remembered: an address staff manually chose on a previous remittance for
+  // this same supplier. An explicit human decision - honour it over guesses.
+  if (cost.supplier_name) {
+    const r = await query(
+      `SELECT remittance_email FROM costs
+        WHERE remittance_email IS NOT NULL
+          AND LOWER(COALESCE(supplier_name, '')) = LOWER($1)
+          AND id <> $2
+        ORDER BY remittance_sent_at DESC NULLS LAST
+        LIMIT 1`,
+      [cost.supplier_name, cost.id],
+    );
+    const email = cleanName(r.rows[0]?.remittance_email);
+    if (email) return { email, name: cleanName(cost.supplier_name), mode, source: 'remembered' };
+  }
+
+  // Freelancers are people, not orgs - match the supplier name against the
+  // address book (freelancers first). Only auto-fill on a UNIQUE match; the
+  // modal's person picker covers ambiguous / no-match cases.
+  if (cost.supplier_name) {
+    const r = await query(
+      `SELECT email, CONCAT(first_name, ' ', last_name) AS name
+         FROM people
+        WHERE COALESCE(is_deleted, false) = false AND email IS NOT NULL
+          AND LOWER(CONCAT(first_name, ' ', last_name)) = LOWER($1)
+        ORDER BY is_freelancer DESC
+        LIMIT 2`,
+      [cost.supplier_name],
+    );
+    if (r.rows.length === 1 && r.rows[0].email) {
+      return { email: cleanName(r.rows[0].email), name: cleanName(r.rows[0].name), mode, source: 'person_match' };
+    }
   }
 
   if (cost.xero_contact_id) {
@@ -184,16 +218,21 @@ function buildBody(cost: CostForRemittance & { uploaded_by_name: string | null }
     : '';
 
   const subject = contact.mode === 'reimbursement'
-    ? `Remittance advice — expense reimbursement ${amount}${invoiceRef ? ` (${invoiceRef})` : ''}`
-    : `Remittance advice — ${amount}${invoiceRef ? ` (invoice ${invoiceRef})` : ''}`;
+    ? `Remittance advice - expense reimbursement ${amount}${invoiceRef ? ` (${invoiceRef})` : ''}`
+    : `Remittance advice - ${amount}${invoiceRef ? ` (invoice ${invoiceRef})` : ''}`;
+
+  const multiNote = contact.mode === 'reimbursement'
+    ? 'If you have other expenses due back to you, you will receive a separate remittance for each.'
+    : 'If you have other invoices with us, you will receive a separate remittance for each.';
 
   const body = `
       <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Remittance Advice</h2>
       <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Hi ${escapeHtml(firstName)},</p>
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">${lead}</p>
       ${scheduledNote}
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">${multiNote}</p>
       <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
-        No action is needed — this is just for your records. If anything looks wrong, reply to this email or call us on <strong>+44 (0) 1273 911382</strong>.
+        No action is needed - this is just for your records. If anything looks wrong, reply to this email or call us on <strong>+44 (0) 1273 911382</strong>.
       </p>
     `;
 
