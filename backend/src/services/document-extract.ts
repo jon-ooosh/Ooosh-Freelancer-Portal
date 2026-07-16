@@ -102,6 +102,15 @@ export async function extractDocument<T>(opts: ExtractDocumentOpts): Promise<T> 
   if (!textBlock || textBlock.type !== 'text') {
     throw new Error('Claude returned no text content');
   }
+  // If the model hit the output ceiling, the JSON is truncated mid-structure and
+  // JSON.parse fails cryptically ("Expected ',' or ']' …"). Surface it plainly so
+  // the fix is obvious — raise maxTokens for this caller.
+  if (response.stop_reason === 'max_tokens') {
+    throw new Error(
+      `Extraction hit the output token limit (max_tokens=${opts.maxTokens ?? DEFAULT_MAX_TOKENS}) — ` +
+        'the response was truncated. Raise maxTokens for this extraction.',
+    );
+  }
   let parsed: T;
   try {
     parsed = JSON.parse(textBlock.text);
