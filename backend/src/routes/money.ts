@@ -885,13 +885,6 @@ router.get('/:jobId/excess-info', async (req: AuthRequest, res: Response) => {
       };
     });
 
-    // Totals — collected = money in account + money on hold (migration 087).
-    // Held money counts as collected for portal display purposes (client sees
-    // their excess is covered, whether by pre-auth or captured payment).
-    const totalRequired = drivers.reduce((sum: number, d: any) => sum + d.excess_amount_required, 0);
-    const totalCollected = drivers.reduce((sum: number, d: any) => sum + d.excess_amount_taken + d.amount_held, 0);
-    const totalOutstanding = Math.max(0, totalRequired - totalCollected);
-
     // A record is "covered" if it's in a terminal state (waived/reimbursed/claimed/rolled_over/not_required),
     // OR enough money has been taken/held to meet the required amount. This catches the edge case of a
     // pre-auth or 'taken' record that's underfunded (e.g. £600 pre-auth against £1,200 required).
@@ -904,6 +897,24 @@ router.get('/:jobId/excess-info', async (req: AuthRequest, res: Response) => {
       const coverage = (d.excess_amount_taken || 0) + (d.amount_held || 0);
       return required > 0 && coverage >= required;
     };
+
+    // Totals — collected = money in account + money on hold (migration 087).
+    // Held money counts as collected for portal display purposes (client sees
+    // their excess is covered, whether by pre-auth or captured payment).
+    const totalRequired = drivers.reduce((sum: number, d: any) => sum + d.excess_amount_required, 0);
+    const totalCollected = drivers.reduce((sum: number, d: any) => sum + d.excess_amount_taken + d.amount_held, 0);
+    // Outstanding is per-record and skips covered records — a `waived` (or
+    // auto-covered / rolled_over / not_required) record that keeps a `required`
+    // amount for reference must NOT read as outstanding on the requirement card.
+    // (The old global `required − collected` counted a covered £1,200-required /
+    // £0-collected record as £1,200 outstanding — the auto-cover phantom.)
+    const totalOutstanding = drivers.reduce((sum: number, d: any) => {
+      if (isCovered(d)) return sum;
+      const required = d.excess_amount_required || 0;
+      const coverage = (d.excess_amount_taken || 0) + (d.amount_held || 0);
+      return sum + Math.max(0, required - coverage);
+    }, 0);
+
     const driversCleared = drivers.filter(isCovered).length;
     const driversPending = drivers.length - driversCleared;
 
