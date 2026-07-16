@@ -17,6 +17,7 @@ import { createChaseDraftForJob } from '../services/gmail-draft';
 import { getJobCommsSummaryStatus, generateJobCommsSummary } from '../services/comms-summary';
 import { answerCommsQuery } from '../services/comms-query';
 import { backfillOpenPipelineThreads, type BackfillScope, type BackfillSummary } from '../services/gmail-backfill';
+import { getJobQuoteVersions, sweepQuoteVersions, type QuoteSweepSummary } from '../services/quote-versions';
 import { runDueAutoChases } from '../services/auto-chase-runner';
 import { isAnthropicConfigured } from '../config/anthropic';
 import { isGmailConfigured } from '../config/gmail';
@@ -168,7 +169,8 @@ router.post('/backfill', authorize('admin'), async (req: AuthRequest, res: Respo
   // Initial scope is provisional — the service validates + overwrites it.
   const summary: BackfillSummary = {
     configured: true, dryRun: false, scope: body.scope ?? 'active',
-    jobsScanned: 0, jobsWithHits: 0, threadsScanned: 0, logged: 0, skipped: 0, duplicates: 0,
+    jobsScanned: 0, jobsWithHits: 0, threadsScanned: 0, threadsRejected: 0,
+    logged: 0, skipped: 0, duplicates: 0,
   };
   backfillState = { running: true, startedAt: new Date().toISOString(), finishedAt: null, summary };
   backfillOpenPipelineThreads({ limit: body.limit, scope: body.scope, sink: summary })
@@ -281,6 +283,78 @@ router.post('/comms-query/:jobId', authorize(...STAFF_ROLES), async (req: AuthRe
     console.error('[auto-chase] comms-query error:', error);
     res.status(500).json({ error: 'Failed to answer the question' });
   }
+});
+
+// ── Quote-PDF version diff (spec §7.3) ──────────────────────────────────────
+// GET harvests-if-stale + lazy-extracts + returns versions & consecutive diffs.
+// Quote PDFs surface on the Activity Timeline; they never enter jobs.files.
+// STAFF_ROLES — operational context on a job the whole team works from.
+
+// GET /api/auto-chase/quote-versions/:jobId — versions + diffs (harvest if stale).
+router.get('/quote-versions/:jobId', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await getJobQuoteVersions(String(req.params.jobId));
+    res.json({ data: result });
+  } catch (error) {
+    console.error('[auto-chase] quote-versions error:', error);
+    res.status(500).json({ error: 'Failed to load quote versions' });
+  }
+});
+
+// POST /api/auto-chase/quote-versions/:jobId/refresh — force a fresh mailbox harvest.
+router.post('/quote-versions/:jobId/refresh', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await getJobQuoteVersions(String(req.params.jobId), { forceHarvest: true });
+    res.json({ data: result });
+  } catch (error) {
+    console.error('[auto-chase] quote-versions refresh error:', error);
+    res.status(500).json({ error: 'Failed to refresh quote versions' });
+  }
+});
+
+// One-off cold-start sweep over the open pipeline (harvest only — extraction
+// stays lazy-on-view). Background like the thread backfill (a real run searches
+// the mailbox per job — well past the proxy timeout). Admin.
+let quoteSweepState: {
+  running: boolean;
+  startedAt: string;
+  finishedAt: string | null;
+  summary: QuoteSweepSummary;
+} | null = null;
+
+// POST /api/auto-chase/quote-versions-sweep — start a background sweep. Admin.
+router.post('/quote-versions-sweep', authorize('admin'), async (req: AuthRequest, res: Response) => {
+  if (!isGmailConfigured()) {
+    return res.status(503).json({ error: 'Gmail not configured — nothing to sweep.' });
+  }
+  if (quoteSweepState?.running) {
+    return res.status(409).json({
+      error: 'A quote-versions sweep is already running — poll GET /api/auto-chase/quote-versions-sweep.',
+      data: { running: true, startedAt: quoteSweepState.startedAt, ...quoteSweepState.summary },
+    });
+  }
+  const limit = Math.min(parseInt(String((req.body || {}).limit || '500'), 10) || 500, 2000);
+  const summary: QuoteSweepSummary = { configured: true, jobsScanned: 0, jobsWithQuotes: 0, stored: 0 };
+  quoteSweepState = { running: true, startedAt: new Date().toISOString(), finishedAt: null, summary };
+  sweepQuoteVersions({ limit, sink: summary })
+    .catch((err) => { summary.error = err instanceof Error ? err.message : String(err); })
+    .finally(() => {
+      if (quoteSweepState) { quoteSweepState.running = false; quoteSweepState.finishedAt = new Date().toISOString(); }
+    });
+  res.json({ data: { started: true, startedAt: quoteSweepState.startedAt } });
+});
+
+// GET /api/auto-chase/quote-versions-sweep — poll the last/current sweep.
+router.get('/quote-versions-sweep', authorize('admin', 'manager'), (_req: AuthRequest, res: Response) => {
+  if (!quoteSweepState) return res.json({ data: { running: false, neverRun: true } });
+  res.json({
+    data: {
+      running: quoteSweepState.running,
+      startedAt: quoteSweepState.startedAt,
+      finishedAt: quoteSweepState.finishedAt,
+      ...quoteSweepState.summary,
+    },
+  });
 });
 
 // POST /api/auto-chase/voice/learn — distil example client emails + our replies

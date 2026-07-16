@@ -140,9 +140,10 @@ export interface SitterShift {
   date: string           // YYYY-MM-DD
   planned_start: string | null
   planned_end: string | null
-  status: string         // shift status
+  status: string         // shift status ('closed' once locked up)
   assignment_status: string // assigned / confirmed
   fee: number | null
+  report_submitted_at?: string | null // lock-up submitted → "Completed"
   jobs: SitterShiftJob[] // who's in that night
 }
 
@@ -201,6 +202,23 @@ export async function getSitterThreadFromOP(
   return opFetch<SitterThreadResponse>(`/studio-sitter/shifts/${date}/thread`, sessionToken)
 }
 
+export interface SitterRecentHandoverNight {
+  date: string
+  entries: SitterThreadMessage[]
+}
+export interface SitterRecentHandoverResponse {
+  success: boolean
+  nights: SitterRecentHandoverNight[]
+}
+
+/** Read the last few nights' handover notes (read-only carry-forward). */
+export async function getSitterRecentHandoverFromOP(
+  sessionToken: string,
+  date: string
+): Promise<SitterRecentHandoverResponse> {
+  return opFetch<SitterRecentHandoverResponse>(`/studio-sitter/shifts/${date}/recent-handover`, sessionToken)
+}
+
 /** Post a handover note to one evening's thread (text only). */
 export async function postSitterThreadOP(
   sessionToken: string,
@@ -237,12 +255,19 @@ export async function postSitterThreadWithFilesOP(
 // STUDIO SITTER LOCK-UP REPORT (Rehearsals — Phase E)
 // =============================================================================
 
+export interface LockupReference {
+  text?: string
+  photos: string[]  // R2 keys OR external URLs
+}
 export interface LockupItem {
   id: string
   label: string
   type: 'yesno' | 'text' | 'number'
+  section?: string
   expected?: string
   end_of_booking_only?: boolean
+  reference?: LockupReference
+  note_prompt?: string
 }
 
 export interface LockupTemplate {
@@ -253,14 +278,11 @@ export interface LockupTemplate {
   lost_property_prompt?: string
 }
 
-export interface LockupReferencePhoto {
-  label: string
-  url: string
-}
-
 export interface LockupStoredReport {
   answers: Record<string, unknown>
-  notes: string
+  exception_notes: Record<string, { text: string; photos: unknown[] }>
+  item_notes: Record<string, { text: string; photos: unknown[] }>
+  notes: { text: string; photos: unknown[] }
   continuing_tomorrow: boolean
   continuing_overridden: boolean
   submitted_at: string
@@ -270,7 +292,6 @@ export interface LockupContextResponse {
   success: boolean
   date: string
   template: LockupTemplate
-  reference_photos: LockupReferencePhoto[]
   continuing_tomorrow: boolean
   continuing_derived: boolean
   submitted: LockupStoredReport | null
@@ -293,7 +314,7 @@ export interface LockupSubmitResponse {
   error?: string
 }
 
-/** Lock-up sub-page context: template + reference photos + derived continuing + prior submission. */
+/** Lock-up sub-page context: template + derived continuing + prior submission. */
 export async function getLockupContextFromOP(
   sessionToken: string,
   date: string
@@ -301,16 +322,42 @@ export async function getLockupContextFromOP(
   return opFetch<LockupContextResponse>(`/studio-sitter/shifts/${date}/lockup`, sessionToken)
 }
 
-/** Submit the lock-up report for one evening. */
+/** Submit the lock-up report (multipart: `payload` JSON + optional photos). */
 export async function submitLockupReportOP(
   sessionToken: string,
   date: string,
-  body: { answers: Record<string, unknown>; notes: string; continuing_tomorrow: boolean }
+  formData: FormData
 ): Promise<LockupSubmitResponse> {
-  return opFetch(`/studio-sitter/shifts/${date}/lockup`, sessionToken, {
+  const url = `${getOpUrl()}/api/portal/studio-sitter/shifts/${date}/lockup`
+  const response = await fetchWithTimeout(url, {
     method: 'POST',
-    body: JSON.stringify(body),
-  })
+    headers: { Cookie: `session=${sessionToken}` },
+    body: formData,
+  }, 60_000)
+  if (!response.ok) {
+    const b = await response.json().catch(() => ({ error: `HTTP ${response.status}` }))
+    throw new OpApiError((b as { error?: string })?.error || `HTTP ${response.status}`, response.status, b)
+  }
+  return response.json()
+}
+
+/** Log lost property found during a shift (multipart: description/found_location + photos). */
+export async function logShiftLostPropertyOP(
+  sessionToken: string,
+  date: string,
+  formData: FormData
+): Promise<{ success: boolean; id: string; error?: string }> {
+  const url = `${getOpUrl()}/api/portal/studio-sitter/shifts/${date}/lost-property`
+  const response = await fetchWithTimeout(url, {
+    method: 'POST',
+    headers: { Cookie: `session=${sessionToken}` },
+    body: formData,
+  }, 60_000)
+  if (!response.ok) {
+    const b = await response.json().catch(() => ({ error: `HTTP ${response.status}` }))
+    throw new OpApiError((b as { error?: string })?.error || `HTTP ${response.status}`, response.status, b)
+  }
+  return response.json()
 }
 
 // =============================================================================

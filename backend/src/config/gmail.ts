@@ -229,6 +229,24 @@ export async function gmailSearchMessageIds(
 }
 
 /**
+ * Download one attachment's bytes (read-only). Gmail returns the payload as
+ * base64url on `messages.attachments.get`; we decode to a Buffer. Used by the
+ * quote-PDF harvest (§7.3) — search a thread, pull the `Quote (NNNNN).pdf` back.
+ */
+export async function gmailGetAttachment(
+  mailbox: string,
+  messageId: string,
+  attachmentId: string,
+): Promise<Buffer> {
+  const res = await gmailApiGet<{ size?: number; data?: string }>(
+    `/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`,
+    mailbox,
+  );
+  if (!res.data) throw new Error(`Gmail: attachment ${attachmentId} returned no data`);
+  return Buffer.from(res.data.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+}
+
+/**
  * Lightweight connectivity probe used by the status endpoint. Returns the
  * mailbox's current profile (email + historyId) — proves the delegation +
  * scopes are working end-to-end without ingesting anything.

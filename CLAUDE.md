@@ -1766,16 +1766,109 @@ These originate outside HH entirely — client sends stuff to us, or items found
       the report inline). **Settings editor** `StudioSitterSettingsSection` (admin/manager, on SettingsPage
       next to Carnet) edits intro / notes prompt / lost-property prompt / checklist items (label, type,
       expected, end-of-booking flag, reorder, add/remove) + uploads/removes reference photos.
-    - **Deferred (fast-follow):** the not-submitted accountability chaser (always-fires, like the
-      completion chaser) — not built this PR.
+    - **Not-submitted accountability chaser: SHIPPED** (Slice 5, migration 173 — see below).
+  - **Slice 4 follow-up SHIPPED (real Jotform port + why-boxes + photos + reply-email, migration 169):**
+    two rounds of jon feedback after a live trial. Template model + submit shape changed:
+    - **Real Jotform port (`203154178314046`), "flat + section label + per-item ref" model.** The first
+      cut was an admitted guess; the DEFAULT_TEMPLATE in `services/studio-sitter-lockup.ts` now carries the
+      30 real checklist items with an optional `section` label (rendered as group headers — "Upstairs" /
+      "Downstairs") and an optional per-item `reference` (`{text?, photos: string[]}` = "what it should look
+      like"). **"Front door locked" is the LAST item**; "Alarm set" removed. 3 `end_of_booking_only`
+      deep-clean items (vacuum/bins, hired kit boxed, backline stored). **Migration 169** is a data-only
+      re-seed of `studio_sitter_lockup_template` generated from the compiled DEFAULT_TEMPLATE so seed ==
+      code fallback exactly (overwrites unconditionally — 168's seed was the guess). `LockupItem` gained
+      `section` + `reference`; the global reference-photos block was REMOVED (photos are per-item now).
+    - **Off-expected "why?" capture** — any yes/no answer that trips `computeExceptions` opens an inline
+      "why?" text box + optional photos; stored on `report_answers.exception_notes[id] = {text, photos[]}`,
+      surfaced in the finishing summary and highlighted (amber) in the staff read-only view.
+    - **Photos throughout via multipart.** The portal submit is now `multipart/form-data` (multer `.any()`
+      on `POST /shifts/:date/lockup`): a `payload` JSON part + `notes_photo` / `why_<id>` file parts, routed
+      by fieldname, uploaded to R2 (`files/attachments/…`), stored as blob refs on the report. Notes field
+      supports photos too. The Next.js route re-forwards multipart with the `Blob` duck-type pattern (never
+      the `File` global). `getShiftReport` + `getLockupContext` presign every stored blob + external
+      reference URL for read (`ReadPhoto {url, filename, content_type}`).
+    - **Lost property pushes to the Holding module** (the earlier `/holding/lost-property` deep-link was a
+      bug — that's a staff-only OP route a freelancer can't reach). New portal `POST /shifts/:date/lost-property`
+      + `logShiftLostPropertyOP` → `logShiftLostProperty` creates a `held_items` row (`kind='lost_property'`,
+      `status='stored'`, `owner_unknown=true`, `created_by=SYSTEM_USER_ID`) with description / found location /
+      photos, from an inline capture form on the lockup page.
+    - **Reply-to-sitter email (the other half of "not a dead-end").** The handover thread is date-scoped, so
+      a staff reply the *next* sitter never sees vanished. `routes/interactions.ts` now fires
+      `notifySitterOfStaffReply(shift_id, content, staffUserId)` after any staff post on a `shift_id` thread
+      — resolves the report submitter, emails them via the new `studio_shift_reply` template (link to
+      `/shift/:date`), resolves the staff author name via `users LEFT JOIN people`.
+    - **Status shows "Completed" once submitted** — the shift's existing `closed` status surfaces as
+      "Completed" on both the portal shift card + OP roster once `report_submitted_at` is set. Portal dashboard
+      shift card gets a **"🔒 Lock up" quick action** (like "Start delivery"), gated to tonight + not-yet-completed.
+      No sitter tap-to-confirm surface (dropped per jon — too many surfaces).
+    - **Staff read-only view + settings** rewritten to match: `StudioLockupReport.tsx` groups by section,
+      shows exception whys + their photos, notes with photos; `StudioSitterSettingsSection` gains per-item
+      `section` input + a per-item `reference` editor (caption + photo upload/remove via `/files/upload`),
+      global photos block removed.
+  - **Slice 4 second feedback round SHIPPED (migration 172):** post-trial tweaks.
+    - **`note_prompt` — always-on note box (`item_notes` channel).** A `LockupItem.note_prompt?: string`
+      shows an optional note+photo box REGARDLESS of the yes/no answer (distinct from the off-expected
+      "why?" box, which it replaces for that item). Seeded on **"clients paid"** ("how did they pay /
+      what's outstanding") + **"kitchen replenished"** ("anything running low"). Stored in a new
+      `report_answers.item_notes[id] = {text, photos[]}` map, kept only for template items that carry a
+      `note_prompt`; the off-expected "why?" box stays `exception_notes`. Portal routes its photos as
+      `item_<id>` multipart fields (alongside `why_<id>` / `notes_photo`). The thread summary surfaces
+      note_prompt notes (even on an expected answer), and an exception on a note_prompt item falls back to
+      its `item_notes` text. Staff read view + Settings editor (per-item "Always-ask note" input) both
+      handle it.
+    - **Lights moved to a final "Lights off & lock up" section** (all lights-off items + front door LAST) —
+      do the substantive work first, sweep the lights on the way out.
+    - **Reference photos: thumbnails + in-page lightbox.** Portal renders reference photos as lazy-loaded
+      `grid-cols-3` thumbnails; tapping opens a full-screen `<img>` lightbox overlay (tap to close) INSTEAD
+      of the old `<a href download>` (which just downloaded the presigned R2 object). Fixes both "slow to
+      load" and "clicking downloads instead of enlarging". Server-side thumbnail generation still deferred
+      (thumbnails are CSS-sized full images for now).
+    - **Bigger section headers** on the portal + staff read view.
+    - Migration 172 re-seeds the template from the updated `DEFAULT_TEMPLATE` (169/170 taken on main, 171 =
+      first real port, 172 = this round). **Lost property already lands in the Holding module** as a
+      `held_items` `kind='lost_property'` row (`logShiftLostProperty` → the `/holding/lost-property` list).
+  - **Slice 4 third round SHIPPED (dedup + submit UX + reference downscale):**
+    - **Re-submit dedup (server-authoritative).** `submitLockupReport` throws `LockupAlreadySubmittedError`
+      (→ portal 409) when the shift is already submitted and the caller didn't pass `allow_resubmit`. The
+      portal catches the 409 and shows a "already submitted at HH:MM — re-submit and overwrite?" confirm;
+      confirming re-POSTs with `allow_resubmit=true`. Stops a stale tab left open between shifts from
+      silently overwriting the report + re-spamming the office, while still allowing a deliberate amend.
+    - **Confirm-on-unanswered.** Submitting with any visible item still blank flags "N items unanswered —
+      tap again to submit anyway" (button becomes "Submit anyway (N left)"); a second tap proceeds. Any
+      answer change re-arms the check. (Deliberately NO scroll-to-first-issue — the amber card highlight
+      already marks them.)
+    - **Reference photos downscaled at upload.** `StudioSitterSettingsSection.uploadItemPhoto` runs the
+      shared `compressImage(file, 1400, 0.8)` before the R2 upload, so new reference photos land ~150-250KB
+      instead of a raw ~3MB phone photo — the actual fix for "slow to load on 4G". Legacy/external seed
+      photos (the Jotform URLs) are unaffected; re-upload via Settings to shrink them. True server-side
+      thumbnail variants remain deferred (not needed once uploads are small).
+  - **Slice 5 SHIPPED (handover carry-forward + not-submitted chaser, migration 173):**
+    - **Recent-handover carry-forward (the day-1-doesn't-carry-to-day-2 fix).** The per-night thread
+      anchor (`shift_id`) is kept, but the portal shift page now surfaces the **last few nights' handover
+      notes read-only** above tonight's composer — so a sitter arriving fresh sees prior context. Endpoint
+      `GET /api/portal/studio-sitter/shifts/:date/recent-handover` (`routes/portal.ts`): premises-wide (one
+      studio), most-recent-first, capped at 4 nights within a 21-day lookback, presigned files, access-gated
+      like the thread. `getSitterRecentHandoverFromOP` + Next route `.../recent-handover/route.ts`; a
+      collapsible "Recent handover · last N nights" section on `src/app/shift/[date]/page.tsx`. **Chosen over
+      job-scoped / per-sitter threads** because the assignment unit is a SITE-EVENING (one sitter, whole
+      building, can span two bands/jobs a night) — a premises-wide recent strip respects that and needs no
+      data migration. Staff already see a job's full evening history on the Job Detail `StudioHandoverCard`,
+      so no change needed there. The reply-to-sitter email stays for "someone replied to YOUR note".
+    - **Not-submitted lock-up chaser (the deferred fast-follow, now shipped).** `runLockupChase()` (daily
+      08:45 Europe/London in `scheduler.ts`): for any shift that closed without a lock-up report, reminds
+      the rostered sitter (`studio_lockup_reminder` email — freelancers have no portal bell) + alerts the
+      office (admins/managers bell + `studio_lockup_missing` info@ email). Once per shift, dedup on
+      `studio_sitter_shifts.lockup_chase_sent_at` (migration 173, stamped FIRST so a send failure can't
+      re-fire), only the last 7 days (no ancient-backlog spam), only shifts with an assigned sitter.
 - **General Tasks system** (build with/after D): `tasks` table (anchor to shift/job/nothing),
   visibility everyone/assignee-only, notify-on-done + notify-if-not-done-after-X-days, **staff via
   bell/email, freelancers portal-only (no bell/email)**; dashboard top-right card + "On Today" +
   sitter portal; Today/Tomorrow/Upcoming/Overdue views.
-- **Handover thread**: `interactions` anchored to a new `shift_id` (mirror the `issue_id`/
-  `held_item_id` pattern + the `IS NULL` scoping guard so it doesn't bubble onto other timelines).
+- **Handover thread**: `interactions` anchored to `shift_id` — SHIPPED (Slice 3), with **recent-handover
+  carry-forward** across nights added in Slice 5 (see above). The `IS NULL` scoping guard keeps it off
+  other timelines.
 - **End-of-day report** (Phase E): ✅ SHIPPED (migration 168) — see the **"Slice 4 SHIPPED"** bullet
-  above. Only the not-submitted accountability chaser is still deferred (fast-follow).
+  above. The not-submitted accountability chaser is now SHIPPED too (Slice 5, migration 173).
 - **Calendar endpoint** (Phase F): `GET /api/studio-sitters/calendar?from&to` for the future
   calendar project (roster row shape already close).
 - **Monday.com teardown (cleanup, Jul 2026 — Monday fully retired):** the `reportFallback` /
@@ -2904,7 +2997,8 @@ The auto-chase feature — ingest the `info@oooshtours.co.uk` inbox (Google Work
 - `config/gmail.ts` — DWD JWT (`google-auth-library`, cached per mailbox, scope `gmail.readonly`, `subject` = impersonated mailbox), then plain `fetch` against the Gmail REST API (deliberately avoids the heavy `googleapis` package). `loadServiceAccountKey()` **auto-detects inline JSON vs a filesystem path** — a value starting with `{` is treated as inline JSON, anything else as a path to read.
 - `services/email-matcher.ts` — `matchEmailToJob()`, deterministic only: HH job# in attached PDF filename → HH job# in subject/body (validated against `jobs.hh_job_number`) → sender/recipient email → single OPEN job. No match ⇒ `gmail_unmatched_inbound` review queue. **Never guess-attach.** AI fuzzy layer deferred.
 - `services/gmail-ingestion.ts` — first run establishes a baseline `historyId` and ingests NOTHING historic (starts from go-live forward); thereafter incremental via the Gmail History API. Dedup on RFC822 Message-ID (partial-unique index) so the same email across future manager mailboxes = one interaction. Matched → `interactions` (`type='email'`, `created_by=SYSTEM_USER_ID`); unmatched → review queue.
-- **⚠️ Internal / automated sender guard (critical — info@ is a firehose of our OWN mail).** `processMessage` skips (no log, no queue) any inbound whose From is on our own domain (`INTERNAL_SENDER_DOMAINS = ['oooshtours.co.uk']`) OR that looks automated (`Auto-Submitted` ≠ `no`, `Precedence: bulk/list/junk`). Without this, internal notifications that carry a HH job# — referral alerts, pre-hire briefings, chase/holding digests, and especially the **client-no-email fallback** (our bounced OUTBOUND redirected to info@ with the job ref in it) — would all match via the job-number layer and pollute job timelines as fake "inbound client emails." Client replies are always external, so the domain cut is clean. It also correctly drops our own SENT copies (Phase 2 owns draft-vs-sent capture). Stays correct into Phase 1.5 manager mailboxes (a client replying to Sarah is still external → kept; Sarah's outbound → skipped). Only loss: a staff FORWARD of a client thread into info@. **Decision: filter smartly, do NOT move internal mail off info@** (staff rely on seeing those alerts in the shared inbox; the filter is lower blast-radius and reversible).
+- **⚠️ Internal / automated sender guard (critical — info@ is a firehose of our OWN mail). REVISED Jul 2026 — now KEEPS genuine outbound to clients.** `ingestGmailMessage` skips (no log, no queue): automated mail (`Auto-Submitted` ≠ `no`, `Precedence: bulk/list/junk`); our **system/template sender** (`notifications@oooshtours.co.uk` — booking/payment confirmations, hire-form requests, delivery notes, referral alerts, digests, the client-no-email fallback); and **internal↔internal** mail (from our domain with NO external recipient). But it now **KEEPS genuine staff→client outbound** (from us WITH an external `To`/`Cc` recipient, tagged `direction=outbound`) and inbound client mail. `hasExternalRecipient()` is the discriminator. The original cut skipped ALL own-domain mail, which also dropped our quotes/replies to clients — leaving the conversation summary + chase draft one-sided and blind to "we sent 5 quotes" (the job-16274 "no quote sent yet" incident). Stays correct into Phase 1.5 manager mailboxes. Only loss: a staff FORWARD of a client thread into info@ with no external recipient. **Decision: filter smartly, do NOT move internal mail off info@.**
+- **⚠️ Backfill + matcher tightening (Jul 2026 — the eBay-labels incident).** The cold-start backfill searched `q="16274"` and force-attached whole matching threads with no validation, so Jon's personal eBay postage-label threads (coincidentally containing those digits) polluted job 16274's timeline. `threadBelongsToJob()` now gates each thread — needs a `Quote (N)` PDF, an explicit `#N`/`job N`/`quote N` reference, or a known job-contact address; a bare digit-coincidence is rejected. The live matcher's body-number layer (`extractReferencedJobNumbers`) likewise now requires an explicit `#`/`job`/`ref`/`quote` prefix (filenames keep the precise `Quote (N)` key). Cleanup: `scripts/reingest-emails.ts` (dry-run default, `--commit`, `--rebackfill`) resets ONLY Gmail-ingested emails (`gmail_message_id IS NOT NULL`) and re-runs the tightened backfill. **Chase-draft tone** is now silence-aware: `unansweredOutbound` (emails we've sent since the client last replied) drives a persistent-non-response register at ≥2 (acknowledge repeated contact, ask if still interested, offer a gracious out) that overrides the "dates far → relax" default.
 - `services/email-retention.ts` — weekly sweep strips bodies older than `system_settings.email_retention_months` (default 24), keeps metadata + `body_stripped_at`, idempotent.
 - `routes/auto-chase.ts` (`/api/auto-chase`) — `GET /status`, `POST /ingest`, `POST /retention-sweep`, `GET /unmatched`.
 - **Migration 157** — email metadata + dedup index on `interactions`; `gmail_sync_state` (per-mailbox `historyId` cursor); `gmail_unmatched_inbound`; `jobs.auto_chase_mode/count/last_at`; seeds `chase_voice_instructions` / `email_retention_months` / `auto_chase_max_silent` (category `chase`).
@@ -2941,7 +3035,8 @@ The auto-chase feature — ingest the `info@oooshtours.co.uk` inbox (Google Work
 **Still deferred (see spec §13.2 for the live checklist):**
 - Passive draft-vs-sent diff capture (§9.3 — the automated sibling of the paste-box voice tuner); "learn from this thread" timeline affordance pre-filling the paste box; creation-time auto-chase selector on the New Enquiry / quote forms (ChaseModal covers per-job now).
 - Phase 3 suppression signals: OOO autoresponder / bounce / hot-inbound content parsing; multi-step cadences.
-- Phase 4: the §7.2 dispute helper is SHIPPED (see above). Still deferred: **quote-PDF version diff** (spec §7.3, jon Jul 2026) — harvest the versioned quote PDFs from ingested threads → extract line items via `services/document-extract.ts` → store `job_quote_versions` snapshots → diff over time + feed the dispute helper. The emailed PDFs are the real "what was on the job when" trail (HH keeps only the latest), so this is the line-item-diff-history companion sourced from PDFs. A real build (attachment→R2 harvest + per-PDF vision extraction + versioned store + diff UI), not a quick add.
+- Phase 4: the §7.2 dispute helper is SHIPPED. **Quote-PDF version diff — SHIPPED (spec §7.3; PRs #984, #987, #989, Jul 2026).** `migration 170` (`job_quote_versions` + per-job harvest cursor). Because our sent quotes are filtered out of live ingestion (§5.4a), harvest is **search-based**, NOT ingestion-piggyback: `services/quote-harvest.ts` searches the mailbox for the HH job number (`gmail.readonly` — no new scope), keeps ONLY attachments whose filename is `Quote (<thisJob>)` (so a multi-quote email routes each PDF to its own job), two-layer dedup (message id + SHA-256 content hash), bytes → private R2 (`email-quotes/`). `services/quote-versions.ts` vision-extracts line items (`extractDocument`, Haiku) + diffs consecutive versions by normalised description; version ORDER is the full message timestamp (the `(1)/(2)` filename suffix is download-order noise). Surfaced on the **Activity Timeline** (`QuoteVersions.tsx`, NOT the Money tab) + fed into the dispute helper's grounding (`comms-query.ts`). **Loading is non-blocking + polled:** `getJobQuoteVersions` returns cached state instantly + kicks a single guarded BACKGROUND run (`jobsWorking` set) that harvests-then-extracts newest-first; the frontend polls (`working` flag + `pending` versions) so items/diffs fill in live; a PDF whose extraction throws is marked `failed` (`failedVersions` set) → "couldn't read this PDF" not eternal "reading…", retried by the Refresh button. Both the summary + quote boxes are pre-collapsed by default. `GET/POST /api/auto-chase/quote-versions/:jobId[/refresh]` + a background `quote-versions-sweep`.
+  - **Extraction truncation FIXED (Jul 2026, job 16274).** Symptom: only the LATEST of 5 quote PDFs extracted; the older 4 showed "couldn't read this PDF". Root cause was NOT the PDFs/R2/vision — it was `document-extract.ts` `JSON.parse` failing (`Expected ',' or ']' … at position ~2777`) because the model's line-item JSON overflowed the default `max_tokens=1024` and truncated mid-array. The older quotes had MORE items (items were trimmed over time; #5 at 19 items just fit). Fix: `extractQuoteVersion` passes `maxTokens: 8192`, and `extractDocument` now throws a clear "hit the output token limit — raise maxTokens" error on `stop_reason === 'max_tokens'` instead of a cryptic JSON-parse failure. Re-extract is automatic (failed rows have `items=NULL`; the in-memory `failedVersions` set clears on restart, so the background run re-attempts on next view). **Lesson: any `extractDocument` caller whose output can be long (list extraction) needs an explicit `maxTokens` — the 1024 default is only safe for small fixed-shape outputs (PCN/cost receipts).**
 - **Timeline email collapse is CHARACTER/inline-based** (`InteractionBody` in `ActivityTimeline.tsx`, Jul 2026 fix). Ingested HTML emails have newlines flattened to spaces at storage (`extractBodyAndAttachments` in `gmail-ingestion.ts` does `\s+→' '`), so the whole quoted thread is one giant line — the old line-anchored `wrote:$` detector never matched and walls of text rendered in full. `findQuoteBoundaryChar` now scans the raw text for the earliest inline marker (`On … wrote:` / Outlook `From:…Sent:` / `--- Original Message ---` / `>`) and collapses from there; a char/line long-clamp catches quote-less long bodies. Display-only — full bodies stay stored (the dispute helper needs them). Don't "fix" this by stripping quotes at ingestion — that would starve §7.2/§7.3.
 - Phase 1.5 manager mailboxes (dedup already handles it); AI fuzzy matcher (layer 4 in `email-matcher.ts`); attachment→R2 harvest; ingest-time quote-stripping (only if stored bodies get heavy — display collapse already solves the UX); **website-enquiry direct integration** (form→OP webhook with address-book search-or-create — NOT email scraping; enquiry form sends From `info@`, so it can't be sender-allowlisted; jon spinning up a dual-repo session for this; see spec §5.4a + §11).
 
@@ -3379,6 +3474,11 @@ methods). Engine: `services/cost-xero-push.ts`; routes: `routes/costs.ts`; UI:
 - **Bills-to-Pay UX**: sortable Due column + Overdue / This Friday / Next Friday / This week / Next 7 days filter pills (client-side over server `due_date` — format dates in LOCAL time, not `toISOString()`, or BST shifts the exact-Friday match) + a per-supplier dropdown. The Xero-status cell collapses status+sync into one clickable pill so row actions don't get pushed off-screen.
 - **Xero reconciliation probe** ("in Xero, not in OP"): `GET /api/costs/reconcile/xero-cot?days=N` (admin/manager) reads SPEND bank transactions on the mapped COT account (`xero_bank_cot_card`) and flags each matched (pushed `xero_object_id`, else amount+near-date) vs unmatched. `XeroCotProbe` panel on the Reconcile tab. Verified live (Jun 2026): unreconciled bank-feed transactions ARE API-readable, so a full matcher is viable — currently kept as an on-demand probe (0 orphans); promote to always-on (dashboard count / chaser / dismiss list) only if orphans recur. Caveat: a truly raw/uncoded statement line won't surface until coded in Xero.
 - **Extraction date guard**: `normaliseCostDate()` in `cost-receipt-extract.ts` — implausibly-future extracted dates (> today + 7d) try the day/month swap and take it if it lands a valid past date (downgrading confidence), else keep + downgrade. Catches the UK-vs-US misread (11/06 → 6 Nov). Prompt is UK day-first; capture modal shows an amber future-date hint.
+
+**Remittance advice (Jul 2026, migration 169).** Optional courtesy email fired from the Bills-to-Pay "mark paid" modal — a tickbox confirming to the payee that their invoice/expense **has been** (or, on a future `paid_value_date`, **is scheduled to be**) paid. Deliberately scoped to freelancers + staff reimbursements (the cases that value it), best-effort supplier fallback. **NOT a PDF** — a branded email note IS a valid remittance advice (no legal format, unlike an invoice). `services/remittance.ts` owns it.
+  - **Recipient is resolved for pre-fill, staff confirm/edit before send (never blind).** `resolveRemittanceContact` order: reimbursement → `uploaded_by` staff person; freelancer-invoice → linked `quote_assignment` person; **remembered** → the address staff manually chose on a *previous* remittance for the same `supplier_name` (a prior `costs.remittance_email`, honoured as an explicit human decision — this is the "manual entry saves" mechanism, no new table); **person name-match** → `supplier_name` against `people` (freelancers first, UNIQUE match only — freelancers are people, not orgs, which is why the first cut surfaced nothing); then org (`xero_contact_id`, name); else none. The modal also has a **person picker** (`GET /people?search=`) to search OP for anyone.
+  - **Decoupled from the money action** — `POST /costs/:id/send-remittance` (admin-only, matches `/pay`) is fired by the frontend *after* a successful pay; a failed email surfaces "paid, but email failed, resend later" and never unwinds the payment. `GET /costs/:id/remittance-contact` drives the pre-fill. Sending stamps `remittance_sent_at`/`remittance_email` (migration 169) → ✉︎ pip on paid rows + the "remembered" reuse.
+  - **`remittance_advice` template** is client-branded but subject/body are composed in the service (supplier-vs-reimbursement wording, paid-vs-scheduled tense) via `subjectOverride`/`bodyHtmlOverride`. Email copy uses plain hyphens, not em-dashes, and includes a "you'll receive a separate remittance for each other invoice" line (heads off the "what about my others?" reply). Rollout: ships OFF `EMAIL_LIVE_TEMPLATES` so it test-redirects until released.
 
 **Push concurrency — per-cost advisory lock (DO NOT REMOVE).** The push is
 triggered from FIVE sites — create / update / approve / pay / the Push-Now

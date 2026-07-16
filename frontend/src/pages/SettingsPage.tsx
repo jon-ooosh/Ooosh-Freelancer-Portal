@@ -4,6 +4,7 @@ import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { Navigate } from 'react-router-dom';
 import XeroBankAccountsSection from '../components/XeroBankAccountsSection';
+import { compressImage } from '../modules/vehicles/lib/image-utils';
 
 interface TeamUser {
   id: string;
@@ -1233,12 +1234,16 @@ function CarnetSettingsSection() {
 
 // ── Studio-sitter lock-up report template ────────────────────────────────────
 
+interface LockupRef { text?: string; photos: string[]; }
 interface LockupTemplateItem {
   id: string;
   label: string;
   type: 'yesno' | 'text' | 'number';
+  section?: string;
   expected?: string;
   end_of_booking_only?: boolean;
+  reference?: LockupRef;
+  note_prompt?: string;
 }
 interface LockupTemplateShape {
   version: number;
@@ -1247,23 +1252,35 @@ interface LockupTemplateShape {
   notes_label?: string;
   lost_property_prompt?: string;
 }
-interface LockupRefPhoto { label: string; url: string; }
 
 function slugId(label: string): string {
   const base = label.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40);
   return base || `item_${Math.random().toString(36).slice(2, 7)}`;
 }
 
+// Reference-photo preview: external URLs render directly, R2 keys via auth blob.
+function RefPhotoPreview({ url }: { url: string }) {
+  const [src, setSrc] = useState<string | null>(url.startsWith('files/') ? null : url);
+  useEffect(() => {
+    let revoke: string | null = null;
+    if (url.startsWith('files/')) {
+      api.blob(`/files/download?key=${encodeURIComponent(url)}`)
+        .then(({ blob }) => { const o = URL.createObjectURL(blob); revoke = o; setSrc(o); })
+        .catch(() => setSrc(null));
+    }
+    return () => { if (revoke) URL.revokeObjectURL(revoke); };
+  }, [url]);
+  if (!src) return <div className="w-full h-16 bg-gray-100 rounded flex items-center justify-center text-[10px] text-gray-400">preview…</div>;
+  return <img src={src} alt="reference" className="w-full h-16 object-cover rounded border border-gray-200" />;
+}
+
 function StudioSitterSettingsSection() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [uploading, setUploading] = useState(false);
+  const [uploadingIdx, setUploadingIdx] = useState<number | null>(null);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
-
   const [tpl, setTpl] = useState<LockupTemplateShape | null>(null);
-  const [photos, setPhotos] = useState<LockupRefPhoto[]>([]);
-  const [photoSrc, setPhotoSrc] = useState<Record<string, string>>({}); // url(key) → objectURL
 
   useEffect(() => { load(); }, []);
 
@@ -1271,22 +1288,18 @@ function StudioSitterSettingsSection() {
     try {
       const res = await api.get<{ data: SystemSetting[] }>('/system-settings?category=studio_sitter');
       const rawTpl = res.data.find(s => s.key === 'studio_sitter_lockup_template')?.value ?? '';
-      const rawPhotos = res.data.find(s => s.key === 'studio_sitter_lockup_reference_photos')?.value ?? '[]';
-      let parsedTpl: LockupTemplateShape;
+      let parsed: LockupTemplateShape;
       try {
         const p = JSON.parse(rawTpl);
-        parsedTpl = { version: Number(p.version) || 1, intro: p.intro ?? '', items: Array.isArray(p.items) ? p.items : [], notes_label: p.notes_label ?? '', lost_property_prompt: p.lost_property_prompt ?? '' };
-      } catch { parsedTpl = { version: 1, intro: '', items: [], notes_label: '', lost_property_prompt: '' }; }
-      setTpl(parsedTpl);
-      let parsedPhotos: LockupRefPhoto[] = [];
-      try { const p = JSON.parse(rawPhotos); if (Array.isArray(p)) parsedPhotos = p.filter((x: any) => x && x.url).map((x: any) => ({ label: String(x.label ?? ''), url: String(x.url) })); } catch { /* ignore */ }
-      setPhotos(parsedPhotos);
-      // Preview each R2-keyed photo (external URLs load directly).
-      for (const ph of parsedPhotos) {
-        if (ph.url.startsWith('files/')) {
-          try { const { blob } = await api.blob(`/files/download?key=${encodeURIComponent(ph.url)}`); setPhotoSrc(prev => ({ ...prev, [ph.url]: URL.createObjectURL(blob) })); } catch { /* skip */ }
-        }
-      }
+        parsed = {
+          version: Number(p.version) || 1,
+          intro: p.intro ?? '',
+          items: Array.isArray(p.items) ? p.items : [],
+          notes_label: p.notes_label ?? '',
+          lost_property_prompt: p.lost_property_prompt ?? '',
+        };
+      } catch { parsed = { version: 1, intro: '', items: [], notes_label: '', lost_property_prompt: '' }; }
+      setTpl(parsed);
     } catch {
       setError('Could not load studio-sitter settings (has migration 168 run?).');
     } finally { setLoading(false); }
@@ -1306,18 +1319,43 @@ function StudioSitterSettingsSection() {
     });
   }
   function addItem() {
-    setTpl(t => t ? { ...t, items: [...t.items, { id: slugId('new item'), label: '', type: 'yesno', expected: 'yes' }] } : t);
+    setTpl(t => t ? { ...t, items: [...t.items, { id: slugId('new item'), label: '', type: 'yesno', expected: 'yes', section: t.items[t.items.length - 1]?.section }] } : t);
   }
   function removeItem(idx: number) {
     setTpl(t => t ? { ...t, items: t.items.filter((_, i) => i !== idx) } : t);
+  }
+
+  async function uploadItemPhoto(idx: number, file: File) {
+    setUploadingIdx(idx); setError('');
+    try {
+      // Reference photos are only "what it should look like" guides — downscale
+      // before upload so they load fast for sitters on 4G (a phone photo is
+      // ~3MB; this lands ~150-250KB). Falls back to the original on any decode
+      // failure (e.g. a non-image).
+      let upload: Blob = file;
+      let name = file.name;
+      try {
+        upload = await compressImage(file, 1400, 0.8);
+        name = file.name.replace(/\.[^.]+$/, '') + '.jpg';
+      } catch { /* keep original */ }
+      const fd = new FormData();
+      fd.append('file', upload, name);
+      fd.append('attachment_only', 'true');
+      const up = await api.upload<{ r2_key: string }>('/files/upload', fd);
+      setTpl(t => t ? { ...t, items: t.items.map((it, i) => i === idx
+        ? { ...it, reference: { text: it.reference?.text, photos: [...(it.reference?.photos ?? []), up.r2_key] } } : it) } : t);
+    } catch (e) { setError(e instanceof Error ? e.message : 'Upload failed'); }
+    finally { setUploadingIdx(null); }
+  }
+  function removeItemPhoto(idx: number, photoIdx: number) {
+    setTpl(t => t ? { ...t, items: t.items.map((it, i) => i === idx
+      ? { ...it, reference: { text: it.reference?.text, photos: (it.reference?.photos ?? []).filter((_, p) => p !== photoIdx) } } : it) } : t);
   }
 
   async function save() {
     if (!tpl) return;
     setSaving(true); setError(''); setSuccess('');
     try {
-      // Assign a slug id to any blank/duplicate, bump version so submitted
-      // reports record which template they answered against.
       const seen = new Set<string>();
       const items = tpl.items
         .filter(it => it.label.trim() !== '')
@@ -1326,9 +1364,13 @@ function StudioSitterSettingsSection() {
           while (seen.has(id)) id = `${id}_${Math.random().toString(36).slice(2, 4)}`;
           seen.add(id);
           const out: LockupTemplateItem = { id, label: it.label.trim(), type: it.type };
-          if (it.type === 'yesno' && it.expected) out.expected = it.expected;
-          if (it.type !== 'yesno' && it.expected) out.expected = it.expected;
+          if (it.section?.trim()) out.section = it.section.trim();
+          if (it.expected) out.expected = it.expected;
           if (it.end_of_booking_only) out.end_of_booking_only = true;
+          if (it.note_prompt?.trim()) out.note_prompt = it.note_prompt.trim();
+          const refText = it.reference?.text?.trim();
+          const refPhotos = (it.reference?.photos ?? []).filter(Boolean);
+          if (refText || refPhotos.length > 0) out.reference = { text: refText || undefined, photos: refPhotos };
           return out;
         });
       const payload: LockupTemplateShape = {
@@ -1338,39 +1380,11 @@ function StudioSitterSettingsSection() {
         notes_label: tpl.notes_label?.trim() || undefined,
         lost_property_prompt: tpl.lost_property_prompt?.trim() || undefined,
       };
-      await api.put('/system-settings', {
-        settings: {
-          studio_sitter_lockup_template: JSON.stringify(payload),
-          studio_sitter_lockup_reference_photos: JSON.stringify(photos),
-        },
-      });
+      await api.put('/system-settings', { settings: { studio_sitter_lockup_template: JSON.stringify(payload) } });
       setSuccess('Lock-up template saved.');
       load();
     } catch (e) { setError(e instanceof Error ? e.message : 'Save failed'); }
     finally { setSaving(false); }
-  }
-
-  async function uploadPhoto(file: File) {
-    setUploading(true); setError(''); setSuccess('');
-    try {
-      const fd = new FormData();
-      fd.append('file', file);
-      fd.append('attachment_only', 'true');
-      const up = await api.upload<{ r2_key: string }>('/files/upload', fd);
-      const next = [...photos, { label: '', url: up.r2_key }];
-      setPhotos(next);
-      try { const { blob } = await api.blob(`/files/download?key=${encodeURIComponent(up.r2_key)}`); setPhotoSrc(prev => ({ ...prev, [up.r2_key]: URL.createObjectURL(blob) })); } catch { /* skip */ }
-      // Persist immediately so an uploaded photo isn't lost if they navigate away.
-      await api.put('/system-settings', { settings: { studio_sitter_lockup_reference_photos: JSON.stringify(next) } });
-      setSuccess('Reference photo added.');
-    } catch (e) { setError(e instanceof Error ? e.message : 'Upload failed'); }
-    finally { setUploading(false); }
-  }
-
-  async function removePhoto(idx: number) {
-    const next = photos.filter((_, i) => i !== idx);
-    setPhotos(next);
-    try { await api.put('/system-settings', { settings: { studio_sitter_lockup_reference_photos: JSON.stringify(next) } }); } catch { /* non-fatal */ }
   }
 
   if (loading || !tpl) return null;
@@ -1381,7 +1395,8 @@ function StudioSitterSettingsSection() {
       <p className="text-sm text-gray-500 mb-4">
         The end-of-night &ldquo;Finish for the night&rdquo; checklist a sitter fills in. Items with an
         <em> expected</em> answer flag anything off-expected. End-of-booking items are hidden when the
-        studio is in use again the next day.
+        studio is in use again the next day. A <em>section</em> groups items under a header; a
+        <em> reference</em> shows &ldquo;what it should look like&rdquo; photos + text on that item.
       </p>
       {error && <div className="mb-3 text-sm text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2">{error}</div>}
       {success && <div className="mb-3 text-sm text-green-700 bg-green-50 border border-green-200 rounded px-3 py-2">{success}</div>}
@@ -1410,12 +1425,7 @@ function StudioSitterSettingsSection() {
           {tpl.items.map((it, idx) => (
             <div key={idx} className="border rounded p-2.5 bg-gray-50">
               <div className="flex gap-2 items-start">
-                <input
-                  className="flex-1 border rounded px-2 py-1 text-sm"
-                  placeholder="Checklist question"
-                  value={it.label}
-                  onChange={(e) => updateItem(idx, { label: e.target.value })}
-                />
+                <input className="flex-1 border rounded px-2 py-1 text-sm" placeholder="Checklist question" value={it.label} onChange={(e) => updateItem(idx, { label: e.target.value })} />
                 <div className="flex flex-col gap-1">
                   <button onClick={() => moveItem(idx, -1)} disabled={idx === 0} className="px-1.5 text-gray-400 hover:text-gray-700 disabled:opacity-30" title="Move up">▲</button>
                   <button onClick={() => moveItem(idx, 1)} disabled={idx === tpl.items.length - 1} className="px-1.5 text-gray-400 hover:text-gray-700 disabled:opacity-30" title="Move down">▼</button>
@@ -1423,6 +1433,10 @@ function StudioSitterSettingsSection() {
                 <button onClick={() => removeItem(idx)} className="px-1.5 text-red-400 hover:text-red-600" title="Remove">✕</button>
               </div>
               <div className="flex flex-wrap gap-3 mt-2 text-xs items-center">
+                <label className="flex items-center gap-1">
+                  <span className="text-gray-500">Section</span>
+                  <input className="border rounded px-1 py-0.5 w-28" placeholder="e.g. Upstairs" value={it.section ?? ''} onChange={(e) => updateItem(idx, { section: e.target.value })} />
+                </label>
                 <label className="flex items-center gap-1">
                   <span className="text-gray-500">Type</span>
                   <select className="border rounded px-1 py-0.5" value={it.type} onChange={(e) => updateItem(idx, { type: e.target.value as LockupTemplateItem['type'] })}>
@@ -1443,40 +1457,47 @@ function StudioSitterSettingsSection() {
                 )}
                 <label className="flex items-center gap-1">
                   <input type="checkbox" checked={!!it.end_of_booking_only} onChange={(e) => updateItem(idx, { end_of_booking_only: e.target.checked })} />
-                  <span className="text-gray-500">End-of-booking only (deep-clean)</span>
+                  <span className="text-gray-500">End-of-booking only</span>
+                </label>
+              </div>
+
+              {/* Per-item reference: "what it should look like" */}
+              <div className="mt-2 border-t border-gray-200 pt-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] text-gray-500">Reference</span>
+                  <input className="flex-1 border rounded px-1.5 py-0.5 text-xs" placeholder="What it should look like (optional caption)"
+                    value={it.reference?.text ?? ''} onChange={(e) => updateItem(idx, { reference: { text: e.target.value, photos: it.reference?.photos ?? [] } })} />
+                  <label className="text-xs px-2 py-0.5 bg-gray-100 hover:bg-gray-200 rounded cursor-pointer">
+                    {uploadingIdx === idx ? 'Uploading…' : '+ Photo'}
+                    <input type="file" accept="image/png,image/jpeg" className="hidden" disabled={uploadingIdx === idx}
+                      onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadItemPhoto(idx, f); e.target.value = ''; }} />
+                  </label>
+                </div>
+                {(it.reference?.photos?.length ?? 0) > 0 && (
+                  <div className="grid grid-cols-3 sm:grid-cols-4 gap-2 mt-2">
+                    {it.reference!.photos.map((p, pi) => (
+                      <div key={pi} className="relative">
+                        <RefPhotoPreview url={p} />
+                        <button onClick={() => removeItemPhoto(idx, pi)} className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-red-500 text-white text-[10px] leading-none" title="Remove">×</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Always-on note box: prompt shown on the form regardless of answer
+                  (e.g. "how did they pay?"). Empty = no note box for this item. */}
+              <div className="mt-2 border-t border-gray-200 pt-2">
+                <label className="flex items-center gap-2">
+                  <span className="text-[11px] text-gray-500 whitespace-nowrap">Always-ask note</span>
+                  <input className="flex-1 border rounded px-1.5 py-0.5 text-xs" placeholder="e.g. How did they pay? (leave blank for none)"
+                    value={it.note_prompt ?? ''} onChange={(e) => updateItem(idx, { note_prompt: e.target.value })} />
                 </label>
               </div>
             </div>
           ))}
           {tpl.items.length === 0 && <p className="text-sm text-gray-400">No items yet.</p>}
         </div>
-      </div>
-
-      <div className="border-t pt-4 mb-4">
-        <div className="flex items-center justify-between mb-2">
-          <span className="text-sm font-medium text-gray-700">Reference photos</span>
-          <label className="text-sm px-2.5 py-1 bg-gray-100 hover:bg-gray-200 rounded cursor-pointer">
-            {uploading ? 'Uploading…' : '+ Add photo'}
-            <input type="file" accept="image/png,image/jpeg" className="hidden" disabled={uploading}
-              onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadPhoto(f); e.target.value = ''; }} />
-          </label>
-        </div>
-        {photos.length === 0 ? (
-          <p className="text-sm text-gray-400">No reference photos. Add a &ldquo;what good looks like&rdquo; shot (alarm panel, key drop, etc.).</p>
-        ) : (
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-            {photos.map((ph, idx) => (
-              <div key={idx} className="border rounded p-2">
-                {(photoSrc[ph.url] || (!ph.url.startsWith('files/') ? ph.url : null))
-                  ? <img src={photoSrc[ph.url] || ph.url} alt={ph.label} className="w-full h-24 object-cover rounded" />
-                  : <div className="w-full h-24 bg-gray-100 rounded flex items-center justify-center text-xs text-gray-400">preview…</div>}
-                <input className="mt-1 w-full border rounded px-1.5 py-0.5 text-xs" placeholder="Caption" value={ph.label}
-                  onChange={(e) => setPhotos(photos.map((p, i) => i === idx ? { ...p, label: e.target.value } : p))} />
-                <button onClick={() => removePhoto(idx)} className="mt-1 text-xs text-red-500 hover:text-red-700">Remove</button>
-              </div>
-            ))}
-          </div>
-        )}
       </div>
 
       <button onClick={save} disabled={saving} className="px-3 py-1.5 bg-purple-600 text-white rounded text-sm disabled:opacity-50">
