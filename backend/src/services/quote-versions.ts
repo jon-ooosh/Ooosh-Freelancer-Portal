@@ -121,6 +121,11 @@ export async function extractQuoteVersion(versionId: string): Promise<QuoteExtra
     systemPrompt: EXTRACT_SYSTEM_PROMPT,
     schema: EXTRACT_SCHEMA,
     userInstruction: 'Extract the line items from this quote PDF.',
+    // A quote's line-item JSON can be long — a big backline quote runs to
+    // dozens of items. The default 1024 truncated the JSON mid-array on the
+    // larger (earlier, un-trimmed) quotes, so JSON.parse failed and they showed
+    // "couldn't read this PDF". Generous headroom fixes it.
+    maxTokens: 8192,
     logTag: 'quote-extract',
   });
   await query(
