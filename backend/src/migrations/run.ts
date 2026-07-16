@@ -208,6 +208,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '171_studio_sitter_lockup_reseed.sql',
         '172_studio_sitter_lockup_reseed2.sql',
         '173_studio_sitter_lockup_chase.sql',
+        '174_auto_cover_excess_from_account.sql',
       ];
 
       for (const migration of migrations) {
