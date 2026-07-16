@@ -1766,8 +1766,7 @@ These originate outside HH entirely — client sends stuff to us, or items found
       the report inline). **Settings editor** `StudioSitterSettingsSection` (admin/manager, on SettingsPage
       next to Carnet) edits intro / notes prompt / lost-property prompt / checklist items (label, type,
       expected, end-of-booking flag, reorder, add/remove) + uploads/removes reference photos.
-    - **Deferred (fast-follow):** the not-submitted accountability chaser (always-fires, like the
-      completion chaser) — not built this PR.
+    - **Not-submitted accountability chaser: SHIPPED** (Slice 5, migration 173 — see below).
   - **Slice 4 follow-up SHIPPED (real Jotform port + why-boxes + photos + reply-email, migration 169):**
     two rounds of jon feedback after a live trial. Template model + submit shape changed:
     - **Real Jotform port (`203154178314046`), "flat + section label + per-item ref" model.** The first
@@ -1843,14 +1842,33 @@ These originate outside HH entirely — client sends stuff to us, or items found
       instead of a raw ~3MB phone photo — the actual fix for "slow to load on 4G". Legacy/external seed
       photos (the Jotform URLs) are unaffected; re-upload via Settings to shrink them. True server-side
       thumbnail variants remain deferred (not needed once uploads are small).
+  - **Slice 5 SHIPPED (handover carry-forward + not-submitted chaser, migration 173):**
+    - **Recent-handover carry-forward (the day-1-doesn't-carry-to-day-2 fix).** The per-night thread
+      anchor (`shift_id`) is kept, but the portal shift page now surfaces the **last few nights' handover
+      notes read-only** above tonight's composer — so a sitter arriving fresh sees prior context. Endpoint
+      `GET /api/portal/studio-sitter/shifts/:date/recent-handover` (`routes/portal.ts`): premises-wide (one
+      studio), most-recent-first, capped at 4 nights within a 21-day lookback, presigned files, access-gated
+      like the thread. `getSitterRecentHandoverFromOP` + Next route `.../recent-handover/route.ts`; a
+      collapsible "Recent handover · last N nights" section on `src/app/shift/[date]/page.tsx`. **Chosen over
+      job-scoped / per-sitter threads** because the assignment unit is a SITE-EVENING (one sitter, whole
+      building, can span two bands/jobs a night) — a premises-wide recent strip respects that and needs no
+      data migration. Staff already see a job's full evening history on the Job Detail `StudioHandoverCard`,
+      so no change needed there. The reply-to-sitter email stays for "someone replied to YOUR note".
+    - **Not-submitted lock-up chaser (the deferred fast-follow, now shipped).** `runLockupChase()` (daily
+      08:45 Europe/London in `scheduler.ts`): for any shift that closed without a lock-up report, reminds
+      the rostered sitter (`studio_lockup_reminder` email — freelancers have no portal bell) + alerts the
+      office (admins/managers bell + `studio_lockup_missing` info@ email). Once per shift, dedup on
+      `studio_sitter_shifts.lockup_chase_sent_at` (migration 173, stamped FIRST so a send failure can't
+      re-fire), only the last 7 days (no ancient-backlog spam), only shifts with an assigned sitter.
 - **General Tasks system** (build with/after D): `tasks` table (anchor to shift/job/nothing),
   visibility everyone/assignee-only, notify-on-done + notify-if-not-done-after-X-days, **staff via
   bell/email, freelancers portal-only (no bell/email)**; dashboard top-right card + "On Today" +
   sitter portal; Today/Tomorrow/Upcoming/Overdue views.
-- **Handover thread**: `interactions` anchored to a new `shift_id` (mirror the `issue_id`/
-  `held_item_id` pattern + the `IS NULL` scoping guard so it doesn't bubble onto other timelines).
+- **Handover thread**: `interactions` anchored to `shift_id` — SHIPPED (Slice 3), with **recent-handover
+  carry-forward** across nights added in Slice 5 (see above). The `IS NULL` scoping guard keeps it off
+  other timelines.
 - **End-of-day report** (Phase E): ✅ SHIPPED (migration 168) — see the **"Slice 4 SHIPPED"** bullet
-  above. Only the not-submitted accountability chaser is still deferred (fast-follow).
+  above. The not-submitted accountability chaser is now SHIPPED too (Slice 5, migration 173).
 - **Calendar endpoint** (Phase F): `GET /api/studio-sitters/calendar?from&to` for the future
   calendar project (roster row shape already close).
 - **Monday.com teardown (cleanup, Jul 2026 — Monday fully retired):** the `reportFallback` /

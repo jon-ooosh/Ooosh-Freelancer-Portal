@@ -844,6 +844,21 @@ export function startScheduler() {
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: Client Storage reminders scheduled daily at 09:20 Europe/London');
 
+  // ── Studio-sitter lock-up chase (morning after) ──────────────────────────
+  // Daily at 08:45 Europe/London. For any shift that closed without a lock-up
+  // report, reminds the rostered sitter + alerts the office. Once per shift
+  // (dedup on lockup_chase_sent_at). See services/studio-sitter-lockup.ts.
+  cron.schedule('45 8 * * *', async () => {
+    try {
+      const { runLockupChase } = await import('../services/studio-sitter-lockup');
+      const n = await runLockupChase();
+      if (n) console.log(`Scheduler: Studio lock-up chase — ${n} shift${n !== 1 ? 's' : ''} chased`);
+    } catch (err) {
+      console.error('Scheduler: Studio lock-up chase failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: Studio lock-up chase scheduled daily at 08:45 Europe/London');
+
   // ── Holding reminders (lost-property chase digest + temp hold-until) ──────
   // Daily at 09:25 Europe/London. Assembles a staff nudge for chases due (the
   // review queue — client emails are sent by a human from there, never here),

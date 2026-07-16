@@ -531,6 +531,79 @@ async function notifyStaffOfLockup(
   }
 }
 
+// ── Not-submitted accountability chase (morning after) ──────────────────────
+
+/**
+ * For any shift that closed without a lock-up report, remind the rostered sitter
+ * (freelancers have no portal bell) + alert the office. Once per shift — dedup on
+ * `lockup_chase_sent_at`, stamped FIRST so a transient send failure can't re-fire
+ * on the next pass. Only chases the last 7 days so it never spams an old backlog.
+ * Runs from the daily scheduler. Returns the number chased.
+ */
+export async function runLockupChase(): Promise<number> {
+  const due = await query(
+    `SELECT s.id AS shift_id, s.shift_date::text AS shift_date,
+            p.first_name, p.last_name, p.email
+     FROM studio_sitter_shifts s
+     JOIN studio_sitter_shift_assignments a ON a.shift_id = s.id AND a.status IN ('assigned','confirmed')
+     JOIN people p ON p.id = a.person_id
+     WHERE s.status <> 'cancelled'
+       AND s.report_submitted_at IS NULL
+       AND s.lockup_chase_sent_at IS NULL
+       AND s.shift_date < CURRENT_DATE
+       AND s.shift_date >= CURRENT_DATE - INTERVAL '7 days'`
+  );
+
+  let sent = 0;
+  for (const row of due.rows) {
+    const dateIso = String(row.shift_date).slice(0, 10);
+    const sitterName = `${row.first_name || ''} ${row.last_name || ''}`.trim() || 'Studio sitter';
+    // Stamp first (dedup): a send failure must not re-fire on the next pass.
+    await query(`UPDATE studio_sitter_shifts SET lockup_chase_sent_at = NOW() WHERE id = $1`, [row.shift_id]);
+
+    // Office bell (admins/managers).
+    try {
+      const staff = await query(
+        `SELECT id FROM users WHERE is_active = true AND role IN ('admin','manager','weekend_manager')`
+      );
+      for (const u of staff.rows) {
+        await query(
+          `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, email_sent_at)
+           VALUES ($1, 'system', $2, $3, 'studio_sitter_shifts', $4, '/studio-sitters', 'normal', NOW())`,
+          [u.id,
+           `🔒 Lock-up not submitted — ${formatLongDate(dateIso)} (${sitterName})`,
+           `${sitterName} hasn't submitted a lock-up report for ${formatLongDate(dateIso)}. A reminder has been sent.`,
+           row.shift_id]
+        );
+      }
+    } catch (err) { console.error('[studio-lockup-chase] bell insert failed:', err); }
+
+    // Office email (info@).
+    try {
+      await emailService.send('studio_lockup_missing', {
+        to: 'info@oooshtours.co.uk',
+        variables: { sitterName, date: formatLongDate(dateIso), rosterUrl: 'https://staff.oooshtours.co.uk/studio-sitters' },
+      });
+    } catch (err) { console.error('[studio-lockup-chase] office email failed:', err); }
+
+    // Sitter reminder email.
+    if (row.email) {
+      try {
+        await emailService.send('studio_lockup_reminder', {
+          to: row.email,
+          variables: {
+            sitterFirstName: row.first_name || 'there',
+            date: formatLongDate(dateIso),
+            lockupUrl: `https://hireforms.oooshtours.co.uk/shift/${dateIso}/lockup`,
+          },
+        });
+      } catch (err) { console.error('[studio-lockup-chase] sitter email failed:', err); }
+    }
+    sent++;
+  }
+  return sent;
+}
+
 // ── Staff reply → email the sitter (so the thread isn't a dead-end) ──────────
 
 /**

@@ -202,6 +202,23 @@ export async function getSitterThreadFromOP(
   return opFetch<SitterThreadResponse>(`/studio-sitter/shifts/${date}/thread`, sessionToken)
 }
 
+export interface SitterRecentHandoverNight {
+  date: string
+  entries: SitterThreadMessage[]
+}
+export interface SitterRecentHandoverResponse {
+  success: boolean
+  nights: SitterRecentHandoverNight[]
+}
+
+/** Read the last few nights' handover notes (read-only carry-forward). */
+export async function getSitterRecentHandoverFromOP(
+  sessionToken: string,
+  date: string
+): Promise<SitterRecentHandoverResponse> {
+  return opFetch<SitterRecentHandoverResponse>(`/studio-sitter/shifts/${date}/recent-handover`, sessionToken)
+}
+
 /** Post a handover note to one evening's thread (text only). */
 export async function postSitterThreadOP(
   sessionToken: string,

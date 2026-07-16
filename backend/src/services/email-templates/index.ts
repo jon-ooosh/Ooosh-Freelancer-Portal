@@ -1677,6 +1677,40 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  // ── Studio-sitter lock-up not submitted — sitter reminder ─────────────
+  // Fires the morning after if a sitter's shift closed without a lock-up
+  // report. Prompts them to finish it (or tell the office).
+  studio_lockup_reminder: {
+    variant: 'client',
+    subject: 'Please finish your studio lock-up — {{date}}',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Hi {{sitterFirstName}},</h2>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.6;">
+        We don't have your end-of-night lock-up report for <strong>{{date}}</strong> yet. When you get a
+        chance, please finish it off — or let the office know if something came up.
+      </p>
+      <p style="margin:0;font-size:14px;color:#334155;">
+        <a href="{{lockupUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Finish the lock-up report →</a>
+      </p>
+    `,
+  },
+
+  // ── Studio-sitter lock-up not submitted — office alert ────────────────
+  studio_lockup_missing: {
+    variant: 'internal',
+    subject: '🔒 Lock-up NOT submitted — {{date}} ({{sitterName}})',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Lock-up report not submitted</h2>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.6;">
+        <strong>{{sitterName}}</strong> was rostered on <strong>{{date}}</strong> but hasn't submitted an
+        end-of-night lock-up report. They've been sent a reminder. Worth a check the studio was closed up OK.
+      </p>
+      <p style="margin:0;font-size:14px;color:#334155;">
+        <a href="{{rosterUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Open the studio sitters roster →</a>
+      </p>
+    `,
+  },
+
   // ── Generic file resend ───────────────────────────────────────────────
   // Used by the Files tab "Email" action — staff sends an arbitrary
   // attachment (delivery note, hire agreement, condition report, jpg

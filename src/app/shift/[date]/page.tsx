@@ -55,6 +55,11 @@ interface ThreadMessage {
   files: SharedFile[]
 }
 
+interface RecentNight {
+  date: string
+  entries: ThreadMessage[]
+}
+
 // =============================================================================
 // HELPERS
 // =============================================================================
@@ -169,6 +174,21 @@ export default function ShiftDetailPage() {
     }
   }, [date])
 
+  // Recent handover — the last few nights' notes carried forward (read-only), so
+  // a sitter arriving fresh sees prior context the per-night thread doesn't carry.
+  const [recentNights, setRecentNights] = useState<RecentNight[]>([])
+  const [recentOpen, setRecentOpen] = useState(false)
+
+  const fetchRecent = useCallback(async () => {
+    try {
+      const response = await fetch(`/api/studio-sitter/shifts/${date}/recent-handover`)
+      const data = await response.json()
+      if (response.ok && data.success) setRecentNights(data.nights || [])
+    } catch (err) {
+      console.error('Failed to load recent handover:', err)
+    }
+  }, [date])
+
   const postNote = useCallback(async () => {
     const content = draft.trim()
     if ((!content && pendingFiles.length === 0) || posting) return
@@ -225,8 +245,9 @@ export default function ShiftDetailPage() {
     if (date) {
       fetchShift()
       fetchThread()
+      fetchRecent()
     }
-  }, [date, fetchShift, fetchThread])
+  }, [date, fetchShift, fetchThread, fetchRecent])
 
   const envelope = shift ? formatEnvelope(shift.planned_start, shift.planned_end) : null
   const isConfirmed = shift?.assignment_status === 'confirmed'
@@ -354,6 +375,60 @@ export default function ShiftDetailPage() {
                 </div>
               )}
             </section>
+
+            {/* Recent handover — the last few nights, carried forward (read-only) */}
+            {recentNights.length > 0 && (
+              <section>
+                <button type="button" onClick={() => setRecentOpen((o) => !o)}
+                  className="w-full flex items-center justify-between text-left">
+                  <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide">
+                    Recent handover <span className="text-gray-400 normal-case font-normal">· last {recentNights.length} night{recentNights.length !== 1 ? 's' : ''}</span>
+                  </h2>
+                  <span className="text-gray-400 text-xs">{recentOpen ? '▾ Hide' : '▸ Show'}</span>
+                </button>
+                {recentOpen && (
+                  <div className="mt-3 space-y-4">
+                    {recentNights.map((night) => (
+                      <div key={night.date}>
+                        <p className="text-xs font-semibold text-gray-600 mb-1.5">{formatLongDate(night.date)}</p>
+                        <div className="space-y-2">
+                          {night.entries.map((m) => (
+                            <div key={m.id} className={`rounded-lg border p-2.5 ${m.from_staff ? 'bg-ooosh-50/60 border-ooosh-100' : 'bg-gray-50 border-gray-100'}`}>
+                              <div className="flex items-center justify-between gap-2 mb-0.5">
+                                <span className="text-[11px] font-semibold text-gray-600">
+                                  {m.author}
+                                  {m.from_staff && <span className="ml-1 text-[9px] px-1 py-0.5 rounded-full bg-ooosh-100 text-ooosh-700 uppercase tracking-wide">Office</span>}
+                                </span>
+                                <span className="text-[10px] text-gray-400 shrink-0">{formatMessageTime(m.created_at)}</span>
+                              </div>
+                              {m.content && m.content !== '(attachment)' && (
+                                <p className="text-xs text-gray-700 whitespace-pre-wrap break-words"><Linkified text={m.content} /></p>
+                              )}
+                              {m.files && m.files.length > 0 && (
+                                <div className="mt-1.5 flex flex-wrap gap-1.5">
+                                  {m.files.map((file, idx) => (
+                                    isImageFile(file) ? (
+                                      <a key={`${m.id}-${idx}`} href={file.url} target="_blank" rel="noopener noreferrer">
+                                        <img src={file.url} alt={file.name} className="w-16 h-16 rounded border border-gray-200 object-cover" />
+                                      </a>
+                                    ) : (
+                                      <a key={`${m.id}-${idx}`} href={file.url} target="_blank" rel="noopener noreferrer"
+                                        className="inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded border border-gray-200 bg-white text-gray-600">
+                                        {fileIcon(file.fileType)} <span className="max-w-[120px] truncate">{file.name}</span>
+                                      </a>
+                                    )
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </section>
+            )}
 
             {/* Handover notes (sitter ⇄ staff thread) */}
             <section>
