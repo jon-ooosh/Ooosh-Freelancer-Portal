@@ -1018,6 +1018,63 @@ router.get('/studio-sitter/shifts/:date/thread', async (req: PortalRequest, res:
   }
 });
 
+// GET /api/portal/studio-sitter/shifts/:date/recent-handover — the last few
+// nights' handover notes (read-only), so a sitter arriving fresh sees the prior
+// context the per-night thread anchor doesn't carry across. Premises-wide (there
+// is one studio), most-recent-first, capped at MAX_NIGHTS within a lookback.
+router.get('/studio-sitter/shifts/:date/recent-handover', async (req: PortalRequest, res: Response) => {
+  try {
+    const date = String(req.params.date);
+    if (!SITTER_DATE_RE.test(date)) { res.status(400).json({ error: 'Invalid date' }); return; }
+    const allowed = req.portalUser!.isStaffShared || await isSitterAssignedTo(req.portalUser!.id, date);
+    if (!allowed) { res.status(403).json({ error: 'Not rostered to this evening' }); return; }
+
+    const result = await query(
+      `SELECT i.id, i.content, i.created_at, i.files, i.created_by, i.author_name,
+              s.shift_date::text AS shift_date,
+              CONCAT(p.first_name, ' ', p.last_name) AS staff_name
+       FROM interactions i
+       JOIN studio_sitter_shifts s ON s.id = i.shift_id AND s.status <> 'cancelled'
+       LEFT JOIN users u ON u.id = i.created_by
+       LEFT JOIN people p ON p.id = u.person_id
+       WHERE s.shift_date < $1
+         AND s.shift_date >= ($1::date - INTERVAL '21 days')
+       ORDER BY s.shift_date DESC, i.created_at ASC
+       LIMIT 120`,
+      [date]
+    );
+
+    // Group by night, keeping the most recent MAX_NIGHTS that carry notes.
+    const MAX_NIGHTS = 4;
+    const byDate = new Map<string, any[]>();
+    for (const row of result.rows) {
+      const d = String(row.shift_date).slice(0, 10);
+      if (!byDate.has(d)) { if (byDate.size >= MAX_NIGHTS) continue; byDate.set(d, []); }
+      byDate.get(d)!.push(row);
+    }
+    const nights = await Promise.all([...byDate.entries()].map(async ([d, rows]) => ({
+      date: d,
+      entries: await Promise.all(rows.map(async (row: any) => {
+        const fromStaff = !!row.created_by;
+        return {
+          id: row.id,
+          content: row.content,
+          created_at: row.created_at,
+          author: fromStaff ? (String(row.staff_name || '').trim() || 'Ooosh') : (row.author_name || 'Studio sitter'),
+          from_staff: fromStaff,
+          mine: false,
+          files: await Promise.all((Array.isArray(row.files) ? row.files : []).map(mapThreadFile)),
+        };
+      })),
+    })));
+
+    res.json({ success: true, nights });
+  } catch (error) {
+    console.error('Portal sitter recent-handover error:', error);
+    res.status(500).json({ error: 'Failed to load recent handover notes' });
+  }
+});
+
 // POST /api/portal/studio-sitter/shifts/:date/thread — add a handover note
 // Accepts JSON ({ content }) or multipart/form-data (content + files[] of
 // images/PDFs). Attachments upload to R2 and store on interactions.files.
