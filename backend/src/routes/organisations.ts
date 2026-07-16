@@ -1243,6 +1243,36 @@ router.post('/:id/do-not-hire', authorize('admin', 'manager'), async (req: AuthR
   }
 });
 
+// POST /api/organisations/:id/auto-cover-excess — Toggle auto-cover-excess-from-
+// held-account (ADMIN ONLY). Opts this client's self-drive hires into being
+// covered from their standing held-on-account balance (migration 169). Kept to
+// admin only — this stops a client collecting fresh excess, so it must not be a
+// staff-level toggle.
+router.post('/:id/auto-cover-excess', authorize('admin'), async (req: AuthRequest, res: Response) => {
+  try {
+    const on = req.body.auto_cover === true;
+    const result = await query(
+      `UPDATE organisations SET
+        auto_cover_excess_from_account = $1,
+        auto_cover_excess_set_at = CASE WHEN $1 THEN NOW() ELSE NULL END,
+        auto_cover_excess_set_by = CASE WHEN $1 THEN $2 ELSE NULL END,
+        updated_at = NOW()
+      WHERE id = $3 AND is_deleted = false
+      RETURNING id, auto_cover_excess_from_account`,
+      [on, req.user?.email || 'unknown', req.params.id]
+    );
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Organisation not found' });
+      return;
+    }
+    await logAudit(req.user!.id, 'organisations', req.params.id as string, 'update', null, { auto_cover_excess_from_account: on });
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Auto-cover excess toggle error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // ── Hire History (all jobs linked to this org) ──────────────────────────
 
 router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
