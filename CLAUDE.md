@@ -1828,6 +1828,21 @@ These originate outside HH entirely — client sends stuff to us, or items found
     - Migration 172 re-seeds the template from the updated `DEFAULT_TEMPLATE` (169/170 taken on main, 171 =
       first real port, 172 = this round). **Lost property already lands in the Holding module** as a
       `held_items` `kind='lost_property'` row (`logShiftLostProperty` → the `/holding/lost-property` list).
+  - **Slice 4 third round SHIPPED (dedup + submit UX + reference downscale):**
+    - **Re-submit dedup (server-authoritative).** `submitLockupReport` throws `LockupAlreadySubmittedError`
+      (→ portal 409) when the shift is already submitted and the caller didn't pass `allow_resubmit`. The
+      portal catches the 409 and shows a "already submitted at HH:MM — re-submit and overwrite?" confirm;
+      confirming re-POSTs with `allow_resubmit=true`. Stops a stale tab left open between shifts from
+      silently overwriting the report + re-spamming the office, while still allowing a deliberate amend.
+    - **Confirm-on-unanswered.** Submitting with any visible item still blank flags "N items unanswered —
+      tap again to submit anyway" (button becomes "Submit anyway (N left)"); a second tap proceeds. Any
+      answer change re-arms the check. (Deliberately NO scroll-to-first-issue — the amber card highlight
+      already marks them.)
+    - **Reference photos downscaled at upload.** `StudioSitterSettingsSection.uploadItemPhoto` runs the
+      shared `compressImage(file, 1400, 0.8)` before the R2 upload, so new reference photos land ~150-250KB
+      instead of a raw ~3MB phone photo — the actual fix for "slow to load on 4G". Legacy/external seed
+      photos (the Jotform URLs) are unaffected; re-upload via Settings to shrink them. True server-side
+      thumbnail variants remain deferred (not needed once uploads are small).
 - **General Tasks system** (build with/after D): `tasks` table (anchor to shift/job/nothing),
   visibility everyone/assignee-only, notify-on-done + notify-if-not-done-after-X-days, **staff via
   bell/email, freelancers portal-only (no bell/email)**; dashboard top-right card + "On Today" +

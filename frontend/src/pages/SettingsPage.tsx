@@ -4,6 +4,7 @@ import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { Navigate } from 'react-router-dom';
 import XeroBankAccountsSection from '../components/XeroBankAccountsSection';
+import { compressImage } from '../modules/vehicles/lib/image-utils';
 
 interface TeamUser {
   id: string;
@@ -1327,8 +1328,18 @@ function StudioSitterSettingsSection() {
   async function uploadItemPhoto(idx: number, file: File) {
     setUploadingIdx(idx); setError('');
     try {
+      // Reference photos are only "what it should look like" guides — downscale
+      // before upload so they load fast for sitters on 4G (a phone photo is
+      // ~3MB; this lands ~150-250KB). Falls back to the original on any decode
+      // failure (e.g. a non-image).
+      let upload: Blob = file;
+      let name = file.name;
+      try {
+        upload = await compressImage(file, 1400, 0.8);
+        name = file.name.replace(/\.[^.]+$/, '') + '.jpg';
+      } catch { /* keep original */ }
       const fd = new FormData();
-      fd.append('file', file);
+      fd.append('file', upload, name);
       fd.append('attachment_only', 'true');
       const up = await api.upload<{ r2_key: string }>('/files/upload', fd);
       setTpl(t => t ? { ...t, items: t.items.map((it, i) => i === idx

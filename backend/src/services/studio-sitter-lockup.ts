@@ -346,12 +346,23 @@ export interface SubmitLockupInput {
   item_notes?: Record<string, { text: string; photos: UploadedPhoto[] }>;
   notes: { text: string; photos: UploadedPhoto[] };
   continuing_tomorrow: boolean;
+  allow_resubmit?: boolean;  // re-submit an already-submitted shift (explicit amend)
 }
 
 export interface SubmitLockupResult {
   ok: boolean;
   shift_id: string;
   exceptions: LockupException[];
+}
+
+/** Thrown when a shift is already submitted and the caller didn't opt into a
+ *  re-submit. The route turns this into a 409 so a stale tab can't silently
+ *  overwrite + re-spam the office. */
+export class LockupAlreadySubmittedError extends Error {
+  constructor(public submittedAt: string) {
+    super('ALREADY_SUBMITTED');
+    this.name = 'LockupAlreadySubmittedError';
+  }
 }
 
 /**
@@ -409,7 +420,7 @@ export async function submitLockupReport(
   try {
     await client.query('BEGIN');
     const shiftRes = await client.query(
-      `SELECT id FROM studio_sitter_shifts WHERE shift_date = $1 AND status <> 'cancelled' LIMIT 1 FOR UPDATE`,
+      `SELECT id, report_submitted_at FROM studio_sitter_shifts WHERE shift_date = $1 AND status <> 'cancelled' LIMIT 1 FOR UPDATE`,
       [date]
     );
     if (shiftRes.rows.length === 0) {
@@ -417,6 +428,12 @@ export async function submitLockupReport(
       throw new Error('No shift for this evening');
     }
     shiftId = shiftRes.rows[0].id;
+    // Dedup: already submitted + not an explicit amend → block (stops a stale tab
+    // silently overwriting the report + re-spamming the office).
+    if (shiftRes.rows[0].report_submitted_at && !input.allow_resubmit) {
+      await client.query('ROLLBACK');
+      throw new LockupAlreadySubmittedError(String(shiftRes.rows[0].report_submitted_at));
+    }
 
     await client.query(
       `UPDATE studio_sitter_shifts

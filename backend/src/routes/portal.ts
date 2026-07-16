@@ -22,7 +22,7 @@ import { resolveClientEmailTarget, buildFallbackBanner, logFallbackToTimeline } 
 import { uploadToR2, isR2Configured, getPresignedDownloadUrl } from '../config/r2';
 import { generateDeliveryNotePdf, DeliveryNoteItem } from '../services/delivery-note-pdf';
 import { getSitterShifts, getSitterShiftDetail, isSitterAssignedTo } from '../services/studio-sitter';
-import { getLockupContext, submitLockupReport, logShiftLostProperty } from '../services/studio-sitter-lockup';
+import { getLockupContext, submitLockupReport, logShiftLostProperty, LockupAlreadySubmittedError } from '../services/studio-sitter-lockup';
 
 // Stable UUID seeded by migration 031 — used as created_by for portal-driven
 // auto-actions (the freelancer is a `people` row, not a `users` row, so we
@@ -1222,9 +1222,14 @@ router.post('/studio-sitter/shifts/:date/lockup', lockupUploadMw, async (req: Po
       item_notes,
       notes: { text: notesText, photos: notesPhotos },
       continuing_tomorrow: parsed.continuing_tomorrow === true || parsed.continuing_tomorrow === 'true',
+      allow_resubmit: parsed.allow_resubmit === true || parsed.allow_resubmit === 'true',
     });
     res.json({ success: true, ...result });
   } catch (error) {
+    if (error instanceof LockupAlreadySubmittedError) {
+      res.status(409).json({ error: 'This shift has already been submitted.', already_submitted: true, submitted_at: error.submittedAt });
+      return;
+    }
     const msg = error instanceof Error ? error.message : 'Failed to submit lock-up report';
     if (msg === 'No shift for this evening') { res.status(404).json({ error: msg }); return; }
     console.error('Portal sitter lock-up submit error:', error);
