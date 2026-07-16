@@ -203,7 +203,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '166_chase_default_sender.sql',
         '167_auto_chase_set_by.sql',
         '168_studio_sitter_lockup_report.sql',
-  '169_auto_cover_excess_from_account.sql',
+  '174_auto_cover_excess_from_account.sql',
       ];
 
       for (const migration of migrations) {
