@@ -31,7 +31,8 @@ export type EmailBucket =
   | 'hire_forms'
   | 'carnet'
   | 'excess'
-  | 'delivery_on_day';
+  | 'delivery_on_day'
+  | 'rehearsal_info';
 
 /** Canonical bucket list — render order on the picker UI follows this array. */
 export const EMAIL_BUCKETS: ReadonlyArray<{
@@ -68,6 +69,11 @@ export const EMAIL_BUCKETS: ReadonlyArray<{
     id: 'delivery_on_day',
     label: 'Delivery / on-the-day',
     description: 'Delivery notes, collection confirmations, check-in summaries.',
+  },
+  {
+    id: 'rehearsal_info',
+    label: 'Rehearsal info pack',
+    description: 'Pre-hire studio info pack (how to get here, parking, wifi, session times).',
   },
 ];
 
@@ -116,6 +122,9 @@ export const TEMPLATE_BUCKETS: Readonly<Record<string, EmailBucket>> = {
   collection_confirmation: 'delivery_on_day',
   vehicle_checked_in: 'delivery_on_day',
   vehicle_swapped: 'delivery_on_day',
+
+  // Rehearsal info pack
+  rehearsal_info_pack: 'rehearsal_info',
 };
 
 /**

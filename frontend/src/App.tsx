@@ -23,7 +23,7 @@ import BacklinePage from './pages/BacklinePage';
 import BacklineMatcherPage from './pages/BacklineMatcherPage';
 import CarnetsPage from './pages/CarnetsPage';
 import CarnetDetailPage from './pages/CarnetDetailPage';
-import StudioSittersPage from './pages/StudioSittersPage';
+import RehearsalsPage from './pages/RehearsalsPage';
 import IssuesPage from './pages/IssuesPage';
 import ProblemsPage from './pages/ProblemsPage';
 import IssueDetailPage from './pages/IssueDetailPage';
@@ -209,7 +209,9 @@ export default function App() {
                 <Route path="/operations/backline-matcher" element={<BacklineMatcherPage />} />
                 <Route path="/operations/carnets" element={<CarnetsPage />} />
                 <Route path="/operations/carnets/:id" element={<CarnetDetailPage />} />
-                <Route path="/operations/studio-sitters" element={<StudioSittersPage />} />
+                <Route path="/operations/rehearsals" element={<RehearsalsPage />} />
+                {/* Studio Sitters re-homed under the Rehearsals hub — keep old links working */}
+                <Route path="/operations/studio-sitters" element={<Navigate to="/operations/rehearsals?tab=sitters" replace />} />
                 <Route path="/operations/fill-gap/:jobId" element={<FillGapPage />} />
                 <Route path="/operations/issues" element={<IssuesPage />} />
                 <Route path="/operations/issues/:id" element={<IssuesPage />} />

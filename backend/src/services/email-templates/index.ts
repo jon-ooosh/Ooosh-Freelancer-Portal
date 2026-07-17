@@ -19,6 +19,46 @@ const templates: Record<string, EmailTemplate> = {
 
   // ── Client-facing templates ────────────────────────────────────────────
 
+  rehearsal_info_pack: {
+    variant: 'client',
+    preheader: 'Everything you need for your rehearsals with us',
+    subject: 'Your rehearsals with Ooosh{{#if dates}} — {{dates}}{{/if}}{{#if jobNumber}} (#{{jobNumber}}){{/if}}',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Your rehearsals with Ooosh</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Hi {{clientName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Looking forward to having <strong>{{jobName}}</strong>{{#if jobNumber}} (job <strong>#{{jobNumber}}</strong>){{/if}} in with us{{#if dates}} — <strong>{{dates}}</strong>{{/if}}.
+        Here's everything you need to know beforehand to help things run smoothly.
+      </p>
+      {{#if directions}}
+        <p style="margin:0 0 6px;font-size:15px;color:#1e293b;font-weight:600;">🚗 How to find us</p>
+        <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">{{directions}}</p>
+      {{/if}}
+      {{#if parking}}
+        <p style="margin:0 0 6px;font-size:15px;color:#1e293b;font-weight:600;">🅿️ Parking</p>
+        <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">{{parking}}</p>
+      {{/if}}
+      {{#if wifi}}
+        <p style="margin:0 0 6px;font-size:15px;color:#1e293b;font-weight:600;">📶 WiFi</p>
+        <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">{{wifi}}</p>
+      {{/if}}
+      {{#if amenities}}
+        <p style="margin:0 0 6px;font-size:15px;color:#1e293b;font-weight:600;">🥪 Local shops & takeaways</p>
+        <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">{{amenities}}</p>
+      {{/if}}
+      {{#if houseRules}}
+        <p style="margin:0 0 6px;font-size:15px;color:#1e293b;font-weight:600;">ℹ️ Good to know</p>
+        <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">{{houseRules}}</p>
+      {{/if}}
+      {{#if studioContact}}
+        <p style="margin:0 0 16px;padding:12px 14px;background-color:#f8fafc;border-radius:8px;font-size:14px;color:#334155;line-height:1.6;">
+          <strong>On the day:</strong> {{studioContact}}
+        </p>
+      {{/if}}
+      <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">Any questions before you arrive, just reply to this email or give us a call.</p>
+    `,
+  },
+
   holding_received: {
     variant: 'client',
     preheader: 'Your items have arrived with us',

@@ -8,6 +8,7 @@ import OrganisationMergeModal from '../components/OrganisationMergeModal';
 import FileUpload from '../components/FileUpload';
 import ActivityTimeline from '../components/ActivityTimeline';
 import ExcessHistorySection from '../components/ExcessHistorySection';
+import RehearsalProfileSection from '../components/RehearsalProfileSection';
 import { IssuesListSection } from '../components/IssuesListSection';
 import HireHistoryTab from '../components/HireHistoryTab';
 import HeldItemsSection from '../components/HeldItemsSection';
@@ -124,7 +125,13 @@ export default function OrganisationDetailPage() {
   const [showDnoForm, setShowDnoForm] = useState(false);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'people' | 'relationships' | 'hire_history' | 'timeline' | 'details' | 'excess' | 'issues' | 'held' | 'storage' | 'pcns' | 'ooh'>('people');
+  const [activeTab, setActiveTab] = useState<'people' | 'relationships' | 'hire_history' | 'timeline' | 'details' | 'excess' | 'issues' | 'held' | 'storage' | 'pcns' | 'ooh' | 'rehearsal'>('people');
+
+  // Open a specific tab when linked with ?tab=… (e.g. the Job Detail rehearsal card).
+  useEffect(() => {
+    const t = new URLSearchParams(window.location.search).get('tab');
+    if (t === 'rehearsal') setActiveTab('rehearsal');
+  }, [id]);
   const [issuesCount, setIssuesCount] = useState<number | null>(null);
   const [pcnCount, setPcnCount] = useState<number | null>(null);
   const [heldCount, setHeldCount] = useState<number | null>(null);
@@ -739,7 +746,7 @@ export default function OrganisationDetailPage() {
       {/* Tabs */}
       <div className="border-b border-gray-200 mb-6">
         <nav className="flex gap-6">
-          {(['people', 'relationships', 'hire_history', 'timeline', 'details', 'excess', 'issues', 'held', 'storage', 'pcns', 'ooh'] as const).map((tab) => {
+          {(['people', 'relationships', 'hire_history', 'timeline', 'details', 'excess', 'issues', 'held', 'storage', 'rehearsal', 'pcns', 'ooh'] as const).map((tab) => {
             const relCount = (org.relationships || []).filter(r => r.status === 'active').length;
             // linked_job_count comes from the backend's UNION of job_organisations + jobs.client_id,
             // matching the Hire History tab content. Falls back to local linked_jobs.length only
@@ -755,6 +762,7 @@ export default function OrganisationDetailPage() {
               : tab === 'issues' ? `Issues${issuesCount ? ` (${issuesCount})` : ''}`
               : tab === 'held' ? (heldCount ? `Held Items (${heldCount})` : 'Held Items')
               : tab === 'storage' ? 'Storage'
+              : tab === 'rehearsal' ? 'Rehearsals'
               : tab === 'pcns' ? (pcnCount ? `PCNs (${pcnCount})` : 'PCNs')
               : tab === 'ooh' ? 'OOH'
               : 'Details';
@@ -1572,6 +1580,10 @@ export default function OrganisationDetailPage() {
       {/* Storage Tab — Client Storage module (recurring storage tenancies) */}
       {activeTab === 'storage' && id && (
         <StorageHistorySection entityType="organisation" entityId={id} />
+      )}
+
+      {activeTab === 'rehearsal' && id && (
+        <RehearsalProfileSection entityType="organisation" entityId={id} />
       )}
 
       {/* Issues Tab — OP job_issues backed (Stage 3, May 2026).
