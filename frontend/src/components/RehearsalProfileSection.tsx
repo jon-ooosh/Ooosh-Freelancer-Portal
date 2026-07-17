@@ -13,6 +13,7 @@ interface ProfileFile {
   filename: string;
   content_type?: string | null;
   label?: string | null;
+  comment?: string | null;
 }
 interface Profile {
   organisation_id: string;
@@ -30,7 +31,7 @@ interface Profile {
 }
 
 const TEXT_FIELDS: [keyof Profile, string, string][] = [
-  ['room_setup', 'Room setup', 'Round a table / forward-facing / their own layout…'],
+  ['room_setup', 'Room setup', 'How they like the room laid out — backline positions, their own layout…'],
   ['mic_list', 'Mics they usually ask for', ''],
   ['power_notes', 'Power / distro needs', ''],
   ['pa_monitoring', 'PA & monitoring preferences', 'Wedges / IEMs, monitor mix quirks…'],
@@ -53,6 +54,13 @@ export default function RehearsalProfileSection({ entityId }: { entityType?: str
   const [saved, setSaved] = useState(false);
   const [uploading, setUploading] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
+  // Tag + comment for the next upload, and inline post-upload editing.
+  const [newTag, setNewTag] = useState('');
+  const [newComment, setNewComment] = useState('');
+  const [editingKey, setEditingKey] = useState<string | null>(null);
+  const [editTag, setEditTag] = useState('');
+  const [editComment, setEditComment] = useState('');
+  const [savingEdit, setSavingEdit] = useState(false);
 
   const load = () => {
     api.get<{ data: Profile | null }>(`/rehearsals/profile/${entityId}`)
@@ -100,12 +108,37 @@ export default function RehearsalProfileSection({ entityId }: { entityType?: str
       const up = await api.upload<{ r2_key: string; filename: string; content_type: string; size_bytes: number }>('/files/upload', fd);
       const r = await api.post<{ data: Profile }>(`/rehearsals/profile/${entityId}/files`, {
         r2_key: up.r2_key, filename: up.filename, content_type: up.content_type, size_bytes: up.size_bytes,
+        label: newTag.trim() || null, comment: newComment.trim() || null,
       });
       setP((c) => ({ ...c, files: r.data.files ?? [] }));
+      setNewTag('');
+      setNewComment('');
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Upload failed');
     } finally {
       setUploading(false);
+    }
+  };
+
+  const startEditFile = (f: ProfileFile) => {
+    setEditingKey(f.r2_key);
+    setEditTag(f.label ?? '');
+    setEditComment(f.comment ?? '');
+  };
+  const cancelEditFile = () => setEditingKey(null);
+  const saveEditFile = async (key: string) => {
+    setSavingEdit(true);
+    try {
+      const r = await api.patch<{ data: Profile }>(
+        `/rehearsals/profile/${entityId}/files/${encodeURIComponent(key)}`,
+        { label: editTag.trim() || null, comment: editComment.trim() || null }
+      );
+      setP((c) => ({ ...c, files: r.data.files ?? [] }));
+      setEditingKey(null);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to update file');
+    } finally {
+      setSavingEdit(false);
     }
   };
 
@@ -183,26 +216,89 @@ export default function RehearsalProfileSection({ entityId }: { entityType?: str
         </div>
       </div>
 
-      {/* Desk files / saved mixes */}
+      {/* Desk files / saved mixes / pictures */}
       <div>
-        <div className="flex items-center justify-between mb-2">
-          <label className="text-sm font-medium text-gray-700">Desk files & documents</label>
+        <label className="block text-sm font-medium text-gray-700 mb-1">Desk files, pictures & documents</label>
+        <p className="text-xs text-gray-500 mb-2">
+          Stage plots, saved desk files, a photo of their preferred layout… Surfaces read-only on every booking's Files tab.
+        </p>
+
+        {/* Upload row — optional tag + comment, like the standard Files tab */}
+        <div className="flex flex-wrap items-end gap-2 mb-3">
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">Tag</label>
+            <input
+              value={newTag}
+              onChange={(e) => setNewTag(e.target.value)}
+              placeholder="e.g. Stage plot"
+              className="w-40 rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-ooosh-500 focus:ring-ooosh-500"
+            />
+          </div>
+          <div className="flex-1 min-w-[12rem]">
+            <label className="block text-xs text-gray-500 mb-1">Comment</label>
+            <input
+              value={newComment}
+              onChange={(e) => setNewComment(e.target.value)}
+              placeholder="Optional note about this file…"
+              className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-ooosh-500 focus:ring-ooosh-500"
+            />
+          </div>
           <button
             onClick={() => fileInput.current?.click()}
             disabled={uploading}
-            className="text-sm text-ooosh-600 hover:underline disabled:opacity-50"
+            className="rounded bg-ooosh-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-ooosh-700 disabled:opacity-50"
           >
             {uploading ? 'Uploading…' : '+ Upload file'}
           </button>
           <input ref={fileInput} type="file" className="hidden" onChange={onFile} />
         </div>
-        <div className="space-y-1.5">
-          {p.files.length === 0 && <p className="text-sm text-gray-400">No files yet — e.g. a saved desk file for the in-house digital desk.</p>}
+
+        <div className="space-y-2">
+          {p.files.length === 0 && <p className="text-sm text-gray-400">No files yet — e.g. a stage plot or a saved desk file.</p>}
           {p.files.map((f) => (
-            <div key={f.r2_key} className="flex items-center gap-2 text-sm">
-              <button onClick={() => openFile(f)} className="text-ooosh-600 hover:underline truncate">{f.filename}</button>
-              <button onClick={() => removeFile(f.r2_key)} className="text-gray-400 hover:text-red-500 text-xs ml-auto" title="Remove">Remove</button>
-            </div>
+            editingKey === f.r2_key ? (
+              <div key={f.r2_key} className="rounded border border-gray-200 p-2.5 space-y-2">
+                <div className="text-sm font-medium text-gray-700 truncate">{f.filename}</div>
+                <div className="flex flex-wrap gap-2">
+                  <input
+                    value={editTag}
+                    onChange={(e) => setEditTag(e.target.value)}
+                    placeholder="Tag"
+                    className="w-40 rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-ooosh-500 focus:ring-ooosh-500"
+                  />
+                  <input
+                    value={editComment}
+                    onChange={(e) => setEditComment(e.target.value)}
+                    placeholder="Comment"
+                    className="flex-1 min-w-[10rem] rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-ooosh-500 focus:ring-ooosh-500"
+                  />
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => saveEditFile(f.r2_key)}
+                    disabled={savingEdit}
+                    className="rounded bg-ooosh-600 px-3 py-1 text-xs font-medium text-white hover:bg-ooosh-700 disabled:opacity-50"
+                  >
+                    {savingEdit ? 'Saving…' : 'Save'}
+                  </button>
+                  <button onClick={cancelEditFile} className="text-xs text-gray-500 hover:underline">Cancel</button>
+                </div>
+              </div>
+            ) : (
+              <div key={f.r2_key} className="flex items-start gap-2 text-sm">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <button onClick={() => openFile(f)} className="text-ooosh-600 hover:underline truncate">{f.filename}</button>
+                    {f.label && (
+                      <span className="inline-block rounded bg-gray-100 text-gray-600 text-xs px-1.5 py-0.5">{f.label}</span>
+                    )}
+                  </div>
+                  {f.comment && <p className="text-xs text-gray-500 mt-0.5">{f.comment}</p>}
+                </div>
+                <button onClick={() => startEditFile(f)} className="text-gray-400 hover:text-ooosh-600 text-xs" title="Edit tag / comment">Edit</button>
+                <button onClick={() => removeFile(f.r2_key)} className="text-gray-400 hover:text-red-500 text-xs" title="Remove">Remove</button>
+              </div>
+            )
           ))}
         </div>
       </div>

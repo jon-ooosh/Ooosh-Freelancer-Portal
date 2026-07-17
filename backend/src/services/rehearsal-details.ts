@@ -34,6 +34,7 @@ export interface ProfileFile {
   content_type?: string | null;
   size_bytes?: number | null;
   label?: string | null;
+  comment?: string | null;
   uploaded_at?: string;
   uploaded_by?: string | null;
 }
@@ -173,6 +174,33 @@ export async function addProfileFile(orgId: string, file: ProfileFile): Promise<
     [orgId, JSON.stringify([file])]
   );
   return (await getRehearsalProfile(orgId))!;
+}
+
+/** Edit a desk file's tag (label) / comment in place. */
+export async function updateProfileFile(
+  orgId: string,
+  r2Key: string,
+  updates: { label?: string | null; comment?: string | null }
+): Promise<RehearsalProfile | null> {
+  const profile = await getRehearsalProfile(orgId);
+  if (!profile) return null;
+  let found = false;
+  const files = (profile.files ?? []).map((f) => {
+    if (f.r2_key !== r2Key) return f;
+    found = true;
+    return {
+      ...f,
+      ...('label' in updates ? { label: updates.label ?? null } : {}),
+      ...('comment' in updates ? { comment: updates.comment ?? null } : {}),
+    };
+  });
+  if (!found) return profile;
+  await query(
+    `UPDATE organisation_rehearsal_profile SET files = $2::jsonb, updated_at = NOW()
+     WHERE organisation_id = $1`,
+    [orgId, JSON.stringify(files)]
+  );
+  return getRehearsalProfile(orgId);
 }
 
 export async function removeProfileFile(orgId: string, r2Key: string): Promise<RehearsalProfile | null> {

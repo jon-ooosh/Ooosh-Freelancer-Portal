@@ -1696,6 +1696,24 @@ export default function JobDetailPage() {
   const [pushingStatusToHH, setPushingStatusToHH] = useState(false);
   const [prepChecklistKey, setPrepChecklistKey] = useState(0);
   const [internalToggling, setInternalToggling] = useState(false);
+  // Band rehearsal-profile files surfaced on the Files tab (read-only). Fetched
+  // at page level so the count feeds the Files tab badge without opening the tab.
+  const [rehearsalFiles, setRehearsalFiles] = useState<
+    { r2_key: string; filename: string; label?: string | null; comment?: string | null }[]
+  >([]);
+  const [rehearsalAnchor, setRehearsalAnchor] = useState<{ id: string; name: string | null } | null>(null);
+  const hasRehearsal = !!hhSyncResult?.derivation?.flags?.has_rehearsal;
+  useEffect(() => {
+    if (!id || !hasRehearsal) { setRehearsalFiles([]); setRehearsalAnchor(null); return; }
+    let cancelled = false;
+    api.get<{ data: { anchorOrg: { id: string; name: string | null } | null; profile: { files?: typeof rehearsalFiles } | null } }>(
+      `/rehearsals/job/${id}`
+    )
+      .then((r) => { if (!cancelled) { setRehearsalFiles(r.data.profile?.files ?? []); setRehearsalAnchor(r.data.anchorOrg); } })
+      .catch(() => { if (!cancelled) { setRehearsalFiles([]); setRehearsalAnchor(null); } });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, hasRehearsal]);
   const editNameRef = useRef<HTMLInputElement>(null);
   const editHHRef = useRef<HTMLInputElement>(null);
   const clientSearchRef = useRef<HTMLDivElement>(null);
@@ -2949,7 +2967,7 @@ export default function JobDetailPage() {
   })();
   // ─────────────────────────────────────────────────────────────────────────
 
-  const fileCount = (job.files || []).length;
+  const fileCount = (job.files || []).length + rehearsalFiles.length;
   const hhJobUrl = job.hh_job_number
     ? `https://myhirehop.com/job.php?id=${job.hh_job_number}`
     : null;
@@ -4890,7 +4908,7 @@ export default function JobDetailPage() {
       {/* Files Tab */}
       {activeTab === 'files' && id && (
         <>
-          <RehearsalProfileFiles jobId={id} />
+          <RehearsalProfileFiles anchorOrg={rehearsalAnchor} files={rehearsalFiles} />
           <JobFilesSection
             jobId={id}
             files={job.files || []}
