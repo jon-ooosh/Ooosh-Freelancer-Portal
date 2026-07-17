@@ -33,6 +33,7 @@ import CostsPage from './pages/CostsPage';
 import VE103BCertificatesPage from './pages/VE103BCertificatesPage';
 import InboxPage from './pages/InboxPage';
 import LostCancelledPage from './pages/LostCancelledPage';
+import LeadsPage from './pages/LeadsPage';
 import FillGapPage from './pages/FillGapPage';
 import FreelancerBookoutShell from './pages/FreelancerBookoutShell';
 import FreelancerCheckinShell from './pages/FreelancerCheckinShell';
@@ -200,6 +201,7 @@ export default function App() {
                 <Route path="/jobs" element={<JobsPage />} />
                 <Route path="/jobs/returns" element={<ReturnsPage />} />
                 <Route path="/jobs/lost-cancelled" element={<LostCancelledPage />} />
+                <Route path="/jobs/leads" element={<LeadsPage />} />
                 <Route path="/jobs/:id" element={<JobDetailPage />} />
                 <Route path="/pipeline" element={<PipelinePage />} />
                 <Route path="/operations/transport" element={<TransportOpsPage />} />

@@ -2,7 +2,7 @@
 
 **Status:** proposed — awaiting sign-off before build.
 **Branch:** `claude/awesome-planck-0a8u19`.
-**Next free migration:** 174 (173 is the latest in `run.ts`).
+**Next free migration:** 176 (175 `leads` is the latest in `run.ts` after merging main).
 
 Companion to `docs/REHEARSALS-SPEC.md` (studio-sitter cover). This spec covers the
 *next* chunk: growing Rehearsals from "sitter cover" into the single place for a
@@ -41,7 +41,7 @@ pre-hire **info pack** email, and a persistent **band rehearsal profile** (the
 
 ---
 
-## 2. Data model — Migration 174 (`rehearsal_details_and_profile`)
+## 2. Data model — Migration 176 (`rehearsal_details_and_profile`)
 
 ### 2.1 `rehearsal_job_details` — per-job intake (one row per job)
 
@@ -98,7 +98,7 @@ INSERT INTO system_settings (key, value, label, category, value_type, sort_order
 ON CONFLICT (key) DO NOTHING;
 ```
 
-**Remember:** add `174_rehearsal_details_and_profile.sql` to the `migrations` array in
+**Remember:** add `176_rehearsal_details_and_profile.sql` to the `migrations` array in
 `backend/src/migrations/run.ts`.
 
 ---
@@ -222,7 +222,7 @@ sitter portal — deferred; the sitter portal already surfaces `share_with_freel
 
 ## 6. Build order
 
-1. Migration 174 (both tables + settings seed) + add to `run.ts`.
+1. Migration 176 (both tables + settings seed) + add to `run.ts`.
 2. `services/rehearsal-details.ts` + `routes/rehearsals.ts` (mount in `routes/index.ts`).
 3. `rehearsal_info_pack` template + `rehearsal_info` routing bucket.
 4. Nav re-home + `RehearsalsPage` hub (Sitters tab + Info Pack settings tab) + redirect.

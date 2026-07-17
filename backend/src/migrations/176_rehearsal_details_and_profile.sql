@@ -1,4 +1,4 @@
--- 174: Rehearsal job details + band rehearsal profile + info-pack boilerplate
+-- 176: Rehearsal job details + band rehearsal profile + info-pack boilerplate
 --
 -- Grows the Rehearsals module past studio-sitter cover (see
 -- docs/REHEARSAL-INFO-AND-PROFILE-SPEC.md). Three pieces:
