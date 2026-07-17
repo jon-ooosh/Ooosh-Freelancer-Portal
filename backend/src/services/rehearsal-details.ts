@@ -263,14 +263,19 @@ function fmtRange(from: string | null, to: string | null): string {
 }
 
 /**
- * Send the client info pack for a job. Composes boilerplate (system_settings,
+ * Compose the info-pack email content for a job: boilerplate (system_settings,
  * category 'rehearsals') + per-job merge (dates + rooms from the rehearsal
- * detection), stamps info_pack_sent_at/_by, logs a timeline interaction.
+ * detection) + resolved recipient. Shared by send + preview so what you preview
+ * is byte-for-byte what sends.
  */
-export async function sendInfoPack(
-  jobId: string,
-  userId: string | null
-): Promise<{ recipient: string; isFallback: boolean }> {
+async function composeInfoPack(jobId: string): Promise<{
+  to: string;
+  cc: string[];
+  prependBanner: string | undefined;
+  variables: Record<string, string>;
+  recipient: string;
+  isFallback: boolean;
+}> {
   const jobRes = await query(
     `SELECT id, hh_job_number, job_name, job_date, job_end,
             hh_derived_flags->'rehearsal_detail' AS rehearsal_detail
@@ -309,10 +314,12 @@ export async function sendInfoPack(
     ? buildFallbackBanner({ jobId, clientName: target.clientName, jobNumber: target.jobNumber, jobName: target.jobName })
     : undefined;
 
-  await emailService.send('rehearsal_info_pack', {
+  return {
     to: target.primaryEmail,
     cc: target.ccEmails,
     prependBanner,
+    recipient: target.primaryEmail,
+    isFallback: target.isFallback,
     variables: {
       clientName: target.primaryFirstName,
       jobName: job.job_name || 'your rehearsals',
@@ -326,6 +333,43 @@ export async function sendInfoPack(
       houseRules: settings.rehearsal_house_rules || '',
       studioContact: settings.rehearsal_contact || '',
     },
+  };
+}
+
+/**
+ * Preview the info pack WITHOUT sending — returns the rendered subject + HTML
+ * (client-facing, no test banner) + resolved recipient. Powers the "preview
+ * before send" modal so staff can see exactly what they're about to send.
+ */
+export async function previewInfoPack(
+  jobId: string
+): Promise<{ subject: string; html: string; recipient: string; isFallback: boolean }> {
+  const c = await composeInfoPack(jobId);
+  const rendered = emailService.renderPreview('rehearsal_info_pack', {
+    to: c.to,
+    variables: c.variables,
+    prependBanner: c.prependBanner,
+  });
+  if ('error' in rendered) throw new Error(rendered.error);
+  return { subject: rendered.subject, html: rendered.html, recipient: c.recipient, isFallback: c.isFallback };
+}
+
+/**
+ * Send the client info pack for a job. Composes boilerplate (system_settings,
+ * category 'rehearsals') + per-job merge (dates + rooms from the rehearsal
+ * detection), stamps info_pack_sent_at/_by, logs a timeline interaction.
+ */
+export async function sendInfoPack(
+  jobId: string,
+  userId: string | null
+): Promise<{ recipient: string; isFallback: boolean }> {
+  const c = await composeInfoPack(jobId);
+
+  await emailService.send('rehearsal_info_pack', {
+    to: c.to,
+    cc: c.cc,
+    prependBanner: c.prependBanner,
+    variables: c.variables,
   });
 
   await query(
@@ -336,10 +380,10 @@ export async function sendInfoPack(
     [jobId, userId]
   );
 
-  if (target.isFallback) {
+  if (c.isFallback) {
     await logFallbackToTimeline({ jobId, templateId: 'rehearsal_info_pack' });
   } else {
-    const content = `📋 Rehearsal info pack sent to ${target.primaryEmail}.`;
+    const content = `📋 Rehearsal info pack sent to ${c.recipient}.`;
     await query(
       `INSERT INTO interactions (type, content, job_id, created_by, source)
        VALUES ('email', $1, $2, $3, 'system')`,
@@ -347,5 +391,5 @@ export async function sendInfoPack(
     );
   }
 
-  return { recipient: target.primaryEmail, isFallback: target.isFallback };
+  return { recipient: c.recipient, isFallback: c.isFallback };
 }

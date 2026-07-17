@@ -339,6 +339,26 @@ upload in `RehearsalProfileSection.onFile`. #3 + #5 were built together on the c
   passed down, no self-fetch) and renders the tag chip + comment. `fileCount` = job files +
   surfaced rehearsal-profile files.
 
+### 5d. Round-2 follow-up #2 (Jul 2026)
+
+- **Org tab deep-link fixed properly — URL-synced tabs.** `?tab=rehearsal` was landing on People
+  because `OrganisationDetailPage` had TWO `[id]` effects — the `?tab=` init and the "reset tab on
+  org switch" — and the reset ran last, clobbering the deep-link. Also the tabs never wrote to the
+  URL (so it couldn't round-trip). Consolidated into ONE `[id]` effect that reads `?tab=` (validated
+  against `VALID_ORG_TABS`, else People), and tab clicks now `setSearchParams({tab}, {replace:true})`
+  so the URL reflects the active tab and deep-links land reliably. **Convention for any detail page
+  with a "reset tab on id change" effect + deep-linkable tabs: read the URL param IN the reset
+  effect — don't run a separate init effect that a later reset can overwrite.**
+- **Info-pack preview before send.** Staff couldn't see what the pack contained before firing it.
+  New `GET /api/rehearsals/job/:jobId/info-pack-preview` returns the rendered subject + client-facing
+  HTML + resolved recipient WITHOUT sending (`emailService.renderPreview()` — same substitution +
+  base-layout wrap as `send`, minus the test-mode banner; `sendInfoPack`/`previewInfoPack` share one
+  `composeInfoPack()` so preview == what sends). The card's action is now **"✉ Preview & send info
+  pack"** → a modal rendering the email in a sandboxed `<iframe srcDoc>` with To/Subject and a
+  **"Send this info pack"** button (the actual send lives in the modal, so you always preview first).
+  This is the prerequisite jon asked for before greenlighting the info-pack files (§5 item A) + T-N
+  auto-send (item B).
+
 ---
 
 ## 6. Build order
