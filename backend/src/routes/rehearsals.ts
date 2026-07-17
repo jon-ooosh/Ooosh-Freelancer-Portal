@@ -16,6 +16,7 @@ import {
   getRehearsalProfile,
   upsertRehearsalProfile,
   addProfileFile,
+  updateProfileFile,
   removeProfileFile,
   getLastInfoPackSent,
   sendInfoPack,
@@ -106,6 +107,7 @@ const fileSchema = z.object({
   content_type: z.string().max(200).nullable().optional(),
   size_bytes: z.number().int().nonnegative().nullable().optional(),
   label: z.string().max(200).nullable().optional(),
+  comment: z.string().max(2000).nullable().optional(),
 });
 router.post('/profile/:orgId/files', async (req: AuthRequest, res: Response) => {
   const parsed = fileSchema.safeParse(req.body);
@@ -120,6 +122,25 @@ router.post('/profile/:orgId/files', async (req: AuthRequest, res: Response) => 
   } catch (err) {
     console.error('[rehearsals] profile file add error:', err);
     res.status(500).json({ error: 'Failed to attach file' });
+  }
+});
+
+// PATCH /api/rehearsals/profile/:orgId/files/:key — edit a desk file's tag / comment
+const fileUpdateSchema = z.object({
+  label: z.string().max(200).nullable().optional(),
+  comment: z.string().max(2000).nullable().optional(),
+});
+router.patch('/profile/:orgId/files/:key', async (req: AuthRequest, res: Response) => {
+  const parsed = fileUpdateSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
+  try {
+    const key = decodeURIComponent(String(req.params.key));
+    const data = await updateProfileFile(String(req.params.orgId), key, parsed.data);
+    if (!data) { res.status(404).json({ error: 'Profile not found' }); return; }
+    res.json({ data });
+  } catch (err) {
+    console.error('[rehearsals] profile file update error:', err);
+    res.status(500).json({ error: 'Failed to update file' });
   }
 });
 

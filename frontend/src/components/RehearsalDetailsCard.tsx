@@ -281,23 +281,40 @@ export default function RehearsalDetailsCard({
 
   return (
     <div className="bg-white rounded-lg border border-gray-200">
-      {/* Collapsible header */}
-      <button
-        type="button"
-        onClick={toggleCollapsed}
-        className="w-full flex items-center justify-between gap-2 p-4 text-left"
-      >
-        <h3 className="font-semibold text-gray-900 flex items-center gap-2 flex-wrap">
-          <span>🎸</span> Rehearsal details
+      {/* Collapsible header. The org name is a real Link (sibling of the toggle
+          button, not nested — an <a> inside a <button> is invalid + wouldn't
+          navigate), so it deep-links to the band's Rehearsals tab. */}
+      <div className="w-full flex items-center justify-between gap-2 p-4">
+        <button
+          type="button"
+          onClick={toggleCollapsed}
+          className="flex items-center gap-2 flex-wrap text-left min-w-0"
+        >
+          <span>🎸</span>
+          <span className="font-semibold text-gray-900">Rehearsal details</span>
           <span className="text-xs font-normal text-gray-400">
             {thingCount > 0 ? `${thingCount} thing${thingCount !== 1 ? 's' : ''}` : 'nothing filled in yet'}
           </span>
+        </button>
+        <div className="flex items-center gap-2 shrink-0">
           {anchorOrg?.name && (
-            <span className="text-sm font-normal text-ooosh-600">· {anchorOrg.name}</span>
+            <Link
+              to={`/organisations/${anchorOrg.id}?tab=rehearsal`}
+              className="text-sm text-ooosh-600 hover:underline truncate max-w-[10rem]"
+            >
+              {anchorOrg.name}
+            </Link>
           )}
-        </h3>
-        <span className={`text-gray-400 transition-transform ${collapsed ? '' : 'rotate-90'}`}>▶</span>
-      </button>
+          <button
+            type="button"
+            onClick={toggleCollapsed}
+            aria-label={collapsed ? 'Expand' : 'Collapse'}
+            className={`text-gray-400 transition-transform ${collapsed ? '' : 'rotate-90'}`}
+          >
+            ▶
+          </button>
+        </div>
+      </div>
 
       {!collapsed && (
         <div className="px-4 pb-4 space-y-4">

@@ -321,6 +321,24 @@ upload in `RehearsalProfileSection.onFile`. #3 + #5 were built together on the c
    upsert endpoints already support it). Combined with #3 (card collapsed by default, "N things"
    count, localStorage key `rehearsal-details-collapsed`).
 
+### 5c. Round-2 follow-up tweaks (Jul 2026, after jon reviewed the round-2 build)
+
+- **Placeholder wording.** The Room-setup placeholder said "Round a table / forward-facing" —
+  that's van seat-config talk, not rehearsal talk. Reworded to "How they like the room laid out —
+  backline positions, their own layout…" (`RehearsalProfileSection.tsx`).
+- **Band deep-link fix.** The collapsible header rewrite (#3) nested the band-name `<Link>` inside
+  the collapse-toggle `<button>` — invalid HTML, and it stopped navigating. The org name is now a
+  real `<Link>` **sibling** of the toggle button (both inside a flex `<div>`), so it deep-links to
+  the band's Rehearsals tab again.
+- **Band profile files now behave like standard OP files.** They gained a **tag + comment** (set at
+  upload, **editable post-upload** inline), matching the Files-tab UX. Backend: `ProfileFile.comment`
+  + `updateProfileFile()` + `PATCH /api/rehearsals/profile/:orgId/files/:key`. The surfaced files on
+  a job's **Files tab now count toward the tab badge** ("Files (N)") — `JobDetailPage` fetches the
+  band profile once at page level (gated on `has_rehearsal`, so it also stops surfacing a band's
+  stage-plots on unrelated hires) and `RehearsalProfileFiles` is now props-driven (files + anchor
+  passed down, no self-fetch) and renders the tag chip + comment. `fileCount` = job files +
+  surfaced rehearsal-profile files.
+
 ---
 
 ## 6. Build order
