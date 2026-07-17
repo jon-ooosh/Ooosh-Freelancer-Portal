@@ -11,6 +11,8 @@ import { resetTicketmasterCallBudget, getTicketmasterCallCount } from './ticketm
 import { collectAll } from './collector';
 import { detectTours } from './detector';
 import { scoreLeads } from './scorer';
+import { runMatching } from './matcher';
+import { researchContacts } from './researcher';
 
 async function num(key: string, fallback: number): Promise<number> {
   const raw = await getSystemSetting(key);
@@ -44,10 +46,12 @@ export async function runPipeline(runId: string): Promise<void> {
     const collection = await collectAll(maxWeeks);
     const detection = await detectTours(runId, { minLeadWeeks, maxWeeks, tourMinDates, tourWindowWeeks });
     const scoring = await scoreLeads();
+    const matching = await runMatching();
+    const research = await researchContacts();
 
     await query(
       `UPDATE lead_runs SET status = 'complete', finished_at = NOW(), counts = $2 WHERE id = $1`,
-      [runId, JSON.stringify({ collection, detection, scoring, tmCalls: getTicketmasterCallCount() })],
+      [runId, JSON.stringify({ collection, detection, scoring, matching, research, tmCalls: getTicketmasterCallCount() })],
     );
     console.log('[leads/pipeline] run %s complete', runId);
   } catch (err) {
