@@ -217,6 +217,17 @@ sitter portal — deferred; the sitter portal already surfaces `share_with_freel
 - **Per-person preferences** tied to person records.
 - **Hub "upcoming rehearsals" overview** list.
 - **General Tasks system** (separate build, deferred entirely).
+- **Files/pictures in the info-pack boilerplate** (jon flagged Jul 2026, after v1 shipped).
+  Client-facing info packs are static text only in v1. A useful add: attach a parking photo,
+  a "where the loading door is" image, a site map PDF, etc. **Approach when built** — mirror the
+  studio-sitter lock-up "reference photos" pattern: an upload widget on the Info Pack settings tab
+  (Operations → Rehearsals) → R2 (`files/attachments/…`, downscale via the shared `compressImage`
+  before upload) → keys stored as a JSON array in a new `rehearsals` `system_settings` row
+  (e.g. `rehearsal_info_pack_images`) → wired into `sendInfoPack` (`services/rehearsal-details.ts`).
+  **Design decision to make first:** raw email *attachments* (simple, but a few phone photos push
+  past spam-filter-friendly sizes) vs **inline images via presigned R2 links** (renders in the body,
+  keeps the email light — the preferred v2). ~half a day either way; the pattern is known so no
+  research needed.
 
 ---
 
