@@ -189,6 +189,21 @@ editor: first-class fields, the preferences list (add/remove label→value rows)
 upload/list (via `attachment_only` upload → `/profile/:orgId/files`), internal notes.
 Optionally the band's rehearsal booking history (nice-to-have, can defer).
 
+### 4.4 Band profile files surface on the Job Files tab (read-only)
+
+Once a job has a resolved band anchor, the band's rehearsal-profile files (mix files, stage
+plots) **surface automatically** in the Job Detail **Files tab** as a distinct read-only
+group — *"From [Band]'s rehearsal profile"* — so staff don't re-attach a stage plot on every
+booking. **Surfaced, not copied:** the files stay owned by `organisation_rehearsal_profile.files`
+(single source of truth), so updating/removing a profile file reflects on every job live; the
+job's own `jobs.files` are untouched. Same authenticated view/download affordances as job
+files; the profile-group rows have no delete/share toggle (managed on the Org Rehearsals tab).
+Backend: `GET /api/rehearsals/job/:jobId` already returns the resolved profile — the Files tab
+reads `profile.files` from it and renders the extra group when non-empty.
+
+*(Future: a `share_with_freelancer`-style flag on profile files so a stage plot can reach the
+sitter portal — deferred; the sitter portal already surfaces `share_with_freelancer` job files.)*
+
 ---
 
 ## 5. Out of scope (phase 2 / deferred)

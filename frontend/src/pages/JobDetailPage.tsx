@@ -29,6 +29,8 @@ import MoneyTab from '../components/MoneyTab';
 import RackPlanModal from '../components/rackplan/RackPlanModal';
 import RackPlanOverviewCard from '../components/rackplan/RackPlanOverviewCard';
 import StudioHandoverCard from '../components/StudioHandoverCard';
+import RehearsalDetailsCard from '../components/RehearsalDetailsCard';
+import RehearsalProfileFiles from '../components/RehearsalProfileFiles';
 import DatePicker from '../components/DatePicker';
 import { TimeInput } from '../components/TimeInput';
 import ChaseModal from '../components/ChaseModal';
@@ -4146,6 +4148,15 @@ export default function JobDetailPage() {
           {/* Staging — surfaces once a plan exists (created from Tools → Staging Calculator) */}
           {id && <StagingOverviewCard jobId={id} refreshKey={stagingRefreshKey} />}
 
+          {/* Rehearsal details — intake + band preferences + info pack (rehearsal jobs only) */}
+          {id && (
+            <RehearsalDetailsCard
+              jobId={id}
+              hasRehearsal={!!hhSyncResult?.derivation?.flags?.has_rehearsal}
+              backlinePrepMins={hhSyncResult?.derivation?.flags?.prep_time_by_category?.backline}
+            />
+          )}
+
           {/* Studio sitter handover — surfaces on rehearsal jobs (self-hides otherwise) */}
           {id && <StudioHandoverCard jobId={id} />}
 
@@ -4878,11 +4889,14 @@ export default function JobDetailPage() {
 
       {/* Files Tab */}
       {activeTab === 'files' && id && (
-        <JobFilesSection
-          jobId={id}
-          files={job.files || []}
-          onFilesChanged={loadJob}
-        />
+        <>
+          <RehearsalProfileFiles jobId={id} />
+          <JobFilesSection
+            jobId={id}
+            files={job.files || []}
+            onFilesChanged={loadJob}
+          />
+        </>
       )}
 
       {/* Crew & Transport Tab */}
