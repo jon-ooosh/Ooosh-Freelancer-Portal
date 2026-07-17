@@ -47,6 +47,7 @@ interface Profile {
 }
 interface AnchorOrg { id: string; name: string | null }
 interface LastSent { sent_at: string; job_id: string; hh_job_number: number | null }
+interface InfoPackPreview { subject: string; html: string; recipient: string; isFallback: boolean }
 interface Resp {
   details: JobDetails | null;
   anchorOrg: AnchorOrg | null;
@@ -98,6 +99,18 @@ export default function RehearsalDetailsCard({
   const [sending, setSending] = useState(false);
   const [sendResult, setSendResult] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem(COLLAPSE_KEY) !== 'false');
+  // Info-pack preview modal.
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [preview, setPreview] = useState<InfoPackPreview | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!previewOpen) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setPreviewOpen(false); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [previewOpen]);
 
   const toggleCollapsed = () => {
     setCollapsed((c) => {
@@ -190,6 +203,21 @@ export default function RehearsalDetailsCard({
     }
   };
 
+  const openPreview = async () => {
+    setPreviewOpen(true);
+    setPreview(null);
+    setPreviewError(null);
+    setPreviewLoading(true);
+    try {
+      const r = await api.get<{ data: InfoPackPreview }>(`/rehearsals/job/${jobId}/info-pack-preview`);
+      setPreview(r.data);
+    } catch (e) {
+      setPreviewError(e instanceof Error ? e.message : 'Failed to load preview');
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
   const sendPack = async () => {
     const recent = data?.lastInfoPackSent
       && (Date.now() - new Date(data.lastInfoPackSent.sent_at).getTime()) < 21 * 864e5;
@@ -205,6 +233,7 @@ export default function RehearsalDetailsCard({
       setSendResult(r.data.isFallback
         ? `No client email on file — sent to ${r.data.recipient} (info@) to forward.`
         : `Sent to ${r.data.recipient}.`);
+      setPreviewOpen(false);
       load();
     } catch (e) {
       setSendResult(e instanceof Error ? e.message : 'Failed to send');
@@ -280,6 +309,7 @@ export default function RehearsalDetailsCard({
   );
 
   return (
+    <>
     <div className="bg-white rounded-lg border border-gray-200">
       {/* Collapsible header. The org name is a real Link (sibling of the toggle
           button, not nested — an <a> inside a <button> is invalid + wouldn't
@@ -404,11 +434,11 @@ export default function RehearsalDetailsCard({
                 <span className="text-xs text-gray-400">Info pack not sent yet</span>
               )}
               <button
-                onClick={sendPack}
+                onClick={openPreview}
                 disabled={sending}
                 className="rounded border border-ooosh-300 px-3 py-1.5 text-sm font-medium text-ooosh-700 hover:bg-ooosh-50 disabled:opacity-40"
               >
-                {sending ? 'Sending…' : '✉ Send info pack'}
+                ✉ Preview & send info pack
               </button>
             </div>
           </div>
@@ -416,5 +446,59 @@ export default function RehearsalDetailsCard({
         </div>
       )}
     </div>
+
+    {/* Info-pack preview modal — see exactly what will send before sending. */}
+    {previewOpen && (
+      <div
+        className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+        onClick={() => setPreviewOpen(false)}
+      >
+        <div
+          className="bg-white rounded-lg shadow-xl w-full max-w-2xl max-h-[90vh] flex flex-col"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="flex items-center justify-between p-4 border-b border-gray-200">
+            <h3 className="font-semibold text-gray-900">Info pack preview</h3>
+            <button onClick={() => setPreviewOpen(false)} className="text-gray-400 hover:text-gray-600" aria-label="Close">✕</button>
+          </div>
+          <div className="p-4 overflow-y-auto flex-1 space-y-3">
+            {previewLoading && <p className="text-sm text-gray-500">Loading preview…</p>}
+            {previewError && <p className="text-sm text-red-600">{previewError}</p>}
+            {preview && (
+              <>
+                <div className="text-sm space-y-1">
+                  <div>
+                    <span className="text-gray-500">To:</span> {preview.recipient}
+                    {preview.isFallback && (
+                      <span className="ml-2 text-amber-600 text-xs">
+                        (no client email on file — would go to info@ to forward)
+                      </span>
+                    )}
+                  </div>
+                  <div><span className="text-gray-500">Subject:</span> {preview.subject}</div>
+                </div>
+                <iframe
+                  title="Info pack preview"
+                  srcDoc={preview.html}
+                  sandbox=""
+                  className="w-full h-[52vh] border border-gray-200 rounded bg-white"
+                />
+              </>
+            )}
+          </div>
+          <div className="flex items-center justify-end gap-2 p-4 border-t border-gray-200">
+            <button onClick={() => setPreviewOpen(false)} className="text-sm text-gray-600 hover:underline px-3 py-1.5">Close</button>
+            <button
+              onClick={sendPack}
+              disabled={sending || previewLoading || !preview}
+              className="rounded bg-ooosh-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-ooosh-700 disabled:opacity-40"
+            >
+              {sending ? 'Sending…' : '✉ Send this info pack'}
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   );
 }

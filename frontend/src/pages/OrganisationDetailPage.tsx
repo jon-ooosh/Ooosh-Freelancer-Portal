@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { hasManagerRole } from '../lib/roles';
-import { useParams, useNavigate, Link } from 'react-router-dom';
+import { useParams, useNavigate, Link, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import SlidePanel from '../components/SlidePanel';
 import OrganisationForm from '../components/OrganisationForm';
@@ -114,6 +114,12 @@ const INFERRED_ORG_TYPE: Record<string, string> = {
   supplies: 'client',
 };
 
+const VALID_ORG_TABS = [
+  'people', 'relationships', 'hire_history', 'timeline', 'details', 'excess',
+  'issues', 'held', 'storage', 'rehearsal', 'pcns', 'ooh',
+] as const;
+type OrgTab = (typeof VALID_ORG_TABS)[number];
+
 export default function OrganisationDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -125,13 +131,8 @@ export default function OrganisationDetailPage() {
   const [showDnoForm, setShowDnoForm] = useState(false);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'people' | 'relationships' | 'hire_history' | 'timeline' | 'details' | 'excess' | 'issues' | 'held' | 'storage' | 'pcns' | 'ooh' | 'rehearsal'>('people');
-
-  // Open a specific tab when linked with ?tab=… (e.g. the Job Detail rehearsal card).
-  useEffect(() => {
-    const t = new URLSearchParams(window.location.search).get('tab');
-    if (t === 'rehearsal') setActiveTab('rehearsal');
-  }, [id]);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [activeTab, setActiveTab] = useState<OrgTab>('people');
   const [issuesCount, setIssuesCount] = useState<number | null>(null);
   const [pcnCount, setPcnCount] = useState<number | null>(null);
   const [heldCount, setHeldCount] = useState<number | null>(null);
@@ -195,14 +196,19 @@ export default function OrganisationDetailPage() {
     }
   }, [id]);
 
-  // Reset tab when switching orgs — component instance is reused across
-  // /organisations/A → /organisations/B so without this the active tab
-  // "drags across".
+  // Land on the tab named in ?tab= (deep-links from Job Detail etc.), else
+  // People. Also resets on org switch — the component instance is reused across
+  // /organisations/A → /organisations/B so without this the active tab "drags
+  // across". Consolidated with the ?tab= handling so the reset can't clobber a
+  // deep-link (both used to be separate [id] effects; the reset ran last and
+  // won, sending ?tab=rehearsal to People).
   useEffect(() => {
-    setActiveTab('people');
+    const t = searchParams.get('tab');
+    setActiveTab(VALID_ORG_TABS.includes(t as OrgTab) ? (t as OrgTab) : 'people');
     setIssuesCount(null);
     setPcnCount(null);
     setHeldCount(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
   async function loadOrg() {
@@ -769,7 +775,13 @@ export default function OrganisationDetailPage() {
             return (
               <button
                 key={tab}
-                onClick={() => setActiveTab(tab)}
+                onClick={() => {
+                  setActiveTab(tab);
+                  // Reflect the tab in the URL so it's deep-linkable + survives refresh.
+                  const next = new URLSearchParams(searchParams);
+                  next.set('tab', tab);
+                  setSearchParams(next, { replace: true });
+                }}
                 className={`pb-3 text-sm font-medium border-b-2 transition-colors ${
                   activeTab === tab
                     ? 'border-ooosh-600 text-ooosh-600'

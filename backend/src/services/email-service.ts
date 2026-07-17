@@ -398,6 +398,27 @@ class EmailService {
   /**
    * Send an email using a registered template.
    */
+  /**
+   * Render a template to its final client-facing subject + HTML WITHOUT sending
+   * — for "preview before send" surfaces. Shows exactly what the recipient would
+   * see (no test-mode banner / redirect — that's a delivery concern, not content).
+   */
+  renderPreview(templateId: string, options: SendEmailOptions): { subject: string; html: string } | { error: string } {
+    const template = templates[templateId];
+    if (!template) return { error: `Unknown email template: ${templateId}` };
+    const variables = options.variables || {};
+    const subject = options.subjectOverride || substituteVariables(template.subject, variables);
+    let bodyHtml = options.bodyHtmlOverride !== undefined
+      ? options.bodyHtmlOverride
+      : substituteVariables(template.body, variables);
+    if (options.prependBanner) bodyHtml = options.prependBanner + bodyHtml;
+    const html = wrapInBaseLayout(bodyHtml, {
+      variant: template.variant,
+      preheader: template.preheader ? substituteVariables(template.preheader, variables) : undefined,
+    });
+    return { subject, html };
+  }
+
   async send(templateId: string, options: SendEmailOptions): Promise<SendEmailResult> {
     const config = getEmailConfig();
     const template = templates[templateId];

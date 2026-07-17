@@ -20,6 +20,7 @@ import {
   removeProfileFile,
   getLastInfoPackSent,
   sendInfoPack,
+  previewInfoPack,
 } from '../services/rehearsal-details';
 
 const router = Router();
@@ -154,6 +155,17 @@ router.delete('/profile/:orgId/files/:key', async (req: AuthRequest, res: Respon
   } catch (err) {
     console.error('[rehearsals] profile file remove error:', err);
     res.status(500).json({ error: 'Failed to remove file' });
+  }
+});
+
+// GET /api/rehearsals/job/:jobId/info-pack-preview — rendered subject + HTML, no send
+router.get('/job/:jobId/info-pack-preview', async (req: AuthRequest, res: Response) => {
+  try {
+    const data = await previewInfoPack(String(req.params.jobId));
+    res.json({ data });
+  } catch (err) {
+    console.error('[rehearsals] info-pack-preview error:', err);
+    res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to preview info pack' });
   }
 });
 
