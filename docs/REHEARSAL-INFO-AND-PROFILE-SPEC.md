@@ -231,11 +231,19 @@ sitter portal — deferred; the sitter portal already surfaces `share_with_freel
 
 ---
 
-## 5b. Round 2 TODOs (Jul 2026, jon feedback after live-testing v1)
+## 5b. Round 2 TODOs (Jul 2026, jon feedback after live-testing v1) — ✅ SHIPPED
 
 Captured after jon trialled the shipped v1 (Rehearsals hub, per-job details card, band
 profile, info-pack send). All UX-polish / joining-up work, not bugs. Ordered roughly by how
 much they hurt in the trial.
+
+**Status (all done):** #1 + #4 turned out to already be in the v1 commit (the "Saved ✓"
+indicator on `RehearsalProfileSection` and the `?tab=rehearsal` deep-links on
+`RehearsalDetailsCard`, both live in `12b9dbc`) — verified, no change needed; jon likely
+just didn't catch the transient "Saved ✓" fade during the trial. #2 had the upload UI but
+skipped image downscaling — closed by running the shared `compressImage` (from
+`components/holding/compress.ts`, passes PDFs/non-images straight through) before the R2
+upload in `RehearsalProfileSection.onFile`. #3 + #5 were built together on the card (below).
 
 1. **"Saved" confirmation on band profile save** (`RehearsalProfileSection.tsx`). Currently the
    Save button just greys out — jon wasn't sure the save had landed. Add an explicit "Saved ✓"
@@ -286,6 +294,32 @@ much they hurt in the trial.
      whether "save as usual" also updates the current job's per-job record or just the profile.
    - This is the "join that process up into a much nicer UX" jon asked for — scope it properly
      before building; it touches both components, both tables, and the read/merge logic.
+
+   **Shipped design (Jul 2026).** Scoped to the two fields staff actually enter at booking time
+   that make sense as band-persistent — **PA setup** (↔ profile `pa_monitoring`) and **Backline
+   from us** (↔ profile `usual_backline`). Each carries a `[⭑ Band usual | 📌 This hire]` toggle:
+   - **Band usual** → writes the band-profile field on the anchor org (partial upsert, other
+     profile fields untouched) AND clears the per-job override (`rehearsal_job_details.<field> =
+     null`), so the standing value shows through on every future booking.
+   - **This hire** → writes the per-job override, leaving the band's usual untouched.
+   - **Display precedence:** per-job override shadows the band's usual; the label tags which one
+     is live (`· this hire` / `· band usual`). The box pre-fills with the effective value (override
+     ?? band usual) so staff see what carries forward.
+   - **Toggle default:** `this hire` when a per-job override already exists (or no anchor org),
+     else `band usual` — so a fresh PA/backline entry carries forward by default (jon's
+     expectation), while an existing one-off stays a one-off.
+   - **Cars / drop-off / notes stay per-job** (they genuinely never carry forward). The rest of the
+     band's standing setup (mics, power, room setup, desk, load-in, contact, preference rows, desk
+     files, internal notes) is shown read-only on the card and remains edited on the org Rehearsals
+     tab — the card links to it ("manage →"). This keeps the card from becoming a second full
+     profile editor while still closing the carry-forward gap on the fields that hurt.
+   - **Save** dispatches one `PUT /rehearsals/job/:jobId` (per-job) + at most one
+     `PUT /rehearsals/profile/:orgId` (only when a shared field is on "band usual" and an anchor
+     org exists), run concurrently. Guard: with no anchor org the profile write is skipped and the
+     toggle is forced to "this hire" so a typed value is never silently dropped.
+   All in `RehearsalDetailsCard.tsx` (no backend change — the existing per-job + partial-profile
+   upsert endpoints already support it). Combined with #3 (card collapsed by default, "N things"
+   count, localStorage key `rehearsal-details-collapsed`).
 
 ---
 

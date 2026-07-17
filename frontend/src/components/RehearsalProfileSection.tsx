@@ -6,6 +6,7 @@
  */
 import { useState, useEffect, useRef } from 'react';
 import { api } from '../services/api';
+import { compressImage } from './holding/compress';
 
 interface ProfileFile {
   r2_key: string;
@@ -86,11 +87,13 @@ export default function RehearsalProfileSection({ entityId }: { entityType?: str
   const rmPref = (i: number) => setP((c) => ({ ...c, preferences: c.preferences.filter((_, j) => j !== i) }));
 
   const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+    const picked = e.target.files?.[0];
     if (fileInput.current) fileInput.current.value = '';
-    if (!file) return;
+    if (!picked) return;
     setUploading(true);
     try {
+      // Downscale phone photos before upload; PDFs / other types pass straight through.
+      const file = await compressImage(picked);
       const fd = new FormData();
       fd.append('file', file);
       fd.append('attachment_only', 'true');
