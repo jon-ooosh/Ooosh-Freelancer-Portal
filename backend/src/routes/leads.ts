@@ -19,6 +19,7 @@ import { validate } from '../middleware/validate';
 import { isTicketmasterConfigured } from '../services/leads/ticketmaster';
 import { isAnthropicConfigured } from '../config/anthropic';
 import { isRunActive, createRun, runPipeline } from '../services/leads/pipeline';
+import { getWarmSummary, composeWarmSummary, appendOrgSummary } from '../services/leads/matcher';
 
 const router = Router();
 router.use(authenticate);
@@ -26,8 +27,11 @@ router.use(authenticate);
 const LEAD_COLUMNS = `
   id, artist_name, tm_artist_id, uk_date_count, first_date, last_date, venues, all_dates,
   relevance_score, client_tier, origin_country, is_international, reasoning, ai_summary, scored_at,
-  matched_organisation_id, match_confidence, match_candidates, stream,
+  matched_organisation_id, match_confidence, match_candidates, stream, contacts,
   status, status_reason, assigned_to, converted_job_id, created_at, updated_at`;
+
+// Same columns, prefixed for the list query's join to organisations.
+const LEAD_COLUMNS_PREFIXED = LEAD_COLUMNS.split(',').map((c) => `l.${c.trim()}`).join(', ');
 
 // GET /api/leads — list. Defaults: hide dismissed/not_relevant, best score first.
 router.get('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
@@ -39,15 +43,17 @@ router.get('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respons
 
     const where: string[] = [];
     const params: unknown[] = [];
-    if (stream) { params.push(stream); where.push(`stream = $${params.length}`); }
-    if (status) { params.push(status); where.push(`status = $${params.length}`); }
-    else if (!includeHidden) { where.push(`status NOT IN ('dismissed', 'not_relevant')`); }
-    if (minScore != null && Number.isFinite(minScore)) { params.push(minScore); where.push(`relevance_score >= $${params.length}`); }
+    if (stream) { params.push(stream); where.push(`l.stream = $${params.length}`); }
+    if (status) { params.push(status); where.push(`l.status = $${params.length}`); }
+    else if (!includeHidden) { where.push(`l.status NOT IN ('dismissed', 'not_relevant')`); }
+    if (minScore != null && Number.isFinite(minScore)) { params.push(minScore); where.push(`l.relevance_score >= $${params.length}`); }
 
     const result = await query(
-      `SELECT ${LEAD_COLUMNS} FROM leads
+      `SELECT ${LEAD_COLUMNS_PREFIXED}, o.name AS matched_org_name
+         FROM leads l
+         LEFT JOIN organisations o ON o.id = l.matched_organisation_id
        ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
-       ORDER BY relevance_score DESC NULLS LAST, first_date ASC NULLS LAST
+       ORDER BY l.relevance_score DESC NULLS LAST, l.first_date ASC NULLS LAST
        LIMIT 500`,
       params,
     );
@@ -136,6 +142,58 @@ router.patch('/:id', authorize(...STAFF_ROLES), validate(patchSchema), async (re
   } catch (error) {
     console.error('[leads] patch error:', error);
     res.status(500).json({ error: 'Failed to update lead' });
+  }
+});
+
+// POST /api/leads/:id/confirm-match — link a partial candidate as the warm match.
+const confirmSchema = z.object({ organisation_id: z.string().uuid() });
+router.post('/:id/confirm-match', authorize(...STAFF_ROLES), validate(confirmSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const orgId = (req.body as z.infer<typeof confirmSchema>).organisation_id;
+    const lead = await query(
+      `SELECT id, artist_name, uk_date_count, first_date, last_date FROM leads WHERE id = $1`,
+      [req.params.id],
+    );
+    if (!lead.rows[0]) return res.status(404).json({ error: 'Lead not found' });
+    const org = await query(`SELECT id FROM organisations WHERE id = $1 AND is_deleted = false`, [orgId]);
+    if (!org.rows[0]) return res.status(404).json({ error: 'Organisation not found' });
+
+    const l = lead.rows[0];
+    const hist = await getWarmSummary(orgId);
+    const summary = composeWarmSummary(l.artist_name, {
+      uk_date_count: l.uk_date_count,
+      first_date: l.first_date ? new Date(l.first_date).toISOString().slice(0, 10) : null,
+      last_date: l.last_date ? new Date(l.last_date).toISOString().slice(0, 10) : null,
+    }, hist);
+    await query(
+      `UPDATE leads SET matched_organisation_id = $2, match_confidence = 'exact', stream = 'warm',
+         ai_summary = $3, updated_at = NOW() WHERE id = $1`,
+      [req.params.id, orgId, summary],
+    );
+    await appendOrgSummary(orgId, summary, new Date().toISOString().slice(0, 10));
+
+    const updated = await query(`SELECT ${LEAD_COLUMNS} FROM leads WHERE id = $1`, [req.params.id]);
+    res.json({ data: updated.rows[0] });
+  } catch (error) {
+    console.error('[leads] confirm-match error:', error);
+    res.status(500).json({ error: 'Failed to confirm match' });
+  }
+});
+
+// POST /api/leads/:id/reject-match — dismiss the "could this be?" suggestions → cold.
+router.post('/:id/reject-match', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const r = await query(
+      `UPDATE leads SET match_confidence = 'none', matched_organisation_id = NULL,
+         match_candidates = '[]'::jsonb, stream = 'cold', updated_at = NOW()
+       WHERE id = $1 RETURNING ${LEAD_COLUMNS}`,
+      [req.params.id],
+    );
+    if (!r.rows[0]) return res.status(404).json({ error: 'Lead not found' });
+    res.json({ data: r.rows[0] });
+  } catch (error) {
+    console.error('[leads] reject-match error:', error);
+    res.status(500).json({ error: 'Failed to reject match' });
   }
 });
 
