@@ -231,6 +231,64 @@ sitter portal — deferred; the sitter portal already surfaces `share_with_freel
 
 ---
 
+## 5b. Round 2 TODOs (Jul 2026, jon feedback after live-testing v1)
+
+Captured after jon trialled the shipped v1 (Rehearsals hub, per-job details card, band
+profile, info-pack send). All UX-polish / joining-up work, not bugs. Ordered roughly by how
+much they hurt in the trial.
+
+1. **"Saved" confirmation on band profile save** (`RehearsalProfileSection.tsx`). Currently the
+   Save button just greys out — jon wasn't sure the save had landed. Add an explicit "Saved ✓"
+   indicator (transient toast or an inline stamp next to the button that fades), same pattern as
+   other detail-page saves. Small, do this first.
+
+2. **Pictures + PDFs in the band profile setup** (`organisation_rehearsal_profile.files` JSONB
+   already exists on migration 176 — the column is there, the UI isn't). jon confirmed "would
+   definitely be great". Wire an upload widget on `RehearsalProfileSection.tsx` → R2
+   (`files/attachments/…`, downscale images via the shared `compressImage`) → append to the
+   `files` JSONB via the existing `POST /api/rehearsals/profile/:orgId/files` /
+   `DELETE …/files/:key` endpoints (already built in `routes/rehearsals.ts` +
+   `addProfileFile`/`removeProfileFile` in `services/rehearsal-details.ts`). Read-only surfacing on
+   the Job Files tab (`RehearsalProfileFiles.tsx`) already works — this is the *upload/manage* side.
+   NB: **distinct from** the deferred "files/pictures in the client-facing info-pack" item in §5 —
+   that one attaches to the outbound *client email*; this one is the internal band "hotel book".
+
+3. **Collapsible rehearsal details card on Job Detail** (`RehearsalDetailsCard.tsx`). The card is
+   big; collapse it by default with an "**N things**" content-count indicator in the collapsed
+   header so staff can see at a glance whether there's anything filled in worth expanding (count
+   the populated fields: pa_setup / backline_notes / cars_count / dropoff_pickup / notes, plus any
+   known-preferences from the profile). Expand on click. Persist collapsed state in localStorage
+   like the other collapsible sections.
+
+4. **Deep link from Job Detail → client org address book should land on the Rehearsals tab.**
+   `OrganisationDetailPage.tsx` already reads `?tab=rehearsal`, so this is just making the
+   "set defaults in the client's Rehearsals tab" link on `RehearsalDetailsCard` navigate to
+   `/organisations/:id?tab=rehearsal` (resolving the anchor org via the same
+   band-org-then-client-org fallback the card already uses). Currently it lands on the org's
+   default tab, which jon found confusing ("Oh I seeeee, you set the defaults in the rehearsals
+   tab").
+
+5. **Unify per-job details editing with the band-level profile — the big one.** Right now there
+   are two disjoint edit surfaces: the per-job `rehearsal_job_details` (this hire's PA/cars/
+   dropoff intake) on Job Detail, and the persistent `organisation_rehearsal_profile` (the band's
+   standing preferences) on the org's Rehearsals tab. jon expected data entered on one upcoming
+   booking to carry into the next — it didn't, because per-job details are per-job by design and
+   only the *profile* persists. Close the gap: make editing feel like **one thing** with a
+   per-save **"save as overall preference OR just for this one rehearsal"** toggle. Design sketch
+   to firm up next session:
+   - On the Job Detail rehearsal card, each editable field (or the card as a whole) offers two
+     save targets: **"This rehearsal only"** → writes `rehearsal_job_details`; **"Save as the
+     band's usual"** → writes `organisation_rehearsal_profile` (the anchor org).
+   - Show the band's standing preference inline as the pre-filled default / placeholder, with a
+     clear "from [Band]'s profile" affordance, so staff see what will carry forward vs what's a
+     one-off override for this hire.
+   - Decide the precedence/merge rule for display (per-job override shadows profile default) and
+     whether "save as usual" also updates the current job's per-job record or just the profile.
+   - This is the "join that process up into a much nicer UX" jon asked for — scope it properly
+     before building; it touches both components, both tables, and the read/merge logic.
+
+---
+
 ## 6. Build order
 
 1. Migration 176 (both tables + settings seed) + add to `run.ts`.
