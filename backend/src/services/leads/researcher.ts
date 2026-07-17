@@ -80,16 +80,19 @@ async function researchOne(lead: LeadRow): Promise<{ contacts: Contact[]; notes:
     `, playing venues including: ${(lead.venues ?? []).slice(0, 5).join(', ')}. ` +
     `Origin: ${lead.origin_country ?? 'Unknown'}. Tier ${lead.client_tier ?? '?'} lead.`;
 
-  const response = await client.messages.create({
-    model: MODEL_ID,
-    max_tokens: 2048,
-    system: SYSTEM_PROMPT,
-    tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 5 } as never],
-    messages: [{
-      role: 'user',
-      content: `Research management and booking contact details for: ${lead.artist_name}\n\nContext: ${context}\n\nSearch their official website, social media, and music industry directories. Return the results as JSON.`,
-    }],
-  });
+  const response = await client.messages.create(
+    {
+      model: MODEL_ID,
+      max_tokens: 2048,
+      system: SYSTEM_PROMPT,
+      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 5 } as never],
+      messages: [{
+        role: 'user',
+        content: `Research management and booking contact details for: ${lead.artist_name}\n\nContext: ${context}\n\nSearch their official website, social media, and music industry directories. Return the results as JSON.`,
+      }],
+    },
+    { timeout: 90_000 }, // a hung web search must not wedge the whole run
+  );
 
   let text = '';
   for (const block of response.content) {
@@ -99,7 +102,7 @@ async function researchOne(lead: LeadRow): Promise<{ contacts: Contact[]; notes:
   return { contacts: parsed?.contacts ?? [], notes: parsed?.notes ?? '' };
 }
 
-export interface ResearchSummary { researched: number; contactsFound: number; failed: number; }
+export interface ResearchSummary { researched: number; contactsFound: number; failed: number; lastError?: string; }
 
 export async function researchContacts(): Promise<ResearchSummary> {
   if (!isAnthropicConfigured()) return { researched: 0, contactsFound: 0, failed: 0 };
@@ -135,8 +138,10 @@ export async function researchContacts(): Promise<ResearchSummary> {
       s.researched += 1;
       s.contactsFound += contacts.length;
     } catch (err) {
-      console.error('[leads/research] %s failed:', lead.artist_name, err);
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('[leads/research] %s failed:', lead.artist_name, msg);
       s.failed += 1;
+      s.lastError = msg; // surfaced in the run banner so a broken web-search tool is diagnosable
     }
   }
 

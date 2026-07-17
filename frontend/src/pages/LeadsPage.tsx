@@ -48,11 +48,12 @@ interface Run {
   id: string;
   status: 'running' | 'complete' | 'failed';
   counts: {
+    mode?: string;
     collection?: { newEvents: number };
     detection?: { toursCreated: number; droppedTooImminent: number; droppedNotTour: number };
     scoring?: { scored: number; skipped: number };
     matching?: { exact: number; partial: number };
-    research?: { researched: number; contactsFound: number };
+    research?: { researched: number; contactsFound: number; failed?: number; lastError?: string };
   } | null;
   error: string | null;
   started_at: string;
@@ -76,6 +77,28 @@ const STATUS_CLS: Record<string, string> = {
 const fmtDate = (d: string | null): string =>
   d ? new Date(d).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }) : '—';
 
+type SortKey = 'band' | 'dates' | 'uk' | 'score' | 'origin' | 'contacts' | 'status';
+const SORT_COLS: { key: SortKey; label: string; align: 'left' | 'right' | 'center'; defDir: 'asc' | 'desc' }[] = [
+  { key: 'band', label: 'Band', align: 'left', defDir: 'asc' },
+  { key: 'dates', label: 'Tour dates', align: 'left', defDir: 'asc' },
+  { key: 'uk', label: 'UK dates', align: 'right', defDir: 'desc' },
+  { key: 'score', label: 'Score', align: 'center', defDir: 'desc' },
+  { key: 'origin', label: 'Origin', align: 'left', defDir: 'asc' },
+  { key: 'contacts', label: 'Contacts', align: 'center', defDir: 'desc' },
+  { key: 'status', label: 'Status', align: 'left', defDir: 'asc' },
+];
+function sortValue(l: Lead, key: SortKey): string | number {
+  switch (key) {
+    case 'band': return l.artist_name.toLowerCase();
+    case 'dates': return l.first_date ?? '';
+    case 'uk': return l.uk_date_count;
+    case 'score': return l.relevance_score ?? -1;
+    case 'origin': return (l.origin_country ?? '').toLowerCase();
+    case 'contacts': return l.contacts?.length ?? 0;
+    case 'status': return l.status;
+  }
+}
+
 export default function LeadsPage() {
   const { user } = useAuthStore();
   const canRun = hasManagerRole(user?.role);
@@ -89,6 +112,9 @@ export default function LeadsPage() {
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
+  const [search, setSearch] = useState('');
+  const [sortKey, setSortKey] = useState<SortKey>('score');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -151,6 +177,19 @@ export default function LeadsPage() {
   const refresh = async () => {
     try { await Promise.all([loadLeads(), loadRun()]); } catch { /* noop */ }
   };
+  const processExisting = async () => {
+    setStarting(true); setError(null);
+    try { await api.post('/leads/process-existing', {}); await loadRun(); }
+    catch (e) { setError(e instanceof Error ? e.message : 'Failed to start'); }
+    finally { setStarting(false); }
+  };
+  const stopRun = async () => {
+    try { await api.post('/leads/cancel', {}); await loadRun(); } catch { /* noop */ }
+  };
+  const toggleSort = (key: SortKey, defDir: 'asc' | 'desc') => {
+    if (sortKey === key) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    else { setSortKey(key); setSortDir(defDir); }
+  };
   const updateLead = async (id: string, status: string) => {
     await api.patch(`/leads/${id}`, { status }); await loadLeads();
   };
@@ -162,9 +201,17 @@ export default function LeadsPage() {
   };
 
   const sv = (k: string) => settings.find((s) => s.key === k)?.value ?? '';
-  const shown = leads.filter((l) => l.stream === tab);
   const coldCount = leads.filter((l) => l.stream === 'cold').length;
   const warmCount = leads.filter((l) => l.stream === 'warm').length;
+
+  const q = search.trim().toLowerCase();
+  const shown = leads
+    .filter((l) => l.stream === tab && (!q || l.artist_name.toLowerCase().includes(q) || (l.origin_country ?? '').toLowerCase().includes(q)))
+    .sort((a, b) => {
+      const va = sortValue(a, sortKey), vb = sortValue(b, sortKey);
+      const cmp = va < vb ? -1 : va > vb ? 1 : 0;
+      return sortDir === 'asc' ? cmp : -cmp;
+    });
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-6">
@@ -181,10 +228,21 @@ export default function LeadsPage() {
             </p>
           )}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap justify-end">
           <button onClick={refresh} className="px-3 py-2 rounded-lg border border-gray-300 text-gray-600 text-sm hover:bg-gray-50">
             ↻ Refresh
           </button>
+          {canRun && isRunning && (
+            <button onClick={stopRun} className="px-3 py-2 rounded-lg border border-red-300 text-red-700 text-sm hover:bg-red-50">
+              ■ Stop
+            </button>
+          )}
+          {canRun && (
+            <button onClick={processExisting} disabled={starting || isRunning} title="Match + research the leads already found — no Ticketmaster crawl (fast)"
+              className="px-3 py-2 rounded-lg border border-[#7B5EA7] text-[#7B5EA7] text-sm font-medium hover:bg-purple-50 disabled:opacity-50">
+              ✨ Match &amp; research existing
+            </button>
+          )}
           {canRun && (
             <button onClick={startRun} disabled={starting || isRunning}
               className="px-4 py-2 rounded-lg bg-[#7B5EA7] text-white text-sm font-medium hover:bg-[#6a4f92] disabled:opacity-50">
@@ -206,15 +264,24 @@ export default function LeadsPage() {
               <b> This page updates automatically — no need to refresh.</b>
             </>
           )}
-          {run.status === 'failed' && <>Last search failed: {run.error || 'unknown error'}</>}
+          {run.status === 'failed' && <>Last run failed: {run.error || 'unknown error'}</>}
           {run.status === 'complete' && run.counts && (
             <>
-              Last search {run.finished_at ? new Date(run.finished_at).toLocaleString('en-GB') : ''}
-              {run.triggered_by_name ? ` by ${run.triggered_by_name}` : ''} —
-              {' '}<b>{run.counts.detection?.toursCreated ?? 0}</b> new tours
-              {' '}(scored {run.counts.scoring?.scored ?? 0}, dropped {run.counts.detection?.droppedTooImminent ?? 0} too-imminent).
-              {' '}Matched {run.counts.matching?.exact ?? 0} known band(s), {run.counts.matching?.partial ?? 0} possible.
-              {' '}Found contacts for {run.counts.research?.researched ?? 0} cold lead(s).
+              {run.counts.mode === 'process_existing' ? (
+                <>Processed existing leads {run.finished_at ? new Date(run.finished_at).toLocaleString('en-GB') : ''} — matched {run.counts.matching?.exact ?? 0} known band(s), {run.counts.matching?.partial ?? 0} possible; found contacts for {run.counts.research?.researched ?? 0} cold lead(s).</>
+              ) : (
+                <>
+                  Last search {run.finished_at ? new Date(run.finished_at).toLocaleString('en-GB') : ''}
+                  {run.triggered_by_name ? ` by ${run.triggered_by_name}` : ''} —
+                  {' '}<b>{run.counts.detection?.toursCreated ?? 0}</b> new tours
+                  {' '}(scored {run.counts.scoring?.scored ?? 0}, dropped {run.counts.detection?.droppedTooImminent ?? 0} too-imminent).
+                  {' '}Matched {run.counts.matching?.exact ?? 0} known band(s), {run.counts.matching?.partial ?? 0} possible.
+                  {' '}Found contacts for {run.counts.research?.researched ?? 0} cold lead(s).
+                </>
+              )}
+              {(run.counts.research?.failed ?? 0) > 0 && run.counts.research?.lastError && (
+                <div className="mt-1 text-amber-700">⚠ Contact research errored on {run.counts.research.failed} lead(s): {run.counts.research.lastError}</div>
+              )}
             </>
           )}
         </div>
@@ -222,13 +289,21 @@ export default function LeadsPage() {
 
       {error && <div className="rounded-lg bg-red-50 text-red-800 px-4 py-3 mb-4 text-sm">{error}</div>}
 
-      <div className="flex gap-1 border-b border-gray-200 mb-4">
-        {(['cold', 'warm'] as const).map((t) => (
-          <button key={t} onClick={() => setTab(t)}
-            className={`px-4 py-2 text-sm font-medium border-b-2 ${tab === t ? 'border-[#7B5EA7] text-[#7B5EA7]' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
-            {t === 'cold' ? `Cold (${coldCount})` : `Warm / Remarketing (${warmCount})`}
-          </button>
-        ))}
+      <div className="flex flex-wrap items-end justify-between gap-2 border-b border-gray-200 mb-4">
+        <div className="flex gap-1">
+          {(['cold', 'warm'] as const).map((t) => (
+            <button key={t} onClick={() => setTab(t)}
+              className={`px-4 py-2 text-sm font-medium border-b-2 ${tab === t ? 'border-[#7B5EA7] text-[#7B5EA7]' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
+              {t === 'cold' ? `Cold (${coldCount})` : `Warm / Remarketing (${warmCount})`}
+            </button>
+          ))}
+        </div>
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search band or origin…"
+          className="mb-1 px-3 py-1.5 rounded-lg border border-gray-300 text-sm w-56"
+        />
       </div>
 
       {loading ? (
@@ -244,13 +319,13 @@ export default function LeadsPage() {
           <table className="min-w-full text-sm">
             <thead className="bg-gray-50 text-gray-500 text-xs uppercase">
               <tr>
-                <th className="px-3 py-2 text-left">Band</th>
-                <th className="px-3 py-2 text-left">Tour dates</th>
-                <th className="px-3 py-2 text-right">UK dates</th>
-                <th className="px-3 py-2 text-center">Score</th>
-                <th className="px-3 py-2 text-left">Origin</th>
-                <th className="px-3 py-2 text-center">Contacts</th>
-                <th className="px-3 py-2 text-left">Status</th>
+                {SORT_COLS.map((c) => (
+                  <th key={c.key}
+                    className={`px-3 py-2 cursor-pointer select-none hover:text-gray-700 ${c.align === 'right' ? 'text-right' : c.align === 'center' ? 'text-center' : 'text-left'}`}
+                    onClick={() => toggleSort(c.key, c.defDir)}>
+                    {c.label}{sortKey === c.key ? (sortDir === 'asc' ? ' ▲' : ' ▼') : ''}
+                  </th>
+                ))}
                 <th className="px-3 py-2"></th>
               </tr>
             </thead>
