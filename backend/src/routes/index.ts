@@ -49,6 +49,7 @@ import studioSittersRouter from './studio-sitters';
 import backlineMatcherRouter from './backline-matcher';
 import wiseRouter from './wise';
 import autoChaseRouter from './auto-chase';
+import leadsRouter from './leads';
 
 const router = Router();
 
@@ -91,6 +92,7 @@ router.use('/staging', stagingRouter);  // Staging Calculator — stock/availabi
 router.use('/carnets', carnetsRouter);  // ATA Carnet management (HH-derived item 575) — read-only in slice 1
 router.use('/studio-sitters', studioSittersRouter);  // Rehearsals — studio-sitter roster (site-evening shifts + assignment)
 router.use('/auto-chase', autoChaseRouter);  // Auto-Chase Phase 1 — Gmail ingestion status/manual-run (inert until GMAIL_* env set)
+router.use('/leads', leadsRouter);  // Lead Finder (Tour Finder → OP) — Ticketmaster cold-lead discovery + scoring
 router.use('/hire-forms', hireFormsRouter);
 router.use('/requirements', requirementsRouter);
 router.use('/portal', portalRouter);  // Freelancer portal — own JWT auth (not OP staff JWT)
