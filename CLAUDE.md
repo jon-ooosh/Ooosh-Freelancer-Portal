@@ -2712,7 +2712,7 @@ These are existing standalone tools that currently push to Monday.com. They need
 - **Staging Calculator** — ✅ **INTEGRATED into OP (Jun 2026)** — see "Staging Calculator Integration" below.
 - **Backline Matcher** — ✅ **INTEGRATED into OP (Jun 2026)** — see "Backline Matcher Integration" below.
 - **PCN Manager** — ✅ **INTEGRATED into OP (Jun 2026)** — see "PCN Manager Integration" below.
-- **Cold Lead Finder** — Ticketmaster API integration (standalone, low priority)
+- **Cold Lead Finder** — ✅ **INTEGRATED into OP as the Leads module (Jul 2026)** — see "Leads Module (Tour Finder)" below.
 
 #### PCN Manager Integration (Jun 2026)
 
@@ -2986,6 +2986,93 @@ JWT auth for free, which is what locks out the old direct-URL access).
   URL — left out rather than guess); availability-into-prompt for the no-job case
   (skipped — only checks when a job is attached). Cross-link demand → Fill-a-Gap /
   purchasing if it earns its keep.
+
+#### Leads Module (Tour Finder) — cold + warm lead finder (LIVE, Jul 2026)
+
+The old standalone `ooosh-tour-finder` (Python CLI → dead Monday board) re-homed into
+OP as the **Leads module**, under **Jobs → Leads** (`/jobs/leads`). Finds touring
+artists coming to the UK (Ticketmaster Discovery API over a fixed 24-venue list),
+AI-scores them for Ooosh relevance, address-book-matches to spot existing clients
+(warm/remarketing), and researches management/booking contacts for cold leads.
+**Spec: `docs/TOUR-FINDER-SPEC.md`.** Deliberately mounted under Jobs, NOT a new
+top-level nav group (jon's call — "streamline rather than expand"). Migration **175**.
+
+**Where it lives:**
+- Backend pipeline: `backend/src/services/leads/*` — `venues.ts` (the 24 MONITORED_VENUES
+  + exclusion lists), `ticketmaster.ts` (throttled TM client, per-run call budget),
+  `collector.ts` (venue resolution + event collection into `tf_events`), `detector.ts`
+  (tour detection + the lookahead-window drop), `scorer.ts` (Claude relevance scoring),
+  `matcher.ts` (pg_trgm address-book matching + org AI-Summary enrichment), `researcher.ts`
+  (Claude web-search contact research), `pipeline.ts` (orchestrator + zombie-run recovery).
+- Routes: `backend/src/routes/leads.ts` (`/api/leads/*`).
+- Frontend: `frontend/src/pages/LeadsPage.tsx` (Cold/Warm tabs, scored table, expandable
+  row detail, partial-match confirm/reject, run banner, search + click-to-sort).
+
+**Storage (migration 175):**
+- `tf_events` — raw Ticketmaster event cache (dedup on TM event id).
+- `leads` — the lead record: artist + UK dates/venues, scoring
+  (`relevance_score`/`client_tier`/`origin_country`/`is_international`/`reasoning`/`ai_summary`),
+  address-book match (`matched_organisation_id`/`match_confidence` [`exact`|`partial`|`none`]/`match_candidates`),
+  `stream` (`cold`|`warm`), `contacts` JSONB, lifecycle
+  (`status` [`new`|`reviewing`|`contacted`|`converted`|`dismissed`|`not_relevant`]/`assigned_to`/`converted_job_id`).
+  Dedup unique index on `(lower(artist_name), first_date)`.
+- `lead_runs` — pipeline run log (`status`/`counts`/`error`/timestamps).
+- `system_settings` category `leads` — the config knobs (all staff-editable, no deploy):
+  `lead_lookahead_min_weeks` (default 3 — the "don't surface tours already running / too
+  imminent to sell" floor), `lead_lookahead_max_weeks` (17), `lead_tour_min_dates` (3),
+  `lead_tour_window_weeks` (6), `lead_min_relevance_score` (6), `lead_contact_research_cap`
+  (20), `lead_auto_run_enabled` (false — the future scheduled-run toggle, not yet wired).
+
+**The pipeline** (`runPipeline`): collect → detect → score → match → research, run as one
+background `setImmediate` job writing progress/counts to `lead_runs`.
+- **Lookahead fix** (the headline value over the old tool): `detector.ts` drops any tour
+  whose earliest *visible* UK date is under `today + lead_lookahead_min_weeks` — no point
+  surfacing a tour that's already on the road or too soon to sell into.
+- **Scoring** (`scorer.ts`): ported ai_filter prompt (Tier 1 international / Tier 2 within
+  70mi of Shoreham / Tier 3), Claude `claude-sonnet-5` with forced tool-use for structured
+  output + prompt caching, batched 30.
+- **Matching** (`matcher.ts`): `pg_trgm` fuzzy match of the artist name against
+  `organisations` (the `%` operator + `similarity()`; `CREATE EXTENSION pg_trgm` in migration
+  175, though the existing trgm index already required it). Exact (normalised equality) →
+  auto-links + enriches the org's AI Summary; partial (≥ threshold) → surfaces "could this be
+  [Org]?" candidates for a human confirm/reject; none → stays cold. Warm summary
+  (`getWarmSummary` → `composeWarmSummary`) writes a dated `[Lead Finder YYYY-MM-DD] …` block
+  into `organisations.ai_summary` (`appendOrgSummary`).
+- **Contact research** (`researcher.ts`): cold/unmatched leads ≥ min score with no contacts →
+  Claude + the **web-search tool** (`{ type: 'web_search_20250305', name: 'web_search',
+  max_uses: 5 }`) finds management/booking contacts, 90s request timeout, capped per run,
+  JSON-parsed with a fence/brace fallback. Errors surface on the run banner (`lastError`).
+
+**Endpoints** (`routes/leads.ts`): `GET /` (list, filter stream/status/min-score),
+`GET /runs/latest`, `GET /settings`, `POST /run` (MANAGER_ROLES — full crawl),
+`POST /process-existing` (MANAGER_ROLES — match+research existing leads only, no TM crawl —
+the fast reprocess path), `POST /cancel` (stop/reset a stuck run), `PATCH /:id` (lifecycle),
+`POST /:id/confirm-match` + `POST /:id/reject-match` (partial-match resolution).
+
+**Zombie-run recovery (the `setImmediate` convention):** the pipeline runs in-process, so a
+deploy restart mid-run kills it while the `lead_runs` row stays `status='running'` forever —
+which both blocks new runs and means the deferred stages never ran. Guards:
+`sweepZombieLeadRuns()` marks any orphaned `running` rows failed and is called at **boot**
+(`index.ts`, after `startScheduler()`); `isRunActive()` has a **30-min stale guard** so an
+old row can't block indefinitely; `POST /leads/cancel` is the manual Stop. Any future
+in-process background job should follow the same boot-sweep + stale-guard + manual-stop shape.
+
+**Env needed on the server:** `TICKETMASTER_API_KEY` (the Ticketmaster **consumer key** only —
+the Discovery API doesn't need the secret) + the existing `ANTHROPIC_API_KEY`. The old
+tour-finder key was reused (found on the server, not regenerated).
+
+**Shipped in three validated PRs:** #997 (PR 1 — collect→detect→score + lookahead fix),
+#1000 (PR 2 — pg_trgm matching, Cold/Warm split, partial confirm/reject, org enrichment,
+web-search contact research), #1002 (PR 3 — zombie-run recovery, "Match & research existing"
+fast path, research timeout/error surfacing, table search + click-to-sort). jon merges each
+to main + deploys manually + validates against a test list before the next.
+
+**Deferred slices (agreed, not built):** scheduled weekly run (`lead_auto_run_enabled` toggle
+is seeded but unwired); dashboard surfacing of new high-score leads; "Create band + link" for
+cold leads (staff-gated address-book create + convert-to-job); outreach-email drafting via the
+Gmail auto-chase infra ("here's a lead + a ready-to-send intro"). **Open discussion:** deepen
+warm matching beyond org-name — some bands are booked under a management/agency org rather than
+a "The Band" org, so a future pass could also match band-role links / people, not just org names.
 
 #### Auto-Chase — Gmail ingestion + AI chase drafts (LIVE, Jul 2026)
 
