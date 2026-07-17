@@ -18,7 +18,7 @@ import { authenticate, authorize, AuthRequest, STAFF_ROLES, MANAGER_ROLES } from
 import { validate } from '../middleware/validate';
 import { isTicketmasterConfigured } from '../services/leads/ticketmaster';
 import { isAnthropicConfigured } from '../config/anthropic';
-import { isRunActive, createRun, runPipeline } from '../services/leads/pipeline';
+import { isRunActive, createRun, runPipeline, runProcessExisting, sweepZombieLeadRuns } from '../services/leads/pipeline';
 import { getWarmSummary, composeWarmSummary, appendOrgSummary } from '../services/leads/matcher';
 
 const router = Router();
@@ -115,6 +115,30 @@ router.post('/run', authorize(...MANAGER_ROLES), async (req: AuthRequest, res: R
   } catch (error) {
     console.error('[leads] run error:', error);
     res.status(500).json({ error: 'Failed to start lead search' });
+  }
+});
+
+// POST /api/leads/process-existing — match + research existing leads only (no TM crawl).
+router.post('/process-existing', authorize(...MANAGER_ROLES), async (_req: AuthRequest, res: Response) => {
+  try {
+    if (await isRunActive()) return res.status(409).json({ error: 'A lead search is already running' });
+    const runId = await createRun(_req.user?.id ?? null, 'manual');
+    setImmediate(() => { void runProcessExisting(runId); });
+    res.status(202).json({ data: { run_id: runId } });
+  } catch (error) {
+    console.error('[leads] process-existing error:', error);
+    res.status(500).json({ error: 'Failed to start processing' });
+  }
+});
+
+// POST /api/leads/cancel — stop/reset any stuck run (marks running runs failed).
+router.post('/cancel', authorize(...MANAGER_ROLES), async (_req: AuthRequest, res: Response) => {
+  try {
+    const swept = await sweepZombieLeadRuns('Cancelled by staff');
+    res.json({ data: { cancelled: swept } });
+  } catch (error) {
+    console.error('[leads] cancel error:', error);
+    res.status(500).json({ error: 'Failed to cancel run' });
   }
 });
 
