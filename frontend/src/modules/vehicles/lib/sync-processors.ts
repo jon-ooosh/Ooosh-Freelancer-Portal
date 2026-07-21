@@ -127,6 +127,7 @@ export async function processBookOutSubmission(
         () =>
           sendConditionReport(
             {
+              eventId,
               vehicleReg,
               vehicleType: formData.vehicleType as string,
               driverName,
@@ -264,6 +265,7 @@ export async function processCollectionSubmission(
         () =>
           sendConditionReport(
             {
+              eventId,
               vehicleReg,
               vehicleType: formData.vehicleType as string,
               driverName,
@@ -324,6 +326,7 @@ export async function processCheckInSubmission(
         hireHopJob: (formData.bookOutHireHopJob as string) || null,
         clientEmail: (formData.bookOutClientEmail as string) || null,
         hireStatus: 'Prep Needed',
+        driverName: (formData.bookOutDriverName as string) || null,
       }),
     'Offline sync: Check-in Monday event',
   )
@@ -378,6 +381,7 @@ export async function processCheckInSubmission(
         () =>
           sendConditionReport(
             {
+              eventId,
               vehicleReg,
               vehicleType: formData.vehicleType as string,
               driverName,

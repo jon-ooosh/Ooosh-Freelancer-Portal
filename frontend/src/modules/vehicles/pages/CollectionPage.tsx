@@ -480,6 +480,7 @@ export function CollectionPage() {
         () =>
           sendConditionReport(
             {
+              eventId,
               vehicleReg: form.vehicleReg,
               vehicleType: form.vehicleType,
               vehicleMake: selectedVehicle?.make,
