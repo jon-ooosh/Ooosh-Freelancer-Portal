@@ -46,18 +46,36 @@ router.get('/job/:jobId', async (req: AuthRequest, res: Response) => {
 });
 
 // PUT /api/rehearsals/job/:jobId — upsert per-job intake
+// Overrides keys must be band-standing profile field names (per-hire override of
+// the band's usual). Keeps junk keys out of the JSONB.
+const OVERRIDE_KEYS = [
+  'room_setup', 'mic_list', 'power_notes', 'pa_monitoring', 'usual_backline',
+  'desk', 'load_in_access', 'regular_contact',
+] as const;
 const jobDetailsSchema = z.object({
   pa_setup: z.string().max(4000).nullable().optional(),
   backline_notes: z.string().max(4000).nullable().optional(),
   cars_count: z.number().int().min(0).max(999).nullable().optional(),
   dropoff_pickup: z.string().max(4000).nullable().optional(),
   notes: z.string().max(4000).nullable().optional(),
+  // Accept any string-keyed map; keys are whitelist-filtered below so a buggy /
+  // stale client can't stash junk keys in the JSONB.
+  overrides: z.record(z.string(), z.string().max(4000)).optional(),
 });
 router.put('/job/:jobId', async (req: AuthRequest, res: Response) => {
   const parsed = jobDetailsSchema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
   try {
-    const data = await upsertRehearsalJobDetails(String(req.params.jobId), parsed.data);
+    const fields = { ...parsed.data };
+    if (fields.overrides) {
+      const clean: Record<string, string> = {};
+      for (const k of OVERRIDE_KEYS) {
+        const v = fields.overrides[k];
+        if (typeof v === 'string' && v.trim()) clean[k] = v;
+      }
+      fields.overrides = clean;
+    }
+    const data = await upsertRehearsalJobDetails(String(req.params.jobId), fields);
     res.json({ data });
   } catch (err) {
     console.error('[rehearsals] job put error:', err);

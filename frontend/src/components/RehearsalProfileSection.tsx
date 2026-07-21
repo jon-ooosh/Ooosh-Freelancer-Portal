@@ -7,6 +7,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { api } from '../services/api';
 import { compressImage } from './holding/compress';
+import { REHEARSAL_SETUP_FIELDS } from '../lib/rehearsal-fields';
 
 interface ProfileFile {
   r2_key: string;
@@ -30,16 +31,11 @@ interface Profile {
   files: ProfileFile[];
 }
 
-const TEXT_FIELDS: [keyof Profile, string, string][] = [
-  ['room_setup', 'Room setup', 'How they like the room laid out — backline positions, their own layout…'],
-  ['mic_list', 'Mics they usually ask for', ''],
-  ['power_notes', 'Power / distro needs', ''],
-  ['pa_monitoring', 'PA & monitoring preferences', 'Wedges / IEMs, monitor mix quirks…'],
-  ['usual_backline', 'Usual backline', 'What they hire from us vs bring'],
-  ['desk', 'In-house desk they use', ''],
-  ['load_in_access', 'Load-in / access quirks', 'Early in, late finish, loading…'],
-  ['regular_contact', 'Regular contact', 'TM / engineer + how they like to be reached'],
-];
+// Setup fields come from the shared source of truth (lib/rehearsal-fields) so the
+// org profile and the Job Detail card always render the same set — no drift.
+const TEXT_FIELDS: [keyof Profile, string, string][] = REHEARSAL_SETUP_FIELDS.map(
+  (f) => [f.key as keyof Profile, f.label, f.placeholder ?? '']
+);
 
 const EMPTY: Profile = {
   organisation_id: '', room_setup: '', mic_list: '', power_notes: '', pa_monitoring: '',
