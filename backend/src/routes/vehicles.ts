@@ -3746,7 +3746,10 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
   y = addRow('Driver', data.driverName, y);
   if (data.clientEmail) y = addRow('Email', data.clientEmail, y);
   if (data.hireHopJob) y = addRow('HireHop Job', '#' + data.hireHopJob, y);
-  y = addRow('Date/Time', timestamp, y);
+  // For a check-in the Date/Time IS the check-in moment, which reads more
+  // naturally alongside the check-in mileage in the comparison block below —
+  // so it's rendered there instead. Book-out / interim keep it here.
+  if (!isCheckIn) y = addRow('Date/Time', timestamp, y);
 
   // Hire Start / End — render date + time on a single line. Time is
   // optional (some legacy data has dates only). The hire START time is
@@ -3800,6 +3803,7 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
     y = addRow('Book-Out Fuel', boFuelStr, y);
     y += 2; addLine(y); y += 4;
 
+    y = addRow('Check-In Date/Time', timestamp, y);
     const currentMileageStr = data.mileage != null ? data.mileage.toLocaleString() + ' miles' : '-';
     y = addRow('Check-In Mileage', currentMileageStr, y);
     y = addRow('Check-In Fuel', data.fuelLevel || '-', y);
@@ -4681,6 +4685,36 @@ async function r2KeyToBuffer(key: string): Promise<Buffer | null> {
   return null;
 }
 
+/** Look up a vehicle's descriptor (type/make/model/colour) from fleet_vehicles
+ *  by reg. The event JSON never stored these — a fresh book-out/check-in PDF
+ *  gets them from the selected vehicle client-side, so a REGENERATED PDF was
+ *  showing a blank "Type" (and no make/model/colour). Reconstruct from the
+ *  fleet record instead. */
+async function getVehicleDescriptorByReg(reg: string): Promise<{
+  vehicleType: string | null;
+  make: string | null;
+  model: string | null;
+  colour: string | null;
+}> {
+  try {
+    const r = await query(
+      `SELECT vehicle_type, make, model, colour FROM fleet_vehicles WHERE reg = $1 LIMIT 1`,
+      [reg.toUpperCase()],
+    );
+    const row = r.rows[0];
+    if (!row) return { vehicleType: null, make: null, model: null, colour: null };
+    return {
+      vehicleType: row.vehicle_type ?? null,
+      make: row.make ?? null,
+      model: row.model ?? null,
+      colour: row.colour ?? null,
+    };
+  } catch (err) {
+    console.warn('[vehicles/pdf] getVehicleDescriptorByReg failed:', err instanceof Error ? err.message : err);
+    return { vehicleType: null, make: null, model: null, colour: null };
+  }
+}
+
 /** Map an OP job_issue severity (urgent/normal/low) to the condition-report
  *  PDF's severity band (Critical/Major/Minor — colour only). */
 function mapIssueSeverityToPdf(sev: string | null | undefined): string {
@@ -5036,6 +5070,11 @@ router.post('/events/:eventId/regenerate-pdf', async (req: AuthRequest, res: Res
         damageItems = await reconstructDamageItemsForEvent(reg, event.hireHopJob);
       }
 
+      // Vehicle descriptor (type/make/model/colour) — never stored on the
+      // event JSON, so reconstruct from the fleet record (applies to book-out
+      // regen too). Event values win if a legacy event happens to carry them.
+      const descriptor = await getVehicleDescriptorByReg(reg);
+
       // Manual corrections from the Regenerate dialog (blank → keep auto value).
       const numOverride = (v: unknown): number | null =>
         v != null && String(v).trim() !== '' && !isNaN(Number(v)) ? Number(v) : null;
@@ -5052,7 +5091,10 @@ router.post('/events/:eventId/regenerate-pdf', async (req: AuthRequest, res: Res
 
       const built = await buildConditionReportPdf({
         vehicleReg: reg,
-        vehicleType: event.vehicleType || '',
+        vehicleType: event.vehicleType || descriptor.vehicleType || '',
+        vehicleMake: event.vehicleMake || descriptor.make || undefined,
+        vehicleModel: event.vehicleModel || descriptor.model || undefined,
+        vehicleColour: event.vehicleColour || descriptor.colour || undefined,
         driverName,
         clientEmail: event.clientEmail || undefined,
         hireHopJob: event.hireHopJob || undefined,
