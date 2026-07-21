@@ -212,6 +212,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '175_leads.sql',
         '176_rehearsal_details_and_profile.sql',
         '177_rehearsal_job_overrides.sql',
+        '178_staff_documents.sql',
       ];
 
       for (const migration of migrations) {

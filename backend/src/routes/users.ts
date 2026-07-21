@@ -200,6 +200,11 @@ router.patch('/:id/cot-card', authorize('admin'), async (req: AuthRequest, res: 
       vals,
     );
     if (!r.rows.length) { res.status(404).json({ error: 'User not found' }); return; }
+    // Issuing/updating a card seeds any COT-card-holder-targeted staff document
+    // (e.g. the card Authorised User Agreement) for this user. Fire-and-forget.
+    import('../services/staff-documents')
+      .then((m) => m.syncCotCardHolderDocuments())
+      .catch((e) => console.error('COT card doc sync failed:', e));
     res.json({ data: r.rows[0] });
   } catch (error) {
     console.error('Update COT card error:', error);
