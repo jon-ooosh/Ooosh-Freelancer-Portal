@@ -477,6 +477,9 @@ export function CheckInPage() {
           hireHopJob: form.bookOutHireHopJob || null,
           clientEmail: form.bookOutClientEmail || null,
           hireStatus: 'Prep Needed',
+          // Persist the returning driver as a first-class field so a later
+          // PDF regeneration doesn't have to parse it out of `details`.
+          driverName: form.bookOutDriverName || null,
         }),
       'R2 event creation',
     )
@@ -796,6 +799,7 @@ export function CheckInPage() {
       () =>
         sendConditionReport(
           {
+            eventId,
             vehicleReg: form.vehicleReg,
             vehicleType: form.vehicleType,
             vehicleMake: selectedVehicle?.make,

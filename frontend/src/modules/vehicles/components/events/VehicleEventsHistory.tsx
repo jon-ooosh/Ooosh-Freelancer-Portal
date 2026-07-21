@@ -168,23 +168,47 @@ function RegenerateDialog({
   vehicleReg: string
   onClose: () => void
 }) {
+  const isCheckIn = event.eventType === 'Check In'
   const [email, setEmail] = useState('')
   const [busy, setBusy] = useState(false)
+  const [showCorrections, setShowCorrections] = useState(false)
+  const [corrections, setCorrections] = useState({
+    driverName: '',
+    bookOutMileage: '',
+    bookOutFuelLevel: '',
+    bookOutDate: '',
+    mileage: '',
+  })
   const [result, setResult] = useState<{
     success: boolean
     message: string
     downloadUrl?: string
     downloadName?: string
+    needsBookOutMileage?: boolean
   } | null>(null)
+
+  function setCorrection(field: keyof typeof corrections, value: string) {
+    setCorrections(prev => ({ ...prev, [field]: value }))
+  }
 
   async function run(mode: 'send' | 'download') {
     setBusy(true)
     setResult(null)
+
+    // Only send non-empty corrections. Any correction implies a rebuild so it
+    // takes effect even if a frozen PDF exists for this event.
+    const overrides = Object.fromEntries(
+      Object.entries(corrections).filter(([, v]) => v.trim() !== ''),
+    ) as Record<string, string>
+    const hasCorrections = Object.keys(overrides).length > 0
+
     const res = await regenerateEventPdf({
       eventId: event.id,
       vehicleReg,
       email: mode === 'send' ? (email.trim() || undefined) : undefined,
       skipEmail: mode === 'download',
+      rebuild: hasCorrections || undefined,
+      overrides: hasCorrections ? overrides : undefined,
     })
     setBusy(false)
 
@@ -194,11 +218,26 @@ function RegenerateDialog({
     }
 
     const parts: string[] = []
-    parts.push(`${res.photoCount ?? 0} photo${res.photoCount === 1 ? '' : 's'} included`)
-    if (!res.signatureFound) parts.push('no signature on file')
+    if (res.source === 'stored') {
+      parts.push('Served stored original report')
+    } else {
+      parts.push(`${res.photoCount ?? 0} photo${res.photoCount === 1 ? '' : 's'} included`)
+      if (res.reconstruction) {
+        parts.push(`${res.reconstruction.damageCount} damage item${res.reconstruction.damageCount === 1 ? '' : 's'}`)
+      }
+      if (!res.signatureFound) parts.push('no signature on file')
+    }
     if (mode === 'send') {
       parts.push(res.emailSent ? `emailed to ${res.emailedTo}` : 'email failed')
     }
+
+    // Reconstructed check-in where the book-out mileage couldn't be found —
+    // prompt staff to enter it manually and regenerate.
+    const needsBookOutMileage =
+      res.source === 'reconstructed' &&
+      !!res.reconstruction &&
+      !res.reconstruction.bookOutMileageFound &&
+      !corrections.bookOutMileage.trim()
 
     // Build a download URL from the base64 so the staff can grab the PDF
     // directly regardless of send/download mode.
@@ -215,11 +254,14 @@ function RegenerateDialog({
       }
     }
 
+    if (needsBookOutMileage) setShowCorrections(true)
+
     setResult({
       success: true,
       message: parts.join(' · '),
       downloadUrl,
       downloadName: res.filename,
+      needsBookOutMileage,
     })
   }
 
@@ -246,6 +288,40 @@ function RegenerateDialog({
           className="w-full rounded border border-gray-300 px-2 py-1.5 text-sm focus:border-blue-400 focus:outline-none"
           disabled={busy}
         />
+
+        <button
+          type="button"
+          onClick={() => setShowCorrections(v => !v)}
+          className="mt-3 text-xs font-medium text-blue-700 hover:underline"
+        >
+          {showCorrections ? '− Hide manual corrections' : '+ Manual corrections (optional)'}
+        </button>
+
+        {showCorrections && (
+          <div className="mt-2 space-y-2 rounded border border-gray-200 bg-gray-50 p-3">
+            <p className="text-[11px] text-gray-500">
+              For older records where some details weren&apos;t saved. Fill only what&apos;s
+              missing — anything left blank keeps the auto-detected value. Saving a correction
+              rebuilds the PDF.
+            </p>
+            <CorrectionField label="Driver name" value={corrections.driverName} onChange={v => setCorrection('driverName', v)} disabled={busy} />
+            {isCheckIn && (
+              <>
+                <CorrectionField label="Book-out mileage" type="number" value={corrections.bookOutMileage} onChange={v => setCorrection('bookOutMileage', v)} disabled={busy} />
+                <CorrectionField label="Book-out fuel (e.g. 7/8)" value={corrections.bookOutFuelLevel} onChange={v => setCorrection('bookOutFuelLevel', v)} disabled={busy} />
+                <CorrectionField label="Book-out date" type="date" value={corrections.bookOutDate} onChange={v => setCorrection('bookOutDate', v)} disabled={busy} />
+                <CorrectionField label="Check-in mileage" type="number" value={corrections.mileage} onChange={v => setCorrection('mileage', v)} disabled={busy} />
+              </>
+            )}
+          </div>
+        )}
+
+        {result?.needsBookOutMileage && (
+          <div className="mt-3 rounded bg-amber-50 p-2 text-xs text-amber-800">
+            Book-out mileage couldn&apos;t be established automatically. Enter it under
+            &ldquo;Manual corrections&rdquo; above and regenerate.
+          </div>
+        )}
 
         {result && (
           <div
@@ -295,5 +371,32 @@ function RegenerateDialog({
         </div>
       </div>
     </div>
+  )
+}
+
+function CorrectionField({
+  label,
+  value,
+  onChange,
+  type = 'text',
+  disabled,
+}: {
+  label: string
+  value: string
+  onChange: (v: string) => void
+  type?: 'text' | 'number' | 'date'
+  disabled?: boolean
+}) {
+  return (
+    <label className="block">
+      <span className="mb-0.5 block text-[11px] font-medium text-gray-600">{label}</span>
+      <input
+        type={type}
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        disabled={disabled}
+        className="w-full rounded border border-gray-300 px-2 py-1 text-sm focus:border-blue-400 focus:outline-none"
+      />
+    </label>
   )
 }
