@@ -107,6 +107,17 @@ export async function regenerateEventPdf(params: {
   vehicleReg: string
   email?: string
   skipEmail?: boolean
+  /** Force a fresh rebuild instead of serving the stored frozen PDF. */
+  rebuild?: boolean
+  /** Manual corrections applied when reconstructing a pre-storage event
+   *  (e.g. the book-out mileage couldn't be established automatically). */
+  overrides?: {
+    driverName?: string
+    bookOutMileage?: string
+    bookOutFuelLevel?: string
+    bookOutDate?: string
+    mileage?: string
+  }
 }): Promise<{
   success: boolean
   pdf?: string
@@ -116,6 +127,9 @@ export async function regenerateEventPdf(params: {
   signatureFound?: boolean
   emailSent?: boolean
   emailedTo?: string | null
+  /** 'stored' = frozen original; 'reconstructed' = rebuilt from live data. */
+  source?: 'stored' | 'reconstructed'
+  reconstruction?: { bookOutMileageFound: boolean; damageCount: number }
   error?: string
 }> {
   try {
@@ -128,6 +142,8 @@ export async function regenerateEventPdf(params: {
           vehicleReg: params.vehicleReg,
           email: params.email,
           skipEmail: params.skipEmail,
+          rebuild: params.rebuild,
+          ...(params.overrides || {}),
         }),
       },
     )
@@ -145,6 +161,8 @@ export async function regenerateEventPdf(params: {
       signatureFound: boolean
       emailSent: boolean
       emailedTo: string | null
+      source?: 'stored' | 'reconstructed'
+      reconstruction?: { bookOutMileageFound: boolean; damageCount: number }
     }
     return { success: true, ...data }
   } catch (err) {
