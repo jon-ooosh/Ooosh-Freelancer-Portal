@@ -359,6 +359,35 @@ upload in `RehearsalProfileSection.onFile`. #3 + #5 were built together on the c
   This is the prerequisite jon asked for before greenlighting the info-pack files (§5 item A) + T-N
   auto-send (item B).
 
+### 5e. Full unification — "Option A" (Jul 2026) ✅ SHIPPED
+
+jon: the two edit surfaces cover *different* fields, so the usual/this-hire toggle only lived on the
+two shared ones. He picked "Option A": one coherent surface, toggle on **every** band-standing setup
+field, without a schema column per field.
+
+- **Data model — migration 177.** One `overrides JSONB` on `rehearsal_job_details`, keyed by the
+  PROFILE field name (`room_setup`, `mic_list`, `power_notes`, `pa_monitoring`, `usual_backline`,
+  `desk`, `load_in_access`, `regular_contact`). Per-hire override lives here; the band's usual lives
+  on `organisation_rehearsal_profile`. **Display precedence: `overrides[key] ?? profile[key]`.** The
+  legacy `pa_setup`/`backline_notes` columns are superseded by `overrides.pa_monitoring` /
+  `overrides.usual_backline`; 177 backfills them and new code stops writing them (columns kept, not
+  dropped).
+- **Shared field list — `frontend/src/lib/rehearsal-fields.ts`.** `REHEARSAL_SETUP_FIELDS` (key =
+  profile column = override key) is the single source of truth; BOTH `RehearsalDetailsCard` and
+  `RehearsalProfileSection` render from it, so the two surfaces can't drift. Add a setup field here
+  and both pick it up.
+- **Card UX (anti-clobber).** Each setup field is a tidy **read row** (label + effective value + a
+  "· this hire / · band usual" tag) that expands to the `[⭑ Band usual | 📌 This hire]` toggle +
+  textarea on click. Card stays collapsed by default. Genuinely per-hire fields (cars / drop-off /
+  notes) sit in a separate "This hire" block. The band's bulky extras (preference rows, files count,
+  internal-notes flag) are **summarised** with a "manage →" link to the org tab — not re-editable on
+  the card.
+- **Save dispatch.** Setup fields on "this hire" with a value → the complete `overrides` map
+  (replace semantics, so clearing/promoting works); dirty "band usual" fields → the profile (partial
+  upsert, untouched fields left alone). Per-hire fields + overrides → `PUT /rehearsals/job/:jobId`;
+  profile changes → `PUT /rehearsals/profile/:orgId`, run concurrently. No-anchor guard: forces
+  "this hire" so a typed value is never dropped. Backend whitelist-filters override keys.
+
 ---
 
 ## 6. Build order

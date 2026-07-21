@@ -19,11 +19,15 @@ import { getJobCoverage } from './studio-sitter';
 
 export interface RehearsalJobDetails {
   job_id: string;
-  pa_setup: string | null;
-  backline_notes: string | null;
+  pa_setup: string | null;        // legacy — superseded by overrides.pa_monitoring
+  backline_notes: string | null;  // legacy — superseded by overrides.usual_backline
   cars_count: number | null;
   dropoff_pickup: string | null;
   notes: string | null;
+  // Per-hire overrides of band-standing profile fields, keyed by PROFILE field
+  // name (room_setup, mic_list, power_notes, pa_monitoring, usual_backline, desk,
+  // load_in_access, regular_contact). Display precedence: overrides[k] ?? profile[k].
+  overrides: Record<string, string>;
   info_pack_sent_at: string | null;
   info_pack_sent_by: string | null;
 }
@@ -83,36 +87,51 @@ export async function resolveRehearsalAnchorOrg(jobId: string): Promise<AnchorOr
 }
 
 const JOB_DETAIL_COLS =
-  'job_id, pa_setup, backline_notes, cars_count, dropoff_pickup, notes, info_pack_sent_at, info_pack_sent_by';
+  'job_id, pa_setup, backline_notes, cars_count, dropoff_pickup, notes, overrides, info_pack_sent_at, info_pack_sent_by';
 
 export async function getRehearsalJobDetails(jobId: string): Promise<RehearsalJobDetails | null> {
   const res = await query(
     `SELECT ${JOB_DETAIL_COLS} FROM rehearsal_job_details WHERE job_id = $1`,
     [jobId]
   );
-  return res.rows[0] ?? null;
+  const row = res.rows[0];
+  if (!row) return null;
+  return { ...row, overrides: row.overrides ?? {} };
 }
 
 const JOB_DETAIL_FIELDS = ['pa_setup', 'backline_notes', 'cars_count', 'dropoff_pickup', 'notes'] as const;
 
 export async function upsertRehearsalJobDetails(
   jobId: string,
-  fields: Partial<Record<(typeof JOB_DETAIL_FIELDS)[number], string | number | null>>
+  fields: Partial<Record<(typeof JOB_DETAIL_FIELDS)[number], string | number | null>> & {
+    overrides?: Record<string, string>;
+  }
 ): Promise<RehearsalJobDetails> {
-  const cols = JOB_DETAIL_FIELDS.filter((f) => f in fields);
-  const insertCols = ['job_id', ...cols];
-  const insertVals = [jobId, ...cols.map((c) => (fields as any)[c] ?? null)];
-  const placeholders = insertVals.map((_, i) => `$${i + 1}`);
-  const updates = cols.map((c) => `${c} = EXCLUDED.${c}`);
+  const insertCols: string[] = ['job_id'];
+  const vals: any[] = [jobId];
+  const setCols: string[] = [];
+  for (const f of JOB_DETAIL_FIELDS) {
+    if (f in fields) {
+      insertCols.push(f);
+      vals.push((fields as any)[f] ?? null);
+      setCols.push(`${f} = EXCLUDED.${f}`);
+    }
+  }
+  if ('overrides' in fields) {
+    insertCols.push('overrides');
+    vals.push(JSON.stringify(fields.overrides ?? {}));
+    setCols.push('overrides = EXCLUDED.overrides');
+  }
+  const placeholders = insertCols.map((c, i) => (c === 'overrides' ? `$${i + 1}::jsonb` : `$${i + 1}`));
   const res = await query(
     `INSERT INTO rehearsal_job_details (${insertCols.join(', ')})
      VALUES (${placeholders.join(', ')})
      ON CONFLICT (job_id) DO UPDATE SET
-       ${updates.length ? updates.join(', ') + ',' : ''} updated_at = NOW()
+       ${setCols.length ? setCols.join(', ') + ',' : ''} updated_at = NOW()
      RETURNING ${JOB_DETAIL_COLS}`,
-    insertVals
+    vals
   );
-  return res.rows[0];
+  return { ...res.rows[0], overrides: res.rows[0].overrides ?? {} };
 }
 
 const PROFILE_COLS =
