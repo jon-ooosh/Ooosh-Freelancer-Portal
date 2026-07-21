@@ -211,6 +211,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '174_auto_cover_excess_from_account.sql',
         '175_leads.sql',
         '176_rehearsal_details_and_profile.sql',
+        '177_staff_documents.sql',
       ];
 
       for (const migration of migrations) {
