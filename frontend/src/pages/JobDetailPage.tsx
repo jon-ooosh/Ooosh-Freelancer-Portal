@@ -1502,6 +1502,7 @@ export default function JobDetailPage() {
   const [jobOrgSelectedOrg, setJobOrgSelectedOrg] = useState<{ id: string; name: string; type: string } | null>(null);
   const [jobOrgRole, setJobOrgRole] = useState('band');
   const [jobOrgSaving, setJobOrgSaving] = useState(false);
+  const [jobOrgCreating, setJobOrgCreating] = useState(false);
   const [orgSuggestions, setOrgSuggestions] = useState<Array<{
     org_id: string; org_name: string; org_type: string;
     relationship_type: string; suggested_role: string;
@@ -2540,6 +2541,25 @@ export default function JobDetailPage() {
       setJobOrgs(data.data);
     } catch (err) {
       console.error('Failed to load job organisations:', err);
+    }
+  }
+
+  // Inline-create a new organisation from the additional-orgs search box, then
+  // select it (staff pick a role + Add). Mirrors createAndSelectClient on the
+  // headline picker. New orgs default to type 'band' — the per-job role is what
+  // matters here, and band is the most common thing you'd add on the fly.
+  async function createAndSelectJobOrg(name: string) {
+    const trimmed = name.trim();
+    if (!trimmed || jobOrgCreating) return;
+    setJobOrgCreating(true);
+    try {
+      const newOrg = await api.post<{ id: string }>('/organisations', { name: trimmed, type: 'band' });
+      setJobOrgSelectedOrg({ id: newOrg.id, name: trimmed, type: 'band' });
+      setJobOrgResults([]);
+    } catch (err: any) {
+      alert(err?.response?.data?.error || err?.message || 'Failed to create organisation');
+    } finally {
+      setJobOrgCreating(false);
     }
   }
 
@@ -3984,6 +4004,7 @@ export default function JobDetailPage() {
                 band: 'bg-purple-100 text-purple-700 border-purple-200',
                 client: 'bg-blue-100 text-blue-700 border-blue-200',
                 promoter: 'bg-red-100 text-red-700 border-red-200',
+                festival: 'bg-orange-100 text-orange-700 border-orange-200',
                 management: 'bg-sky-100 text-sky-700 border-sky-200',
                 label: 'bg-green-100 text-green-700 border-green-200',
                 venue_operator: 'bg-teal-100 text-teal-700 border-teal-200',
@@ -4024,20 +4045,35 @@ export default function JobDetailPage() {
                       className="border border-gray-300 rounded px-2 py-1 text-xs w-48 focus:ring-ooosh-500 focus:border-ooosh-500"
                       autoFocus
                     />
-                    {jobOrgResults.length > 0 && (
-                      <div className="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg z-20 w-64 max-h-48 overflow-y-auto">
-                        {jobOrgResults.map((o) => (
-                          <button
-                            key={o.id}
-                            onClick={() => { setJobOrgSelectedOrg(o); setJobOrgResults([]); }}
-                            className="w-full text-left px-3 py-2 hover:bg-gray-50 text-xs flex items-center gap-2 border-b border-gray-50 last:border-b-0"
-                          >
-                            <span className="font-medium">{o.name}</span>
-                            <span className="text-gray-400">{o.type}</span>
-                          </button>
-                        ))}
-                      </div>
-                    )}
+                    {(() => {
+                      const trimmed = jobOrgSearch.trim();
+                      const hasExact = jobOrgResults.some(o => o.name.toLowerCase() === trimmed.toLowerCase());
+                      const showCreate = trimmed.length >= 2 && !hasExact;
+                      if (jobOrgResults.length === 0 && !showCreate) return null;
+                      return (
+                        <div className="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg z-20 w-64 max-h-48 overflow-y-auto">
+                          {jobOrgResults.map((o) => (
+                            <button
+                              key={o.id}
+                              onClick={() => { setJobOrgSelectedOrg(o); setJobOrgResults([]); }}
+                              className="w-full text-left px-3 py-2 hover:bg-gray-50 text-xs flex items-center gap-2 border-b border-gray-50 last:border-b-0"
+                            >
+                              <span className="font-medium">{o.name}</span>
+                              <span className="text-gray-400">{o.type}</span>
+                            </button>
+                          ))}
+                          {showCreate && (
+                            <button
+                              onClick={() => createAndSelectJobOrg(trimmed)}
+                              disabled={jobOrgCreating}
+                              className="w-full text-left px-3 py-2 hover:bg-ooosh-50 text-xs text-ooosh-700 font-medium border-t border-gray-100 disabled:opacity-50"
+                            >
+                              {jobOrgCreating ? 'Creating…' : <>+ Create "<span className="font-semibold">{trimmed}</span>" as new organisation</>}
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </div>
                 ) : (
                   <>
@@ -4052,6 +4088,7 @@ export default function JobDetailPage() {
                       <option value="band">Band</option>
                       <option value="client">Client</option>
                       <option value="promoter">Promoter</option>
+                      <option value="festival">Festival</option>
                       <option value="management">Management</option>
                       <option value="label">Label</option>
                       <option value="venue_operator">Venue Operator</option>
