@@ -165,9 +165,13 @@ router.get('/cot-cards', authorize('admin'), async (_req: AuthRequest, res: Resp
   try {
     const result = await query(
       `SELECT u.id, u.email, u.is_active, u.cot_card_last4, u.cot_card_label,
-              p.first_name, p.last_name
+              p.first_name, p.last_name,
+              a.status AS agreement_status, c.completed_at AS agreement_completed_at
          FROM users u
          LEFT JOIN people p ON p.id = u.person_id
+         LEFT JOIN staff_documents d ON d.slug = 'cot-card-agreement'
+         LEFT JOIN staff_document_assignments a ON a.user_id = u.id AND a.document_id = d.id
+         LEFT JOIN staff_document_completions c ON c.id = a.current_completion_id
         WHERE u.role <> 'freelancer'
         ORDER BY u.is_active DESC, p.first_name, p.last_name`
     );
