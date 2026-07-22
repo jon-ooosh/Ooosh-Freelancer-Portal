@@ -3962,6 +3962,8 @@ When `job_contacts` has rows for a job, they ARE the recipient list. The org-lev
 
 Because we pass `CLIENT_ID`, HH updates the existing contact record in place — including its `NAME` field. That's the intended cleanup direction (evolves "ATC Live" → "Sarah Smith / ATC Live") and matches the SPEC's Stream C cleanup notes. New jobs for the same client will show the most recent push's NAME until their own push overwrites it.
 
+**⚠️ Call ORDER: `save_job.php` FIRST, then `job_save_contact.php` (Jul 2026, "Save error. 154" fix).** `job_save_contact.php` is UPDATE-oriented — it needs an existing `CLIENT_ID` to save against. Calling it WITHOUT one (e.g. when the headline org is a freshly-created OP org with no `external_id_map` entry yet — the "change the headline client" case) makes HireHop reject with **"Save error. 154"**. So `sync-client-to-hh` (and `push-hirehop`) both run `save_job.php` FIRST — it creates/links the HH client from `company`/`name`/`email` and hands back the `client_id` (fall back to `job_data.php` to read it) — THEN enrich via `job_save_contact.php` with that `CLIENT_ID`. **Never reorder these.** Any future OP→HH contact-sync surface must follow the same order.
+
 **`person_id` on `resolveHireFormContacts` results:**
 - Present for: `job_contact`, `job_contact_primary`, `client_person`, role-derived linked-org sources, `client_name_match`
 - Absent for: `client_org`, `linked_org`-style org-level rows, `manual_entry`
