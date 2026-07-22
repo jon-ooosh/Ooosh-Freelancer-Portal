@@ -844,6 +844,27 @@ export function startScheduler() {
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: Client Storage reminders scheduled daily at 09:20 Europe/London');
 
+  // ── Staff Documents reminders (chase / renew / escalate / lapse) ─────────
+  // Daily at 09:35 Europe/London. Chases pending/lapsed staff-document
+  // assignments, nudges completions approaching renewal, lapses expired ones,
+  // and escalates stale-pending to managers. Bells only — the Step-7 escalation
+  // scheduler emails per prefs. See services/staff-document-reminders.ts +
+  // docs/STAFF-DOCUMENTS-SPEC.md §5.
+  cron.schedule('35 9 * * *', async () => {
+    try {
+      const { runStaffDocumentReminders } = await import('../services/staff-document-reminders');
+      const r = await runStaffDocumentReminders();
+      if (r.lapsed || r.renewalNudges || r.chased || r.escalated) {
+        console.log(
+          `Scheduler: Staff-document reminders — ${r.chased} chased, ${r.renewalNudges} renewal nudges, ${r.lapsed} lapsed, ${r.escalated} escalated`
+        );
+      }
+    } catch (err) {
+      console.error('Scheduler: Staff-document reminders failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: Staff Documents reminders scheduled daily at 09:35 Europe/London');
+
   // ── Studio-sitter lock-up chase (morning after) ──────────────────────────
   // Daily at 08:45 Europe/London. For any shift that closed without a lock-up
   // report, reminds the rostered sitter + alerts the office. Once per shift
