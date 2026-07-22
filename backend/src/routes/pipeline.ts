@@ -1326,7 +1326,7 @@ router.get('/client-history', async (req: AuthRequest, res: Response) => {
 
 const createJobOrgSchema = z.object({
   organisation_id: z.string().uuid(),
-  role: z.enum(['band', 'client', 'promoter', 'venue_operator', 'management', 'label', 'supplier', 'other']),
+  role: z.enum(['band', 'client', 'promoter', 'festival', 'management', 'label', 'venue_operator', 'supplier', 'other']),
   is_primary: z.boolean().optional().default(false),
   notes: z.string().optional().nullable(),
 });
@@ -3031,10 +3031,65 @@ router.post('/:id/sync-client-to-hh', async (req: AuthRequest, res: Response) =>
 
     const { hhBroker } = await import('../services/hirehop-broker');
 
-    // Step 1: Create/update contact in HireHop address book via job_save_contact.php
+    // Resolve the values we want on the HH contact.
     const orgName = orgDetails?.name || job.client_name || job.company_name || '';
     const nameForHh = primaryContact?.name || orgName;
     const companyForHh = orgName || primaryContact?.name || '';
+    const emailForHh = primaryContact?.email || orgDetails?.email;
+    const phoneForHh = primaryContact?.phone || orgDetails?.phone;
+
+    // ── Step 1: establish/link the client on the HH job via save_job.php ──
+    // MUST run before job_save_contact.php. This mirrors the working "Create in
+    // HireHop" flow: save_job.php creates (or links) the HH client from
+    // company/name/email and returns its client_id. job_save_contact.php below is
+    // an UPDATE-oriented endpoint — calling it WITHOUT a CLIENT_ID (e.g. for a
+    // freshly-created OP org that has no external_id_map entry yet, like a client
+    // just added via the headline picker) makes HireHop reject with
+    // "Save error. 154" because there's no contact to save against. Running
+    // save_job first hands us a client_id to enrich with.
+    const jobBody: Record<string, unknown> = {
+      job: job.hh_job_number,
+      name: nameForHh,
+      company: companyForHh,
+      no_webhook: 1,
+    };
+    if (hhClientId) jobBody.client_id = hhClientId;
+    if (emailForHh) jobBody.email = emailForHh;
+    if (phoneForHh) jobBody.telephone = phoneForHh;
+
+    const jobSaveResp = await hhBroker.post<Record<string, unknown>>(
+      '/api/save_job.php',
+      jobBody,
+      { priority: 'high' }
+    );
+    if (!jobSaveResp.success) {
+      console.error('[Pipeline] HireHop job client link failed:', jobSaveResp.error);
+      res.status(502).json({ error: `HireHop API error: ${jobSaveResp.error || 'Unknown error'}` });
+      return;
+    }
+
+    // Pick up the client_id save_job created/linked. Fall back to reading the
+    // job if save_job didn't echo it (mirrors push-hirehop).
+    const savedData = (jobSaveResp.data || {}) as Record<string, unknown>;
+    const autoClientId = savedData.client_id ?? savedData.CLIENT_ID ?? savedData.clientId;
+    if (autoClientId && Number(autoClientId) > 0) {
+      hhClientId = Number(autoClientId);
+    }
+    if (!hhClientId) {
+      const jobDataResp = await hhBroker.get<Record<string, unknown>>(
+        '/api/job_data.php',
+        { job: Number(job.hh_job_number) },
+        { priority: 'high', cacheTTL: 0 }
+      );
+      if (jobDataResp.success && jobDataResp.data) {
+        const jd = jobDataResp.data;
+        const fetched = jd.CLIENT_ID ?? jd.client_id ?? jd.clientId;
+        if (fetched && Number(fetched) > 0) hhClientId = Number(fetched);
+      }
+    }
+
+    // ── Step 2: enrich the contact (name/company/address/email/phone) via
+    // job_save_contact.php. Now we always have a CLIENT_ID to update in place. ──
     const contactPayload: Record<string, unknown> = {
       JOB_ID: job.hh_job_number,
       NAME: nameForHh,
@@ -3042,43 +3097,31 @@ router.post('/:id/sync-client-to-hh', async (req: AuthRequest, res: Response) =>
       CLIENT: 1,
       no_webhook: 1,
     };
-
-    // Include existing HH client ID to update rather than create a duplicate
-    if (hhClientId) {
-      contactPayload.CLIENT_ID = hhClientId;
-    }
-
-    // Add address, email, phone — primary contact's email/phone wins when set.
+    if (hhClientId) contactPayload.CLIENT_ID = hhClientId;
     if (orgDetails) {
       // Build full address from address + location fields
       const addressParts = [orgDetails.address, orgDetails.location].filter(Boolean);
-      if (addressParts.length > 0) {
-        contactPayload.ADDRESS = addressParts.join(', ');
-      }
+      if (addressParts.length > 0) contactPayload.ADDRESS = addressParts.join(', ');
     }
-    const emailForHh = primaryContact?.email || orgDetails?.email;
-    const phoneForHh = primaryContact?.phone || orgDetails?.phone;
-    if (emailForHh) {
-      contactPayload.EMAIL = emailForHh;
-    }
-    if (phoneForHh) {
-      contactPayload.TELEPHONE = phoneForHh;
-    }
+    if (emailForHh) contactPayload.EMAIL = emailForHh;
+    if (phoneForHh) contactPayload.TELEPHONE = phoneForHh;
 
     const contactResponse = await hhBroker.post(
       '/php_functions/job_save_contact.php',
       contactPayload,
       { priority: 'high' }
     );
-
     if (!contactResponse.success) {
-      console.error('[Pipeline] HireHop contact sync failed:', contactResponse.error);
-      res.status(502).json({ error: `HireHop contact API error: ${contactResponse.error || 'Unknown error'}` });
-      return;
+      // Step 1 already linked the client on the job, so the rename itself landed.
+      // Warn rather than hard-fail (address/phone enrich is best-effort).
+      console.warn('[Pipeline] Contact enrich failed for HH job #' + job.hh_job_number + ':', contactResponse.error);
     }
 
-    // Extract the returned HH contact ID and store in external_id_map
-    const returnedHhClientId = (contactResponse.data as any)?.id;
+    // Store/refresh the HH contact ID mapping for this org.
+    const returnedHhClientId = (contactResponse.data as any)?.id
+      || (contactResponse.data as any)?.ID
+      || (contactResponse.data as any)?.CLIENT_ID
+      || hhClientId;
     if (returnedHhClientId && job.client_id) {
       await query(
         `INSERT INTO external_id_map (entity_type, entity_id, external_system, external_id)
@@ -3086,30 +3129,7 @@ router.post('/:id/sync-client-to-hh', async (req: AuthRequest, res: Response) =>
          ON CONFLICT (entity_type, entity_id, external_system) DO UPDATE SET external_id = $2, synced_at = NOW()`,
         [job.client_id, String(returnedHhClientId)]
       );
-      hhClientId = returnedHhClientId;
-      console.log('[Pipeline] HireHop contact created/updated, ID:', returnedHhClientId);
-    }
-
-    // Step 2: Update the job's client link via save_job.php
-    const jobBody: Record<string, unknown> = {
-      job: job.hh_job_number,
-      name: job.client_name || '',
-      company: job.company_name || job.client_name || '',
-      no_webhook: 1,
-    };
-
-    if (hhClientId) jobBody.client_id = hhClientId;
-
-    const hhResponse = await hhBroker.post(
-      '/api/save_job.php',
-      jobBody,
-      { priority: 'high' }
-    );
-
-    if (!hhResponse.success) {
-      console.error('[Pipeline] HireHop job client link failed:', hhResponse.error);
-      // Contact was already synced, so we warn but don't fully fail
-      console.warn('[Pipeline] Contact was synced but job client link failed for HH job #' + job.hh_job_number);
+      console.log('[Pipeline] HireHop contact synced, ID:', returnedHhClientId);
     }
 
     // Build a summary of what was synced
