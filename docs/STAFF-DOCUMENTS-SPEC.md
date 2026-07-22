@@ -224,6 +224,22 @@ anything's outstanding — kept a nudge, not a lockout.
 - **Library CRUD + versioning**: create/edit documents, upload a new version
   (with change note), set completion mode / targeting / chase / review /
   escalation, retire.
+
+  **Authoring model (decided Jul 2026 — "Option A"):** documents are DATA, not
+  code — authored/edited in-app, no deploy. Two paths per document:
+  1. **Inline body** — typed in OP as **markdown-lite** (bold, headings,
+     numbered/bullet lists, links), rendered by `frontend/src/components/
+     MarkdownLite.tsx` (also used for the admin editor's live preview). Best for
+     text policies/agreements; minor tweaks = edit → publish new version.
+  2. **Uploaded file** — a finished PDF authored anywhere (Google Docs, etc.)
+     uploaded as the version (`file_r2_key` + `file_name`). Best for anything
+     graphic-heavy or laid-out — no fighting an editor.
+  The signed snapshot PDF renders **text only**, so keep *signable* documents to
+  markdown/text; put anything visual in read-only guides or uploaded PDFs. Full
+  WYSIWYG + inline images in the in-app editor was considered ("Option B") and
+  deferred — upload-a-PDF covers the visual case without the PDF-rendering
+  weight. The admin editor (PR 4) is a markdown textarea + live preview + a
+  file-upload alternative.
 - **Completion matrix**: per document, who's completed / pending / lapsed, with
   filters + a "chase now" manual nudge. Per user, everything they owe.
 - Lives under the **Staff** nav group (admin-gated child), sibling to the future
