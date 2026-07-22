@@ -69,6 +69,26 @@ function isManager(role?: string): boolean {
   return role === 'admin' || role === 'manager' || role === 'weekend_manager';
 }
 
+// Which categories may be shared into the freelancer portal. The rest
+// (agreement / contract / official_doc) are internal-only.
+const SHAREABLE_CATEGORIES = ['policy', 'training', 'other'];
+
+function slugify(s: string): string {
+  return (s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 70) || 'document';
+}
+async function uniqueSlug(base: string): Promise<string> {
+  let slug = base;
+  let n = 1;
+  // Bounded loop — appends -2, -3, … until free.
+  while (n < 500) {
+    const r = await query(`SELECT 1 FROM staff_documents WHERE slug = $1`, [slug]);
+    if (!r.rows.length) return slug;
+    n += 1;
+    slug = `${base}-${n}`;
+  }
+  return `${base}-${Date.now()}`;
+}
+
 // ════════════════════════════════════════════════════════════════════════
 // STAFF — my documents
 // ════════════════════════════════════════════════════════════════════════
@@ -329,8 +349,9 @@ router.get('/', authorize(...MANAGER_ROLES), async (_req: AuthRequest, res: Resp
 });
 
 const createSchema = z.object({
-  slug: z.string().trim().min(2).max(80).regex(/^[a-z0-9-]+$/, 'lowercase-hyphen only'),
+  slug: z.string().trim().min(2).max(80).regex(/^[a-z0-9-]+$/, 'lowercase-hyphen only').optional(),
   title: z.string().trim().min(1).max(200),
+  shareable_with_freelancers: z.boolean().optional(),
   category: z.enum(['policy', 'agreement', 'training', 'official_doc', 'contract', 'other']).default('policy'),
   completion_mode: z.enum(['read_only', 'tick', 'sign']).default('read_only'),
   tick_label: z.string().trim().max(200).nullable().optional(),
@@ -358,9 +379,15 @@ router.post('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respon
     if (!parse.success) { res.status(400).json({ error: 'Invalid input', issues: parse.error.issues }); return; }
     const d = parse.data;
     if (!d.body && !d.file_r2_key) { res.status(400).json({ error: 'Provide a body or an uploaded file' }); return; }
+    const shareable = !!d.shareable_with_freelancers;
+    if (shareable && !SHAREABLE_CATEGORIES.includes(d.category)) {
+      res.status(400).json({ error: `Only ${SHAREABLE_CATEGORIES.join(' / ')} documents can be shared with freelancers` });
+      return;
+    }
 
     const mgr = isManager(req.user!.role);
     const approvalStatus = mgr ? (d.save_as_draft ? 'draft' : 'approved') : 'draft';
+    const slug = d.slug?.trim() || await uniqueSlug(slugify(d.title));
 
     await client.query('BEGIN');
     const docRes = await client.query(
@@ -368,14 +395,14 @@ router.post('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respon
          (slug, title, category, completion_mode, tick_label, visibility, target_type,
           target_roles, target_user_ids, chase_interval_days, escalate_after_days,
           review_interval_months, created_by, approval_status,
-          approved_by, approved_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
-      [d.slug, d.title, d.category, d.completion_mode, d.tick_label || null, d.visibility,
+          approved_by, approved_at, shareable_with_freelancers)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING *`,
+      [slug, d.title, d.category, d.completion_mode, d.tick_label || null, d.visibility,
        d.target_type, d.target_roles || null, d.target_user_ids || null,
        d.chase_interval_days || null, d.escalate_after_days || null, d.review_interval_months || null,
        req.user!.id, approvalStatus,
        approvalStatus === 'approved' ? req.user!.id : null,
-       approvalStatus === 'approved' ? new Date() : null],
+       approvalStatus === 'approved' ? new Date() : null, shareable],
     );
     const doc = docRes.rows[0];
     await client.query(
@@ -415,6 +442,7 @@ const patchSchema = z.object({
   escalate_after_days: z.number().int().positive().nullable().optional(),
   review_interval_months: z.number().int().positive().nullable().optional(),
   is_active: z.boolean().optional(),
+  shareable_with_freelancers: z.boolean().optional(),
 });
 
 // PATCH /api/staff-documents/:id — update config. Managers: any document.
@@ -425,12 +453,19 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
     if (!parse.success) { res.status(400).json({ error: 'Invalid input', issues: parse.error.issues }); return; }
     const fields = parse.data;
 
-    const cur = await query(`SELECT created_by, approval_status FROM staff_documents WHERE id = $1`, [req.params.id]);
+    const cur = await query(`SELECT created_by, approval_status, category FROM staff_documents WHERE id = $1`, [req.params.id]);
     if (!cur.rows.length) { res.status(404).json({ error: 'Document not found' }); return; }
     if (!isManager(req.user!.role)) {
       if (cur.rows[0].created_by !== req.user!.id) { res.status(403).json({ error: 'Not your document' }); return; }
       if (cur.rows[0].approval_status === 'approved') {
         res.status(403).json({ error: 'Approved documents can only be edited by a manager' }); return;
+      }
+    }
+    if (fields.shareable_with_freelancers === true) {
+      const cat = fields.category ?? cur.rows[0].category;
+      if (!SHAREABLE_CATEGORIES.includes(cat)) {
+        res.status(400).json({ error: `Only ${SHAREABLE_CATEGORIES.join(' / ')} documents can be shared with freelancers` });
+        return;
       }
     }
     const sets: string[] = [];
@@ -683,6 +718,31 @@ router.post('/:id/reject', authorize(...MANAGER_ROLES), async (req: AuthRequest,
     res.json({ data: { approval_status: 'draft' } });
   } catch (error) {
     console.error('[staff-documents] reject error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// DELETE /api/staff-documents/:id — admin only. Hard-deletes ONLY if nobody has
+// completed it (cascades versions/assignments). If there are signed/ticked
+// records, refuse and point at retire (Edit → untick Active) so the audit
+// trail is never destroyed.
+router.delete('/:id', authorize('admin'), async (req: AuthRequest, res: Response) => {
+  try {
+    const c = await query(
+      `SELECT COUNT(*)::int AS n FROM staff_document_completions
+        WHERE assignment_id IN (SELECT id FROM staff_document_assignments WHERE document_id = $1)`,
+      [req.params.id],
+    );
+    if (c.rows[0].n > 0) {
+      res.status(409).json({ error: 'This document has signed records — retire it instead (Edit → untick Active) so the audit trail is kept.' });
+      return;
+    }
+    const r = await query(`DELETE FROM staff_documents WHERE id = $1 RETURNING id`, [req.params.id]);
+    if (!r.rows.length) { res.status(404).json({ error: 'Document not found' }); return; }
+    await logAudit(req.user!.id, 'staff_documents', String(req.params.id), 'delete', null, null).catch(() => {});
+    res.json({ data: { deleted: true } });
+  } catch (error) {
+    console.error('[staff-documents] delete error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

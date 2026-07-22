@@ -34,6 +34,7 @@ import VE103BCertificatesPage from './pages/VE103BCertificatesPage';
 import InboxPage from './pages/InboxPage';
 import StaffDocumentsPage from './pages/StaffDocumentsPage';
 import StaffDocumentsAdminPage from './pages/StaffDocumentsAdminPage';
+import StaffReceiptsPage from './pages/StaffReceiptsPage';
 import LostCancelledPage from './pages/LostCancelledPage';
 import LeadsPage from './pages/LeadsPage';
 import FillGapPage from './pages/FillGapPage';
@@ -237,6 +238,7 @@ export default function App() {
                 <Route path="/inbox" element={<InboxPage />} />
                 <Route path="/staff/documents" element={<StaffDocumentsPage />} />
                 <Route path="/staff/documents/admin" element={<StaffDocumentsAdminPage />} />
+                <Route path="/my-receipts" element={<StaffReceiptsPage />} />
                 <Route path="/profile" element={<ProfilePage />} />
                 <Route path="/team" element={<Navigate to="/settings" replace />} />
                 <Route path="/settings" element={<SettingsPage />} />

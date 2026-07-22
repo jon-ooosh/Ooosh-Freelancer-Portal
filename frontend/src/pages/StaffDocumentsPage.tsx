@@ -4,7 +4,7 @@ import MarkdownLite from '../components/MarkdownLite';
 import { SignatureCapture, SignatureCaptureHandle } from '../modules/vehicles/components/book-out/SignatureCapture';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
-import { DocFormModal, VersionModal, DocRow, UserRow, ApprovalStatus } from './StaffDocumentsAdminPage';
+import { DocFormModal, VersionModal, ViewModal, DocRow, UserRow, ApprovalStatus } from './StaffDocumentsAdminPage';
 
 type Mode = 'read_only' | 'tick' | 'sign';
 
@@ -64,6 +64,7 @@ export default function StaffDocumentsPage() {
   const [users, setUsers] = useState<UserRow[]>([]);
   const [form, setForm] = useState<{ open: boolean; doc: DocRow | null }>({ open: false, doc: null });
   const [versionDoc, setVersionDoc] = useState<DocRow | null>(null);
+  const [viewProposal, setViewProposal] = useState<DocRow | null>(null);
   const role = useAuthStore((s) => s.user?.role);
   const canPublish = hasManagerRole(role);
 
@@ -115,7 +116,7 @@ export default function StaffDocumentsPage() {
         <h1 className="text-2xl font-bold text-gray-900">My Documents</h1>
         <button onClick={() => setForm({ open: true, doc: null })}
           className="shrink-0 px-3 py-2 rounded-md border border-purple-300 text-purple-700 text-sm font-medium hover:bg-purple-50">
-          + Propose a document
+          + New document
         </button>
       </div>
       <p className="text-gray-500 mb-6">Policies, agreements and guides for you to read and sign.</p>
@@ -225,6 +226,7 @@ export default function StaffDocumentsPage() {
                       <div className="text-xs text-gray-400">{d.category}</div>
                     </div>
                     <div className="shrink-0 flex items-center gap-2 text-sm">
+                      <button onClick={() => setViewProposal(d)} className="text-gray-600 hover:text-purple-700">View</button>
                       {d.approval_status !== 'approved' && (
                         <>
                           <button onClick={() => setForm({ open: true, doc: d })} className="text-gray-600 hover:text-purple-700">Edit</button>
@@ -262,6 +264,10 @@ export default function StaffDocumentsPage() {
       {versionDoc && (
         <VersionModal doc={versionDoc} onClose={() => setVersionDoc(null)}
           onSaved={() => { setVersionDoc(null); load(); }} />
+      )}
+      {viewProposal && (
+        <ViewModal doc={viewProposal} canReview={false} onApprove={() => {}} onReject={() => {}}
+          onClose={() => setViewProposal(null)} />
       )}
     </div>
   );
