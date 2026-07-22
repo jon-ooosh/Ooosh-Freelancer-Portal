@@ -60,6 +60,20 @@ function ContentEditor({ body, setBody, file, setFile }: {
             : <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={10}
                 placeholder="Markdown: **bold**, # headings, 1. lists, [links](https://…)"
                 className="w-full border border-gray-300 rounded-md p-2 text-sm font-mono resize-y" />}
+          <details className="mt-2 text-xs text-gray-600 bg-gray-50 rounded-md border border-gray-200 p-2">
+            <summary className="cursor-pointer font-medium text-gray-700">Formatting help (markdown)</summary>
+            <table className="mt-2 w-full">
+              <tbody className="align-top">
+                <tr><td className="py-0.5 pr-3 font-mono text-purple-700 whitespace-nowrap">**bold**</td><td>bold text</td></tr>
+                <tr><td className="py-0.5 pr-3 font-mono text-purple-700 whitespace-nowrap"># Heading</td><td>large heading (## / ### for smaller)</td></tr>
+                <tr><td className="py-0.5 pr-3 font-mono text-purple-700 whitespace-nowrap">1. item</td><td>numbered list (each on its own line)</td></tr>
+                <tr><td className="py-0.5 pr-3 font-mono text-purple-700 whitespace-nowrap">- item</td><td>bullet list</td></tr>
+                <tr><td className="py-0.5 pr-3 font-mono text-purple-700 whitespace-nowrap">[text](https://…)</td><td>a link</td></tr>
+                <tr><td className="py-0.5 pr-3 text-gray-500 whitespace-nowrap">blank line</td><td>starts a new paragraph</td></tr>
+              </tbody>
+            </table>
+            <p className="mt-2 text-gray-400">Use <strong>Preview</strong> (top right) to see how it'll look.</p>
+          </details>
           <p className="text-xs text-gray-400 mt-1">For anything with images/layout, author it in Google Docs, export a PDF, and use "Upload a PDF" instead.</p>
         </>
       )}
@@ -116,6 +130,18 @@ function DocFormModal({ doc, users, onClose, onSaved }: {
 
   const numOrNull = (s: string) => s.trim() ? Number(s) : null;
 
+  const dirty = editing
+    ? (title !== doc!.title || category !== doc!.category || mode !== doc!.completion_mode
+        || (tickLabel || '') !== (doc!.tick_label || '') || visibility !== doc!.visibility
+        || targetType !== doc!.target_type || isActive !== doc!.is_active
+        || chase !== (doc!.chase_interval_days?.toString() || '')
+        || escalate !== (doc!.escalate_after_days?.toString() || '')
+        || review !== (doc!.review_interval_months?.toString() || '')
+        || JSON.stringify(roles) !== JSON.stringify(doc!.target_roles || [])
+        || JSON.stringify(userIds) !== JSON.stringify(doc!.target_user_ids || []))
+    : !!(slug || title || body.trim() || file || tickLabel || roles.length || userIds.length || chase || escalate || review);
+  const attemptClose = () => { if (dirty && !window.confirm('Discard your changes?')) return; onClose(); };
+
   const submit = async () => {
     setErr('');
     if (!title.trim()) { setErr('Title is required.'); return; }
@@ -148,11 +174,11 @@ function DocFormModal({ doc, users, onClose, onSaved }: {
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={onClose}>
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={attemptClose}>
       <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[92vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between px-5 py-3 border-b">
           <h3 className="font-semibold text-gray-900">{editing ? 'Edit document' : 'New document'}</h3>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-700 text-xl">×</button>
+          <button onClick={attemptClose} className="text-gray-400 hover:text-gray-700 text-xl">×</button>
         </div>
         <div className="p-5 overflow-y-auto space-y-4">
           {err && <div className="p-3 rounded bg-red-50 text-red-700 text-sm">{err}</div>}
@@ -255,7 +281,7 @@ function DocFormModal({ doc, users, onClose, onSaved }: {
           {editing && <p className="text-xs text-gray-400">To change the document text, use "New version" on the list — that re-flags anyone who already completed it.</p>}
         </div>
         <div className="px-5 py-3 border-t flex justify-end gap-2">
-          <button onClick={onClose} className="px-4 py-2 text-sm text-gray-600">Cancel</button>
+          <button onClick={attemptClose} className="px-4 py-2 text-sm text-gray-600">Cancel</button>
           <button onClick={submit} disabled={saving} className="px-5 py-2 rounded-md bg-purple-700 text-white text-sm font-medium disabled:opacity-50">
             {saving ? 'Saving…' : editing ? 'Save' : 'Create'}
           </button>
@@ -273,6 +299,9 @@ function VersionModal({ doc, onClose, onSaved }: { doc: DocRow; onClose: () => v
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
 
+  const dirty = !!(body.trim() || file || changeNote.trim());
+  const attemptClose = () => { if (dirty && !window.confirm('Discard your changes?')) return; onClose(); };
+
   const submit = async () => {
     setErr('');
     if (!body.trim() && !file) { setErr('Add content.'); return; }
@@ -288,11 +317,11 @@ function VersionModal({ doc, onClose, onSaved }: { doc: DocRow; onClose: () => v
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={onClose}>
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={attemptClose}>
       <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[92vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between px-5 py-3 border-b">
           <h3 className="font-semibold text-gray-900">New version — {doc.title}</h3>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-700 text-xl">×</button>
+          <button onClick={attemptClose} className="text-gray-400 hover:text-gray-700 text-xl">×</button>
         </div>
         <div className="p-5 overflow-y-auto space-y-3">
           {err && <div className="p-3 rounded bg-red-50 text-red-700 text-sm">{err}</div>}
@@ -303,7 +332,7 @@ function VersionModal({ doc, onClose, onSaved }: { doc: DocRow; onClose: () => v
           </label>
         </div>
         <div className="px-5 py-3 border-t flex justify-end gap-2">
-          <button onClick={onClose} className="px-4 py-2 text-sm text-gray-600">Cancel</button>
+          <button onClick={attemptClose} className="px-4 py-2 text-sm text-gray-600">Cancel</button>
           <button onClick={submit} disabled={saving} className="px-5 py-2 rounded-md bg-purple-700 text-white text-sm font-medium disabled:opacity-50">
             {saving ? 'Publishing…' : 'Publish version'}
           </button>
@@ -317,7 +346,7 @@ function VersionModal({ doc, onClose, onSaved }: { doc: DocRow; onClose: () => v
 interface MatrixRow {
   id: string; status: string; user_id: string; email: string;
   first_name: string | null; last_name: string | null;
-  completed_at: string | null; pdf_r2_key: string | null; expires_at: string | null;
+  completed_at: string | null; pdf_r2_key: string | null; completion_id: string | null; expires_at: string | null;
 }
 function MatrixModal({ doc, onClose }: { doc: DocRow; onClose: () => void }) {
   const [rows, setRows] = useState<MatrixRow[]>([]);
@@ -336,8 +365,8 @@ function MatrixModal({ doc, onClose }: { doc: DocRow; onClose: () => void }) {
     try { await api.post(`/staff-documents/${doc.id}/sync`, {}); await load(); }
     finally { setSyncing(false); }
   };
-  const openPdf = async (key: string) => {
-    const { blob } = await api.blob(`/files/download?key=${encodeURIComponent(key)}`);
+  const openPdf = async (completionId: string) => {
+    const { blob } = await api.blob(`/staff-documents/completions/${completionId}/pdf`);
     window.open(URL.createObjectURL(blob), '_blank');
   };
   const badge = (s: string) => s === 'completed' ? 'bg-green-100 text-green-700'
@@ -373,7 +402,7 @@ function MatrixModal({ doc, onClose }: { doc: DocRow; onClose: () => void }) {
                       {r.expires_at && r.status === 'completed' && <> · renews {new Date(r.expires_at).toLocaleDateString('en-GB')}</>}
                     </td>
                     <td className="py-2 pl-3 text-right">
-                      {r.pdf_r2_key && <button onClick={() => openPdf(r.pdf_r2_key!)} className="text-xs text-purple-700">Signed copy</button>}
+                      {r.pdf_r2_key && r.completion_id && <button onClick={() => openPdf(r.completion_id!)} className="text-xs text-purple-700">Signed copy</button>}
                     </td>
                   </tr>
                 ))}

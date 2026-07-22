@@ -747,6 +747,25 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         .map((r) => ({ date: r.date, jobs: r.jobs.map((j) => j.label).slice(0, 2) }));
     } catch { /* non-fatal — bucket just won't populate */ }
 
+    // Outstanding staff documents — pending/lapsed assignments on active,
+    // tracked (non-read-only) documents for active staff. Manager-facing only
+    // (it's about other people's compliance), so compute 0 for everyone else →
+    // the frontend bucket hides. Non-fatal.
+    let staffDocsOutstanding = 0;
+    if (['admin', 'manager', 'weekend_manager'].includes(req.user?.role || '')) {
+      try {
+        const sd = await query(`
+          SELECT COUNT(*) AS count
+          FROM staff_document_assignments a
+          JOIN staff_documents d ON d.id = a.document_id
+          JOIN users u ON u.id = a.user_id AND u.is_active = true
+          WHERE d.is_active = true AND d.completion_mode <> 'read_only'
+            AND a.status IN ('pending', 'lapsed')
+        `);
+        staffDocsOutstanding = parseInt(sd.rows[0].count as string, 10) || 0;
+      } catch { /* non-fatal */ }
+    }
+
     // Build prep time estimates by day
     const prepEstimates: Record<string, {
       job_count: number; vehicle_count: number;
@@ -918,6 +937,9 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         // Evenings in the next 14 days needing a sitter with none assigned.
         sitter_gap_count: sitterGaps.length,
         sitter_gaps: sitterGaps.slice(0, 5),
+        // ── Outstanding staff documents (managers) ──
+        // Pending/lapsed tracked-document assignments across active staff.
+        staff_documents_outstanding_count: staffDocsOutstanding,
         // ── Card-machine receipt scans outstanding (migration 087) ──
         // Excess collected/held on a physical terminal needs a receipt scan
         // attached. Amber to-do, non-blocking.

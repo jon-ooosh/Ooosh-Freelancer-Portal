@@ -327,6 +327,8 @@ export interface OperationsData {
     receipts_outstanding?: ReceiptOutstanding[];
     /** Company-card (COT) costs with no receipt attached, older than 3 days. */
     cot_receipts_outstanding_count?: number;
+    /** Pending/lapsed staff-document assignments (managers only). */
+    staff_documents_outstanding_count?: number;
     /** Client recharges flagged but not yet resolved (push/external/absorb). */
     recharges_to_resolve_count?: number;
     recharges_to_resolve_total?: number;

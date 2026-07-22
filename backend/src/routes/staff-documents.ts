@@ -17,7 +17,7 @@ import { z } from 'zod';
 import { query, getClient } from '../config/database';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES, MANAGER_ROLES } from '../middleware/auth';
 import { logAudit } from '../middleware/audit';
-import { isR2Configured, uploadToR2 } from '../config/r2';
+import { isR2Configured, uploadToR2, getFromR2 } from '../config/r2';
 import {
   syncDocumentAssignments,
   renderDocumentBody,
@@ -236,6 +236,33 @@ router.post('/assignments/:id/complete', authorize(...STAFF_ROLES), async (req: 
     res.status(500).json({ error: 'Internal server error' });
   } finally {
     client.release();
+  }
+});
+
+// GET /api/staff-documents/completions/:id/pdf — signed snapshot, own only
+// (managers may fetch any). Ownership is enforced here — the generic
+// /api/files/download is prefix-gated only, so we never hand a staff member a
+// raw key to someone else's signed copy.
+router.get('/completions/:id/pdf', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const r = await query(
+      `SELECT pdf_r2_key, user_id FROM staff_document_completions WHERE id = $1`,
+      [req.params.id],
+    );
+    const c = r.rows[0];
+    if (!c || !c.pdf_r2_key) { res.status(404).json({ error: 'Not found' }); return; }
+    if (c.user_id !== req.user!.id && !isManager(req.user!.role)) {
+      res.status(403).json({ error: 'Not available to you' });
+      return;
+    }
+    const obj = await getFromR2(c.pdf_r2_key);
+    const chunks: Buffer[] = [];
+    for await (const chunk of obj.Body as NodeJS.ReadableStream) chunks.push(Buffer.from(chunk as Uint8Array));
+    res.setHeader('Content-Type', 'application/pdf');
+    res.send(Buffer.concat(chunks));
+  } catch (error) {
+    console.error('[staff-documents] completion pdf error:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -458,6 +485,7 @@ router.get('/:id/matrix', authorize(...MANAGER_ROLES), async (req: AuthRequest, 
   try {
     const r = await query(
       `SELECT a.id, a.status, a.assigned_at, a.expires_at, a.chase_sent_at, a.escalated_at,
+              a.current_completion_id AS completion_id,
               u.id AS user_id, u.email, p.first_name, p.last_name,
               c.completed_at, c.pdf_r2_key, c.mode
          FROM staff_document_assignments a

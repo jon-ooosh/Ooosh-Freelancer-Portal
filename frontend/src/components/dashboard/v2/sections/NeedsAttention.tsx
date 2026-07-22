@@ -297,6 +297,16 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
     items: [],
     viewAllHref: '/money/costs?missing_receipt=1',
   };
+  // Staff with outstanding documents to read/sign (managers only — the backend
+  // returns 0 for non-managers so this hides). Deep-links to the admin library.
+  const staffDocs: NABucket = {
+    key: 'staff_documents',
+    title: 'Staff Documents',
+    accent: 'amber',
+    count: na.staff_documents_outstanding_count || 0,
+    items: [],
+    viewAllHref: '/staff/documents/admin',
+  };
   // Client recharges flagged but not yet resolved (pushed to HH / billed
   // externally / absorbed) on active or finished hires. Amber — money we could
   // be billing back that's sitting unactioned. Deep-links to the Recharges tab.
@@ -460,7 +470,7 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
   // expiringHolds leads the secondary row — red accent, time-critical (hold
   // auto-voids at day 5). Sits ahead of the amber/blue/purple buckets so it
   // catches the eye when present.
-  const secondaryBuckets = [expiringHolds, receiptsOutstanding, cotReceipts, rechargesToResolve, ...pcnBuckets, carnets, referrals, excess, sitterGaps, transportArrangements, fleetBucket, problemsBucket];
+  const secondaryBuckets = [expiringHolds, receiptsOutstanding, cotReceipts, staffDocs, rechargesToResolve, ...pcnBuckets, carnets, referrals, excess, sitterGaps, transportArrangements, fleetBucket, problemsBucket];
   const secondaryAny = secondaryBuckets.some(b => b.count > 0);
 
   return (
