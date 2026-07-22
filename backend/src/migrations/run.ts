@@ -214,6 +214,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '177_rehearsal_job_overrides.sql',
         '178_staff_documents.sql',
         '179_cot_card_agreement_wording.sql',
+        '180_staff_document_approval.sql',
       ];
 
       for (const migration of migrations) {
