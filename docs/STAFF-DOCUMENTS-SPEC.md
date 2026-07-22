@@ -240,6 +240,23 @@ anything's outstanding — kept a nudge, not a lockout.
   deferred — upload-a-PDF covers the visual case without the PDF-rendering
   weight. The admin editor (PR 4) is a markdown textarea + live preview + a
   file-upload alternative.
+
+  **Two-stage authoring (migration 180, Jul 2026 — "Option A"):** ANY staff
+  member can create a document. **Managers** publish immediately (or tick "save
+  as draft"). **Everyone else** creates a **draft** (`approval_status='draft'`),
+  builds it up (targeting, recurrence, chase settings, content), then
+  **Submit for approval** → `pending_approval` → a manager **Approves**
+  (→ `approved`, assignments materialise) or requests **Changes** (→ back to
+  `draft` with a note). Only `approved` (+ active, tracked) documents ever
+  materialise assignments (`syncDocumentAssignments` gates on it); drafts/pending
+  are invisible to everyone except their author + managers, and read-only draft
+  library docs don't show in the everyone-library until approved. Notifications
+  are **bell + immediate email** both ways (submit → managers; approve/reject →
+  author). Access point: **"Propose a document"** + a **"My proposals"** list on
+  *My Documents* (all staff); the full **Manage Documents** admin surface +
+  approval queue stays manager-only. Endpoints: `POST /:id/submit` (author),
+  `POST /:id/approve` + `POST /:id/reject` (manager), `GET /authored` (own docs),
+  `GET /:id/raw` (current version raw content — powers new-version pre-fill).
 - **Completion matrix**: per document, who's completed / pending / lapsed, with
   filters + a "chase now" manual nudge. Per user, everything they owe.
 - Lives under the **Staff** nav group (admin-gated child), sibling to the future

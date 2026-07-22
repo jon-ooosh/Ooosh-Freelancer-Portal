@@ -2,20 +2,22 @@ import { useCallback, useEffect, useState } from 'react';
 import { api } from '../services/api';
 import MarkdownLite from '../components/MarkdownLite';
 
-type Mode = 'read_only' | 'tick' | 'sign';
-type Category = 'policy' | 'agreement' | 'training' | 'official_doc' | 'contract' | 'other';
-type Visibility = 'everyone' | 'assignees' | 'owner_admin';
-type TargetType = 'all_staff' | 'role' | 'list' | 'cot_card_holders';
+export type Mode = 'read_only' | 'tick' | 'sign';
+export type Category = 'policy' | 'agreement' | 'training' | 'official_doc' | 'contract' | 'other';
+export type Visibility = 'everyone' | 'assignees' | 'owner_admin';
+export type TargetType = 'all_staff' | 'role' | 'list' | 'cot_card_holders';
+export type ApprovalStatus = 'draft' | 'pending_approval' | 'approved';
 
-interface DocRow {
+export interface DocRow {
   id: string; slug: string; title: string; category: Category;
   completion_mode: Mode; tick_label: string | null; visibility: Visibility;
   target_type: TargetType; target_roles: string[] | null; target_user_ids: string[] | null;
   chase_interval_days: number | null; escalate_after_days: number | null; review_interval_months: number | null;
   is_active: boolean; current_version: number | null;
+  approval_status: ApprovalStatus; review_notes: string | null;
   pending_count: number; completed_count: number; lapsed_count: number;
 }
-interface UserRow { id: string; email: string; first_name: string | null; last_name: string | null; }
+export interface UserRow { id: string; email: string; first_name: string | null; last_name: string | null; }
 
 const STAFF_ROLES = ['admin', 'manager', 'staff', 'general_assistant', 'weekend_manager'];
 const CATEGORIES: Category[] = ['policy', 'agreement', 'training', 'official_doc', 'contract', 'other'];
@@ -106,10 +108,11 @@ function ContentEditor({ body, setBody, file, setFile }: {
 }
 
 // ── Create / edit config modal ────────────────────────────────────────────────
-function DocFormModal({ doc, users, onClose, onSaved }: {
-  doc: DocRow | null; users: UserRow[]; onClose: () => void; onSaved: () => void;
+export function DocFormModal({ doc, users, canPublish = true, onClose, onSaved }: {
+  doc: DocRow | null; users: UserRow[]; canPublish?: boolean; onClose: () => void; onSaved: () => void;
 }) {
   const editing = !!doc;
+  const [saveAsDraft, setSaveAsDraft] = useState(false);
   const [slug, setSlug] = useState(doc?.slug || '');
   const [title, setTitle] = useState(doc?.title || '');
   const [category, setCategory] = useState<Category>(doc?.category || 'policy');
@@ -164,6 +167,7 @@ function DocFormModal({ doc, users, onClose, onSaved }: {
         await api.post('/staff-documents', {
           slug: slug.trim(), ...config,
           body: body.trim() || null, file_r2_key: file?.file_r2_key || null, file_name: file?.file_name || null,
+          save_as_draft: canPublish ? saveAsDraft : true,
         });
       }
       onSaved();
@@ -272,6 +276,14 @@ function DocFormModal({ doc, users, onClose, onSaved }: {
               <ContentEditor body={body} setBody={setBody} file={file} setFile={setFile} />
             </div>
           )}
+          {!editing && (canPublish ? (
+            <label className="flex items-center gap-2 text-sm text-gray-700">
+              <input type="checkbox" checked={saveAsDraft} onChange={(e) => setSaveAsDraft(e.target.checked)} />
+              Save as a draft (don't publish yet)
+            </label>
+          ) : (
+            <p className="text-xs text-gray-600 bg-amber-50 rounded p-2">This will be saved as a <strong>draft</strong>. Build it up, then submit it for a manager to approve before it goes out.</p>
+          ))}
           {editing && (
             <label className="flex items-center gap-2 text-sm">
               <input type="checkbox" checked={isActive} onChange={(e) => setIsActive(e.target.checked)} />
@@ -283,7 +295,7 @@ function DocFormModal({ doc, users, onClose, onSaved }: {
         <div className="px-5 py-3 border-t flex justify-end gap-2">
           <button onClick={attemptClose} className="px-4 py-2 text-sm text-gray-600">Cancel</button>
           <button onClick={submit} disabled={saving} className="px-5 py-2 rounded-md bg-purple-700 text-white text-sm font-medium disabled:opacity-50">
-            {saving ? 'Saving…' : editing ? 'Save' : 'Create'}
+            {saving ? 'Saving…' : editing ? 'Save' : (canPublish && !saveAsDraft ? 'Create & publish' : 'Save draft')}
           </button>
         </div>
       </div>
@@ -292,14 +304,33 @@ function DocFormModal({ doc, users, onClose, onSaved }: {
 }
 
 // ── New version modal ─────────────────────────────────────────────────────────
-function VersionModal({ doc, onClose, onSaved }: { doc: DocRow; onClose: () => void; onSaved: () => void }) {
+export function VersionModal({ doc, onClose, onSaved }: { doc: DocRow; onClose: () => void; onSaved: () => void }) {
   const [body, setBody] = useState('');
   const [file, setFile] = useState<{ file_r2_key: string; file_name: string } | null>(null);
   const [changeNote, setChangeNote] = useState('');
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
+  const [loadingRaw, setLoadingRaw] = useState(true);
+  const [initialBody, setInitialBody] = useState('');
+  const [initialFileKey, setInitialFileKey] = useState('');
 
-  const dirty = !!(body.trim() || file || changeNote.trim());
+  // Pre-fill from the current version so a new version starts from the existing
+  // text, not a blank page.
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await api.get<{ data: { body: string | null; file_r2_key: string | null; file_name: string | null } }>(`/staff-documents/${doc.id}/raw`);
+        if (res.data.body) { setBody(res.data.body); setInitialBody(res.data.body); }
+        if (res.data.file_r2_key) {
+          setFile({ file_r2_key: res.data.file_r2_key, file_name: res.data.file_name || 'document' });
+          setInitialFileKey(res.data.file_r2_key);
+        }
+      } catch { /* start blank if the current version can't be read */ }
+      finally { setLoadingRaw(false); }
+    })();
+  }, [doc.id]);
+
+  const dirty = body !== initialBody || (file?.file_r2_key || '') !== initialFileKey || !!changeNote.trim();
   const attemptClose = () => { if (dirty && !window.confirm('Discard your changes?')) return; onClose(); };
 
   const submit = async () => {
@@ -325,8 +356,9 @@ function VersionModal({ doc, onClose, onSaved }: { doc: DocRow; onClose: () => v
         </div>
         <div className="p-5 overflow-y-auto space-y-3">
           {err && <div className="p-3 rounded bg-red-50 text-red-700 text-sm">{err}</div>}
-          <p className="text-xs text-amber-700 bg-amber-50 rounded p-2">Publishing a new version re-flags everyone who completed the previous one to review/re-sign.</p>
-          <ContentEditor body={body} setBody={setBody} file={file} setFile={setFile} />
+          <p className="text-xs text-amber-700 bg-amber-50 rounded p-2">Publishing a new version re-flags everyone who completed the previous one to review/re-sign. Edit the current text below.</p>
+          {loadingRaw ? <div className="text-sm text-gray-500">Loading current version…</div>
+            : <ContentEditor body={body} setBody={setBody} file={file} setFile={setFile} />}
           <label className="text-sm block">Change note
             <input value={changeNote} onChange={(e) => setChangeNote(e.target.value)} placeholder="What changed" className="mt-1 w-full border rounded-md px-2 py-1.5" />
           </label>
@@ -434,7 +466,18 @@ export default function StaffDocumentsAdminPage() {
   }, []);
   useEffect(() => { load(); }, [load]);
 
+  const approve = async (id: string) => { await api.post(`/staff-documents/${id}/approve`, {}); load(); };
+  const reject = async (id: string) => {
+    const reason = window.prompt('Request changes — note to the author (optional):');
+    if (reason === null) return; // cancelled
+    await api.post(`/staff-documents/${id}/reject`, { reason });
+    load();
+  };
+
   const modeLabel: Record<Mode, string> = { read_only: 'Read only', tick: 'Tick', sign: 'Sign' };
+  const approvalPill = (s: ApprovalStatus) => s === 'draft' ? { t: 'Draft', c: 'bg-gray-100 text-gray-600' }
+    : s === 'pending_approval' ? { t: 'Pending approval', c: 'bg-amber-100 text-amber-700' }
+    : null;
 
   return (
     <div className="max-w-5xl mx-auto p-4 sm:p-6">
@@ -456,7 +499,12 @@ export default function StaffDocumentsAdminPage() {
               {docs.map((d) => (
                 <tr key={d.id} className={`border-b border-gray-100 ${d.is_active ? '' : 'opacity-50'}`}>
                   <td className="py-2 px-4">
-                    <div className="font-medium text-gray-900">{d.title}</div>
+                    <div className="font-medium text-gray-900 flex items-center gap-2">
+                      {d.title}
+                      {approvalPill(d.approval_status) && (
+                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${approvalPill(d.approval_status)!.c}`}>{approvalPill(d.approval_status)!.t}</span>
+                      )}
+                    </div>
                     <div className="text-xs text-gray-400">{d.category}{!d.is_active && ' · retired'}</div>
                   </td>
                   <td className="py-2 px-3 text-gray-600">{modeLabel[d.completion_mode]}</td>
@@ -472,6 +520,12 @@ export default function StaffDocumentsAdminPage() {
                   </td>
                   <td className="py-2 px-3 text-gray-500">{d.current_version ?? '—'}</td>
                   <td className="py-2 px-3 text-right whitespace-nowrap">
+                    {d.approval_status === 'pending_approval' && (
+                      <>
+                        <button onClick={() => approve(d.id)} className="text-xs text-green-700 font-medium hover:underline px-1">Approve</button>
+                        <button onClick={() => reject(d.id)} className="text-xs text-red-600 hover:underline px-1">Changes</button>
+                      </>
+                    )}
                     <button onClick={() => setForm({ open: true, doc: d })} className="text-xs text-gray-600 hover:text-purple-700 px-1">Edit</button>
                     <button onClick={() => setVersionDoc(d)} className="text-xs text-gray-600 hover:text-purple-700 px-1">New version</button>
                     {d.completion_mode !== 'read_only' && (

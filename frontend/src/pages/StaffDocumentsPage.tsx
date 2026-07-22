@@ -2,6 +2,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../services/api';
 import MarkdownLite from '../components/MarkdownLite';
 import { SignatureCapture, SignatureCaptureHandle } from '../modules/vehicles/components/book-out/SignatureCapture';
+import { useAuthStore } from '../hooks/useAuthStore';
+import { hasManagerRole } from '../lib/roles';
+import { DocFormModal, VersionModal, DocRow, UserRow, ApprovalStatus } from './StaffDocumentsAdminPage';
 
 type Mode = 'read_only' | 'tick' | 'sign';
 
@@ -57,12 +60,24 @@ export default function StaffDocumentsPage() {
   const [viewerId, setViewerId] = useState<string | null>(null);
   const [viewerAssignment, setViewerAssignment] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [authored, setAuthored] = useState<DocRow[]>([]);
+  const [users, setUsers] = useState<UserRow[]>([]);
+  const [form, setForm] = useState<{ open: boolean; doc: DocRow | null }>({ open: false, doc: null });
+  const [versionDoc, setVersionDoc] = useState<DocRow | null>(null);
+  const role = useAuthStore((s) => s.user?.role);
+  const canPublish = hasManagerRole(role);
 
   const load = useCallback(async () => {
     try {
       setLoading(true);
-      const res = await api.get<{ data: MineData }>('/staff-documents/mine');
-      setData(res.data);
+      const [mine, auth, us] = await Promise.all([
+        api.get<{ data: MineData }>('/staff-documents/mine'),
+        api.get<{ data: DocRow[] }>('/staff-documents/authored').catch(() => ({ data: [] as DocRow[] })),
+        api.get<{ data: UserRow[] }>('/users').catch(() => ({ data: [] as UserRow[] })),
+      ]);
+      setData(mine.data);
+      setAuthored(auth.data);
+      setUsers(us.data);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load');
@@ -70,6 +85,13 @@ export default function StaffDocumentsPage() {
       setLoading(false);
     }
   }, []);
+
+  const submitForApproval = async (id: string) => {
+    await api.post(`/staff-documents/${id}/submit`, {});
+    setToast('Sent for approval.');
+    setTimeout(() => setToast(null), 4000);
+    load();
+  };
 
   useEffect(() => { load(); }, [load]);
 
@@ -89,7 +111,13 @@ export default function StaffDocumentsPage() {
 
   return (
     <div className="max-w-4xl mx-auto p-4 sm:p-6">
-      <h1 className="text-2xl font-bold text-gray-900 mb-1">My Documents</h1>
+      <div className="flex items-start justify-between gap-3 mb-1">
+        <h1 className="text-2xl font-bold text-gray-900">My Documents</h1>
+        <button onClick={() => setForm({ open: true, doc: null })}
+          className="shrink-0 px-3 py-2 rounded-md border border-purple-300 text-purple-700 text-sm font-medium hover:bg-purple-50">
+          + Propose a document
+        </button>
+      </div>
       <p className="text-gray-500 mb-6">Policies, agreements and guides for you to read and sign.</p>
 
       {error && <div className="mb-4 p-3 rounded bg-red-50 text-red-700 text-sm">{error}</div>}
@@ -179,6 +207,45 @@ export default function StaffDocumentsPage() {
         </section>
       )}
 
+      {/* My proposals — documents this user has created */}
+      {authored.length > 0 && (
+        <section className="mt-8">
+          <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-2">My proposals</h2>
+          <div className="space-y-2">
+            {authored.map((d) => {
+              const pill = APPROVAL_PILL[d.approval_status];
+              return (
+                <div key={d.id} className="bg-white border border-gray-200 rounded-lg p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="font-medium text-gray-900 truncate flex items-center gap-2">
+                        {d.title}
+                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${pill.c}`}>{pill.t}</span>
+                      </div>
+                      <div className="text-xs text-gray-400">{d.category}</div>
+                    </div>
+                    <div className="shrink-0 flex items-center gap-2 text-sm">
+                      {d.approval_status !== 'approved' && (
+                        <>
+                          <button onClick={() => setForm({ open: true, doc: d })} className="text-gray-600 hover:text-purple-700">Edit</button>
+                          <button onClick={() => setVersionDoc(d)} className="text-gray-600 hover:text-purple-700">Content</button>
+                        </>
+                      )}
+                      {d.approval_status === 'draft' && (
+                        <button onClick={() => submitForApproval(d.id)} className="px-3 py-1 rounded-md bg-purple-700 text-white text-xs font-medium hover:bg-purple-800">Submit for approval</button>
+                      )}
+                    </div>
+                  </div>
+                  {d.approval_status === 'draft' && d.review_notes && (
+                    <div className="mt-2 text-xs text-red-700 bg-red-50 rounded p-2">Changes requested: {d.review_notes}</div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
+
       {viewerId && (
         <DocumentViewer
           documentId={viewerId}
@@ -187,9 +254,24 @@ export default function StaffDocumentsPage() {
           onCompleted={onCompleted}
         />
       )}
+      {form.open && (
+        <DocFormModal doc={form.doc} users={users} canPublish={canPublish}
+          onClose={() => setForm({ open: false, doc: null })}
+          onSaved={() => { setForm({ open: false, doc: null }); load(); }} />
+      )}
+      {versionDoc && (
+        <VersionModal doc={versionDoc} onClose={() => setVersionDoc(null)}
+          onSaved={() => { setVersionDoc(null); load(); }} />
+      )}
     </div>
   );
 }
+
+const APPROVAL_PILL: Record<ApprovalStatus, { t: string; c: string }> = {
+  draft: { t: 'Draft', c: 'bg-gray-100 text-gray-600' },
+  pending_approval: { t: 'Pending approval', c: 'bg-amber-100 text-amber-700' },
+  approved: { t: 'Approved', c: 'bg-green-100 text-green-700' },
+};
 
 function DocumentViewer({ documentId, assignmentId, onClose, onCompleted }: {
   documentId: string;
