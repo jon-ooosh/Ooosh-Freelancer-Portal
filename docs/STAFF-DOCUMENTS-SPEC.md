@@ -370,8 +370,8 @@ Merge `[name]` and `[last 4]` at render from the user's `cot_card_label` /
 >    spending.
 > 2. **Receipts, promptly.** I will obtain a valid VAT receipt or invoice for
 >    every transaction and submit it (via the Operations Platform / to the office)
->    **within 3 working days**. I understand unlogged spend will be chased and may
->    be treated as a personal charge until evidenced.
+>    **within 3 working days, or as soon as possible**. I understand unlogged
+>    spend will be chased and may be treated as a personal charge until evidenced.
 > 3. **Within limits.** I will stay within any spending limit set on my card and
 >    seek manager approval before any large or unusual purchase.
 > 4. **Keep it secure.** I will keep the card, PIN and card details secure, will

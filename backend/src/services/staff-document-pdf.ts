@@ -13,6 +13,7 @@
 import { PDFDocument, rgb, PDFFont, StandardFonts } from 'pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
 import { loadRobotoFonts } from './pdf-fonts';
+import { fetchLogo } from './hire-form-pdf';
 
 const MARGIN = 50;
 const PAGE_W = 595; // A4 portrait
@@ -92,10 +93,21 @@ export async function generateStaffDocumentPdf(data: StaffDocumentPdfData): Prom
     }
   };
 
-  // Header band
+  // Header band with logo top-left.
   page.drawRectangle({ x: 0, y: PAGE_H - 70, width: PAGE_W, height: 70, color: PURPLE });
-  page.drawText('Ooosh Tours', { x: MARGIN, y: PAGE_H - 42, size: 16, font: bold, color: rgb(1, 1, 1) });
-  page.drawText('Transport · Backline · Rehearsals', { x: MARGIN, y: PAGE_H - 58, size: 9, font: regular, color: rgb(0.9, 0.88, 0.95) });
+  let textX = MARGIN;
+  const logo = await fetchLogo();
+  if (logo) {
+    try {
+      const img = await pdf.embedPng(logo);
+      const h = 42;
+      const w = (img.width / img.height) * h;
+      page.drawImage(img, { x: MARGIN, y: PAGE_H - 70 + (70 - h) / 2, width: w, height: h });
+      textX = MARGIN + w + 14;
+    } catch { /* logo unreadable — fall back to text only */ }
+  }
+  page.drawText('Ooosh Tours', { x: textX, y: PAGE_H - 42, size: 16, font: bold, color: rgb(1, 1, 1) });
+  page.drawText('Transport · Backline · Rehearsals', { x: textX, y: PAGE_H - 58, size: 9, font: regular, color: rgb(0.9, 0.88, 0.95) });
   y = PAGE_H - 90;
 
   // Title

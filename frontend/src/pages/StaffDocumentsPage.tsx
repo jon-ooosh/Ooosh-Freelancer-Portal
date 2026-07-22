@@ -17,6 +17,7 @@ interface Assignment {
   completion_mode: Mode;
   tick_label: string | null;
   version: number | null;
+  current_completion_id: string | null;
   pdf_r2_key: string | null;
   completed_at: string | null;
 }
@@ -40,6 +41,12 @@ function fmt(d: string | null): string {
 
 async function openR2File(key: string) {
   const { blob } = await api.blob(`/files/download?key=${encodeURIComponent(key)}`);
+  window.open(URL.createObjectURL(blob), '_blank');
+}
+
+// Signed copy via the ownership-checked endpoint (never a raw key).
+async function openCompletionPdf(completionId: string) {
+  const { blob } = await api.blob(`/staff-documents/completions/${completionId}/pdf`);
   window.open(URL.createObjectURL(blob), '_blank');
 }
 
@@ -139,8 +146,8 @@ export default function StaffDocumentsPage() {
                   </div>
                 </div>
                 <div className="shrink-0 flex items-center gap-2">
-                  {a.pdf_r2_key && (
-                    <button onClick={() => openR2File(a.pdf_r2_key!)}
+                  {a.pdf_r2_key && a.current_completion_id && (
+                    <button onClick={() => openCompletionPdf(a.current_completion_id!)}
                       className="px-3 py-1.5 rounded-md border border-gray-300 text-sm text-gray-700 hover:bg-gray-50">
                       Signed copy
                     </button>
