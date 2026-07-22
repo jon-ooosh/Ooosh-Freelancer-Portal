@@ -2257,6 +2257,8 @@ interface CotCardRow {
   last_name: string | null;
   cot_card_last4: string | null;
   cot_card_label: string | null;
+  agreement_status: string | null;
+  agreement_completed_at: string | null;
 }
 
 function CotCardRegisterSection() {
@@ -2326,6 +2328,7 @@ function CotCardRegisterSection() {
               <th className="py-2 pr-3 font-medium">Staff</th>
               <th className="py-2 px-3 font-medium">Card last 4</th>
               <th className="py-2 px-3 font-medium">Card label</th>
+              <th className="py-2 px-3 font-medium">Card agreement</th>
               <th className="py-2 pl-3 font-medium text-right">&nbsp;</th>
             </tr>
           </thead>
@@ -2342,6 +2345,17 @@ function CotCardRegisterSection() {
                   <input value={drafts[r.id]?.label ?? ''} maxLength={60}
                     onChange={(e) => setDrafts((d) => ({ ...d, [r.id]: { ...d[r.id], label: e.target.value } }))}
                     placeholder="e.g. Amex ·1234" className="w-40 border border-gray-300 rounded-md px-2 py-1 text-sm" />
+                </td>
+                <td className="py-2 px-3">
+                  {!r.cot_card_label ? (
+                    <span className="text-xs text-gray-400">—</span>
+                  ) : r.agreement_status === 'completed' ? (
+                    <span className="text-xs text-green-700">Signed{r.agreement_completed_at ? ` ${new Date(r.agreement_completed_at).toLocaleDateString('en-GB')}` : ''}</span>
+                  ) : r.agreement_status === 'lapsed' ? (
+                    <span className="text-xs text-amber-700">Renewal due</span>
+                  ) : (
+                    <span className="text-xs text-amber-700">Outstanding</span>
+                  )}
                 </td>
                 <td className="py-2 pl-3 text-right">
                   {savedId === r.id ? <span className="text-xs text-green-600">Saved ✓</span> : (
