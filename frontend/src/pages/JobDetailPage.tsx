@@ -101,6 +101,7 @@ interface JobDetail {
   client_id: string | null;
   client_name: string | null;
   company_name: string | null;
+  client_org_name: string | null;
   client_ref: string | null;
   venue_id: string | null;
   venue_name: string | null;
@@ -1595,6 +1596,7 @@ export default function JobDetailPage() {
   const [editingClient, setEditingClient] = useState(false);
   const [clientSearch, setClientSearch] = useState('');
   const [clientSearchResults, setClientSearchResults] = useState<Array<{ id: string; name: string; type: string }>>([]);
+  const [creatingClient, setCreatingClient] = useState(false);
   const [inlineEditSaving, setInlineEditSaving] = useState(false);
   const [pushingToHH, setPushingToHH] = useState(false);
   const [hhClientOutOfSync, setHhClientOutOfSync] = useState(false);
@@ -1957,6 +1959,25 @@ export default function JobDetailPage() {
       setHhClientSyncName(org.name);
       setHhClientOutOfSync(true);
       setHhClientSyncSuccess(false);
+    }
+  }
+
+  // Create a brand-new client organisation from the picker (mirrors the New
+  // Enquiry form's inline create) when the search finds no matching org.
+  async function createAndSelectClient(name: string) {
+    const trimmed = name.trim();
+    if (!trimmed || creatingClient) return;
+    setCreatingClient(true);
+    try {
+      const newOrg = await api.post<{ id: string }>('/organisations', {
+        name: trimmed,
+        type: 'client',
+      });
+      await selectClient({ id: newOrg.id, name: trimmed });
+    } catch (err: any) {
+      alert(err?.message || 'Failed to create organisation');
+    } finally {
+      setCreatingClient(false);
     }
   }
 
@@ -3279,12 +3300,14 @@ export default function JobDetailPage() {
 
             {/* Client, Venue, Dates summary row */}
             <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-sm text-gray-600 items-center">
-              {/* Client headline — prefer band → linked client org → company → client_name
-                  Contact person surfaced separately when HH CONTACT differs from HH COMPANY */}
+              {/* Client headline — prefer band → linked client org (canonical name via
+                  client_id) → HH company_name → HH client_name. Reading the linked org's
+                  own name (not the volatile HH company_name string) means changing the
+                  client actually updates the headline immediately. */}
               <div className="relative inline-flex items-center gap-1" ref={clientSearchRef}>
                 {(() => {
                   const bandOrg = jobOrgs.find(jo => jo.role === 'band');
-                  const hasClient = !!(job.client_name || job.company_name);
+                  const hasClient = !!(job.client_org_name || job.client_name || job.company_name);
                   if (!bandOrg && !hasClient) {
                     return (
                       <button
@@ -3296,6 +3319,7 @@ export default function JobDetailPage() {
                     );
                   }
                   const headlineText = bandOrg?.organisation_name
+                    || job.client_org_name
                     || job.company_name
                     || job.client_name;
                   const headlineLinkId = bandOrg?.organisation_id || job.client_id;
@@ -3347,9 +3371,26 @@ export default function JobDetailPage() {
                         ))}
                       </div>
                     )}
-                    {clientSearch.length >= 2 && clientSearchResults.length === 0 && (
-                      <div className="px-3 py-2 text-sm text-gray-400">No results</div>
-                    )}
+                    {(() => {
+                      const trimmed = clientSearch.trim();
+                      if (trimmed.length < 2) return null;
+                      const exactMatch = clientSearchResults.some(
+                        (o) => o.name.toLowerCase() === trimmed.toLowerCase()
+                      );
+                      if (exactMatch) return null;
+                      return (
+                        <button
+                          onClick={() => createAndSelectClient(trimmed)}
+                          disabled={creatingClient}
+                          className="w-full text-left px-3 py-2 hover:bg-green-50 text-sm flex items-center gap-2 border-t border-gray-100 disabled:opacity-60"
+                        >
+                          <span className="text-xs font-medium bg-green-100 text-green-700 px-1.5 py-0.5 rounded">+ New</span>
+                          <span className="text-gray-900 truncate">
+                            {creatingClient ? 'Creating…' : <>Create &ldquo;{trimmed}&rdquo; as new client</>}
+                          </span>
+                        </button>
+                      );
+                    })()}
                   </div>
                 )}
               </div>
@@ -3357,7 +3398,7 @@ export default function JobDetailPage() {
               {(() => {
                 const bandOrg = jobOrgs.find(jo => jo.role === 'band');
                 if (!bandOrg) return null;
-                const billedToText = job.company_name || job.client_name;
+                const billedToText = job.client_org_name || job.company_name || job.client_name;
                 if (!billedToText) return null;
                 return (
                   <span className="text-xs text-gray-500">
@@ -3369,18 +3410,6 @@ export default function JobDetailPage() {
                     ) : (
                       <span className="text-gray-600">{billedToText}</span>
                     )}
-                  </span>
-                );
-              })()}
-              {/* Contact pill (HH CONTACT differs from HH COMPANY → person contact) */}
-              {(() => {
-                const bandOrg = jobOrgs.find(jo => jo.role === 'band');
-                if (bandOrg) return null;
-                if (!job.company_name || !job.client_name) return null;
-                if (job.client_name === job.company_name) return null;
-                return (
-                  <span className="text-xs text-gray-500">
-                    Contact: <span className="text-gray-700">{job.client_name}</span>
                   </span>
                 );
               })()}
