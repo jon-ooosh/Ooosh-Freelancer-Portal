@@ -69,6 +69,49 @@ export default function BacklineMatcherPage() {
   const [q, setQ] = useState('');
   const [statusFilter, setStatusFilter] = useState(initial.statusFilter);
 
+  // Ad-hoc "add item" (skip the AI matcher) — for broken kit needing a
+  // replacement, or suggestions to stock something.
+  const [showAdd, setShowAdd] = useState(false);
+  const [addRequest, setAddRequest] = useState('');
+  const [addNotes, setAddNotes] = useState('');
+  const [addJobs, setAddJobs] = useState('');
+  const [addHaveIt, setAddHaveIt] = useState<DemandRow['have_it_status']>('no');
+  const [adding, setAdding] = useState(false);
+  const [addError, setAddError] = useState('');
+
+  function openAdd() {
+    setAddRequest('');
+    setAddNotes('');
+    setAddJobs('');
+    setAddHaveIt('no');
+    setAddError('');
+    setShowAdd(true);
+  }
+
+  async function submitAdd() {
+    if (!addRequest.trim() || adding) return;
+    setAdding(true);
+    setAddError('');
+    try {
+      const jobNumbers = addJobs
+        .split(/[\s,]+/)
+        .map((s) => s.trim())
+        .filter((s) => /^\d+$/.test(s));
+      await api.post('/backline-matcher/demand', {
+        request: addRequest.trim(),
+        notes: addNotes.trim() || undefined,
+        have_it_status: addHaveIt,
+        jobNumbers,
+      });
+      setShowAdd(false);
+      await loadDemand();
+    } catch {
+      setAddError('Could not add — please try again.');
+    } finally {
+      setAdding(false);
+    }
+  }
+
   // Persist sort + status filter so the view comes back the way staff left it.
   useEffect(() => {
     try {
@@ -151,6 +194,12 @@ export default function BacklineMatcherPage() {
               <option value="sort_of">Similar only</option>
               <option value="yes">In stock</option>
             </select>
+            <button
+              onClick={openAdd}
+              className="px-3 py-1.5 bg-ooosh-600 text-white rounded-lg text-sm font-medium hover:bg-ooosh-700"
+            >
+              + Add item
+            </button>
           </div>
         </div>
 
@@ -232,6 +281,73 @@ export default function BacklineMatcherPage() {
           </table>
         </div>
       </div>
+
+      {/* Ad-hoc add item modal */}
+      {showAdd && (
+        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 p-4" onClick={() => setShowAdd(false)}>
+          <div className="bg-white rounded-xl shadow-xl p-6 w-[440px] max-w-full max-h-[85vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-semibold text-gray-900 mb-1">Add backline item</h3>
+            <p className="text-xs text-gray-500 mb-4">
+              For kit that needs replacing or has been suggested — no AI search needed. If it's already tracked, this
+              merges into the existing row.
+            </p>
+            <div className="space-y-3">
+              <div>
+                <label className="text-xs text-gray-500 mb-1 block">Item</label>
+                <input
+                  type="text"
+                  value={addRequest}
+                  onChange={(e) => setAddRequest(e.target.value)}
+                  placeholder="e.g. Fender Twin Reverb"
+                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
+                  autoFocus
+                />
+              </div>
+              <div>
+                <label className="text-xs text-gray-500 mb-1 block">Note (optional)</label>
+                <textarea
+                  value={addNotes}
+                  onChange={(e) => setAddNotes(e.target.value)}
+                  placeholder="e.g. Broke on last hire — need a replacement"
+                  rows={2}
+                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm resize-y"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-gray-500 mb-1 block">Link to job(s) — optional</label>
+                <input
+                  type="text"
+                  value={addJobs}
+                  onChange={(e) => setAddJobs(e.target.value)}
+                  placeholder="HireHop job number(s), comma-separated"
+                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-gray-500 mb-1 block">Do we stock it?</label>
+                <select
+                  value={addHaveIt}
+                  onChange={(e) => setAddHaveIt(e.target.value as DemandRow['have_it_status'])}
+                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
+                >
+                  <option value="no">Not stocked</option>
+                  <option value="sort_of">Similar only</option>
+                  <option value="yes">In stock</option>
+                </select>
+              </div>
+              {addError && <p className="text-xs text-red-600">{addError}</p>}
+            </div>
+            <div className="flex justify-end gap-2 mt-5">
+              <button onClick={() => setShowAdd(false)} className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
+              <button
+                onClick={submitAdd}
+                disabled={!addRequest.trim() || adding}
+                className="px-4 py-1.5 text-sm bg-ooosh-600 text-white rounded hover:bg-ooosh-700 disabled:opacity-50"
+              >{adding ? 'Adding…' : 'Add item'}</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -209,6 +209,7 @@ export default function RequirementCard({
   onStatusChange,
   onAdvanceStep,
   onRemove,
+  onEdit,
   onVanAndDriverToggle,
   onSlotModeChange,
   selfDriveVanOverride,
@@ -231,6 +232,9 @@ export default function RequirementCard({
   onStatusChange: (reqId: string, status: JobRequirement['status']) => void;
   onAdvanceStep: (reqId: string) => void;
   onRemove: (reqId: string, reason?: string) => void;
+  /** Reminder edit — reopens the reminder modal pre-filled. Only wired for
+   *  reminder cards; other types have no edit affordance. */
+  onEdit?: (req: JobRequirement) => void;
   onVanAndDriverToggle?: () => void;
   onSlotModeChange?: (itemId: number, slotIndex: number, mode: VehicleSlotMode) => void;
   selfDriveVanOverride?: number | null;
@@ -1161,6 +1165,19 @@ export default function RequirementCard({
               className={`inline-flex px-3 py-1 rounded text-xs font-medium ${statusConfig.bg} ${statusConfig.colour}`}>
               {typeLabels?.[req.status] || statusConfig.label}
             </span>
+          )}
+
+          {/* Edit button — reminders only */}
+          {req.requirement_type === 'reminder' && onEdit && (
+            <button
+              onClick={() => onEdit(req)}
+              className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-ooosh-600 transition-all ml-1"
+              title="Edit reminder"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+              </svg>
+            </button>
           )}
 
           {/* Remove button */}
