@@ -766,6 +766,22 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       } catch { /* non-fatal */ }
     }
 
+    // Backline to buy — high-priority gaps with no acquisition plan yet: kit
+    // we've marked high priority that we don't stock (not / similar / used-to)
+    // and haven't decided to get. Turns the demand tracker from a passive log
+    // into a prompt. Defensively wrapped so a pre-183 DB can't 500 the dashboard.
+    let backlineToBuy = 0;
+    try {
+      const bb = await query(`
+        SELECT COUNT(*) AS count
+        FROM backline_demand
+        WHERE priority = 'high'
+          AND have_it_status IN ('no', 'sort_of', 'used_to')
+          AND acquisition_status = 'none'
+      `);
+      backlineToBuy = parseInt(bb.rows[0].count as string, 10) || 0;
+    } catch { /* non-fatal — pre-migration or table absent */ }
+
     // Build prep time estimates by day
     const prepEstimates: Record<string, {
       job_count: number; vehicle_count: number;
@@ -937,6 +953,9 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         // Evenings in the next 14 days needing a sitter with none assigned.
         sitter_gap_count: sitterGaps.length,
         sitter_gaps: sitterGaps.slice(0, 5),
+        // ── Backline to buy (demand tracker) ──
+        // High-priority gaps with no acquisition plan yet — purchasing prompt.
+        backline_to_buy_count: backlineToBuy,
         // ── Outstanding staff documents (managers) ──
         // Pending/lapsed tracked-document assignments across active staff.
         staff_documents_outstanding_count: staffDocsOutstanding,
