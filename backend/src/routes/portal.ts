@@ -1321,6 +1321,115 @@ router.post('/studio-sitter/shifts/:date/lost-property', lockupUploadMw, async (
   }
 });
 
+// ── Resources (Staff Documents shared with freelancers) ──────────────
+//
+// GET /api/portal/resources      → approved, shareable staff documents
+// GET /api/portal/resources/:id  → markdown body for the in-portal reader
+//
+// Replaces the old Monday "Staff Training" board read. A staff document
+// surfaces here only when it is active + approved + flagged
+// shareable_with_freelancers (the flag is only settable for policy / training /
+// other categories — enforced on the OP staff side). File-backed docs carry a
+// short-lived presigned R2 url; markdown docs are read in-portal via the
+// detail endpoint.
+
+function fileTypeFromName(name: string | null): string | null {
+  if (!name) return null;
+  const ext = name.split('.').pop()?.toLowerCase();
+  return ext ? ext.toUpperCase() : null;
+}
+
+router.get('/resources', async (_req: PortalRequest, res: Response) => {
+  try {
+    const result = await query(
+      `SELECT d.id, d.title, d.category,
+              v.file_r2_key, v.file_name
+         FROM staff_documents d
+         JOIN staff_document_versions v
+           ON v.document_id = d.id AND v.is_current = true
+        WHERE d.is_active = true
+          AND d.approval_status = 'approved'
+          AND d.shareable_with_freelancers = true
+        ORDER BY d.category, d.title`,
+    );
+
+    const resources = await Promise.all(
+      result.rows.map(async (r: Record<string, any>) => {
+        const isFile = !!r.file_r2_key;
+        let url: string | null = null;
+        if (isFile) {
+          try {
+            url = await getPresignedDownloadUrl(r.file_r2_key, 3600);
+          } catch (err) {
+            console.error('[portal] resource presign failed', r.id, err);
+          }
+        }
+        return {
+          id: r.id,
+          title: r.title,
+          category: r.category,
+          kind: isFile ? 'file' : 'markdown',
+          fileName: r.file_name || null,
+          fileType: isFile ? fileTypeFromName(r.file_name) : null,
+          url,
+        };
+      }),
+    );
+
+    res.json({ resources });
+  } catch (error) {
+    console.error('Portal resources error:', error);
+    res.status(500).json({ error: 'Failed to load resources' });
+  }
+});
+
+router.get('/resources/:id', async (req: PortalRequest, res: Response) => {
+  try {
+    if (!isUuidLike(req.params.id)) { res.status(404).json({ error: 'Not found' }); return; }
+    const result = await query(
+      `SELECT d.id, d.title, d.category,
+              v.body, v.file_r2_key, v.file_name
+         FROM staff_documents d
+         JOIN staff_document_versions v
+           ON v.document_id = d.id AND v.is_current = true
+        WHERE d.id = $1
+          AND d.is_active = true
+          AND d.approval_status = 'approved'
+          AND d.shareable_with_freelancers = true`,
+      [req.params.id],
+    );
+    const doc = result.rows[0];
+    if (!doc) { res.status(404).json({ error: 'Not found' }); return; }
+
+    if (doc.file_r2_key) {
+      // File-backed: hand back a fresh presigned url, not a body.
+      let url: string | null = null;
+      try {
+        url = await getPresignedDownloadUrl(doc.file_r2_key, 3600);
+      } catch (err) {
+        console.error('[portal] resource presign failed', doc.id, err);
+      }
+      res.json({
+        resource: {
+          id: doc.id, title: doc.title, category: doc.category, kind: 'file',
+          fileName: doc.file_name || null, fileType: fileTypeFromName(doc.file_name), url,
+        },
+      });
+      return;
+    }
+
+    res.json({
+      resource: {
+        id: doc.id, title: doc.title, category: doc.category, kind: 'markdown',
+        body: doc.body || '',
+      },
+    });
+  } catch (error) {
+    console.error('Portal resource detail error:', error);
+    res.status(500).json({ error: 'Failed to load resource' });
+  }
+});
+
 // ── Notification preferences (mirrors the old Monday-backed shape) ───
 //
 // GET  /api/portal/settings/notifications → current mute status
