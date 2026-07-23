@@ -126,6 +126,13 @@ function substituteVariables(template: string, variables: Record<string, string>
   // 1. Resolve {{#if varName}}...{{/if}} blocks first. The block renders iff
   // the variable is present and non-empty (after trimming). Lets templates
   // own their HTML structure while still keeping data values escaped.
+  //
+  // ⚠️ SINGLE LEVEL ONLY — this regex is non-greedy and does NOT support NESTED
+  // {{#if}} blocks. A {{#if a}}…{{#if b}}…{{/if}}…{{/if}} matches to the FIRST
+  // {{/if}}, orphaning the outer close (renders as a literal "{{/if}}") and the
+  // inner open (literal "{{#if b}}"). Keep every conditional flat — e.g. render
+  // an image and its caption as two SEPARATE top-level {{#if}} blocks, never one
+  // nested in the other. (Bit us on rehearsal_info_pack photos, Jul 2026.)
   let result = template.replace(
     /\{\{#if (\w+)\}\}([\s\S]*?)\{\{\/if\}\}/g,
     (_match, key: string, body: string) => {

@@ -3459,7 +3459,13 @@ SMTP_FROM=Ooosh Tours <notifications@oooshtours.co.uk>
 **Template structure:**
 - Base layout: `backend/src/services/email-templates/base.ts` — Ooosh branding wrapper
 - Per-template: `backend/src/services/email-templates/{template-id}.ts` — subject + body
-- Variables injected via `{{variableName}}` substitution
+- Variables injected via `{{variableName}}` substitution (HTML-escaped — so a `{{var}}`
+  can't inject raw HTML; a URL is fine, `&` → `&amp;` is valid in `src`/`href`)
+- Conditional sections via `{{#if var}}…{{/if}}` — **single level only, NEVER nest them.**
+  `substituteVariables` uses a non-greedy single-level regex; a nested
+  `{{#if a}}…{{#if b}}…{{/if}}…{{/if}}` matches to the FIRST `{{/if}}`, leaving a literal
+  `{{/if}}` / `{{#if b}}` artifact in the sent email. Render e.g. an image and its caption
+  as two SEPARATE top-level `{{#if}}` blocks. (Bit `rehearsal_info_pack` photos, Jul 2026.)
 
 **Convention: include the HH job number on every job-scoped template** (May 2026). Any new email template that relates to a specific job MUST surface the HH job number in BOTH the subject line and the body, using the Katatonia pattern:
 
