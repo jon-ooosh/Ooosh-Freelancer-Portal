@@ -1,8 +1,23 @@
 # Staff Documents & Training — Module Spec
 
-**Status:** Proposed (Jul 2026). Not yet built.
-**Branch (spec):** `claude/capital-card-agreement-892gu3`
-**First migration:** take the next free at build time (**177** at time of writing — latest is 176).
+**Status:** LIVE (Jul 2026). Shipped across PRs 1–7 on `claude/capital-card-agreement-892gu3`.
+**Migrations:** 178 (foundation) · 179 (COT card wording) · 180 (approval workflow) · 181 (freelancer shareable flag).
+
+## Shipped (PRs 1–7)
+- **Foundation** (mig 178): `staff_documents` / `_versions` / `_assignments` / `_completions`; tick/sign/read-only completion; versioning; assignment resolver; COT card agreement seeded (sign, annual, targets card-holders). COT Card Register auto-assigns on card issue.
+- **Reminder scheduler**: daily 09:35 chase / renew / lapse / escalate (bells; Step-7 escalation emails). **NB there is NO repeat manager escalation** — one escalation per pending assignment, then the ongoing weekly user chase + the dashboard bucket carry it. Add a repeat/ladder later if wanted.
+- **Staff "My Documents"**: read → tick/sign, signed-copy PDF (ownership-checked), reference library.
+- **Admin "Manage Documents"** (avatar dropdown, manager-tier): create (markdown-write-with-preview OR upload-a-PDF), edit config, **new version pre-filled from the current version**, **read-only View with inline Approve / Request-changes**, **Delete** (hard-delete only when no signed records, else retire), completion matrix, COT register "Card agreement" column.
+- **Two-stage authoring** (mig 180): any staff create; non-managers → draft → submit → manager approve/reject; bell+email both ways; drafts invisible until approved. "New document" + "My proposals" on My Documents (Option A).
+- **Authoring model**: markdown-lite in-app OR upload a finished PDF (signable docs stay text). **Slug is auto-generated** from the title (no longer a visible field). Chase/escalate/renew **default 7 / 14 / 12**, overwritable.
+- **Freelancer shareable flag** (mig 181): `shareable_with_freelancers`, settable only for **policy / training / other** (agreement/contract/official_doc internal-only, backend-enforced) with an on-form signal. **The freelancer-portal Resources *display* is NOT yet wired** — see Deferred.
+- **Receipt-chaser fix**: `/my-receipts` page (all staff, own COT costs missing receipts, upload) + chaser email repointed there (the `/money/costs` page is manager-gated, so non-manager card-holders previously had nowhere to go).
+
+## Deferred (next session)
+- **Freelancer portal Resources repoint** — surface `shareable_with_freelancers` docs in the Next.js portal `/resources` page (currently reads Monday). Needs an OP portal endpoint (portal auth) + presigned download + the page swap (same DATA_BACKEND pattern as other portal repoints).
+- **Per-page "how-to" help flyout** (jon's idea, HireHop-style) — a live site-map with one optional how-to guide associated per OP page, popped into a side "Help" drawer on each page. Guides authored in this module (a new `official_doc`/`training`-ish category or a `page_slug` link column), rendered read-only. Design it as its own thread: (a) enumerate pages/routes into a pick-list, (b) a `page_help` association (page slug → staff_document id), (c) a `<PageHelp>` drawer component mounted in Layout that shows the associated guide when one exists. Refreshed from the route table each time so it tracks OP as it grows.
+- **Repeat/laddered escalation** for chronically-unsigned docs (currently single escalation).
+- **People-scoped assignments** (freelancers signing, not just reading) — the read-only share is v1.
 
 ## 1. What this is
 

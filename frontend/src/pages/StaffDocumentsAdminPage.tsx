@@ -15,12 +15,15 @@ export interface DocRow {
   chase_interval_days: number | null; escalate_after_days: number | null; review_interval_months: number | null;
   is_active: boolean; current_version: number | null;
   approval_status: ApprovalStatus; review_notes: string | null;
+  shareable_with_freelancers: boolean;
   pending_count: number; completed_count: number; lapsed_count: number;
 }
 export interface UserRow { id: string; email: string; first_name: string | null; last_name: string | null; }
 
 const STAFF_ROLES = ['admin', 'manager', 'staff', 'general_assistant', 'weekend_manager'];
 const CATEGORIES: Category[] = ['policy', 'agreement', 'training', 'official_doc', 'contract', 'other'];
+// Categories that may be shared into the freelancer portal (must match backend).
+const SHAREABLE_CATEGORIES: Category[] = ['policy', 'training', 'other'];
 
 async function uploadDocFile(file: File): Promise<{ file_r2_key: string; file_name: string }> {
   const fd = new FormData();
@@ -113,7 +116,6 @@ export function DocFormModal({ doc, users, canPublish = true, onClose, onSaved }
 }) {
   const editing = !!doc;
   const [saveAsDraft, setSaveAsDraft] = useState(false);
-  const [slug, setSlug] = useState(doc?.slug || '');
   const [title, setTitle] = useState(doc?.title || '');
   const [category, setCategory] = useState<Category>(doc?.category || 'policy');
   const [mode, setMode] = useState<Mode>(doc?.completion_mode || 'read_only');
@@ -122,9 +124,12 @@ export function DocFormModal({ doc, users, canPublish = true, onClose, onSaved }
   const [targetType, setTargetType] = useState<TargetType>(doc?.target_type || 'list');
   const [roles, setRoles] = useState<string[]>(doc?.target_roles || []);
   const [userIds, setUserIds] = useState<string[]>(doc?.target_user_ids || []);
-  const [chase, setChase] = useState<string>(doc?.chase_interval_days?.toString() || '');
-  const [escalate, setEscalate] = useState<string>(doc?.escalate_after_days?.toString() || '');
-  const [review, setReview] = useState<string>(doc?.review_interval_months?.toString() || '');
+  // Sensible defaults for a new tracked document (overwritable).
+  const [chase, setChase] = useState<string>(doc ? (doc.chase_interval_days?.toString() || '') : '7');
+  const [escalate, setEscalate] = useState<string>(doc ? (doc.escalate_after_days?.toString() || '') : '14');
+  const [review, setReview] = useState<string>(doc ? (doc.review_interval_months?.toString() || '') : '12');
+  const [shareable, setShareable] = useState<boolean>(doc?.shareable_with_freelancers ?? false);
+  const canShare = SHAREABLE_CATEGORIES.includes(category);
   const [isActive, setIsActive] = useState(doc?.is_active ?? true);
   const [body, setBody] = useState('');
   const [file, setFile] = useState<{ file_r2_key: string; file_name: string } | null>(null);
@@ -140,15 +145,15 @@ export function DocFormModal({ doc, users, canPublish = true, onClose, onSaved }
         || chase !== (doc!.chase_interval_days?.toString() || '')
         || escalate !== (doc!.escalate_after_days?.toString() || '')
         || review !== (doc!.review_interval_months?.toString() || '')
+        || shareable !== (doc!.shareable_with_freelancers ?? false)
         || JSON.stringify(roles) !== JSON.stringify(doc!.target_roles || [])
         || JSON.stringify(userIds) !== JSON.stringify(doc!.target_user_ids || []))
-    : !!(slug || title || body.trim() || file || tickLabel || roles.length || userIds.length || chase || escalate || review);
+    : !!(title || body.trim() || file || tickLabel || roles.length || userIds.length || chase || escalate || review);
   const attemptClose = () => { if (dirty && !window.confirm('Discard your changes?')) return; onClose(); };
 
   const submit = async () => {
     setErr('');
     if (!title.trim()) { setErr('Title is required.'); return; }
-    if (!editing && !slug.trim()) { setErr('Slug is required.'); return; }
     if (!editing && !body.trim() && !file) { setErr('Add content (write markdown or upload a file).'); return; }
     setSaving(true);
     try {
@@ -160,12 +165,13 @@ export function DocFormModal({ doc, users, canPublish = true, onClose, onSaved }
         target_user_ids: targetType === 'list' ? userIds : null,
         chase_interval_days: numOrNull(chase), escalate_after_days: numOrNull(escalate),
         review_interval_months: numOrNull(review),
+        shareable_with_freelancers: canShare ? shareable : false,
       };
       if (editing) {
         await api.patch(`/staff-documents/${doc!.id}`, { ...config, is_active: isActive });
       } else {
         await api.post('/staff-documents', {
-          slug: slug.trim(), ...config,
+          ...config,
           body: body.trim() || null, file_r2_key: file?.file_r2_key || null, file_name: file?.file_name || null,
           save_as_draft: canPublish ? saveAsDraft : true,
         });
@@ -188,12 +194,8 @@ export function DocFormModal({ doc, users, canPublish = true, onClose, onSaved }
           {err && <div className="p-3 rounded bg-red-50 text-red-700 text-sm">{err}</div>}
 
           <div className="grid grid-cols-2 gap-3">
-            <label className="text-sm">Title
+            <label className="text-sm col-span-2">Title
               <input value={title} onChange={(e) => setTitle(e.target.value)} className="mt-1 w-full border rounded-md px-2 py-1.5" />
-            </label>
-            <label className="text-sm">Slug {editing && <span className="text-gray-400">(fixed)</span>}
-              <input value={slug} disabled={editing} onChange={(e) => setSlug(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '-'))}
-                className="mt-1 w-full border rounded-md px-2 py-1.5 disabled:bg-gray-100" placeholder="cot-card-agreement" />
             </label>
             <label className="text-sm">Category
               <select value={category} onChange={(e) => setCategory(e.target.value as Category)} className="mt-1 w-full border rounded-md px-2 py-1.5">
@@ -256,6 +258,18 @@ export function DocFormModal({ doc, users, canPublish = true, onClose, onSaved }
               ))}
             </div>
           )}
+          <div className="rounded-md border border-gray-200 p-2.5">
+            <label className={`flex items-center gap-2 text-sm ${canShare ? 'text-gray-700' : 'text-gray-400'}`}>
+              <input type="checkbox" checked={canShare && shareable} disabled={!canShare}
+                onChange={(e) => setShareable(e.target.checked)} />
+              🔗 Share with freelancers (shows in the portal Resources section)
+            </label>
+            <p className="text-xs mt-1 text-gray-400">
+              {canShare
+                ? 'Freelancers will be able to read this. Fine for guides & general policies.'
+                : `“${category}” documents are internal only — switch to policy / training / other to allow sharing.`}
+            </p>
+          </div>
           {mode !== 'read_only' && (
             <div className="grid grid-cols-3 gap-3">
               <label className="text-sm">Chase every (days)
@@ -447,6 +461,54 @@ function MatrixModal({ doc, onClose }: { doc: DocRow; onClose: () => void }) {
   );
 }
 
+// ── Read-only view modal (with inline approve / request-changes) ──────────────
+export function ViewModal({ doc, canReview, onApprove, onReject, onClose }: {
+  doc: DocRow; canReview: boolean; onApprove: () => void; onReject: () => void; onClose: () => void;
+}) {
+  const [data, setData] = useState<{ body: string | null; file_r2_key: string | null; file_name: string | null } | null>(null);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    (async () => {
+      try { const r = await api.get<{ data: { body: string | null; file_r2_key: string | null; file_name: string | null } }>(`/staff-documents/${doc.id}/raw`); setData(r.data); }
+      catch { /* ignore */ } finally { setLoading(false); }
+    })();
+  }, [doc.id]);
+  const openFile = async (key: string) => {
+    const { blob } = await api.blob(`/files/download?key=${encodeURIComponent(key)}`);
+    window.open(URL.createObjectURL(blob), '_blank');
+  };
+  const reviewable = canReview && doc.approval_status === 'pending_approval';
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-5 py-3 border-b">
+          <h3 className="font-semibold text-gray-900 truncate">{doc.title}</h3>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-700 text-xl">×</button>
+        </div>
+        <div className="p-5 overflow-y-auto">
+          {loading ? <div className="text-gray-500">Loading…</div> : data ? (
+            <>
+              {data.file_r2_key && (
+                <button onClick={() => openFile(data.file_r2_key!)} className="mb-4 px-4 py-2 rounded-md border border-gray-300 text-sm text-gray-700 hover:bg-gray-50">
+                  📄 Open {data.file_name || 'document'}
+                </button>
+              )}
+              {data.body && <MarkdownLite text={data.body} />}
+              {!data.body && !data.file_r2_key && <div className="text-gray-400 text-sm">No content.</div>}
+            </>
+          ) : <div className="text-gray-400">Couldn't load the content.</div>}
+        </div>
+        {reviewable && (
+          <div className="px-5 py-3 border-t flex justify-end gap-2">
+            <button onClick={onReject} className="px-4 py-2 rounded-md border border-red-300 text-red-600 text-sm">Request changes</button>
+            <button onClick={onApprove} className="px-5 py-2 rounded-md bg-green-600 text-white text-sm font-medium hover:bg-green-700">Approve &amp; publish</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── Page ──────────────────────────────────────────────────────────────────────
 export default function StaffDocumentsAdminPage() {
   const [docs, setDocs] = useState<DocRow[]>([]);
@@ -455,6 +517,7 @@ export default function StaffDocumentsAdminPage() {
   const [form, setForm] = useState<{ open: boolean; doc: DocRow | null }>({ open: false, doc: null });
   const [versionDoc, setVersionDoc] = useState<DocRow | null>(null);
   const [matrixDoc, setMatrixDoc] = useState<DocRow | null>(null);
+  const [viewDoc, setViewDoc] = useState<DocRow | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -466,12 +529,18 @@ export default function StaffDocumentsAdminPage() {
   }, []);
   useEffect(() => { load(); }, [load]);
 
-  const approve = async (id: string) => { await api.post(`/staff-documents/${id}/approve`, {}); load(); };
+  const approve = async (id: string) => { await api.post(`/staff-documents/${id}/approve`, {}); setViewDoc(null); load(); };
   const reject = async (id: string) => {
     const reason = window.prompt('Request changes — note to the author (optional):');
     if (reason === null) return; // cancelled
     await api.post(`/staff-documents/${id}/reject`, { reason });
+    setViewDoc(null);
     load();
+  };
+  const del = async (id: string) => {
+    if (!window.confirm('Delete this document? This cannot be undone.')) return;
+    try { await api.delete(`/staff-documents/${id}`); load(); }
+    catch (e) { alert(e instanceof Error ? e.message : 'Could not delete.'); }
   };
 
   const modeLabel: Record<Mode, string> = { read_only: 'Read only', tick: 'Tick', sign: 'Sign' };
@@ -520,17 +589,15 @@ export default function StaffDocumentsAdminPage() {
                   </td>
                   <td className="py-2 px-3 text-gray-500">{d.current_version ?? '—'}</td>
                   <td className="py-2 px-3 text-right whitespace-nowrap">
-                    {d.approval_status === 'pending_approval' && (
-                      <>
-                        <button onClick={() => approve(d.id)} className="text-xs text-green-700 font-medium hover:underline px-1">Approve</button>
-                        <button onClick={() => reject(d.id)} className="text-xs text-red-600 hover:underline px-1">Changes</button>
-                      </>
-                    )}
+                    <button onClick={() => setViewDoc(d)} className={`text-xs px-1 ${d.approval_status === 'pending_approval' ? 'text-green-700 font-medium hover:underline' : 'text-gray-600 hover:text-purple-700'}`}>
+                      {d.approval_status === 'pending_approval' ? 'Review' : 'View'}
+                    </button>
                     <button onClick={() => setForm({ open: true, doc: d })} className="text-xs text-gray-600 hover:text-purple-700 px-1">Edit</button>
                     <button onClick={() => setVersionDoc(d)} className="text-xs text-gray-600 hover:text-purple-700 px-1">New version</button>
                     {d.completion_mode !== 'read_only' && (
                       <button onClick={() => setMatrixDoc(d)} className="text-xs text-gray-600 hover:text-purple-700 px-1">Who's done</button>
                     )}
+                    <button onClick={() => del(d.id)} className="text-xs text-red-500 hover:text-red-700 px-1">Delete</button>
                   </td>
                 </tr>
               ))}
@@ -544,6 +611,7 @@ export default function StaffDocumentsAdminPage() {
         onClose={() => setForm({ open: false, doc: null })} onSaved={() => { setForm({ open: false, doc: null }); load(); }} />}
       {versionDoc && <VersionModal doc={versionDoc} onClose={() => setVersionDoc(null)} onSaved={() => { setVersionDoc(null); load(); }} />}
       {matrixDoc && <MatrixModal doc={matrixDoc} onClose={() => setMatrixDoc(null)} />}
+      {viewDoc && <ViewModal doc={viewDoc} canReview onApprove={() => approve(viewDoc.id)} onReject={() => reject(viewDoc.id)} onClose={() => setViewDoc(null)} />}
     </div>
   );
 }
