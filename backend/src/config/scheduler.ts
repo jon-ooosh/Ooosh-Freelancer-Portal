@@ -709,6 +709,20 @@ export function startScheduler() {
   });
   console.log('Scheduler: Carnet request-form auto-emails scheduled daily at 09:15');
 
+  // ── Rehearsal info-pack auto-send ────────────────────────────────────
+  // Daily at 09:20 — send the client info pack T-N days before the rehearsal
+  // (off by default; enabled + N-days configured on the Info Pack settings tab).
+  cron.schedule('20 9 * * *', async () => {
+    try {
+      const { runRehearsalInfoPackAutoSend } = await import('../services/rehearsal-info-pack-auto');
+      const result = await runRehearsalInfoPackAutoSend();
+      if (result.sent > 0) console.log(`Scheduler: Rehearsal info packs — ${result.sent} sent`);
+    } catch (err) {
+      console.error('Scheduler: Rehearsal info-pack auto-send failed:', err);
+    }
+  });
+  console.log('Scheduler: Rehearsal info-pack auto-send scheduled daily at 09:20');
+
   // ── Freelancer completion chaser ─────────────────────────────────────
   // Every 30 minutes — nudge freelancers who haven't completed jobs that
   // are past their scheduled time. Levels: 2h / 6h / 14h, then staff

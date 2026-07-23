@@ -21,6 +21,10 @@ import {
   getLastInfoPackSent,
   sendInfoPack,
   previewInfoPack,
+  getInfoPackImages,
+  addInfoPackImage,
+  updateInfoPackImageCaption,
+  removeInfoPackImage,
 } from '../services/rehearsal-details';
 
 const router = Router();
@@ -173,6 +177,54 @@ router.delete('/profile/:orgId/files/:key', async (req: AuthRequest, res: Respon
   } catch (err) {
     console.error('[rehearsals] profile file remove error:', err);
     res.status(500).json({ error: 'Failed to remove file' });
+  }
+});
+
+// ── Info-pack photos (Info Pack settings tab) — admin/manager ──────────────
+router.get('/info-pack-images', authorize('admin', 'manager'), async (_req: AuthRequest, res: Response) => {
+  try {
+    res.json({ data: await getInfoPackImages() });
+  } catch (err) {
+    console.error('[rehearsals] info-pack-images get error:', err);
+    res.status(500).json({ error: 'Failed to load photos' });
+  }
+});
+
+const infoPackImageSchema = z.object({
+  r2_key: z.string().min(1).max(1024),   // private key from POST /files/upload
+  filename: z.string().min(1).max(512),
+  caption: z.string().max(300).optional(),
+});
+router.post('/info-pack-images', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {
+  const parsed = infoPackImageSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
+  try {
+    const data = await addInfoPackImage(parsed.data.r2_key, parsed.data.filename, parsed.data.caption ?? '');
+    res.json({ data });
+  } catch (err) {
+    console.error('[rehearsals] info-pack-images add error:', err);
+    res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to add photo' });
+  }
+});
+
+router.patch('/info-pack-images/:key', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {
+  const caption = typeof req.body?.caption === 'string' ? req.body.caption.slice(0, 300) : '';
+  try {
+    const data = await updateInfoPackImageCaption(decodeURIComponent(String(req.params.key)), caption);
+    res.json({ data });
+  } catch (err) {
+    console.error('[rehearsals] info-pack-images patch error:', err);
+    res.status(500).json({ error: 'Failed to update photo' });
+  }
+});
+
+router.delete('/info-pack-images/:key', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {
+  try {
+    const data = await removeInfoPackImage(decodeURIComponent(String(req.params.key)));
+    res.json({ data });
+  } catch (err) {
+    console.error('[rehearsals] info-pack-images delete error:', err);
+    res.status(500).json({ error: 'Failed to remove photo' });
   }
 });
 
