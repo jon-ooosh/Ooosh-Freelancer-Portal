@@ -318,6 +318,18 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
     items: [],
     viewAllHref: '/money/costs?view=recharge',
   };
+  // High-priority backline gaps with no acquisition plan — kit we've flagged
+  // high priority that we don't stock and haven't decided to get. Blue —
+  // informational purchasing prompt, not time-critical. Deep-links to the
+  // Backline Matcher filtered to high-priority.
+  const backlineToBuy: NABucket = {
+    key: 'backline_to_buy',
+    title: 'Backline to Buy',
+    accent: 'blue',
+    count: na.backline_to_buy_count || 0,
+    items: [],
+    viewAllHref: '/operations/backline-matcher?priority=high',
+  };
 
   // Transport arrangements to action — quotes in next 7 days on a
   // confirmed/pre-dispatch job where any arranging pill (client intro /
@@ -470,7 +482,7 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
   // expiringHolds leads the secondary row — red accent, time-critical (hold
   // auto-voids at day 5). Sits ahead of the amber/blue/purple buckets so it
   // catches the eye when present.
-  const secondaryBuckets = [expiringHolds, receiptsOutstanding, cotReceipts, staffDocs, rechargesToResolve, ...pcnBuckets, carnets, referrals, excess, sitterGaps, transportArrangements, fleetBucket, problemsBucket];
+  const secondaryBuckets = [expiringHolds, receiptsOutstanding, cotReceipts, staffDocs, rechargesToResolve, ...pcnBuckets, carnets, referrals, excess, sitterGaps, backlineToBuy, transportArrangements, fleetBucket, problemsBucket];
   const secondaryAny = secondaryBuckets.some(b => b.count > 0);
 
   return (

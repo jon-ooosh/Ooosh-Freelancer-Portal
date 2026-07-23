@@ -217,6 +217,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '180_staff_document_approval.sql',
         '181_staff_document_shareable.sql',
         '182_rehearsal_info_pack_images_and_autosend.sql',
+        '183_backline_demand_priority.sql',
       ];
 
       for (const migration of migrations) {

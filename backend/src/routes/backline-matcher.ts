@@ -273,9 +273,15 @@ router.get('/demand', async (req: AuthRequest, res: Response) => {
     have_it_desc: 'have_it_status DESC, request_count DESC',
     last_asked_asc: 'last_requested_at ASC, request_count DESC',
     last_asked_desc: 'last_requested_at DESC, request_count DESC',
+    // Priority sort: high → low, with unset (NULL) always last regardless of
+    // direction, tiebroken by most-asked.
+    priority_asc: "CASE priority WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END DESC, request_count DESC",
+    priority_desc: "CASE priority WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END ASC, request_count DESC",
   };
   const orderBy = sortMap[String(req.query.sort || 'count')] || sortMap.count;
   const status = String(req.query.status || '').trim();
+  const priorityFilter = String(req.query.priority || '').trim();
+  const acquisitionFilter = String(req.query.acquisition || '').trim();
 
   const conditions: string[] = [];
   const params: any[] = [];
@@ -283,16 +289,25 @@ router.get('/demand', async (req: AuthRequest, res: Response) => {
     params.push(`%${q}%`);
     conditions.push(`display_request ILIKE $${params.length}`);
   }
-  if (['yes', 'no', 'sort_of'].includes(status)) {
+  if (['yes', 'no', 'sort_of', 'used_to'].includes(status)) {
     params.push(status);
     conditions.push(`have_it_status = $${params.length}`);
+  }
+  if ((['high', 'medium', 'low'] as string[]).includes(priorityFilter)) {
+    params.push(priorityFilter);
+    conditions.push(`priority = $${params.length}`);
+  }
+  if ((['getting_soon', 'ordered', 'not_getting', 'none'] as string[]).includes(acquisitionFilter)) {
+    params.push(acquisitionFilter);
+    conditions.push(`acquisition_status = $${params.length}`);
   }
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
 
   try {
     const r = await query(
       `SELECT id, display_request, request_count, total_hire_days, job_refs,
-              have_it_status, notes, source, first_requested_at, last_requested_at
+              have_it_status, priority, acquisition_status, notes, source,
+              first_requested_at, last_requested_at
          FROM backline_demand ${where}
         ORDER BY ${orderBy}
         LIMIT 500`,
@@ -317,10 +332,16 @@ router.get('/demand', async (req: AuthRequest, res: Response) => {
  * genuine "matcher asks" signal) and we don't downgrade an existing row's
  * source from 'matcher' to 'manual'.
  */
+const HAVE_IT_VALUES = ['yes', 'no', 'sort_of', 'used_to'] as const;
+const PRIORITY_VALUES = ['high', 'medium', 'low'] as const;
+const ACQUISITION_VALUES = ['none', 'getting_soon', 'ordered', 'not_getting'] as const;
+
 const createDemandSchema = z.object({
   request: z.string().min(1).max(500),
   notes: z.string().max(1000).optional(),
-  have_it_status: z.enum(['yes', 'no', 'sort_of']).optional(),
+  have_it_status: z.enum(HAVE_IT_VALUES).optional(),
+  priority: z.enum(PRIORITY_VALUES).optional(),
+  acquisition_status: z.enum(ACQUISITION_VALUES).optional(),
   jobNumbers: z.array(z.union([z.string(), z.number()])).optional(),
 });
 
@@ -329,7 +350,7 @@ router.post('/demand', async (req: AuthRequest, res: Response) => {
   if (!parsed.success) {
     return res.status(400).json({ success: false, error: 'request (1-500 chars) required.' });
   }
-  const { request, notes, have_it_status } = parsed.data;
+  const { request, notes, have_it_status, priority } = parsed.data;
   const normalised = normaliseRequest(request);
   if (!normalised) {
     return res.status(400).json({ success: false, error: 'request must contain letters or numbers.' });
@@ -343,17 +364,32 @@ router.post('/demand', async (req: AuthRequest, res: Response) => {
     ),
   );
   const note = notes?.trim() || null;
+  // Treat acquisition 'none' as "not provided" so a merge never clobbers an
+  // existing plan (e.g. 'ordered') with the default. The have-it=In-stock rule
+  // (acquisition auto-clears to 'none') is applied in the CASE below.
+  const acqParam =
+    parsed.data.acquisition_status && parsed.data.acquisition_status !== 'none'
+      ? parsed.data.acquisition_status
+      : null;
   try {
     const r = await query(
       `INSERT INTO backline_demand
          (normalised_request, display_request, request_count, total_hire_days,
-          job_refs, have_it_status, notes, source, first_requested_at, last_requested_at)
-       VALUES ($1, $2, 1, 0, $3, COALESCE($4, 'no'), $5, 'manual', NOW(), NOW())
+          job_refs, have_it_status, notes, source, priority, acquisition_status,
+          first_requested_at, last_requested_at)
+       VALUES ($1, $2, 1, 0, $3, COALESCE($4, 'no'), $5, 'manual', $6,
+               CASE WHEN COALESCE($4, 'no') = 'yes' THEN 'none' ELSE COALESCE($7, 'none') END,
+               NOW(), NOW())
        ON CONFLICT (normalised_request) DO UPDATE SET
          job_refs = (
            SELECT ARRAY(SELECT DISTINCT unnest(backline_demand.job_refs || $3::text[]))
          ),
          have_it_status = COALESCE($4, backline_demand.have_it_status),
+         priority = COALESCE($6, backline_demand.priority),
+         acquisition_status = CASE
+           WHEN COALESCE($4, backline_demand.have_it_status) = 'yes' THEN 'none'
+           ELSE COALESCE($7, backline_demand.acquisition_status)
+         END,
          notes = CASE
                    WHEN $5::text IS NULL THEN backline_demand.notes
                    WHEN backline_demand.notes IS NULL OR backline_demand.notes = '' THEN $5
@@ -363,7 +399,7 @@ router.post('/demand', async (req: AuthRequest, res: Response) => {
          last_requested_at = NOW(),
          updated_at = NOW()
        RETURNING id, (xmax = 0) AS inserted`,
-      [normalised, request.trim(), jobRefs, have_it_status || null, note],
+      [normalised, request.trim(), jobRefs, have_it_status || null, note, priority || null, acqParam],
     );
     return res.json({
       success: true,
@@ -376,9 +412,11 @@ router.post('/demand', async (req: AuthRequest, res: Response) => {
   }
 });
 
-/** Manual correction of a demand row's status / notes. */
+/** Manual correction of a demand row's status / priority / plan / notes. */
 const patchSchema = z.object({
-  have_it_status: z.enum(['yes', 'no', 'sort_of']).optional(),
+  have_it_status: z.enum(HAVE_IT_VALUES).optional(),
+  priority: z.enum(PRIORITY_VALUES).nullable().optional(),
+  acquisition_status: z.enum(ACQUISITION_VALUES).optional(),
   notes: z.string().max(1000).nullable().optional(),
 });
 
@@ -392,6 +430,18 @@ router.patch('/demand/:id', async (req: AuthRequest, res: Response) => {
   if (parsed.data.have_it_status !== undefined) {
     params.push(parsed.data.have_it_status);
     sets.push(`have_it_status = $${params.length}`);
+    // Flipping to In stock clears the acquisition plan — nothing left to get.
+    if (parsed.data.have_it_status === 'yes' && parsed.data.acquisition_status === undefined) {
+      sets.push(`acquisition_status = 'none'`);
+    }
+  }
+  if (parsed.data.priority !== undefined) {
+    params.push(parsed.data.priority); // may be null to clear
+    sets.push(`priority = $${params.length}`);
+  }
+  if (parsed.data.acquisition_status !== undefined) {
+    params.push(parsed.data.acquisition_status);
+    sets.push(`acquisition_status = $${params.length}`);
   }
   if (parsed.data.notes !== undefined) {
     params.push(parsed.data.notes);

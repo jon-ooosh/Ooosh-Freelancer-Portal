@@ -10,23 +10,46 @@ import { useState, useEffect, useCallback } from 'react';
 import { api } from '../services/api';
 import BacklineMatcher from '../components/BacklineMatcher';
 
+type HaveIt = 'yes' | 'no' | 'sort_of' | 'used_to';
+type Priority = 'high' | 'medium' | 'low';
+type Acquisition = 'none' | 'getting_soon' | 'ordered' | 'not_getting';
+
 interface DemandRow {
   id: string;
   display_request: string;
   request_count: number;
   total_hire_days: number;
   job_refs: string[];
-  have_it_status: 'yes' | 'no' | 'sort_of';
+  have_it_status: HaveIt;
+  priority: Priority | null;
+  acquisition_status: Acquisition;
   notes: string | null;
   first_requested_at: string;
   last_requested_at: string;
 }
 
-const STATUS_BADGE: Record<DemandRow['have_it_status'], { label: string; cls: string }> = {
+const STATUS_BADGE: Record<HaveIt, { label: string; cls: string }> = {
   yes: { label: 'In stock', cls: 'bg-green-100 text-green-700' },
   sort_of: { label: 'Similar', cls: 'bg-amber-100 text-amber-700' },
+  used_to: { label: 'We used to', cls: 'bg-orange-100 text-orange-700' },
   no: { label: 'Not stocked', cls: 'bg-red-100 text-red-700' },
 };
+
+const PRIORITY_BADGE: Record<Priority, { label: string; cls: string }> = {
+  high: { label: 'High', cls: 'bg-red-100 text-red-700' },
+  medium: { label: 'Medium', cls: 'bg-amber-100 text-amber-700' },
+  low: { label: 'Low', cls: 'bg-gray-100 text-gray-600' },
+};
+
+const ACQUISITION_BADGE: Record<Acquisition, { label: string; cls: string }> = {
+  none: { label: '—', cls: 'bg-gray-50 text-gray-400' },
+  getting_soon: { label: 'Getting soon', cls: 'bg-blue-100 text-blue-700' },
+  ordered: { label: 'Ordered', cls: 'bg-indigo-100 text-indigo-700' },
+  not_getting: { label: 'Not getting', cls: 'bg-gray-100 text-gray-500' },
+};
+
+// Idea 2: nudge to prioritise something asked for repeatedly but still a gap.
+const PRIORITISE_HINT_THRESHOLD = 3;
 
 // Click-to-sort columns. `field` is the backend sort base; the sort key sent to
 // the API is `${field}_${dir}`. `defaultDir` is the direction applied when the
@@ -37,6 +60,7 @@ const SORT_COLUMNS = [
   { field: 'request_count', label: 'Times asked', align: 'right', defaultDir: 'desc' as SortDir },
   { field: 'hire_days', label: 'Hire-days', align: 'right', defaultDir: 'desc' as SortDir },
   { field: 'have_it', label: 'Do we have it?', align: 'left', defaultDir: 'asc' as SortDir },
+  { field: 'priority', label: 'Priority', align: 'left', defaultDir: 'asc' as SortDir },
   { field: 'last_asked', label: 'Last asked', align: 'left', defaultDir: 'desc' as SortDir },
 ] as const;
 
@@ -68,6 +92,12 @@ export default function BacklineMatcherPage() {
   const [sort, setSort] = useState(initial.sort);
   const [q, setQ] = useState('');
   const [statusFilter, setStatusFilter] = useState(initial.statusFilter);
+  // Priority filter seeds from ?priority= (dashboard "Backline to Buy" deep-link).
+  const [priorityFilter, setPriorityFilter] = useState(() => {
+    const p = new URLSearchParams(window.location.search).get('priority') || '';
+    return (['high', 'medium', 'low'] as string[]).includes(p) ? p : '';
+  });
+  const [acquisitionFilter, setAcquisitionFilter] = useState('');
 
   // Ad-hoc "add item" (skip the AI matcher) — for broken kit needing a
   // replacement, or suggestions to stock something.
@@ -75,7 +105,9 @@ export default function BacklineMatcherPage() {
   const [addRequest, setAddRequest] = useState('');
   const [addNotes, setAddNotes] = useState('');
   const [addJobs, setAddJobs] = useState('');
-  const [addHaveIt, setAddHaveIt] = useState<DemandRow['have_it_status']>('no');
+  const [addHaveIt, setAddHaveIt] = useState<HaveIt>('no');
+  const [addPriority, setAddPriority] = useState<'' | Priority>('');
+  const [addAcquisition, setAddAcquisition] = useState<Acquisition>('none');
   const [adding, setAdding] = useState(false);
   const [addError, setAddError] = useState('');
 
@@ -84,6 +116,8 @@ export default function BacklineMatcherPage() {
     setAddNotes('');
     setAddJobs('');
     setAddHaveIt('no');
+    setAddPriority('');
+    setAddAcquisition('none');
     setAddError('');
     setShowAdd(true);
   }
@@ -101,6 +135,8 @@ export default function BacklineMatcherPage() {
         request: addRequest.trim(),
         notes: addNotes.trim() || undefined,
         have_it_status: addHaveIt,
+        priority: addPriority || undefined,
+        acquisition_status: addAcquisition,
         jobNumbers,
       });
       setShowAdd(false);
@@ -131,10 +167,18 @@ export default function BacklineMatcherPage() {
     });
   }
 
-  async function updateStatus(id: string, status: DemandRow['have_it_status']) {
-    setRows((prev) => prev.map((r) => (r.id === id ? { ...r, have_it_status: status } : r)));
+  async function updateRow(id: string, patch: Partial<Pick<DemandRow, 'have_it_status' | 'priority' | 'acquisition_status'>>) {
+    setRows((prev) => prev.map((r) => {
+      if (r.id !== id) return r;
+      const next = { ...r, ...patch };
+      // Mirror the backend rule: flipping to In stock clears the plan.
+      if (patch.have_it_status === 'yes' && patch.acquisition_status === undefined) {
+        next.acquisition_status = 'none';
+      }
+      return next;
+    }));
     try {
-      await api.patch(`/backline-matcher/demand/${id}`, { have_it_status: status });
+      await api.patch(`/backline-matcher/demand/${id}`, patch);
     } catch {
       loadDemand();
     }
@@ -146,6 +190,8 @@ export default function BacklineMatcherPage() {
       const params = new URLSearchParams({ sort });
       if (q.trim()) params.set('q', q.trim());
       if (statusFilter) params.set('status', statusFilter);
+      if (priorityFilter) params.set('priority', priorityFilter);
+      if (acquisitionFilter) params.set('acquisition', acquisitionFilter);
       const resp = await api.get<{ items: DemandRow[] }>(`/backline-matcher/demand?${params.toString()}`);
       setRows(resp.items || []);
     } catch {
@@ -153,7 +199,7 @@ export default function BacklineMatcherPage() {
     } finally {
       setLoading(false);
     }
-  }, [sort, q, statusFilter]);
+  }, [sort, q, statusFilter, priorityFilter, acquisitionFilter]);
 
   useEffect(() => {
     const t = setTimeout(loadDemand, 250);
@@ -189,10 +235,32 @@ export default function BacklineMatcherPage() {
               onChange={(e) => setStatusFilter(e.target.value)}
               className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm"
             >
-              <option value="">All statuses</option>
+              <option value="">All stock</option>
               <option value="no">Not stocked</option>
               <option value="sort_of">Similar only</option>
+              <option value="used_to">We used to</option>
               <option value="yes">In stock</option>
+            </select>
+            <select
+              value={priorityFilter}
+              onChange={(e) => setPriorityFilter(e.target.value)}
+              className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm"
+            >
+              <option value="">All priorities</option>
+              <option value="high">High</option>
+              <option value="medium">Medium</option>
+              <option value="low">Low</option>
+            </select>
+            <select
+              value={acquisitionFilter}
+              onChange={(e) => setAcquisitionFilter(e.target.value)}
+              className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm"
+            >
+              <option value="">All plans</option>
+              <option value="getting_soon">Getting soon</option>
+              <option value="ordered">Ordered</option>
+              <option value="not_getting">Not getting</option>
+              <option value="none">No plan</option>
             </select>
             <button
               onClick={openAdd}
@@ -224,9 +292,13 @@ export default function BacklineMatcherPage() {
                       </span>
                     </th>
                   );
-                  // Inject the non-sortable Jobs column between "Do we have it?" and "Last asked".
-                  if (col.field === 'have_it') {
-                    return [th, <th key="jobs" className="text-left px-4 py-2 font-medium">Jobs</th>];
+                  // Inject the non-sortable Plan + Jobs columns after Priority.
+                  if (col.field === 'priority') {
+                    return [
+                      th,
+                      <th key="plan" className="text-left px-4 py-2 font-medium">Plan</th>,
+                      <th key="jobs" className="text-left px-4 py-2 font-medium">Jobs</th>,
+                    ];
                   }
                   return th;
                 })}
@@ -234,30 +306,75 @@ export default function BacklineMatcherPage() {
             </thead>
             <tbody className="divide-y divide-gray-100">
               {loading ? (
-                <tr><td colSpan={6} className="px-4 py-6 text-center text-gray-400">Loading…</td></tr>
+                <tr><td colSpan={8} className="px-4 py-6 text-center text-gray-400">Loading…</td></tr>
               ) : rows.length === 0 ? (
-                <tr><td colSpan={6} className="px-4 py-6 text-center text-gray-400">No requests logged yet.</td></tr>
+                <tr><td colSpan={8} className="px-4 py-6 text-center text-gray-400">No requests logged yet.</td></tr>
               ) : (
                 rows.map((row) => {
                   const badge = STATUS_BADGE[row.have_it_status];
+                  const priBadge = row.priority ? PRIORITY_BADGE[row.priority] : { label: '—', cls: 'bg-gray-50 text-gray-400' };
+                  const acqBadge = ACQUISITION_BADGE[row.acquisition_status];
+                  // "Not getting" is a closed decision — de-emphasise the row.
+                  const dim = row.acquisition_status === 'not_getting';
+                  // Idea 2: nudge to prioritise a repeatedly-asked gap that isn't
+                  // already high priority.
+                  const showHint =
+                    row.request_count >= PRIORITISE_HINT_THRESHOLD &&
+                    row.have_it_status !== 'yes' &&
+                    row.priority !== 'high' &&
+                    row.acquisition_status === 'none';
                   return (
-                    <tr key={row.id} className="hover:bg-gray-50">
+                    <tr key={row.id} className={`hover:bg-gray-50 ${dim ? 'opacity-55' : ''}`}>
                       <td className="px-4 py-2 font-medium text-gray-900">
                         {row.display_request}
-                        {row.notes && <div className="text-xs text-gray-400 font-normal">{row.notes}</div>}
+                        {showHint && (
+                          <span
+                            className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-50 text-amber-700 align-middle"
+                            title={`Asked ${row.request_count}× and still a gap — consider prioritising`}
+                          >↑ asked {row.request_count}×</span>
+                        )}
+                        {row.notes && <div className="text-xs text-gray-400 font-normal whitespace-pre-line">{row.notes}</div>}
                       </td>
                       <td className="px-4 py-2 text-right text-gray-700">{row.request_count}</td>
                       <td className="px-4 py-2 text-right text-gray-700">{row.total_hire_days || '—'}</td>
                       <td className="px-4 py-2">
                         <select
                           value={row.have_it_status}
-                          onChange={(e) => updateStatus(row.id, e.target.value as DemandRow['have_it_status'])}
+                          onChange={(e) => updateRow(row.id, { have_it_status: e.target.value as HaveIt })}
                           className={`text-xs font-medium pl-2 pr-6 py-0.5 rounded-full border-0 cursor-pointer focus:ring-2 focus:ring-ooosh-400 ${badge.cls}`}
                           title="Update whether we stock this"
                         >
                           <option value="no">Not stocked</option>
                           <option value="sort_of">Similar</option>
+                          <option value="used_to">We used to</option>
                           <option value="yes">In stock</option>
+                        </select>
+                      </td>
+                      <td className="px-4 py-2">
+                        <select
+                          value={row.priority ?? ''}
+                          onChange={(e) => updateRow(row.id, { priority: (e.target.value || null) as Priority | null })}
+                          className={`text-xs font-medium pl-2 pr-6 py-0.5 rounded-full border-0 cursor-pointer focus:ring-2 focus:ring-ooosh-400 ${priBadge.cls}`}
+                          title="Set priority"
+                        >
+                          <option value="">— None</option>
+                          <option value="high">High</option>
+                          <option value="medium">Medium</option>
+                          <option value="low">Low</option>
+                        </select>
+                      </td>
+                      <td className="px-4 py-2">
+                        <select
+                          value={row.acquisition_status}
+                          onChange={(e) => updateRow(row.id, { acquisition_status: e.target.value as Acquisition })}
+                          disabled={row.have_it_status === 'yes'}
+                          className={`text-xs font-medium pl-2 pr-6 py-0.5 rounded-full border-0 cursor-pointer focus:ring-2 focus:ring-ooosh-400 disabled:cursor-not-allowed disabled:opacity-60 ${acqBadge.cls}`}
+                          title={row.have_it_status === 'yes' ? 'In stock — no plan needed' : 'Set the acquisition plan'}
+                        >
+                          <option value="none">— No plan</option>
+                          <option value="getting_soon">Getting soon</option>
+                          <option value="ordered">Ordered</option>
+                          <option value="not_getting">Not getting</option>
                         </select>
                       </td>
                       <td className="px-4 py-2 text-gray-500 text-xs">
@@ -323,18 +440,49 @@ export default function BacklineMatcherPage() {
                   className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
                 />
               </div>
-              <div>
-                <label className="text-xs text-gray-500 mb-1 block">Do we stock it?</label>
-                <select
-                  value={addHaveIt}
-                  onChange={(e) => setAddHaveIt(e.target.value as DemandRow['have_it_status'])}
-                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
-                >
-                  <option value="no">Not stocked</option>
-                  <option value="sort_of">Similar only</option>
-                  <option value="yes">In stock</option>
-                </select>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs text-gray-500 mb-1 block">Do we stock it?</label>
+                  <select
+                    value={addHaveIt}
+                    onChange={(e) => setAddHaveIt(e.target.value as HaveIt)}
+                    className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
+                  >
+                    <option value="no">Not stocked</option>
+                    <option value="sort_of">Similar only</option>
+                    <option value="used_to">We used to</option>
+                    <option value="yes">In stock</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs text-gray-500 mb-1 block">Priority</label>
+                  <select
+                    value={addPriority}
+                    onChange={(e) => setAddPriority(e.target.value as '' | Priority)}
+                    className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
+                  >
+                    <option value="">— None</option>
+                    <option value="high">High</option>
+                    <option value="medium">Medium</option>
+                    <option value="low">Low</option>
+                  </select>
+                </div>
               </div>
+              {addHaveIt !== 'yes' && (
+                <div>
+                  <label className="text-xs text-gray-500 mb-1 block">Plan</label>
+                  <select
+                    value={addAcquisition}
+                    onChange={(e) => setAddAcquisition(e.target.value as Acquisition)}
+                    className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
+                  >
+                    <option value="none">— No plan yet</option>
+                    <option value="getting_soon">Getting soon</option>
+                    <option value="ordered">Ordered</option>
+                    <option value="not_getting">Not getting</option>
+                  </select>
+                </div>
+              )}
               {addError && <p className="text-xs text-red-600">{addError}</p>}
             </div>
             <div className="flex justify-end gap-2 mt-5">
