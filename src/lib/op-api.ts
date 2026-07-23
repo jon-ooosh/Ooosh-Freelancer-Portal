@@ -361,6 +361,48 @@ export async function logShiftLostPropertyOP(
 }
 
 // =============================================================================
+// RESOURCES (Staff Documents shared with freelancers)
+// =============================================================================
+
+export interface PortalResource {
+  id: string
+  title: string
+  category: string
+  kind: 'file' | 'markdown'
+  fileName: string | null
+  fileType: string | null
+  url: string | null
+}
+
+export interface PortalResourcesResponse {
+  resources: PortalResource[]
+}
+
+export interface PortalResourceDetail {
+  id: string
+  title: string
+  category: string
+  kind: 'file' | 'markdown'
+  body?: string
+  fileName?: string | null
+  fileType?: string | null
+  url?: string | null
+}
+
+/** List approved, freelancer-shareable staff documents. */
+export async function getResourcesFromOP(sessionToken: string): Promise<PortalResourcesResponse> {
+  return opFetch<PortalResourcesResponse>('/resources', sessionToken)
+}
+
+/** Fetch a single resource (markdown body, or a fresh presigned file url). */
+export async function getResourceDetailFromOP(
+  sessionToken: string,
+  id: string
+): Promise<{ resource: PortalResourceDetail }> {
+  return opFetch<{ resource: PortalResourceDetail }>(`/resources/${id}`, sessionToken)
+}
+
+// =============================================================================
 // API FUNCTIONS
 // =============================================================================
 

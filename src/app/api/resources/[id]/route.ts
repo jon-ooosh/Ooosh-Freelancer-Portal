@@ -1,13 +1,10 @@
 /**
- * Resources API Endpoint
+ * Resource Detail API Endpoint
  *
- * GET /api/resources
+ * GET /api/resources/[id]
  *
- * Fetches staff documents flagged as shareable with freelancers from the
- * Operations Platform (OP). Replaces the old Monday "Staff Training" board read
- * — Monday has been retired, so this is OP-only with no fallback. When the
- * portal isn't in OP mode (shouldn't happen in production) it returns an empty
- * list, and the page shows its empty state.
+ * Returns a single shareable staff document — the markdown body for the
+ * in-portal reader, or a fresh presigned url for a file-backed doc. OP-only.
  *
  * Requires authentication.
  */
@@ -16,12 +13,15 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getSessionUser } from '@/lib/session'
 import {
   isOpMode,
-  getResourcesFromOP,
+  getResourceDetailFromOP,
   isOpClientError,
   OpApiError,
 } from '@/lib/op-api'
 
-export async function GET(request: NextRequest) {
+export async function GET(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
   try {
     const session = await getSessionUser()
     if (!session) {
@@ -32,7 +32,7 @@ export async function GET(request: NextRequest) {
     }
 
     if (!isOpMode()) {
-      return NextResponse.json({ success: true, resources: [], totalCount: 0 })
+      return NextResponse.json({ success: false, error: 'Not found' }, { status: 404 })
     }
 
     const sessionToken = request.cookies.get('session')?.value
@@ -43,25 +43,26 @@ export async function GET(request: NextRequest) {
       )
     }
 
+    const { id } = await params
+
     try {
-      const data = await getResourcesFromOP(sessionToken)
-      const resources = data.resources || []
-      return NextResponse.json({ success: true, resources, totalCount: resources.length })
+      const data = await getResourceDetailFromOP(sessionToken, id)
+      return NextResponse.json({ success: true, resource: data.resource })
     } catch (opError) {
       if (isOpClientError(opError)) {
         const status = (opError as OpApiError).status
         return NextResponse.json({ success: false, error: opError.message }, { status })
       }
-      console.error('OP resources error:', opError)
+      console.error('OP resource detail error:', opError)
       return NextResponse.json(
-        { success: false, error: 'Unable to load resources. Please refresh and try again.' },
+        { success: false, error: 'Unable to load this document. Please refresh and try again.' },
         { status: 502 }
       )
     }
   } catch (error) {
-    console.error('Resources API error:', error)
+    console.error('Resource detail API error:', error)
     return NextResponse.json(
-      { success: false, error: 'Failed to fetch resources' },
+      { success: false, error: 'Failed to fetch resource' },
       { status: 500 }
     )
   }
