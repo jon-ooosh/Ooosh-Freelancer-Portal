@@ -55,6 +55,13 @@ const templates: Record<string, EmailTemplate> = {
           <strong>On the day:</strong> {{studioContact}}
         </p>
       {{/if}}
+      {{#if img1}}<p style="margin:16px 0 8px;font-size:15px;color:#1e293b;font-weight:600;">📷 Photos</p>{{/if}}
+      {{#if img1}}<div style="margin:0 0 12px;"><img src="{{img1}}" alt="{{img1cap}}" style="max-width:100%;height:auto;border-radius:8px;display:block;">{{#if img1cap}}<p style="margin:4px 0 0;font-size:13px;color:#64748b;">{{img1cap}}</p>{{/if}}</div>{{/if}}
+      {{#if img2}}<div style="margin:0 0 12px;"><img src="{{img2}}" alt="{{img2cap}}" style="max-width:100%;height:auto;border-radius:8px;display:block;">{{#if img2cap}}<p style="margin:4px 0 0;font-size:13px;color:#64748b;">{{img2cap}}</p>{{/if}}</div>{{/if}}
+      {{#if img3}}<div style="margin:0 0 12px;"><img src="{{img3}}" alt="{{img3cap}}" style="max-width:100%;height:auto;border-radius:8px;display:block;">{{#if img3cap}}<p style="margin:4px 0 0;font-size:13px;color:#64748b;">{{img3cap}}</p>{{/if}}</div>{{/if}}
+      {{#if img4}}<div style="margin:0 0 12px;"><img src="{{img4}}" alt="{{img4cap}}" style="max-width:100%;height:auto;border-radius:8px;display:block;">{{#if img4cap}}<p style="margin:4px 0 0;font-size:13px;color:#64748b;">{{img4cap}}</p>{{/if}}</div>{{/if}}
+      {{#if img5}}<div style="margin:0 0 12px;"><img src="{{img5}}" alt="{{img5cap}}" style="max-width:100%;height:auto;border-radius:8px;display:block;">{{#if img5cap}}<p style="margin:4px 0 0;font-size:13px;color:#64748b;">{{img5cap}}</p>{{/if}}</div>{{/if}}
+      {{#if img6}}<div style="margin:0 0 16px;"><img src="{{img6}}" alt="{{img6cap}}" style="max-width:100%;height:auto;border-radius:8px;display:block;">{{#if img6cap}}<p style="margin:4px 0 0;font-size:13px;color:#64748b;">{{img6cap}}</p>{{/if}}</div>{{/if}}
       <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">Any questions before you arrive, just reply to this email or give us a call.</p>
     `,
   },

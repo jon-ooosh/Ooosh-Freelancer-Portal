@@ -11,11 +11,86 @@
  * falling back to the job's client org. `resolveRehearsalAnchorOrg` is the one
  * place that decides "whose profile applies to this job".
  */
+import { randomUUID } from 'crypto';
+import { Readable } from 'stream';
 import { query } from '../config/database';
 import { emailService } from './email-service';
-import { getSystemSettings } from '../routes/system-settings';
+import { getSystemSettings, invalidateSystemSettingsCache } from '../routes/system-settings';
+import { getFromR2, uploadToPublicR2, deleteFromPublicR2 } from '../config/r2';
 import { resolveClientEmailTarget, buildFallbackBanner, logFallbackToTimeline } from './money-emails';
 import { getJobCoverage } from './studio-sitter';
+
+// ── Info-pack photos (client email) ─────────────────────────────────────────
+// Images live in the PUBLIC R2 bucket so the inline <img> URLs are durable
+// (presigned links would expire in an archived client email). Stored as a JSON
+// array on the `rehearsal_info_pack_images` system_settings row.
+export interface InfoPackImage { key: string; filename: string; caption: string; url?: string }
+const IMAGES_KEY = 'rehearsal_info_pack_images';
+export const MAX_INFO_PACK_IMAGES = 6;
+
+function publicUrl(key: string): string {
+  const base = (process.env.R2_PUBLIC_URL || '').replace(/\/$/, '');
+  return `${base}/${key}`;
+}
+
+async function streamToBuffer(stream: Readable): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) chunks.push(chunk instanceof Buffer ? chunk : Buffer.from(chunk));
+  return Buffer.concat(chunks);
+}
+
+async function writeSystemSetting(key: string, value: string): Promise<void> {
+  await query(
+    `INSERT INTO system_settings (key, value, category) VALUES ($1, $2, 'rehearsals')
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+    [key, value]
+  );
+  invalidateSystemSettingsCache();
+}
+
+async function readImages(): Promise<InfoPackImage[]> {
+  const s = await getSystemSettings([IMAGES_KEY]);
+  try {
+    const arr = JSON.parse(s[IMAGES_KEY] || '[]');
+    return Array.isArray(arr) ? arr.filter((x: any) => x && x.key) : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function getInfoPackImages(): Promise<InfoPackImage[]> {
+  return (await readImages()).map((im) => ({ ...im, caption: im.caption || '', url: publicUrl(im.key) }));
+}
+
+/** Copy an already-uploaded private object into the public bucket + register it. */
+export async function addInfoPackImage(privateKey: string, filename: string, caption: string): Promise<InfoPackImage[]> {
+  const images = await readImages();
+  if (images.length >= MAX_INFO_PACK_IMAGES) throw new Error(`Maximum ${MAX_INFO_PACK_IMAGES} photos`);
+  const obj = await getFromR2(privateKey);
+  if (!obj.Body) throw new Error('Uploaded file not found');
+  const buf = await streamToBuffer(obj.Body as Readable);
+  const ext = (filename.split('.').pop() || 'jpg').toLowerCase().replace(/[^a-z0-9]/g, '') || 'jpg';
+  const publicKey = `rehearsal-info-pack/${randomUUID()}.${ext}`;
+  await uploadToPublicR2(publicKey, buf, obj.ContentType || 'image/jpeg');
+  images.push({ key: publicKey, filename, caption: caption || '' });
+  await writeSystemSetting(IMAGES_KEY, JSON.stringify(images));
+  return getInfoPackImages();
+}
+
+export async function updateInfoPackImageCaption(key: string, caption: string): Promise<InfoPackImage[]> {
+  const images = await readImages();
+  const im = images.find((x) => x.key === key);
+  if (im) im.caption = caption || '';
+  await writeSystemSetting(IMAGES_KEY, JSON.stringify(images));
+  return getInfoPackImages();
+}
+
+export async function removeInfoPackImage(key: string): Promise<InfoPackImage[]> {
+  const remaining = (await readImages()).filter((x) => x.key !== key);
+  await writeSystemSetting(IMAGES_KEY, JSON.stringify(remaining));
+  try { await deleteFromPublicR2(key); } catch { /* best-effort cleanup */ }
+  return getInfoPackImages();
+}
 
 export interface RehearsalJobDetails {
   job_id: string;
@@ -333,6 +408,14 @@ async function composeInfoPack(jobId: string): Promise<{
     ? buildFallbackBanner({ jobId, clientName: target.clientName, jobNumber: target.jobNumber, jobName: target.jobName })
     : undefined;
 
+  // Inline photos (durable public-bucket URLs) → img1..imgN + captions.
+  const imageVars: Record<string, string> = {};
+  const images = await getInfoPackImages();
+  images.slice(0, MAX_INFO_PACK_IMAGES).forEach((im, i) => {
+    imageVars[`img${i + 1}`] = im.url || '';
+    imageVars[`img${i + 1}cap`] = im.caption || '';
+  });
+
   return {
     to: target.primaryEmail,
     cc: target.ccEmails,
@@ -351,6 +434,7 @@ async function composeInfoPack(jobId: string): Promise<{
       amenities: settings.rehearsal_amenities || '',
       houseRules: settings.rehearsal_house_rules || '',
       studioContact: settings.rehearsal_contact || '',
+      ...imageVars,
     },
   };
 }
