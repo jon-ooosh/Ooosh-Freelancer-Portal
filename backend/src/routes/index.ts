@@ -52,12 +52,14 @@ import wiseRouter from './wise';
 import autoChaseRouter from './auto-chase';
 import leadsRouter from './leads';
 import staffDocumentsRouter from './staff-documents';
+import freelancersRouter from './freelancers';
 
 const router = Router();
 
 router.use('/health', healthRouter);
 router.use('/auth', authRouter);
 router.use('/people', peopleRouter);
+router.use('/freelancers', freelancersRouter);  // Freelancer onboarding — invite + application lifecycle
 router.use('/organisations', organisationsRouter);
 router.use('/venues', venuesRouter);
 router.use('/interactions', interactionsRouter);
