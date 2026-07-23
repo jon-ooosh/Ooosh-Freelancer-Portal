@@ -305,6 +305,77 @@ router.get('/demand', async (req: AuthRequest, res: Response) => {
   }
 });
 
+/**
+ * Ad-hoc manual add to the demand tracker — WITHOUT going through the AI
+ * matcher. For "this got broken, we need a replacement" / "someone suggested we
+ * stock this". Optionally links to job(s) (which double as the "needed by"
+ * indicator) and carries a note. Dated by `last_requested_at = NOW()`.
+ *
+ * Merge-on-conflict (same key as the matcher): if the item is already tracked
+ * we union in the job refs, refresh the date, append the note, and optionally
+ * update the have-it status — but we do NOT bump request_count (that's the
+ * genuine "matcher asks" signal) and we don't downgrade an existing row's
+ * source from 'matcher' to 'manual'.
+ */
+const createDemandSchema = z.object({
+  request: z.string().min(1).max(500),
+  notes: z.string().max(1000).optional(),
+  have_it_status: z.enum(['yes', 'no', 'sort_of']).optional(),
+  jobNumbers: z.array(z.union([z.string(), z.number()])).optional(),
+});
+
+router.post('/demand', async (req: AuthRequest, res: Response) => {
+  const parsed = createDemandSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ success: false, error: 'request (1-500 chars) required.' });
+  }
+  const { request, notes, have_it_status } = parsed.data;
+  const normalised = normaliseRequest(request);
+  if (!normalised) {
+    return res.status(400).json({ success: false, error: 'request must contain letters or numbers.' });
+  }
+  // Keep only digit-shaped job numbers, distinct.
+  const jobRefs = Array.from(
+    new Set(
+      (parsed.data.jobNumbers || [])
+        .map((n) => String(n).trim())
+        .filter((n) => /^\d+$/.test(n)),
+    ),
+  );
+  const note = notes?.trim() || null;
+  try {
+    const r = await query(
+      `INSERT INTO backline_demand
+         (normalised_request, display_request, request_count, total_hire_days,
+          job_refs, have_it_status, notes, source, first_requested_at, last_requested_at)
+       VALUES ($1, $2, 1, 0, $3, COALESCE($4, 'no'), $5, 'manual', NOW(), NOW())
+       ON CONFLICT (normalised_request) DO UPDATE SET
+         job_refs = (
+           SELECT ARRAY(SELECT DISTINCT unnest(backline_demand.job_refs || $3::text[]))
+         ),
+         have_it_status = COALESCE($4, backline_demand.have_it_status),
+         notes = CASE
+                   WHEN $5::text IS NULL THEN backline_demand.notes
+                   WHEN backline_demand.notes IS NULL OR backline_demand.notes = '' THEN $5
+                   ELSE backline_demand.notes || E'\n' || $5
+                 END,
+         display_request = $2,
+         last_requested_at = NOW(),
+         updated_at = NOW()
+       RETURNING id, (xmax = 0) AS inserted`,
+      [normalised, request.trim(), jobRefs, have_it_status || null, note],
+    );
+    return res.json({
+      success: true,
+      id: r.rows[0].id,
+      merged: !r.rows[0].inserted,
+    });
+  } catch (err) {
+    console.error('[Backline matcher] demand create error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to add item' });
+  }
+});
+
 /** Manual correction of a demand row's status / notes. */
 const patchSchema = z.object({
   have_it_status: z.enum(['yes', 'no', 'sort_of']).optional(),
