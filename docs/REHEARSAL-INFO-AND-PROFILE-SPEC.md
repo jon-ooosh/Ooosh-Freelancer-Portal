@@ -210,24 +210,14 @@ sitter portal — deferred; the sitter portal already surfaces `share_with_freel
 
 - **Client-facing intake form (capture level B)** — public token form linked from the pack,
   TM answers prefs → feeds the profile. The "hotel" experience; bolt-on once the store exists.
-- **Auto-send** the info pack at T-N days (like hire forms/carnet). Manual + last-sent line
-  for now.
+- ~~**Auto-send** the info pack at T-N days (like hire forms/carnet).~~ ✅ SHIPPED — see §5f (item B).
 - **Personalised lines in the client email** ("your oat milk is stocked"). Profile stays
   internal prep in v1.
 - **Per-person preferences** tied to person records.
 - **Hub "upcoming rehearsals" overview** list.
 - **General Tasks system** (separate build, deferred entirely).
-- **Files/pictures in the info-pack boilerplate** (jon flagged Jul 2026, after v1 shipped).
-  Client-facing info packs are static text only in v1. A useful add: attach a parking photo,
-  a "where the loading door is" image, a site map PDF, etc. **Approach when built** — mirror the
-  studio-sitter lock-up "reference photos" pattern: an upload widget on the Info Pack settings tab
-  (Operations → Rehearsals) → R2 (`files/attachments/…`, downscale via the shared `compressImage`
-  before upload) → keys stored as a JSON array in a new `rehearsals` `system_settings` row
-  (e.g. `rehearsal_info_pack_images`) → wired into `sendInfoPack` (`services/rehearsal-details.ts`).
-  **Design decision to make first:** raw email *attachments* (simple, but a few phone photos push
-  past spam-filter-friendly sizes) vs **inline images via presigned R2 links** (renders in the body,
-  keeps the email light — the preferred v2). ~half a day either way; the pattern is known so no
-  research needed.
+- ~~**Files/pictures in the info-pack boilerplate**~~ ✅ SHIPPED — see §5f (item A). Delivered inline
+  via the durable **public** R2 bucket (not presigned links — those expire in an archived email).
 
 ---
 
@@ -387,6 +377,33 @@ field, without a schema column per field.
   upsert, untouched fields left alone). Per-hire fields + overrides → `PUT /rehearsals/job/:jobId`;
   profile changes → `PUT /rehearsals/profile/:orgId`, run concurrently. No-anchor guard: forces
   "this hire" so a typed value is never dropped. Backend whitelist-filters override keys.
+
+### 5f. Info-pack photos (A) + auto-send (B) — Jul 2026 ✅ SHIPPED
+
+- **A — pictures/PDFs in the client info pack.** Delivered **inline** (renders in the client's email
+  body *and* in the preview modal — attachments would be worse UX, presigned URLs would expire in an
+  archived email). Images live in the **PUBLIC R2 bucket** so the `<img>` URLs are durable; stored as
+  a JSON array on the `rehearsal_info_pack_images` `system_settings` row (`[{key, filename, caption}]`,
+  cap 6). Upload path reuses the existing private `/files/upload` (client-side `compressImage` first),
+  then the backend copies the object into the public bucket (`addInfoPackImage`) — no new multipart
+  plumbing. Managed on the **Rehearsals hub → Info Pack tab** (`InfoPackPhotos`: upload / caption /
+  remove, admin-manager gated). Endpoints `GET/POST/PATCH/DELETE /api/rehearsals/info-pack-images`.
+  `composeInfoPack` injects `img1..img6` + `imgNcap` variables; the template has 6 conditional `<img>`
+  slots (`{{#if imgN}}` — the URL is escaped, valid in `src`). The preview renders them for free.
+- **B — auto-send at T-N days.** `services/rehearsal-info-pack-auto.ts` `runRehearsalInfoPackAutoSend()`,
+  daily 09:20. **Off by default.** When enabled, sends the pack for confirmed rehearsal jobs whose
+  first session lands within N days and that haven't had a pack (self-healing window; `info_pack_sent_at`
+  gates re-send). Skips lost / cancelled / internal / speculative. Toggle + N-days on the Info Pack tab
+  (`rehearsal_info_pack_auto_enabled` / `_auto_days`, migration 182). Shares `sendInfoPack` with the
+  manual path.
+- **Convention:** the three settings keys (`rehearsal_info_pack_images`, `_auto_enabled`, `_auto_days`)
+  are managed by dedicated controls on the Info Pack tab, NOT the generic text-field editor — the
+  generic Save deliberately omits the images key so it can't clobber an uploaded photo.
+- **Template-nesting fix (Jul 2026).** First cut nested the caption `{{#if imgNcap}}` INSIDE the image
+  `{{#if imgN}}` block — but `substituteVariables` is single-level (non-greedy regex), so nested ifs
+  left literal `{{/if}}` / `{{#if imgNcap}}` artifacts in the email (visible in the preview). Flattened
+  each image + caption into two SEPARATE top-level `{{#if}}` blocks. **Never nest `{{#if}}` in an email
+  template** — noted in CLAUDE.md (Email Service) + a comment on `substituteVariables`.
 
 ---
 

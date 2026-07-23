@@ -2224,7 +2224,7 @@ The cleanup strategy is: OP becomes master for relationship data, HH gets what i
   - [x] Multi-filter on Organisations: has email, has people, type
   - [x] Multi-filter on Venues: linked to org
   - [x] Sort options on all list pages: name, recently added, recently updated, last contacted
-  - [x] "Last Contact" column on People + Organisations (colour-coded: green <30d, amber 30-90d, red >90d)
+  - [x] "Last Contact" column on People + Organisations (colour-coded: green <30d, amber 30-90d, red >90d). **"Last contacted" = broadest reachable genuine contact, NOT just the entity's own interactions (Jul 2026).** Client contact overwhelmingly lands on the JOB timeline, not the org's/person's own — so reading only `interactions WHERE organisation_id = o.id` (the original) read stale/empty. Both the org + people list columns AND their "last contacted" sort now compute `MAX(created_at)` over contact-type interactions (`type IN ('call','email','meeting')` — auto-chase-ingested client emails are `type='email'`, so they count; `note`/system rows deliberately excluded) reachable from the entity. Org (`routes/organisations.ts` `lastContactSubquery`): own timeline + jobs linked via `job_organisations`/`jobs.client_id` + people linked via active `person_organisation_roles`. Person (`routes/people.ts` `lastContactSubquery`): own timeline + jobs they're a `job_contacts` or crew (`quote_assignments`→`quotes`) contact on — kept person-focused, NOT the whole org's timeline (that lives on the org page; bubbling it would make every contact at a busy client look freshly contacted). One shared subquery drives both the SELECT and the sort so they can't drift. Any new "last contacted" surface should read from this broadened source, not the entity's own interactions alone.
   - [x] Smart suggestions on Org Detail (suggest band retype for misclassified clients)
   - [x] Data Cleanup page restricted to admin/manager roles in nav
   - [x] Client info surfacing on New Enquiry form + Job Detail sidebar: Do Not Hire warning (red banner), Working Terms, Internal Notes — via enhanced `/pipeline/client-history` endpoint returning `client_info` from organisations table
@@ -2249,7 +2249,7 @@ The cleanup strategy is: OP becomes master for relationship data, HH gets what i
 - [x] **Hire History Tab** (15 Apr 2026)
   - [x] `GET /api/organisations/:id/hire-history` — paginated jobs via job_organisations, retro + lost reason parsing
   - [x] `GET /api/people/:id/hire-history` — jobs via org memberships UNION crew assignments
-  - [x] Reusable `HireHistoryTab.tsx` component with stats cards (total, confirmed, value, retro breakdown)
+  - [x] Reusable `HireHistoryTab.tsx` component with stats cards (total, confirmed, value, retro breakdown). **Stats cards are filter-aware (Jul 2026):** the four cards (Total Jobs / Confirmed / Total Value / Retros) reflect the active outcome/role/year filters — the org + person hire-history stats + retro queries apply the same `filterSql` as the list/count (previously they always computed over the whole entity). `Total Value` sums whatever `job_value` is present across the visible filtered rows (the confirmed-only `SUM FILTER` was dropped — the Money tab owns the figure). A subtle "· filtered" hint renders on the cards when a filter is active (`filtersActive` in `HireHistoryTab.tsx`).
   - [x] Retro rating badge + notes + follow-up shown inline (not just hover)
   - [x] Lost reason shown for lost jobs (grey "Lost" badge + reason text)
   - [x] Person hire history shows "Crew" label for crew assignment links
@@ -3459,7 +3459,13 @@ SMTP_FROM=Ooosh Tours <notifications@oooshtours.co.uk>
 **Template structure:**
 - Base layout: `backend/src/services/email-templates/base.ts` — Ooosh branding wrapper
 - Per-template: `backend/src/services/email-templates/{template-id}.ts` — subject + body
-- Variables injected via `{{variableName}}` substitution
+- Variables injected via `{{variableName}}` substitution (HTML-escaped — so a `{{var}}`
+  can't inject raw HTML; a URL is fine, `&` → `&amp;` is valid in `src`/`href`)
+- Conditional sections via `{{#if var}}…{{/if}}` — **single level only, NEVER nest them.**
+  `substituteVariables` uses a non-greedy single-level regex; a nested
+  `{{#if a}}…{{#if b}}…{{/if}}…{{/if}}` matches to the FIRST `{{/if}}`, leaving a literal
+  `{{/if}}` / `{{#if b}}` artifact in the sent email. Render e.g. an image and its caption
+  as two SEPARATE top-level `{{#if}}` blocks. (Bit `rehearsal_info_pack` photos, Jul 2026.)
 
 **Convention: include the HH job number on every job-scoped template** (May 2026). Any new email template that relates to a specific job MUST surface the HH job number in BOTH the subject line and the body, using the Katatonia pattern:
 

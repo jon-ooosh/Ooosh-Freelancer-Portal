@@ -45,12 +45,33 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     const { search, type, page = '1', limit = '50', tag, has_email, has_people, missing_email, missing_phone, location, sort } = req.query;
     const offset = (parseInt(page as string) - 1) * parseInt(limit as string);
 
+    // "Last contacted" = most recent GENUINE contact-type interaction (call/email/meeting —
+    // auto-chase ingested client emails are type='email', so they count) reachable from the org:
+    // its own timeline, interactions on jobs linked to it (job_organisations OR jobs.client_id),
+    // and interactions on people linked to it (active roles). Client contact overwhelmingly lands
+    // on the job timeline, not the org's, so the org's own interactions alone read stale.
+    const lastContactSubquery = `(
+      SELECT MAX(i.created_at) FROM interactions i
+      WHERE i.type IN ('call','email','meeting') AND (
+        i.organisation_id = o.id
+        OR i.job_id IN (
+          SELECT jo.job_id FROM job_organisations jo WHERE jo.organisation_id = o.id
+          UNION
+          SELECT j2.id FROM jobs j2 WHERE j2.client_id = o.id AND j2.is_deleted = false
+        )
+        OR i.person_id IN (
+          SELECT por.person_id FROM person_organisation_roles por
+          WHERE por.organisation_id = o.id AND por.status = 'active'
+        )
+      )
+    )`;
+
     let sql = `
       SELECT o.*,
         (SELECT COUNT(*) FROM person_organisation_roles por
          WHERE por.organisation_id = o.id AND por.status = 'active') as active_people_count,
         parent.name as parent_name,
-        (SELECT MAX(i.created_at) FROM interactions i WHERE i.organisation_id = o.id) as last_interaction_at
+        ${lastContactSubquery} as last_interaction_at
       FROM organisations o
       LEFT JOIN organisations parent ON parent.id = o.parent_id
       WHERE o.is_deleted = false
@@ -108,7 +129,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       'name': 'o.name',
       'recently_added': 'o.created_at DESC',
       'recently_updated': 'o.updated_at DESC',
-      'last_contacted': '(SELECT MAX(i.created_at) FROM interactions i WHERE i.organisation_id = o.id) DESC NULLS LAST',
+      'last_contacted': `${lastContactSubquery} DESC NULLS LAST`,
     };
     const orderBy = sortMap[sort as string] || 'o.name';
 
@@ -1366,7 +1387,9 @@ router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
       [id, ...filterParams, limit, offset]
     );
 
-    // Compute summary stats
+    // Compute summary stats — respects the active filters so the four cards move with the
+    // visible list. total_value sums whatever job_value is present across the filtered set
+    // (no status restriction — the Money tab owns the figure; here we just sum what's there).
     const statsResult = await query(
       `${jobLinkCTE}
        SELECT
@@ -1374,13 +1397,14 @@ router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
          COUNT(*) FILTER (WHERE j.pipeline_status = 'completed' OR j.status = 11) AS completed_jobs,
          COUNT(*) FILTER (WHERE j.pipeline_status = 'confirmed' OR j.status = 2) AS confirmed_jobs,
          COUNT(*) FILTER (WHERE j.pipeline_status = 'lost') AS lost_jobs,
-         COALESCE(SUM(j.job_value) FILTER (WHERE j.pipeline_status IN ('confirmed','completed','prepped','dispatched','returned','returned_incomplete') OR j.status BETWEEN 2 AND 11), 0) AS total_value
+         COALESCE(SUM(j.job_value), 0) AS total_value
        FROM org_jobs oj
-       JOIN jobs j ON j.id = oj.job_id AND j.is_deleted = false`,
-      [id]
+       JOIN jobs j ON j.id = oj.job_id AND j.is_deleted = false
+       WHERE 1=1${filterSql}`,
+      [id, ...filterParams]
     );
 
-    // Count retros by rating
+    // Count retros by rating (also filtered, so the retro card tracks the visible set)
     const retroResult = await query(
       `${jobLinkCTE}
        SELECT
@@ -1389,8 +1413,9 @@ router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
          COUNT(*) FILTER (WHERE i.content LIKE 'Job retro: Issues%') AS retro_issues
        FROM org_jobs oj
        JOIN jobs j ON j.id = oj.job_id AND j.is_deleted = false
-       LEFT JOIN interactions i ON i.job_id = j.id AND i.content LIKE 'Job retro:%'`,
-      [id]
+       LEFT JOIN interactions i ON i.job_id = j.id AND i.content LIKE 'Job retro:%'
+       WHERE 1=1${filterSql}`,
+      [id, ...filterParams]
     );
 
     // Distinct roles + years across the whole hire history (unfiltered) — populates filter dropdowns

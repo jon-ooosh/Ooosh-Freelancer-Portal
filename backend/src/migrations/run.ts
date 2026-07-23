@@ -216,6 +216,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '179_cot_card_agreement_wording.sql',
         '180_staff_document_approval.sql',
         '181_staff_document_shareable.sql',
+        '182_rehearsal_info_pack_images_and_autosend.sql',
       ];
 
       for (const migration of migrations) {
