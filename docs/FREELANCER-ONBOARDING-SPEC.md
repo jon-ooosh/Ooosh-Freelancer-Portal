@@ -295,14 +295,60 @@ licence uploads are reviewed manually.
    section).
 5. **Phase E — iDenfy** (deferred to the Christmas iDenfy migration).
 
-## 13. Open questions to confirm before/while building
+## 13. Decisions locked (jon, build kickoff)
 
-- **Approve/decline RBAC tier** — `MANAGER_ROLES` or wider `STAFF_ROLES`?
-- **`178_staff_documents.sql`** — is this the intended home for portal My Documents /
-  training docs, or a separate concern? (Confirm before building Phase D.)
-- **Declined freelancers in picklists** — hidden entirely, or greyed "declined"?
-- **Re-invite / annual re-consent** — new application row each time (proposed) vs reusing
-  one row; and whether the reminder scanner auto-triggers the re-invite email or just nudges
-  staff.
-- **Onboarding state storage** — `onboarding JSONB` on people (light migration) vs dedicated
-  boolean columns.
+- **RBAC:** invite / input a new freelancer = **STAFF_ROLES** (anyone on the team).
+  Approve / decline = **MANAGER_ROLES** (incl. weekend_manager). Enforced structurally
+  in `middleware/auth.ts` (`authorize` treats weekend_manager ≡ manager).
+- **Training docs home:** `178_staff_documents.sql` **is** where all training/general-info
+  docs are built. A subset gets shared to the freelancer portal's **"Resources"** section
+  (portal terminology = "Resources", not "My Documents") via `share_with_freelancer`.
+- **Declined + expired in picklists:** grey out with the **reason** shown — `declined`
+  greyed "declined", document-expired greyed "expired" (see §14 eligibility model).
+- **Re-invite / annual re-consent:** new `freelancer_applications` row each time (history
+  preserved). Re-send the same form **pre-filled** with the last answers, flagging anything
+  overdue / expired / expiring within 12 months. Trigger the re-invite email ~1 month before
+  the annual review date, weekly nudge, block ("reattestation overdue") at the review date if
+  not re-attested.
+- **Onboarding state storage:** small `onboarding JSONB` on `people` for the bits without a
+  column (portal-invite-sent, resources-shared); reuse the existing `has_tshirt` /
+  `is_insured_on_vehicles` booleans directly.
+
+## 14. Eligibility, removal & renewal (design, from jon's sanity checks)
+
+**Eligibility is separate from approval.** `is_approved` = the manager's approval decision
+(stays true once approved — we haven't sacked them). A **document-derived eligibility** is
+computed from the expiry-date columns: an expired driving document (licence / DVLA check /
+passport where relevant) greys the freelancer out of driving pickers with a **"licence
+expired"** reason, and auto-clears the moment a new valid date is entered. So the greying
+mechanism is shared across states, each with a reason: **pending / declined / expired /
+reattestation overdue**. (v1: expired driving docs block driving work specifically; a
+role-aware refinement for non-driving work is a later slice.)
+
+**Removal — two tiers.** Soft "off the books" = untick `is_freelancer` (reverts to an
+ordinary contact, drops out of all freelancer pickers, history preserved; stamps
+`freelancer_removed_at` / `freelancer_removed_reason` for audit, closes any open
+application). Hard "never again" = the existing **Do Not Hire** flag (red banner,
+admin-set, audited).
+
+**Renewal timeline** (annual, driven by `freelancer_next_review_date`): re-invite email
+~1 month before the review date → weekly nudge → if not re-attested by the review date,
+greyed "reattestation overdue" + blocked until they re-submit. Document-expiry (licence /
+passport / DVLA) is a **separate** clock — chased before the specific document lapses; a
+lapse greys the freelancer for the affected work type. Both feed the same greying surface.
+
+## 15. Build status
+
+- **Phase A — SHIPPED (this PR):** migration 179 (`freelancer_applications` + all new
+  `people` columns — status denorm, `onboarding` JSONB, removal audit fields, document
+  expiry dates, preferred name, day-rate note); backend `routes/freelancers.ts`
+  (`POST /invite` [existing-person or new-shell], `POST /applications/:id/resend`,
+  `GET /applications`); `freelancer_invite` email template (client variant, test-mode
+  routed). Reuses existing person columns discovered during build (`has_tshirt`,
+  `is_insured_on_vehicles`, `freelancer_references`, `emergency_contact_name/phone`,
+  `date_of_birth`, `home_address`, `licence_details`).
+- **Phase B — NEXT:** invite UI (Person Detail button + New-Freelancer quick-add), pending
+  tag on People, greyed picklist entries; the public `/freelancer-apply/:token` form +
+  submit → enrich → info@ alert.
+- **Phases C–E:** review/approve + Freelancer tab + onboarding checklist; document-expiry
+  reminder scanner + portal Resources; iDenfy (deferred to the Christmas migration).
