@@ -101,6 +101,7 @@ interface JobDetail {
   client_id: string | null;
   client_name: string | null;
   company_name: string | null;
+  client_org_name: string | null;
   client_ref: string | null;
   venue_id: string | null;
   venue_name: string | null;
@@ -1501,6 +1502,7 @@ export default function JobDetailPage() {
   const [jobOrgSelectedOrg, setJobOrgSelectedOrg] = useState<{ id: string; name: string; type: string } | null>(null);
   const [jobOrgRole, setJobOrgRole] = useState('band');
   const [jobOrgSaving, setJobOrgSaving] = useState(false);
+  const [jobOrgCreating, setJobOrgCreating] = useState(false);
   const [orgSuggestions, setOrgSuggestions] = useState<Array<{
     org_id: string; org_name: string; org_type: string;
     relationship_type: string; suggested_role: string;
@@ -1595,6 +1597,7 @@ export default function JobDetailPage() {
   const [editingClient, setEditingClient] = useState(false);
   const [clientSearch, setClientSearch] = useState('');
   const [clientSearchResults, setClientSearchResults] = useState<Array<{ id: string; name: string; type: string }>>([]);
+  const [creatingClient, setCreatingClient] = useState(false);
   const [inlineEditSaving, setInlineEditSaving] = useState(false);
   const [pushingToHH, setPushingToHH] = useState(false);
   const [hhClientOutOfSync, setHhClientOutOfSync] = useState(false);
@@ -1957,6 +1960,25 @@ export default function JobDetailPage() {
       setHhClientSyncName(org.name);
       setHhClientOutOfSync(true);
       setHhClientSyncSuccess(false);
+    }
+  }
+
+  // Create a brand-new client organisation from the picker (mirrors the New
+  // Enquiry form's inline create) when the search finds no matching org.
+  async function createAndSelectClient(name: string) {
+    const trimmed = name.trim();
+    if (!trimmed || creatingClient) return;
+    setCreatingClient(true);
+    try {
+      const newOrg = await api.post<{ id: string }>('/organisations', {
+        name: trimmed,
+        type: 'client',
+      });
+      await selectClient({ id: newOrg.id, name: trimmed });
+    } catch (err: any) {
+      alert(err?.message || 'Failed to create organisation');
+    } finally {
+      setCreatingClient(false);
     }
   }
 
@@ -2519,6 +2541,25 @@ export default function JobDetailPage() {
       setJobOrgs(data.data);
     } catch (err) {
       console.error('Failed to load job organisations:', err);
+    }
+  }
+
+  // Inline-create a new organisation from the additional-orgs search box, then
+  // select it (staff pick a role + Add). Mirrors createAndSelectClient on the
+  // headline picker. New orgs default to type 'band' — the per-job role is what
+  // matters here, and band is the most common thing you'd add on the fly.
+  async function createAndSelectJobOrg(name: string) {
+    const trimmed = name.trim();
+    if (!trimmed || jobOrgCreating) return;
+    setJobOrgCreating(true);
+    try {
+      const newOrg = await api.post<{ id: string }>('/organisations', { name: trimmed, type: 'band' });
+      setJobOrgSelectedOrg({ id: newOrg.id, name: trimmed, type: 'band' });
+      setJobOrgResults([]);
+    } catch (err: any) {
+      alert(err?.response?.data?.error || err?.message || 'Failed to create organisation');
+    } finally {
+      setJobOrgCreating(false);
     }
   }
 
@@ -3279,12 +3320,14 @@ export default function JobDetailPage() {
 
             {/* Client, Venue, Dates summary row */}
             <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-sm text-gray-600 items-center">
-              {/* Client headline — prefer band → linked client org → company → client_name
-                  Contact person surfaced separately when HH CONTACT differs from HH COMPANY */}
+              {/* Client headline — prefer band → linked client org (canonical name via
+                  client_id) → HH company_name → HH client_name. Reading the linked org's
+                  own name (not the volatile HH company_name string) means changing the
+                  client actually updates the headline immediately. */}
               <div className="relative inline-flex items-center gap-1" ref={clientSearchRef}>
                 {(() => {
                   const bandOrg = jobOrgs.find(jo => jo.role === 'band');
-                  const hasClient = !!(job.client_name || job.company_name);
+                  const hasClient = !!(job.client_org_name || job.client_name || job.company_name);
                   if (!bandOrg && !hasClient) {
                     return (
                       <button
@@ -3296,6 +3339,7 @@ export default function JobDetailPage() {
                     );
                   }
                   const headlineText = bandOrg?.organisation_name
+                    || job.client_org_name
                     || job.company_name
                     || job.client_name;
                   const headlineLinkId = bandOrg?.organisation_id || job.client_id;
@@ -3347,9 +3391,26 @@ export default function JobDetailPage() {
                         ))}
                       </div>
                     )}
-                    {clientSearch.length >= 2 && clientSearchResults.length === 0 && (
-                      <div className="px-3 py-2 text-sm text-gray-400">No results</div>
-                    )}
+                    {(() => {
+                      const trimmed = clientSearch.trim();
+                      if (trimmed.length < 2) return null;
+                      const exactMatch = clientSearchResults.some(
+                        (o) => o.name.toLowerCase() === trimmed.toLowerCase()
+                      );
+                      if (exactMatch) return null;
+                      return (
+                        <button
+                          onClick={() => createAndSelectClient(trimmed)}
+                          disabled={creatingClient}
+                          className="w-full text-left px-3 py-2 hover:bg-green-50 text-sm flex items-center gap-2 border-t border-gray-100 disabled:opacity-60"
+                        >
+                          <span className="text-xs font-medium bg-green-100 text-green-700 px-1.5 py-0.5 rounded">+ New</span>
+                          <span className="text-gray-900 truncate">
+                            {creatingClient ? 'Creating…' : <>Create &ldquo;{trimmed}&rdquo; as new client</>}
+                          </span>
+                        </button>
+                      );
+                    })()}
                   </div>
                 )}
               </div>
@@ -3357,7 +3418,7 @@ export default function JobDetailPage() {
               {(() => {
                 const bandOrg = jobOrgs.find(jo => jo.role === 'band');
                 if (!bandOrg) return null;
-                const billedToText = job.company_name || job.client_name;
+                const billedToText = job.client_org_name || job.company_name || job.client_name;
                 if (!billedToText) return null;
                 return (
                   <span className="text-xs text-gray-500">
@@ -3369,18 +3430,6 @@ export default function JobDetailPage() {
                     ) : (
                       <span className="text-gray-600">{billedToText}</span>
                     )}
-                  </span>
-                );
-              })()}
-              {/* Contact pill (HH CONTACT differs from HH COMPANY → person contact) */}
-              {(() => {
-                const bandOrg = jobOrgs.find(jo => jo.role === 'band');
-                if (bandOrg) return null;
-                if (!job.company_name || !job.client_name) return null;
-                if (job.client_name === job.company_name) return null;
-                return (
-                  <span className="text-xs text-gray-500">
-                    Contact: <span className="text-gray-700">{job.client_name}</span>
                   </span>
                 );
               })()}
@@ -3955,6 +4004,7 @@ export default function JobDetailPage() {
                 band: 'bg-purple-100 text-purple-700 border-purple-200',
                 client: 'bg-blue-100 text-blue-700 border-blue-200',
                 promoter: 'bg-red-100 text-red-700 border-red-200',
+                festival: 'bg-orange-100 text-orange-700 border-orange-200',
                 management: 'bg-sky-100 text-sky-700 border-sky-200',
                 label: 'bg-green-100 text-green-700 border-green-200',
                 venue_operator: 'bg-teal-100 text-teal-700 border-teal-200',
@@ -3995,20 +4045,35 @@ export default function JobDetailPage() {
                       className="border border-gray-300 rounded px-2 py-1 text-xs w-48 focus:ring-ooosh-500 focus:border-ooosh-500"
                       autoFocus
                     />
-                    {jobOrgResults.length > 0 && (
-                      <div className="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg z-20 w-64 max-h-48 overflow-y-auto">
-                        {jobOrgResults.map((o) => (
-                          <button
-                            key={o.id}
-                            onClick={() => { setJobOrgSelectedOrg(o); setJobOrgResults([]); }}
-                            className="w-full text-left px-3 py-2 hover:bg-gray-50 text-xs flex items-center gap-2 border-b border-gray-50 last:border-b-0"
-                          >
-                            <span className="font-medium">{o.name}</span>
-                            <span className="text-gray-400">{o.type}</span>
-                          </button>
-                        ))}
-                      </div>
-                    )}
+                    {(() => {
+                      const trimmed = jobOrgSearch.trim();
+                      const hasExact = jobOrgResults.some(o => o.name.toLowerCase() === trimmed.toLowerCase());
+                      const showCreate = trimmed.length >= 2 && !hasExact;
+                      if (jobOrgResults.length === 0 && !showCreate) return null;
+                      return (
+                        <div className="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg z-20 w-64 max-h-48 overflow-y-auto">
+                          {jobOrgResults.map((o) => (
+                            <button
+                              key={o.id}
+                              onClick={() => { setJobOrgSelectedOrg(o); setJobOrgResults([]); }}
+                              className="w-full text-left px-3 py-2 hover:bg-gray-50 text-xs flex items-center gap-2 border-b border-gray-50 last:border-b-0"
+                            >
+                              <span className="font-medium">{o.name}</span>
+                              <span className="text-gray-400">{o.type}</span>
+                            </button>
+                          ))}
+                          {showCreate && (
+                            <button
+                              onClick={() => createAndSelectJobOrg(trimmed)}
+                              disabled={jobOrgCreating}
+                              className="w-full text-left px-3 py-2 hover:bg-ooosh-50 text-xs text-ooosh-700 font-medium border-t border-gray-100 disabled:opacity-50"
+                            >
+                              {jobOrgCreating ? 'Creating…' : <>+ Create "<span className="font-semibold">{trimmed}</span>" as new organisation</>}
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </div>
                 ) : (
                   <>
@@ -4023,6 +4088,7 @@ export default function JobDetailPage() {
                       <option value="band">Band</option>
                       <option value="client">Client</option>
                       <option value="promoter">Promoter</option>
+                      <option value="festival">Festival</option>
                       <option value="management">Management</option>
                       <option value="label">Label</option>
                       <option value="venue_operator">Venue Operator</option>
@@ -6629,6 +6695,10 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, cli
 
   // Reminder form state
   const [showReminderForm, setShowReminderForm] = useState(false);
+  // When set, the reminder modal is in edit mode against this requirement id
+  // (assignees are locked in edit — changing who's notified is delete-and-re-add,
+  // since each assignee is a separate job_requirements row).
+  const [editingReminderId, setEditingReminderId] = useState<string | null>(null);
   const [heldItemsRefreshKey, setHeldItemsRefreshKey] = useState(0);
   const [reminderText, setReminderText] = useState('');
   const [reminderDate, setReminderDate] = useState('');
@@ -6637,21 +6707,37 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, cli
   const [reminderEventTrigger, setReminderEventTrigger] = useState('');
   const [reminderUsers, setReminderUsers] = useState<Array<{ id: string; first_name: string; last_name: string }>>([]);
 
+  function ensureReminderUsersLoaded() {
+    if (reminderUsers.length === 0) {
+      api.get<{ data: Array<{ id: string; first_name: string; last_name: string }> }>('/users')
+        .then(res => setReminderUsers(res.data))
+        .catch(() => {});
+    }
+  }
+
+  function openEditReminder(req: JobRequirement) {
+    setEditingReminderId(req.id);
+    setReminderText(req.custom_label || req.notes || '');
+    setReminderDate(req.due_date ? String(req.due_date).split('T')[0] : '');
+    setReminderDelivery((req.delivery_method as 'both' | 'notification' | 'email') || 'both');
+    setReminderEventTrigger(req.event_trigger || '');
+    setReminderAssignees(['']); // not used in edit mode
+    ensureReminderUsersLoaded();
+    setShowReminderForm(true);
+  }
+
   async function addRequirement(typeKey: string) {
     if (typeKey === 'reminder') {
       // Show form instead of creating immediately
       setShowAddMenu(false);
+      setEditingReminderId(null);
       setShowReminderForm(true);
       setReminderText('');
       setReminderDate('');
       setReminderDelivery('both');
       setReminderAssignees(['']);
       setReminderEventTrigger('');
-      if (reminderUsers.length === 0) {
-        api.get<{ data: Array<{ id: string; first_name: string; last_name: string }> }>('/users')
-          .then(res => setReminderUsers(res.data))
-          .catch(() => {});
-      }
+      ensureReminderUsersLoaded();
       return;
     }
     try {
@@ -6667,26 +6753,39 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, cli
   async function createReminder() {
     if (!reminderText.trim()) return;
     try {
-      const validAssignees = reminderAssignees.filter(id => id);
-
-      // Create one requirement per assignee (or one for self if none selected)
-      const targets = validAssignees.length > 0 ? validAssignees : [null];
-      for (const assignee of targets) {
-        await api.post(`/requirements/job/${jobId}`, {
-          requirement_type: 'reminder',
-          phase,
+      if (editingReminderId) {
+        // Edit mode — update text / date / delivery / trigger on the single
+        // row. Assignees are deliberately not editable here (see openEditReminder).
+        await api.patch(`/requirements/${editingReminderId}`, {
           custom_label: reminderText.trim(),
-          due_date: reminderDate || null,
-          assigned_to: assignee,
           notes: reminderText.trim(),
+          due_date: reminderDate || null,
           event_trigger: reminderEventTrigger || null,
           delivery_method: reminderDelivery,
         });
+      } else {
+        const validAssignees = reminderAssignees.filter(id => id);
+
+        // Create one requirement per assignee (or one for self if none selected)
+        const targets = validAssignees.length > 0 ? validAssignees : [null];
+        for (const assignee of targets) {
+          await api.post(`/requirements/job/${jobId}`, {
+            requirement_type: 'reminder',
+            phase,
+            custom_label: reminderText.trim(),
+            due_date: reminderDate || null,
+            assigned_to: assignee,
+            notes: reminderText.trim(),
+            event_trigger: reminderEventTrigger || null,
+            delivery_method: reminderDelivery,
+          });
+        }
       }
       await loadAll();
       setShowReminderForm(false);
+      setEditingReminderId(null);
     } catch (err) {
-      console.error('Failed to create reminder:', err);
+      console.error('Failed to save reminder:', err);
     }
   }
 
@@ -6876,6 +6975,7 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, cli
                   onStatusChange={changeStatus}
                   onAdvanceStep={advanceStep}
                   onRemove={removeRequirement}
+                  onEdit={req.requirement_type === 'reminder' ? openEditReminder : undefined}
                   onVanAndDriverToggle={req.requirement_type === 'vehicle' ? toggleVanAndDriver : undefined}
                   onSlotModeChange={req.requirement_type === 'vehicle' ? changeSlotMode : undefined}
                   selfDriveVanOverride={selfDriveVanOverride}
@@ -6958,11 +7058,11 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, cli
         );
       })()}
 
-      {/* Reminder creation form modal */}
+      {/* Reminder creation / edit form modal */}
       {showReminderForm && (
-        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50" onClick={() => setShowReminderForm(false)}>
+        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50" onClick={() => { setShowReminderForm(false); setEditingReminderId(null); }}>
           <div className="bg-white rounded-xl shadow-xl p-6 w-[420px] max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
-            <h3 className="text-lg font-semibold text-gray-900 mb-3">Add Reminder</h3>
+            <h3 className="text-lg font-semibold text-gray-900 mb-3">{editingReminderId ? 'Edit Reminder' : 'Add Reminder'}</h3>
             <div className="space-y-3">
               <input
                 type="text"
@@ -7021,44 +7121,53 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, cli
                 </select>
               </div>
 
-              {/* Assignees (multi-user) */}
-              <div>
-                <label className="text-xs text-gray-500 mb-1 block">Notify</label>
-                {reminderAssignees.map((assignee, idx) => (
-                  <div key={idx} className="flex items-center gap-1 mb-1">
-                    <select
-                      value={assignee}
-                      onChange={e => {
-                        const updated = [...reminderAssignees];
-                        updated[idx] = e.target.value;
-                        setReminderAssignees(updated);
-                      }}
-                      className="flex-1 border border-gray-300 rounded px-3 py-1.5 text-sm"
-                    >
-                      <option value="">Me</option>
-                      {reminderUsers.map(u => (
-                        <option key={u.id} value={u.id}>{u.first_name} {u.last_name}</option>
-                      ))}
-                    </select>
-                    {reminderAssignees.length > 1 && (
-                      <button type="button" onClick={() => setReminderAssignees(reminderAssignees.filter((_, i) => i !== idx))}
-                        className="text-red-400 hover:text-red-600 text-xs px-1">&times;</button>
-                    )}
-                  </div>
-                ))}
-                <button type="button"
-                  onClick={() => setReminderAssignees([...reminderAssignees, ''])}
-                  className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium"
-                >+ Add person</button>
-              </div>
+              {/* Assignees (multi-user) — create only. In edit mode the
+                  reminder is a single row per person, so changing who's
+                  notified is delete-and-re-add rather than edit. */}
+              {!editingReminderId && (
+                <div>
+                  <label className="text-xs text-gray-500 mb-1 block">Notify</label>
+                  {reminderAssignees.map((assignee, idx) => (
+                    <div key={idx} className="flex items-center gap-1 mb-1">
+                      <select
+                        value={assignee}
+                        onChange={e => {
+                          const updated = [...reminderAssignees];
+                          updated[idx] = e.target.value;
+                          setReminderAssignees(updated);
+                        }}
+                        className="flex-1 border border-gray-300 rounded px-3 py-1.5 text-sm"
+                      >
+                        <option value="">Me</option>
+                        {reminderUsers.map(u => (
+                          <option key={u.id} value={u.id}>{u.first_name} {u.last_name}</option>
+                        ))}
+                      </select>
+                      {reminderAssignees.length > 1 && (
+                        <button type="button" onClick={() => setReminderAssignees(reminderAssignees.filter((_, i) => i !== idx))}
+                          className="text-red-400 hover:text-red-600 text-xs px-1">&times;</button>
+                      )}
+                    </div>
+                  ))}
+                  <button type="button"
+                    onClick={() => setReminderAssignees([...reminderAssignees, ''])}
+                    className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium"
+                  >+ Add person</button>
+                </div>
+              )}
+              {editingReminderId && (
+                <p className="text-[11px] text-gray-400">
+                  To change who's notified, delete this reminder and add a new one.
+                </p>
+              )}
             </div>
             <div className="flex justify-end gap-2 mt-4">
-              <button onClick={() => setShowReminderForm(false)} className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
+              <button onClick={() => { setShowReminderForm(false); setEditingReminderId(null); }} className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
               <button
                 onClick={createReminder}
                 disabled={!reminderText.trim()}
                 className="px-4 py-1.5 text-sm bg-ooosh-600 text-white rounded hover:bg-ooosh-700 disabled:opacity-50"
-              >Add Reminder</button>
+              >{editingReminderId ? 'Save Changes' : 'Add Reminder'}</button>
             </div>
           </div>
         </div>
@@ -7420,7 +7529,7 @@ function JobFilesSection({
               return (
                 <div
                   key={file.url || idx}
-                  className="flex items-start justify-between p-3 rounded-lg border border-gray-100 hover:border-gray-200 hover:bg-gray-50 group"
+                  className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between p-3 rounded-lg border border-gray-100 hover:border-gray-200 hover:bg-gray-50 group"
                 >
                   <div className="flex items-start gap-3 min-w-0 flex-1">
                     <div className={`w-8 h-8 rounded flex items-center justify-center text-xs font-bold flex-shrink-0 ${
@@ -7432,7 +7541,7 @@ function JobFilesSection({
                       {isLink ? '🔗' : file.type === 'image' ? 'IMG' : file.type === 'document' ? 'DOC' : 'FILE'}
                     </div>
                     <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 min-w-0">
                         <button
                           onClick={openFile}
                           className="text-sm font-medium text-gray-900 hover:text-ooosh-600 truncate text-left"
@@ -7517,13 +7626,13 @@ function JobFilesSection({
                     </div>
                   </div>
                   {!isEditing && (
-                    <div className="flex items-center gap-2 flex-shrink-0 ml-2">
+                    <div className="flex items-center gap-2 flex-wrap flex-shrink-0 pl-11 sm:pl-0 sm:ml-2">
                       <button
                         onClick={() => handleToggleShare(file)}
                         className={`text-xs px-2 py-0.5 rounded border transition-colors ${
                           file.share_with_freelancer
                             ? 'bg-green-50 border-green-200 text-green-700'
-                            : 'bg-gray-50 border-gray-200 text-gray-400 opacity-0 group-hover:opacity-100'
+                            : 'bg-gray-50 border-gray-200 text-gray-400 opacity-100 sm:opacity-0 sm:group-hover:opacity-100'
                         }`}
                         title={file.share_with_freelancer ? 'Shared with freelancers — click to unshare' : 'Share with freelancers'}
                       >
@@ -7532,7 +7641,7 @@ function JobFilesSection({
                       {!isLink && (
                         <button
                           onClick={() => setEmailingFile(file)}
-                          className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium opacity-0 group-hover:opacity-100 transition-opacity"
+                          className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity"
                           title="Email this file"
                         >
                           Email
@@ -7540,7 +7649,7 @@ function JobFilesSection({
                       )}
                       <button
                         onClick={() => startEdit(file)}
-                        className="text-xs text-gray-600 hover:text-gray-800 font-medium opacity-0 group-hover:opacity-100 transition-opacity"
+                        className="text-xs text-gray-600 hover:text-gray-800 font-medium opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity"
                         title="Edit tag / comment"
                       >
                         Edit
@@ -7548,7 +7657,7 @@ function JobFilesSection({
                       {!isLink && (
                         <button
                           onClick={() => setViewingFile(file)}
-                          className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium opacity-0 group-hover:opacity-100 transition-opacity"
+                          className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity"
                         >
                           View
                         </button>
@@ -7556,7 +7665,7 @@ function JobFilesSection({
                       <button
                         onClick={() => handleDelete(file.url)}
                         disabled={deleting === file.url}
-                        className="text-xs text-red-500 hover:text-red-700 font-medium disabled:opacity-50 opacity-0 group-hover:opacity-100 transition-opacity"
+                        className="text-xs text-red-500 hover:text-red-700 font-medium disabled:opacity-50 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity"
                       >
                         {deleting === file.url ? '...' : 'Delete'}
                       </button>

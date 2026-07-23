@@ -23,6 +23,7 @@ export interface StaffDocumentRow {
   target_roles: string[] | null;
   target_user_ids: string[] | null;
   is_active: boolean;
+  approval_status: 'draft' | 'pending_approval' | 'approved';
 }
 
 /** Merge simple placeholders in a document body for a given user. */
@@ -72,12 +73,12 @@ async function getTargetUserIds(doc: StaffDocumentRow): Promise<string[]> {
  */
 export async function syncDocumentAssignments(documentId: string): Promise<number> {
   const docRes = await query(
-    `SELECT id, slug, title, completion_mode, target_type, target_roles, target_user_ids, is_active
+    `SELECT id, slug, title, completion_mode, target_type, target_roles, target_user_ids, is_active, approval_status
        FROM staff_documents WHERE id = $1`,
     [documentId],
   );
   const doc = docRes.rows[0] as StaffDocumentRow | undefined;
-  if (!doc || !doc.is_active || doc.completion_mode === 'read_only') return 0;
+  if (!doc || !doc.is_active || doc.completion_mode === 'read_only' || doc.approval_status !== 'approved') return 0;
 
   const targetIds = await getTargetUserIds(doc);
   if (!targetIds.length) return 0;
@@ -118,7 +119,7 @@ export async function syncDocumentAssignments(documentId: string): Promise<numbe
 export async function syncCotCardHolderDocuments(): Promise<void> {
   const r = await query(
     `SELECT id FROM staff_documents
-      WHERE is_active = true AND completion_mode <> 'read_only' AND target_type = 'cot_card_holders'`,
+      WHERE is_active = true AND approval_status = 'approved' AND completion_mode <> 'read_only' AND target_type = 'cot_card_holders'`,
   );
   for (const row of r.rows) {
     await syncDocumentAssignments(row.id as string).catch((e) =>
@@ -129,7 +130,7 @@ export async function syncCotCardHolderDocuments(): Promise<void> {
 /** Sync all active trackable documents (used on new-user create + the daily scheduler). */
 export async function syncAllActiveDocuments(): Promise<void> {
   const r = await query(
-    `SELECT id FROM staff_documents WHERE is_active = true AND completion_mode <> 'read_only'`,
+    `SELECT id FROM staff_documents WHERE is_active = true AND approval_status = 'approved' AND completion_mode <> 'read_only'`,
   );
   for (const row of r.rows) {
     await syncDocumentAssignments(row.id as string).catch((e) =>

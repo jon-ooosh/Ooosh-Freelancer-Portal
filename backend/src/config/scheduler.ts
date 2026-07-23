@@ -709,6 +709,20 @@ export function startScheduler() {
   });
   console.log('Scheduler: Carnet request-form auto-emails scheduled daily at 09:15');
 
+  // ── Rehearsal info-pack auto-send ────────────────────────────────────
+  // Daily at 09:20 — send the client info pack T-N days before the rehearsal
+  // (off by default; enabled + N-days configured on the Info Pack settings tab).
+  cron.schedule('20 9 * * *', async () => {
+    try {
+      const { runRehearsalInfoPackAutoSend } = await import('../services/rehearsal-info-pack-auto');
+      const result = await runRehearsalInfoPackAutoSend();
+      if (result.sent > 0) console.log(`Scheduler: Rehearsal info packs — ${result.sent} sent`);
+    } catch (err) {
+      console.error('Scheduler: Rehearsal info-pack auto-send failed:', err);
+    }
+  });
+  console.log('Scheduler: Rehearsal info-pack auto-send scheduled daily at 09:20');
+
   // ── Freelancer completion chaser ─────────────────────────────────────
   // Every 30 minutes — nudge freelancers who haven't completed jobs that
   // are past their scheduled time. Levels: 2h / 6h / 14h, then staff
@@ -843,6 +857,27 @@ export function startScheduler() {
     }
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: Client Storage reminders scheduled daily at 09:20 Europe/London');
+
+  // ── Staff Documents reminders (chase / renew / escalate / lapse) ─────────
+  // Daily at 09:35 Europe/London. Chases pending/lapsed staff-document
+  // assignments, nudges completions approaching renewal, lapses expired ones,
+  // and escalates stale-pending to managers. Bells only — the Step-7 escalation
+  // scheduler emails per prefs. See services/staff-document-reminders.ts +
+  // docs/STAFF-DOCUMENTS-SPEC.md §5.
+  cron.schedule('35 9 * * *', async () => {
+    try {
+      const { runStaffDocumentReminders } = await import('../services/staff-document-reminders');
+      const r = await runStaffDocumentReminders();
+      if (r.lapsed || r.renewalNudges || r.chased || r.escalated) {
+        console.log(
+          `Scheduler: Staff-document reminders — ${r.chased} chased, ${r.renewalNudges} renewal nudges, ${r.lapsed} lapsed, ${r.escalated} escalated`
+        );
+      }
+    } catch (err) {
+      console.error('Scheduler: Staff-document reminders failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: Staff Documents reminders scheduled daily at 09:35 Europe/London');
 
   // ── Studio-sitter lock-up chase (morning after) ──────────────────────────
   // Daily at 08:45 Europe/London. For any shift that closed without a lock-up

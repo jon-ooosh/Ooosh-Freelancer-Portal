@@ -57,7 +57,7 @@ Staff sees a status badge on the person header (the header already renders
 
 ## 4. Data model
 
-### 4a. New table — `freelancer_applications` (migration 179)
+### 4a. New table — `freelancer_applications` (migration 184)
 
 One row per application (an existing freelancer being re-invited for annual re-consent
 gets a new row, keeping history).
@@ -87,7 +87,7 @@ rejected once `applied` (unless re-opened) / `approved` / `declined`. (Mirrors t
 parking token model — cleaner than juggling expiries.) Optional soft expiry
 (`invited_at + N days`) can be added if you want stale links to auto-close.
 
-### 4b. Expanded per-person document + expiry fields (migration 179)
+### 4b. Expanded per-person document + expiry fields (migration 184)
 
 To drive "chase me X months before their licence expires", document expiry dates must be
 **queryable columns**, not buried in `files` JSONB. Add nullable columns on `people`
@@ -283,7 +283,7 @@ licence uploads are reviewed manually.
 
 ## 12. Phased build order
 
-1. **Phase A — Data + invite** (migration 179: `freelancer_applications` + new person
+1. **Phase A — Data + invite** (migration 184: `freelancer_applications` + new person
    columns; invite endpoints; token minting; invite UI buttons + "New freelancer" quick-add;
    invite email template).
 2. **Phase B — Apply** (public `/freelancer-apply/:token` page + get/submit endpoints +
@@ -339,7 +339,7 @@ lapse greys the freelancer for the affected work type. Both feed the same greyin
 
 ## 15. Build status
 
-- **Phase A — SHIPPED (this PR):** migration 179 (`freelancer_applications` + all new
+- **Phase A — SHIPPED (this PR):** migration 184 (`freelancer_applications` + all new
   `people` columns — status denorm, `onboarding` JSONB, removal audit fields, document
   expiry dates, preferred name, day-rate note); backend `routes/freelancers.ts`
   (`POST /invite` [existing-person or new-shell], `POST /applications/:id/resend`,

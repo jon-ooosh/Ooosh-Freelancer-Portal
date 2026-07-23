@@ -327,9 +327,13 @@ export interface OperationsData {
     receipts_outstanding?: ReceiptOutstanding[];
     /** Company-card (COT) costs with no receipt attached, older than 3 days. */
     cot_receipts_outstanding_count?: number;
+    /** Pending/lapsed staff-document assignments (managers only). */
+    staff_documents_outstanding_count?: number;
     /** Client recharges flagged but not yet resolved (push/external/absorb). */
     recharges_to_resolve_count?: number;
     recharges_to_resolve_total?: number;
+    /** High-priority backline demand with no acquisition plan — purchasing prompt. */
+    backline_to_buy_count?: number;
     /** PCN buckets (Step 8) — internal surfacing, never client comms. */
     pcn_nip_urgent?: PcnAttentionItem[];
     pcn_ready_to_transfer?: PcnAttentionItem[];

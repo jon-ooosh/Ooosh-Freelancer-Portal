@@ -17,15 +17,40 @@ import { z } from 'zod';
 import { query, getClient } from '../config/database';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES, MANAGER_ROLES } from '../middleware/auth';
 import { logAudit } from '../middleware/audit';
-import { isR2Configured, uploadToR2 } from '../config/r2';
+import { isR2Configured, uploadToR2, getFromR2 } from '../config/r2';
 import {
   syncDocumentAssignments,
   renderDocumentBody,
 } from '../services/staff-documents';
 import { generateStaffDocumentPdf } from '../services/staff-document-pdf';
+import { emailService } from '../services/email-service';
+import { getFrontendUrl } from '../config/app-urls';
 
 const router = Router();
 router.use(authenticate);
+
+// Bell + immediate email (the approval flow wants both). email_sent_at is
+// stamped so the Step-7 escalation scheduler doesn't re-email.
+async function emailAndBell(
+  userId: string, title: string, content: string, documentId: string,
+  actionUrl: string, priority: 'low' | 'normal' | 'high' = 'normal',
+): Promise<void> {
+  await query(
+    `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, email_sent_at)
+     VALUES ($1, 'follow_up', $2, $3, 'staff_documents', $4, $5, $6, NOW())`,
+    [userId, title, content, documentId, actionUrl, priority],
+  ).catch((e) => console.error('[staff-documents] bell failed:', e));
+  try {
+    const u = await query(`SELECT u.email, p.first_name FROM users u LEFT JOIN people p ON p.id = u.person_id WHERE u.id = $1`, [userId]);
+    if (u.rows[0]?.email) {
+      await emailService.sendRaw({
+        to: u.rows[0].email,
+        subject: title,
+        html: `<p>Hi ${u.rows[0].first_name || ''},</p><p>${content}</p><p><a href="${getFrontendUrl()}${actionUrl}">Open in Ooosh</a></p>`,
+      });
+    }
+  } catch (e) { console.error('[staff-documents] email failed:', e); }
+}
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
@@ -42,6 +67,26 @@ async function getUserDisplay(userId: string): Promise<{ name: string; last4: st
 
 function isManager(role?: string): boolean {
   return role === 'admin' || role === 'manager' || role === 'weekend_manager';
+}
+
+// Which categories may be shared into the freelancer portal. The rest
+// (agreement / contract / official_doc) are internal-only.
+const SHAREABLE_CATEGORIES = ['policy', 'training', 'other'];
+
+function slugify(s: string): string {
+  return (s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 70) || 'document';
+}
+async function uniqueSlug(base: string): Promise<string> {
+  let slug = base;
+  let n = 1;
+  // Bounded loop — appends -2, -3, … until free.
+  while (n < 500) {
+    const r = await query(`SELECT 1 FROM staff_documents WHERE slug = $1`, [slug]);
+    if (!r.rows.length) return slug;
+    n += 1;
+    slug = `${base}-${n}`;
+  }
+  return `${base}-${Date.now()}`;
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -72,7 +117,8 @@ router.get('/mine', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Res
       `SELECT d.id, d.slug, d.title, d.category, v.version
          FROM staff_documents d
          LEFT JOIN staff_document_versions v ON v.document_id = d.id AND v.is_current = true
-        WHERE d.is_active = true AND d.completion_mode = 'read_only' AND d.visibility = 'everyone'
+        WHERE d.is_active = true AND d.approval_status = 'approved'
+          AND d.completion_mode = 'read_only' AND d.visibility = 'everyone'
         ORDER BY d.category, d.title`,
     );
     res.json({ data: { todo, completed, library: library.rows } });
@@ -88,6 +134,7 @@ router.get('/:id/view', authorize(...STAFF_ROLES), async (req: AuthRequest, res:
     const userId = req.user!.id;
     const docRes = await query(
       `SELECT d.id, d.slug, d.title, d.category, d.completion_mode, d.tick_label, d.visibility,
+              d.approval_status, d.created_by,
               v.id AS version_id, v.version, v.body, v.file_r2_key, v.file_name
          FROM staff_documents d
          LEFT JOIN staff_document_versions v ON v.document_id = d.id AND v.is_current = true
@@ -106,8 +153,13 @@ router.get('/:id/view', authorize(...STAFF_ROLES), async (req: AuthRequest, res:
 
     // Visibility check.
     const mgr = isManager(req.user!.role);
-    let allowed = doc.visibility === 'everyone' || mgr || !!assignment;
-    if (doc.visibility === 'owner_admin') allowed = mgr || !!assignment;
+    const isAuthor = doc.created_by === userId;
+    // Unapproved (draft / pending) documents are only visible to their author + managers.
+    if (doc.approval_status !== 'approved' && !mgr && !isAuthor) {
+      res.status(404).json({ error: 'Document not found' }); return;
+    }
+    let allowed = doc.visibility === 'everyone' || mgr || isAuthor || !!assignment;
+    if (doc.visibility === 'owner_admin') allowed = mgr || isAuthor || !!assignment;
     if (!allowed) { res.status(403).json({ error: 'Not available to you' }); return; }
 
     const me = await getUserDisplay(userId);
@@ -239,6 +291,33 @@ router.post('/assignments/:id/complete', authorize(...STAFF_ROLES), async (req: 
   }
 });
 
+// GET /api/staff-documents/completions/:id/pdf — signed snapshot, own only
+// (managers may fetch any). Ownership is enforced here — the generic
+// /api/files/download is prefix-gated only, so we never hand a staff member a
+// raw key to someone else's signed copy.
+router.get('/completions/:id/pdf', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const r = await query(
+      `SELECT pdf_r2_key, user_id FROM staff_document_completions WHERE id = $1`,
+      [req.params.id],
+    );
+    const c = r.rows[0];
+    if (!c || !c.pdf_r2_key) { res.status(404).json({ error: 'Not found' }); return; }
+    if (c.user_id !== req.user!.id && !isManager(req.user!.role)) {
+      res.status(403).json({ error: 'Not available to you' });
+      return;
+    }
+    const obj = await getFromR2(c.pdf_r2_key);
+    const chunks: Buffer[] = [];
+    for await (const chunk of obj.Body as NodeJS.ReadableStream) chunks.push(Buffer.from(chunk as Uint8Array));
+    res.setHeader('Content-Type', 'application/pdf');
+    res.send(Buffer.concat(chunks));
+  } catch (error) {
+    console.error('[staff-documents] completion pdf error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // ════════════════════════════════════════════════════════════════════════
 // ADMIN — document library management (MANAGER_ROLES)
 // ════════════════════════════════════════════════════════════════════════
@@ -260,7 +339,7 @@ router.get('/', authorize(...MANAGER_ROLES), async (_req: AuthRequest, res: Resp
                   COUNT(*) FILTER (WHERE status = 'lapsed')    AS lapsed
              FROM staff_document_assignments GROUP BY document_id
          ) s ON s.document_id = d.id
-        ORDER BY d.is_active DESC, d.category, d.title`,
+        ORDER BY (d.approval_status = 'pending_approval') DESC, d.is_active DESC, d.category, d.title`,
     );
     res.json({ data: r.rows });
   } catch (error) {
@@ -270,8 +349,9 @@ router.get('/', authorize(...MANAGER_ROLES), async (_req: AuthRequest, res: Resp
 });
 
 const createSchema = z.object({
-  slug: z.string().trim().min(2).max(80).regex(/^[a-z0-9-]+$/, 'lowercase-hyphen only'),
+  slug: z.string().trim().min(2).max(80).regex(/^[a-z0-9-]+$/, 'lowercase-hyphen only').optional(),
   title: z.string().trim().min(1).max(200),
+  shareable_with_freelancers: z.boolean().optional(),
   category: z.enum(['policy', 'agreement', 'training', 'official_doc', 'contract', 'other']).default('policy'),
   completion_mode: z.enum(['read_only', 'tick', 'sign']).default('read_only'),
   tick_label: z.string().trim().max(200).nullable().optional(),
@@ -286,28 +366,43 @@ const createSchema = z.object({
   body: z.string().nullable().optional(),
   file_r2_key: z.string().nullable().optional(),
   file_name: z.string().max(200).nullable().optional(),
+  save_as_draft: z.boolean().optional(),
 });
 
-// POST /api/staff-documents — create a document + its first version
-router.post('/', authorize(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
+// POST /api/staff-documents — create a document + its first version.
+// Any staff member may create; managers publish immediately (unless they save a
+// draft), everyone else lands as a draft to build up and then submit for approval.
+router.post('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
   const client = await getClient();
   try {
     const parse = createSchema.safeParse(req.body);
     if (!parse.success) { res.status(400).json({ error: 'Invalid input', issues: parse.error.issues }); return; }
     const d = parse.data;
     if (!d.body && !d.file_r2_key) { res.status(400).json({ error: 'Provide a body or an uploaded file' }); return; }
+    const shareable = !!d.shareable_with_freelancers;
+    if (shareable && !SHAREABLE_CATEGORIES.includes(d.category)) {
+      res.status(400).json({ error: `Only ${SHAREABLE_CATEGORIES.join(' / ')} documents can be shared with freelancers` });
+      return;
+    }
+
+    const mgr = isManager(req.user!.role);
+    const approvalStatus = mgr ? (d.save_as_draft ? 'draft' : 'approved') : 'draft';
+    const slug = d.slug?.trim() || await uniqueSlug(slugify(d.title));
 
     await client.query('BEGIN');
     const docRes = await client.query(
       `INSERT INTO staff_documents
          (slug, title, category, completion_mode, tick_label, visibility, target_type,
           target_roles, target_user_ids, chase_interval_days, escalate_after_days,
-          review_interval_months, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
-      [d.slug, d.title, d.category, d.completion_mode, d.tick_label || null, d.visibility,
+          review_interval_months, created_by, approval_status,
+          approved_by, approved_at, shareable_with_freelancers)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING *`,
+      [slug, d.title, d.category, d.completion_mode, d.tick_label || null, d.visibility,
        d.target_type, d.target_roles || null, d.target_user_ids || null,
        d.chase_interval_days || null, d.escalate_after_days || null, d.review_interval_months || null,
-       req.user!.id],
+       req.user!.id, approvalStatus,
+       approvalStatus === 'approved' ? req.user!.id : null,
+       approvalStatus === 'approved' ? new Date() : null, shareable],
     );
     const doc = docRes.rows[0];
     await client.query(
@@ -347,14 +442,32 @@ const patchSchema = z.object({
   escalate_after_days: z.number().int().positive().nullable().optional(),
   review_interval_months: z.number().int().positive().nullable().optional(),
   is_active: z.boolean().optional(),
+  shareable_with_freelancers: z.boolean().optional(),
 });
 
-// PATCH /api/staff-documents/:id — update config
-router.patch('/:id', authorize(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
+// PATCH /api/staff-documents/:id — update config. Managers: any document.
+// Non-managers: only their own draft/pending document.
+router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
   try {
     const parse = patchSchema.safeParse(req.body);
     if (!parse.success) { res.status(400).json({ error: 'Invalid input', issues: parse.error.issues }); return; }
     const fields = parse.data;
+
+    const cur = await query(`SELECT created_by, approval_status, category FROM staff_documents WHERE id = $1`, [req.params.id]);
+    if (!cur.rows.length) { res.status(404).json({ error: 'Document not found' }); return; }
+    if (!isManager(req.user!.role)) {
+      if (cur.rows[0].created_by !== req.user!.id) { res.status(403).json({ error: 'Not your document' }); return; }
+      if (cur.rows[0].approval_status === 'approved') {
+        res.status(403).json({ error: 'Approved documents can only be edited by a manager' }); return;
+      }
+    }
+    if (fields.shareable_with_freelancers === true) {
+      const cat = fields.category ?? cur.rows[0].category;
+      if (!SHAREABLE_CATEGORIES.includes(cat)) {
+        res.status(400).json({ error: `Only ${SHAREABLE_CATEGORIES.join(' / ')} documents can be shared with freelancers` });
+        return;
+      }
+    }
     const sets: string[] = [];
     const vals: unknown[] = [];
     for (const [k, v] of Object.entries(fields)) {
@@ -386,8 +499,9 @@ const versionSchema = z.object({
   change_note: z.string().max(1000).nullable().optional(),
 });
 
-// POST /api/staff-documents/:id/versions — publish a new version (supersedes)
-router.post('/:id/versions', authorize(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
+// POST /api/staff-documents/:id/versions — publish a new version (supersedes).
+// Managers: any. Non-managers: only their own draft/pending document.
+router.post('/:id/versions', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
   const client = await getClient();
   try {
     const parse = versionSchema.safeParse(req.body);
@@ -395,8 +509,14 @@ router.post('/:id/versions', authorize(...MANAGER_ROLES), async (req: AuthReques
     const v = parse.data;
     if (!v.body && !v.file_r2_key) { res.status(400).json({ error: 'Provide a body or an uploaded file' }); return; }
 
-    const docRes = await query(`SELECT id, completion_mode FROM staff_documents WHERE id = $1`, [req.params.id]);
+    const docRes = await query(`SELECT id, completion_mode, created_by, approval_status FROM staff_documents WHERE id = $1`, [req.params.id]);
     if (!docRes.rows.length) { res.status(404).json({ error: 'Document not found' }); return; }
+    if (!isManager(req.user!.role)) {
+      if (docRes.rows[0].created_by !== req.user!.id) { res.status(403).json({ error: 'Not your document' }); return; }
+      if (docRes.rows[0].approval_status === 'approved') {
+        res.status(403).json({ error: 'Approved documents can only be versioned by a manager' }); return;
+      }
+    }
 
     await client.query('BEGIN');
     const nextRes = await client.query(
@@ -458,6 +578,7 @@ router.get('/:id/matrix', authorize(...MANAGER_ROLES), async (req: AuthRequest, 
   try {
     const r = await query(
       `SELECT a.id, a.status, a.assigned_at, a.expires_at, a.chase_sent_at, a.escalated_at,
+              a.current_completion_id AS completion_id,
               u.id AS user_id, u.email, p.first_name, p.last_name,
               c.completed_at, c.pdf_r2_key, c.mode
          FROM staff_document_assignments a
@@ -471,6 +592,157 @@ router.get('/:id/matrix', authorize(...MANAGER_ROLES), async (req: AuthRequest, 
     res.json({ data: r.rows });
   } catch (error) {
     console.error('[staff-documents] matrix error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════════
+// AUTHORING WORKFLOW — draft → submit → approve/reject (two-stage)
+// ════════════════════════════════════════════════════════════════════════
+
+// GET /api/staff-documents/authored — documents the caller created (any status),
+// with completion stats. Powers the "My proposals" list in My Documents.
+router.get('/authored', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const r = await query(
+      `SELECT d.*, v.version AS current_version,
+              COALESCE(s.pending, 0) AS pending_count, COALESCE(s.completed, 0) AS completed_count, COALESCE(s.lapsed, 0) AS lapsed_count
+         FROM staff_documents d
+         LEFT JOIN staff_document_versions v ON v.document_id = d.id AND v.is_current = true
+         LEFT JOIN (
+           SELECT document_id,
+                  COUNT(*) FILTER (WHERE status = 'pending')   AS pending,
+                  COUNT(*) FILTER (WHERE status = 'completed') AS completed,
+                  COUNT(*) FILTER (WHERE status = 'lapsed')    AS lapsed
+             FROM staff_document_assignments GROUP BY document_id
+         ) s ON s.document_id = d.id
+        WHERE d.created_by = $1
+        ORDER BY d.created_at DESC`,
+      [req.user!.id],
+    );
+    res.json({ data: r.rows });
+  } catch (error) {
+    console.error('[staff-documents] authored error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /api/staff-documents/:id/raw — current version's RAW content (placeholders
+// intact) for editing / new-version pre-fill. Author or manager only.
+router.get('/:id/raw', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const r = await query(
+      `SELECT d.created_by, v.version, v.body, v.file_r2_key, v.file_name
+         FROM staff_documents d
+         LEFT JOIN staff_document_versions v ON v.document_id = d.id AND v.is_current = true
+        WHERE d.id = $1`,
+      [req.params.id],
+    );
+    const row = r.rows[0];
+    if (!row) { res.status(404).json({ error: 'Not found' }); return; }
+    if (!isManager(req.user!.role) && row.created_by !== req.user!.id) {
+      res.status(403).json({ error: 'Not available to you' }); return;
+    }
+    res.json({ data: { version: row.version, body: row.body, file_r2_key: row.file_r2_key, file_name: row.file_name } });
+  } catch (error) {
+    console.error('[staff-documents] raw error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/staff-documents/:id/submit — draft → pending_approval; notify managers.
+router.post('/:id/submit', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const r = await query(`SELECT id, title, created_by, approval_status FROM staff_documents WHERE id = $1`, [req.params.id]);
+    const doc = r.rows[0];
+    if (!doc) { res.status(404).json({ error: 'Document not found' }); return; }
+    if (!isManager(req.user!.role) && doc.created_by !== req.user!.id) { res.status(403).json({ error: 'Not your document' }); return; }
+    if (doc.approval_status !== 'draft') { res.status(409).json({ error: 'Only a draft can be submitted for approval' }); return; }
+
+    await query(`UPDATE staff_documents SET approval_status = 'pending_approval', submitted_at = NOW(), updated_at = NOW() WHERE id = $1`, [doc.id]);
+    const creator = await getUserDisplay(doc.created_by);
+    const mgrs = await query(`SELECT id FROM users WHERE is_active = true AND role IN ('admin', 'manager', 'weekend_manager')`);
+    for (const m of mgrs.rows) {
+      if (m.id === req.user!.id) continue;
+      await emailAndBell(m.id, `Document awaiting approval: ${doc.title}`,
+        `${creator.name || 'A staff member'} has proposed the staff document “${doc.title}” — it needs your approval before it goes out.`,
+        doc.id, '/staff/documents/admin', 'high');
+    }
+    await logAudit(req.user!.id, 'staff_documents', doc.id, 'update', null, { submitted: true }).catch(() => {});
+    res.json({ data: { approval_status: 'pending_approval' } });
+  } catch (error) {
+    console.error('[staff-documents] submit error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/staff-documents/:id/approve — MANAGER: → approved, materialise, notify creator.
+router.post('/:id/approve', authorize(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const r = await query(`SELECT id, title, created_by, approval_status FROM staff_documents WHERE id = $1`, [req.params.id]);
+    const doc = r.rows[0];
+    if (!doc) { res.status(404).json({ error: 'Document not found' }); return; }
+    if (doc.approval_status === 'approved') { res.status(409).json({ error: 'Already approved' }); return; }
+
+    await query(`UPDATE staff_documents SET approval_status = 'approved', approved_by = $2, approved_at = NOW(), review_notes = NULL, updated_at = NOW() WHERE id = $1`, [doc.id, req.user!.id]);
+    await syncDocumentAssignments(doc.id).catch((e) => console.error('[staff-documents] approve sync failed:', e));
+    if (doc.created_by && doc.created_by !== req.user!.id) {
+      await emailAndBell(doc.created_by, `Approved: ${doc.title}`,
+        `Your staff document “${doc.title}” has been approved and is now live.`, doc.id, '/staff/documents');
+    }
+    await logAudit(req.user!.id, 'staff_documents', doc.id, 'update', null, { approved: true }).catch(() => {});
+    res.json({ data: { approval_status: 'approved' } });
+  } catch (error) {
+    console.error('[staff-documents] approve error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+const rejectSchema = z.object({ reason: z.string().trim().max(1000).optional() });
+
+// POST /api/staff-documents/:id/reject — MANAGER: → draft, notify creator with reason.
+router.post('/:id/reject', authorize(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const reason = rejectSchema.safeParse(req.body).data?.reason || '';
+    const r = await query(`SELECT id, title, created_by FROM staff_documents WHERE id = $1`, [req.params.id]);
+    const doc = r.rows[0];
+    if (!doc) { res.status(404).json({ error: 'Document not found' }); return; }
+
+    await query(`UPDATE staff_documents SET approval_status = 'draft', review_notes = $2, submitted_at = NULL, updated_at = NOW() WHERE id = $1`, [doc.id, reason || null]);
+    if (doc.created_by && doc.created_by !== req.user!.id) {
+      await emailAndBell(doc.created_by, `Changes requested: ${doc.title}`,
+        `Your staff document “${doc.title}” needs changes before it can go out.${reason ? ' Note: ' + reason : ''}`,
+        doc.id, '/staff/documents');
+    }
+    await logAudit(req.user!.id, 'staff_documents', doc.id, 'update', null, { rejected: true }).catch(() => {});
+    res.json({ data: { approval_status: 'draft' } });
+  } catch (error) {
+    console.error('[staff-documents] reject error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// DELETE /api/staff-documents/:id — admin only. Hard-deletes ONLY if nobody has
+// completed it (cascades versions/assignments). If there are signed/ticked
+// records, refuse and point at retire (Edit → untick Active) so the audit
+// trail is never destroyed.
+router.delete('/:id', authorize('admin'), async (req: AuthRequest, res: Response) => {
+  try {
+    const c = await query(
+      `SELECT COUNT(*)::int AS n FROM staff_document_completions
+        WHERE assignment_id IN (SELECT id FROM staff_document_assignments WHERE document_id = $1)`,
+      [req.params.id],
+    );
+    if (c.rows[0].n > 0) {
+      res.status(409).json({ error: 'This document has signed records — retire it instead (Edit → untick Active) so the audit trail is kept.' });
+      return;
+    }
+    const r = await query(`DELETE FROM staff_documents WHERE id = $1 RETURNING id`, [req.params.id]);
+    if (!r.rows.length) { res.status(404).json({ error: 'Document not found' }); return; }
+    await logAudit(req.user!.id, 'staff_documents', String(req.params.id), 'delete', null, null).catch(() => {});
+    res.json({ data: { deleted: true } });
+  } catch (error) {
+    console.error('[staff-documents] delete error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

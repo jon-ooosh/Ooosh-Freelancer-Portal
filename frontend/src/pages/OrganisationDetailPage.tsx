@@ -655,34 +655,6 @@ export default function OrganisationDetailPage() {
         </div>
       )}
 
-      {/* Auto-cover excess from held account — ADMIN ONLY (not manager) */}
-      {user?.role === 'admin' && (
-        <div className="mb-4 bg-purple-50 border border-purple-200 rounded-lg px-4 py-3 flex items-center justify-between gap-3">
-          <div>
-            <p className="text-sm font-semibold text-purple-800">
-              Auto-cover excess from held account
-              {org.auto_cover_excess_from_account && <span className="ml-2 text-xs font-medium px-1.5 py-0.5 rounded-full bg-purple-200 text-purple-800">ON</span>}
-            </p>
-            <p className="text-xs text-purple-600 mt-0.5">
-              {org.auto_cover_excess_from_account
-                ? `This client's self-drive hires are auto-covered from their standing held-on-account balance — no fresh excess collected.${org.auto_cover_excess_set_by ? ` Set by ${org.auto_cover_excess_set_by}.` : ''}`
-                : 'Off — this client’s hires collect excess as normal. Turn on only for clients who leave a standing excess deposit with us.'}
-            </p>
-          </div>
-          <button
-            onClick={async () => {
-              const on = !org.auto_cover_excess_from_account;
-              if (on && !confirm('Turn ON auto-cover? This client’s self-drive hires will stop collecting fresh excess while their held-on-account balance covers them. Admin only.')) return;
-              await api.post(`/organisations/${id}/auto-cover-excess`, { auto_cover: on });
-              loadOrg();
-            }}
-            className={`text-xs px-3 py-1.5 rounded whitespace-nowrap ${org.auto_cover_excess_from_account ? 'bg-purple-100 text-purple-700 hover:bg-purple-200' : 'bg-purple-600 text-white hover:bg-purple-700'}`}
-          >
-            {org.auto_cover_excess_from_account ? 'Turn off' : 'Turn on'}
-          </button>
-        </div>
-      )}
-
       {/* Smart suggestions */}
       {(() => {
         const suggestions: Array<{ key: string; text: string; action: string; newType: string }> = [];
@@ -1581,7 +1553,38 @@ export default function OrganisationDetailPage() {
 
       {/* Excess History Tab */}
       {activeTab === 'excess' && id && (
-        <ExcessHistorySection entityType="organisation" entityId={id} />
+        <div className="space-y-4">
+          <ExcessHistorySection entityType="organisation" entityId={id} />
+
+          {/* Auto-cover excess from held account — ADMIN ONLY (not manager).
+              Rare setting, moved here (bottom of Excess History) so it isn't in the way on every org. */}
+          {user?.role === 'admin' && (
+            <div className="bg-purple-50 border border-purple-200 rounded-lg px-4 py-3 flex items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold text-purple-800">
+                  Auto-cover excess from held account
+                  {org.auto_cover_excess_from_account && <span className="ml-2 text-xs font-medium px-1.5 py-0.5 rounded-full bg-purple-200 text-purple-800">ON</span>}
+                </p>
+                <p className="text-xs text-purple-600 mt-0.5">
+                  {org.auto_cover_excess_from_account
+                    ? `This client's self-drive hires are auto-covered from their standing held-on-account balance — no fresh excess collected.${org.auto_cover_excess_set_by ? ` Set by ${org.auto_cover_excess_set_by}.` : ''}`
+                    : 'Off — this client’s hires collect excess as normal. Turn on only for clients who leave a standing excess deposit with us.'}
+                </p>
+              </div>
+              <button
+                onClick={async () => {
+                  const on = !org.auto_cover_excess_from_account;
+                  if (on && !confirm('Turn ON auto-cover? This client’s self-drive hires will stop collecting fresh excess while their held-on-account balance covers them. Admin only.')) return;
+                  await api.post(`/organisations/${id}/auto-cover-excess`, { auto_cover: on });
+                  loadOrg();
+                }}
+                className={`text-xs px-3 py-1.5 rounded whitespace-nowrap ${org.auto_cover_excess_from_account ? 'bg-purple-100 text-purple-700 hover:bg-purple-200' : 'bg-purple-600 text-white hover:bg-purple-700'}`}
+              >
+                {org.auto_cover_excess_from_account ? 'Turn off' : 'Turn on'}
+              </button>
+            </div>
+          )}
+        </div>
       )}
 
       {/* Held Items Tab — Holding module (incoming / temp storage / lost property) */}
