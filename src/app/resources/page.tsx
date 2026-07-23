@@ -2,9 +2,10 @@
 
 /**
  * Resources Page
- * 
- * Displays company documents and guides for freelancers.
- * Route: /resources
+ *
+ * Company documents and guides for freelancers, sourced from the Operations
+ * Platform (staff documents flagged shareable_with_freelancers). File-backed
+ * docs open via a presigned url; markdown docs open in an in-portal reader.
  */
 
 import { useEffect, useState } from 'react'
@@ -15,17 +16,14 @@ import Link from 'next/link'
 // TYPES
 // =============================================================================
 
-interface FileAsset {
-  assetId: string
-  name: string
-  fileType?: string
-  url?: string  // For external links like Google Docs
-}
-
 interface Resource {
   id: string
-  name: string
-  files: FileAsset[]
+  title: string
+  category: string
+  kind: 'file' | 'markdown'
+  fileName: string | null
+  fileType: string | null
+  url: string | null
 }
 
 interface ResourcesApiResponse {
@@ -36,131 +34,85 @@ interface ResourcesApiResponse {
 }
 
 // =============================================================================
-// HELPER FUNCTIONS
+// HELPERS
 // =============================================================================
 
-/**
- * Get file icon based on extension or type
- */
-function getFileIcon(filename: string, fileType?: string): string {
-  // Check if it's a Google Doc or external link
-  if (fileType === 'LINK' || filename.toLowerCase().includes('google')) {
-    return '📄'
-  }
-  
-  const ext = filename.split('.').pop()?.toLowerCase()
-  switch (ext) {
-    case 'pdf':
-      return '📕'
+const CATEGORY_LABELS: Record<string, string> = {
+  policy: 'Policy',
+  training: 'Training',
+  other: 'Guide',
+  agreement: 'Agreement',
+  official_doc: 'Official',
+  contract: 'Contract',
+}
+
+function categoryLabel(category: string): string {
+  return CATEGORY_LABELS[category] || 'Document'
+}
+
+function resourceIcon(r: Resource): string {
+  if (r.kind === 'markdown') return '📄'
+  switch (r.fileType?.toLowerCase()) {
+    case 'pdf': return '📕'
     case 'doc':
-    case 'docx':
-      return '📘'
+    case 'docx': return '📘'
     case 'xls':
-    case 'xlsx':
-      return '📊'
+    case 'xlsx': return '📊'
     case 'ppt':
-    case 'pptx':
-      return '📙'
+    case 'pptx': return '📙'
     case 'jpg':
     case 'jpeg':
     case 'png':
     case 'gif':
-    case 'webp':
-      return '🖼️'
+    case 'webp': return '🖼️'
     case 'mp4':
     case 'mov':
-    case 'avi':
-      return '🎬'
-    default:
-      return '📄'
+    case 'avi': return '🎬'
+    default: return '📄'
   }
 }
 
-/**
- * Get a friendly file type label
- */
-function getFileTypeLabel(filename: string, fileType?: string): string {
-  if (fileType === 'LINK') return 'Link'
-  if (fileType === 'MONDAY_DOC') return 'Monday Doc'
-  
-  const ext = filename.split('.').pop()?.toLowerCase()
-  switch (ext) {
-    case 'pdf': return 'PDF'
-    case 'doc':
-    case 'docx': return 'Word'
-    case 'xls':
-    case 'xlsx': return 'Excel'
-    case 'ppt':
-    case 'pptx': return 'PowerPoint'
-    default: return ext?.toUpperCase() || 'File'
-  }
+function actionLabel(r: Resource): string {
+  return r.kind === 'markdown' ? 'Read' : `Open${r.fileType ? ` ${r.fileType}` : ''}`
 }
 
 // =============================================================================
 // COMPONENTS
 // =============================================================================
 
-/**
- * Resource Card Component
- */
-function ResourceCard({ resource, onFileClick }: { 
-  resource: Resource
-  onFileClick: (file: FileAsset) => void 
-}) {
+function ResourceCard({ resource, onOpen }: { resource: Resource; onOpen: (r: Resource) => void }) {
+  const unavailable = resource.kind === 'file' && !resource.url
   return (
-    <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
-      {/* Resource Header */}
-      <div className="px-4 py-3 border-b border-gray-100 bg-gray-50">
-        <h3 className="font-medium text-gray-900">{resource.name}</h3>
+    <button
+      onClick={() => !unavailable && onOpen(resource)}
+      disabled={unavailable}
+      className="w-full flex items-center gap-3 px-4 py-3 bg-white rounded-xl shadow-sm border border-gray-100 hover:bg-gray-50 transition-colors text-left disabled:opacity-60 disabled:cursor-not-allowed"
+    >
+      <span className="text-2xl flex-shrink-0">{resourceIcon(resource)}</span>
+      <div className="flex-1 min-w-0">
+        <p className="text-sm font-medium text-gray-900 truncate">{resource.title}</p>
+        <p className="text-xs text-gray-500">
+          {categoryLabel(resource.category)}
+          {unavailable && ' · temporarily unavailable'}
+        </p>
       </div>
-      
-      {/* Files List */}
-      <div className="divide-y divide-gray-100">
-        {resource.files.length === 0 ? (
-          <div className="px-4 py-3 text-sm text-gray-500 italic">
-            No files attached
-          </div>
-        ) : (
-          resource.files.map((file) => (
-            <button
-              key={file.assetId}
-              onClick={() => onFileClick(file)}
-              className="w-full flex items-center gap-3 px-4 py-3 hover:bg-gray-50 transition-colors text-left"
-            >
-              <span className="text-2xl">{getFileIcon(file.name, file.fileType)}</span>
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-gray-900 truncate">{file.name}</p>
-                <p className="text-xs text-gray-500">{getFileTypeLabel(file.name, file.fileType)}</p>
-              </div>
-              <svg className="w-5 h-5 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-              </svg>
-            </button>
-          ))
-        )}
-      </div>
-    </div>
+      <span className="text-xs font-medium text-ooosh-600 flex-shrink-0">
+        {unavailable ? '—' : actionLabel(resource)}
+      </span>
+    </button>
   )
 }
 
-/**
- * Loading Skeleton Component
- */
 function LoadingSkeleton() {
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       {[1, 2, 3].map((i) => (
-        <div key={i} className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden animate-pulse">
-          <div className="px-4 py-3 border-b border-gray-100 bg-gray-50">
-            <div className="h-5 bg-gray-200 rounded w-1/3"></div>
-          </div>
-          <div className="px-4 py-3">
-            <div className="flex items-center gap-3">
-              <div className="w-8 h-8 bg-gray-200 rounded"></div>
-              <div className="flex-1">
-                <div className="h-4 bg-gray-200 rounded w-2/3 mb-1"></div>
-                <div className="h-3 bg-gray-200 rounded w-1/4"></div>
-              </div>
+        <div key={i} className="bg-white rounded-xl shadow-sm border border-gray-100 p-4 animate-pulse">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 bg-gray-200 rounded"></div>
+            <div className="flex-1">
+              <div className="h-4 bg-gray-200 rounded w-2/3 mb-1"></div>
+              <div className="h-3 bg-gray-200 rounded w-1/4"></div>
             </div>
           </div>
         </div>
@@ -169,9 +121,6 @@ function LoadingSkeleton() {
   )
 }
 
-/**
- * Empty State Component
- */
 function EmptyState() {
   return (
     <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-8 text-center">
@@ -185,18 +134,16 @@ function EmptyState() {
 }
 
 // =============================================================================
-// MAIN PAGE COMPONENT
+// MAIN PAGE
 // =============================================================================
 
 export default function ResourcesPage() {
   const router = useRouter()
-  
+
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [resources, setResources] = useState<Resource[]>([])
-  const [loadingFile, setLoadingFile] = useState<string | null>(null)
 
-  // Fetch resources on mount
   useEffect(() => {
     async function fetchResources() {
       try {
@@ -223,38 +170,13 @@ export default function ResourcesPage() {
     fetchResources()
   }, [router])
 
-  /**
-   * Handle file click - open file or external link
-   */
-  const handleFileClick = async (file: FileAsset) => {
-    // If file has a direct URL (e.g., Google Docs link), open it directly
-    if (file.url) {
-      window.open(file.url, '_blank')
+  const handleOpen = (resource: Resource) => {
+    if (resource.kind === 'markdown') {
+      router.push(`/resources/${resource.id}`)
       return
     }
-
-    // If it's a Monday Doc, we can't open it without Monday login
-    if (file.fileType === 'MONDAY_DOC') {
-      alert('This is a Monday Doc and requires a Monday.com login to view. Please ask the team for a PDF or Google Docs version.')
-      return
-    }
-
-    // For regular files, fetch the public URL from our API
-    setLoadingFile(file.assetId)
-    try {
-      const response = await fetch(`/api/files/${file.assetId}`)
-      const data = await response.json()
-
-      if (data.success && data.publicUrl) {
-        window.open(data.publicUrl, '_blank')
-      } else {
-        alert('Failed to open file. Please try again.')
-      }
-    } catch (err) {
-      console.error('Error opening file:', err)
-      alert('Failed to open file. Please try again.')
-    } finally {
-      setLoadingFile(null)
+    if (resource.url) {
+      window.open(resource.url, '_blank')
     }
   }
 
@@ -294,11 +216,10 @@ export default function ResourcesPage() {
 
       {/* Main Content */}
       <main className="max-w-lg mx-auto px-4 py-6">
-        {/* Error Banner */}
         {error && (
           <div className="mb-4 bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">
             {error}
-            <button 
+            <button
               onClick={() => window.location.reload()}
               className="ml-2 underline hover:no-underline"
             >
@@ -307,29 +228,14 @@ export default function ResourcesPage() {
           </div>
         )}
 
-        {/* Loading File Overlay */}
-        {loadingFile && (
-          <div className="fixed inset-0 bg-black/20 flex items-center justify-center z-50">
-            <div className="bg-white rounded-lg px-6 py-4 shadow-lg flex items-center gap-3">
-              <div className="w-5 h-5 border-2 border-ooosh-500 border-t-transparent rounded-full animate-spin"></div>
-              <span className="text-gray-700">Opening file...</span>
-            </div>
-          </div>
-        )}
-
-        {/* Content */}
         {loading ? (
           <LoadingSkeleton />
         ) : resources.length === 0 ? (
           <EmptyState />
         ) : (
-          <div className="space-y-4">
+          <div className="space-y-3">
             {resources.map((resource) => (
-              <ResourceCard 
-                key={resource.id} 
-                resource={resource} 
-                onFileClick={handleFileClick}
-              />
+              <ResourceCard key={resource.id} resource={resource} onOpen={handleOpen} />
             ))}
           </div>
         )}

@@ -399,6 +399,11 @@ field, without a schema column per field.
 - **Convention:** the three settings keys (`rehearsal_info_pack_images`, `_auto_enabled`, `_auto_days`)
   are managed by dedicated controls on the Info Pack tab, NOT the generic text-field editor — the
   generic Save deliberately omits the images key so it can't clobber an uploaded photo.
+- **Template-nesting fix (Jul 2026).** First cut nested the caption `{{#if imgNcap}}` INSIDE the image
+  `{{#if imgN}}` block — but `substituteVariables` is single-level (non-greedy regex), so nested ifs
+  left literal `{{/if}}` / `{{#if imgNcap}}` artifacts in the email (visible in the preview). Flattened
+  each image + caption into two SEPARATE top-level `{{#if}}` blocks. **Never nest `{{#if}}` in an email
+  template** — noted in CLAUDE.md (Email Service) + a comment on `substituteVariables`.
 
 ---
 
