@@ -9,7 +9,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { getSessionUser } from '@/lib/session'
-import { isOpMode, logShiftLostPropertyOP, isOpClientError, OpApiError } from '@/lib/op-api'
+import { logShiftLostPropertyOP, isOpClientError, OpApiError } from '@/lib/op-api'
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 
@@ -27,10 +27,6 @@ export async function POST(
     if (!user) {
       return NextResponse.json({ success: false, error: 'Authentication required' }, { status: 401 })
     }
-    if (!isOpMode()) {
-      return NextResponse.json({ success: false, error: 'Not found' }, { status: 404 })
-    }
-
     const sessionToken = request.cookies.get('session')?.value
     if (!sessionToken) {
       return NextResponse.json({ success: false, error: 'Session token missing' }, { status: 401 })

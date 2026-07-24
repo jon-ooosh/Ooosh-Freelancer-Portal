@@ -1,20 +1,15 @@
 /**
  * Ooosh Operations Platform API Client
  *
- * Replaces Monday.com as the data source for the freelancer portal.
- * Uses the /api/portal/* endpoints on the OP backend.
+ * The data source for the freelancer portal — the /api/portal/* endpoints on
+ * the OP backend. (Monday.com, the previous source, has been retired.)
  *
- * Feature flag: DATA_BACKEND=op  (default: monday)
  * Env vars: OP_BACKEND_URL (e.g. https://staff.oooshtours.co.uk)
  */
 
 // =============================================================================
 // CONFIG
 // =============================================================================
-
-export function isOpMode(): boolean {
-  return process.env.DATA_BACKEND === 'op'
-}
 
 function getOpUrl(): string {
   const url = process.env.OP_BACKEND_URL
@@ -769,67 +764,4 @@ export async function resetPasswordOP(
     if (m) sessionToken = m[1]
   }
   return { success: true, user: data.user, sessionToken }
-}
-
-// =============================================================================
-// FALLBACK TELEMETRY
-// =============================================================================
-
-/**
- * Whether silent fallback to Monday is allowed when an OP call errors.
- *
- * Default: true (safety net during migration). Set PORTAL_MONDAY_FALLBACK_ENABLED=false
- * on Netlify once OP is the sole source of truth — callers then return a clean
- * 502 instead of silently serving Monday data.
- */
-export function mondayFallbackAllowed(): boolean {
-  return process.env.PORTAL_MONDAY_FALLBACK_ENABLED !== 'false'
-}
-
-/**
- * Report a Monday-fallback event to the OP so staff get alerted.
- *
- * Called whenever the portal attempts an OP operation, fails, and falls
- * back to Monday.com. Fire-and-forget — we never want telemetry to
- * block the user-facing flow.
- *
- * Requires env vars:
- *   OP_BACKEND_URL
- *   PORTAL_TELEMETRY_SECRET (matching value on OP server)
- *
- * If the secret isn't configured we log locally and give up — no exception
- * is thrown.
- */
-export function reportFallback(operation: string, error: unknown, context: { email?: string } = {}): void {
-  const secret = process.env.PORTAL_TELEMETRY_SECRET
-  const baseUrl = process.env.OP_BACKEND_URL
-
-  const errorMessage = error instanceof Error ? error.message : String(error ?? 'Unknown error')
-  const stack = error instanceof Error ? error.stack : undefined
-
-  // Always log so Netlify function logs capture it
-  console.warn(`[PORTAL FALLBACK] operation=${operation} email=${context.email || 'unknown'} error=${errorMessage}`)
-
-  if (!secret || !baseUrl) {
-    console.warn('[PORTAL FALLBACK] Skipping OP telemetry — PORTAL_TELEMETRY_SECRET or OP_BACKEND_URL not set')
-    return
-  }
-
-  // Fire-and-forget
-  fetch(`${baseUrl.replace(/\/$/, '')}/api/portal/telemetry/monday-fallback`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Portal-Telemetry-Key': secret,
-    },
-    body: JSON.stringify({
-      operation,
-      errorMessage,
-      email: context.email,
-      stack,
-    }),
-  }).catch((err) => {
-    // Last-resort log. Telemetry failing shouldn't cascade into user-facing errors.
-    console.error('[PORTAL FALLBACK] Failed to report to OP:', err)
-  })
 }

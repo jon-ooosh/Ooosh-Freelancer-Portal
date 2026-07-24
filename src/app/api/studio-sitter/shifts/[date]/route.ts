@@ -13,7 +13,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSessionUser } from '@/lib/session'
 import {
-  isOpMode,
   getSitterShiftDetailFromOP,
   isOpClientError,
   OpApiError,
@@ -34,10 +33,6 @@ export async function GET(
     const user = await getSessionUser()
     if (!user) {
       return NextResponse.json({ success: false, error: 'Authentication required' }, { status: 401 })
-    }
-
-    if (!isOpMode()) {
-      return NextResponse.json({ success: false, error: 'Not found' }, { status: 404 })
     }
 
     const sessionToken = request.cookies.get('session')?.value
