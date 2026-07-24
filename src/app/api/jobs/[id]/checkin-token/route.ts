@@ -17,7 +17,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createHmac } from 'node:crypto'
 import { getSessionUser } from '@/lib/session'
-import { isOpMode, mondayFallbackAllowed, reportFallback } from '@/lib/op-api'
 
 export async function POST(
   request: NextRequest,
@@ -48,18 +47,6 @@ export async function POST(
     if (!secret) {
       console.error('FREELANCER_HUB_SECRET is not configured')
       return NextResponse.json({ success: false, error: 'Check-in is not configured' }, { status: 500 })
-    }
-
-    // Collections only exist in OP mode. No Monday equivalent — if OP mode is
-    // off, surface a clean error rather than a broken redirect.
-    if (!isOpMode()) {
-      if (!mondayFallbackAllowed()) {
-        reportFallback('checkin-token', new Error(`OP mode disabled (jobId: ${jobId})`), { email: session.email })
-      }
-      return NextResponse.json(
-        { success: false, error: 'Collection check-in is currently unavailable. Please refresh and try again.' },
-        { status: 502 }
-      )
     }
 
     const opUrl = (process.env.OP_BACKEND_URL || '').replace(/\/$/, '')

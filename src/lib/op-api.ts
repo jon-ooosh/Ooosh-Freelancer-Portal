@@ -1,20 +1,15 @@
 /**
  * Ooosh Operations Platform API Client
  *
- * Replaces Monday.com as the data source for the freelancer portal.
- * Uses the /api/portal/* endpoints on the OP backend.
+ * The data source for the freelancer portal — the /api/portal/* endpoints on
+ * the OP backend. (Monday.com, the previous source, has been retired.)
  *
- * Feature flag: DATA_BACKEND=op  (default: monday)
  * Env vars: OP_BACKEND_URL (e.g. https://staff.oooshtours.co.uk)
  */
 
 // =============================================================================
 // CONFIG
 // =============================================================================
-
-export function isOpMode(): boolean {
-  return process.env.DATA_BACKEND === 'op'
-}
 
 function getOpUrl(): string {
   const url = process.env.OP_BACKEND_URL
@@ -116,6 +111,290 @@ export interface PortalEquipmentResponse {
   items: PortalEquipmentItem[]
   whatIsIt?: string
   message?: string
+}
+
+// =============================================================================
+// STUDIO SITTER SHIFTS (Rehearsals — Phase D portal surface)
+// =============================================================================
+
+export interface SitterSharedFile {
+  name: string
+  url: string
+  fileType: string | null
+}
+
+export interface SitterShiftJob {
+  job_id: string
+  hh_job_number: number | null
+  label: string          // band / client / job name
+  rooms: string[]        // sitter-needed room labels, e.g. ["Room 1 · Lockout"]
+  files?: SitterSharedFile[]
+}
+
+export interface SitterShift {
+  date: string           // YYYY-MM-DD
+  planned_start: string | null
+  planned_end: string | null
+  status: string         // shift status ('closed' once locked up)
+  assignment_status: string // assigned / confirmed
+  fee: number | null
+  report_submitted_at?: string | null // lock-up submitted → "Completed"
+  jobs: SitterShiftJob[] // who's in that night
+}
+
+export interface SitterShiftsResponse {
+  success: boolean
+  shifts: SitterShift[]
+}
+
+export interface SitterShiftDetail {
+  date: string
+  planned_start: string | null
+  planned_end: string | null
+  status: string
+  fee: number | null
+  assignment_status: string | null
+  jobs: SitterShiftJob[]
+}
+
+export interface SitterShiftDetailResponse extends SitterShiftDetail {
+  success: boolean
+}
+
+/** The sitter's own upcoming/recent rostered evenings. */
+export async function getSitterShiftsFromOP(sessionToken: string): Promise<SitterShiftsResponse> {
+  return opFetch<SitterShiftsResponse>('/studio-sitter/shifts', sessionToken)
+}
+
+/** One evening's detail — who's in each room + that job's shared specs/files. */
+export async function getSitterShiftDetailFromOP(
+  sessionToken: string,
+  date: string
+): Promise<SitterShiftDetailResponse> {
+  return opFetch<SitterShiftDetailResponse>(`/studio-sitter/shifts/${date}`, sessionToken)
+}
+
+export interface SitterThreadMessage {
+  id: string
+  content: string
+  created_at: string
+  author: string
+  from_staff: boolean
+  mine: boolean
+  files: SitterSharedFile[]
+}
+
+export interface SitterThreadResponse {
+  success: boolean
+  messages: SitterThreadMessage[]
+}
+
+/** Read the handover thread for one evening. */
+export async function getSitterThreadFromOP(
+  sessionToken: string,
+  date: string
+): Promise<SitterThreadResponse> {
+  return opFetch<SitterThreadResponse>(`/studio-sitter/shifts/${date}/thread`, sessionToken)
+}
+
+export interface SitterRecentHandoverNight {
+  date: string
+  entries: SitterThreadMessage[]
+}
+export interface SitterRecentHandoverResponse {
+  success: boolean
+  nights: SitterRecentHandoverNight[]
+}
+
+/** Read the last few nights' handover notes (read-only carry-forward). */
+export async function getSitterRecentHandoverFromOP(
+  sessionToken: string,
+  date: string
+): Promise<SitterRecentHandoverResponse> {
+  return opFetch<SitterRecentHandoverResponse>(`/studio-sitter/shifts/${date}/recent-handover`, sessionToken)
+}
+
+/** Post a handover note to one evening's thread (text only). */
+export async function postSitterThreadOP(
+  sessionToken: string,
+  date: string,
+  content: string
+): Promise<{ success: boolean; message: SitterThreadMessage }> {
+  return opFetch(`/studio-sitter/shifts/${date}/thread`, sessionToken, {
+    method: 'POST',
+    body: JSON.stringify({ content }),
+  })
+}
+
+/** Post a handover note with attachments (multipart: content + files[]). */
+export async function postSitterThreadWithFilesOP(
+  sessionToken: string,
+  date: string,
+  formData: FormData
+): Promise<{ success: boolean; message: SitterThreadMessage }> {
+  const url = `${getOpUrl()}/api/portal/studio-sitter/shifts/${date}/thread`
+  // 60s — attachments can be slow on site.
+  const response = await fetchWithTimeout(url, {
+    method: 'POST',
+    headers: { 'Cookie': `session=${sessionToken}` },
+    body: formData, // multipart/form-data (content + files)
+  }, 60_000)
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }))
+    throw new OpApiError((body as { error?: string })?.error || `HTTP ${response.status}`, response.status, body)
+  }
+  return response.json()
+}
+
+// =============================================================================
+// STUDIO SITTER LOCK-UP REPORT (Rehearsals — Phase E)
+// =============================================================================
+
+export interface LockupReference {
+  text?: string
+  photos: string[]  // R2 keys OR external URLs
+}
+export interface LockupItem {
+  id: string
+  label: string
+  type: 'yesno' | 'text' | 'number'
+  section?: string
+  expected?: string
+  end_of_booking_only?: boolean
+  reference?: LockupReference
+  note_prompt?: string
+}
+
+export interface LockupTemplate {
+  version: number
+  intro?: string
+  items: LockupItem[]
+  notes_label?: string
+  lost_property_prompt?: string
+}
+
+export interface LockupStoredReport {
+  answers: Record<string, unknown>
+  exception_notes: Record<string, { text: string; photos: unknown[] }>
+  item_notes: Record<string, { text: string; photos: unknown[] }>
+  notes: { text: string; photos: unknown[] }
+  continuing_tomorrow: boolean
+  continuing_overridden: boolean
+  submitted_at: string
+}
+
+export interface LockupContextResponse {
+  success: boolean
+  date: string
+  template: LockupTemplate
+  continuing_tomorrow: boolean
+  continuing_derived: boolean
+  submitted: LockupStoredReport | null
+  has_shift: boolean
+  error?: string
+}
+
+export interface LockupException {
+  id: string
+  label: string
+  answer: string
+  expected: string
+}
+
+export interface LockupSubmitResponse {
+  success: boolean
+  ok: boolean
+  shift_id: string
+  exceptions: LockupException[]
+  error?: string
+}
+
+/** Lock-up sub-page context: template + derived continuing + prior submission. */
+export async function getLockupContextFromOP(
+  sessionToken: string,
+  date: string
+): Promise<LockupContextResponse> {
+  return opFetch<LockupContextResponse>(`/studio-sitter/shifts/${date}/lockup`, sessionToken)
+}
+
+/** Submit the lock-up report (multipart: `payload` JSON + optional photos). */
+export async function submitLockupReportOP(
+  sessionToken: string,
+  date: string,
+  formData: FormData
+): Promise<LockupSubmitResponse> {
+  const url = `${getOpUrl()}/api/portal/studio-sitter/shifts/${date}/lockup`
+  const response = await fetchWithTimeout(url, {
+    method: 'POST',
+    headers: { Cookie: `session=${sessionToken}` },
+    body: formData,
+  }, 60_000)
+  if (!response.ok) {
+    const b = await response.json().catch(() => ({ error: `HTTP ${response.status}` }))
+    throw new OpApiError((b as { error?: string })?.error || `HTTP ${response.status}`, response.status, b)
+  }
+  return response.json()
+}
+
+/** Log lost property found during a shift (multipart: description/found_location + photos). */
+export async function logShiftLostPropertyOP(
+  sessionToken: string,
+  date: string,
+  formData: FormData
+): Promise<{ success: boolean; id: string; error?: string }> {
+  const url = `${getOpUrl()}/api/portal/studio-sitter/shifts/${date}/lost-property`
+  const response = await fetchWithTimeout(url, {
+    method: 'POST',
+    headers: { Cookie: `session=${sessionToken}` },
+    body: formData,
+  }, 60_000)
+  if (!response.ok) {
+    const b = await response.json().catch(() => ({ error: `HTTP ${response.status}` }))
+    throw new OpApiError((b as { error?: string })?.error || `HTTP ${response.status}`, response.status, b)
+  }
+  return response.json()
+}
+
+// =============================================================================
+// RESOURCES (Staff Documents shared with freelancers)
+// =============================================================================
+
+export interface PortalResource {
+  id: string
+  title: string
+  category: string
+  kind: 'file' | 'markdown'
+  fileName: string | null
+  fileType: string | null
+  url: string | null
+}
+
+export interface PortalResourcesResponse {
+  resources: PortalResource[]
+}
+
+export interface PortalResourceDetail {
+  id: string
+  title: string
+  category: string
+  kind: 'file' | 'markdown'
+  body?: string
+  fileName?: string | null
+  fileType?: string | null
+  url?: string | null
+}
+
+/** List approved, freelancer-shareable staff documents. */
+export async function getResourcesFromOP(sessionToken: string): Promise<PortalResourcesResponse> {
+  return opFetch<PortalResourcesResponse>('/resources', sessionToken)
+}
+
+/** Fetch a single resource (markdown body, or a fresh presigned file url). */
+export async function getResourceDetailFromOP(
+  sessionToken: string,
+  id: string
+): Promise<{ resource: PortalResourceDetail }> {
+  return opFetch<{ resource: PortalResourceDetail }>(`/resources/${id}`, sessionToken)
 }
 
 // =============================================================================
@@ -485,67 +764,4 @@ export async function resetPasswordOP(
     if (m) sessionToken = m[1]
   }
   return { success: true, user: data.user, sessionToken }
-}
-
-// =============================================================================
-// FALLBACK TELEMETRY
-// =============================================================================
-
-/**
- * Whether silent fallback to Monday is allowed when an OP call errors.
- *
- * Default: true (safety net during migration). Set PORTAL_MONDAY_FALLBACK_ENABLED=false
- * on Netlify once OP is the sole source of truth — callers then return a clean
- * 502 instead of silently serving Monday data.
- */
-export function mondayFallbackAllowed(): boolean {
-  return process.env.PORTAL_MONDAY_FALLBACK_ENABLED !== 'false'
-}
-
-/**
- * Report a Monday-fallback event to the OP so staff get alerted.
- *
- * Called whenever the portal attempts an OP operation, fails, and falls
- * back to Monday.com. Fire-and-forget — we never want telemetry to
- * block the user-facing flow.
- *
- * Requires env vars:
- *   OP_BACKEND_URL
- *   PORTAL_TELEMETRY_SECRET (matching value on OP server)
- *
- * If the secret isn't configured we log locally and give up — no exception
- * is thrown.
- */
-export function reportFallback(operation: string, error: unknown, context: { email?: string } = {}): void {
-  const secret = process.env.PORTAL_TELEMETRY_SECRET
-  const baseUrl = process.env.OP_BACKEND_URL
-
-  const errorMessage = error instanceof Error ? error.message : String(error ?? 'Unknown error')
-  const stack = error instanceof Error ? error.stack : undefined
-
-  // Always log so Netlify function logs capture it
-  console.warn(`[PORTAL FALLBACK] operation=${operation} email=${context.email || 'unknown'} error=${errorMessage}`)
-
-  if (!secret || !baseUrl) {
-    console.warn('[PORTAL FALLBACK] Skipping OP telemetry — PORTAL_TELEMETRY_SECRET or OP_BACKEND_URL not set')
-    return
-  }
-
-  // Fire-and-forget
-  fetch(`${baseUrl.replace(/\/$/, '')}/api/portal/telemetry/monday-fallback`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Portal-Telemetry-Key': secret,
-    },
-    body: JSON.stringify({
-      operation,
-      errorMessage,
-      email: context.email,
-      stack,
-    }),
-  }).catch((err) => {
-    // Last-resort log. Telemetry failing shouldn't cascade into user-facing errors.
-    console.error('[PORTAL FALLBACK] Failed to report to OP:', err)
-  })
 }

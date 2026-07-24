@@ -19,6 +19,127 @@ const templates: Record<string, EmailTemplate> = {
 
   // ── Client-facing templates ────────────────────────────────────────────
 
+  freelancer_invite: {
+    variant: 'client',
+    preheader: 'Complete your freelancer sign-up with Ooosh Tours',
+    subject: 'Working with Ooosh Tours — freelancer sign-up',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Freelancer sign-up</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Hi {{firstName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Many thanks for your interest in working with us as a self-employed freelancer. Assuming you meet our
+        standard criteria, we'll be happy to offer you work on a freelance basis. Most work is offered via our
+        private WhatsApp group, or sometimes by email or phone - you're under no obligation to accept any work,
+        just say yes to what suits you.
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        There are usually two types of work: work directly for us (deliveries, warehouse, backline/sound at shows -
+        usually a day or less, minimum a half-day rate of £75 for a five-hour call) and work on behalf of clients
+        (tour work such as driving, TMing, FOH, merch - usually a day rate). If you're applying for driving work,
+        our insurance requires you to be over 23, have held your licence at least two years, and have no more than
+        six points in the last three years.
+      </p>
+      <p style="margin:0 0 20px;font-size:15px;color:#334155;line-height:1.6;">
+        The first step is to complete the form below. It gathers your basic contact and ID details - and, if you're
+        after driving work, your licence details and a few insurance questions. Please pay particular attention to
+        the Privacy Notice at the top and the Terms &amp; Conditions (including our Code of Conduct) at the bottom.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 24px;">
+        <tr><td style="border-radius:8px;background-color:#7B5EA7;">
+          <a href="{{formUrl}}" style="display:inline-block;padding:12px 22px;font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:8px;">Complete your sign-up form →</a>
+        </td></tr>
+      </table>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Once you've submitted the form we'll process your details and reply to confirm whether you've been accepted,
+        if we need more information, or otherwise. If accepted, you'll get a link to join the WhatsApp group and our
+        payment/invoicing procedure - in brief, we aim to pay approved invoices on the first Friday one week after
+        submission (normally paid within 7-14 days).
+      </p>
+      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
+        Any questions in the meantime, just reply to this email. If the button above doesn't work, copy and paste
+        this link into your browser:<br>
+        <a href="{{formUrl}}" style="color:#7B5EA7;word-break:break-all;">{{formUrl}}</a>
+      </p>
+    `,
+  },
+
+  freelancer_application_received: {
+    variant: 'internal',
+    preheader: 'A freelancer has submitted their sign-up form',
+    subject: 'Freelancer application — {{name}}',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:18px;color:#1e293b;">New freelancer application</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        <strong>{{name}}</strong> has submitted their freelancer sign-up form and is waiting to be reviewed.
+      </p>
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.6;">
+        Skills: {{skills}}
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;">
+        <tr><td style="border-radius:8px;background-color:#7B5EA7;">
+          <a href="{{reviewUrl}}" style="display:inline-block;padding:11px 20px;font-size:14px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:8px;">Review their details →</a>
+        </td></tr>
+      </table>
+      <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">
+        Open their record to check the submitted details, documents and insurance answers, then approve, decline or
+        ask for more info.
+      </p>
+    `,
+  },
+
+  rehearsal_info_pack: {
+    variant: 'client',
+    preheader: 'Everything you need for your rehearsals with us',
+    subject: 'Your rehearsals with Ooosh{{#if dates}} — {{dates}}{{/if}}{{#if jobNumber}} (#{{jobNumber}}){{/if}}',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Your rehearsals with Ooosh</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Hi {{clientName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Looking forward to having <strong>{{jobName}}</strong>{{#if jobNumber}} (job <strong>#{{jobNumber}}</strong>){{/if}} in with us{{#if dates}} — <strong>{{dates}}</strong>{{/if}}.
+        Here's everything you need to know beforehand to help things run smoothly.
+      </p>
+      {{#if directions}}
+        <p style="margin:0 0 6px;font-size:15px;color:#1e293b;font-weight:600;">🚗 How to find us</p>
+        <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">{{directions}}</p>
+      {{/if}}
+      {{#if parking}}
+        <p style="margin:0 0 6px;font-size:15px;color:#1e293b;font-weight:600;">🅿️ Parking</p>
+        <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">{{parking}}</p>
+      {{/if}}
+      {{#if wifi}}
+        <p style="margin:0 0 6px;font-size:15px;color:#1e293b;font-weight:600;">📶 WiFi</p>
+        <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">{{wifi}}</p>
+      {{/if}}
+      {{#if amenities}}
+        <p style="margin:0 0 6px;font-size:15px;color:#1e293b;font-weight:600;">🥪 Local shops & takeaways</p>
+        <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">{{amenities}}</p>
+      {{/if}}
+      {{#if houseRules}}
+        <p style="margin:0 0 6px;font-size:15px;color:#1e293b;font-weight:600;">ℹ️ Good to know</p>
+        <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">{{houseRules}}</p>
+      {{/if}}
+      {{#if studioContact}}
+        <p style="margin:0 0 16px;padding:12px 14px;background-color:#f8fafc;border-radius:8px;font-size:14px;color:#334155;line-height:1.6;">
+          <strong>On the day:</strong> {{studioContact}}
+        </p>
+      {{/if}}
+      {{#if img1}}<p style="margin:16px 0 8px;font-size:15px;color:#1e293b;font-weight:600;">📷 Photos</p>{{/if}}
+      {{#if img1}}<div style="margin:0 0 4px;"><img src="{{img1}}" alt="{{img1cap}}" style="max-width:100%;height:auto;border-radius:8px;display:block;"></div>{{/if}}
+      {{#if img1cap}}<p style="margin:0 0 12px;font-size:13px;color:#64748b;">{{img1cap}}</p>{{/if}}
+      {{#if img2}}<div style="margin:0 0 4px;"><img src="{{img2}}" alt="{{img2cap}}" style="max-width:100%;height:auto;border-radius:8px;display:block;"></div>{{/if}}
+      {{#if img2cap}}<p style="margin:0 0 12px;font-size:13px;color:#64748b;">{{img2cap}}</p>{{/if}}
+      {{#if img3}}<div style="margin:0 0 4px;"><img src="{{img3}}" alt="{{img3cap}}" style="max-width:100%;height:auto;border-radius:8px;display:block;"></div>{{/if}}
+      {{#if img3cap}}<p style="margin:0 0 12px;font-size:13px;color:#64748b;">{{img3cap}}</p>{{/if}}
+      {{#if img4}}<div style="margin:0 0 4px;"><img src="{{img4}}" alt="{{img4cap}}" style="max-width:100%;height:auto;border-radius:8px;display:block;"></div>{{/if}}
+      {{#if img4cap}}<p style="margin:0 0 12px;font-size:13px;color:#64748b;">{{img4cap}}</p>{{/if}}
+      {{#if img5}}<div style="margin:0 0 4px;"><img src="{{img5}}" alt="{{img5cap}}" style="max-width:100%;height:auto;border-radius:8px;display:block;"></div>{{/if}}
+      {{#if img5cap}}<p style="margin:0 0 12px;font-size:13px;color:#64748b;">{{img5cap}}</p>{{/if}}
+      {{#if img6}}<div style="margin:0 0 4px;"><img src="{{img6}}" alt="{{img6cap}}" style="max-width:100%;height:auto;border-radius:8px;display:block;"></div>{{/if}}
+      {{#if img6cap}}<p style="margin:0 0 16px;font-size:13px;color:#64748b;">{{img6cap}}</p>{{/if}}
+      <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">Any questions before you arrive, just reply to this email or give us a call.</p>
+    `,
+  },
+
   holding_received: {
     variant: 'client',
     preheader: 'Your items have arrived with us',
@@ -669,6 +790,21 @@ const templates: Record<string, EmailTemplate> = {
       <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
         If you have any questions, just reply to this email or call us on <strong>+44 (0) 1273 911382</strong>.
       </p>
+    `,
+  },
+
+  // ── Remittance advice ─────────────────────────────────────────────────
+  // Subject + body are composed in services/remittance.ts (supplier vs
+  // reimbursement wording, paid-vs-scheduled tense) and passed via
+  // subjectOverride / bodyHtmlOverride. This registration exists so the
+  // client branding, EMAIL_LIVE_TEMPLATES allowlist, and audit log all apply.
+  remittance_advice: {
+    variant: 'client',
+    preheader: 'Remittance advice from Ooosh Tours',
+    subject: 'Remittance Advice',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Remittance Advice</h2>
+      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">This confirms a payment has been made to you.</p>
     `,
   },
 
@@ -1606,6 +1742,92 @@ const templates: Record<string, EmailTemplate> = {
       </table>
       <p style="margin:0;font-size:14px;color:#334155;">
         <a href="{{jobUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Open job in Ooosh →</a>
+      </p>
+    `,
+  },
+
+  // ── Studio-sitter lock-up report submitted (internal) ─────────────────
+  // Fires when a sitter submits the end-of-night lock-up report. Goes to info@
+  // (mirrors the OOH / money / vehicle internal-alert routing). Exceptions +
+  // notes are plain-text (newline-joined), rendered with white-space:pre-line.
+  studio_lockup_submitted: {
+    variant: 'internal',
+    subject: '🔒 Lock-up report — {{date}} ({{sitterName}})',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Lock-up report submitted</h2>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.6;">
+        <strong>{{sitterName}}</strong> has finished for the night and locked up on
+        <strong>{{date}}</strong>.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
+            <p style="margin:0 0 8px;font-size:14px;color:#1e293b;font-weight:600;">{{statusLine}}</p>
+            {{#if exceptionsText}}<p style="margin:0 0 4px;font-size:13px;color:#64748b;">Needs attention</p><p style="margin:0 0 8px;font-size:14px;color:#b45309;white-space:pre-line;">{{exceptionsText}}</p>{{/if}}
+            {{#if notes}}<p style="margin:0 0 4px;font-size:13px;color:#64748b;">Sitter's notes</p><p style="margin:0 0 8px;font-size:14px;color:#1e293b;white-space:pre-line;">{{notes}}</p>{{/if}}
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0;font-size:14px;color:#334155;">
+        <a href="{{rosterUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Open the studio sitters roster →</a>
+      </p>
+    `,
+  },
+
+  // ── Studio-sitter handover reply (to the sitter) ──────────────────────
+  // The freelancer portal has no bell, so a staff reply on a shift handover
+  // thread is emailed to the rostered sitter with a link back to that evening.
+  studio_shift_reply: {
+    variant: 'client',
+    subject: 'Reply on your studio night — {{date}}',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Hi {{sitterFirstName}},</h2>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.6;">
+        <strong>{{staffName}}</strong> replied to your handover note for <strong>{{date}}</strong>:
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
+            <p style="margin:0;font-size:14px;color:#1e293b;white-space:pre-line;">{{replyText}}</p>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0;font-size:14px;color:#334155;">
+        <a href="{{shiftUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Open the shift &amp; reply →</a>
+      </p>
+    `,
+  },
+
+  // ── Studio-sitter lock-up not submitted — sitter reminder ─────────────
+  // Fires the morning after if a sitter's shift closed without a lock-up
+  // report. Prompts them to finish it (or tell the office).
+  studio_lockup_reminder: {
+    variant: 'client',
+    subject: 'Please finish your studio lock-up — {{date}}',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Hi {{sitterFirstName}},</h2>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.6;">
+        We don't have your end-of-night lock-up report for <strong>{{date}}</strong> yet. When you get a
+        chance, please finish it off — or let the office know if something came up.
+      </p>
+      <p style="margin:0;font-size:14px;color:#334155;">
+        <a href="{{lockupUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Finish the lock-up report →</a>
+      </p>
+    `,
+  },
+
+  // ── Studio-sitter lock-up not submitted — office alert ────────────────
+  studio_lockup_missing: {
+    variant: 'internal',
+    subject: '🔒 Lock-up NOT submitted — {{date}} ({{sitterName}})',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Lock-up report not submitted</h2>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.6;">
+        <strong>{{sitterName}}</strong> was rostered on <strong>{{date}}</strong> but hasn't submitted an
+        end-of-night lock-up report. They've been sent a reminder. Worth a check the studio was closed up OK.
+      </p>
+      <p style="margin:0;font-size:14px;color:#334155;">
+        <a href="{{rosterUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Open the studio sitters roster →</a>
       </p>
     `,
   },

@@ -13,7 +13,10 @@ interface ChaseableJob {
   next_chase_date?: string | null;
   chase_alert_user_id?: string | null;
   chase_alert_delivery?: 'bell' | 'bell_email' | 'none' | null;
+  auto_chase_mode?: 'off' | 'draft' | 'send' | null;
 }
+
+type AutoChaseMode = 'off' | 'draft' | 'send';
 
 type Mode = 'reschedule' | 'log';
 type Delivery = 'bell' | 'bell_email' | 'none';
@@ -41,11 +44,11 @@ export default function ChaseModal({
   const [mode, setMode] = useState<Mode>('log');
   const [chaseMethod, setChaseMethod] = useState<string>('phone');
   const [content, setContent] = useState('');
-  const [chaseResponse, setChaseResponse] = useState('');
   const [nextChaseDate, setNextChaseDate] = useState('');
   const [selectedChasePreset, setSelectedChasePreset] = useState<string | null>(null);
   const [chaseAlertUserId, setChaseAlertUserId] = useState('');
   const [delivery, setDelivery] = useState<Delivery>('none');
+  const [autoChaseMode, setAutoChaseMode] = useState<AutoChaseMode>('off');
   const [teamUsers, setTeamUsers] = useState<{ id: string; email: string; first_name: string; last_name: string }[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -55,6 +58,9 @@ export default function ChaseModal({
   const [drafting, setDrafting] = useState(false);
   const [draftResult, setDraftResult] = useState<{ to: string; subject: string; threaded: boolean } | null>(null);
   const [draftError, setDraftError] = useState('');
+  // Whether auto-SEND is enabled globally — the "Send" option is only offered
+  // when it is, so there's no confusing "Send that secretly only drafts".
+  const [autoSendEnabled, setAutoSendEnabled] = useState(false);
 
   useEffect(() => {
     if (isOpen && job) {
@@ -62,10 +68,10 @@ export default function ChaseModal({
       setSelectedChasePreset('5 days');
       setMode('log');
       setContent('');
-      setChaseResponse('');
       setChaseMethod('phone');
       setChaseAlertUserId(job.chase_alert_user_id || '');
       setDelivery(job.chase_alert_delivery || 'none');
+      setAutoChaseMode((job.auto_chase_mode as AutoChaseMode) || 'off');
       setError('');
       setDraftResult(null);
       setDraftError('');
@@ -80,6 +86,14 @@ export default function ChaseModal({
         .catch(() => {});
     }
   }, [isOpen]);
+
+  useEffect(() => {
+    if (isOpen && canDraftChase) {
+      api.get<{ data: { key: string; value: string | null }[] }>('/system-settings?category=chase')
+        .then(res => setAutoSendEnabled(res.data.find(s => s.key === 'auto_chase_send_enabled')?.value === 'true'))
+        .catch(() => {});
+    }
+  }, [isOpen, canDraftChase]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -110,11 +124,14 @@ export default function ChaseModal({
           content: content.trim(),
           job_id: job.id,
           chase_method: chaseMethod,
-          chase_response: chaseResponse || undefined,
           next_chase_date: nextChaseDate || undefined,
           chase_alert_user_id: chaseAlertUserId || undefined,
           chase_alert_delivery: delivery,
         });
+      }
+      // Persist the per-job auto-chase mode if it changed (manager-tier control).
+      if (canDraftChase && autoChaseMode !== ((job.auto_chase_mode as AutoChaseMode) || 'off')) {
+        await api.patch(`/pipeline/${job.id}`, { auto_chase_mode: autoChaseMode });
       }
       onChaseLogged();
       onClose();
@@ -136,6 +153,11 @@ export default function ChaseModal({
         {},
       );
       setDraftResult({ to: res.data.to, subject: res.data.subject, threaded: res.data.threaded });
+      // Auto-populate the chase as a logged email (not saved until they click
+      // Log Chase). Keep any note they'd already typed.
+      setMode('log');
+      setChaseMethod('email');
+      setContent((prev) => (prev.trim() ? prev : 'Generated auto-chase email — draft created in info@ for review.'));
     } catch (err) {
       setDraftError(err instanceof Error ? err.message : 'Failed to draft chase');
     } finally {
@@ -148,43 +170,82 @@ export default function ChaseModal({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black/30" onClick={onClose} />
-      <div className="relative bg-white rounded-xl shadow-xl p-6 w-full max-w-md mx-4">
-        <h3 className="text-lg font-semibold mb-1">
-          {isReschedule ? 'Reschedule Chase' : 'Log Chase'}
-        </h3>
-        <p className="text-sm text-gray-500 mb-4">
-          {job.job_name} — {job.company_name || job.client_name}
-          {!isReschedule && job.chase_count > 0 && <span className="ml-2 text-gray-400">(chase #{job.chase_count + 1})</span>}
-        </p>
+      <div className="relative bg-white rounded-xl shadow-xl w-full max-w-md mx-4 max-h-[90vh] flex flex-col">
+        <div className="px-6 pt-6 pb-3">
+          <h3 className="text-lg font-semibold mb-1">
+            {isReschedule ? 'Reschedule Chase' : 'Log Chase'}
+          </h3>
+          <p className="text-sm text-gray-500">
+            {job.job_name} — {job.company_name || job.client_name}
+            {!isReschedule && job.chase_count > 0 && <span className="ml-2 text-gray-400">(chase #{job.chase_count + 1})</span>}
+          </p>
+        </div>
 
-        {/* AI chase-draft — creates a Gmail draft in info@ for review. Manager tier. */}
-        {canDraftChase && (
-          <div className="mb-4 p-3 rounded-lg border border-indigo-200 bg-indigo-50/60">
-            {draftResult ? (
-              <div className="text-xs text-indigo-900">
-                <p className="font-medium">✓ Draft created in info@</p>
-                <p className="mt-0.5 text-indigo-700">
-                  To {draftResult.to}{draftResult.threaded ? ' (replying in their thread)' : ' (new email)'} — review &amp; send from Gmail Drafts.
-                </p>
-                <p className="mt-0.5 text-indigo-500 truncate" title={draftResult.subject}>“{draftResult.subject}”</p>
+        <div className="px-6 pb-4 overflow-y-auto flex-1">
+        {/* Chase actions — a one-off "chase now" (manual draft) vs setting up
+            auto-chase for the due date. Two clearly-separate things. Manager
+            tier, and only on the "Log a chase" view (irrelevant to rescheduling). */}
+        {canDraftChase && !isReschedule && (
+          <div className="mb-3 rounded-lg border border-indigo-200 bg-indigo-50/60 overflow-hidden">
+            {/* Chase now — immediate, manual. */}
+            <div className="p-2.5 flex items-center justify-between gap-3">
+              <div className="text-xs min-w-0">
+                <p className="font-medium text-indigo-800">Chase now</p>
+                {draftResult ? (
+                  <p className="text-indigo-700 mt-0.5">✓ Draft in info@ to {draftResult.to}{draftResult.threaded ? ' (in their thread)' : ''} — send it from Gmail.</p>
+                ) : (
+                  <p className="text-indigo-600 mt-0.5">Write a chase as a Gmail draft for you to send.</p>
+                )}
+                {draftError && <p className="text-red-600 mt-0.5">{draftError}</p>}
               </div>
-            ) : (
-              <div className="flex items-center justify-between gap-3">
-                <div className="text-xs text-indigo-800">
-                  <p className="font-medium">Draft a chase email</p>
-                  <p className="text-indigo-600">AI-drafts a “just checking in” email as a Gmail draft in info@ — nothing sends.</p>
+              <button
+                type="button"
+                onClick={handleDraftChase}
+                disabled={drafting}
+                className="shrink-0 px-3 py-1.5 text-xs font-medium bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50"
+              >
+                {drafting ? 'Drafting…' : '✨ Draft chase'}
+              </button>
+            </div>
+
+            {/* Auto-chase — what happens automatically on the due date. */}
+            <div className="px-2.5 py-2 border-t border-indigo-100 bg-white/40">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-xs font-medium text-indigo-800">Auto-chase when due</span>
+                <div className="inline-flex p-0.5 bg-white border border-indigo-200 rounded-lg text-xs">
+                  {([
+                    { k: 'off', label: 'Off' },
+                    { k: 'draft', label: 'Draft' },
+                    { k: 'send', label: 'Send' },
+                  ] as const).map((m) => {
+                    const lockedSend = m.k === 'send' && !autoSendEnabled && autoChaseMode !== 'send';
+                    return (
+                      <button
+                        key={m.k}
+                        type="button"
+                        disabled={lockedSend}
+                        title={lockedSend ? 'Turn on auto-send in Settings → Auto-Chase first' : undefined}
+                        onClick={() => setAutoChaseMode(m.k)}
+                        className={`px-2.5 py-1 rounded-md transition-colors ${
+                          autoChaseMode === m.k ? 'bg-indigo-600 text-white font-medium' : 'text-indigo-600 hover:bg-indigo-50'
+                        } ${lockedSend ? 'opacity-40 cursor-not-allowed hover:bg-transparent' : ''}`}
+                      >
+                        {m.label}
+                      </button>
+                    );
+                  })}
                 </div>
-                <button
-                  type="button"
-                  onClick={handleDraftChase}
-                  disabled={drafting}
-                  className="shrink-0 px-3 py-1.5 text-xs font-medium bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50"
-                >
-                  {drafting ? 'Drafting…' : '✨ Draft chase'}
-                </button>
               </div>
-            )}
-            {draftError && <p className="mt-2 text-xs text-red-600">{draftError}</p>}
+              <p className="text-[11px] text-indigo-500 mt-1.5">
+                {autoChaseMode === 'off'
+                  ? 'Off — you chase it yourself (manually, or with “Chase now” above).'
+                  : autoChaseMode === 'draft'
+                  ? 'On the chase date, a Gmail draft is auto-written for you to review + send.'
+                  : autoSendEnabled
+                  ? 'On the chase date, the chase is auto-written and sent. A client reply pauses it; after 3 silent chases it comes back to you.'
+                  : 'Auto-send is off globally, so this will only draft until you enable it in Settings → Auto-Chase.'}
+              </p>
+            </div>
           </div>
         )}
 
@@ -214,8 +275,7 @@ export default function ChaseModal({
           <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">{error}</div>
         )}
 
-        {/* Fixed min-height prevents the dialog jumping when switching modes */}
-        <div className="space-y-4 min-h-[360px]">
+        <div className="space-y-4">
           {!isReschedule && (
             <>
               <div>
@@ -244,17 +304,6 @@ export default function ChaseModal({
                   onChange={(e) => setContent(e.target.value)}
                   placeholder="e.g. Called, left voicemail. Will try again Thursday."
                   rows={3}
-                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Response (optional)</label>
-                <input
-                  type="text"
-                  value={chaseResponse}
-                  onChange={(e) => setChaseResponse(e.target.value)}
-                  placeholder="e.g. No answer / Waiting on budget sign-off / Will confirm Friday"
                   className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
                 />
               </div>
@@ -357,7 +406,9 @@ export default function ChaseModal({
           </div>
         </div>
 
-        <div className="flex gap-3 justify-end mt-6">
+        </div>{/* end scrollable body */}
+
+        <div className="flex gap-3 justify-end px-6 py-4 border-t border-gray-100">
           <button
             onClick={onClose}
             className="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50"

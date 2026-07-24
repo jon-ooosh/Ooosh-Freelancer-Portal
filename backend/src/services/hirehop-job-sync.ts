@@ -251,14 +251,6 @@ export async function syncJobsFromHireHop(userId: string): Promise<JobSyncResult
 
   console.log(`[HH Job Sync] Processing ${jobs.length} active jobs`);
 
-  // Debug: log first job's raw data to diagnose MONEY field
-  if (jobs.length > 0) {
-    const sample = jobs[0];
-    console.log(`[HH Job Sync] Sample job fields:`, Object.keys(sample).join(', '));
-    console.log(`[HH Job Sync] Sample MONEY value:`, JSON.stringify(sample.MONEY), `type: ${typeof sample.MONEY}`);
-    console.log(`[HH Job Sync] Sample INVOICED value:`, JSON.stringify(sample.INVOICED), `type: ${typeof sample.INVOICED}`);
-  }
-
   // Pre-load all HireHop org mappings for client linking
   const orgMappings = await query(
     `SELECT external_id, entity_id FROM external_id_map
@@ -343,7 +335,11 @@ export async function syncJobsFromHireHop(userId: string): Promise<JobSyncResult
       }
 
       if (existing.rows.length > 0) {
-        // Update existing job — HH-owned fields only (never overwrite pipeline fields)
+        // Update existing job — HH-owned fields only (never overwrite pipeline fields).
+        // job_value is deliberately NOT written here: search_list.php's MONEY
+        // field is empty/0 for most jobs and used to clobber the cached value
+        // back to £0 every 30 minutes. job_value is owned by the billing-accrued
+        // path (Money tab side-effect + services/job-value-sync gap-filler).
         await client.query(
           `UPDATE jobs SET
              job_name = $1, job_type = $2, status = $3, status_name = $4,
@@ -352,9 +348,9 @@ export async function syncJobsFromHireHop(userId: string): Promise<JobSyncResult
              venue_id = COALESCE($10, venue_id), venue_name = $11,
              out_date = $12, job_date = $13, job_end = $14, return_date = $15,
              created_date = $16, manager1_name = $17, manager2_name = $18,
-             custom_index = $19, job_value = $20, hh_status = $3,
+             custom_index = $19, hh_status = $3,
              updated_at = NOW()
-           WHERE hh_job_number = $21`,
+           WHERE hh_job_number = $20`,
           [
             stripProjectPrefix(job.JOB_NAME),
             job.JOB_TYPE || null,
@@ -375,7 +371,6 @@ export async function syncJobsFromHireHop(userId: string): Promise<JobSyncResult
             job.MANAGER || null,
             job.MANAGER2 || null,
             job.CUSTOM_INDEX || null,
-            job.MONEY != null ? job.MONEY : null,
             jobNumber,
           ]
         );
@@ -390,17 +385,19 @@ export async function syncJobsFromHireHop(userId: string): Promise<JobSyncResult
           statusCode === 10 ? 'lost' :
           statusCode === 11 ? 'confirmed' : 'new_enquiry';
 
+        // job_value deliberately not seeded from MONEY (unreliable) — the
+        // hourly job-value gap-filler populates it from HH billing accrued.
         const jobResult = await client.query(
           `INSERT INTO jobs (
              hh_job_number, job_name, job_type, status, status_name,
              colour, client_id, client_name, company_name, client_ref,
              venue_id, venue_name, out_date, job_date, job_end, return_date,
              created_date, manager1_name, manager2_name, custom_index, created_by,
-             job_value, hh_status, pipeline_status, pipeline_status_changed_at
+             hh_status, pipeline_status, pipeline_status_changed_at
            ) VALUES (
              $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
              $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
-             $22, $4, $23, NOW()
+             $4, $22, NOW()
            ) RETURNING id`,
           [
             jobNumber,
@@ -424,7 +421,6 @@ export async function syncJobsFromHireHop(userId: string): Promise<JobSyncResult
             job.MANAGER2 || null,
             job.CUSTOM_INDEX || null,
             userId,
-            job.MONEY != null ? job.MONEY : null,
             initialPipelineStatus,
           ]
         );
@@ -734,7 +730,6 @@ export async function syncSingleHireHopJob(
     MANAGER: (raw.MANAGER as string) || null,
     MANAGER2: (raw.MANAGER2 as string) || null,
     CUSTOM_INDEX: (raw.CUSTOM_INDEX as string) || null,
-    MONEY: raw.MONEY != null ? Number(raw.MONEY) : null,
   };
 
   const result: SingleJobSyncResult = {
@@ -812,6 +807,8 @@ export async function syncSingleHireHopJob(
     );
 
     if (existing.rows.length > 0) {
+      // job_value deliberately not written — owned by the billing-accrued
+      // path (Money tab side-effect + services/job-value-sync gap-filler).
       await client.query(
         `UPDATE jobs SET
            job_name = $1, job_type = $2, status = $3, status_name = $4,
@@ -820,9 +817,9 @@ export async function syncSingleHireHopJob(
            venue_id = COALESCE($10, venue_id), venue_name = $11,
            out_date = $12, job_date = $13, job_end = $14, return_date = $15,
            created_date = $16, manager1_name = $17, manager2_name = $18,
-           custom_index = $19, job_value = $20, hh_status = $3,
+           custom_index = $19, hh_status = $3,
            updated_at = NOW()
-         WHERE hh_job_number = $21`,
+         WHERE hh_job_number = $20`,
         [
           stripProjectPrefix(job.JOB_NAME),
           job.JOB_TYPE,
@@ -843,7 +840,6 @@ export async function syncSingleHireHopJob(
           job.MANAGER,
           job.MANAGER2,
           job.CUSTOM_INDEX,
-          job.MONEY,
           job.NUMBER,
         ],
       );
@@ -860,17 +856,19 @@ export async function syncSingleHireHopJob(
         statusCode === 10 ? 'lost' :
         statusCode === 11 ? 'confirmed' : 'new_enquiry';
 
+      // job_value deliberately not seeded — the hourly job-value gap-filler
+      // populates it from HH billing accrued.
       const insertRes = await client.query(
         `INSERT INTO jobs (
            hh_job_number, job_name, job_type, status, status_name,
            colour, client_id, client_name, company_name, client_ref,
            venue_id, venue_name, out_date, job_date, job_end, return_date,
            created_date, manager1_name, manager2_name, custom_index, created_by,
-           job_value, hh_status, pipeline_status, pipeline_status_changed_at
+           hh_status, pipeline_status, pipeline_status_changed_at
          ) VALUES (
            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
            $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
-           $22, $4, $23, NOW()
+           $4, $22, NOW()
          ) RETURNING id`,
         [
           job.NUMBER,
@@ -894,7 +892,6 @@ export async function syncSingleHireHopJob(
           job.MANAGER2,
           job.CUSTOM_INDEX,
           userId,
-          job.MONEY,
           initialPipelineStatus,
         ],
       );

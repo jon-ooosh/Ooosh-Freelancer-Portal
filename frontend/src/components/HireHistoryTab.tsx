@@ -303,16 +303,20 @@ export default function HireHistoryTab({ entityType, entityId }: Props) {
 
   return (
     <div className="space-y-4">
-      {/* Stats summary */}
+      {/* Stats summary — reflects the active filters (see the "· filtered" hint) */}
       {stats && totalJobs > 0 && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <div className="bg-white rounded-lg border border-gray-200 p-3 text-center">
             <div className="text-2xl font-bold text-gray-900">{stats.total_jobs}</div>
-            <div className="text-xs text-gray-500">Total Jobs</div>
+            <div className="text-xs text-gray-500">
+              Total Jobs{filtersActive && <span className="text-ooosh-500"> · filtered</span>}
+            </div>
           </div>
           <div className="bg-white rounded-lg border border-gray-200 p-3 text-center">
             <div className="text-2xl font-bold text-green-600">{stats.confirmed_jobs}</div>
-            <div className="text-xs text-gray-500">Confirmed</div>
+            <div className="text-xs text-gray-500">
+              Confirmed{filtersActive && <span className="text-ooosh-500"> · filtered</span>}
+            </div>
           </div>
           <div className="bg-white rounded-lg border border-gray-200 p-3 text-center">
             <div className="text-2xl font-bold text-gray-900">
@@ -320,7 +324,9 @@ export default function HireHistoryTab({ entityType, entityId }: Props) {
                 ? `£${parseFloat(stats.total_value).toLocaleString('en-GB', { maximumFractionDigits: 0 })}`
                 : '—'}
             </div>
-            <div className="text-xs text-gray-500">Total Value</div>
+            <div className="text-xs text-gray-500">
+              Total Value{filtersActive && <span className="text-ooosh-500"> · filtered</span>}
+            </div>
           </div>
           <div className="bg-white rounded-lg border border-gray-200 p-3 text-center">
             {totalRetros > 0 ? (
@@ -332,7 +338,9 @@ export default function HireHistoryTab({ entityType, entityId }: Props) {
             ) : (
               <div className="text-2xl font-bold text-gray-300">&mdash;</div>
             )}
-            <div className="text-xs text-gray-500 mt-0.5">Retros</div>
+            <div className="text-xs text-gray-500 mt-0.5">
+              Retros{filtersActive && <span className="text-ooosh-500"> · filtered</span>}
+            </div>
           </div>
         </div>
       )}

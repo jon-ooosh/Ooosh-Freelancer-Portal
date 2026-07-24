@@ -10,7 +10,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
-import { authenticate, authorize, AuthRequest } from '../middleware/auth';
+import { authenticate, authorize, STAFF_ROLES, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { verifyApiKey } from '../middleware/api-key';
 import { hhBroker } from '../services/hirehop-broker';
@@ -26,6 +26,7 @@ import {
 } from '../services/confirmation-hooks';
 import { calculateVatAdjustment } from '../services/vat-adjustment';
 import { syncExcessRequirementStatus } from '../services/excess-requirement-sync';
+import { reconcileExpiredPreauthsForJob } from '../services/excess-preauth';
 import { emailService } from '../services/email-service';
 import { getFrontendUrl } from '../config/app-urls';
 
@@ -318,6 +319,48 @@ router.delete('/:jobId/resolve-balance', authorize('admin'), async (req: AuthReq
     const msg = error instanceof Error ? error.message : String(error);
     console.error('[money] unresolve-balance error:', msg);
     res.status(500).json({ error: 'Failed to remove balance override', detail: msg });
+  }
+});
+
+// ── POST /api/money/:jobId/resend-confirmation ──
+// Manually re-fire the client payment/booking-confirmation email for a job.
+// Reads live data, so it works for ANY confirmed job (incl. ones whose original
+// auto-send failed — the resend does not depend on a stored "failed" flag).
+// Surfaces the send result (incl. SMTP failure) so staff know if it worked.
+router.post('/:jobId/resend-confirmation', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const jobUuid = await resolveJobUuid(String(req.params.jobId));
+    if (!jobUuid) { res.status(404).json({ error: 'Job not found' }); return; }
+
+    // amount: the figure to show in the email. Frontend passes the total hire
+    // deposits it already has from /summary. Falls back to 0 (template still
+    // renders sensibly) if not supplied.
+    const amount = Number(req.body?.amount) || 0;
+    const isConfirmingBooking = req.body?.is_confirming_booking !== false; // default true
+    const bankName = typeof req.body?.bank_name === 'string' ? req.body.bank_name : '';
+
+    const result = await sendPaymentEmail({
+      jobId: jobUuid,
+      amount,
+      bankName,
+      paymentType: 'deposit',
+      isConfirmingBooking,
+    });
+
+    if (!result.sent) {
+      // Not a 500 — the request was valid, the email just didn't go. Report
+      // clearly so the UI can show why (no recipient vs SMTP failure).
+      res.status(200).json({
+        data: { sent: false, reason: result.reason, error: result.error, is_fallback: result.isFallback },
+      });
+      return;
+    }
+
+    res.json({ data: { sent: true, is_fallback: result.isFallback } });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error('[money] resend-confirmation error:', msg);
+    res.status(500).json({ error: 'Failed to resend confirmation email', detail: msg });
   }
 });
 
@@ -651,53 +694,14 @@ router.get('/job-lookup/:hhJobNumber', async (req: AuthRequest, res: Response) =
 });
 
 // ── POST /api/money/sync-values — Bulk-update job_value for jobs missing values ──
-// Called on jobs/pipeline page load to populate cached hire values from HH billing
+// On-demand trigger for the job-value gap-filler (same engine as the hourly
+// scheduler task — see services/job-value-sync.ts).
 
 router.post('/sync-values', async (req: AuthRequest, res: Response) => {
   try {
-    // Find HH-linked jobs with no job_value (or job_value = 0)
-    const jobsResult = await query(
-      `SELECT id, hh_job_number FROM jobs
-       WHERE hh_job_number IS NOT NULL
-         AND (job_value IS NULL OR job_value = 0)
-         AND status NOT IN (9, 10, 11)
-       ORDER BY updated_at DESC
-       LIMIT 20`
-    );
-
-    if (jobsResult.rows.length === 0) {
-      res.json({ data: { updated: 0 } });
-      return;
-    }
-
-    let updated = 0;
-    // Process sequentially to avoid rate limiting (billing_list is per-job)
-    for (const job of jobsResult.rows) {
-      try {
-        const billingRes = await hhBroker.get('/php_functions/billing_list.php',
-          { main_id: job.hh_job_number, type: 1 },
-          { priority: 'low', cacheTTL: 300 }
-        );
-
-        if (billingRes.success && billingRes.data) {
-          const bl = billingRes.data as Record<string, any>;
-          if (bl.rows && Array.isArray(bl.rows)) {
-            for (const row of bl.rows) {
-              if (parseInt(row.kind ?? '0') === 0) {
-                const accrued = parseFloat(row.accrued || row.data?.accrued || '0');
-                if (accrued > 0) {
-                  await query(`UPDATE jobs SET job_value = $1 WHERE id = $2`, [accrued, job.id]);
-                  updated++;
-                }
-                break;
-              }
-            }
-          }
-        }
-      } catch { /* skip individual failures */ }
-    }
-
-    res.json({ data: { updated, checked: jobsResult.rows.length } });
+    const { syncMissingJobValues } = await import('../services/job-value-sync');
+    const result = await syncMissingJobValues(20);
+    res.json({ data: result });
   } catch (error) {
     console.error('[money] Sync values error:', error);
     res.status(500).json({ error: 'Failed to sync job values' });
@@ -729,6 +733,13 @@ router.get('/:jobId/excess-info', async (req: AuthRequest, res: Response) => {
     }
 
     const job = jobResult.rows[0];
+
+    // Opportunistic self-heal — resolve any past-expiry pre-auth hold on this job
+    // to its true state (Stripe/window) so the Overview card shows a binary
+    // held/released, not a stale guess. Fire-and-forget: never delays this render.
+    void reconcileExpiredPreauthsForJob(job.id).catch((e) =>
+      console.error('[money] excess-info pre-auth self-heal failed:', e)
+    );
 
     // Calculate hire duration
     const startDate = job.job_date || job.out_date;
@@ -874,13 +885,6 @@ router.get('/:jobId/excess-info', async (req: AuthRequest, res: Response) => {
       };
     });
 
-    // Totals — collected = money in account + money on hold (migration 087).
-    // Held money counts as collected for portal display purposes (client sees
-    // their excess is covered, whether by pre-auth or captured payment).
-    const totalRequired = drivers.reduce((sum: number, d: any) => sum + d.excess_amount_required, 0);
-    const totalCollected = drivers.reduce((sum: number, d: any) => sum + d.excess_amount_taken + d.amount_held, 0);
-    const totalOutstanding = Math.max(0, totalRequired - totalCollected);
-
     // A record is "covered" if it's in a terminal state (waived/reimbursed/claimed/rolled_over/not_required),
     // OR enough money has been taken/held to meet the required amount. This catches the edge case of a
     // pre-auth or 'taken' record that's underfunded (e.g. £600 pre-auth against £1,200 required).
@@ -893,6 +897,24 @@ router.get('/:jobId/excess-info', async (req: AuthRequest, res: Response) => {
       const coverage = (d.excess_amount_taken || 0) + (d.amount_held || 0);
       return required > 0 && coverage >= required;
     };
+
+    // Totals — collected = money in account + money on hold (migration 087).
+    // Held money counts as collected for portal display purposes (client sees
+    // their excess is covered, whether by pre-auth or captured payment).
+    const totalRequired = drivers.reduce((sum: number, d: any) => sum + d.excess_amount_required, 0);
+    const totalCollected = drivers.reduce((sum: number, d: any) => sum + d.excess_amount_taken + d.amount_held, 0);
+    // Outstanding is per-record and skips covered records — a `waived` (or
+    // auto-covered / rolled_over / not_required) record that keeps a `required`
+    // amount for reference must NOT read as outstanding on the requirement card.
+    // (The old global `required − collected` counted a covered £1,200-required /
+    // £0-collected record as £1,200 outstanding — the auto-cover phantom.)
+    const totalOutstanding = drivers.reduce((sum: number, d: any) => {
+      if (isCovered(d)) return sum;
+      const required = d.excess_amount_required || 0;
+      const coverage = (d.excess_amount_taken || 0) + (d.amount_held || 0);
+      return sum + Math.max(0, required - coverage);
+    }, 0);
+
     const driversCleared = drivers.filter(isCovered).length;
     const driversPending = drivers.length - driversCleared;
 
@@ -1015,6 +1037,12 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
 
     const job = jobResult.rows[0];
     const hhJobId = job.hh_job_number;
+
+    // Opportunistic self-heal — resolve any past-expiry pre-auth hold to its true
+    // state so the Money tab shows a binary held/released. Fire-and-forget.
+    void reconcileExpiredPreauthsForJob(job.id).catch((e) =>
+      console.error('[money] summary pre-auth self-heal failed:', e)
+    );
 
     // Fetch HireHop billing data (deposits, payments, hire value)
     let hhBilling: any = null;

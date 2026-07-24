@@ -28,6 +28,9 @@ import { useAuthStore } from '../hooks/useAuthStore';
 import MoneyTab from '../components/MoneyTab';
 import RackPlanModal from '../components/rackplan/RackPlanModal';
 import RackPlanOverviewCard from '../components/rackplan/RackPlanOverviewCard';
+import StudioHandoverCard from '../components/StudioHandoverCard';
+import RehearsalDetailsCard from '../components/RehearsalDetailsCard';
+import RehearsalProfileFiles from '../components/RehearsalProfileFiles';
 import DatePicker from '../components/DatePicker';
 import { TimeInput } from '../components/TimeInput';
 import ChaseModal from '../components/ChaseModal';
@@ -98,6 +101,7 @@ interface JobDetail {
   client_id: string | null;
   client_name: string | null;
   company_name: string | null;
+  client_org_name: string | null;
   client_ref: string | null;
   venue_id: string | null;
   venue_name: string | null;
@@ -878,7 +882,7 @@ function HireFormActions({ assignmentId, pdfKey, pdfGeneratedAt, vehicleId }: {
       {open && (
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="absolute left-0 mt-1 z-20 w-52 bg-white rounded-lg shadow-lg border border-gray-200 py-1 text-sm">
+          <div className="absolute right-0 mt-1 z-20 w-52 bg-white rounded-lg shadow-lg border border-gray-200 py-1 text-sm">
             <button
               type="button"
               onClick={() => { setOpen(false); generatePdf(false); }}
@@ -923,7 +927,7 @@ function HireFormActions({ assignmentId, pdfKey, pdfGeneratedAt, vehicleId }: {
         </>
       )}
       {message && (
-        <div className={`absolute left-0 top-full mt-1 z-20 w-64 text-xs px-2 py-1.5 rounded shadow-sm ${message.startsWith('Error') ? 'bg-red-50 text-red-700' : 'bg-green-50 text-green-700'}`}>
+        <div className={`absolute right-0 top-full mt-1 z-20 w-64 max-w-[80vw] text-xs px-2 py-1.5 rounded shadow-sm ${message.startsWith('Error') ? 'bg-red-50 text-red-700' : 'bg-green-50 text-green-700'}`}>
           {message}
         </div>
       )}
@@ -1400,8 +1404,11 @@ export default function JobDetailPage() {
   const location = useLocation();
   const [searchParams] = useSearchParams();
   const user = useAuthStore(s => s.user);
+  // `backTo` is retained only as a fallback destination if the job fails to load
+  // (see loadJob's catch). The top-of-page "Back to …" breadcrumb was removed
+  // (Jul 2026) — it was usually wrong, since only Pipeline/Lost&Cancelled passed
+  // `state.from`; every other entry point silently defaulted to "Back to Jobs".
   const backTo = (location.state as { from?: string })?.from || '/jobs';
-  const backLabel = backTo.includes('/returns') ? 'Back to Returns' : backTo.includes('/lost-cancelled') ? 'Back to Lost & Cancelled' : backTo === '/pipeline' ? 'Back to Pipeline' : 'Back to Jobs';
 
   const [job, setJob] = useState<JobDetail | null>(null);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
@@ -1475,6 +1482,7 @@ export default function JobDetailPage() {
     venueName: '',
     jobDate: '',
     arrivalTime: '',
+    freelancerNotes: '',
     notes: '',
     pushToHirehop: true,
   });
@@ -1494,6 +1502,7 @@ export default function JobDetailPage() {
   const [jobOrgSelectedOrg, setJobOrgSelectedOrg] = useState<{ id: string; name: string; type: string } | null>(null);
   const [jobOrgRole, setJobOrgRole] = useState('band');
   const [jobOrgSaving, setJobOrgSaving] = useState(false);
+  const [jobOrgCreating, setJobOrgCreating] = useState(false);
   const [orgSuggestions, setOrgSuggestions] = useState<Array<{
     org_id: string; org_name: string; org_type: string;
     relationship_type: string; suggested_role: string;
@@ -1588,6 +1597,7 @@ export default function JobDetailPage() {
   const [editingClient, setEditingClient] = useState(false);
   const [clientSearch, setClientSearch] = useState('');
   const [clientSearchResults, setClientSearchResults] = useState<Array<{ id: string; name: string; type: string }>>([]);
+  const [creatingClient, setCreatingClient] = useState(false);
   const [inlineEditSaving, setInlineEditSaving] = useState(false);
   const [pushingToHH, setPushingToHH] = useState(false);
   const [hhClientOutOfSync, setHhClientOutOfSync] = useState(false);
@@ -1689,6 +1699,24 @@ export default function JobDetailPage() {
   const [pushingStatusToHH, setPushingStatusToHH] = useState(false);
   const [prepChecklistKey, setPrepChecklistKey] = useState(0);
   const [internalToggling, setInternalToggling] = useState(false);
+  // Band rehearsal-profile files surfaced on the Files tab (read-only). Fetched
+  // at page level so the count feeds the Files tab badge without opening the tab.
+  const [rehearsalFiles, setRehearsalFiles] = useState<
+    { r2_key: string; filename: string; label?: string | null; comment?: string | null }[]
+  >([]);
+  const [rehearsalAnchor, setRehearsalAnchor] = useState<{ id: string; name: string | null } | null>(null);
+  const hasRehearsal = !!hhSyncResult?.derivation?.flags?.has_rehearsal;
+  useEffect(() => {
+    if (!id || !hasRehearsal) { setRehearsalFiles([]); setRehearsalAnchor(null); return; }
+    let cancelled = false;
+    api.get<{ data: { anchorOrg: { id: string; name: string | null } | null; profile: { files?: typeof rehearsalFiles } | null } }>(
+      `/rehearsals/job/${id}`
+    )
+      .then((r) => { if (!cancelled) { setRehearsalFiles(r.data.profile?.files ?? []); setRehearsalAnchor(r.data.anchorOrg); } })
+      .catch(() => { if (!cancelled) { setRehearsalFiles([]); setRehearsalAnchor(null); } });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, hasRehearsal]);
   const editNameRef = useRef<HTMLInputElement>(null);
   const editHHRef = useRef<HTMLInputElement>(null);
   const clientSearchRef = useRef<HTMLDivElement>(null);
@@ -1932,6 +1960,25 @@ export default function JobDetailPage() {
       setHhClientSyncName(org.name);
       setHhClientOutOfSync(true);
       setHhClientSyncSuccess(false);
+    }
+  }
+
+  // Create a brand-new client organisation from the picker (mirrors the New
+  // Enquiry form's inline create) when the search finds no matching org.
+  async function createAndSelectClient(name: string) {
+    const trimmed = name.trim();
+    if (!trimmed || creatingClient) return;
+    setCreatingClient(true);
+    try {
+      const newOrg = await api.post<{ id: string }>('/organisations', {
+        name: trimmed,
+        type: 'client',
+      });
+      await selectClient({ id: newOrg.id, name: trimmed });
+    } catch (err: any) {
+      alert(err?.message || 'Failed to create organisation');
+    } finally {
+      setCreatingClient(false);
     }
   }
 
@@ -2326,6 +2373,7 @@ export default function JobDetailPage() {
       venueName: job.venue_name || '',
       jobDate: defaultDate,
       arrivalTime: '',
+      freelancerNotes: '',
       notes: '',
       pushToHirehop: true,
     });
@@ -2493,6 +2541,25 @@ export default function JobDetailPage() {
       setJobOrgs(data.data);
     } catch (err) {
       console.error('Failed to load job organisations:', err);
+    }
+  }
+
+  // Inline-create a new organisation from the additional-orgs search box, then
+  // select it (staff pick a role + Add). Mirrors createAndSelectClient on the
+  // headline picker. New orgs default to type 'band' — the per-job role is what
+  // matters here, and band is the most common thing you'd add on the fly.
+  async function createAndSelectJobOrg(name: string) {
+    const trimmed = name.trim();
+    if (!trimmed || jobOrgCreating) return;
+    setJobOrgCreating(true);
+    try {
+      const newOrg = await api.post<{ id: string }>('/organisations', { name: trimmed, type: 'band' });
+      setJobOrgSelectedOrg({ id: newOrg.id, name: trimmed, type: 'band' });
+      setJobOrgResults([]);
+    } catch (err: any) {
+      alert(err?.response?.data?.error || err?.message || 'Failed to create organisation');
+    } finally {
+      setJobOrgCreating(false);
     }
   }
 
@@ -2941,7 +3008,7 @@ export default function JobDetailPage() {
   })();
   // ─────────────────────────────────────────────────────────────────────────
 
-  const fileCount = (job.files || []).length;
+  const fileCount = (job.files || []).length + rehearsalFiles.length;
   const hhJobUrl = job.hh_job_number
     ? `https://myhirehop.com/job.php?id=${job.hh_job_number}`
     : null;
@@ -2951,11 +3018,6 @@ export default function JobDetailPage() {
   return (
     <div className={showClientHistory ? 'lg:flex lg:gap-6' : ''}>
       <div className={showClientHistory ? 'flex-1 min-w-0' : ''}>
-      {/* Back link */}
-      <Link to={backTo} className="text-sm text-ooosh-600 hover:text-ooosh-700 mb-4 inline-block">
-        &larr; {backLabel}
-      </Link>
-
       {/* Combined banner — absorbed booking folded into another. Replaces the
           red cancelled banner (it's a merge, not a real cancellation). */}
       {job.combined_into_job_id && (
@@ -3258,12 +3320,14 @@ export default function JobDetailPage() {
 
             {/* Client, Venue, Dates summary row */}
             <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-sm text-gray-600 items-center">
-              {/* Client headline — prefer band → linked client org → company → client_name
-                  Contact person surfaced separately when HH CONTACT differs from HH COMPANY */}
+              {/* Client headline — prefer band → linked client org (canonical name via
+                  client_id) → HH company_name → HH client_name. Reading the linked org's
+                  own name (not the volatile HH company_name string) means changing the
+                  client actually updates the headline immediately. */}
               <div className="relative inline-flex items-center gap-1" ref={clientSearchRef}>
                 {(() => {
                   const bandOrg = jobOrgs.find(jo => jo.role === 'band');
-                  const hasClient = !!(job.client_name || job.company_name);
+                  const hasClient = !!(job.client_org_name || job.client_name || job.company_name);
                   if (!bandOrg && !hasClient) {
                     return (
                       <button
@@ -3275,6 +3339,7 @@ export default function JobDetailPage() {
                     );
                   }
                   const headlineText = bandOrg?.organisation_name
+                    || job.client_org_name
                     || job.company_name
                     || job.client_name;
                   const headlineLinkId = bandOrg?.organisation_id || job.client_id;
@@ -3326,9 +3391,26 @@ export default function JobDetailPage() {
                         ))}
                       </div>
                     )}
-                    {clientSearch.length >= 2 && clientSearchResults.length === 0 && (
-                      <div className="px-3 py-2 text-sm text-gray-400">No results</div>
-                    )}
+                    {(() => {
+                      const trimmed = clientSearch.trim();
+                      if (trimmed.length < 2) return null;
+                      const exactMatch = clientSearchResults.some(
+                        (o) => o.name.toLowerCase() === trimmed.toLowerCase()
+                      );
+                      if (exactMatch) return null;
+                      return (
+                        <button
+                          onClick={() => createAndSelectClient(trimmed)}
+                          disabled={creatingClient}
+                          className="w-full text-left px-3 py-2 hover:bg-green-50 text-sm flex items-center gap-2 border-t border-gray-100 disabled:opacity-60"
+                        >
+                          <span className="text-xs font-medium bg-green-100 text-green-700 px-1.5 py-0.5 rounded">+ New</span>
+                          <span className="text-gray-900 truncate">
+                            {creatingClient ? 'Creating…' : <>Create &ldquo;{trimmed}&rdquo; as new client</>}
+                          </span>
+                        </button>
+                      );
+                    })()}
                   </div>
                 )}
               </div>
@@ -3336,7 +3418,7 @@ export default function JobDetailPage() {
               {(() => {
                 const bandOrg = jobOrgs.find(jo => jo.role === 'band');
                 if (!bandOrg) return null;
-                const billedToText = job.company_name || job.client_name;
+                const billedToText = job.client_org_name || job.company_name || job.client_name;
                 if (!billedToText) return null;
                 return (
                   <span className="text-xs text-gray-500">
@@ -3348,18 +3430,6 @@ export default function JobDetailPage() {
                     ) : (
                       <span className="text-gray-600">{billedToText}</span>
                     )}
-                  </span>
-                );
-              })()}
-              {/* Contact pill (HH CONTACT differs from HH COMPANY → person contact) */}
-              {(() => {
-                const bandOrg = jobOrgs.find(jo => jo.role === 'band');
-                if (bandOrg) return null;
-                if (!job.company_name || !job.client_name) return null;
-                if (job.client_name === job.company_name) return null;
-                return (
-                  <span className="text-xs text-gray-500">
-                    Contact: <span className="text-gray-700">{job.client_name}</span>
                   </span>
                 );
               })()}
@@ -3758,9 +3828,17 @@ export default function JobDetailPage() {
                   </div>
                 </div>
                 {editJobDate && editJobEnd && (() => {
-                  const start = new Date(editJobDate);
-                  const end = new Date(editJobEnd);
-                  const days = Math.round((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24));
+                  // Match HireHop's charge-period rule (and the OP→HH push in
+                  // pipeline.ts calcHHDuration): days = ceil(elapsed hours / 24)
+                  // computed from the full start/end DATETIMES. Ceiling counts
+                  // any part-day past a whole 24h block as a new day. For a
+                  // 9am→9am van the hours are exact multiples so this is a plain
+                  // day difference; for a rehearsal finishing on the last day
+                  // (e.g. 10:00–22:00) it correctly reports the final part-day.
+                  const startMs = Date.parse(`${editJobDate}T${editStartTime || '09:00'}:00Z`);
+                  const endMs = Date.parse(`${editJobEnd}T${editEndTime || '09:00'}:00Z`);
+                  if (isNaN(startMs) || isNaN(endMs)) return null;
+                  const days = Math.ceil(Math.max(0, (endMs - startMs) / (1000 * 60 * 60 * 24)));
                   return days > 0 ? <p className="text-xs text-gray-500 font-medium mt-1">{days} day{days !== 1 ? 's' : ''}</p> : null;
                 })()}
                 <div className="flex items-center gap-2 mt-3">
@@ -3934,6 +4012,7 @@ export default function JobDetailPage() {
                 band: 'bg-purple-100 text-purple-700 border-purple-200',
                 client: 'bg-blue-100 text-blue-700 border-blue-200',
                 promoter: 'bg-red-100 text-red-700 border-red-200',
+                festival: 'bg-orange-100 text-orange-700 border-orange-200',
                 management: 'bg-sky-100 text-sky-700 border-sky-200',
                 label: 'bg-green-100 text-green-700 border-green-200',
                 venue_operator: 'bg-teal-100 text-teal-700 border-teal-200',
@@ -3974,20 +4053,35 @@ export default function JobDetailPage() {
                       className="border border-gray-300 rounded px-2 py-1 text-xs w-48 focus:ring-ooosh-500 focus:border-ooosh-500"
                       autoFocus
                     />
-                    {jobOrgResults.length > 0 && (
-                      <div className="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg z-20 w-64 max-h-48 overflow-y-auto">
-                        {jobOrgResults.map((o) => (
-                          <button
-                            key={o.id}
-                            onClick={() => { setJobOrgSelectedOrg(o); setJobOrgResults([]); }}
-                            className="w-full text-left px-3 py-2 hover:bg-gray-50 text-xs flex items-center gap-2 border-b border-gray-50 last:border-b-0"
-                          >
-                            <span className="font-medium">{o.name}</span>
-                            <span className="text-gray-400">{o.type}</span>
-                          </button>
-                        ))}
-                      </div>
-                    )}
+                    {(() => {
+                      const trimmed = jobOrgSearch.trim();
+                      const hasExact = jobOrgResults.some(o => o.name.toLowerCase() === trimmed.toLowerCase());
+                      const showCreate = trimmed.length >= 2 && !hasExact;
+                      if (jobOrgResults.length === 0 && !showCreate) return null;
+                      return (
+                        <div className="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg z-20 w-64 max-h-48 overflow-y-auto">
+                          {jobOrgResults.map((o) => (
+                            <button
+                              key={o.id}
+                              onClick={() => { setJobOrgSelectedOrg(o); setJobOrgResults([]); }}
+                              className="w-full text-left px-3 py-2 hover:bg-gray-50 text-xs flex items-center gap-2 border-b border-gray-50 last:border-b-0"
+                            >
+                              <span className="font-medium">{o.name}</span>
+                              <span className="text-gray-400">{o.type}</span>
+                            </button>
+                          ))}
+                          {showCreate && (
+                            <button
+                              onClick={() => createAndSelectJobOrg(trimmed)}
+                              disabled={jobOrgCreating}
+                              className="w-full text-left px-3 py-2 hover:bg-ooosh-50 text-xs text-ooosh-700 font-medium border-t border-gray-100 disabled:opacity-50"
+                            >
+                              {jobOrgCreating ? 'Creating…' : <>+ Create "<span className="font-semibold">{trimmed}</span>" as new organisation</>}
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </div>
                 ) : (
                   <>
@@ -4002,6 +4096,7 @@ export default function JobDetailPage() {
                       <option value="band">Band</option>
                       <option value="client">Client</option>
                       <option value="promoter">Promoter</option>
+                      <option value="festival">Festival</option>
                       <option value="management">Management</option>
                       <option value="label">Label</option>
                       <option value="venue_operator">Venue Operator</option>
@@ -4145,6 +4240,18 @@ export default function JobDetailPage() {
           {/* Staging — surfaces once a plan exists (created from Tools → Staging Calculator) */}
           {id && <StagingOverviewCard jobId={id} refreshKey={stagingRefreshKey} />}
 
+          {/* Rehearsal details — intake + band preferences + info pack (rehearsal jobs only) */}
+          {id && (
+            <RehearsalDetailsCard
+              jobId={id}
+              hasRehearsal={!!hhSyncResult?.derivation?.flags?.has_rehearsal}
+              backlinePrepMins={hhSyncResult?.derivation?.flags?.prep_time_by_category?.backline}
+            />
+          )}
+
+          {/* Studio sitter handover — surfaces on rehearsal jobs (self-hides otherwise) */}
+          {id && <StudioHandoverCard jobId={id} />}
+
           {/* PCNs — penalty charge notices on this job. Renders only when rows
               exist (a PCN isn't a per-job prep gate); one row per notice. */}
           {id && (
@@ -4165,6 +4272,7 @@ export default function JobDetailPage() {
             clientOrgName={job.client_name}
             derivedFlags={hhSyncResult?.derivation?.flags || null}
             seatAvailability={hhSyncResult?.derivation?.seatAvailability || null}
+            assignedVehicleRegs={jobAssignedVehicles.map(v => v.reg).filter(Boolean)}
             hasCrewQuotes={quotes.some(q => (q.job_type === 'crewed' || (q.assignments && q.assignments.length > 0)) && q.status !== 'cancelled')}
             hasCrewOnHH={hhSyncResult?.derivation?.flags?.has_crew_items || false}
             onOpenCrewCalculator={() => { setShowCalculator(true); setActiveTab('transport'); }}
@@ -4346,29 +4454,48 @@ export default function JobDetailPage() {
                   <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide mr-1">
                     Vehicles on this job
                   </span>
+                  {/* Assigned chip → Vehicle Detail (view the van). */}
                   {jobAssignedVehicles.map((v) => {
                     const s = statusChip[v.status] || { label: v.status, cls: 'bg-gray-100 text-gray-600' };
                     return (
-                      <span
+                      <Link
                         key={v.vehicle_id}
-                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-ooosh-50 border border-ooosh-200"
+                        to={`/vehicles/fleet/${v.vehicle_id}`}
+                        title={`View ${v.reg || 'vehicle'}`}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-ooosh-50 border border-ooosh-200 hover:bg-ooosh-100"
                       >
                         <span aria-hidden>🚐</span>
                         <span className="font-semibold text-gray-900 text-sm">{v.reg || '—'}</span>
                         {v.type && <span className="text-xs text-gray-500">{normVanType(v.type)}</span>}
                         <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${s.cls}`}>{s.label}</span>
-                      </span>
+                      </Link>
                     );
                   })}
+                  {/* Unassigned chip → Allocations page for this job (pick a van).
+                      Can't one-click assign from here — allocation is per
+                      driver-slot — so it's a shortcut to the allocations screen,
+                      same destination as the card's "Allocate Van" button. */}
                   {unassigned.map((t, i) => (
-                    <span
-                      key={`u-${i}`}
-                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-50 border border-dashed border-amber-300 text-amber-700 text-sm font-medium"
-                      title="Detected on HireHop but no van allocated yet"
-                    >
-                      <span aria-hidden>🚐</span>
-                      {t} — unassigned
-                    </span>
+                    job.hh_job_number ? (
+                      <Link
+                        key={`u-${i}`}
+                        to={`/vehicles/allocations?job=${job.hh_job_number}`}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-50 border border-dashed border-amber-300 text-amber-700 text-sm font-medium hover:bg-amber-100"
+                        title="No van allocated yet — click to allocate on the Allocations page"
+                      >
+                        <span aria-hidden>🚐</span>
+                        {t} — unassigned <span aria-hidden>→</span>
+                      </Link>
+                    ) : (
+                      <span
+                        key={`u-${i}`}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-50 border border-dashed border-amber-300 text-amber-700 text-sm font-medium"
+                        title="Detected on HireHop but no van allocated yet"
+                      >
+                        <span aria-hidden>🚐</span>
+                        {t} — unassigned
+                      </span>
+                    )
                   ))}
                 </div>
               </div>
@@ -4444,19 +4571,13 @@ export default function JobDetailPage() {
                   } p-5`}>
                     <div className="flex items-start justify-between mb-3">
                       <div className="flex items-center gap-2 flex-wrap">
+                        {/* No per-card reg: the "Vehicles on this job" strip up
+                            top is the single source for which vans are on the job.
+                            Every driver can drive any van on the job, so a per-card
+                            reg told you nothing meaningful (and repeated on every
+                            card). Book Out / Check In read the van off the row
+                            internally (effective_vehicle_id), not from here. */}
                         <span className="text-lg">🚐</span>
-                        {/* Reg lives in the "Vehicles on this job" strip up top,
-                            not repeated prominently on every card — just a subtle
-                            chip so you can still tell which van THIS driver is on
-                            (useful on multi-van hires). */}
-                        {a.vehicle_reg && (
-                          <span
-                            className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600 font-medium"
-                            title="Van linked to this driver"
-                          >
-                            {a.vehicle_reg}
-                          </span>
-                        )}
                         <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${sc.bg} ${sc.text}`}>
                           {sc.label}
                         </span>
@@ -4487,14 +4608,21 @@ export default function JobDetailPage() {
                       </div>
                     </div>
 
-                    {/* Driver info */}
+                    {/* Driver info — name + contact on the left; driver flags
+                        and the excess fold inline on the right, wrapping below
+                        on mobile. The "DRIVER" label is dropped (the name is
+                        self-evidently the driver) and the excess no longer needs
+                        its own full-width row. */}
                     {a.assignment_type === 'self_drive' && (
                       <div className={`rounded-lg p-3 mb-3 ${
                         hasReferralBlocker ? 'bg-orange-50' : 'bg-gray-50'
                       }`}>
-                        <div className="flex items-center justify-between">
-                          <div>
-                            <span className="text-xs font-medium text-gray-500 uppercase">Driver</span>
+                        {/* Stack on mobile, inline on ≥sm. Stacking (rather than
+                            flex-wrap) gives the name its own full-width row on a
+                            phone, so a long name doesn't get squeezed against the
+                            excess block and break mid-word. */}
+                        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-x-3 gap-y-1">
+                          <div className="min-w-0">
                             {a.driver_name ? (
                               <p className="text-sm font-medium text-gray-900">
                                 {a.driver_id ? (
@@ -4511,14 +4639,14 @@ export default function JobDetailPage() {
                               <p className="text-sm text-gray-400 italic">No driver assigned</p>
                             )}
                           </div>
-                          <div className="flex gap-2">
+                          <div className="flex items-center flex-wrap gap-2 text-xs">
                             {hasReferralBlocker && (
-                              <span className="text-xs px-2 py-1 rounded-full bg-orange-100 text-orange-700 font-medium">
+                              <span className="px-2 py-1 rounded-full bg-orange-100 text-orange-700 font-medium">
                                 Referral Pending
                               </span>
                             )}
                             {a.driver_points != null && a.driver_points > 0 && (
-                              <span className={`text-xs px-2 py-1 rounded-full font-medium ${
+                              <span className={`px-2 py-1 rounded-full font-medium ${
                                 a.driver_points >= 10 ? 'bg-red-100 text-red-700' :
                                 a.driver_points >= 7 ? 'bg-orange-100 text-orange-700' :
                                 a.driver_points >= 4 ? 'bg-amber-100 text-amber-700' :
@@ -4527,97 +4655,85 @@ export default function JobDetailPage() {
                                 {a.driver_points} pts
                               </span>
                             )}
+                            {/* Excess — folded inline. Display rule: prefer the
+                                driver's personal liability
+                                (drivers.calculated_excess_amount); the per-job
+                                excess_amount_required is £0 for a driver covered
+                                by a sibling in the top-N slot (correct accounting
+                                but misleading — the person is still liable for
+                                £1,200+ if they damage the van). Falls back to the
+                                per-job amount, then the £1,200 floor. */}
+                            {a.excess && (() => {
+                              const personalLiability = a.driver_calculated_excess
+                                ? Number(a.driver_calculated_excess)
+                                : null;
+                              const perJobRequired = a.excess?.excess_amount_required != null
+                                ? Number(a.excess.excess_amount_required)
+                                : null;
+                              const displayAmount = personalLiability && personalLiability >= 1200
+                                ? personalLiability
+                                : (perJobRequired && perJobRequired > 0 ? perJobRequired : 1200);
+                              return (
+                                <span className="inline-flex items-center gap-1.5">
+                                  <span className="text-gray-400">Excess</span>
+                                  <span className="font-medium text-gray-700">£{displayAmount.toFixed(2)}</span>
+                                  <span className={`px-2 py-0.5 rounded-full font-medium ${
+                                    a.excess.excess_status === 'taken' ? 'bg-green-100 text-green-700' :
+                                    a.excess.excess_status === 'pre_auth' ? 'bg-sky-100 text-sky-700' :
+                                    a.excess.excess_status === 'waived' ? 'bg-blue-100 text-blue-700' :
+                                    a.excess.excess_status === 'reimbursed' ? 'bg-emerald-100 text-emerald-700' :
+                                    a.excess.excess_status === 'partially_reimbursed' ? 'bg-orange-100 text-orange-700' :
+                                    a.excess.excess_status === 'fully_claimed' ? 'bg-red-100 text-red-700' :
+                                    ['needed', 'pending'].includes(a.excess.excess_status) ? 'bg-amber-100 text-amber-700' :
+                                    a.excess.excess_status === 'partially_paid' ? 'bg-yellow-100 text-yellow-700' :
+                                    a.excess.excess_status === 'not_required' ? 'bg-gray-100 text-gray-500' :
+                                    'bg-gray-100 text-gray-600'
+                                  }`}>
+                                    {a.excess.excess_status === 'taken' ? 'Taken' :
+                                     a.excess.excess_status === 'pre_auth' ? 'Pre-auth' :
+                                     a.excess.excess_status === 'waived' ? 'Waived' :
+                                     a.excess.excess_status === 'reimbursed' ? 'Reimbursed' :
+                                     a.excess.excess_status === 'partially_reimbursed' ? 'Part Reimbursed' :
+                                     a.excess.excess_status === 'fully_claimed' ? 'Claimed' :
+                                     ['needed', 'pending'].includes(a.excess.excess_status) ? 'Required' :
+                                     a.excess.excess_status === 'partially_paid' ? 'Part Paid' :
+                                     a.excess.excess_status === 'not_required' ? 'Covered' :
+                                     a.excess.excess_status}
+                                  </span>
+                                  {a.excess.dispute_status && (
+                                    <span className={`px-2 py-0.5 rounded-full font-semibold ${a.excess.dispute_status === 'won' ? 'bg-gray-100 text-gray-600' : 'bg-red-100 text-red-700'}`}>
+                                      {a.excess.dispute_status === 'open' ? '⚠ Chargeback' : `Chargeback ${a.excess.dispute_status}`}
+                                    </span>
+                                  )}
+                                  {/* "Covered" (not_required) rows are the top-N
+                                      losers — £0 sibling of another driver's excess.
+                                      Nothing actionable, so no Edit/Manage. */}
+                                  {a.excess.excess_status !== 'not_required' && (
+                                    <>
+                                      <button
+                                        type="button"
+                                        onClick={() => a.excess && openExcessModal(a.excess.id, 'edit_required')}
+                                        disabled={a.excess && excessModalLoadingId === a.excess.id ? true : false}
+                                        title="Edit required excess amount"
+                                        className="font-medium text-ooosh-700 hover:text-ooosh-900 hover:underline disabled:opacity-50"
+                                      >
+                                        {a.excess && excessModalLoadingId === a.excess.id ? '…' : 'Edit'}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => a.excess && openExcessModal(a.excess.id)}
+                                        disabled={a.excess && excessModalLoadingId === a.excess.id ? true : false}
+                                        className="font-medium text-gray-600 hover:text-gray-900 hover:underline disabled:opacity-50"
+                                      >
+                                        Manage
+                                      </button>
+                                    </>
+                                  )}
+                                </span>
+                              );
+                            })()}
                           </div>
                         </div>
-
-                        {/* Excess status */}
-                        {a.excess && (() => {
-                          // Display rule: prefer the driver's personal
-                          // liability (drivers.calculated_excess_amount).
-                          // The per-job excess_amount_required is the
-                          // REALISATION — it's £0 for drivers covered by a
-                          // sibling in the top-N slot, which is correct
-                          // accounting but misleading on the card (the
-                          // person IS liable for £1,200+ if they damage the
-                          // van; another driver's payment just satisfies it).
-                          // Same fix shape as the /drivers page got in
-                          // migration 065. Falls back to per-job amount for
-                          // pre-fix data, then to the £1,200 floor.
-                          const personalLiability = a.driver_calculated_excess
-                            ? Number(a.driver_calculated_excess)
-                            : null;
-                          const perJobRequired = a.excess?.excess_amount_required != null
-                            ? Number(a.excess.excess_amount_required)
-                            : null;
-                          const displayAmount = personalLiability && personalLiability >= 1200
-                            ? personalLiability
-                            : (perJobRequired && perJobRequired > 0 ? perJobRequired : 1200);
-                          return (
-                          <div className="mt-2 pt-2 border-t border-gray-200">
-                            <div className="flex items-center justify-between text-xs">
-                              <span className="text-gray-500">Insurance Excess</span>
-                              <div className="flex items-center gap-2">
-                                <span className="font-medium text-gray-700">
-                                  £{displayAmount.toFixed(2)}
-                                </span>
-                                <span className={`px-2 py-0.5 rounded-full font-medium ${
-                                  a.excess.excess_status === 'taken' ? 'bg-green-100 text-green-700' :
-                                  a.excess.excess_status === 'pre_auth' ? 'bg-sky-100 text-sky-700' :
-                                  a.excess.excess_status === 'waived' ? 'bg-blue-100 text-blue-700' :
-                                  a.excess.excess_status === 'reimbursed' ? 'bg-emerald-100 text-emerald-700' :
-                                  a.excess.excess_status === 'partially_reimbursed' ? 'bg-orange-100 text-orange-700' :
-                                  a.excess.excess_status === 'fully_claimed' ? 'bg-red-100 text-red-700' :
-                                  ['needed', 'pending'].includes(a.excess.excess_status) ? 'bg-amber-100 text-amber-700' :
-                                  a.excess.excess_status === 'partially_paid' ? 'bg-yellow-100 text-yellow-700' :
-                                  a.excess.excess_status === 'not_required' ? 'bg-gray-100 text-gray-500' :
-                                  'bg-gray-100 text-gray-600'
-                                }`}>
-                                  {a.excess.excess_status === 'taken' ? 'Taken' :
-                                   a.excess.excess_status === 'pre_auth' ? 'Pre-auth' :
-                                   a.excess.excess_status === 'waived' ? 'Waived' :
-                                   a.excess.excess_status === 'reimbursed' ? 'Reimbursed' :
-                                   a.excess.excess_status === 'partially_reimbursed' ? 'Part Reimbursed' :
-                                   a.excess.excess_status === 'fully_claimed' ? 'Claimed' :
-                                   ['needed', 'pending'].includes(a.excess.excess_status) ? 'Required' :
-                                   a.excess.excess_status === 'partially_paid' ? 'Part Paid' :
-                                   a.excess.excess_status === 'not_required' ? 'Covered' :
-                                   a.excess.excess_status}
-                                </span>
-                                {a.excess.dispute_status && (
-                                  <span className={`px-2 py-0.5 rounded-full font-semibold ${a.excess.dispute_status === 'won' ? 'bg-gray-100 text-gray-600' : 'bg-red-100 text-red-700'}`}>
-                                    {a.excess.dispute_status === 'open' ? '⚠ Chargeback' : `Chargeback ${a.excess.dispute_status}`}
-                                  </span>
-                                )}
-                                {/* "Covered" (not_required) rows are the top-N
-                                    losers — £0 sibling of another driver's excess
-                                    on the same hire. Nothing actionable, so no
-                                    Edit/Manage (only dead-end actions would show). */}
-                                {a.excess.excess_status !== 'not_required' && (
-                                  <>
-                                    <button
-                                      type="button"
-                                      onClick={() => a.excess && openExcessModal(a.excess.id, 'edit_required')}
-                                      disabled={a.excess && excessModalLoadingId === a.excess.id ? true : false}
-                                      title="Edit required excess amount"
-                                      className="text-xs font-medium text-ooosh-700 hover:text-ooosh-900 hover:underline disabled:opacity-50"
-                                    >
-                                      {a.excess && excessModalLoadingId === a.excess.id ? '…' : 'Edit'}
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => a.excess && openExcessModal(a.excess.id)}
-                                      disabled={a.excess && excessModalLoadingId === a.excess.id ? true : false}
-                                      className="text-xs font-medium text-gray-600 hover:text-gray-900 hover:underline disabled:opacity-50"
-                                    >
-                                      Manage
-                                    </button>
-                                  </>
-                                )}
-                              </div>
-                            </div>
-                          </div>
-                          );
-                        })()}
                       </div>
                     )}
 
@@ -4865,11 +4981,14 @@ export default function JobDetailPage() {
 
       {/* Files Tab */}
       {activeTab === 'files' && id && (
-        <JobFilesSection
-          jobId={id}
-          files={job.files || []}
-          onFilesChanged={loadJob}
-        />
+        <>
+          <RehearsalProfileFiles anchorOrg={rehearsalAnchor} files={rehearsalFiles} />
+          <JobFilesSection
+            jobId={id}
+            files={job.files || []}
+            onFilesChanged={loadJob}
+          />
+        </>
       )}
 
       {/* Crew & Transport Tab */}
@@ -5562,6 +5681,7 @@ export default function JobDetailPage() {
           next_chase_date: job.next_chase_date,
           chase_alert_user_id: (job as unknown as { chase_alert_user_id?: string | null }).chase_alert_user_id || null,
           chase_alert_delivery: (job as unknown as { chase_alert_delivery?: 'bell' | 'bell_email' | null }).chase_alert_delivery || null,
+          auto_chase_mode: (job as unknown as { auto_chase_mode?: 'off' | 'draft' | 'send' | null }).auto_chase_mode || null,
         } : null}
         onClose={() => setShowChaseModal(false)}
         onChaseLogged={() => { loadJob(); loadInteractions(); }}
@@ -5722,15 +5842,32 @@ export default function JobDetailPage() {
                   </div>
                 </div>
 
-                {/* Notes */}
+                {/* Notes — two fields matching the full calculator convention.
+                    The old single "Notes" field saved to internal_notes, which
+                    the freelancer portal never shows — staff notes meant for
+                    the driver were silently invisible (Jul 2026 bug). */}
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Notes</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Freelancer Notes <span className="font-normal text-gray-400">(shown to the freelancer in the portal)</span>
+                  </label>
+                  <textarea
+                    value={localFormData.freelancerNotes}
+                    onChange={(e) => setLocalFormData({ ...localFormData, freelancerNotes: e.target.value })}
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                    rows={2}
+                    placeholder="What's included, access info, who to ask for..."
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Internal Notes <span className="font-normal text-gray-400">(staff only)</span>
+                  </label>
                   <textarea
                     value={localFormData.notes}
                     onChange={(e) => setLocalFormData({ ...localFormData, notes: e.target.value })}
                     className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
                     rows={2}
-                    placeholder="Optional notes..."
+                    placeholder="Margins, commercial notes..."
                   />
                 </div>
 
@@ -5775,6 +5912,7 @@ export default function JobDetailPage() {
                         jobDate: dateStr,
                         arrivalTime: localFormData.arrivalTime || undefined,
                         notes: localFormData.notes || undefined,
+                        freelancerNotes: localFormData.freelancerNotes || undefined,
                       });
                       // Push to HireHop if toggled on
                       if (localFormData.pushToHirehop && job.hh_job_number && localResult?.id) {
@@ -5785,7 +5923,7 @@ export default function JobDetailPage() {
                         }
                       }
                       setShowLocalForm(false);
-                      setLocalFormData({ jobType: 'delivery', venueId: '', venueName: '', jobDate: '', arrivalTime: '', notes: '', pushToHirehop: true });
+                      setLocalFormData({ jobType: 'delivery', venueId: '', venueName: '', jobDate: '', arrivalTime: '', freelancerNotes: '', notes: '', pushToHirehop: true });
                       loadQuotes();
                     } catch (err) {
                       alert(err instanceof Error ? err.message : 'Failed to create');
@@ -5970,7 +6108,7 @@ export default function JobDetailPage() {
               to THIS job — those already show in the merch card on Overview.
               Informational only (not on the prep ticker). Hidden when empty. */}
           {job.client_id && (
-            <div className="mb-4">
+            <div className="empty:hidden mb-4">
               <HeldItemsSection entityType="organisation" entityId={job.client_id}
                 kinds={['incoming', 'temp_storage', 'lost_property']} excludeJobId={job.id}
                 openOnly hideWhenEmpty heading="📦 Also holding (FYI)" />
@@ -6417,7 +6555,7 @@ function OverviewFinancialStrip({ jobId }: { jobId: string }) {
 }
 
 
-function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, clientOrgName, derivedFlags, seatAvailability, hasCrewQuotes, hasCrewOnHH, onOpenCrewCalculator, onLaunchStaging, onLaunchRackPlan, onLaunchBacklineMatcher }: {
+function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, clientOrgName, derivedFlags, seatAvailability, assignedVehicleRegs, hasCrewQuotes, hasCrewOnHH, onOpenCrewCalculator, onLaunchStaging, onLaunchRackPlan, onLaunchBacklineMatcher }: {
   jobId: string;
   hhJobNumber?: number | null;
   pipelineStatus?: string | null;
@@ -6440,6 +6578,8 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, cli
     nonMatchingVans: Array<{ reg: string; seat_layout: string | null }>;
     unknownVans: Array<{ reg: string }>;
   } | null;
+  /** Regs allocated to this job — shown on the vehicle requirement headline. */
+  assignedVehicleRegs?: string[];
   hasCrewQuotes?: boolean;
   hasCrewOnHH?: boolean;
   onOpenCrewCalculator?: () => void;
@@ -6563,6 +6703,10 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, cli
 
   // Reminder form state
   const [showReminderForm, setShowReminderForm] = useState(false);
+  // When set, the reminder modal is in edit mode against this requirement id
+  // (assignees are locked in edit — changing who's notified is delete-and-re-add,
+  // since each assignee is a separate job_requirements row).
+  const [editingReminderId, setEditingReminderId] = useState<string | null>(null);
   const [heldItemsRefreshKey, setHeldItemsRefreshKey] = useState(0);
   const [reminderText, setReminderText] = useState('');
   const [reminderDate, setReminderDate] = useState('');
@@ -6571,21 +6715,37 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, cli
   const [reminderEventTrigger, setReminderEventTrigger] = useState('');
   const [reminderUsers, setReminderUsers] = useState<Array<{ id: string; first_name: string; last_name: string }>>([]);
 
+  function ensureReminderUsersLoaded() {
+    if (reminderUsers.length === 0) {
+      api.get<{ data: Array<{ id: string; first_name: string; last_name: string }> }>('/users')
+        .then(res => setReminderUsers(res.data))
+        .catch(() => {});
+    }
+  }
+
+  function openEditReminder(req: JobRequirement) {
+    setEditingReminderId(req.id);
+    setReminderText(req.custom_label || req.notes || '');
+    setReminderDate(req.due_date ? String(req.due_date).split('T')[0] : '');
+    setReminderDelivery((req.delivery_method as 'both' | 'notification' | 'email') || 'both');
+    setReminderEventTrigger(req.event_trigger || '');
+    setReminderAssignees(['']); // not used in edit mode
+    ensureReminderUsersLoaded();
+    setShowReminderForm(true);
+  }
+
   async function addRequirement(typeKey: string) {
     if (typeKey === 'reminder') {
       // Show form instead of creating immediately
       setShowAddMenu(false);
+      setEditingReminderId(null);
       setShowReminderForm(true);
       setReminderText('');
       setReminderDate('');
       setReminderDelivery('both');
       setReminderAssignees(['']);
       setReminderEventTrigger('');
-      if (reminderUsers.length === 0) {
-        api.get<{ data: Array<{ id: string; first_name: string; last_name: string }> }>('/users')
-          .then(res => setReminderUsers(res.data))
-          .catch(() => {});
-      }
+      ensureReminderUsersLoaded();
       return;
     }
     try {
@@ -6601,26 +6761,39 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, cli
   async function createReminder() {
     if (!reminderText.trim()) return;
     try {
-      const validAssignees = reminderAssignees.filter(id => id);
-
-      // Create one requirement per assignee (or one for self if none selected)
-      const targets = validAssignees.length > 0 ? validAssignees : [null];
-      for (const assignee of targets) {
-        await api.post(`/requirements/job/${jobId}`, {
-          requirement_type: 'reminder',
-          phase,
+      if (editingReminderId) {
+        // Edit mode — update text / date / delivery / trigger on the single
+        // row. Assignees are deliberately not editable here (see openEditReminder).
+        await api.patch(`/requirements/${editingReminderId}`, {
           custom_label: reminderText.trim(),
-          due_date: reminderDate || null,
-          assigned_to: assignee,
           notes: reminderText.trim(),
+          due_date: reminderDate || null,
           event_trigger: reminderEventTrigger || null,
           delivery_method: reminderDelivery,
         });
+      } else {
+        const validAssignees = reminderAssignees.filter(id => id);
+
+        // Create one requirement per assignee (or one for self if none selected)
+        const targets = validAssignees.length > 0 ? validAssignees : [null];
+        for (const assignee of targets) {
+          await api.post(`/requirements/job/${jobId}`, {
+            requirement_type: 'reminder',
+            phase,
+            custom_label: reminderText.trim(),
+            due_date: reminderDate || null,
+            assigned_to: assignee,
+            notes: reminderText.trim(),
+            event_trigger: reminderEventTrigger || null,
+            delivery_method: reminderDelivery,
+          });
+        }
       }
       await loadAll();
       setShowReminderForm(false);
+      setEditingReminderId(null);
     } catch (err) {
-      console.error('Failed to create reminder:', err);
+      console.error('Failed to save reminder:', err);
     }
   }
 
@@ -6803,12 +6976,14 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, cli
                   req={req}
                   derivedFlags={effectiveFlags}
                   seatAvailability={seatAvailability}
+                  assignedVehicleRegs={assignedVehicleRegs}
                   jobId={jobId}
                   hhJobNumber={hhJobNumber}
                   isVanAndDriver={isVanAndDriver}
                   onStatusChange={changeStatus}
                   onAdvanceStep={advanceStep}
                   onRemove={removeRequirement}
+                  onEdit={req.requirement_type === 'reminder' ? openEditReminder : undefined}
                   onVanAndDriverToggle={req.requirement_type === 'vehicle' ? toggleVanAndDriver : undefined}
                   onSlotModeChange={req.requirement_type === 'vehicle' ? changeSlotMode : undefined}
                   selfDriveVanOverride={selfDriveVanOverride}
@@ -6891,11 +7066,11 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, cli
         );
       })()}
 
-      {/* Reminder creation form modal */}
+      {/* Reminder creation / edit form modal */}
       {showReminderForm && (
-        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50" onClick={() => setShowReminderForm(false)}>
+        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50" onClick={() => { setShowReminderForm(false); setEditingReminderId(null); }}>
           <div className="bg-white rounded-xl shadow-xl p-6 w-[420px] max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
-            <h3 className="text-lg font-semibold text-gray-900 mb-3">Add Reminder</h3>
+            <h3 className="text-lg font-semibold text-gray-900 mb-3">{editingReminderId ? 'Edit Reminder' : 'Add Reminder'}</h3>
             <div className="space-y-3">
               <input
                 type="text"
@@ -6954,44 +7129,53 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, cli
                 </select>
               </div>
 
-              {/* Assignees (multi-user) */}
-              <div>
-                <label className="text-xs text-gray-500 mb-1 block">Notify</label>
-                {reminderAssignees.map((assignee, idx) => (
-                  <div key={idx} className="flex items-center gap-1 mb-1">
-                    <select
-                      value={assignee}
-                      onChange={e => {
-                        const updated = [...reminderAssignees];
-                        updated[idx] = e.target.value;
-                        setReminderAssignees(updated);
-                      }}
-                      className="flex-1 border border-gray-300 rounded px-3 py-1.5 text-sm"
-                    >
-                      <option value="">Me</option>
-                      {reminderUsers.map(u => (
-                        <option key={u.id} value={u.id}>{u.first_name} {u.last_name}</option>
-                      ))}
-                    </select>
-                    {reminderAssignees.length > 1 && (
-                      <button type="button" onClick={() => setReminderAssignees(reminderAssignees.filter((_, i) => i !== idx))}
-                        className="text-red-400 hover:text-red-600 text-xs px-1">&times;</button>
-                    )}
-                  </div>
-                ))}
-                <button type="button"
-                  onClick={() => setReminderAssignees([...reminderAssignees, ''])}
-                  className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium"
-                >+ Add person</button>
-              </div>
+              {/* Assignees (multi-user) — create only. In edit mode the
+                  reminder is a single row per person, so changing who's
+                  notified is delete-and-re-add rather than edit. */}
+              {!editingReminderId && (
+                <div>
+                  <label className="text-xs text-gray-500 mb-1 block">Notify</label>
+                  {reminderAssignees.map((assignee, idx) => (
+                    <div key={idx} className="flex items-center gap-1 mb-1">
+                      <select
+                        value={assignee}
+                        onChange={e => {
+                          const updated = [...reminderAssignees];
+                          updated[idx] = e.target.value;
+                          setReminderAssignees(updated);
+                        }}
+                        className="flex-1 border border-gray-300 rounded px-3 py-1.5 text-sm"
+                      >
+                        <option value="">Me</option>
+                        {reminderUsers.map(u => (
+                          <option key={u.id} value={u.id}>{u.first_name} {u.last_name}</option>
+                        ))}
+                      </select>
+                      {reminderAssignees.length > 1 && (
+                        <button type="button" onClick={() => setReminderAssignees(reminderAssignees.filter((_, i) => i !== idx))}
+                          className="text-red-400 hover:text-red-600 text-xs px-1">&times;</button>
+                      )}
+                    </div>
+                  ))}
+                  <button type="button"
+                    onClick={() => setReminderAssignees([...reminderAssignees, ''])}
+                    className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium"
+                  >+ Add person</button>
+                </div>
+              )}
+              {editingReminderId && (
+                <p className="text-[11px] text-gray-400">
+                  To change who's notified, delete this reminder and add a new one.
+                </p>
+              )}
             </div>
             <div className="flex justify-end gap-2 mt-4">
-              <button onClick={() => setShowReminderForm(false)} className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
+              <button onClick={() => { setShowReminderForm(false); setEditingReminderId(null); }} className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
               <button
                 onClick={createReminder}
                 disabled={!reminderText.trim()}
                 className="px-4 py-1.5 text-sm bg-ooosh-600 text-white rounded hover:bg-ooosh-700 disabled:opacity-50"
-              >Add Reminder</button>
+              >{editingReminderId ? 'Save Changes' : 'Add Reminder'}</button>
             </div>
           </div>
         </div>
@@ -7353,7 +7537,7 @@ function JobFilesSection({
               return (
                 <div
                   key={file.url || idx}
-                  className="flex items-start justify-between p-3 rounded-lg border border-gray-100 hover:border-gray-200 hover:bg-gray-50 group"
+                  className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between p-3 rounded-lg border border-gray-100 hover:border-gray-200 hover:bg-gray-50 group"
                 >
                   <div className="flex items-start gap-3 min-w-0 flex-1">
                     <div className={`w-8 h-8 rounded flex items-center justify-center text-xs font-bold flex-shrink-0 ${
@@ -7365,7 +7549,7 @@ function JobFilesSection({
                       {isLink ? '🔗' : file.type === 'image' ? 'IMG' : file.type === 'document' ? 'DOC' : 'FILE'}
                     </div>
                     <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 min-w-0">
                         <button
                           onClick={openFile}
                           className="text-sm font-medium text-gray-900 hover:text-ooosh-600 truncate text-left"
@@ -7450,13 +7634,13 @@ function JobFilesSection({
                     </div>
                   </div>
                   {!isEditing && (
-                    <div className="flex items-center gap-2 flex-shrink-0 ml-2">
+                    <div className="flex items-center gap-2 flex-wrap flex-shrink-0 pl-11 sm:pl-0 sm:ml-2">
                       <button
                         onClick={() => handleToggleShare(file)}
                         className={`text-xs px-2 py-0.5 rounded border transition-colors ${
                           file.share_with_freelancer
                             ? 'bg-green-50 border-green-200 text-green-700'
-                            : 'bg-gray-50 border-gray-200 text-gray-400 opacity-0 group-hover:opacity-100'
+                            : 'bg-gray-50 border-gray-200 text-gray-400 opacity-100 sm:opacity-0 sm:group-hover:opacity-100'
                         }`}
                         title={file.share_with_freelancer ? 'Shared with freelancers — click to unshare' : 'Share with freelancers'}
                       >
@@ -7465,7 +7649,7 @@ function JobFilesSection({
                       {!isLink && (
                         <button
                           onClick={() => setEmailingFile(file)}
-                          className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium opacity-0 group-hover:opacity-100 transition-opacity"
+                          className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity"
                           title="Email this file"
                         >
                           Email
@@ -7473,7 +7657,7 @@ function JobFilesSection({
                       )}
                       <button
                         onClick={() => startEdit(file)}
-                        className="text-xs text-gray-600 hover:text-gray-800 font-medium opacity-0 group-hover:opacity-100 transition-opacity"
+                        className="text-xs text-gray-600 hover:text-gray-800 font-medium opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity"
                         title="Edit tag / comment"
                       >
                         Edit
@@ -7481,7 +7665,7 @@ function JobFilesSection({
                       {!isLink && (
                         <button
                           onClick={() => setViewingFile(file)}
-                          className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium opacity-0 group-hover:opacity-100 transition-opacity"
+                          className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity"
                         >
                           View
                         </button>
@@ -7489,7 +7673,7 @@ function JobFilesSection({
                       <button
                         onClick={() => handleDelete(file.url)}
                         disabled={deleting === file.url}
-                        className="text-xs text-red-500 hover:text-red-700 font-medium disabled:opacity-50 opacity-0 group-hover:opacity-100 transition-opacity"
+                        className="text-xs text-red-500 hover:text-red-700 font-medium disabled:opacity-50 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity"
                       >
                         {deleting === file.url ? '...' : 'Delete'}
                       </button>

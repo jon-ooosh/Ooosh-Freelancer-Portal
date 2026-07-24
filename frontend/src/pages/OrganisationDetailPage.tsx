@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { hasManagerRole } from '../lib/roles';
-import { useParams, useNavigate, Link } from 'react-router-dom';
+import { useParams, useNavigate, Link, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import SlidePanel from '../components/SlidePanel';
 import OrganisationForm from '../components/OrganisationForm';
@@ -8,6 +8,7 @@ import OrganisationMergeModal from '../components/OrganisationMergeModal';
 import FileUpload from '../components/FileUpload';
 import ActivityTimeline from '../components/ActivityTimeline';
 import ExcessHistorySection from '../components/ExcessHistorySection';
+import RehearsalProfileSection from '../components/RehearsalProfileSection';
 import { IssuesListSection } from '../components/IssuesListSection';
 import HireHistoryTab from '../components/HireHistoryTab';
 import HeldItemsSection from '../components/HeldItemsSection';
@@ -35,6 +36,8 @@ interface OrgDetail {
   do_not_hire_reason: string | null;
   do_not_hire_set_at: string | null;
   do_not_hire_set_by: string | null;
+  auto_cover_excess_from_account?: boolean;
+  auto_cover_excess_set_by?: string | null;
   working_terms_type: string | null;
   working_terms_credit_days: number | null;
   working_terms_notes: string | null;
@@ -111,6 +114,12 @@ const INFERRED_ORG_TYPE: Record<string, string> = {
   supplies: 'client',
 };
 
+const VALID_ORG_TABS = [
+  'people', 'relationships', 'hire_history', 'timeline', 'details', 'excess',
+  'issues', 'held', 'storage', 'rehearsal', 'pcns', 'ooh',
+] as const;
+type OrgTab = (typeof VALID_ORG_TABS)[number];
+
 export default function OrganisationDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -122,7 +131,8 @@ export default function OrganisationDetailPage() {
   const [showDnoForm, setShowDnoForm] = useState(false);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'people' | 'relationships' | 'hire_history' | 'timeline' | 'details' | 'excess' | 'issues' | 'held' | 'storage' | 'pcns' | 'ooh'>('people');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [activeTab, setActiveTab] = useState<OrgTab>('people');
   const [issuesCount, setIssuesCount] = useState<number | null>(null);
   const [pcnCount, setPcnCount] = useState<number | null>(null);
   const [heldCount, setHeldCount] = useState<number | null>(null);
@@ -186,14 +196,19 @@ export default function OrganisationDetailPage() {
     }
   }, [id]);
 
-  // Reset tab when switching orgs — component instance is reused across
-  // /organisations/A → /organisations/B so without this the active tab
-  // "drags across".
+  // Land on the tab named in ?tab= (deep-links from Job Detail etc.), else
+  // People. Also resets on org switch — the component instance is reused across
+  // /organisations/A → /organisations/B so without this the active tab "drags
+  // across". Consolidated with the ?tab= handling so the reset can't clobber a
+  // deep-link (both used to be separate [id] effects; the reset ran last and
+  // won, sending ?tab=rehearsal to People).
   useEffect(() => {
-    setActiveTab('people');
+    const t = searchParams.get('tab');
+    setActiveTab(VALID_ORG_TABS.includes(t as OrgTab) ? (t as OrgTab) : 'people');
     setIssuesCount(null);
     setPcnCount(null);
     setHeldCount(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
   async function loadOrg() {
@@ -508,10 +523,6 @@ export default function OrganisationDetailPage() {
 
   return (
     <div>
-      <Link to="/organisations" className="text-sm text-ooosh-600 hover:text-ooosh-700 mb-4 inline-block">
-        &larr; Back to Organisations
-      </Link>
-
       {/* Header */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
         <div className="flex items-start justify-between">
@@ -713,7 +724,7 @@ export default function OrganisationDetailPage() {
       {/* Tabs */}
       <div className="border-b border-gray-200 mb-6">
         <nav className="flex gap-6">
-          {(['people', 'relationships', 'hire_history', 'timeline', 'details', 'excess', 'issues', 'held', 'storage', 'pcns', 'ooh'] as const).map((tab) => {
+          {(['people', 'relationships', 'hire_history', 'timeline', 'details', 'excess', 'issues', 'held', 'storage', 'rehearsal', 'pcns', 'ooh'] as const).map((tab) => {
             const relCount = (org.relationships || []).filter(r => r.status === 'active').length;
             // linked_job_count comes from the backend's UNION of job_organisations + jobs.client_id,
             // matching the Hire History tab content. Falls back to local linked_jobs.length only
@@ -729,13 +740,20 @@ export default function OrganisationDetailPage() {
               : tab === 'issues' ? `Issues${issuesCount ? ` (${issuesCount})` : ''}`
               : tab === 'held' ? (heldCount ? `Held Items (${heldCount})` : 'Held Items')
               : tab === 'storage' ? 'Storage'
+              : tab === 'rehearsal' ? 'Rehearsals'
               : tab === 'pcns' ? (pcnCount ? `PCNs (${pcnCount})` : 'PCNs')
               : tab === 'ooh' ? 'OOH'
               : 'Details';
             return (
               <button
                 key={tab}
-                onClick={() => setActiveTab(tab)}
+                onClick={() => {
+                  setActiveTab(tab);
+                  // Reflect the tab in the URL so it's deep-linkable + survives refresh.
+                  const next = new URLSearchParams(searchParams);
+                  next.set('tab', tab);
+                  setSearchParams(next, { replace: true });
+                }}
                 className={`pb-3 text-sm font-medium border-b-2 transition-colors ${
                   activeTab === tab
                     ? 'border-ooosh-600 text-ooosh-600'
@@ -1535,7 +1553,38 @@ export default function OrganisationDetailPage() {
 
       {/* Excess History Tab */}
       {activeTab === 'excess' && id && (
-        <ExcessHistorySection entityType="organisation" entityId={id} />
+        <div className="space-y-4">
+          <ExcessHistorySection entityType="organisation" entityId={id} />
+
+          {/* Auto-cover excess from held account — ADMIN ONLY (not manager).
+              Rare setting, moved here (bottom of Excess History) so it isn't in the way on every org. */}
+          {user?.role === 'admin' && (
+            <div className="bg-purple-50 border border-purple-200 rounded-lg px-4 py-3 flex items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold text-purple-800">
+                  Auto-cover excess from held account
+                  {org.auto_cover_excess_from_account && <span className="ml-2 text-xs font-medium px-1.5 py-0.5 rounded-full bg-purple-200 text-purple-800">ON</span>}
+                </p>
+                <p className="text-xs text-purple-600 mt-0.5">
+                  {org.auto_cover_excess_from_account
+                    ? `This client's self-drive hires are auto-covered from their standing held-on-account balance — no fresh excess collected.${org.auto_cover_excess_set_by ? ` Set by ${org.auto_cover_excess_set_by}.` : ''}`
+                    : 'Off — this client’s hires collect excess as normal. Turn on only for clients who leave a standing excess deposit with us.'}
+                </p>
+              </div>
+              <button
+                onClick={async () => {
+                  const on = !org.auto_cover_excess_from_account;
+                  if (on && !confirm('Turn ON auto-cover? This client’s self-drive hires will stop collecting fresh excess while their held-on-account balance covers them. Admin only.')) return;
+                  await api.post(`/organisations/${id}/auto-cover-excess`, { auto_cover: on });
+                  loadOrg();
+                }}
+                className={`text-xs px-3 py-1.5 rounded whitespace-nowrap ${org.auto_cover_excess_from_account ? 'bg-purple-100 text-purple-700 hover:bg-purple-200' : 'bg-purple-600 text-white hover:bg-purple-700'}`}
+              >
+                {org.auto_cover_excess_from_account ? 'Turn off' : 'Turn on'}
+              </button>
+            </div>
+          )}
+        </div>
       )}
 
       {/* Held Items Tab — Holding module (incoming / temp storage / lost property) */}
@@ -1546,6 +1595,10 @@ export default function OrganisationDetailPage() {
       {/* Storage Tab — Client Storage module (recurring storage tenancies) */}
       {activeTab === 'storage' && id && (
         <StorageHistorySection entityType="organisation" entityId={id} />
+      )}
+
+      {activeTab === 'rehearsal' && id && (
+        <RehearsalProfileSection entityType="organisation" entityId={id} />
       )}
 
       {/* Issues Tab — OP job_issues backed (Stage 3, May 2026).

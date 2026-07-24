@@ -584,7 +584,10 @@ export default function DriverDetailPage() {
             </span>
           </div>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap justify-end gap-2">
+          {!editing && (
+            <SnapshotPdfButton driverId={driver.id} driverName={driver.full_name} />
+          )}
           {!editing && canEdit && (
             <button
               onClick={startEditing}
@@ -1102,12 +1105,6 @@ function ReferralPanel({ driver, onDriverUpdate }: { driver: DriverDetail; onDri
           >
             Resolve Referral
           </button>
-          <SnapshotPdfButton driverId={driver.id} driverName={driver.full_name} />
-        </div>
-      )}
-      {isResolved && (
-        <div className="flex gap-2 mt-2">
-          <SnapshotPdfButton driverId={driver.id} driverName={driver.full_name} />
         </div>
       )}
 

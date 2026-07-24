@@ -8,6 +8,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
+import { describePreauth, paymentMethodLabel } from '../lib/preauth';
 import { getPaymentState, PAYMENT_STATE_LABELS, PAYMENT_STATE_CLASSES } from '../services/paymentState';
 import ExcessPaymentModal, { statusLabel, statusColor, computeHireDays } from './ExcessPaymentModal';
 import CostCaptureModal from './CostCaptureModal';
@@ -158,6 +159,10 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   const [balNotes, setBalNotes] = useState('');
   const [balSaving, setBalSaving] = useState(false);
   const [balError, setBalError] = useState('');
+
+  // Resend client confirmation email (manual re-fire, e.g. after an SMTP blip)
+  const [resending, setResending] = useState(false);
+  const [resendMsg, setResendMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   // Record payment form
   const [showPaymentForm, setShowPaymentForm] = useState(false);
@@ -415,6 +420,44 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
       setLoading(false);
     }
   }, [jobId]);
+
+  // Manually re-send the client's booking/payment confirmation email. Works on
+  // any confirmed job — used when the original auto-send failed (e.g. transient
+  // SMTP failure). Reports the result inline so staff know it actually went.
+  const handleResendConfirmation = async () => {
+    if (!data) return;
+    setResending(true);
+    setResendMsg(null);
+    try {
+      const resp = await api.post<{ data: { sent: boolean; reason?: string; error?: string; is_fallback?: boolean } }>(
+        `/money/${jobId}/resend-confirmation`,
+        {
+          amount: data.financial.total_hire_deposits || 0,
+          is_confirming_booking: true,
+        }
+      );
+      const r = resp.data;
+      if (r.sent) {
+        setResendMsg({
+          ok: true,
+          text: r.is_fallback
+            ? 'Sent — but no client email on file, so it went to info@. Add a contact email and re-send.'
+            : 'Confirmation email sent to the client.',
+        });
+      } else {
+        setResendMsg({
+          ok: false,
+          text: r.reason === 'no_recipient'
+            ? 'Not sent — no client email found. Add a contact email on the client/job first.'
+            : `Not sent — ${r.error || 'email send failed'}. Try again in a moment.`,
+        });
+      }
+    } catch (e) {
+      setResendMsg({ ok: false, text: e instanceof Error ? e.message : 'Failed to resend' });
+    } finally {
+      setResending(false);
+    }
+  };
 
   // Business-level balance override (migration 117) — admin marks the HH-derived
   // balance as settled in Xero / written off. Doesn't touch HireHop or Xero.
@@ -921,6 +964,12 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                       <>
                         {' · '}
                         Collected: £{Number(record.excess_amount_taken || 0).toFixed(2)}
+                        {/* When + how it was collected, inline. Pre-auth held/released
+                            records show their own dated line below (describePreauth). */}
+                        {Number(record.excess_amount_taken || 0) > 0 && record.payment_date &&
+                          ` on ${new Date(record.payment_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`}
+                        {Number(record.excess_amount_taken || 0) > 0 && record.payment_method &&
+                          ` · ${paymentMethodLabel(record.payment_method)}`}
                       </>
                     )}
                     {Number(record.amount_released || 0) > 0 && (
@@ -943,7 +992,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                         <span className="text-emerald-700">
                           Reimbursed: £{Number(record.reimbursement_amount).toFixed(2)}
                           {record.reimbursement_date && ` on ${new Date(record.reimbursement_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`}
-                          {record.reimbursement_method && ` (${record.reimbursement_method.replace(/_/g, ' ')})`}
+                          {record.reimbursement_method && ` (${paymentMethodLabel(record.reimbursement_method)})`}
                         </span>
                       )}
                     </p>
@@ -967,16 +1016,18 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                       ))}
                     </p>
                   )}
-                  {record.excess_status === 'pre_auth' && record.held_expires_at && (() => {
-                    const daysLeft = Math.ceil((new Date(record.held_expires_at).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
-                    const cls = daysLeft <= 1 ? 'text-red-600' : daysLeft <= 2 ? 'text-amber-600' : 'text-sky-600';
+                  {(record.excess_status === 'pre_auth' || record.excess_status === 'released') && (() => {
+                    // Shared wording — see lib/preauth.ts. Binary held/released,
+                    // never a "maybe"; the server-side self-heal resolves a stuck
+                    // past-expiry hold to its true state on this tab's load.
+                    const d = describePreauth(record);
+                    if (!d.compact) return null;
+                    const cls = d.isHold
+                      ? (d.pastExpiry ? 'text-amber-600' : 'text-sky-600')
+                      : 'text-gray-500';
                     return (
                       <p className={`text-[11px] mt-0.5 font-medium ${cls}`}>
-                        {daysLeft <= 0
-                          ? 'Hold expired — capture or release'
-                          : daysLeft === 1
-                            ? 'Hold expires tomorrow'
-                            : `Hold expires in ${daysLeft} days`}
+                        {d.compact}{record.payment_method ? ` · ${paymentMethodLabel(record.payment_method)}` : ''}
                       </p>
                     );
                   })()}
@@ -1114,7 +1165,28 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
 
       {/* Payment History */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-        <h3 className="text-lg font-semibold text-gray-900 mb-4">Payment History</h3>
+        <div className="flex items-center justify-between mb-4 gap-3">
+          <h3 className="text-lg font-semibold text-gray-900">Payment History</h3>
+          <button
+            onClick={handleResendConfirmation}
+            disabled={resending}
+            title="Re-send the client's booking/payment confirmation email"
+            className="px-3 py-1.5 text-sm font-medium text-ooosh-700 border border-ooosh-200 hover:bg-ooosh-50 rounded-md disabled:opacity-50 whitespace-nowrap"
+          >
+            {resending ? 'Sending…' : 'Resend confirmation'}
+          </button>
+        </div>
+        {resendMsg && (
+          <div
+            className={`mb-4 text-sm rounded-md px-3 py-2 border ${
+              resendMsg.ok
+                ? 'bg-green-50 border-green-200 text-green-800'
+                : 'bg-amber-50 border-amber-200 text-amber-800'
+            }`}
+          >
+            {resendMsg.text}
+          </div>
+        )}
 
         {/* Payment history — hire payments from HireHop (excess payments tracked in Insurance Excess section above) */}
         {(() => {

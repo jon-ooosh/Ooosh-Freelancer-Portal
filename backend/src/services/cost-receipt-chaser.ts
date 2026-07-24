@@ -41,7 +41,7 @@ export async function runCostReceiptChase(): Promise<ChaseResult> {
     [String(GRACE_DAYS)]
   );
 
-  const actionUrl = `${getFrontendUrl()}/money/costs?missing_receipt=1&mine=1`;
+  const actionUrl = `${getFrontendUrl()}/my-receipts`;
 
   for (const row of due.rows as Array<{ user_id: string; n: number; cost_ids: string[] }>) {
     const n = row.n;
