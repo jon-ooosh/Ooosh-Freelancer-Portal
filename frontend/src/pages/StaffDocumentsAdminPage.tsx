@@ -16,6 +16,12 @@ export interface DocRow {
   is_active: boolean; current_version: number | null;
   approval_status: ApprovalStatus; review_notes: string | null;
   shareable_with_freelancers: boolean;
+  tags: string[] | null;
+  owner_user_ids: string[] | null;
+  content_review_interval_months: number | null;
+  content_review_due_date: string | null;
+  content_reviewed_at: string | null;
+  author_name?: string | null;
   pending_count: number; completed_count: number; lapsed_count: number;
 }
 export interface UserRow { id: string; email: string; first_name: string | null; last_name: string | null; }
@@ -31,6 +37,49 @@ async function uploadDocFile(file: File): Promise<{ file_r2_key: string; file_na
   fd.append('attachment_only', 'true');
   const res = await api.upload<{ r2_key: string; filename: string }>('/files/upload', fd);
   return { file_r2_key: res.r2_key, file_name: res.filename };
+}
+
+// ── Tag input (freeform chips; Enter / comma adds, suggestions from existing) ─
+function TagInput({ tags, setTags, suggestions }: {
+  tags: string[]; setTags: (t: string[]) => void; suggestions: string[];
+}) {
+  const [text, setText] = useState('');
+  const add = (raw: string) => {
+    const t = raw.trim().toLowerCase().replace(/,+$/, '').slice(0, 40);
+    if (t && !tags.includes(t)) setTags([...tags, t]);
+    setText('');
+  };
+  const remaining = suggestions.filter((s) => !tags.includes(s)).slice(0, 8);
+  return (
+    <div>
+      <div className="flex flex-wrap gap-1.5 mb-1.5">
+        {tags.map((t) => (
+          <span key={t} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-purple-100 text-purple-800 text-xs">
+            {t}
+            <button type="button" onClick={() => setTags(tags.filter((x) => x !== t))} className="text-purple-500 hover:text-purple-800">×</button>
+          </span>
+        ))}
+      </div>
+      <input
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); add(text); }
+          else if (e.key === 'Backspace' && !text && tags.length) setTags(tags.slice(0, -1));
+        }}
+        onBlur={() => text && add(text)}
+        placeholder="e.g. vehicles, money, staging — Enter to add"
+        className="w-full border rounded-md px-2 py-1.5 text-sm"
+      />
+      {remaining.length > 0 && (
+        <div className="flex flex-wrap gap-1 mt-1.5">
+          {remaining.map((s) => (
+            <button key={s} type="button" onClick={() => add(s)} className="px-2 py-0.5 rounded-full bg-gray-100 text-gray-600 text-xs hover:bg-gray-200">+ {s}</button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // ── Content editor (write markdown OR upload a file) ──────────────────────────
@@ -111,8 +160,8 @@ function ContentEditor({ body, setBody, file, setFile }: {
 }
 
 // ── Create / edit config modal ────────────────────────────────────────────────
-export function DocFormModal({ doc, users, canPublish = true, onClose, onSaved }: {
-  doc: DocRow | null; users: UserRow[]; canPublish?: boolean; onClose: () => void; onSaved: () => void;
+export function DocFormModal({ doc, users, canPublish = true, tagSuggestions = [], onClose, onSaved }: {
+  doc: DocRow | null; users: UserRow[]; canPublish?: boolean; tagSuggestions?: string[]; onClose: () => void; onSaved: () => void;
 }) {
   const editing = !!doc;
   const [saveAsDraft, setSaveAsDraft] = useState(false);
@@ -130,6 +179,9 @@ export function DocFormModal({ doc, users, canPublish = true, onClose, onSaved }
   const [review, setReview] = useState<string>(doc ? (doc.review_interval_months?.toString() || '') : '12');
   const [shareable, setShareable] = useState<boolean>(doc?.shareable_with_freelancers ?? false);
   const canShare = SHAREABLE_CATEGORIES.includes(category);
+  const [tags, setTags] = useState<string[]>(doc?.tags || []);
+  const [ownerIds, setOwnerIds] = useState<string[]>(doc?.owner_user_ids || []);
+  const [contentReview, setContentReview] = useState<string>(doc ? (doc.content_review_interval_months?.toString() || '') : '12');
   const [isActive, setIsActive] = useState(doc?.is_active ?? true);
   const [body, setBody] = useState('');
   const [file, setFile] = useState<{ file_r2_key: string; file_name: string } | null>(null);
@@ -146,9 +198,12 @@ export function DocFormModal({ doc, users, canPublish = true, onClose, onSaved }
         || escalate !== (doc!.escalate_after_days?.toString() || '')
         || review !== (doc!.review_interval_months?.toString() || '')
         || shareable !== (doc!.shareable_with_freelancers ?? false)
+        || contentReview !== (doc!.content_review_interval_months?.toString() || '')
         || JSON.stringify(roles) !== JSON.stringify(doc!.target_roles || [])
-        || JSON.stringify(userIds) !== JSON.stringify(doc!.target_user_ids || []))
-    : !!(title || body.trim() || file || tickLabel || roles.length || userIds.length || chase || escalate || review);
+        || JSON.stringify(userIds) !== JSON.stringify(doc!.target_user_ids || [])
+        || JSON.stringify(tags) !== JSON.stringify(doc!.tags || [])
+        || JSON.stringify(ownerIds) !== JSON.stringify(doc!.owner_user_ids || []))
+    : !!(title || body.trim() || file || tickLabel || roles.length || userIds.length || chase || escalate || review || tags.length || ownerIds.length);
   const attemptClose = () => { if (dirty && !window.confirm('Discard your changes?')) return; onClose(); };
 
   const submit = async () => {
@@ -166,6 +221,9 @@ export function DocFormModal({ doc, users, canPublish = true, onClose, onSaved }
         chase_interval_days: numOrNull(chase), escalate_after_days: numOrNull(escalate),
         review_interval_months: numOrNull(review),
         shareable_with_freelancers: canShare ? shareable : false,
+        tags: tags.length ? tags : null,
+        owner_user_ids: ownerIds.length ? ownerIds : null,
+        content_review_interval_months: numOrNull(contentReview),
       };
       if (editing) {
         await api.patch(`/staff-documents/${doc!.id}`, { ...config, is_active: isActive });
@@ -217,6 +275,11 @@ export function DocFormModal({ doc, users, canPublish = true, onClose, onSaved }
                 placeholder="I have read and agree to the above." className="mt-1 w-full border rounded-md px-2 py-1.5" />
             </label>
           )}
+
+          <div className="text-sm">
+            <div className="mb-1 text-gray-700">Tags <span className="text-gray-400 font-normal">— for search & filtering (e.g. vehicles, money, staging)</span></div>
+            <TagInput tags={tags} setTags={setTags} suggestions={tagSuggestions} />
+          </div>
 
           <div className="grid grid-cols-2 gap-3">
             <label className="text-sm">Visibility
@@ -270,6 +333,30 @@ export function DocFormModal({ doc, users, canPublish = true, onClose, onSaved }
                 : `“${category}” documents are internal only — switch to policy / training / other to allow sharing.`}
             </p>
           </div>
+
+          <div className="rounded-md border border-gray-200 p-2.5 space-y-2">
+            <div className="text-sm font-medium text-gray-700">Ownership &amp; content review</div>
+            <div className="text-sm">
+              <div className="mb-1 text-gray-600">Owner(s) — responsible for keeping it current</div>
+              <div className="border rounded-md p-2 max-h-32 overflow-y-auto space-y-1">
+                {users.map((u) => (
+                  <label key={u.id} className="flex items-center gap-2">
+                    <input type="checkbox" checked={ownerIds.includes(u.id)}
+                      onChange={(e) => setOwnerIds((prev) => e.target.checked ? [...prev, u.id] : prev.filter((x) => x !== u.id))} />
+                    {[u.first_name, u.last_name].filter(Boolean).join(' ') || u.email}
+                  </label>
+                ))}
+              </div>
+            </div>
+            <label className="text-sm block">Owner reviews content every (months)
+              <input value={contentReview} onChange={(e) => setContentReview(e.target.value.replace(/\D/g, ''))}
+                placeholder="never" className="mt-1 w-40 border rounded-md px-2 py-1.5" />
+              <span className="block text-xs text-gray-400 mt-1">
+                The owner(s) / author are reminded to check it's still accurate and mark it reviewed. Separate from staff re-signing below.
+              </span>
+            </label>
+          </div>
+
           {mode !== 'read_only' && (
             <div className="grid grid-cols-3 gap-3">
               <label className="text-sm">Chase every (days)
@@ -518,6 +605,8 @@ export default function StaffDocumentsAdminPage() {
   const [versionDoc, setVersionDoc] = useState<DocRow | null>(null);
   const [matrixDoc, setMatrixDoc] = useState<DocRow | null>(null);
   const [viewDoc, setViewDoc] = useState<DocRow | null>(null);
+  const [search, setSearch] = useState('');
+  const [tagFilter, setTagFilter] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -542,6 +631,29 @@ export default function StaffDocumentsAdminPage() {
     try { await api.delete(`/staff-documents/${id}`); load(); }
     catch (e) { alert(e instanceof Error ? e.message : 'Could not delete.'); }
   };
+  const markReviewed = async (id: string) => {
+    if (!window.confirm('Mark this document as reviewed — content confirmed still current?')) return;
+    try { await api.post(`/staff-documents/${id}/mark-reviewed`, {}); load(); }
+    catch (e) { alert(e instanceof Error ? e.message : 'Could not mark reviewed.'); }
+  };
+  const userName = (id: string) => {
+    const u = users.find((x) => x.id === id);
+    return u ? ([u.first_name, u.last_name].filter(Boolean).join(' ') || u.email) : '—';
+  };
+
+  const todayStr = new Date().toISOString().slice(0, 10);
+  // DATE columns serialise to a full ISO timestamp in JSON — compare date parts.
+  const reviewDue = (d: DocRow) => !!d.content_review_due_date && d.content_review_due_date.slice(0, 10) <= todayStr;
+  const allTags = Array.from(new Set(docs.flatMap((d) => d.tags || []))).sort();
+  const q = search.trim().toLowerCase();
+  const filtered = docs.filter((d) => {
+    if (tagFilter && !(d.tags || []).includes(tagFilter)) return false;
+    if (!q) return true;
+    return d.title.toLowerCase().includes(q)
+      || (d.tags || []).some((t) => t.includes(q))
+      || (d.author_name || '').toLowerCase().includes(q)
+      || d.category.includes(q);
+  });
 
   const modeLabel: Record<Mode, string> = { read_only: 'Read only', tick: 'Tick', sign: 'Sign' };
   const approvalPill = (s: ApprovalStatus) => s === 'draft' ? { t: 'Draft', c: 'bg-gray-100 text-gray-600' }
@@ -557,6 +669,24 @@ export default function StaffDocumentsAdminPage() {
       </div>
       <p className="text-gray-500 mb-6">Create and manage the policies, agreements and guides staff read and sign.</p>
 
+      {!loading && docs.length > 0 && (
+        <div className="mb-4 flex flex-col sm:flex-row sm:items-center gap-2">
+          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search title, tag, author…"
+            className="border rounded-md px-3 py-1.5 text-sm w-full sm:w-72" />
+          {allTags.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5">
+              {allTags.map((t) => (
+                <button key={t} onClick={() => setTagFilter(tagFilter === t ? null : t)}
+                  className={`px-2 py-0.5 rounded-full text-xs ${tagFilter === t ? 'bg-purple-700 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
+                  {t}
+                </button>
+              ))}
+              {tagFilter && <button onClick={() => setTagFilter(null)} className="text-xs text-gray-500 underline">clear</button>}
+            </div>
+          )}
+        </div>
+      )}
+
       {loading ? <div className="text-gray-500">Loading…</div> : (
         <div className="bg-white border border-gray-200 rounded-lg overflow-x-auto">
           <table className="min-w-full text-sm">
@@ -565,16 +695,25 @@ export default function StaffDocumentsAdminPage() {
               <th className="py-2 px-3">Status</th><th className="py-2 px-3">v</th><th className="py-2 px-3"></th>
             </tr></thead>
             <tbody>
-              {docs.map((d) => (
+              {filtered.map((d) => (
                 <tr key={d.id} className={`border-b border-gray-100 ${d.is_active ? '' : 'opacity-50'}`}>
                   <td className="py-2 px-4">
-                    <div className="font-medium text-gray-900 flex items-center gap-2">
+                    <div className="font-medium text-gray-900 flex flex-wrap items-center gap-2">
                       {d.title}
                       {approvalPill(d.approval_status) && (
                         <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${approvalPill(d.approval_status)!.c}`}>{approvalPill(d.approval_status)!.t}</span>
                       )}
+                      {reviewDue(d) && <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-100 text-amber-700">Review due</span>}
                     </div>
-                    <div className="text-xs text-gray-400">{d.category}{!d.is_active && ' · retired'}</div>
+                    <div className="text-xs text-gray-400">
+                      {d.category}{!d.is_active && ' · retired'}{d.author_name && ` · by ${d.author_name}`}
+                      {d.owner_user_ids && d.owner_user_ids.length > 0 && ` · owner: ${d.owner_user_ids.map(userName).join(', ')}`}
+                    </div>
+                    {d.tags && d.tags.length > 0 && (
+                      <div className="flex flex-wrap gap-1 mt-1">
+                        {d.tags.map((t) => <span key={t} className="px-1.5 py-0.5 rounded-full bg-purple-50 text-purple-700 text-[10px]">{t}</span>)}
+                      </div>
+                    )}
                   </td>
                   <td className="py-2 px-3 text-gray-600">{modeLabel[d.completion_mode]}</td>
                   <td className="py-2 px-3 text-gray-600 text-xs">{d.target_type.replace('_', ' ')}</td>
@@ -597,17 +736,24 @@ export default function StaffDocumentsAdminPage() {
                     {d.completion_mode !== 'read_only' && (
                       <button onClick={() => setMatrixDoc(d)} className="text-xs text-gray-600 hover:text-purple-700 px-1">Who's done</button>
                     )}
+                    {reviewDue(d) && (
+                      <button onClick={() => markReviewed(d.id)} className="text-xs text-amber-700 hover:text-amber-900 px-1">Mark reviewed</button>
+                    )}
                     <button onClick={() => del(d.id)} className="text-xs text-red-500 hover:text-red-700 px-1">Delete</button>
                   </td>
                 </tr>
               ))}
-              {docs.length === 0 && <tr><td colSpan={6} className="py-6 text-center text-gray-400">No documents yet — create one.</td></tr>}
+              {filtered.length === 0 && (
+                <tr><td colSpan={6} className="py-6 text-center text-gray-400">
+                  {docs.length === 0 ? 'No documents yet — create one.' : 'No documents match your search.'}
+                </td></tr>
+              )}
             </tbody>
           </table>
         </div>
       )}
 
-      {form.open && <DocFormModal doc={form.doc} users={users}
+      {form.open && <DocFormModal doc={form.doc} users={users} tagSuggestions={allTags}
         onClose={() => setForm({ open: false, doc: null })} onSaved={() => { setForm({ open: false, doc: null }); load(); }} />}
       {versionDoc && <VersionModal doc={versionDoc} onClose={() => setVersionDoc(null)} onSaved={() => { setVersionDoc(null); load(); }} />}
       {matrixDoc && <MatrixModal doc={matrixDoc} onClose={() => setMatrixDoc(null)} />}

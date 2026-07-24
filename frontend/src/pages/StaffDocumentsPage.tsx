@@ -25,7 +25,11 @@ interface Assignment {
   completed_at: string | null;
 }
 interface LibraryDoc { id: string; slug: string; title: string; category: string; version: number | null; }
-interface MineData { todo: Assignment[]; completed: Assignment[]; library: LibraryDoc[] }
+interface ReviewOwed {
+  id: string; title: string; category: string;
+  content_review_due_date: string | null; content_reviewed_at: string | null; version: number | null;
+}
+interface MineData { todo: Assignment[]; completed: Assignment[]; library: LibraryDoc[]; reviewsOwed: ReviewOwed[] }
 
 interface ViewData {
   id: string; title: string; category: string; completion_mode: Mode; tick_label: string | null;
@@ -94,6 +98,14 @@ export default function StaffDocumentsPage() {
     load();
   };
 
+  const markReviewed = async (id: string) => {
+    if (!window.confirm('Mark as reviewed — you confirm the content is still current?')) return;
+    await api.post(`/staff-documents/${id}/mark-reviewed`, {});
+    setToast('Thanks — review recorded.');
+    setTimeout(() => setToast(null), 4000);
+    load();
+  };
+
   useEffect(() => { load(); }, [load]);
 
   const openViewer = (documentId: string, assignmentId: string | null) => {
@@ -158,6 +170,37 @@ export default function StaffDocumentsPage() {
         <div className="mb-8 p-4 rounded-lg bg-green-50 text-green-700 text-sm">
           Nothing to sign right now — you're all up to date. ✓
         </div>
+      )}
+
+      {/* Documents you own — content review due */}
+      {data && data.reviewsOwed.length > 0 && (
+        <section className="mb-8">
+          <h2 className="text-sm font-semibold text-amber-700 uppercase tracking-wide mb-2">
+            Documents you look after — review due ({data.reviewsOwed.length})
+          </h2>
+          <p className="text-xs text-gray-500 mb-2">
+            You're an owner or author of these. Check they're still accurate, then mark reviewed. If one needs updating,{' '}
+            {canPublish ? 'publish a new version from Manage Documents' : 'ask a manager to publish a new version'}.
+          </p>
+          <div className="space-y-2">
+            {data.reviewsOwed.map((r) => (
+              <div key={r.id} className="flex items-center justify-between gap-3 bg-white border border-amber-200 rounded-lg p-4 shadow-sm">
+                <div className="min-w-0">
+                  <div className="font-medium text-gray-900 truncate">{r.title}</div>
+                  <div className="text-xs text-gray-500 mt-0.5">
+                    {CATEGORY_LABEL[r.category] || 'Document'}
+                    {r.content_review_due_date && <> · review due {fmt(r.content_review_due_date)}</>}
+                    {r.content_reviewed_at && <> · last reviewed {fmt(r.content_reviewed_at)}</>}
+                  </div>
+                </div>
+                <div className="shrink-0 flex items-center gap-2">
+                  <button onClick={() => openViewer(r.id, null)} className="px-3 py-1.5 rounded-md text-sm text-purple-700 hover:bg-purple-50">View</button>
+                  <button onClick={() => markReviewed(r.id)} className="px-4 py-2 rounded-md bg-amber-600 text-white text-sm font-medium hover:bg-amber-700">Mark reviewed</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
       )}
 
       {/* Completed */}
