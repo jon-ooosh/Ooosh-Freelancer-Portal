@@ -11,6 +11,7 @@ import ExcessHistorySection from '../components/ExcessHistorySection';
 import HireHistoryTab from '../components/HireHistoryTab';
 import FreelancerHistorySection from '../components/FreelancerHistorySection';
 import HeldItemsSection from '../components/HeldItemsSection';
+import InviteFreelancerModal from '../components/InviteFreelancerModal';
 import StorageHistorySection from '../components/StorageHistorySection';
 import { PcnHistorySection } from '../components/PcnHistorySection';
 import { PERSON_ORG_ROLES } from '@shared/index';
@@ -38,6 +39,7 @@ interface PersonDetail {
   home_address: string | null;
   date_of_birth: string | null;
   is_freelancer: boolean;
+  freelancer_status: string | null;
   freelancer_joined_date: string | null;
   freelancer_next_review_date: string | null;
   skills: string[];
@@ -93,6 +95,7 @@ export default function PersonDetailPage() {
   const [person, setPerson] = useState<PersonDetail | null>(null);
   const [dnoReason, setDnoReason] = useState('');
   const [showDnoForm, setShowDnoForm] = useState(false);
+  const [showInvite, setShowInvite] = useState(false);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'timeline' | 'hire_history' | 'freelancer_history' | 'details' | 'relationships' | 'excess' | 'held' | 'storage' | 'pcn'>('timeline');
@@ -337,10 +340,17 @@ export default function PersonDetailPage() {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            {isFreelancer && (
-              <span className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${person.is_approved ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>
-                {person.is_approved ? 'Approved Freelancer' : 'Pending Approval'}
-              </span>
+            {isFreelancer && (() => {
+              const fp = freelancerStatusPill(person.freelancer_status, person.is_approved);
+              return <span className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${fp.cls}`}>{fp.label}</span>;
+            })()}
+            {!person.is_approved && (
+              <button
+                onClick={() => setShowInvite(true)}
+                className="px-3 py-1.5 text-sm border border-purple-300 text-purple-700 rounded hover:bg-purple-50 transition-colors"
+              >
+                {isFreelancer ? 'Re-send sign-up' : 'Invite to freelance'}
+              </button>
             )}
             <button
               onClick={() => {
@@ -982,8 +992,29 @@ export default function PersonDetailPage() {
           onCancel={() => setShowEdit(false)}
         />
       </SlidePanel>
+
+      {showInvite && (
+        <InviteFreelancerModal
+          personId={person.id}
+          personName={`${person.first_name} ${person.last_name}`}
+          onClose={() => setShowInvite(false)}
+          onInvited={() => { setShowInvite(false); loadPerson(); }}
+        />
+      )}
     </div>
   );
+}
+
+// Finer freelancer status pill (invited / applied / more_info / approved / declined).
+function freelancerStatusPill(status: string | null, isApproved: boolean): { label: string; cls: string } {
+  if (isApproved || status === 'approved') return { label: 'Approved Freelancer', cls: 'bg-green-100 text-green-700' };
+  switch (status) {
+    case 'invited': return { label: 'Invited', cls: 'bg-slate-100 text-slate-600' };
+    case 'applied': return { label: 'Applied — needs review', cls: 'bg-amber-100 text-amber-700' };
+    case 'more_info': return { label: 'Info requested', cls: 'bg-amber-100 text-amber-700' };
+    case 'declined': return { label: 'Declined', cls: 'bg-red-100 text-red-700' };
+    default: return { label: 'Pending Approval', cls: 'bg-amber-100 text-amber-700' };
+  }
 }
 
 const REQUIRED_DOCS = [

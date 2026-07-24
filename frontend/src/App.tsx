@@ -43,6 +43,7 @@ import FreelancerCheckinShell from './pages/FreelancerCheckinShell';
 import StoragePage from './pages/StoragePage';
 import StorageTcsAcceptPage from './pages/StorageTcsAcceptPage';
 import CarnetFormPage from './pages/CarnetFormPage';
+import FreelancerApplyPage from './pages/FreelancerApplyPage';
 import HoldingPage from './pages/HoldingPage';
 import PcnsPage from './pages/PcnsPage';
 import PcnDetailPage from './pages/PcnDetailPage';
@@ -176,6 +177,8 @@ export default function App() {
       {/* Public storage T&Cs acceptance — token-authenticated, no Layout wrapper */}
       <Route path="/storage-tcs/:token" element={<StorageTcsAcceptPage />} />
       <Route path="/carnet-form/:token" element={<CarnetFormPage />} />
+      {/* Public freelancer sign-up — token-authenticated, no Layout wrapper */}
+      <Route path="/freelancer-apply/:token" element={<FreelancerApplyPage />} />
       {/* Public PCN pay-direct proof-of-payment upload — token-authenticated, no Layout */}
       <Route path="/pcn-receipt/:token" element={<PcnReceiptUploadPage />} />
       {/* Public inbound merch-delivery form (no login) — replaces the JotForm */}
