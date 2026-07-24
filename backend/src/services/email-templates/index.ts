@@ -63,6 +63,30 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  freelancer_application_received: {
+    variant: 'internal',
+    preheader: 'A freelancer has submitted their sign-up form',
+    subject: 'Freelancer application — {{name}}',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:18px;color:#1e293b;">New freelancer application</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        <strong>{{name}}</strong> has submitted their freelancer sign-up form and is waiting to be reviewed.
+      </p>
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.6;">
+        Skills: {{skills}}
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;">
+        <tr><td style="border-radius:8px;background-color:#7B5EA7;">
+          <a href="{{reviewUrl}}" style="display:inline-block;padding:11px 20px;font-size:14px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:8px;">Review their details →</a>
+        </td></tr>
+      </table>
+      <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">
+        Open their record to check the submitted details, documents and insurance answers, then approve, decline or
+        ask for more info.
+      </p>
+    `,
+  },
+
   rehearsal_info_pack: {
     variant: 'client',
     preheader: 'Everything you need for your rehearsals with us',

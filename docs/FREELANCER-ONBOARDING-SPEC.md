@@ -1,6 +1,6 @@
 # Freelancer Onboarding Module — Spec (DRAFT)
 
-Status: **planning / awaiting sign-off** — no code until this is agreed.
+Status: **Phases A + B SHIPPED** (invite + apply/enrich/alert). Phase C next (review/approve + surfaces). See §15 for the live build status.
 
 Branch: `claude/freelancer-onboarding-workflow-j498xl`
 
@@ -286,8 +286,8 @@ licence uploads are reviewed manually.
 1. **Phase A — Data + invite** (migration 184: `freelancer_applications` + new person
    columns; invite endpoints; token minting; invite UI buttons + "New freelancer" quick-add;
    invite email template).
-2. **Phase B — Apply** (public `/freelancer-apply/:token` page + get/submit endpoints +
-   enrich + info@ alert + application-received template).
+2. **Phase B — Apply** ✅ SHIPPED (public `/freelancer-apply/:token` page + get/upload/submit
+   endpoints + enrich + info@ alert + application-received template + invite UI + pending tag).
 3. **Phase C — Review + surfaces** (Freelancer tab; approve/decline/more-info; onboarding
    checklist; pending tag + People filter; greyed picklists; approval/decline/more-info
    templates).
@@ -347,8 +347,48 @@ lapse greys the freelancer for the affected work type. Both feed the same greyin
   routed). Reuses existing person columns discovered during build (`has_tshirt`,
   `is_insured_on_vehicles`, `freelancer_references`, `emergency_contact_name/phone`,
   `date_of_birth`, `home_address`, `licence_details`).
-- **Phase B — NEXT:** invite UI (Person Detail button + New-Freelancer quick-add), pending
-  tag on People, greyed picklist entries; the public `/freelancer-apply/:token` form +
-  submit → enrich → info@ alert.
-- **Phases C–E:** review/approve + Freelancer tab + onboarding checklist; document-expiry
-  reminder scanner + portal Resources; iDenfy (deferred to the Christmas migration).
+- **Phase B — SHIPPED:** the end-to-end apply flow + invite UI.
+  - **Backend** (`routes/freelancers.ts`) — public apply endpoints declared BEFORE the JWT auth
+    gate, rate-limited (40/min), token IS the gate (status-bound: live while `invited`/`more_info`,
+    410 once `applied`/`approved`/`declined`):
+    - `GET /apply/:token` — form context + validity + pre-fill (name/email/phone/DOB/address/skills/
+      licence dates from the linked person, so a re-invite is pre-filled).
+    - `POST /apply/:token/upload` — one document at a time (multipart, 15 MB, image/PDF only) →
+      R2 under `files/freelancers/<person_id>/<label>-<uuid>.<ext>`, returns an `{r2_key,label,…}`
+      ref the frontend collects.
+    - `POST /apply/:token/submit` — ENRICHES the linked person (COALESCE so empties never wipe
+      existing data): name/preferred/email/phone/mobile/DOB/home_address/emergency/skills, and —
+      only when a "Driving" skill is picked — licence number/issued-by/expiry/passed-date; DVLA check
+      date stamped today when a DVLA doc is present; passport/PLI expiry; day-rate note; uploaded docs
+      appended to `people.files` (matching DriverDetailPage label/tag shape); signature → R2. Stores
+      `submission`/`insurance_answers`/`references`/`signature_r2_key`/`tcs_version` on the application,
+      flips `status='applied'` + `people.freelancer_status='applied'`, logs a person-timeline
+      interaction, and fires the `freelancer_application_received` alert to info@ (deeplink to
+      `/people/:id`).
+  - **`freelancer_application_received`** internal email template (test-mode routed).
+  - **Frontend:**
+    - `FreelancerApplyPage.tsx` (public, no Layout, mounted before `ProtectedRoute` in `App.tsx` at
+      `/freelancer-apply/:token`) — full Jotform port: about-you, emergency contact, work eligibility
+      + "looking for", skills multi-select, conditional Driving block (confidence, licence fields,
+      licence/DVLA uploads, 4-question insurance questionnaire), passport, extra docs (PLI/CV),
+      repeatable references, scrollable Privacy/T&Cs consent + signature pad. `<DocUpload>` posts each
+      file as picked.
+    - `InviteFreelancerModal.tsx` (shared) — existing-person mode (one click) OR new-shell mode
+      (name+email). Shows the tokenised link + Copy button + whether the intro email went out.
+    - Wired into **PersonDetailPage** ("Invite to freelance" / "Re-send sign-up" button, gated to
+      `!is_approved`; finer `freelancerStatusPill` for invited/applied/more_info/approved/declined)
+      and **PeoplePage** ("+ New Freelancer" quick-add button + per-row freelancer-status pill in
+      freelancer mode).
+  - **PII note:** DOB / home address enrich into the existing plaintext `people` columns (consistent
+    with how the whole address book stores contacts today). Encrypting freelancer PII is the deferred
+    "Freelancer PII" retrofit slice — it needs `*_encrypted` companion columns + dual-write plumbing
+    that doesn't exist on `people` yet, so it's out of Phase B (a new migration + own PR).
+- **Phase C — NEXT:** Freelancer tab on Person Detail; approve / decline / request-more-info
+  endpoints (MANAGER_ROLES) + templates; onboarding checklist; **greyed picklist entries**
+  (relax the `is_approved=true` crew/transport pickers — the real one is `GET /api/people`'s
+  `is_approved` conditional filter in `routes/people.ts` + the `quotes.ts:1887` crew-history query —
+  to return pending freelancers with `is_approved` per row so the frontend can render them disabled
+  with a "pending approval" note; deliberately deferred here so the picker isn't half-changed — do it
+  alongside the approve flow).
+- **Phases D–E:** document-expiry reminder scanner + portal Resources; iDenfy (deferred to the
+  Christmas migration).
