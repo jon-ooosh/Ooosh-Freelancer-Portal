@@ -1906,7 +1906,10 @@ Headlines (design invariants — still apply):
 - **Timing gotcha:** rehearsals do NOT run 9am→9am like vehicles/backline — they finish on the day
   they finish. HH's `job_end` carries the phantom 9am-next-morning rollover (Numan "10–16 Jul" is
   really 10am 10th → 10pm 15th), so the last session evening = `job_end_date − 1` when `job_end`
-  time is an early-morning rollover. Sibling to the `return_date +1 buffer` gotcha.
+  time is an early-morning rollover. Sibling to the `return_date +1 buffer` gotcha. The SAME
+  finish-on-the-day nature also broke the OP→HH charge-period push (rehearsals under-counted by a
+  day because the push floored elapsed hours) — fixed Jul 2026 by ceiling, see the "Charge period =
+  `ceil(elapsed_hours / 24)`" note under the "Create in HireHop" button in Stream A.
 - **Tasks** (general ad-hoc/building jobs, built here but entity-general): visibility
   everyone/assignee-only, notify-on-done + notify-if-not-done-after-X-days, default notify the
   assignee — **staff via bell/email, freelancers portal-only (no bell/email)**. Staff input/surface
@@ -2157,6 +2160,7 @@ The Job Detail page has inline editing for all key fields.
 - [x] **Job name** — Inline editable
 - [x] **Pipeline fields** — Likelihood, next chase date, job value — all inline editable on Job Detail
 - [x] **Create in HireHop** button — Push Ooosh-native enquiry to create HH job, write back the number. HH user/manager mapping via `hh_user_id` on users table (migration 028). Uses `/api/save_job.php` with confirmed field names: `out`/`start`/`end`/`to` for dates, `duration_days`/`duration_hrs` for charge period, `duration_locked: 0`. Default times 09:00 when DatePicker sends date-only. Details field is NOT pushed to HH job memo.
+  - **⚠️ Charge period = `ceil(elapsed_hours / 24)`, computed from the INSIDE dates only — Job Start → Job End (NOT Outgoing/Returning). CEIL, never floor (Jul 2026 fix, PR #1033 — do not reintroduce floor).** `calcHHDuration(start, end)` in `routes/pipeline.ts` is the single source for all push paths (Create in HireHop / sync-dates / combine). HireHop's own charge-period rule counts any fraction of a day past a whole 24h block as a new chargeable day — confirmed live on job 16390: finish 22:00 (132h) → 6 days, finish 09:00 next morning (143h) → 6, finish 10:05 (145h) → 7 = `ceil(hours/24)` throughout. HH honours the `duration_days` we send on save, so pushing `floor` was actively overriding HH with the wrong figure. The bug only showed on hires NOT entered on a whole 24h (9am→9am) boundary — most visibly **rehearsals**, which finish on the actual last day (e.g. 10:00–22:00) with no morning rollover, so a genuine 6-day rehearsal (9–14 Nov, 132h) was pushed as 5. For 9am→9am van entries the hours are exact 24h multiples so `ceil == floor` — vans unchanged. `duration_hrs` is also ceiled to mirror HH exactly (144.08h → 145). The Job Detail date-editor "N days" label (`JobDetailPage.tsx`) uses the same times-aware ceil so OP and HH agree; the excess (`ExcessPaymentModal`) and transition-modal day-counts already ceiled the full timestamps. Outgoing/Returning (`out`/`to`) are pushed as their own fields (equipment reserved-from / available-again) and only sanity-clamped (`out` can't be after `start`) — they never feed the day count.
 
 **Stream B: Band-Centric Data Model** ✅ COMPLETE
 Organisation-to-organisation relationships and multi-org job links. Makes "bands" a first-class concept.
