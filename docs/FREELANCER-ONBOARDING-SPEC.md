@@ -383,6 +383,26 @@ lapse greys the freelancer for the affected work type. Both feed the same greyin
     with how the whole address book stores contacts today). Encrypting freelancer PII is the deferred
     "Freelancer PII" retrofit slice — it needs `*_encrypted` companion columns + dual-write plumbing
     that doesn't exist on `people` yet, so it's out of Phase B (a new migration + own PR).
+- **Phase B feedback round — SHIPPED (post first live test):** form + email polish, no schema change.
+  - **Email `freelancer_invite` + `freelancer_application_received` + `FREELANCER_TERMS`:** all
+    em-dashes / en-dashes replaced with plain hyphens; the under-button paragraphs bumped 13px → 15px
+    (body size). Targeted edits only — the shared email-templates file has other templates with
+    em-dashes that MUST NOT be blanket-replaced.
+  - **DOB age gate:** DOB now REQUIRED; must be **≥18** to sign up, **≥23** if a "Driving" skill is
+    picked (insurer minimum). Enforced BOTH client-side (`ageFrom` in `FreelancerApplyPage.submit`)
+    and server-side (`ageFromDob` in `routes/freelancers.ts` submit handler) — the server is the gate.
+  - **"What are you looking for?"** is now MULTI-select (checkboxes, `looking_for` stored as an array
+    in `submission`), not a single radio.
+  - **Passport section** renders only when **`uk_eu`** ("UK & EU tours") is ticked in "looking for".
+    (Deliberately strict to `uk_eu`; "Whatever's going" does NOT trigger it — trivial to widen if
+    wanted.)
+  - **"Other" skill** reveals a free-text "describe your other skill(s)" box → `submission.other_skill_detail`.
+  - **Driving details required when driving:** licence number / issued-by / expiry / passed-date +
+    Licence Front + Licence Back + DVLA Summary uploads are all mandatory when a "Driving" skill is
+    selected (client + server validated). The Driving block shows `*` markers + an inline note.
+  - **Enrich verified:** COALESCE means a partial fill populates only the fields provided and never
+    wipes existing person data — confirmed working (skills + home address populated on the TEST 123
+    live test).
 - **Phase C — NEXT:** Freelancer tab on Person Detail; approve / decline / request-more-info
   endpoints (MANAGER_ROLES) + templates; onboarding checklist; **greyed picklist entries**
   (relax the `is_approved=true` crew/transport pickers — the real one is `GET /api/people`'s
@@ -390,5 +410,14 @@ lapse greys the freelancer for the affected work type. Both feed the same greyin
   to return pending freelancers with `is_approved` per row so the frontend can render them disabled
   with a "pending approval" note; deliberately deferred here so the picker isn't half-changed — do it
   alongside the approve flow).
+  - **Consolidate the freelancer surfaces on Person Detail (jon, Phase B feedback):** the freelancer
+    options are currently split confusingly across the **Edit** slide-panel (freelancer fields:
+    is_freelancer, joined/review dates, approved, insured, t-shirt, skills, references) AND the
+    **Details** tab (which also shows some of them). Roll the existing **"Freelancer History"** tab
+    into a single general **"Freelancer"** tab that is the ONE home for "everything to do with this
+    person being a freelancer" — application review/approve panel, onboarding checklist, the
+    documents + expiry dates, the freelancer flags (approved/insured/t-shirt/skills/review date), and
+    the assignment history. Pull the freelancer fields OUT of the generic Edit panel (which should
+    stay for plain contact details) so there's one obvious place to manage a freelancer.
 - **Phases D–E:** document-expiry reminder scanner + portal Resources; iDenfy (deferred to the
   Christmas migration).

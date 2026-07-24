@@ -29,18 +29,18 @@ const templates: Record<string, EmailTemplate> = {
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
         Many thanks for your interest in working with us as a self-employed freelancer. Assuming you meet our
         standard criteria, we'll be happy to offer you work on a freelance basis. Most work is offered via our
-        private WhatsApp group, or sometimes by email or phone — you're under no obligation to accept any work,
+        private WhatsApp group, or sometimes by email or phone - you're under no obligation to accept any work,
         just say yes to what suits you.
       </p>
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
-        There are usually two types of work: work directly for us (deliveries, warehouse, backline/sound at shows —
+        There are usually two types of work: work directly for us (deliveries, warehouse, backline/sound at shows -
         usually a day or less, minimum a half-day rate of £75 for a five-hour call) and work on behalf of clients
-        (tour work such as driving, TMing, FOH, merch — usually a day rate). If you're applying for driving work,
+        (tour work such as driving, TMing, FOH, merch - usually a day rate). If you're applying for driving work,
         our insurance requires you to be over 23, have held your licence at least two years, and have no more than
         six points in the last three years.
       </p>
       <p style="margin:0 0 20px;font-size:15px;color:#334155;line-height:1.6;">
-        The first step is to complete the form below. It gathers your basic contact and ID details — and, if you're
+        The first step is to complete the form below. It gathers your basic contact and ID details - and, if you're
         after driving work, your licence details and a few insurance questions. Please pay particular attention to
         the Privacy Notice at the top and the Terms &amp; Conditions (including our Code of Conduct) at the bottom.
       </p>
@@ -49,13 +49,13 @@ const templates: Record<string, EmailTemplate> = {
           <a href="{{formUrl}}" style="display:inline-block;padding:12px 22px;font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:8px;">Complete your sign-up form →</a>
         </td></tr>
       </table>
-      <p style="margin:0 0 16px;font-size:13px;color:#64748b;line-height:1.6;">
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
         Once you've submitted the form we'll process your details and reply to confirm whether you've been accepted,
         if we need more information, or otherwise. If accepted, you'll get a link to join the WhatsApp group and our
-        payment/invoicing procedure — in brief, we aim to pay approved invoices on the first Friday one week after
-        submission (normally paid within 7–14 days).
+        payment/invoicing procedure - in brief, we aim to pay approved invoices on the first Friday one week after
+        submission (normally paid within 7-14 days).
       </p>
-      <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">
+      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
         Any questions in the meantime, just reply to this email. If the button above doesn't work, copy and paste
         this link into your browser:<br>
         <a href="{{formUrl}}" style="color:#7B5EA7;word-break:break-all;">{{formUrl}}</a>

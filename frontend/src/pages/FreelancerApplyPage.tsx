@@ -58,8 +58,9 @@ export default function FreelancerApplyPage() {
   // work
   const [utr, setUtr] = useState('');
   const [eligible, setEligible] = useState(false);
-  const [lookingFor, setLookingFor] = useState('');
+  const [lookingFor, setLookingFor] = useState<string[]>([]);
   const [skills, setSkills] = useState<string[]>([]);
+  const [otherSkillDetail, setOtherSkillDetail] = useState('');
   // driving
   const [drivingConfidence, setDrivingConfidence] = useState<string[]>([]);
   const [licenceNumber, setLicenceNumber] = useState('');
@@ -87,6 +88,8 @@ export default function FreelancerApplyPage() {
   const hasInk = useRef(false);
 
   const isDriving = skills.some((s) => /driv/i.test(s));
+  const hasOther = skills.includes('Other');
+  const wantsEu = lookingFor.includes('uk_eu');
 
   useEffect(() => {
     (async () => {
@@ -142,11 +145,35 @@ export default function FreelancerApplyPage() {
     hasInk.current = false;
   }
 
+  function ageFrom(d: string): number | null {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return null;
+    const b = new Date(`${d}T00:00:00Z`);
+    if (isNaN(b.getTime())) return null;
+    const now = new Date();
+    let a = now.getUTCFullYear() - b.getUTCFullYear();
+    const m = now.getUTCMonth() - b.getUTCMonth();
+    if (m < 0 || (m === 0 && now.getUTCDate() < b.getUTCDate())) a--;
+    return a;
+  }
+
   async function submit() {
     setError('');
     if (!firstName.trim() || !lastName.trim()) return setError('Please enter your first and last name.');
     if (email.trim() && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim())) return setError('Please enter a valid email.');
+    const age = ageFrom(dob);
+    if (age === null) return setError('Please enter your date of birth.');
+    if (age < 18) return setError('You need to be at least 18 to sign up.');
     if (skills.length === 0) return setError('Please select at least one skill.');
+    if (isDriving && age < 23) return setError("Driving work requires you to be at least 23 (our insurer's minimum). Please untick Driving if you only want non-driving work.");
+    if (isDriving) {
+      if (!licenceNumber.trim() || !licenceIssuedBy.trim() || !licenceExpiry || !licencePassed) {
+        return setError('Please complete all of your driving licence details.');
+      }
+      const has = (l: string) => docs.some((d) => d.label === l);
+      if (!has('Licence Front') || !has('Licence Back') || !has('DVLA Summary')) {
+        return setError('Please upload your licence (front and back) and a DVLA check summary.');
+      }
+    }
     if (!accepted) return setError('Please read and accept the terms.');
     if (!hasInk.current) return setError('Please sign in the box.');
     setSubmitting(true);
@@ -161,8 +188,8 @@ export default function FreelancerApplyPage() {
           email: email.trim() || null, phone: phone.trim() || null, mobile: mobile.trim() || null,
           date_of_birth: dob || null, home_address: homeAddress.trim() || null,
           emergency_contact_name: emName.trim() || null, emergency_contact_phone: emPhone.trim() || null,
-          utr: utr.trim() || null, eligible_to_work: eligible, looking_for: lookingFor || null,
-          skills,
+          utr: utr.trim() || null, eligible_to_work: eligible, looking_for: lookingFor,
+          skills, other_skill_detail: hasOther ? otherSkillDetail.trim() || null : null,
           driving_confidence: isDriving ? drivingConfidence : null,
           licence_number: isDriving ? licenceNumber.trim() || null : null,
           licence_issued_by: isDriving ? licenceIssuedBy.trim() || null : null,
@@ -211,7 +238,7 @@ export default function FreelancerApplyPage() {
           <input placeholder="Mobile" value={mobile} onChange={(e) => setMobile(e.target.value)} className={inp} />
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-2">
-          <label className="text-xs text-slate-500">Date of birth<input type="date" value={dob} onChange={(e) => setDob(e.target.value)} className={inp} /></label>
+          <label className="text-xs text-slate-500">Date of birth *<input type="date" value={dob} onChange={(e) => setDob(e.target.value)} className={inp} /></label>
           <input placeholder="Home address" value={homeAddress} onChange={(e) => setHomeAddress(e.target.value)} className={`${inp} mt-4`} />
         </div>
       </Section>
@@ -228,10 +255,10 @@ export default function FreelancerApplyPage() {
           <input placeholder="UTR number (if you have one)" value={utr} onChange={(e) => setUtr(e.target.value)} className={inp} />
           <label className={cell}><input type="checkbox" checked={eligible} onChange={(e) => setEligible(e.target.checked)} /> I'm eligible to work in the UK</label>
         </div>
-        <p className="text-xs font-medium text-slate-600 mb-1">What are you looking for?</p>
+        <p className="text-xs font-medium text-slate-600 mb-1">What are you looking for? <span className="font-normal text-slate-400">(tick all that apply)</span></p>
         <div className="flex flex-wrap gap-3">
           {LOOKING_FOR.map((o) => (
-            <label key={o.v} className={cell}><input type="radio" name="looking" checked={lookingFor === o.v} onChange={() => setLookingFor(o.v)} /> {o.label}</label>
+            <label key={o.v} className={cell}><input type="checkbox" checked={lookingFor.includes(o.v)} onChange={() => toggle(lookingFor, setLookingFor, o.v)} /> {o.label}</label>
           ))}
         </div>
       </Section>
@@ -240,25 +267,29 @@ export default function FreelancerApplyPage() {
         <div className="grid grid-cols-2 sm:grid-cols-3 gap-1">
           {SKILLS.map((s) => <label key={s} className={cell}><input type="checkbox" checked={skills.includes(s)} onChange={() => toggle(skills, setSkills, s)} /> {s}</label>)}
         </div>
+        {hasOther && (
+          <input placeholder="Please describe your other skill(s)" value={otherSkillDetail} onChange={(e) => setOtherSkillDetail(e.target.value)} className={`${inp} mt-2`} />
+        )}
       </Section>
 
       {isDriving && (
         <div className="border-l-2 border-purple-200 pl-4 mb-5">
-          <Section title="Driving details">
+          <Section title="Driving details" required>
+            <p className="text-xs text-slate-500 mb-2">You've ticked Driving, so please complete all of these and upload your licence and DVLA check below.</p>
             <p className="text-xs font-medium text-slate-600 mb-1">Confident driving / carrying:</p>
             <div className="flex flex-wrap gap-3 mb-3">
               {DRIVING_CONFIDENCE.map((c) => <label key={c} className={cell}><input type="checkbox" checked={drivingConfidence.includes(c)} onChange={() => toggle(drivingConfidence, setDrivingConfidence, c)} /> {c}</label>)}
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-              <input placeholder="Licence number" value={licenceNumber} onChange={(e) => setLicenceNumber(e.target.value)} className={inp} />
-              <input placeholder="Issued by (e.g. DVLA)" value={licenceIssuedBy} onChange={(e) => setLicenceIssuedBy(e.target.value)} className={inp} />
-              <label className="text-xs text-slate-500">Licence expiry<input type="date" value={licenceExpiry} onChange={(e) => setLicenceExpiry(e.target.value)} className={inp} /></label>
-              <label className="text-xs text-slate-500">Date passed<input type="date" value={licencePassed} onChange={(e) => setLicencePassed(e.target.value)} className={inp} /></label>
+              <input placeholder="Licence number *" value={licenceNumber} onChange={(e) => setLicenceNumber(e.target.value)} className={inp} />
+              <input placeholder="Issued by (e.g. DVLA) *" value={licenceIssuedBy} onChange={(e) => setLicenceIssuedBy(e.target.value)} className={inp} />
+              <label className="text-xs text-slate-500">Licence expiry *<input type="date" value={licenceExpiry} onChange={(e) => setLicenceExpiry(e.target.value)} className={inp} /></label>
+              <label className="text-xs text-slate-500">Date passed *<input type="date" value={licencePassed} onChange={(e) => setLicencePassed(e.target.value)} className={inp} /></label>
             </div>
             <input placeholder="Licence address (if different from home address)" value={licenceAddress} onChange={(e) => setLicenceAddress(e.target.value)} className={`${inp} mt-2`} />
           </Section>
 
-          <Section title="Licence & DVLA documents">
+          <Section title="Licence & DVLA documents" required>
             <DocUpload token={token!} label="Licence Front" docs={docs} setDocs={setDocs} setError={setError} />
             <DocUpload token={token!} label="Licence Back" docs={docs} setDocs={setDocs} setError={setError} />
             <DocUpload token={token!} label="DVLA Summary" docs={docs} setDocs={setDocs} setError={setError} />
@@ -279,16 +310,18 @@ export default function FreelancerApplyPage() {
         </div>
       )}
 
-      <Section title="Passport (needed for EU tour work)">
-        <div className="flex flex-wrap gap-3 mb-2">
-          <span className="text-sm text-slate-700">Passport valid for 18+ months?</span>
-          <label className={cell}><input type="radio" name="pp" checked={passportValid === 'yes'} onChange={() => setPassportValid('yes')} /> Yes</label>
-          <label className={cell}><input type="radio" name="pp" checked={passportValid === 'no'} onChange={() => setPassportValid('no')} /> No</label>
-          <label className={cell}><input type="radio" name="pp" checked={passportValid === 'na'} onChange={() => setPassportValid('na')} /> N/A</label>
-        </div>
-        <label className="text-xs text-slate-500 block mb-2">Passport expiry<input type="date" value={passportExpiry} onChange={(e) => setPassportExpiry(e.target.value)} className={inp} style={{ maxWidth: 200 }} /></label>
-        <DocUpload token={token!} label="Passport" docs={docs} setDocs={setDocs} setError={setError} />
-      </Section>
+      {wantsEu && (
+        <Section title="Passport (needed for EU tour work)">
+          <div className="flex flex-wrap gap-3 mb-2">
+            <span className="text-sm text-slate-700">Passport valid for 18+ months?</span>
+            <label className={cell}><input type="radio" name="pp" checked={passportValid === 'yes'} onChange={() => setPassportValid('yes')} /> Yes</label>
+            <label className={cell}><input type="radio" name="pp" checked={passportValid === 'no'} onChange={() => setPassportValid('no')} /> No</label>
+            <label className={cell}><input type="radio" name="pp" checked={passportValid === 'na'} onChange={() => setPassportValid('na')} /> N/A</label>
+          </div>
+          <label className="text-xs text-slate-500 block mb-2">Passport expiry<input type="date" value={passportExpiry} onChange={(e) => setPassportExpiry(e.target.value)} className={inp} style={{ maxWidth: 200 }} /></label>
+          <DocUpload token={token!} label="Passport" docs={docs} setDocs={setDocs} setError={setError} />
+        </Section>
+      )}
 
       <Section title="Anything else + extra documents">
         <input placeholder="Expected day rate (optional)" value={dayRate} onChange={(e) => setDayRate(e.target.value)} className={`${inp} mb-2`} />
