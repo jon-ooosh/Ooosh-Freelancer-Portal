@@ -16,7 +16,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSessionUser } from '@/lib/session'
 import {
-  isOpMode,
   getSitterShiftsFromOP,
   isOpClientError,
   OpApiError,
@@ -27,11 +26,6 @@ export async function GET(request: NextRequest) {
     const user = await getSessionUser()
     if (!user) {
       return NextResponse.json({ success: false, error: 'Authentication required' }, { status: 401 })
-    }
-
-    // OP-only feature — nothing to show outside OP mode.
-    if (!isOpMode()) {
-      return NextResponse.json({ success: true, shifts: [] })
     }
 
     const sessionToken = request.cookies.get('session')?.value

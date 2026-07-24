@@ -15,7 +15,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSessionUser } from '@/lib/session'
 import {
-  isOpMode,
   getResourcesFromOP,
   isOpClientError,
   OpApiError,
@@ -29,10 +28,6 @@ export async function GET(request: NextRequest) {
         { success: false, error: 'Not authenticated' },
         { status: 401 }
       )
-    }
-
-    if (!isOpMode()) {
-      return NextResponse.json({ success: true, resources: [], totalCount: 0 })
     }
 
     const sessionToken = request.cookies.get('session')?.value
