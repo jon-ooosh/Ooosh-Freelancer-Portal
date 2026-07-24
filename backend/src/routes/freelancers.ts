@@ -38,7 +38,7 @@ const LIVE_TOKEN_STATUSES = ['invited', 'more_info'];
 const TCS_VERSION = 'v1-2026-07';
 
 // Consent text shown on the apply form (GDPR + working T&Cs, incl. payment terms).
-const FREELANCER_TERMS = `Ooosh Tours Ltd — Freelancer Data & Working Terms
+const FREELANCER_TERMS = `Ooosh Tours Ltd - Freelancer Data & Working Terms
 
 1. Who we are. Ooosh Tours Ltd ("Ooosh", "we") is the data controller for the
 information you provide on this form. We collect it to assess you as a potential
@@ -61,7 +61,7 @@ by emailing info@oooshtours.co.uk.
 4. Sharing. We share what's necessary with our motor insurer (to add you to
 cover), and we do not sell your data or use it for marketing.
 
-5. Payment terms. Freelance work is offered on an ad-hoc basis — being on our
+5. Payment terms. Freelance work is offered on an ad-hoc basis - being on our
 books does not guarantee work. Rates are agreed per job before you start. You
 invoice us for work completed; we pay to the schedule set out at the time of
 booking. You are responsible for your own tax and National Insurance (you
@@ -99,6 +99,18 @@ function textOrNull(v: unknown): string | null {
   if (typeof v !== 'string') return null;
   const t = v.trim();
   return t.length ? t : null;
+}
+
+// Whole years old from a YYYY-MM-DD date of birth, or null if unparseable.
+function ageFromDob(dob: string | null): number | null {
+  if (!dob) return null;
+  const d = new Date(`${dob}T00:00:00Z`);
+  if (isNaN(d.getTime())) return null;
+  const now = new Date();
+  let age = now.getUTCFullYear() - d.getUTCFullYear();
+  const m = now.getUTCMonth() - d.getUTCMonth();
+  if (m < 0 || (m === 0 && now.getUTCDate() < d.getUTCDate())) age--;
+  return age;
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -282,6 +294,45 @@ router.post('/apply/:token/submit', publicLimiter, async (req: Request, res: Res
     const hasDvlaDoc = documents.some((d) => /dvla/i.test(d.label));
     const hasPliDoc = documents.some((d) => /\bpli\b|public liab/i.test(d.label));
 
+    // ── Age gate: 18+ generally, 23+ to drive for us (insurer minimum) ──
+    const dob = isoDateOrNull(b.date_of_birth);
+    const age = ageFromDob(dob);
+    if (!dob || age === null) {
+      res.status(400).json({ error: 'Please enter your date of birth.' });
+      return;
+    }
+    if (age < 18) {
+      res.status(400).json({ error: 'You need to be at least 18 to sign up.' });
+      return;
+    }
+    if (isDriving && age < 23) {
+      res.status(400).json({
+        error: 'Driving work requires you to be at least 23 (our insurer\'s minimum). Please untick Driving if you only want non-driving work.',
+      });
+      return;
+    }
+
+    // ── Driving: full licence details + licence/DVLA uploads required ────
+    if (isDriving) {
+      const drivingComplete =
+        textOrNull(b.licence_number) &&
+        textOrNull(b.licence_issued_by) &&
+        isoDateOrNull(b.licence_expiry) &&
+        isoDateOrNull(b.licence_passed_date);
+      if (!drivingComplete) {
+        res.status(400).json({ error: 'Please complete all of your driving licence details.' });
+        return;
+      }
+      const hasLicenceFront = documents.some((d) => /licen[cs]e front/i.test(d.label));
+      const hasLicenceBack = documents.some((d) => /licen[cs]e back/i.test(d.label));
+      if (!hasLicenceFront || !hasLicenceBack || !hasDvlaDoc) {
+        res.status(400).json({
+          error: 'Please upload photos of your licence (front and back) and a recent DVLA check summary.',
+        });
+        return;
+      }
+    }
+
     // ── Signature → R2 ──────────────────────────────────────────────────
     let signatureKey: string | null = null;
     try {
@@ -301,7 +352,10 @@ router.post('/apply/:token/submit', publicLimiter, async (req: Request, res: Res
     // Everything the freelancer answered, kept verbatim for audit / re-render.
     const submission = {
       preferred_name: textOrNull(b.preferred_name),
-      looking_for: b.looking_for ?? null,               // tour / local / uk / uk_eu
+      looking_for: Array.isArray(b.looking_for)
+        ? b.looking_for.filter((v: unknown) => typeof v === 'string')
+        : (b.looking_for ?? null),                      // array: local / uk / uk_eu / any
+      other_skill_detail: textOrNull(b.other_skill_detail),
       utr: textOrNull(b.utr),
       eligible_to_work: b.eligible_to_work === true,
       passport_valid_18mo: b.passport_valid_18mo ?? null,
