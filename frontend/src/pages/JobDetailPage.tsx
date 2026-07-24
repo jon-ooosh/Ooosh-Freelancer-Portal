@@ -3828,9 +3828,17 @@ export default function JobDetailPage() {
                   </div>
                 </div>
                 {editJobDate && editJobEnd && (() => {
-                  const start = new Date(editJobDate);
-                  const end = new Date(editJobEnd);
-                  const days = Math.round((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24));
+                  // Match HireHop's charge-period rule (and the OP→HH push in
+                  // pipeline.ts calcHHDuration): days = ceil(elapsed hours / 24)
+                  // computed from the full start/end DATETIMES. Ceiling counts
+                  // any part-day past a whole 24h block as a new day. For a
+                  // 9am→9am van the hours are exact multiples so this is a plain
+                  // day difference; for a rehearsal finishing on the last day
+                  // (e.g. 10:00–22:00) it correctly reports the final part-day.
+                  const startMs = Date.parse(`${editJobDate}T${editStartTime || '09:00'}:00Z`);
+                  const endMs = Date.parse(`${editJobEnd}T${editEndTime || '09:00'}:00Z`);
+                  if (isNaN(startMs) || isNaN(endMs)) return null;
+                  const days = Math.ceil(Math.max(0, (endMs - startMs) / (1000 * 60 * 60 * 24)));
                   return days > 0 ? <p className="text-xs text-gray-500 font-medium mt-1">{days} day{days !== 1 ? 's' : ''}</p> : null;
                 })()}
                 <div className="flex items-center gap-2 mt-3">

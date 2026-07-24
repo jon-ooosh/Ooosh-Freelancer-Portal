@@ -1963,8 +1963,18 @@ function buildHHDateTime(
  * days=N makes the HH UI display "N days (1 hours)" — confirmed via job
  * 15833 (4 days/96 hrs) and 15335 (6 days/144 hrs).
  *
+ * Days are CEILED, not floored: HireHop's own charge-period rule counts any
+ * fraction of a day past a whole 24h block as a new chargeable day. Confirmed
+ * via job 16390: finish 22:00 (132h) → 6 days, finish 09:00 next morning
+ * (143h) → 6 days, finish 10:05 (145h) → 7 days = ceil(hours/24) in every
+ * case. Flooring under-counted whenever a hire wasn't entered on a whole-day
+ * (9am→9am) boundary — most visibly rehearsals, which finish on the last day
+ * (e.g. 10:00–22:00) with no morning rollover, so a genuine 6-day rehearsal
+ * was pushed as 5. For 9am→9am van entries the hours are exact 24h multiples,
+ * so ceil == floor and their duration is unchanged.
+ *
  * duration_locked=0 keeps HH auto-recalculating duration on subsequent date
- * edits.
+ * edits (its own recalculation also ceils, so our pushed value stays in sync).
  */
 function calcHHDuration(
   startDateTime: string | undefined,
@@ -1976,8 +1986,8 @@ function calcHHDuration(
   if (isNaN(startMs) || isNaN(endMs)) return null;
   const totalHours = Math.max(0, (endMs - startMs) / (1000 * 60 * 60));
   return {
-    duration_days: Math.floor(totalHours / 24),
-    duration_hrs: Math.round(totalHours),
+    duration_days: Math.ceil(totalHours / 24),
+    duration_hrs: Math.ceil(totalHours),
     duration_locked: 0,
   };
 }
