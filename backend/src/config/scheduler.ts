@@ -868,9 +868,9 @@ export function startScheduler() {
     try {
       const { runStaffDocumentReminders } = await import('../services/staff-document-reminders');
       const r = await runStaffDocumentReminders();
-      if (r.lapsed || r.renewalNudges || r.chased || r.escalated) {
+      if (r.lapsed || r.renewalNudges || r.chased || r.escalated || r.contentReviewChased || r.contentReviewEscalated) {
         console.log(
-          `Scheduler: Staff-document reminders — ${r.chased} chased, ${r.renewalNudges} renewal nudges, ${r.lapsed} lapsed, ${r.escalated} escalated`
+          `Scheduler: Staff-document reminders — ${r.chased} chased, ${r.renewalNudges} renewal nudges, ${r.lapsed} lapsed, ${r.escalated} escalated, ${r.contentReviewChased} content-review chased, ${r.contentReviewEscalated} content-review escalated`
         );
       }
     } catch (err) {

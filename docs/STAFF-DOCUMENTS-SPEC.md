@@ -1,7 +1,16 @@
 # Staff Documents & Training — Module Spec
 
-**Status:** LIVE (Jul 2026). Shipped across PRs 1–7 on `claude/capital-card-agreement-892gu3`.
-**Migrations:** 178 (foundation) · 179 (COT card wording) · 180 (approval workflow) · 181 (freelancer shareable flag).
+**Status:** LIVE (Jul 2026). Shipped across PRs 1–7 (`claude/capital-card-agreement-892gu3`) plus two follow-ups: the freelancer-portal Resources repoint (PR #1027) and the tags / owners / content-review round (`claude/staff-docs-training-handover-x071ye`).
+**Migrations:** 178 (foundation) · 179 (COT card wording) · 180 (approval workflow) · 181 (freelancer shareable flag) · 185 (tags, owners, content-review cadence).
+
+## Shipped (follow-ups)
+- **Freelancer-portal Resources display** (PR #1027): the portal `/resources` page reads shareable staff documents from OP (Monday retired, no fallback). File docs → presigned R2 url; markdown docs → in-portal reader. Backend `GET /api/portal/resources` + `/:id`.
+- **Tags + search/filter, owners, author, content-review cadence** (migration 185):
+  - `tags TEXT[]` — freeform categories (vehicles / money / staging), editable at create + after; search box + tag-filter pills on the admin Manage page.
+  - Author surfaced (`created_by` → "by X" on the list).
+  - `owner_user_ids UUID[]` — person(s) responsible for keeping the doc current.
+  - **Owner content-review cadence** — distinct from the assignee re-sign cadence. `content_review_interval_months` + `content_review_due_date`; when due, the daily scanner chases the owners/author weekly (escalating to managers, laddered, once overdue by escalate_after_days) until they **mark reviewed** (`POST /:id/mark-reviewed` → clock knocked forward) OR **publish a new version** (a significant change — advances the clock AND re-arms assignees via the existing new-version flow). Surfaced in My Documents ("Documents you look after — review due") for non-manager owners + on the admin list.
+  - **#3 laddered escalation**: the assignee manager-escalation now re-fires every `escalate_after_days` instead of once.
 
 ## Shipped (PRs 1–7)
 - **Foundation** (mig 178): `staff_documents` / `_versions` / `_assignments` / `_completions`; tick/sign/read-only completion; versioning; assignment resolver; COT card agreement seeded (sign, annual, targets card-holders). COT Card Register auto-assigns on card issue.
@@ -14,9 +23,7 @@
 - **Receipt-chaser fix**: `/my-receipts` page (all staff, own COT costs missing receipts, upload) + chaser email repointed there (the `/money/costs` page is manager-gated, so non-manager card-holders previously had nowhere to go).
 
 ## Deferred (next session)
-- **Freelancer portal Resources repoint** — surface `shareable_with_freelancers` docs in the Next.js portal `/resources` page (currently reads Monday). Needs an OP portal endpoint (portal auth) + presigned download + the page swap (same DATA_BACKEND pattern as other portal repoints).
 - **Per-page "how-to" help flyout** (jon's idea, HireHop-style) — a live site-map with one optional how-to guide associated per OP page, popped into a side "Help" drawer on each page. Guides authored in this module (a new `official_doc`/`training`-ish category or a `page_slug` link column), rendered read-only. Design it as its own thread: (a) enumerate pages/routes into a pick-list, (b) a `page_help` association (page slug → staff_document id), (c) a `<PageHelp>` drawer component mounted in Layout that shows the associated guide when one exists. Refreshed from the route table each time so it tracks OP as it grows.
-- **Repeat/laddered escalation** for chronically-unsigned docs (currently single escalation).
 - **People-scoped assignments** (freelancers signing, not just reading) — the read-only share is v1.
 
 ## 1. What this is

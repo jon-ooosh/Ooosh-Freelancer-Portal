@@ -89,6 +89,21 @@ async function uniqueSlug(base: string): Promise<string> {
   return `${base}-${Date.now()}`;
 }
 
+// Today + N months as a YYYY-MM-DD string (local components — a one-day boundary
+// imprecision is immaterial for a soft review-due date). Null clears the clock.
+function addMonthsToTodayStr(months: number | null | undefined): string | null {
+  if (!months || months <= 0) return null;
+  const d = new Date();
+  d.setMonth(d.getMonth() + Number(months));
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+// Can this user mark the content review done? Managers, the document's owners,
+// or its creator.
+function canReviewContent(role: string | undefined, userId: string, ownerIds: string[] | null, createdBy: string | null): boolean {
+  return isManager(role) || createdBy === userId || (Array.isArray(ownerIds) && ownerIds.includes(userId));
+}
+
 // ════════════════════════════════════════════════════════════════════════
 // STAFF — my documents
 // ════════════════════════════════════════════════════════════════════════
@@ -121,7 +136,24 @@ router.get('/mine', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Res
           AND d.completion_mode = 'read_only' AND d.visibility = 'everyone'
         ORDER BY d.category, d.title`,
     );
-    res.json({ data: { todo, completed, library: library.rows } });
+
+    // Documents this user owns (or authored) whose content review is now due —
+    // the owner content-review surface. Managers can also action these from the
+    // admin Manage page, but a non-manager owner needs a home here.
+    const reviewsOwed = await query(
+      `SELECT d.id, d.title, d.category, d.content_review_due_date, d.content_reviewed_at, v.version
+         FROM staff_documents d
+         LEFT JOIN staff_document_versions v ON v.document_id = d.id AND v.is_current = true
+        WHERE d.is_active = true AND d.approval_status = 'approved'
+          AND d.content_review_interval_months IS NOT NULL
+          AND d.content_review_due_date IS NOT NULL
+          AND d.content_review_due_date <= CURRENT_DATE
+          AND (d.created_by = $1 OR $1 = ANY(d.owner_user_ids))
+        ORDER BY d.content_review_due_date`,
+      [userId],
+    );
+
+    res.json({ data: { todo, completed, library: library.rows, reviewsOwed: reviewsOwed.rows } });
   } catch (error) {
     console.error('[staff-documents] mine error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -134,7 +166,7 @@ router.get('/:id/view', authorize(...STAFF_ROLES), async (req: AuthRequest, res:
     const userId = req.user!.id;
     const docRes = await query(
       `SELECT d.id, d.slug, d.title, d.category, d.completion_mode, d.tick_label, d.visibility,
-              d.approval_status, d.created_by,
+              d.approval_status, d.created_by, d.owner_user_ids,
               v.id AS version_id, v.version, v.body, v.file_r2_key, v.file_name
          FROM staff_documents d
          LEFT JOIN staff_document_versions v ON v.document_id = d.id AND v.is_current = true
@@ -154,12 +186,13 @@ router.get('/:id/view', authorize(...STAFF_ROLES), async (req: AuthRequest, res:
     // Visibility check.
     const mgr = isManager(req.user!.role);
     const isAuthor = doc.created_by === userId;
+    const isOwner = Array.isArray(doc.owner_user_ids) && doc.owner_user_ids.includes(userId);
     // Unapproved (draft / pending) documents are only visible to their author + managers.
     if (doc.approval_status !== 'approved' && !mgr && !isAuthor) {
       res.status(404).json({ error: 'Document not found' }); return;
     }
-    let allowed = doc.visibility === 'everyone' || mgr || isAuthor || !!assignment;
-    if (doc.visibility === 'owner_admin') allowed = mgr || isAuthor || !!assignment;
+    let allowed = doc.visibility === 'everyone' || mgr || isAuthor || isOwner || !!assignment;
+    if (doc.visibility === 'owner_admin') allowed = mgr || isAuthor || isOwner || !!assignment;
     if (!allowed) { res.status(403).json({ error: 'Not available to you' }); return; }
 
     const me = await getUserDisplay(userId);
@@ -327,11 +360,14 @@ router.get('/', authorize(...MANAGER_ROLES), async (_req: AuthRequest, res: Resp
   try {
     const r = await query(
       `SELECT d.*, v.version AS current_version,
+              COALESCE(NULLIF(TRIM(CONCAT(ap.first_name, ' ', ap.last_name)), ''), au.email) AS author_name,
               COALESCE(s.pending, 0)   AS pending_count,
               COALESCE(s.completed, 0) AS completed_count,
               COALESCE(s.lapsed, 0)    AS lapsed_count
          FROM staff_documents d
          LEFT JOIN staff_document_versions v ON v.document_id = d.id AND v.is_current = true
+         LEFT JOIN users au ON au.id = d.created_by
+         LEFT JOIN people ap ON ap.id = au.person_id
          LEFT JOIN (
            SELECT document_id,
                   COUNT(*) FILTER (WHERE status = 'pending')   AS pending,
@@ -362,6 +398,9 @@ const createSchema = z.object({
   chase_interval_days: z.number().int().positive().nullable().optional(),
   escalate_after_days: z.number().int().positive().nullable().optional(),
   review_interval_months: z.number().int().positive().nullable().optional(),
+  tags: z.array(z.string().trim().min(1).max(40)).max(30).nullable().optional(),
+  owner_user_ids: z.array(z.string().uuid()).nullable().optional(),
+  content_review_interval_months: z.number().int().positive().nullable().optional(),
   // initial version content:
   body: z.string().nullable().optional(),
   file_r2_key: z.string().nullable().optional(),
@@ -390,19 +429,23 @@ router.post('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respon
     const slug = d.slug?.trim() || await uniqueSlug(slugify(d.title));
 
     await client.query('BEGIN');
+    const contentReviewDue = addMonthsToTodayStr(d.content_review_interval_months);
     const docRes = await client.query(
       `INSERT INTO staff_documents
          (slug, title, category, completion_mode, tick_label, visibility, target_type,
           target_roles, target_user_ids, chase_interval_days, escalate_after_days,
           review_interval_months, created_by, approval_status,
-          approved_by, approved_at, shareable_with_freelancers)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING *`,
+          approved_by, approved_at, shareable_with_freelancers,
+          tags, owner_user_ids, content_review_interval_months, content_review_due_date)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) RETURNING *`,
       [slug, d.title, d.category, d.completion_mode, d.tick_label || null, d.visibility,
        d.target_type, d.target_roles || null, d.target_user_ids || null,
        d.chase_interval_days || null, d.escalate_after_days || null, d.review_interval_months || null,
        req.user!.id, approvalStatus,
        approvalStatus === 'approved' ? req.user!.id : null,
-       approvalStatus === 'approved' ? new Date() : null, shareable],
+       approvalStatus === 'approved' ? new Date() : null, shareable,
+       d.tags && d.tags.length ? d.tags : null, d.owner_user_ids && d.owner_user_ids.length ? d.owner_user_ids : null,
+       d.content_review_interval_months || null, contentReviewDue],
     );
     const doc = docRes.rows[0];
     await client.query(
@@ -441,6 +484,9 @@ const patchSchema = z.object({
   chase_interval_days: z.number().int().positive().nullable().optional(),
   escalate_after_days: z.number().int().positive().nullable().optional(),
   review_interval_months: z.number().int().positive().nullable().optional(),
+  tags: z.array(z.string().trim().min(1).max(40)).max(30).nullable().optional(),
+  owner_user_ids: z.array(z.string().uuid()).nullable().optional(),
+  content_review_interval_months: z.number().int().positive().nullable().optional(),
   is_active: z.boolean().optional(),
   shareable_with_freelancers: z.boolean().optional(),
 });
@@ -453,7 +499,7 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
     if (!parse.success) { res.status(400).json({ error: 'Invalid input', issues: parse.error.issues }); return; }
     const fields = parse.data;
 
-    const cur = await query(`SELECT created_by, approval_status, category FROM staff_documents WHERE id = $1`, [req.params.id]);
+    const cur = await query(`SELECT created_by, approval_status, category, content_review_interval_months FROM staff_documents WHERE id = $1`, [req.params.id]);
     if (!cur.rows.length) { res.status(404).json({ error: 'Document not found' }); return; }
     if (!isManager(req.user!.role)) {
       if (cur.rows[0].created_by !== req.user!.id) { res.status(403).json({ error: 'Not your document' }); return; }
@@ -475,6 +521,15 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
       sets.push(`${k} = $${vals.length}`);
     }
     if (!sets.length) { res.status(400).json({ error: 'Nothing to update' }); return; }
+    // If the content-review cadence actually changed, restart the review clock
+    // (recompute the due date, clear the chase/escalate stamps for a fresh cycle).
+    if (fields.content_review_interval_months !== undefined
+        && fields.content_review_interval_months !== cur.rows[0].content_review_interval_months) {
+      const newDue = addMonthsToTodayStr(fields.content_review_interval_months);
+      vals.push(newDue);
+      sets.push(`content_review_due_date = $${vals.length}`);
+      sets.push(`content_review_chased_at = NULL`, `content_review_escalated_at = NULL`);
+    }
     sets.push(`updated_at = NOW()`);
     vals.push(req.params.id);
     const r = await query(
@@ -509,7 +564,7 @@ router.post('/:id/versions', authorize(...STAFF_ROLES), async (req: AuthRequest,
     const v = parse.data;
     if (!v.body && !v.file_r2_key) { res.status(400).json({ error: 'Provide a body or an uploaded file' }); return; }
 
-    const docRes = await query(`SELECT id, completion_mode, created_by, approval_status FROM staff_documents WHERE id = $1`, [req.params.id]);
+    const docRes = await query(`SELECT id, completion_mode, created_by, approval_status, content_review_interval_months FROM staff_documents WHERE id = $1`, [req.params.id]);
     if (!docRes.rows.length) { res.status(404).json({ error: 'Document not found' }); return; }
     if (!isManager(req.user!.role)) {
       if (docRes.rows[0].created_by !== req.user!.id) { res.status(403).json({ error: 'Not your document' }); return; }
@@ -539,6 +594,16 @@ router.post('/:id/versions', authorize(...STAFF_ROLES), async (req: AuthRequest,
         RETURNING user_id`,
       [req.params.id],
     );
+    // A new version IS a content review (a significant change) — advance the
+    // owner review clock so it isn't flagged for review again immediately.
+    const newDue = addMonthsToTodayStr(docRes.rows[0].content_review_interval_months);
+    await client.query(
+      `UPDATE staff_documents
+          SET content_reviewed_at = NOW(), content_reviewed_by = $2, content_review_due_date = $3,
+              content_review_chased_at = NULL, content_review_escalated_at = NULL
+        WHERE id = $1`,
+      [req.params.id, req.user!.id, newDue],
+    );
     await client.query('COMMIT');
 
     // Notify re-flagged users (best-effort).
@@ -559,6 +624,38 @@ router.post('/:id/versions', authorize(...STAFF_ROLES), async (req: AuthRequest,
     res.status(500).json({ error: 'Internal server error' });
   } finally {
     client.release();
+  }
+});
+
+// POST /api/staff-documents/:id/mark-reviewed — owner / creator / manager
+// confirms the content is still current. Advances the review clock and clears
+// the chase. Does NOT disturb assignees — that's what "New version" is for (a
+// significant change, which re-arms everyone to re-acknowledge).
+router.post('/:id/mark-reviewed', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const r = await query(
+      `SELECT id, title, created_by, owner_user_ids, content_review_interval_months FROM staff_documents WHERE id = $1`,
+      [req.params.id],
+    );
+    const doc = r.rows[0];
+    if (!doc) { res.status(404).json({ error: 'Document not found' }); return; }
+    if (!canReviewContent(req.user!.role, req.user!.id, doc.owner_user_ids, doc.created_by)) {
+      res.status(403).json({ error: 'Only an owner, the author, or a manager can mark this reviewed' });
+      return;
+    }
+    const newDue = addMonthsToTodayStr(doc.content_review_interval_months);
+    await query(
+      `UPDATE staff_documents
+          SET content_reviewed_at = NOW(), content_reviewed_by = $2, content_review_due_date = $3,
+              content_review_chased_at = NULL, content_review_escalated_at = NULL, updated_at = NOW()
+        WHERE id = $1`,
+      [doc.id, req.user!.id, newDue],
+    );
+    await logAudit(req.user!.id, 'staff_documents', doc.id, 'update', null, { content_reviewed: true }).catch(() => {});
+    res.json({ data: { content_reviewed_at: new Date().toISOString(), content_review_due_date: newDue } });
+  } catch (error) {
+    console.error('[staff-documents] mark-reviewed error:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 

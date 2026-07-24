@@ -219,6 +219,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '182_rehearsal_info_pack_images_and_autosend.sql',
         '183_backline_demand_priority.sql',
         '184_freelancer_onboarding.sql',
+        '185_staff_document_owners_tags_review.sql',
       ];
 
       for (const migration of migrations) {
