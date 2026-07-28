@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { api } from '../services/api';
 import FreelancerHistorySection from './FreelancerHistorySection';
 
@@ -68,8 +68,28 @@ const STATUS_DESCRIPTION: Record<string, string> = {
   pending: 'Not yet approved for assignment to jobs.',
 };
 
+interface InviteAudit {
+  id: string;
+  status: string;
+  invited_at: string | null;
+  submitted_at: string | null;
+  invited_by: string | null;
+  invited_by_name: string | null;
+}
+
 export default function FreelancerPanel({ person, onChanged, onFilesChanged, onActivityCreated, onInvite }: FreelancerPanelProps) {
   const [editing, setEditing] = useState(false);
+  const [invite, setInvite] = useState<InviteAudit | null>(null);
+
+  // Who sent the sign-up invite, and when. Re-fetched when the person or their
+  // freelancer status changes (e.g. after a re-invite opens a fresh application).
+  useEffect(() => {
+    let cancelled = false;
+    api.get<{ data: InviteAudit | null }>(`/freelancers/by-person/${person.id}`)
+      .then((r) => { if (!cancelled) setInvite(r.data); })
+      .catch(() => { if (!cancelled) setInvite(null); });
+    return () => { cancelled = true; };
+  }, [person.id, person.freelancer_status]);
 
   const pill = freelancerStatusPill(person.freelancer_status, person.is_approved);
   const descriptionKey = person.is_approved ? 'approved' : (person.freelancer_status || 'pending');
@@ -104,6 +124,12 @@ export default function FreelancerPanel({ person, onChanged, onFilesChanged, onA
               )}
             </div>
             <p className="mt-2 text-sm text-gray-500">{description}</p>
+            {invite?.invited_at && (
+              <p className="mt-1 text-xs text-gray-400">
+                Invited{invite.invited_by_name ? ` by ${invite.invited_by_name}` : ''} on {fmtDateTime(invite.invited_at)}
+                {invite.submitted_at ? ` · applied ${fmtDate(invite.submitted_at)}` : ''}
+              </p>
+            )}
           </div>
           {!person.is_approved && (
             <button
@@ -522,6 +548,14 @@ function fmtDate(dateStr: string | null | undefined): string | null {
   const d = new Date(dateStr);
   if (isNaN(d.getTime())) return null;
   return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+}
+
+function fmtDateTime(dateStr: string | null | undefined): string | null {
+  if (!dateStr) return null;
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return null;
+  return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+    + ' at ' + d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
 }
 
 function DetailField({ label, value }: { label: string; value: string | null | undefined }) {

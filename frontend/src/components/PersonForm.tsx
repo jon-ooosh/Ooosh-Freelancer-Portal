@@ -14,10 +14,11 @@ interface PersonFormData {
   date_of_birth: string;
   notes: string;
   tags: string[];
-  // Freelancer — the detail fields (skills, dates, approval, docs, references)
-  // now live on the Person's "Freelancer" tab. This toggle is just the gateway
-  // that flags someone as a freelancer and reveals that tab.
-  is_freelancer: boolean;
+  // Freelancer status is NOT edited here. Everything freelancer — flagging the
+  // person, skills, dates, approval, documents, references — lives on the
+  // Person's "Freelancer" tab, reached via the header "Invite to freelance"
+  // button (which sets is_freelancer and reveals the tab). This form is plain
+  // contact details + working terms only.
   working_terms_type: string;
   working_terms_credit_days: string;
   working_terms_notes: string;
@@ -41,7 +42,6 @@ const emptyForm: PersonFormData = {
   date_of_birth: '',
   notes: '',
   tags: [],
-  is_freelancer: false,
   working_terms_type: 'usual',
   working_terms_credit_days: '',
   working_terms_notes: '',
@@ -53,7 +53,6 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(!!personId);
-  const [showFreelancer, setShowFreelancer] = useState(false);
   const [recordVersion, setRecordVersion] = useState<number | null>(null);
   const [emailWarning, setEmailWarning] = useState<{ name: string; id: string } | null>(null);
   const emailCheckRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -84,12 +83,10 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
         date_of_birth: (data.date_of_birth as string) || '',
         notes: (data.notes as string) || '',
         tags: (data.tags as string[]) || [],
-        is_freelancer: (data.is_freelancer as boolean) || false,
         working_terms_type: (data.working_terms_type as string) || '',
         working_terms_credit_days: data.working_terms_credit_days != null ? String(data.working_terms_credit_days) : '',
         working_terms_notes: (data.working_terms_notes as string) || '',
       });
-      setShowFreelancer((data.is_freelancer as boolean) || false);
       if (data.version !== undefined) setRecordVersion(data.version as number);
 
       const first = (data.first_name as string) || '';
@@ -344,27 +341,6 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
           rows={3}
           className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 resize-none"
         />
-      </div>
-
-      {/* Freelancer toggle — the gateway flag. Skills, dates, approval,
-          documents and references live on the person's "Freelancer" tab. */}
-      <div className="border-t pt-4">
-        <label className="flex items-center gap-2 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={showFreelancer}
-            onChange={e => { setShowFreelancer(e.target.checked); set('is_freelancer', e.target.checked); }}
-            className="rounded border-gray-300 text-ooosh-600 focus:ring-ooosh-500"
-          />
-          <span className="text-sm font-medium text-gray-700">This person is a freelancer</span>
-        </label>
-        {showFreelancer && (
-          <p className="mt-2 text-xs text-gray-500">
-            {isEdit
-              ? 'Manage skills, approval, review dates, documents and references on the Freelancer tab.'
-              : 'After creating, manage skills, approval, review dates and documents on the Freelancer tab.'}
-          </p>
-        )}
       </div>
 
       {/* Actions */}

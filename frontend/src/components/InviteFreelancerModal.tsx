@@ -33,6 +33,7 @@ export default function InviteFreelancerModal({
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
   const [email, setEmail] = useState('');
+  const [phone, setPhone] = useState('');
   const [sendEmail, setSendEmail] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
@@ -47,7 +48,11 @@ export default function InviteFreelancerModal({
       setError('Please enter a first and last name.');
       return;
     }
-    if (isNew && email.trim() && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim())) {
+    if (isNew && !email.trim()) {
+      setError('An email address is required — the sign-up link is sent there.');
+      return;
+    }
+    if (isNew && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim())) {
       setError('Please enter a valid email.');
       return;
     }
@@ -55,7 +60,7 @@ export default function InviteFreelancerModal({
     try {
       const body = personId
         ? { person_id: personId, send_email: sendEmail }
-        : { first_name: firstName.trim(), last_name: lastName.trim(), email: email.trim() || undefined, send_email: sendEmail };
+        : { first_name: firstName.trim(), last_name: lastName.trim(), email: email.trim(), phone: phone.trim() || undefined, send_email: sendEmail };
       const r = await api.post<InviteResult>('/freelancers/invite', body);
       setResult(r);
       onInvited?.(r.person_id);
@@ -92,7 +97,8 @@ export default function InviteFreelancerModal({
                   <input placeholder="First name" value={firstName} onChange={(e) => setFirstName(e.target.value)} className="border border-slate-300 rounded px-2 py-1.5 text-sm" />
                   <input placeholder="Last name" value={lastName} onChange={(e) => setLastName(e.target.value)} className="border border-slate-300 rounded px-2 py-1.5 text-sm" />
                 </div>
-                <input placeholder="Email (optional but recommended)" value={email} onChange={(e) => setEmail(e.target.value)} className="border border-slate-300 rounded px-2 py-1.5 text-sm w-full" />
+                <input type="email" placeholder="Email (required)" value={email} onChange={(e) => setEmail(e.target.value)} className="border border-slate-300 rounded px-2 py-1.5 text-sm w-full" />
+                <input type="tel" placeholder="Phone (optional)" value={phone} onChange={(e) => setPhone(e.target.value)} className="border border-slate-300 rounded px-2 py-1.5 text-sm w-full" />
               </div>
             ) : (
               <p className="text-sm text-slate-600 mb-3">

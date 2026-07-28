@@ -507,6 +507,13 @@ const inviteSchema = z
   .refine(
     (v) => v.person_id || (v.first_name && v.last_name),
     { message: 'Provide person_id, or first_name + last_name for a new freelancer.' }
+  )
+  .refine(
+    // A brand-new freelancer must carry an email — the sign-up link is sent
+    // there and it's the identity we match/dedupe on. Existing-person invites
+    // (person_id set) use whatever's already on the record.
+    (v) => v.person_id || !!v.email,
+    { message: 'An email address is required for a new freelancer.', path: ['email'] }
   );
 
 router.post('/invite', async (req: AuthRequest, res: Response) => {
@@ -656,6 +663,31 @@ router.get('/applications', async (req: AuthRequest, res: Response) => {
     res.json({ data: result.rows });
   } catch (error) {
     console.error('Freelancer applications list error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── GET /api/freelancers/by-person/:personId ───────────────────────────────
+// Latest application for a person, enriched with who sent the invite and when.
+// Powers the invite-audit line on the Person's Freelancer tab. Returns null
+// when the person has never been invited.
+router.get('/by-person/:personId', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await query(
+      `SELECT fa.id, fa.status, fa.invited_at, fa.submitted_at, fa.invited_by,
+              COALESCE(NULLIF(TRIM(CONCAT_WS(' ', p.first_name, p.last_name)), ''), u.email)
+                AS invited_by_name
+         FROM freelancer_applications fa
+         LEFT JOIN users u ON u.id = fa.invited_by
+         LEFT JOIN people p ON p.id = u.person_id
+        WHERE fa.person_id = $1
+        ORDER BY fa.invited_at DESC
+        LIMIT 1`,
+      [req.params.personId]
+    );
+    res.json({ data: result.rows[0] || null });
+  } catch (error) {
+    console.error('Freelancer by-person error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
