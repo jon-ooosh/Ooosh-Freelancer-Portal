@@ -228,6 +228,40 @@ figures. (Optional: the corresponding `vehicle_mileage_log` dual-write rows carr
 bad figure — the upward-only ratchet means current-mileage display is unaffected, so this
 is cosmetic.) **No fake check-ins on completed jobs.**
 
+### Confirmed figures + corrections (read off R2 Event History)
+
+**15411 — RO23HLU** (`67a341d5-7ddc-4c0e-9354-301779b2e07b`): true book-out **101,607**
+(26 Jun event), check-in **102,131** (28 Jun event — already correct on the rows). Rows
+wrongly hold `mileage_out = 99608` (RO23HLR's crossed value). **Ready to run:**
+```sql
+UPDATE vehicle_hire_assignments
+SET mileage_out = 101607, updated_at = now()
+WHERE hirehop_job_id = 15411
+  AND vehicle_id = '67a341d5-7ddc-4c0e-9354-301779b2e07b'   -- RO23HLU
+  AND mileage_out = 99608;                                   -- guard; expect 5
+```
+
+**16206 — SA75RVV** (a new, low-mileage van — the cross is FLIPPED vs 15411): rows hold
+`mileage_out = 100568` (RX73TBZ's ~100k, crossed) + `mileage_in = 5651`. Because SA75RVV
+genuinely reads ~5–6k, `mileage_in ≈ 5651` is likely SA75RVV's own — **but confirm both
+figures from SA75RVV's 3-Jul book-out + 6-Jul check-in events before running** (jon noted
+SA75RVV "ends ~5,851", so `mileage_in` may also need nudging). Template:
+```sql
+UPDATE vehicle_hire_assignments
+SET mileage_out = <SA75RVV_3JUL_BOOKOUT>,          -- from SA75RVV's book-out event
+    mileage_in  = <SA75RVV_6JUL_CHECKIN>,          -- confirm; may already equal 5651
+    updated_at  = now()
+WHERE hirehop_job_id = 16206
+  AND vehicle_id = (SELECT id FROM fleet_vehicles
+                    WHERE regexp_replace(upper(reg),'\s','','g') = 'SA75RVV')
+  AND (mileage_out = 100568 OR mileage_out IS NULL);   -- guard; expect 4
+```
+
+The per-reg R2 events are ground truth (they were never scrambled). `vehicle_mileage_log`
++ current fleet mileage are unaffected (the events logged the correct figures, and the
+upward-only ratchet protects current-mileage display) — so only the assignment-row
+`mileage_out`/`mileage_in` need correcting; it's a historical-record fix, no cascade.
+
 ### Recovering / enumerating photos in R2 (any job)
 
 1. `GET /api/vehicles/get-events?vehicleReg=<REG>&eventType=Book+Out` → event IDs.
