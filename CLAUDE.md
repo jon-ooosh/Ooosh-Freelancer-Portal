@@ -3927,6 +3927,40 @@ Two invariants that, when broken, silently strand a hire and mis-attribute its c
 
 **Historical backlog (cleared Jun 2026):** `16149`, `15769` (×4), `15738` — hires booked out via the PATCH path before the fix that never got a proper check-in, leaving rows stuck `booked_out` on already-`completed` jobs (and the van wrongly reading "Check In available" / `fleet_vehicles.hire_status='On Hire'`). Flipped to `returned` by hand. The fleet-wide finder for any future occurrence: `booked_out`/`active` assignments whose linked job is already `returned`/`completed`/`cancelled`/`lost` (dual job-match on `job_id` OR `hh_job_number`). Flipping the assignment does NOT recompute `fleet_vehicles.hire_status` (raw SQL skips `syncFleetHireStatus`), so correct the cached fleet status separately if the stale row was pinning the van `On Hire`.
 
+### Multi-van book-out scramble (Jul 2026) — read before touching the book-out write path
+
+**Full incident + root cause + cleanup + fix design: `docs/MULTI-VAN-BOOKOUT-SCRAMBLE.md`.**
+
+**The bug:** the book-out write path **never partitions driver rows by van.** On a 2-van
+"everyone drives everything" self-drive job, all drivers share one set of `vehicle_hire_assignments`
+rows, and *each* van's book-out stamps itself onto *all* of them — there's no
+`van_requirement_index` scoping. Because three fields have three different write disciplines, the
+first and last van each "win" different columns on the same shared rows, so the data comes out
+**scrambled, not merely wrong**:
+- `vehicle_id` — last-write-wins (BookOutPage `writeBackTrack` PATCH loop, `hire-forms.ts` PATCH `fieldMap` plain assign) → **2nd** van booked out wins every row.
+- `mileage_out` — first-write-once (`save-event` book-out branch, `vehicles.ts` `COALESCE(mileage_out, …)`) → **1st** van wins.
+- `hire_form_pdf_key` — first-write, atomic-claim (`generateAndEmailHireFormPdf`) → **1st** van wins.
+- The 2nd van ends with **zero rows** (its rows' `vehicle_id` got overwritten to the other van), so a check-in for it hits the DB-authoritative gate (`check-in-eligibility`, `JOIN fleet_vehicles ON fv.id = vha.vehicle_id`) with nothing to find → falls back to the van's *previous* hire and blocks. **Live incident: job 14885, RX24SZG blocked at check-in behind RO23HLU (Jul 2026).**
+- **Sibling symptom — photos:** book-out walkaround core photos are keyed `events/{eventId}/{REG}/{angle}.jpg`; a crossed `form.vehicleReg` files the 2nd van's core photos under the wrong reg/eventId, so its check-in "Book-Out Summary" (a **live listing of one prefix**) shows only the handful of uniquely-keyed extras. **The photos are NOT lost** — the condition-report PDF embeds them via a separate LOCAL base64 pipeline (frozen at `condition-reports/{REG}/{eventId}.pdf`), and the loose objects sit under the crossed prefix (recover/enumerate via `get-events` → `list-photos?prefix=…` → `regenerate-pdf`). The PDF's "View full size" links 404 for the same reason (they point at the expected, empty key) — self-contained, not a general link bug.
+
+**The one line that permits it:** the PATCH terminal-row guard blocks writes only on
+`swapped`/`returned`/`cancelled` — so a row already `booked_out` to one van can have its
+`vehicle_id` re-stamped by a *second* van's book-out. Tightening that (refuse to overwrite
+`vehicle_id` on a row already booked out to a *different* van) is the narrowest guard.
+
+**Blast-radius fingerprint (sweep):** a row whose `hire_form_pdf_key` reg ≠ its `vehicle_id`'s
+fleet reg (and the PDF reg is a real, different fleet van). At discovery: **3 jobs** — 14885
+(fixed), 15411 (Jabir HLR/HLU), 16206 (SA75RVV/RX73TBZ). 15411/16206 are completed → historical
+mileage tidy only, no stuck flags. Query + per-job cleanup in the doc.
+
+**Status:** 14885 cleaned up (mileage `UPDATE` + missing-van `INSERT` + UI check-in). **Not yet
+built:** (1) detection scanner — van `hire_status='On Hire'` + book-out event but no live
+`booked_out` row → email **jon@** (not info@), stamp-first dedup, ship first; (2) the fix —
+server-side **adopt-or-create a per-van assignment row keyed on `van_requirement_index`** at the
+choke-point both book-out paths funnel through, *before* `firePostBookOutHooks`, cloning (reuse
+`add-to-hire` + `services/vha-dedup.ts`) rather than overwriting, plus the terminal-guard
+tightening. Closes fields + photos + view-full-size links at source. **Plan with jon before coding.**
+
 ### Per-job contacts (`job_contacts`)
 
 **The convention:** each hire has its own contact list — who's actually involved in THIS booking — distinct from the org-wide "who works at this company" model in `person_organisation_roles`. Rounds 1-6 (May 2026) built this end-to-end: the storage layer, the routing graduation, the management UI, and the HH push enrichment. **All new client-facing email senders, and any new HH push surface, MUST follow this convention.**
