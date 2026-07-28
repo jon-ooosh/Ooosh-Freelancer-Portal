@@ -1872,13 +1872,22 @@ These originate outside HH entirely — client sends stuff to us, or items found
   above. The not-submitted accountability chaser is now SHIPPED too (Slice 5, migration 173).
 - **Calendar endpoint** (Phase F): `GET /api/studio-sitters/calendar?from&to` for the future
   calendar project (roster row shape already close).
-- **Monday.com teardown (cleanup, Jul 2026 — Monday fully retired):** the `reportFallback` /
-  `DATA_BACKEND` / Monday-fallback machinery across the *legacy* portal routes (jobs, completion, auth,
-  warehouse, etc.) is now dead weight + an alert-noise source (a stray sitter-thread 5xx fired a
-  "[Portal fallback] fell back to Monday" email). A dedicated teardown PR should remove it repo-wide
-  (`src/lib/monday.ts`, the `isOpMode()` branches, `mondayFallbackAllowed`, `reportFallback`, the Monday
-  webhook routes). Immediate silence lever meanwhile: unset `PORTAL_TELEMETRY_SECRET` on Netlify
-  (`reportFallback` no-ops without it). The 3 studio-sitter routes are already clean.
+- **Monday.com teardown (DONE, Jul 2026 — Monday fully retired):** the Monday machinery has been
+  stripped from the freelancer portal (PRs #1036 + follow-up). Removed: `src/lib/monday.ts`, the
+  `isOpMode` / `mondayFallbackAllowed` / `reportFallback` helpers + the `DATA_BACKEND` /
+  `PORTAL_MONDAY_FALLBACK_ENABLED` / `PORTAL_TELEMETRY_SECRET` flags (`src/lib/op-api.ts`), the 3 Monday
+  webhook routes, the 3 Monday file-asset routes (`files/[assetId]`/`asset-url`/`qh` — OP serves
+  presigned urls now), the 2 orphaned Monday Netlify functions (`completion-background` /
+  `completion-reminders` — superseded by `services/completion-chaser.ts`), the orphaned Monday-era libs
+  `src/lib/email.ts` + `src/lib/pdf.ts`, the redundant Monday-Q&H `QHFiles` job-page component, and the
+  **PIN-gated portal staff crew-transport calculator** (`src/app/staff/*` + `/api/staff/*` — the old
+  Monday-backed transport cost calculator, fully superseded by the OP-native Crew & Transport calculator
+  at `/operations/transport`). All portal routes are OP-only (auth / jobs / settings-notifications /
+  resources / studio-sitter — the `if (!isOpMode())` guards are gone). The `DATA_BACKEND` /
+  `PORTAL_MONDAY_FALLBACK_ENABLED` / `PORTAL_TELEMETRY_SECRET` / `STAFF_PIN` / `MONDAY_*` env vars on
+  Netlify are now unused. **The portal (`src/`) has NO Monday API code left** — only a couple of
+  historical comments, `'Monday'` weekday strings, and the `MONDAY_WEBHOOK_SECRET` env-var *name* kept as
+  a shared-secret fallback in `api/hirehop/items/[jobId]` (rename with an env update if ever tidying).
 - **Shop sales**: deferred, out of scope (substantial, cross-cutting).
 - **Rehearsal job info beyond sitters (TODO — jon flagged Jul 2026):** the Rehearsals module
   should grow past studio-sitter cover to be the single place for everything about a studio job.
