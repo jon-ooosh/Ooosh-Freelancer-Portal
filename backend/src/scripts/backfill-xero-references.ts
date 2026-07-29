@@ -41,6 +41,11 @@ const idArg = process.argv.find((a) => a.startsWith('--id='));
 const idFilter = idArg ? idArg.split('=')[1] : null;
 const limitArg = process.argv.find((a) => a.startsWith('--limit='));
 const limit = limitArg ? parseInt(limitArg.split('=')[1], 10) : null;
+// Xero allows ~60 calls/min. Each re-sync makes a couple of calls (contact
+// lookup + update), so throttle to stay well under. Default ~1.5s between costs.
+const delayArg = process.argv.find((a) => a.startsWith('--delay='));
+const delayMs = delayArg ? parseInt(delayArg.split('=')[1], 10) : 1500;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // Mirror of cost-xero-push.ts xeroReference() so the dry-run can show what the
 // Reference WILL become. Keep in step with that helper. (Some suppliers use a
@@ -135,7 +140,18 @@ async function main() {
   let skippedLocked = 0;
   let skipped = 0;
   let errored = 0;
-  for (const r of actionable) {
+  let xeroLocked = 0; // "not of valid status" / "could not be found" — Xero-side
+  let rateLimited = 0; // 429 — transient, just re-run
+  const rateLimitedIds: string[] = [];
+  // Xero rejects a Reference edit on a paid/reconciled object even when OP thinks
+  // it's still editable (OP's cached state lags Xero). Treat those as Xero-locked
+  // skips, not red errors. 429 = transient (re-run picks them up).
+  const isXeroLocked = (msg: string) => /valid status for modification|could not be found/i.test(msg);
+  const isRateLimit = (msg: string) => /429|transient error/i.test(msg);
+
+  for (let i = 0; i < actionable.length; i++) {
+    const r = actionable[i];
+    if (i > 0 && delayMs > 0) await sleep(delayMs);
     try {
       const res = await resyncCostToXero(r.id);
       if (res.pushed) {
@@ -148,20 +164,26 @@ async function main() {
         skipped++;
         console.log(`  – ${r.id}  skipped: ${res.skipped}`);
       } else {
-        errored++;
-        console.log(`  ✗ ${r.id}  error: ${res.error || 'unknown'}`);
+        const msg = res.error || 'unknown';
+        if (isRateLimit(msg)) { rateLimited++; rateLimitedIds.push(r.id); console.log(`  ↻ ${r.id}  rate-limited (429) — re-run to retry`); }
+        else if (isXeroLocked(msg)) { xeroLocked++; console.log(`  ⊘ ${r.id}  Xero-locked/gone: ${msg}`); }
+        else { errored++; console.log(`  ✗ ${r.id}  error: ${msg}`); }
       }
     } catch (err) {
-      errored++;
-      console.log(`  ✗ ${r.id}  threw: ${err instanceof Error ? err.message : String(err)}`);
+      const msg = err instanceof Error ? err.message : String(err);
+      if (isRateLimit(msg)) { rateLimited++; rateLimitedIds.push(r.id); console.log(`  ↻ ${r.id}  rate-limited (429) — re-run to retry`); }
+      else if (isXeroLocked(msg)) { xeroLocked++; console.log(`  ⊘ ${r.id}  Xero-locked/gone: ${msg}`); }
+      else { errored++; console.log(`  ✗ ${r.id}  threw: ${msg}`); }
     }
   }
 
   console.log(`\n=== Done ===`);
   console.log(`Re-synced: ${pushed}`);
-  console.log(`Locked (Xero): ${skippedLocked}`);
-  console.log(`Skipped: ${skipped}`);
-  console.log(`Errored: ${errored}\n`);
+  console.log(`Locked (OP knew): ${skippedLocked}`);
+  console.log(`Xero-locked/gone (paid/reconciled/deleted in Xero — nothing to do): ${xeroLocked}`);
+  console.log(`Rate-limited (429) — RE-RUN to pick these up: ${rateLimited}`);
+  if (rateLimitedIds.length) console.log(`  ${rateLimitedIds.join(' ')}`);
+  console.log(`Errored (real): ${errored}\n`);
   process.exit(0);
 }
 
