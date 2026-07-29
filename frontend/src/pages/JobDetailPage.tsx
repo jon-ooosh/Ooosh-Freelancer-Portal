@@ -178,6 +178,17 @@ interface QuoteAssignment {
   is_ooosh_crew?: boolean;
 }
 
+interface QuoteExpenseLine {
+  id: string;
+  category: string;
+  label: string;
+  amount: number;
+  included: boolean;
+  chargeMode?: 'included' | 'not_included' | 'recharge' | 'na';
+  description?: string;
+  pdDays?: number;
+}
+
 interface SavedQuote {
   id: string;
   job_type: string;
@@ -226,6 +237,8 @@ interface SavedQuote {
   run_notes: string | null;
   // Assignments
   assignments: QuoteAssignment[];
+  // Expense line items (from the calculator) — per-line category/amount/charge-mode
+  expenses: QuoteExpenseLine[] | null;
   // Notes
   internal_notes: string | null;
   freelancer_notes: string | null;
@@ -251,6 +264,59 @@ interface PersonOption {
   is_insured_on_vehicles: boolean;
   is_approved: boolean;
   current_organisations?: PersonOrgLink[] | null;
+}
+
+// Per-line expense breakdown on a quote card — surfaces what staff picked in the
+// calculator ("what's included": fuel/parking/hotels + each line's charge mode)
+// which the summary Client-charges/Our-costs grid otherwise lumps into one figure.
+// Collapsible, default-open when the quote has expenses. Read-only.
+const EXPENSE_LINE_LABELS: Record<string, string> = {
+  fuel: 'Fuel', parking: 'Parking', tolls: 'Tolls', transport_out: 'Travel (out)',
+  transport_back: 'Travel (back)', hotel: 'Hotel', pd: 'Per Diem', other: 'Other',
+};
+const EXPENSE_MODE_PILL: Record<string, { label: string; cls: string }> = {
+  included: { label: 'In quote', cls: 'bg-gray-100 text-gray-600' },
+  not_included: { label: 'Client pays', cls: 'bg-gray-100 text-gray-500' },
+  recharge: { label: 'Recharge', cls: 'bg-amber-100 text-amber-700' },
+  na: { label: 'N/A', cls: 'bg-gray-100 text-gray-400' },
+};
+
+function QuoteExpensesBreakdown({ expenses }: { expenses: QuoteExpenseLine[] | null }) {
+  const lines = Array.isArray(expenses) ? expenses.filter((e) => Number(e.amount) > 0) : [];
+  const [open, setOpen] = useState(true);
+  if (lines.length === 0) return null;
+  return (
+    <div className="mt-2 text-xs">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="text-gray-400 font-medium hover:text-gray-600 flex items-center gap-1"
+      >
+        <span className="text-[10px]">{open ? '▾' : '▸'}</span>
+        Expense breakdown ({lines.length})
+      </button>
+      {open && (
+        <div className="mt-1 space-y-0.5 pl-3.5">
+          {lines.map((e) => {
+            const mode = e.chargeMode ?? (e.included ? 'included' : 'not_included');
+            const pill = EXPENSE_MODE_PILL[mode] || EXPENSE_MODE_PILL.included;
+            const name = EXPENSE_LINE_LABELS[e.category] || e.label || e.category;
+            return (
+              <div key={e.id} className="flex items-center justify-between gap-2">
+                <span className="text-gray-600 truncate">
+                  {name}
+                  {e.category === 'pd' && e.pdDays ? ` (${e.pdDays}d)` : ''}
+                </span>
+                <span className="flex items-center gap-2 shrink-0">
+                  <span className="text-gray-500">&pound;{Number(e.amount).toFixed(2)}</span>
+                  <span className={`px-1.5 py-0.5 rounded-full ${pill.cls}`}>{pill.label}</span>
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 }
 
 /** A distinct van allocated to the job, for the "Vehicles on this job" strip. */
@@ -5279,6 +5345,9 @@ export default function JobDetailPage() {
                           <p className="text-gray-500 font-medium">Total cost: &pound;{totalCost.toFixed(2)}</p>
                         </div>
                       </div>
+
+                      {/* Per-line expense breakdown (what staff picked in the calculator) */}
+                      <QuoteExpensesBreakdown expenses={q.expenses} />
 
 
                       {/* Crew assignments */}
