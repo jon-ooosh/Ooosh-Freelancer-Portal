@@ -180,6 +180,8 @@ const round2 = (n: number) => Math.round(n * 100) / 100;
 // Xero Reference field: the supplier's invoice number when we have one (so the
 // bill/transaction is findable by the number printed on the paperwork),
 // falling back to the supplier name. Max 255 chars per Xero.
+// NOTE: some suppliers use a UUID-shaped invoice number verbatim (e.g. Spotify's
+// printed "Invoice ID" is a real GUID) — do NOT filter those out, they're genuine.
 function xeroReference(cost: CostRow): string | undefined {
   const ref = (cost.invoice_number || cost.supplier_name || '').toString().trim().slice(0, 255);
   return ref || undefined;
