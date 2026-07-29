@@ -710,6 +710,26 @@ export function startScheduler() {
   });
   console.log('Scheduler: Carnet request-form auto-emails scheduled daily at 09:15');
 
+  // ── Insurance referral alert safety-net ──────────────────────────────
+  // Daily at 09:18 — catch drivers flagged requires_referral=true who signed
+  // recently but never got the info@ referral-alert email (their SignaturePage
+  // chain reached neither POST /api/hire-forms nor the driver-verification
+  // signature-step email trigger). Idempotent via drivers.referral_alert_sent_at,
+  // bounded to the last 14 days so it never spams an ancient backlog. See
+  // services/referral-alert.ts + CLAUDE.md → "Insurance Referral Workflow".
+  cron.schedule('18 9 * * *', async () => {
+    try {
+      const { runReferralAlertScan } = await import('../services/referral-alert');
+      const result = await runReferralAlertScan();
+      if (result.sent > 0) {
+        console.log(`Scheduler: Referral alert safety-net — ${result.sent}/${result.checked} sent`);
+      }
+    } catch (err) {
+      console.error('Scheduler: Referral alert safety-net failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: Referral alert safety-net scheduled daily at 09:18');
+
   // ── Rehearsal info-pack auto-send ────────────────────────────────────
   // Daily at 09:20 — send the client info pack T-N days before the rehearsal
   // (off by default; enabled + N-days configured on the Info Pack settings tab).

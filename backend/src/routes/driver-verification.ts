@@ -324,10 +324,10 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       licencePoints: 'licence_points',
       licenceEndorsements: 'licence_endorsements',
       requiresReferral: 'requires_referral',
-      referralStatus: 'referral_status',
       referralReasons: 'referral_notes',
-      referralDate: 'referral_date',
       referralNotes: 'referral_notes',
+      // referralStatus / referralDate intentionally unmapped — the hire-form
+      // app must NOT set the referral workflow state (see allowedFields note).
     };
 
     // Whitelist of fields the hire form app can update
@@ -345,7 +345,15 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       'insurance_status', 'overall_status',
       'idenfy_check_date', 'idenfy_scan_ref', 'signature_date',
       'licence_points', 'licence_endorsements',
-      'requires_referral', 'referral_status', 'referral_date', 'referral_notes',
+      // NB: 'referral_status' + 'referral_date' are DELIBERATELY NOT writable
+      // from the hire-form app. A submission with requires_referral=true must
+      // leave referral_status NULL (the red "Refer to Insurers" TODO state) —
+      // only a staff action on DriverDetailPage moves it to 'pending'. The
+      // standalone app used to send referral_status='pending', which jumped the
+      // queue and made it look like staff had already actioned a referral
+      // they hadn't (Meadham / HH 16330 incident, Jul 2026). Mirrors
+      // routes/hire-forms.ts, which likewise never writes referral_status.
+      'requires_referral', 'referral_notes',
     ]);
 
     // DATE fields need normalisation — the hire form app sometimes sends
@@ -458,6 +466,17 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
              AND calculated_excess_amount IS NULL`,
           [driverId]
         );
+
+        // Fire the info@ referral alert email at signature time. The picture is
+        // complete by now, so this is where the alert belongs (the earlier
+        // fireReferralNotification only drops a bell — no email). Idempotent
+        // via drivers.referral_alert_sent_at + self-gated on requires_referral,
+        // so it's a no-op when the driver doesn't require a referral. This is
+        // the path that was MISSING for drivers whose SignaturePage chain
+        // never reached POST /api/hire-forms (Meadham / HH 16330 incident).
+        import('../services/referral-alert').then(({ sendReferralAlert }) =>
+          sendReferralAlert(driverId)
+        ).catch(err => console.error('[driver-verification] Referral alert error:', err));
       }
 
       res.json({ success: true, driverId });
@@ -483,6 +502,19 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       // Fire referral notification for new driver created with referral flag
       if (referralBeingSet) {
         await fireReferralNotification(email, newId, updates);
+      }
+
+      // Rare: a new driver created WITH a signature + referral flag in one
+      // call. Fire the info@ referral alert email too (bell above is not
+      // enough). Idempotent + self-gated on requires_referral — see the
+      // existing-driver branch note.
+      const signatureBeingSetOnCreate =
+        ('signature_date' in updates && updates.signature_date) ||
+        ('signatureDate' in updates && (updates as Record<string, unknown>).signatureDate);
+      if (referralBeingSet && signatureBeingSetOnCreate) {
+        import('../services/referral-alert').then(({ sendReferralAlert }) =>
+          sendReferralAlert(newId)
+        ).catch(err => console.error('[driver-verification] Referral alert error:', err));
       }
 
       res.json({ success: true, driverId: newId, created: true });
@@ -799,7 +831,9 @@ async function fireReferralNotification(
 
     // email_sent_at = NOW() so the escalation scheduler doesn't fire an early
     // email mid-flow. The proper referral_alert email (with snapshot PDF) is
-    // sent from hire-forms.ts once the full form is submitted.
+    // sent via services/referral-alert.ts sendReferralAlert — from the
+    // signature step below, from POST /api/hire-forms, or from the daily
+    // safety-net scanner (whichever completes first; idempotent).
     for (const userId of targets.bellUserIds) {
       await query(
         `INSERT INTO notifications (user_id, type, title, content, action_url, priority, email_sent_at)
@@ -810,12 +844,13 @@ async function fireReferralNotification(
 
     console.log(`[driver-verification] Bell notification sent to ${targets.bellUserIds.length} vehicle manager user(s)`);
 
-    // NOTE: No email alert fired here. The referral flag is set mid-flow
-    // (e.g. during the insurance questionnaire, before POA/DVLA/signature),
-    // so we can't yet refer to insurers with a complete picture. The
-    // referral_alert email is fired from hire-forms.ts when the full form
-    // is submitted (with snapshot PDF attached). Bell notifications above
-    // give staff early visibility without spamming info@ mid-form.
+    // NOTE: No email alert fired HERE. The referral flag is often set mid-flow
+    // (during the insurance questionnaire, before POA/DVLA/signature), so we
+    // can't yet refer to insurers with a complete picture — the bell above
+    // gives the vehicle manager early visibility without spamming info@. The
+    // info@ referral_alert email (with snapshot PDF) fires later via
+    // sendReferralAlert — at the signature step (below), on POST /api/hire-forms,
+    // or from the daily safety-net scanner. Idempotent via referral_alert_sent_at.
   } catch (error) {
     // Don't fail the update if notification fails
     console.error('[driver-verification] Failed to send referral notification:', error);

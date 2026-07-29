@@ -5357,6 +5357,37 @@ router.post('/send-condition-report', async (req: FlexibleVehicleRequest, res: R
     }
     data.performedByName = await resolveOperatorName(req);
 
+    // Per-driver referral gate (Phase D2b). A driver whose referral is still
+    // pending is HELD BACK — they get neither the hire agreement nor the
+    // condition report. Resolve the held-back drivers on this job (by email +
+    // name) and skip any matching recipient. Book-out itself is per-VAN and
+    // proceeds on the approved drivers; only the paperwork is withheld per
+    // driver. Matches book-out (own-van/cross-van agreement) so the two artefacts
+    // stay consistent. Held-back drivers are authorised later via the referral
+    // resolution flow.
+    const heldBackEmails = new Set<string>();
+    const heldBackNames = new Set<string>();
+    if (data.hireHopJob) {
+      const hbJob = parseInt(String(data.hireHopJob), 10);
+      if (!Number.isNaN(hbJob)) {
+        const heldBack = await query(
+          `SELECT DISTINCT d.email, d.full_name
+             FROM vehicle_hire_assignments vha
+             JOIN drivers d ON d.id = vha.driver_id
+             LEFT JOIN jobs j ON j.id = vha.job_id
+            WHERE (vha.hirehop_job_id = $1 OR j.hh_job_number = $1)
+              AND d.requires_referral = TRUE
+              AND (d.referral_status IS NULL
+                   OR d.referral_status NOT IN ('approved', 'waived'))`,
+          [hbJob]
+        );
+        for (const r of heldBack.rows) {
+          if (r.email) heldBackEmails.add(String(r.email).trim().toLowerCase());
+          if (r.full_name) heldBackNames.add(String(r.full_name).trim().toLowerCase());
+        }
+      }
+    }
+
     // Job-level fallback recipient (resolved once, reused for any recipient
     // with no email on file).
     let fallbackJobId: string | null = null;
@@ -5387,6 +5418,22 @@ router.post('/send-condition-report', async (req: FlexibleVehicleRequest, res: R
     for (const recipient of recipients) {
       const driverName = String(recipient?.driverName || '').trim() || 'Driver';
       const explicitEmail = recipient?.email ? String(recipient.email).trim() : '';
+
+      // Referral hold: skip held-back drivers (no condition report, no email).
+      const recipEmailKey = explicitEmail.toLowerCase();
+      const recipNameKey = driverName.toLowerCase();
+      if (
+        (recipEmailKey && heldBackEmails.has(recipEmailKey)) ||
+        heldBackNames.has(recipNameKey)
+      ) {
+        console.log(`[vehicles/send-condition-report] hold ${driverName} — driver referral pending, report withheld`);
+        results.push({
+          driverName,
+          success: false,
+          error: 'Referral pending — not authorised; condition report withheld until resolved',
+        });
+        continue;
+      }
 
       try {
         const { pdfBytes, filename } = await buildConditionReportPdf({

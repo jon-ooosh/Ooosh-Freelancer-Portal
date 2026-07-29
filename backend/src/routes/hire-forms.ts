@@ -9,7 +9,7 @@ import { Router, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import crypto from 'crypto';
 import { query, getPool } from '../config/database';
-import { authenticate, AuthRequest } from '../middleware/auth';
+import { authenticate, authorize, MANAGER_ROLES, AuthRequest } from '../middleware/auth';
 import {
   authenticateVehicleFlexible,
   isFreelancerBookout,
@@ -651,10 +651,17 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
       });
     }
 
-    // Send referral notification email (non-blocking — don't fail the request)
+    // Send referral alert email (non-blocking — don't fail the request).
+    // Idempotent via drivers.referral_alert_sent_at — safe against the
+    // driver-verification signature-step path + the daily safety-net scanner
+    // both firing for the same driver (only the first claim sends).
     if (requiresReferral) {
-      sendReferralNotification(driverId, f.full_name, f.email || '', referralReason, f.hirehop_job_id || null)
-        .catch(err => console.error('[hire-forms] Referral notification error:', err));
+      import('../services/referral-alert').then(({ sendReferralAlert }) =>
+        sendReferralAlert(driverId, {
+          hirehopJobId: f.hirehop_job_id || null,
+          referralReason,
+        })
+      ).catch(err => console.error('[hire-forms] Referral alert error:', err));
     }
 
     res.status(201).json({
@@ -1218,6 +1225,47 @@ const FREELANCER_PATCH_ALLOW = new Set([
  * this twice on the same job (e.g. once per cloned assignment in a
  * multi-van add-to-hire) is safe.
  */
+/**
+ * Per-driver referral gate for hire-agreement paperwork (Phase D2b, Jul 2026).
+ *
+ * Book-out is per-VAN (the van legitimately goes out on its approved drivers);
+ * a referral is per-DRIVER. So we gate the AGREEMENT / authorisation per driver,
+ * never the whole van. A driver is authorised to receive an agreement only when
+ * they were never flagged (`requires_referral = false`) OR the referral has been
+ * resolved to `approved`/`waived`. A driver with `requires_referral = true` and
+ * `referral_status NOT IN ('approved','waived')` is HELD BACK — they stay on the
+ * job, visibly pending, and are authorised later via the referral-resolution flow
+ * (same rails as the mid-tour driver flow).
+ *
+ * `'waived'` counts as authorised — downstream UX already treats it as approved.
+ *
+ * Returns true when the driver may receive an agreement. Fails OPEN (returns
+ * true) if the assignment row can't be found — a missing row is a data problem,
+ * not a referral hold, and we don't want to silently suppress a legitimate
+ * agreement. The referral-alert path surfaces genuine pending referrals loudly
+ * elsewhere.
+ *
+ * Motivation incident: HH 15075 — Joseph Hilton (requires_referral=true,
+ * referral_status='pending') received a hire agreement + condition report at
+ * book-out even though we weren't yet cleared to insure him.
+ */
+async function isDriverAuthorisedForAgreement(assignmentId: string): Promise<boolean> {
+  const res = await query(
+    `SELECT d.requires_referral, d.referral_status
+       FROM vehicle_hire_assignments vha
+       JOIN drivers d ON d.id = vha.driver_id
+      WHERE vha.id = $1`,
+    [assignmentId],
+  );
+  if (res.rows.length === 0) return true; // no driver row resolvable — fail open
+  const { requires_referral, referral_status } = res.rows[0] as {
+    requires_referral: boolean | null;
+    referral_status: string | null;
+  };
+  if (!requires_referral) return true;
+  return referral_status === 'approved' || referral_status === 'waived';
+}
+
 export function firePostBookOutHooks(opts: {
   assignmentId: string;
   vehicleId: string;
@@ -2025,6 +2073,18 @@ async function resolveHireFormEmailTarget(
  * manual fixing.
  */
 async function generateAndEmailHireFormPdf(assignmentId: string, trigger: string): Promise<void> {
+  // Per-driver referral gate (Phase D2b). A driver whose referral is still
+  // pending is HELD BACK — no agreement PDF, no email — until the referral is
+  // resolved to approved/waived (which fires the agreement via the authorise
+  // action). Checked BEFORE the atomic claim below so a later authorise re-fires
+  // cleanly (no burnt hire_form_email_claimed_at). Early-return void is a
+  // deliberate skip: runHookWithRecovery only retries on a thrown error, so this
+  // never trips the retry/alert path.
+  if (!(await isDriverAuthorisedForAgreement(assignmentId))) {
+    console.log(`[hire-forms] ${trigger}: hold ${assignmentId} — driver referral pending, agreement withheld`);
+    return;
+  }
+
   // Atomic claim. The own-van agreement email can now be triggered by TWO
   // server-side paths for a single book-out — the PATCH /:id write-back loop
   // and the POST /save-event condition-report path (added so a freelancer
@@ -2198,7 +2258,17 @@ async function generateAndEmailCrossVanHireForm(
   driverAssignmentId: string,
   vanVehicleId: string,
   ctx: { jobId: string | null; hhJobNumber: number | null },
-): Promise<'sent' | 'skipped' | 'failed'> {
+): Promise<'sent' | 'skipped' | 'failed' | 'held_back'> {
+  // Per-driver referral gate (Phase D2b). Held-back drivers get no cross-van
+  // agreement either. Checked BEFORE the claim INSERT so no hire_form_documents
+  // row is burnt — a later authorise re-fires cleanly. Distinct 'held_back'
+  // sentinel (NOT 'failed') so fanOutVanHireForms doesn't treat it as a transient
+  // error and throw for a runHookWithRecovery retry.
+  if (!(await isDriverAuthorisedForAgreement(driverAssignmentId))) {
+    console.log(`[hire-forms] cross-van: hold ${driverAssignmentId} — driver referral pending, agreement withheld`);
+    return 'held_back';
+  }
+
   const claim = await query(
     `INSERT INTO hire_form_documents (assignment_id, vehicle_id, driver_id, job_id, hirehop_job_id)
      SELECT $1, $2, vha.driver_id, $3, $4
@@ -2741,119 +2811,11 @@ router.get('/:id/download', authenticateOrApiKey, async (req: AuthRequest, res: 
 });
 
 // ── Referral notification helper ──
-
-async function sendReferralNotification(
-  driverId: string,
-  driverName: string,
-  driverEmail: string,
-  referralReason: string,
-  hirehopJobId: number | null,
-): Promise<void> {
-  try {
-    // Build referral reasons list from driver data
-    const driverResult = await query(
-      `SELECT d.*,
-        COALESCE(
-          (SELECT string_agg(CONCAT('#', vha.hirehop_job_id, ' ', vha.hirehop_job_name), ', ')
-           FROM vehicle_hire_assignments vha
-           WHERE vha.driver_id = d.id AND vha.status IN ('soft', 'confirmed', 'booked_out', 'active')),
-          'No active hires'
-        ) AS linked_jobs
-      FROM drivers d WHERE d.id = $1`,
-      [driverId]
-    );
-
-    if (driverResult.rows.length === 0) return;
-    const driver = decryptDriverRow(driverResult.rows[0]);
-
-    // Build human-readable reasons
-    const reasons: string[] = [];
-    if (referralReason) reasons.push(referralReason);
-    if (driver.has_disability) reasons.push('Declared disability/medical condition');
-    if (driver.has_convictions) reasons.push('Declared motoring convictions');
-    if (driver.has_prosecution) reasons.push('Declared pending prosecution');
-    if (driver.has_accidents) reasons.push('Declared previous accidents');
-    if (driver.has_insurance_issues) reasons.push('Declared insurance issues');
-    if (driver.has_driving_ban) reasons.push('Declared previous driving ban');
-    if (driver.licence_points >= 9) reasons.push(`${driver.licence_points} penalty points on licence`);
-    if (driver.licence_issue_country && !['GB', 'UK', 'DVLA'].includes(driver.licence_issue_country.toUpperCase())) {
-      reasons.push(`Non-standard licence country: ${driver.licence_issue_country}`);
-    }
-    if (reasons.length === 0) reasons.push('Flagged by hire form verification process');
-
-    const frontendUrl = getFrontendUrl();
-
-    // Try to generate snapshot PDF for attachment
-    let attachments: Array<{ filename: string; content: Buffer; contentType: string }> | undefined;
-    try {
-      const { generateDriverSnapshot, loadDriverDocuments } = await import('../services/driver-snapshot-pdf');
-      const { fetchLogo } = await import('../services/hire-form-pdf');
-
-      const documents = await loadDriverDocuments(driver.files || []);
-      let logoImage: Buffer | null = null;
-      try { logoImage = await fetchLogo(); } catch { /* skip */ }
-
-      const isUk = (driver.licence_issue_country || '').toUpperCase() === 'GB' ||
-        (driver.licence_issued_by || '').toUpperCase().includes('DVLA');
-
-      const snapshotData = {
-        driverName: driver.full_name || driverName,
-        email: driver.email || driverEmail,
-        phone: driver.phone ? `${driver.phone_country || ''} ${driver.phone}` : '',
-        dateOfBirth: driver.date_of_birth || '',
-        nationality: driver.nationality || '',
-        homeAddress: driver.address_full || [driver.address_line1, driver.address_line2, driver.city, driver.postcode].filter(Boolean).join(', '),
-        licenceAddress: driver.licence_address || '',
-        licenceNumber: driver.licence_number || '',
-        licenceIssuedBy: driver.licence_issued_by || driver.licence_issue_country || '',
-        licenceValidTo: driver.licence_valid_to || '',
-        datePassedTest: driver.date_passed_test || '',
-        dvlaPoints: String(driver.licence_points || 0),
-        dvlaEndorsements: Array.isArray(driver.licence_endorsements)
-          ? driver.licence_endorsements.map((e: any) => e.code).join(', ') || 'None'
-          : 'None',
-        calculatedExcess: '',
-        isUkDriver: isUk,
-        hasDisability: driver.has_disability || false,
-        hasConvictions: driver.has_convictions || false,
-        hasProsecution: driver.has_prosecution || false,
-        hasAccidents: driver.has_accidents || false,
-        hasInsuranceIssues: driver.has_insurance_issues || false,
-        hasDrivingBan: driver.has_driving_ban || false,
-        additionalDetails: driver.additional_details || '',
-        jobId: hirehopJobId ? String(hirehopJobId) : 'N/A',
-        documents,
-        logoImage,
-      };
-
-      const { pdfBytes, filename } = await generateDriverSnapshot(snapshotData);
-      attachments = [{ filename, content: Buffer.from(pdfBytes), contentType: 'application/pdf' }];
-      console.log(`[hire-forms] Snapshot PDF generated for referral email: ${filename}`);
-    } catch (snapshotErr) {
-      console.warn('[hire-forms] Could not generate snapshot PDF for referral email:', (snapshotErr as Error).message);
-    }
-
-    const { getVehicleNotificationTargets } = await import('../services/vehicle-notify');
-    const vehicleTargets = await getVehicleNotificationTargets();
-    await emailService.send('referral_alert', {
-      to: vehicleTargets.to,
-      cc: vehicleTargets.cc,
-      variables: {
-        driverName: driverName || 'Unknown',
-        driverEmail: driverEmail || 'N/A',
-        jobNumber: hirehopJobId ? String(hirehopJobId) : 'N/A',
-        referralReasons: reasons.map(r => `• ${r}`).join('<br/>'),
-        linkedJobs: driver.linked_jobs || 'No active hires',
-        driverUrl: `${frontendUrl}/drivers/${driverId}`,
-      },
-      attachments,
-    });
-
-    console.log(`[hire-forms] Referral notification sent for driver ${driverName}`);
-  } catch (err) {
-    console.error('[hire-forms] Failed to send referral notification:', err);
-  }
-}
+// Extracted to services/referral-alert.ts as `sendReferralAlert` — shared &
+// idempotent (via drivers.referral_alert_sent_at) across POST /api/hire-forms,
+// the driver-verification signature step, and the daily safety-net scanner.
+// Do NOT re-add a local sender here — route every referral-alert send through
+// the shared service so the once-only claim holds across all paths.
 
 // ─── POST-SIGNATURE AUTOMATIONS ─────────────────────────────────────────────
 // Called by hire form app after successful signature + assignment creation.
@@ -2964,6 +2926,133 @@ router.post('/:id/post-signature', authenticateOrApiKey, async (req: AuthRequest
   } catch (error) {
     console.error('[post-signature] Error:', error);
     res.status(500).json({ error: 'Post-signature processing failed' });
+  }
+});
+
+// ── POST /api/hire-forms/:id/authorise-agreement ──
+// Phase D2b: authorise a previously HELD-BACK driver (referral now resolved
+// to approved/waived) and fire their withheld hire agreement. Human-in-the-loop
+// — staff click this only after confirming the insurer has cleared the driver;
+// it does NOT auto-fire on referral resolution. Mid-tour rails: stamps
+// hire_start = NOW() (the driver wasn't authorised to drive during the wait),
+// generates + emails the agreement for THIS assignment, and drops a team
+// notification. Surfaces the recomputed top-N excess vs held as a WARNING —
+// never silently moves money (excess is a warning, not a hard gate).
+router.post('/:id/authorise-agreement', authenticate, authorize(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
+  const id = String(req.params.id);
+  try {
+    const assignmentResult = await query(
+      `SELECT a.*, fv.reg AS vehicle_reg, d.full_name AS driver_name, d.email AS driver_email,
+              d.requires_referral, d.referral_status,
+              j.hh_job_number AS job_hh_number, j.job_name AS op_job_name
+         FROM vehicle_hire_assignments a
+         LEFT JOIN fleet_vehicles fv ON fv.id = a.vehicle_id
+         LEFT JOIN drivers d ON d.id = a.driver_id
+         LEFT JOIN jobs j ON j.id = a.job_id
+        WHERE a.id = $1`,
+      [id]
+    );
+    if (assignmentResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Assignment not found' });
+    }
+    const a = assignmentResult.rows[0];
+
+    // Guard: the driver must actually be cleared. If they're still held back,
+    // point staff at the referral resolution first.
+    const authorised = !a.requires_referral
+      || a.referral_status === 'approved'
+      || a.referral_status === 'waived';
+    if (!authorised) {
+      return res.status(400).json({
+        error: 'Driver referral is not resolved — resolve the referral to approved/waived before authorising.',
+      });
+    }
+
+    // Must have a van to generate an agreement against.
+    if (!a.vehicle_id) {
+      return res.status(400).json({
+        error: 'No vehicle linked to this assignment — book the van out (or allocate one) before authorising the agreement.',
+      });
+    }
+
+    // Mid-tour rails: the driver wasn't authorised to drive while the referral
+    // was pending, so their hire starts NOW (only if not already set).
+    await query(
+      `UPDATE vehicle_hire_assignments SET hire_start = NOW(), updated_at = NOW()
+        WHERE id = $1 AND hire_start IS NULL`,
+      [id]
+    );
+
+    // Fire the agreement for THIS assignment. The own-van generator's referral
+    // gate now passes (driver authorised) and the atomic claim was never burnt
+    // (the gate returned before it while held back), so this fires cleanly.
+    const results: Record<string, unknown> = {};
+    setImmediate(() => {
+      runHookWithRecovery(
+        {
+          hookLabel: 'Referral-authorise hire agreement',
+          jobId: a.job_id,
+          hhJobNumber: a.hirehop_job_id || a.job_hh_number || null,
+          assignmentId: id,
+        },
+        () => generateAndEmailHireFormPdf(id, 'referral-authorise')
+      ).catch((err) => {
+        console.error(`[hire-forms] referral-authorise agreement failed for ${id}:`, err);
+      });
+    });
+
+    // Team notification (mid-tour style) — the driver has just been authorised.
+    const hhForDisplay = a.hirehop_job_id || a.job_hh_number || null;
+    try {
+      const { getVehicleNotificationTargets } = await import('../services/vehicle-notify');
+      const targets = await getVehicleNotificationTargets();
+      const frontendUrl = getFrontendUrl();
+      for (const userId of targets.bellUserIds) {
+        await query(
+          `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, priority, action_url, email_sent_at)
+           VALUES ($1, 'hire_form', $2, $3, 'vehicle_hire_assignments', $4, 'normal', $5, NOW())`,
+          [
+            userId,
+            `Driver authorised — ${a.driver_name || 'Unknown'}`,
+            `${a.driver_name || 'A driver'}'s referral has been resolved and their hire agreement has been sent for job #${hhForDisplay || '?'} (${a.op_job_name || ''}), vehicle ${a.vehicle_reg || 'unassigned'}.`,
+            id,
+            a.job_id ? `/jobs/${a.job_id}` : null,
+          ]
+        );
+      }
+    } catch (notifyErr) {
+      console.warn('[hire-forms] referral-authorise notification failed (non-blocking):', (notifyErr as Error).message);
+    }
+
+    // Surface recomputed top-N excess vs held — WARNING only, no auto-bump.
+    // An insurer-imposed adjusted excess on referral resolution already wrote to
+    // job_excess.excess_amount_required; this tells staff whether the job's
+    // excess is now under-collected so they can decide to collect the top-up.
+    if (a.job_id) {
+      try {
+        const excess = await query(
+          `SELECT
+             COALESCE(SUM(excess_amount_required), 0)::numeric AS required_total,
+             COALESCE(SUM(excess_amount_taken + COALESCE(amount_held, 0)), 0)::numeric AS held_total
+           FROM job_excess
+           WHERE job_id = $1
+             AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required', 'waived', 'released')`,
+          [a.job_id]
+        );
+        const requiredTotal = Number(excess.rows[0]?.required_total || 0);
+        const heldTotal = Number(excess.rows[0]?.held_total || 0);
+        const outstanding = Math.max(requiredTotal - heldTotal, 0);
+        results.excess = { requiredTotal, heldTotal, outstanding };
+      } catch (err) {
+        console.warn('[hire-forms] referral-authorise excess recompute failed (non-blocking):', (err as Error).message);
+      }
+    }
+
+    console.log(`[hire-forms] Referral-authorised assignment ${id} (driver ${a.driver_name || a.driver_id})`);
+    res.json({ success: true, assignmentId: id, results });
+  } catch (error) {
+    console.error('[hire-forms] authorise-agreement error:', error);
+    res.status(500).json({ error: 'Failed to authorise agreement' });
   }
 });
 
