@@ -1,4 +1,4 @@
--- 186 — Fleet "stuck On Hire" detection-scanner dedup marker
+-- 187 — Fleet "stuck On Hire" detection-scanner dedup marker
 --
 -- Adds `fleet_vehicles.stuck_onhire_alerted_at TIMESTAMPTZ` — the dedup marker
 -- for the multi-van book-out scramble detection scanner (see

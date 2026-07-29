@@ -3954,7 +3954,7 @@ fleet reg (and the PDF reg is a real, different fleet van). At discovery: **3 jo
 mileage tidy only, no stuck flags. Query + per-job cleanup in the doc.
 
 **Status:** 14885 cleaned up (mileage `UPDATE` + missing-van `INSERT` + UI check-in).
-**(1) Detection scanner — SHIPPED (migration 186).** `runStuckOnHireScan`
+**(1) Detection scanner — SHIPPED (migration 187).** `runStuckOnHireScan`
 (`services/sanity-check-scanner.ts`, wired into the 15-min sanity cron) finds vehicles projected
 `hire_status='On Hire'` with NO live `booked_out`/`active` assignment row — mirrors
 `syncFleetHireStatus`'s exact "has a live assignment" definition (dual job match, lost/cancelled
@@ -4096,7 +4096,7 @@ Pattern for safety-net warning emails that previously fired inline and spammed s
 | `runDispatchSanityScan` | `pipeline_status='dispatched'` AND `status<5` AND no marker yet | 30 min (one full polling-sync cycle, so cached HH `jobs.status` has refreshed) | `jobs.under_dispatch_warned_at` |
 | `runReturnedBookedOutScan` | `pipeline_status='returned'` AND any `vehicle_hire_assignments` row still `booked_out`/`active` AND no marker yet | 20 min (desk-side check-in time after HH webhook fires Returned) | `jobs.returned_bookedout_warned_at` |
 
-A third consumer, `runStuckOnHireScan` (migration 186), follows the same stamp-first pattern but keys off `fleet_vehicles.hire_status` rather than `jobs.pipeline_status`: it flags a van projected `On Hire` with no live `booked_out`/`active` assignment (the multi-van book-out scramble fingerprint) and alerts **jon@** (not info@). Its dedup marker (`fleet_vehicles.stuck_onhire_alerted_at`) is cleared inside `syncFleetHireStatus` when the van leaves On Hire, not via a pipeline_status transition writer. See the "Multi-van book-out scramble" entry above.
+A third consumer, `runStuckOnHireScan` (migration 187), follows the same stamp-first pattern but keys off `fleet_vehicles.hire_status` rather than `jobs.pipeline_status`: it flags a van projected `On Hire` with no live `booked_out`/`active` assignment (the multi-van book-out scramble fingerprint) and alerts **jon@** (not info@). Its dedup marker (`fleet_vehicles.stuck_onhire_alerted_at`) is cleared inside `syncFleetHireStatus` when the van leaves On Hire, not via a pipeline_status transition writer. See the "Multi-van book-out scramble" entry above.
 
 **Marker clears** are wired into `routes/pipeline.ts` (`PATCH /:id/status`) and `routes/webhooks.ts` (HH inbound status changes) — both clear the matching pipeline_status marker when leaving the watched state.
 

@@ -239,7 +239,7 @@ is cosmetic.) **No fake check-ins on completed jobs.**
 
 ---
 
-## 6. Detection scanner (SHIPPED — migration 186)
+## 6. Detection scanner (SHIPPED — migration 187)
 
 `runStuckOnHireScan` in `services/sanity-check-scanner.ts`, wired into the 15-min sanity
 cron alongside the dispatch/return/no-ts/stalled-leg scanners.
@@ -259,7 +259,7 @@ cron alongside the dispatch/return/no-ts/stalled-leg scanners.
   DB assignment points at its PREVIOUS hire (the scramble overwrote the current-hire rows'
   `vehicle_id`), so the current job can only come from the event — the alert fires *without*
   the number if the read fails, never blocking on it.
-- **Dedup marker: `fleet_vehicles.stuck_onhire_alerted_at`** (migration 186), stamp-first.
+- **Dedup marker: `fleet_vehicles.stuck_onhire_alerted_at`** (migration 187), stamp-first.
   **Cleared inside `syncFleetHireStatus` whenever the van leaves On Hire** (not via a
   pipeline_status transition writer, unlike the other scanners' markers) — so a re-entered
   stuck state alerts afresh, and a van the next sync correctly demotes to Prep Needed clears
