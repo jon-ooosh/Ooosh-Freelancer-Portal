@@ -182,9 +182,20 @@ const round2 = (n: number) => Math.round(n * 100) / 100;
 // falling back to the supplier name. Max 255 chars per Xero.
 // NOTE: some suppliers use a UUID-shaped invoice number verbatim (e.g. Spotify's
 // printed "Invoice ID" is a real GUID) — do NOT filter those out, they're genuine.
+// On SPEND-MONEY this is the field the Xero UI labels "Reference" (visible). On a
+// BILL it's stored but hidden — the visible box there is InvoiceNumber (below).
 function xeroReference(cost: CostRow): string | undefined {
   const ref = (cost.invoice_number || cost.supplier_name || '').toString().trim().slice(0, 255);
   return ref || undefined;
+}
+
+// Xero InvoiceNumber = the "Reference" box the Xero UI shows on a BILL (ACCPAY).
+// So the supplier's invoice number must go here to actually appear on the bill.
+// The invoice number ONLY — no supplier-name fallback (the Contact already names
+// the supplier; a name in this box would be wrong/ugly). Undefined = leave blank.
+function xeroInvoiceNumber(cost: CostRow): string | undefined {
+  const n = (cost.invoice_number || '').toString().trim().slice(0, 255);
+  return n || undefined;
 }
 
 // Build the Xero line items + lineAmountTypes for a cost.
@@ -385,6 +396,7 @@ async function pushBill(cost: CostRow): Promise<PushResult> {
         date: dateOnly(cost.cost_date),
         dueDate: billDueDate,
         reference: xeroReference(cost),
+        invoiceNumber: xeroInvoiceNumber(cost),
         status: 'AUTHORISED',
         lineAmountTypes,
         lineItems,
@@ -592,6 +604,7 @@ async function resyncCostToXeroLocked(costId: string): Promise<PushResult & { lo
         date: dateOnly(cost.cost_date),
         dueDate: billDueDate,
         reference: xeroReference(cost),
+        invoiceNumber: xeroInvoiceNumber(cost),
         status: 'AUTHORISED',
         lineAmountTypes,
         lineItems,
