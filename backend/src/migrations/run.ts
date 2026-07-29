@@ -220,6 +220,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '183_backline_demand_priority.sql',
         '184_freelancer_onboarding.sql',
         '185_staff_document_owners_tags_review.sql',
+        '186_referral_alert_sent_at.sql',
       ];
 
       for (const migration of migrations) {

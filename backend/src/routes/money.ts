@@ -1611,17 +1611,27 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
         : excessRecords[0].excess_status
       : null;
 
-    // Check client balance on account
+    // Check client balance on account.
+    // MUST read the canonical v_excess_held view — never re-sum excess_amount_taken
+    // here. The old inline sum included 'rolled_over' records and counted them
+    // alongside the live 'taken' record, so a rolled-forward chain (all sharing one
+    // hh_deposit_id = the same physical £1,200) was double-counted (job 16335 showed
+    // "£2,400 on account" for a single £1,200 — the same class of bug as the Hoosiers
+    // by-org fix). v_excess_held excludes rolled_over/released/not_required, so each
+    // chain contributes its money once. pre_auth is excluded too: the banner offers to
+    // apply this balance "against this job's excess or balance", and a card hold bound
+    // to another hire can't be moved/applied — it's collateral, not cash on account
+    // (matches the dashboard "Unreimbursed Excess" bucket, which also drops pre_auth).
     let clientBalance = 0;
     if (job.client_id) {
       const balanceResult = await query(
-        `SELECT COALESCE(SUM(excess_amount_taken), 0) - COALESCE(SUM(claim_amount), 0) - COALESCE(SUM(reimbursement_amount), 0) AS balance
-         FROM job_excess je
-         JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
-         LEFT JOIN jobs j ON j.id = je.job_id
+        `SELECT COALESCE(SUM(h.held_amount), 0) AS balance
+         FROM v_excess_held h
+         JOIN job_excess je ON je.id = h.excess_id
+         JOIN jobs j ON j.id = je.job_id
          WHERE j.client_id = $1
-           AND je.excess_status IN ('taken', 'rolled_over')
-           AND je.job_id != $2`,
+           AND je.job_id != $2
+           AND je.excess_status <> 'pre_auth'`,
         [job.client_id, job.id]
       );
       clientBalance = parseFloat(balanceResult.rows[0]?.balance || '0');
