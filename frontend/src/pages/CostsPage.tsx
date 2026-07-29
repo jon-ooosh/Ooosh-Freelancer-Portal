@@ -1064,19 +1064,33 @@ function XeroCell({ cost, busy, onRetry, resyncBusy, onResync }: { cost: Cost; b
     && cost.xero_sync_state !== 'error') {
     return <span className="text-xs text-gray-400 whitespace-nowrap" title="The Xero bill is created automatically when this cost is approved">Syncs on approval</span>;
   }
+  // Xero LOCKS these — a reconciled spend-money and a paid bill can't be mutated,
+  // so no re-sync affordance (staff fix those directly in Xero).
   if (cost.xero_sync_state === 'reconciled') {
     return <span className="px-2 py-0.5 text-xs rounded-full bg-emerald-100 text-emerald-800">Reconciled</span>;
   }
+  if (cost.xero_sync_state === 'attached' && isBill && cost.xero_payment_id) {
+    return <span className="px-2 py-0.5 text-xs rounded-full bg-green-100 text-green-800" title="Bill paid in Xero">Bill paid</span>;
+  }
+  // Synced but still editable in Xero (unpaid bill / unreconciled spend-money).
+  // Make the pill click-to-re-sync so staff can push a corrected invoice number
+  // etc. into Xero WITHOUT waiting for the xero_stale flag (which only fires on
+  // an OP-side edit). Re-syncing an already-correct cost is a harmless no-op.
+  const syncedPill = (colour: string, label: string, title: string) =>
+    onResync ? (
+      <button disabled={resyncBusy} onClick={onResync}
+        title={`${title} — click to re-sync to Xero (safe no-op if already up to date).`}
+        className={`px-2 py-0.5 text-xs rounded-full ${colour} hover:opacity-80 disabled:opacity-50 whitespace-nowrap`}>
+        {resyncBusy ? '…' : label}
+      </button>
+    ) : <span className={`px-2 py-0.5 text-xs rounded-full ${colour}`} title={title}>{label}</span>;
   if (cost.xero_sync_state === 'attached') {
-    if (isBill) {
-      return cost.xero_payment_id
-        ? <span className="px-2 py-0.5 text-xs rounded-full bg-green-100 text-green-800" title="Bill paid in Xero">Bill paid</span>
-        : <span className="px-2 py-0.5 text-xs rounded-full bg-blue-100 text-blue-800" title="Bill in Xero, awaiting payment">In Xero</span>;
-    }
-    return <span className="px-2 py-0.5 text-xs rounded-full bg-green-100 text-green-800">Synced</span>;
+    return isBill
+      ? syncedPill('bg-blue-100 text-blue-800', 'In Xero', 'Bill in Xero, awaiting payment')
+      : syncedPill('bg-green-100 text-green-800', 'Synced', 'Synced to Xero');
   }
   if (cost.xero_sync_state === 'bill_created') {
-    return <span className="px-2 py-0.5 text-xs rounded-full bg-blue-100 text-blue-800" title="In Xero; receipt attach pending">{isBill ? 'Bill created' : 'Sent'}</span>;
+    return syncedPill('bg-blue-100 text-blue-800', isBill ? 'Bill created' : 'Sent', 'In Xero; receipt attach pending');
   }
   // Actionable states collapse the status + sync button into ONE clickable pill
   // (the button used to widen the column and push the row actions off-screen).
