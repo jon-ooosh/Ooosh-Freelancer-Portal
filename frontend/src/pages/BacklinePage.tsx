@@ -740,10 +740,10 @@ function JobRow({ job, mode, navigate, onStatusChange, onLocationChange }: {
             {canPlace && !job.location && (
               <button
                 onClick={(e) => { e.stopPropagation(); setShowLocationModal(true); }}
-                className="text-[10px] px-1.5 py-0.5 rounded-full text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 font-medium transition-colors"
+                className="text-xs px-1.5 py-0.5 rounded-full text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 font-medium transition-colors"
                 title="Record where the kit is"
               >
-                ＋ Location
+                <span className="text-sm">＋</span> Location
               </button>
             )}
           </div>
