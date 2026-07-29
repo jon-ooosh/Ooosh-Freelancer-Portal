@@ -9,7 +9,7 @@ import { Router, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import crypto from 'crypto';
 import { query, getPool } from '../config/database';
-import { authenticate, AuthRequest } from '../middleware/auth';
+import { authenticate, authorize, MANAGER_ROLES, AuthRequest } from '../middleware/auth';
 import {
   authenticateVehicleFlexible,
   isFreelancerBookout,
@@ -1225,6 +1225,47 @@ const FREELANCER_PATCH_ALLOW = new Set([
  * this twice on the same job (e.g. once per cloned assignment in a
  * multi-van add-to-hire) is safe.
  */
+/**
+ * Per-driver referral gate for hire-agreement paperwork (Phase D2b, Jul 2026).
+ *
+ * Book-out is per-VAN (the van legitimately goes out on its approved drivers);
+ * a referral is per-DRIVER. So we gate the AGREEMENT / authorisation per driver,
+ * never the whole van. A driver is authorised to receive an agreement only when
+ * they were never flagged (`requires_referral = false`) OR the referral has been
+ * resolved to `approved`/`waived`. A driver with `requires_referral = true` and
+ * `referral_status NOT IN ('approved','waived')` is HELD BACK — they stay on the
+ * job, visibly pending, and are authorised later via the referral-resolution flow
+ * (same rails as the mid-tour driver flow).
+ *
+ * `'waived'` counts as authorised — downstream UX already treats it as approved.
+ *
+ * Returns true when the driver may receive an agreement. Fails OPEN (returns
+ * true) if the assignment row can't be found — a missing row is a data problem,
+ * not a referral hold, and we don't want to silently suppress a legitimate
+ * agreement. The referral-alert path surfaces genuine pending referrals loudly
+ * elsewhere.
+ *
+ * Motivation incident: HH 15075 — Joseph Hilton (requires_referral=true,
+ * referral_status='pending') received a hire agreement + condition report at
+ * book-out even though we weren't yet cleared to insure him.
+ */
+async function isDriverAuthorisedForAgreement(assignmentId: string): Promise<boolean> {
+  const res = await query(
+    `SELECT d.requires_referral, d.referral_status
+       FROM vehicle_hire_assignments vha
+       JOIN drivers d ON d.id = vha.driver_id
+      WHERE vha.id = $1`,
+    [assignmentId],
+  );
+  if (res.rows.length === 0) return true; // no driver row resolvable — fail open
+  const { requires_referral, referral_status } = res.rows[0] as {
+    requires_referral: boolean | null;
+    referral_status: string | null;
+  };
+  if (!requires_referral) return true;
+  return referral_status === 'approved' || referral_status === 'waived';
+}
+
 export function firePostBookOutHooks(opts: {
   assignmentId: string;
   vehicleId: string;
@@ -2032,6 +2073,18 @@ async function resolveHireFormEmailTarget(
  * manual fixing.
  */
 async function generateAndEmailHireFormPdf(assignmentId: string, trigger: string): Promise<void> {
+  // Per-driver referral gate (Phase D2b). A driver whose referral is still
+  // pending is HELD BACK — no agreement PDF, no email — until the referral is
+  // resolved to approved/waived (which fires the agreement via the authorise
+  // action). Checked BEFORE the atomic claim below so a later authorise re-fires
+  // cleanly (no burnt hire_form_email_claimed_at). Early-return void is a
+  // deliberate skip: runHookWithRecovery only retries on a thrown error, so this
+  // never trips the retry/alert path.
+  if (!(await isDriverAuthorisedForAgreement(assignmentId))) {
+    console.log(`[hire-forms] ${trigger}: hold ${assignmentId} — driver referral pending, agreement withheld`);
+    return;
+  }
+
   // Atomic claim. The own-van agreement email can now be triggered by TWO
   // server-side paths for a single book-out — the PATCH /:id write-back loop
   // and the POST /save-event condition-report path (added so a freelancer
@@ -2205,7 +2258,17 @@ async function generateAndEmailCrossVanHireForm(
   driverAssignmentId: string,
   vanVehicleId: string,
   ctx: { jobId: string | null; hhJobNumber: number | null },
-): Promise<'sent' | 'skipped' | 'failed'> {
+): Promise<'sent' | 'skipped' | 'failed' | 'held_back'> {
+  // Per-driver referral gate (Phase D2b). Held-back drivers get no cross-van
+  // agreement either. Checked BEFORE the claim INSERT so no hire_form_documents
+  // row is burnt — a later authorise re-fires cleanly. Distinct 'held_back'
+  // sentinel (NOT 'failed') so fanOutVanHireForms doesn't treat it as a transient
+  // error and throw for a runHookWithRecovery retry.
+  if (!(await isDriverAuthorisedForAgreement(driverAssignmentId))) {
+    console.log(`[hire-forms] cross-van: hold ${driverAssignmentId} — driver referral pending, agreement withheld`);
+    return 'held_back';
+  }
+
   const claim = await query(
     `INSERT INTO hire_form_documents (assignment_id, vehicle_id, driver_id, job_id, hirehop_job_id)
      SELECT $1, $2, vha.driver_id, $3, $4
@@ -2863,6 +2926,133 @@ router.post('/:id/post-signature', authenticateOrApiKey, async (req: AuthRequest
   } catch (error) {
     console.error('[post-signature] Error:', error);
     res.status(500).json({ error: 'Post-signature processing failed' });
+  }
+});
+
+// ── POST /api/hire-forms/:id/authorise-agreement ──
+// Phase D2b: authorise a previously HELD-BACK driver (referral now resolved
+// to approved/waived) and fire their withheld hire agreement. Human-in-the-loop
+// — staff click this only after confirming the insurer has cleared the driver;
+// it does NOT auto-fire on referral resolution. Mid-tour rails: stamps
+// hire_start = NOW() (the driver wasn't authorised to drive during the wait),
+// generates + emails the agreement for THIS assignment, and drops a team
+// notification. Surfaces the recomputed top-N excess vs held as a WARNING —
+// never silently moves money (excess is a warning, not a hard gate).
+router.post('/:id/authorise-agreement', authenticate, authorize(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
+  const id = String(req.params.id);
+  try {
+    const assignmentResult = await query(
+      `SELECT a.*, fv.reg AS vehicle_reg, d.full_name AS driver_name, d.email AS driver_email,
+              d.requires_referral, d.referral_status,
+              j.hh_job_number AS job_hh_number, j.job_name AS op_job_name
+         FROM vehicle_hire_assignments a
+         LEFT JOIN fleet_vehicles fv ON fv.id = a.vehicle_id
+         LEFT JOIN drivers d ON d.id = a.driver_id
+         LEFT JOIN jobs j ON j.id = a.job_id
+        WHERE a.id = $1`,
+      [id]
+    );
+    if (assignmentResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Assignment not found' });
+    }
+    const a = assignmentResult.rows[0];
+
+    // Guard: the driver must actually be cleared. If they're still held back,
+    // point staff at the referral resolution first.
+    const authorised = !a.requires_referral
+      || a.referral_status === 'approved'
+      || a.referral_status === 'waived';
+    if (!authorised) {
+      return res.status(400).json({
+        error: 'Driver referral is not resolved — resolve the referral to approved/waived before authorising.',
+      });
+    }
+
+    // Must have a van to generate an agreement against.
+    if (!a.vehicle_id) {
+      return res.status(400).json({
+        error: 'No vehicle linked to this assignment — book the van out (or allocate one) before authorising the agreement.',
+      });
+    }
+
+    // Mid-tour rails: the driver wasn't authorised to drive while the referral
+    // was pending, so their hire starts NOW (only if not already set).
+    await query(
+      `UPDATE vehicle_hire_assignments SET hire_start = NOW(), updated_at = NOW()
+        WHERE id = $1 AND hire_start IS NULL`,
+      [id]
+    );
+
+    // Fire the agreement for THIS assignment. The own-van generator's referral
+    // gate now passes (driver authorised) and the atomic claim was never burnt
+    // (the gate returned before it while held back), so this fires cleanly.
+    const results: Record<string, unknown> = {};
+    setImmediate(() => {
+      runHookWithRecovery(
+        {
+          hookLabel: 'Referral-authorise hire agreement',
+          jobId: a.job_id,
+          hhJobNumber: a.hirehop_job_id || a.job_hh_number || null,
+          assignmentId: id,
+        },
+        () => generateAndEmailHireFormPdf(id, 'referral-authorise')
+      ).catch((err) => {
+        console.error(`[hire-forms] referral-authorise agreement failed for ${id}:`, err);
+      });
+    });
+
+    // Team notification (mid-tour style) — the driver has just been authorised.
+    const hhForDisplay = a.hirehop_job_id || a.job_hh_number || null;
+    try {
+      const { getVehicleNotificationTargets } = await import('../services/vehicle-notify');
+      const targets = await getVehicleNotificationTargets();
+      const frontendUrl = getFrontendUrl();
+      for (const userId of targets.bellUserIds) {
+        await query(
+          `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, priority, action_url, email_sent_at)
+           VALUES ($1, 'hire_form', $2, $3, 'vehicle_hire_assignments', $4, 'normal', $5, NOW())`,
+          [
+            userId,
+            `Driver authorised — ${a.driver_name || 'Unknown'}`,
+            `${a.driver_name || 'A driver'}'s referral has been resolved and their hire agreement has been sent for job #${hhForDisplay || '?'} (${a.op_job_name || ''}), vehicle ${a.vehicle_reg || 'unassigned'}.`,
+            id,
+            a.job_id ? `/jobs/${a.job_id}` : null,
+          ]
+        );
+      }
+    } catch (notifyErr) {
+      console.warn('[hire-forms] referral-authorise notification failed (non-blocking):', (notifyErr as Error).message);
+    }
+
+    // Surface recomputed top-N excess vs held — WARNING only, no auto-bump.
+    // An insurer-imposed adjusted excess on referral resolution already wrote to
+    // job_excess.excess_amount_required; this tells staff whether the job's
+    // excess is now under-collected so they can decide to collect the top-up.
+    if (a.job_id) {
+      try {
+        const excess = await query(
+          `SELECT
+             COALESCE(SUM(excess_amount_required), 0)::numeric AS required_total,
+             COALESCE(SUM(excess_amount_taken + COALESCE(amount_held, 0)), 0)::numeric AS held_total
+           FROM job_excess
+           WHERE job_id = $1
+             AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required', 'waived', 'released')`,
+          [a.job_id]
+        );
+        const requiredTotal = Number(excess.rows[0]?.required_total || 0);
+        const heldTotal = Number(excess.rows[0]?.held_total || 0);
+        const outstanding = Math.max(requiredTotal - heldTotal, 0);
+        results.excess = { requiredTotal, heldTotal, outstanding };
+      } catch (err) {
+        console.warn('[hire-forms] referral-authorise excess recompute failed (non-blocking):', (err as Error).message);
+      }
+    }
+
+    console.log(`[hire-forms] Referral-authorised assignment ${id} (driver ${a.driver_name || a.driver_id})`);
+    res.json({ success: true, assignmentId: id, results });
+  } catch (error) {
+    console.error('[hire-forms] authorise-agreement error:', error);
+    res.status(500).json({ error: 'Failed to authorise agreement' });
   }
 });
 

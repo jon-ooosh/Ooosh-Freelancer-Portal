@@ -293,6 +293,14 @@ interface VehicleAssignment {
   driver_email: string | null;
   driver_phone: string | null;
   driver_points: number | null;
+  /**
+   * Driver's insurance-referral state (from the drivers row). Drives the
+   * Phase D2b "held back" card state: a driver with requires_referral=true and
+   * referral_status NOT IN (approved, waived) is on the job but NOT authorised
+   * to drive — no agreement/condition report until staff authorise them.
+   */
+  requires_referral?: boolean | null;
+  referral_status?: string | null;
   freelancer_name: string | null;
   freelancer_person_id: string | null;
   assignment_type: string;
@@ -1528,6 +1536,8 @@ export default function JobDetailPage() {
   // driver's hire-form assignment has no van but other vans on the job
   // are already booked out.
   const [addToHireAssignmentId, setAddToHireAssignmentId] = useState<string | null>(null);
+  // Phase D2b: assignment currently being authorised after a referral resolve.
+  const [authorisingAssignmentId, setAuthorisingAssignmentId] = useState<string | null>(null);
   const [vehicleAssignmentsLoading, setVehicleAssignmentsLoading] = useState(false);
   const [dispatchCheck, setDispatchCheck] = useState<DispatchCheckResult | null>(null);
   // Cross-job allocation conflicts — van also booked on another job over
@@ -2626,6 +2636,33 @@ export default function JobDetailPage() {
     }
   }
 
+  // Phase D2b: authorise a held-back driver whose referral has now resolved —
+  // stamps hire_start, fires their withheld hire agreement, notifies the team,
+  // and surfaces the recomputed top-N excess vs held as a heads-up (no auto-bump).
+  async function authoriseAgreement(assignmentId: string) {
+    if (authorisingAssignmentId) return;
+    setAuthorisingAssignmentId(assignmentId);
+    try {
+      const res = await api.post<{ success: boolean; results?: { excess?: { requiredTotal: number; heldTotal: number; outstanding: number } } }>(
+        `/hire-forms/${assignmentId}/authorise-agreement`, {}
+      );
+      const ex = res?.results?.excess;
+      if (ex && ex.outstanding > 0.005) {
+        alert(
+          `Agreement sent and driver authorised.\n\n` +
+          `Heads-up: this job's insurance excess is £${ex.requiredTotal.toLocaleString()} required, ` +
+          `£${ex.heldTotal.toLocaleString()} held — £${ex.outstanding.toLocaleString()} outstanding. ` +
+          `Collect the top-up on the Money tab if needed (nothing has been auto-charged).`
+        );
+      }
+      await loadVehicleAssignments();
+    } catch (err: any) {
+      alert(err?.response?.data?.error || 'Failed to authorise agreement');
+    } finally {
+      setAuthorisingAssignmentId(null);
+    }
+  }
+
   async function loadVehicleAssignments() {
     if (!id) return;
     setVehicleAssignmentsLoading(true);
@@ -2715,6 +2752,10 @@ export default function JobDetailPage() {
             dispute_status: r.dispute_status ?? null,
           } : null,
           effective_vehicle_id: r.vehicle_id || inferred?.id || null,
+          // Referral state (aliased driver_* on the API row) → the card fields
+          // the Phase D2b held-back state reads.
+          requires_referral: r.driver_requires_referral ?? null,
+          referral_status: r.driver_referral_status ?? null,
           // Backfill reg/type from the inferred sibling so the card header
           // shows the van whenever we know it, not just when this row's own
           // vehicle_id is set. No-op when the row is already linked.
@@ -4788,6 +4829,48 @@ export default function JobDetailPage() {
                         </Link>
                       )}
 
+                      {/* Phase D2b — per-driver referral gate. A held-back driver
+                          (referral pending) is ON the job but NOT authorised to
+                          drive: show the pending badge, suppress the book-out /
+                          allocate CTAs (below). Once resolved (approved/waived)
+                          and the agreement hasn't gone out yet, show the one-click
+                          "Authorise & send agreement" (mid-tour rails). */}
+                      {a.driver_id && (() => {
+                        const heldBack = !!a.requires_referral
+                          && a.referral_status !== 'approved'
+                          && a.referral_status !== 'waived';
+                        if (heldBack) {
+                          return (
+                            <span
+                              className="inline-flex items-center gap-1.5 px-3 py-2 bg-amber-100 text-amber-800 border border-amber-300 rounded-lg text-sm font-medium"
+                              title="Insurance referral not yet resolved — this driver is on the job but not authorised to drive. Resolve the referral on the driver's page, then authorise here."
+                            >
+                              ⏳ Referral pending — not authorised to drive
+                            </span>
+                          );
+                        }
+                        const wasReferred = a.referral_status === 'approved' || a.referral_status === 'waived';
+                        const effectiveVehicleId = a.effective_vehicle_id || a.vehicle_id;
+                        const needsAuthorise = wasReferred
+                          && !a.hire_form_pdf_key
+                          && !!effectiveVehicleId
+                          && ['soft', 'confirmed', 'booked_out', 'active'].includes(a.status);
+                        if (needsAuthorise) {
+                          return (
+                            <button
+                              type="button"
+                              onClick={() => authoriseAgreement(a.id)}
+                              disabled={authorisingAssignmentId === a.id}
+                              className="inline-flex items-center gap-1.5 px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm font-medium disabled:opacity-50"
+                              title="Referral resolved — stamp hire start now, email this driver their hire agreement, and notify the team."
+                            >
+                              {authorisingAssignmentId === a.id ? 'Authorising…' : '✅ Authorise & send agreement'}
+                            </button>
+                          );
+                        }
+                        return null;
+                      })()}
+
                       {/* Primary next-action — Allocate Van / Book Out / Check In.
                           State-aware: drives the staff cockpit workflow from
                           this card so they don't have to leave Job Detail to
@@ -4808,6 +4891,8 @@ export default function JobDetailPage() {
                           the job has V&D slots and this assignment isn't yet booked-out
                           self-drive. Routes to BookOutPage with ?mode=van_and_driver. */}
                       {(() => {
+                        // Phase D2b: held-back driver → no book-out/allocate CTA.
+                        if (a.requires_referral && a.referral_status !== 'approved' && a.referral_status !== 'waived') return null;
                         const slots = hhSyncResult?.derivation?.flags?.vehicle_slots || [];
                         const matchedSlot = slots.find(s => s.slot_index === (a.van_requirement_index ?? 0));
                         const slotIsVand = matchedSlot?.mode === 'van_and_driver';
@@ -4860,6 +4945,8 @@ export default function JobDetailPage() {
                       })()}
 
                       {a.assignment_type === 'self_drive' && (() => {
+                        // Phase D2b: held-back driver → no book-out/allocate CTA.
+                        if (a.requires_referral && a.referral_status !== 'approved' && a.referral_status !== 'waived') return null;
                         // If the matching slot is in V&D mode the V&D button above
                         // owns this card — hide the customer self-drive button to
                         // keep the UX unambiguous (one path per slot mode).
