@@ -239,19 +239,32 @@ is cosmetic.) **No fake check-ins on completed jobs.**
 
 ---
 
-## 6. Detection scanner (TO BUILD — ship first, low risk)
+## 6. Detection scanner (SHIPPED — migration 187)
 
-Sanity scanner mirroring the existing dispatch/return ones in
-`services/sanity-check-scanner.ts` (wired into the 15-min sanity cron). Flag a van that
-reads `fleet_vehicles.hire_status='On Hire'` **and** has a book-out event, but has **no
-live `booked_out`/`active` assignment row** (dual job-match — the exact stuck-shape that
-RX24SZG and SA75RVV-had-it-been-stuck present). Also worth flagging the sweep fingerprint
-(§3) as it appears.
+`runStuckOnHireScan` in `services/sanity-check-scanner.ts`, wired into the 15-min sanity
+cron alongside the dispatch/return/no-ts/stalled-leg scanners.
 
-- **Recipient: `jon@oooshtours.co.uk`, NOT info@** (jon's call — info@ would get ignored
-  and staff wouldn't know the context). Include reg + HH job number + a plain description.
-- Stamp-first dedup marker (same discipline as the other scanners).
-- Near-zero blast radius; ship ahead of the core fix so any recurrence is caught before
+- **Detection is pure-DB** — flag any `fleet_vehicles.hire_status='On Hire'` (active van)
+  with **no live `booked_out`/`active` assignment row**. It mirrors
+  `syncFleetHireStatus`'s exact "has a live assignment" definition (dual job-match,
+  lost/cancelled jobs excluded), so "no live row" == "the On-Hire projection is
+  unjustified". The doc's original "and has a book-out event" qualifier was dropped as
+  unnecessary — `syncFleetHireStatus` is the *only* thing that sets On Hire, so an On-Hire
+  van with no live row is already the anomaly; a rare manual-override On-Hire is a
+  legitimate bonus catch, not a false positive.
+- **Recipient: `jon@oooshtours.co.uk`, NOT info@** (jon's call). Reg + best-effort HH job
+  number + a plain description + deep-links.
+- **HH job number is best-effort R2 enrichment** (`lookupStuckOnHireJob` reads the van's
+  most recent book-out event from `vehicle-events/{REG}/_index.json`). The stuck van's live
+  DB assignment points at its PREVIOUS hire (the scramble overwrote the current-hire rows'
+  `vehicle_id`), so the current job can only come from the event — the alert fires *without*
+  the number if the read fails, never blocking on it.
+- **Dedup marker: `fleet_vehicles.stuck_onhire_alerted_at`** (migration 187), stamp-first.
+  **Cleared inside `syncFleetHireStatus` whenever the van leaves On Hire** (not via a
+  pipeline_status transition writer, unlike the other scanners' markers) — so a re-entered
+  stuck state alerts afresh, and a van the next sync correctly demotes to Prep Needed clears
+  the marker for free.
+- Near-zero blast radius; shipped ahead of the core fix so any recurrence is caught before
   someone hits it at check-in.
 
 ---
@@ -304,5 +317,5 @@ There's a related spec worth reading alongside this: `docs/BOOKOUT-PHASE-SPLIT-S
 - [x] Sweep for other affected jobs → 3 total (14885, 15411, 16206).
 - [x] Confirm 15411/16206 have no stuck flags (SA75RVV correctly On Hire on job 16086).
 - [ ] Historical mileage tidy for 15411 + 16206 (needs R2 event odometers; low priority).
-- [ ] Build detection scanner → jon@ (ship first).
+- [x] Build detection scanner → jon@ (`runStuckOnHireScan`, migration 186; shipped first).
 - [ ] Design + build the partition-by-van core fix (plan with jon before coding).

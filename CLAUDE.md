@@ -4008,9 +4008,17 @@ fleet reg (and the PDF reg is a real, different fleet van). At discovery: **3 jo
 (fixed), 15411 (Jabir HLR/HLU), 16206 (SA75RVV/RX73TBZ). 15411/16206 are completed → historical
 mileage tidy only, no stuck flags. Query + per-job cleanup in the doc.
 
-**Status:** 14885 cleaned up (mileage `UPDATE` + missing-van `INSERT` + UI check-in). **Not yet
-built:** (1) detection scanner — van `hire_status='On Hire'` + book-out event but no live
-`booked_out` row → email **jon@** (not info@), stamp-first dedup, ship first; (2) the fix —
+**Status:** 14885 cleaned up (mileage `UPDATE` + missing-van `INSERT` + UI check-in).
+**(1) Detection scanner — SHIPPED (migration 187).** `runStuckOnHireScan`
+(`services/sanity-check-scanner.ts`, wired into the 15-min sanity cron) finds vehicles projected
+`hire_status='On Hire'` with NO live `booked_out`/`active` assignment row — mirrors
+`syncFleetHireStatus`'s exact "has a live assignment" definition (dual job match, lost/cancelled
+excluded), so "no live row" == "the projection is unjustified". Emails **jon@** (not info@) ONCE per
+stuck van, deduped via `fleet_vehicles.stuck_onhire_alerted_at` (stamp-first; **cleared in
+`syncFleetHireStatus` when the van leaves On Hire**). HH job number is best-effort R2 enrichment
+(`lookupStuckOnHireJob` reads the van's most recent book-out event — the DB assignment points at the
+van's PREVIOUS hire, so the current job can only come from the event). Also catches any other stale
+On-Hire drift (self-corrects on next sync, one alert). **Not yet built:** (2) the fix —
 server-side **adopt-or-create a per-van assignment row keyed on `van_requirement_index`** at the
 choke-point both book-out paths funnel through, *before* `firePostBookOutHooks`, cloning (reuse
 `add-to-hire` + `services/vha-dedup.ts`) rather than overwriting, plus the terminal-guard
@@ -4143,7 +4151,9 @@ Pattern for safety-net warning emails that previously fired inline and spammed s
 | `runDispatchSanityScan` | `pipeline_status='dispatched'` AND `status<5` AND no marker yet | 30 min (one full polling-sync cycle, so cached HH `jobs.status` has refreshed) | `jobs.under_dispatch_warned_at` |
 | `runReturnedBookedOutScan` | `pipeline_status='returned'` AND any `vehicle_hire_assignments` row still `booked_out`/`active` AND no marker yet | 20 min (desk-side check-in time after HH webhook fires Returned) | `jobs.returned_bookedout_warned_at` |
 
-**Marker clears** are wired into `routes/pipeline.ts` (`PATCH /:id/status`) and `routes/webhooks.ts` (HH inbound status changes) — both clear the matching marker when leaving the watched state.
+A third consumer, `runStuckOnHireScan` (migration 187), follows the same stamp-first pattern but keys off `fleet_vehicles.hire_status` rather than `jobs.pipeline_status`: it flags a van projected `On Hire` with no live `booked_out`/`active` assignment (the multi-van book-out scramble fingerprint) and alerts **jon@** (not info@). Its dedup marker (`fleet_vehicles.stuck_onhire_alerted_at`) is cleared inside `syncFleetHireStatus` when the van leaves On Hire, not via a pipeline_status transition writer. See the "Multi-van book-out scramble" entry above.
+
+**Marker clears** are wired into `routes/pipeline.ts` (`PATCH /:id/status`) and `routes/webhooks.ts` (HH inbound status changes) — both clear the matching pipeline_status marker when leaving the watched state.
 
 **Why deferred + grace:** the original inline pattern fired the moment the trigger happened, but two real-world facts make that a false-positive generator: (a) the polling sync is every 30 min, so the cached `jobs.status` lags live HireHop by up to that long; (b) the writeback uses `no_webhook=1` (loop prevention), so the action that triggered the warning doesn't refresh the cached copy either. By the time the scanner sweeps after the grace window, both background sync and desk-side action have had time to land — when the warning fires, it's pointing at a real gap.
 
