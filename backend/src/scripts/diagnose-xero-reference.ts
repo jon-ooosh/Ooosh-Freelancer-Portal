@@ -69,11 +69,16 @@ async function main() {
         const xeroRef = obj.Reference ?? '(blank)';
         const xeroStatus = obj.Status ?? obj.status ?? '(?)';
         const isReconciled = obj.IsReconciled ?? '';
-        console.log(`  ── Xero stored Reference="${xeroRef}"   Status=${xeroStatus}${isReconciled !== '' ? `  IsReconciled=${isReconciled}` : ''}`);
-        if (String(xeroRef) !== sent) {
-          console.log(`  ✗ MISMATCH — Xero does not have the invoice number we send.`);
+        // On a BILL the Xero UI's visible "Reference" box is InvoiceNumber.
+        const xeroInvNo = isBill ? (obj.InvoiceNumber ?? '(blank)') : '(n/a — spend-money)';
+        console.log(`  ── Xero API Reference="${xeroRef}"   ${isBill ? `Xero InvoiceNumber="${xeroInvNo}" (the visible "Reference" box on a bill)   ` : ''}Status=${xeroStatus}${isReconciled !== '' ? `  IsReconciled=${isReconciled}` : ''}`);
+        // The field the user actually sees: InvoiceNumber for bills, Reference for spend-money.
+        const visible = isBill ? String(obj.InvoiceNumber ?? '') : String(obj.Reference ?? '');
+        const wantVisible = isBill ? (r.invoice_number || '').toString().trim() : sent;
+        if (visible === wantVisible && wantVisible) {
+          console.log(`  ✓ The invoice number is in the field the user sees.`);
         } else {
-          console.log(`  ✓ Match — Xero Reference equals what OP sends.`);
+          console.log(`  ✗ The visible field is "${visible || '(blank)'}" but should be "${wantVisible || '(none)'}" — re-run the backfill to fix.`);
         }
       }
     } catch (err) {

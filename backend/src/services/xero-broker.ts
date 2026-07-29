@@ -67,6 +67,14 @@ export interface CreateBillInput {
   /** When known, used directly (skips the name-based get-or-create lookup). */
   contactId?: string;
   reference?: string;
+  /**
+   * Supplier's invoice number → Xero `InvoiceNumber`. On an ACCPAY bill this IS
+   * the field the Xero UI labels "Reference" (the visible box); the API
+   * `Reference` field above is stored but hidden on bills. So the supplier
+   * invoice number must go here to actually show up on the bill. (Spend-money
+   * has no InvoiceNumber — there the API `Reference` is the visible field.)
+   */
+  invoiceNumber?: string;
   date?: string;          // YYYY-MM-DD
   dueDate?: string;       // YYYY-MM-DD
   lineItems: XeroLineItem[];
@@ -443,6 +451,8 @@ class XeroBroker {
             {
               Type: 'ACCPAY',
               Contact: { ContactID: contactID },
+              // InvoiceNumber = the "Reference" box shown on a bill in the Xero UI.
+              ...(input.invoiceNumber ? { InvoiceNumber: input.invoiceNumber } : {}),
               Reference: input.reference,
               Date: input.date,
               DueDate: input.dueDate,
@@ -539,6 +549,8 @@ class XeroBroker {
               InvoiceID: invoiceId,
               Type: 'ACCPAY',
               Contact: { ContactID: contact.ContactID },
+              // InvoiceNumber = the "Reference" box shown on a bill in the Xero UI.
+              ...(input.invoiceNumber ? { InvoiceNumber: input.invoiceNumber } : {}),
               Reference: input.reference,
               Date: input.date,
               DueDate: input.dueDate,
