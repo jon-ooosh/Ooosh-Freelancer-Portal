@@ -365,6 +365,18 @@ class XeroBroker {
     return r.BankTransactions || [];
   }
 
+  /** Read a single ACCPAY/ACCREC invoice by ID (diagnostics / read-back). billsScope for ACCPAY. */
+  async getInvoice(invoiceId: string): Promise<Record<string, unknown> | null> {
+    const r = await this.request<{ Invoices?: Array<Record<string, unknown>> }>('GET', `/Invoices/${invoiceId}`, { billsScope: true });
+    return r.Invoices?.[0] ?? null;
+  }
+
+  /** Read a single spend-money bank transaction by ID (diagnostics / read-back). */
+  async getBankTransaction(bankTransactionId: string): Promise<Record<string, unknown> | null> {
+    const r = await this.request<{ BankTransactions?: Array<Record<string, unknown>> }>('GET', `/BankTransactions/${bankTransactionId}`);
+    return r.BankTransactions?.[0] ?? null;
+  }
+
   // ── Writes ───────────────────────────────────────────────────────────────
 
   /** Find a contact by exact name or create it (for ACCPAY supplier linkage). */
