@@ -1,10 +1,19 @@
 # Multi-van book-out scramble — incident, root cause, cleanup & fix design (Jul 2026)
 
-**Status:** root cause confirmed; live data cleanup done for the triggering job; the
-code fix + detection scanner are designed but **not yet built**. This doc is a complete
-handoff — a fresh session should be able to finish everything from here without re-deriving.
+**Status (updated):** root cause confirmed; live data cleanup done for the triggering job
+(14885); **detection scanner SHIPPED + deployed** (`runStuckOnHireScan`, migration 187, PR
+#1053 — see §6). The **partition-by-van core fix (§7) is still to build** — plan with jon
+before coding. This doc is a complete handoff — a fresh session should be able to build the
+core fix from here without re-deriving.
 
-Branch this was investigated on: `claude/vehicle-checkin-error-nm1tib`.
+**Remaining work:**
+1. **§7 core fix** — the real defect. Its own branch/PR. START HERE.
+2. **§5 cosmetic mileage tidy** on completed jobs 15411 + 16206 — optional, display
+   unaffected (upward-only ratchet), no operational upside. Skip unless the historical
+   numbers matter.
+
+Branches: investigated on `claude/vehicle-checkin-error-nm1tib`; detection scanner on
+`claude/multi-van-bookout-scramble-j2evjh`.
 
 > Line numbers below are as-of the commit this doc was written on and will drift — treat
 > them as "look near here", grep the symbol names to confirm.
