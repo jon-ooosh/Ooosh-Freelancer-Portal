@@ -1,5 +1,7 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { api } from '../services/api';
+import { useAuthStore } from '../hooks/useAuthStore';
+import { hasManagerRole } from '../lib/roles';
 import FreelancerHistorySection from './FreelancerHistorySection';
 
 // ---------------------------------------------------------------------------
@@ -32,6 +34,7 @@ export interface FreelancerPerson {
   skills: string[];
   is_insured_on_vehicles: boolean;
   has_tshirt: boolean;
+  onboarding: Record<string, unknown> | null;
   emergency_contact_name: string | null;
   emergency_contact_phone: string | null;
   licence_details: string | null;
@@ -77,9 +80,28 @@ interface InviteAudit {
   invited_by_name: string | null;
 }
 
+interface FullApplication {
+  id: string;
+  status: string;
+  submitted_at: string | null;
+  reviewed_at: string | null;
+  decision_notes: string | null;
+  submission: Record<string, unknown> | null;
+  insurance_answers: Record<string, unknown> | null;
+  references: Array<Record<string, unknown>> | null;
+  invited_by_name: string | null;
+  reviewed_by_name: string | null;
+}
+
+const REVIEWABLE = ['applied', 'more_info'];
+
 export default function FreelancerPanel({ person, onChanged, onFilesChanged, onActivityCreated, onInvite }: FreelancerPanelProps) {
   const [editing, setEditing] = useState(false);
   const [invite, setInvite] = useState<InviteAudit | null>(null);
+  const [application, setApplication] = useState<FullApplication | null>(null);
+
+  const currentUser = useAuthStore((s) => s.user);
+  const isManager = hasManagerRole(currentUser?.role);
 
   // Who sent the sign-up invite, and when. Re-fetched when the person or their
   // freelancer status changes (e.g. after a re-invite opens a fresh application).
@@ -90,6 +112,22 @@ export default function FreelancerPanel({ person, onChanged, onFilesChanged, onA
       .catch(() => { if (!cancelled) setInvite(null); });
     return () => { cancelled = true; };
   }, [person.id, person.freelancer_status]);
+
+  // Full application (submission / insurance / references) for the review panel —
+  // only fetched when there's a reviewable application to act on.
+  const loadApplication = useCallback(() => {
+    if (!invite?.id || !REVIEWABLE.includes(person.freelancer_status || '')) {
+      setApplication(null);
+      return;
+    }
+    let cancelled = false;
+    api.get<{ data: FullApplication }>(`/freelancers/applications/${invite.id}`)
+      .then((r) => { if (!cancelled) setApplication(r.data); })
+      .catch(() => { if (!cancelled) setApplication(null); });
+    return () => { cancelled = true; };
+  }, [invite?.id, person.freelancer_status]);
+
+  useEffect(() => { loadApplication(); }, [loadApplication]);
 
   const pill = freelancerStatusPill(person.freelancer_status, person.is_approved);
   const descriptionKey = person.is_approved ? 'approved' : (person.freelancer_status || 'pending');
@@ -142,6 +180,20 @@ export default function FreelancerPanel({ person, onChanged, onFilesChanged, onA
         </div>
       </div>
 
+      {/* Application review (only while there's a submitted / info-requested form) */}
+      {REVIEWABLE.includes(person.freelancer_status || '') && application && (
+        <ReviewPanel
+          application={application}
+          isManager={isManager}
+          onDecided={() => { onChanged(); }}
+        />
+      )}
+
+      {/* Onboarding checklist (once approved) */}
+      {person.is_approved && (
+        <OnboardingChecklist person={person} onChanged={onChanged} />
+      )}
+
       {/* Freelancer details (read / edit) */}
       {editing ? (
         <FreelancerDetailsForm
@@ -191,6 +243,235 @@ export default function FreelancerPanel({ person, onChanged, onFilesChanged, onA
 
       {/* Assignment history + upcoming */}
       <FreelancerHistorySection entityId={person.id} />
+    </div>
+  );
+}
+
+// ---- Application review panel --------------------------------------------
+
+function ReviewPanel({ application, isManager, onDecided }: {
+  application: FullApplication;
+  isManager: boolean;
+  onDecided: () => void;
+}) {
+  const [mode, setMode] = useState<null | 'decline' | 'request-info'>(null);
+  const [notes, setNotes] = useState('');
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState('');
+
+  const sub = application.submission || {};
+  const lookingFor = Array.isArray(sub.looking_for) ? (sub.looking_for as string[]) : (sub.looking_for ? [String(sub.looking_for)] : []);
+  const insurance = application.insurance_answers || {};
+  const insuranceEntries = Object.entries(insurance).filter(([, v]) => v !== null && v !== undefined && v !== '');
+  const refs = Array.isArray(application.references) ? application.references : [];
+
+  async function act(action: 'approve' | 'decline' | 'request-info', requireNotes: boolean) {
+    if (requireNotes && !notes.trim()) { setError('Please add a note explaining what you need / why.'); return; }
+    setBusy(action);
+    setError('');
+    try {
+      await api.post(`/freelancers/applications/${application.id}/${action}`, { notes: notes.trim() || undefined });
+      onDecided();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Action failed');
+      setBusy(null);
+    }
+  }
+
+  return (
+    <div className="bg-white rounded-xl shadow-sm border border-amber-200 p-6">
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-sm font-semibold text-gray-700">Review application</h3>
+        {application.submitted_at && (
+          <span className="text-xs text-gray-400">Submitted {fmtDate(application.submitted_at)}</span>
+        )}
+      </div>
+
+      {application.status === 'more_info' && (
+        <div className="mb-4 rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-xs text-amber-800">
+          More info was requested{application.decision_notes ? `: "${application.decision_notes}"` : ''} — waiting on the freelancer. You can still approve or decline now.
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3 text-sm">
+        <ReviewField label="Looking for" value={lookingFor.length ? lookingFor.map(prettyLookingFor).join(', ') : null} />
+        <ReviewField label="Eligible to work in UK" value={sub.eligible_to_work === true ? 'Confirmed' : (sub.eligible_to_work === false ? 'Not confirmed' : null)} />
+        <ReviewField label="UTR" value={typeof sub.utr === 'string' ? sub.utr : null} />
+        <ReviewField label="Expected day rate" value={typeof sub.expected_day_rate === 'string' ? sub.expected_day_rate : null} />
+        {typeof sub.other_skill_detail === 'string' && sub.other_skill_detail && (
+          <div className="md:col-span-2"><ReviewField label="Other skills" value={sub.other_skill_detail} /></div>
+        )}
+        {typeof sub.anything_else === 'string' && sub.anything_else && (
+          <div className="md:col-span-2"><ReviewField label="Anything else" value={sub.anything_else} /></div>
+        )}
+      </div>
+
+      {insuranceEntries.length > 0 && (
+        <div className="mt-4 pt-4 border-t">
+          <p className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Insurance questionnaire</p>
+          <ul className="space-y-1 text-sm text-gray-700">
+            {insuranceEntries.map(([k, v]) => (
+              <li key={k} className="flex gap-2">
+                <span className="text-gray-500">{prettyKey(k)}:</span>
+                <span className="font-medium">{String(v)}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {refs.length > 0 && (
+        <div className="mt-4 pt-4 border-t">
+          <p className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">References</p>
+          <ul className="space-y-2 text-sm text-gray-700">
+            {refs.map((r, i) => (
+              <li key={i}>
+                <span className="font-medium">{String(r.name || '—')}</span>
+                {r.company ? ` · ${String(r.company)}` : ''}{r.role ? ` (${String(r.role)})` : ''}
+                {Boolean(r.email || r.phone) && (
+                  <span className="text-gray-500"> — {[r.email, r.phone].filter(Boolean).map(String).join(', ')}</span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      <p className="mt-4 text-xs text-gray-400">
+        Full submitted details, documents and signature are in the Details / Documents sections below and the person's record.
+      </p>
+
+      {error && <div className="mt-3 bg-red-50 text-red-700 px-3 py-2 rounded text-sm">{error}</div>}
+
+      {/* Decision */}
+      <div className="mt-4 pt-4 border-t">
+        {!isManager ? (
+          <p className="text-sm text-gray-500">A manager needs to approve or decline this application.</p>
+        ) : mode ? (
+          <div className="space-y-2">
+            <label className="block text-xs font-medium text-gray-500 uppercase tracking-wider">
+              {mode === 'decline' ? 'Reason (shown to the freelancer if you email them)' : 'What do you need from them?'}
+            </label>
+            <textarea
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              rows={3}
+              autoFocus
+              placeholder={mode === 'decline' ? 'Optional note…' : 'e.g. Please re-upload a clearer photo of your licence back.'}
+              className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 resize-y"
+            />
+            <div className="flex gap-2">
+              <button
+                onClick={() => act(mode === 'decline' ? 'decline' : 'request-info', mode === 'request-info')}
+                disabled={!!busy}
+                className={`px-4 py-1.5 text-sm rounded font-medium text-white disabled:opacity-50 ${mode === 'decline' ? 'bg-red-600 hover:bg-red-700' : 'bg-amber-600 hover:bg-amber-700'}`}
+              >
+                {busy ? 'Sending…' : mode === 'decline' ? 'Confirm decline + email' : 'Send request + email'}
+              </button>
+              <button onClick={() => { setMode(null); setNotes(''); setError(''); }} className="px-4 py-1.5 text-sm border border-gray-300 rounded hover:bg-gray-50">Cancel</button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            <button
+              onClick={() => act('approve', false)}
+              disabled={!!busy}
+              className="px-4 py-1.5 text-sm bg-green-600 text-white rounded font-medium hover:bg-green-700 disabled:opacity-50"
+            >
+              {busy === 'approve' ? 'Approving…' : '✓ Approve'}
+            </button>
+            <button onClick={() => setMode('request-info')} className="px-4 py-1.5 text-sm border border-amber-300 text-amber-700 rounded hover:bg-amber-50">Request more info</button>
+            <button onClick={() => setMode('decline')} className="px-4 py-1.5 text-sm border border-red-300 text-red-700 rounded hover:bg-red-50">Decline</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ReviewField({ label, value }: { label: string; value: string | null | undefined }) {
+  return (
+    <div>
+      <dt className="text-xs font-medium text-gray-500 uppercase tracking-wider">{label}</dt>
+      <dd className="mt-0.5 text-gray-900">{value || '—'}</dd>
+    </div>
+  );
+}
+
+function prettyLookingFor(v: string): string {
+  const map: Record<string, string> = { local: 'Local work', uk: 'UK tours', uk_eu: 'UK & EU tours', any: "Whatever's going" };
+  return map[v] || v;
+}
+
+function prettyKey(k: string): string {
+  return k.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+// ---- Onboarding checklist -------------------------------------------------
+
+function OnboardingChecklist({ person, onChanged }: { person: FreelancerPerson; onChanged: () => void }) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState('');
+
+  const onboarding = (person.onboarding || {}) as Record<string, unknown>;
+  const jsonbDone = (key: string) => {
+    const v = onboarding[key];
+    return !!v && (v === true || (typeof v === 'object' && (v as { done?: boolean }).done === true));
+  };
+
+  async function toggle(key: string, value: boolean) {
+    setBusy(key);
+    setError('');
+    try {
+      await api.patch(`/freelancers/${person.id}/onboarding`, { [key]: value });
+      onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Update failed');
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  const items: { key: string; label: string; done: boolean; toggleKey?: string; note?: string }[] = [
+    { key: 'approved', label: 'Reviewed & approved', done: true },
+    { key: 'insured', label: 'Added to vehicle insurance', done: person.is_insured_on_vehicles, toggleKey: 'is_insured_on_vehicles' },
+    { key: 'tshirt', label: 'T-shirt given', done: person.has_tshirt, toggleKey: 'has_tshirt' },
+    { key: 'portal', label: 'Portal access sent', done: jsonbDone('portal_invite_sent'), toggleKey: 'portal_invite_sent', note: 'Send them the portal sign-up link' },
+    { key: 'resources', label: 'Training / how-to docs shared', done: jsonbDone('resources_shared'), toggleKey: 'resources_shared' },
+    { key: 'payments', label: 'Payments policy available', done: true, note: 'Covered by the T&Cs signed at application' },
+  ];
+
+  const completeCount = items.filter((i) => i.done).length;
+
+  return (
+    <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-sm font-semibold text-gray-700">Onboarding checklist</h3>
+        <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${completeCount === items.length ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>
+          {completeCount}/{items.length} done
+        </span>
+      </div>
+      {error && <div className="bg-red-50 text-red-700 px-3 py-1.5 rounded text-xs mb-2">{error}</div>}
+      <ul className="space-y-2">
+        {items.map((item) => {
+          const toggleable = !!item.toggleKey && item.key !== 'approved' && item.key !== 'payments';
+          return (
+            <li key={item.key} className="flex items-start gap-3">
+              <input
+                type="checkbox"
+                checked={item.done}
+                disabled={!toggleable || busy === item.toggleKey}
+                onChange={(e) => item.toggleKey && toggle(item.toggleKey, e.target.checked)}
+                className="mt-0.5 rounded border-gray-300 text-ooosh-600 focus:ring-ooosh-500 disabled:opacity-60"
+              />
+              <div className="min-w-0">
+                <span className={`text-sm ${item.done ? 'text-gray-900' : 'text-gray-700'}`}>{item.label}</span>
+                {item.note && <p className="text-xs text-gray-400">{item.note}</p>}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
     </div>
   );
 }
