@@ -21,7 +21,7 @@ import multer from 'multer';
 import rateLimit from 'express-rate-limit';
 import { z } from 'zod';
 import { query } from '../config/database';
-import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
+import { authenticate, authorize, AuthRequest, STAFF_ROLES, MANAGER_ROLES } from '../middleware/auth';
 import { logAudit } from '../middleware/audit';
 import { getFrontendUrl } from '../config/app-urls';
 import { emailService } from '../services/email-service';
@@ -688,6 +688,272 @@ router.get('/by-person/:personId', async (req: AuthRequest, res: Response) => {
     res.json({ data: result.rows[0] || null });
   } catch (error) {
     console.error('Freelancer by-person error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── GET /api/freelancers/applications/:id ──────────────────────────────────
+// Full application for the review panel (submission / insurance answers /
+// references / decision notes). STAFF_ROLES — staff can already see the person.
+router.get('/applications/:id', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await query(
+      `SELECT fa.id, fa.person_id, fa.status, fa.form_token,
+              fa.invited_at, fa.submitted_at, fa.reviewed_at, fa.decision_notes,
+              fa.submission, fa.insurance_answers, fa."references", fa.tcs_version,
+              fa.signature_r2_key,
+              COALESCE(NULLIF(TRIM(CONCAT_WS(' ', ip.first_name, ip.last_name)), ''), iu.email)
+                AS invited_by_name,
+              COALESCE(NULLIF(TRIM(CONCAT_WS(' ', rp.first_name, rp.last_name)), ''), ru.email)
+                AS reviewed_by_name
+         FROM freelancer_applications fa
+         LEFT JOIN users iu ON iu.id = fa.invited_by
+         LEFT JOIN people ip ON ip.id = iu.person_id
+         LEFT JOIN users ru ON ru.id = fa.reviewed_by
+         LEFT JOIN people rp ON rp.id = ru.person_id
+        WHERE fa.id = $1`,
+      [req.params.id]
+    );
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Application not found' });
+      return;
+    }
+    res.json({ data: result.rows[0] });
+  } catch (error) {
+    console.error('[freelancers] get application error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Shared loader for a review action — the application + linked person, or null.
+async function loadReviewApplication(id: string) {
+  const result = await query(
+    `SELECT fa.id AS app_id, fa.status, fa.form_token, fa.person_id,
+            p.first_name, p.preferred_name, p.email,
+            p.freelancer_joined_date, p.freelancer_next_review_date
+       FROM freelancer_applications fa
+       JOIN people p ON p.id = fa.person_id
+      WHERE fa.id = $1`,
+    [id]
+  );
+  return result.rows[0] || null;
+}
+
+// Statuses an application can be reviewed FROM (a submitted or info-requested form).
+const REVIEWABLE_STATUSES = ['applied', 'more_info'];
+
+// ── POST /api/freelancers/applications/:id/approve ─────────────────────────
+// Clear the freelancer for work. MANAGER_ROLES (booking/money consequence).
+router.post('/applications/:id/approve', authorize(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const app = await loadReviewApplication(String(req.params.id));
+    if (!app) { res.status(404).json({ error: 'Application not found' }); return; }
+    if (app.status === 'approved') { res.status(409).json({ error: 'Already approved.' }); return; }
+    if (!REVIEWABLE_STATUSES.includes(app.status)) {
+      res.status(409).json({ error: `Can't approve an application that's '${app.status}'.` });
+      return;
+    }
+
+    const notes = textOrNull(req.body?.notes);
+    const personId = app.person_id as string;
+
+    // Approve the person: is_approved, status, joined date (first time only),
+    // review date (+1yr if not already set). Seed the onboarding checklist's
+    // reviewed/approved fact into the JSONB.
+    await query(
+      `UPDATE people SET
+         is_approved                 = true,
+         freelancer_status           = 'approved',
+         freelancer_joined_date      = COALESCE(freelancer_joined_date, CURRENT_DATE),
+         freelancer_next_review_date = COALESCE(freelancer_next_review_date, CURRENT_DATE + INTERVAL '1 year'),
+         onboarding                  = COALESCE(onboarding, '{}'::jsonb) || jsonb_build_object('approved_at', to_jsonb(NOW())),
+         updated_at                  = NOW()
+       WHERE id = $1`,
+      [personId]
+    );
+    await query(
+      `UPDATE freelancer_applications SET
+         status = 'approved', reviewed_by = $2, reviewed_at = NOW(),
+         decision_notes = $3, updated_at = NOW()
+       WHERE id = $1`,
+      [app.app_id, req.user!.id, notes]
+    );
+
+    await logAudit(req.user!.id, 'freelancer_applications', app.app_id as string, 'update', { status: app.status }, { status: 'approved' });
+    await query(
+      `INSERT INTO interactions (person_id, type, content, created_by, source)
+       VALUES ($1, 'note', $2, $3, 'system')`,
+      [personId, '✅ Freelancer application approved.', req.user!.id]
+    ).catch((e) => console.error('[freelancers] approve timeline note failed:', e));
+
+    // Approval email (WhatsApp link + payments reference). Best-effort.
+    let emailResult: { success: boolean; skipped?: boolean; error?: string } = { success: false, skipped: true };
+    if (app.email) {
+      const r = await emailService.send('freelancer_approved', {
+        to: app.email as string,
+        variables: {
+          firstName: (app.preferred_name || app.first_name || 'there') as string,
+          whatsappUrl: '',        // set when the WhatsApp invite link is available
+          notes: notes || '',
+        },
+      });
+      emailResult = { success: r.success, error: r.error };
+    } else {
+      emailResult = { success: false, skipped: true, error: 'No email on file.' };
+    }
+
+    res.json({ data: { ok: true }, email_result: emailResult });
+  } catch (error) {
+    console.error('[freelancers] approve error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── POST /api/freelancers/applications/:id/decline ─────────────────────────
+// Not proceeding. MANAGER_ROLES. is_approved stays false; status → declined.
+router.post('/applications/:id/decline', authorize(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const app = await loadReviewApplication(String(req.params.id));
+    if (!app) { res.status(404).json({ error: 'Application not found' }); return; }
+    if (!REVIEWABLE_STATUSES.includes(app.status)) {
+      res.status(409).json({ error: `Can't decline an application that's '${app.status}'.` });
+      return;
+    }
+    const notes = textOrNull(req.body?.notes);
+    const personId = app.person_id as string;
+
+    await query(
+      `UPDATE people SET
+         is_approved = false, freelancer_status = 'declined', updated_at = NOW()
+       WHERE id = $1`,
+      [personId]
+    );
+    await query(
+      `UPDATE freelancer_applications SET
+         status = 'declined', reviewed_by = $2, reviewed_at = NOW(),
+         decision_notes = $3, updated_at = NOW()
+       WHERE id = $1`,
+      [app.app_id, req.user!.id, notes]
+    );
+
+    await logAudit(req.user!.id, 'freelancer_applications', app.app_id as string, 'update', { status: app.status }, { status: 'declined' });
+    await query(
+      `INSERT INTO interactions (person_id, type, content, created_by, source)
+       VALUES ($1, 'note', $2, $3, 'system')`,
+      [personId, notes ? `🚫 Freelancer application declined: ${notes}` : '🚫 Freelancer application declined.', req.user!.id]
+    ).catch((e) => console.error('[freelancers] decline timeline note failed:', e));
+
+    let emailResult: { success: boolean; skipped?: boolean; error?: string } = { success: false, skipped: true };
+    if (app.email && req.body?.send_email !== false) {
+      const r = await emailService.send('freelancer_declined', {
+        to: app.email as string,
+        variables: { firstName: (app.preferred_name || app.first_name || 'there') as string, notes: notes || '' },
+      });
+      emailResult = { success: r.success, error: r.error };
+    }
+    res.json({ data: { ok: true }, email_result: emailResult });
+  } catch (error) {
+    console.error('[freelancers] decline error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── POST /api/freelancers/applications/:id/request-info ────────────────────
+// Ask for more/corrected info. MANAGER_ROLES. Re-opens the token (more_info is
+// a LIVE_TOKEN_STATUS) so the same pre-filled form link works again.
+router.post('/applications/:id/request-info', authorize(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const app = await loadReviewApplication(String(req.params.id));
+    if (!app) { res.status(404).json({ error: 'Application not found' }); return; }
+    if (!REVIEWABLE_STATUSES.includes(app.status)) {
+      res.status(409).json({ error: `Can't request info on an application that's '${app.status}'.` });
+      return;
+    }
+    const notes = textOrNull(req.body?.notes);
+    if (!notes) { res.status(400).json({ error: 'Please say what information you need.' }); return; }
+    const personId = app.person_id as string;
+
+    await query(
+      `UPDATE people SET freelancer_status = 'more_info', updated_at = NOW() WHERE id = $1`,
+      [personId]
+    );
+    await query(
+      `UPDATE freelancer_applications SET
+         status = 'more_info', reviewed_by = $2, reviewed_at = NOW(),
+         decision_notes = $3, updated_at = NOW()
+       WHERE id = $1`,
+      [app.app_id, req.user!.id, notes]
+    );
+
+    await logAudit(req.user!.id, 'freelancer_applications', app.app_id as string, 'update', { status: app.status }, { status: 'more_info' });
+    await query(
+      `INSERT INTO interactions (person_id, type, content, created_by, source)
+       VALUES ($1, 'note', $2, $3, 'system')`,
+      [personId, `📨 More info requested from freelancer: ${notes}`, req.user!.id]
+    ).catch((e) => console.error('[freelancers] request-info timeline note failed:', e));
+
+    const formUrl = formUrlFor(app.form_token as string);
+    let emailResult: { success: boolean; skipped?: boolean; error?: string } = { success: false, skipped: true };
+    if (app.email) {
+      const r = await emailService.send('freelancer_more_info', {
+        to: app.email as string,
+        variables: { firstName: (app.preferred_name || app.first_name || 'there') as string, notes, formUrl },
+      });
+      emailResult = { success: r.success, error: r.error };
+    } else {
+      emailResult = { success: false, skipped: true, error: 'No email on file.' };
+    }
+    res.json({ data: { ok: true }, form_url: formUrl, email_result: emailResult });
+  } catch (error) {
+    console.error('[freelancers] request-info error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── PATCH /api/freelancers/:personId/onboarding ────────────────────────────
+// Toggle onboarding-checklist items. STAFF_ROLES — day-to-day onboarding admin.
+// Reuses the existing has_tshirt / is_insured_on_vehicles booleans directly and
+// stores the columnless items (portal_invite_sent, resources_shared) in the
+// onboarding JSONB. Only keys present in the body are touched.
+const ONBOARDING_JSONB_KEYS = ['portal_invite_sent', 'resources_shared'] as const;
+
+router.patch('/:personId/onboarding', async (req: AuthRequest, res: Response) => {
+  try {
+    const personId = req.params.personId;
+    const existing = await query(
+      'SELECT id, is_freelancer, is_insured_on_vehicles, has_tshirt, onboarding FROM people WHERE id = $1 AND is_deleted = false',
+      [personId]
+    );
+    if (existing.rows.length === 0) { res.status(404).json({ error: 'Person not found' }); return; }
+    const b = req.body || {};
+
+    // Merge JSONB items (stamp with an actor+timestamp when set true, clear when false).
+    const currentOnboarding = existing.rows[0].onboarding || {};
+    const nextOnboarding: Record<string, unknown> = { ...currentOnboarding };
+    for (const key of ONBOARDING_JSONB_KEYS) {
+      if (key in b) {
+        nextOnboarding[key] = b[key]
+          ? { done: true, at: new Date().toISOString(), by: req.user!.id }
+          : false;
+      }
+    }
+
+    const insured = typeof b.is_insured_on_vehicles === 'boolean' ? b.is_insured_on_vehicles : existing.rows[0].is_insured_on_vehicles;
+    const tshirt = typeof b.has_tshirt === 'boolean' ? b.has_tshirt : existing.rows[0].has_tshirt;
+
+    const updated = await query(
+      `UPDATE people SET
+         is_insured_on_vehicles = $2,
+         has_tshirt             = $3,
+         onboarding             = $4::jsonb,
+         updated_at             = NOW()
+       WHERE id = $1
+       RETURNING id, is_insured_on_vehicles, has_tshirt, onboarding`,
+      [personId, insured, tshirt, JSON.stringify(nextOnboarding)]
+    );
+    res.json({ data: updated.rows[0] });
+  } catch (error) {
+    console.error('[freelancers] onboarding update error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
