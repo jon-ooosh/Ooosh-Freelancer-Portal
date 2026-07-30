@@ -27,6 +27,7 @@ interface CostRow extends Cost {
   job_name?: string | null;
   vehicle_reg?: string | null;
   allocation_count?: number;
+  allocation_jobs?: Array<{ job_id: string | null; hh_job_number: number | null; job_name: string | null; amount: number }>;
   due_date?: string | null;
 }
 
@@ -506,6 +507,19 @@ export default function CostsPage() {
                       : c.vehicle_reg && c.vehicle_id ? (
                         <Link to={`/vehicles/fleet/${c.vehicle_id}`} className="text-purple-700 hover:underline">{c.vehicle_reg}</Link>
                       ) : c.vehicle_reg ? <span className="text-purple-700">{c.vehicle_reg}</span> : '—'}
+                    {c.allocation_jobs && c.allocation_jobs.length > 0 && (
+                      <div className="text-[11px] text-gray-500 mt-0.5" title="Cost split across these jobs (OP cost tracking only)">
+                        ⑂ {c.allocation_jobs.map((a, i) => (
+                          <span key={a.job_id || i}>
+                            {i > 0 && ' '}
+                            {a.job_id && a.hh_job_number
+                              ? <Link to={`/jobs/${a.job_id}`} className="text-purple-600 hover:underline">#{a.hh_job_number}</Link>
+                              : a.hh_job_number ? <span className="text-purple-600">#{a.hh_job_number}</span> : '(job)'}
+                            <span className="text-gray-400"> £{Number(a.amount).toFixed(0)}</span>
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </td>
                   {view === 'all' && <td className="px-2.5 py-2 text-gray-600 whitespace-nowrap">{c.uploaded_by_name || '—'}</td>}
                   <td className="px-2.5 py-2">
