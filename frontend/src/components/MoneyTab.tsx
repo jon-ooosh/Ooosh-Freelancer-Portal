@@ -144,6 +144,10 @@ interface JobCostLite {
   is_allocation?: boolean;
   full_amount_gross?: number | null;
   allocation_id?: string | null;
+  // Capture job — where the cost was actually entered (differs from this job on
+  // split-in rows; the full invoice + recharge live there).
+  job_id?: string | null;
+  capture_hh_job_number?: number | null;
 }
 interface JobQuoteLite {
   id: string;
@@ -2003,6 +2007,42 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
       </div>
       {clientQuoted > 0 && (
         <p className="text-xs text-gray-400 -mt-2 mb-4">Client quoted {m(clientQuoted)} for transport / crew.</p>
+      )}
+
+      {/* Actual costs (part of quote) — itemised, so staff can see WHICH bills make up the total */}
+      {actualCosts.length > 0 && (
+        <div className="border-t border-gray-100 pt-3 mb-3">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-sm font-medium text-gray-700">Costs applied to this job</span>
+            <span className="text-sm font-semibold text-gray-900">{m(actualsTotal)}</span>
+          </div>
+          <ul className="space-y-1">
+            {actualCosts.map((c) => {
+              const isSplit = !!c.is_allocation;
+              const captureJobId = c.job_id;
+              return (
+                <li key={isSplit ? `a-${c.allocation_id || c.id}` : `c-${c.id}`} className="flex items-center justify-between text-sm gap-2">
+                  <span className="text-gray-600 truncate min-w-0">
+                    <span className="inline-block px-1.5 py-0.5 mr-1.5 text-[10px] font-medium bg-gray-100 text-gray-500 rounded align-middle">Quote</span>
+                    {c.supplier_name || c.description || c.category || 'Cost'}
+                    {isSplit && (
+                      captureJobId ? (
+                        <a href={`/jobs/${captureJobId}`} className="ml-1 text-xs text-purple-600 hover:underline"
+                          title={`This job's share of a ${m(num(c.full_amount_gross))} cost captured on ${c.capture_hh_job_number ? `job #${c.capture_hh_job_number}` : 'another job'}`}>
+                          · split from {c.capture_hh_job_number ? `#${c.capture_hh_job_number}` : 'another job'}
+                        </a>
+                      ) : (
+                        <span className="ml-1 text-xs text-purple-600" title={`This job's share of a ${m(num(c.full_amount_gross))} cost split across jobs`}>· split ({m(num(c.full_amount_gross))} total)</span>
+                      )
+                    )}
+                  </span>
+                  <span className="text-gray-900 shrink-0">{m(num(c.amount_gross))}</span>
+                </li>
+              );
+            })}
+          </ul>
+          <p className="text-[11px] text-gray-400 mt-1.5">Manage individual costs on the <a href="/money/costs" className="text-purple-600 hover:underline">Costs hub</a>.</p>
+        </div>
       )}
 
       {/* Extra (rechargeable) costs */}

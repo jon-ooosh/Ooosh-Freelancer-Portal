@@ -348,21 +348,25 @@ router.get('/by-job/:jobId', async (req: AuthRequest, res: Response) => {
 
     const result = await query(
       `SELECT c.*, CONCAT(up.first_name, ' ', up.last_name) AS uploaded_by_name,
+              capj.hh_job_number AS capture_hh_job_number,
               NULL::numeric AS alloc_amount, NULL::boolean AS alloc_recharge,
               NULL::text AS alloc_notes, NULL::uuid AS allocation_id, false AS is_allocation
          FROM costs c
          LEFT JOIN users u ON u.id = c.uploaded_by
          LEFT JOIN people up ON up.id = u.person_id
+         LEFT JOIN jobs capj ON capj.id = c.job_id
         WHERE c.job_id = $1
           AND NOT EXISTS (SELECT 1 FROM cost_allocations a WHERE a.cost_id = c.id)
        UNION ALL
        SELECT c.*, CONCAT(up.first_name, ' ', up.last_name) AS uploaded_by_name,
+              capj.hh_job_number AS capture_hh_job_number,
               a.amount AS alloc_amount, a.recharge AS alloc_recharge,
               a.notes AS alloc_notes, a.id AS allocation_id, true AS is_allocation
          FROM cost_allocations a
          JOIN costs c ON c.id = a.cost_id
          LEFT JOIN users u ON u.id = c.uploaded_by
          LEFT JOIN people up ON up.id = u.person_id
+         LEFT JOIN jobs capj ON capj.id = c.job_id
         WHERE a.job_id = $1
        ORDER BY created_at DESC`,
       [jobId],
