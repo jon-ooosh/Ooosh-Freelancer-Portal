@@ -144,7 +144,16 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     }
 
     if (is_approved === 'true') {
-      sql += ` AND p.is_approved = true`;
+      // Crew/transport pickers opt in with include_pending=true so pending
+      // freelancers (invited/applied/more_info, not declined/removed) surface
+      // alongside approved ones — the frontend renders them disabled with a
+      // "pending approval" note rather than hiding them. Existing callers that
+      // don't pass include_pending keep the strict approved-only behaviour.
+      if (req.query.include_pending === 'true' && is_freelancer === 'true') {
+        sql += ` AND (p.is_approved = true OR (p.freelancer_status IN ('invited','applied','more_info') AND p.freelancer_removed_at IS NULL))`;
+      } else {
+        sql += ` AND p.is_approved = true`;
+      }
     }
 
     if (is_insured === 'true') {

@@ -3197,7 +3197,13 @@ Staff-driven `invite → apply → review → approve → onboard` lifecycle for
 
 - **Invite audit surfacing:** `GET /freelancers/by-person/:personId` returns the latest application's `status` / `invited_at` / `submitted_at` / `invited_by` + a resolved `invited_by_name` (**join `people` via `users.person_id`** — `users` has no name columns; `COALESCE(NULLIF(TRIM(...)), u.email)`). `FreelancerPanel` shows "Invited by <name> on <date at time> · applied <date>" under the status line, refetched whenever `person.freelancer_status` changes.
 
-**Roadmap:** Phase A (data + invite) + Phase B (apply form + review) + the B-feedback round are SHIPPED. **Phase C is in progress** — the consolidated "Freelancer" tab + these three refinements (Edit-toggle removed / invite email required + phone / invite audit) are done; **remaining Phase C** = manager-tier approve / decline / request-more-info endpoints (`MANAGER_ROLES`) + the three lifecycle email templates (`freelancer_approved` / `_declined` / `_more_info`), an onboarding-checklist card, and relaxing the `is_approved=true` crew/transport pickers so pending freelancers surface (disabled, "pending approval" note) rather than being invisible. **Phase D** (doc-expiry reminder scanner + portal Resources surface) and **Phase E** (iDenfy identity verification — deferred to a quiet window) come later. Do NOT start the deferred Phase C endpoints without confirming scope with jon.
+- **Review / decide (Phase C, Jul 2026):** `GET /freelancers/applications/:id` (full submission / insurance answers / references, STAFF_ROLES) + `POST /applications/:id/{approve|decline|request-info}` (**MANAGER_ROLES**). Approve → `is_approved=true` + `freelancer_status='approved'`, stamps `freelancer_joined_date` (first time) + `freelancer_next_review_date` (+1yr) + `onboarding.approved_at`, sends `freelancer_approved`. Decline → `freelancer_declined`. Request-info → `more_info` (re-opens the token — `more_info` is a LIVE_TOKEN_STATUS) + `freelancer_more_info` (pre-filled form link). All audit-logged + timeline note. Frontend `ReviewPanel` on the Freelancer tab (submission + insurance Q&A + references + decision buttons; decline/request-info take a reason); decision gated to managers (`hasManagerRole`), STAFF see a "manager needs to approve" note. All three email templates ship OFF `EMAIL_LIVE_TEMPLATES`.
+
+- **Onboarding checklist (Phase C):** `OnboardingChecklist` card (shown once approved) — Reviewed & approved (auto) · Vehicle insurance (`is_insured_on_vehicles`) · T-shirt (`has_tshirt`) · Portal access sent (`onboarding.portal_invite_sent`, **manual tick** — portal Resources is Phase D, no auto-email yet) · Training docs shared (`onboarding.resources_shared`) · Payments policy (informational, covered by signed T&Cs). Toggles via `PATCH /freelancers/:personId/onboarding` (STAFF_ROLES — reuses the two booleans + merges the columnless items into the `onboarding` JSONB).
+
+- **Greyed pickers (Phase C):** `GET /api/people` gained an opt-in **`include_pending=true`** — with `is_freelancer=true&is_approved=true` it returns approved AND pending (invited/applied/more_info, not declined/removed) freelancers, `is_approved`/`freelancer_status` per row (strict-approved callers unchanged). The two crew pickers (`JobDetailPage` + `TransportOpsPage`) pass it and render pending freelancers **disabled with an amber "Pending approval" pill**. `quotes.ts:1887` crew-*history* left strict (those were approved when assigned).
+
+**Roadmap:** Phase A (data + invite) + Phase B (apply form) + Phase C (consolidated Freelancer tab + toggle removal + invite email/phone/audit + review/approve/decline/more-info + onboarding checklist + greyed pickers) are SHIPPED. **Phase D — NEXT:** document-expiry reminder scanner + portal Resources surface + the §14 doc-expiry **eligibility** greying (an approved freelancer with an expired licence/DVLA/passport greyed "expired" for driving — pairs with the reminder scanner's expiry logic) + a "Send portal invite" button that fires the register email (vs the current manual tick). **Phase E** (iDenfy identity verification) is deferred to the Christmas iDenfy migration.
 
 #### Staff Documents & Training (LIVE, Jul 2026) — see `docs/STAFF-DOCUMENTS-SPEC.md`
 
@@ -4032,11 +4038,33 @@ stuck van, deduped via `fleet_vehicles.stuck_onhire_alerted_at` (stamp-first; **
 `syncFleetHireStatus` when the van leaves On Hire**). HH job number is best-effort R2 enrichment
 (`lookupStuckOnHireJob` reads the van's most recent book-out event — the DB assignment points at the
 van's PREVIOUS hire, so the current job can only come from the event). Also catches any other stale
-On-Hire drift (self-corrects on next sync, one alert). **Not yet built:** (2) the fix —
-server-side **adopt-or-create a per-van assignment row keyed on `van_requirement_index`** at the
-choke-point both book-out paths funnel through, *before* `firePostBookOutHooks`, cloning (reuse
-`add-to-hire` + `services/vha-dedup.ts`) rather than overwriting, plus the terminal-guard
-tightening. Closes fields + photos + view-full-size links at source. **Plan with jon before coding.**
+On-Hire drift (self-corrects on next sync, one alert).
+**(2) The core fix — SHIPPED (PR #1057, Jul 2026).** Book-out now **partitions driver rows by
+van**: when a book-out `PATCH /api/hire-forms/:id` (`status='booked_out'` + a `vehicle_id`)
+targets a **driver** row already live-booked-out to a **different** van, it **clones** a fresh
+per-van row for `(this driver, this van)` instead of re-pointing the shared one — van A's row is
+left untouched, van B gets its own rows and becomes bookable + checkinable. Idempotent (reuses an
+existing `(driver, van, job)` booked-out row on retry). The clone drives the same post-book-out
+chain as the normal path — `cancelOrphanSiblingAllocations` + `firePostBookOutHooks` (fleet
+status, own-van agreement, `fanOutVanHireForms` cross-van, OOH, auto-dispatch) + vehicle-requirement
+sync — so the **per-driver referral gate stays intact** (the clone's agreement routes through
+`generateAndEmailHireFormPdf` → `isDriverAuthorisedForAgreement`; a referral-pending driver is held
+back exactly as before). A non-book-out re-point of a live van, or a driverless row, is **refused**
+(no-op 200) — genuine swaps go through Swap Vehicle; this is the terminal-guard tightening. The
+frontend `updateDriverHireForm` now forwards `mileage_out` so the second-van clone records the
+correct odometer (backend consumes it ONLY on the clone path — the normal update ignores it,
+save-event still owns `mileage_out` there). Closes fields + photos + view-full-size links at source
+(none cross once the reg isn't crossed). **Implementation note / deliberate deviation from the
+original sketch:** the clone lives in the **PATCH path ONLY**, not a shared PATCH+save-event
+choke-point. Reasons: (a) in a staff book-out `save-event` fires BEFORE the write-back PATCH loop,
+so it can't see clones the PATCH hasn't made yet; (b) the incident class is staff self-drive
+multi-van (uses the PATCH loop); (c) freelancer multi-van D&C is explicitly out of scope. If a
+freelancer multi-van book-out ever needs this, the same clone logic would have to move into (or be
+duplicated at) the `save-event` book-out matcher in `vehicles.ts`. **No migration** (Zod
+`patchSchema` gained optional `mileage_out`/`fuel_level_out`; consumed only on the clone branch).
+**Verify live** on the next real 2-van book-out — build-verified only, no runtime CI (see the PR's
+"How to verify"). The historical mileage tidy for 15411 + 16206 is still the one open item below
+(cosmetic, completed jobs, no stuck flags).
 
 ### Per-job contacts (`job_contacts`)
 
