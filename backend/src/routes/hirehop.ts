@@ -352,7 +352,10 @@ router.get('/jobs/:id', async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
     const result = await query(
-      `SELECT * FROM jobs WHERE id = $1 AND is_deleted = false`,
+      `SELECT j.*, o.name AS client_org_name
+       FROM jobs j
+       LEFT JOIN organisations o ON o.id = j.client_id AND o.is_deleted = false
+       WHERE j.id = $1 AND j.is_deleted = false`,
       [id]
     );
 

@@ -457,41 +457,19 @@ function NotificationMuteToggle({ jobId }: { jobId: string }) {
 // =============================================================================
 
 function VenueFiles({ files, title = 'Venue Files' }: { files: VenueFile[]; title?: string }) {
-  const [loadingFile, setLoadingFile] = useState<string | null>(null)
-
   if (!files || files.length === 0) return null
 
-  const handleFileClick = async (file: VenueFile) => {
-    // For Google Drive / external links, open directly
+  const handleFileClick = (file: VenueFile) => {
     if (file.url) {
       window.open(file.url, '_blank')
-      return
-    }
-
-    // For Monday ASSET files, fetch the temporary public URL
-    if (file.assetId) {
-      setLoadingFile(file.assetId)
-      try {
-        const res = await fetch(`/api/files/asset-url?id=${file.assetId}`)
-        const data = await res.json()
-        if (data.success && data.url) {
-          window.open(data.url, '_blank')
-        } else {
-          alert('Unable to load file. Please try again.')
-        }
-      } catch (err) {
-        console.error('Error fetching asset URL:', err)
-        alert('Unable to load file. Please try again.')
-      } finally {
-        setLoadingFile(null)
-      }
+    } else {
+      alert('Unable to load this file.')
     }
   }
 
   // Get a file icon based on file name
   const getFileIcon = (name: string, fileType?: string): string => {
     if (fileType === 'GOOGLE_DRIVE') return '📄'
-    if (fileType === 'MONDAY_DOC') return '📝'
     const lower = name.toLowerCase()
     if (lower.endsWith('.pdf')) return '📕'
     if (lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.png')) return '🖼️'
@@ -512,8 +490,7 @@ function VenueFiles({ files, title = 'Venue Files' }: { files: VenueFile[]; titl
           <button
             key={file.assetId || index}
             onClick={() => handleFileClick(file)}
-            disabled={loadingFile === file.assetId}
-            className="w-full flex items-center gap-3 p-3 rounded-lg border border-gray-100 hover:bg-gray-50 transition-colors text-left disabled:opacity-50"
+            className="w-full flex items-center gap-3 p-3 rounded-lg border border-gray-100 hover:bg-gray-50 transition-colors text-left"
           >
             <span className="text-xl">{getFileIcon(file.name, file.fileType)}</span>
             <div className="flex-1 min-w-0">
@@ -522,133 +499,9 @@ function VenueFiles({ files, title = 'Venue Files' }: { files: VenueFile[]; titl
                 <p className="text-xs text-gray-400">{file.fileType === 'GOOGLE_DRIVE' ? 'Google Drive' : file.fileType}</p>
               )}
             </div>
-            {loadingFile === file.assetId ? (
-              <div className="w-4 h-4 border-2 border-purple-500 border-t-transparent rounded-full animate-spin"></div>
-            ) : (
-              <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-              </svg>
-            )}
-          </button>
-        ))}
-      </div>
-    </div>
-  )
-}
-
-// =============================================================================
-// Q&H FILES COMPONENT (Job-specific files from Quotes & Hires board)
-// =============================================================================
-
-interface QHFile {
-  assetId: string
-  name: string
-  fileType?: string
-  url?: string
-  sourceName?: string
-}
-
-function QHFiles({ hhRef }: { hhRef: string }) {
-  const [files, setFiles] = useState<QHFile[]>([])
-  const [loading, setLoading] = useState(true)
-  const [loadingFile, setLoadingFile] = useState<string | null>(null)
-
-  useEffect(() => {
-    async function fetchFiles() {
-      try {
-        const res = await fetch(`/api/files/qh?hhRef=${encodeURIComponent(hhRef)}`)
-        const data = await res.json()
-        if (data.success && data.files) {
-          setFiles(data.files)
-        }
-      } catch (err) {
-        console.error('Error fetching Q&H files:', err)
-      } finally {
-        setLoading(false)
-      }
-    }
-
-    if (hhRef) {
-      fetchFiles()
-    } else {
-      setLoading(false)
-    }
-  }, [hhRef])
-
-  // Don't render anything if loading or no files
-  if (loading) return null
-  if (files.length === 0) return null
-
-  const handleFileClick = async (file: QHFile) => {
-    // For Google Drive / external links, open directly
-    if (file.url) {
-      window.open(file.url, '_blank')
-      return
-    }
-
-    // For Monday ASSET files, fetch the temporary public URL
-    if (file.assetId) {
-      setLoadingFile(file.assetId)
-      try {
-        const res = await fetch(`/api/files/asset-url?id=${file.assetId}`)
-        const data = await res.json()
-        if (data.success && data.url) {
-          window.open(data.url, '_blank')
-        } else {
-          alert('Unable to load file. Please try again.')
-        }
-      } catch (err) {
-        console.error('Error fetching asset URL:', err)
-        alert('Unable to load file. Please try again.')
-      } finally {
-        setLoadingFile(null)
-      }
-    }
-  }
-
-  const getFileIcon = (name: string, fileType?: string): string => {
-    if (fileType === 'GOOGLE_DRIVE') return '📄'
-    if (fileType === 'MONDAY_DOC') return '📝'
-    const lower = name.toLowerCase()
-    if (lower.endsWith('.pdf')) return '📕'
-    if (lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.png')) return '🖼️'
-    if (lower.endsWith('.doc') || lower.endsWith('.docx')) return '📄'
-    return '📎'
-  }
-
-  return (
-    <div className="bg-white rounded-xl shadow-sm p-6">
-      <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-        <span>📂</span> Job Files
-        <span className="text-sm font-normal text-gray-500">
-          ({files.length} file{files.length !== 1 ? 's' : ''})
-        </span>
-      </h2>
-      <p className="text-xs text-gray-400 mb-3">
-        Tech riders, stage plots and other job documents
-      </p>
-      <div className="space-y-2">
-        {files.map((file, index) => (
-          <button
-            key={file.assetId || index}
-            onClick={() => handleFileClick(file)}
-            disabled={loadingFile === file.assetId}
-            className="w-full flex items-center gap-3 p-3 rounded-lg border border-gray-100 hover:bg-gray-50 transition-colors text-left disabled:opacity-50"
-          >
-            <span className="text-xl">{getFileIcon(file.name, file.fileType)}</span>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium text-gray-900 truncate">{file.name}</p>
-              {file.sourceName && (
-                <p className="text-xs text-gray-400 truncate">From: {file.sourceName}</p>
-              )}
-            </div>
-            {loadingFile === file.assetId ? (
-              <div className="w-4 h-4 border-2 border-purple-500 border-t-transparent rounded-full animate-spin"></div>
-            ) : (
-              <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-              </svg>
-            )}
+            <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+            </svg>
           </button>
         ))}
       </div>
@@ -967,11 +820,6 @@ function CrewJobDetail({ job, venue }: { job: Job; venue: Venue | null }) {
         <VenueFiles files={job.files} title="Job Files" />
       )}
 
-      {/* Q&H Job Files — tech riders, stage plots, etc. */}
-      {job.hhRef && (
-        <QHFiles hhRef={job.hhRef} />
-      )}
-
       {/* Equipment Reference — same HireHop integration, labelled as reference */}
       {job.hhRef && (
         <EquipmentList hhRef={job.hhRef} isReference={true} />
@@ -985,6 +833,20 @@ function CrewJobDetail({ job, venue }: { job: Job; venue: Venue | null }) {
           </h2>
           <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
             <p className="text-gray-700 whitespace-pre-wrap">{venue.accessNotes}</p>
+          </div>
+        </div>
+      )}
+
+      {/* Key Notes — the quote's freelancer_notes from OP. The D&C layout has
+          always rendered this card; the crew layout never did, so notes staff
+          wrote for crewed jobs were invisible to the freelancer (Jul 2026). */}
+      {job.keyNotes && (
+        <div className="bg-white rounded-xl shadow-sm p-6">
+          <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+            <span>📋</span> Key Notes
+          </h2>
+          <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+            <p className="text-gray-700 whitespace-pre-wrap">{job.keyNotes}</p>
           </div>
         </div>
       )}
@@ -1449,11 +1311,6 @@ export default function JobDetailsPage() {
                 {/* Job Files — tagged "share_with_freelancer" on the job in OP */}
                 {job.files && job.files.length > 0 && (
                   <VenueFiles files={job.files} title="Job Files" />
-                )}
-
-                {/* Q&H Job Files — tech riders, stage plots, etc. */}
-                {job.hhRef && (
-                  <QHFiles hhRef={job.hhRef} />
                 )}
 
                 {/* Equipment List - simple read-only with filtering */}

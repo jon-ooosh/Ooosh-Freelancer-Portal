@@ -15,6 +15,12 @@ import { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { STEP_PHASE, FUTURE_STEP } from './CarnetSection';
+import { describePreauth } from '../lib/preauth';
+import BacklineLocationModal, {
+  BacklineLocation,
+  backlineLocationIcon,
+  backlineLocationLabel,
+} from './BacklineLocationModal';
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -162,7 +168,8 @@ const EXCESS_STATUS_LABELS: Record<string, { label: string; colour: string }> = 
   pending:               { label: 'Required',          colour: 'text-amber-600' },
   partially_paid:        { label: 'Partially Paid',    colour: 'text-amber-600' },
   taken:                 { label: 'Taken',             colour: 'text-green-600' },
-  pre_auth:              { label: 'Pre-auth Taken',    colour: 'text-blue-600' },
+  pre_auth:              { label: 'Pre-auth Held',     colour: 'text-sky-600' },
+  released:              { label: 'Pre-auth Released', colour: 'text-gray-500' },
   waived:                { label: 'Waived',            colour: 'text-gray-500' },
   fully_claimed:         { label: 'Fully Claimed',     colour: 'text-red-600' },
   partially_reimbursed:  { label: 'Partially Reimbursed', colour: 'text-amber-600' },
@@ -194,7 +201,7 @@ const REHEARSAL_FLAVOUR_LABEL: Record<string, string> = {
 export default function RequirementCard({
   req,
   derivedFlags,
-  seatAvailability,
+  assignedVehicleRegs,
   isNested,
   jobId,
   hhJobNumber,
@@ -202,6 +209,7 @@ export default function RequirementCard({
   onStatusChange,
   onAdvanceStep,
   onRemove,
+  onEdit,
   onVanAndDriverToggle,
   onSlotModeChange,
   selfDriveVanOverride,
@@ -210,6 +218,12 @@ export default function RequirementCard({
 }: {
   req: JobRequirement;
   derivedFlags?: DerivedFlags | null;
+  /** Regs of vans actually allocated to THIS job — shown on the vehicle
+   *  headline ("Vehicle (Self-Drive) — RO23HLU") once a van is linked. */
+  assignedVehicleRegs?: string[];
+  /** @deprecated The seat-availability fleet cross-reference (which fleet
+   *  vans already have the layout) was removed — staff found the unrelated
+   *  regs confusing. Prop kept in the type so existing callers don't break. */
   seatAvailability?: SeatAvailability | null;
   isNested?: boolean;
   jobId: string;
@@ -218,6 +232,9 @@ export default function RequirementCard({
   onStatusChange: (reqId: string, status: JobRequirement['status']) => void;
   onAdvanceStep: (reqId: string) => void;
   onRemove: (reqId: string, reason?: string) => void;
+  /** Reminder edit — reopens the reminder modal pre-filled. Only wired for
+   *  reminder cards; other types have no edit affordance. */
+  onEdit?: (req: JobRequirement) => void;
   onVanAndDriverToggle?: () => void;
   onSlotModeChange?: (itemId: number, slotIndex: number, mode: VehicleSlotMode) => void;
   selfDriveVanOverride?: number | null;
@@ -258,6 +275,17 @@ export default function RequirementCard({
   const [rehearsalPickerSearch, setRehearsalPickerSearch] = useState('');
   const [rehearsalBusy, setRehearsalBusy] = useState(false);
 
+  // Backline "where is it?" location (pre-hire cards only)
+  const isBacklinePrehire = req.requirement_type === 'backline' && req.phase === 'pre_hire';
+  const [backlineLocation, setBacklineLocation] = useState<BacklineLocation | null>(null);
+  const [showLocationModal, setShowLocationModal] = useState(false);
+  useEffect(() => {
+    if (!isBacklinePrehire) return;
+    api.get<{ data: { location: BacklineLocation | null } }>(`/backline/location-context/${req.id}`)
+      .then(d => setBacklineLocation(d.data.location))
+      .catch(() => {});
+  }, [isBacklinePrehire, req.id]);
+
   const loadRehearsalCoverage = () => {
     if (!jobId) return;
     api.get<{ data: { date: string; status: string; assignee: { id: string; name: string } | null }[] }>(`/studio-sitters/job/${jobId}/coverage`)
@@ -297,23 +325,24 @@ export default function RequirementCard({
   const isSuspendedByVD = suspensionReason !== null;
   const statusConfig = PREP_STATUS_CONFIG[req.status] || PREP_STATUS_CONFIG.not_started;
   const typeLabels = TYPE_STATUS_LABELS[req.requirement_type];
-  // The `vehicle` type_label is the static "Vehicle (Self-Drive)" from the
-  // requirement-type picklist. Override it with a mode-aware suffix computed
-  // from the live derived slot modes so a V&D (or mixed) job reads honestly.
+  // Headline mode qualifier. The static `vehicle` type_label is "Vehicle
+  // (Self-Drive)", but each van slot already shows its own Self-Drive / Van &
+  // Driver toggle in the body — so repeating the mode in the headline on a
+  // single-mode job is noise. Only surface a qualifier for MIXED jobs (which
+  // the per-slot toggles don't summarise at a glance).
   const vehicleModeSuffix = (() => {
     if (req.requirement_type !== 'vehicle' || req.custom_label) return null;
     const sd = derivedFlags?.self_drive_count ?? 0;
     const vd = derivedFlags?.van_and_driver_count ?? 0;
-    if (sd === 0 && vd === 0) return null; // no slot data — leave static label
     if (sd > 0 && vd > 0) return `Mixed — ${sd} self-drive, ${vd} van & driver`;
-    return vd > 0 ? 'Van & Driver' : 'Self-Drive';
+    return null;
   })();
   const label = req.custom_label || req.type_label;
-  // When the vehicle card carries a mode suffix, render the base "Vehicle" word
-  // in the (strikethrough-on-done) title and the mode as a separate, never-struck
-  // qualifier — otherwise a completed V&D vehicle shows "Vehicle (Van & Driver)"
-  // crossed out, which reads as "mode cancelled" rather than "prep done".
-  const titleBase = vehicleModeSuffix ? 'Vehicle' : label;
+  // For the vehicle type always render the bare "Vehicle" word (not the static
+  // "Vehicle (Self-Drive)" picklist label) so (a) the mode isn't duplicated with
+  // the per-slot toggles and (b) strikethrough-on-done only crosses "Vehicle",
+  // never a mode qualifier (which would read as "mode cancelled").
+  const titleBase = (req.requirement_type === 'vehicle' && !req.custom_label) ? 'Vehicle' : label;
 
   // Load hire form and excess data for nested cards
   useEffect(() => {
@@ -482,7 +511,18 @@ export default function RequirementCard({
                 {vehicleModeSuffix && (
                   <span className="text-gray-500"> ({vehicleModeSuffix})</span>
                 )}
+                {/* Allocated van reg(s) on the headline, once we know them. */}
+                {req.requirement_type === 'vehicle' && assignedVehicleRegs && assignedVehicleRegs.length > 0 && (
+                  <span className="text-gray-700"> — {assignedVehicleRegs.join(', ')}</span>
+                )}
               </span>
+              {/* Seat config lives on the headline now (was buried in the body
+                  next to a confusing list of unrelated fleet regs). */}
+              {req.requirement_type === 'vehicle' && derivedFlags?.seat_config && (
+                <span className={`text-[11px] px-1.5 py-0.5 rounded font-medium ${derivedFlags.seat_config === 'forward_facing' ? 'bg-amber-50 text-amber-700' : 'bg-green-50 text-green-700'}`}>
+                  {derivedFlags.seat_config === 'forward_facing' ? '⬆️ Forward-facing' : '🔄 Round a table'}
+                </span>
+              )}
               {req.is_auto && req.source === 'hirehop_sync' && (
                 <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-500 border border-blue-200 font-medium">HH</span>
               )}
@@ -498,7 +538,11 @@ export default function RequirementCard({
 
             {/* Vehicle */}
             {req.requirement_type === 'vehicle' && derivedFlags?.has_vehicle && (
-              <div className="mt-1 text-xs text-gray-500 space-y-1">
+              <div className="mt-1 text-xs text-gray-500 flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
+                {/* Left column — the vans on the job. The prep estimate sits in
+                    a right column (below) so the card uses its full width rather
+                    than cramming everything into the left third. */}
+                <div className="space-y-1 min-w-0">
                 {/* Per-slot rows (preferred) with fallback to job-level toggle for pre-migration jobs */}
                 {derivedFlags.vehicle_slots && derivedFlags.vehicle_slots.length > 0 ? (
                   <>
@@ -596,19 +640,14 @@ export default function RequirementCard({
                     </div>
                   );
                 })()}
-                {derivedFlags.seat_config && (
-                  <div className={derivedFlags.seat_config === 'forward_facing' ? 'text-amber-600' : 'text-green-600'}>
-                    {derivedFlags.seat_config === 'forward_facing' ? '⬆️ Forward-facing seats' : '🔄 Round a table'}
-                    {seatAvailability?.matchingVans && seatAvailability.matchingVans.length > 0 && (
-                      <span className="text-green-600 ml-1">— {seatAvailability.matchingVans.map(v => v.reg).join(', ')} already set</span>
-                    )}
-                    {seatAvailability?.nonMatchingVans && seatAvailability.nonMatchingVans.length > 0 && (
-                      <span className="text-gray-400 ml-1">— {seatAvailability.nonMatchingVans.map(v => v.reg).join(', ')} need turning</span>
-                    )}
-                  </div>
-                )}
+                </div>
+                {/* Right column — prep estimate, right-aligned on ≥sm so it
+                    uses the horizontal space. Seat config now lives on the
+                    headline; the confusing fleet-reg cross-reference is gone. */}
                 {derivedFlags.prep_time_by_category.vehicles > 0 && (
-                  <div>Est. prep: {formatPrepTime(derivedFlags.prep_time_by_category.vehicles)}</div>
+                  <div className="shrink-0 sm:text-right whitespace-nowrap">
+                    Est. prep: {formatPrepTime(derivedFlags.prep_time_by_category.vehicles)}
+                  </div>
                 )}
               </div>
             )}
@@ -806,6 +845,29 @@ export default function RequirementCard({
               </div>
             )}
 
+            {/* Backline location — "where is it?" (pre-hire, once prep has started) */}
+            {isBacklinePrehire && (backlineLocation || req.status !== 'not_started') && (
+              <div className="mt-1.5">
+                {backlineLocation ? (
+                  <button
+                    onClick={() => setShowLocationModal(true)}
+                    className="text-[11px] px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-100 font-medium hover:bg-indigo-100 transition-colors"
+                    title="Edit location"
+                  >
+                    {backlineLocationIcon(backlineLocation)} {backlineLocationLabel(backlineLocation)}
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => setShowLocationModal(true)}
+                    className="text-[11px] text-gray-400 hover:text-indigo-600 font-medium transition-colors"
+                    title="Record where the kit is"
+                  >
+                    ＋ Where is it?
+                  </button>
+                )}
+              </div>
+            )}
+
             {/* Rehearsal — studio-sitter detection reflection (Phase A, read-only) */}
             {req.requirement_type === 'rehearsal' && derivedFlags?.has_rehearsal && (() => {
               const detail = derivedFlags.rehearsal_detail;
@@ -986,9 +1048,14 @@ export default function RequirementCard({
                 .map(d => d.held_expires_at)
                 .filter((x): x is string => !!x)
                 .sort()[0];
-              const daysToExpiry = earliestExpiry
-                ? Math.ceil((new Date(earliestExpiry).getTime() - Date.now()) / 86400000)
-                : null;
+              // One source of truth for the pre-auth wording (shared with the
+              // Money tab + Manage modal) — represent the group as one synthetic
+              // held record so the copy can never contradict the other surfaces.
+              const preAuthDesc = describePreauth({
+                excess_status: 'pre_auth',
+                amount_held: preAuthTotal,
+                held_expires_at: earliestExpiry ?? null,
+              });
               if (unresolved.length === 0 && preAuths.length === 0) return null;
               return (
                 <div className="mt-1 space-y-1">
@@ -1006,13 +1073,10 @@ export default function RequirementCard({
                       £{heldAmount.toLocaleString('en-GB', { minimumFractionDigits: 2 })} excess still to resolve — reimburse, claim, roll over or waive.
                     </div>
                   )}
-                  {/* Blue info — live pre-auth, decision pending */}
+                  {/* Sky info — live pre-auth hold (wording shared across surfaces) */}
                   {preAuths.length > 0 && (
-                    <div className="text-xs text-blue-600 bg-blue-50 border border-blue-200 rounded px-2 py-1">
-                      Pre-auth £{preAuthTotal.toLocaleString('en-GB', { minimumFractionDigits: 2 })} held
-                      {daysToExpiry !== null && (daysToExpiry > 0
-                        ? ` — auto-releases in ${daysToExpiry} day${daysToExpiry === 1 ? '' : 's'}`
-                        : ' — releasing imminently')}. Capture now if claiming for damage, otherwise no action needed.
+                    <div className="text-xs text-sky-700 bg-sky-50 border border-sky-200 rounded px-2 py-1">
+                      {preAuthDesc.headline} {preAuthDesc.detail}
                     </div>
                   )}
                 </div>
@@ -1077,7 +1141,12 @@ export default function RequirementCard({
                     return (
                       <button
                         key={s}
-                        onClick={() => { onStatusChange(req.id, s); setShowStatusMenu(false); }}
+                        onClick={() => {
+                          onStatusChange(req.id, s);
+                          setShowStatusMenu(false);
+                          // Finishing backline prep? Offer to record where it went.
+                          if (isBacklinePrehire && s === 'done') setShowLocationModal(true);
+                        }}
                         className={`w-full text-left px-3 py-1.5 text-xs hover:bg-gray-50 flex items-center gap-2 ${req.status === s ? 'font-bold' : ''}`}
                       >
                         <span className={`w-2 h-2 rounded-full ${sc.bg.replace('100', '500')}`} />
@@ -1096,6 +1165,19 @@ export default function RequirementCard({
               className={`inline-flex px-3 py-1 rounded text-xs font-medium ${statusConfig.bg} ${statusConfig.colour}`}>
               {typeLabels?.[req.status] || statusConfig.label}
             </span>
+          )}
+
+          {/* Edit button — reminders only */}
+          {req.requirement_type === 'reminder' && onEdit && (
+            <button
+              onClick={() => onEdit(req)}
+              className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-ooosh-600 transition-all ml-1"
+              title="Edit reminder"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+              </svg>
+            </button>
           )}
 
           {/* Remove button */}
@@ -1371,6 +1453,15 @@ export default function RequirementCard({
             </>
           )}
         </div>
+      )}
+
+      {showLocationModal && (
+        <BacklineLocationModal
+          requirementId={req.id}
+          initialLocation={backlineLocation}
+          onClose={() => setShowLocationModal(false)}
+          onSaved={(loc) => setBacklineLocation(loc)}
+        />
       )}
     </div>
   );

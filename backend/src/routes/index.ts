@@ -46,15 +46,20 @@ import rackPlansRouter from './rack-plans';
 import stagingRouter from './staging';
 import carnetsRouter from './carnets';
 import studioSittersRouter from './studio-sitters';
+import rehearsalsRouter from './rehearsals';
 import backlineMatcherRouter from './backline-matcher';
 import wiseRouter from './wise';
 import autoChaseRouter from './auto-chase';
+import leadsRouter from './leads';
+import staffDocumentsRouter from './staff-documents';
+import freelancersRouter from './freelancers';
 
 const router = Router();
 
 router.use('/health', healthRouter);
 router.use('/auth', authRouter);
 router.use('/people', peopleRouter);
+router.use('/freelancers', freelancersRouter);  // Freelancer onboarding — invite + application lifecycle
 router.use('/organisations', organisationsRouter);
 router.use('/venues', venuesRouter);
 router.use('/interactions', interactionsRouter);
@@ -90,7 +95,10 @@ router.use('/rack-plans', rackPlansRouter);  // Rack Planner — how a rack/syst
 router.use('/staging', stagingRouter);  // Staging Calculator — stock/availability/push + 3D plan short-links (embedded vanilla-JS tool)
 router.use('/carnets', carnetsRouter);  // ATA Carnet management (HH-derived item 575) — read-only in slice 1
 router.use('/studio-sitters', studioSittersRouter);  // Rehearsals — studio-sitter roster (site-evening shifts + assignment)
+router.use('/rehearsals', rehearsalsRouter);  // Rehearsals — per-job details, band profile, client info pack
 router.use('/auto-chase', autoChaseRouter);  // Auto-Chase Phase 1 — Gmail ingestion status/manual-run (inert until GMAIL_* env set)
+router.use('/leads', leadsRouter);  // Lead Finder (Tour Finder → OP) — Ticketmaster cold-lead discovery + scoring
+router.use('/staff-documents', staffDocumentsRouter);  // Staff Documents & Training — versioned policies/agreements, tick/sign completion + tracking
 router.use('/hire-forms', hireFormsRouter);
 router.use('/requirements', requirementsRouter);
 router.use('/portal', portalRouter);  // Freelancer portal — own JWT auth (not OP staff JWT)

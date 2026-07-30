@@ -2113,6 +2113,38 @@ router.post('/:id/release', validate(releaseSchema), async (req: AuthRequest, re
   }
 });
 
+// ── POST /api/excess/:id/reconcile-preauth — Confirm a held pre-auth's true state ──
+//
+// Asks the truth (Stripe for online holds; the 5-day window for card-machine
+// holds) whether a `pre_auth` hold is still live, and flips it to `released` if
+// it's gone. This is what lets the UI show a BINARY held/not-held state instead
+// of guessing about a past-expiry hold.
+//
+// Powers: the "Check hold status" button in the Manage modal, and the
+// opportunistic self-heal on Money-tab / Overview load. Read-only against Stripe
+// (retrieve, never capture) — the only side effect is flipping OP to `released`
+// when Stripe confirms the hold is canceled. Never pre-empts a live hold.
+//
+// Idempotent: a record already `released` (or never a pre_auth) returns
+// `not_preauth` with the current row and changes nothing.
+router.post('/:id/reconcile-preauth', async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    const { reconcileExcessPreauth } = await import('../services/excess-preauth');
+    const reconcile = await reconcileExcessPreauth(id);
+    const updated = await query(`SELECT * FROM job_excess WHERE id = $1`, [id]);
+    if (updated.rows.length === 0) {
+      res.status(404).json({ error: 'Excess record not found' });
+      return;
+    }
+    res.json({ data: updated.rows[0], reconcile });
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error('[excess] reconcile-preauth error:', errMsg, error);
+    res.status(500).json({ error: 'Failed to reconcile pre-auth', detail: errMsg });
+  }
+});
+
 // ── POST /api/excess/:id/claim — Record damage claim (apply deposit to invoice) ──
 //
 // Applies part of the held deposit to a HireHop invoice on the current job. The
@@ -2396,9 +2428,36 @@ router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSch
     // 15781/15235/15358/15503/15996 — Jun 2026).
     const looksLikeStripePi = (v: unknown): v is string =>
       typeof v === 'string' && /^pi_[A-Za-z0-9]+$/.test(v.trim());
-    const resolvedPi: string | null =
+    let resolvedPi: string | null =
       (looksLikeStripePi(current.stripe_payment_intent_id) ? current.stripe_payment_intent_id.trim() : null) ||
       (looksLikeStripePi(current.payment_reference) ? current.payment_reference.trim() : null);
+
+    // Rollover chain-walk: when THIS record has no PI of its own (e.g. it's a
+    // rolled-over child that only inherited hh_deposit_id, not the PI) walk the
+    // deposit chain back to the ORIGINATING record that first took the money and
+    // use its PI. Mirrors resolveDepositBankId's chain-walk for the bank. This is
+    // what lets a rolled-over excess reimburse to the original card one-click,
+    // "from wherever it ended up", instead of loud-failing for want of a PI.
+    if (!resolvedPi && current.hh_deposit_id) {
+      const originPi = await query(
+        `SELECT stripe_payment_intent_id, payment_reference
+         FROM job_excess
+         WHERE hh_deposit_id = $1
+           AND (stripe_payment_intent_id ~ '^pi_' OR payment_reference ~ '^pi_')
+         ORDER BY COALESCE(payment_date, created_at) ASC
+         LIMIT 1`,
+        [current.hh_deposit_id]
+      );
+      const origin = originPi.rows[0];
+      if (origin) {
+        resolvedPi =
+          (looksLikeStripePi(origin.stripe_payment_intent_id) ? origin.stripe_payment_intent_id.trim() : null) ||
+          (looksLikeStripePi(origin.payment_reference) ? origin.payment_reference.trim() : null);
+        if (resolvedPi) {
+          console.log(`[excess] Reimburse PI resolved via rollover chain (deposit ${current.hh_deposit_id}) → ${resolvedPi}`);
+        }
+      }
+    }
 
     let stripeRefundId: string | null = null;
     const stripeRefundPath = method === 'stripe_gbp' && !!resolvedPi;
@@ -2437,7 +2496,7 @@ router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSch
         console.error('[excess] Stripe refund failed:', msg);
         res.status(502).json({
           error: 'Stripe refund failed',
-          detail: msg,
+          detail: `${msg} — if the original charge is past Stripe's refund window (~180 days), the card can no longer be refunded. Contact the hirer and reimburse by another method (e.g. BACS) via this form instead.`,
         });
         return;
       }

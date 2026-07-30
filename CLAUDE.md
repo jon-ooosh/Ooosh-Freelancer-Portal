@@ -259,10 +259,10 @@ If you need to change Nginx behaviour (new location blocks, proxy rules, headers
 
 ### Phase 2 — In Progress
 
-- [x] **HireHop job sync (read-only pull)** — jobs table, sync service, API routes, job_value sync
+- [x] **HireHop job sync (read-only pull)** — jobs table, sync service, API routes
   - Automated: runs every 30 minutes via `config/scheduler.ts`
   - Logged to `sync_log` table with status tracking
-  - **Known issue:** job_value (money) not populating from HireHop. Fixed falsy check bug. May need `job_data.php` instead of `search_list.php`. Check `[HH Job Sync] Sample MONEY value:` in server logs.
+  - **⚠️ `job_value` is NOT written by the sync (fixed Jul 2026 — do not reintroduce).** HireHop's `MONEY` field from `search_list.php`/`job_data.php`/webhook payloads is empty/0 for most jobs; for months the sync blindly copied it over `jobs.job_value`, clobbering the cached display value back to £0 every 30 minutes (Money-tab visits kept "fixing" it, sync kept re-zeroing — the tug of war behind the "client history values revert to £0" report, Jul 2026). `job_value` is owned by the billing-accrued path: Money tab `/summary` side-effect (instant per-job self-heal) + `services/job-value-sync.ts` gap-filler (hourly scheduler at :40, 20 jobs/pass; also behind `POST /api/money/sync-values`). One-shot repair: `backend/src/scripts/backfill-job-values.ts` (dry-run default, `--commit`). Any future sync/webhook field-mapping work MUST leave `job_value` alone.
 - [x] **Jobs UI** — jobs list page, job detail view, status badges, filtering by status
 - [x] **Enquiry & Sales Pipeline (Phases A–D)** — see docs/PIPELINE-SPEC.md
   - [x] Phase A: Data layer (migrations 003-006, pipeline fields, chase interaction type)
@@ -560,6 +560,7 @@ Existing hire form app is NOT being rebuilt — just repointing its data layer f
   - `POST /api/driver-verification/next-step` — routing engine (replaces `get-next-step.js`)
   - `POST /api/driver-verification/update` — partial driver field updates (upsert, whitelisted fields)
   - `GET /api/driver-verification/check-hire-form` — check if hire form exists for job
+  - `GET /api/driver-verification/driver-by-scan-ref?scan_ref=` — resolve driver email from iDenfy scanRef (Jul 2026, see "iDenfy identity resolution" below)
 - [x] Auth: API key (`X-API-Key`), Bearer JWT (hire_form_session type), shared verification secret
 - [x] Document analysis engine + routing engine ported from `get-next-step.js`
 - [x] Mounted in routes/index.ts at `/driver-verification`
@@ -621,6 +622,11 @@ Netlify functions being repointed with `DATA_BACKEND` feature flag (default: `mo
 - [ ] Vehicle swap flow (see Phase D3 below)
 - [ ] Monitor for 1-2 weeks, then remove Monday.com fallback code
 
+**iDenfy identity resolution + same-origin return URLs (Jul 2026, Mae/mae-hill.com incident):**
+Two hire-form-app bugs fixed together — full detail in the hire form repo's CLAUDE.md (`ooosh-driver-verification-`).
+- **Never derive a driver's email from the iDenfy clientId.** The clientId encoding is lossy (strips chars outside `[a-z0-9_]` — hyphens pre-fix, still `+`/apostrophes), so the webhook decoded `team@mae-hill.com` as `team@maehill.com` and find-or-created a **phantom driver record**; the real record never got the licence data and the router looped the driver back into iDenfy forever. Convention now: `create-idenfy-session.js` writes the scanRef onto the OP driver row keyed by the RAW email (via `POST /driver-verification/update`); `idenfy-webhook.js` resolves the authoritative email via `GET /driver-verification/driver-by-scan-ref` (clientId decode kept only as fallback for in-flight sessions / OP outage). Watch for phantom records (same driver, hyphen-stripped email variant) if the fallback ever fires for a dash-domain driver on a pre-fix session.
+- **iDenfy success/error URLs must be same-origin with the driver's browser.** The app serves on BOTH `hireforms.oooshtours.co.uk` (what OP's hire-form emails link to) and `ooosh-driver-verification.netlify.app`, with no redirect between them; the session token lives in per-origin sessionStorage. The return URLs were hardcoded to netlify.app, so hireforms-origin drivers came back tokenless → driver-status 401 loop → the "spinning wheel of death" (ProcessingHub also now stops polling on 401 and offers re-verification, and the processing-hub URL handler validates the session like every other step).
+
 **Phase C5 — VE103B Certificate Generation** ✅ COMPLETE (9 Apr 2026)
 VE103B is a UK document authorising a named driver to take a hired vehicle abroad. Printed as text-only overlay onto pre-printed official forms. Replaces manual process + Google Sheets log.
 **Full spec:** `docs/VE103B-SPEC.md`
@@ -665,6 +671,8 @@ Replaces the prominent "+ Assign Driver" Quick Assign button with per-card next-
 - [x] Quick Assign demoted: prominent primary button → subtle "+ Add driver manually" text link, gated to admin/manager only, tooltip explains when to use. Modal flow itself unchanged — still `/api/hire-forms/quick-assign` on the backend.
 - [x] Send / Chase hire form button untouched (lives on Job Requirements vehicle card, mid-tour use case preserved).
 
+**Drivers & Vehicles tab — "Vehicles on this job" strip + card layout convention (Jul 2026).** The reg is shown **once**, in a header strip at the top of the tab — NOT repeated prominently on every driver card. The strip (`JobDetailPage.tsx`) lists every distinct van allocated to the job, deduped across **all** assignment rows **including driverless staff-allocation rows** that never surface as a driver card (a van picked on Allocations before a driver is bucketed onto its slot — previously invisible on the job card). Source: `jobAssignedVehicles` state, built in `loadVehicleAssignments` from the raw `allRows` (the shaped/displayed `vehicleAssignments` filters those driverless rows out, so DON'T derive the strip from it). Each HH-detected van type with no van allocated shows a dashed **"<type> — unassigned"** chip (detected slots from `hhSyncResult…vehicle_slots` minus assigned, matched via the `normVanType` helper). Strip chips are links: assigned → `/vehicles/fleet/:id` (Vehicle Detail); unassigned → `/vehicles/allocations?job=<hh>` (a shortcut — allocation itself stays per driver-slot, so a chip can't one-click assign). Per-driver cards therefore carry **no reg at all** (since every driver on a job can drive any van on it, a per-card reg conveyed nothing meaningful and just repeated on every card — the strip is the single source, and Book Out / Check In read the van off the row internally via `effective_vehicle_id`, never from a visible chip). Cards lead with the driver name (no "DRIVER" label) and fold the excess (£ / status / Edit / Manage) inline to the right of the name (`flex-col` on mobile so long names don't wrap mid-word, `sm:flex-row` inline on desktop). Hire-form actions (Generate PDF / +Email / View / Re-send) are collapsed into a **"Hire form ▾"** dropdown so the state-aware primary button (Allocate / Book Out / Check In) stays the focus. **Don't re-add a prominent per-card reg** — the strip is the single source. On the **Overview** vehicle requirement card (`RequirementCard.tsx`): the allocated reg(s) + seat config (Round a table / Forward-facing) live on the **headline** ("Vehicle — RO23HLU  🔄 Round a table"), the headline mode qualifier shows **only for mixed jobs** (pure self-drive/V&D rely on the per-slot toggles — don't say "Self-Drive" twice), the prep estimate is right-aligned to use the card's width, and the old "which fleet vans already have this layout / need turning" reg cross-reference was **removed** (staff found the unrelated regs confusing). `RequirementCard` takes `assignedVehicleRegs` (threaded from `JobPrepChecklist`); the legacy `seatAvailability` prop is kept in the type but unused.
+
 **Staggered multi-van job discovery (Jun 2026).** A job with more than one van whose vans leave on **different days** must stay reachable in the book-out + allocation pickers after the first van has gone out. The trap: a job has a single `out_date`, so once van 1 leaves, `out_date` is in the past — and both job-discovery endpoints (`GET /api/vehicles/jobs/going-out` → Fleet ▸ Van ▸ Book Out picker; `GET /api/vehicles/jobs/upcoming` → Allocations "Going Out") window strictly on `out_date >= today`, dropping the job and making the remaining van unbookable except via the BookOutPage "enter job # manually" escape hatch. **Incident: job 15411 (Jabir – HLR & HLU), Jun 2026** — RO23HLR out day 1, RO23HLU collected day 2, only HLR showed. The recent multi-van work was all in the slot/assignment layer (assignment rows, allocation cascade, per-card buttons), which operates on a job you can already *see*; this is one layer upstream in job discovery, which had assumed a job goes out on one day. **Fix:** both endpoints also retain a job that has already started (`out_date < today`), isn't back yet (`COALESCE(return_date, job_end) >= today`), is still `ACTIVE_STATUSES`, AND still has a van slot in a pre-book-out state — a `soft`/`confirmed` `vehicle_hire_assignments` row found via the **dual-match join** (`vha.job_id = j.id OR vha.hirehop_job_id = j.hh_job_number`, because staff-allocation rows carry only `hirehop_job_id` until a hire form is submitted). Mirrors the `/jobs/upcoming-due-back` widening pattern. **Don't re-window these queries to a plain `out_date >= today`** or you reintroduce the bug. Limitation: this keys off an *existing* un-booked-out assignment row for the late van (the common case — vans are pre-allocated/hire-formed); a started multi-van job where the second van has *no* assignment row at all still relies on the manual-entry fallback. The "enter job # manually" field stays as belt-and-braces.
 
 **Deferred from this pass:**
@@ -680,6 +688,7 @@ Joined-up referral management: flag → email → review → resolve → date ex
 - [x] Contextual warning banner: amber (pending), green (approved), red (declined)
 - [x] Referral email notification (`referral_alert` template) on hire form submission when `requires_referral=true`
 - [x] Driver verification snapshot PDF generation (`driver-snapshot-pdf.ts`) — ported from Monday.com Netlify function
+- [x] **Snapshot document matching — tag/label variants (Jul 2026 fix).** `loadDriverDocuments` used to match each file against an exact-string label map (`'licence front'`, `'poa 1'`, …). The live hire-form / iDenfy upload path writes tags like `licence_front` and labels like `license_front` / `poa1` (American spelling, underscores, no spaces — the Monday migration used yet another form, `Licence Front` / `POA 1`). So snapshots silently dropped the licence + POA images; only `passport` / `signature` happened to match (Adam Coelho / job 16063 incident). Now matches on a NORMALISED token (lowercase, strip non-alphanumerics) against `tag` first then `label`, via `DOC_MATCH_TOKENS` — mirrors the frontend `DriverDetailPage` `DOCUMENT_CATEGORIES` fileLabels lists. **Kept as an inline backend map, NOT a `shared/` constant:** the backend doesn't import `shared/` at runtime (its `rootDir` excludes `../shared`), so a shared value would need build-config surgery — inline mirrors the frontend with zero deploy risk. Keep the two lists in step when a new upload path invents another variant.
 - [x] Snapshot PDF attached to referral notification email
 - [x] Date extension on approval: mirrors driver's existing dates exactly. **Empty stays empty** — no `today` / `today+90d` fallbacks. Backend skips empty values on the UPDATE so blank pickers leave the underlying date untouched. Stops staff inadvertently fabricating a check date that never happened (e.g. DVLA date for a non-UK driver) or shortening an existing future date by accepting a defaulted "today" without realising. Pre-May 2026 the form pre-filled today / today+90d on every null field — flagged by Mads Antonsen referral 7 May 2026 (HH 15207) where DVLA picker showed today's date for a non-UK driver. Help text reads "Mirrors the driver's current dates — leave blank to leave a date untouched."
 - [x] Adjusted excess field on resolution (for insurer-imposed excess increases, stored on `job_excess` records)
@@ -696,8 +705,15 @@ Joined-up referral management: flag → email → review → resolve → date ex
 | `true` | `'declined'` | Not Approved | red | Referred, insurer declined |
 
 **The transitions:**
-- Hire form submission with `requires_referral=true` → `referral_status` stays NULL (red Refer to Insurers todo state). Pre-May 2026 `routes/hire-forms.ts` was setting `'pending'` here, jumping the queue and making it look like staff had already actioned something they hadn't. The `referral_alert` email to admins still fires from `requires_referral=true`, independent of `referral_status`.
+- Hire form submission with `requires_referral=true` → `referral_status` stays NULL (red Refer to Insurers todo state). Pre-May 2026 `routes/hire-forms.ts` was setting `'pending'` here, jumping the queue and making it look like staff had already actioned something they hadn't. The `referral_alert` email still fires from `requires_referral=true`, independent of `referral_status` (see the "referral alert" note below).
+- **⚠️ `POST /api/driver-verification/update` MUST NEVER write `referral_status` / `referral_date` (Jul 2026 fix).** The standalone hire-form app sends `referralStatus: 'pending'` (pre-fix behaviour that was never corrected on the app side); `driver-verification.ts` used to whitelist those two columns and write them verbatim, so a driver whose flow terminated at `driver-verification/update` (a known intermittent gap where `POST /api/hire-forms` never runs) leaked a false amber "Referred & Waiting" when nobody had referred anything. Both columns are now stripped from the `allowedFields` whitelist (and the `referralStatus`/`referralDate` field-map entries removed), so the app can only set `requires_referral` + `referral_notes` — mirroring `hire-forms.ts`, which never writes `referral_status`. Meadham / HH 16330 incident.
 - Staff clicks "Mark as Referred to Insurer" on DriverDetailPage → `referral_status='pending'`, `referral_date=today` (audit of when the email actually went out). Button only renders when `referral_status IS NULL`.
+
+**Referral alert email — idempotent, three trigger paths (Jul 2026, migration 186).** The `referral_alert` email (driver snapshot PDF attached, to info@ + will@ via `getVehicleNotificationTargets`) lives in **`services/referral-alert.ts` `sendReferralAlert(driverId, opts)`** — the single sender. It's fired from THREE places, deduped by `drivers.referral_alert_sent_at` (a conditional-UPDATE claim before the send; the claim is released on send-failure so a retry / later path can re-attempt):
+  1. **`POST /api/hire-forms`** — full form submitted (was the ONLY path pre-fix).
+  2. **`POST /api/driver-verification/update` signature step** — fired when `signature_date` is set, self-gated on `requires_referral` (no-op otherwise). **This is the path that was missing:** a driver whose SignaturePage chain reached only `driver-verification/update` set the flag + got a Will-addressed *bell* (`fireReferralNotification`, no email) but no info@ email ever went out. Catches the case where the flag was set in an *earlier* update and the signature lands later (the exact Meadham timeline).
+  3. **Daily 09:18 safety-net scanner** (`runReferralAlertScan`, `config/scheduler.ts`) — sweeps `requires_referral=true AND referral_alert_sent_at IS NULL AND signature_date >= today-14d` and fires the alert for any that both paths above missed.
+  **Do NOT re-add a local referral-alert sender** in `hire-forms.ts` or elsewhere — route every send through `sendReferralAlert` so the once-only claim holds across all paths. `fireReferralNotification` in `driver-verification.ts` stays as the early *bell-only* nudge (mid-flow visibility for the vehicle manager) and deliberately sends no email.
 - Staff resolves via "Resolve Referral" form → one of three outcomes:
   - `'approved'` (insurer said yes): clears `requires_referral`, `insurance_status='Approved'`, allows date extensions
   - `'waived'` (no referral needed): same effect as `'approved'` but distinct in `referral_status` for audit clarity. UI label "Approved without referral (waived)"
@@ -717,6 +733,43 @@ Joined-up referral management: flag → email → review → resolve → date ex
 - [ ] Pipeline/Job Detail: referral status shown per-job where driver has pending referral (blocks dispatch)
 - [ ] `post-signature-notifications.js` repointing: currently reads from Monday.com to check referral — needs OP backend repoint (reads from driver-verification status endpoint instead)
 - [ ] Excess module integration: adjusted excess from referral resolution flows into excess tracking/payment portal
+
+**Phase D2b — Per-driver referral gate at book-out ✅ SHIPPED (Jul 2026)**
+
+**Motivation incident (29 Jul 2026, HH 15075 "My Generation - Van hire"):** 1 van (RO23HLV), 3 drivers. James O'Dell + Sam Bryant approved; **Joseph Hilton `requires_referral=true, referral_status='pending'`** (Referred & Waiting — insurers not yet responded). The van was correctly booked out on the two approved drivers, but Joseph **also** got a Vehicle Condition Report AND a "Your vehicle hire agreement for RO23HLV" email (confirmed in Resend) — i.e. the system treated a driver we're not yet cleared to insure as authorised. jon's rule: **"so long as we have one driver verified we can book out, but a referral-pending driver shouldn't be included automatically."**
+
+**Root cause: there is NO referral gate anywhere on the physical book-out path.** The only "gate" signals are informational and enforce nothing:
+- `POST /api/assignments/:id/book-out` (`assignments.ts` ~483) pushes `"Driver referral pending"` into a `warnings[]` array then books out regardless.
+- `GET /api/assignments/dispatch-check/:jobId` returns `canDispatch: true` always (feeds the amber `ExcessGateBanner` "referral pending" text — a nudge, not a block).
+- `PATCH /api/hire-forms/:id → booked_out` (the path BookOutPage actually uses) has **no referral check**; it fires `firePostBookOutHooks`, which emails the agreement.
+- The ONLY hard referral gate in the codebase is `hire-forms.ts` `/quick-assign` (~880) — a different entry point Joseph didn't come through.
+
+**How the agreement reached Joseph:** `firePostBookOutHooks` emails a hire agreement per-driver via two paths, **neither of which filters on referral status**:
+1. **Own-van** `generateAndEmailHireFormPdf(assignmentId)` (`hire-forms.ts` ~2034) — fires per booked-out assignment. **This is the path that emailed Joseph** (on a single-van job all drivers share the one van, so the fan-out below is a no-op and the own-van path emails everyone).
+2. **Cross-van fan-out** `fanOutVanHireForms` → `generateAndEmailCrossVanHireForm` (~2159) — targets signed self-drive drivers on a *different* van (`vehicle_id IS DISTINCT FROM` the booked-out van). No-op on single-van jobs; the leak path on **multi-van** jobs.
+
+**The design (agreed with jon):** book-out is **per-van** (the van legitimately goes out on its approved drivers); a referral is **per-driver**. So gate the *paperwork/authorisation* per driver, never the whole van. Model it on the existing **mid-tour driver flow** — a referral-pending driver is "held back" and authorised later exactly like a driver whose hire form lands after book-out.
+
+- **Referral-authorised set:** a driver may receive an agreement / be treated as authorised only when `referral_status IN ('approved','waived')` OR the driver was never flagged (`requires_referral=false`). `'waived'` counts (jon's flag — downstream UX already treats it as approved). A driver with `requires_referral=true AND referral_status NOT IN ('approved','waived')` is **held back**.
+- **The skip guard lives in BOTH agreement generators** (own-van + cross-van), NOT only one — single-van jobs leak via own-van, multi-van via fan-out. Cleanest shape: one shared helper `isDriverAuthorisedForAgreement(assignmentId)` called at the top of `generateAndEmailHireFormPdf` AND `generateAndEmailCrossVanHireForm`. **Return a distinct `'held_back'` sentinel, never `'failed'`** — a deliberate skip must not trip `runHookWithRecovery`'s retry/alert (which treats `'failed'` as a transient error). For the own-van path, check BEFORE the atomic `hire_form_email_claimed_at` claim so a later authorise can re-fire cleanly (no burnt claim). The Condition Report send path (`/send-condition-report` recipients loop) needs the same per-recipient filter so a held-back driver gets neither artefact.
+- **Held-back driver keeps a distinct card state** on Drivers & Vehicles — "⏳ Referral pending — not authorised to drive" — visibly ON the job (NOT deleted), keying off `drivers.requires_referral`/`referral_status` (confirmed: Joseph's pending state lives on the `drivers` row; his `job_excess` row is untouched `not_required` £0). This is a card-render change only — no new column needed (the pending state is already on `drivers`).
+- **Authorise action (mid-tour rails):** on referral resolution to `approved`/`waived`, staff get a one-click "Authorise & send agreement" on that card. It: stamps `hire_start = NOW()` (the driver wasn't authorised to drive during the wait — same as the mid-tour `post-signature` branch), fires the agreement via `generateAndEmailHireFormPdf` for that one assignment, and drops the mid-tour-style team notification. Human-in-the-loop (staff click confirms the insurer actually cleared them) — do NOT auto-fire on resolution.
+- **Increased-excess-on-referral is a warning at authorise time, never an auto-bump.** The referral-resolution form already writes an insurer-imposed adjusted excess to `job_excess` (Phase D2). Top-N is deliberately NOT auto-recomputed (documented design — money may already be collected). So on 15075: Joseph currently `not_required` £0 (James holds the single £1,200 slot). If Joseph resolves at £1,800 he becomes the new top-1 and the job excess *should* rise to £1,800 (£600 top-up). The authorise step **surfaces the recomputed top-N figure vs what's held** and lets staff collect/decide — consistent with the OP convention (excess is a warning, not a hard gate; book-out itself is non-blocking on excess). Never silently move money; on multi-van jobs a bumped driver only changes the job total if they'd land in the top-N.
+
+**Build checklist (all shipped):**
+- [x] `isDriverAuthorisedForAgreement(assignmentId)` shared helper in `hire-forms.ts` (`requires_referral && referral_status NOT IN ('approved','waived')` → held back; **fails OPEN** — a missing assignment/driver row returns authorised, since that's a data gap not a referral hold, and the referral-alert path surfaces genuine pending referrals loudly elsewhere).
+- [x] Guard at top of `generateAndEmailHireFormPdf` (own-van, `Promise<void>`) — early `return` (void) BEFORE the atomic `hire_form_email_claimed_at` claim, so a later authorise re-fires cleanly (no burnt claim). Void early-return is the "held_back" equivalent for a void fn — `runHookWithRecovery` only retries on a THROWN error, so a deliberate skip never trips retry/alert.
+- [x] Guard at top of `generateAndEmailCrossVanHireForm` (cross-van fan-out) — returns the distinct `'held_back'` sentinel (union widened to `'sent' | 'skipped' | 'failed' | 'held_back'`) BEFORE the `hire_form_documents` INSERT claim. `fanOutVanHireForms` only escalates `=== 'failed'`, so `'held_back'` never throws/retries.
+- [x] Per-recipient filter in `vehicles.ts` `/send-condition-report` — resolves the job's held-back drivers (by email + `full_name`, dual job-match on `hirehop_job_id`/`hh_job_number`) once, skips any matching recipient with a "Referral pending — withheld" result line. Held-back driver gets neither the agreement nor the condition report.
+- [x] Held-back card state "⏳ Referral pending — not authorised to drive" on JobDetailPage Drivers & Vehicles (render-only, off the assignment row's `requires_referral`/`referral_status`, aliased `driver_requires_referral`/`driver_referral_status` from `assignments.ts` `BASE_SELECT`). Suppresses the Allocate/Book Out/Soft-Book-Out CTAs while held back.
+- [x] "✅ Authorise & send agreement" action (`POST /api/hire-forms/:id/authorise-agreement`, MANAGER_ROLES) — shows on a card once `referral_status IN ('approved','waived')` AND no agreement produced yet (`!hire_form_pdf_key`) AND a van is linked. Stamps `hire_start = NOW()` (mid-tour rails), fires `generateAndEmailHireFormPdf` for that one assignment, drops a mid-tour-style team bell to the vehicle manager. Human-in-the-loop — NOT auto-fired on resolution.
+- [x] Authorise step surfaces recomputed top-N excess vs held in the response (`results.excess = { requiredTotal, heldTotal, outstanding }`, summed over non-terminal `job_excess` on the job); the frontend alerts a "£X outstanding — collect on the Money tab if needed" heads-up. Warning only, NEVER an auto-bump.
+
+**Conventions worth remembering:**
+- **The referral gate lives in `isDriverAuthorisedForAgreement` — route ALL new agreement/authorisation surfaces through it** (both agreement generators + the condition-report loop already do). Don't re-derive `requires_referral && referral_status NOT IN (…)` inline.
+- **`'waived'` counts as authorised** everywhere (matches `deriveDriverStatus` + the resolve-referral flow).
+- **Book-out stays per-VAN, non-blocking.** The gate withholds only the per-driver PAPERWORK/authorisation — the van still goes out on its approved drivers. A held-back driver stays visibly ON the job (card render off `drivers` fields; no new column).
+- **Never auto-bump excess on authorise.** The referral-resolution form already writes any insurer-imposed adjusted excess to `job_excess`; the authorise step only SURFACES the recomputed top-N vs held so staff decide whether to collect.
 
 **Phase D3 — Vehicle Swap (Breakdown / Reallocation)** ← IN PROGRESS (May 2026)
 When a vehicle breaks down mid-hire and needs swapping to a replacement.
@@ -885,7 +938,7 @@ The hire form process calculates excess. The principle: charge the excess of the
 - [x] Payment methods match HireHop bank accounts exactly (same names, same IDs)
 - [x] Smart payment form: quick-click amounts (25% deposit, 50%, full/remaining), auto-detect deposit vs balance
 - [x] Deposit calculator: min 25% (floor £100), full payment if <£400
-- [x] Job values populated from HH billing_list accrued (side-effect on Money tab view + bulk sync endpoint)
+- [x] Job values populated from HH billing_list accrued (side-effect on Money tab view + hourly `job-value-sync` gap-filler; the HH job sync/webhook deliberately never write `job_value` — see Phase 2 job-sync note)
 - [x] "Overview" tab (renamed from Job Requirements) with payment progress bar at top
 - [x] Email templates: booking confirmed, payment received, excess received/reimbursed/claimed, last-minute alert
 - [x] Email branding: purple header (#7B5EA7), footer "Transport - Backline - Rehearsals"
@@ -1135,12 +1188,23 @@ Built on branch `claude/excess-preauth-lifecycle-ZvUQA` as one PR (jon's call). 
 
 **Branch for this work:** PR 1 = #573, PR 2 = #582, PR 3 = #597 + #599, PR 3 polish = #603 (all merged to main). PR 4 = branch `claude/excess-preauth-lifecycle-ZvUQA`. The held/taken pre-auth lifecycle is now feature-complete.
 
+**Pre-auth UX consistency + binary held/released + on-demand Stripe reconcile (Jul 2026).** Fixed the contradiction where three surfaces hand-wrote their own pre-auth copy and disagreed about a past-expiry hold (Overview card said "held, releasing imminently, no action needed"; Money-tab modal said "expired, likely already released, verify"). Both read the SAME `pre_auth` record — which sits in limbo until Stripe confirms cancellation (webhook or nightly sweep). Fix:
+- **One source of truth for the wording** — `frontend/src/lib/preauth.ts` `describePreauth(record)` returns `{ tone, isHold, wasHold, pastExpiry, label, headline, compact, detail, stripeUrl }`, consumed by `RequirementCard` (excess_resolve aggregate note, via a synthetic group record), `MoneyTab` (row line), and `ExcessPaymentModal` (banner). They can no longer drift.
+- **Binary, no "maybe" state** (jon's call — extra hedge states read as noise). A record is either **Held** (blue, capture-if-claiming-else-auto-releases) or **Released** (grey, audit line "£X was held DD/MM–DD/MM and released without capture. No action needed"). The Released state deliberately PRESERVES the audit fact that a hold happened.
+- **`released` is what makes binary honest** — a stuck past-expiry `pre_auth` is resolved to its true state via **`POST /api/excess/:id/reconcile-preauth`** (single-record engine `reconcileExcessPreauth` in `services/excess-preauth.ts`): Stripe channel → `paymentIntents.retrieve`, flip to `released` only if `canceled` (never pre-empts a hold Stripe still considers live — their window runs ~7 days); card-machine → release once past the 5-day window. Returns `{ changed, status: 'released'|'still_held'|'not_preauth'|'unknown' }`. The nightly 09:40 sweep now REUSES this engine (was inline — one code path, no drift).
+- **Plan-(b) self-heal without delaying load** — `reconcileExpiredPreauthsForJob(jobId)` is called **fire-and-forget** at the top of `/money/:jobId/summary` + `/excess-info` (in-window holds make ZERO Stripe calls; only past-expiry rows are touched), so a stuck hold resolves to Held/Released on view. Plus a manual **"Check hold status"** button in the Manage modal for instant resolution (closes → parent re-renders Released if confirmed gone).
+- **Stripe visibility gap** — the Manage modal now shows a **"View in Stripe ↗"** deep-link (`dashboard.stripe.com/payments/{stripe_payment_intent_id}`) so staff can eyeball the payment directly. Dig-in surface only (modal), not always-on UI (too noisy).
+- **Label fix** — `RequirementCard` labelled `pre_auth` as "Pre-auth **Taken**" (wrong — a hold is NOT taken money, the whole point of migration 087); now "Pre-auth **Held**" everywhere, matching the modal + MoneyTab. Added a `released` → "Pre-auth Released" label.
+- **Convention:** any NEW surface rendering a pre-auth MUST use `describePreauth()` rather than hand-writing copy; any "resolve a stuck hold" path MUST go through `reconcileExcessPreauth` so Stripe/window logic stays in one place.
+
 ##### Phase F — Staff Card Payments (OP-first money loop)
 
 OP is now the staff control surface for the FULL post-collection money loop. Initial collection (PaymentIntent creation, payment-link generation) is the remaining piece — staff still walks to the card terminal for that.
 
 **Shipped (Jun 2026):**
 - [x] **OP-initiated Stripe refunds — excess** (`/excess/:id/reimburse` with `method='stripe_gbp'` + `stripe_payment_intent_id` on the record). Calls `stripe.refunds.create()` directly; HH paperwork pushed best-effort once Stripe succeeds; `refund_legs` JSONB pre-records the leg so the incoming `charge.refunded` webhook is a no-op.
+- [x] **Reimburse PI resolution chain-walks the rollover chain (Jul 2026).** The reimburse handler resolves the PaymentIntent from the record's own `stripe_payment_intent_id` / `payment_reference` first, then — if neither carries a `pi_` and the record has an `hh_deposit_id` — walks the deposit chain (earliest record sharing `hh_deposit_id` that carries a `pi_`) and uses *its* PI. Mirrors `resolveDepositBankId`'s chain-walk for the bank. This is what lets a **rolled-over excess reimburse to the original card one-click "from wherever it ended up"** — the rollover only copies `hh_deposit_id` forward, NOT the PI, so without this a `stripe_gbp` reimburse on the child would loud-fail (`no_stripe_pi`). Fixes existing rolled-over records retroactively (no migration — the origin still holds the PI). **Don't "fix" this instead by copying the PI forward at rollover time** — the chain-walk is the intended mechanism, and it's read-time so it covers historical records.
+- [x] **Stripe's ~180-day refund window is a real constraint — surfaced, not blocked (Jul 2026).** A card charge past Stripe's window can't be refunded to source; the refund may be *accepted* then bounce at the issuer async. Policy: **attempt the Stripe refund, don't pre-block on age**; on synchronous failure the `502` message tells staff to reimburse by another method (BACS via the same form); on async failure the **`charge.refund.updated` / `refund.updated` webhook (`status='failed'`) emails info@** (`services/stripe-webhook.ts`) with the amount + OP job ref + "contact the hirer, reimburse another way". The BACS/other-method reimburse path already exists (any `method !== 'stripe_gbp'` records + pushes HH, captures bank details) — Stripe expiry just forces you onto it. **⚠️ The failed-refund alert only fires if the Stripe webhook endpoint is subscribed to `charge.refund.updated`** (dashboard config). Deferred: a proactive "holds nearing refund window" dashboard bucket (a `v_excess_held` + Stripe-origin + charge-age query; 0 rows past 180d at build time).
 - [x] **OP-initiated Stripe refunds — hire payments** (`POST /api/money/:jobId/refund-payment`). Money tab payment-history rows render a Refund button; Stripe-paid rows lock the method to `stripe_gbp` and refund via the API; other methods record-keep only (negative HH payment application + OP `job_payments` row). Same hh_push_error surfacing pattern as the excess flow. Multiple partial refunds against one deposit allowed (cumulative cap = original amount).
 - [x] **Stripe webhook reciprocity** — OP-initiated refunds and the corresponding `charge.refunded` webhook dedup on `stripe_refund_<id>` keys across both paths.
 - [x] **Hire `refund-payment` Xero two-step fix (Jun 2026)** — the hire-side refund endpoint pushed `billing_payments_save.php` but never fired the `accounting/tasks.php` `post_payment` task, so OP refunds landed in HireHop billing but **never posted to Xero**. Every other money-out path (excess reimburse/claim/capture, deposit record) already did the two-step — this was the only miss. Now fires `post_payment` after the HH push (best-effort, mirrors the excess path). Caught via job 16043 (Oz Touring double £720 deposit refund).
@@ -1172,7 +1236,7 @@ held_amount = max(excess_amount_taken + amount_held − claim_amount − reimbur
               for excess_status NOT IN ('rolled_over','released','not_required')
 ```
 - Excludes `rolled_over` (the cash moved to the forward record — counting both double-counted, the original bug behind the `/money/excess` "Total Held" overstatement) and `released` (pre-auth ended) and `not_required` (top-N £0 loser). `reimbursed`/`fully_claimed` net to 0 naturally; live `pre_auth` holds count via `amount_held`.
-- **Consumers (all read `v_excess_held`):** `client_excess_ledger` view's `balance_held` (migration 109 redefined it to sum from `v_excess_held`; other columns unchanged), `/money/overview` Excess Held card + table, and the dashboard "Unreimbursed Excess" bucket (`routes/dashboard.ts`, which also excludes `pre_auth` since a hold isn't returnable cash). **Any new "how much excess do we hold" surface MUST read `v_excess_held`** rather than re-summing `excess_amount_taken` — that's how the drift happened.
+- **Consumers (all read `v_excess_held`):** `client_excess_ledger` view's `balance_held` (migration 109 redefined it to sum from `v_excess_held`; other columns unchanged), `/money/overview` Excess Held card + table, the dashboard "Unreimbursed Excess" bucket (`routes/dashboard.ts`, which also excludes `pre_auth` since a hold isn't returnable cash), the address-book **`GET /api/excess/by-org/:orgId` + `/by-person/:personId`** summaries (`summary.balance_held`, Jul 2026 — these feed the `ExcessGateBanner` green "Client has £X on account" note + the Excess History tabs), and the **Money-tab `/money/:jobId/summary` `client_balance_on_account`** (`routes/money.ts`, Jul 2026 — feeds the green "Client has £X on account from previous hires" banner on the per-job Money tab; excludes `pre_auth` on top of the view since the banner offers to *apply* the balance to this job and a hold on another hire can't be applied). **Any new "how much excess do we hold" surface MUST read `v_excess_held`** rather than re-summing `excess_amount_taken` — that's how the drift happened. **Incident (Jul 2026, Hoosiers):** `by-org` was naively summing `excess_amount_taken − claims − reimbursements` over EVERY record incl. `rolled_over`, so two rolled-forward £1,200 records showed a phantom "£2,400 on account" on the gate banner while `/money/excess` (canonical) correctly showed £0 held — the banner was double-counting cash that had moved to a forward hire. Both endpoints now `LEFT JOIN v_excess_held` and sum `held_amount`. **Incident (Jul 2026, Lime Garden / job 16335):** the same class of bug survived in `routes/money.ts`'s inline `client_balance_on_account` query — it summed `excess_amount_taken` over `('taken','rolled_over')` with an INNER `JOIN vehicle_hire_assignments`, so a rolled-forward chain (all four records sharing `hh_deposit_id=7767` = the same physical £1,200) showed "£2,400 on account" (the live `taken` record + one rolled-over ancestor that happened to have a hire form; a second ancestor with `assignment_id IS NULL` was dropped by the join, which is the only reason it wasn't £3,600). Fixed to read `v_excess_held` like every other surface.
 - This only changed AGGREGATION-for-display; the excess lifecycle (collect/claim/reimburse/rollover/pre-auth) is untouched. The view is reversible.
 - **Stale backlog:** `scripts/reconcile-stale-excess.ts` (dry-run default, `--commit`, `--days=N`) clears the historic backlog — finished-hire `taken`/`partially_paid` records with NO claims/holds, marked `reimbursed` (reimbursement_amount topped to taken → held→0). Direct DB update, **no client emails / HH pushes / Stripe calls**. Records with claims or partial reimbursements are reported for manual review, never auto-committed.
 - **Receipts Outstanding bucket** is forward-only from **1 Jun 2026** (migration 110 cleared the migration-087 historic backfill flags; dashboard query also guards `created_at >= 1 Jun` + self-retires once the hire is `completed`). **Pre-auth Holds Expiring bucket** is now action-only (`held_expires_at` between today and +2 days — past-expiry holds, which can't be actioned, are dropped).
@@ -1603,8 +1667,284 @@ These originate outside HH entirely — client sends stuff to us, or items found
 - [ ] Auto-reminder: chase client to collect, flag for disposal after X weeks
 - [ ] Global pages for both: `/operations/deliveries`, `/operations/lost-property`
 
-##### Stream 5: Rehearsals / Studio Sitter Module ← SPEC'D (Jun 2026), build pending
-**Full spec: `docs/REHEARSALS-SPEC.md`** — read it before touching rehearsal code. Headlines:
+##### Stream 5: Rehearsals / Studio Sitter Module ← A–E SHIPPED (Jul 2026); tasks + calendar + submit-chaser PENDING
+**Full spec: `docs/REHEARSALS-SPEC.md`** — read it before touching rehearsal code.
+
+**What's built (staff-side complete):**
+- **Phase A — detection** (`services/rehearsal-plan.ts`): classifies rooms + flavour from HH line
+  items, applies the base-room double-count rule + the finish-on-the-day timing rule, derives
+  per-day sitter-needed evenings. `deriveRequirementsForJob` persists the result on
+  `hh_derived_flags.rehearsal_detail` + sets the rehearsal requirement notes to a live summary.
+- **Phase B — roster + assignment** (migration **153**: `studio_sitter_shifts` [one per date,
+  UNIQUE = two-rooms-same-night jobs share one shift] + `studio_sitter_shift_assignments` [partial
+  unique index = one live sitter per shift]). `services/studio-sitter.ts` (roster derivation,
+  per-job coverage, assign/reassign/unassign, date-selectable bulk, manual-override cover,
+  remove-cover, approved-freelancer list Studio-Sitter-tag-first, **coverage-driven requirement
+  status** — winds Not Started→In Progress→Done, `blocked`/Problem left manual, synced from
+  assign/unassign/remove + the derivation engine, default per-night fee from `system_settings`).
+  `routes/studio-sitters.ts` (`/api/studio-sitters/*`, STAFF_ROLES). Frontend `StudioSittersPage`
+  (Operations → Studio Sitters): roster with 7/14/All range + All/Unassigned/Assigned filter
+  (localStorage-persisted), assign/reassign/clear, tick-nights bulk assign, manual "＋ Add cover" +
+  Remove, manager-editable default fee. `RequirementCard`: evening chips are click-to-assign
+  (inline picker) + "Manage on Studio Sitters roster →" link; shows the assigned sitter per chip.
+- **Phase C — surfacing:** dashboard NeedsAttention "Evenings without a sitter" bucket
+  (`sitter_gap_count`/`sitter_gaps` on `/dashboard/operations`, derived via `getRoster`); Job Detail
+  amber pre-hire banner ("Rehearsal starts in N days — X evenings without a studio sitter", 7-day
+  window hardcoded — promote to `system_settings` if it needs tuning); per-card daytime "＋ Call a
+  sitter for a day →" link.
+
+**What's left (the spec's Phase C portal / D / E / F):**
+- **Phase D — freelancer portal surface for sitters** (IN PROGRESS): sitters see their assigned
+  shifts in the Next.js portal (`src/app/`), shift detail = who's in each room that night (derived)
+  + session times + shared specs/stage-plots (`share_with_freelancer` files) + the day-to-day
+  handover thread. The sitter's `person_id` → `studio_sitter_shift_assignments`. The **default fee**
+  captured on assignments is meant to display here.
+  - **Slice 1 SHIPPED (backend, read-only):** `services/studio-sitter.ts` `getSitterShifts` /
+    `getSitterShiftDetail` / `isSitterAssignedTo`; portal endpoints `GET /api/portal/studio-sitter/shifts`
+    (own rostered nights, −3..+60d) + `GET /api/portal/studio-sitter/shifts/:date` (who's-in +
+    shared job files, presigned; access-gated to the rostered sitter or the shared staff account).
+  - **Slice 2 SHIPPED (portal UI, read-only):** the sitter's rostered evenings surface on the
+    Next.js portal dashboard (`src/app/dashboard/page.tsx`) as a "🎸 Studio Shifts" section that
+    sits alongside their driving jobs (hidden when they have none — most freelancers aren't
+    sitters), plus a shift detail page (`src/app/shift/[date]/page.tsx`): envelope times, per-night
+    fee, who's in each room, and each job's shared specs (`share_with_freelancer` files, presigned).
+    Wiring: `getSitterShiftsFromOP` / `getSitterShiftDetailFromOP` + `Sitter*` types in
+    `src/lib/op-api.ts`; OP-only Next.js API routes `src/app/api/studio-sitter/shifts/route.ts` +
+    `.../shifts/[date]/route.ts` (empty list outside `DATA_BACKEND=op` — no Monday fallback, sitters
+    are OP-native). Backend `getSitterShiftDetail(date, personId?)` was enriched to also return the
+    shift envelope + the requesting sitter's fee/assignment status so the detail page is
+    self-sufficient on a direct load/refresh (portal route now passes `req.portalUser.id`).
+  - **Slice 3 SHIPPED (handover thread, two-way):** migration **164** adds `interactions.shift_id`
+    (FK → `studio_sitter_shifts`, `ON DELETE SET NULL`) + `interactions.author_name` (display name for
+    non-user authors). Freelancer-authored notes store `created_by = NULL` + `author_name` (sitters are
+    people, not `users`); the read layer prefers `author_name`, else the `users → people` name. The
+    `shift_id IS NULL` scoping guard was added to the person/org/job/venue reads in `routes/interactions.ts`
+    (mirrors `issue_id`), plus a `?shift_id=` filter + INSERT/parent-inherit/entity-wiring support.
+    **Portal:** `GET`/`POST /api/portal/studio-sitter/shifts/:date/thread` (`routes/portal.ts`) — flat
+    chronological log, access-gated (rostered sitter or shared staff account); a sitter post fires a
+    **low-priority bell (no email)** to prior staff participants of that thread. Portal UI: a "Handover
+    notes" section on `src/app/shift/[date]/page.tsx` (read + composer). **Staff:** a per-row "💬 Notes"
+    panel (`ShiftNotes`) on `StudioSittersPage` reading/posting `/api/interactions?shift_id=`.
+    *Deferred:* @mention autocomplete in the staff composer (plain textarea for now — mentions still
+    work via the generic API), file attachments on shift notes, and notifying staff of a sitter's
+    *first* note before any staff have engaged the thread (staff see it via the roster Notes panel).
+  - **Slice 3 refinements SHIPPED:** (a) **enquiries default-off** — `loadRehearsalJobs`/`getRoster`
+    gained an `includeSpeculative` arg (default false → excludes `new_enquiry`/`quoting`/`paused`/
+    `provisional`); the roster route reads `?speculative=1`, the staff page has an "Include enquiries"
+    toggle + a blue "enquiry" row badge (`row.speculative`). Dashboard sitter-gap + bulk-assign inherit
+    the confirmed-only default; the **portal** enrichment passes `includeSpeculative=true` so a sitter
+    always sees every band booked that night. (b) **Roster look-back** — the staff page adds From/To
+    date inputs (backend already accepted arbitrary `from`/`to`) alongside the 7/14/All quick-sets, so
+    staff can scroll back through history; persisted in the `ooosh_studio_sitters_prefs` localStorage.
+    (c) **Portal window** widened from +60d to **−14d…+365d** so far-future assignments surface.
+    (d) **Job Detail handover card** — `StudioHandoverCard` on the Overview tab (self-hides on
+    non-rehearsal jobs) lists the job's evenings and shows the shared per-evening thread; the roster's
+    `ShiftNotes` was extracted to `components/StudioShiftNotes.tsx` (shared by both, now URL-linkified);
+    reuses the existing `/studio-sitters/job/:jobId/coverage` endpoint (no new backend endpoint). URLs
+    are auto-linkified on the portal thread too. *Still deferred:* image/PDF attachments on the thread.
+    (e) **Notes-present indicators** — `getJobCoverage` + the roster's `loadShifts` now return a
+    per-shift `note_count`; the roster "💬 Notes (N)" button highlights when a thread exists, and the
+    Job Detail handover card shows a "💬 N" badge per evening + auto-opens evenings that already have a
+    conversation. Removed the "One sitter per evening…" subtitle. **Notes are shift-anchored, so they
+    survive reassign/clear** (the shift row stays; only removing a manual-cover shift hides its notes).
+    A "Notes" button only appears once a shift exists (i.e. once assigned / manual cover) — unassigned
+    future nights have no shift row yet, so no thread anchor.
+  - **Slice 3 attachments SHIPPED:** images/PDFs on the handover thread, both surfaces. Stored on
+    `interactions.files` in the staff attachment shape (`{r2_key, filename, content_type, size_bytes}`)
+    under the `files/attachments/…` R2 prefix, so staff- and sitter-posted files render alike. **Staff**
+    (`StudioShiftNotes`) reuse the `messaging/Attachments` stack (`useAttachments` + file input +
+    paste + `PendingAttachmentStrip`, render via `AttachmentList`). **Portal:** the thread POST now
+    accepts `multipart/form-data` (multer, 8MB×6, image/PDF only) → uploads to R2 → stores on the
+    interaction; the Next.js route forwards multipart, `op-api` gained `postSitterThreadWithFilesOP`,
+    and the shift page composer has a 📎 attach + inline image render. The thread GET's file mapper
+    (`mapThreadFile` in `routes/portal.ts`) handles BOTH the `r2_key` (staff/sitter) and legacy `url`
+    (shared-file) shapes + presigns `files/` keys. Attachment-only notes store `content='(attachment)'`
+    (NOT NULL guard) and hide the placeholder on render. Deferred: thumbnail generation (images render
+    full-size via presigned URL / auth blob), and per-message read receipts.
+    **Two post-launch attach fixes (Jul 2026):** (1) the portal `onChange` read `Array.from(e.target.files)`
+    INSIDE the deferred setState updater while `e.target.value=''` ran synchronously first and emptied the
+    FileList → no chip. Capture the array BEFORE the reset (staff `useAttachments` + completion `PhotoCapture`
+    both read synchronously — the pattern to follow). Portal chips now show an image thumbnail (objectURL,
+    revoked on remove/post). (2) The multipart forward used `f instanceof File`, but **`File` is not a global
+    in Netlify's Node runtime** (only `Blob` is) → `ReferenceError` → 502. Iterate `formData` entries as
+    `string | Blob`, treat non-string as a file, materialise each to a fresh `Blob` before re-forwarding.
+    **Convention: never reference the `File` global in a Next.js route handler — use `Blob` / duck-type.**
+    The 3 OP-native sitter Next.js routes also had their `reportFallback` (Monday-fallback telemetry) calls
+    removed — sitters never had a Monday board, so a 5xx firing a "fell back to Monday" alert was wrong.
+  - **Slice 4 SHIPPED (end-of-day lock-up report — Phase E, migration 168):** the
+    **"🔒 Finish for the night"** flow. Port of Jotform `203154178314046`, configurable, soft, no PDF.
+    - **Storage:** migration 168 adds the 4 `report_*` columns to `studio_sitter_shifts`
+      (`report_answers JSONB`, `report_template_version INT`, `report_submitted_by` → `people(id)` since
+      sitters are freelancers not OP users, `report_submitted_at`); submit sets the existing `closed`
+      status (roster/portal/coverage reads all already tolerate `closed`, so no regression to coverage
+      sync or the sitter's own view). **Template + reference photos** live in `system_settings` (category
+      `studio_sitter`, seeded by 168): `studio_sitter_lockup_template` (JSON string) +
+      `studio_sitter_lockup_reference_photos` (JSON array). `services/studio-sitter-lockup.ts` owns
+      parse/read with a hardcoded `DEFAULT_TEMPLATE` fallback (mirrors the seed) so the portal never
+      breaks if the row is missing/corrupt.
+    - **"Continuing tomorrow?" is DERIVED, not asked** — `isStudioInUseOn(nextDay)` queries whether ANY
+      rehearsal job's `[first_session_date, last_session_date]` window (daytime OR evening; excl.
+      lost/cancelled/internal, incl. speculative) spans the next day. Pre-filled + overridable (Yes/No
+      buttons on the form); a `true` value hides the `end_of_booking_only` deep-clean items.
+    - **Expected-answer flagging** — each template item carries an `expected` value; `computeExceptions`
+      flags off-expected `yesno` answers (treats **`na`/`n/a` as non-exception** — not applicable = fine;
+      unanswered ≠ exception). Submit shows "N items need attention"; the staff read-only view highlights
+      ONLY the exceptions (amber), the rest a quiet green/red/grey recap. `report_template_version`
+      records which template version was answered against (bumped on every Settings save).
+    - **On submit** (`submitLockupReport`, one transaction, `FOR UPDATE` on the shift): store answers,
+      set `status='closed'`, and post the free-text note + an exceptions summary line into the shift
+      handover thread (`interactions` with `shift_id`, `created_by=NULL`, `author_name`) so it's
+      **replyable — the Jotform-dead-end fix**. Then fire a staff bell (admins/managers, `email_sent_at`
+      stamped so the escalator doesn't double-email) + an `info@` email (`studio_lockup_submitted`
+      internal template) — both best-effort, never fail the submit. Lost-property prompt deep-links to
+      `/holding/lost-property`.
+    - **Portal:** `/shift/[date]/lockup` sub-page (`src/app/shift/[date]/lockup/page.tsx`), reached from a
+      "🔒 Finish for the night" button at the bottom of the shift page. Reference photos, derived
+      continuing toggle, yesno/text/number items, notes, sticky submit bar, success screen. Endpoints
+      `GET`/`POST /api/portal/studio-sitter/shifts/:date/lockup` (access-gated: rostered sitter or shared
+      staff account); Next.js route `src/app/api/studio-sitter/shifts/[date]/lockup/route.ts`; op-api
+      `getLockupContextFromOP`/`submitLockupReportOP`.
+    - **Staff read-only view:** `GET /api/studio-sitters/report/:date` → `getShiftReport` (full answers +
+      exceptions). Reusable `StudioLockupReport.tsx` mounted on the Studio Sitters roster (🔒 button with
+      green ✓ / amber ⚠N pip, from a `report` summary now on `getRoster`'s shift shape) and the Job Detail
+      `StudioHandoverCard` (🔒 ✓ per-evening badge from `report_submitted_at` on `getJobCoverage`, expands
+      the report inline). **Settings editor** `StudioSitterSettingsSection` (admin/manager, on SettingsPage
+      next to Carnet) edits intro / notes prompt / lost-property prompt / checklist items (label, type,
+      expected, end-of-booking flag, reorder, add/remove) + uploads/removes reference photos.
+    - **Not-submitted accountability chaser: SHIPPED** (Slice 5, migration 173 — see below).
+  - **Slice 4 follow-up SHIPPED (real Jotform port + why-boxes + photos + reply-email, migration 169):**
+    two rounds of jon feedback after a live trial. Template model + submit shape changed:
+    - **Real Jotform port (`203154178314046`), "flat + section label + per-item ref" model.** The first
+      cut was an admitted guess; the DEFAULT_TEMPLATE in `services/studio-sitter-lockup.ts` now carries the
+      30 real checklist items with an optional `section` label (rendered as group headers — "Upstairs" /
+      "Downstairs") and an optional per-item `reference` (`{text?, photos: string[]}` = "what it should look
+      like"). **"Front door locked" is the LAST item**; "Alarm set" removed. 3 `end_of_booking_only`
+      deep-clean items (vacuum/bins, hired kit boxed, backline stored). **Migration 169** is a data-only
+      re-seed of `studio_sitter_lockup_template` generated from the compiled DEFAULT_TEMPLATE so seed ==
+      code fallback exactly (overwrites unconditionally — 168's seed was the guess). `LockupItem` gained
+      `section` + `reference`; the global reference-photos block was REMOVED (photos are per-item now).
+    - **Off-expected "why?" capture** — any yes/no answer that trips `computeExceptions` opens an inline
+      "why?" text box + optional photos; stored on `report_answers.exception_notes[id] = {text, photos[]}`,
+      surfaced in the finishing summary and highlighted (amber) in the staff read-only view.
+    - **Photos throughout via multipart.** The portal submit is now `multipart/form-data` (multer `.any()`
+      on `POST /shifts/:date/lockup`): a `payload` JSON part + `notes_photo` / `why_<id>` file parts, routed
+      by fieldname, uploaded to R2 (`files/attachments/…`), stored as blob refs on the report. Notes field
+      supports photos too. The Next.js route re-forwards multipart with the `Blob` duck-type pattern (never
+      the `File` global). `getShiftReport` + `getLockupContext` presign every stored blob + external
+      reference URL for read (`ReadPhoto {url, filename, content_type}`).
+    - **Lost property pushes to the Holding module** (the earlier `/holding/lost-property` deep-link was a
+      bug — that's a staff-only OP route a freelancer can't reach). New portal `POST /shifts/:date/lost-property`
+      + `logShiftLostPropertyOP` → `logShiftLostProperty` creates a `held_items` row (`kind='lost_property'`,
+      `status='stored'`, `owner_unknown=true`, `created_by=SYSTEM_USER_ID`) with description / found location /
+      photos, from an inline capture form on the lockup page.
+    - **Reply-to-sitter email (the other half of "not a dead-end").** The handover thread is date-scoped, so
+      a staff reply the *next* sitter never sees vanished. `routes/interactions.ts` now fires
+      `notifySitterOfStaffReply(shift_id, content, staffUserId)` after any staff post on a `shift_id` thread
+      — resolves the report submitter, emails them via the new `studio_shift_reply` template (link to
+      `/shift/:date`), resolves the staff author name via `users LEFT JOIN people`.
+    - **Status shows "Completed" once submitted** — the shift's existing `closed` status surfaces as
+      "Completed" on both the portal shift card + OP roster once `report_submitted_at` is set. Portal dashboard
+      shift card gets a **"🔒 Lock up" quick action** (like "Start delivery"), gated to tonight + not-yet-completed.
+      No sitter tap-to-confirm surface (dropped per jon — too many surfaces).
+    - **Staff read-only view + settings** rewritten to match: `StudioLockupReport.tsx` groups by section,
+      shows exception whys + their photos, notes with photos; `StudioSitterSettingsSection` gains per-item
+      `section` input + a per-item `reference` editor (caption + photo upload/remove via `/files/upload`),
+      global photos block removed.
+  - **Slice 4 second feedback round SHIPPED (migration 172):** post-trial tweaks.
+    - **`note_prompt` — always-on note box (`item_notes` channel).** A `LockupItem.note_prompt?: string`
+      shows an optional note+photo box REGARDLESS of the yes/no answer (distinct from the off-expected
+      "why?" box, which it replaces for that item). Seeded on **"clients paid"** ("how did they pay /
+      what's outstanding") + **"kitchen replenished"** ("anything running low"). Stored in a new
+      `report_answers.item_notes[id] = {text, photos[]}` map, kept only for template items that carry a
+      `note_prompt`; the off-expected "why?" box stays `exception_notes`. Portal routes its photos as
+      `item_<id>` multipart fields (alongside `why_<id>` / `notes_photo`). The thread summary surfaces
+      note_prompt notes (even on an expected answer), and an exception on a note_prompt item falls back to
+      its `item_notes` text. Staff read view + Settings editor (per-item "Always-ask note" input) both
+      handle it.
+    - **Lights moved to a final "Lights off & lock up" section** (all lights-off items + front door LAST) —
+      do the substantive work first, sweep the lights on the way out.
+    - **Reference photos: thumbnails + in-page lightbox.** Portal renders reference photos as lazy-loaded
+      `grid-cols-3` thumbnails; tapping opens a full-screen `<img>` lightbox overlay (tap to close) INSTEAD
+      of the old `<a href download>` (which just downloaded the presigned R2 object). Fixes both "slow to
+      load" and "clicking downloads instead of enlarging". Server-side thumbnail generation still deferred
+      (thumbnails are CSS-sized full images for now).
+    - **Bigger section headers** on the portal + staff read view.
+    - Migration 172 re-seeds the template from the updated `DEFAULT_TEMPLATE` (169/170 taken on main, 171 =
+      first real port, 172 = this round). **Lost property already lands in the Holding module** as a
+      `held_items` `kind='lost_property'` row (`logShiftLostProperty` → the `/holding/lost-property` list).
+  - **Slice 4 third round SHIPPED (dedup + submit UX + reference downscale):**
+    - **Re-submit dedup (server-authoritative).** `submitLockupReport` throws `LockupAlreadySubmittedError`
+      (→ portal 409) when the shift is already submitted and the caller didn't pass `allow_resubmit`. The
+      portal catches the 409 and shows a "already submitted at HH:MM — re-submit and overwrite?" confirm;
+      confirming re-POSTs with `allow_resubmit=true`. Stops a stale tab left open between shifts from
+      silently overwriting the report + re-spamming the office, while still allowing a deliberate amend.
+    - **Confirm-on-unanswered.** Submitting with any visible item still blank flags "N items unanswered —
+      tap again to submit anyway" (button becomes "Submit anyway (N left)"); a second tap proceeds. Any
+      answer change re-arms the check. (Deliberately NO scroll-to-first-issue — the amber card highlight
+      already marks them.)
+    - **Reference photos downscaled at upload.** `StudioSitterSettingsSection.uploadItemPhoto` runs the
+      shared `compressImage(file, 1400, 0.8)` before the R2 upload, so new reference photos land ~150-250KB
+      instead of a raw ~3MB phone photo — the actual fix for "slow to load on 4G". Legacy/external seed
+      photos (the Jotform URLs) are unaffected; re-upload via Settings to shrink them. True server-side
+      thumbnail variants remain deferred (not needed once uploads are small).
+  - **Slice 5 SHIPPED (handover carry-forward + not-submitted chaser, migration 173):**
+    - **Recent-handover carry-forward (the day-1-doesn't-carry-to-day-2 fix).** The per-night thread
+      anchor (`shift_id`) is kept, but the portal shift page now surfaces the **last few nights' handover
+      notes read-only** above tonight's composer — so a sitter arriving fresh sees prior context. Endpoint
+      `GET /api/portal/studio-sitter/shifts/:date/recent-handover` (`routes/portal.ts`): premises-wide (one
+      studio), most-recent-first, capped at 4 nights within a 21-day lookback, presigned files, access-gated
+      like the thread. `getSitterRecentHandoverFromOP` + Next route `.../recent-handover/route.ts`; a
+      collapsible "Recent handover · last N nights" section on `src/app/shift/[date]/page.tsx`. **Chosen over
+      job-scoped / per-sitter threads** because the assignment unit is a SITE-EVENING (one sitter, whole
+      building, can span two bands/jobs a night) — a premises-wide recent strip respects that and needs no
+      data migration. Staff already see a job's full evening history on the Job Detail `StudioHandoverCard`,
+      so no change needed there. The reply-to-sitter email stays for "someone replied to YOUR note".
+    - **Not-submitted lock-up chaser (the deferred fast-follow, now shipped).** `runLockupChase()` (daily
+      08:45 Europe/London in `scheduler.ts`): for any shift that closed without a lock-up report, reminds
+      the rostered sitter (`studio_lockup_reminder` email — freelancers have no portal bell) + alerts the
+      office (admins/managers bell + `studio_lockup_missing` info@ email). Once per shift, dedup on
+      `studio_sitter_shifts.lockup_chase_sent_at` (migration 173, stamped FIRST so a send failure can't
+      re-fire), only the last 7 days (no ancient-backlog spam), only shifts with an assigned sitter.
+- **General Tasks system** (build with/after D): `tasks` table (anchor to shift/job/nothing),
+  visibility everyone/assignee-only, notify-on-done + notify-if-not-done-after-X-days, **staff via
+  bell/email, freelancers portal-only (no bell/email)**; dashboard top-right card + "On Today" +
+  sitter portal; Today/Tomorrow/Upcoming/Overdue views.
+- **Handover thread**: `interactions` anchored to `shift_id` — SHIPPED (Slice 3), with **recent-handover
+  carry-forward** across nights added in Slice 5 (see above). The `IS NULL` scoping guard keeps it off
+  other timelines.
+- **End-of-day report** (Phase E): ✅ SHIPPED (migration 168) — see the **"Slice 4 SHIPPED"** bullet
+  above. The not-submitted accountability chaser is now SHIPPED too (Slice 5, migration 173).
+- **Calendar endpoint** (Phase F): `GET /api/studio-sitters/calendar?from&to` for the future
+  calendar project (roster row shape already close).
+- **Monday.com teardown (DONE, Jul 2026 — Monday fully retired):** the Monday machinery has been
+  stripped from the freelancer portal (PRs #1036 + follow-up). Removed: `src/lib/monday.ts`, the
+  `isOpMode` / `mondayFallbackAllowed` / `reportFallback` helpers + the `DATA_BACKEND` /
+  `PORTAL_MONDAY_FALLBACK_ENABLED` / `PORTAL_TELEMETRY_SECRET` flags (`src/lib/op-api.ts`), the 3 Monday
+  webhook routes, the 3 Monday file-asset routes (`files/[assetId]`/`asset-url`/`qh` — OP serves
+  presigned urls now), the 2 orphaned Monday Netlify functions (`completion-background` /
+  `completion-reminders` — superseded by `services/completion-chaser.ts`), the orphaned Monday-era libs
+  `src/lib/email.ts` + `src/lib/pdf.ts`, the redundant Monday-Q&H `QHFiles` job-page component, and the
+  **PIN-gated portal staff crew-transport calculator** (`src/app/staff/*` + `/api/staff/*` — the old
+  Monday-backed transport cost calculator, fully superseded by the OP-native Crew & Transport calculator
+  at `/operations/transport`). All portal routes are OP-only (auth / jobs / settings-notifications /
+  resources / studio-sitter — the `if (!isOpMode())` guards are gone). The `DATA_BACKEND` /
+  `PORTAL_MONDAY_FALLBACK_ENABLED` / `PORTAL_TELEMETRY_SECRET` / `STAFF_PIN` / `MONDAY_*` env vars on
+  Netlify are now unused. **The portal (`src/`) has NO Monday API code left** — only a couple of
+  historical comments, `'Monday'` weekday strings, and the `MONDAY_WEBHOOK_SECRET` env-var *name* kept as
+  a shared-secret fallback in `api/hirehop/items/[jobId]` (rename with an env update if ever tidying).
+- **Shop sales**: deferred, out of scope (substantial, cross-cutting).
+- **Rehearsal job info beyond sitters (TODO — jon flagged Jul 2026):** the Rehearsals module
+  should grow past studio-sitter cover to be the single place for everything about a studio job.
+  Capture + surface, on an **expanded rehearsal card on the Job Detail view** (the natural home):
+  what **PA setup** the band wants; whether they need **backline from us** and how much; how many
+  **cars** the band is bringing (parking/space planning); any **lorry / truck / van drop-off or
+  pickup** arrangements (who's dropping/collecting, when). Some of this is HH-derivable (backline
+  line items already detected), some is free-form intake. Likely a mix of derived flags + a
+  structured "studio job details" record (new columns or a `rehearsal_job_details` table) rendered
+  as a richer rehearsal requirement/overview card. Scope + model this once the studio-sitter side
+  (portal + tasks + end-of-day report) is wrapped. Keep it card-on-Job-Detail, not a new nav.
+
+Headlines (design invariants — still apply):
 
 - **Load-bearing model:** the assignment unit is a **SITE-EVENING**, not a job-room-day. One
   premises, **one sitter per evening** even if both rooms are busy — the sitter looks after the
@@ -1619,7 +1959,10 @@ These originate outside HH entirely — client sends stuff to us, or items found
 - **Timing gotcha:** rehearsals do NOT run 9am→9am like vehicles/backline — they finish on the day
   they finish. HH's `job_end` carries the phantom 9am-next-morning rollover (Numan "10–16 Jul" is
   really 10am 10th → 10pm 15th), so the last session evening = `job_end_date − 1` when `job_end`
-  time is an early-morning rollover. Sibling to the `return_date +1 buffer` gotcha.
+  time is an early-morning rollover. Sibling to the `return_date +1 buffer` gotcha. The SAME
+  finish-on-the-day nature also broke the OP→HH charge-period push (rehearsals under-counted by a
+  day because the push floored elapsed hours) — fixed Jul 2026 by ceiling, see the "Charge period =
+  `ceil(elapsed_hours / 24)`" note under the "Create in HireHop" button in Stream A.
 - **Tasks** (general ad-hoc/building jobs, built here but entity-general): visibility
   everyone/assignee-only, notify-on-done + notify-if-not-done-after-X-days, default notify the
   assignee — **staff via bell/email, freelancers portal-only (no bell/email)**. Staff input/surface
@@ -1629,9 +1972,10 @@ These originate outside HH entirely — client sends stuff to us, or items found
   **end-of-day report** (configurable in `system_settings`, ported from the Jotform, no PDF, notes
   → thread so staff can reply), **shared specs/files** via `share_with_freelancer`, lost-property /
   held-items via the Holding module. **Shop sales = deferred** (out of scope for now).
-- **Build order:** A detection+model+job-card → B roster page+assign/bulk → C portal surface →
-  D tasks+handover → E end-of-day report+chaser → F calendar endpoint. Migration numbers: take the
-  next free at build time (150 is being taken by parallel work; check `run.ts`).
+- **Build order / status:** staff-side (detection + roster/assign + dashboard/banner surfacing) is
+  DONE (migration 153). Remaining = portal surface + tasks + handover thread + end-of-day report +
+  calendar endpoint (see "What's left" above). New migrations: take the next free at build time
+  (check `run.ts`).
 
 ##### Stream 6: Payment Tracking (pre-Xero)
 *Merged into Step 3 (Money System).* `job_payments` table, per-job financial summary, payment recording, and client payment terms are all part of the unified Money tab on Job Detail. See Step 3 Phases C-F for full spec.
@@ -1662,6 +2006,7 @@ Global operational view for what's currently happening / about to happen with tr
 - [ ] **D&C venue connect-column parser broken (18 Apr 2026)** — the `--refresh-venues` pass reported `no Monday venue link: 155/155`, but Jon confirms every one of those items actually has its venue linked on Monday via the `connect_boards6` column. The JSON parsing in `migrate-monday-upcoming.ts` (both create-path and refresh-venues path) for `connect_boards6` isn't extracting `linkedPulseIds[0].linkedPulseId`. First task next session: dump one known-linked item's raw column value and fix the parser. Affects both migration of new items and the ~196 already-migrated "No venue" rows on Transport Ops.
 - [x] Inline crew assignment on Transport Ops page (same picker as Job Detail, bidirectional)
 - [x] Local D/C form improvements: venue address book lookup, smart date defaults, amber warning on change
+- [x] **Freelancer notes portal visibility (Jul 2026, PR #966).** Two gaps hid `quotes.freelancer_notes` from freelancers — the notes were always saved and the portal API always returned them (as `keyNotes`, a Monday-era field name): (a) the portal's **crewed-job layout** (`CrewJobDetail` in `src/app/job/[id]/page.tsx`) never rendered the "📋 Key Notes" card the two D&C layouts (single + multi-stop) both had; (b) the **Local D/C form's** single "Notes" field saved to `internal_notes` (portal-invisible by design) — a straight local collection created with driver notes in that box showed the freelancer nothing. Now: crew layout renders the card, and the local form has TWO fields matching the calculator convention (Freelancer Notes → `freelancer_notes`, Internal Notes → `internal_notes`; `POST /quotes/local` accepts `freelancerNotes`). **Conventions:** any new portal job layout must render `job.keyNotes`; any new quote-creation surface with a notes box must be explicit about which of the two columns it writes (a bare "Notes" label reads as "the driver will see this" to staff). NB the `/start` wizard and dashboard cards deliberately don't show notes — the job detail page is the canonical surface. No backfill of historical local-form notes (intent can't be inferred); staff copy driver-relevant ones across via the Transport Ops inline edit.
 - [x] Quote editing: Edit Quote modal on Transport Ops page + Job Detail page (venue, date, time, fees, notes)
 - [x] Inline-editable arranging details: client intro status picker, key points, tolls/accom/flights clickable pills, notes
 - [x] Run grouping UI: letter-based display (Run A/B/C), coloured side bands, join/create run buttons per job
@@ -1703,6 +2048,7 @@ Global operational view for what's currently happening / about to happen with tr
   - **Robustness tail (§7.3-7.5, migration 159).** §7.3 "started but not completed" alert: both resolvers stamp `quotes.van_leg_started_at`; **`runFreelancerLegStalledScan`** (in `sanity-check-scanner.ts`, wired into the 15-min sanity cron) alerts info@ ONCE per quote (deduped via `van_leg_alert_sent_at`, business hours only, 3h grace) when a started van leg never completes — so staff learn before the client chases. info@-only, matching the sibling scanners. §7.4: `fetchWithTimeout` (AbortController) on the portal's POST paths (`opFetch`, login, completion=60s, register/reset) so a hung OP surfaces "try again" instead of an indefinite spinner. §7.5: reset-password page auto-redirects to `/dashboard` once the reset logs the freelancer in (stops the Lewis double-reset loop).
   - **Conventions worth remembering:** (a) `save-event` is a source of truth for book-out — it drives the hire-forms cascade, not just the vehicle side. (b) The own-van agreement email is serialised by the atomic claim; the cross-van fan-out by the `hire_form_documents` UNIQUE. (c) A freelancer collection is a SOFT check-in — `soft_checked_in_at` stamped, `status` NOT flipped to `returned` (enforced server-side: a checkin session can't fire a returning event). (d) The book-out and check-in tokens share ONE HMAC format; the resolve ENDPOINT sets the session `mode`. (e) Any new leg-completion path calls `maybeCloseQuote`. (f) The two freelancer entrypoints are `/vehicles/book-out` (`BookOutEntry` → `FreelancerBookoutShell` → `BookOutPage`) and `/vehicles/check-in` (`CheckInEntry` → `FreelancerCheckinShell` → `CollectionPage`); both decide freelancer-vs-staff on `?freelancerToken=` / an active freelancer session.
   - **Still TODO (deferred):** freelancer-led interim check-in for the van-swap case (reuses the same soft check-in primitive); multi-van D&C (drivers × vans). CollectionPage's full walkaround UI (photos, PDF recipients) wants a live collection to shake out — the critical lifecycle path is verified but was never exercised end-to-end before this round.
+  - **First live collection shakeout (13 Jul 2026, Jack Looker / HH 15669):** caught exactly the class of gap the round-5 caveat predicted. The checkin resolve + session + auth all worked, but `CollectionPage` never READ the vehicle from the freelancer session — its only vehicle-selection path was the `useAllocations` auto-select effect, which is deliberately gated off for freelancers, so `form.vehicleId` stayed null and the freelancer sat on the amber "Waiting for vehicle allocation…" box forever despite the van being booked out and in `freelancerContext`. Fixed by porting BookOutPage's freelancer pre-fill effect (seed `vehicleId`/`vehicleReg`/`hireHopJob`/`driverName` from `freelancerContext` once the vehicles list loads; driver = `customerDriverName` fallback freelancer's own name, editable). **Convention: any vehicle-module page that runs in freelancer mode MUST seed its form from `freelancerContext`** — the staff data hooks (`useAllocations`, `useDriverHireForms`, `useVehicleIssues`) are 403-gated for freelancer sessions, so gating a hook off without adding the context pre-fill silently strands the flow. The walkaround remainder (photos, PDF recipients) is still not live-proven — watch the next real collection past Step 1.
 
 ##### Carnets ✅ COMPLETE (Jun 2026) — see `docs/CARNET-SPEC.md`
 Full ATA Carnet module replacing the Monday board + Jotform request form. Dedicated `job_carnets` + `carnet_gmrs` tables (NOT just a requirement card — promoted to a module like job_issues/storage because of the GMR children, custody chain, client form + signed authority, and document storage). Two modes on one record: `we_supply` (HH-detected via sale item **575** "Arrangement fee - provision of ATA Carnet", £750 — mirrors VE103B detection exactly) and `client_arranges` (manual lightweight "thing to do"). Per-job scope. Money stays in HireHop (item 575 → Money tab). GMRs tracked requested → made → sent, with number + uploaded QR image for forwarding to clients.
@@ -1867,6 +2213,7 @@ The Job Detail page has inline editing for all key fields.
 - [x] **Job name** — Inline editable
 - [x] **Pipeline fields** — Likelihood, next chase date, job value — all inline editable on Job Detail
 - [x] **Create in HireHop** button — Push Ooosh-native enquiry to create HH job, write back the number. HH user/manager mapping via `hh_user_id` on users table (migration 028). Uses `/api/save_job.php` with confirmed field names: `out`/`start`/`end`/`to` for dates, `duration_days`/`duration_hrs` for charge period, `duration_locked: 0`. Default times 09:00 when DatePicker sends date-only. Details field is NOT pushed to HH job memo.
+  - **⚠️ Charge period = `ceil(elapsed_hours / 24)`, computed from the INSIDE dates only — Job Start → Job End (NOT Outgoing/Returning). CEIL, never floor (Jul 2026 fix, PR #1033 — do not reintroduce floor).** `calcHHDuration(start, end)` in `routes/pipeline.ts` is the single source for all push paths (Create in HireHop / sync-dates / combine). HireHop's own charge-period rule counts any fraction of a day past a whole 24h block as a new chargeable day — confirmed live on job 16390: finish 22:00 (132h) → 6 days, finish 09:00 next morning (143h) → 6, finish 10:05 (145h) → 7 = `ceil(hours/24)` throughout. HH honours the `duration_days` we send on save, so pushing `floor` was actively overriding HH with the wrong figure. The bug only showed on hires NOT entered on a whole 24h (9am→9am) boundary — most visibly **rehearsals**, which finish on the actual last day (e.g. 10:00–22:00) with no morning rollover, so a genuine 6-day rehearsal (9–14 Nov, 132h) was pushed as 5. For 9am→9am van entries the hours are exact 24h multiples so `ceil == floor` — vans unchanged. `duration_hrs` is also ceiled to mirror HH exactly (144.08h → 145). The Job Detail date-editor "N days" label (`JobDetailPage.tsx`) uses the same times-aware ceil so OP and HH agree; the excess (`ExcessPaymentModal`) and transition-modal day-counts already ceiled the full timestamps. Outgoing/Returning (`out`/`to`) are pushed as their own fields (equipment reserved-from / available-again) and only sanity-clamped (`out` can't be after `start`) — they never feed the day count.
 
 **Stream B: Band-Centric Data Model** ✅ COMPLETE
 Organisation-to-organisation relationships and multi-org job links. Makes "bands" a first-class concept.
@@ -1934,7 +2281,7 @@ The cleanup strategy is: OP becomes master for relationship data, HH gets what i
   - [x] Multi-filter on Organisations: has email, has people, type
   - [x] Multi-filter on Venues: linked to org
   - [x] Sort options on all list pages: name, recently added, recently updated, last contacted
-  - [x] "Last Contact" column on People + Organisations (colour-coded: green <30d, amber 30-90d, red >90d)
+  - [x] "Last Contact" column on People + Organisations (colour-coded: green <30d, amber 30-90d, red >90d). **"Last contacted" = broadest reachable genuine contact, NOT just the entity's own interactions (Jul 2026).** Client contact overwhelmingly lands on the JOB timeline, not the org's/person's own — so reading only `interactions WHERE organisation_id = o.id` (the original) read stale/empty. Both the org + people list columns AND their "last contacted" sort now compute `MAX(created_at)` over contact-type interactions (`type IN ('call','email','meeting')` — auto-chase-ingested client emails are `type='email'`, so they count; `note`/system rows deliberately excluded) reachable from the entity. Org (`routes/organisations.ts` `lastContactSubquery`): own timeline + jobs linked via `job_organisations`/`jobs.client_id` + people linked via active `person_organisation_roles`. Person (`routes/people.ts` `lastContactSubquery`): own timeline + jobs they're a `job_contacts` or crew (`quote_assignments`→`quotes`) contact on — kept person-focused, NOT the whole org's timeline (that lives on the org page; bubbling it would make every contact at a busy client look freshly contacted). One shared subquery drives both the SELECT and the sort so they can't drift. Any new "last contacted" surface should read from this broadened source, not the entity's own interactions alone.
   - [x] Smart suggestions on Org Detail (suggest band retype for misclassified clients)
   - [x] Data Cleanup page restricted to admin/manager roles in nav
   - [x] Client info surfacing on New Enquiry form + Job Detail sidebar: Do Not Hire warning (red banner), Working Terms, Internal Notes — via enhanced `/pipeline/client-history` endpoint returning `client_info` from organisations table
@@ -1959,7 +2306,7 @@ The cleanup strategy is: OP becomes master for relationship data, HH gets what i
 - [x] **Hire History Tab** (15 Apr 2026)
   - [x] `GET /api/organisations/:id/hire-history` — paginated jobs via job_organisations, retro + lost reason parsing
   - [x] `GET /api/people/:id/hire-history` — jobs via org memberships UNION crew assignments
-  - [x] Reusable `HireHistoryTab.tsx` component with stats cards (total, confirmed, value, retro breakdown)
+  - [x] Reusable `HireHistoryTab.tsx` component with stats cards (total, confirmed, value, retro breakdown). **Stats cards are filter-aware (Jul 2026):** the four cards (Total Jobs / Confirmed / Total Value / Retros) reflect the active outcome/role/year filters — the org + person hire-history stats + retro queries apply the same `filterSql` as the list/count (previously they always computed over the whole entity). `Total Value` sums whatever `job_value` is present across the visible filtered rows (the confirmed-only `SUM FILTER` was dropped — the Money tab owns the figure). A subtle "· filtered" hint renders on the cards when a filter is active (`filtersActive` in `HireHistoryTab.tsx`).
   - [x] Retro rating badge + notes + follow-up shown inline (not just hover)
   - [x] Lost reason shown for lost jobs (grey "Lost" badge + reason text)
   - [x] Person hire history shows "Crew" label for crew assignment links
@@ -2294,6 +2641,7 @@ Standalone OP-native module replacing the Monday.com "Storage Clients" board. Oo
 **Key design points:**
 - **One live tenancy per room** enforced by a partial unique index (`status IN ('active','notice','reserved')`); the create handler catches `23505` → 409. Move-out soft-ends the tenancy (row preserved as ex-client history) and frees the room.
 - **Invoice "tickbox" = forward-moving date.** Manual-billing tenancies carry `next_bill_date`. "Mark invoice sent" logs a `storage_invoice_log` row and advances `next_bill_date` by cadence (clearing the per-cycle reminder dedup stamps). Recurring-mode (Xero) tenancies are tracked but not nudged. Mirrors the chase-date convention.
+- **Billing decouple + custom cadence (migration 162, Jul 2026).** `next_bill_date` is now PURELY the reminder trigger, separate from the invoice record. "Mark invoice sent" is a pre-filled modal (`MarkInvoicedModal`): amount, optional `invoice_number`, optional `period_start`/`period_end` (all three on `storage_invoice_log`), and an overridable next-due date (pre-filled from cadence, `+1m/+3m/+6m/+1y` quick-set). `mark-invoiced` next-due resolution: explicit override → fixed cadence interval → **custom** `billing_custom_interval_value`+`billing_custom_interval_unit` (day/week/month/year — unit is code-whitelisted so the interval SQL is injection-safe) → left as-is. **Why it exists:** a `custom` cadence had no machine-readable interval, so mark-sent couldn't advance the date — it got stuck circling the same dead cycle and re-nagging about an already-sent invoice (Studio 1 / Raygun, 07/07/2026). The custom interval + `bill_reminder_lead_days` / `bill_overdue_grace_days` are all editable on the Edit-tenancy form.
 - **Reminders** (per-cycle dedup via `billing_reminder_sent_for` / `billing_overdue_sent_for` / `rate_review_sent_for`): billing due-soon (lead days before), billing overdue (grace days after, unticked → high priority), rate review due. Notify `bill_reminder_person_id` (fallback admins/managers) as `follow_up` bell notifications (escalation handles email per prefs).
 - **Access requests** (`storage_access_events`): "collect X / courier Y" pinch point — log → notify admins/managers → mark done. Non-blocking access-list check warns if the attendee isn't on the unit's allowed list.
 - **T&Cs:** versioned (`storage_tcs_versions`, one current), public accept-link + e-signature → `storage_tcs_agreements` (signature PNG to R2).
@@ -2422,7 +2770,7 @@ These are existing standalone tools that currently push to Monday.com. They need
 - **Staging Calculator** — ✅ **INTEGRATED into OP (Jun 2026)** — see "Staging Calculator Integration" below.
 - **Backline Matcher** — ✅ **INTEGRATED into OP (Jun 2026)** — see "Backline Matcher Integration" below.
 - **PCN Manager** — ✅ **INTEGRATED into OP (Jun 2026)** — see "PCN Manager Integration" below.
-- **Cold Lead Finder** — Ticketmaster API integration (standalone, low priority)
+- **Cold Lead Finder** — ✅ **INTEGRATED into OP as the Leads module (Jul 2026)** — see "Leads Module (Tour Finder)" below.
 
 #### PCN Manager Integration (Jun 2026)
 
@@ -2697,9 +3045,96 @@ JWT auth for free, which is what locks out the old direct-URL access).
   (skipped — only checks when a job is attached). Cross-link demand → Fill-a-Gap /
   purchasing if it earns its keep.
 
-#### Auto-Chase — Phase 1: Gmail ingestion (Jul 2026, PR #919)
+#### Leads Module (Tour Finder) — cold + warm lead finder (LIVE, Jul 2026)
 
-The foundation of the auto-chase feature — ingest the `info@oooshtours.co.uk` inbox (Google Workspace domain-wide delegation) and log client emails onto job timelines as `interactions`, which feeds the existing Pipeline Chase Model for free. **Full spec: `docs/AUTO-CHASE-SPEC.md`** (read §13.1 "Phase 1 — as built" before touching this). Branch `claude/auto-chase-feature-design-tiknf2`.
+The old standalone `ooosh-tour-finder` (Python CLI → dead Monday board) re-homed into
+OP as the **Leads module**, under **Jobs → Leads** (`/jobs/leads`). Finds touring
+artists coming to the UK (Ticketmaster Discovery API over a fixed 24-venue list),
+AI-scores them for Ooosh relevance, address-book-matches to spot existing clients
+(warm/remarketing), and researches management/booking contacts for cold leads.
+**Spec: `docs/TOUR-FINDER-SPEC.md`.** Deliberately mounted under Jobs, NOT a new
+top-level nav group (jon's call — "streamline rather than expand"). Migration **175**.
+
+**Where it lives:**
+- Backend pipeline: `backend/src/services/leads/*` — `venues.ts` (the 24 MONITORED_VENUES
+  + exclusion lists), `ticketmaster.ts` (throttled TM client, per-run call budget),
+  `collector.ts` (venue resolution + event collection into `tf_events`), `detector.ts`
+  (tour detection + the lookahead-window drop), `scorer.ts` (Claude relevance scoring),
+  `matcher.ts` (pg_trgm address-book matching + org AI-Summary enrichment), `researcher.ts`
+  (Claude web-search contact research), `pipeline.ts` (orchestrator + zombie-run recovery).
+- Routes: `backend/src/routes/leads.ts` (`/api/leads/*`).
+- Frontend: `frontend/src/pages/LeadsPage.tsx` (Cold/Warm tabs, scored table, expandable
+  row detail, partial-match confirm/reject, run banner, search + click-to-sort).
+
+**Storage (migration 175):**
+- `tf_events` — raw Ticketmaster event cache (dedup on TM event id).
+- `leads` — the lead record: artist + UK dates/venues, scoring
+  (`relevance_score`/`client_tier`/`origin_country`/`is_international`/`reasoning`/`ai_summary`),
+  address-book match (`matched_organisation_id`/`match_confidence` [`exact`|`partial`|`none`]/`match_candidates`),
+  `stream` (`cold`|`warm`), `contacts` JSONB, lifecycle
+  (`status` [`new`|`reviewing`|`contacted`|`converted`|`dismissed`|`not_relevant`]/`assigned_to`/`converted_job_id`).
+  Dedup unique index on `(lower(artist_name), first_date)`.
+- `lead_runs` — pipeline run log (`status`/`counts`/`error`/timestamps).
+- `system_settings` category `leads` — the config knobs (all staff-editable, no deploy):
+  `lead_lookahead_min_weeks` (default 3 — the "don't surface tours already running / too
+  imminent to sell" floor), `lead_lookahead_max_weeks` (17), `lead_tour_min_dates` (3),
+  `lead_tour_window_weeks` (6), `lead_min_relevance_score` (6), `lead_contact_research_cap`
+  (20), `lead_auto_run_enabled` (false — the future scheduled-run toggle, not yet wired).
+
+**The pipeline** (`runPipeline`): collect → detect → score → match → research, run as one
+background `setImmediate` job writing progress/counts to `lead_runs`.
+- **Lookahead fix** (the headline value over the old tool): `detector.ts` drops any tour
+  whose earliest *visible* UK date is under `today + lead_lookahead_min_weeks` — no point
+  surfacing a tour that's already on the road or too soon to sell into.
+- **Scoring** (`scorer.ts`): ported ai_filter prompt (Tier 1 international / Tier 2 within
+  70mi of Shoreham / Tier 3), Claude `claude-sonnet-5` with forced tool-use for structured
+  output + prompt caching, batched 30.
+- **Matching** (`matcher.ts`): `pg_trgm` fuzzy match of the artist name against
+  `organisations` (the `%` operator + `similarity()`; `CREATE EXTENSION pg_trgm` in migration
+  175, though the existing trgm index already required it). Exact (normalised equality) →
+  auto-links + enriches the org's AI Summary; partial (≥ threshold) → surfaces "could this be
+  [Org]?" candidates for a human confirm/reject; none → stays cold. Warm summary
+  (`getWarmSummary` → `composeWarmSummary`) writes a dated `[Lead Finder YYYY-MM-DD] …` block
+  into `organisations.ai_summary` (`appendOrgSummary`).
+- **Contact research** (`researcher.ts`): cold/unmatched leads ≥ min score with no contacts →
+  Claude + the **web-search tool** (`{ type: 'web_search_20250305', name: 'web_search',
+  max_uses: 5 }`) finds management/booking contacts, 90s request timeout, capped per run,
+  JSON-parsed with a fence/brace fallback. Errors surface on the run banner (`lastError`).
+
+**Endpoints** (`routes/leads.ts`): `GET /` (list, filter stream/status/min-score),
+`GET /runs/latest`, `GET /settings`, `POST /run` (MANAGER_ROLES — full crawl),
+`POST /process-existing` (MANAGER_ROLES — match+research existing leads only, no TM crawl —
+the fast reprocess path), `POST /cancel` (stop/reset a stuck run), `PATCH /:id` (lifecycle),
+`POST /:id/confirm-match` + `POST /:id/reject-match` (partial-match resolution).
+
+**Zombie-run recovery (the `setImmediate` convention):** the pipeline runs in-process, so a
+deploy restart mid-run kills it while the `lead_runs` row stays `status='running'` forever —
+which both blocks new runs and means the deferred stages never ran. Guards:
+`sweepZombieLeadRuns()` marks any orphaned `running` rows failed and is called at **boot**
+(`index.ts`, after `startScheduler()`); `isRunActive()` has a **30-min stale guard** so an
+old row can't block indefinitely; `POST /leads/cancel` is the manual Stop. Any future
+in-process background job should follow the same boot-sweep + stale-guard + manual-stop shape.
+
+**Env needed on the server:** `TICKETMASTER_API_KEY` (the Ticketmaster **consumer key** only —
+the Discovery API doesn't need the secret) + the existing `ANTHROPIC_API_KEY`. The old
+tour-finder key was reused (found on the server, not regenerated).
+
+**Shipped in three validated PRs:** #997 (PR 1 — collect→detect→score + lookahead fix),
+#1000 (PR 2 — pg_trgm matching, Cold/Warm split, partial confirm/reject, org enrichment,
+web-search contact research), #1002 (PR 3 — zombie-run recovery, "Match & research existing"
+fast path, research timeout/error surfacing, table search + click-to-sort). jon merges each
+to main + deploys manually + validates against a test list before the next.
+
+**Deferred slices (agreed, not built):** scheduled weekly run (`lead_auto_run_enabled` toggle
+is seeded but unwired); dashboard surfacing of new high-score leads; "Create band + link" for
+cold leads (staff-gated address-book create + convert-to-job); outreach-email drafting via the
+Gmail auto-chase infra ("here's a lead + a ready-to-send intro"). **Open discussion:** deepen
+warm matching beyond org-name — some bands are booked under a management/agency org rather than
+a "The Band" org, so a future pass could also match band-role links / people, not just org names.
+
+#### Auto-Chase — Gmail ingestion + AI chase drafts (LIVE, Jul 2026)
+
+The auto-chase feature — ingest the `info@oooshtours.co.uk` inbox (Google Workspace domain-wide delegation), log client emails onto job timelines as `interactions` (feeds the Pipeline Chase Model for free), and AI-draft "just checking in" chases as Gmail drafts staff review + send. **Full spec: `docs/AUTO-CHASE-SPEC.md`** (§13.1 = Phase 1 as-built, §13.2 = Phase 2 progress + remaining checklist). Branch `claude/auto-chase-feature-design-tiknf2`.
 
 **Deployed INERT until configured.** Everything is gated on `isGmailConfigured()` (`Boolean(GMAIL_SERVICE_ACCOUNT_JSON && GMAIL_DELEGATED_USER)`). Without those env vars the scheduler crons are skipped and every endpoint returns `configured: false` cleanly — the migration + code are safe to deploy ahead of the Google setup. Mirrors the `isStripeConfigured()` / `isAnthropicConfigured()` guard pattern.
 
@@ -2707,7 +3142,8 @@ The foundation of the auto-chase feature — ingest the `info@oooshtours.co.uk` 
 - `config/gmail.ts` — DWD JWT (`google-auth-library`, cached per mailbox, scope `gmail.readonly`, `subject` = impersonated mailbox), then plain `fetch` against the Gmail REST API (deliberately avoids the heavy `googleapis` package). `loadServiceAccountKey()` **auto-detects inline JSON vs a filesystem path** — a value starting with `{` is treated as inline JSON, anything else as a path to read.
 - `services/email-matcher.ts` — `matchEmailToJob()`, deterministic only: HH job# in attached PDF filename → HH job# in subject/body (validated against `jobs.hh_job_number`) → sender/recipient email → single OPEN job. No match ⇒ `gmail_unmatched_inbound` review queue. **Never guess-attach.** AI fuzzy layer deferred.
 - `services/gmail-ingestion.ts` — first run establishes a baseline `historyId` and ingests NOTHING historic (starts from go-live forward); thereafter incremental via the Gmail History API. Dedup on RFC822 Message-ID (partial-unique index) so the same email across future manager mailboxes = one interaction. Matched → `interactions` (`type='email'`, `created_by=SYSTEM_USER_ID`); unmatched → review queue.
-- **⚠️ Internal / automated sender guard (critical — info@ is a firehose of our OWN mail).** `processMessage` skips (no log, no queue) any inbound whose From is on our own domain (`INTERNAL_SENDER_DOMAINS = ['oooshtours.co.uk']`) OR that looks automated (`Auto-Submitted` ≠ `no`, `Precedence: bulk/list/junk`). Without this, internal notifications that carry a HH job# — referral alerts, pre-hire briefings, chase/holding digests, and especially the **client-no-email fallback** (our bounced OUTBOUND redirected to info@ with the job ref in it) — would all match via the job-number layer and pollute job timelines as fake "inbound client emails." Client replies are always external, so the domain cut is clean. It also correctly drops our own SENT copies (Phase 2 owns draft-vs-sent capture). Stays correct into Phase 1.5 manager mailboxes (a client replying to Sarah is still external → kept; Sarah's outbound → skipped). Only loss: a staff FORWARD of a client thread into info@. **Decision: filter smartly, do NOT move internal mail off info@** (staff rely on seeing those alerts in the shared inbox; the filter is lower blast-radius and reversible).
+- **⚠️ Internal / automated sender guard (critical — info@ is a firehose of our OWN mail). REVISED Jul 2026 — now KEEPS genuine outbound to clients.** `ingestGmailMessage` skips (no log, no queue): automated mail (`Auto-Submitted` ≠ `no`, `Precedence: bulk/list/junk`); our **system/template sender** (`notifications@oooshtours.co.uk` — booking/payment confirmations, hire-form requests, delivery notes, referral alerts, digests, the client-no-email fallback); and **internal↔internal** mail (from our domain with NO external recipient). But it now **KEEPS genuine staff→client outbound** (from us WITH an external `To`/`Cc` recipient, tagged `direction=outbound`) and inbound client mail. `hasExternalRecipient()` is the discriminator. The original cut skipped ALL own-domain mail, which also dropped our quotes/replies to clients — leaving the conversation summary + chase draft one-sided and blind to "we sent 5 quotes" (the job-16274 "no quote sent yet" incident). Stays correct into Phase 1.5 manager mailboxes. Only loss: a staff FORWARD of a client thread into info@ with no external recipient. **Decision: filter smartly, do NOT move internal mail off info@.**
+- **⚠️ Backfill + matcher tightening (Jul 2026 — the eBay-labels incident).** The cold-start backfill searched `q="16274"` and force-attached whole matching threads with no validation, so Jon's personal eBay postage-label threads (coincidentally containing those digits) polluted job 16274's timeline. `threadBelongsToJob()` now gates each thread — needs a `Quote (N)` PDF, an explicit `#N`/`job N`/`quote N` reference, or a known job-contact address; a bare digit-coincidence is rejected. The live matcher's body-number layer (`extractReferencedJobNumbers`) likewise now requires an explicit `#`/`job`/`ref`/`quote` prefix (filenames keep the precise `Quote (N)` key). Cleanup: `scripts/reingest-emails.ts` (dry-run default, `--commit`, `--rebackfill`) resets ONLY Gmail-ingested emails (`gmail_message_id IS NOT NULL`) and re-runs the tightened backfill. **Chase-draft tone** is now silence-aware: `unansweredOutbound` (emails we've sent since the client last replied) drives a persistent-non-response register at ≥2 (acknowledge repeated contact, ask if still interested, offer a gracious out) that overrides the "dates far → relax" default.
 - `services/email-retention.ts` — weekly sweep strips bodies older than `system_settings.email_retention_months` (default 24), keeps metadata + `body_stripped_at`, idempotent.
 - `routes/auto-chase.ts` (`/api/auto-chase`) — `GET /status`, `POST /ingest`, `POST /retention-sweep`, `GET /unmatched`.
 - **Migration 157** — email metadata + dedup index on `interactions`; `gmail_sync_state` (per-mailbox `historyId` cursor); `gmail_unmatched_inbound`; `jobs.auto_chase_mode/count/last_at`; seeds `chase_voice_instructions` / `email_retention_months` / `auto_chase_max_silent` (category `chase`).
@@ -2719,14 +3155,74 @@ The foundation of the auto-chase feature — ingest the `info@oooshtours.co.uk` 
 
 **Jon's locked-in design decisions** (all in `system_settings`, tunable without a deploy): retention = 24 months full body then strip (`email_retention_months`); cold dead-end = 3 silent chases then escalate to a human (`auto_chase_max_silent`); multi-mailbox staleness accepted as a Phase 1 cost (draft-not-send is the mitigation, fast manager-mailbox rollout is the fix — NO "always CC info@" mandate).
 
-**Phase 2 — AI drafts + real Gmail draft creation shipped (Jul 2026):**
-- `services/chase-draft.ts` drafts a "just checking in" chase with Claude Sonnet 5, grounded in the quote line items (`jobs.line_items`), repeat-vs-first-contact history, prior ingested email thread, and prior chase count. The "checking-in NOT renegotiating" guardrails live in the code SYSTEM_PROMPT; the `chase_voice_instructions` system-setting is appended (tunable without a deploy). `POST /api/auto-chase/preview-draft/:jobId` (admin/manager) returns the draft as JSON without touching Gmail (quality check on real jobs).
-- `config/gmail.ts` gained the `gmail.compose` scope on a **separate** JWT client (`getGmailComposeClient`) so ingestion stays strictly read-only, plus `createGmailDraft()` (`POST /users/{mailbox}/drafts`, base64url RFC822 + optional `threadId`). **OP only creates drafts — never sends; staff send from Gmail.**
-- `services/gmail-draft.ts` `createChaseDraftForJob()` — AI draft → resolve recipient + thread latch (most recent ingested INBOUND client email on the job → reply into that thread; else the job's primary `job_contacts` email → standalone draft; else 422) → build MIME → create the draft. `POST /api/auto-chase/create-draft/:jobId` (admin/manager). **Note:** we filter our own outbound out of ingestion, so we usually don't have the *original sent-quote* thread id — the common "quoted, silence" case creates a standalone draft to the client, and only latches when the client has already replied. Latching onto the sent-quote thread would need a Gmail search-for-thread step (future).
+**GO-LIVE STATE (Jul 2026): Phase 1 + most of Phase 2 are LIVE and working on prod.** Emails are ingesting onto job timelines; chase drafts create real Gmail drafts in info@. The service account key is a FILE at `/var/www/ooosh-portal/backend/gmail-sa.json` owned by the service user (`chown --reference=.env` — a `chmod 600` root-owned file gave `EACCES`; match `.env`'s owner). Both `gmail.readonly` + `gmail.compose` scopes are authorised on the DWD client. Baseline established, 10-min ingestion cron running.
 
-**Still deferred (see spec):** wire create-draft into the chase-due trigger (08:00 chase scanner) for jobs with `auto_chase_mode='draft'`; ChaseModal Off/Draft/Send toggle (`auto_chase_mode` column already there) + chase-voice Settings UI; passive draft-vs-sent diff capture; Phase 1.5 manager mailboxes (dedup already handles it); Phase 2 AI fuzzy matcher (layer 4 in `email-matcher.ts`); attachment→R2 harvest; Phase 4 dispute helper + line-item diff history + the **website-enquiry direct integration** (form→OP webhook — NOT email scraping; see spec §5.4a + §11).
+**Phase 2 — AI drafts + real Gmail draft creation + search/backfill (Jul 2026):**
+- `services/chase-draft.ts` drafts a "just checking in" chase with Claude Sonnet 5 (`claude-sonnet-5`), forced tool-use, grounded in the quote line items (`jobs.line_items`), repeat-vs-first-contact history, prior ingested email thread, prior chase count, **days-until-hire (urgency/tone)**, and **the INSIDE hire dates**. The "checking-in NOT renegotiating" guardrails live in the code SYSTEM_PROMPT; the `chase_voice_instructions` system-setting is appended (tunable without a deploy). `POST /api/auto-chase/preview-draft/:jobId` returns the draft as JSON without touching Gmail.
+- **INSIDE hire dates (critical grounding rule).** Read from OP's `jobs` (synced from HH). Hire START = `job_date` (fallback `out_date`); last hire DAY = `job_end` date **minus 1 when `job_end`'s time-of-day is a morning marker (`getUTCHours() < 12`)** — Ooosh books `job_end` ~09:00 the morning *after* the last hire day (a hire to the 15th shows `job_end` 16th 09:00; the 16th is the RETURN, not a hire day). Matches OP's own "N days" figure. Fixes both 1-day-as-2-day AND multi-day overstatement. A HARD RULE forbids describing the hire as running to the return date. This is code-only — the voice setting can't reach a factual date calc.
+- `config/gmail.ts` — `gmail.compose` scope on a **separate** JWT client (`getGmailComposeClient`) so ingestion stays strictly read-only; `createGmailDraft()` (`POST /users/{mailbox}/drafts`, base64url RFC822 + optional `threadId`); `gmailSearchMessageIds()` (readonly `messages.list?q=`). **OP only creates drafts — never sends; staff send from Gmail.**
+- `services/gmail-draft.ts` `createChaseDraftForJob()` — AI draft → resolve recipient + thread latch → MIME → create draft. `POST /api/auto-chase/create-draft/:jobId`. Latch order: most recent ingested INBOUND client email on the job (reply into their thread) → else primary `job_contacts` email + a **Gmail search on the HH job number** to latch onto the original sent-quote thread even when the client never replied → else 422 no client email.
+- **Cold-start backfill** — `services/gmail-backfill.ts` + `POST /api/auto-chase/backfill` (admin, `{limit?≤200 default 50, dryRun?}`): for each OPEN-pipeline job with an HH number, search the mailbox for the number, pull the matching thread(s), ingest every message onto the KNOWN job. Idempotent (RFC822 dedup) — run repeatedly a limit at a time. Shared `ingestGmailMessage()` extracted from `processMessage()` (live = matcher; backfill = forced known job).
+- **Frontend:** "✨ Draft chase" button in `ChaseModal` (manager-tier, calls create-draft, shows recipient + threaded/standalone inline). Chase-voice Settings UI (`ChaseVoiceSettingsSection` on SettingsPage, edits `chase_voice_instructions`, category `chase`). **Timeline email collapse** (`InteractionBody` in `ActivityTimeline.tsx`) — ingested emails hide the quoted reply chain (`>` / "On … wrote:" / Original-Message dividers) behind a "··· show quoted text" toggle; long non-email bodies clamp to 12 lines. Render-only, stored content untouched.
+
+**Phase 2 — automation loop + summary + voice tuning (Jul 2026, SHIPPED — spec §13.2 slices 5-6):**
+- **Per-job conversation SUMMARY** (§7.1) — `services/comms-summary.ts` (Haiku) digests a job's ingested `type='email'` interactions, cached in `job_comms_summaries` (migration 163). `GET`/`POST /api/auto-chase/job-summary/:jobId` (STAFF_ROLES); `ConversationSummary.tsx` at the top of the Activity Timeline (jobs only), auto-generates on a missing/stale cache, renders nothing when Anthropic off / no emails. Staleness is COMPUTED at read time (live count/newest vs stored) — no coupling into the ingest hot path; regeneration is lazy (next viewer of a stale job). Falls back to snippets for retention-stripped bodies.
+- **Example-driven voice tuning** (§9.3) — `learnChaseVoice()` (Sonnet) distils pasted client emails + our replies into a PROPOSED `chase_voice_instructions` note (style only). `POST /api/auto-chase/voice/learn` (manager-tier) returns the proposal; "Teach the voice from real examples" panel in Settings → Auto-Chase reviews + saves it. Distil-into-instructions, NOT raw few-shot (keeps the runtime prompt small + transparent).
+- **Dispute helper** (§7.2) — `services/comms-query.ts` `answerCommsQuery(jobId, question)` (Sonnet) answers a natural-language question strictly from a job's ingested email chain (quotes + dates, "can't find it" when absent, never guesses); the chain is a prompt-cached block so repeat questions on a job reuse it. `POST /api/auto-chase/comms-query/:jobId` (STAFF_ROLES); surfaced as a "🔎 Ask about these emails" box folded into `ConversationSummary.tsx`. The line-item-diff history table (auto-assembled audit trail) is the still-deferred Phase 4 companion.
+- **Automation loop** (§9-§10, migration 165 master switch, 166 default sender) — the reply-bump + suppression gate + scheduled draft/send:
+  - **Reply-bump** (`gmail-ingestion.ts`): a LIVE inbound client email pushes `next_chase_date` forward (sacred-future) + resets `auto_chase_count` (auto-unenrol on reply). Backfill (`forceJobId`) exempt so historical replays never move live chase dates.
+  - **Suppression** (`services/chase-suppression.ts`): Do-Not-Hire / internal → suppress; cold dead-end (≥ `auto_chase_max_silent`) → escalate to a human (turns the job's auto-chase off + bell); client emailed since our last chase → suppress. OOO/bounce/hot-inbound deferred.
+  - **Runner** (`services/auto-chase-runner.ts`, cron 08:10 Europe/London + `POST /api/auto-chase/run-due`): due jobs with `auto_chase_mode IN ('draft','send')` → gate → Gmail draft (draft) or send (send). **`auto_chase_send_enabled` master switch defaults OFF** → a 'send' job only drafts until flipped (graduation). Every action logs a `source='system'` chase interaction; failures/suppressions defer the chase. Sign-off: whoever SET the auto-chase (`jobs.auto_chase_set_by`, stamped on the pipeline PATCH, migration 167) → job's manager1 first name → `chase_default_sender_name` setting → "the Ooosh team" (manual "Draft chase" button uses the clicker's name). The ChaseModal offers "Send" only when the global switch is on, so there's no confusing per-job "Send" that silently only drafts; the auto-chase box is hidden in reschedule mode.
+  - **Thread latch** (`gmail-draft.ts`): replies to the NEWEST message in the thread (`latestThreadMessageId` via `threads.get`), not the latest *inbound* — fixes drafts landing mid-conversation after an unanswered outbound.
+  - **Per-job control**: `auto_chase_mode` on the pipeline PATCH; ChaseModal Off/Draft/Send toggle (manager-tier); Settings master switch + default-sender field.
+- **Gmail send** (`config/gmail.ts` `sendGmailDraft` via `drafts/send`, compose scope) — used ONLY by the gated auto-send path.
+
+**Still deferred (see spec §13.2 for the live checklist):**
+- Passive draft-vs-sent diff capture (§9.3 — the automated sibling of the paste-box voice tuner); "learn from this thread" timeline affordance pre-filling the paste box; creation-time auto-chase selector on the New Enquiry / quote forms (ChaseModal covers per-job now).
+- Phase 3 suppression signals: OOO autoresponder / bounce / hot-inbound content parsing; multi-step cadences.
+- Phase 4: the §7.2 dispute helper is SHIPPED. **Quote-PDF version diff — SHIPPED (spec §7.3; PRs #984, #987, #989, Jul 2026).** `migration 170` (`job_quote_versions` + per-job harvest cursor). Because our sent quotes are filtered out of live ingestion (§5.4a), harvest is **search-based**, NOT ingestion-piggyback: `services/quote-harvest.ts` searches the mailbox for the HH job number (`gmail.readonly` — no new scope), keeps ONLY attachments whose filename is `Quote (<thisJob>)` (so a multi-quote email routes each PDF to its own job), two-layer dedup (message id + SHA-256 content hash), bytes → private R2 (`email-quotes/`). `services/quote-versions.ts` vision-extracts line items (`extractDocument`, Haiku) + diffs consecutive versions by normalised description; version ORDER is the full message timestamp (the `(1)/(2)` filename suffix is download-order noise). Surfaced on the **Activity Timeline** (`QuoteVersions.tsx`, NOT the Money tab) + fed into the dispute helper's grounding (`comms-query.ts`). **Loading is non-blocking + polled:** `getJobQuoteVersions` returns cached state instantly + kicks a single guarded BACKGROUND run (`jobsWorking` set) that harvests-then-extracts newest-first; the frontend polls (`working` flag + `pending` versions) so items/diffs fill in live; a PDF whose extraction throws is marked `failed` (`failedVersions` set) → "couldn't read this PDF" not eternal "reading…", retried by the Refresh button. Both the summary + quote boxes are pre-collapsed by default. `GET/POST /api/auto-chase/quote-versions/:jobId[/refresh]` + a background `quote-versions-sweep`.
+  - **Extraction truncation FIXED (Jul 2026, job 16274).** Symptom: only the LATEST of 5 quote PDFs extracted; the older 4 showed "couldn't read this PDF". Root cause was NOT the PDFs/R2/vision — it was `document-extract.ts` `JSON.parse` failing (`Expected ',' or ']' … at position ~2777`) because the model's line-item JSON overflowed the default `max_tokens=1024` and truncated mid-array. The older quotes had MORE items (items were trimmed over time; #5 at 19 items just fit). Fix: `extractQuoteVersion` passes `maxTokens: 8192`, and `extractDocument` now throws a clear "hit the output token limit — raise maxTokens" error on `stop_reason === 'max_tokens'` instead of a cryptic JSON-parse failure. Re-extract is automatic (failed rows have `items=NULL`; the in-memory `failedVersions` set clears on restart, so the background run re-attempts on next view). **Lesson: any `extractDocument` caller whose output can be long (list extraction) needs an explicit `maxTokens` — the 1024 default is only safe for small fixed-shape outputs (PCN/cost receipts).**
+- **Timeline email collapse is CHARACTER/inline-based** (`InteractionBody` in `ActivityTimeline.tsx`, Jul 2026 fix). Ingested HTML emails have newlines flattened to spaces at storage (`extractBodyAndAttachments` in `gmail-ingestion.ts` does `\s+→' '`), so the whole quoted thread is one giant line — the old line-anchored `wrote:$` detector never matched and walls of text rendered in full. `findQuoteBoundaryChar` now scans the raw text for the earliest inline marker (`On … wrote:` / Outlook `From:…Sent:` / `--- Original Message ---` / `>`) and collapses from there; a char/line long-clamp catches quote-less long bodies. Display-only — full bodies stay stored (the dispute helper needs them). Don't "fix" this by stripping quotes at ingestion — that would starve §7.2/§7.3.
+- Phase 1.5 manager mailboxes (dedup already handles it); AI fuzzy matcher (layer 4 in `email-matcher.ts`); attachment→R2 harvest; ingest-time quote-stripping (only if stored bodies get heavy — display collapse already solves the UX); **website-enquiry direct integration** (form→OP webhook with address-book search-or-create — NOT email scraping; enquiry form sends From `info@`, so it can't be sender-allowlisted; jon spinning up a dual-repo session for this; see spec §5.4a + §11).
+
+#### Freelancer Onboarding (Phases A–C SHIPPED, Phase D next, Jul 2026) — see `docs/FREELANCER-ONBOARDING-SPEC.md`
+
+Staff-driven `invite → apply → review → approve → onboard` lifecycle for taking a new freelancer from "someone we might use" to "approved, ready to be crewed onto jobs". Replaces the old "just tick `is_freelancer` and hope" flow. **Migration 184** (`freelancer_applications` table + `people.freelancer_status` denorm column). Routes `routes/freelancers.ts` (`/api/freelancers/*`). Frontend `InviteFreelancerModal.tsx` (invite), `FreelancerPanel.tsx` (the consolidated per-person freelancer surface), `FreelancerHistorySection.tsx` (assignment history — see Crew & Transport).
+
+- **Storage:** `freelancer_applications` — `person_id` FK, `form_token` (UNIQUE, drives the token-gated public apply form — NOT open to the public), `status` (`invited`/`applied`/`more_info`/`approved`/`declined`), audit (`invited_by` → users, `invited_at`, `submitted_at`, `reviewed_by`, `reviewed_at`, `decision_notes`), payload JSONB (`submission`/`insurance_answers`/`references`), `signature_r2_key`, `tcs_version`. `people.freelancer_status` mirrors the latest application status for cheap list reads; `is_freelancer` / `is_approved` are the operational flags.
+
+- **How a person becomes a freelancer (post-toggle-removal, Jul 2026):** the Edit-person form's "This person is a freelancer" checkbox was **removed** as redundant — three real entry points already set the flag: (1) the Person Detail header **"Invite to freelance"** button (renders for any `!is_approved` person → flags `is_freelancer=true`, opens a `freelancer_applications` row, mints the token, optionally emails the link); (2) an **inbound submitted apply-form** flips `is_freelancer=true` + `status='applied'`; (3) the PeoplePage **"+ New Freelancer"** quick-add. The passive path (wait for the form, then approve) and the active path (invite proactively) both converge on the same application record. The **Freelancer tab / `FreelancerPanel`** only shows once `is_freelancer=true`, so the header button is the discoverable "make this person a freelancer" action.
+
+- **Invite flow (`InviteFreelancerModal` + `POST /freelancers/invite`, STAFF_ROLES):** existing-person mode (one click flags + opens application) or new-shell mode (name + **required email** + optional phone → creates the person + application in one step). **Email is mandatory in new mode** (the sign-up link is emailed there; Zod `.refine` enforces it server-side for a new freelancer). Phone is stored on the new shell if given. On success surfaces the tokenised form link (copy button) + whether the intro email went out.
+
+- **Invite audit surfacing:** `GET /freelancers/by-person/:personId` returns the latest application's `status` / `invited_at` / `submitted_at` / `invited_by` + a resolved `invited_by_name` (**join `people` via `users.person_id`** — `users` has no name columns; `COALESCE(NULLIF(TRIM(...)), u.email)`). `FreelancerPanel` shows "Invited by <name> on <date at time> · applied <date>" under the status line, refetched whenever `person.freelancer_status` changes.
+
+- **Review / decide (Phase C, Jul 2026):** `GET /freelancers/applications/:id` (full submission / insurance answers / references, STAFF_ROLES) + `POST /applications/:id/{approve|decline|request-info}` (**MANAGER_ROLES**). Approve → `is_approved=true` + `freelancer_status='approved'`, stamps `freelancer_joined_date` (first time) + `freelancer_next_review_date` (+1yr) + `onboarding.approved_at`, sends `freelancer_approved`. Decline → `freelancer_declined`. Request-info → `more_info` (re-opens the token — `more_info` is a LIVE_TOKEN_STATUS) + `freelancer_more_info` (pre-filled form link). All audit-logged + timeline note. Frontend `ReviewPanel` on the Freelancer tab (submission + insurance Q&A + references + decision buttons; decline/request-info take a reason); decision gated to managers (`hasManagerRole`), STAFF see a "manager needs to approve" note. All three email templates ship OFF `EMAIL_LIVE_TEMPLATES`.
+
+- **Onboarding checklist (Phase C):** `OnboardingChecklist` card (shown once approved) — Reviewed & approved (auto) · Vehicle insurance (`is_insured_on_vehicles`) · T-shirt (`has_tshirt`) · Portal access sent (`onboarding.portal_invite_sent`, **manual tick** — portal Resources is Phase D, no auto-email yet) · Training docs shared (`onboarding.resources_shared`) · Payments policy (informational, covered by signed T&Cs). Toggles via `PATCH /freelancers/:personId/onboarding` (STAFF_ROLES — reuses the two booleans + merges the columnless items into the `onboarding` JSONB).
+
+- **Greyed pickers (Phase C):** `GET /api/people` gained an opt-in **`include_pending=true`** — with `is_freelancer=true&is_approved=true` it returns approved AND pending (invited/applied/more_info, not declined/removed) freelancers, `is_approved`/`freelancer_status` per row (strict-approved callers unchanged). The two crew pickers (`JobDetailPage` + `TransportOpsPage`) pass it and render pending freelancers **disabled with an amber "Pending approval" pill**. `quotes.ts:1887` crew-*history* left strict (those were approved when assigned).
+
+**Roadmap:** Phase A (data + invite) + Phase B (apply form) + Phase C (consolidated Freelancer tab + toggle removal + invite email/phone/audit + review/approve/decline/more-info + onboarding checklist + greyed pickers) are SHIPPED. **Phase D — NEXT:** document-expiry reminder scanner + portal Resources surface + the §14 doc-expiry **eligibility** greying (an approved freelancer with an expired licence/DVLA/passport greyed "expired" for driving — pairs with the reminder scanner's expiry logic) + a "Send portal invite" button that fires the register email (vs the current manual tick). **Phase E** (iDenfy identity verification) is deferred to the Christmas iDenfy migration.
+
+#### Staff Documents & Training (LIVE, Jul 2026) — see `docs/STAFF-DOCUMENTS-SPEC.md`
+
+Staff-facing module for policies / agreements / training / official docs / contracts that staff **read, tick-acknowledge, or sign** — versioned, assignable, renewable, chased. First pillar of a future "Staff" section (holiday/TOIL to follow). Migrations **178** (foundation) / **179** (COT card wording) / **180** (approval workflow) / **181** (freelancer shareable flag) / **185** (tags, owners, content-review cadence). Routes `routes/staff-documents.ts` (`/api/staff-documents/*`); services `services/staff-documents.ts` (assignment resolver) + `staff-document-reminders.ts` (daily 09:35 scheduler) + `staff-document-pdf.ts` (signed snapshot). Frontend `pages/StaffDocumentsPage.tsx` (staff "My Documents") + `StaffDocumentsAdminPage.tsx` (admin) + `components/MarkdownLite.tsx`.
+
+- **Storage:** `staff_documents` (the doc + completion/chase/approval config) → `staff_document_versions` (versioned content; editing = new version) → `staff_document_assignments` (per-user tracker + dedup stamps) → `staff_document_completions` (immutable log, one row per tick/sign event — keeps every historical signature + PDF). Generalises the Storage T&Cs signature machinery, pointed at `users` instead of clients.
+- **Completion modes (per instance):** `read_only` (library reference, never tracked) / `tick` (acknowledge) / `sign` (drawn signature via the shared `SignatureCapture` pad). Signable docs render a branded snapshot PDF (logo top-left) to **private R2** `files/staff-documents/…`; downloaded via an **ownership-checked** endpoint (`GET /:id/completions/:id/pdf` — own only, managers any; never a raw key).
+- **Targeting:** `all_staff` / `role` / `list` / `cot_card_holders` (a derived set — issuing a `cot_card_label` on the COT Card Register auto-assigns card-holder docs via `syncCotCardHolderDocuments`). Resolver is **additive/idempotent** — only ever *adds* missing assignments, never edits existing ones; gates on `is_active AND approval_status='approved' AND completion_mode<>'read_only'`.
+- **Chase / escalate / renew** (per doc, default **7 / 14 / 12**, overwritable): daily scanner lapses expired completions, nudges approaching-renewal, chases pending/lapsed per `chase_interval_days`, escalates stale-pending to managers **once** (no repeat ladder yet). Bells; Step-7 escalation emails per prefs. Soft nudges, never a gate. Dashboard "Staff Documents" NeedsAttention bucket (managers only).
+- **Two-stage authoring (mig 180, Option A):** ANY staff create; **managers** publish immediately (or "save as draft"); **everyone else** → `draft` → **Submit for approval** → manager **Approve** (materialise + notify author) / **Request changes** (→ draft + note). Drafts/pending invisible to non-authors (resolver + `/mine` library + `/:id/view` all gate on `approved`). Bell **+ immediate email** both ways. Surfaces: **"New document" + "My proposals"** on My Documents (all staff); **Manage Documents** admin (avatar dropdown, `MANAGER_ROLES`) with pending-first list, per-row **View** (read-only render, inline Approve/Request-changes) / Edit / New version (pre-filled from current) / Who's done / **Delete** (hard-delete only when no signed records exist, else 409 → retire via `is_active=false`).
+- **Authoring:** markdown-lite typed in-app (bold/headings/lists/links, `MarkdownLite`, live preview + a formatting-help dropdown) **OR** upload a finished PDF (`file_r2_key` — for anything graphic/laid-out; author in Google Docs, export, upload). Signable docs stay text (the snapshot PDF is text-only). **Slug auto-generated** from the title (`slugify` + `uniqueSlug`, not a visible field). Unsaved-changes guard on the editor modals.
+- **Freelancer shareable (mig 181):** `shareable_with_freelancers`, settable ONLY for **policy / training / other** (agreement/contract/official_doc internal-only — backend-enforced in create/patch) with an on-form signal. **Portal Resources display LIVE (PR #1027):** the Next.js portal `/resources` page reads shareable staff docs from OP (`GET /api/portal/resources` + `/:id`, portal auth) — file docs → presigned R2 url, markdown docs → in-portal reader. Monday retired, no fallback.
+- **Tags / owners / author / content-review (mig 185):** `tags TEXT[]` (freeform categories — vehicles/money/staging — search + filter on the admin Manage page); author surfaced from `created_by`; `owner_user_ids UUID[]` (responsible for keeping it current). **Owner content-review cadence** is distinct from the assignee re-sign cadence: `content_review_interval_months` + `content_review_due_date` — when due, the daily scanner chases owners/author weekly (escalating to managers, laddered, once overdue by `escalate_after_days`) until they **mark reviewed** (`POST /:id/mark-reviewed` — knocks the due date forward, does NOT disturb assignees) OR **publish a new version** (a significant change — advances the clock AND re-arms assignees via the existing new-version flow). Surfaced in My Documents ("Documents you look after — review due") + on the admin list. The assignee manager-escalation is now **laddered** (re-fires every `escalate_after_days`, was once).
+- **COT card agreement** is the seeded first instance (`slug='cot-card-agreement'`, sign, annual, targets card-holders); the COT Card Register (Settings) shows a "Card agreement" Signed/Outstanding/Renewal-due column.
+- **Receipt-chaser companion fix:** `/my-receipts` (all staff, own COT costs missing receipts, upload — the `/money/costs` page is manager-gated so non-manager card-holders had nowhere to go; `cost-receipt-chaser.ts` email repointed there).
 
 ### Future Enhancements (captured, not scheduled)
+
+- **Per-page "how-to" help flyout (jon's idea, Jul 2026 — HireHop-style)** — HireHop has a thin side "Help" panel that pops out per page with a guide for that page. Do the same in OP, sourced from the **Staff Documents** module so guides are authored/versioned/shareable in one place: (a) enumerate OP routes into a pick-list (refreshed from the route table each time so it tracks OP as it grows), (b) a `page_help` association (page slug → `staff_documents.id`), (c) a `<PageHelp>` drawer component mounted in `Layout` that shows the associated guide (read-only `MarkdownLite` / PDF) when one exists for the current route, hidden otherwise. Ties into the deferred freelancer-portal Resources display (same read-only render). Design as its own thread once the staff-docs module has settled. See `docs/STAFF-DOCUMENTS-SPEC.md` "Deferred".
 
 - **Client-facing interactivity on rack / staging view-only links (Jun 2026, spitballed, parked for quiet-time)** — both the Rack Planner and Staging Calculator already publish a public, token/slug-based view-only link sent to clients (rack = a 2D React Flow page `RackPlanPublicPage.tsx`; staging = the vanilla-JS 3D viewer `stage-view.html`). Two phased enhancements discussed with jon and deliberately deferred:
   - **Phase 1 — "Approve" button (both tools).** Client opens the link, clicks Approve, optionally types their name + a comment. Backend stamps `approved_at` / `approved_by_name` / `comment`; staff see a green "✅ Approved by [name] on [date]" badge on the Overview card + a bell notification. Link is public/unauthenticated so "who approved" is self-declared — fine for a visual sign-off (low stakes, name + timestamp give the audit trail). Decision left open: keep purely informational (badge only, edits stay free) vs lock the plan from edits once approved with an "unlock to revise" override — jon leaned informational to start. Needs a public write endpoint (rate-limited, token-scoped) + the badge + notification. ~1 day.
@@ -2857,6 +3353,12 @@ The foundation of the auto-chase feature — ingest the `info@oooshtours.co.uk` 
 - **Job-level people + role junction (`job_person_roles`) for role-based email routing — per SPEC.md §2.3 and §3.4** (flagged 22 Apr 2026, partially addressed May 2026). The safety net + the May 2026 `job_contacts` model (rounds 1-6, see "Per-job contacts" under Shared Utilities) are stepping stones — they keep comms working and let staff manage per-hire contacts, but it's a SINGLE-LIST model with one primary. The real SPEC vision is role-keyed: per-job roles (Enquirer, Authoriser, Payer, Site Contact, Driver, Booker) routing automated emails to the right role (`payment_received → Payer`, `delivery_confirmed → Site Contact`, etc.). Current state (post-round-6): every job CAN have its contact list managed, and primary lands as `to` for all client emails — but it's one bucket for everyone. Proper build needs: either (a) extend `job_contacts` with a per-row `role` enum, or (b) build a separate `job_person_roles` table (`job_id, person_id, role, is_primary, notes, start_date, end_date`); population path from HH sync (default `CLIENT` contact → Enquirer/Main Contact role) + New Enquiry form + hire form submission; role-keyed recipient helpers per template (replace `getJobEmailRecipients` with `getRoleRecipient(jobId, 'payer')` + fallback chain); Job Detail UI to add/edit roles per job. Open design question: extend `job_contacts` (smaller migration, reuses existing UI + endpoints) vs. fresh table (cleaner if roles need start/end dates per booking phase). Issue logged in platform tracker: search "job-level people" in /operations/issues.
 - ~~**Vehicle condition report PDF failure (C3, 22 Apr 2026)**~~ — **RESOLVED 22 Apr 2026** (initially with a pdf-lib Roboto port, then **superseded 23 Apr 2026** by restoring the original jsPDF template). Root cause of the crash was `drawText` drawing `✓` (U+2713) with `StandardFonts.Helvetica` (WinAnsi), which throws `WinAnsi cannot encode "✓" (0x2713)`. The first fix ported the logic to pdf-lib with Roboto via fontkit and looked functional but plain, losing the navy-branded header + clickable photo links from the original standalone Vehicle Module template. Second fix ported the original `netlify/functions/generate-pdf.mts` from the pre-integration VM codebase verbatim into `buildConditionReportPdf` — it uses **jsPDF** (not pdf-lib) because jsPDF provides `textWithLink()` for hyperlink annotations and renders bullets as filled rounded rectangles instead of Unicode ticks, sidestepping the WinAnsi issue entirely. Logo loads from the existing R2 asset via `fetchLogo()` converted to a data URI at runtime (cached in-module), so no hardcoded `LOGO_BASE64` string. StandardFonts fallback removed from `hire-form-pdf.ts` as well — missing Roboto now throws instead of silently degrading. Also added `POST /api/vehicles/events/:eventId/regenerate-pdf` for mis-fire backfills + damage-dispute re-sends, surfaced in the Event History section of VehicleDetailPage. `save-event` persists signature base64 as a separate R2 png (`vehicle-events/{REG}/{id}_signature.png`) and `briefingItems` on the event JSON so regenerations have full fidelity.
 - ~~**Photo clickability — photos in private bucket (23 Apr 2026)**~~ — **RESOLVED 23 Apr 2026.** `backend/src/config/r2.ts` now exports `uploadToPublicR2` / `getFromPublicR2` / `listPublicR2Objects` targeting `R2_PUBLIC_BUCKET_NAME` (`ooosh-vehicle-photos`). In `vehicles.ts`: `/upload-photo` branches on the `events/` prefix and writes condition photos to the public bucket (everything else stays private); `/list-photos`, `/photo/*`, and `/events/:id/regenerate-pdf` all read from the public bucket for `events/` keys. Signatures + event JSON stay in the private bucket (embedded in the PDF, not linked from it). Env vars required: backend needs `R2_PUBLIC_URL=https://pub-<hash>.r2.dev` + `R2_PUBLIC_BUCKET_NAME=ooosh-vehicle-photos`; frontend needs `VITE_R2_PUBLIC_URL=https://pub-<hash>.r2.dev` (live book-outs pre-build the `r2Url` client-side, so Vite needs the value baked in at `npm run build`). Historical book-outs before this fix have photos stranded in `ooosh-operations` — accept as lost (one-off, only Desmond's RX24SZC 22 Apr hire was affected). **Future hardening** (non-urgent): the `pub-<hash>.r2.dev` dev URL is rate-limited and bypasses Cloudflare caching. At Ooosh's current volume (handful of PDFs/week × handful of clicks each) this doesn't matter. If traffic ever grows, connect a custom domain (e.g. `photos.oooshtours.co.uk`) to the bucket via Cloudflare dashboard and swap the env var values — no code change required.
+- **Condition-report PDF storage + regeneration (Jul 2026).** Two long-standing gaps on the vehicle condition report (`buildConditionReportPdf`), surfaced together on a check-in insurance claim (Adam Coelho / RF21PWX / job 16063):
+  - **The check-in event JSON is a THIN record.** `createVehicleEvent` (`events-api.ts`) only persists a fixed field set (mileage, fuelLevel, details string, hireHopJob, …). It never stored the book-out COMPARISON fields (`bookOutMileage`/`bookOutFuelLevel`/`bookOutDate`), the driver name (buried in the `details` string as `"Returning driver: X"`), or the `damageItems` (those go to the **Job Issues** register via `/api/problems/auto-create`, not the event). So a **regenerated** check-in PDF — rebuilt purely from the event JSON — came out with a blank Book-Out column, no driver name, and a false "No damage reported". (The ORIGINAL at-check-in PDF was correct — it had the full transient payload; only regeneration lost it.)
+  - **Fix 1 — store the PDF at generation (the real record).** `/generate-pdf` + `/send-condition-report` now accept an `eventId` and freeze the built PDF to R2 at `condition-reports/{REG}/{eventId}.pdf` (private bucket — carries PII). Threaded from BookOut/CheckIn/Collection pages + the offline `sync-processors` replays (all create the event first, so `eventId` is in scope). `events/:eventId/regenerate-pdf` serves those exact bytes verbatim when present (`source:'stored'`) — the accurate at-the-moment snapshot, no reconstruction. Surfaced via the existing **Regenerate** button in Fleet › Vehicle › **Event History** (`VehicleEventsHistory.tsx`). Book-out PDFs are stored too (per-van artefact; the first recipient's PDF is stored, they differ only by driver name).
+  - **Fix 2 — reconstruct for pre-storage (historical) events.** When no frozen PDF exists, the regenerate endpoint reconstructs (`source:'reconstructed'`): book-out comparison + driver name from the matching **book-out event** (`findBookOutStateForCheckIn` — book-out is ONE physical event per van per hire, matched by HireHop job + constrained to at/before the check-in so a later hire's book-out can't leak in); damage + photos from `job_issues` (`reconstructDamageItemsForEvent` — scoped strictly by OP job + fleet vehicle). Reconstructions are deliberately **NOT** re-stored (they're best-effort from live/mutable sources and may be incomplete — freezing would then serve a stale copy and ignore corrections). Manual corrections (driver name, book-out mileage/fuel/date, check-in mileage) can be typed into the RegenerateDialog "Manual corrections" section — they imply `rebuild:true` so they apply even over a stored copy; an amber prompt fires when the book-out mileage couldn't be auto-established. Also: check-in event now persists `driverName` first-class going forward, and the regenerate parser reads `"Returning driver:"` as well as `"Driver:"`.
+  - **Fix 3 — vehicle descriptor + Date/Time placement (follow-up).** The event JSON never stored `vehicleType`/`make`/`model`/`colour` either (a fresh PDF gets them from the selected vehicle client-side), so a regenerated PDF showed a blank "Type". Reconstruction now pulls them from `fleet_vehicles` by reg (`getVehicleDescriptorByReg`, applies to book-out regen too). Also: on a CHECK-IN report the header "Date/Time" row was moved out of HIRE DETAILS into the VEHICLE STATE COMPARISON block (as "Check-In Date/Time", above Check-In Mileage) where it reads naturally opposite the book-out side — book-out / interim keep Date/Time in HIRE DETAILS.
+  - **Conventions:** any new condition-report generation path MUST thread `eventId` through so the PDF is frozen; reconstruction reflects the issues' CURRENT state ("now, not then") — the frozen store is what gives a true snapshot; damage lives in `job_issues`, not the event JSON, so a regen must read it from there; vehicle descriptor comes from `fleet_vehicles` (also never on the event). Storage keyed by event; retrieval/regeneration is stored-first, reconstruct-fallback.
 - ~~**Allocations booked-out UX (22 Apr 2026)**~~ — **PARTIALLY RESOLVED 24 Apr 2026.** AllocationsPage now hides "Book Out" on `booked_out`/`active` cards and shows a "Booked Out" / "On Hire" pill in its place (`AllocationsPage.tsx:721-733`). Still missing: an explicit "Mark as Returned" action directly on booked-out cards (currently staff action check-in from the CheckInPage). Tracked alongside the van-centric rebuild — worth bundling into that pass.
 - **Check-in didn't flip assignment status for stuck historical data (22 Apr 2026 fix deployed but stuck rows remain)** — eventType mismatch bug (`'Check In'` vs `'check-in'`) meant the save-event check-in side effects never ran between ~20 Apr and 22 Apr. Any assignments that went through book-out → check-in during that window are stuck at `status='booked_out'` in the DB, causing Allocations to still show them as allocated. **SQL remediation** (safe — preserves audit):
   ```sql
@@ -3035,7 +3537,13 @@ SMTP_FROM=Ooosh Tours <notifications@oooshtours.co.uk>
 **Template structure:**
 - Base layout: `backend/src/services/email-templates/base.ts` — Ooosh branding wrapper
 - Per-template: `backend/src/services/email-templates/{template-id}.ts` — subject + body
-- Variables injected via `{{variableName}}` substitution
+- Variables injected via `{{variableName}}` substitution (HTML-escaped — so a `{{var}}`
+  can't inject raw HTML; a URL is fine, `&` → `&amp;` is valid in `src`/`href`)
+- Conditional sections via `{{#if var}}…{{/if}}` — **single level only, NEVER nest them.**
+  `substituteVariables` uses a non-greedy single-level regex; a nested
+  `{{#if a}}…{{#if b}}…{{/if}}…{{/if}}` matches to the FIRST `{{/if}}`, leaving a literal
+  `{{/if}}` / `{{#if b}}` artifact in the sent email. Render e.g. an image and its caption
+  as two SEPARATE top-level `{{#if}}` blocks. (Bit `rehearsal_info_pack` photos, Jul 2026.)
 
 **Convention: include the HH job number on every job-scoped template** (May 2026). Any new email template that relates to a specific job MUST surface the HH job number in BOTH the subject line and the body, using the Katatonia pattern:
 
@@ -3049,6 +3557,19 @@ The HH job number is the thread that ties any email back to the job in HireHop /
 **Caller responsibility:** the sending route must pass `jobNumber: String(job.hh_job_number || '')` in the `variables` object. If the job-scoped sender has no HH number to hand (e.g. an OP-only enquiry not yet pushed to HireHop), pass an empty string — the templates degrade gracefully to `(#)` / `(job #)`. Don't omit the variable entirely (renders as the literal `{{jobNumber}}` placeholder).
 
 **Templates this does NOT apply to:** auth flows (`portal_verification_code`, `portal_password_reset`), system alerts not tied to a specific job (`hire_form_fallback_alert`, `monday_fallback_alert`, `platform_issue_reported`), vehicle-scoped templates (`compliance_reminder`), and multi-entity templates (`file_resend`). Use judgement — if the email is about one job, the number goes in; if it's about a person/vehicle/system event with no job context, it doesn't.
+
+**Transient-failure retry + outage canary (Jul 2026).** Gmail SMTP on port 587 sporadically rejects auth on a fresh STARTTLS connection with `535-5.7.8 Username and Password not accepted … BadCredentials` **even when the credentials are valid** — a known flaky behaviour when every send opens a brand-new authenticated connection (which we do; the transporter is a non-pooled singleton). Proven live 8 Jul 2026 (job 16251): same `info@` account, same password, two 535s minutes apart while other sends went through fine. The password was never wrong.
+
+- **`isTransientSmtpError()` + `sendMailWithRetry()`** (`services/email-service.ts`) wrap every `send()` and `sendRaw()`. Transient = SMTP `421` / `45x` / **`535`** (treated as transient on the deliberate assumption the app password is valid), socket-level codes (`ECONNECTION`/`ETIMEDOUT`/`ESOCKET`/`ECONNRESET`/`EAI_AGAIN`), or a message matching Gmail's auth-rejection text. **3 attempts total** — immediate, +2s, +5s (`RETRY_BACKOFF_MS`). Permanent errors (bad recipient `550`, unknown template) throw immediately, no retry. This alone kills ~all of these incidents.
+- **Outage canary — `raiseEmailHealthAlert()`.** When a send fails AFTER all retries, it writes a **bell notification to admins** (`type='system'`, title `'Email delivery is failing'`, `priority='urgent'`, `email_sent_at=NOW()` so the escalator never tries to *email* the alert). **Deduped to at most one per hour.** This is the answer to "if email genuinely broke, how would we know?" — the failure signal MUST NOT travel over the channel that's failing, so it goes to the DB-backed inbox, not email. A truly-revoked password is still caught here (every send fails all retries → canary fires), just after the retries.
+- **Silent-skip alert also writes an admin bell** (`sendConfirmationSilentSkipAlert`, `services/confirmation-hooks.ts`) — job-specific (`entity_type='jobs'`, links to `/jobs/<uuid>`), so "the confirmation for job X didn't fire" is actionable in the inbox even if the alert *email* can't get out. Its copy is now conditional: the "no client email on record" guidance only shows when an issue actually indicates a missing recipient; an SMTP-shaped `context` gets "transient SMTP failure, recipient is fine" copy instead (the old boilerplate sent staff hunting through a perfectly-fine address book on 16251).
+- **Manual re-fire:** `POST /api/money/:jobId/resend-confirmation` (STAFF_ROLES) re-sends the booking/payment confirmation for any confirmed job — reads live data, so it works regardless of when the job confirmed or whether the original auto-send failed. Surfaced as a **"Resend confirmation" button on the Money tab Payment History header**, with an inline result banner (sent / went-to-info@ fallback / SMTP failure). This is the staff recovery path when an email slips through.
+- **Root cause is CONCURRENCY, and the transporter is now POOLED (Jul 2026).** The `email_log` over 8 Jul showed failures clustering in bursts — the daily 08:00 batch fired 5 sends in ~2s and Gmail `535`'d 2 while sending the other 3 (same account, same valid password). A non-pooled transport opens a fresh authenticated connection per send, so a burst = a concurrent-AUTH storm = random 535s on the surplus logins. The transporter now uses `pool: true, maxConnections: 1` (+ `maxMessages: 50`, `rateLimit: 5`/`rateDelta: 1000`, socket timeouts) so every send funnels through ONE reused, already-authenticated connection — there is never more than one AUTH in flight. Retry + pooling together: pooling prevents the storm, retry mops up any residual blip. **This runs in a single systemd process = one pool; if the API is ever clustered, each worker gets its own pool and the concurrency ceiling multiplies — revisit then.** Our volume is low (dozens/day) so serialising costs nothing.
+- **ALL outbound email now funnels through `emailService` (Jul 2026).** Two call sites in `routes/vehicles.ts` (the `/send-email` attachment branch + the `/send-condition-report` loop) used to `nodemailer.createTransport(...)` directly for attachment emails, bypassing pooling/retry/canary/audit entirely — which is why the book-out condition report kept 535ing after the first fix (job 16125). Both now call `emailService.sendRaw({ ..., attachments, skipLayout: true })` (`skipLayout` sends their already-complete HTML without the base-layout wrap). **Never `createTransport` outside `email-service.ts`** — there is exactly one transport (the pool) and every send must go through it, or it silently misses the reliability layer.
+- **Provider abstraction — SMTP or Resend, `EMAIL_PROVIDER` flag (Jul 2026).** The likely TRIGGER for the sudden onset was the auto-chase **Gmail API / domain-wide-delegation setup on 7 Jul** — granting a service account access to the mailboxes put Google's security into a heightened state that intermittently 535-rejects the `info@` app-password SMTP logins (valid password, account flagged). Pooling+retry mitigate the symptom but don't cure a Google-flagged account, so `emailService` gained a provider layer: `EMAIL_PROVIDER=smtp` (default, Gmail) or `EMAIL_PROVIDER=resend`. Resend sends over the already-verified `oooshtours.co.uk` domain via its own infra — **completely independent of the `info@` Google account credentials**, so immune to whatever Google does to that account's auth. Everything ABOVE the transport is provider-agnostic (templates, retry, outage canary, audit log, test-mode redirect, `skipLayout`); only `EmailService.deliver()` branches (`sendViaResend()` uses the REST API via global fetch — no SDK dep; `httpStatus` 429/5xx classified transient by the retry). `reply_to` forced to `info@`. Env: `EMAIL_PROVIDER`, `RESEND_API_KEY`. Deploy-dark then flip, same pattern as `DATA_BACKEND`; instant rollback by flipping back to `smtp`. **Note:** Resend sends do NOT appear in the `info@` Gmail Sent folder (they're in the Resend dashboard log + our `email_log`); replies still land in the Gmail inbox via `reply_to`. Watch the shared Resend account's plan limits — OP + the enquiry-forms app both send from it.
+- **Client email signature (Jul 2026).** The `client` base-layout footer (`email-templates/base.ts` `renderClientSignature()`) carries the company signature — shop promo + contact + socials + legal + confidentiality disclaimer — mirroring the Gmail signature. Applied to client-facing sends ONLY: NOT the `internal` variant (ops alerts to info@/will@ don't need it) and NOT the auto-chase Gmail drafts (plain-text, built outside `wrapInBaseLayout`; Gmail appends its own signature when a human sends them, so ours would double up). Social-icon images are on the existing signature CDN; the two company logos (`OOOSH_LOGO_URL` = purple disc, `ONE_PERCENT_LOGO_URL` = 1% for the Planet) are constants left blank until their image URLs are pasted in — each renders only when its URL is set, so a blank never shows a broken image. All images have alt text so the block reads with images blocked.
+- **Gmail API alternative (not taken):** we already have service-account DWD infra in `config/gmail.ts`; adding a `gmail.send` scope + `info@` impersonation would send as the real mailbox (shows in Sent). Rejected in favour of Resend because it keeps us on the same Google rails that are being flaky / deprecating password auth — Resend decouples us entirely.
+- **`role='admin'` targets the admin inbox** for both the canary and the silent-skip bell (jon's call — nobody else can action email/tech issues). Self-maintaining if the admin set changes. All these bell notifications set `email_sent_at=NOW()` so the escalation scheduler never double-emails them.
 
 ### Fleet Hire-Status Sync ✅ COMPLETE
 
@@ -3138,7 +3659,9 @@ methods). Engine: `services/cost-xero-push.ts`; routes: `routes/costs.ts`; UI:
 `components/CostCaptureModal.tsx` + `pages/CostsPage.tsx`.
 
 **Feedback-round additions (Jun 2026)** — all in `docs/COST-CAPTURE-RECHARGE-SPEC.md`:
-- **Bundled-invoice allocation split** (`cost_allocations`, migration 092): split one cost across jobs via `PUT /costs/:id/allocations` — `CostAllocationModal`, surfaced both as a `⑂` row action AND a "Split across multiple jobs" tick at capture time (`onSavedAndSplit`).
+- **Bundled-invoice allocation split** (`cost_allocations`, migration 092): split one cost across jobs via `PUT /costs/:id/allocations` — `CostAllocationModal`, surfaced both as a `⑂` row action AND a "Split across multiple jobs" tick at capture time (`onSavedAndSplit`). **Model = "Option A": one cost = one payable = one Xero bill; `cost_allocations` is a pure OP-side attribution layer** — a split NEVER changes what we owe the supplier or what's pushed to Xero, it only re-attributes the cost across jobs for OP cost tracking. Under-allocation is allowed (the modal shows an amber "£X unallocated (our cost) — OK to save" nudge; the remainder stays as our own cost, surfaced on no job); only OVER-allocation is blocked. When splitting a captured cost, the modal pre-seeds the capture job at the full amount as the first line, so the common "split the captured job's cost across others" flow is one add.
+  - **⚠️ THE cost read that honours allocations is `GET /costs/by-job/:jobId`** (allocation-aware UNION — see the big comment block on that route). A job's costs = (A) costs captured on it with NO allocations at `full amount_gross` UNION (B) allocations TO it at the allocation amount. A split cost is attributed **purely by its allocations** (surfaces once per allocated job via clause B, never double-counted on its capture job). This was the fix for the write-only-`cost_allocations` bug (Jul 2026, PR #1060): the ⑂ fork wrote rows but nothing read them, so a £150 invoice split £75/£75 stayed £150 on its capture job with nothing on the other job. **Any NEW per-job cost read MUST go through `/by-job` (or replicate the UNION) — never `SELECT … FROM costs WHERE job_id = $1` alone**, which ignores splits. Recharge stays cost-level (on `costs.job_id` = capture job); splits never move it — allocation-in rows render read-only on other jobs' Money tabs (no recharge/Resolve controls).
+  - **Money-tab itemisation:** the Job Costs panel (`MoneyTab.tsx` `JobCostsPanel`) itemises every cost applied to the job — "Costs applied to this job" (quote_actual) + "Extra costs" (extra) lists, each row tagged + amount + a "· split from #<capture HH job>" deeplink to the capture job for allocation-in rows. `/by-job` returns `is_allocation`, `full_amount_gross`, `allocation_id`, `job_id` (capture job uuid on a split-in row) + `capture_hh_job_number` so the frontend can name/link the source.
 - **Edit-after-push → manual re-sync** (migration 147, `costs.xero_stale`): editing a Xero-affecting field on an already-pushed cost flags it stale (amber "Re-sync" pill) rather than silently diverging or auto-mutating a reconciled object. `POST /costs/:id/resync-xero` updates the Xero object IN PLACE (`updateBill`/`updateSpendMoney`, POST-with-ID, never duplicates); 409 + dismiss for Xero-locked (paid/reconciled). **Delete is OP-only — it does NOT delete the Xero bill/txn** (the delete confirm warns when `xero_object_id` is set; void in Xero separately).
 - **COT receipt chaser** (migration 148): weekly digest (Wed 12:00 London) to each card-holder about company-card costs missing a receipt (3-day grace), `services/cost-receipt-chaser.ts`; `?missing_receipt=1[&mine=1]` list filter + "COT Receipts" dashboard bucket.
 - **COT card register** (migration 148, `users.cot_card_label`): admin-managed card per staff (Settings → COT Card Register, `GET /users/cot-cards` + `PATCH /users/:id/cot-card`); capture stamps holder + last4 server-side, staff never type card details.
@@ -3147,6 +3670,11 @@ methods). Engine: `services/cost-xero-push.ts`; routes: `routes/costs.ts`; UI:
 - **Bills-to-Pay UX**: sortable Due column + Overdue / This Friday / Next Friday / This week / Next 7 days filter pills (client-side over server `due_date` — format dates in LOCAL time, not `toISOString()`, or BST shifts the exact-Friday match) + a per-supplier dropdown. The Xero-status cell collapses status+sync into one clickable pill so row actions don't get pushed off-screen.
 - **Xero reconciliation probe** ("in Xero, not in OP"): `GET /api/costs/reconcile/xero-cot?days=N` (admin/manager) reads SPEND bank transactions on the mapped COT account (`xero_bank_cot_card`) and flags each matched (pushed `xero_object_id`, else amount+near-date) vs unmatched. `XeroCotProbe` panel on the Reconcile tab. Verified live (Jun 2026): unreconciled bank-feed transactions ARE API-readable, so a full matcher is viable — currently kept as an on-demand probe (0 orphans); promote to always-on (dashboard count / chaser / dismiss list) only if orphans recur. Caveat: a truly raw/uncoded statement line won't surface until coded in Xero.
 - **Extraction date guard**: `normaliseCostDate()` in `cost-receipt-extract.ts` — implausibly-future extracted dates (> today + 7d) try the day/month swap and take it if it lands a valid past date (downgrading confidence), else keep + downgrade. Catches the UK-vs-US misread (11/06 → 6 Nov). Prompt is UK day-first; capture modal shows an amber future-date hint.
+
+**Remittance advice (Jul 2026, migration 169).** Optional courtesy email fired from the Bills-to-Pay "mark paid" modal — a tickbox confirming to the payee that their invoice/expense **has been** (or, on a future `paid_value_date`, **is scheduled to be**) paid. Deliberately scoped to freelancers + staff reimbursements (the cases that value it), best-effort supplier fallback. **NOT a PDF** — a branded email note IS a valid remittance advice (no legal format, unlike an invoice). `services/remittance.ts` owns it.
+  - **Recipient is resolved for pre-fill, staff confirm/edit before send (never blind).** `resolveRemittanceContact` order: reimbursement → `uploaded_by` staff person; freelancer-invoice → linked `quote_assignment` person; **remembered** → the address staff manually chose on a *previous* remittance for the same `supplier_name` (a prior `costs.remittance_email`, honoured as an explicit human decision — this is the "manual entry saves" mechanism, no new table); **person name-match** → `supplier_name` against `people` (freelancers first, UNIQUE match only — freelancers are people, not orgs, which is why the first cut surfaced nothing); then org (`xero_contact_id`, name); else none. The modal also has a **person picker** (`GET /people?search=`) to search OP for anyone.
+  - **Decoupled from the money action** — `POST /costs/:id/send-remittance` (admin-only, matches `/pay`) is fired by the frontend *after* a successful pay; a failed email surfaces "paid, but email failed, resend later" and never unwinds the payment. `GET /costs/:id/remittance-contact` drives the pre-fill. Sending stamps `remittance_sent_at`/`remittance_email` (migration 169) → ✉︎ pip on paid rows + the "remembered" reuse.
+  - **`remittance_advice` template** is client-branded but subject/body are composed in the service (supplier-vs-reimbursement wording, paid-vs-scheduled tense) via `subjectOverride`/`bodyHtmlOverride`. Email copy uses plain hyphens, not em-dashes, and includes a "you'll receive a separate remittance for each other invoice" line (heads off the "what about my others?" reply). Rollout: ships OFF `EMAIL_LIVE_TEMPLATES` so it test-redirects until released.
 
 **Push concurrency — per-cost advisory lock (DO NOT REMOVE).** The push is
 triggered from FIVE sites — create / update / approve / pay / the Push-Now
@@ -3221,7 +3749,9 @@ entry, so a garage invoice is entered once:
 Migration 118 (`invoice_number` + `vat_treatment`) is in `run.ts`.
 
 **June 2026 polish round (PR #706):**
-- **Invoice number → Xero Reference.** `xeroReference()` helper in `cost-xero-push.ts` — the Xero `Reference` field on bills, spend-money AND bill payments carries `invoice_number` (fallback: supplier name). Previously it redundantly sent the supplier name (already the Contact).
+- **Invoice number → Xero Reference.** `xeroReference()` helper in `cost-xero-push.ts` — the Xero `Reference` field on bills, spend-money AND bill payments carries `invoice_number` (fallback: supplier name). Previously it redundantly sent the supplier name (already the Contact). **Do NOT filter "junk-looking" invoice numbers** — a UUID-shaped value can be genuine (Spotify's printed Invoice ID is a real GUID); a UUID guard was tried + reverted (Jul 2026).
+- **⚠️ Xero ACCPAY bill quirk — the invoice number the user SEES on a bill is `InvoiceNumber`, NOT the API `Reference` (Jul 2026).** On a Bill (ACCPAY invoice), the field the Xero UI labels "Reference" (the visible box) maps to the API **`InvoiceNumber`** field — the API `Reference` field IS stored but hidden. On **spend-money** (BankTransaction) there's no InvoiceNumber, so the UI "Reference" IS the API `Reference`. That's why for months spend-money references appeared but bill references didn't — we only ever set `Reference`, which lands invisibly on bills. Fix: `xeroInvoiceNumber(cost)` (invoice number ONLY, no supplier-name fallback) is passed as `invoiceNumber` to `createBill`/`updateBill`, which set Xero `InvoiceNumber` (in addition to `Reference`, kept as a bonus). Spend-money paths unchanged. Verified via `scripts/diagnose-xero-reference.ts` (reads back the actual stored `Reference` + `InvoiceNumber` from Xero for a cost — read-only, use `--id=`/`--supplier=`). Backfill re-run (`backfill-xero-references.ts`) re-pushes existing bills through `updateBill` so `InvoiceNumber` populates on the visible box.
+- **Xero Reference reachability + un-gated re-sync (Jul 2026).** `invoice_number` reaches Xero `Reference` ONLY at push time or via `resyncCostToXero` (the "Re-sync to Xero" action, `POST /costs/:id/resync-xero`). The **"Push now"** button (`POST /costs/:id/sync-xero` → `pushCostToXeroBackground`) short-circuits anything already pushed (`PUSHED_STATES` guard) and never touches Reference again. So a cost pushed before `invoice_number` extraction was reliable had NO reachable way to get its real number into Xero — the re-sync action used to be gated behind the amber "Re-sync" pill (`xero_stale=TRUE`, set only on an OP-side edit). **Fix:** the terminal "Synced" / "In Xero" / "Bill created" / "Sent" pills in `CostsPage.tsx XeroCell` are now **click-to-re-sync** for ANY pushed, non-locked cost (calls the existing `resyncStale` handler). Xero-LOCKED states stay static — **reconciled spend-money** and **paid bills** (`xero_payment_id` set) can't be mutated; `resyncCostToXero` returns `{locked:true}` → 409 for those. Re-syncing an already-correct cost is a harmless no-op. Backlog fixer: `scripts/backfill-xero-references.ts` (dry-run default, `--commit`, `--supplier=`/`--id=`/`--limit=`) sweeps every pushed non-locked cost through `resyncCostToXero` in place (never duplicates); locked ones reported + skipped. **Convention:** any new "the Xero object drifted from OP" surface should reach `resyncCostToXero`, not a fresh push — that's the only in-place update path.
 - **AI extraction hardening** (`cost-receipt-extract.ts`): `invoice_number` is now in the prompt + schema (it was simply never asked for — the field post-dated the extractor). Explicit gross-vs-net prompt rules, plus a deterministic post-parse `normaliseAmounts()` repair: net + VAT must equal gross; obvious swaps fixed, confidence downgraded to `medium` on any real correction so the modal banner prompts a human check. If accuracy complaints persist, the next lever is swapping `MODEL_ID` from Haiku to Sonnet (~10x cost, still <1p/receipt).
 - **Capture modal uses the document's actual figures.** When extracted VAT isn't 20% of net, the modal lands in Manual mode with all three figures verbatim — it previously force-recomputed net from gross at 20%, mangling correct extractions (a real source of staff gross/net complaints).
 - **Category is required on save** (except service-record-only saves, which create no cost row). A missing category = missing `xero_account_code` = guaranteed push failure ("Missing xero_account_code" incident, Jun 2026). The push error message now tells staff to Edit → pick category (PATCH auto-retries the push).
@@ -3245,6 +3775,8 @@ The full "recharge a cost to the client" story, in three layers. **Specs:** `doc
 **2. Declared running-cost recharge (the runner / V&D job).** `jobs.recharge_running_costs` (migration 152) declares "we recharge this job's fuel/parking/etc. at actual + markup post-hire". Set TWO ways, both converge on the flag: (a) a **Recharge** line on a Crew & Transport quote (auto-set on quote save), or (b) the compact **⛽ toggle in the Money tab's Job Costs panel** (`MoneyTab.tsx` — for the no-quote / mid-hire case; it was removed from the Job Detail header as redundant). The flag drives: **cost auto-inherit** (`routes/costs.ts` create — a running-cost cost, Xero code 410/411/325, on a flagged job defaults to `extra` + recharge-pending, with an amber hint in `CostCaptureModal`), and the **standing forward-looking `recharge_running_costs` post-hire card** (`hh-requirement-derivation.ts`, amber "expect invoices", manual close — distinct from the reactive `cost_resolve`). The capture modal's "This job so far" box also surfaces the job's *expected* recharges (declared Recharge lines across its quotes).
 
 **3. Expense charge model — `QuoteExpenseItem.chargeMode`.** Four states: `included` | `not_included` | `recharge` | `na`. **PD defaults to `na`** (most jobs carry none). `recharge` + `na` are both excluded from the client quote total (recharge bills at actual post-hire; the amount on a recharge line is an indicative estimate). Back-compat: absent `chargeMode` derives from the legacy `included` boolean. The 4-radio-column control (+ "set all" headings) is shared by `TransportCalculator.tsx` (create) and `QuoteEditModal.tsx` (edit — which fetches expenses via `GET /quotes/:id` so **both the Job Detail and Transport Ops edit entry points behave identically**; the PUT accepts `expenses`, recalcs the total, re-flags the job, and lets staff **add / remove / retype** lines, not just re-state them). `expensesRecharge` is a calculator output; recharge lines stay out of `clientChargeTotal`.
+
+**Fee edits vs recalc — override semantics on `PUT /quotes/:id` (Jul 2026).** The edit modal echoes the loaded fee figures back on EVERY save, so the PUT handler treats a posted `client_charge_rounded` / `freelancer_fee_rounded` as an override **only when it differs from the stored value** (compared against `oldQuote` — safe for stale browser bundles too). Genuine overrides are **re-applied AFTER the recalc block**, so editing the fee and editing the expenses are independent intents: whichever you touched wins for its own field; an untouched fee follows the calculator. Pre-Jul-2026 the overrides were gated on `!recalcNeeded`, and since the modal always sent `expenses` (forcing `recalcNeeded=true`), every fee edit on a calculator-backed quote was silently dropped and overwritten by the calculator reproducing the original figure — the "fee reverts on save" bug. Companion frontend fix: `QuoteEditModal` dirty-tracks expenses and only includes them in the payload when actually touched — sending them unconditionally also meant a notes-only save repriced the quote from *current* `calculator_settings` (fuel price drift etc.). **Don't regress either half:** new fields on the edit modal that feed the calculator should extend `calcAffectingFields`, and any new derived-total writer in the PUT must run before the fee-override re-apply. NB quote fee edits never push to HireHop (the amber "already pushed to HH" banner covers that); local D&C quotes skip recalc entirely. Display gotchas when verifying a fee edit landed: a quote in a **priced run group** renders the run's combined fee on Job Detail / Transport Ops / the portal (individual fee struck through — by design), and the portal reads `quote_assignments.agreed_rate` in preference to the quote fee (normally NULL — the standard "+ Assign" picker sends only person + role; only Monday-migrated or manually-rated assignments carry one).
 
 **4. Freelancer portal clarity — `deriveCrewMoney()` in `routes/portal.ts` is the SINGLE source of the freelancer-facing pay/reimburse wording.** It turns the quote's expense states into plain instructions on the portal job page ("Expenses & Per Diem — what to do"): **Per Diem ALWAYS shows a line** (No PDs / "we're paying it — include on your invoice" / "client pays you directly"); **fronted** types (fuel/parking/tolls) → "pay it, include on your invoice"; **prebooked** types (hotel/transport) → "booked & paid by Ooosh"; `not_included` → "client covers directly". Reword freelancer money instructions there, one place. The panel only renders in `DATA_BACKEND=op` mode (the portal is the in-repo Next.js app at `src/app/`).
 
@@ -3472,6 +4004,76 @@ Two invariants that, when broken, silently strand a hire and mis-attribute its c
 
 **Historical backlog (cleared Jun 2026):** `16149`, `15769` (×4), `15738` — hires booked out via the PATCH path before the fix that never got a proper check-in, leaving rows stuck `booked_out` on already-`completed` jobs (and the van wrongly reading "Check In available" / `fleet_vehicles.hire_status='On Hire'`). Flipped to `returned` by hand. The fleet-wide finder for any future occurrence: `booked_out`/`active` assignments whose linked job is already `returned`/`completed`/`cancelled`/`lost` (dual job-match on `job_id` OR `hh_job_number`). Flipping the assignment does NOT recompute `fleet_vehicles.hire_status` (raw SQL skips `syncFleetHireStatus`), so correct the cached fleet status separately if the stale row was pinning the van `On Hire`.
 
+### Multi-van book-out scramble (Jul 2026) — read before touching the book-out write path
+
+**Full incident + root cause + cleanup + fix design: `docs/MULTI-VAN-BOOKOUT-SCRAMBLE.md`.**
+
+**The bug:** the book-out write path **never partitions driver rows by van.** On a 2-van
+"everyone drives everything" self-drive job, all drivers share one set of `vehicle_hire_assignments`
+rows, and *each* van's book-out stamps itself onto *all* of them — there's no
+`van_requirement_index` scoping. Because three fields have three different write disciplines, the
+first and last van each "win" different columns on the same shared rows, so the data comes out
+**scrambled, not merely wrong**:
+- `vehicle_id` — last-write-wins (BookOutPage `writeBackTrack` PATCH loop, `hire-forms.ts` PATCH `fieldMap` plain assign) → **2nd** van booked out wins every row.
+- `mileage_out` — first-write-once (`save-event` book-out branch, `vehicles.ts` `COALESCE(mileage_out, …)`) → **1st** van wins.
+- `hire_form_pdf_key` — first-write, atomic-claim (`generateAndEmailHireFormPdf`) → **1st** van wins.
+- The 2nd van ends with **zero rows** (its rows' `vehicle_id` got overwritten to the other van), so a check-in for it hits the DB-authoritative gate (`check-in-eligibility`, `JOIN fleet_vehicles ON fv.id = vha.vehicle_id`) with nothing to find → falls back to the van's *previous* hire and blocks. **Live incident: job 14885, RX24SZG blocked at check-in behind RO23HLU (Jul 2026).**
+- **Sibling symptom — photos:** book-out walkaround core photos are keyed `events/{eventId}/{REG}/{angle}.jpg`; a crossed `form.vehicleReg` files the 2nd van's core photos under the wrong reg/eventId, so its check-in "Book-Out Summary" (a **live listing of one prefix**) shows only the handful of uniquely-keyed extras. **The photos are NOT lost** — the condition-report PDF embeds them via a separate LOCAL base64 pipeline (frozen at `condition-reports/{REG}/{eventId}.pdf`), and the loose objects sit under the crossed prefix (recover/enumerate via `get-events` → `list-photos?prefix=…` → `regenerate-pdf`). The PDF's "View full size" links 404 for the same reason (they point at the expected, empty key) — self-contained, not a general link bug.
+
+**The one line that permits it:** the PATCH terminal-row guard blocks writes only on
+`swapped`/`returned`/`cancelled` — so a row already `booked_out` to one van can have its
+`vehicle_id` re-stamped by a *second* van's book-out. Tightening that (refuse to overwrite
+`vehicle_id` on a row already booked out to a *different* van) is the narrowest guard.
+
+**Blast-radius fingerprint (sweep):** a row whose `hire_form_pdf_key` reg ≠ its `vehicle_id`'s
+fleet reg (and the PDF reg is a real, different fleet van). At discovery: **3 jobs** — 14885
+(fixed), 15411 (Jabir HLR/HLU), 16206 (SA75RVV/RX73TBZ). 15411/16206 are completed, no stuck flags.
+Query + per-job cleanup in the doc. **Verified 30 Jul 2026 — all 3 jobs clean; no mileage tidy
+needed** (the surviving RO23HLU/SA75RVV rows already carry the correct book-out/check-in mileage per
+the emailed condition-report PDFs; the prior investigation's scrambled figures were a stale
+snapshot). RO23HLR/RX73TBZ have no rows on their jobs — deliberately NOT recreated on completed
+hires; their mileage lives in the event history / PDFs.
+
+**Status:** 14885 cleaned up (mileage `UPDATE` + missing-van `INSERT` + UI check-in).
+**(1) Detection scanner — SHIPPED (migration 187).** `runStuckOnHireScan`
+(`services/sanity-check-scanner.ts`, wired into the 15-min sanity cron) finds vehicles projected
+`hire_status='On Hire'` with NO live `booked_out`/`active` assignment row — mirrors
+`syncFleetHireStatus`'s exact "has a live assignment" definition (dual job match, lost/cancelled
+excluded), so "no live row" == "the projection is unjustified". Emails **jon@** (not info@) ONCE per
+stuck van, deduped via `fleet_vehicles.stuck_onhire_alerted_at` (stamp-first; **cleared in
+`syncFleetHireStatus` when the van leaves On Hire**). HH job number is best-effort R2 enrichment
+(`lookupStuckOnHireJob` reads the van's most recent book-out event — the DB assignment points at the
+van's PREVIOUS hire, so the current job can only come from the event). Also catches any other stale
+On-Hire drift (self-corrects on next sync, one alert).
+**(2) The core fix — SHIPPED (PR #1057, Jul 2026).** Book-out now **partitions driver rows by
+van**: when a book-out `PATCH /api/hire-forms/:id` (`status='booked_out'` + a `vehicle_id`)
+targets a **driver** row already live-booked-out to a **different** van, it **clones** a fresh
+per-van row for `(this driver, this van)` instead of re-pointing the shared one — van A's row is
+left untouched, van B gets its own rows and becomes bookable + checkinable. Idempotent (reuses an
+existing `(driver, van, job)` booked-out row on retry). The clone drives the same post-book-out
+chain as the normal path — `cancelOrphanSiblingAllocations` + `firePostBookOutHooks` (fleet
+status, own-van agreement, `fanOutVanHireForms` cross-van, OOH, auto-dispatch) + vehicle-requirement
+sync — so the **per-driver referral gate stays intact** (the clone's agreement routes through
+`generateAndEmailHireFormPdf` → `isDriverAuthorisedForAgreement`; a referral-pending driver is held
+back exactly as before). A non-book-out re-point of a live van, or a driverless row, is **refused**
+(no-op 200) — genuine swaps go through Swap Vehicle; this is the terminal-guard tightening. The
+frontend `updateDriverHireForm` now forwards `mileage_out` so the second-van clone records the
+correct odometer (backend consumes it ONLY on the clone path — the normal update ignores it,
+save-event still owns `mileage_out` there). Closes fields + photos + view-full-size links at source
+(none cross once the reg isn't crossed). **Implementation note / deliberate deviation from the
+original sketch:** the clone lives in the **PATCH path ONLY**, not a shared PATCH+save-event
+choke-point. Reasons: (a) in a staff book-out `save-event` fires BEFORE the write-back PATCH loop,
+so it can't see clones the PATCH hasn't made yet; (b) the incident class is staff self-drive
+multi-van (uses the PATCH loop); (c) freelancer multi-van D&C is explicitly out of scope. If a
+freelancer multi-van book-out ever needs this, the same clone logic would have to move into (or be
+duplicated at) the `save-event` book-out matcher in `vehicles.ts`. **No migration** (Zod
+`patchSchema` gained optional `mileage_out`/`fuel_level_out`; consumed only on the clone branch).
+**Verify live** on the next real 2-van book-out — build-verified only, no runtime CI (see the PR's
+"How to verify"). The historical mileage tidy for 15411 + 16206 was **verified clean on
+30 Jul 2026 — no action needed** (both jobs' surviving rows already match the emailed PDFs; the
+doc's scrambled figures were stale). The multi-van scramble item is now fully closed bar the live
+2-van book-out verification.
+
 ### Per-job contacts (`job_contacts`)
 
 **The convention:** each hire has its own contact list — who's actually involved in THIS booking — distinct from the org-wide "who works at this company" model in `person_organisation_roles`. Rounds 1-6 (May 2026) built this end-to-end: the storage layer, the routing graduation, the management UI, and the HH push enrichment. **All new client-facing email senders, and any new HH push surface, MUST follow this convention.**
@@ -3533,6 +4135,8 @@ When `job_contacts` has rows for a job, they ARE the recipient list. The org-lev
 | `CLIENT_ID` | `external_id_map` lookup — UPDATE in place, not duplicate |
 
 Because we pass `CLIENT_ID`, HH updates the existing contact record in place — including its `NAME` field. That's the intended cleanup direction (evolves "ATC Live" → "Sarah Smith / ATC Live") and matches the SPEC's Stream C cleanup notes. New jobs for the same client will show the most recent push's NAME until their own push overwrites it.
+
+**⚠️ Call ORDER: `save_job.php` FIRST, then `job_save_contact.php` (Jul 2026, "Save error. 154" fix).** `job_save_contact.php` is UPDATE-oriented — it needs an existing `CLIENT_ID` to save against. Calling it WITHOUT one (e.g. when the headline org is a freshly-created OP org with no `external_id_map` entry yet — the "change the headline client" case) makes HireHop reject with **"Save error. 154"**. So `sync-client-to-hh` (and `push-hirehop`) both run `save_job.php` FIRST — it creates/links the HH client from `company`/`name`/`email` and hands back the `client_id` (fall back to `job_data.php` to read it) — THEN enrich via `job_save_contact.php` with that `CLIENT_ID`. **Never reorder these.** Any future OP→HH contact-sync surface must follow the same order.
 
 **`person_id` on `resolveHireFormContacts` results:**
 - Present for: `job_contact`, `job_contact_primary`, `client_person`, role-derived linked-org sources, `client_name_match`
@@ -3597,7 +4201,9 @@ Pattern for safety-net warning emails that previously fired inline and spammed s
 | `runDispatchSanityScan` | `pipeline_status='dispatched'` AND `status<5` AND no marker yet | 30 min (one full polling-sync cycle, so cached HH `jobs.status` has refreshed) | `jobs.under_dispatch_warned_at` |
 | `runReturnedBookedOutScan` | `pipeline_status='returned'` AND any `vehicle_hire_assignments` row still `booked_out`/`active` AND no marker yet | 20 min (desk-side check-in time after HH webhook fires Returned) | `jobs.returned_bookedout_warned_at` |
 
-**Marker clears** are wired into `routes/pipeline.ts` (`PATCH /:id/status`) and `routes/webhooks.ts` (HH inbound status changes) — both clear the matching marker when leaving the watched state.
+A third consumer, `runStuckOnHireScan` (migration 187), follows the same stamp-first pattern but keys off `fleet_vehicles.hire_status` rather than `jobs.pipeline_status`: it flags a van projected `On Hire` with no live `booked_out`/`active` assignment (the multi-van book-out scramble fingerprint) and alerts **jon@** (not info@). Its dedup marker (`fleet_vehicles.stuck_onhire_alerted_at`) is cleared inside `syncFleetHireStatus` when the van leaves On Hire, not via a pipeline_status transition writer. See the "Multi-van book-out scramble" entry above.
+
+**Marker clears** are wired into `routes/pipeline.ts` (`PATCH /:id/status`) and `routes/webhooks.ts` (HH inbound status changes) — both clear the matching pipeline_status marker when leaving the watched state.
 
 **Why deferred + grace:** the original inline pattern fired the moment the trigger happened, but two real-world facts make that a false-positive generator: (a) the polling sync is every 30 min, so the cached `jobs.status` lags live HireHop by up to that long; (b) the writeback uses `no_webhook=1` (loop prevention), so the action that triggered the warning doesn't refresh the cached copy either. By the time the scanner sweeps after the grace window, both background sync and desk-side action have had time to land — when the warning fires, it's pointing at a real gap.
 
@@ -3735,6 +4341,8 @@ Two-tier freelancer identification:
 - `is_freelancer` BOOLEAN — explicit flag
 - `freelancer_joined_date` DATE — when added as freelancer
 - `freelancer_next_review_date` DATE — annual review trigger for licence/details
+
+**Freelancer History tab (Jul 2026).** Person Detail gains a "Freelancer History" tab (rendered only when `is_freelancer`, sits after Hire History) — the ASSIGNMENT-grained view of everything ever booked against a freelancer, past + upcoming, **including cancelled/declined** (shown muted, not hidden). Deliberately distinct from the job-grained Hire History tab (which shows the JOB's status + whole-job value and filters cancelled crew out — both tabs stay). Backend: `GET /api/people/:id/freelancer-history` (`routes/people.ts`, after hire-history) — three sources merged in JS into one normalised item shape: (1) crew/transport via `quote_assignments` + `quotes` (no status filter, LEFT JOIN jobs so local D&C with NULL `job_id` survive, `run_groups.combined_freelancer_fee` surfaced); (2) studio sitter shifts (ALL statuses — unlike `getSitterShifts`, which drops declined/cancelled); (3) driven vehicle assignments via `vehicle_hire_assignments.freelancer_person_id` with the dual-match job join. Fee rule: `agreed_rate ?? freelancer_fee_rounded ?? freelancer_fee` for crew, `a.fee` for sitter, null for vehicle (pay lives on the crew quote). Summary stats: total gigs (excl. cancelled/declined), upcoming, declined, cancelled, fees YTD (`date_start` in current calendar year, booked-ahead counts). Frontend: `FreelancerHistorySection.tsx` — self-contained `{entityId}` section per the ExcessHistorySection convention; stat cards + filter pills + "Upcoming & Pending" (soonest first) above "History". When adding a new per-freelancer assignment source in future (e.g. a tasks system), union it into this endpoint rather than building a parallel surface.
 
 ### Vehicles Table
 
@@ -4283,4 +4891,5 @@ Returns `{ success, sent, failed, results: [{ email, success, error? }] }`. Per-
 - API responses follow `{ data, pagination }` or `{ error }` patterns
 - **Migration runner has a hardcoded file list** — when adding a new migration, you MUST also add the filename to the `migrations` array in `backend/src/migrations/run.ts`
 - **Detail pages must reset tab state on `id` change.** React Router reuses the same component instance across `/jobs/A` → `/jobs/B`, so `useState(initialTab)` only initialises once and the active tab "drags across" to the new entity. Every `*DetailPage` with tabs needs a `useEffect(() => setActiveTab(default), [id])`. Currently applied on Job, Driver, Person, Organisation, Venue, Vehicle. Add the same pattern to any new detail page (and clear per-tab caches in the same effect if the tabs hold previously-loaded data, e.g. DriverDetailPage clears `hireHistory` / `excessHistory` on driver switch).
+- **No top-of-page "Back to …" breadcrumb on entity detail pages (Jul 2026 decision).** Removed from Job / Person / Organisation / Venue / Vehicle / PCN detail pages. They were usually *wrong*: a hardcoded destination (e.g. `<Link to="/people">`) ignores where you actually came from, and JobDetailPage's "smart" `location.state.from || '/jobs'` variant only worked from the two pages that bothered to pass `state.from` (Pipeline + Lost & Cancelled) — every other entry point (dashboard, global search, Jobs/Returns/Backline/Transport lists, notifications, hire-history links, direct URL, refresh) silently defaulted to "Back to Jobs". A wrong back button is worse than none; the browser's own back button is always correct, and the nav bar + page title already orient the user. **Don't re-add them.** What was deliberately KEPT: (a) **contextual deeplinks that reflect a real parent relationship** — Issue detail → its job (`Back to job #NNNNN`), Carnet detail → carnets list + its job, Fill-a-Gap → its job, Excess Ledger → Ledger; (b) **"not found" / dead-end recovery buttons** inside error states (e.g. DriverDetailPage's "Driver not found → Back to Drivers", VehicleDetailPage's not-found "Back to vehicles") — those are the only way out of a dead-end page, so they stay; (c) **vehicle-module kiosk/workflow exits** (BookOut / CheckIn / Collection / Prep "Back to Dashboard/Fleet/Queue") — these are deliberate "exit this workflow" actions and, in freelancer kiosk mode, the *only* navigation available (no nav shell), so removing them would strand freelancers. NB `JobDetailPage.tsx` keeps the `backTo` variable purely as the redirect target in `loadJob`'s catch (job failed to load), not as a rendered breadcrumb. **Alignment side-effect (fixed Jul 2026):** removing the breadcrumb exposed a pre-existing ~16px spacer in the Job Detail sidebar — the "📦 Also holding (FYI)" `HeldItemsSection` wrapper kept its `mb-4` even when the section rendered nothing, so the Client History card sat lower than the main card. Fixed with `empty:hidden` on that wrapper. If a future sidebar section is added above the Client History card with a conditional/`hideWhenEmpty` component inside a margined wrapper, use the same `empty:hidden` pattern so an empty render doesn't leave a phantom gap.
 - **`vehicle_hire_assignments` is soft-cancel only.** Every removal path in the application sets `status = 'cancelled'` rather than physically deleting the row. `DELETE /api/assignments/:id`, the cancellation flow, lost-cleanup, swap-vehicle — all soft. There is **no `DELETE FROM vehicle_hire_assignments` anywhere in the codebase**, and there shouldn't be: the row is the source of truth for an actual hire that physically happened, so destroying it loses audit trail (book-out/check-in events in R2 still reference it). If a future Claude needs to "remove" an assignment, soft-cancel is the path. The same applies to `job_excess` and the broader hire-tracking chain — soft state changes preferred over physical deletion. (See May 2026 incident: HH job 15862 had its `vehicle_hire_assignments` row hard-deleted out from under it by direct SQL during an earlier cleanup pass; we had to rebuild the row from the R2 book-out event so the weekend team could check the van back in normally. Soft-cancel would have avoided that whole detour.)

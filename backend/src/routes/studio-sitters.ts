@@ -16,6 +16,7 @@ import {
   assignMany, createManualShift, removeManualCover, listSitters,
   getDefaultSitterFee, setDefaultSitterFee,
 } from '../services/studio-sitter';
+import { getShiftReport } from '../services/studio-sitter-lockup';
 
 const router = Router();
 router.use(authenticate, authorize(...STAFF_ROLES));
@@ -37,7 +38,8 @@ router.get('/roster', async (req: AuthRequest, res: Response) => {
     const from = DATE_RE.test(String(req.query.from)) ? String(req.query.from) : today;
     const to = DATE_RE.test(String(req.query.to)) ? String(req.query.to) : addDaysIso(from, 14);
     if (to < from) { res.status(400).json({ error: 'to must be on or after from' }); return; }
-    const rows = await getRoster(from, to);
+    const includeSpeculative = req.query.speculative === '1' || req.query.speculative === 'true';
+    const rows = await getRoster(from, to, includeSpeculative);
     res.json({ data: rows, range: { from, to } });
   } catch (err) {
     console.error('[studio-sitters] roster error:', err);
@@ -52,6 +54,18 @@ router.get('/sitters', async (_req: AuthRequest, res: Response) => {
   } catch (err) {
     console.error('[studio-sitters] sitters error:', err);
     res.status(500).json({ error: 'Failed to load sitters' });
+  }
+});
+
+// GET /api/studio-sitters/report/:date — read-only lock-up report (staff view)
+router.get('/report/:date', async (req: AuthRequest, res: Response) => {
+  const date = String(req.params.date);
+  if (!DATE_RE.test(date)) { res.status(400).json({ error: 'Invalid date' }); return; }
+  try {
+    res.json({ data: await getShiftReport(date) });
+  } catch (err) {
+    console.error('[studio-sitters] report error:', err);
+    res.status(500).json({ error: 'Failed to load lock-up report' });
   }
 });
 

@@ -493,6 +493,11 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
         }
       }
 
+      // Auto-cover from the client's standing held-on-account balance (opt-in,
+      // admin-set per client). Runs before the requirement sync so a covered
+      // (waived) record is already in place when the card status is derived.
+      await autoCoverExcessFromAccount(client, jobId, expectedExcess, result);
+
       // Promote the excess requirement to 'done' if coverage is already met
       // (e.g. derivation runs after a portal pre-auth has landed).
       await syncExcessRequirementStatus(jobId, client);
@@ -1082,6 +1087,102 @@ async function suspendRequirement(client: any, jobId: string, requirementType: s
      WHERE id = $2`,
     [updatedNotes, req.id]
   );
+}
+
+/**
+ * Auto-cover a self-drive hire's excess from the client's standing
+ * held-on-account balance (migration 169). Opt-in + admin-set per client via
+ * `organisations.auto_cover_excess_from_account`.
+ *
+ * When the client is opted in AND holds enough on account (sum of
+ * `v_excess_held` over their `held_on_account = true` records, this job
+ * excluded), the derivation record is marked `waived` with an
+ * `[Auto-covered by account]` marker note — so the dispatch gate, the Money
+ * tab and the close-out card all treat it as resolved, with no fresh excess
+ * collected and no per-hire staff action.
+ *
+ * STANDING cover: the held balance is NOT consumed (it's a rolling deposit,
+ * returned by BACS when the client stops), so concurrent/repeat hires all draw
+ * on the same balance — acceptable for the trusted regulars this is enabled for.
+ * Only full cover: if the balance is short of `expectedExcess` (e.g. a rare
+ * multi-van hire) the record is left `needed` and staff collect / apply as usual
+ * (the "client has £X on account" banner still shows).
+ *
+ * Marker-gated + idempotent, mirroring the V&D/Internal suspension: re-runs are
+ * no-ops, and turning the flag off (or the balance dropping) reverts a
+ * previously auto-covered record back to `needed`. Never touches a record with
+ * money attached — only the money-free `needed`/`pending` derivation record (or
+ * one we ourselves auto-covered).
+ */
+async function autoCoverExcessFromAccount(
+  client: any,
+  jobId: string,
+  expectedExcess: number,
+  result: DerivationResult
+): Promise<void> {
+  const org = await client.query(
+    `SELECT COALESCE(o.auto_cover_excess_from_account, false) AS opted_in, j.client_id
+     FROM jobs j LEFT JOIN organisations o ON o.id = j.client_id WHERE j.id = $1`,
+    [jobId]
+  );
+  const optedIn = org.rows[0]?.opted_in === true;
+  const clientId = org.rows[0]?.client_id || null;
+
+  // The standard derivation excess record — no assignment, no money moved.
+  const tgt = await client.query(
+    `SELECT id, excess_status, notes FROM job_excess
+     WHERE job_id = $1 AND assignment_id IS NULL
+       AND excess_status IN ('needed', 'pending', 'waived')
+     ORDER BY created_at ASC LIMIT 1`,
+    [jobId]
+  );
+  const rec = tgt.rows[0];
+  if (!rec) return;
+  const isAutoCovered = String(rec.notes || '').includes('[Auto-covered by account]');
+
+  // Revert a previously auto-covered record back to a live requirement.
+  const revert = async (): Promise<void> => {
+    if (!(isAutoCovered && rec.excess_status === 'waived')) return;
+    await client.query(
+      `UPDATE job_excess
+       SET excess_status = 'needed', claim_notes = NULL, excess_amount_required = $2,
+           notes = NULLIF(regexp_replace(COALESCE(notes, ''), E'\\n?\\[Auto-covered by account\\][^\\n]*', '', 'g'), ''),
+           updated_at = NOW()
+       WHERE id = $1`,
+      [rec.id, expectedExcess]
+    );
+    result.requirementsUpdated.push('excess_record (auto-cover removed — reverted to needed)');
+  };
+
+  if (!optedIn || !clientId) { await revert(); return; }
+
+  // Client's standing held-on-account balance (this job's own records excluded).
+  const bal = await client.query(
+    `SELECT COALESCE(SUM(h.held_amount), 0) AS balance
+     FROM job_excess je
+     JOIN v_excess_held h ON h.excess_id = je.id
+     JOIN jobs j ON j.id = je.job_id
+     WHERE j.client_id = $1 AND je.held_on_account = TRUE AND je.job_id <> $2`,
+    [clientId, jobId]
+  );
+  const balance = parseFloat(bal.rows[0]?.balance || 0);
+
+  if (expectedExcess > 0 && balance >= expectedExcess) {
+    if (rec.excess_status === 'waived' && isAutoCovered) return; // already covered — idempotent
+    const marker = `[Auto-covered by account] £${expectedExcess.toLocaleString()} covered by £${balance.toLocaleString()} held on account for this client — no fresh excess collected.`;
+    await client.query(
+      `UPDATE job_excess
+       SET excess_status = 'waived', claim_notes = $2, excess_amount_required = $3,
+           notes = CASE WHEN COALESCE(notes, '') LIKE '%[Auto-covered by account]%' THEN notes
+                        ELSE COALESCE(notes || E'\n', '') || $2 END,
+           updated_at = NOW()
+       WHERE id = $1`,
+      [rec.id, marker, expectedExcess]
+    );
+    result.requirementsUpdated.push(`excess_record (auto-covered by £${balance.toLocaleString()} held on account)`);
+  } else {
+    await revert(); // balance no longer sufficient — revert any prior auto-cover
+  }
 }
 
 /**

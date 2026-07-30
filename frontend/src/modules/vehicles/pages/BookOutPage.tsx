@@ -745,6 +745,7 @@ export function BookOutPage() {
     setUploadProgress('Generating PDF & finalising...')
 
     const pdfData = {
+      eventId,
       vehicleReg: form.vehicleReg,
       vehicleType: form.vehicleType,
       vehicleMake: selectedVehicle?.make,

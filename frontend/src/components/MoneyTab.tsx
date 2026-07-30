@@ -8,11 +8,13 @@ import { useState, useEffect, useCallback } from 'react';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
+import { describePreauth, paymentMethodLabel } from '../lib/preauth';
 import { getPaymentState, PAYMENT_STATE_LABELS, PAYMENT_STATE_CLASSES } from '../services/paymentState';
 import ExcessPaymentModal, { statusLabel, statusColor, computeHireDays } from './ExcessPaymentModal';
 import CostCaptureModal from './CostCaptureModal';
+import CostAllocationModal from './CostAllocationModal';
 import RechargeResolveModal, { RechargeStatusPill } from './RechargeResolveModal';
-import type { JobExcess } from '../../../shared/types';
+import type { JobExcess, Cost } from '../../../shared/types';
 
 // HireHop bank accounts (id → label) for the cross-job apply bank field.
 const HH_BANKS: Array<{ id: number; label: string }> = [
@@ -137,6 +139,15 @@ interface JobCostLite {
   recharge_amount: number | null;
   recharged_to_hh_at: string | null;
   recharge_status: string | null;
+  // Allocation-aware read: a row split IN from a cost captured on another job.
+  // amount_gross is this job's share; full_amount_gross is the cost's total.
+  is_allocation?: boolean;
+  full_amount_gross?: number | null;
+  allocation_id?: string | null;
+  // Capture job — where the cost was actually entered (differs from this job on
+  // split-in rows; the full invoice + recharge live there).
+  job_id?: string | null;
+  capture_hh_job_number?: number | null;
 }
 interface JobQuoteLite {
   id: string;
@@ -144,6 +155,12 @@ interface JobQuoteLite {
   freelancer_fee_rounded: number | null;
   client_fee: number | null;
   status: string | null;
+  // Cost components (for the Expected make-up). Admin fee is deliberately NOT a
+  // column — it's a markup, never an invoice we reconcile against — so summing
+  // these four gives the outlay we actually expect to pay out.
+  expected_fuel_cost: number | null;
+  expenses_included: number | null;
+  travel_cost: number | null;
 }
 
 export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
@@ -158,6 +175,10 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   const [balNotes, setBalNotes] = useState('');
   const [balSaving, setBalSaving] = useState(false);
   const [balError, setBalError] = useState('');
+
+  // Resend client confirmation email (manual re-fire, e.g. after an SMTP blip)
+  const [resending, setResending] = useState(false);
+  const [resendMsg, setResendMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   // Record payment form
   const [showPaymentForm, setShowPaymentForm] = useState(false);
@@ -245,6 +266,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   const [jobCosts, setJobCosts] = useState<JobCostLite[]>([]);
   const [jobQuotes, setJobQuotes] = useState<JobQuoteLite[]>([]);
   const [showAddCost, setShowAddCost] = useState(false);
+  const [splittingCost, setSplittingCost] = useState<Cost | null>(null);
 
   const openRefundModal = (dep: FinancialData['financial']['deposits'][number]) => {
     setRefundingDep(dep);
@@ -415,6 +437,44 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
       setLoading(false);
     }
   }, [jobId]);
+
+  // Manually re-send the client's booking/payment confirmation email. Works on
+  // any confirmed job — used when the original auto-send failed (e.g. transient
+  // SMTP failure). Reports the result inline so staff know it actually went.
+  const handleResendConfirmation = async () => {
+    if (!data) return;
+    setResending(true);
+    setResendMsg(null);
+    try {
+      const resp = await api.post<{ data: { sent: boolean; reason?: string; error?: string; is_fallback?: boolean } }>(
+        `/money/${jobId}/resend-confirmation`,
+        {
+          amount: data.financial.total_hire_deposits || 0,
+          is_confirming_booking: true,
+        }
+      );
+      const r = resp.data;
+      if (r.sent) {
+        setResendMsg({
+          ok: true,
+          text: r.is_fallback
+            ? 'Sent — but no client email on file, so it went to info@. Add a contact email and re-send.'
+            : 'Confirmation email sent to the client.',
+        });
+      } else {
+        setResendMsg({
+          ok: false,
+          text: r.reason === 'no_recipient'
+            ? 'Not sent — no client email found. Add a contact email on the client/job first.'
+            : `Not sent — ${r.error || 'email send failed'}. Try again in a moment.`,
+        });
+      }
+    } catch (e) {
+      setResendMsg({ ok: false, text: e instanceof Error ? e.message : 'Failed to resend' });
+    } finally {
+      setResending(false);
+    }
+  };
 
   // Business-level balance override (migration 117) — admin marks the HH-derived
   // balance as settled in Xero / written off. Doesn't touch HireHop or Xero.
@@ -921,6 +981,12 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                       <>
                         {' · '}
                         Collected: £{Number(record.excess_amount_taken || 0).toFixed(2)}
+                        {/* When + how it was collected, inline. Pre-auth held/released
+                            records show their own dated line below (describePreauth). */}
+                        {Number(record.excess_amount_taken || 0) > 0 && record.payment_date &&
+                          ` on ${new Date(record.payment_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`}
+                        {Number(record.excess_amount_taken || 0) > 0 && record.payment_method &&
+                          ` · ${paymentMethodLabel(record.payment_method)}`}
                       </>
                     )}
                     {Number(record.amount_released || 0) > 0 && (
@@ -943,7 +1009,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                         <span className="text-emerald-700">
                           Reimbursed: £{Number(record.reimbursement_amount).toFixed(2)}
                           {record.reimbursement_date && ` on ${new Date(record.reimbursement_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`}
-                          {record.reimbursement_method && ` (${record.reimbursement_method.replace(/_/g, ' ')})`}
+                          {record.reimbursement_method && ` (${paymentMethodLabel(record.reimbursement_method)})`}
                         </span>
                       )}
                     </p>
@@ -967,16 +1033,18 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                       ))}
                     </p>
                   )}
-                  {record.excess_status === 'pre_auth' && record.held_expires_at && (() => {
-                    const daysLeft = Math.ceil((new Date(record.held_expires_at).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
-                    const cls = daysLeft <= 1 ? 'text-red-600' : daysLeft <= 2 ? 'text-amber-600' : 'text-sky-600';
+                  {(record.excess_status === 'pre_auth' || record.excess_status === 'released') && (() => {
+                    // Shared wording — see lib/preauth.ts. Binary held/released,
+                    // never a "maybe"; the server-side self-heal resolves a stuck
+                    // past-expiry hold to its true state on this tab's load.
+                    const d = describePreauth(record);
+                    if (!d.compact) return null;
+                    const cls = d.isHold
+                      ? (d.pastExpiry ? 'text-amber-600' : 'text-sky-600')
+                      : 'text-gray-500';
                     return (
                       <p className={`text-[11px] mt-0.5 font-medium ${cls}`}>
-                        {daysLeft <= 0
-                          ? 'Hold expired — capture or release'
-                          : daysLeft === 1
-                            ? 'Hold expires tomorrow'
-                            : `Hold expires in ${daysLeft} days`}
+                        {d.compact}{record.payment_method ? ` · ${paymentMethodLabel(record.payment_method)}` : ''}
                       </p>
                     );
                   })()}
@@ -1114,7 +1182,28 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
 
       {/* Payment History */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-        <h3 className="text-lg font-semibold text-gray-900 mb-4">Payment History</h3>
+        <div className="flex items-center justify-between mb-4 gap-3">
+          <h3 className="text-lg font-semibold text-gray-900">Payment History</h3>
+          <button
+            onClick={handleResendConfirmation}
+            disabled={resending}
+            title="Re-send the client's booking/payment confirmation email"
+            className="px-3 py-1.5 text-sm font-medium text-ooosh-700 border border-ooosh-200 hover:bg-ooosh-50 rounded-md disabled:opacity-50 whitespace-nowrap"
+          >
+            {resending ? 'Sending…' : 'Resend confirmation'}
+          </button>
+        </div>
+        {resendMsg && (
+          <div
+            className={`mb-4 text-sm rounded-md px-3 py-2 border ${
+              resendMsg.ok
+                ? 'bg-green-50 border-green-200 text-green-800'
+                : 'bg-amber-50 border-amber-200 text-amber-800'
+            }`}
+          >
+            {resendMsg.text}
+          </div>
+        )}
 
         {/* Payment history — hire payments from HireHop (excess payments tracked in Insurance Excess section above) */}
         {(() => {
@@ -1213,6 +1302,14 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
           presetJobId={jobId}
           onClose={() => setShowAddCost(false)}
           onSaved={() => { setShowAddCost(false); loadJobCosts(); }}
+          onSavedAndSplit={(c) => { setShowAddCost(false); loadJobCosts(); setSplittingCost(c); }}
+        />
+      )}
+      {splittingCost && (
+        <CostAllocationModal
+          cost={splittingCost}
+          onClose={() => setSplittingCost(null)}
+          onSaved={() => { setSplittingCost(null); loadJobCosts(); }}
         />
       )}
 
@@ -1833,7 +1930,22 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
   }
 
   const liveQuotes = quotes.filter((q) => q.status !== 'cancelled');
-  const quotedCost = liveQuotes.reduce((s, q) => s + num(q.freelancer_fee_rounded ?? q.freelancer_fee), 0);
+  // Expected outlay = what we actually expect to PAY OUT (and reconcile invoices
+  // against): freelancer labour + van fuel + fronted (absorbed) expenses +
+  // transport fares. Admin fee is EXCLUDED — it's a markup baked into our_total_cost,
+  // never a real invoice. Previously this summed only the freelancer fee, so it
+  // understated the expected cost by fuel/expenses/transport.
+  const expFreelancer = liveQuotes.reduce((s, q) => s + num(q.freelancer_fee_rounded ?? q.freelancer_fee), 0);
+  const expFuel = liveQuotes.reduce((s, q) => s + num(q.expected_fuel_cost), 0);
+  const expExpenses = liveQuotes.reduce((s, q) => s + num(q.expenses_included), 0);
+  const expTransport = liveQuotes.reduce((s, q) => s + num(q.travel_cost), 0);
+  const quotedCost = expFreelancer + expFuel + expExpenses + expTransport;
+  const expectedMakeup: { label: string; amount: number }[] = [
+    { label: 'Freelancer', amount: expFreelancer },
+    { label: 'Fuel', amount: expFuel },
+    { label: 'Fronted expenses', amount: expExpenses },
+    { label: 'Transport', amount: expTransport },
+  ].filter((c) => c.amount > 0.005);
   const clientQuoted = liveQuotes.reduce((s, q) => s + num(q.client_fee), 0);
 
   const actualCosts = costs.filter((c) => c.cost_intent === 'quote_actual');
@@ -1869,7 +1981,19 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
         <div className="rounded-md border border-gray-200 p-3">
           <div className="text-xs text-gray-500">Expected (from quotes)</div>
           <div className="text-lg font-semibold text-gray-900">{m(quotedCost)}</div>
-          <div className="text-xs text-gray-400">crew / transport cost</div>
+          {expectedMakeup.length > 0 ? (
+            <div className="mt-1 space-y-0.5">
+              {expectedMakeup.map((c) => (
+                <div key={c.label} className="flex items-center justify-between text-xs text-gray-400">
+                  <span>{c.label}</span>
+                  <span>{m(c.amount)}</span>
+                </div>
+              ))}
+              <div className="text-[10px] text-gray-300 pt-0.5">admin fee excluded</div>
+            </div>
+          ) : (
+            <div className="text-xs text-gray-400">crew / transport cost</div>
+          )}
         </div>
         <div className="rounded-md border border-gray-200 p-3">
           <div className="text-xs text-gray-500">Actuals (part of quote)</div>
@@ -1885,6 +2009,42 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
         <p className="text-xs text-gray-400 -mt-2 mb-4">Client quoted {m(clientQuoted)} for transport / crew.</p>
       )}
 
+      {/* Actual costs (part of quote) — itemised, so staff can see WHICH bills make up the total */}
+      {actualCosts.length > 0 && (
+        <div className="border-t border-gray-100 pt-3 mb-3">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-sm font-medium text-gray-700">Costs applied to this job</span>
+            <span className="text-sm font-semibold text-gray-900">{m(actualsTotal)}</span>
+          </div>
+          <ul className="space-y-1">
+            {actualCosts.map((c) => {
+              const isSplit = !!c.is_allocation;
+              const captureJobId = c.job_id;
+              return (
+                <li key={isSplit ? `a-${c.allocation_id || c.id}` : `c-${c.id}`} className="flex items-center justify-between text-sm gap-2">
+                  <span className="text-gray-600 truncate min-w-0">
+                    <span className="inline-block px-1.5 py-0.5 mr-1.5 text-[10px] font-medium bg-gray-100 text-gray-500 rounded align-middle">Quote</span>
+                    {c.supplier_name || c.description || c.category || 'Cost'}
+                    {isSplit && (
+                      captureJobId ? (
+                        <a href={`/jobs/${captureJobId}`} className="ml-1 text-xs text-purple-600 hover:underline"
+                          title={`This job's share of a ${m(num(c.full_amount_gross))} cost captured on ${c.capture_hh_job_number ? `job #${c.capture_hh_job_number}` : 'another job'}`}>
+                          · split from {c.capture_hh_job_number ? `#${c.capture_hh_job_number}` : 'another job'}
+                        </a>
+                      ) : (
+                        <span className="ml-1 text-xs text-purple-600" title={`This job's share of a ${m(num(c.full_amount_gross))} cost split across jobs`}>· split ({m(num(c.full_amount_gross))} total)</span>
+                      )
+                    )}
+                  </span>
+                  <span className="text-gray-900 shrink-0">{m(num(c.amount_gross))}</span>
+                </li>
+              );
+            })}
+          </ul>
+          <p className="text-[11px] text-gray-400 mt-1.5">Manage individual costs on the <a href="/money/costs" className="text-purple-600 hover:underline">Costs hub</a>.</p>
+        </div>
+      )}
+
       {/* Extra (rechargeable) costs */}
       {extraCosts.length > 0 && (
         <div className="border-t border-gray-100 pt-3">
@@ -1894,13 +2054,20 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
           </div>
           <ul className="space-y-1">
             {extraCosts.map((c) => {
-              const pending = c.recharge_mode !== 'none' && (c.recharge_status ?? 'pending') === 'pending';
+              // Allocation-in rows are a share of a cost captured on ANOTHER
+              // job — recharge (and its resolution) belongs to that capture job,
+              // so we show them read-only here, tagged as a split.
+              const isSplit = !!c.is_allocation;
+              const pending = !isSplit && c.recharge_mode !== 'none' && (c.recharge_status ?? 'pending') === 'pending';
               return (
-                <li key={c.id} className="flex items-center justify-between text-sm gap-2">
-                  <span className="text-gray-600 truncate">{c.supplier_name || c.description || c.category || 'Cost'}</span>
+                <li key={isSplit ? `a-${c.allocation_id || c.id}` : `c-${c.id}`} className="flex items-center justify-between text-sm gap-2">
+                  <span className="text-gray-600 truncate">
+                    {c.supplier_name || c.description || c.category || 'Cost'}
+                    {isSplit && <span className="ml-1 text-xs text-purple-600" title={`This job's share of a ${m(num(c.full_amount_gross))} cost split across jobs`}>· split ({m(num(c.full_amount_gross))} total)</span>}
+                  </span>
                   <span className="flex items-center gap-2 shrink-0">
                     <span className="text-gray-900">{m(num(c.amount_gross))}</span>
-                    {c.recharge_mode !== 'none' && <RechargeStatusPill status={c.recharge_status} mode={c.recharge_mode} />}
+                    {!isSplit && c.recharge_mode !== 'none' && <RechargeStatusPill status={c.recharge_status} mode={c.recharge_mode} />}
                     {pending && (
                       <button onClick={() => setResolving(c)}
                         className="px-2 py-0.5 text-xs text-white bg-blue-600 hover:bg-blue-700 rounded">

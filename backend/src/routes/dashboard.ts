@@ -730,6 +730,72 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       rechargesToResolveResult,
     ] = results;
 
+    // ── Allocated-vehicle enrichment for the Today section ──
+    // For each of today's going-out + returning jobs, attach the allocated van
+    // reg(s) + their fleet prep-readiness (`fleet_vehicles.hire_status`) so
+    // staff can see "what's going out + is it prepped" at a glance. Only used
+    // by the Today block; kept out of the big Promise.all because it keys off
+    // the going-out/returning job ids we've just resolved.
+    const goingOutIds: string[] = goingOutResult.rows.map((r: any) => r.id);
+    const returningIds: string[] = returningResult.rows.map((r: any) => r.id);
+    const todayJobIds = Array.from(new Set([...goingOutIds, ...returningIds]));
+
+    const vehiclesByJob = new Map<string, Array<{ reg: string; hire_status: string | null }>>();
+    const vanRequiredJobIds = new Set<string>();
+    if (todayJobIds.length > 0) {
+      const [vehiclesRes, vanReqRes] = await Promise.all([
+        // Distinct allocated vans per job. DISTINCT collapses the dual-row
+        // pattern (staff-allocation + hire-form rows share the same van/job)
+        // and multiple drivers sharing one van, so each reg appears once.
+        // Dual-match join (job_id OR hirehop_job_id) surfaces V&D
+        // staff-allocation rows that carry only hirehop_job_id.
+        query(
+          `SELECT DISTINCT j.id AS job_id, fv.reg, fv.hire_status
+           FROM vehicle_hire_assignments vha
+           JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+           JOIN jobs j ON (
+             vha.job_id = j.id
+             OR (vha.job_id IS NULL AND vha.hirehop_job_id = j.hh_job_number)
+           )
+           WHERE j.id = ANY($1)
+             AND vha.status IN ('soft', 'confirmed', 'booked_out', 'active')
+           ORDER BY j.id, fv.reg`,
+          [todayJobIds],
+        ),
+        // Which of today's going-out jobs actually need a van (have a live
+        // pre-hire vehicle requirement) — drives the "van unassigned" flag.
+        goingOutIds.length > 0
+          ? query(
+              `SELECT DISTINCT job_id
+               FROM job_requirements
+               WHERE job_id = ANY($1)
+                 AND requirement_type = 'vehicle'
+                 AND phase = 'pre_hire'
+                 AND (notes IS NULL OR notes NOT LIKE '%[Suspended:%')`,
+              [goingOutIds],
+            )
+          : Promise.resolve({ rows: [] as any[] }),
+      ]);
+      for (const r of vehiclesRes.rows as any[]) {
+        const arr = vehiclesByJob.get(r.job_id) || [];
+        arr.push({ reg: r.reg, hire_status: r.hire_status ?? null });
+        vehiclesByJob.set(r.job_id, arr);
+      }
+      for (const r of vanReqRes.rows as any[]) vanRequiredJobIds.add(r.job_id);
+    }
+
+    const attachVehicles = (rows: any[], goingOut: boolean) =>
+      rows.map((j: any) => {
+        const vehicles = vehiclesByJob.get(j.id) || [];
+        return {
+          ...j,
+          vehicles,
+          // Only flag "van needed but none allocated" on the going-out side —
+          // it's the yard-planning signal. Returning rows just show reg(s).
+          van_unassigned: goingOut && vehicles.length === 0 && vanRequiredJobIds.has(j.id),
+        };
+      });
+
     // Build the 14-day on-hire series — oldest day first, today last.
     const onHireSpark: number[] = onHireSparkResult.rows.map(
       (row: { on_hire_count: string | number }) => parseInt(String(row.on_hire_count), 10) || 0,
@@ -746,6 +812,41 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         .filter((r) => r.needs_sitter && !r.assignee)
         .map((r) => ({ date: r.date, jobs: r.jobs.map((j) => j.label).slice(0, 2) }));
     } catch { /* non-fatal — bucket just won't populate */ }
+
+    // Outstanding staff documents — pending/lapsed assignments on active,
+    // tracked (non-read-only) documents for active staff. Manager-facing only
+    // (it's about other people's compliance), so compute 0 for everyone else →
+    // the frontend bucket hides. Non-fatal.
+    let staffDocsOutstanding = 0;
+    if (['admin', 'manager', 'weekend_manager'].includes(req.user?.role || '')) {
+      try {
+        const sd = await query(`
+          SELECT COUNT(*) AS count
+          FROM staff_document_assignments a
+          JOIN staff_documents d ON d.id = a.document_id
+          JOIN users u ON u.id = a.user_id AND u.is_active = true
+          WHERE d.is_active = true AND d.completion_mode <> 'read_only'
+            AND a.status IN ('pending', 'lapsed')
+        `);
+        staffDocsOutstanding = parseInt(sd.rows[0].count as string, 10) || 0;
+      } catch { /* non-fatal */ }
+    }
+
+    // Backline to buy — high-priority gaps with no acquisition plan yet: kit
+    // we've marked high priority that we don't stock (not / similar / used-to)
+    // and haven't decided to get. Turns the demand tracker from a passive log
+    // into a prompt. Defensively wrapped so a pre-183 DB can't 500 the dashboard.
+    let backlineToBuy = 0;
+    try {
+      const bb = await query(`
+        SELECT COUNT(*) AS count
+        FROM backline_demand
+        WHERE priority = 'high'
+          AND have_it_status IN ('no', 'sort_of', 'used_to')
+          AND acquisition_status = 'none'
+      `);
+      backlineToBuy = parseInt(bb.rows[0].count as string, 10) || 0;
+    } catch { /* non-fatal — pre-migration or table absent */ }
 
     // Build prep time estimates by day
     const prepEstimates: Record<string, {
@@ -855,8 +956,8 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       stat_cards: { ...statCardsResult.rows[0], on_hire_spark: onHireSpark },
       on_today: onToday,
       today: {
-        going_out: goingOutResult.rows,
-        returning: returningResult.rows,
+        going_out: attachVehicles(goingOutResult.rows, true),
+        returning: attachVehicles(returningResult.rows, false),
         transport_quotes: todayTransportResult.rows,
         vehicle_assignments: todayVehiclesResult.rows,
       },
@@ -918,6 +1019,12 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         // Evenings in the next 14 days needing a sitter with none assigned.
         sitter_gap_count: sitterGaps.length,
         sitter_gaps: sitterGaps.slice(0, 5),
+        // ── Backline to buy (demand tracker) ──
+        // High-priority gaps with no acquisition plan yet — purchasing prompt.
+        backline_to_buy_count: backlineToBuy,
+        // ── Outstanding staff documents (managers) ──
+        // Pending/lapsed tracked-document assignments across active staff.
+        staff_documents_outstanding_count: staffDocsOutstanding,
         // ── Card-machine receipt scans outstanding (migration 087) ──
         // Excess collected/held on a physical terminal needs a receipt scan
         // attached. Amber to-do, non-blocking.

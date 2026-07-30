@@ -412,6 +412,10 @@ const tenancySchema = z.object({
   key_location: z.string().max(200).optional().nullable(),
   billing_mode: z.enum(['recurring', 'manual']).default('manual'),
   billing_cadence: z.enum(['monthly', 'quarterly', 'annual', 'custom']).default('monthly'),
+  // Custom-cadence interval (only used when billing_cadence = 'custom') so a
+  // custom tenancy can auto-advance next_bill_date like the fixed cadences.
+  billing_custom_interval_value: z.number().int().positive().optional().nullable(),
+  billing_custom_interval_unit: z.enum(['day', 'week', 'month', 'year']).optional().nullable(),
   next_bill_date: z.string().optional().nullable(),
   bill_reminder_person_id: z.string().uuid().optional().nullable(),
   bill_reminder_lead_days: z.number().int().optional(),
@@ -431,13 +435,14 @@ router.post('/tenancies', validate(tenancySchema), async (req: AuthRequest, res:
          access_type, access_code, access_code_encrypted, key_location,
          billing_mode, billing_cadence, next_bill_date, bill_reminder_person_id,
          bill_reminder_lead_days, bill_overdue_grace_days, rate_review_cadence, next_rate_review_date,
-         notes, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,COALESCE($15,7),COALESCE($16,5),$17,$18,$19,$20) RETURNING *`,
+         notes, created_by, billing_custom_interval_value, billing_custom_interval_unit)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,COALESCE($15,7),COALESCE($16,5),$17,$18,$19,$20,$21,$22) RETURNING *`,
       [b.room_id, b.organisation_id ?? null, b.lead_contact_person_id ?? null, b.status, b.move_in_date ?? null,
        b.weekly_rate, b.access_type, ac.plain, ac.enc, b.key_location ?? null,
        b.billing_mode, b.billing_cadence, b.next_bill_date ?? null, b.bill_reminder_person_id ?? null,
        b.bill_reminder_lead_days ?? null, b.bill_overdue_grace_days ?? null, b.rate_review_cadence,
-       b.next_rate_review_date ?? null, b.notes ?? null, req.user!.id]
+       b.next_rate_review_date ?? null, b.notes ?? null, req.user!.id,
+       b.billing_custom_interval_value ?? null, b.billing_custom_interval_unit ?? null]
     );
     // Reflect occupancy on the room
     await query(`UPDATE storage_rooms SET status = 'occupied', updated_at = NOW() WHERE id = $1 AND status != 'out_of_use'`, [b.room_id]);
@@ -454,7 +459,8 @@ router.post('/tenancies', validate(tenancySchema), async (req: AuthRequest, res:
 
 router.put('/tenancies/:id', validate(tenancySchema.partial()), async (req: AuthRequest, res: Response) => {
   const allowed = ['organisation_id', 'lead_contact_person_id', 'status', 'move_in_date', 'billing_mode',
-    'billing_cadence', 'next_bill_date', 'bill_reminder_person_id', 'bill_reminder_lead_days',
+    'billing_cadence', 'billing_custom_interval_value', 'billing_custom_interval_unit',
+    'next_bill_date', 'bill_reminder_person_id', 'bill_reminder_lead_days',
     'bill_overdue_grace_days', 'rate_review_cadence', 'next_rate_review_date', 'notes',
     'access_type', 'access_code', 'key_location'];
   const fields: string[] = [];
@@ -508,10 +514,21 @@ router.post('/tenancies/:id/rate', authorize(...ADMIN_MANAGER), validate(rateSch
   res.json({ data: result.rows[0] });
 });
 
-// Mark this cycle's invoice as sent → log it + advance next_bill_date by cadence
+// Mark this cycle's invoice as sent → log it + move the reminder (next_bill_date)
+// forward. The reminder date and the invoice record are now decoupled:
+//   • next_bill_date is purely "when do we send / get reminded about the next one".
+//   • the invoice-log row records what actually went out (number, amount, and the
+//     optional period it covered).
+// next_bill_date resolution order: explicit override → cadence interval (incl. a
+// custom value+unit) → left as-is. Fixed unit literals below are code-controlled,
+// so the custom interval is injection-safe (value is parameterised).
+const CUSTOM_UNIT_SQL: Record<string, string> = { day: 'days', week: 'weeks', month: 'months', year: 'years' };
 const invoiceSchema = z.object({
   amount: z.number().optional().nullable(),
-  next_bill_date: z.string().optional().nullable(), // override (required for 'custom' cadence)
+  invoice_number: z.string().max(120).optional().nullable(),
+  period_start: z.string().optional().nullable(),
+  period_end: z.string().optional().nullable(),
+  next_bill_date: z.string().optional().nullable(), // explicit "next one due" override
   notes: z.string().optional().nullable(),
 });
 router.post('/tenancies/:id/mark-invoiced', validate(invoiceSchema), async (req: AuthRequest, res: Response) => {
@@ -524,13 +541,15 @@ router.post('/tenancies/:id/mark-invoiced', validate(invoiceSchema), async (req:
     : Number(ten.weekly_rate) * (ten.billing_cadence === 'monthly' ? 52 / 12 : ten.billing_cadence === 'quarterly' ? 13 : ten.billing_cadence === 'annual' ? 52 : 1);
 
   await query(
-    `INSERT INTO storage_invoice_log (tenancy_id, due_date, amount, sent_by, notes)
-     VALUES ($1,$2,$3,$4,$5)`,
-    [req.params.id, dueDate, Math.round(amount * 100) / 100, req.user!.id, b.notes ?? null]
+    `INSERT INTO storage_invoice_log (tenancy_id, due_date, amount, sent_by, notes, invoice_number, period_start, period_end)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+    [req.params.id, dueDate, Math.round(amount * 100) / 100, req.user!.id, b.notes ?? null,
+     b.invoice_number ?? null, b.period_start ?? null, b.period_end ?? null]
   );
 
-  // Advance next_bill_date by cadence (or to explicit override for custom)
+  // Advance next_bill_date (the reminder trigger).
   const cadenceInterval: Record<string, string> = { monthly: '1 month', quarterly: '3 months', annual: '1 year' };
+  const customUnit = ten.billing_custom_interval_unit ? CUSTOM_UNIT_SQL[ten.billing_custom_interval_unit] : null;
   let nextSql: string;
   const params: unknown[] = [req.params.id];
   if (b.next_bill_date) {
@@ -538,8 +557,12 @@ router.post('/tenancies/:id/mark-invoiced', validate(invoiceSchema), async (req:
     params.push(b.next_bill_date);
   } else if (cadenceInterval[ten.billing_cadence]) {
     nextSql = `(COALESCE(next_bill_date, CURRENT_DATE) + interval '${cadenceInterval[ten.billing_cadence]}')::date`;
+  } else if (ten.billing_cadence === 'custom' && ten.billing_custom_interval_value && customUnit) {
+    // e.g. value=6, unit='month' → COALESCE(next_bill_date, today) + (6 * interval '1 months')
+    nextSql = `(COALESCE(next_bill_date, CURRENT_DATE) + ($2::int * interval '1 ${customUnit}'))::date`;
+    params.push(ten.billing_custom_interval_value);
   } else {
-    nextSql = `next_bill_date`; // custom with no override: leave as-is, staff will set
+    nextSql = `next_bill_date`; // custom with no interval + no override: leave as-is, staff will set
   }
   const result = await query(
     `UPDATE storage_tenancies

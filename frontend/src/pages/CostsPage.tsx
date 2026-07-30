@@ -27,6 +27,7 @@ interface CostRow extends Cost {
   job_name?: string | null;
   vehicle_reg?: string | null;
   allocation_count?: number;
+  allocation_jobs?: Array<{ job_id: string | null; hh_job_number: number | null; job_name: string | null; amount: number }>;
   due_date?: string | null;
 }
 
@@ -256,10 +257,18 @@ export default function CostsPage() {
   // Mark a bill paid: captures the value date (may be future) + the method the
   // money went out from. The backend records the payment against the Xero bill
   // on that method's mapped bank account.
-  async function payCost(id: string, paidDate: string, paidMethod: string) {
+  async function payCost(id: string, paidDate: string, paidMethod: string, remittanceEmail?: string) {
     setActionBusy(id + 'pay');
     try {
       await api.post(`/costs/${id}/pay`, { paid_date: paidDate, paid_method: paidMethod });
+      // Remittance is decoupled — a failed email never unwinds the payment.
+      if (remittanceEmail) {
+        try {
+          await api.post(`/costs/${id}/send-remittance`, { email: remittanceEmail });
+        } catch (remErr) {
+          alert(`Marked paid — but the remittance email to ${remittanceEmail} failed to send: ${remErr instanceof Error ? remErr.message : 'unknown error'}. You can resend it later.`);
+        }
+      }
       setPayTarget(null);
       await load(true);
     } catch (err) {
@@ -498,6 +507,19 @@ export default function CostsPage() {
                       : c.vehicle_reg && c.vehicle_id ? (
                         <Link to={`/vehicles/fleet/${c.vehicle_id}`} className="text-purple-700 hover:underline">{c.vehicle_reg}</Link>
                       ) : c.vehicle_reg ? <span className="text-purple-700">{c.vehicle_reg}</span> : '—'}
+                    {c.allocation_jobs && c.allocation_jobs.length > 0 && (
+                      <div className="text-[11px] text-gray-500 mt-0.5" title="Cost split across these jobs (OP cost tracking only)">
+                        ⑂ {c.allocation_jobs.map((a, i) => (
+                          <span key={a.job_id || i}>
+                            {i > 0 && ' '}
+                            {a.job_id && a.hh_job_number
+                              ? <Link to={`/jobs/${a.job_id}`} className="text-purple-600 hover:underline">#{a.hh_job_number}</Link>
+                              : a.hh_job_number ? <span className="text-purple-600">#{a.hh_job_number}</span> : '(job)'}
+                            <span className="text-gray-400"> £{Number(a.amount).toFixed(0)}</span>
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </td>
                   {view === 'all' && <td className="px-2.5 py-2 text-gray-600 whitespace-nowrap">{c.uploaded_by_name || '—'}</td>}
                   <td className="px-2.5 py-2">
@@ -510,6 +532,9 @@ export default function CostsPage() {
                     )}
                     {c.recharge_mode !== 'none' && (
                       <span className="ml-1"><RechargeStatusPill status={c.recharge_status} mode={c.recharge_mode} /></span>
+                    )}
+                    {c.remittance_sent_at && (
+                      <span className="ml-1 text-xs text-gray-400" title={`Remittance advice sent${c.remittance_email ? ` to ${c.remittance_email}` : ''}`}>✉︎</span>
                     )}
                   </td>
                   <td className="px-2.5 py-2 whitespace-nowrap">
@@ -576,7 +601,7 @@ export default function CostsPage() {
           cost={payTarget}
           busy={actionBusy === payTarget.id + 'pay'}
           onClose={() => setPayTarget(null)}
-          onSubmit={(date, method) => payCost(payTarget.id, date, method)}
+          onSubmit={(date, method, remittanceEmail) => payCost(payTarget.id, date, method, remittanceEmail)}
         />
       )}
       {resolving && (
@@ -797,11 +822,62 @@ function PayModal({ cost, busy, onClose, onSubmit }: {
   cost: CostRow;
   busy: boolean;
   onClose: () => void;
-  onSubmit: (paidDate: string, paidMethod: string) => void;
+  onSubmit: (paidDate: string, paidMethod: string, remittanceEmail?: string) => void;
 }) {
   const [paidDate, setPaidDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [paidMethod, setPaidMethod] = useState('lloyds_transfer');
   const isReimburse = cost.payment_method === 'reimburse_me';
+  const payeeName = isReimburse ? (cost.uploaded_by_name || 'staff') : (cost.supplier_name || 'supplier');
+
+  // Remittance advice — optional courtesy email to the payee. Pre-fill the
+  // address from the resolved contact; staff confirm before it goes (never
+  // send blind). Default unticked — sending external mail is a deliberate act.
+  const [sendRemittance, setSendRemittance] = useState(false);
+  const [remittanceEmail, setRemittanceEmail] = useState('');
+  const [contactLoaded, setContactLoaded] = useState(false);
+  const [contactSource, setContactSource] = useState<string | null>(null);
+  // Person picker — search OP for the payee (freelancers are always in here).
+  const [pickerQuery, setPickerQuery] = useState('');
+  const [pickerResults, setPickerResults] = useState<Array<{ id: string; first_name: string; last_name: string; email: string | null }>>([]);
+  const [pickerOpen, setPickerOpen] = useState(false);
+
+  useEffect(() => {
+    const q = pickerQuery.trim();
+    if (q.length < 2) { setPickerResults([]); return; }
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      try {
+        const res = await api.get<{ data: Array<{ id: string; first_name: string; last_name: string; email: string | null }> }>(
+          `/people?search=${encodeURIComponent(q)}&limit=8`,
+        );
+        if (!cancelled) setPickerResults(res.data || []);
+      } catch {
+        if (!cancelled) setPickerResults([]);
+      }
+    }, 300);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [pickerQuery]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await api.get<{ data: { email: string | null; source: string } }>(`/costs/${cost.id}/remittance-contact`);
+        if (cancelled) return;
+        const c = res.data;
+        if (c?.email) setRemittanceEmail(c.email);
+        setContactSource(c?.source ?? null);
+      } catch {
+        /* pre-fill is best-effort — staff can still type an address */
+      } finally {
+        if (!cancelled) setContactLoaded(true);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [cost.id]);
+
+  const isFutureDate = paidDate > new Date().toISOString().slice(0, 10);
+  const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(remittanceEmail.trim());
   // Due date from the supplier's resolved terms (server-computed), falling back
   // to flat invoice + 30 for an older API response.
   const dueDate = (() => {
@@ -845,12 +921,87 @@ function PayModal({ cost, busy, onClose, onSubmit }: {
             </select>
             <p className="text-xs text-gray-400 mt-1">Records the payment against the bill on this account's Xero feed.</p>
           </div>
+
+          {/* Optional remittance advice to the payee. */}
+          <div className="border-t border-gray-100 pt-3">
+            <label className="flex items-start gap-2 cursor-pointer">
+              <input type="checkbox" checked={sendRemittance} onChange={(e) => setSendRemittance(e.target.checked)}
+                className="mt-0.5 rounded border-gray-300 text-purple-600 focus:ring-purple-500" />
+              <span className="text-sm text-gray-700">
+                Also send <strong>{payeeName}</strong> remittance advice
+                <span className="block text-xs text-gray-400">
+                  {isFutureDate
+                    ? 'A short email: their invoice is scheduled to be paid on this date.'
+                    : 'A short email confirming their invoice has been paid.'}
+                </span>
+              </span>
+            </label>
+            {sendRemittance && (
+              <div className="mt-2 pl-6">
+                <input type="email" value={remittanceEmail}
+                  onChange={(e) => { setRemittanceEmail(e.target.value); setContactSource('manual'); }}
+                  placeholder={contactLoaded ? 'name@example.com' : 'Looking up contact…'}
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-purple-500" />
+                {contactLoaded && !remittanceEmail && (
+                  <p className="text-xs text-amber-600 mt-1">No email found for this payee — search OP below or type one.</p>
+                )}
+                {remittanceEmail && !emailValid && (
+                  <p className="text-xs text-amber-600 mt-1">That doesn't look like a valid email address.</p>
+                )}
+                {remittanceEmail && emailValid && contactSource === 'reimbursement_staff' && (
+                  <p className="text-xs text-gray-400 mt-1">From their staff profile.</p>
+                )}
+                {remittanceEmail && emailValid && (contactSource === 'freelancer_assignment' || contactSource === 'person_match') && (
+                  <p className="text-xs text-gray-400 mt-1">From their OP contact record.</p>
+                )}
+                {remittanceEmail && emailValid && contactSource === 'remembered' && (
+                  <p className="text-xs text-gray-400 mt-1">Remembered from a previous remittance.</p>
+                )}
+                {remittanceEmail && emailValid && contactSource === 'supplier_org' && (
+                  <p className="text-xs text-gray-400 mt-1">From the supplier's record.</p>
+                )}
+
+                {/* Person picker — search OP for the payee (freelancers are always here). */}
+                <div className="relative mt-2">
+                  <input type="text" value={pickerQuery}
+                    onChange={(e) => { setPickerQuery(e.target.value); setPickerOpen(true); }}
+                    onFocus={() => setPickerOpen(true)}
+                    placeholder="🔍 Search OP for the payee (name or email)"
+                    className="w-full border border-gray-200 rounded-md px-3 py-1.5 text-sm focus:ring-2 focus:ring-purple-500" />
+                  {pickerOpen && pickerResults.length > 0 && (
+                    <div className="absolute z-10 mt-1 w-full bg-white border border-gray-200 rounded-md shadow-lg max-h-48 overflow-auto">
+                      {pickerResults.map((p) => {
+                        const name = `${p.first_name} ${p.last_name}`.trim();
+                        return (
+                          <button key={p.id} type="button" disabled={!p.email}
+                            onClick={() => {
+                              if (!p.email) return;
+                              setRemittanceEmail(p.email);
+                              setContactSource('person_match');
+                              setPickerQuery('');
+                              setPickerResults([]);
+                              setPickerOpen(false);
+                            }}
+                            className="w-full text-left px-3 py-1.5 text-sm hover:bg-purple-50 disabled:opacity-50 disabled:cursor-not-allowed">
+                            <span className="text-gray-800">{name}</span>
+                            <span className="block text-xs text-gray-400">{p.email || 'no email on file'}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
         <div className="flex justify-end gap-2 px-6 py-4 border-t border-gray-200">
           <button onClick={onClose} className="px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded-md">Cancel</button>
-          <button onClick={() => onSubmit(paidDate, paidMethod)} disabled={busy}
+          <button
+            onClick={() => onSubmit(paidDate, paidMethod, sendRemittance && emailValid ? remittanceEmail.trim() : undefined)}
+            disabled={busy || (sendRemittance && !emailValid)}
             className="px-4 py-2 text-sm text-white bg-purple-600 hover:bg-purple-700 rounded-md disabled:opacity-50">
-            {busy ? 'Saving…' : 'Mark paid'}
+            {busy ? 'Saving…' : sendRemittance && emailValid ? 'Mark paid & send' : 'Mark paid'}
           </button>
         </div>
       </div>
@@ -927,19 +1078,33 @@ function XeroCell({ cost, busy, onRetry, resyncBusy, onResync }: { cost: Cost; b
     && cost.xero_sync_state !== 'error') {
     return <span className="text-xs text-gray-400 whitespace-nowrap" title="The Xero bill is created automatically when this cost is approved">Syncs on approval</span>;
   }
+  // Xero LOCKS these — a reconciled spend-money and a paid bill can't be mutated,
+  // so no re-sync affordance (staff fix those directly in Xero).
   if (cost.xero_sync_state === 'reconciled') {
     return <span className="px-2 py-0.5 text-xs rounded-full bg-emerald-100 text-emerald-800">Reconciled</span>;
   }
+  if (cost.xero_sync_state === 'attached' && isBill && cost.xero_payment_id) {
+    return <span className="px-2 py-0.5 text-xs rounded-full bg-green-100 text-green-800" title="Bill paid in Xero">Bill paid</span>;
+  }
+  // Synced but still editable in Xero (unpaid bill / unreconciled spend-money).
+  // Make the pill click-to-re-sync so staff can push a corrected invoice number
+  // etc. into Xero WITHOUT waiting for the xero_stale flag (which only fires on
+  // an OP-side edit). Re-syncing an already-correct cost is a harmless no-op.
+  const syncedPill = (colour: string, label: string, title: string) =>
+    onResync ? (
+      <button disabled={resyncBusy} onClick={onResync}
+        title={`${title} — click to re-sync to Xero (safe no-op if already up to date).`}
+        className={`px-2 py-0.5 text-xs rounded-full ${colour} hover:opacity-80 disabled:opacity-50 whitespace-nowrap`}>
+        {resyncBusy ? '…' : label}
+      </button>
+    ) : <span className={`px-2 py-0.5 text-xs rounded-full ${colour}`} title={title}>{label}</span>;
   if (cost.xero_sync_state === 'attached') {
-    if (isBill) {
-      return cost.xero_payment_id
-        ? <span className="px-2 py-0.5 text-xs rounded-full bg-green-100 text-green-800" title="Bill paid in Xero">Bill paid</span>
-        : <span className="px-2 py-0.5 text-xs rounded-full bg-blue-100 text-blue-800" title="Bill in Xero, awaiting payment">In Xero</span>;
-    }
-    return <span className="px-2 py-0.5 text-xs rounded-full bg-green-100 text-green-800">Synced</span>;
+    return isBill
+      ? syncedPill('bg-blue-100 text-blue-800', 'In Xero', 'Bill in Xero, awaiting payment')
+      : syncedPill('bg-green-100 text-green-800', 'Synced', 'Synced to Xero');
   }
   if (cost.xero_sync_state === 'bill_created') {
-    return <span className="px-2 py-0.5 text-xs rounded-full bg-blue-100 text-blue-800" title="In Xero; receipt attach pending">{isBill ? 'Bill created' : 'Sent'}</span>;
+    return syncedPill('bg-blue-100 text-blue-800', isBill ? 'Bill created' : 'Sent', 'In Xero; receipt attach pending');
   }
   // Actionable states collapse the status + sync button into ONE clickable pill
   // (the button used to widen the column and push the row actions off-screen).
