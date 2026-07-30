@@ -730,6 +730,72 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       rechargesToResolveResult,
     ] = results;
 
+    // ── Allocated-vehicle enrichment for the Today section ──
+    // For each of today's going-out + returning jobs, attach the allocated van
+    // reg(s) + their fleet prep-readiness (`fleet_vehicles.hire_status`) so
+    // staff can see "what's going out + is it prepped" at a glance. Only used
+    // by the Today block; kept out of the big Promise.all because it keys off
+    // the going-out/returning job ids we've just resolved.
+    const goingOutIds: string[] = goingOutResult.rows.map((r: any) => r.id);
+    const returningIds: string[] = returningResult.rows.map((r: any) => r.id);
+    const todayJobIds = Array.from(new Set([...goingOutIds, ...returningIds]));
+
+    const vehiclesByJob = new Map<string, Array<{ reg: string; hire_status: string | null }>>();
+    const vanRequiredJobIds = new Set<string>();
+    if (todayJobIds.length > 0) {
+      const [vehiclesRes, vanReqRes] = await Promise.all([
+        // Distinct allocated vans per job. DISTINCT collapses the dual-row
+        // pattern (staff-allocation + hire-form rows share the same van/job)
+        // and multiple drivers sharing one van, so each reg appears once.
+        // Dual-match join (job_id OR hirehop_job_id) surfaces V&D
+        // staff-allocation rows that carry only hirehop_job_id.
+        query(
+          `SELECT DISTINCT j.id AS job_id, fv.reg, fv.hire_status
+           FROM vehicle_hire_assignments vha
+           JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+           JOIN jobs j ON (
+             vha.job_id = j.id
+             OR (vha.job_id IS NULL AND vha.hirehop_job_id = j.hh_job_number)
+           )
+           WHERE j.id = ANY($1)
+             AND vha.status IN ('soft', 'confirmed', 'booked_out', 'active')
+           ORDER BY j.id, fv.reg`,
+          [todayJobIds],
+        ),
+        // Which of today's going-out jobs actually need a van (have a live
+        // pre-hire vehicle requirement) — drives the "van unassigned" flag.
+        goingOutIds.length > 0
+          ? query(
+              `SELECT DISTINCT job_id
+               FROM job_requirements
+               WHERE job_id = ANY($1)
+                 AND requirement_type = 'vehicle'
+                 AND phase = 'pre_hire'
+                 AND (notes IS NULL OR notes NOT LIKE '%[Suspended:%')`,
+              [goingOutIds],
+            )
+          : Promise.resolve({ rows: [] as any[] }),
+      ]);
+      for (const r of vehiclesRes.rows as any[]) {
+        const arr = vehiclesByJob.get(r.job_id) || [];
+        arr.push({ reg: r.reg, hire_status: r.hire_status ?? null });
+        vehiclesByJob.set(r.job_id, arr);
+      }
+      for (const r of vanReqRes.rows as any[]) vanRequiredJobIds.add(r.job_id);
+    }
+
+    const attachVehicles = (rows: any[], goingOut: boolean) =>
+      rows.map((j: any) => {
+        const vehicles = vehiclesByJob.get(j.id) || [];
+        return {
+          ...j,
+          vehicles,
+          // Only flag "van needed but none allocated" on the going-out side —
+          // it's the yard-planning signal. Returning rows just show reg(s).
+          van_unassigned: goingOut && vehicles.length === 0 && vanRequiredJobIds.has(j.id),
+        };
+      });
+
     // Build the 14-day on-hire series — oldest day first, today last.
     const onHireSpark: number[] = onHireSparkResult.rows.map(
       (row: { on_hire_count: string | number }) => parseInt(String(row.on_hire_count), 10) || 0,
@@ -890,8 +956,8 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       stat_cards: { ...statCardsResult.rows[0], on_hire_spark: onHireSpark },
       on_today: onToday,
       today: {
-        going_out: goingOutResult.rows,
-        returning: returningResult.rows,
+        going_out: attachVehicles(goingOutResult.rows, true),
+        returning: attachVehicles(returningResult.rows, false),
         transport_quotes: todayTransportResult.rows,
         vehicle_assignments: todayVehiclesResult.rows,
       },
