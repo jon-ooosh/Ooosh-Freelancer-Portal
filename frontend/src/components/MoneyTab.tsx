@@ -12,8 +12,9 @@ import { describePreauth, paymentMethodLabel } from '../lib/preauth';
 import { getPaymentState, PAYMENT_STATE_LABELS, PAYMENT_STATE_CLASSES } from '../services/paymentState';
 import ExcessPaymentModal, { statusLabel, statusColor, computeHireDays } from './ExcessPaymentModal';
 import CostCaptureModal from './CostCaptureModal';
+import CostAllocationModal from './CostAllocationModal';
 import RechargeResolveModal, { RechargeStatusPill } from './RechargeResolveModal';
-import type { JobExcess } from '../../../shared/types';
+import type { JobExcess, Cost } from '../../../shared/types';
 
 // HireHop bank accounts (id → label) for the cross-job apply bank field.
 const HH_BANKS: Array<{ id: number; label: string }> = [
@@ -138,6 +139,11 @@ interface JobCostLite {
   recharge_amount: number | null;
   recharged_to_hh_at: string | null;
   recharge_status: string | null;
+  // Allocation-aware read: a row split IN from a cost captured on another job.
+  // amount_gross is this job's share; full_amount_gross is the cost's total.
+  is_allocation?: boolean;
+  full_amount_gross?: number | null;
+  allocation_id?: string | null;
 }
 interface JobQuoteLite {
   id: string;
@@ -256,6 +262,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   const [jobCosts, setJobCosts] = useState<JobCostLite[]>([]);
   const [jobQuotes, setJobQuotes] = useState<JobQuoteLite[]>([]);
   const [showAddCost, setShowAddCost] = useState(false);
+  const [splittingCost, setSplittingCost] = useState<Cost | null>(null);
 
   const openRefundModal = (dep: FinancialData['financial']['deposits'][number]) => {
     setRefundingDep(dep);
@@ -1291,6 +1298,14 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
           presetJobId={jobId}
           onClose={() => setShowAddCost(false)}
           onSaved={() => { setShowAddCost(false); loadJobCosts(); }}
+          onSavedAndSplit={(c) => { setShowAddCost(false); loadJobCosts(); setSplittingCost(c); }}
+        />
+      )}
+      {splittingCost && (
+        <CostAllocationModal
+          cost={splittingCost}
+          onClose={() => setSplittingCost(null)}
+          onSaved={() => { setSplittingCost(null); loadJobCosts(); }}
         />
       )}
 
@@ -1999,13 +2014,20 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
           </div>
           <ul className="space-y-1">
             {extraCosts.map((c) => {
-              const pending = c.recharge_mode !== 'none' && (c.recharge_status ?? 'pending') === 'pending';
+              // Allocation-in rows are a share of a cost captured on ANOTHER
+              // job — recharge (and its resolution) belongs to that capture job,
+              // so we show them read-only here, tagged as a split.
+              const isSplit = !!c.is_allocation;
+              const pending = !isSplit && c.recharge_mode !== 'none' && (c.recharge_status ?? 'pending') === 'pending';
               return (
-                <li key={c.id} className="flex items-center justify-between text-sm gap-2">
-                  <span className="text-gray-600 truncate">{c.supplier_name || c.description || c.category || 'Cost'}</span>
+                <li key={isSplit ? `a-${c.allocation_id || c.id}` : `c-${c.id}`} className="flex items-center justify-between text-sm gap-2">
+                  <span className="text-gray-600 truncate">
+                    {c.supplier_name || c.description || c.category || 'Cost'}
+                    {isSplit && <span className="ml-1 text-xs text-purple-600" title={`This job's share of a ${m(num(c.full_amount_gross))} cost split across jobs`}>· split ({m(num(c.full_amount_gross))} total)</span>}
+                  </span>
                   <span className="flex items-center gap-2 shrink-0">
                     <span className="text-gray-900">{m(num(c.amount_gross))}</span>
-                    {c.recharge_mode !== 'none' && <RechargeStatusPill status={c.recharge_status} mode={c.recharge_mode} />}
+                    {!isSplit && c.recharge_mode !== 'none' && <RechargeStatusPill status={c.recharge_status} mode={c.recharge_mode} />}
                     {pending && (
                       <button onClick={() => setResolving(c)}
                         className="px-2 py-0.5 text-xs text-white bg-blue-600 hover:bg-blue-700 rounded">
