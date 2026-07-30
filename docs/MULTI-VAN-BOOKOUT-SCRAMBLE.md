@@ -203,7 +203,15 @@ wanted). No data lost.
 
 ---
 
-## 5. Cleanup — jobs 15411 & 16206 (REMAINING, low priority)
+## 5. Cleanup — jobs 15411 & 16206 (VERIFIED CLEAN 30 Jul 2026 — no action taken)
+
+> **Outcome:** a live DB dump on 30 Jul 2026 showed both jobs' surviving rows already carry the
+> correct mileage per the emailed condition-report PDFs (RO23HLU 101,607/102,131 on 15411;
+> SA75RVV 5,145/5,651 on 16206). The scrambled figures below (99,608 / 100,568) were a **stale
+> snapshot** from the original investigation — the mileage had since been put right. **No UPDATE
+> was needed.** RO23HLR/RX73TBZ have no rows on their jobs and were deliberately NOT recreated
+> (completed hires; mileage lives in event history / PDFs). The rest of this section is retained
+> for historical context / the recovery method, but there is nothing left to do here.
 
 Both **completed**, both vans long back, **no stuck flags** (SA75RVV reads `On Hire`
 correctly — it's genuinely out on job 16086). So these are **data-integrity tidies, not
@@ -344,7 +352,12 @@ There's a related spec worth reading alongside this: `docs/BOOKOUT-PHASE-SPLIT-S
 - [x] Confirm photos safe (condition-report PDF) + duff links self-contained.
 - [x] Sweep for other affected jobs → 3 total (14885, 15411, 16206).
 - [x] Confirm 15411/16206 have no stuck flags (SA75RVV correctly On Hire on job 16086).
-- [ ] Historical mileage tidy for 15411 + 16206 (needs R2 event odometers; low priority).
+- [x] Historical mileage tidy for 15411 + 16206 — **verified clean 30 Jul 2026, no action needed.**
+      Live DB dump showed the surviving RO23HLU (15411) + SA75RVV (16206) rows already carry the
+      correct book-out/check-in mileage per the emailed condition-report PDFs (RO23HLU 101,607/102,131;
+      SA75RVV 5,145/5,651). The §5 scrambled figures (99,608 / 100,568) were a stale snapshot — the
+      mileage had already been put right. RO23HLR/RX73TBZ have no rows on their jobs, deliberately not
+      recreated on completed hires (mileage lives in the event history / PDFs).
 - [x] Build detection scanner → jon@ (`runStuckOnHireScan`, migration 186; shipped first).
 - [x] Design + build the partition-by-van core fix — SHIPPED (PR #1057, Jul 2026). Clone-per-van in
       the PATCH book-out transition; referral gate preserved; no migration. Needs live verification
