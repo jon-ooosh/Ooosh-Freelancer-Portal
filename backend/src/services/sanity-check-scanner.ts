@@ -21,8 +21,17 @@
  *     that reintroduced a timestamp-less book-out (the RX73TBZ 16057↔16149
  *     mis-attribution state). One alert per job, deduped via a notes marker.
  *
- * Both markers are cleared on transitions out of their respective
- * pipeline_status so a re-entered state can warn afresh — handled in
+ *   • runStuckOnHireScan — detection scanner for the multi-van book-out
+ *     scramble (docs/MULTI-VAN-BOOKOUT-SCRAMBLE.md §6). Finds vehicles
+ *     projected `hire_status='On Hire'` with NO live booked_out/active
+ *     assignment row — the fingerprint of the scramble (the 2nd van's rows had
+ *     their vehicle_id overwritten to the other van, so the van reads On Hire
+ *     but owns no assignment and can't be checked in). Alerts jon@ ONCE per
+ *     stuck van, deduped via `fleet_vehicles.stuck_onhire_alerted_at` (marker
+ *     cleared in syncFleetHireStatus when the van leaves On Hire).
+ *
+ * The pipeline_status markers are cleared on transitions out of their
+ * respective pipeline_status so a re-entered state can warn afresh — handled in
  * routes/pipeline.ts and routes/webhooks.ts wherever pipeline_status
  * transitions are written.
  */
@@ -32,6 +41,7 @@ import { getFrontendUrl } from '../config/app-urls';
 import { HH_STATUS_LABELS } from './auto-dispatch';
 import { buildAndSendReturnedBookedOutAlert } from './vehicle-emails';
 import { isWithinBusinessHours } from './completion-chaser';
+import { getFromR2 } from '../config/r2';
 
 // Grace window before a started-but-not-completed van leg is flagged. A
 // book-out / collection walkaround is ~30 min; 3h means something's genuinely
@@ -333,6 +343,126 @@ export async function runBookedOutNoTimestampScan(): Promise<{ checked: number; 
       else console.warn(`[sanity-scanner] booked_out-no-ts alert send failed for ${jobRef}:`, result);
     } catch (err) {
       console.error(`[sanity-scanner] booked_out-no-ts scan error for job ${jobKey}:`, err);
+    }
+  }
+
+  return { checked: candidates.rows.length, warned };
+}
+
+/**
+ * Best-effort: read the van's most recent book-out event from R2 and return its
+ * HireHop job number. The stuck van's live DB assignment points at its PREVIOUS
+ * hire (the scramble overwrote the current-hire rows' vehicle_id to the other
+ * van), so we can't get the CURRENT job from the DB — the book-out event is the
+ * only record of which job the van actually went out on. Returns null on any
+ * failure; the alert fires without the number rather than blocking on it.
+ */
+async function lookupStuckOnHireJob(reg: string): Promise<string | null> {
+  try {
+    const key = `vehicle-events/${reg.toUpperCase()}/_index.json`;
+    const resp = await getFromR2(key);
+    if (!resp?.Body) return null;
+    const text = await resp.Body.transformToString('utf-8');
+    const index = JSON.parse(text) as { events?: Array<Record<string, unknown>> };
+    const events = Array.isArray(index.events) ? index.events : [];
+    const bookOuts = events
+      .filter((e) => String(e.eventType || '').toLowerCase().replace(/[^a-z]/g, '') === 'bookout')
+      .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+    const latest = bookOuts[0];
+    const hh = latest?.hireHopJob;
+    return hh != null && String(hh).trim() !== '' ? String(hh).trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Detection scanner for the multi-van book-out scramble
+ * (docs/MULTI-VAN-BOOKOUT-SCRAMBLE.md §6). Finds vehicles projected
+ * `hire_status='On Hire'` that have NO live booked_out/active assignment row —
+ * the fingerprint of the scramble (the 2nd van booked out on a job wins every
+ * shared row's vehicle_id, so the FIRST van's rows point at the other van and
+ * the van is left projected On Hire while owning no assignment, un-checkin-able).
+ *
+ * Detection mirrors syncFleetHireStatus's "has a live assignment" definition
+ * EXACTLY (booked_out/active, excluding rows whose linked job is lost/cancelled
+ * via the dual job match), so "no live row" == "syncFleetHireStatus would NOT
+ * keep this On Hire". That also catches any other drift where the fleet
+ * projection is stale (e.g. the only booked_out row sits on a since-dead job) —
+ * a legitimate bonus, self-corrects on the next sync (which demotes to Prep
+ * Needed and clears the marker).
+ *
+ * Alerts jon@ ONCE per stuck van — deduped via
+ * fleet_vehicles.stuck_onhire_alerted_at, stamped FIRST (a transient send
+ * failure must not re-fire on the next scan). The marker is CLEARED in
+ * syncFleetHireStatus whenever the van leaves On Hire. Recipient is jon@ (NOT
+ * info@) — this is a data-integrity anomaly he wants to action, not general ops
+ * noise.
+ */
+export async function runStuckOnHireScan(): Promise<{ checked: number; warned: number }> {
+  const candidates = await query(
+    `SELECT fv.id, fv.reg
+       FROM fleet_vehicles fv
+      WHERE fv.hire_status = 'On Hire'
+        AND COALESCE(fv.is_active, true) = true
+        AND fv.stuck_onhire_alerted_at IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM vehicle_hire_assignments vha
+           WHERE vha.vehicle_id = fv.id
+             AND vha.status IN ('booked_out', 'active')
+             AND NOT EXISTS (
+               SELECT 1 FROM jobs j
+                WHERE ((vha.job_id IS NOT NULL AND j.id = vha.job_id)
+                       OR (vha.job_id IS NULL AND j.hh_job_number = vha.hirehop_job_id))
+                  AND j.pipeline_status IN ('lost', 'cancelled')
+             )
+        )
+      ORDER BY fv.reg ASC
+      LIMIT 100`
+  );
+
+  if (candidates.rows.length === 0) return { checked: 0, warned: 0 };
+
+  let warned = 0;
+  const frontendUrl = getFrontendUrl();
+
+  for (const row of candidates.rows) {
+    try {
+      const reg: string = row.reg || '(no reg)';
+
+      // Stamp the marker FIRST — stamp-first, like the sibling scanners.
+      await query(
+        `UPDATE fleet_vehicles SET stuck_onhire_alerted_at = NOW(), updated_at = NOW() WHERE id = $1`,
+        [row.id]
+      );
+
+      const hhJob = await lookupStuckOnHireJob(reg);
+      const jobLabel = hhJob ? `HH #${hhJob}` : '(could not resolve the current job — see R2 event history)';
+      const hhJobUrl = hhJob ? `https://myhirehop.com/job.php?id=${hhJob}` : '';
+      const vehicleUrl = `${frontendUrl}/vehicles/fleet/${row.id}`;
+
+      const html = `
+        <p><strong>Van stuck "On Hire" with no live assignment — likely the multi-van book-out scramble.</strong></p>
+        <p>Vehicle <strong>${reg}</strong> reads <code>hire_status='On Hire'</code> but has NO
+        <code>booked_out</code>/<code>active</code> hire assignment row. On a multi-van "everyone drives
+        everything" job, a second van's book-out can overwrite the first van's shared rows' <code>vehicle_id</code>,
+        leaving this van projected On Hire while owning no assignment — so it can't be checked in.</p>
+        <p>Best-guess current job: <strong>${jobLabel}</strong>.</p>
+        <p>Fix per <code>docs/MULTI-VAN-BOOKOUT-SCRAMBLE.md</code> — re-create the missing per-van assignment
+        row (mileage from the book-out event) so the van can be checked in, then verify photos/PDF.</p>
+        ${hhJobUrl ? `<p><a href="${hhJobUrl}">Open job in HireHop</a> · ` : '<p>'}<a href="${vehicleUrl}">Open vehicle in OP</a></p>
+        <p style="color:#888;font-size:12px">Detection scanner — On Hire without a live assignment.</p>
+      `;
+
+      const result = await emailService.sendRaw({
+        to: 'jon@oooshtours.co.uk',
+        subject: `⚠ Van stuck On Hire, no assignment — ${reg}${hhJob ? ` (HH #${hhJob})` : ''}`,
+        html,
+      });
+      if (result.success) warned++;
+      else console.warn(`[sanity-scanner] stuck-on-hire alert send failed for ${reg}:`, result);
+    } catch (err) {
+      console.error(`[sanity-scanner] stuck-on-hire scan error for vehicle ${row.id}:`, err);
     }
   }
 

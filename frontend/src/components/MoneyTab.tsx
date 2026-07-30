@@ -145,6 +145,12 @@ interface JobQuoteLite {
   freelancer_fee_rounded: number | null;
   client_fee: number | null;
   status: string | null;
+  // Cost components (for the Expected make-up). Admin fee is deliberately NOT a
+  // column — it's a markup, never an invoice we reconcile against — so summing
+  // these four gives the outlay we actually expect to pay out.
+  expected_fuel_cost: number | null;
+  expenses_included: number | null;
+  travel_cost: number | null;
 }
 
 export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
@@ -1905,7 +1911,22 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
   }
 
   const liveQuotes = quotes.filter((q) => q.status !== 'cancelled');
-  const quotedCost = liveQuotes.reduce((s, q) => s + num(q.freelancer_fee_rounded ?? q.freelancer_fee), 0);
+  // Expected outlay = what we actually expect to PAY OUT (and reconcile invoices
+  // against): freelancer labour + van fuel + fronted (absorbed) expenses +
+  // transport fares. Admin fee is EXCLUDED — it's a markup baked into our_total_cost,
+  // never a real invoice. Previously this summed only the freelancer fee, so it
+  // understated the expected cost by fuel/expenses/transport.
+  const expFreelancer = liveQuotes.reduce((s, q) => s + num(q.freelancer_fee_rounded ?? q.freelancer_fee), 0);
+  const expFuel = liveQuotes.reduce((s, q) => s + num(q.expected_fuel_cost), 0);
+  const expExpenses = liveQuotes.reduce((s, q) => s + num(q.expenses_included), 0);
+  const expTransport = liveQuotes.reduce((s, q) => s + num(q.travel_cost), 0);
+  const quotedCost = expFreelancer + expFuel + expExpenses + expTransport;
+  const expectedMakeup: { label: string; amount: number }[] = [
+    { label: 'Freelancer', amount: expFreelancer },
+    { label: 'Fuel', amount: expFuel },
+    { label: 'Fronted expenses', amount: expExpenses },
+    { label: 'Transport', amount: expTransport },
+  ].filter((c) => c.amount > 0.005);
   const clientQuoted = liveQuotes.reduce((s, q) => s + num(q.client_fee), 0);
 
   const actualCosts = costs.filter((c) => c.cost_intent === 'quote_actual');
@@ -1941,7 +1962,19 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
         <div className="rounded-md border border-gray-200 p-3">
           <div className="text-xs text-gray-500">Expected (from quotes)</div>
           <div className="text-lg font-semibold text-gray-900">{m(quotedCost)}</div>
-          <div className="text-xs text-gray-400">crew / transport cost</div>
+          {expectedMakeup.length > 0 ? (
+            <div className="mt-1 space-y-0.5">
+              {expectedMakeup.map((c) => (
+                <div key={c.label} className="flex items-center justify-between text-xs text-gray-400">
+                  <span>{c.label}</span>
+                  <span>{m(c.amount)}</span>
+                </div>
+              ))}
+              <div className="text-[10px] text-gray-300 pt-0.5">admin fee excluded</div>
+            </div>
+          ) : (
+            <div className="text-xs text-gray-400">crew / transport cost</div>
+          )}
         </div>
         <div className="rounded-md border border-gray-200 p-3">
           <div className="text-xs text-gray-500">Actuals (part of quote)</div>
