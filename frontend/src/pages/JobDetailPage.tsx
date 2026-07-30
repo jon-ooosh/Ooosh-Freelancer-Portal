@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { hasManagerRole } from '../lib/roles';
+import { vehiclePrepPill } from '../lib/vehiclePrep';
 import { useParams, useNavigate, Link, useLocation, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { getPaymentState, PAYMENT_STATE_LABELS, PAYMENT_STATE_CLASSES } from '../services/paymentState';
@@ -327,6 +328,8 @@ interface JobAssignedVehicle {
   type: string | null;
   /** Most-progressed assignment status across all rows on this van. */
   status: string;
+  /** Fleet prep-readiness projection (`fleet_vehicles.hire_status`). */
+  hire_status: string | null;
 }
 
 /**
@@ -2845,6 +2848,7 @@ export default function JobDetailPage() {
             reg: r.vehicle_reg || '',
             type: r.vehicle_type ?? null,
             status: r.status,
+            hire_status: r.vehicle_hire_status ?? null,
           });
         } else if ((ASSIGNMENT_STATUS_RANK[r.status] ?? -1) > (ASSIGNMENT_STATUS_RANK[existing.status] ?? -1)) {
           existing.status = r.status;
@@ -4565,6 +4569,7 @@ export default function JobDetailPage() {
                   {/* Assigned chip → Vehicle Detail (view the van). */}
                   {jobAssignedVehicles.map((v) => {
                     const s = statusChip[v.status] || { label: v.status, cls: 'bg-gray-100 text-gray-600' };
+                    const prep = vehiclePrepPill(v.hire_status);
                     return (
                       <Link
                         key={v.vehicle_id}
@@ -4576,6 +4581,9 @@ export default function JobDetailPage() {
                         <span className="font-semibold text-gray-900 text-sm">{v.reg || '—'}</span>
                         {v.type && <span className="text-xs text-gray-500">{normVanType(v.type)}</span>}
                         <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${s.cls}`}>{s.label}</span>
+                        {prep && (
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${prep.cls}`}>{prep.label}</span>
+                        )}
                       </Link>
                     );
                   })}

@@ -56,6 +56,12 @@ export interface ScheduleJob {
   return_time: string | null;
   end_time: string | null;
   has_ooh_return?: boolean;
+  /** Allocated van(s) on this job (self-drive / van-hire only) + their fleet
+   *  prep-readiness. Populated for the Today section's going-out + returning
+   *  rows. Empty when no van is allocated (or not a van job). */
+  vehicles?: Array<{ reg: string; hire_status: string | null }>;
+  /** Going-out only: job needs a van but none is allocated yet. */
+  van_unassigned?: boolean;
 }
 
 export interface TransportQuote {
