@@ -4038,11 +4038,33 @@ stuck van, deduped via `fleet_vehicles.stuck_onhire_alerted_at` (stamp-first; **
 `syncFleetHireStatus` when the van leaves On Hire**). HH job number is best-effort R2 enrichment
 (`lookupStuckOnHireJob` reads the van's most recent book-out event — the DB assignment points at the
 van's PREVIOUS hire, so the current job can only come from the event). Also catches any other stale
-On-Hire drift (self-corrects on next sync, one alert). **Not yet built:** (2) the fix —
-server-side **adopt-or-create a per-van assignment row keyed on `van_requirement_index`** at the
-choke-point both book-out paths funnel through, *before* `firePostBookOutHooks`, cloning (reuse
-`add-to-hire` + `services/vha-dedup.ts`) rather than overwriting, plus the terminal-guard
-tightening. Closes fields + photos + view-full-size links at source. **Plan with jon before coding.**
+On-Hire drift (self-corrects on next sync, one alert).
+**(2) The core fix — SHIPPED (PR #1057, Jul 2026).** Book-out now **partitions driver rows by
+van**: when a book-out `PATCH /api/hire-forms/:id` (`status='booked_out'` + a `vehicle_id`)
+targets a **driver** row already live-booked-out to a **different** van, it **clones** a fresh
+per-van row for `(this driver, this van)` instead of re-pointing the shared one — van A's row is
+left untouched, van B gets its own rows and becomes bookable + checkinable. Idempotent (reuses an
+existing `(driver, van, job)` booked-out row on retry). The clone drives the same post-book-out
+chain as the normal path — `cancelOrphanSiblingAllocations` + `firePostBookOutHooks` (fleet
+status, own-van agreement, `fanOutVanHireForms` cross-van, OOH, auto-dispatch) + vehicle-requirement
+sync — so the **per-driver referral gate stays intact** (the clone's agreement routes through
+`generateAndEmailHireFormPdf` → `isDriverAuthorisedForAgreement`; a referral-pending driver is held
+back exactly as before). A non-book-out re-point of a live van, or a driverless row, is **refused**
+(no-op 200) — genuine swaps go through Swap Vehicle; this is the terminal-guard tightening. The
+frontend `updateDriverHireForm` now forwards `mileage_out` so the second-van clone records the
+correct odometer (backend consumes it ONLY on the clone path — the normal update ignores it,
+save-event still owns `mileage_out` there). Closes fields + photos + view-full-size links at source
+(none cross once the reg isn't crossed). **Implementation note / deliberate deviation from the
+original sketch:** the clone lives in the **PATCH path ONLY**, not a shared PATCH+save-event
+choke-point. Reasons: (a) in a staff book-out `save-event` fires BEFORE the write-back PATCH loop,
+so it can't see clones the PATCH hasn't made yet; (b) the incident class is staff self-drive
+multi-van (uses the PATCH loop); (c) freelancer multi-van D&C is explicitly out of scope. If a
+freelancer multi-van book-out ever needs this, the same clone logic would have to move into (or be
+duplicated at) the `save-event` book-out matcher in `vehicles.ts`. **No migration** (Zod
+`patchSchema` gained optional `mileage_out`/`fuel_level_out`; consumed only on the clone branch).
+**Verify live** on the next real 2-van book-out — build-verified only, no runtime CI (see the PR's
+"How to verify"). The historical mileage tidy for 15411 + 16206 is still the one open item below
+(cosmetic, completed jobs, no stuck flags).
 
 ### Per-job contacts (`job_contacts`)
 
