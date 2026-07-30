@@ -3185,7 +3185,7 @@ The auto-chase feature — ingest the `info@oooshtours.co.uk` inbox (Google Work
 - **Timeline email collapse is CHARACTER/inline-based** (`InteractionBody` in `ActivityTimeline.tsx`, Jul 2026 fix). Ingested HTML emails have newlines flattened to spaces at storage (`extractBodyAndAttachments` in `gmail-ingestion.ts` does `\s+→' '`), so the whole quoted thread is one giant line — the old line-anchored `wrote:$` detector never matched and walls of text rendered in full. `findQuoteBoundaryChar` now scans the raw text for the earliest inline marker (`On … wrote:` / Outlook `From:…Sent:` / `--- Original Message ---` / `>`) and collapses from there; a char/line long-clamp catches quote-less long bodies. Display-only — full bodies stay stored (the dispute helper needs them). Don't "fix" this by stripping quotes at ingestion — that would starve §7.2/§7.3.
 - Phase 1.5 manager mailboxes (dedup already handles it); AI fuzzy matcher (layer 4 in `email-matcher.ts`); attachment→R2 harvest; ingest-time quote-stripping (only if stored bodies get heavy — display collapse already solves the UX); **website-enquiry direct integration** (form→OP webhook with address-book search-or-create — NOT email scraping; enquiry form sends From `info@`, so it can't be sender-allowlisted; jon spinning up a dual-repo session for this; see spec §5.4a + §11).
 
-#### Freelancer Onboarding (Phase C in progress, Jul 2026) — see `docs/FREELANCER-ONBOARDING-SPEC.md`
+#### Freelancer Onboarding (Phases A–C SHIPPED, Phase D next, Jul 2026) — see `docs/FREELANCER-ONBOARDING-SPEC.md`
 
 Staff-driven `invite → apply → review → approve → onboard` lifecycle for taking a new freelancer from "someone we might use" to "approved, ready to be crewed onto jobs". Replaces the old "just tick `is_freelancer` and hope" flow. **Migration 184** (`freelancer_applications` table + `people.freelancer_status` denorm column). Routes `routes/freelancers.ts` (`/api/freelancers/*`). Frontend `InviteFreelancerModal.tsx` (invite), `FreelancerPanel.tsx` (the consolidated per-person freelancer surface), `FreelancerHistorySection.tsx` (assignment history — see Crew & Transport).
 
@@ -4027,8 +4027,12 @@ first and last van each "win" different columns on the same shared rows, so the 
 
 **Blast-radius fingerprint (sweep):** a row whose `hire_form_pdf_key` reg ≠ its `vehicle_id`'s
 fleet reg (and the PDF reg is a real, different fleet van). At discovery: **3 jobs** — 14885
-(fixed), 15411 (Jabir HLR/HLU), 16206 (SA75RVV/RX73TBZ). 15411/16206 are completed → historical
-mileage tidy only, no stuck flags. Query + per-job cleanup in the doc.
+(fixed), 15411 (Jabir HLR/HLU), 16206 (SA75RVV/RX73TBZ). 15411/16206 are completed, no stuck flags.
+Query + per-job cleanup in the doc. **Verified 30 Jul 2026 — all 3 jobs clean; no mileage tidy
+needed** (the surviving RO23HLU/SA75RVV rows already carry the correct book-out/check-in mileage per
+the emailed condition-report PDFs; the prior investigation's scrambled figures were a stale
+snapshot). RO23HLR/RX73TBZ have no rows on their jobs — deliberately NOT recreated on completed
+hires; their mileage lives in the event history / PDFs.
 
 **Status:** 14885 cleaned up (mileage `UPDATE` + missing-van `INSERT` + UI check-in).
 **(1) Detection scanner — SHIPPED (migration 187).** `runStuckOnHireScan`
@@ -4065,8 +4069,10 @@ freelancer multi-van book-out ever needs this, the same clone logic would have t
 duplicated at) the `save-event` book-out matcher in `vehicles.ts`. **No migration** (Zod
 `patchSchema` gained optional `mileage_out`/`fuel_level_out`; consumed only on the clone branch).
 **Verify live** on the next real 2-van book-out — build-verified only, no runtime CI (see the PR's
-"How to verify"). The historical mileage tidy for 15411 + 16206 is still the one open item below
-(cosmetic, completed jobs, no stuck flags).
+"How to verify"). The historical mileage tidy for 15411 + 16206 was **verified clean on
+30 Jul 2026 — no action needed** (both jobs' surviving rows already match the emailed PDFs; the
+doc's scrambled figures were stale). The multi-van scramble item is now fully closed bar the live
+2-van book-out verification.
 
 ### Per-job contacts (`job_contacts`)
 
