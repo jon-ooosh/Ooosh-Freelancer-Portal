@@ -168,6 +168,13 @@ export async function updateDriverHireForm(params: {
   if (params.startTime) body.start_time = params.startTime
   if (params.endTime) body.end_time = params.endTime
   if (params.ve103b) body.ve103b_ref = params.ve103b
+  // Forwarded so a SECOND-van book-out on a multi-van job records the correct
+  // odometer on the freshly cloned per-van row (the backend consumes it only
+  // on that clone path — the normal update ignores it, save-event owns
+  // mileage_out there). See docs/MULTI-VAN-BOOKOUT-SCRAMBLE.md.
+  if (params.mileageOut !== undefined && !Number.isNaN(params.mileageOut)) {
+    body.mileage_out = params.mileageOut
+  }
   if (params.returnOvernight !== undefined) {
     body.return_overnight = params.returnOvernight === 'Yes' ? true
       : params.returnOvernight === 'No' ? false : null

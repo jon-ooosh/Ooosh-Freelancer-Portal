@@ -1186,6 +1186,13 @@ const patchSchema = z.object({
   client_email: z.string().email().nullable().optional(),
   status: z.enum(['soft', 'confirmed', 'booked_out', 'active', 'returned', 'cancelled']).optional(),
   notes: z.string().optional(),
+  // Consumed ONLY on the multi-van clone path (see the PATCH handler's
+  // partition-by-van branch) — lets a second-van book-out record the correct
+  // odometer/fuel on the freshly cloned per-van row. The normal update path
+  // ignores these (save-event owns mileage_out there via write-once COALESCE),
+  // so passing them on a first-van book-out is a harmless no-op.
+  mileage_out: z.number().nonnegative().optional(),
+  fuel_level_out: z.string().max(50).optional(),
 });
 
 // Fields a freelancer book-out session is allowed to write at book-out
@@ -1491,19 +1498,220 @@ router.patch('/:id', authenticateVehicleFlexible, validate(patchSchema), async (
     const wantsBookOut = updates.status === 'booked_out';
     if (wantsVehicleChange || wantsBookOut) {
       const cur = await query(
-        `SELECT status FROM vehicle_hire_assignments WHERE id = $1`,
+        `SELECT * FROM vehicle_hire_assignments WHERE id = $1`,
         [id]
       );
       if (cur.rows.length === 0) {
         return res.status(404).json({ error: 'Hire form not found' });
       }
-      const curStatus = cur.rows[0].status as string;
+      const curRow = cur.rows[0];
+      const curStatus = curRow.status as string;
       if (curStatus === 'swapped' || curStatus === 'returned' || curStatus === 'cancelled') {
         console.warn(
           `[hire-forms] PATCH ignored on terminal row ${id} (status=${curStatus}); ` +
           `refusing vehicle-link/book-out write (wantsVehicleChange=${wantsVehicleChange}, wantsBookOut=${wantsBookOut})`
         );
         return res.json({ data: { id, no_op: true, reason: 'terminal_status' } });
+      }
+
+      // ── Multi-van partition: clone rather than overwrite ──
+      //
+      // The BookOutPage write-back loop PATCHes EVERY driver hire-form row on
+      // the job with the van currently being booked out (form.hireFormEntries
+      // is van-agnostic — GET /by-job returns every self-drive assignment). On
+      // a multi-van "everyone drives everything" job, booking out van B would
+      // therefore overwrite van A's vehicle_id on the shared driver rows
+      // (fieldMap does a plain last-write-wins assign), leaving van A pointing
+      // at B and van B with no rows of its own — so van B is unbookable AND
+      // uncheckinable (job 14885, RX24SZG blocked at check-in behind RO23HLU,
+      // Jul 2026; full write-up in docs/MULTI-VAN-BOOKOUT-SCRAMBLE.md).
+      //
+      // The driver genuinely needs a row PER van they've been booked out onto,
+      // so when a book-out targets a driver row that is already live-booked-out
+      // to a DIFFERENT van, we CLONE a fresh per-van row for (this driver, this
+      // van) instead of re-pointing the existing one. Van A's row is left
+      // untouched; van B gets its own row. Agreements + fleet status + orphan
+      // dedup are driven off the clone exactly as the normal book-out path
+      // drives them off the updated row — so the referral gate
+      // (isDriverAuthorisedForAgreement, called inside generateAndEmailHireFormPdf
+      // via firePostBookOutHooks) still holds back a referral-pending driver.
+      const targetVehicleId = updates.vehicle_id as string | null | undefined;
+      const isLiveBookedOut = curStatus === 'booked_out' || curStatus === 'active';
+      const isDifferentVan =
+        !!targetVehicleId && !!curRow.vehicle_id && targetVehicleId !== curRow.vehicle_id;
+
+      if (isLiveBookedOut && isDifferentVan) {
+        // Only ever clone a real driver row on a genuine book-out transition.
+        // A non-book-out re-point of a live van, or a driverless staff-
+        // allocation row, is refused (no-op 200 so the write-back loop treats
+        // it as success and moves on). Real van changes go through Swap Vehicle.
+        if (!wantsBookOut || !curRow.driver_id) {
+          console.warn(
+            `[hire-forms] PATCH refused re-point of live booked-out van on row ${id} ` +
+            `(${curRow.vehicle_id} → ${targetVehicleId}, driver=${curRow.driver_id ?? 'none'}, ` +
+            `wantsBookOut=${wantsBookOut}); use Swap Vehicle for a genuine swap.`
+          );
+          return res.json({
+            data: { id, no_op: true, reason: curRow.driver_id ? 'live_vehicle_relink_refused' : 'live_driverless_relink_refused' },
+          });
+        }
+
+        // Idempotency: a retry, or the other book-out write path, may already
+        // have created this driver's row for the target van. Reuse it rather
+        // than making a duplicate.
+        const existingClone = await query(
+          `SELECT * FROM vehicle_hire_assignments
+            WHERE vehicle_id = $1
+              AND status IN ('booked_out', 'active')
+              AND driver_id IS NOT DISTINCT FROM $2
+              AND (
+                ($3::uuid IS NOT NULL AND job_id = $3::uuid)
+                OR ($4::integer IS NOT NULL AND hirehop_job_id = $4::integer)
+              )
+            ORDER BY created_at DESC
+            LIMIT 1`,
+          [targetVehicleId, curRow.driver_id, curRow.job_id, curRow.hirehop_job_id]
+        );
+
+        let cloneRow: Record<string, any>;
+        if (existingClone.rows.length > 0) {
+          cloneRow = existingClone.rows[0];
+          console.log(
+            `[hire-forms] PATCH multi-van: reusing existing row ${cloneRow.id} for driver ` +
+            `${curRow.driver_id} on van ${targetVehicleId} (source ${id} stays on ${curRow.vehicle_id})`
+          );
+        } else {
+          // mileage_out / fuel_level_out reach us only when the caller forwards
+          // them (BookOutPage's write-back does for the van being booked out).
+          // If absent, the clone's odometer stays NULL — the authoritative
+          // book-out figure still lives in the vehicle event / condition report.
+          const cloneMileage =
+            typeof updates.mileage_out === 'number' && !Number.isNaN(updates.mileage_out)
+              ? updates.mileage_out
+              : null;
+          const cloneFuel =
+            typeof updates.fuel_level_out === 'string' && updates.fuel_level_out
+              ? updates.fuel_level_out
+              : null;
+          const cloneHireEnd =
+            typeof updates.hire_end === 'string' && updates.hire_end ? updates.hire_end : curRow.hire_end;
+          const cloneStartTime =
+            typeof updates.start_time === 'string' && updates.start_time ? updates.start_time : curRow.start_time;
+          const cloneEndTime =
+            typeof updates.end_time === 'string' && updates.end_time ? updates.end_time : curRow.end_time;
+          const cloneReturnOvernight =
+            updates.return_overnight !== undefined ? updates.return_overnight : curRow.return_overnight;
+          const bookedBy = req.user?.id || curRow.booked_out_by || null;
+
+          const cloneResult = await query(
+            `INSERT INTO vehicle_hire_assignments (
+               vehicle_id, job_id, hirehop_job_id, hirehop_job_name,
+               driver_id, assignment_type, van_requirement_index,
+               required_type, required_gearbox,
+               status, status_changed_at,
+               hire_start, hire_end, start_time, end_time, return_overnight,
+               booked_out_at, booked_out_by,
+               mileage_out, fuel_level_out,
+               client_email, notes, allocated_by_name, created_by
+             ) VALUES (
+               $1, $2, $3, $4,
+               $5, $6, $7,
+               $8, $9,
+               'booked_out', NOW(),
+               COALESCE($10, CURRENT_DATE), $11, $12, $13, $14,
+               NOW(), $15,
+               $16, $17,
+               $18, $19, $20, $21
+             )
+             RETURNING *`,
+            [
+              targetVehicleId,
+              curRow.job_id,
+              curRow.hirehop_job_id,
+              curRow.hirehop_job_name,
+              curRow.driver_id,
+              curRow.assignment_type,
+              curRow.van_requirement_index ?? 0,
+              curRow.required_type,
+              curRow.required_gearbox,
+              curRow.hire_start,
+              cloneHireEnd,
+              cloneStartTime,
+              cloneEndTime,
+              cloneReturnOvernight,
+              bookedBy,
+              cloneMileage,
+              cloneFuel,
+              curRow.client_email,
+              `[Multi-van clone] cloned from ${id} for van ${targetVehicleId} at book-out.`,
+              curRow.allocated_by_name,
+              bookedBy,
+            ]
+          );
+          cloneRow = cloneResult.rows[0];
+          console.log(
+            `[hire-forms] PATCH multi-van: cloned row ${cloneRow.id} for driver ${curRow.driver_id} ` +
+            `on van ${targetVehicleId} (source ${id} stays on ${curRow.vehicle_id}) — ` +
+            `job ${curRow.job_id ?? curRow.hirehop_job_id}`
+          );
+        }
+
+        // Orphan dedup: this hire-form row now owns the target van, so cancel
+        // any driverless staff-allocation sibling on the same (van, job).
+        try {
+          const cancelled = await cancelOrphanSiblingAllocations({
+            keepAssignmentId: cloneRow.id,
+            vehicleId: cloneRow.vehicle_id,
+            jobId: cloneRow.job_id ?? null,
+            hhJobNumber: cloneRow.hirehop_job_id ?? null,
+          });
+          if (cancelled > 0) {
+            console.log(`[hire-forms] PATCH multi-van clone: cancelled ${cancelled} orphan sibling(s) for ${cloneRow.id}`);
+          }
+        } catch (err) {
+          console.warn(`[hire-forms] orphan dedup failed for clone ${cloneRow.id}:`, err);
+        }
+
+        // Post-book-out hooks on the CLONE (fleet status, requirement advance,
+        // own-van agreement, cross-van fan-out, OOH, auto-dispatch). Same call
+        // the normal booked_out branch makes — referral gate + idempotency
+        // (atomic claim / hire_form_documents UNIQUE) all live downstream.
+        const isFreelancer = isFreelancerBookout(req);
+        firePostBookOutHooks({
+          assignmentId: cloneRow.id,
+          vehicleId: cloneRow.vehicle_id,
+          jobId: cloneRow.job_id ?? null,
+          hhJobNumber: cloneRow.hirehop_job_id ?? null,
+          returnOvernight: cloneRow.return_overnight,
+          hireFormEmailedAt: cloneRow.hire_form_emailed_at,
+          actorLabel: isFreelancer ? 'freelancer book-out' : (req.user?.email || 'staff'),
+          actorUserId: isFreelancer ? null : (req.user?.id || null),
+        });
+
+        // Vehicle requirement sync — same as the normal vehicle-state change.
+        if (cloneRow.job_id) {
+          const jobIdForSync: string = cloneRow.job_id;
+          const hhJobIdForSync: number | null = cloneRow.hirehop_job_id ?? null;
+          const cloneIdForSync: string = cloneRow.id;
+          setImmediate(() => {
+            runHookWithRecovery(
+              {
+                hookLabel: 'Vehicle requirement sync',
+                jobId: jobIdForSync,
+                hhJobNumber: hhJobIdForSync,
+                assignmentId: cloneIdForSync,
+              },
+              async () => {
+                const { syncVehicleRequirementStatus } = await import('../services/vehicle-requirement-sync');
+                await syncVehicleRequirementStatus(jobIdForSync);
+              }
+            ).catch((err) => {
+              console.warn(`[hire-forms] Vehicle requirement sync failed for job ${jobIdForSync}:`, err);
+            });
+          });
+        }
+
+        return res.json({ data: cloneRow, multi_van_clone: true });
       }
     }
 
