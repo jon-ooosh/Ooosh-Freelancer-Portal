@@ -46,6 +46,7 @@ interface PersonDetail {
   is_insured_on_vehicles: boolean;
   is_approved: boolean;
   has_tshirt: boolean;
+  onboarding: Record<string, unknown> | null;
   emergency_contact_name: string | null;
   emergency_contact_phone: string | null;
   licence_details: string | null;

@@ -1,6 +1,6 @@
 # Freelancer Onboarding Module — Spec (DRAFT)
 
-Status: **Phases A + B SHIPPED** (invite + apply/enrich/alert). Phase C next (review/approve + surfaces). See §15 for the live build status.
+Status: **Phases A + B + C SHIPPED** (invite + apply/enrich/alert + review/approve + surfaces). Phase D next (document-expiry reminders + portal Resources). See §15 for the live build status.
 
 Branch: `claude/freelancer-onboarding-workflow-j498xl`
 
@@ -403,21 +403,44 @@ lapse greys the freelancer for the affected work type. Both feed the same greyin
   - **Enrich verified:** COALESCE means a partial fill populates only the fields provided and never
     wipes existing person data — confirmed working (skills + home address populated on the TEST 123
     live test).
-- **Phase C — NEXT:** Freelancer tab on Person Detail; approve / decline / request-more-info
-  endpoints (MANAGER_ROLES) + templates; onboarding checklist; **greyed picklist entries**
-  (relax the `is_approved=true` crew/transport pickers — the real one is `GET /api/people`'s
-  `is_approved` conditional filter in `routes/people.ts` + the `quotes.ts:1887` crew-history query —
-  to return pending freelancers with `is_approved` per row so the frontend can render them disabled
-  with a "pending approval" note; deliberately deferred here so the picker isn't half-changed — do it
-  alongside the approve flow).
-  - **Consolidate the freelancer surfaces on Person Detail (jon, Phase B feedback):** the freelancer
-    options are currently split confusingly across the **Edit** slide-panel (freelancer fields:
-    is_freelancer, joined/review dates, approved, insured, t-shirt, skills, references) AND the
-    **Details** tab (which also shows some of them). Roll the existing **"Freelancer History"** tab
-    into a single general **"Freelancer"** tab that is the ONE home for "everything to do with this
-    person being a freelancer" — application review/approve panel, onboarding checklist, the
-    documents + expiry dates, the freelancer flags (approved/insured/t-shirt/skills/review date), and
-    the assignment history. Pull the freelancer fields OUT of the generic Edit panel (which should
-    stay for plain contact details) so there's one obvious place to manage a freelancer.
-- **Phases D–E:** document-expiry reminder scanner + portal Resources; iDenfy (deferred to the
-  Christmas migration).
+- **Phase C — SHIPPED.** Review / decide + surfaces, no schema change (migration 184 already carried
+  every column — `onboarding` JSONB, review/decision fields).
+  - **Consolidated "Freelancer" tab (SHIPPED earlier in Phase C):** the old "Freelancer History" tab
+    became a single **"Freelancer"** tab (`FreelancerPanel.tsx`) — the ONE home for status, details,
+    documents, and assignment history; the freelancer fields were pulled OUT of the generic Edit
+    panel, and the redundant "This person is a freelancer" toggle removed (three real entry points
+    already flag a person — header "Invite to freelance", inbound apply-form, PeoplePage "+ New
+    Freelancer"). Invite email made required + phone added; invite audit ("invited by X on … · applied
+    …") surfaced via `GET /freelancers/by-person/:personId`.
+  - **Review / decide (this round):** `GET /freelancers/applications/:id` (full submission / insurance
+    answers / references, STAFF_ROLES) + `POST /applications/:id/{approve|decline|request-info}`
+    (MANAGER_ROLES). Approve → `is_approved=true` + `freelancer_status='approved'` + stamps
+    `freelancer_joined_date` (first time) + `freelancer_next_review_date` (+1yr) + seeds
+    `onboarding.approved_at` + `freelancer_approved` email. Decline → `declined` + `freelancer_declined`
+    email. Request-info → `more_info` (re-opens the token, since `more_info` is a LIVE_TOKEN_STATUS) +
+    `freelancer_more_info` email (pre-filled form link). All audit-logged + timeline note. Frontend:
+    a **ReviewPanel** on the Freelancer tab (submission summary + insurance Q&A + references + decision
+    buttons; decline/request-info take a reason note) — decision buttons gated to managers
+    (`hasManagerRole`), STAFF see a "manager needs to approve" note.
+  - **Onboarding checklist (this round):** `OnboardingChecklist` card on the Freelancer tab (shown once
+    approved). Items: Reviewed & approved (auto ✓) · Added to vehicle insurance (`is_insured_on_vehicles`)
+    · T-shirt given (`has_tshirt`) · Portal access sent (`onboarding.portal_invite_sent`, **manual tick**
+    for now — the portal Resources surface is Phase D, so no auto-email yet) · Training / how-to docs
+    shared (`onboarding.resources_shared`) · Payments policy available (informational, covered by the
+    signed T&Cs). Toggles via `PATCH /freelancers/:personId/onboarding` (STAFF_ROLES — reuses the two
+    existing booleans + merges the columnless items into the `onboarding` JSONB).
+  - **Greyed picklists (this round):** `GET /api/people` gained an opt-in `include_pending=true` param —
+    when combined with `is_freelancer=true&is_approved=true` it returns approved AND pending
+    (invited/applied/more_info, not declined/removed) freelancers, `is_approved`/`freelancer_status` per
+    row (existing strict-approved callers unchanged). The two crew pickers (`JobDetailPage` +
+    `TransportOpsPage`) pass it and render pending freelancers **disabled with an amber "Pending
+    approval" pill** + tooltip. The `quotes.ts:1887` crew-*history* query was left strict — those are
+    people previously assigned (already approved at the time), so relaxing it adds no value.
+  - **Deferred to Phase D (the natural pairing):** the document-expiry **eligibility** greying (an
+    approved freelancer with an expired licence / DVLA check / passport greyed "expired" for driving
+    work, per §14) — it shares the expiry-date logic with the Phase D reminder scanner. A "Send portal
+    invite" button that actually fires the register email (vs the current manual tick) also lands with
+    the Phase D portal Resources surface.
+- **Phase D — NEXT:** document-expiry reminder scanner (§8) + portal Resources section (§7); the
+  §14 expiry-eligibility greying; the auto-send portal invite.
+- **Phase E:** iDenfy (deferred to the Christmas migration).

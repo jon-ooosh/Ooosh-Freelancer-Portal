@@ -87,6 +87,94 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  freelancer_approved: {
+    variant: 'client',
+    preheader: "You're approved to freelance with Ooosh Tours",
+    subject: 'Welcome aboard — approved to freelance with Ooosh Tours',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">You're all set</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Hi {{firstName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Good news - we've reviewed your details and you're now approved to work with us on a freelance basis. Thanks
+        for taking the time to sign up.
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Most work is offered through our private WhatsApp group, sometimes by email or phone. You're never under any
+        obligation - just say yes to what suits you.
+      </p>
+      {{#if whatsappUrl}}
+        <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;">
+          <tr><td style="border-radius:8px;background-color:#7B5EA7;">
+            <a href="{{whatsappUrl}}" style="display:inline-block;padding:12px 22px;font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:8px;">Join the WhatsApp group →</a>
+          </td></tr>
+        </table>
+      {{/if}}
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        <strong>Getting paid.</strong> Agree your rate with us before each job, then invoice us for the work you've
+        done. We aim to pay approved invoices on the first Friday one week after submission (normally within 7-14
+        days). You're responsible for your own tax and National Insurance.
+      </p>
+      {{#if notes}}
+        <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">{{notes}}</p>
+      {{/if}}
+      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
+        Any questions, just reply to this email. We look forward to working with you.
+      </p>
+    `,
+  },
+
+  freelancer_declined: {
+    variant: 'client',
+    preheader: 'An update on your Ooosh Tours freelancer application',
+    subject: 'Your Ooosh Tours freelancer application',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Your application</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Hi {{firstName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Thank you for your interest in freelancing with Ooosh Tours and for taking the time to complete our sign-up
+        form. On this occasion we're not able to take you onto our books.
+      </p>
+      {{#if notes}}
+        <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">{{notes}}</p>
+      {{/if}}
+      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
+        We're grateful you considered working with us, and we wish you all the best. If you'd like to discuss this,
+        just reply to this email.
+      </p>
+    `,
+  },
+
+  freelancer_more_info: {
+    variant: 'client',
+    preheader: 'We need a little more information for your Ooosh sign-up',
+    subject: 'A little more info needed — Ooosh Tours freelancer sign-up',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Almost there</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Hi {{firstName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Thanks for submitting your freelancer sign-up. Before we can finish reviewing it, we need a little more
+        information from you:
+      </p>
+      {{#if notes}}
+        <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="margin:0 0 20px;">
+          <tr><td style="border-left:3px solid #7B5EA7;padding:4px 0 4px 14px;">
+            <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">{{notes}}</p>
+          </td></tr>
+        </table>
+      {{/if}}
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;">
+        <tr><td style="border-radius:8px;background-color:#7B5EA7;">
+          <a href="{{formUrl}}" style="display:inline-block;padding:12px 22px;font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:8px;">Update your sign-up →</a>
+        </td></tr>
+      </table>
+      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
+        Your original details are saved, so you only need to add or correct what's asked above. If the button doesn't
+        work, copy and paste this link into your browser:<br>
+        <a href="{{formUrl}}" style="color:#7B5EA7;word-break:break-all;">{{formUrl}}</a>
+      </p>
+    `,
+  },
+
   rehearsal_info_pack: {
     variant: 'client',
     preheader: 'Everything you need for your rehearsals with us',
