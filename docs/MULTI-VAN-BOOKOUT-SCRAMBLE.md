@@ -269,7 +269,35 @@ cron alongside the dispatch/return/no-ts/stalled-leg scanners.
 
 ---
 
-## 7. The core fix (TO DESIGN WITH JON, THEN BUILD)
+## 7. The core fix — SHIPPED (PR #1057, Jul 2026)
+
+**As built:** the clone-per-van partition lives in the **PATCH `/api/hire-forms/:id` book-out
+transition ONLY** (not the shared PATCH+save-event choke-point the sketch below imagined). When a
+book-out PATCH (`status='booked_out'` + a `vehicle_id`) targets a **driver** row already
+live-booked-out to a **different** van, it **clones** a fresh per-van row for `(this driver, this
+van)` instead of overwriting — van A's row is untouched, van B gets its own row and becomes
+bookable + checkinable. Idempotent (reuses an existing `(driver, van, job)` booked-out row on
+retry). The clone drives the same post-book-out chain as the normal path
+(`cancelOrphanSiblingAllocations` + `firePostBookOutHooks` + vehicle-requirement sync), so the
+per-driver referral gate holds (the clone's agreement routes through `generateAndEmailHireFormPdf`
+→ `isDriverAuthorisedForAgreement`). A non-book-out re-point of a live van, or a driverless row, is
+refused (no-op 200) — genuine swaps go through Swap Vehicle; that's the terminal-guard tightening.
+The frontend `updateDriverHireForm` forwards `mileage_out` so the second-van clone records the
+correct odometer (backend consumes it only on the clone branch). No migration.
+
+**Why PATCH-only, not the save-event matcher too:** in a staff book-out `createVehicleEvent`
+(save-event) fires BEFORE the write-back PATCH loop, so it can't see clones the PATCH hasn't made
+yet; the incident class is staff self-drive multi-van (which uses the PATCH loop); and freelancer
+multi-van D&C is explicitly out of scope. If a freelancer multi-van ever needs this, move/duplicate
+the clone logic into the `vehicles.ts` save-event book-out matcher.
+
+**Verify live** on the next real 2-van book-out (build-verified only, no runtime CI) — the sweep in
+§3 should stay empty for the job, both vans should check in cleanly, and `runStuckOnHireScan`
+should stay silent.
+
+---
+
+Original design sketch (superseded by "As built" above):
 
 Make book-out **partition driver rows by van**. A server-side "adopt-or-create a per-van
 assignment row (keyed on `van_requirement_index`)" step at the single choke-point both
@@ -318,4 +346,6 @@ There's a related spec worth reading alongside this: `docs/BOOKOUT-PHASE-SPLIT-S
 - [x] Confirm 15411/16206 have no stuck flags (SA75RVV correctly On Hire on job 16086).
 - [ ] Historical mileage tidy for 15411 + 16206 (needs R2 event odometers; low priority).
 - [x] Build detection scanner → jon@ (`runStuckOnHireScan`, migration 186; shipped first).
-- [ ] Design + build the partition-by-van core fix (plan with jon before coding).
+- [x] Design + build the partition-by-van core fix — SHIPPED (PR #1057, Jul 2026). Clone-per-van in
+      the PATCH book-out transition; referral gate preserved; no migration. Needs live verification
+      on the next real 2-van book-out.
