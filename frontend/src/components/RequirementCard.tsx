@@ -1284,6 +1284,17 @@ export default function RequirementCard({
               </div>
             )}
 
+            {requiresDeleteReason && req.is_auto && (
+              <div className="mb-2 rounded-md bg-amber-50 border border-amber-200 p-2 text-xs text-amber-800 leading-snug">
+                💡 This card is <strong>auto-generated from HireHop</strong> and will
+                come straight back on the next sync. If this is a{' '}
+                <strong>Van &amp; Driver</strong> hire (we supply the driver), don't
+                delete it — use the <strong>Van &amp; Driver toggle</strong> on the
+                vehicle card instead. That durably suspends hire forms &amp; excess and
+                won't regenerate.
+              </div>
+            )}
+
             {requiresDeleteReason && (
               <div className="mb-2">
                 <input
