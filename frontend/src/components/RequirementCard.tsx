@@ -1039,7 +1039,13 @@ export default function RequirementCard({
             {/* Excess resolution — explain the amber/blue light against live excess */}
             {req.requirement_type === 'excess_resolve' && excessInfo?.drivers && (() => {
               const NEEDS_ACTION = ['needed', 'pending', 'taken', 'partially_paid', 'partially_reimbursed'];
-              const unresolved = excessInfo.drivers.filter(d => NEEDS_ACTION.includes(d.excess_status));
+              // Only records with real money collected/held are "in limbo". A
+              // non-terminal record with £0 taken+held (e.g. a top-N loser stuck
+              // at 'needed') has nothing to reimburse/claim — mirror the backend
+              // resolution rule so the card never nags "£0.00 excess in limbo".
+              const unresolved = excessInfo.drivers.filter(
+                d => NEEDS_ACTION.includes(d.excess_status)
+                  && ((d.excess_amount_taken || 0) + (d.amount_held || 0)) > 0);
               const heldAmount = unresolved.reduce(
                 (sum, d) => sum + Math.max(0, (d.excess_amount_taken || 0) + (d.amount_held || 0)), 0);
               const preAuths = excessInfo.drivers.filter(d => d.excess_status === 'pre_auth');
@@ -1281,6 +1287,17 @@ export default function RequirementCard({
                   If you meant to dismiss the email picker, click <strong>Close</strong> there
                   instead — not this X.
                 </div>
+              </div>
+            )}
+
+            {requiresDeleteReason && req.is_auto && (
+              <div className="mb-2 rounded-md bg-amber-50 border border-amber-200 p-2 text-xs text-amber-800 leading-snug">
+                💡 This card is <strong>auto-generated from HireHop</strong> and will
+                come straight back on the next sync. If this is a{' '}
+                <strong>Van &amp; Driver</strong> hire (we supply the driver), don't
+                delete it — use the <strong>Van &amp; Driver toggle</strong> on the
+                vehicle card instead. That durably suspends hire forms &amp; excess and
+                won't regenerate.
               </div>
             )}
 

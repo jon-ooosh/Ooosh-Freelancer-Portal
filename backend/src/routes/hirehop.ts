@@ -616,6 +616,26 @@ router.patch('/jobs/:jobId/vehicle-slot-mode', authenticate, async (req: AuthReq
       [JSON.stringify(modes), jobId]
     );
 
+    // Audit trail — a V&D toggle suspends the hire-forms/excess chain, so log
+    // who flipped which slot. Logged before the re-derivation so the timeline
+    // entry survives even if derivation hits a transient error.
+    try {
+      const isVandD = mode === 'van_and_driver';
+      await query(
+        `INSERT INTO interactions (type, content, job_id, created_by, source)
+         VALUES ('note', $1, $2, $3, 'system')`,
+        [
+          isVandD
+            ? `🚐 Vehicle slot switched to Van & Driver — hire forms and excess suspended for this van`
+            : `Vehicle slot switched to Self-Drive — hire forms and excess re-enabled for this van`,
+          jobId,
+          req.user!.id,
+        ]
+      );
+    } catch (logErr) {
+      console.warn('Vehicle slot mode: timeline log failed (non-fatal):', logErr);
+    }
+
     // Re-derive requirements after slot change
     const { deriveRequirementsForJob } = await import('../services/hh-requirement-derivation');
     const derivation = await deriveRequirementsForJob(jobId);
@@ -695,6 +715,25 @@ router.patch('/jobs/:jobId/van-and-driver', authenticate, async (req: AuthReques
       `UPDATE jobs SET vehicle_slot_modes = $1, is_van_and_driver = $2, updated_at = NOW() WHERE id = $3`,
       [JSON.stringify(modes), !!isVanAndDriver, jobId]
     );
+
+    // Audit trail — a V&D toggle suspends the hire-forms/excess chain, so log
+    // who flipped it. Logged before the re-derivation so the timeline entry
+    // survives even if derivation hits a transient error.
+    try {
+      await query(
+        `INSERT INTO interactions (type, content, job_id, created_by, source)
+         VALUES ('note', $1, $2, $3, 'system')`,
+        [
+          isVanAndDriver
+            ? '🚐 Job switched to Van & Driver — hire forms and excess suspended (we supply the driver)'
+            : 'Job switched to Self-Drive — hire forms and excess re-enabled',
+          jobId,
+          req.user!.id,
+        ]
+      );
+    } catch (logErr) {
+      console.warn('Van & driver toggle: timeline log failed (non-fatal):', logErr);
+    }
 
     const { deriveRequirementsForJob } = await import('../services/hh-requirement-derivation');
     const derivation = await deriveRequirementsForJob(jobId);

@@ -84,10 +84,11 @@ function fileTagColour(label: string): string {
 }
 
 // Check if a file can be previewed inline
-function isPreviewable(name: string): 'image' | 'pdf' | null {
+function isPreviewable(name: string): 'image' | 'pdf' | 'spreadsheet' | null {
   const lower = name.toLowerCase();
   if (/\.(jpg|jpeg|png|gif|webp|svg)$/.test(lower)) return 'image';
   if (/\.pdf$/.test(lower)) return 'pdf';
+  if (/\.(xlsx|xls|csv)$/.test(lower)) return 'spreadsheet';
   return null;
 }
 
@@ -6550,6 +6551,128 @@ export default function JobDetailPage() {
 
 // ── File Viewer Modal ─────────────────────────────────────────────────────
 
+// Inline spreadsheet preview (.xlsx / .xls / .csv). SheetJS is loaded lazily
+// (dynamic import) so the ~400KB parser stays out of the main bundle and only
+// executes when a staff member actually opens a spreadsheet. Renders a
+// read-only data table — computed cell values only; complex formatting, charts
+// and merged-cell layout are lossy (download for full fidelity).
+const SHEET_MAX_ROWS = 500;
+const SHEET_MAX_COLS = 50;
+
+function SpreadsheetPreview({ blob }: { blob: Blob }) {
+  const [book, setBook] = useState<{ XLSX: typeof import('xlsx'); wb: import('xlsx').WorkBook } | null>(null);
+  const [active, setActive] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError('');
+    setActive(0);
+    (async () => {
+      try {
+        const XLSX = await import('xlsx');
+        const buf = await blob.arrayBuffer();
+        const wb = XLSX.read(buf, { type: 'array' });
+        if (!cancelled) setBook({ XLSX, wb });
+      } catch {
+        if (!cancelled) setError('Could not read this spreadsheet — try downloading it instead.');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [blob]);
+
+  const grid = useMemo(() => {
+    if (!book) return null;
+    const { XLSX, wb } = book;
+    const name = wb.SheetNames[active];
+    const ws = name ? wb.Sheets[name] : undefined;
+    if (!ws) return { rows: [] as string[][], moreRows: 0, moreCols: 0 };
+    const aoa = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, blankrows: false, defval: '' });
+    const moreRows = Math.max(0, aoa.length - SHEET_MAX_ROWS);
+    let moreCols = 0;
+    const rows = aoa.slice(0, SHEET_MAX_ROWS).map((r) => {
+      const row = Array.isArray(r) ? r : [];
+      moreCols = Math.max(moreCols, Math.max(0, row.length - SHEET_MAX_COLS));
+      return row.slice(0, SHEET_MAX_COLS).map((c) => (c == null ? '' : String(c)));
+    });
+    return { rows, moreRows, moreCols };
+  }, [book, active]);
+
+  if (loading) {
+    return <div className="animate-spin h-8 w-8 border-4 border-ooosh-600 border-t-transparent rounded-full" />;
+  }
+  if (error || !book || !grid) {
+    return <p className="text-sm text-red-600">{error || 'Could not read this spreadsheet.'}</p>;
+  }
+
+  const [headerRow, ...bodyRows] = grid.rows;
+
+  return (
+    <div className="w-full h-full flex flex-col min-h-0">
+      {book.wb.SheetNames.length > 1 && (
+        <div className="flex flex-wrap gap-1 mb-2 shrink-0">
+          {book.wb.SheetNames.map((name, i) => (
+            <button
+              key={name}
+              type="button"
+              onClick={() => setActive(i)}
+              className={`px-2 py-1 text-xs rounded border ${
+                i === active
+                  ? 'bg-ooosh-600 text-white border-ooosh-600'
+                  : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
+              }`}
+            >
+              {name}
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="flex-1 overflow-auto border border-gray-200 rounded min-h-0">
+        {grid.rows.length === 0 ? (
+          <p className="text-sm text-gray-500 p-4">This sheet is empty.</p>
+        ) : (
+          <table className="text-xs border-collapse">
+            {headerRow && (
+              <thead className="sticky top-0 bg-gray-100">
+                <tr>
+                  {headerRow.map((cell, ci) => (
+                    <th key={ci} className="border border-gray-200 px-2 py-1 text-left font-semibold text-gray-700 whitespace-nowrap">
+                      {cell}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+            )}
+            <tbody>
+              {bodyRows.map((row, ri) => (
+                <tr key={ri} className="odd:bg-white even:bg-gray-50">
+                  {(headerRow || []).map((_, ci) => (
+                    <td key={ci} className="border border-gray-200 px-2 py-1 text-gray-700 whitespace-nowrap">
+                      {row[ci] ?? ''}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+      {(grid.moreRows > 0 || grid.moreCols > 0) && (
+        <p className="text-xs text-amber-600 mt-2 shrink-0">
+          Preview truncated
+          {grid.moreRows > 0 ? ` — ${grid.moreRows} more row${grid.moreRows === 1 ? '' : 's'}` : ''}
+          {grid.moreCols > 0 ? ` — ${grid.moreCols} more column${grid.moreCols === 1 ? '' : 's'}` : ''}
+          . Download for the full file.
+        </p>
+      )}
+    </div>
+  );
+}
+
 function FileViewerModal({
   file,
   onClose,
@@ -6558,6 +6681,7 @@ function FileViewerModal({
   onClose: () => void;
 }) {
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
+  const [blob, setBlob] = useState<Blob | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -6569,6 +6693,7 @@ function FileViewerModal({
       const { blob } = await api.blob(`/files/download?key=${encodeURIComponent(file.url)}`);
       const url = URL.createObjectURL(blob);
       setObjectUrl(url);
+      setBlob(blob);
     } catch {
       setError('Failed to load file');
     } finally {
@@ -6590,7 +6715,7 @@ function FileViewerModal({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black/50" onClick={onClose} />
-      <div className="relative bg-white rounded-xl shadow-xl w-full max-w-4xl mx-4 max-h-[90vh] flex flex-col">
+      <div className={`relative bg-white rounded-xl shadow-xl w-full mx-4 max-h-[90vh] flex flex-col ${previewType === 'spreadsheet' ? 'max-w-6xl' : 'max-w-4xl'}`}>
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-gray-200">
           <div className="flex items-center gap-3 min-w-0">
@@ -6642,6 +6767,9 @@ function FileViewerModal({
               title={file.name}
               className="w-full h-[70vh] border-0"
             />
+          )}
+          {blob && previewType === 'spreadsheet' && (
+            <SpreadsheetPreview blob={blob} />
           )}
           {objectUrl && !previewType && (
             <div className="text-center">
