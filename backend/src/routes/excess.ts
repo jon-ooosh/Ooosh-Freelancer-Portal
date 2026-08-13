@@ -2459,6 +2459,43 @@ router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSch
       }
     }
 
+    // job_payments fallback: the job_excess rollover chain above only sees PIs
+    // that actually landed on a job_excess row. A record can legitimately hold
+    // the money (hh_deposit_id set, amount_taken populated) with NO PI on ANY
+    // job_excess row in its chain — the classic case is a payment-event that
+    // 500'd on the job_excess UPDATE (e.g. the 42P08 incident, job 16085) but
+    // had already committed the job_payments audit row carrying the PI, then
+    // self-healed the deposit/amount via passive reconciliation (which never
+    // writes the PI). Recover the PI from job_payments: prefer the exact HH
+    // deposit linkage, fall back to the job's excess payments. Read-only —
+    // only recovers a PI that genuinely exists in the audit log, so cash/BACS
+    // records still correctly fall through to the no_stripe_pi loud-fail.
+    if (!resolvedPi && (current.hh_deposit_id || current.hirehop_job_id)) {
+      const jpRes = await query(
+        `SELECT stripe_payment_intent, payment_reference
+         FROM job_payments
+         WHERE (stripe_payment_intent ~ '^pi_' OR payment_reference ~ '^pi_')
+           AND (
+             ($1::bigint IS NOT NULL AND hirehop_deposit_id = $1)
+             OR ($2::bigint IS NOT NULL AND hirehop_job_id = $2 AND payment_type = 'excess')
+           )
+         ORDER BY
+           CASE WHEN $1::bigint IS NOT NULL AND hirehop_deposit_id = $1 THEN 0 ELSE 1 END,
+           created_at ASC
+         LIMIT 1`,
+        [current.hh_deposit_id ?? null, current.hirehop_job_id ?? null]
+      );
+      const jp = jpRes.rows[0];
+      if (jp) {
+        resolvedPi =
+          (looksLikeStripePi(jp.stripe_payment_intent) ? jp.stripe_payment_intent.trim() : null) ||
+          (looksLikeStripePi(jp.payment_reference) ? jp.payment_reference.trim() : null);
+        if (resolvedPi) {
+          console.log(`[excess] Reimburse PI resolved via job_payments fallback (deposit ${current.hh_deposit_id ?? 'n/a'}, hh_job ${current.hirehop_job_id ?? 'n/a'}) → ${resolvedPi}`);
+        }
+      }
+    }
+
     let stripeRefundId: string | null = null;
     const stripeRefundPath = method === 'stripe_gbp' && !!resolvedPi;
 
