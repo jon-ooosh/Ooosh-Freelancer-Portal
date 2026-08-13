@@ -27,6 +27,12 @@ import {
 import { calculateVatAdjustment } from '../services/vat-adjustment';
 import { syncExcessRequirementStatus } from '../services/excess-requirement-sync';
 import { reconcileExpiredPreauthsForJob } from '../services/excess-preauth';
+import {
+  claimStripeEvent,
+  recordStripeEventDeposit,
+  markStripeEventProcessed,
+  isStripeEventProcessed,
+} from '../services/stripe-event-claim';
 import { emailService } from '../services/email-service';
 import { getFrontendUrl } from '../config/app-urls';
 
@@ -2017,22 +2023,31 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
           statusChanged = true;
           console.log(`[money] Job ${job.id} moved to confirmed (deposit received)`);
 
-          // Push status to HireHop (status 2 = Booked)
+          // Push status to HireHop (status 2 = Booked).
+          // ⚠️ The broker RESOLVES { success: false } on a rate-limit failure (327/329) — it
+          // does NOT throw. Check pushResult.success before mirroring the status locally, or
+          // OP declares "Booked" off a failed push and the next 30-min sync reverts it
+          // (job 16513 split-brain). On failure, leave jobs.status for the reconciler to retry.
           if (hhNum) {
             try {
-              await hhBroker.post('/frames/status_save.php', {
+              const pushResult = await hhBroker.post('/frames/status_save.php', {
                 job: hhNum,
                 status: 2, // Booked
                 no_webhook: 1,
               }, { priority: 'high' });
-              // Update local HH status
-              await query(
-                `UPDATE jobs SET status = 2, status_name = 'Booked', hh_status = 2 WHERE id = $1`,
-                [job.id]
-              );
-              console.log(`[money] HH job ${hhNum} status updated to Booked`);
-            } catch {
-              console.error('[money] HH status update to Booked failed (non-fatal)');
+              if (pushResult.success) {
+                await query(
+                  `UPDATE jobs SET status = 2, status_name = 'Booked', hh_status = 2 WHERE id = $1`,
+                  [job.id]
+                );
+                console.log(`[money] HH job ${hhNum} status updated to Booked`);
+              } else {
+                console.error(
+                  `[money] HH status push to Booked FAILED (record-payment, job ${hhNum}): ${pushResult.error} — leaving jobs.status for the reconciler`
+                );
+              }
+            } catch (pushErr) {
+              console.error('[money] HH status update to Booked threw (record-payment):', pushErr);
             }
           }
         }
@@ -2627,6 +2642,54 @@ router.post('/:jobId/refund-payment', validate(refundPaymentSchema), async (req:
   }
 });
 
+// ── Stripe event idempotency (Payment Portal) ──
+// The portal claims a Stripe event id HERE, before it creates the HireHop deposit, so a
+// Stripe re-delivery of the same event can never produce a duplicate deposit / OP record /
+// client email (job 16513, Aug 2026). See services/stripe-event-claim.ts + migration 188.
+// It's a Postgres claim, so it stays fast + reliable even during a HireHop 327 storm.
+
+const stripeEventClaimSchema = z.object({
+  event_id: z.string().min(1).max(255),
+  type: z.string().max(100).optional(),
+});
+
+// POST /api/money/stripe-event/claim — atomically claim a Stripe event for processing.
+// Returns { proceed, alreadyProcessed, hh_deposit_id }. proceed=false ⇒ the portal must no-op.
+router.post('/stripe-event/claim', validate(stripeEventClaimSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { event_id, type } = req.body as { event_id: string; type?: string };
+    const result = await claimStripeEvent(event_id, type || 'unknown');
+    res.json({
+      data: {
+        proceed: result.proceed,
+        alreadyProcessed: result.alreadyProcessed,
+        hh_deposit_id: result.hhDepositId,
+      },
+    });
+  } catch (err) {
+    console.error('[money] stripe-event/claim failed:', err);
+    res.status(500).json({ error: 'Failed to claim Stripe event' });
+  }
+});
+
+const stripeEventDepositSchema = z.object({
+  event_id: z.string().min(1).max(255),
+  hh_deposit_id: z.number().int(),
+});
+
+// POST /api/money/stripe-event/record-deposit — record the HireHop deposit id the portal
+// created for this event, so a Stripe retry reuses it instead of creating a duplicate.
+router.post('/stripe-event/record-deposit', validate(stripeEventDepositSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { event_id, hh_deposit_id } = req.body as { event_id: string; hh_deposit_id: number };
+    await recordStripeEventDeposit(event_id, hh_deposit_id);
+    res.json({ data: { ok: true } });
+  } catch (err) {
+    console.error('[money] stripe-event/record-deposit failed:', err);
+    res.status(500).json({ error: 'Failed to record Stripe event deposit' });
+  }
+});
+
 // ── POST /api/money/:jobId/payment-event — Receive payment event from external system ──
 // Called by Payment Portal (or Stripe webhook) when a payment is processed externally.
 // The portal creates the HH deposit itself — this endpoint records it in OP + handles status transitions.
@@ -2640,6 +2703,7 @@ const paymentEventSchema = z.object({
   source: z.string().max(50).optional(),
   excess_id: z.string().uuid().optional(),
   hh_deposit_id: z.number().int().optional(),
+  stripe_event_id: z.string().max(255).optional(),
   notes: z.string().max(1000).optional(),
 });
 
@@ -2648,8 +2712,26 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
     const jobId = req.params.jobId as string;
     const {
       payment_type, amount, payment_method, payment_reference,
-      stripe_payment_intent, source, excess_id, hh_deposit_id, notes,
+      stripe_payment_intent, source, excess_id, hh_deposit_id, stripe_event_id, notes,
     } = req.body;
+
+    // ── Idempotency: a Stripe re-delivery of the same event must be a no-op ──
+    // The portal already dedups deposit creation via /stripe-event/claim; this is the
+    // belt for the OP side (no duplicate job_payments row, no duplicate client email, no
+    // duplicate status re-push) and also protects OP's own callers. Only short-circuits an
+    // event whose payment-event previously ran to COMPLETION (processed_at stamped at the
+    // end of this handler). Best-effort — a lookup failure must not block a real payment.
+    if (stripe_event_id) {
+      try {
+        if (await isStripeEventProcessed(stripe_event_id)) {
+          console.log(`[money] payment-event deduplicated — Stripe event ${stripe_event_id} already processed`);
+          res.json({ data: { deduplicated: true } });
+          return;
+        }
+      } catch (e) {
+        console.error('[money] payment-event idempotency check failed (continuing):', e);
+      }
+    }
 
     // Accept UUID or HH job number
     const isUuid = /^[0-9a-f]{8}-/.test(jobId);
@@ -2934,21 +3016,34 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
           statusChanged = true;
           console.log(`[money] Job ${job.id} moved to confirmed (payment portal deposit received)`);
 
-          // Push status to HireHop (status 2 = Booked)
+          // Push status to HireHop (status 2 = Booked).
+          // ⚠️ The broker RESOLVES { success: false } on a rate-limit failure (327/329) —
+          // it does NOT throw (documented broker contract). So we MUST check resp.success
+          // before declaring Booked; a bare try/catch here never fires on a 327 and the
+          // UPDATE below would run against a FAILED push, marking OP "Booked" while HH is
+          // still Enquiry — the next 30-min sync then reverts jobs.status (job 16513 split-
+          // brain). Only mirror the HH status locally when the push actually succeeded;
+          // otherwise leave jobs.status untouched so the reconciler (30-min sync) re-pushes.
           if (hhNum) {
             try {
-              await hhBroker.post('/frames/status_save.php', {
+              const pushResult = await hhBroker.post('/frames/status_save.php', {
                 job: hhNum,
                 status: 2, // Booked
                 no_webhook: 1,
               }, { priority: 'high' });
-              await query(
-                `UPDATE jobs SET status = 2, status_name = 'Booked', hh_status = 2 WHERE id = $1`,
-                [job.id]
-              );
-              console.log(`[money] HH job ${hhNum} status updated to Booked via payment-event`);
-            } catch {
-              console.error('[money] HH status update to Booked failed (non-fatal, payment-event)');
+              if (pushResult.success) {
+                await query(
+                  `UPDATE jobs SET status = 2, status_name = 'Booked', hh_status = 2 WHERE id = $1`,
+                  [job.id]
+                );
+                console.log(`[money] HH job ${hhNum} status updated to Booked via payment-event`);
+              } else {
+                console.error(
+                  `[money] HH status push to Booked FAILED (payment-event, job ${hhNum}): ${pushResult.error} — leaving jobs.status for the reconciler`
+                );
+              }
+            } catch (pushErr) {
+              console.error('[money] HH status update to Booked threw (payment-event):', pushErr);
             }
           }
         }
@@ -3032,6 +3127,14 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
         triggerSource: 'payment_event',
         issues: silentSkipIssues,
       }).catch(e => console.error('[money] Silent-skip alert failed (payment-event):', e));
+    }
+
+    // ── Mark the Stripe event fully processed (idempotency terminal) ──
+    // A future re-delivery of this event now short-circuits at the top of the handler.
+    // Best-effort — the payment itself has already landed, so a marker failure must not 500.
+    if (stripe_event_id) {
+      markStripeEventProcessed(stripe_event_id, { hhDepositId: hh_deposit_id ?? null })
+        .catch(e => console.error('[money] markStripeEventProcessed failed (payment-event):', e));
     }
 
     res.json({
