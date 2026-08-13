@@ -21,6 +21,19 @@
  *     that reintroduced a timestamp-less book-out (the RX73TBZ 16057↔16149
  *     mis-attribution state). One alert per job, deduped via a notes marker.
  *
+ *   • runBookedSplitScan — proactive escalation alarm for the "confirmed in
+ *     OP but never Booked in HireHop" split-brain (job 16513). A HireHop 327
+ *     storm can make the post-payment status-push fail silently, leaving a job
+ *     at pipeline_status='confirmed' (or further) while jobs.status stays < 2
+ *     in HireHop. The booked-status reconciler (services/booked-status-
+ *     reconciler.ts) heals these silently on the 30-min sync, but if HireHop
+ *     stays unreachable the job sits stuck with no one told. This scanner
+ *     emails jon@ ONCE per stuck job after a 2-hour grace, deduped via
+ *     `jobs.booked_split_alerted_at` (migration 189). Scoped on `status < 2`
+ *     so a legit last-minute booking racing confirmed→prepping→dispatched
+ *     (where HH status climbs to >= 2) never trips it. The marker is cleared
+ *     in-scan once the job recovers (status >= 2) or goes terminal.
+ *
  *   • runStuckOnHireScan — detection scanner for the multi-van book-out
  *     scramble (docs/MULTI-VAN-BOOKOUT-SCRAMBLE.md §6). Finds vehicles
  *     projected `hire_status='On Hire'` with NO live booked_out/active
@@ -343,6 +356,115 @@ export async function runBookedOutNoTimestampScan(): Promise<{ checked: number; 
       else console.warn(`[sanity-scanner] booked_out-no-ts alert send failed for ${jobRef}:`, result);
     } catch (err) {
       console.error(`[sanity-scanner] booked_out-no-ts scan error for job ${jobKey}:`, err);
+    }
+  }
+
+  return { checked: candidates.rows.length, warned };
+}
+
+// Operationally past-confirmed pipeline statuses. In all of these, HireHop
+// should be at status >= 2 (Booked). A job in one of these with jobs.status < 2
+// is the "confirmed in OP, never Booked in HH" split-brain (job 16513). Enquiry
+// stages (new_enquiry/quoting/paused/provisional) are legitimately < 2, and
+// lost/cancelled are terminal — both excluded.
+const BOOKED_SPLIT_STATUSES = [
+  'confirmed',
+  'prepping',
+  'prepped',
+  'dispatched',
+  'returned_incomplete',
+  'returned',
+  'completed',
+];
+
+/**
+ * Escalation alarm for the OP↔HireHop "Booked" split-brain (job 16513).
+ *
+ * Finds jobs OP believes are past-confirmed (BOOKED_SPLIT_STATUSES) but HireHop
+ * never received the Booked push for (jobs.status < 2), stuck for over 2 hours
+ * (pipeline_status_changed_at grace). The booked-status reconciler retries the
+ * push every 30-min sync; this alarm only fires when that keeps failing (a
+ * persistent HireHop outage), so a genuinely stuck job surfaces instead of
+ * sitting silent.
+ *
+ * The `status < 2` guard is what keeps a legitimate last-minute booking racing
+ * confirmed→prepping→dispatched from tripping this: once the HH push lands and
+ * status climbs to >= 2, the job drops out of the candidate set.
+ *
+ * One alert per stuck job — deduped via `jobs.booked_split_alerted_at`, stamped
+ * FIRST (a transient send failure must not re-fire on the next sweep). The
+ * marker is cleared in-scan for any job that has recovered (status >= 2) or gone
+ * terminal (lost/cancelled), so a re-stuck job can warn afresh. Recipient is
+ * jon@ (a data-integrity anomaly he wants to action), matching runStuckOnHireScan.
+ */
+export async function runBookedSplitScan(): Promise<{ checked: number; warned: number }> {
+  // Clear the marker for any job that's no longer stuck — the exact inverse of
+  // the candidate condition below (minus grace), so a recovered/terminal job is
+  // released and can re-alert if it ever gets stuck again.
+  await query(
+    `UPDATE jobs
+        SET booked_split_alerted_at = NULL, updated_at = NOW()
+      WHERE booked_split_alerted_at IS NOT NULL
+        AND NOT (pipeline_status = ANY($1::text[]) AND COALESCE(status, 0) < 2)`,
+    [BOOKED_SPLIT_STATUSES]
+  );
+
+  const candidates = await query(
+    `SELECT id, hh_job_number, job_name, pipeline_status, status
+       FROM jobs
+      WHERE pipeline_status = ANY($1::text[])
+        AND COALESCE(status, 0) < 2
+        AND hh_job_number IS NOT NULL
+        AND booked_split_alerted_at IS NULL
+        AND pipeline_status_changed_at IS NOT NULL
+        AND pipeline_status_changed_at < NOW() - INTERVAL '2 hours'
+        AND is_deleted = false
+      ORDER BY pipeline_status_changed_at ASC
+      LIMIT 50`,
+    [BOOKED_SPLIT_STATUSES]
+  );
+
+  if (candidates.rows.length === 0) return { checked: 0, warned: 0 };
+
+  let warned = 0;
+  const frontendUrl = getFrontendUrl();
+
+  for (const job of candidates.rows) {
+    try {
+      const hhNum: number | null = job.hh_job_number;
+      const jobRef = hhNum ? `HH #${hhNum}` : (job.job_name || 'Unknown job');
+      const opJobUrl = `${frontendUrl}/jobs/${job.id}`;
+      const hhJobUrl = hhNum ? `https://myhirehop.com/job.php?id=${hhNum}` : '';
+
+      // Stamp the marker FIRST — stamp-first, like the sibling scanners.
+      await query(
+        `UPDATE jobs SET booked_split_alerted_at = NOW(), updated_at = NOW() WHERE id = $1`,
+        [job.id]
+      );
+
+      const html = `
+        <p><strong>Booking not registered in HireHop — OP↔HireHop split-brain.</strong></p>
+        <p><strong>${jobRef}</strong>${job.job_name ? ` (${job.job_name})` : ''} has been
+        <code>pipeline_status='${job.pipeline_status}'</code> in OP for over 2 hours, but
+        HireHop still shows it at status <strong>${job.status ?? 0}</strong> (below Booked).</p>
+        <p>This is the job-16513 pattern: the post-payment "Booked" push to HireHop failed
+        (typically a 327 rate-limit storm) and the retry keeps failing. The booked-status
+        reconciler retries every 30-min sync, so a persistent alert means HireHop is likely
+        unreachable or the push is being rejected — please check HireHop and, if needed, set
+        the job to Booked manually.</p>
+        ${hhJobUrl ? `<p><a href="${hhJobUrl}">Open job in HireHop</a> · ` : '<p>'}<a href="${opJobUrl}">Open job in OP</a></p>
+        <p style="color:#888;font-size:12px">Sanity scanner — confirmed in OP, not Booked in HireHop (2h+).</p>
+      `;
+
+      const result = await emailService.sendRaw({
+        to: 'jon@oooshtours.co.uk',
+        subject: `⚠ Booking not in HireHop — ${jobRef}`,
+        html,
+      });
+      if (result.success) warned++;
+      else console.warn(`[sanity-scanner] booked-split alert send failed for ${jobRef}:`, result);
+    } catch (err) {
+      console.error(`[sanity-scanner] booked-split scan error for job ${job.id}:`, err);
     }
   }
 
