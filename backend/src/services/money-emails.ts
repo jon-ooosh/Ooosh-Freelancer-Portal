@@ -377,10 +377,42 @@ export async function sendPaymentEmail(opts: {
    * matching invariant comment in routes/money.ts.
    */
   isConfirmingBooking: boolean;
+  /**
+   * Optional explicit recipient list (from the "Resend confirmation" picker).
+   * When supplied and non-empty, it REPLACES the normal address-book resolution
+   * entirely — first entry becomes `to`, the rest are CC. No info@ fallback
+   * banner fires (these are a deliberate staff choice, not a silent miss).
+   * Omit for the automatic auto-send path.
+   */
+  overrideRecipients?: Array<{ email: string; name?: string | null }>;
 }): Promise<{ sent: boolean; reason?: 'no_recipient' | 'error'; error?: string; isFallback?: boolean }> {
-  const { jobId, amount, bankName, isConfirmingBooking } = opts;
+  const { jobId, amount, bankName, isConfirmingBooking, overrideRecipients } = opts;
   const templateId = isConfirmingBooking ? 'booking_confirmed_deposit' : 'payment_received';
-  const target = await resolveClientEmailTarget(jobId, templateId);
+
+  // Recipient resolution: an explicit picker override wins; otherwise fall back
+  // to the standard address-book resolution (which itself lands on info@ when
+  // nothing is reachable).
+  let toEmail: string;
+  let ccEmails: string[];
+  let firstName: string;
+  let isFallback = false;
+  let target: Awaited<ReturnType<typeof resolveClientEmailTarget>> | null = null;
+
+  const cleanOverride = (overrideRecipients || [])
+    .map((r) => ({ email: (r.email || '').trim(), name: r.name || '' }))
+    .filter((r) => r.email);
+
+  if (cleanOverride.length > 0) {
+    toEmail = cleanOverride[0].email;
+    ccEmails = cleanOverride.slice(1).map((r) => r.email);
+    firstName = cleanOverride[0].name.trim().split(/\s+/)[0] || toEmail.split('@')[0] || 'there';
+  } else {
+    target = await resolveClientEmailTarget(jobId, templateId);
+    toEmail = target.primaryEmail;
+    ccEmails = target.ccEmails;
+    firstName = target.primaryFirstName || 'there';
+    isFallback = target.isFallback;
+  }
 
   const jobResult = await query(
     `SELECT job_name, hh_job_number, job_date, job_end, out_date, return_date FROM jobs WHERE id = $1`,
@@ -407,9 +439,9 @@ export async function sendPaymentEmail(opts: {
 
   try {
     const res = await emailService.send(templateId, {
-      to: target.primaryEmail,
-      cc: target.ccEmails.length > 0 ? target.ccEmails : undefined,
-      prependBanner: target.isFallback
+      to: toEmail,
+      cc: ccEmails.length > 0 ? ccEmails : undefined,
+      prependBanner: isFallback && target
         ? buildFallbackBanner({
             jobId,
             clientName: target.clientName,
@@ -418,7 +450,7 @@ export async function sendPaymentEmail(opts: {
           })
         : undefined,
       variables: {
-        firstName: target.primaryFirstName,
+        firstName,
         amount: `\u00A3${amount.toFixed(2)}`,
         bankName: bankName || 'card',
         jobName,
@@ -432,13 +464,13 @@ export async function sendPaymentEmail(opts: {
         balanceSection: '',
       },
     });
-    if (!res.success) return { sent: false, reason: 'error', error: res.error, isFallback: target.isFallback };
-    if (target.isFallback) {
+    if (!res.success) return { sent: false, reason: 'error', error: res.error, isFallback };
+    if (isFallback) {
       await logFallbackToTimeline({ jobId, templateId, amount });
     }
-    return { sent: true, isFallback: target.isFallback };
+    return { sent: true, isFallback };
   } catch (err) {
-    return { sent: false, reason: 'error', error: err instanceof Error ? err.message : String(err), isFallback: target.isFallback };
+    return { sent: false, reason: 'error', error: err instanceof Error ? err.message : String(err), isFallback };
   }
 }
 
