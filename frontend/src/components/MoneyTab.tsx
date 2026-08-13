@@ -1170,6 +1170,18 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
           <ResendConfirmationModal
             jobId={jobId}
             amount={data.financial.total_hire_deposits || 0}
+            hireValueIncVat={data.financial.hire_value_inc_vat || 0}
+            balanceOwed={data.financial.balance_override ? 0 : (data.financial.balance_outstanding || 0)}
+            payments={data.financial.deposits
+              // Hire payments only — excess has its own lifecycle/emails. Application
+              // lines (excess/credit applied to an invoice) aren't real client payments.
+              .filter((d) => !d.is_excess && d.is_deposit !== false)
+              .map((d) => ({
+                date: d.date,
+                method: d.bank_name || 'Card',
+                amount: Math.abs(d.amount),
+                isRefund: d.is_refund,
+              }))}
             onClose={() => setShowResendModal(false)}
             onResult={(r) => setResendMsg(r)}
           />
