@@ -65,17 +65,75 @@ interface ExcessRow {
   hirehop_job_id: number | null;
   client_name: string | null;
   excess_status: string;
+  hh_deposit_id: number | null;
 }
 
 async function findExcessByPaymentIntent(pi: string | null): Promise<ExcessRow | null> {
   if (!pi) return null;
   const r = await query(
-    `SELECT id, job_id, hirehop_job_id, client_name, excess_status
+    `SELECT id, job_id, hirehop_job_id, client_name, excess_status, hh_deposit_id
      FROM job_excess WHERE stripe_payment_intent_id = $1
      ORDER BY updated_at DESC LIMIT 1`,
     [pi]
   );
   return r.rows[0] || null;
+}
+
+/**
+ * Compose the "what happened to the OP excess" line for the charge.refunded
+ * alert email. Most `updated:false` outcomes are BENIGN and must not tell staff
+ * to "reconcile manually" — that copy sent someone chasing a correctly-handled
+ * refund (job 16294, Jul 2026):
+ *  - `duplicate leg` fires for every OP-initiated Stripe reimburse (OP pre-records
+ *    the leg, so this webhook is a no-op) — the money was already recorded.
+ *  - `rolled_over` matches the TERMINAL ORIGIN of a rollover chain by its PI, not
+ *    the reimbursed CHILD. The refund was actually handled downstream — chase the
+ *    chain by `hh_deposit_id` and, if a sibling was reimbursed, name that hire.
+ * Only genuinely-unresolved outcomes keep the "reconcile manually" nudge.
+ */
+async function describeUnwindNote(
+  result: { updated: boolean; newStatus: string; reason?: string },
+  ex: ExcessRow
+): Promise<string> {
+  if (result.updated) {
+    return `OP excess auto-marked <strong>${result.newStatus}</strong> to match Stripe — no further action needed.`;
+  }
+
+  const reason = result.reason || '';
+
+  if (reason === 'record already rolled_over') {
+    // Walk the rollover chain (shared hh_deposit_id) for a reimbursed sibling —
+    // that's where the refund really landed.
+    let reimbursedOn: number | null = null;
+    if (ex.hh_deposit_id) {
+      const sib = await query(
+        `SELECT hirehop_job_id FROM job_excess
+         WHERE hh_deposit_id = $1 AND id <> $2
+           AND excess_status IN ('reimbursed', 'partially_reimbursed')
+         ORDER BY updated_at DESC LIMIT 1`,
+        [ex.hh_deposit_id, ex.id]
+      ).catch(() => ({ rows: [] as Array<{ hirehop_job_id: number | null }> }));
+      reimbursedOn = sib.rows[0]?.hirehop_job_id ?? null;
+    }
+    return reimbursedOn
+      ? `This excess was rolled forward to hire #${reimbursedOn} and reimbursed there — no action needed.`
+      : `This excess was rolled forward to a later hire; the refund is tracked on that hire — no action needed.`;
+  }
+
+  // Other benign terminal / already-recorded outcomes.
+  if (
+    reason === 'duplicate leg (idempotent skip)' ||
+    reason === 'record already reimbursed (leg logged)' ||
+    reason === 'no remaining balance to refund' ||
+    reason.startsWith('pre_auth') ||
+    reason === 'record already released' ||
+    reason === 'record already waived'
+  ) {
+    return `OP excess already reflects this refund (${reason}) — no action needed.`;
+  }
+
+  // Genuinely unresolved (needed/pending/not_required/excess-not-found, etc.).
+  return `OP excess not changed: ${reason}. Reconcile manually if needed.`;
 }
 
 function jobRef(ex: ExcessRow | null): string {
@@ -197,9 +255,7 @@ async function processStripeEvent(event: StripeEventLike): Promise<void> {
             method: 'stripe_gbp',
             notes: `Stripe charge ${charge.id}`,
           });
-          unwindNote = result.updated
-            ? `OP excess auto-marked <strong>${result.newStatus}</strong> to match Stripe — no further action needed.`
-            : `OP excess not changed: ${result.reason}. Reconcile manually if needed.`;
+          unwindNote = await describeUnwindNote(result, ex);
         } catch (err) {
           console.error('[stripe-webhook] charge.refunded excess unwind failed:', err);
           unwindNote = `OP excess auto-unwind failed — please reconcile manually on the Money tab.`;
@@ -252,7 +308,7 @@ async function processStripeEvent(event: StripeEventLike): Promise<void> {
             subject = `Stripe refund recorded — £${refunded} (already on OP)`;
             bodyLines = [
               `A refund of £${refunded} was processed in Stripe for charge ${charge.id}.`,
-              `Hire payment on ${jobRef({ id: '', job_id: null, hirehop_job_id: origRow.hirehop_job_id, client_name: origRow.client_name, excess_status: '' })} — already recorded in OP. No action needed.`,
+              `Hire payment on ${jobRef({ id: '', job_id: null, hirehop_job_id: origRow.hirehop_job_id, client_name: origRow.client_name, excess_status: '', hh_deposit_id: null })} — already recorded in OP. No action needed.`,
             ];
           } else {
             // OP-originated path failed mid-flight OR this is a Stripe-dashboard
