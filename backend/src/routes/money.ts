@@ -345,12 +345,28 @@ router.post('/:jobId/resend-confirmation', authorize(...STAFF_ROLES), async (req
     const isConfirmingBooking = req.body?.is_confirming_booking !== false; // default true
     const bankName = typeof req.body?.bank_name === 'string' ? req.body.bank_name : '';
 
+    // Optional recipient override from the "Resend confirmation" picker.
+    // When present, it REPLACES the default address-book resolution (first =
+    // to, rest = cc). Absent → the email routes to the job's default contact
+    // as before. Malformed entries are dropped; an all-empty list falls back
+    // to the default path rather than erroring.
+    const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    const rawRecipients = Array.isArray(req.body?.recipients) ? req.body.recipients : [];
+    const overrideRecipients = rawRecipients
+      .map((r: any) => ({
+        email: typeof r?.email === 'string' ? r.email.trim() : '',
+        name: typeof r?.name === 'string' ? r.name : '',
+      }))
+      .filter((r: { email: string }) => EMAIL_RE.test(r.email))
+      .slice(0, 10);
+
     const result = await sendPaymentEmail({
       jobId: jobUuid,
       amount,
       bankName,
       paymentType: 'deposit',
       isConfirmingBooking,
+      overrideRecipients: overrideRecipients.length > 0 ? overrideRecipients : undefined,
     });
 
     if (!result.sent) {
