@@ -385,7 +385,7 @@ export async function sendPaymentEmail(opts: {
    * Omit for the automatic auto-send path.
    */
   overrideRecipients?: Array<{ email: string; name?: string | null }>;
-}): Promise<{ sent: boolean; reason?: 'no_recipient' | 'error'; error?: string; isFallback?: boolean }> {
+}): Promise<{ sent: boolean; reason?: 'no_recipient' | 'error'; error?: string; isFallback?: boolean; toEmail?: string; ccEmails?: string[] }> {
   const { jobId, amount, bankName, isConfirmingBooking, overrideRecipients } = opts;
   const templateId = isConfirmingBooking ? 'booking_confirmed_deposit' : 'payment_received';
 
@@ -464,13 +464,198 @@ export async function sendPaymentEmail(opts: {
         balanceSection: '',
       },
     });
-    if (!res.success) return { sent: false, reason: 'error', error: res.error, isFallback };
+    if (!res.success) return { sent: false, reason: 'error', error: res.error, isFallback, toEmail, ccEmails };
     if (isFallback) {
       await logFallbackToTimeline({ jobId, templateId, amount });
     }
-    return { sent: true, isFallback };
+    return { sent: true, isFallback, toEmail, ccEmails };
   } catch (err) {
-    return { sent: false, reason: 'error', error: err instanceof Error ? err.message : String(err), isFallback };
+    return { sent: false, reason: 'error', error: err instanceof Error ? err.message : String(err), isFallback, toEmail, ccEmails };
+  }
+}
+
+/** One payment line for the itemised statement (resend confirmation). */
+export interface StatementPaymentLine {
+  date: string;        // ISO or display date string
+  method: string;      // bank name / method label
+  amount: number;      // positive for a payment, positive for a refund (isRefund distinguishes)
+  isRefund?: boolean;
+}
+
+/** Build the branded itemised-payment-statement HTML body used by the manual
+ *  "Resend confirmation" action. Rendered as a `bodyHtmlOverride` so the base
+ *  layout (Ooosh header + client signature) still wraps it. All values are
+ *  composed here (not passed through {{var}} substitution), so escape any
+ *  free-text before embedding — payment methods + dates are controlled strings,
+ *  so no user free-text lands in this HTML. */
+export function buildPaymentStatementHtml(opts: {
+  firstName: string;
+  jobName: string;
+  jobNumber: string;
+  payments: StatementPaymentLine[];
+  hireValueIncVat: number;
+  totalPaid: number;
+  balanceOwed: number;
+}): string {
+  const { firstName, jobName, jobNumber, payments, hireValueIncVat, totalPaid, balanceOwed } = opts;
+  const gbp = (n: number) => `£${(n || 0).toFixed(2)}`;
+  const fmtDate = (d: string) => {
+    const parsed = new Date(d);
+    return isNaN(parsed.getTime())
+      ? escapeHtml(d)
+      : parsed.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+  };
+  const jobRef = jobNumber ? ` (job <strong>#${escapeHtml(jobNumber)}</strong>)` : '';
+  const paidInFull = balanceOwed <= 0.01;
+
+  const rows = payments.length > 0
+    ? payments.map((p) => `
+        <tr>
+          <td style="padding:8px 12px;border-bottom:1px solid #eee;font-size:14px;color:#333;">${fmtDate(p.date)}</td>
+          <td style="padding:8px 12px;border-bottom:1px solid #eee;font-size:14px;color:#333;">${escapeHtml(p.method || 'Card')}${p.isRefund ? ' <span style="color:#b91c1c;font-size:12px;">(refund)</span>' : ''}</td>
+          <td style="padding:8px 12px;border-bottom:1px solid #eee;font-size:14px;color:${p.isRefund ? '#b91c1c' : '#333'};text-align:right;white-space:nowrap;">${p.isRefund ? '−' : ''}${gbp(p.amount)}</td>
+        </tr>`).join('')
+    : `<tr><td colspan="3" style="padding:12px;font-size:14px;color:#777;text-align:center;">No payments recorded yet.</td></tr>`;
+
+  return `
+    <p style="margin:0 0 16px;font-size:16px;color:#333;">Hi ${escapeHtml(firstName)},</p>
+    <p style="margin:0 0 20px;font-size:15px;color:#333;line-height:1.5;">
+      Here's a summary of the payments we've received for <strong>${escapeHtml(jobName)}</strong>${jobRef}.
+    </p>
+
+    <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;margin:0 0 20px;border:1px solid #eee;border-radius:8px;overflow:hidden;">
+      <thead>
+        <tr style="background-color:#f7f5fb;">
+          <th style="padding:10px 12px;font-size:13px;color:#7B5EA7;text-align:left;border-bottom:1px solid #e5e0ee;">Date</th>
+          <th style="padding:10px 12px;font-size:13px;color:#7B5EA7;text-align:left;border-bottom:1px solid #e5e0ee;">Method</th>
+          <th style="padding:10px 12px;font-size:13px;color:#7B5EA7;text-align:right;border-bottom:1px solid #e5e0ee;">Amount</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
+
+    <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;margin:0 0 20px;">
+      <tr>
+        <td style="padding:6px 12px;font-size:14px;color:#555;">Hire total</td>
+        <td style="padding:6px 12px;font-size:14px;color:#333;text-align:right;white-space:nowrap;">${gbp(hireValueIncVat)}</td>
+      </tr>
+      <tr>
+        <td style="padding:6px 12px;font-size:14px;color:#555;border-top:1px solid #eee;">Total paid</td>
+        <td style="padding:6px 12px;font-size:14px;font-weight:600;color:#166534;text-align:right;white-space:nowrap;border-top:1px solid #eee;">${gbp(totalPaid)}</td>
+      </tr>
+      <tr>
+        <td style="padding:8px 12px;font-size:15px;font-weight:700;color:#333;border-top:2px solid #e5e0ee;">${paidInFull ? 'Balance' : 'Balance outstanding'}</td>
+        <td style="padding:8px 12px;font-size:15px;font-weight:700;text-align:right;white-space:nowrap;border-top:2px solid #e5e0ee;color:${paidInFull ? '#166534' : '#b91c1c'};">${paidInFull ? 'Paid in full' : gbp(balanceOwed)}</td>
+      </tr>
+    </table>
+
+    <p style="margin:0 0 8px;font-size:14px;color:#555;line-height:1.5;">
+      If anything doesn't look right, just reply to this email and we'll sort it out.
+    </p>
+    <p style="margin:0;font-size:14px;color:#555;">Thanks,<br/>The Ooosh Tours team</p>
+  `;
+}
+
+/** Send the itemised payment statement (the manual "Resend confirmation" action).
+ *  Reuses the live `booking_confirmed_deposit` template as the delivery vehicle
+ *  (so it inherits the client variant + EMAIL_LIVE_TEMPLATES allowlist) but
+ *  overrides the subject + body — the body is the itemised statement rather than
+ *  the single-total confirmation copy.
+ *
+ *  Recipient resolution mirrors sendPaymentEmail: an explicit override wins
+ *  (first = to, rest = CC, no info@ banner); otherwise the address-book default
+ *  (which lands on info@ with a banner when nothing's reachable). */
+export async function sendPaymentStatementEmail(opts: {
+  jobId: string;
+  payments: StatementPaymentLine[];
+  hireValueIncVat: number;
+  totalPaid: number;
+  balanceOwed: number;
+  overrideRecipients?: Array<{ email: string; name?: string | null }>;
+}): Promise<{ sent: boolean; reason?: 'no_recipient' | 'error'; error?: string; isFallback?: boolean; toEmail?: string; ccEmails?: string[] }> {
+  const { jobId, payments, hireValueIncVat, totalPaid, balanceOwed, overrideRecipients } = opts;
+  const templateId = 'booking_confirmed_deposit';
+
+  let toEmail: string;
+  let ccEmails: string[];
+  let firstName: string;
+  let isFallback = false;
+  let target: Awaited<ReturnType<typeof resolveClientEmailTarget>> | null = null;
+
+  const cleanOverride = (overrideRecipients || [])
+    .map((r) => ({ email: (r.email || '').trim(), name: r.name || '' }))
+    .filter((r) => r.email);
+
+  if (cleanOverride.length > 0) {
+    toEmail = cleanOverride[0].email;
+    ccEmails = cleanOverride.slice(1).map((r) => r.email);
+    firstName = cleanOverride[0].name.trim().split(/\s+/)[0] || toEmail.split('@')[0] || 'there';
+  } else {
+    target = await resolveClientEmailTarget(jobId, templateId);
+    toEmail = target.primaryEmail;
+    ccEmails = target.ccEmails;
+    firstName = target.primaryFirstName || 'there';
+    isFallback = target.isFallback;
+  }
+
+  const jobResult = await query(`SELECT job_name, hh_job_number FROM jobs WHERE id = $1`, [jobId]);
+  const job = jobResult.rows[0];
+  const jobNumber = String(job?.hh_job_number || '');
+  const jobName = job?.job_name || (jobNumber ? `Job #${jobNumber}` : 'your hire');
+
+  const bodyHtml = buildPaymentStatementHtml({
+    firstName, jobName, jobNumber, payments, hireValueIncVat, totalPaid, balanceOwed,
+  });
+  const subject = `Payment summary — ${jobName}${jobNumber ? ` (#${jobNumber})` : ''}`;
+
+  try {
+    const res = await emailService.send(templateId, {
+      to: toEmail,
+      cc: ccEmails.length > 0 ? ccEmails : undefined,
+      subjectOverride: subject,
+      bodyHtmlOverride: bodyHtml,
+      prependBanner: isFallback && target
+        ? buildFallbackBanner({
+            jobId,
+            clientName: target.clientName,
+            jobNumber: target.jobNumber,
+            jobName: target.jobName,
+          })
+        : undefined,
+    });
+    if (!res.success) return { sent: false, reason: 'error', error: res.error, isFallback, toEmail, ccEmails };
+    if (isFallback) {
+      await logFallbackToTimeline({ jobId, templateId, amount: totalPaid });
+    }
+    return { sent: true, isFallback, toEmail, ccEmails };
+  } catch (err) {
+    return { sent: false, reason: 'error', error: err instanceof Error ? err.message : String(err), isFallback, toEmail, ccEmails };
+  }
+}
+
+/** Log an `email` interaction on the job timeline recording that staff manually
+ *  re-sent the payment/booking confirmation, and to whom. Separate from the
+ *  fallback-to-info@ logger — this is the audit trail for a deliberate resend. */
+export async function logResendToTimeline(opts: {
+  jobId: string;
+  recipients: string[];
+  itemised: boolean;
+  isFallback?: boolean;
+}): Promise<void> {
+  const to = opts.recipients.filter(Boolean);
+  const who = to.length > 0
+    ? to.join(', ')
+    : 'info@ (no client contact on file)';
+  const what = opts.itemised ? 'payment summary' : 'booking/payment confirmation';
+  const fallbackNote = opts.isFallback ? ' (redirected to info@ — no client email on file)' : '';
+  const content = `📧 Resent ${what} to ${who}${fallbackNote}.`;
+  try {
+    await query(
+      `INSERT INTO interactions (type, content, job_id, source) VALUES ('email', $1, $2, 'system')`,
+      [content, opts.jobId]
+    );
+  } catch (err) {
+    console.error('[money-emails] Failed to log resend to timeline:', err instanceof Error ? err.message : err);
   }
 }
 

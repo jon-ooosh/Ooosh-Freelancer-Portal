@@ -16,7 +16,7 @@ import { verifyApiKey } from '../middleware/api-key';
 import { hhBroker } from '../services/hirehop-broker';
 import { pushDepositToHH, HH_BANK_IDS, getMethodForBankId } from '../services/hh-deposit';
 import { getStripeClient, isStripeConfigured, isStripeError } from '../config/stripe';
-import { sendPaymentEmail, sendExcessEmail, sendLastMinuteAlert } from '../services/money-emails';
+import { sendPaymentEmail, sendExcessEmail, sendLastMinuteAlert, sendPaymentStatementEmail, logResendToTimeline, type StatementPaymentLine } from '../services/money-emails';
 import {
   triggerHireFormEmailOnConfirmation as triggerHireFormEmailOnConfirmationShared,
   triggerCarnetFormOnConfirmation,
@@ -360,14 +360,39 @@ router.post('/:jobId/resend-confirmation', authorize(...STAFF_ROLES), async (req
       .filter((r: { email: string }) => EMAIL_RE.test(r.email))
       .slice(0, 10);
 
-    const result = await sendPaymentEmail({
-      jobId: jobUuid,
-      amount,
-      bankName,
-      paymentType: 'deposit',
-      isConfirmingBooking,
-      overrideRecipients: overrideRecipients.length > 0 ? overrideRecipients : undefined,
-    });
+    // Itemised statement inputs (from the Money tab, matching what staff see).
+    // When `payments` is present we send the itemised payment summary; otherwise
+    // (older frontend bundle) we fall back to the single-total confirmation.
+    const rawPayments = Array.isArray(req.body?.payments) ? req.body.payments : [];
+    const payments: StatementPaymentLine[] = rawPayments
+      .map((p: any) => ({
+        date: typeof p?.date === 'string' ? p.date : '',
+        method: typeof p?.method === 'string' ? p.method : '',
+        amount: Number(p?.amount) || 0,
+        isRefund: p?.isRefund === true,
+      }))
+      .slice(0, 100);
+    const wantsStatement = payments.length > 0
+      || typeof req.body?.hire_value === 'number'
+      || typeof req.body?.balance_owed === 'number';
+
+    const result = wantsStatement
+      ? await sendPaymentStatementEmail({
+          jobId: jobUuid,
+          payments,
+          hireValueIncVat: Number(req.body?.hire_value) || 0,
+          totalPaid: Number(req.body?.total_paid) || amount,
+          balanceOwed: Number(req.body?.balance_owed) || 0,
+          overrideRecipients: overrideRecipients.length > 0 ? overrideRecipients : undefined,
+        })
+      : await sendPaymentEmail({
+          jobId: jobUuid,
+          amount,
+          bankName,
+          paymentType: 'deposit',
+          isConfirmingBooking,
+          overrideRecipients: overrideRecipients.length > 0 ? overrideRecipients : undefined,
+        });
 
     if (!result.sent) {
       // Not a 500 — the request was valid, the email just didn't go. Report
@@ -377,6 +402,14 @@ router.post('/:jobId/resend-confirmation', authorize(...STAFF_ROLES), async (req
       });
       return;
     }
+
+    // Audit trail: leave a timeline note recording the manual resend + who got it.
+    await logResendToTimeline({
+      jobId: jobUuid,
+      recipients: [result.toEmail, ...(result.ccEmails || [])].filter((e): e is string => !!e),
+      itemised: wantsStatement,
+      isFallback: result.isFallback,
+    });
 
     res.json({ data: { sent: true, is_fallback: result.isFallback } });
   } catch (error) {

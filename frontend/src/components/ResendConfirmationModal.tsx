@@ -15,10 +15,24 @@ interface ContactOption {
   source: string;
 }
 
+/** One payment row for the itemised statement, as the client will see it. */
+export interface ResendPaymentLine {
+  date: string;
+  method: string;
+  amount: number;
+  isRefund?: boolean;
+}
+
 interface ResendConfirmationModalProps {
   jobId: string;
-  /** Deposit figure shown in the email. Passed straight through. */
+  /** Total hire paid — headline figure + fallback when no lines are passed. */
   amount: number;
+  /** Itemised hire payments (date/method/amount) the client will see listed. */
+  payments?: ResendPaymentLine[];
+  /** Hire total (inc VAT) for the statement summary. */
+  hireValueIncVat?: number;
+  /** Balance still outstanding (0 = paid in full). */
+  balanceOwed?: number;
   onClose: () => void;
   /** Fired after a send attempt with a ready-to-render result banner. */
   onResult: (result: { ok: boolean; text: string }) => void;
@@ -29,6 +43,9 @@ const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 export default function ResendConfirmationModal({
   jobId,
   amount,
+  payments,
+  hireValueIncVat,
+  balanceOwed,
   onClose,
   onResult,
 }: ResendConfirmationModalProps) {
@@ -113,12 +130,18 @@ export default function ResendConfirmationModal({
         amount,
         is_confirming_booking: true,
         recipients,
+        // Itemised statement inputs — the client sees each payment listed, plus
+        // the hire total and any balance owed (like the payment portal view).
+        payments: payments || [],
+        total_paid: amount,
+        hire_value: hireValueIncVat ?? 0,
+        balance_owed: balanceOwed ?? 0,
       });
       const r = resp.data;
       if (r.sent) {
         const to = recipients[0].email;
         const extra = recipients.length > 1 ? ` (+${recipients.length - 1} CC'd)` : '';
-        onResult({ ok: true, text: `Confirmation email sent to ${to}${extra}.` });
+        onResult({ ok: true, text: `Payment summary sent to ${to}${extra}.` });
         onClose();
       } else {
         setError(
@@ -143,9 +166,9 @@ export default function ResendConfirmationModal({
       >
         <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
           <div>
-            <h2 className="text-lg font-bold text-gray-800">Resend confirmation</h2>
+            <h2 className="text-lg font-bold text-gray-800">Send payment summary</h2>
             <p className="text-xs text-gray-500 mt-0.5">
-              Send the booking/payment confirmation to people on this job, or a one-off address.
+              Emails an itemised summary of payments received to people on this job, or a one-off address.
             </p>
           </div>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
@@ -156,6 +179,22 @@ export default function ResendConfirmationModal({
         </div>
 
         <div className="p-6 space-y-5">
+          {/* What the client will receive */}
+          <div className="bg-gray-50 rounded-lg p-3 border border-gray-200 text-sm text-gray-600">
+            The email lists{' '}
+            <span className="font-medium text-gray-800">
+              {payments && payments.length > 0
+                ? `${payments.length} payment${payments.length === 1 ? '' : 's'}`
+                : 'the payments'}
+            </span>{' '}
+            (date, method, amount), the hire total{' '}
+            <span className="font-medium text-gray-800">£{(hireValueIncVat ?? 0).toFixed(2)}</span>, and{' '}
+            {(balanceOwed ?? 0) <= 0.01
+              ? <span className="font-medium text-green-700">Paid in full</span>
+              : <>a balance of <span className="font-medium text-red-600">£{(balanceOwed ?? 0).toFixed(2)}</span></>}
+            .
+          </div>
+
           {/* Contacts picker */}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">
