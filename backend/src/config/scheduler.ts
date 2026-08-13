@@ -104,6 +104,20 @@ export function startScheduler() {
         } catch (deriveErr) {
           console.error('Scheduler: Requirement derivation failed:', deriveErr);
         }
+
+        // ── Booked-status reconciler ──
+        // Heal the OP↔HH split-brain: OP thinks a job is confirmed but the HireHop status
+        // push never landed (e.g. lost to a 327 rate-limit storm). Re-push status 2 so the
+        // job doesn't sit stuck at Enquiry in HireHop (job 16513 backstop).
+        try {
+          const { reconcileBookedStatus } = await import('../services/booked-status-reconciler');
+          const rec = await reconcileBookedStatus();
+          if (rec.candidates > 0) {
+            console.log(`Scheduler: Booked reconciler — ${rec.repushed} re-pushed, ${rec.failed} still failing (of ${rec.candidates})`);
+          }
+        } catch (recErr) {
+          console.error('Scheduler: Booked reconciler failed:', recErr);
+        }
       } catch (err) {
         console.error('Scheduler: Job sync failed:', err);
         // Try to log failure
