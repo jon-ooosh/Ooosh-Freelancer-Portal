@@ -17,7 +17,6 @@
  * logged at all are caught later by the Xero-matched reconciliation (future).
  */
 import { query } from '../config/database';
-import { getFrontendUrl } from '../config/app-urls';
 
 const GRACE_DAYS = 3;    // give staff a few days to attach the receipt before the weekly digest picks it up
 
@@ -41,7 +40,13 @@ export async function runCostReceiptChase(): Promise<ChaseResult> {
     [String(GRACE_DAYS)]
   );
 
-  const actionUrl = `${getFrontendUrl()}/my-receipts`;
+  // Relative path only. The notification-escalation email builder wraps
+  // action_url with frontendLink(), and NotificationBell / InboxPage navigate()
+  // it directly — both expect a relative path (e.g. '/my-receipts'). Storing an
+  // absolute URL here double-prepends the host in the email
+  // (staff.oooshtours.co.uk/https://staff.oooshtours.co.uk/my-receipts) and
+  // breaks the in-app click-through too.
+  const actionUrl = '/my-receipts';
 
   for (const row of due.rows as Array<{ user_id: string; n: number; cost_ids: string[] }>) {
     const n = row.n;
