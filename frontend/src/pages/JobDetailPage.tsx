@@ -2708,8 +2708,13 @@ export default function JobDetailPage() {
     }
   }
 
-  async function handleRemoveJobOrg(linkId: string) {
+  // The × sits right next to the ☆ on a small chip, so confirm before removing —
+  // a fat-fingered tap otherwise silently drops an org off the job.
+  async function handleRemoveJobOrg(linkId: string, orgName: string) {
     if (!id) return;
+    if (!confirm(`Remove "${orgName}" from this job?\n\nThis only unlinks it from this hire — the organisation itself is untouched.`)) {
+      return;
+    }
     try {
       await api.delete(`/pipeline/${id}/organisations/${linkId}`);
       loadJobOrgs();
@@ -3464,7 +3469,7 @@ export default function JobDetailPage() {
                   the client into a "Billed to:" sub-line — asserting a billing split
                   that often wasn't true. Every associated org now renders equally in
                   the Organisations row below; the lead is just the one that headlines. */}
-              <div className="relative inline-flex items-center gap-1" ref={clientSearchRef}>
+              <div className="relative inline-flex items-center gap-1">
                 {(() => {
                   const leadOrg = jobOrgs.find(jo => jo.is_primary);
                   const hasClient = !!(job.client_org_name || job.client_name || job.company_name);
@@ -3492,68 +3497,9 @@ export default function JobDetailPage() {
                       ) : (
                         <span>{headlineText}</span>
                       )}
-                      {/* Always available — the client is what's edited here even
-                          when a lead org is headlining, so the pencil must not
-                          disappear behind the lead (it's the only way to change
-                          the client, and the client chip below shows the target). */}
-                      <button
-                        onClick={startEditClient}
-                        className="text-gray-300 hover:text-gray-500 transition-colors"
-                        title={leadOrg ? 'Change client (shown as Client below)' : 'Change client'}
-                      >
-                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-                        </svg>
-                      </button>
                     </>
                   );
                 })()}
-                {editingClient && (
-                  <div className="absolute top-full left-0 mt-1 z-50 bg-white border border-gray-200 rounded-lg shadow-lg w-64">
-                    <input
-                      type="text"
-                      value={clientSearch}
-                      onChange={(e) => setClientSearch(e.target.value)}
-                      placeholder="Search organisations..."
-                      className="w-full border-b border-gray-200 px-3 py-2 text-sm focus:ring-0 focus:outline-none rounded-t-lg"
-                      autoFocus
-                    />
-                    {clientSearchResults.length > 0 && (
-                      <div className="max-h-48 overflow-y-auto">
-                        {clientSearchResults.map((o) => (
-                          <button
-                            key={o.id}
-                            onClick={() => selectClient(o)}
-                            className="w-full text-left px-3 py-2 hover:bg-gray-50 text-sm flex items-center gap-2 border-b border-gray-50 last:border-b-0"
-                          >
-                            <span className="font-medium">{o.name}</span>
-                            <span className="text-gray-400 text-xs">{o.type}</span>
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                    {(() => {
-                      const trimmed = clientSearch.trim();
-                      if (trimmed.length < 2) return null;
-                      const exactMatch = clientSearchResults.some(
-                        (o) => o.name.toLowerCase() === trimmed.toLowerCase()
-                      );
-                      if (exactMatch) return null;
-                      return (
-                        <button
-                          onClick={() => createAndSelectClient(trimmed)}
-                          disabled={creatingClient}
-                          className="w-full text-left px-3 py-2 hover:bg-green-50 text-sm flex items-center gap-2 border-t border-gray-100 disabled:opacity-60"
-                        >
-                          <span className="text-xs font-medium bg-green-100 text-green-700 px-1.5 py-0.5 rounded">+ New</span>
-                          <span className="text-gray-900 truncate">
-                            {creatingClient ? 'Creating…' : <>Create &ldquo;{trimmed}&rdquo; as new client</>}
-                          </span>
-                        </button>
-                      );
-                    })()}
-                  </div>
-                )}
               </div>
               {/* Venue */}
               {job.venue_name && (
@@ -4138,7 +4084,10 @@ export default function JobDetailPage() {
               const clientName = job.client_org_name || job.company_name || job.client_name;
               if (!clientName) return null;
               return (
-                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border bg-blue-100 text-blue-700 border-blue-200">
+                <span
+                  ref={clientSearchRef}
+                  className="relative inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border bg-blue-100 text-blue-700 border-blue-200"
+                >
                   <button
                     onClick={() => handleSetLeadOrg(null)}
                     disabled={jobOrgSaving || !hasExplicitLead}
@@ -4154,6 +4103,66 @@ export default function JobDetailPage() {
                     </Link>
                   ) : (
                     <span className="font-semibold">{clientName}</span>
+                  )}
+                  {/* The client is CHANGED, never removed — it's a single FK driving
+                      the excess ledger / Xero bucketing / cross-job credit boundary,
+                      so it gets a pencil where the other chips get an ×. This is the
+                      only client-edit affordance (the headline's was dropped so the
+                      client isn't offered twice). */}
+                  <button
+                    onClick={startEditClient}
+                    className="ml-0.5 opacity-40 hover:opacity-100 transition-opacity"
+                    title="Change client"
+                  >
+                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                    </svg>
+                  </button>
+                  {editingClient && (
+                    <div className="absolute top-full left-0 mt-1 z-50 bg-white border border-gray-200 rounded-lg shadow-lg w-64 font-normal text-gray-900">
+                      <input
+                        type="text"
+                        value={clientSearch}
+                        onChange={(e) => setClientSearch(e.target.value)}
+                        placeholder="Search organisations..."
+                        className="w-full border-b border-gray-200 px-3 py-2 text-sm focus:ring-0 focus:outline-none rounded-t-lg"
+                        autoFocus
+                      />
+                      {clientSearchResults.length > 0 && (
+                        <div className="max-h-48 overflow-y-auto">
+                          {clientSearchResults.map((o) => (
+                            <button
+                              key={o.id}
+                              onClick={() => selectClient(o)}
+                              className="w-full text-left px-3 py-2 hover:bg-gray-50 text-sm flex items-center gap-2 border-b border-gray-50 last:border-b-0"
+                            >
+                              <span className="font-medium">{o.name}</span>
+                              <span className="text-gray-400 text-xs">{o.type}</span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      {(() => {
+                        const trimmed = clientSearch.trim();
+                        if (trimmed.length < 2) return null;
+                        const exactMatch = clientSearchResults.some(
+                          (o) => o.name.toLowerCase() === trimmed.toLowerCase()
+                        );
+                        if (exactMatch) return null;
+                        return (
+                          <button
+                            onClick={() => createAndSelectClient(trimmed)}
+                            disabled={creatingClient}
+                            className="w-full text-left px-3 py-2 hover:bg-green-50 text-sm flex items-center gap-2 border-t border-gray-100 disabled:opacity-60"
+                          >
+                            <span className="text-xs font-medium bg-green-100 text-green-700 px-1.5 py-0.5 rounded">+ New</span>
+                            <span className="text-gray-900 truncate">
+                              {creatingClient ? 'Creating…' : <>Create &ldquo;{trimmed}&rdquo; as new client</>}
+                            </span>
+                          </button>
+                        );
+                      })()}
+                    </div>
                   )}
                 </span>
               );
@@ -4184,9 +4193,9 @@ export default function JobDetailPage() {
                     {jo.organisation_name}
                   </Link>
                   <button
-                    onClick={() => handleRemoveJobOrg(jo.id)}
+                    onClick={() => handleRemoveJobOrg(jo.id, jo.organisation_name)}
                     className="ml-0.5 opacity-40 hover:opacity-100 transition-opacity"
-                    title="Remove"
+                    title="Remove from this job"
                   >
                     &times;
                   </button>
