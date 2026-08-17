@@ -2237,6 +2237,31 @@ Organisation-to-organisation relationships and multi-org job links. Makes "bands
 - [x] Org-to-org relationship types: manages↔managed_by, books_for↔booked_by, does_accounts_for↔accounts_done_by, promotes↔promoted_by, supplies↔supplied_by, represents↔represented_by
 - [x] Person-to-org role types: Tour Manager, Manager, Production Manager, Engineer, Accountant, Promoter, Crew, Band Member, Driver, Agent, Site Contact, Owner, General Contact, Other
 
+##### Lead organisation + client lock (migration 190, Aug 2026)
+
+**Two parallel mechanisms attach an org to a job, and they stay separate on purpose:**
+
+| Mechanism | What it is | Who owns it |
+|---|---|---|
+| `jobs.client_id` | The **accounting client** — single FK, HireHop-derived. Drives the excess ledger, Xero contact bucketing, cross-job credit's same-client boundary, `client_excess_ledger`. | HireHop sync, unless locked (below) |
+| `job_organisations` | **Every other org on the hire** — band, promoter, management, label, etc. Many-to-many with a role picklist. | Staff, via the Job Detail Organisations row |
+
+**The lead organisation is CHOSEN, not inferred.** `job_organisations.is_primary` (dormant since migration 027) now flags which org headlines the job. No flagged row = the client is the lead, so nothing needed backfilling. A partial unique index (`uq_job_org_primary`) keeps it to one per job, mirroring the `job_contacts.is_primary` convention.
+
+**What this replaced:** the headline used to be `jobOrgs.find(jo => jo.role === 'band')` — adding a band automatically stole the headline and demoted the client to a grey "Billed to:" sub-line. That asserted a billing split that often wasn't true (job 16352: adding "Motrik" as the band demoted sole contact "Rob Jones" to "Billed to"). **Do NOT reintroduce a role-inferred headline or a "Billed to" line** — every associated org now renders equally in the Organisations row, and the ⭐ picks which one leads.
+
+Swapping the lead is a single flag flip — fully reversible, rewrites no attribution, and `client_id` stays authoritative for accounting whichever org headlines. That's the answer to "swap the names without ghost trails": don't rename the org and don't re-point the client, just move the star.
+
+- **Endpoint:** `PUT /api/pipeline/:jobId/organisations/lead` — `{ organisation_id: uuid | null }`, null clears. Transactional (clear-then-set; the unique index means the old lead must go first). Returns the full refreshed list.
+- **Kanban:** the pipeline list query exposes `lead_org_name` (was `band_name`). Cards render one line: lead → client → `—`.
+- **Client chip:** the Organisations row renders the client from `client_id` as a non-removable "Client:" chip, so it's visible even when not leading. Its ⭐ clears the flag. It's changed via the **headline pencil** (which stays visible even when a lead org is headlining — it's the only way to change the client).
+
+**Client lock — `jobs.client_locked_at` / `client_locked_by`.** The HH job sync wrote `client_id = COALESCE($n, client_id)`, which only guards NULL — so an OP-side client change silently reverted within 30 minutes, because HireHop's `COMPANY` string won every pass. Changing the client via `PATCH /api/pipeline/:id/edit` now stamps the lock, and both sync paths guard with `client_id = CASE WHEN client_locked_at IS NOT NULL THEN client_id ELSE COALESCE($n, client_id) END`. When locked AND HireHop disagrees, the sync queues a **`client_mismatch`** review (Data Cleanup page) instead of reverting — visible disagreement beats silent revert. Staff resolve it by pushing OP's client to HH (`sync-client-to-hh`) or changing it back in OP.
+
+**Renaming an org to "fix" a job is still the wrong move** — the sync matches the client org by NAME against HH `COMPANY`, so renaming means the next pass finds no match, creates a fresh duplicate shell, and (pre-lock) re-pointed `client_id` at the duplicate. Use the org **merge** tool for genuine duplicates, and the lead flag for "which name shows".
+
+**Job-sync `possible_band` guard rail.** The contact sync has flagged suspicious org names since Stream C, but the JOB sync — which auto-creates one org per distinct HH `COMPANY` string — had none, so ~20 junk orgs (`WOH26 / ARTHUR VEROCAI`, `WOH26 / Lush Life / Aja Monet`, …) accumulated silently when a colleague used HireHop's company field as a notes field. Both syncs now share `services/sync-review.ts` (`flagForReview` + `looksLikeCompanyName`), and the job sync's shell-create path is a single shared helper (`resolveClientOrgFromCompany`) rather than two hand-copied blocks — which is exactly how the guard rail ended up on one sync and not the other. **Any new org-creating sync path must go through that helper.**
+
 **Stream C: HireHop Data Cleanup** (depends on Stream A "Create in HireHop" button)
 HireHop sync imported contacts literally — bands became people, management companies got typed as "client", etc.
 The cleanup strategy is: OP becomes master for relationship data, HH gets what it needs via push.

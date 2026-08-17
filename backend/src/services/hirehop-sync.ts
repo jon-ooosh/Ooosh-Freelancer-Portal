@@ -12,6 +12,7 @@
  */
 import { query, getClient } from '../config/database';
 import { hhBroker } from './hirehop-broker';
+import { flagForReview, looksLikeCompanyName } from './sync-review';
 
 // ── HireHop response types ─────────────────────────────────────────────
 
@@ -133,34 +134,9 @@ export interface SyncResult {
   total: number;
 }
 
-// Helper to flag an entity for manual review (dedupes by entity + review_type)
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function flagForReview(
-  dbClient: any,
-  params: {
-    entity_type: string;
-    entity_id: string | null;
-    external_id: string;
-    review_type: string;
-    summary: string;
-    details?: Record<string, unknown>;
-  }
-): Promise<boolean> {
-  // Don't create duplicate pending reviews for the same entity+type
-  const existing = await dbClient.query(
-    `SELECT id FROM sync_review_queue
-     WHERE entity_type = $1 AND external_id = $2 AND review_type = $3 AND status = 'pending'`,
-    [params.entity_type, params.external_id, params.review_type]
-  );
-  if (existing.rows.length > 0) return false;
-
-  await dbClient.query(
-    `INSERT INTO sync_review_queue (entity_type, entity_id, external_id, review_type, summary, details)
-     VALUES ($1, $2, $3, $4, $5, $6)`,
-    [params.entity_type, params.entity_id, params.external_id, params.review_type, params.summary, JSON.stringify(params.details || {})]
-  );
-  return true;
-}
+// flagForReview + looksLikeCompanyName live in services/sync-review.ts — shared
+// with the JOB sync, which creates orgs from HH COMPANY strings and needs the
+// same guard rails.
 
 export async function syncContactsFromHireHop(userId: string): Promise<SyncResult> {
   const result: SyncResult = {
@@ -297,8 +273,7 @@ export async function syncContactsFromHireHop(userId: string): Promise<SyncResul
           // (e.g., HH says 'client' but name doesn't look like a company)
           const orgName = rep.COMPANY.trim();
           const newOrgType = getOrgType(rep);
-          const companyWords = /\b(ltd|limited|group|inc|llc|plc|services|productions|consulting|management|agency)\b/i;
-          if (newOrgType === 'client' && !companyWords.test(orgName)) {
+          if (newOrgType === 'client' && !looksLikeCompanyName(orgName)) {
             const flagged = await flagForReview(client, {
               entity_type: 'organisation',
               entity_id: orgId,
