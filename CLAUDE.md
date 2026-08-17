@@ -2246,23 +2246,21 @@ Organisation-to-organisation relationships and multi-org job links. Makes "bands
 | `jobs.client_id` | The **accounting client** — single FK, HireHop-derived. Drives the excess ledger, Xero contact bucketing, cross-job credit's same-client boundary, `client_excess_ledger`. | HireHop sync, unless locked (below) |
 | `job_organisations` | **Every other org on the hire** — band, promoter, management, label, etc. Many-to-many with a role picklist. | Staff, via the Job Detail Organisations row |
 
-**The lead organisation is CHOSEN, not inferred.** `job_organisations.is_primary` (dormant since migration 027) now flags which org headlines the job. No flagged row = the client is the lead, so nothing needed backfilling. A partial unique index (`uq_job_org_primary`) keeps it to one per job, mirroring the `job_contacts.is_primary` convention.
+**The ORGANISATIONS row on Job Detail is the ONE place every org is shown and managed.** The header's summary line (under the job title) carries venue + dates only — **no organisation at all**. It used to repeat the client / lead org, so the same name appeared twice in the header, with two competing edit affordances. **Don't re-add an org to that line.**
 
-**What this replaced:** the headline used to be `jobOrgs.find(jo => jo.role === 'band')` — adding a band automatically stole the headline and demoted the client to a grey "Billed to:" sub-line. That asserted a billing split that often wasn't true (job 16352: adding "Motrik" as the band demoted sole contact "Rob Jones" to "Billed to"). **Do NOT reintroduce a role-inferred headline or a "Billed to" line** — every associated org now renders equally in the Organisations row, and the ⭐ picks which one leads.
-
-Swapping the lead is a single flag flip — fully reversible, rewrites no attribution, and `client_id` stays authoritative for accounting whichever org headlines. That's the answer to "swap the names without ghost trails": don't rename the org and don't re-point the client, just move the star.
-
-- **Endpoint:** `PUT /api/pipeline/:jobId/organisations/lead` — `{ organisation_id: uuid | null }`, null clears. Transactional (clear-then-set; the unique index means the old lead must go first). Returns the full refreshed list.
-- **Kanban:** the pipeline list query exposes `lead_org_name` (was `band_name`). Cards render one line: lead → client → `—`.
-
-**The Organisations row is the ONE place orgs are managed** — the Job Detail headline is a plain read-only link to the lead, with no edit affordance of its own (its client pencil was dropped: with the client also rendered as a chip below, it offered the same edit twice). In that row:
-
-| Chip | Affordances | Why |
+| Chip in the row | Affordances | Why |
 |---|---|---|
-| **Client** (from `client_id`, always shown) | ☆ make lead · ✏️ **change** | A single FK driving accounting — it's swapped, never unlinked, so it gets a pencil where the others get an ×. This is the only client-edit affordance in the UI; the search dropdown is anchored to this chip (`clientSearchRef`). |
-| Every `job_organisations` row | ☆ make lead · × remove | × confirms first (`"Remove X from this job?"`) — it sits beside the ☆ on a small chip, so a mis-tap would otherwise silently drop an org. Removing only unlinks it from the hire; the org itself is untouched. |
+| **Client** (from `client_id`, always present; renders `+ Add client` when the job has none) | ★/☆ · ✏️ **change** | A single FK driving accounting — it's swapped, never unlinked, so it gets a pencil where the others get an ×. This is the ONLY client-edit affordance in the UI; the search dropdown is anchored to this chip (`clientSearchRef`). |
+| Every `job_organisations` row | ★/☆ · × remove | × confirms first (`"Remove X from this job?"`) — it sits beside the ★ on a small chip, so a mis-tap would otherwise silently drop an org. Removing only unlinks it from the hire; the org itself is untouched. |
 
-**Don't re-add an edit control to the headline** — the client is reachable from its chip, and duplicating it there is what made the header read as two competing client fields.
+**The ★ is CHOSEN, not inferred, and its only job is list representation.** `job_organisations.is_primary` (dormant since migration 027) flags which org represents the hire wherever a list has room for one name — today that's `lead_org_name` on the pipeline/kanban query. No flagged row = the client represents it, so nothing needed backfilling. A partial unique index (`uq_job_org_primary`) keeps it to one per job, mirroring the `job_contacts.is_primary` convention.
+
+**What this replaced:** the kanban card and the Job Detail header both used `jobOrgs.find(jo => jo.role === 'band')` — adding a band automatically stole the top slot and demoted the client to a grey "Billed to:" sub-line, asserting a billing split that often wasn't true (job 16352: adding "Motrik" as the band demoted sole contact "Rob Jones" to "Billed to"). **Do NOT reintroduce a role-inferred top slot or a "Billed to" line.**
+
+Moving the ★ is a single flag flip — fully reversible, rewrites no attribution, and `client_id` stays authoritative for accounting whichever org is starred. That's the answer to "swap the names without ghost trails": don't rename the org and don't re-point the client, just move the star.
+
+- **Endpoint:** `PUT /api/pipeline/:jobId/organisations/lead` — `{ organisation_id: uuid | null }`, null clears. Transactional (clear-then-set; the unique index means the old one must go first). Returns the full refreshed list.
+- **Kanban:** the pipeline list query exposes `lead_org_name` (was `band_name`). Cards render one line: starred org → client → `—`.
 
 **Client lock — `jobs.client_locked_at` / `client_locked_by`.** The HH job sync wrote `client_id = COALESCE($n, client_id)`, which only guards NULL — so an OP-side client change silently reverted within 30 minutes, because HireHop's `COMPANY` string won every pass. Changing the client via `PATCH /api/pipeline/:id/edit` now stamps the lock, and both sync paths guard with `client_id = CASE WHEN client_locked_at IS NOT NULL THEN client_id ELSE COALESCE($n, client_id) END`. When locked AND HireHop disagrees, the sync queues a **`client_mismatch`** review (Data Cleanup page) instead of reverting — visible disagreement beats silent revert. Staff resolve it by pushing OP's client to HH (`sync-client-to-hh`) or changing it back in OP.
 

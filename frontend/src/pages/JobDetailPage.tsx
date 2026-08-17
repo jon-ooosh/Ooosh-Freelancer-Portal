@@ -3456,51 +3456,13 @@ export default function JobDetailPage() {
               </h1>
             )}
 
-            {/* Client, Venue, Dates summary row */}
+            {/* Venue, Dates summary row.
+                NO organisation here — every org on the job (client included) lives
+                in the ORGANISATIONS row below, which is the single place they're
+                shown and managed. This line used to repeat the client/lead org,
+                so the same name appeared twice in the header with two different
+                edit affordances. Don't re-add it. */}
             <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-sm text-gray-600 items-center">
-              {/* Headline organisation — the LEAD org if one is flagged, else the
-                  linked client org (canonical name via client_id) → HH company_name
-                  → HH client_name. Reading the linked org's own name (not the
-                  volatile HH company_name string) means changing the client updates
-                  the headline immediately.
-
-                  The lead is CHOSEN (job_organisations.is_primary), not inferred from
-                  a role. Previously a band automatically took the headline and pushed
-                  the client into a "Billed to:" sub-line — asserting a billing split
-                  that often wasn't true. Every associated org now renders equally in
-                  the Organisations row below; the lead is just the one that headlines. */}
-              <div className="relative inline-flex items-center gap-1">
-                {(() => {
-                  const leadOrg = jobOrgs.find(jo => jo.is_primary);
-                  const hasClient = !!(job.client_org_name || job.client_name || job.company_name);
-                  if (!leadOrg && !hasClient) {
-                    return (
-                      <button
-                        onClick={startEditClient}
-                        className="text-gray-400 hover:text-ooosh-600 transition-colors text-xs border border-dashed border-gray-300 px-2 py-0.5 rounded"
-                      >
-                        + Add client
-                      </button>
-                    );
-                  }
-                  const headlineText = leadOrg?.organisation_name
-                    || job.client_org_name
-                    || job.company_name
-                    || job.client_name;
-                  const headlineLinkId = leadOrg?.organisation_id || job.client_id;
-                  return (
-                    <>
-                      {headlineLinkId ? (
-                        <Link to={`/organisations/${headlineLinkId}`} className="text-ooosh-600 hover:text-ooosh-700">
-                          {headlineText}
-                        </Link>
-                      ) : (
-                        <span>{headlineText}</span>
-                      )}
-                    </>
-                  );
-                })()}
-              </div>
               {/* Venue */}
               {job.venue_name && (
                 <span>
@@ -4070,54 +4032,68 @@ export default function JobDetailPage() {
           </div>
         )}
 
-        {/* Associated organisations — every org on this job, rendered equally.
-            The ⭐ picks which one HEADLINES the job (job_organisations.is_primary).
+        {/* Associated organisations — the SINGLE place every org on this job is
+            shown and managed. Nothing above repeats them.
+            The ★ picks which one represents the job on job lists / pipeline cards
+            (job_organisations.is_primary → `lead_org_name` on the list query).
             The client chip comes from `client_id` rather than a job_organisations
-            row, so it's always visible and can lead without needing to be
-            duplicated as a link; its ⭐ clears the flag (headline falls back to
-            the client) and it's changed via the headline pencil, not removed. */}
+            row, so it's always present; its ★ clears the flag (lists fall back to
+            the client) and it's CHANGED via its pencil, never removed. */}
         <div className="mt-3 pt-3 border-t border-gray-100">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-xs font-medium text-gray-500 uppercase tracking-wider">Organisations:</span>
             {(() => {
               const hasExplicitLead = jobOrgs.some(jo => jo.is_primary);
               const clientName = job.client_org_name || job.company_name || job.client_name;
-              if (!clientName) return null;
               return (
                 <span
                   ref={clientSearchRef}
-                  className="relative inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border bg-blue-100 text-blue-700 border-blue-200"
+                  className={`relative inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border ${
+                    clientName
+                      ? 'bg-blue-100 text-blue-700 border-blue-200'
+                      : 'border-dashed border-gray-300 text-gray-500'
+                  }`}
                 >
-                  <button
-                    onClick={() => handleSetLeadOrg(null)}
-                    disabled={jobOrgSaving || !hasExplicitLead}
-                    className={`transition-opacity ${!hasExplicitLead ? 'opacity-100 cursor-default' : 'opacity-30 hover:opacity-100'}`}
-                    title={!hasExplicitLead ? 'Leads this job' : 'Make this the lead organisation'}
-                  >
-                    {!hasExplicitLead ? '★' : '☆'}
-                  </button>
-                  <span className="opacity-70">Client:</span>
-                  {job.client_id ? (
-                    <Link to={`/organisations/${job.client_id}`} className="hover:underline font-semibold">
-                      {clientName}
-                    </Link>
+                  {clientName ? (
+                    <>
+                      <button
+                        onClick={() => handleSetLeadOrg(null)}
+                        disabled={jobOrgSaving || !hasExplicitLead}
+                        className={`transition-opacity ${!hasExplicitLead ? 'opacity-100 cursor-default' : 'opacity-30 hover:opacity-100'}`}
+                        title={!hasExplicitLead ? 'Represents this job on job lists and pipeline cards' : 'Show this org on job lists and pipeline cards instead'}
+                      >
+                        {!hasExplicitLead ? '★' : '☆'}
+                      </button>
+                      <span className="opacity-70">Client:</span>
+                      {job.client_id ? (
+                        <Link to={`/organisations/${job.client_id}`} className="hover:underline font-semibold">
+                          {clientName}
+                        </Link>
+                      ) : (
+                        <span className="font-semibold">{clientName}</span>
+                      )}
+                    </>
                   ) : (
-                    <span className="font-semibold">{clientName}</span>
+                    <button onClick={startEditClient} className="hover:text-ooosh-600 transition-colors">
+                      + Add client
+                    </button>
                   )}
                   {/* The client is CHANGED, never removed — it's a single FK driving
                       the excess ledger / Xero bucketing / cross-job credit boundary,
                       so it gets a pencil where the other chips get an ×. This is the
-                      only client-edit affordance (the headline's was dropped so the
-                      client isn't offered twice). */}
-                  <button
-                    onClick={startEditClient}
-                    className="ml-0.5 opacity-40 hover:opacity-100 transition-opacity"
-                    title="Change client"
-                  >
-                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-                    </svg>
-                  </button>
+                      ONLY client-edit affordance; the summary line above no longer
+                      repeats the client at all. */}
+                  {clientName && (
+                    <button
+                      onClick={startEditClient}
+                      className="ml-0.5 opacity-40 hover:opacity-100 transition-opacity"
+                      title="Change client"
+                    >
+                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                      </svg>
+                    </button>
+                  )}
                   {editingClient && (
                     <div className="absolute top-full left-0 mt-1 z-50 bg-white border border-gray-200 rounded-lg shadow-lg w-64 font-normal text-gray-900">
                       <input
@@ -4184,7 +4160,7 @@ export default function JobDetailPage() {
                     onClick={() => handleSetLeadOrg(jo.is_primary ? null : jo.organisation_id)}
                     disabled={jobOrgSaving}
                     className={`transition-opacity ${jo.is_primary ? 'opacity-100' : 'opacity-30 hover:opacity-100'}`}
-                    title={jo.is_primary ? 'Leads this job — click to hand the headline back to the client' : 'Make this the lead organisation'}
+                    title={jo.is_primary ? 'Represents this job on job lists and pipeline cards — click to hand that back to the client' : 'Show this org on job lists and pipeline cards instead'}
                   >
                     {jo.is_primary ? '★' : '☆'}
                   </button>
