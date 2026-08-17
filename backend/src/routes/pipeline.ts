@@ -1,6 +1,6 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
-import { query } from '../config/database';
+import { query, getClient } from '../config/database';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES, MANAGER_ROLES } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
@@ -179,8 +179,13 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       `SELECT j.*,
         m1p.first_name as manager1_first_name, m1p.last_name as manager1_last_name,
         m2p.first_name as manager2_first_name, m2p.last_name as manager2_last_name,
+        -- Lead organisation: the org explicitly flagged to headline this job.
+        -- NULL means no explicit lead, so the card falls back to the client.
+        -- (Was band_name -- a band automatically took the headline and pushed
+        -- the client into a "Billed to:" sub-line, which asserted a billing
+        -- split that often was not true. The lead is now chosen, not inferred.)
         (SELECT o.name FROM job_organisations jo JOIN organisations o ON o.id = jo.organisation_id
-         WHERE jo.job_id = j.id AND jo.role = 'band' LIMIT 1) as band_name,
+         WHERE jo.job_id = j.id AND jo.is_primary = true LIMIT 1) as lead_org_name,
         (SELECT json_agg(json_build_object('id', jo.id, 'role', jo.role, 'organisation_name', o.name, 'organisation_type', o.type, 'organisation_id', jo.organisation_id))
          FROM job_organisations jo JOIN organisations o ON o.id = jo.organisation_id
          WHERE jo.job_id = j.id) as linked_organisations,
@@ -1339,7 +1344,7 @@ router.get('/:jobId/organisations', async (req: AuthRequest, res: Response) => {
        FROM job_organisations jo
        JOIN organisations o ON o.id = jo.organisation_id AND o.is_deleted = false
        WHERE jo.job_id = $1
-       ORDER BY jo.role, o.name`,
+       ORDER BY jo.is_primary DESC, jo.role, o.name`,
       [req.params.jobId]
     );
     res.json({ data: result.rows });
@@ -1385,6 +1390,79 @@ router.post('/:jobId/organisations', validate(createJobOrgSchema), async (req: A
     }
     console.error('Create job organisation error:', error);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// PUT /api/pipeline/:jobId/organisations/lead
+//
+// Sets which organisation headlines the job. `organisation_id: null` clears the
+// flag, which falls the headline back to the job's `client_id` (the accounting
+// client) — the default lead for every job, so nothing needs backfilling.
+//
+// This is deliberately a flag flip, not a data move: `client_id` stays
+// authoritative for accounting (excess ledger, Xero bucketing, cross-job credit)
+// no matter which org leads the display. Swapping the lead leaves no trail to
+// unpick — flip it back and you're exactly where you started.
+const setLeadOrgSchema = z.object({
+  organisation_id: z.string().uuid().nullable(),
+});
+
+router.put('/:jobId/organisations/lead', validate(setLeadOrgSchema), async (req: AuthRequest, res: Response) => {
+  const client = await getClient();
+  try {
+    const jobId = req.params.jobId as string;
+    const { organisation_id } = req.body;
+
+    await client.query('BEGIN');
+
+    const job = await client.query(
+      'SELECT id FROM jobs WHERE id = $1 AND is_deleted = false',
+      [jobId]
+    );
+    if (job.rows.length === 0) {
+      await client.query('ROLLBACK');
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
+    // Clear first — the partial unique index (migration 190) allows exactly
+    // one lead per job, so the old one has to go before the new one lands.
+    await client.query(
+      'UPDATE job_organisations SET is_primary = false, updated_at = NOW() WHERE job_id = $1 AND is_primary = true',
+      [jobId]
+    );
+
+    if (organisation_id) {
+      const set = await client.query(
+        `UPDATE job_organisations SET is_primary = true, updated_at = NOW()
+         WHERE job_id = $1 AND organisation_id = $2
+         RETURNING id`,
+        [jobId, organisation_id]
+      );
+      if (set.rows.length === 0) {
+        await client.query('ROLLBACK');
+        res.status(404).json({ error: 'That organisation is not linked to this job' });
+        return;
+      }
+    }
+
+    const rows = await client.query(
+      `SELECT jo.*, o.name as organisation_name, o.type as organisation_type
+       FROM job_organisations jo
+       JOIN organisations o ON o.id = jo.organisation_id AND o.is_deleted = false
+       WHERE jo.job_id = $1
+       ORDER BY jo.is_primary DESC, jo.role, o.name`,
+      [jobId]
+    );
+
+    await client.query('COMMIT');
+    res.json({ data: rows.rows });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Set lead organisation error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  } finally {
+    client.release();
   }
 });
 
@@ -1870,6 +1948,17 @@ router.patch('/:id/edit', validate(editJobSchema), async (req: AuthRequest, res:
     if (params.length === 0) {
       res.status(400).json({ error: 'No fields to update' });
       return;
+    }
+
+    // Changing the client here is a deliberate human decision — stamp the lock
+    // so the 30-minute HireHop job sync stops overwriting it with HireHop's
+    // COMPANY string (which only reflects whatever HH was last told). The sync
+    // queues a `client_mismatch` review instead of reverting silently.
+    if ('client_id' in fields && String(currentJob.client_id ?? '') !== String(fields.client_id ?? '')) {
+      updates.push('client_locked_at = NOW()');
+      updates.push(`client_locked_by = $${pIdx}`);
+      params.push(req.user!.id);
+      pIdx++;
     }
 
     params.push(jobId);

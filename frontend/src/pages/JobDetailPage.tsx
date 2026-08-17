@@ -2644,6 +2644,26 @@ export default function JobDetailPage() {
     }
   }
 
+  // Set (or clear) which organisation headlines this job. Passing null clears
+  // the flag so the headline falls back to the client. Purely a display flag —
+  // `client_id` stays authoritative for accounting either way, so swapping the
+  // lead leaves nothing to unpick.
+  async function handleSetLeadOrg(organisationId: string | null) {
+    if (!id || jobOrgSaving) return;
+    setJobOrgSaving(true);
+    try {
+      const data = await api.put<{ data: typeof jobOrgs }>(
+        `/pipeline/${id}/organisations/lead`,
+        { organisation_id: organisationId }
+      );
+      setJobOrgs(data.data);
+    } catch (err: any) {
+      alert(err?.response?.data?.error || err?.message || 'Failed to set lead organisation');
+    } finally {
+      setJobOrgSaving(false);
+    }
+  }
+
   async function handleAddJobOrg() {
     if (!jobOrgSelectedOrg || !id) return;
     setJobOrgSaving(true);
@@ -2688,8 +2708,13 @@ export default function JobDetailPage() {
     }
   }
 
-  async function handleRemoveJobOrg(linkId: string) {
+  // The × sits right next to the ☆ on a small chip, so confirm before removing —
+  // a fat-fingered tap otherwise silently drops an org off the job.
+  async function handleRemoveJobOrg(linkId: string, orgName: string) {
     if (!id) return;
+    if (!confirm(`Remove "${orgName}" from this job?\n\nThis only unlinks it from this hire — the organisation itself is untouched.`)) {
+      return;
+    }
     try {
       await api.delete(`/pipeline/${id}/organisations/${linkId}`);
       loadJobOrgs();
@@ -3433,15 +3458,22 @@ export default function JobDetailPage() {
 
             {/* Client, Venue, Dates summary row */}
             <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-sm text-gray-600 items-center">
-              {/* Client headline — prefer band → linked client org (canonical name via
-                  client_id) → HH company_name → HH client_name. Reading the linked org's
-                  own name (not the volatile HH company_name string) means changing the
-                  client actually updates the headline immediately. */}
-              <div className="relative inline-flex items-center gap-1" ref={clientSearchRef}>
+              {/* Headline organisation — the LEAD org if one is flagged, else the
+                  linked client org (canonical name via client_id) → HH company_name
+                  → HH client_name. Reading the linked org's own name (not the
+                  volatile HH company_name string) means changing the client updates
+                  the headline immediately.
+
+                  The lead is CHOSEN (job_organisations.is_primary), not inferred from
+                  a role. Previously a band automatically took the headline and pushed
+                  the client into a "Billed to:" sub-line — asserting a billing split
+                  that often wasn't true. Every associated org now renders equally in
+                  the Organisations row below; the lead is just the one that headlines. */}
+              <div className="relative inline-flex items-center gap-1">
                 {(() => {
-                  const bandOrg = jobOrgs.find(jo => jo.role === 'band');
+                  const leadOrg = jobOrgs.find(jo => jo.is_primary);
                   const hasClient = !!(job.client_org_name || job.client_name || job.company_name);
-                  if (!bandOrg && !hasClient) {
+                  if (!leadOrg && !hasClient) {
                     return (
                       <button
                         onClick={startEditClient}
@@ -3451,11 +3483,11 @@ export default function JobDetailPage() {
                       </button>
                     );
                   }
-                  const headlineText = bandOrg?.organisation_name
+                  const headlineText = leadOrg?.organisation_name
                     || job.client_org_name
                     || job.company_name
                     || job.client_name;
-                  const headlineLinkId = bandOrg?.organisation_id || job.client_id;
+                  const headlineLinkId = leadOrg?.organisation_id || job.client_id;
                   return (
                     <>
                       {headlineLinkId ? (
@@ -3465,88 +3497,10 @@ export default function JobDetailPage() {
                       ) : (
                         <span>{headlineText}</span>
                       )}
-                      {bandOrg && (
-                        <span className="text-xs text-purple-500 font-medium">(Band)</span>
-                      )}
-                      <button
-                        onClick={startEditClient}
-                        className="text-gray-300 hover:text-gray-500 transition-colors"
-                        title="Change client"
-                      >
-                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-                        </svg>
-                      </button>
                     </>
                   );
                 })()}
-                {editingClient && (
-                  <div className="absolute top-full left-0 mt-1 z-50 bg-white border border-gray-200 rounded-lg shadow-lg w-64">
-                    <input
-                      type="text"
-                      value={clientSearch}
-                      onChange={(e) => setClientSearch(e.target.value)}
-                      placeholder="Search organisations..."
-                      className="w-full border-b border-gray-200 px-3 py-2 text-sm focus:ring-0 focus:outline-none rounded-t-lg"
-                      autoFocus
-                    />
-                    {clientSearchResults.length > 0 && (
-                      <div className="max-h-48 overflow-y-auto">
-                        {clientSearchResults.map((o) => (
-                          <button
-                            key={o.id}
-                            onClick={() => selectClient(o)}
-                            className="w-full text-left px-3 py-2 hover:bg-gray-50 text-sm flex items-center gap-2 border-b border-gray-50 last:border-b-0"
-                          >
-                            <span className="font-medium">{o.name}</span>
-                            <span className="text-gray-400 text-xs">{o.type}</span>
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                    {(() => {
-                      const trimmed = clientSearch.trim();
-                      if (trimmed.length < 2) return null;
-                      const exactMatch = clientSearchResults.some(
-                        (o) => o.name.toLowerCase() === trimmed.toLowerCase()
-                      );
-                      if (exactMatch) return null;
-                      return (
-                        <button
-                          onClick={() => createAndSelectClient(trimmed)}
-                          disabled={creatingClient}
-                          className="w-full text-left px-3 py-2 hover:bg-green-50 text-sm flex items-center gap-2 border-t border-gray-100 disabled:opacity-60"
-                        >
-                          <span className="text-xs font-medium bg-green-100 text-green-700 px-1.5 py-0.5 rounded">+ New</span>
-                          <span className="text-gray-900 truncate">
-                            {creatingClient ? 'Creating…' : <>Create &ldquo;{trimmed}&rdquo; as new client</>}
-                          </span>
-                        </button>
-                      );
-                    })()}
-                  </div>
-                )}
               </div>
-              {/* Billed to sub-line (when Band takes top slot) */}
-              {(() => {
-                const bandOrg = jobOrgs.find(jo => jo.role === 'band');
-                if (!bandOrg) return null;
-                const billedToText = job.client_org_name || job.company_name || job.client_name;
-                if (!billedToText) return null;
-                return (
-                  <span className="text-xs text-gray-500">
-                    Billed to:{' '}
-                    {job.client_id ? (
-                      <Link to={`/organisations/${job.client_id}`} className="text-gray-600 hover:text-ooosh-600 underline decoration-dotted">
-                        {billedToText}
-                      </Link>
-                    ) : (
-                      <span className="text-gray-600">{billedToText}</span>
-                    )}
-                  </span>
-                );
-              })()}
-
               {/* Venue */}
               {job.venue_name && (
                 <span>
@@ -4116,10 +4070,103 @@ export default function JobDetailPage() {
           </div>
         )}
 
-        {/* Linked Organisations (Band, Promoter, etc.) */}
+        {/* Associated organisations — every org on this job, rendered equally.
+            The ⭐ picks which one HEADLINES the job (job_organisations.is_primary).
+            The client chip comes from `client_id` rather than a job_organisations
+            row, so it's always visible and can lead without needing to be
+            duplicated as a link; its ⭐ clears the flag (headline falls back to
+            the client) and it's changed via the headline pencil, not removed. */}
         <div className="mt-3 pt-3 border-t border-gray-100">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-xs font-medium text-gray-500 uppercase tracking-wider">Organisations:</span>
+            {(() => {
+              const hasExplicitLead = jobOrgs.some(jo => jo.is_primary);
+              const clientName = job.client_org_name || job.company_name || job.client_name;
+              if (!clientName) return null;
+              return (
+                <span
+                  ref={clientSearchRef}
+                  className="relative inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border bg-blue-100 text-blue-700 border-blue-200"
+                >
+                  <button
+                    onClick={() => handleSetLeadOrg(null)}
+                    disabled={jobOrgSaving || !hasExplicitLead}
+                    className={`transition-opacity ${!hasExplicitLead ? 'opacity-100 cursor-default' : 'opacity-30 hover:opacity-100'}`}
+                    title={!hasExplicitLead ? 'Leads this job' : 'Make this the lead organisation'}
+                  >
+                    {!hasExplicitLead ? '★' : '☆'}
+                  </button>
+                  <span className="opacity-70">Client:</span>
+                  {job.client_id ? (
+                    <Link to={`/organisations/${job.client_id}`} className="hover:underline font-semibold">
+                      {clientName}
+                    </Link>
+                  ) : (
+                    <span className="font-semibold">{clientName}</span>
+                  )}
+                  {/* The client is CHANGED, never removed — it's a single FK driving
+                      the excess ledger / Xero bucketing / cross-job credit boundary,
+                      so it gets a pencil where the other chips get an ×. This is the
+                      only client-edit affordance (the headline's was dropped so the
+                      client isn't offered twice). */}
+                  <button
+                    onClick={startEditClient}
+                    className="ml-0.5 opacity-40 hover:opacity-100 transition-opacity"
+                    title="Change client"
+                  >
+                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                    </svg>
+                  </button>
+                  {editingClient && (
+                    <div className="absolute top-full left-0 mt-1 z-50 bg-white border border-gray-200 rounded-lg shadow-lg w-64 font-normal text-gray-900">
+                      <input
+                        type="text"
+                        value={clientSearch}
+                        onChange={(e) => setClientSearch(e.target.value)}
+                        placeholder="Search organisations..."
+                        className="w-full border-b border-gray-200 px-3 py-2 text-sm focus:ring-0 focus:outline-none rounded-t-lg"
+                        autoFocus
+                      />
+                      {clientSearchResults.length > 0 && (
+                        <div className="max-h-48 overflow-y-auto">
+                          {clientSearchResults.map((o) => (
+                            <button
+                              key={o.id}
+                              onClick={() => selectClient(o)}
+                              className="w-full text-left px-3 py-2 hover:bg-gray-50 text-sm flex items-center gap-2 border-b border-gray-50 last:border-b-0"
+                            >
+                              <span className="font-medium">{o.name}</span>
+                              <span className="text-gray-400 text-xs">{o.type}</span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      {(() => {
+                        const trimmed = clientSearch.trim();
+                        if (trimmed.length < 2) return null;
+                        const exactMatch = clientSearchResults.some(
+                          (o) => o.name.toLowerCase() === trimmed.toLowerCase()
+                        );
+                        if (exactMatch) return null;
+                        return (
+                          <button
+                            onClick={() => createAndSelectClient(trimmed)}
+                            disabled={creatingClient}
+                            className="w-full text-left px-3 py-2 hover:bg-green-50 text-sm flex items-center gap-2 border-t border-gray-100 disabled:opacity-60"
+                          >
+                            <span className="text-xs font-medium bg-green-100 text-green-700 px-1.5 py-0.5 rounded">+ New</span>
+                            <span className="text-gray-900 truncate">
+                              {creatingClient ? 'Creating…' : <>Create &ldquo;{trimmed}&rdquo; as new client</>}
+                            </span>
+                          </button>
+                        );
+                      })()}
+                    </div>
+                  )}
+                </span>
+              );
+            })()}
             {jobOrgs.map((jo) => {
               const roleColors: Record<string, string> = {
                 band: 'bg-purple-100 text-purple-700 border-purple-200',
@@ -4133,14 +4180,22 @@ export default function JobDetailPage() {
               };
               return (
                 <span key={jo.id} className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border ${roleColors[jo.role] || 'bg-gray-100 text-gray-700 border-gray-200'}`}>
+                  <button
+                    onClick={() => handleSetLeadOrg(jo.is_primary ? null : jo.organisation_id)}
+                    disabled={jobOrgSaving}
+                    className={`transition-opacity ${jo.is_primary ? 'opacity-100' : 'opacity-30 hover:opacity-100'}`}
+                    title={jo.is_primary ? 'Leads this job — click to hand the headline back to the client' : 'Make this the lead organisation'}
+                  >
+                    {jo.is_primary ? '★' : '☆'}
+                  </button>
                   <span className="opacity-70 capitalize">{jo.role.replace('_', ' ')}:</span>
                   <Link to={`/organisations/${jo.organisation_id}`} className="hover:underline font-semibold">
                     {jo.organisation_name}
                   </Link>
                   <button
-                    onClick={() => handleRemoveJobOrg(jo.id)}
+                    onClick={() => handleRemoveJobOrg(jo.id, jo.organisation_name)}
                     className="ml-0.5 opacity-40 hover:opacity-100 transition-opacity"
-                    title="Remove"
+                    title="Remove from this job"
                   >
                     &times;
                   </button>
