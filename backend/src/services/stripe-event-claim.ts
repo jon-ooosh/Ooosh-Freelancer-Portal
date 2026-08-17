@@ -27,6 +27,34 @@ import { query } from '../config/database';
 // off; a genuinely-failed prior attempt is picked up by the next Stripe retry after the window.
 const STALE_CLAIM_SECONDS = 60;
 
+// ⚠️ KEYSPACE SEPARATION — the load-bearing fix for the job-16523 incident (Aug 2026).
+//
+// `stripe_events` has TWO independent consumers that mean DIFFERENT things by a row:
+//   1. OP's OWN Stripe receiver (services/stripe-webhook.ts) — a RECEIPT log: "I received
+//      this event id". It writes raw `evt_...` ids.
+//   2. The Payment Portal's payment-event / deposit claim (these helpers) — a BUSINESS-EFFECT
+//      log: "the money effect of this event has been applied to a job".
+//
+// Both Stripe destinations are subscribed to overlapping event types on the SAME Stripe
+// account, so they receive the SAME event id. Pre-fix, OP's receiver would insert the row and
+// stamp `processed_at` for an event it deliberately IGNORED (no handler case), and the
+// portal's `payment-event` then read that stamp as "already fully handled" and no-opped —
+// silently dropping a live £1,200 excess pre-auth (job 16523, 15 Aug 2026).
+//
+// Fix: portal-facing keys are namespaced, so the two consumers can never collide again
+// regardless of which event types get subscribed to which endpoint in the Stripe dashboard.
+// The receiver deliberately stays on RAW ids (its existing rows keep working).
+//
+// Historical rows written by these helpers before the prefix existed are orphaned by design —
+// a Stripe re-delivery of a >days-old event is not a real scenario, and treating an old
+// receiver-written row as "the portal already did this" is precisely the bug being fixed.
+const PORTAL_KEY_PREFIX = 'pe:';
+
+/** Namespace an event id into the portal (business-effect) keyspace. */
+function portalKey(eventId: string): string {
+  return eventId.startsWith(PORTAL_KEY_PREFIX) ? eventId : `${PORTAL_KEY_PREFIX}${eventId}`;
+}
+
 export interface ClaimResult {
   /** true = caller owns this event and should do the work; false = already handled / in flight. */
   proceed: boolean;
@@ -52,7 +80,7 @@ export async function claimStripeEvent(eventId: string, type: string): Promise<C
        WHERE stripe_events.processed_at IS NULL
          AND stripe_events.claimed_at < NOW() - ($3 || ' seconds')::interval
      RETURNING id, hh_deposit_id`,
-    [eventId, type, String(STALE_CLAIM_SECONDS)]
+    [portalKey(eventId), type, String(STALE_CLAIM_SECONDS)]
   );
 
   if (claim.rows.length > 0) {
@@ -67,7 +95,7 @@ export async function claimStripeEvent(eventId: string, type: string): Promise<C
   // Conflict without a claim: the row exists and is either already processed or still in flight.
   const existing = await query(
     `SELECT processed_at, hh_deposit_id FROM stripe_events WHERE id = $1`,
-    [eventId]
+    [portalKey(eventId)]
   );
   const row = existing.rows[0];
   return {
@@ -83,7 +111,7 @@ export async function recordStripeEventDeposit(eventId: string, hhDepositId: num
     `UPDATE stripe_events
         SET hh_deposit_id = COALESCE(hh_deposit_id, $2)
       WHERE id = $1`,
-    [eventId, hhDepositId]
+    [portalKey(eventId), hhDepositId]
   );
 }
 
@@ -102,7 +130,7 @@ export async function markStripeEventProcessed(
      ON CONFLICT (id) DO UPDATE
        SET processed_at  = COALESCE(stripe_events.processed_at, NOW()),
            hh_deposit_id = COALESCE(stripe_events.hh_deposit_id, EXCLUDED.hh_deposit_id)`,
-    [eventId, opts.type ?? 'payment_event', opts.hhDepositId ?? null]
+    [portalKey(eventId), opts.type ?? 'payment_event', opts.hhDepositId ?? null]
   );
 }
 
@@ -116,7 +144,7 @@ export async function markStripeEventProcessed(
 export async function isStripeEventProcessed(eventId: string): Promise<boolean> {
   const res = await query(
     `SELECT processed_at FROM stripe_events WHERE id = $1`,
-    [eventId]
+    [portalKey(eventId)]
   );
   return Boolean(res.rows[0]?.processed_at);
 }
