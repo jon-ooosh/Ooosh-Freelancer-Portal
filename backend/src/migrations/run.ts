@@ -224,6 +224,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '187_fleet_stuck_onhire_marker.sql',
         '188_stripe_event_dedup.sql',
         '189_booked_split_alert_marker.sql',
+        '190_job_lead_org_and_client_lock.sql',
       ];
 
       for (const migration of migrations) {
