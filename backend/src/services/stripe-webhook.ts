@@ -151,7 +151,16 @@ async function alertInfo(subject: string, lines: string[]): Promise<void> {
     .catch((e) => console.error('[stripe-webhook] alert email failed:', e));
 }
 
-async function processStripeEvent(event: StripeEventLike): Promise<void> {
+/**
+ * Handle one Stripe event.
+ *
+ * @returns true if this receiver ACTED on the event, false if it deliberately ignored it.
+ *          The caller uses this to decide whether to keep a `stripe_events` receipt row —
+ *          see the keyspace note in `services/stripe-event-claim.ts`. New `case` branches
+ *          inherit "handled" automatically (only `default` returns false), so this can't
+ *          silently regress when a handler is added.
+ */
+async function processStripeEvent(event: StripeEventLike): Promise<boolean> {
   switch (event.type) {
     case 'payment_intent.canceled': {
       const pi = event.data.object as PaymentIntentObj;
@@ -362,7 +371,10 @@ async function processStripeEvent(event: StripeEventLike): Promise<void> {
     default:
       // Subscribed to a narrow set; ignore anything else quietly.
       console.log(`[stripe-webhook] Ignoring unhandled event type: ${event.type}`);
+      return false;
   }
+
+  return true;
 }
 
 export async function handleStripeWebhook(req: Request, res: Response): Promise<void> {
@@ -399,9 +411,20 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
       [event.id, event.type]
     );
 
-    await processStripeEvent(event);
+    const handled = await processStripeEvent(event);
 
-    await query(`UPDATE stripe_events SET processed_at = NOW() WHERE id = $1`, [event.id]);
+    if (handled) {
+      await query(`UPDATE stripe_events SET processed_at = NOW() WHERE id = $1`, [event.id]);
+    } else {
+      // We deliberately did nothing with this event, so we must NOT keep a receipt row
+      // claiming otherwise. Leaving a `processed_at`-stamped row here is what silently
+      // swallowed a live excess pre-auth on job 16523 (Aug 2026): the Payment Portal's
+      // payment-event read our "processed" stamp for an event we'd ignored and no-opped.
+      // The portal keyspace is now prefixed (see services/stripe-event-claim.ts) so this
+      // can't recur, but an honest receipt log is the belt to that braces — and it also
+      // keeps `claimStripeEvent`'s fresh-`claimed_at` staleness window out of the way.
+      await query(`DELETE FROM stripe_events WHERE id = $1 AND processed_at IS NULL`, [event.id]);
+    }
     res.json({ received: true });
   } catch (err) {
     // Return 500 so Stripe retries; processed_at stays null so the retry reprocesses.

@@ -3710,6 +3710,49 @@ Singleton Stripe SDK client for OP's direct Stripe operations (pre-auth capture,
 - **The reconciler heals silently; the scanner is the loud backstop.** `booked-status-reconciler.ts` `reconcileBookedStatus()` (wired into the 30-min sync) re-pushes HH status 2 for `pipeline_status='confirmed' AND status<2` jobs — no bell, no email. `runBookedSplitScan` (2h grace, jon@ alert) only fires when that keeps failing. See the sanity-scanner entry above.
 - **Harmless historical scar:** `job_payments` is append-only, so a duplicate-deposit incident leaves n=2 audit rows forever even after the HH-side cleanup — the double-intent detection query still shows the old event. Not a live problem; don't try to delete audit rows.
 
+### `stripe_events` keyspace separation — the cross-endpoint collision (Aug 2026) — job 16523
+
+**Read this before touching `stripe_events`, `services/stripe-event-claim.ts`, or `services/stripe-webhook.ts`.**
+
+**The incident.** A client authorised a £1,200 excess pre-auth through the Payment Portal (15 Aug 2026, 15:52). Stripe delivered `payment_intent.amount_capturable_updated` and BOTH webhook destinations returned `200 OK`. The Netlify log showed one clean attempt, `✅ OP MODE: Pre-auth event recorded`, 1.1s total. And yet OP had **nothing** — no `job_payments` row, no `job_excess` movement (`excess_status` still `pending`, `amount_held` 0). A live hold on a client's card, completely invisible to us. Found only because the client mentioned it.
+
+**Root cause: TWO Stripe destinations, ONE event id, ONE `stripe_events` table meaning two different things.**
+
+| Consumer | Writes | Means |
+|---|---|---|
+| OP's own receiver (`services/stripe-webhook.ts`, `/api/webhooks/stripe`) | raw `evt_...` | "I received this event" — a RECEIPT log |
+| Payment Portal via `payment-event` / `claimStripeEvent` (`services/stripe-event-claim.ts`) | same raw `evt_...` | "the MONEY EFFECT of this event has been applied to a job" |
+
+Both destinations are subscribed to overlapping event types on the same Stripe account, so both receive the **same** `evt_` id. The receiver's flow is: `INSERT stripe_events` → run the handler → `UPDATE … SET processed_at = NOW()`. But `payment_intent.amount_capturable_updated` has **no `case`** in its switch — it fell to `default:` ("Ignoring unhandled event type"), did nothing, and **still got stamped `processed_at`**. Three milliseconds later (`claimed_at` 15:52:57.624 → `processed_at` .627 — a no-op handler's fingerprint), the portal's `payment-event` arrived carrying the same `stripe_event_id`, `isStripeEventProcessed()` returned true, and it returned `200 {deduplicated:true}` before reaching even the `job_payments` INSERT.
+
+**Why it started on 13 Aug:** the job-16513 idempotency fix (`83938a4`) threaded `stripe_event_id` into the pre-auth path for the first time. Every pre-auth before that sent no event id and so never hit the dedup gate — 20 clean portal pre-auths from 25 Jun to 7 Aug, then the first one attempted after the deploy (16523, 15 Aug) failed. The fix for the duplicate-deposit problem created a silent-drop problem on the one path that shares an event id with OP's own receiver.
+
+**Deposits were unaffected** — the charge path keys off `checkout.session.completed`, which OP's endpoint is not subscribed to, so no collision.
+
+**The fixes (all three, belt and braces):**
+1. **Keyspace separation (load-bearing).** `stripe-event-claim.ts` prefixes every portal-facing key with `pe:` via `portalKey()`, applied inside all four helpers (`claimStripeEvent` / `recordStripeEventDeposit` / `markStripeEventProcessed` / `isStripeEventProcessed`). The receiver stays on RAW ids. The two consumers now occupy disjoint keyspaces and **cannot collide regardless of what gets subscribed to which endpoint in the Stripe dashboard** — which is the point, since that config is a dashboard click, not code. Historical portal-written rows are orphaned by design (a Stripe re-delivery of a days-old event isn't a real scenario, and treating a receiver row as "the portal did this" is the bug).
+2. **An honest receipt log.** `processStripeEvent` now returns `handled: boolean` (only `default:` returns false — new `case` branches inherit "handled" automatically, so this can't silently regress). `handleStripeWebhook` stamps `processed_at` only when handled, and DELETEs the receipt row when it deliberately ignored the event. This also keeps `claimStripeEvent`'s fresh-`claimed_at` staleness window out of the way — note that leaving an unstamped row would NOT have been enough on its own, because the claim's `WHERE processed_at IS NULL AND claimed_at < NOW() - 60s` would still have blocked a portal claim for 60s.
+3. **Portal-side propagation** (netlify-functions) — the pre-auth path's OP call is bounded and its failures now propagate instead of being swallowed. See that repo's CLAUDE.md.
+
+**Also removed:** `payment_intent.amount_capturable_updated` was unticked from OP's Stripe destination (it only ever hit `default:`). That was the same-day mitigation; fixes 1+2 are what make re-adding it safe. `payment_intent.succeeded` remains subscribed on both endpoints — harmless today because the portal's handler for it just logs, and now structurally safe anyway.
+
+**Conventions:**
+- **Never read/write `stripe_events` with a raw `evt_` id from a portal/business-effect path** — go through the `stripe-event-claim.ts` helpers so the prefix is applied.
+- **"I ignored it" ≠ "it's processed."** Any new receiver-side event handling must keep the handled/ignored distinction; don't stamp `processed_at` for a no-op.
+- **A `stripe_events` row does not tell you WHO wrote it** unless you look at the key prefix (and, for legacy rows, `type` — the receiver writes the real Stripe event type, `markStripeEventProcessed` defaults to `'payment_event'`).
+
+### Stripe → OP pre-auth discovery (`services/stripe-preauth-reconciler.ts`, daily 09:50)
+
+The safety net that would have caught 16523 without a human. **A missed CHARGE self-heals** — it leaves a HireHop deposit for the Money-tab passive reconciliation to match. **A missed PRE-AUTH leaves no HH artefact at all** (only a job note), so nothing existed to reconcile against; the 09:40 expiry sweep only reconciles holds OP already knows about. This closes the only direction left: ask Stripe what it is actually holding.
+
+Lists `requires_capture` PaymentIntents created in the last 10 days (Stripe auths live ~7), keeps only ours (same metadata gate the portal webhook uses — `jobId` + `paymentType='excess'` + `isPreAuth='true'`), and diffs against `job_excess.stripe_payment_intent_id` ∪ `job_payments.stripe_payment_intent`.
+
+**Self-heal vs alert — the rule:**
+- Hold live **AND** the hire hasn't finished → **self-heal**: replay the exact `payment-event` call the portal should have made, over localhost with a short-lived admin JWT (the `job-financials-backfill` pattern — one computation path, so excess creation, requirement sync, the dispatch gate and the client email all behave identically to the happy path). Idempotency key `reconcile:<pi_id>`.
+- Finished hire / unknown job / anything ambiguous → **alert info@ only, never auto-write.** Emailing a client "we've taken your £1,200 hold" days after their hire ended would be worse than the gap it fixes.
+
+Runs right after the 09:40 expiry sweep — that one reconciles known holds, this one finds unknown ones. Silent when clean.
+
 ### Cost Capture & Xero Push ✅ (Jun 2026)
 
 Staff capture supplier costs (`costs` table, migration 092) on `/money/costs`
