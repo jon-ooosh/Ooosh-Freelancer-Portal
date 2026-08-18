@@ -375,6 +375,7 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
   const [preauthAmount, setPreauthAmount] = useState(requiredAmount > 0 ? requiredAmount.toFixed(2) : '');
   const [preauthMethod, setPreauthMethod] = useState('worldpay');
   const [preauthReference, setPreauthReference] = useState('');
+  const [preauthStripePi, setPreauthStripePi] = useState('');
   const [preauthExpiryDays, setPreauthExpiryDays] = useState('5');
   const [preauthNotes, setPreauthNotes] = useState('');
 
@@ -785,10 +786,21 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
           const amt = parseFloat(preauthAmount);
           if (isNaN(amt) || amt <= 0) throw new Error('Enter a valid hold amount');
           const days = parseInt(preauthExpiryDays, 10);
+          // Stripe holds: the PaymentIntent id is what ties the OP record back to
+          // the hold Stripe is actually carrying. Without it OP can't cancel the
+          // hold (Release needs the PI) AND the daily Stripe→OP pre-auth
+          // reconciler can't match the record, so it keeps alerting info@ about a
+          // hold that IS recorded. Be forgiving about which box it was pasted
+          // into — a `pi_...` in the auth-ref field counts.
+          const pastedPi = preauthStripePi.trim() || (preauthReference.trim().startsWith('pi_') ? preauthReference.trim() : '');
+          const stripePi = preauthMethod === 'stripe_gbp' ? pastedPi : '';
           await api.post(`/excess/${excess.id}/record-preauth`, {
             amount: amt,
             method: preauthMethod,
-            reference: preauthReference || null,
+            // Mirror the portal's own convention of storing the PI as the
+            // reference when there's no separate terminal auth code.
+            reference: preauthReference.trim() || stripePi || null,
+            stripe_payment_intent_id: stripePi || null,
             expires_in_days: isNaN(days) ? 5 : days,
             notes: preauthNotes || null,
           });
@@ -2080,6 +2092,25 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
                     </p>
                   )}
                 </div>
+                {preauthMethod === 'stripe_gbp' && (
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">
+                      Stripe PaymentIntent ID
+                    </label>
+                    <input
+                      type="text"
+                      value={preauthStripePi}
+                      onChange={(e) => setPreauthStripePi(e.target.value)}
+                      placeholder="pi_3ABC..."
+                      className="w-full text-sm border border-gray-300 rounded-md px-3 py-2 font-mono"
+                    />
+                    <p className="mt-1 text-xs text-gray-500">
+                      From the Stripe dashboard, or from the daily pre-auth alert email.
+                      Without it OP can't release or capture the hold, and the daily
+                      Stripe reconciler will keep flagging it as unrecorded.
+                    </p>
+                  </div>
+                )}
                 <div className="grid grid-cols-2 gap-2">
                   <div>
                     <label className="block text-xs font-medium text-gray-600 mb-1">Auth ref (optional)</label>
