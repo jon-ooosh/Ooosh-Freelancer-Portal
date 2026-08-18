@@ -8,6 +8,7 @@ import type {
   Job, PipelineStatus, Likelihood, HoldReason, ConfirmedMethod,
 } from '@shared/index';
 import { PIPELINE_STATUS_CONFIG, LOST_REASON_OPTIONS, PAUSED_REASON_OPTIONS, PERSON_ORG_ROLES } from '@shared/index';
+import { defaultRevisitDate, REVISIT_LEAD_DAYS_UNDER_MINIMUM } from '../lib/revisitDate';
 
 // Roles available for the "Linked organisations" picker on a job. These map
 // to `job_organisations.role` (VARCHAR(50), free-text). Keep aligned with the
@@ -553,12 +554,14 @@ function TransitionModal({
   isOpen,
   targetStatus,
   jobId,
+  hireStart,
   onConfirm,
   onCancel,
 }: {
   isOpen: boolean;
   targetStatus: PipelineStatus | null;
   jobId?: string;
+  hireStart?: string | null;
   onConfirm: (data: Record<string, unknown>) => void;
   onCancel: () => void;
 }) {
@@ -566,11 +569,34 @@ function TransitionModal({
   const [holdDetail, setHoldDetail] = useState('');
   const [setRevisit, setSetRevisit] = useState(false);
   const [revisitDate, setRevisitDate] = useState('');
+  // Staff has taken manual control of the revisit fields — stop re-defaulting them.
+  const [revisitTouched, setRevisitTouched] = useState(false);
   const [confirmedMethod, setConfirmedMethod] = useState<ConfirmedMethod>('deposit');
   const [lostReason, setLostReason] = useState('Price');
   const [lostDetail, setLostDetail] = useState('');
   const [note, setNote] = useState('');
   const [keepRequirementIds, setKeepRequirementIds] = useState<Set<string>>(new Set());
+
+  // This modal stays mounted between opens (it early-returns on !isOpen rather
+  // than being conditionally rendered), so state survives a close. Re-arm the
+  // auto-default each time it opens, otherwise one manual edit would suppress
+  // the default for every later pause until the page is reloaded.
+  useEffect(() => { if (isOpen) setRevisitTouched(false); }, [isOpen]);
+
+  // Mirrors JobDetailPage's StatusTransitionModal — "Under 4-day window" pauses
+  // pre-fill a revisit date a fortnight before the hire starts. Declared BEFORE
+  // the isOpen early-return so hook order stays stable across open/close.
+  const autoRevisit = defaultRevisitDate(hireStart);
+  useEffect(() => {
+    if (targetStatus !== 'paused' || revisitTouched) return;
+    if (holdReason === 'under_minimum' && autoRevisit) {
+      setSetRevisit(true);
+      setRevisitDate(autoRevisit);
+    } else {
+      setSetRevisit(false);
+      setRevisitDate('');
+    }
+  }, [targetStatus, holdReason, autoRevisit, revisitTouched]);
 
   if (!isOpen || !targetStatus) return null;
 
@@ -629,7 +655,7 @@ function TransitionModal({
                 <input
                   type="checkbox"
                   checked={setRevisit}
-                  onChange={(e) => setSetRevisit(e.target.checked)}
+                  onChange={(e) => { setRevisitTouched(true); setSetRevisit(e.target.checked); }}
                   className="rounded border-gray-300 text-ooosh-600 focus:ring-ooosh-500"
                 />
                 Set a revisit date?
@@ -641,10 +667,15 @@ function TransitionModal({
                 <input
                   type="date"
                   value={revisitDate}
-                  onChange={(e) => setRevisitDate(e.target.value)}
+                  onChange={(e) => { setRevisitTouched(true); setRevisitDate(e.target.value); }}
                   min={new Date().toISOString().split('T')[0]}
                   className="mt-2 w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
                 />
+              )}
+              {setRevisit && !revisitTouched && revisitDate === autoRevisit && autoRevisit && (
+                <p className="text-xs text-ooosh-600 mt-1">
+                  Defaulted to {REVISIT_LEAD_DAYS_UNDER_MINIMUM} days before the hire starts — change it if you'd rather come back sooner or later.
+                </p>
               )}
             </div>
           </div>
@@ -3094,6 +3125,7 @@ export default function PipelinePage() {
   const [transitionModal, setTransitionModal] = useState<{
     jobId: string;
     targetStatus: PipelineStatus;
+    hireStart?: string | null;
   } | null>(null);
   const [chaseModal, setChaseModal] = useState<Job | null>(null);
 
@@ -3238,7 +3270,7 @@ export default function PipelinePage() {
     if (job.pipeline_status === targetStatus) return;
 
     if (['paused', 'confirmed', 'lost'].includes(targetStatus)) {
-      setTransitionModal({ jobId: job.id, targetStatus });
+      setTransitionModal({ jobId: job.id, targetStatus, hireStart: job.job_date || job.out_date });
       return;
     }
 
@@ -3859,6 +3891,7 @@ export default function PipelinePage() {
         isOpen={!!transitionModal}
         targetStatus={transitionModal?.targetStatus || null}
         jobId={transitionModal?.jobId}
+        hireStart={transitionModal?.hireStart}
         onConfirm={handleTransitionConfirm}
         onCancel={() => setTransitionModal(null)}
       />
