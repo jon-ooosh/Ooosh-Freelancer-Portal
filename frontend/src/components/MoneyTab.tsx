@@ -1865,28 +1865,28 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   );
 }
 
-// Paperwork cell for a cost row on the Job Costs panel — the receipt thumb (or a
-// soft "no receipt" marker) plus a click-through to the cost itself on the Costs
-// hub. The link narrows the hub to the CAPTURE job (`c.job_id`), which for a
-// split-in row is a different job than the one we're looking at — that's where
-// the invoice and the recharge actually live.
-function CostPaperwork({ cost, onPreview }: { cost: JobCostLite; onPreview: (c: JobCostLite) => void }) {
-  const captureJobId = cost.job_id;
-  const hubHref = captureJobId
-    ? `/money/costs?view=all&job=${captureJobId}&cost=${cost.id}`
+// Deep-link to a cost on the Costs hub. Narrows the hub to the CAPTURE job
+// (`c.job_id`) — for a split-in row that's a different job than the one we're
+// looking at, and it's where the invoice and the recharge actually live. The
+// `job` filter also keeps the target row inside the hub's 200-row page cap.
+function costHubHref(cost: JobCostLite): string {
+  return cost.job_id
+    ? `/money/costs?view=all&job=${cost.job_id}&cost=${cost.id}`
     : `/money/costs?view=all&cost=${cost.id}`;
-  return (
-    <span className="flex items-center gap-1.5 shrink-0">
-      {cost.receipt_r2_key ? (
-        <ReceiptThumb cost={cost} size="sm" onOpen={() => onPreview(cost)} />
-      ) : (
-        <span className="text-[10px] text-gray-300 whitespace-nowrap" title="No receipt or invoice attached to this cost">
-          no receipt
-        </span>
-      )}
-      <a href={hubHref} title="Open this cost on the Costs hub" className="text-gray-300 hover:text-purple-600 text-xs">↗</a>
-    </span>
-  );
+}
+
+// Receipt cell for a cost row — the thumb (image / 📎, opens a lightbox) or a
+// soft marker when there's no paperwork attached. The click-through to the hub
+// lives on the row title instead: an arrow this size was too small to aim at.
+function CostReceiptCell({ cost, onPreview }: { cost: JobCostLite; onPreview: (c: JobCostLite) => void }) {
+  if (!cost.receipt_r2_key) {
+    return (
+      <span className="text-[10px] text-gray-300 whitespace-nowrap" title="No receipt or invoice attached to this cost">
+        no receipt
+      </span>
+    );
+  }
+  return <ReceiptThumb cost={cost} size="sm" onOpen={() => onPreview(cost)} />;
 }
 
 // Quoted-vs-actual variance + extra/recharge breakdown for a job's captured
@@ -2038,8 +2038,10 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
                 <li key={isSplit ? `a-${c.allocation_id || c.id}` : `c-${c.id}`} className="flex items-center justify-between text-sm gap-2">
                   <span className="text-gray-600 truncate min-w-0">
                     <span className="inline-block px-1.5 py-0.5 mr-1.5 text-[10px] font-medium bg-gray-100 text-gray-500 rounded align-middle">Quote</span>
-                    {c.supplier_name || c.description || c.category || 'Cost'}
-                    {c.invoice_number && <span className="ml-1.5 text-xs text-gray-400">#{c.invoice_number}</span>}
+                    <a href={costHubHref(c)} title="Open this cost on the Costs hub" className="hover:text-purple-700 hover:underline">
+                      {c.supplier_name || c.description || c.category || 'Cost'}
+                      {c.invoice_number && <span className="ml-1.5 text-xs text-gray-400">#{c.invoice_number}</span>}
+                    </a>
                     {isSplit && (
                       captureJobId ? (
                         <a href={`/jobs/${captureJobId}`} className="ml-1 text-xs text-purple-600 hover:underline"
@@ -2053,7 +2055,7 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
                   </span>
                   <span className="flex items-center gap-2 shrink-0">
                     <span className="text-gray-900">{m(num(c.amount_gross))}</span>
-                    <CostPaperwork cost={c} onPreview={setReceiptPreview} />
+                    <CostReceiptCell cost={c} onPreview={setReceiptPreview} />
                   </span>
                 </li>
               );
@@ -2080,13 +2082,15 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
               return (
                 <li key={isSplit ? `a-${c.allocation_id || c.id}` : `c-${c.id}`} className="flex items-center justify-between text-sm gap-2">
                   <span className="text-gray-600 truncate">
-                    {c.supplier_name || c.description || c.category || 'Cost'}
-                    {c.invoice_number && <span className="ml-1.5 text-xs text-gray-400">#{c.invoice_number}</span>}
+                    <a href={costHubHref(c)} title="Open this cost on the Costs hub" className="hover:text-purple-700 hover:underline">
+                      {c.supplier_name || c.description || c.category || 'Cost'}
+                      {c.invoice_number && <span className="ml-1.5 text-xs text-gray-400">#{c.invoice_number}</span>}
+                    </a>
                     {isSplit && <span className="ml-1 text-xs text-purple-600" title={`This job's share of a ${m(num(c.full_amount_gross))} cost split across jobs`}>· split ({m(num(c.full_amount_gross))} total)</span>}
                   </span>
                   <span className="flex items-center gap-2 shrink-0">
                     <span className="text-gray-900">{m(num(c.amount_gross))}</span>
-                    <CostPaperwork cost={c} onPreview={setReceiptPreview} />
+                    <CostReceiptCell cost={c} onPreview={setReceiptPreview} />
                     {!isSplit && c.recharge_mode !== 'none' && <RechargeStatusPill status={c.recharge_status} mode={c.recharge_mode} />}
                     {pending && (
                       <button onClick={() => setResolving(c)}
