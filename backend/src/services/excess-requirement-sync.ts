@@ -90,6 +90,14 @@ export async function syncExcessRequirementStatus(
              AND COALESCE(je.held_on_account, false) = false
              AND je.excess_status NOT IN
                ('reimbursed','fully_claimed','waived','rolled_over','not_required','released')
+             -- ...and there is actually money to resolve. A non-terminal record
+             -- with £0 taken+held (e.g. a top-N loser stuck at 'needed' because
+             -- the top-N wasn't recomputed after a van swap) has nothing to
+             -- reimburse or claim post-hire, so it must not block the card from
+             -- greening. "Did you collect it?" is a PRE-hire concern (the
+             -- dispatch gate / pre-hire coverage card own that); this post-hire
+             -- card is only about resolving money we actually hold.
+             AND COALESCE(je.excess_amount_taken, 0) + COALESCE(je.amount_held, 0) > 0
          ) AS resolved,
          EXISTS (SELECT 1 FROM job_excess je2 WHERE je2.job_id = $1) AS has_records
      ) rs

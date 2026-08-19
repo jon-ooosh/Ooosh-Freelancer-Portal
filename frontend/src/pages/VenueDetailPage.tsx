@@ -113,10 +113,6 @@ export default function VenueDetailPage() {
 
   return (
     <div>
-      <Link to="/venues" className="text-sm text-ooosh-600 hover:text-ooosh-700 mb-4 inline-block">
-        &larr; Back to Venues
-      </Link>
-
       {/* Header */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
         <div className="flex items-start justify-between">

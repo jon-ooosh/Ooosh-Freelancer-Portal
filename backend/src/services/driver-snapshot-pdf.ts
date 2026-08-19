@@ -257,24 +257,66 @@ export async function generateDriverSnapshot(data: DriverSnapshotData): Promise<
 }
 
 /**
+ * Canonical document key → accepted normalised match tokens.
+ *
+ * Normalisation (see `normaliseDocToken`) lowercases and strips every
+ * non-alphanumeric character, so British/American spelling and
+ * space/underscore/hyphen variants all collapse to the same token:
+ *   'Licence Front' | 'licence_front' | 'License Front' | 'license_front'
+ *   | 'licence-front'  →  'licencefront' / 'licensefront'
+ *   'POA 1' | 'poa1' | 'Proof of Address 1'  →  'poa1' / 'proofofaddress1'
+ *
+ * Mirrors the frontend's DOCUMENT_CATEGORIES fileLabels lists
+ * (frontend/src/pages/DriverDetailPage.tsx) + the Monday migration tags
+ * (backend/src/scripts/migrate-monday-driver-files.ts). The live
+ * hire-form / iDenfy upload path writes tags like `licence_front` and
+ * labels like `license_front` / `poa1`, which the old exact-string map
+ * silently skipped — so snapshots came out missing the licence + POAs
+ * (only passport/signature happened to match). Match on `tag` first, then
+ * fall back to `label`. Keep this in step with the frontend list.
+ */
+const DOC_MATCH_TOKENS: Record<string, string[]> = {
+  licenceFront: ['licencefront', 'licensefront'],
+  licenceBack: ['licenceback', 'licenseback'],
+  dvlaCheck: ['dvlacheck', 'dvlacheckcode', 'dvla'],
+  poa1: ['poa1', 'proofofaddress1', 'proofofaddress'],
+  poa2: ['poa2', 'proofofaddress2'],
+  passport: ['passport'],
+  signature: ['signature', 'sig'],
+};
+
+// token → doc key reverse lookup (exact match — so 'proofofaddress2'
+// resolves to poa2 and never falls into poa1's 'proofofaddress').
+const TOKEN_TO_DOC_KEY: Record<string, string> = Object.entries(DOC_MATCH_TOKENS).reduce(
+  (acc, [docKey, tokens]) => {
+    for (const t of tokens) acc[t] = docKey;
+    return acc;
+  },
+  {} as Record<string, string>,
+);
+
+function normaliseDocToken(s: string | undefined | null): string {
+  return (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+/**
+ * Resolve a file's doc key from its `tag` (preferred) or `label`.
+ * Returns null when neither matches a known document type.
+ */
+function resolveDocKey(file: { label?: string; tag?: string }): string | null {
+  const tagKey = TOKEN_TO_DOC_KEY[normaliseDocToken(file.tag)];
+  if (tagKey) return tagKey;
+  return TOKEN_TO_DOC_KEY[normaliseDocToken(file.label)] || null;
+}
+
+/**
  * Load document buffers from R2 for a driver's uploaded files.
  */
-export async function loadDriverDocuments(files: Array<{ label?: string; url: string }>): Promise<Record<string, Buffer | null>> {
+export async function loadDriverDocuments(files: Array<{ label?: string; tag?: string; url: string }>): Promise<Record<string, Buffer | null>> {
   const docs: Record<string, Buffer | null> = {};
-  const labelMap: Record<string, string> = {
-    'licence front': 'licenceFront',
-    'licence back': 'licenceBack',
-    'passport': 'passport',
-    'poa 1': 'poa1',
-    'proof of address 1': 'poa1',
-    'poa 2': 'poa2',
-    'proof of address 2': 'poa2',
-    'dvla check': 'dvlaCheck',
-    'signature': 'signature',
-  };
 
   for (const file of files) {
-    const key = labelMap[(file.label || '').toLowerCase()];
+    const key = resolveDocKey(file);
     if (!key || docs[key]) continue;  // Skip unknown labels or already loaded
 
     try {

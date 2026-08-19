@@ -6,6 +6,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import { api } from '../services/api';
+import { describePreauth } from '../lib/preauth';
 import type { JobExcess, ExcessStatus } from '../../../shared/types';
 
 interface OutstandingInvoice {
@@ -169,6 +170,40 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
   function handleClose() {
     if (madeChange) onUpdated();
     onClose();
+  }
+
+  // "Check hold status" — asks Stripe (or applies the card-machine window rule)
+  // for a held pre-auth's TRUE state and flips it to released if it's gone. This
+  // is what lets us show a binary held/released instead of a stale guess. If it
+  // resolves to released, close so the parent re-renders with the true state.
+  const [reconciling, setReconciling] = useState(false);
+  const [reconcileMsg, setReconcileMsg] = useState<string | null>(null);
+  async function handleCheckHoldStatus() {
+    setReconciling(true);
+    setReconcileMsg(null);
+    setError('');
+    try {
+      const resp = await api.post<{ data: unknown; reconcile: { changed: boolean; status: string; stripeStatus?: string } }>(
+        `/excess/${excess.id}/reconcile-preauth`, {}
+      );
+      const r = resp.reconcile;
+      if (r.changed || r.status === 'released') {
+        setMadeChange(true);
+        handleClose(); // parent refreshes → record now reads "Released"
+        return;
+      }
+      if (r.status === 'still_held') {
+        setReconcileMsg(`Stripe confirms the hold is still live${r.stripeStatus ? ` (${r.stripeStatus})` : ''} — capture is available if you're claiming.`);
+      } else if (r.status === 'unknown') {
+        setReconcileMsg('Couldn’t reach Stripe to confirm — open it in the Stripe dashboard, or try again shortly.');
+      } else {
+        setReconcileMsg('This hold is no longer active.');
+      }
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Failed to check hold status');
+    } finally {
+      setReconciling(false);
+    }
   }
 
   // Payment form — uses absolute "total collected" semantics (not delta-add).
@@ -340,6 +375,7 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
   const [preauthAmount, setPreauthAmount] = useState(requiredAmount > 0 ? requiredAmount.toFixed(2) : '');
   const [preauthMethod, setPreauthMethod] = useState('worldpay');
   const [preauthReference, setPreauthReference] = useState('');
+  const [preauthStripePi, setPreauthStripePi] = useState('');
   const [preauthExpiryDays, setPreauthExpiryDays] = useState('5');
   const [preauthNotes, setPreauthNotes] = useState('');
 
@@ -750,10 +786,21 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
           const amt = parseFloat(preauthAmount);
           if (isNaN(amt) || amt <= 0) throw new Error('Enter a valid hold amount');
           const days = parseInt(preauthExpiryDays, 10);
+          // Stripe holds: the PaymentIntent id is what ties the OP record back to
+          // the hold Stripe is actually carrying. Without it OP can't cancel the
+          // hold (Release needs the PI) AND the daily Stripe→OP pre-auth
+          // reconciler can't match the record, so it keeps alerting info@ about a
+          // hold that IS recorded. Be forgiving about which box it was pasted
+          // into — a `pi_...` in the auth-ref field counts.
+          const pastedPi = preauthStripePi.trim() || (preauthReference.trim().startsWith('pi_') ? preauthReference.trim() : '');
+          const stripePi = preauthMethod === 'stripe_gbp' ? pastedPi : '';
           await api.post(`/excess/${excess.id}/record-preauth`, {
             amount: amt,
             method: preauthMethod,
-            reference: preauthReference || null,
+            // Mirror the portal's own convention of storing the PI as the
+            // reference when there's no separate terminal auth code.
+            reference: preauthReference.trim() || stripePi || null,
+            stripe_payment_intent_id: stripePi || null,
             expires_in_days: isNaN(days) ? 5 : days,
             notes: preauthNotes || null,
           });
@@ -934,30 +981,50 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
               </span>
             </div>
           </div>
-          {/* Pre-auth hold: show expiry countdown so staff capture or release before
-              Stripe / the acquirer auto-voids at the 5-day mark. */}
-          {excess.excess_status === 'pre_auth' && excess.held_expires_at && (
-            <div className="mt-3 px-3 py-2 bg-sky-50 border border-sky-200 rounded-md">
-              <p className="text-xs text-sky-800">
-                {(() => {
-                  const expires = new Date(excess.held_expires_at);
-                  const daysLeft = Math.ceil((expires.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
-                  const dateStr = expires.toLocaleDateString('en-GB');
-                  if (daysLeft <= 0) return `Hold expired ${dateStr} — likely already auto-released by Stripe. Verify before capturing.`;
-                  if (daysLeft === 1) return `Hold expires tomorrow (${dateStr}) — capture or release today.`;
-                  return `Hold expires in ${daysLeft} days (${dateStr}). Capture what you need or release the rest before it auto-voids.`;
-                })()}
-              </p>
-            </div>
-          )}
-          {excess.excess_status === 'released' && (Number(excess.amount_released || 0) > 0) && (
-            <div className="mt-3 px-3 py-2 bg-gray-50 border border-gray-200 rounded-md">
-              <p className="text-xs text-gray-600">
-                £{Number(excess.amount_released).toFixed(2)} released without capture
-                {excess.released_at && ` on ${new Date(excess.released_at).toLocaleDateString('en-GB')}`}.
-              </p>
-            </div>
-          )}
+          {/* Pre-auth state — wording shared with the Overview card + Money tab
+              (lib/preauth.ts) so the surfaces can't contradict each other. Binary
+              held/released; the "Check hold status" button resolves a stuck
+              past-expiry hold to its true state via Stripe. The Stripe deep-link
+              is the manual backstop for eyeballing the payment directly. */}
+          {(excess.excess_status === 'pre_auth' || excess.excess_status === 'released') && (() => {
+            const d = describePreauth(excess);
+            if (d.tone === 'none') return null;
+            if (d.tone === 'released' && d.amount <= 0) return null;
+            const box = d.isHold ? 'bg-sky-50 border-sky-200' : 'bg-gray-50 border-gray-200';
+            const text = d.isHold ? 'text-sky-800' : 'text-gray-600';
+            return (
+              <div className={`mt-3 px-3 py-2 rounded-md border ${box}`}>
+                <p className={`text-xs ${text}`}>
+                  <span className="font-medium">{d.headline}</span> {d.detail}
+                </p>
+                {(d.isHold || d.stripeUrl) && (
+                  <div className="mt-2 flex items-center gap-4 flex-wrap">
+                    {d.isHold && (
+                      <button
+                        type="button"
+                        onClick={handleCheckHoldStatus}
+                        disabled={reconciling}
+                        className="text-xs font-medium text-sky-700 hover:text-sky-900 underline disabled:opacity-50"
+                      >
+                        {reconciling ? 'Checking…' : 'Check hold status'}
+                      </button>
+                    )}
+                    {d.stripeUrl && (
+                      <a
+                        href={d.stripeUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-xs font-medium text-sky-700 hover:text-sky-900 underline"
+                      >
+                        View in Stripe ↗
+                      </a>
+                    )}
+                  </div>
+                )}
+                {reconcileMsg && <p className="mt-1 text-xs text-gray-600">{reconcileMsg}</p>}
+              </div>
+            );
+          })()}
           {excess.receipt_required && !excess.receipt_uploaded_at && (
             <div className="mt-3 px-3 py-2 bg-amber-50 border border-amber-200 rounded-md">
               <p className="text-xs text-amber-800">
@@ -2025,6 +2092,25 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
                     </p>
                   )}
                 </div>
+                {preauthMethod === 'stripe_gbp' && (
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">
+                      Stripe PaymentIntent ID
+                    </label>
+                    <input
+                      type="text"
+                      value={preauthStripePi}
+                      onChange={(e) => setPreauthStripePi(e.target.value)}
+                      placeholder="pi_3ABC..."
+                      className="w-full text-sm border border-gray-300 rounded-md px-3 py-2 font-mono"
+                    />
+                    <p className="mt-1 text-xs text-gray-500">
+                      From the Stripe dashboard, or from the daily pre-auth alert email.
+                      Without it OP can't release or capture the hold, and the daily
+                      Stripe reconciler will keep flagging it as unrecorded.
+                    </p>
+                  </div>
+                )}
                 <div className="grid grid-cols-2 gap-2">
                   <div>
                     <label className="block text-xs font-medium text-gray-600 mb-1">Auth ref (optional)</label>

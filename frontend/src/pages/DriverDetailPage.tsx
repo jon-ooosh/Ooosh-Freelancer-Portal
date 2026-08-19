@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { deriveDriverStatus } from '../lib/driverStatus';
 import { hasManagerRole } from '../lib/roles';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { api } from '../services/api';
@@ -51,6 +52,14 @@ interface DriverDetail {
   licence_restrictions: string | null;
   licence_next_check_due: string | null;
   date_passed_test: string | null;
+  // FROM dates — what staff and the hire form actually set (migration 192).
+  poa1_doc_date: string | null;
+  poa2_doc_date: string | null;
+  passport_check_date: string | null;
+  passport_expiry: string | null;
+  // Derived expiry windows, maintained by services/driver-validity.ts on every
+  // write. Display only — never edit these directly, edit the FROM date.
+  licence_check_valid_until: string | null;
   poa1_valid_until: string | null;
   poa2_valid_until: string | null;
   dvla_valid_until: string | null;
@@ -193,57 +202,78 @@ function daysUntil(d: string | null): number | null {
  * - DVLA: 30 days from DVLA check date
  * - Passport: 30 days from iDenfy check (non-UK) or passport_valid_until
  */
-function computeOooshValidity(driver: DriverDetail): {
-  licence: string | null;
-  licenceCapped: boolean;
-  dvla: string | null;
-  passport: string | null;
-  isUkDriver: boolean;
-} {
-  function addDays(dateStr: string | null, days: number): string | null {
-    if (!dateStr) return null;
-    try {
-      const d = new Date(dateStr);
-      if (isNaN(d.getTime())) return null;
-      d.setDate(d.getDate() + days);
-      return d.toISOString().split('T')[0];
-    } catch { return null; }
-  }
+/**
+ * One row of the Document Validity card: the FROM date staff set, and the
+ * expiry OP derived from it.
+ *
+ * There is deliberately no arithmetic here. Every window is computed once, in
+ * backend/src/services/driver-validity.ts, and stored on the driver row. This
+ * page used to re-implement the rules locally, which is how it came to render a
+ * confident green "16 Nov 2026" for a driver whose iDenfy check had been DENIED
+ * and who had no licence, no name and no files (manjagoproduction@, Aug 2026) —
+ * the backend refused to trust that record, the page didn't know to.
+ */
+interface ValidityRow {
+  key: string;
+  label: string;
+  /** Column holding the FROM date — the editable field. */
+  fromField: string;
+  fromLabel: string;
+  /** Derived expiry, read straight off the driver row. */
+  until: string | null;
+  /** The document's own expiry, where it has one. Also editable. */
+  docExpiryField?: string;
+  docExpiryLabel?: string;
+  /** Shown when there is no derived window, in place of a misleading date. */
+  emptyHint?: string;
+}
 
-  function minDate(a: string | null, b: string | null): string | null {
-    if (!a) return b;
-    if (!b) return a;
-    return new Date(a) < new Date(b) ? a : b;
-  }
-
-  // UK driver: licence issued by DVLA OR licence_issue_country = GB
-  const isUkDriver = driver.licence_issued_by === 'DVLA' || driver.licence_issue_country === 'GB';
-
-  // Licence: 90d from iDenfy check, capped at actual licence expiry
-  const licenceWindow = addDays(driver.idenfy_check_date, 90);
-  const licenceActual = driver.licence_valid_to || null;
-  let licence: string | null = licenceWindow;
-  let licenceCapped = false;
-  if (licenceWindow && licenceActual) {
-    const capped = minDate(licenceWindow, licenceActual);
-    licenceCapped = capped !== licenceWindow;
-    licence = capped;
-  } else if (!licenceWindow && licenceActual) {
-    // No iDenfy check yet — fall back to licence_next_check_due if set
-    licence = driver.licence_next_check_due || null;
-  }
-
-  // DVLA: 30d from check date
-  const dvla = addDays(driver.dvla_check_date, 30);
-
-  // Passport: always show stored value if set (UK drivers need it for address mismatch).
-  // For non-UK drivers, auto-compute 30d from iDenfy if no stored value.
-  let passport: string | null = driver.passport_valid_until || null;
-  if (!passport && !isUkDriver) {
-    passport = addDays(driver.idenfy_check_date, 30);
-  }
-
-  return { licence, licenceCapped, dvla, passport, isUkDriver };
+function buildValidityRows(driver: DriverDetail): ValidityRow[] {
+  const licenceUntrusted = !!driver.idenfy_check_date && !driver.licence_issued_by?.trim();
+  return [
+    {
+      key: 'licence',
+      label: 'Licence',
+      fromField: 'idenfy_check_date',
+      fromLabel: 'Identity checked',
+      until: driver.licence_check_valid_until,
+      docExpiryField: 'licence_valid_to',
+      docExpiryLabel: 'Licence expires',
+      emptyHint: licenceUntrusted
+        ? 'Identity check recorded but no licence details came back — needs re-verification'
+        : undefined,
+    },
+    {
+      key: 'dvla',
+      label: 'DVLA check',
+      fromField: 'dvla_check_date',
+      fromLabel: 'Checked',
+      until: driver.dvla_valid_until,
+    },
+    {
+      key: 'poa1',
+      label: `Proof of address 1${driver.poa1_provider ? ` (${driver.poa1_provider})` : ''}`,
+      fromField: 'poa1_doc_date',
+      fromLabel: 'Document dated',
+      until: driver.poa1_valid_until,
+    },
+    {
+      key: 'poa2',
+      label: `Proof of address 2${driver.poa2_provider ? ` (${driver.poa2_provider})` : ''}`,
+      fromField: 'poa2_doc_date',
+      fromLabel: 'Document dated',
+      until: driver.poa2_valid_until,
+    },
+    {
+      key: 'passport',
+      label: 'Passport',
+      fromField: 'passport_check_date',
+      fromLabel: 'Checked',
+      until: driver.passport_valid_until,
+      docExpiryField: 'passport_expiry',
+      docExpiryLabel: 'Passport expires',
+    },
+  ];
 }
 
 // Normalise address for comparison — strip whitespace, punctuation, lowercase
@@ -260,26 +290,6 @@ function addressesDiffer(a: string, b: string): boolean {
  * Six statuses: In Progress / Approved / Expired / Refer to Insurers / Referred & Waiting / Not Approved
  * "Expired" = one or more documents past its validity window (renewable).
  */
-function deriveDriverStatus(driver: { requires_referral: boolean; referral_status: string | null; licence_valid_to: string | null; dvla_valid_until?: string | null; poa1_valid_until: string | null; signature_date: string | null; licence_number: string | null; dvla_check_date: string | null; email: string | null }): { label: string; colour: string } {
-  if (driver.requires_referral) {
-    if (driver.referral_status === 'approved') return { label: 'Approved', colour: 'bg-green-100 text-green-700' };
-    if (driver.referral_status === 'waived') return { label: 'Approved (Waived)', colour: 'bg-green-100 text-green-700' };
-    if (driver.referral_status === 'declined') return { label: 'Not Approved', colour: 'bg-red-100 text-red-700' };
-    if (driver.referral_status === 'pending') return { label: 'Referred & Waiting', colour: 'bg-amber-100 text-amber-700' };
-    return { label: 'Refer to Insurers', colour: 'bg-red-100 text-red-700' };
-  }
-  if (!driver.signature_date) {
-    return { label: 'In Progress', colour: 'bg-blue-100 text-blue-700' };
-  }
-  // "Expired" fires only when a date is present AND in the past. Missing
-  // dates (iDenfy often doesn't extract licence_valid_to, for instance)
-  // are NOT treated as expired — per-doc pills below surface the gaps.
-  if (isDateExpired(driver.licence_valid_to) || isDateExpired(driver.poa1_valid_until)) {
-    return { label: 'Expired', colour: 'bg-amber-100 text-amber-700' };
-  }
-  return { label: 'Approved', colour: 'bg-green-100 text-green-700' };
-}
-
 function statusBadge(status: string) {
   const colours: Record<string, string> = {
     soft: 'bg-gray-100 text-gray-700',
@@ -467,11 +477,13 @@ export default function DriverDetailPage() {
       date_passed_test: toInputDate(driver.date_passed_test),
       dvla_check_code: driver.dvla_check_code || '',
       dvla_check_date: toInputDate(driver.dvla_check_date),
-      dvla_valid_until: toInputDate(driver.dvla_valid_until),
       idenfy_check_date: toInputDate(driver.idenfy_check_date),
-      poa1_valid_until: toInputDate(driver.poa1_valid_until),
-      poa2_valid_until: toInputDate(driver.poa2_valid_until),
-      passport_valid_until: toInputDate(driver.passport_valid_until),
+      // FROM dates — the editable inputs. The *_valid_until columns are derived
+      // server-side on save, so they are deliberately NOT seeded here.
+      poa1_doc_date: toInputDate(driver.poa1_doc_date),
+      poa2_doc_date: toInputDate(driver.poa2_doc_date),
+      passport_check_date: toInputDate(driver.passport_check_date),
+      passport_expiry: toInputDate(driver.passport_expiry),
       referral_notes: driver.referral_notes || '',
       // Insurance questionnaire
       has_disability: driver.has_disability,
@@ -584,7 +596,10 @@ export default function DriverDetailPage() {
             </span>
           </div>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap justify-end gap-2">
+          {!editing && (
+            <SnapshotPdfButton driverId={driver.id} driverName={driver.full_name} />
+          )}
           {!editing && canEdit && (
             <button
               onClick={startEditing}
@@ -1102,12 +1117,6 @@ function ReferralPanel({ driver, onDriverUpdate }: { driver: DriverDetail; onDri
           >
             Resolve Referral
           </button>
-          <SnapshotPdfButton driverId={driver.id} driverName={driver.full_name} />
-        </div>
-      )}
-      {isResolved && (
-        <div className="flex gap-2 mt-2">
-          <SnapshotPdfButton driverId={driver.id} driverName={driver.full_name} />
         </div>
       )}
 
@@ -1267,29 +1276,6 @@ function DetailsTab({
     );
   };
 
-  const validityField = (label: string, key: string, providerKey?: string) => {
-    const providerLabel = providerKey ? (driver as any)[providerKey] : null;
-    const fullLabel = providerLabel ? `${label} (${providerLabel})` : label;
-    if (editing) {
-      return (
-        <div>
-          <label className="block text-xs text-gray-500 mb-1">{fullLabel}</label>
-          <input
-            type="date"
-            value={editData[key] || ''}
-            onChange={(e) => setEditData({ ...editData, [key]: e.target.value })}
-            className="w-full rounded border border-gray-300 px-2 py-1 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-          />
-        </div>
-      );
-    }
-    return (
-      <div>
-        <dt className="text-xs text-gray-400 mb-1">{fullLabel}</dt>
-        <dd><ValidityPill date={(driver as any)[key]} /></dd>
-      </div>
-    );
-  };
 
   const homeAddress = driver.address_full ||
     [driver.address_line1, driver.address_line2, driver.city, driver.postcode].filter(Boolean).join(', ');
@@ -1335,65 +1321,76 @@ function DetailsTab({
         </div>
       </div>
 
-      {/* Document Validity — Ooosh acceptance windows, not raw doc dates */}
+      {/* Document Validity — one FROM date in, OP-derived expiry out */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-        <h3 className="text-sm font-semibold text-gray-700 mb-4">Document Validity</h3>
-        <p className="text-xs text-gray-400 mb-3">Ooosh acceptance windows — expiry triggers a renewal request via the hire form.</p>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          {/* Licence: 90 days from iDenfy check, capped at actual licence expiry */}
-          {(() => {
-            const computed = computeOooshValidity(driver);
-            if (editing) {
-              return (
-                <>
-                  <div>
-                    <label className="block text-xs text-gray-500 mb-1">Licence (90d from check)</label>
-                    <input type="date" value={editData.idenfy_check_date || ''} onChange={(e) => setEditData({ ...editData, idenfy_check_date: e.target.value })} className="w-full rounded border border-gray-300 px-2 py-1 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500" />
-                    {computed.licenceCapped && (
-                      <span className="block text-[10px] text-amber-600 mt-0.5">Capped by licence expiry {formatDate(driver.licence_valid_to)}</span>
+        <h3 className="text-sm font-semibold text-gray-700 mb-1">Document Validity</h3>
+        <p className="text-xs text-gray-400 mb-4">
+          Enter the date <strong>on the document</strong> (or the day the check was run) — Ooosh
+          works out when it lapses. Expiry triggers a renewal request via the hire form.
+        </p>
+        <div className="space-y-2">
+          {buildValidityRows(driver).map((row) => (
+            <div
+              key={row.key}
+              className="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_auto] gap-2 sm:gap-4 items-center py-2 border-b border-gray-100 last:border-0"
+            >
+              <div className="min-w-0">
+                <div className="text-sm text-gray-900">{row.label}</div>
+                {editing ? (
+                  <div className="flex flex-wrap gap-3 mt-1.5">
+                    <label className="block">
+                      <span className="block text-[11px] text-gray-500 mb-0.5">{row.fromLabel}</span>
+                      <input
+                        type="date"
+                        value={editData[row.fromField] || ''}
+                        onChange={(e) => setEditData({ ...editData, [row.fromField]: e.target.value })}
+                        className="rounded border border-gray-300 px-2 py-1 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                      />
+                    </label>
+                    {row.docExpiryField && (
+                      <label className="block">
+                        <span className="block text-[11px] text-gray-500 mb-0.5">{row.docExpiryLabel}</span>
+                        <input
+                          type="date"
+                          value={editData[row.docExpiryField] || ''}
+                          onChange={(e) => setEditData({ ...editData, [row.docExpiryField!]: e.target.value })}
+                          className="rounded border border-gray-300 px-2 py-1 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                        />
+                      </label>
                     )}
                   </div>
-                  <div>
-                    <label className="block text-xs text-gray-500 mb-1">DVLA Check (30d from check)</label>
-                    <input type="date" value={editData.dvla_check_date || ''} onChange={(e) => setEditData({ ...editData, dvla_check_date: e.target.value })} className="w-full rounded border border-gray-300 px-2 py-1 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500" />
+                ) : (
+                  <div className="text-xs text-gray-500 mt-0.5">
+                    {(driver as unknown as Record<string, string | null>)[row.fromField]
+                      ? `${row.fromLabel} ${formatDate((driver as unknown as Record<string, string | null>)[row.fromField])}`
+                      : `${row.fromLabel} — not recorded`}
+                    {row.docExpiryField &&
+                      (driver as unknown as Record<string, string | null>)[row.docExpiryField] && (
+                        <> · {row.docExpiryLabel} {formatDate((driver as unknown as Record<string, string | null>)[row.docExpiryField!])}</>
+                      )}
                   </div>
-                  {validityField(`POA 1${editData.poa1_provider ? ` (${editData.poa1_provider})` : ''} (90d from doc)`, 'poa1_valid_until', undefined)}
-                  {validityField(`POA 2${editData.poa2_provider ? ` (${editData.poa2_provider})` : ''} (90d from doc)`, 'poa2_valid_until', undefined)}
-                  {validityField('Passport', 'passport_valid_until')}
-                </>
-              );
-            }
-            return (
-              <>
-                <div>
-                  <dt className="text-xs text-gray-400 mb-1">Licence (90d from check)</dt>
-                  <dd>
-                    <ValidityPill date={computed.licence} />
-                    {computed.licenceCapped && (
-                      <span className="block text-[10px] text-amber-600 mt-0.5">Capped by licence expiry {formatDate(driver.licence_valid_to)}</span>
-                    )}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-xs text-gray-400 mb-1">DVLA Check (30d from check)</dt>
-                  <dd><ValidityPill date={computed.dvla} /></dd>
-                </div>
-                <div>
-                  <dt className="text-xs text-gray-400 mb-1">POA 1{driver.poa1_provider ? ` (${driver.poa1_provider})` : ''} (90d from doc)</dt>
-                  <dd><ValidityPill date={driver.poa1_valid_until} /></dd>
-                </div>
-                <div>
-                  <dt className="text-xs text-gray-400 mb-1">POA 2{driver.poa2_provider ? ` (${driver.poa2_provider})` : ''} (90d from doc)</dt>
-                  <dd><ValidityPill date={driver.poa2_valid_until} /></dd>
-                </div>
-                <div>
-                  <dt className="text-xs text-gray-400 mb-1">Passport{!computed.isUkDriver ? ' (30d from check)' : ''}</dt>
-                  <dd><ValidityPill date={computed.passport} /></dd>
-                </div>
-              </>
-            );
-          })()}
+                )}
+              </div>
+              <div className="sm:text-right">
+                {row.until ? (
+                  <ValidityPill date={row.until} />
+                ) : (
+                  <span className="text-xs text-gray-400">Not set</span>
+                )}
+                {!row.until && row.emptyHint && (
+                  <div className="text-[11px] text-amber-600 mt-0.5 sm:max-w-[16rem]">{row.emptyHint}</div>
+                )}
+              </div>
+            </div>
+          ))}
         </div>
+        {editing && (
+          <p className="text-[11px] text-gray-400 mt-3">
+            Expiry dates are calculated on save — licence 90 days from the identity check
+            (capped at the licence&rsquo;s own expiry), DVLA and passport 30 days, proof of
+            address 90 days from the document date.
+          </p>
+        )}
       </div>
 
       {/* Addresses */}

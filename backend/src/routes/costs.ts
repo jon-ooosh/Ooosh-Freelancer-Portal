@@ -14,6 +14,7 @@ import { z } from 'zod';
 import multer from 'multer';
 import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
+import { resolveRemittanceContact, getCostForRemittance, sendRemittance } from '../services/remittance';
 
 const router = Router();
 router.use(authenticate);
@@ -245,7 +246,14 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         CONCAT(up.first_name, ' ', up.last_name) AS uploaded_by_name,
         j.hh_job_number, j.job_name,
         fv.reg AS vehicle_reg,
-        (SELECT COUNT(*)::int FROM cost_allocations a WHERE a.cost_id = c.id) AS allocation_count
+        (SELECT COUNT(*)::int FROM cost_allocations a WHERE a.cost_id = c.id) AS allocation_count,
+        (SELECT COALESCE(json_agg(json_build_object(
+                  'job_id', a.job_id, 'hh_job_number', aj.hh_job_number,
+                  'job_name', aj.job_name, 'amount', a.amount
+                ) ORDER BY a.created_at), '[]'::json)
+           FROM cost_allocations a
+           LEFT JOIN jobs aj ON aj.id = a.job_id
+          WHERE a.cost_id = c.id) AS allocation_jobs
       FROM costs c
       LEFT JOIN users u   ON u.id = c.uploaded_by
       LEFT JOIN people up ON up.id = u.person_id
@@ -317,13 +325,77 @@ async function listBy(column: string, value: string, res: Response, extra?: Reco
   res.json({ data: result.rows, outstanding, ...(extra || {}) });
 }
 
+// A job's cost figure is ALLOCATION-AWARE (the single read that honours the
+// cost_allocations attribution layer — see docs/COST-CAPTURE-RECHARGE-SPEC.md).
+//   (A) costs captured on this job with NO allocations → full amount_gross
+//   (B) allocations TO this job (cost captured anywhere) → the allocation amount
+// A cost that HAS allocations is attributed purely by its allocations, so it
+// only surfaces here via (B) — never both. This prevents the double-count that
+// let a split £150 invoice still read as £150 on its capture job while nothing
+// landed on the other job (the bug this fixes). The remainder of an
+// under-allocated cost (allocations summing to less than gross) is unattributed
+// "our cost" and correctly surfaces on no job.
+//
+// Each row's `amount_gross` is REPLACED with this job's effective share so every
+// downstream consumer (MoneyTab JobCostsPanel, capture-modal jobSummary) works
+// unchanged. `full_amount_gross` keeps the true cost total; `is_allocation`
+// flags a split-in row (rendered distinctly + no recharge affordance — recharge
+// stays on the cost's capture job).
 router.get('/by-job/:jobId', async (req: AuthRequest, res: Response) => {
   try {
     const jobId = String(req.params.jobId);
-    // Surface the job's recharge-running-costs flag so the capture modal can
-    // default new running-cost costs to recharge + show the hint.
     const jf = await query('SELECT recharge_running_costs FROM jobs WHERE id = $1', [jobId]);
-    await listBy('job_id', jobId, res, { recharge_running_costs: jf.rows[0]?.recharge_running_costs ?? false });
+
+    const result = await query(
+      `SELECT c.*, CONCAT(up.first_name, ' ', up.last_name) AS uploaded_by_name,
+              capj.hh_job_number AS capture_hh_job_number,
+              NULL::numeric AS alloc_amount, NULL::boolean AS alloc_recharge,
+              NULL::text AS alloc_notes, NULL::uuid AS allocation_id, false AS is_allocation
+         FROM costs c
+         LEFT JOIN users u ON u.id = c.uploaded_by
+         LEFT JOIN people up ON up.id = u.person_id
+         LEFT JOIN jobs capj ON capj.id = c.job_id
+        WHERE c.job_id = $1
+          AND NOT EXISTS (SELECT 1 FROM cost_allocations a WHERE a.cost_id = c.id)
+       UNION ALL
+       SELECT c.*, CONCAT(up.first_name, ' ', up.last_name) AS uploaded_by_name,
+              capj.hh_job_number AS capture_hh_job_number,
+              a.amount AS alloc_amount, a.recharge AS alloc_recharge,
+              a.notes AS alloc_notes, a.id AS allocation_id, true AS is_allocation
+         FROM cost_allocations a
+         JOIN costs c ON c.id = a.cost_id
+         LEFT JOIN users u ON u.id = c.uploaded_by
+         LEFT JOIN people up ON up.id = u.person_id
+         LEFT JOIN jobs capj ON capj.id = c.job_id
+        WHERE a.job_id = $1
+       ORDER BY created_at DESC`,
+      [jobId],
+    );
+
+    const rows = result.rows.map((r) => {
+      const fullGross = r.amount_gross;
+      const effective = r.is_allocation ? r.alloc_amount : r.amount_gross;
+      return {
+        ...r,
+        amount_gross: effective,        // this job's share (drives all sums)
+        full_amount_gross: fullGross,   // the cost's true total
+        allocation_recharge: r.alloc_recharge,
+        allocation_notes: r.alloc_notes,
+      };
+    });
+
+    // Outstanding (close-out flag) is computed over costs genuinely captured
+    // against this job — allocation-in rows are another job's payable, tracked
+    // there. Preserves pre-allocation behaviour for the common (unsplit) case.
+    const outstanding = rows.filter(
+      (r) => !r.is_allocation && (
+        r.status !== 'resolved'
+        || (r.recharge_mode !== 'none' && (r.recharge_status ?? 'pending') === 'pending')
+        || r.payment_status !== 'paid'
+      ),
+    ).length;
+
+    res.json({ data: rows, outstanding, recharge_running_costs: jf.rows[0]?.recharge_running_costs ?? false });
   }
   catch (err) { console.error('[costs] by-job error:', err); res.status(500).json({ error: 'Internal server error' }); }
 });
@@ -1089,6 +1161,39 @@ router.post('/:id/pay', authorize(...ADMIN_ONLY), async (req: AuthRequest, res: 
   }
 });
 
+// ── Remittance advice ───────────────────────────────────────────────────────
+// Optional courtesy email confirming a bill/reimbursement has been (or will be)
+// paid. Decoupled from /pay — a bad email must never block/unwind a payment.
+
+// Resolve the payee + address for pre-filling the mark-paid modal's tickbox.
+router.get('/:id/remittance-contact', authorize(...ADMIN_ONLY), async (req: AuthRequest, res: Response) => {
+  try {
+    const cost = await getCostForRemittance(req.params.id as string);
+    if (!cost) { res.status(404).json({ error: 'Cost not found' }); return; }
+    const contact = await resolveRemittanceContact(cost);
+    res.json({ data: contact });
+  } catch (err) {
+    console.error('[costs] remittance-contact error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+const remittanceSchema = z.object({ email: z.string().trim().email().max(200) });
+
+router.post('/:id/send-remittance', authorize(...ADMIN_ONLY), async (req: AuthRequest, res: Response) => {
+  try {
+    const parse = remittanceSchema.safeParse(req.body ?? {});
+    if (!parse.success) { res.status(400).json({ error: 'A valid recipient email is required' }); return; }
+    const result = await sendRemittance(req.params.id as string, parse.data.email);
+    if (!result.ok) { res.status(502).json({ error: result.error || 'Send failed' }); return; }
+    await audit(req.user!.id, req.params.id as string, 'remittance_sent', null, { email: parse.data.email });
+    res.json({ data: { sent: true, email: parse.data.email } });
+  } catch (err) {
+    console.error('[costs] send-remittance error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // ── Allocations (bundled invoice split) ─────────────────────────────────────
 // Replaces all allocations for a cost in one transaction.
 
@@ -1098,8 +1203,24 @@ router.put('/:id/allocations', authorize(...STAFF_ROLES), async (req: AuthReques
     if (!parse.success) { res.status(400).json({ error: 'Invalid input', issues: parse.error.issues }); return; }
     const { allocations } = parse.data;
 
-    const exists = await query('SELECT id FROM costs WHERE id = $1', [req.params.id]);
+    const exists = await query('SELECT id, amount_gross FROM costs WHERE id = $1', [req.params.id]);
     if (!exists.rows.length) { res.status(404).json({ error: 'Cost not found' }); return; }
+
+    // Attribution is OP-only and OPTIONAL — it may leave a remainder unallocated
+    // ("our cost"), so allocations summing to LESS than the cost total is fine.
+    // Only OVER-allocation is rejected: you can't attribute more than the cost.
+    const gross = Number(exists.rows[0].amount_gross ?? 0);
+    const allocated = allocations.reduce((s, a) => s + Number(a.amount || 0), 0);
+    if (allocated > gross + 0.01) {
+      res.status(400).json({
+        error: `Allocated £${allocated.toFixed(2)} exceeds the cost total £${gross.toFixed(2)}. Reduce the split — you can't attribute more than the cost.`,
+      });
+      return;
+    }
+    if (allocations.some((a) => !(Number(a.amount) > 0))) {
+      res.status(400).json({ error: 'Every line needs an amount greater than zero.' });
+      return;
+    }
 
     await query('BEGIN');
     try {

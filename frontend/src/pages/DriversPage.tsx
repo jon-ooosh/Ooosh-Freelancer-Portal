@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { deriveDriverStatus } from '../lib/driverStatus';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
 import CalculatedExcessEditModal from '../components/CalculatedExcessEditModal';
@@ -58,14 +59,6 @@ interface DriversResponse {
 type StatusKey = 'in_progress' | 'approved' | 'expired' | 'referred_waiting' | 'refer_insurers' | 'not_approved';
 type SortKey = 'last_activity' | 'name' | 'dvla_expiring' | 'points_desc';
 
-function isDateExpired(d: string | null): boolean {
-  if (!d) return false;
-  try {
-    return new Date(d) < new Date();
-  } catch {
-    return false;
-  }
-}
 
 function relativeTime(iso: string | null): string {
   if (!iso) return '—';
@@ -88,40 +81,6 @@ function relativeTime(iso: string | null): string {
   } catch {
     return '—';
   }
-}
-
-/**
- * Unified driver status — single source of truth.
- * Mirror of the SQL CASE in backend/src/routes/drivers.ts list endpoint;
- * keep in sync if the status rules change.
- */
-function deriveDriverStatus(driver: DriverListItem): { label: string; colour: string } {
-  if (driver.requires_referral) {
-    if (driver.referral_status === 'approved') {
-      return { label: 'Approved', colour: 'bg-green-100 text-green-700' };
-    }
-    if (driver.referral_status === 'waived') {
-      return { label: 'Approved (Waived)', colour: 'bg-green-100 text-green-700' };
-    }
-    if (driver.referral_status === 'declined') {
-      return { label: 'Not Approved', colour: 'bg-red-100 text-red-700' };
-    }
-    if (driver.referral_status === 'pending') {
-      return { label: 'Referred & Waiting', colour: 'bg-amber-100 text-amber-700' };
-    }
-    return { label: 'Refer to Insurers', colour: 'bg-red-100 text-red-700' };
-  }
-  if (!driver.signature_date) {
-    return { label: 'In Progress', colour: 'bg-blue-100 text-blue-700' };
-  }
-  const expired =
-    isDateExpired(driver.licence_valid_to) ||
-    isDateExpired(driver.dvla_valid_until) ||
-    isDateExpired(driver.poa1_valid_until);
-  if (expired) {
-    return { label: 'Expired', colour: 'bg-amber-100 text-amber-700' };
-  }
-  return { label: 'Approved', colour: 'bg-green-100 text-green-700' };
 }
 
 const STATUS_PILLS: { key: StatusKey; label: string; pillColour: string }[] = [
@@ -272,13 +231,13 @@ export default function DriversPage() {
           <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-gray-50">
               <tr>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Email</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Licence</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Points</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Excess</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Last Activity</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Email</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Licence</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Points</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Excess</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Last Activity</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
               </tr>
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
@@ -301,22 +260,24 @@ export default function DriversPage() {
                       onClick={() => navigate(`/drivers/${driver.id}`)}
                       className="hover:bg-gray-50 cursor-pointer transition-colors"
                     >
-                      <td className="px-6 py-4 whitespace-nowrap">
+                      <td className="px-4 py-4 whitespace-nowrap">
                         <div className="text-sm font-medium text-gray-900">{driver.full_name}</div>
                         {driver.postcode && (
                           <div className="text-xs text-gray-400">{driver.postcode}</div>
                         )}
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                        {driver.email || '—'}
+                      <td className="px-4 py-4 text-sm text-gray-500">
+                        <div className="max-w-[200px] truncate" title={driver.email || ''}>
+                          {driver.email || '—'}
+                        </div>
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 font-mono">
+                      <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-500 font-mono">
                         {driver.licence_number || '—'}
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
+                      <td className="px-4 py-4 whitespace-nowrap">
                         {pointsBadge(driver.licence_points)}
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm">
+                      <td className="px-4 py-4 whitespace-nowrap text-sm">
                         {/* Driver-level individual liability — always editable. */}
                         <button
                           type="button"
@@ -342,10 +303,10 @@ export default function DriversPage() {
                           <span className="ml-1 text-xs text-gray-400">✎</span>
                         </button>
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500" title={driver.updated_at || ''}>
+                      <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-500" title={driver.updated_at || ''}>
                         {relativeTime(driver.updated_at)}
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
+                      <td className="px-4 py-4 whitespace-nowrap">
                         <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs ${status.colour}`}>
                           {status.label}
                         </span>

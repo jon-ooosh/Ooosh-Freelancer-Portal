@@ -104,6 +104,20 @@ export function startScheduler() {
         } catch (deriveErr) {
           console.error('Scheduler: Requirement derivation failed:', deriveErr);
         }
+
+        // ── Booked-status reconciler ──
+        // Heal the OP↔HH split-brain: OP thinks a job is confirmed but the HireHop status
+        // push never landed (e.g. lost to a 327 rate-limit storm). Re-push status 2 so the
+        // job doesn't sit stuck at Enquiry in HireHop (job 16513 backstop).
+        try {
+          const { reconcileBookedStatus } = await import('../services/booked-status-reconciler');
+          const rec = await reconcileBookedStatus();
+          if (rec.candidates > 0) {
+            console.log(`Scheduler: Booked reconciler — ${rec.repushed} re-pushed, ${rec.failed} still failing (of ${rec.candidates})`);
+          }
+        } catch (recErr) {
+          console.error('Scheduler: Booked reconciler failed:', recErr);
+        }
       } catch (err) {
         console.error('Scheduler: Job sync failed:', err);
         // Try to log failure
@@ -118,6 +132,26 @@ export function startScheduler() {
       }
     });
     console.log('Scheduler: HireHop job sync scheduled every 30 minutes');
+
+    // ── Job Value Gap-Filler ──────────────────────────────────────────
+    // Hourly at :40 — populate the cached jobs.job_value (drives pipeline,
+    // client-history sidebars, hire-history stats) from HH billing accrued
+    // for HH-linked jobs still showing NULL/£0. The job sync itself no
+    // longer writes job_value (search_list's MONEY field is unreliable and
+    // used to clobber values back to £0 every 30 min). Money tab views
+    // self-heal individual jobs instantly; this catches the rest.
+    cron.schedule('40 * * * *', async () => {
+      try {
+        const { syncMissingJobValues } = await import('../services/job-value-sync');
+        const result = await syncMissingJobValues(20);
+        if (result.updated > 0) {
+          console.log(`Scheduler: Job value gap-filler — populated ${result.updated}/${result.checked} jobs`);
+        }
+      } catch (err) {
+        console.error('Scheduler: Job value gap-filler failed:', err);
+      }
+    });
+    console.log('Scheduler: Job value gap-filler scheduled hourly at :40');
   }
 
   // ── Chase Alert Scanner ───────────────────────────────────────────────
@@ -510,16 +544,18 @@ export function startScheduler() {
   // migration 102) guarantee at most ONE email per transition.
   cron.schedule('*/15 * * * *', async () => {
     try {
-      const { runDispatchSanityScan, runReturnedBookedOutScan, runBookedOutNoTimestampScan, runFreelancerLegStalledScan } = await import('../services/sanity-check-scanner');
-      const [dispatch, returned, noTs, stalledLeg] = await Promise.all([
+      const { runDispatchSanityScan, runReturnedBookedOutScan, runBookedOutNoTimestampScan, runFreelancerLegStalledScan, runStuckOnHireScan, runBookedSplitScan } = await import('../services/sanity-check-scanner');
+      const [dispatch, returned, noTs, stalledLeg, stuckOnHire, bookedSplit] = await Promise.all([
         runDispatchSanityScan(),
         runReturnedBookedOutScan(),
         runBookedOutNoTimestampScan(),
         runFreelancerLegStalledScan(),
+        runStuckOnHireScan(),
+        runBookedSplitScan(),
       ]);
-      if (dispatch.warned > 0 || returned.warned > 0 || noTs.warned > 0 || stalledLeg.warned > 0) {
+      if (dispatch.warned > 0 || returned.warned > 0 || noTs.warned > 0 || stalledLeg.warned > 0 || stuckOnHire.warned > 0 || bookedSplit.warned > 0) {
         console.log(
-          `Scheduler: Sanity scans — dispatch ${dispatch.warned}/${dispatch.checked}, returned ${returned.warned}/${returned.checked}, booked_out-no-ts ${noTs.warned}/${noTs.checked}, stalled-leg ${stalledLeg.warned}/${stalledLeg.checked}`
+          `Scheduler: Sanity scans — dispatch ${dispatch.warned}/${dispatch.checked}, returned ${returned.warned}/${returned.checked}, booked_out-no-ts ${noTs.warned}/${noTs.checked}, stalled-leg ${stalledLeg.warned}/${stalledLeg.checked}, stuck-on-hire ${stuckOnHire.warned}/${stuckOnHire.checked}, booked-split ${bookedSplit.warned}/${bookedSplit.checked}`
         );
       }
     } catch (err) {
@@ -689,6 +725,40 @@ export function startScheduler() {
   });
   console.log('Scheduler: Carnet request-form auto-emails scheduled daily at 09:15');
 
+  // ── Insurance referral alert safety-net ──────────────────────────────
+  // Daily at 09:18 — catch drivers flagged requires_referral=true who signed
+  // recently but never got the info@ referral-alert email (their SignaturePage
+  // chain reached neither POST /api/hire-forms nor the driver-verification
+  // signature-step email trigger). Idempotent via drivers.referral_alert_sent_at,
+  // bounded to the last 14 days so it never spams an ancient backlog. See
+  // services/referral-alert.ts + CLAUDE.md → "Insurance Referral Workflow".
+  cron.schedule('18 9 * * *', async () => {
+    try {
+      const { runReferralAlertScan } = await import('../services/referral-alert');
+      const result = await runReferralAlertScan();
+      if (result.sent > 0) {
+        console.log(`Scheduler: Referral alert safety-net — ${result.sent}/${result.checked} sent`);
+      }
+    } catch (err) {
+      console.error('Scheduler: Referral alert safety-net failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: Referral alert safety-net scheduled daily at 09:18');
+
+  // ── Rehearsal info-pack auto-send ────────────────────────────────────
+  // Daily at 09:20 — send the client info pack T-N days before the rehearsal
+  // (off by default; enabled + N-days configured on the Info Pack settings tab).
+  cron.schedule('20 9 * * *', async () => {
+    try {
+      const { runRehearsalInfoPackAutoSend } = await import('../services/rehearsal-info-pack-auto');
+      const result = await runRehearsalInfoPackAutoSend();
+      if (result.sent > 0) console.log(`Scheduler: Rehearsal info packs — ${result.sent} sent`);
+    } catch (err) {
+      console.error('Scheduler: Rehearsal info-pack auto-send failed:', err);
+    }
+  });
+  console.log('Scheduler: Rehearsal info-pack auto-send scheduled daily at 09:20');
+
   // ── Freelancer completion chaser ─────────────────────────────────────
   // Every 30 minutes — nudge freelancers who haven't completed jobs that
   // are past their scheduled time. Levels: 2h / 6h / 14h, then staff
@@ -824,6 +894,42 @@ export function startScheduler() {
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: Client Storage reminders scheduled daily at 09:20 Europe/London');
 
+  // ── Staff Documents reminders (chase / renew / escalate / lapse) ─────────
+  // Daily at 09:35 Europe/London. Chases pending/lapsed staff-document
+  // assignments, nudges completions approaching renewal, lapses expired ones,
+  // and escalates stale-pending to managers. Bells only — the Step-7 escalation
+  // scheduler emails per prefs. See services/staff-document-reminders.ts +
+  // docs/STAFF-DOCUMENTS-SPEC.md §5.
+  cron.schedule('35 9 * * *', async () => {
+    try {
+      const { runStaffDocumentReminders } = await import('../services/staff-document-reminders');
+      const r = await runStaffDocumentReminders();
+      if (r.lapsed || r.renewalNudges || r.chased || r.escalated || r.contentReviewChased || r.contentReviewEscalated) {
+        console.log(
+          `Scheduler: Staff-document reminders — ${r.chased} chased, ${r.renewalNudges} renewal nudges, ${r.lapsed} lapsed, ${r.escalated} escalated, ${r.contentReviewChased} content-review chased, ${r.contentReviewEscalated} content-review escalated`
+        );
+      }
+    } catch (err) {
+      console.error('Scheduler: Staff-document reminders failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: Staff Documents reminders scheduled daily at 09:35 Europe/London');
+
+  // ── Studio-sitter lock-up chase (morning after) ──────────────────────────
+  // Daily at 08:45 Europe/London. For any shift that closed without a lock-up
+  // report, reminds the rostered sitter + alerts the office. Once per shift
+  // (dedup on lockup_chase_sent_at). See services/studio-sitter-lockup.ts.
+  cron.schedule('45 8 * * *', async () => {
+    try {
+      const { runLockupChase } = await import('../services/studio-sitter-lockup');
+      const n = await runLockupChase();
+      if (n) console.log(`Scheduler: Studio lock-up chase — ${n} shift${n !== 1 ? 's' : ''} chased`);
+    } catch (err) {
+      console.error('Scheduler: Studio lock-up chase failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: Studio lock-up chase scheduled daily at 08:45 Europe/London');
+
   // ── Holding reminders (lost-property chase digest + temp hold-until) ──────
   // Daily at 09:25 Europe/London. Assembles a staff nudge for chases due (the
   // review queue — client emails are sent by a human from there, never here),
@@ -920,35 +1026,25 @@ export function startScheduler() {
   //     auto-voided it and it can no longer be captured.
   cron.schedule('40 9 * * *', async () => {
     try {
-      const { markExcessReleased } = await import('../services/excess-preauth');
-      const { getStripeClient, isStripeConfigured } = await import('./stripe');
+      // Single-record reconcile engine — shared with the on-demand "Check hold
+      // status" button and the opportunistic self-heal on Money-tab load, so all
+      // three paths behave identically.
+      const { reconcileExcessPreauth } = await import('../services/excess-preauth');
 
       const rows = await query(
-        `SELECT id, payment_method, stripe_payment_intent_id
-         FROM job_excess
+        `SELECT id FROM job_excess
          WHERE excess_status = 'pre_auth'
            AND held_expires_at IS NOT NULL
            AND held_expires_at < NOW()`
       );
 
       let released = 0;
-      for (const r of rows.rows as Array<{ id: string; payment_method: string | null; stripe_payment_intent_id: string | null }>) {
-        if (r.payment_method === 'stripe_gbp' && r.stripe_payment_intent_id) {
-          // Only release if Stripe confirms it's gone — never pre-empt a hold
-          // Stripe still considers live (their auth window can run to ~7 days).
-          if (!isStripeConfigured()) continue;
-          try {
-            const pi = await getStripeClient().paymentIntents.retrieve(r.stripe_payment_intent_id);
-            if (pi.status === 'canceled') {
-              if (await markExcessReleased(r.id, 'Stripe hold expired/canceled (reconciled)')) released++;
-            }
-          } catch (e) {
-            console.error(`Scheduler: Stripe PI retrieve failed for excess ${r.id}:`, e);
-          }
-        } else {
-          // Card-machine / cash: past the 5-day window → auto-void on the
-          // acquirer's clock, can't be captured. Release in OP.
-          if (await markExcessReleased(r.id, 'Card-machine hold expired (5-day window elapsed)')) released++;
+      for (const r of rows.rows as Array<{ id: string }>) {
+        try {
+          const result = await reconcileExcessPreauth(r.id);
+          if (result.changed) released++;
+        } catch (e) {
+          console.error(`Scheduler: Pre-auth reconcile failed for excess ${r.id}:`, e);
         }
       }
       if (released > 0) console.log(`Scheduler: Pre-auth reconciliation released ${released} expired hold(s)`);
@@ -957,6 +1053,32 @@ export function startScheduler() {
     }
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: Pre-auth expiry reconciliation scheduled daily at 09:40 Europe/London');
+
+  // ── Stripe → OP pre-auth discovery ──────────────────────────────────────
+  // Daily at 09:50 Europe/London, right after the 09:40 expiry sweep — that one
+  // reconciles holds OP already knows about; this one finds holds OP NEVER LEARNED
+  // ABOUT. A missed charge self-heals (it leaves a HireHop deposit for the Money-tab
+  // reconciliation to match), but a pre-auth creates no HH artefact at all, so until
+  // now a dropped portal webhook meant a live hold on a client's card that was
+  // completely invisible to us (job 16523, Aug 2026). Asks Stripe directly for
+  // requires_capture excess pre-auths, self-heals the ones on live hires via the real
+  // payment-event endpoint, and emails info@ about anything it deliberately left alone.
+  cron.schedule('50 9 * * *', async () => {
+    try {
+      const { reconcileStripePreauths } = await import('../services/stripe-preauth-reconciler');
+      const r = await reconcileStripePreauths();
+      if (r.skipped) {
+        console.log(`Scheduler: Stripe pre-auth discovery skipped (${r.skipped})`);
+      } else if (r.candidates > 0) {
+        console.log(
+          `Scheduler: Stripe pre-auth discovery — ${r.candidates} orphan(s): ${r.healed} healed, ${r.alerted} alerted, ${r.failed} failed (examined ${r.examined})`,
+        );
+      }
+    } catch (err) {
+      console.error('Scheduler: Stripe pre-auth discovery failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: Stripe pre-auth discovery scheduled daily at 09:50 Europe/London');
 
   // ── Stripe reimbursement silent-failure detector ────────────────────────
   // Daily at 09:42 Europe/London. Safety net for the "no silent failures"
@@ -1066,6 +1188,27 @@ export function startScheduler() {
         }
       }, { timezone: 'Europe/London' });
       console.log('Scheduler: Email retention sweep scheduled Sun 04:00 Europe/London');
+
+      // Daily 08:10 Europe/London — process due auto-chases (§9–§10). Finds jobs
+      // opted into auto-chase (auto_chase_mode = draft/send) whose chase is due,
+      // runs the suppression gate, then creates a Gmail draft (draft mode) or
+      // sends it (send mode, only when the auto_chase_send_enabled master switch
+      // is on). Runs just after the 08:00 chase-alert scanner. Needs Anthropic
+      // too (guarded inside the runner). See services/auto-chase-runner.ts.
+      cron.schedule('10 8 * * *', async () => {
+        try {
+          const { runDueAutoChases } = await import('../services/auto-chase-runner');
+          const r = await runDueAutoChases();
+          if (r.due > 0) {
+            console.log(
+              `Scheduler: Auto-chase — ${r.drafted} drafted, ${r.sent} sent, ${r.suppressed} held, ${r.escalated} escalated, ${r.failed} failed (of ${r.due} due; send master ${r.sendMasterOn ? 'ON' : 'off'})`,
+            );
+          }
+        } catch (err) {
+          console.error('Scheduler: Auto-chase runner failed:', err);
+        }
+      }, { timezone: 'Europe/London' });
+      console.log('Scheduler: Auto-chase runner scheduled daily at 08:10 Europe/London');
     }
   }
 

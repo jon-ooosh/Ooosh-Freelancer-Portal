@@ -10,6 +10,8 @@
  *   charge.dispute.created/updated/closed → flag the excess + email info@ (chargebacks
  *                                       only ever arrive via webhook).
  *   charge.refunded                  → email info@ (notify only; staff reconcile).
+ *   refund.updated / charge.refund.updated (status=failed) → email info@ (refund
+ *                                       bounced at the issuer — reimburse another way).
  *
  * Idempotency: stripe_events table. A row is inserted on receipt; processed_at is
  * stamped only after the handler succeeds. A failed handler returns 500 so Stripe
@@ -35,6 +37,14 @@ type DisputeObj = {
   status: string | null;
 };
 type RefundListItem = { id: string; amount: number; created: number };
+type RefundObj = {
+  id: string;
+  status: string | null;
+  amount: number;
+  charge: string | { id: string } | null;
+  payment_intent: string | { id: string } | null;
+  failure_reason: string | null;
+};
 type ChargeObj = {
   id: string;
   payment_intent: string | { id: string } | null;
@@ -55,17 +65,75 @@ interface ExcessRow {
   hirehop_job_id: number | null;
   client_name: string | null;
   excess_status: string;
+  hh_deposit_id: number | null;
 }
 
 async function findExcessByPaymentIntent(pi: string | null): Promise<ExcessRow | null> {
   if (!pi) return null;
   const r = await query(
-    `SELECT id, job_id, hirehop_job_id, client_name, excess_status
+    `SELECT id, job_id, hirehop_job_id, client_name, excess_status, hh_deposit_id
      FROM job_excess WHERE stripe_payment_intent_id = $1
      ORDER BY updated_at DESC LIMIT 1`,
     [pi]
   );
   return r.rows[0] || null;
+}
+
+/**
+ * Compose the "what happened to the OP excess" line for the charge.refunded
+ * alert email. Most `updated:false` outcomes are BENIGN and must not tell staff
+ * to "reconcile manually" — that copy sent someone chasing a correctly-handled
+ * refund (job 16294, Jul 2026):
+ *  - `duplicate leg` fires for every OP-initiated Stripe reimburse (OP pre-records
+ *    the leg, so this webhook is a no-op) — the money was already recorded.
+ *  - `rolled_over` matches the TERMINAL ORIGIN of a rollover chain by its PI, not
+ *    the reimbursed CHILD. The refund was actually handled downstream — chase the
+ *    chain by `hh_deposit_id` and, if a sibling was reimbursed, name that hire.
+ * Only genuinely-unresolved outcomes keep the "reconcile manually" nudge.
+ */
+async function describeUnwindNote(
+  result: { updated: boolean; newStatus: string; reason?: string },
+  ex: ExcessRow
+): Promise<string> {
+  if (result.updated) {
+    return `OP excess auto-marked <strong>${result.newStatus}</strong> to match Stripe — no further action needed.`;
+  }
+
+  const reason = result.reason || '';
+
+  if (reason === 'record already rolled_over') {
+    // Walk the rollover chain (shared hh_deposit_id) for a reimbursed sibling —
+    // that's where the refund really landed.
+    let reimbursedOn: number | null = null;
+    if (ex.hh_deposit_id) {
+      const sib = await query(
+        `SELECT hirehop_job_id FROM job_excess
+         WHERE hh_deposit_id = $1 AND id <> $2
+           AND excess_status IN ('reimbursed', 'partially_reimbursed')
+         ORDER BY updated_at DESC LIMIT 1`,
+        [ex.hh_deposit_id, ex.id]
+      ).catch(() => ({ rows: [] as Array<{ hirehop_job_id: number | null }> }));
+      reimbursedOn = sib.rows[0]?.hirehop_job_id ?? null;
+    }
+    return reimbursedOn
+      ? `This excess was rolled forward to hire #${reimbursedOn} and reimbursed there — no action needed.`
+      : `This excess was rolled forward to a later hire; the refund is tracked on that hire — no action needed.`;
+  }
+
+  // Other benign terminal / already-recorded outcomes.
+  if (
+    reason === 'duplicate leg (idempotent skip)' ||
+    reason === 'record already reimbursed (leg logged)' ||
+    reason === 'no remaining balance to refund' ||
+    reason.startsWith('pre_auth') ||
+    reason === 'record already released' ||
+    reason === 'record already waived'
+  ) {
+    return `OP excess already reflects this refund (${reason}) — no action needed.`;
+  }
+
+  // Genuinely unresolved (needed/pending/not_required/excess-not-found, etc.).
+  return `OP excess not changed: ${reason}. Reconcile manually if needed.`;
 }
 
 function jobRef(ex: ExcessRow | null): string {
@@ -83,7 +151,16 @@ async function alertInfo(subject: string, lines: string[]): Promise<void> {
     .catch((e) => console.error('[stripe-webhook] alert email failed:', e));
 }
 
-async function processStripeEvent(event: StripeEventLike): Promise<void> {
+/**
+ * Handle one Stripe event.
+ *
+ * @returns true if this receiver ACTED on the event, false if it deliberately ignored it.
+ *          The caller uses this to decide whether to keep a `stripe_events` receipt row —
+ *          see the keyspace note in `services/stripe-event-claim.ts`. New `case` branches
+ *          inherit "handled" automatically (only `default` returns false), so this can't
+ *          silently regress when a handler is added.
+ */
+async function processStripeEvent(event: StripeEventLike): Promise<boolean> {
   switch (event.type) {
     case 'payment_intent.canceled': {
       const pi = event.data.object as PaymentIntentObj;
@@ -121,6 +198,28 @@ async function processStripeEvent(event: StripeEventLike): Promise<void> {
           flag === 'open'
             ? `Action needed: respond in the Stripe dashboard before the evidence deadline. The excess record is flagged on the Money tab.`
             : `No further action — recorded for the audit trail.`,
+        ]
+      );
+      break;
+    }
+    // A refund can be accepted by Stripe then FAIL at the issuer (expired/closed
+    // card, or past the card's refund window) — it comes back async as a refund
+    // update with status 'failed'. The money bounces back to us, so staff must
+    // contact the hirer and reimburse another way. Only ever arrives via webhook.
+    case 'refund.updated':
+    case 'refund.failed':
+    case 'charge.refund.updated': {
+      const refund = event.data.object as RefundObj;
+      if (refund.status !== 'failed') break; // only act on the failure transition
+      const ex = await findExcessByPaymentIntent(piId(refund.payment_intent));
+      const amt = (refund.amount / 100).toFixed(2);
+      await alertInfo(
+        `⚠ Stripe refund FAILED — £${amt}`,
+        [
+          `A Stripe refund of £${amt} was accepted but then <strong>failed</strong> at the card issuer — the money has bounced back to us and the customer was NOT refunded.`,
+          `Reason: ${refund.failure_reason || 'unknown'} (this often means the card is expired/closed or the charge is past the card's refund window). Stripe refund id: ${refund.id}.`,
+          `OP excess: ${jobRef(ex)}.`,
+          `Action needed: contact the hirer for alternative reimbursement details and record the reimbursement in OP by another method (e.g. BACS).`,
         ]
       );
       break;
@@ -165,9 +264,7 @@ async function processStripeEvent(event: StripeEventLike): Promise<void> {
             method: 'stripe_gbp',
             notes: `Stripe charge ${charge.id}`,
           });
-          unwindNote = result.updated
-            ? `OP excess auto-marked <strong>${result.newStatus}</strong> to match Stripe — no further action needed.`
-            : `OP excess not changed: ${result.reason}. Reconcile manually if needed.`;
+          unwindNote = await describeUnwindNote(result, ex);
         } catch (err) {
           console.error('[stripe-webhook] charge.refunded excess unwind failed:', err);
           unwindNote = `OP excess auto-unwind failed — please reconcile manually on the Money tab.`;
@@ -220,7 +317,7 @@ async function processStripeEvent(event: StripeEventLike): Promise<void> {
             subject = `Stripe refund recorded — £${refunded} (already on OP)`;
             bodyLines = [
               `A refund of £${refunded} was processed in Stripe for charge ${charge.id}.`,
-              `Hire payment on ${jobRef({ id: '', job_id: null, hirehop_job_id: origRow.hirehop_job_id, client_name: origRow.client_name, excess_status: '' })} — already recorded in OP. No action needed.`,
+              `Hire payment on ${jobRef({ id: '', job_id: null, hirehop_job_id: origRow.hirehop_job_id, client_name: origRow.client_name, excess_status: '', hh_deposit_id: null })} — already recorded in OP. No action needed.`,
             ];
           } else {
             // OP-originated path failed mid-flight OR this is a Stripe-dashboard
@@ -274,7 +371,10 @@ async function processStripeEvent(event: StripeEventLike): Promise<void> {
     default:
       // Subscribed to a narrow set; ignore anything else quietly.
       console.log(`[stripe-webhook] Ignoring unhandled event type: ${event.type}`);
+      return false;
   }
+
+  return true;
 }
 
 export async function handleStripeWebhook(req: Request, res: Response): Promise<void> {
@@ -311,9 +411,20 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
       [event.id, event.type]
     );
 
-    await processStripeEvent(event);
+    const handled = await processStripeEvent(event);
 
-    await query(`UPDATE stripe_events SET processed_at = NOW() WHERE id = $1`, [event.id]);
+    if (handled) {
+      await query(`UPDATE stripe_events SET processed_at = NOW() WHERE id = $1`, [event.id]);
+    } else {
+      // We deliberately did nothing with this event, so we must NOT keep a receipt row
+      // claiming otherwise. Leaving a `processed_at`-stamped row here is what silently
+      // swallowed a live excess pre-auth on job 16523 (Aug 2026): the Payment Portal's
+      // payment-event read our "processed" stamp for an event we'd ignored and no-opped.
+      // The portal keyspace is now prefixed (see services/stripe-event-claim.ts) so this
+      // can't recur, but an honest receipt log is the belt to that braces — and it also
+      // keeps `claimStripeEvent`'s fresh-`claimed_at` staleness window out of the way.
+      await query(`DELETE FROM stripe_events WHERE id = $1 AND processed_at IS NULL`, [event.id]);
+    }
     res.json({ received: true });
   } catch (err) {
     // Return 500 so Stripe retries; processed_at stays null so the retry reprocesses.

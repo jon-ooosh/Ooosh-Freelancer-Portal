@@ -310,6 +310,7 @@ export const LOST_REASON_OPTIONS = [
   'Timing',
   'No Decision',
   'Cancelled Event',
+  'Confirmed Alternative Quote (from us)',
   'Other',
 ] as const;
 
@@ -661,7 +662,15 @@ export interface Driver {
   licence_restrictions: string | null;
   licence_next_check_due: string | null;
   date_passed_test: string | null;
-  // Document expiry dates (the validity backbone)
+  // Document FROM dates — the validity backbone. Staff and the hire form set
+  // ONLY these; every *_valid_until below is derived from them on write by
+  // backend/src/services/driver-validity.ts. Never write an expiry directly.
+  poa1_doc_date: string | null;
+  poa2_doc_date: string | null;
+  passport_check_date: string | null;
+  passport_expiry: string | null;
+  // Derived expiry windows (read-only for consumers).
+  licence_check_valid_until: string | null;
   poa1_valid_until: string | null;
   poa2_valid_until: string | null;
   dvla_valid_until: string | null;
@@ -1080,6 +1089,9 @@ export interface Cost {
   paid_at: string | null;
   paid_value_date: string | null;
   paid_method: string | null;
+  /** Remittance advice sent to the payee for this cost (audit + "sent" pip). */
+  remittance_sent_at?: string | null;
+  remittance_email?: string | null;
   receipt_r2_key: string | null;
   receipt_filename: string | null;
   xero_sync_state: CostXeroSyncState;

@@ -99,7 +99,7 @@ router.get('/:jobId/transport-crew', async (req: AuthRequest, res: Response) => 
     try {
       vehicles = await query(
         `SELECT vha.id, vha.status, vha.hire_start, vha.hire_end,
-                fv.reg, fv.name AS vehicle_name
+                fv.reg
          FROM vehicle_hire_assignments vha
          LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
          WHERE vha.job_id = $1 AND vha.status NOT IN ('cancelled')`,

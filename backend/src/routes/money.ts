@@ -10,13 +10,13 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
-import { authenticate, authorize, AuthRequest } from '../middleware/auth';
+import { authenticate, authorize, STAFF_ROLES, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { verifyApiKey } from '../middleware/api-key';
 import { hhBroker } from '../services/hirehop-broker';
 import { pushDepositToHH, HH_BANK_IDS, getMethodForBankId } from '../services/hh-deposit';
 import { getStripeClient, isStripeConfigured, isStripeError } from '../config/stripe';
-import { sendPaymentEmail, sendExcessEmail, sendLastMinuteAlert } from '../services/money-emails';
+import { sendPaymentEmail, sendExcessEmail, sendLastMinuteAlert, sendPaymentStatementEmail, logResendToTimeline, type StatementPaymentLine } from '../services/money-emails';
 import {
   triggerHireFormEmailOnConfirmation as triggerHireFormEmailOnConfirmationShared,
   triggerCarnetFormOnConfirmation,
@@ -26,6 +26,13 @@ import {
 } from '../services/confirmation-hooks';
 import { calculateVatAdjustment } from '../services/vat-adjustment';
 import { syncExcessRequirementStatus } from '../services/excess-requirement-sync';
+import { reconcileExpiredPreauthsForJob } from '../services/excess-preauth';
+import {
+  claimStripeEvent,
+  recordStripeEventDeposit,
+  markStripeEventProcessed,
+  isStripeEventProcessed,
+} from '../services/stripe-event-claim';
 import { emailService } from '../services/email-service';
 import { getFrontendUrl } from '../config/app-urls';
 
@@ -318,6 +325,97 @@ router.delete('/:jobId/resolve-balance', authorize('admin'), async (req: AuthReq
     const msg = error instanceof Error ? error.message : String(error);
     console.error('[money] unresolve-balance error:', msg);
     res.status(500).json({ error: 'Failed to remove balance override', detail: msg });
+  }
+});
+
+// ── POST /api/money/:jobId/resend-confirmation ──
+// Manually re-fire the client payment/booking-confirmation email for a job.
+// Reads live data, so it works for ANY confirmed job (incl. ones whose original
+// auto-send failed — the resend does not depend on a stored "failed" flag).
+// Surfaces the send result (incl. SMTP failure) so staff know if it worked.
+router.post('/:jobId/resend-confirmation', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const jobUuid = await resolveJobUuid(String(req.params.jobId));
+    if (!jobUuid) { res.status(404).json({ error: 'Job not found' }); return; }
+
+    // amount: the figure to show in the email. Frontend passes the total hire
+    // deposits it already has from /summary. Falls back to 0 (template still
+    // renders sensibly) if not supplied.
+    const amount = Number(req.body?.amount) || 0;
+    const isConfirmingBooking = req.body?.is_confirming_booking !== false; // default true
+    const bankName = typeof req.body?.bank_name === 'string' ? req.body.bank_name : '';
+
+    // Optional recipient override from the "Resend confirmation" picker.
+    // When present, it REPLACES the default address-book resolution (first =
+    // to, rest = cc). Absent → the email routes to the job's default contact
+    // as before. Malformed entries are dropped; an all-empty list falls back
+    // to the default path rather than erroring.
+    const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    const rawRecipients = Array.isArray(req.body?.recipients) ? req.body.recipients : [];
+    const overrideRecipients = rawRecipients
+      .map((r: any) => ({
+        email: typeof r?.email === 'string' ? r.email.trim() : '',
+        name: typeof r?.name === 'string' ? r.name : '',
+      }))
+      .filter((r: { email: string }) => EMAIL_RE.test(r.email))
+      .slice(0, 10);
+
+    // Itemised statement inputs (from the Money tab, matching what staff see).
+    // When `payments` is present we send the itemised payment summary; otherwise
+    // (older frontend bundle) we fall back to the single-total confirmation.
+    const rawPayments = Array.isArray(req.body?.payments) ? req.body.payments : [];
+    const payments: StatementPaymentLine[] = rawPayments
+      .map((p: any) => ({
+        date: typeof p?.date === 'string' ? p.date : '',
+        method: typeof p?.method === 'string' ? p.method : '',
+        amount: Number(p?.amount) || 0,
+        isRefund: p?.isRefund === true,
+      }))
+      .slice(0, 100);
+    const wantsStatement = payments.length > 0
+      || typeof req.body?.hire_value === 'number'
+      || typeof req.body?.balance_owed === 'number';
+
+    const result = wantsStatement
+      ? await sendPaymentStatementEmail({
+          jobId: jobUuid,
+          payments,
+          hireValueIncVat: Number(req.body?.hire_value) || 0,
+          totalPaid: Number(req.body?.total_paid) || amount,
+          balanceOwed: Number(req.body?.balance_owed) || 0,
+          overrideRecipients: overrideRecipients.length > 0 ? overrideRecipients : undefined,
+        })
+      : await sendPaymentEmail({
+          jobId: jobUuid,
+          amount,
+          bankName,
+          paymentType: 'deposit',
+          isConfirmingBooking,
+          overrideRecipients: overrideRecipients.length > 0 ? overrideRecipients : undefined,
+        });
+
+    if (!result.sent) {
+      // Not a 500 — the request was valid, the email just didn't go. Report
+      // clearly so the UI can show why (no recipient vs SMTP failure).
+      res.status(200).json({
+        data: { sent: false, reason: result.reason, error: result.error, is_fallback: result.isFallback },
+      });
+      return;
+    }
+
+    // Audit trail: leave a timeline note recording the manual resend + who got it.
+    await logResendToTimeline({
+      jobId: jobUuid,
+      recipients: [result.toEmail, ...(result.ccEmails || [])].filter((e): e is string => !!e),
+      itemised: wantsStatement,
+      isFallback: result.isFallback,
+    });
+
+    res.json({ data: { sent: true, is_fallback: result.isFallback } });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error('[money] resend-confirmation error:', msg);
+    res.status(500).json({ error: 'Failed to resend confirmation email', detail: msg });
   }
 });
 
@@ -651,53 +749,14 @@ router.get('/job-lookup/:hhJobNumber', async (req: AuthRequest, res: Response) =
 });
 
 // ── POST /api/money/sync-values — Bulk-update job_value for jobs missing values ──
-// Called on jobs/pipeline page load to populate cached hire values from HH billing
+// On-demand trigger for the job-value gap-filler (same engine as the hourly
+// scheduler task — see services/job-value-sync.ts).
 
 router.post('/sync-values', async (req: AuthRequest, res: Response) => {
   try {
-    // Find HH-linked jobs with no job_value (or job_value = 0)
-    const jobsResult = await query(
-      `SELECT id, hh_job_number FROM jobs
-       WHERE hh_job_number IS NOT NULL
-         AND (job_value IS NULL OR job_value = 0)
-         AND status NOT IN (9, 10, 11)
-       ORDER BY updated_at DESC
-       LIMIT 20`
-    );
-
-    if (jobsResult.rows.length === 0) {
-      res.json({ data: { updated: 0 } });
-      return;
-    }
-
-    let updated = 0;
-    // Process sequentially to avoid rate limiting (billing_list is per-job)
-    for (const job of jobsResult.rows) {
-      try {
-        const billingRes = await hhBroker.get('/php_functions/billing_list.php',
-          { main_id: job.hh_job_number, type: 1 },
-          { priority: 'low', cacheTTL: 300 }
-        );
-
-        if (billingRes.success && billingRes.data) {
-          const bl = billingRes.data as Record<string, any>;
-          if (bl.rows && Array.isArray(bl.rows)) {
-            for (const row of bl.rows) {
-              if (parseInt(row.kind ?? '0') === 0) {
-                const accrued = parseFloat(row.accrued || row.data?.accrued || '0');
-                if (accrued > 0) {
-                  await query(`UPDATE jobs SET job_value = $1 WHERE id = $2`, [accrued, job.id]);
-                  updated++;
-                }
-                break;
-              }
-            }
-          }
-        }
-      } catch { /* skip individual failures */ }
-    }
-
-    res.json({ data: { updated, checked: jobsResult.rows.length } });
+    const { syncMissingJobValues } = await import('../services/job-value-sync');
+    const result = await syncMissingJobValues(20);
+    res.json({ data: result });
   } catch (error) {
     console.error('[money] Sync values error:', error);
     res.status(500).json({ error: 'Failed to sync job values' });
@@ -729,6 +788,13 @@ router.get('/:jobId/excess-info', async (req: AuthRequest, res: Response) => {
     }
 
     const job = jobResult.rows[0];
+
+    // Opportunistic self-heal — resolve any past-expiry pre-auth hold on this job
+    // to its true state (Stripe/window) so the Overview card shows a binary
+    // held/released, not a stale guess. Fire-and-forget: never delays this render.
+    void reconcileExpiredPreauthsForJob(job.id).catch((e) =>
+      console.error('[money] excess-info pre-auth self-heal failed:', e)
+    );
 
     // Calculate hire duration
     const startDate = job.job_date || job.out_date;
@@ -874,13 +940,6 @@ router.get('/:jobId/excess-info', async (req: AuthRequest, res: Response) => {
       };
     });
 
-    // Totals — collected = money in account + money on hold (migration 087).
-    // Held money counts as collected for portal display purposes (client sees
-    // their excess is covered, whether by pre-auth or captured payment).
-    const totalRequired = drivers.reduce((sum: number, d: any) => sum + d.excess_amount_required, 0);
-    const totalCollected = drivers.reduce((sum: number, d: any) => sum + d.excess_amount_taken + d.amount_held, 0);
-    const totalOutstanding = Math.max(0, totalRequired - totalCollected);
-
     // A record is "covered" if it's in a terminal state (waived/reimbursed/claimed/rolled_over/not_required),
     // OR enough money has been taken/held to meet the required amount. This catches the edge case of a
     // pre-auth or 'taken' record that's underfunded (e.g. £600 pre-auth against £1,200 required).
@@ -893,6 +952,24 @@ router.get('/:jobId/excess-info', async (req: AuthRequest, res: Response) => {
       const coverage = (d.excess_amount_taken || 0) + (d.amount_held || 0);
       return required > 0 && coverage >= required;
     };
+
+    // Totals — collected = money in account + money on hold (migration 087).
+    // Held money counts as collected for portal display purposes (client sees
+    // their excess is covered, whether by pre-auth or captured payment).
+    const totalRequired = drivers.reduce((sum: number, d: any) => sum + d.excess_amount_required, 0);
+    const totalCollected = drivers.reduce((sum: number, d: any) => sum + d.excess_amount_taken + d.amount_held, 0);
+    // Outstanding is per-record and skips covered records — a `waived` (or
+    // auto-covered / rolled_over / not_required) record that keeps a `required`
+    // amount for reference must NOT read as outstanding on the requirement card.
+    // (The old global `required − collected` counted a covered £1,200-required /
+    // £0-collected record as £1,200 outstanding — the auto-cover phantom.)
+    const totalOutstanding = drivers.reduce((sum: number, d: any) => {
+      if (isCovered(d)) return sum;
+      const required = d.excess_amount_required || 0;
+      const coverage = (d.excess_amount_taken || 0) + (d.amount_held || 0);
+      return sum + Math.max(0, required - coverage);
+    }, 0);
+
     const driversCleared = drivers.filter(isCovered).length;
     const driversPending = drivers.length - driversCleared;
 
@@ -1015,6 +1092,12 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
 
     const job = jobResult.rows[0];
     const hhJobId = job.hh_job_number;
+
+    // Opportunistic self-heal — resolve any past-expiry pre-auth hold to its true
+    // state so the Money tab shows a binary held/released. Fire-and-forget.
+    void reconcileExpiredPreauthsForJob(job.id).catch((e) =>
+      console.error('[money] summary pre-auth self-heal failed:', e)
+    );
 
     // Fetch HireHop billing data (deposits, payments, hire value)
     let hhBilling: any = null;
@@ -1583,17 +1666,27 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
         : excessRecords[0].excess_status
       : null;
 
-    // Check client balance on account
+    // Check client balance on account.
+    // MUST read the canonical v_excess_held view — never re-sum excess_amount_taken
+    // here. The old inline sum included 'rolled_over' records and counted them
+    // alongside the live 'taken' record, so a rolled-forward chain (all sharing one
+    // hh_deposit_id = the same physical £1,200) was double-counted (job 16335 showed
+    // "£2,400 on account" for a single £1,200 — the same class of bug as the Hoosiers
+    // by-org fix). v_excess_held excludes rolled_over/released/not_required, so each
+    // chain contributes its money once. pre_auth is excluded too: the banner offers to
+    // apply this balance "against this job's excess or balance", and a card hold bound
+    // to another hire can't be moved/applied — it's collateral, not cash on account
+    // (matches the dashboard "Unreimbursed Excess" bucket, which also drops pre_auth).
     let clientBalance = 0;
     if (job.client_id) {
       const balanceResult = await query(
-        `SELECT COALESCE(SUM(excess_amount_taken), 0) - COALESCE(SUM(claim_amount), 0) - COALESCE(SUM(reimbursement_amount), 0) AS balance
-         FROM job_excess je
-         JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
-         LEFT JOIN jobs j ON j.id = je.job_id
+        `SELECT COALESCE(SUM(h.held_amount), 0) AS balance
+         FROM v_excess_held h
+         JOIN job_excess je ON je.id = h.excess_id
+         JOIN jobs j ON j.id = je.job_id
          WHERE j.client_id = $1
-           AND je.excess_status IN ('taken', 'rolled_over')
-           AND je.job_id != $2`,
+           AND je.job_id != $2
+           AND je.excess_status <> 'pre_auth'`,
         [job.client_id, job.id]
       );
       clientBalance = parseFloat(balanceResult.rows[0]?.balance || '0');
@@ -1979,22 +2072,31 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
           statusChanged = true;
           console.log(`[money] Job ${job.id} moved to confirmed (deposit received)`);
 
-          // Push status to HireHop (status 2 = Booked)
+          // Push status to HireHop (status 2 = Booked).
+          // ⚠️ The broker RESOLVES { success: false } on a rate-limit failure (327/329) — it
+          // does NOT throw. Check pushResult.success before mirroring the status locally, or
+          // OP declares "Booked" off a failed push and the next 30-min sync reverts it
+          // (job 16513 split-brain). On failure, leave jobs.status for the reconciler to retry.
           if (hhNum) {
             try {
-              await hhBroker.post('/frames/status_save.php', {
+              const pushResult = await hhBroker.post('/frames/status_save.php', {
                 job: hhNum,
                 status: 2, // Booked
                 no_webhook: 1,
               }, { priority: 'high' });
-              // Update local HH status
-              await query(
-                `UPDATE jobs SET status = 2, status_name = 'Booked', hh_status = 2 WHERE id = $1`,
-                [job.id]
-              );
-              console.log(`[money] HH job ${hhNum} status updated to Booked`);
-            } catch {
-              console.error('[money] HH status update to Booked failed (non-fatal)');
+              if (pushResult.success) {
+                await query(
+                  `UPDATE jobs SET status = 2, status_name = 'Booked', hh_status = 2 WHERE id = $1`,
+                  [job.id]
+                );
+                console.log(`[money] HH job ${hhNum} status updated to Booked`);
+              } else {
+                console.error(
+                  `[money] HH status push to Booked FAILED (record-payment, job ${hhNum}): ${pushResult.error} — leaving jobs.status for the reconciler`
+                );
+              }
+            } catch (pushErr) {
+              console.error('[money] HH status update to Booked threw (record-payment):', pushErr);
             }
           }
         }
@@ -2589,6 +2691,54 @@ router.post('/:jobId/refund-payment', validate(refundPaymentSchema), async (req:
   }
 });
 
+// ── Stripe event idempotency (Payment Portal) ──
+// The portal claims a Stripe event id HERE, before it creates the HireHop deposit, so a
+// Stripe re-delivery of the same event can never produce a duplicate deposit / OP record /
+// client email (job 16513, Aug 2026). See services/stripe-event-claim.ts + migration 188.
+// It's a Postgres claim, so it stays fast + reliable even during a HireHop 327 storm.
+
+const stripeEventClaimSchema = z.object({
+  event_id: z.string().min(1).max(255),
+  type: z.string().max(100).optional(),
+});
+
+// POST /api/money/stripe-event/claim — atomically claim a Stripe event for processing.
+// Returns { proceed, alreadyProcessed, hh_deposit_id }. proceed=false ⇒ the portal must no-op.
+router.post('/stripe-event/claim', validate(stripeEventClaimSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { event_id, type } = req.body as { event_id: string; type?: string };
+    const result = await claimStripeEvent(event_id, type || 'unknown');
+    res.json({
+      data: {
+        proceed: result.proceed,
+        alreadyProcessed: result.alreadyProcessed,
+        hh_deposit_id: result.hhDepositId,
+      },
+    });
+  } catch (err) {
+    console.error('[money] stripe-event/claim failed:', err);
+    res.status(500).json({ error: 'Failed to claim Stripe event' });
+  }
+});
+
+const stripeEventDepositSchema = z.object({
+  event_id: z.string().min(1).max(255),
+  hh_deposit_id: z.number().int(),
+});
+
+// POST /api/money/stripe-event/record-deposit — record the HireHop deposit id the portal
+// created for this event, so a Stripe retry reuses it instead of creating a duplicate.
+router.post('/stripe-event/record-deposit', validate(stripeEventDepositSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { event_id, hh_deposit_id } = req.body as { event_id: string; hh_deposit_id: number };
+    await recordStripeEventDeposit(event_id, hh_deposit_id);
+    res.json({ data: { ok: true } });
+  } catch (err) {
+    console.error('[money] stripe-event/record-deposit failed:', err);
+    res.status(500).json({ error: 'Failed to record Stripe event deposit' });
+  }
+});
+
 // ── POST /api/money/:jobId/payment-event — Receive payment event from external system ──
 // Called by Payment Portal (or Stripe webhook) when a payment is processed externally.
 // The portal creates the HH deposit itself — this endpoint records it in OP + handles status transitions.
@@ -2602,6 +2752,7 @@ const paymentEventSchema = z.object({
   source: z.string().max(50).optional(),
   excess_id: z.string().uuid().optional(),
   hh_deposit_id: z.number().int().optional(),
+  stripe_event_id: z.string().max(255).optional(),
   notes: z.string().max(1000).optional(),
 });
 
@@ -2610,8 +2761,26 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
     const jobId = req.params.jobId as string;
     const {
       payment_type, amount, payment_method, payment_reference,
-      stripe_payment_intent, source, excess_id, hh_deposit_id, notes,
+      stripe_payment_intent, source, excess_id, hh_deposit_id, stripe_event_id, notes,
     } = req.body;
+
+    // ── Idempotency: a Stripe re-delivery of the same event must be a no-op ──
+    // The portal already dedups deposit creation via /stripe-event/claim; this is the
+    // belt for the OP side (no duplicate job_payments row, no duplicate client email, no
+    // duplicate status re-push) and also protects OP's own callers. Only short-circuits an
+    // event whose payment-event previously ran to COMPLETION (processed_at stamped at the
+    // end of this handler). Best-effort — a lookup failure must not block a real payment.
+    if (stripe_event_id) {
+      try {
+        if (await isStripeEventProcessed(stripe_event_id)) {
+          console.log(`[money] payment-event deduplicated — Stripe event ${stripe_event_id} already processed`);
+          res.json({ data: { deduplicated: true } });
+          return;
+        }
+      } catch (e) {
+        console.error('[money] payment-event idempotency check failed (continuing):', e);
+      }
+    }
 
     // Accept UUID or HH job number
     const isUuid = /^[0-9a-f]{8}-/.test(jobId);
@@ -2896,21 +3065,34 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
           statusChanged = true;
           console.log(`[money] Job ${job.id} moved to confirmed (payment portal deposit received)`);
 
-          // Push status to HireHop (status 2 = Booked)
+          // Push status to HireHop (status 2 = Booked).
+          // ⚠️ The broker RESOLVES { success: false } on a rate-limit failure (327/329) —
+          // it does NOT throw (documented broker contract). So we MUST check resp.success
+          // before declaring Booked; a bare try/catch here never fires on a 327 and the
+          // UPDATE below would run against a FAILED push, marking OP "Booked" while HH is
+          // still Enquiry — the next 30-min sync then reverts jobs.status (job 16513 split-
+          // brain). Only mirror the HH status locally when the push actually succeeded;
+          // otherwise leave jobs.status untouched so the reconciler (30-min sync) re-pushes.
           if (hhNum) {
             try {
-              await hhBroker.post('/frames/status_save.php', {
+              const pushResult = await hhBroker.post('/frames/status_save.php', {
                 job: hhNum,
                 status: 2, // Booked
                 no_webhook: 1,
               }, { priority: 'high' });
-              await query(
-                `UPDATE jobs SET status = 2, status_name = 'Booked', hh_status = 2 WHERE id = $1`,
-                [job.id]
-              );
-              console.log(`[money] HH job ${hhNum} status updated to Booked via payment-event`);
-            } catch {
-              console.error('[money] HH status update to Booked failed (non-fatal, payment-event)');
+              if (pushResult.success) {
+                await query(
+                  `UPDATE jobs SET status = 2, status_name = 'Booked', hh_status = 2 WHERE id = $1`,
+                  [job.id]
+                );
+                console.log(`[money] HH job ${hhNum} status updated to Booked via payment-event`);
+              } else {
+                console.error(
+                  `[money] HH status push to Booked FAILED (payment-event, job ${hhNum}): ${pushResult.error} — leaving jobs.status for the reconciler`
+                );
+              }
+            } catch (pushErr) {
+              console.error('[money] HH status update to Booked threw (payment-event):', pushErr);
             }
           }
         }
@@ -2994,6 +3176,14 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
         triggerSource: 'payment_event',
         issues: silentSkipIssues,
       }).catch(e => console.error('[money] Silent-skip alert failed (payment-event):', e));
+    }
+
+    // ── Mark the Stripe event fully processed (idempotency terminal) ──
+    // A future re-delivery of this event now short-circuits at the top of the handler.
+    // Best-effort — the payment itself has already landed, so a marker failure must not 500.
+    if (stripe_event_id) {
+      markStripeEventProcessed(stripe_event_id, { hhDepositId: hh_deposit_id ?? null })
+        .catch(e => console.error('[money] markStripeEventProcessed failed (payment-event):', e));
     }
 
     res.json({

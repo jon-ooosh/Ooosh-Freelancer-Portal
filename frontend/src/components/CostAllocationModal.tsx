@@ -1,9 +1,16 @@
 /**
  * CostAllocationModal — split one cost (e.g. a bundled freelancer invoice
  * covering several jobs) across those jobs. Writes a cost_allocations row per
- * line via PUT /api/costs/:id/allocations. The allocated total must reconcile
- * to the cost's gross before it can be saved; each line shows that job's
- * expected crew/transport cost (from its quotes) as a sanity check.
+ * line via PUT /api/costs/:id/allocations.
+ *
+ * OP-only attribution: the split is optional and for our own cost tracking —
+ * it does NOT change what we owe the supplier or what's pushed to Xero (one
+ * cost = one payable = one Xero bill). Reads on the Money tab honour it.
+ *
+ * The lines may sum to LESS than the cost total — the remainder is left
+ * unattributed ("our cost", e.g. £20 of a £70 fuel receipt where £50 goes to a
+ * client). An amber nudge shows the unallocated balance but never blocks. Only
+ * OVER-allocation (more than the cost total) is rejected.
  */
 import { useState, useEffect } from 'react';
 import { api } from '../services/api';
@@ -13,6 +20,11 @@ interface AllocCostLite {
   amount_gross: number | null;
   supplier_name: string | null;
   description: string | null;
+  // Capture / primary job — pre-seeded as the first line when splitting a cost
+  // that was captured against a job (the common case).
+  job_id?: string | null;
+  hh_job_number?: number | null;
+  job_name?: string | null;
 }
 
 interface Line {
@@ -45,23 +57,33 @@ export default function CostAllocationModal({ cost, onClose, onSaved }: {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
-  // Load existing allocations
+  // Load existing allocations. If there are none and the cost was captured
+  // against a job, pre-seed that job as the first line at the full amount — so
+  // the common "split the captured job's cost across others" flow is one add.
   useEffect(() => {
     (async () => {
       try {
         const r = await api.get<{ data: { allocations?: Array<{ job_id: string | null; hh_job_number?: number | null; job_name?: string | null; amount: number; recharge: boolean; notes: string | null }> } }>(`/costs/${cost.id}`);
         const existing = (r.data.allocations || []).filter((a) => a.job_id);
-        setLines(existing.map((a) => ({
-          key: nextKey(),
-          job_id: a.job_id as string,
-          label: a.hh_job_number ? `#${a.hh_job_number}${a.job_name ? ' – ' + a.job_name : ''}` : '(job)',
-          amount: String(a.amount ?? ''),
-          recharge: !!a.recharge,
-          notes: a.notes || '',
-        })));
+        if (existing.length) {
+          setLines(existing.map((a) => ({
+            key: nextKey(),
+            job_id: a.job_id as string,
+            label: a.hh_job_number ? `#${a.hh_job_number}${a.job_name ? ' – ' + a.job_name : ''}` : '(job)',
+            amount: String(a.amount ?? ''),
+            recharge: !!a.recharge,
+            notes: a.notes || '',
+          })));
+        } else if (cost.job_id) {
+          const label = cost.hh_job_number ? `#${cost.hh_job_number}${cost.job_name ? ' – ' + cost.job_name : ''}` : '(captured job)';
+          const seed: Line = { key: nextKey(), job_id: cost.job_id, label, amount: gross > 0 ? gross.toFixed(2) : '', recharge: false, notes: '' };
+          setLines([seed]);
+          fetchExpected(cost.job_id);
+        }
       } catch { /* start empty */ }
       finally { setLoading(false); }
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cost.id]);
 
   // Job search
@@ -82,6 +104,15 @@ export default function CostAllocationModal({ cost, onClose, onSaved }: {
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
 
+  async function fetchExpected(jobId: string) {
+    try {
+      const qr = await api.get<{ data: Array<{ freelancer_fee: number | null; freelancer_fee_rounded: number | null; status: string | null }> }>(`/quotes?job_id=${jobId}`);
+      const exp = (qr.data || []).filter((q) => q.status !== 'cancelled')
+        .reduce((sum, q) => sum + Number(q.freelancer_fee_rounded ?? q.freelancer_fee ?? 0), 0);
+      setLines((prev) => prev.map((l) => l.job_id === jobId ? { ...l, expected: exp || null } : l));
+    } catch { /* no expected */ }
+  }
+
   async function addJob(s: JobSuggestion) {
     if (lines.some((l) => l.job_id === s.id)) { setJobSearch(''); setJobSuggestions([]); return; }
     const allocatedSoFar = round2(lines.reduce((sum, l) => sum + (Number(l.amount) || 0), 0));
@@ -90,13 +121,7 @@ export default function CostAllocationModal({ cost, onClose, onSaved }: {
     setLines((prev) => [...prev, line]);
     setJobSearch('');
     setJobSuggestions([]);
-    // Fetch the job's expected crew/transport cost (sum of quote freelancer fees).
-    try {
-      const qr = await api.get<{ data: Array<{ freelancer_fee: number | null; freelancer_fee_rounded: number | null; status: string | null }> }>(`/quotes?job_id=${s.id}`);
-      const exp = (qr.data || []).filter((q) => q.status !== 'cancelled')
-        .reduce((sum, q) => sum + Number(q.freelancer_fee_rounded ?? q.freelancer_fee ?? 0), 0);
-      setLines((prev) => prev.map((l) => l.job_id === s.id ? { ...l, expected: exp || null } : l));
-    } catch { /* no expected */ }
+    fetchExpected(s.id);
   }
 
   const setLine = (key: string, patch: Partial<Line>) => setLines((prev) => prev.map((l) => l.key === key ? { ...l, ...patch } : l));
@@ -104,12 +129,13 @@ export default function CostAllocationModal({ cost, onClose, onSaved }: {
 
   const allocated = round2(lines.reduce((s, l) => s + (Number(l.amount) || 0), 0));
   const remaining = round2(gross - allocated);
-  const reconciles = Math.abs(remaining) <= 0.01;
+  const overAllocated = remaining < -0.01;
+  const unallocated = remaining > 0.01; // remainder stays as "our cost" — allowed
 
   async function save() {
     setError('');
-    if (lines.length && !reconciles) {
-      setError(`Allocated ${gbp(allocated)} of ${gbp(gross)} — must match the cost total (${remaining > 0 ? gbp(remaining) + ' left' : gbp(-remaining) + ' over'}).`);
+    if (overAllocated) {
+      setError(`Allocated ${gbp(allocated)} — that's ${gbp(-remaining)} more than the cost total (${gbp(gross)}). You can't attribute more than the cost.`);
       return;
     }
     if (lines.some((l) => !(Number(l.amount) > 0))) { setError('Every line needs an amount greater than zero.'); return; }
@@ -138,7 +164,7 @@ export default function CostAllocationModal({ cost, onClose, onSaved }: {
 
         <div className="px-6 py-4 space-y-4">
           <p className="text-sm text-gray-600">
-            {cost.supplier_name || cost.description || 'Cost'} — total <strong>{gbp(gross)}</strong>. Add the jobs this invoice covers and split the amount; the lines must add up to the total.
+            {cost.supplier_name || cost.description || 'Cost'} — total <strong>{gbp(gross)}</strong>. Add the jobs this cost covers and split the amount. This is for our own cost tracking only — it doesn&apos;t change what we owe the supplier or what&apos;s pushed to Xero. Any amount you don&apos;t assign stays as our own cost.
           </p>
 
           {loading ? <div className="text-sm text-gray-500">Loading…</div> : (
@@ -156,10 +182,6 @@ export default function CostAllocationModal({ cost, onClose, onSaved }: {
                         <input type="number" step="0.01" min="0" className={`${inputCls} w-24`} value={l.amount}
                           onChange={(e) => setLine(l.key, { amount: e.target.value })} />
                       </div>
-                      <label className="flex items-center gap-1 text-xs text-gray-600">
-                        <input type="checkbox" checked={l.recharge} onChange={(e) => setLine(l.key, { recharge: e.target.checked })} />
-                        recharge
-                      </label>
                       <button onClick={() => removeLine(l.key)} className="text-red-500 hover:text-red-700 text-sm px-1" title="Remove">🗑</button>
                     </div>
                   ))}
@@ -186,13 +208,20 @@ export default function CostAllocationModal({ cost, onClose, onSaved }: {
                 )}
               </div>
 
-              {/* Reconciliation */}
+              {/* Reconciliation — under-allocation allowed (amber nudge), over-allocation blocked (red). */}
               <div className={`flex items-center justify-between text-sm rounded-md px-3 py-2 ${
                 lines.length === 0 ? 'bg-gray-50 text-gray-500'
-                  : reconciles ? 'bg-green-50 text-green-700' : 'bg-amber-50 text-amber-700'
+                  : overAllocated ? 'bg-red-50 text-red-700'
+                  : unallocated ? 'bg-amber-50 text-amber-700'
+                  : 'bg-green-50 text-green-700'
               }`}>
                 <span>Allocated {gbp(allocated)} of {gbp(gross)}</span>
-                <span>{lines.length === 0 ? 'No split' : reconciles ? '✓ reconciles' : remaining > 0 ? `${gbp(remaining)} left` : `${gbp(-remaining)} over`}</span>
+                <span>
+                  {lines.length === 0 ? 'No split'
+                    : overAllocated ? `${gbp(-remaining)} over — reduce`
+                    : unallocated ? `${gbp(remaining)} unallocated (our cost) — OK to save`
+                    : '✓ fully allocated'}
+                </span>
               </div>
 
               {error && <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-md px-3 py-2">{error}</div>}
@@ -204,7 +233,7 @@ export default function CostAllocationModal({ cost, onClose, onSaved }: {
           <span className="text-xs text-gray-400 self-center">{lines.length === 0 ? 'Saving with no lines clears the split.' : ''}</span>
           <div className="flex gap-2">
             <button onClick={onClose} className="px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded-md">Cancel</button>
-            <button onClick={save} disabled={saving || loading || (lines.length > 0 && !reconciles)}
+            <button onClick={save} disabled={saving || loading || overAllocated}
               className="px-4 py-2 text-sm text-white bg-purple-600 hover:bg-purple-700 rounded-md disabled:opacity-50">
               {saving ? 'Saving…' : 'Save split'}
             </button>
