@@ -1,9 +1,11 @@
 import { useEffect, useState, useCallback, ReactNode } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { EntitySearch } from '../components/holding/EntitySearch';
 import { NotifyClientModal } from '../components/holding/NotifyClientModal';
 import { HeldItemForm } from '../components/holding/HeldItemForm';
+import { HeldItemPicker, HandoverFlow } from '../components/holding/HeldItemPicker';
+import { describeHeldCounts, heldCountClass, isPartiallyArrived } from '../components/holding/counts';
 import { locationLabelOrDash } from '../components/holding/format';
 import { ChaseReviewPanel } from '../components/holding/ChaseReviewPanel';
 import ThreadView from '../components/messaging/ThreadView';
@@ -111,6 +113,11 @@ export default function HoldingPage({ view }: { view: View }) {
   const [showDone, setShowDone] = useState(false);
   const [unknownOnly, setUnknownOnly] = useState(false);
   const [creating, setCreating] = useState(false);
+  // The two physical actions — receiving and handing over — used to exist only
+  // on the mobile /quick page, so backfilling an arrived delivery meant leaving
+  // this page entirely. Same shared components as /quick.
+  const [receiving, setReceiving] = useState(false);
+  const [handingOver, setHandingOver] = useState(false);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   // Lost-property list defaults to "what needs chasing now" at the top.
@@ -173,9 +180,19 @@ export default function HoldingPage({ view }: { view: View }) {
     <div className="p-4 sm:p-6 max-w-7xl mx-auto">
       <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
         <h1 className="text-2xl font-bold text-slate-800">{view === 'held' ? 'Held for Clients' : 'Lost Property'}</h1>
-        <button onClick={() => setCreating(true)} className="bg-[#7B5EA7] text-white px-4 py-2 rounded-lg text-sm font-medium">
-          {view === 'held' ? '+ Log Item' : '+ Log Lost Property'}
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          {view === 'held' && (
+            <button onClick={() => setReceiving(true)} className="bg-white border border-slate-300 text-slate-700 px-4 py-2 rounded-lg text-sm font-medium hover:bg-slate-50">
+              📦 Receive delivery
+            </button>
+          )}
+          <button onClick={() => setHandingOver(true)} className="bg-white border border-slate-300 text-slate-700 px-4 py-2 rounded-lg text-sm font-medium hover:bg-slate-50">
+            {view === 'held' ? '✅ Hand over' : '✅ Mark collected'}
+          </button>
+          <button onClick={() => setCreating(true)} className="bg-[#7B5EA7] text-white px-4 py-2 rounded-lg text-sm font-medium">
+            {view === 'held' ? '+ Log Item' : '+ Log Lost Property'}
+          </button>
+        </div>
       </div>
 
       {view === 'lost_property' && <ChaseReviewPanel defaultOpen={searchParams.get('review') === '1'} onChanged={load} />}
@@ -216,7 +233,7 @@ export default function HoldingPage({ view }: { view: View }) {
           <tbody>
             {sortedRows.map((h) => {
               const client = h.owner_person_name || h.owner_organisation_name || h.client_name_text;
-              const received = h.received_count != null && h.box_count != null ? `${h.received_count}/${h.box_count}` : (h.box_count != null ? String(h.box_count) : '—');
+              const counts = describeHeldCounts(h);
               return (
                 <tr key={h.id} onClick={() => setDetailId(h.id)} className="border-t hover:bg-slate-50 cursor-pointer">
                   <td className="px-3 py-2 font-medium text-slate-800">
@@ -239,7 +256,11 @@ export default function HoldingPage({ view }: { view: View }) {
                   {view === 'held' ? (
                     <>
                       <td className="px-3 py-2">{h.hh_job_number ? `#${h.hh_job_number}` : '—'}</td>
-                      <td className="px-3 py-2">{received}</td>
+                      <td className="px-3 py-2">
+                        {counts
+                          ? <span className={`font-medium ${heldCountClass(counts.tone)}`} title={counts.text}>{counts.short}</span>
+                          : <span className="text-slate-400">—</span>}
+                      </td>
                       <td className="px-3 py-2">{fmtDate(h.needed_by)}</td>
                       <td className="px-3 py-2"><HoldUntilCell value={h.hold_until} /></td>
                       <td className="px-3 py-2">{locationLabelOrDash(h)}</td>
@@ -264,12 +285,56 @@ export default function HoldingPage({ view }: { view: View }) {
       </div>
 
       {creating && <CreateModal view={view} locations={locations} onClose={() => setCreating(false)} onSaved={() => { setCreating(false); load(); }} />}
+      {receiving && <ReceiveModal locations={locations} onClose={() => setReceiving(false)} onSaved={() => { setReceiving(false); load(); }} />}
+      {handingOver && (
+        <Modal title={view === 'held' ? 'Hand over an item' : 'Mark an item collected'} onClose={() => setHandingOver(false)}>
+          <HandoverFlow compact onDone={() => { setHandingOver(false); load(); }} />
+        </Modal>
+      )}
       {detailId && <DetailModal id={detailId} locations={locations} onClose={closeDetail} onChange={load} />}
     </div>
   );
 }
 
-// ════════════════════════ CREATE ════════════════════════
+// ════════════════════════ RECEIVE / CREATE ════════════════════════
+/**
+ * Receive a delivery — search first (so an expected one gets booked in against
+ * its existing record rather than duplicated), falling through to a fresh log
+ * with "it's already here" pre-ticked. Mirrors /quick's Package-arrived tile.
+ */
+function ReceiveModal({ locations, onClose, onSaved }: { locations: HeldItemLocation[]; onClose: () => void; onSaved: () => void }) {
+  const navigate = useNavigate();
+  const [mode, setMode] = useState<'search' | 'create'>('search');
+
+  if (mode === 'create') {
+    return (
+      <Modal title="Log a delivery that's already here" onClose={onClose}>
+        <HeldItemForm variant="desktop" kinds={['incoming']} locations={locations} arrivedDefault
+          onDone={onSaved} onCancel={() => setMode('search')} />
+      </Modal>
+    );
+  }
+
+  return (
+    <Modal title="Receive a delivery" onClose={onClose}>
+      <div className="space-y-3">
+        <p className="text-sm text-slate-500">
+          Is it already expected? Search by job #, client or description — pick it to book it in.
+          If nobody told us it was coming, log it as new.
+        </p>
+        <HeldItemPicker compact kinds={['incoming', 'temp_storage']}
+          placeholder="Search expected deliveries…"
+          emptyHint="Nothing matching — log it as new below."
+          onPick={(h) => navigate(`/holding/receipt/${h.id}`)} />
+        <button onClick={() => setMode('create')}
+          className="w-full border-2 border-dashed border-slate-300 rounded-lg py-2.5 text-sm text-slate-600 font-medium hover:bg-slate-50">
+          + Not listed — log a delivery that's already here
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
 // Thin wrapper around the shared HeldItemForm (also used by the mobile /quick
 // launcher) so the desktop + mobile capture flows can never drift apart.
 function CreateModal({ view, locations, onClose, onSaved }: { view: View; locations: HeldItemLocation[]; onClose: () => void; onSaved: () => void }) {
@@ -327,7 +392,10 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
                   : <p className="text-slate-800">#{h.hh_job_number} <span className="text-xs text-slate-400">(not linked in OP)</span></p>)
               : <p className="text-slate-800">—</p>}
           </div>
-          {h.kind !== 'lost_property' && <Field label="Boxes" value={h.received_count != null && h.box_count != null ? `${h.received_count}/${h.box_count}` : (h.box_count != null ? String(h.box_count) : '—')} />}
+          {h.kind !== 'lost_property' && (() => {
+            const c = describeHeldCounts(h);
+            return <Field label="Boxes" plain className={c ? heldCountClass(c.tone) : ''} value={c ? c.text : '—'} />;
+          })()}
           {/* Dates (expected / needed-by / hold-until) are editable in the
               Dates section below. Here we just show the arrival log once it's in. */}
           {h.kind !== 'lost_property' && h.status !== 'expected' && h.arrived_at &&
@@ -387,9 +455,34 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
                 )}
                 <CollectButton id={id} kind={h.kind} busy={busy} onOpen={() => setOpenAction('collect')} onAction={action} />
                 <ShipBackButton id={id} busy={busy} onOpen={() => setOpenAction('ship')} onAction={action} />
-                {h.kind === 'incoming' && h.status === 'expected' && (
+                {/* Two different outcomes for a delivery that isn't complete:
+                    - nothing turned up at all  → cancel the record outright
+                    - some turned up, rest isn't coming → CORRECT the expected
+                      count so the shortfall stops reading as outstanding. That's
+                      an update, not a cancellation: what's here is still ours to
+                      hand over. Previously only the first existed, and only while
+                      the item was still `expected` — so a part-arrived delivery
+                      had no way to be closed off at all. */}
+                {h.kind === 'incoming' && !h.received_count && h.status === 'expected' && (
                   <button disabled={!!busy} onClick={() => { if (confirm("Mark this as not arriving? It'll drop off the prep checklist.")) action('cancel', async () => { await api.put(`/holding/${id}`, { status: 'cancelled' }); onClose(); }); }}
                     className="px-3 py-1.5 bg-white border border-slate-300 text-slate-600 rounded-lg text-xs">✕ Won't arrive</button>
+                )}
+                {h.kind !== 'lost_property' && isPartiallyArrived(h) && (
+                  <button disabled={!!busy}
+                    onClick={() => {
+                      const here = h.received_count as number;
+                      const was = h.box_count as number;
+                      if (!confirm(`Only ${here} of ${was} turned up. Mark ${here} as the full amount? The rest stops showing as outstanding — the ${here} here still needs handing over.`)) return;
+                      // Keep the original declared figure in the notes — the
+                      // correction shouldn't quietly erase what we were told
+                      // was coming.
+                      const trail = `[${new Date().toLocaleDateString('en-GB')}] Expected count corrected ${was} → ${here} (nothing more coming).`;
+                      action('shortfall', async () => {
+                        await api.put(`/holding/${id}`, { box_count: here, notes: h.notes ? `${h.notes}\n${trail}` : trail });
+                        setMsg(`Expected count corrected to ${here}.`);
+                      });
+                    }}
+                    className="px-3 py-1.5 bg-white border border-amber-300 text-amber-700 rounded-lg text-xs">📦 Nothing more coming</button>
                 )}
                 {h.kind === 'lost_property' && (
                   <button disabled={!!busy} onClick={() => action('chase', async () => { await api.post(`/holding/${id}/chase`, {}); setMsg('Chase logged (escalation bumped).'); })}
@@ -416,8 +509,8 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
   );
 }
 
-function Field({ label, value }: { label: string; value: string }) {
-  return <div><p className="text-xs text-slate-400">{label}</p><p className="text-slate-800 capitalize">{value}</p></div>;
+function Field({ label, value, plain, className }: { label: string; value: string; plain?: boolean; className?: string }) {
+  return <div><p className="text-xs text-slate-400">{label}</p><p className={`${plain ? 'text-slate-800' : 'text-slate-800 capitalize'} ${className || ''}`}>{value}</p></div>;
 }
 
 // Internal @mentionable discussion thread on a held item. Reuses the shared

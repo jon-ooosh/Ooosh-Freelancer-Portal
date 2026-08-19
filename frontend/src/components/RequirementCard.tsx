@@ -1001,12 +1001,22 @@ export default function RequirementCard({
             {/* Reminder — show due date, assigned user, event trigger, delivery, notes */}
             {req.requirement_type === 'reminder' && (
               <div className="mt-1 text-xs text-gray-500 space-y-0.5">
-                {req.due_date && (
-                  <div className={`font-medium ${new Date(req.due_date) <= new Date() ? 'text-red-600' : 'text-blue-600'}`}>
-                    Due: {new Date(req.due_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}
-                    {new Date(req.due_date) <= new Date() && ' (overdue)'}
-                  </div>
-                )}
+                {req.due_date && (() => {
+                  // A done reminder is never "overdue" — the hourly reminder
+                  // scanner (config/scheduler.ts) already skips done/blocked/
+                  // cancelled, so a red "(overdue)" on a ticked-off card is pure
+                  // noise. Keep the date visible (past tense) so history reads.
+                  // (Cancelled requirements aren't rendered, so `done` covers it.)
+                  const settled = req.status === 'done';
+                  const past = new Date(req.due_date) <= new Date();
+                  const when = new Date(req.due_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+                  if (settled) return <div className="text-gray-400">{past ? 'Was due' : 'Due'}: {when}</div>;
+                  return (
+                    <div className={`font-medium ${past ? 'text-red-600' : 'text-blue-600'}`}>
+                      Due: {when}{past && ' (overdue)'}
+                    </div>
+                  );
+                })()}
                 {req.event_trigger && (
                   <div className="text-[10px] text-purple-600">
                     Triggers on: job {req.event_trigger}

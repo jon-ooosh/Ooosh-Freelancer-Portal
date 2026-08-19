@@ -67,7 +67,11 @@ router.post('/public/merch-form', publicLimiter, validate(merchFormSchema), asyn
     if (j.rows.length > 0) { jobId = j.rows[0].id; jobName = j.rows[0].job_name; }
   }
 
-  const description = b.box_count ? `${b.box_count} box(es) of merch/equipment` : 'Merch/equipment (box count TBC)';
+  // Description says WHAT it is, never HOW MANY — a count baked in here froze
+  // at declaration time ("5 box(es)…") and stayed wrong once a partial arrival
+  // was booked in. The quantity lives in box_count/received_count and is
+  // rendered from there on every surface (frontend holding/counts.ts).
+  const description = 'Merch/equipment';
 
   const ins = await query(
     `INSERT INTO held_items (

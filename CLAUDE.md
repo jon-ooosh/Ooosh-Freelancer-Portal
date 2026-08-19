@@ -2792,10 +2792,62 @@ upgrades after first-live feedback that the chase/notify state was buried behind
   `NotifyClientModal` mid-flow — pick recipients (resolved from job#/org/person, or free-enter
   name+email), or untick to just log without emailing. Applies to lost property AND incoming/merch.
 
+**Count vocabulary — THREE words, one helper (Aug 2026).** `frontend/src/components/holding/counts.ts`
+`describeHeldCounts()` is the single source for how quantities read: **expected** (`box_count`,
+what the client said they'd send) · **here** (`received_count`, what turned up) · **outstanding**
+(the difference). It renders `3 of 5 here · 2 outstanding` on the Holding list, the detail modal,
+the picker and the Job-View panel, so they cannot drift. `services/holding-requirement-sync.ts`
+mirrors the same wording for the merch pip's notes (the backend can't import `shared/` at runtime —
+keep the two in step, same convention as `DOC_MATCH_TOKENS`). **The `description` says WHAT the
+thing is, never HOW MANY** — the merch form used to generate `"5 box(es) of merch/equipment"`, which
+froze at declaration time and stayed wrong forever once a partial arrival was booked in (job 15912:
+client declared 5, 3 turned up, every surface still read "5"). It now writes `'Merch/equipment'`.
+**Any new surface showing a quantity MUST call `describeHeldCounts`, not read the description.**
+Pre-Aug-2026 records keep their baked-in description — it's editable inline on the detail modal.
+
+**Expected vs here — the create form can book straight in.** `HeldItemForm` gained an **"It's
+already here"** toggle (+ "how many arrived"). Without it every item logged from `/holding` was born
+`expected` (the backend defaults `status` off `received_count` — `routes/holding.ts`), so an arrived-
+but-unlogged delivery could only be backfilled via `/quick`. Defaults on for `variant='mobile'` (you're
+holding the box) and via `arrivedDefault` from the desktop Receive flow; off for a plain "+ Log Item"
+(a forward declaration). Only meaningful for `incoming` — temp storage / lost property are by
+definition already in the building.
+
+**Receive + hand over live on BOTH surfaces.** The two things that physically happen used to exist
+only on the mobile `/quick` page. `components/holding/HeldItemPicker.tsx` exports `HeldItemPicker`
+(search-first list) + `HandoverFlow` (pick → who took it → `POST /:id/collected`), used by `/quick`
+AND the `/holding` header buttons (📦 Receive delivery · ✅ Hand over). Same convention as
+`HeldItemForm` — **add a new capture/handover field there, not in either page.**
+
+**Job View panel is no longer read-only.** `HeldItemsSection` takes `actions` + `onChanged`: rows
+deep-link to `/holding?item=<id>` (HoldingPage has honoured `?item=` all along — the rows just used
+to link at the bare list) and carry the ONE next physical step (Receive → the receipt page, or Hand
+over → inline confirm). `onChanged` reloads the job so the derived merch pip re-reads the items.
+Everything else (notify / ship back / dispose / relink) deliberately stays on the Holding pages.
+`kinds` is an effect dependency — pass a **stable** reference (`HELD_KINDS` on JobDetailPage), not an
+inline array literal.
+
+**Short delivery: "Nothing more coming" is an UPDATE, not a cancellation.** `✕ Won't arrive`
+(cancels the record) now only shows when nothing at all turned up, and a part-arrived delivery gets
+**📦 Nothing more coming** instead — it corrects `box_count` down to `received_count` so the shortfall
+stops reading as outstanding, while what IS here stays open to be handed over. The original declared
+figure is appended to `notes` so the correction doesn't quietly erase what we were told was coming.
+Previously the cancel action was gated to `status='expected'`, so a part-arrived delivery had no
+closing action at all.
+
 **Remaining / open:**
 - IRL feedback from the chase + hold-until flows (staff trialling over the following weeks).
+- **Merch pip label doesn't split awaiting vs here.** `in_progress` reads "To hand over" even when
+  nothing has arrived yet (`RequirementCard` `TYPE_STATUS_LABELS`), because the 4-state requirement
+  status can't carry the distinction and the card has no access to the items. The notes line beneath
+  it now says "Nothing here yet · 5 outstanding", which carries the meaning. Fix properly when the
+  Holding pages are unified (the action-bucket rework) rather than string-sniffing the notes.
+- **Unify `/holding` + `/holding/lost-property`** into one action-bucketed page (they are already one
+  table + one endpoint — the split is purely `VIEW_KINDS` in `HoldingPage.tsx` plus two nav entries).
 
 **Migrations:** 113/115/116 (initial) + 119 (chase/hold). `qrcode` dep added at the initial build.
+The Aug 2026 round (counts vocabulary, receive/handover on `/holding`, job-panel actions) added **no
+migration** — every column it needed already existed.
 
 ### External Tools (already built, need repointing from Monday.com → Ooosh API)
 

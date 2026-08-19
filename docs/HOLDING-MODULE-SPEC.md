@@ -359,6 +359,39 @@ for linked items; for unknown/unlinked items, capture a recipient at notify time
 
 ---
 
+## 11a. Count vocabulary + the two physical actions (Aug 2026)
+
+**Three words, one helper.** `frontend/src/components/holding/counts.ts` `describeHeldCounts()`:
+
+| Term | Column | Meaning |
+|---|---|---|
+| Expected | `box_count` | what the client said they'd send |
+| Here | `received_count` | what actually turned up |
+| Outstanding | derived | expected − here |
+
+Renders `3 of 5 here · 2 outstanding` on the Holding list, the detail modal, the picker and the
+Job-View panel. `services/holding-requirement-sync.ts` mirrors the wording for the merch pip notes
+(backend can't import `shared/` at runtime). **The `description` says WHAT it is, never HOW MANY** —
+the merch form baked the count in (`"5 box(es) of merch/equipment"`), which froze at declaration
+time and stayed wrong once a partial arrival was booked in. Any new quantity surface calls the
+helper; nothing parses the description.
+
+**Expected vs here.** `HeldItemForm` has an "It's already here" toggle (+ how many arrived) — without
+it every item logged from `/holding` was born `expected`, so an arrived-but-unlogged delivery could
+only be backfilled via `/quick`.
+
+**Receive + hand over on both surfaces.** `components/holding/HeldItemPicker.tsx` exports
+`HeldItemPicker` + `HandoverFlow`, shared by `/quick` and the `/holding` header. Same
+don't-let-them-drift convention as `HeldItemForm`.
+
+**Job View panel** takes `actions` + `onChanged`: rows deep-link (`/holding?item=<id>`) and carry the
+one next physical step. Everything else stays on the Holding pages.
+
+**Short delivery** → "📦 Nothing more coming" corrects `box_count` down to `received_count` (an
+update); "✕ Won't arrive" (cancel) is now reserved for nothing-arrived-at-all.
+
+---
+
 ## 12. Deferred for v1 (noted, not built)
 
 - **£ / billing.** `chargeable` flag + `storage_started_at` + `charge_notes` captured; surface
