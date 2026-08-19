@@ -22,6 +22,7 @@ import { v4 as uuid } from 'uuid';
 import { query } from '../config/database';
 import { encryptDriverPiiInto, decryptDriverRow, DRIVER_PII_FIELDS } from '../services/driver-pii';
 import { computeDriverValidity, persistableWindows, touchesValidity, backfillFromDates } from '../services/driver-validity';
+import { faceNeedsReview, sendIdentityReviewAlert } from '../services/identity-review';
 import { uploadToR2, isR2Configured } from '../config/r2';
 import { emailService } from '../services/email-service';
 
@@ -244,6 +245,35 @@ router.post('/next-step', authenticateHireForm, async (req: HireFormRequest, res
 
     const driver = result.rows[0] ? decryptDriverRow(result.rows[0]) : null;
     const analysis = analyzeDocuments(driver);
+
+    // ── Terminal state: a human has to look at this ─────────────────────────
+    //
+    // THIS IS THE LOOP-BREAKER. When iDenfy could not match the driver's face
+    // to their licence photo, nothing here knew about it: the routing engine
+    // has no branch for "we tried and it failed", so every path where the
+    // licence is invalid falls through to `{ step: 'idenfy' }`. The driver
+    // re-verified, failed identically, and was sent back — indefinitely. The
+    // webhook had been writing overall_status='Stuck' since launch and the
+    // router never read it.
+    //
+    // Checked BEFORE calculateNextStep so it wins over every other route, and
+    // the driver stops rather than being handed back to the machine that just
+    // rejected them. Staff were alerted when the flag was raised.
+    const identityStatus = (driver?.identity_check_status as string | null) ?? null;
+    if (identityStatus === 'needs_review' || identityStatus === 'rejected') {
+      res.json({
+        success: true,
+        email,
+        currentStep,
+        nextStep: 'manual-review',
+        reason: identityStatus === 'rejected'
+          ? 'Photo ID check was not accepted on review'
+          : 'Photo ID check needs manual review by Ooosh',
+        documentStatus: analysis,
+      });
+      return;
+    }
+
     const nextStep = calculateNextStep(analysis, currentStep, addressMismatch);
 
     res.json({
@@ -325,6 +355,14 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       overallStatus: 'overall_status',
       idenfyCheckDate: 'idenfy_check_date',
       idenfyScanRef: 'idenfy_scan_ref',
+      // iDenfy verdict — computed by the webhook since launch, persisted from
+      // Aug 2026 so a failed face match can actually do something.
+      idenfyOverall: 'idenfy_overall',
+      idenfyFaceResult: 'idenfy_face_result',
+      idenfyDocResult: 'idenfy_doc_result',
+      idenfyMismatchTags: 'idenfy_mismatch_tags',
+      idenfySuspicionReasons: 'idenfy_suspicion_reasons',
+      currentJobNumber: 'current_job_number',
       signatureDate: 'signature_date',
       licencePoints: 'licence_points',
       licenceEndorsements: 'licence_endorsements',
@@ -352,6 +390,13 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       'has_insurance_issues', 'has_driving_ban', 'additional_details',
       'insurance_status', 'overall_status',
       'idenfy_check_date', 'idenfy_scan_ref', 'signature_date',
+      'idenfy_overall', 'idenfy_face_result', 'idenfy_doc_result',
+      'idenfy_mismatch_tags', 'idenfy_suspicion_reasons',
+      'current_job_number',
+      // NB `identity_check_status` is NOT writable by the hire-form app — it is
+      // DERIVED below from idenfy_face_result, and cleared only by a staff
+      // review. Letting the app set it would repeat the referral_status mistake
+      // (Meadham / HH 16330), where the app's own value jumped the staff queue.
       'licence_points', 'licence_endorsements',
       // NB: 'referral_status' + 'referral_date' are DELIBERATELY NOT writable
       // from the hire-form app. A submission with requires_referral=true must
@@ -375,6 +420,10 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       'dvla_valid_until', 'passport_valid_until',
       'poa1_doc_date', 'poa2_doc_date', 'passport_check_date', 'passport_expiry',
       'dvla_check_date', 'signature_date', 'referral_date',
+    ]);
+
+    const JSONB_FIELDS = new Set([
+      'idenfy_mismatch_tags', 'idenfy_suspicion_reasons',
     ]);
 
     function normaliseDate(raw: unknown): string | null {
@@ -405,6 +454,10 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       let coerced: unknown = value ?? null;
       if (DATE_FIELDS.has(dbField)) {
         coerced = normaliseDate(coerced);
+      } else if (JSONB_FIELDS.has(dbField) && coerced !== null) {
+        // node-postgres sends a JS array as a Postgres array literal, which a
+        // JSONB column rejects. Stringify so it lands as JSON.
+        coerced = typeof coerced === 'string' ? coerced : JSON.stringify(coerced);
       }
       params.push(coerced);
       setClauses.push(`${dbField} = $${params.length}`);
@@ -454,6 +507,30 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       }
     }
 
+    // ── Derive the identity-review flag from the face verdict ───────────────
+    //
+    // The hire-form app reports what iDenfy said; OP decides what that means.
+    // Only an explicit non-match trips review — an absent face result (e.g. a
+    // passport-only session, where no comparison was run) must not raise a
+    // false flag.
+    //
+    // A staff decision always wins: once someone has accepted or rejected the
+    // match, a repeat webhook carrying the same stale verdict does not re-open
+    // it. Staff can re-open from the driver page if genuinely re-verified.
+    let identityFlagRaised = false;
+    if ('idenfy_face_result' in writtenCols && faceNeedsReview(String(writtenCols.idenfy_face_result || ''))) {
+      const current = await query(
+        `SELECT identity_check_status FROM drivers WHERE email = $1 AND is_active = true LIMIT 1`,
+        [email],
+      );
+      const status = current.rows[0]?.identity_check_status ?? null;
+      if (status === null || status === 'needs_review') {
+        params.push('needs_review');
+        setClauses.push(`identity_check_status = $${params.length}`);
+        identityFlagRaised = status === null;
+      }
+    }
+
     console.log(`[driver-verification] UPDATE for ${email} — writing fields:`, setClauses.map(c => c.split(' = ')[0]));
 
     setClauses.push('updated_at = NOW()');
@@ -492,6 +569,13 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       // Fire referral notification if requires_referral just changed to true
       if (referralBeingSet && !wasAlreadyReferred && driverId) {
         await fireReferralNotification(email, driverId, updates);
+      }
+
+      // Alert on a NEWLY raised identity review. Once-only inside the helper,
+      // and best-effort — a failed alert must never fail the driver's update.
+      if (identityFlagRaised && driverId) {
+        sendIdentityReviewAlert(driverId).catch(err =>
+          console.error('[driver-verification] identity review alert failed:', err));
       }
 
       // If signature_date was set in this update and the driver doesn't yet
@@ -1106,7 +1190,12 @@ function buildDriverStatusResponse(driver: Record<string, unknown>) {
 
   // Determine overall status
   let status = 'new';
-  if (driver.overall_status === 'Insurance Review') status = 'insurance_review';
+  // Ahead of everything else: a driver awaiting a human ID review must not be
+  // reported as "keep going", or ProcessingHub polls forever waiting for a
+  // state that will only ever change when a member of staff acts.
+  if (driver.identity_check_status === 'needs_review') status = 'manual_review';
+  else if (driver.identity_check_status === 'rejected') status = 'identity_rejected';
+  else if (driver.overall_status === 'Insurance Review') status = 'insurance_review';
   else if (driver.overall_status === 'Stuck') status = 'stuck';
   else if (analysis.allValid) status = 'verified';
   else if (analysis.licence.valid) {

@@ -8,13 +8,14 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
-import { authenticate, authorize, AuthRequest } from '../middleware/auth';
+import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { generateDriverSnapshot, loadDriverDocuments, type DriverSnapshotData } from '../services/driver-snapshot-pdf';
 import { uploadToR2 } from '../config/r2';
 import { fetchLogo } from '../services/hire-form-pdf';
 import { encryptDriverPiiInto, decryptDriverRow, decryptDriverRows } from '../services/driver-pii';
 import { persistableWindows, touchesValidity, backfillFromDates } from '../services/driver-validity';
+import { sendIdentityReviewAlert } from '../services/identity-review';
 
 const router = Router();
 router.use(authenticate);
@@ -649,6 +650,75 @@ router.patch('/:id/calculated-excess', authorize('admin', 'manager'), validate(e
     res.status(500).json({ error: 'Failed to edit calculated excess' });
   }
 });
+
+// ── POST /api/drivers/:id/resolve-identity — accept or reject a face match ──
+//
+// The staff counterpart to the automatic flag raised when iDenfy cannot match a
+// driver's selfie to their licence photo. A mismatch is usually innocent (an
+// older licence photo, a change in appearance), so the resolution is a human
+// looking at the two images on the driver record and saying which it is.
+//
+// Deliberately STAFF_ROLES, not manager-only: unlike an insurance referral —
+// which needs the insurer's answer — this is a visual comparison anyone on the
+// desk can make, and keeping it narrow would rebuild the bottleneck this whole
+// piece of work exists to remove.
+const resolveIdentitySchema = z.object({
+  outcome: z.enum(['accepted', 'rejected']),
+  notes: z.string().max(2000).optional().default(''),
+});
+
+router.post(
+  '/:id/resolve-identity',
+  authorize(...STAFF_ROLES),
+  validate(resolveIdentitySchema),
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const { id } = req.params;
+      const { outcome, notes } = req.body as { outcome: 'accepted' | 'rejected'; notes: string };
+
+      const result = await query(
+        `UPDATE drivers
+            SET identity_check_status = $1,
+                identity_reviewed_by  = $2,
+                identity_reviewed_at  = NOW(),
+                identity_review_notes = NULLIF($3, ''),
+                updated_at            = NOW()
+          WHERE id = $4
+          RETURNING id, full_name, identity_check_status`,
+        [outcome, req.user!.id, notes, id],
+      );
+      if (result.rows.length === 0) {
+        res.status(404).json({ error: 'Driver not found' });
+        return;
+      }
+
+      await query(
+        `INSERT INTO audit_log (user_id, entity_type, entity_id, action, new_values)
+         VALUES ($1, 'driver', $2, 'resolve_identity', $3)`,
+        [req.user!.id, id, JSON.stringify({ outcome, notes })],
+      );
+
+      res.json({ data: result.rows[0] });
+    } catch (error) {
+      console.error('[drivers] Resolve identity error:', error);
+      res.status(500).json({ error: 'Failed to resolve identity check' });
+    }
+  },
+);
+
+// ── POST /api/drivers/:id/resend-identity-alert — re-send the review email ──
+router.post(
+  '/:id/resend-identity-alert',
+  authorize(...STAFF_ROLES),
+  async (req: AuthRequest, res: Response) => {
+    const result = await sendIdentityReviewAlert(req.params.id as string, { force: true });
+    if (!result.sent) {
+      res.status(400).json({ error: `Could not send alert (${result.reason})` });
+      return;
+    }
+    res.json({ data: { sent: true } });
+  },
+);
 
 // ── POST /api/drivers/:id/resolve-referral — Resolve insurance referral ──
 

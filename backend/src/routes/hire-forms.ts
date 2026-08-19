@@ -36,6 +36,7 @@ import { syncFleetHireStatus } from '../services/fleet-hire-status-sync';
 import { autoDispatchJob } from '../services/auto-dispatch';
 import { runHookWithRecovery } from '../services/post-hook-recovery';
 import { cancelOrphanSiblingAllocations } from '../services/vha-dedup';
+import { isIdentityAuthorised, identityHoldReason } from '../services/identity-review';
 
 /** Format a date string/Date to "18 Mar 2026" */
 function fmtDate(d?: string | Date | null): string {
@@ -850,6 +851,7 @@ router.post('/quick-assign', authenticate, validate(quickAssignSchema), async (r
     const driverCheck = await query(
       `SELECT licence_valid_to, dvla_valid_until,
               poa1_valid_until, poa2_valid_until,
+              identity_check_status,
               requires_referral, referral_status, full_name
          FROM drivers WHERE id = $1`,
       [f.driver_id]
@@ -877,6 +879,17 @@ router.post('/quick-assign', authenticate, validate(quickAssignSchema), async (r
         expiredDocs,
       });
     }
+    // Photo ID review sits alongside the insurance referral: same "a human must
+    // decide" shape, different decider. Checked first because it is the more
+    // fundamental question — we do not yet know this is the person on the licence.
+    if (!isIdentityAuthorised(dr.identity_check_status)) {
+      return res.status(400).json({
+        error: `Cannot assign ${dr.full_name} — ${identityHoldReason(dr.identity_check_status)}`,
+        code: 'driver_identity_unverified',
+        identity_check_status: dr.identity_check_status,
+      });
+    }
+
     if (dr.requires_referral && dr.referral_status !== 'approved') {
       return res.status(400).json({
         error: `Cannot assign ${dr.full_name} — insurance referral is ${dr.referral_status || 'pending'}. Resolve the referral on the driver detail page first.`,
@@ -1258,17 +1271,22 @@ const FREELANCER_PATCH_ALLOW = new Set([
  */
 async function isDriverAuthorisedForAgreement(assignmentId: string): Promise<boolean> {
   const res = await query(
-    `SELECT d.requires_referral, d.referral_status
+    `SELECT d.requires_referral, d.referral_status, d.identity_check_status
        FROM vehicle_hire_assignments vha
        JOIN drivers d ON d.id = vha.driver_id
       WHERE vha.id = $1`,
     [assignmentId],
   );
   if (res.rows.length === 0) return true; // no driver row resolvable — fail open
-  const { requires_referral, referral_status } = res.rows[0] as {
+  const { requires_referral, referral_status, identity_check_status } = res.rows[0] as {
     requires_referral: boolean | null;
     referral_status: string | null;
+    identity_check_status: string | null;
   };
+  // An unresolved photo ID check holds the agreement for the same reason a
+  // pending referral does: we are not yet cleared to treat this person as an
+  // authorised driver. Fails OPEN on an unknown status, like the referral arm.
+  if (!isIdentityAuthorised(identity_check_status)) return false;
   if (!requires_referral) return true;
   return referral_status === 'approved' || referral_status === 'waived';
 }
