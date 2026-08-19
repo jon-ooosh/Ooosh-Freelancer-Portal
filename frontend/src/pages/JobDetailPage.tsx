@@ -5066,16 +5066,26 @@ export default function JobDetailPage() {
                         const baseClass = 'inline-flex items-center gap-1.5 px-3 py-2 bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700 text-sm font-medium';
                         const effectiveVehicleId = a.effective_vehicle_id || a.vehicle_id;
                         if (a.status === 'soft' || a.status === 'confirmed') {
-                          // Mid-tour Add-to-Hire: this driver has signed a hire form
-                          // but isn't linked to a van, AND at least one van on the
-                          // job is already physically out (booked_out / active).
+                          // Mid-tour Add-to-Hire: the van this driver would go out
+                          // on is ALREADY physically out (booked_out / active).
                           // Takes precedence over Allocate Van / Book Out — those
                           // assume the van is still in the warehouse.
-                          if (!a.vehicle_id) {
+                          //
+                          // Keyed on "is the van already out?", NOT on "has this
+                          // driver got a van?". Quick-assign offers a vehicle
+                          // picker, so a late driver added to a van that has
+                          // already left arrives here WITH a vehicle_id — and the
+                          // old `!a.vehicle_id` test skipped straight past this
+                          // branch to "Book Out", inviting a walkaround on a van
+                          // that was 200 miles away (job 16291, Aug 2026).
+                          {
                             const bookedOutSiblings = vehicleAssignments.filter(other =>
                               other.id !== a.id &&
                               other.vehicle_id &&
-                              (other.status === 'booked_out' || other.status === 'active')
+                              (other.status === 'booked_out' || other.status === 'active') &&
+                              // Once this driver has a van, only THAT van counts —
+                              // another van being out doesn't make theirs out.
+                              (!effectiveVehicleId || other.vehicle_id === effectiveVehicleId)
                             );
                             if (bookedOutSiblings.length > 0) {
                               return (

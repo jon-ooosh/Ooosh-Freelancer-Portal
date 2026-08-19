@@ -1965,9 +1965,22 @@ router.post(
       const source = sourceResult.rows[0];
 
       // 2. Validate source is in a state to be added mid-tour
-      if (source.vehicle_id) {
+      //
+      // Having a van linked is NOT itself a blocker. Quick-assign offers a
+      // vehicle picker, so a staff member adding a late driver to an already-out
+      // van naturally picks that van — and the old `if (source.vehicle_id)`
+      // guard then rejected the exact case this endpoint exists to serve, while
+      // the Job Detail card fell through to "Book Out" and invited a full
+      // walkaround on a van that had already left (job 16291, Aug 2026).
+      //
+      // What we must still refuse is using Add to Hire to MOVE a driver onto a
+      // different van — that is Swap Vehicle's job. So the check is scoped: the
+      // van already on this row has to be among the ones requested. Step 3
+      // below independently proves every requested van is genuinely booked out
+      // on this job, which is the real safety property.
+      if (source.vehicle_id && !requestedVehicleIds.includes(source.vehicle_id)) {
         return res.status(400).json({
-          error: 'Driver is already linked to a vehicle. Use Swap Vehicle if you need to change it.',
+          error: 'Driver is already linked to a different vehicle. Use Swap Vehicle if you need to change it.',
         });
       }
       if (!['soft', 'confirmed'].includes(source.status)) {
