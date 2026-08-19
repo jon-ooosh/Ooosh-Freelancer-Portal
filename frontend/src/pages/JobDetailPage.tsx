@@ -42,6 +42,11 @@ import type { FileAttachment, PipelineStatus, HoldReason, ConfirmedMethod } from
 import { PIPELINE_STATUS_CONFIG, LOST_REASON_OPTIONS, PAUSED_REASON_OPTIONS } from '@shared/index';
 import { defaultRevisitDate, REVISIT_LEAD_DAYS_UNDER_MINIMUM } from '../lib/revisitDate';
 
+
+// Stable reference — HeldItemsSection takes `kinds` as an effect dependency, so
+// an inline array literal would refetch on every parent render.
+const HELD_KINDS = ['incoming', 'temp_storage', 'lost_property'] as const;
+
 const STATUS_MAP: Record<number, string> = {
   0: 'Enquiry', 1: 'Provisional', 2: 'Booked', 3: 'Prepped',
   4: 'Part Dispatched', 5: 'Dispatched', 6: 'Returned Incomplete',
@@ -6324,7 +6329,7 @@ export default function JobDetailPage() {
           {job.client_id && (
             <div className="empty:hidden mb-4">
               <HeldItemsSection entityType="organisation" entityId={job.client_id}
-                kinds={['incoming', 'temp_storage', 'lost_property']} excludeJobId={job.id}
+                kinds={HELD_KINDS} excludeJobId={job.id}
                 openOnly hideWhenEmpty heading="📦 Also holding (FYI)" />
             </div>
           )}
@@ -7385,8 +7390,12 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, cli
                 {hhJobNumber && <SendMerchFormButton jobId={jobId} hhJobNumber={hhJobNumber} />}
               </div>
             </div>
+            {/* actions: the two physical steps (receive / hand over) inline, so
+                the job screen doesn't bounce to /holding for them. onChanged
+                reloads the job so the derived merch pip re-reads the items. */}
             <HeldItemsSection key={heldItemsRefreshKey} entityType="job" entityId={jobId}
-              kinds={['incoming', 'temp_storage', 'lost_property']} bare emptyHint="Nothing held for this job yet." />
+              kinds={HELD_KINDS} bare actions onChanged={loadAll}
+              emptyHint="Nothing held for this job yet." />
           </div>
         );
         if (!merchReq) return <div className="mt-2">{panel}</div>;
