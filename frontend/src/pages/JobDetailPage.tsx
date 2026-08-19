@@ -40,6 +40,7 @@ import FileEmailModal from '../components/FileEmailModal';
 import QuoteEditModal from '../components/QuoteEditModal';
 import type { FileAttachment, PipelineStatus, HoldReason, ConfirmedMethod } from '@shared/index';
 import { PIPELINE_STATUS_CONFIG, LOST_REASON_OPTIONS, PAUSED_REASON_OPTIONS } from '@shared/index';
+import { defaultRevisitDate, REVISIT_LEAD_DAYS_UNDER_MINIMUM } from '../lib/revisitDate';
 
 
 // Stable reference — HeldItemsSection takes `kinds` as an effect dependency, so
@@ -6253,6 +6254,7 @@ export default function JobDetailPage() {
           jobId={id}
           clientId={job?.client_id}
           clientName={job?.client_name || job?.company_name}
+          hireStart={job?.job_date || job?.out_date}
           onConfirm={(data) => handleStatusTransition(transitionTarget, data)}
           onCancel={() => { setShowTransitionModal(false); setTransitionTarget(null); }}
         />
@@ -8066,6 +8068,7 @@ function StatusTransitionModal({
   jobId,
   clientId,
   clientName,
+  hireStart,
 }: {
   targetStatus: PipelineStatus | 'completed';
   saving: boolean;
@@ -8074,11 +8077,14 @@ function StatusTransitionModal({
   jobId?: string;
   clientId?: string | null;
   clientName?: string | null;
+  hireStart?: string | null;
 }) {
   const [holdReason, setHoldReason] = useState<HoldReason>('fully_booked');
   const [holdDetail, setHoldDetail] = useState('');
   const [setRevisit, setSetRevisit] = useState(false);
   const [revisitDate, setRevisitDate] = useState('');
+  // Staff has taken manual control of the revisit fields — stop re-defaulting them.
+  const [revisitTouched, setRevisitTouched] = useState(false);
   const [confirmedMethod, setConfirmedMethod] = useState<ConfirmedMethod>('deposit');
   const [lostReason, setLostReason] = useState('Price');
   const [lostDetail, setLostDetail] = useState('');
@@ -8099,6 +8105,23 @@ function StatusTransitionModal({
     { text: '', date: '', delivery: 'both', priority: 'normal', userId: '' },
   ]);
   const [teamUsers, setTeamUsers] = useState<Array<{ id: string; first_name: string; last_name: string; email: string }>>([]);
+
+  // "Under 4-day window" pauses get a pre-filled revisit date — the hire is worth
+  // another swing once the diary loosens, so default it to a fortnight before the
+  // hire starts rather than making staff work it out. Any other reason is a
+  // judgement call and stays opt-in. Re-running on reason change also CLEARS the
+  // default when staff switch away, so a stale date can't be submitted by accident.
+  const autoRevisit = defaultRevisitDate(hireStart);
+  useEffect(() => {
+    if (targetStatus !== 'paused' || revisitTouched) return;
+    if (holdReason === 'under_minimum' && autoRevisit) {
+      setSetRevisit(true);
+      setRevisitDate(autoRevisit);
+    } else {
+      setSetRevisit(false);
+      setRevisitDate('');
+    }
+  }, [targetStatus, holdReason, autoRevisit, revisitTouched]);
 
   // Load team users for "remind someone else"
   useEffect(() => {
@@ -8226,7 +8249,7 @@ function StatusTransitionModal({
                 <input
                   type="checkbox"
                   checked={setRevisit}
-                  onChange={(e) => setSetRevisit(e.target.checked)}
+                  onChange={(e) => { setRevisitTouched(true); setSetRevisit(e.target.checked); }}
                   className="rounded border-gray-300 text-ooosh-600 focus:ring-ooosh-500"
                 />
                 Set a revisit date?
@@ -8238,10 +8261,15 @@ function StatusTransitionModal({
                 <input
                   type="date"
                   value={revisitDate}
-                  onChange={(e) => setRevisitDate(e.target.value)}
+                  onChange={(e) => { setRevisitTouched(true); setRevisitDate(e.target.value); }}
                   min={new Date().toISOString().split('T')[0]}
                   className="mt-2 w-full border border-gray-300 rounded px-3 py-2 text-sm"
                 />
+              )}
+              {setRevisit && !revisitTouched && revisitDate === autoRevisit && autoRevisit && (
+                <p className="text-xs text-ooosh-600 mt-1">
+                  Defaulted to {REVISIT_LEAD_DAYS_UNDER_MINIMUM} days before the hire starts — change it if you'd rather come back sooner or later.
+                </p>
               )}
             </div>
           </div>
