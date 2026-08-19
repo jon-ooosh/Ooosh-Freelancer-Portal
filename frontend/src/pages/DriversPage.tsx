@@ -7,6 +7,8 @@ import { MobileListCard } from '../components/mobile/MobileListCard';
 import { TelLink } from '../components/mobile/TapTargets';
 
 interface DriverListItem {
+  /** HH job whose form the driver is mid-way through (no assignment row yet). */
+  current_job_number?: number | null;
   id: string;
   full_name: string;
   email: string | null;
@@ -309,6 +311,9 @@ export default function DriversPage() {
                       <td className="px-4 py-4 whitespace-nowrap">
                         <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs ${status.colour}`}>
                           {status.label}
+                          {status.label === 'In Progress' && driver.current_job_number
+                            ? ` · #${driver.current_job_number}`
+                            : ''}
                         </span>
                       </td>
                     </tr>
@@ -347,6 +352,12 @@ export default function DriversPage() {
                     trailing={
                       <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs whitespace-nowrap ${status.colour}`}>
                         {status.label}
+                        {/* A driver mid-form has no assignment row yet, so Hire
+                            History is empty and nothing else says which hire
+                            they belong to. */}
+                        {status.label === 'In Progress' && driver.current_job_number
+                          ? ` · #${driver.current_job_number}`
+                          : ''}
                       </span>
                     }
                     secondary={

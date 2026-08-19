@@ -60,6 +60,17 @@ interface DriverDetail {
   // Derived expiry windows, maintained by services/driver-validity.ts on every
   // write. Display only — never edit these directly, edit the FROM date.
   licence_check_valid_until: string | null;
+  // iDenfy verdict + staff review of a failed face match (migration 193).
+  idenfy_overall: string | null;
+  idenfy_face_result: string | null;
+  idenfy_doc_result: string | null;
+  idenfy_mismatch_tags: string[] | null;
+  idenfy_suspicion_reasons: string[] | null;
+  identity_check_status: 'needs_review' | 'accepted' | 'rejected' | null;
+  identity_reviewed_at: string | null;
+  identity_review_notes: string | null;
+  current_job_number: number | null;
+  current_job_started_at: string | null;
   poa1_valid_until: string | null;
   poa2_valid_until: string | null;
   dvla_valid_until: string | null;
@@ -203,6 +214,116 @@ function daysUntil(d: string | null): number | null {
  * - Passport: 30 days from iDenfy check (non-UK) or passport_valid_until
  */
 /**
+ * Identity review panel — staff adjudication of a failed iDenfy face match.
+ *
+ * Renders only when there is something to say. The whole point is that a
+ * mismatch is usually innocent (an older licence photo, a changed appearance),
+ * so this presents the machine's verdict and sends staff to the two images
+ * rather than pronouncing on the driver.
+ */
+function IdentityReviewPanel({ driver, onDriverUpdate }: {
+  driver: DriverDetail;
+  onDriverUpdate: (d: DriverDetail) => void;
+}) {
+  const [notes, setNotes] = useState('');
+  const [busy, setBusy] = useState<'accepted' | 'rejected' | null>(null);
+  const [error, setError] = useState('');
+
+  const status = driver.identity_check_status;
+  if (!status) return null;
+
+  const detail: string[] = [];
+  if (driver.idenfy_overall) detail.push(`iDenfy result: ${driver.idenfy_overall}`);
+  if (driver.idenfy_face_result) detail.push(`Face check: ${driver.idenfy_face_result}`);
+  if (driver.idenfy_doc_result) detail.push(`Document check: ${driver.idenfy_doc_result}`);
+  for (const t of driver.idenfy_mismatch_tags || []) detail.push(`Mismatch: ${t}`);
+  for (const r of driver.idenfy_suspicion_reasons || []) detail.push(`Flag: ${r}`);
+
+  async function resolve(outcome: 'accepted' | 'rejected') {
+    setBusy(outcome);
+    setError('');
+    try {
+      await api.post(`/drivers/${driver.id}/resolve-identity`, { outcome, notes });
+      const refreshed = await api.get<{ data: DriverDetail }>(`/drivers/${driver.id}`);
+      onDriverUpdate(refreshed.data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save that — please try again.');
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  const tone = status === 'needs_review'
+    ? { box: 'bg-amber-50 border-amber-200', head: 'text-amber-800' }
+    : status === 'accepted'
+      ? { box: 'bg-green-50 border-green-200', head: 'text-green-800' }
+      : { box: 'bg-red-50 border-red-200', head: 'text-red-800' };
+
+  return (
+    <div className={`rounded-xl border p-6 ${tone.box}`}>
+      <h3 className={`text-sm font-semibold mb-1 ${tone.head}`}>
+        {status === 'needs_review' && 'Photo ID check needs review'}
+        {status === 'accepted' && 'Photo ID check accepted'}
+        {status === 'rejected' && 'Photo ID check rejected'}
+      </h3>
+
+      {status === 'needs_review' && (
+        <p className="text-sm text-gray-700 mb-3">
+          iDenfy couldn&rsquo;t match this driver&rsquo;s selfie to the photo on their licence. That&rsquo;s
+          often just an old licence photo or a change in appearance &mdash; compare the
+          <strong> Selfie</strong> and <strong>Licence Front</strong> images below and decide.
+          Until then they can&rsquo;t be assigned to a hire and won&rsquo;t be sent a hire agreement.
+        </p>
+      )}
+
+      {detail.length > 0 && (
+        <ul className="text-xs text-gray-600 mb-3 space-y-0.5">
+          {detail.map((d) => <li key={d}>• {d}</li>)}
+        </ul>
+      )}
+
+      {status !== 'needs_review' && (
+        <p className="text-xs text-gray-600">
+          {driver.identity_reviewed_at && <>Reviewed {formatDate(driver.identity_reviewed_at)}. </>}
+          {driver.identity_review_notes}
+        </p>
+      )}
+
+      {status === 'needs_review' && (
+        <>
+          <textarea
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            rows={2}
+            placeholder="Notes (optional) — e.g. spoke to driver, licence photo is 9 years old"
+            className="w-full rounded border border-gray-300 px-3 py-2 text-sm mb-3 focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+          />
+          {error && <p className="text-sm text-red-600 mb-2">{error}</p>}
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              disabled={busy !== null}
+              onClick={() => resolve('accepted')}
+              className="px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm font-medium disabled:opacity-50"
+            >
+              {busy === 'accepted' ? 'Saving…' : '✓ It&rsquo;s them — accept'}
+            </button>
+            <button
+              type="button"
+              disabled={busy !== null}
+              onClick={() => resolve('rejected')}
+              className="px-3 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 text-sm font-medium disabled:opacity-50"
+            >
+              {busy === 'rejected' ? 'Saving…' : '✕ Not a match — reject'}
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
  * One row of the Document Validity card: the FROM date staff set, and the
  * expiry OP derived from it.
  *
@@ -328,6 +449,9 @@ function excessStatusBadge(status: string) {
 const DOCUMENT_CATEGORIES: { label: string; fileLabels: string[]; description: string }[] = [
   { label: 'Licence Front', fileLabels: ['Licence Front', 'licence_front', 'License Front', 'license_front'], description: 'Photo of front of driving licence' },
   { label: 'Licence Back', fileLabels: ['Licence Back', 'licence_back', 'License Back', 'license_back'], description: 'Photo of back of driving licence' },
+  // Captured by iDenfy and discarded until Aug 2026. Sits directly under the
+  // licence images so the comparison staff are asked to make is one glance.
+  { label: 'Selfie', fileLabels: ['Selfie', 'selfie', 'face', 'FACE', 'idenfy_face'], description: 'Photo taken during identity verification — compare against the licence' },
   { label: 'DVLA Check', fileLabels: ['DVLA Check Code', 'DVLA Check', 'dvla_check', 'dvla check', 'dvla'], description: 'DVLA check code screenshot' },
   { label: 'Proof of Address 1', fileLabels: ['Proof of Address', 'POA 1', 'poa1', 'Proof of Address 1'], description: 'Utility bill, council tax, or bank statement' },
   { label: 'Proof of Address 2', fileLabels: ['POA 2', 'poa2', 'Proof of Address 2'], description: 'Second proof of address document' },
@@ -1320,6 +1444,21 @@ function DetailsTab({
           {field('Nationality', 'nationality')}
         </div>
       </div>
+
+      {/* Which hire is this? A driver part-way through the form has no
+          vehicle_hire_assignments row yet, so the Hire History tab is empty and
+          nothing tells staff what a stuck driver relates to. */}
+      {driver.current_job_number && !driver.signature_date && (
+        <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900">
+          Currently completing a hire form for job{' '}
+          <Link to={`/jobs?search=${driver.current_job_number}`} className="font-semibold underline">
+            #{driver.current_job_number}
+          </Link>
+          {driver.current_job_started_at && <> &middot; started {formatDate(driver.current_job_started_at)}</>}
+        </div>
+      )}
+
+      <IdentityReviewPanel driver={driver} onDriverUpdate={onDriverUpdate} />
 
       {/* Document Validity — one FROM date in, OP-derived expiry out */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
