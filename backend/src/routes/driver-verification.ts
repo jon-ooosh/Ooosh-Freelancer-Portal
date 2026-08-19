@@ -21,6 +21,7 @@ import path from 'path';
 import { v4 as uuid } from 'uuid';
 import { query } from '../config/database';
 import { encryptDriverPiiInto, decryptDriverRow, DRIVER_PII_FIELDS } from '../services/driver-pii';
+import { computeDriverValidity, persistableWindows, touchesValidity, backfillFromDates } from '../services/driver-validity';
 import { uploadToR2, isR2Configured } from '../config/r2';
 import { emailService } from '../services/email-service';
 
@@ -303,6 +304,10 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       licenseNextCheckDue: 'licence_next_check_due',
       poa1ValidUntil: 'poa1_valid_until',
       poa2ValidUntil: 'poa2_valid_until',
+      poa1DocDate: 'poa1_doc_date',
+      poa2DocDate: 'poa2_doc_date',
+      passportCheckDate: 'passport_check_date',
+      passportExpiry: 'passport_expiry',
       dvlaValidUntil: 'dvla_valid_until',
       passportValidUntil: 'passport_valid_until',
       poa1Provider: 'poa1_provider',
@@ -338,6 +343,9 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       'licence_valid_from', 'licence_valid_to', 'date_passed_test',
       'licence_next_check_due',
       'poa1_valid_until', 'poa2_valid_until', 'dvla_valid_until', 'passport_valid_until',
+      // FROM dates (migration 192). The *_valid_until columns above are DERIVED
+      // from these on write — see services/driver-validity.ts.
+      'poa1_doc_date', 'poa2_doc_date', 'passport_check_date', 'passport_expiry',
       'poa1_provider', 'poa2_provider',
       'dvla_check_code', 'dvla_check_date',
       'has_disability', 'has_convictions', 'has_prosecution', 'has_accidents',
@@ -365,6 +373,7 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       'date_passed_test', 'licence_next_check_due',
       'poa1_valid_until', 'poa2_valid_until',
       'dvla_valid_until', 'passport_valid_until',
+      'poa1_doc_date', 'poa2_doc_date', 'passport_check_date', 'passport_expiry',
       'dvla_check_date', 'signature_date', 'referral_date',
     ]);
 
@@ -385,6 +394,8 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
     // Capture the encryptable PII fields actually written (post-normalisation)
     // for the Phase 1 dual-write follow-up below.
     const writtenPii: Record<string, unknown> = {};
+    // Every column this write touches — drives the validity re-derivation below.
+    const writtenCols: Record<string, unknown> = {};
     const piiFieldSet = new Set<string>(DRIVER_PII_FIELDS);
 
     for (const [key, value] of Object.entries(updates)) {
@@ -397,6 +408,7 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       }
       params.push(coerced);
       setClauses.push(`${dbField} = $${params.length}`);
+      writtenCols[dbField] = coerced;
       if (piiFieldSet.has(dbField)) writtenPii[dbField] = coerced;
     }
 
@@ -404,6 +416,42 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       console.log(`[driver-verification] UPDATE for ${email} — NO valid fields after mapping! Incoming keys were:`, Object.keys(updates));
       res.status(400).json({ error: 'No valid fields to update' });
       return;
+    }
+
+    // ── Keep the derived expiry columns in step with the FROM dates ─────────
+    //
+    // The hire-form app writes from both ends: the DVLA processing page posts
+    // only `dvlaValidUntil`, while the iDenfy webhook posts check dates. So we
+    // first back-fill any missing FROM date from the expiry it came with, then
+    // re-derive every window from the merged row. Derived values are appended
+    // last, so they win over anything sent directly.
+    const reconciled = backfillFromDates(writtenCols);
+    for (const [col, value] of Object.entries(reconciled)) {
+      if (col in writtenCols) continue;
+      params.push(value);
+      setClauses.push(`${col} = $${params.length}`);
+      writtenCols[col] = value;
+    }
+
+    if (touchesValidity(Object.keys(writtenCols))) {
+      const prior = await query(
+        `SELECT * FROM drivers WHERE email = $1 AND is_active = true LIMIT 1`,
+        [email],
+      );
+      const merged = { ...(prior.rows[0] || {}), ...writtenCols };
+      for (const [col, value] of Object.entries(persistableWindows(merged))) {
+        if (col in writtenCols) {
+          // Overwrite the caller's value in place rather than adding a second
+          // assignment for the same column (Postgres rejects duplicates).
+          const idx = setClauses.findIndex(c => c.startsWith(`${col} = $`));
+          const pos = Number(setClauses[idx].split('$')[1]);
+          params[pos - 1] = value;
+        } else {
+          params.push(value);
+          setClauses.push(`${col} = $${params.length}`);
+        }
+        writtenCols[col] = value;
+      }
     }
 
     console.log(`[driver-verification] UPDATE for ${email} — writing fields:`, setClauses.map(c => c.split(' = ')[0]));
@@ -878,106 +926,37 @@ interface DocumentAnalysis {
 }
 
 function analyzeDocuments(driver: Record<string, unknown> | null): DocumentAnalysis {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
+  // Delegates to services/driver-validity.ts — the SINGLE definition shared
+  // with the staff-facing surfaces. Before Aug 2026 this function held its own
+  // copy of the window arithmetic while the drivers list, the assign picker and
+  // the book-out gate read raw *_valid_until columns that nothing kept in step,
+  // so the router and the staff UI could disagree about the same driver.
+  // Keep the SHAPE here (the hire-form app consumes it) but never the rules.
+  const v = computeDriverValidity(driver as never);
 
   const analysis: DocumentAnalysis = {
-    licence: { valid: false, expiryDate: null },
-    poa1: { valid: false, expiryDate: null, provider: null },
-    poa2: { valid: false, expiryDate: null, provider: null },
-    dvla: { valid: false, expiryDate: null },
-    passport: { valid: false, expiryDate: null },
-    isUkDriver: false,
+    licence: { valid: v.licence.valid, expiryDate: v.licence.until },
+    poa1: {
+      valid: v.poa1.valid,
+      expiryDate: v.poa1.until,
+      provider: (driver?.poa1_provider as string) || null,
+    },
+    poa2: {
+      valid: v.poa2.valid,
+      expiryDate: v.poa2.until,
+      provider: (driver?.poa2_provider as string) || null,
+    },
+    dvla: { valid: v.dvla.valid, expiryDate: v.dvla.until },
+    passport: { valid: v.passport.valid, expiryDate: v.passport.until },
+    isUkDriver: v.isUkDriver,
     allValid: false,
   };
 
-  if (!driver) return analysis;
-
-  analysis.isUkDriver = driver.licence_issued_by === 'DVLA';
-
-  // Helper: add days to a date string
-  function addDays(dateStr: string, days: number): Date {
-    const d = new Date(dateStr);
-    d.setDate(d.getDate() + days);
-    return d;
-  }
-
-  // Licence: 90 days from iDenfy check, capped at actual licence expiry
-  // Falls back to licence_next_check_due if idenfy_check_date is not set
-  //
-  // Integrity guard: licence_issued_by must be populated for the licence
-  // record to be trusted. A partial webhook write (date fields set but
-  // identity blank) would otherwise let a stale date count as proof of
-  // validity, and the non-UK branch would route the driver to passport
-  // upload instead of re-running licence verification.
-  const licenceIssuedBy =
-    typeof driver.licence_issued_by === 'string' ? driver.licence_issued_by.trim() : '';
-  if (licenceIssuedBy && driver.idenfy_check_date) {
-    const windowEnd = addDays(driver.idenfy_check_date as string, 90);
-    // Cap at actual licence expiry if that's sooner
-    let effectiveEnd = windowEnd;
-    if (driver.licence_valid_to) {
-      const licenceExpiry = new Date(driver.licence_valid_to as string);
-      if (licenceExpiry < windowEnd) effectiveEnd = licenceExpiry;
-    }
-    analysis.licence.valid = effectiveEnd > today;
-    analysis.licence.expiryDate = effectiveEnd.toISOString().split('T')[0];
-  } else if (licenceIssuedBy && driver.licence_next_check_due) {
-    // licence_next_check_due stores the actual expiry date (already check date + 90 days)
-    // If value looks like a past date relative to driver creation, it's the raw check date — add 90 days
-    const storedDate = new Date(driver.licence_next_check_due as string);
-    // Treat the stored value as the expiry date directly (it should already be check date + 90d)
-    analysis.licence.valid = storedDate > today;
-    analysis.licence.expiryDate = storedDate.toISOString().split('T')[0];
-  }
-
-  // POA1: 90 days from doc date (stored as poa1_valid_until by hire form)
-  if (driver.poa1_valid_until) {
-    const poa1Date = new Date(driver.poa1_valid_until as string);
-    analysis.poa1.valid = poa1Date > today;
-    analysis.poa1.expiryDate = (driver.poa1_valid_until as string);
-  }
-  analysis.poa1.provider = (driver.poa1_provider as string) || null;
-
-  // POA2: 90 days from doc date
-  if (driver.poa2_valid_until) {
-    const poa2Date = new Date(driver.poa2_valid_until as string);
-    analysis.poa2.valid = poa2Date > today;
-    analysis.poa2.expiryDate = (driver.poa2_valid_until as string);
-  }
-  analysis.poa2.provider = (driver.poa2_provider as string) || null;
-
-  // DVLA: 30 days from check date
-  if (driver.dvla_check_date) {
-    const dvlaEnd = addDays(driver.dvla_check_date as string, 30);
-    analysis.dvla.valid = dvlaEnd > today;
-    analysis.dvla.expiryDate = dvlaEnd.toISOString().split('T')[0];
-  } else if (driver.dvla_valid_until) {
-    // Fallback to stored value
-    const dvlaDate = new Date(driver.dvla_valid_until as string);
-    analysis.dvla.valid = dvlaDate > today;
-    analysis.dvla.expiryDate = (driver.dvla_valid_until as string);
-  }
-
-  // Passport: only valid when explicitly recorded. The licence Idenfy session
-  // does NOT verify a passport — a separate passport-upload step is required.
-  // Earlier fallback to idenfy_check_date + 30 days here marked every non-UK
-  // driver as having a valid passport after their licence Idenfy check, which
-  // caused the routing engine to skip the passport-upload step entirely.
-  if (driver.passport_valid_until) {
-    const passDate = new Date(driver.passport_valid_until as string);
-    analysis.passport.valid = passDate > today;
-    analysis.passport.expiryDate = (driver.passport_valid_until as string);
-  }
-
-  // All valid check
-  if (analysis.isUkDriver) {
-    analysis.allValid = analysis.licence.valid && analysis.poa1.valid &&
-      analysis.poa2.valid && analysis.dvla.valid;
-  } else {
-    analysis.allValid = analysis.licence.valid && analysis.poa1.valid &&
-      analysis.poa2.valid && analysis.passport.valid;
-  }
+  // Policy unchanged: a UK driver needs licence + both POAs + DVLA; everyone
+  // else needs licence + both POAs + passport.
+  analysis.allValid = analysis.isUkDriver
+    ? analysis.licence.valid && analysis.poa1.valid && analysis.poa2.valid && analysis.dvla.valid
+    : analysis.licence.valid && analysis.poa1.valid && analysis.poa2.valid && analysis.passport.valid;
 
   return analysis;
 }

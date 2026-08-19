@@ -226,6 +226,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '189_booked_split_alert_marker.sql',
         '190_job_lead_org_and_client_lock.sql',
         '191_lost_reason_alt_quote_rename.sql',
+        '192_driver_validity_from_dates.sql',
       ];
 
       for (const migration of migrations) {

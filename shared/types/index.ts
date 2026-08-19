@@ -662,7 +662,15 @@ export interface Driver {
   licence_restrictions: string | null;
   licence_next_check_due: string | null;
   date_passed_test: string | null;
-  // Document expiry dates (the validity backbone)
+  // Document FROM dates — the validity backbone. Staff and the hire form set
+  // ONLY these; every *_valid_until below is derived from them on write by
+  // backend/src/services/driver-validity.ts. Never write an expiry directly.
+  poa1_doc_date: string | null;
+  poa2_doc_date: string | null;
+  passport_check_date: string | null;
+  passport_expiry: string | null;
+  // Derived expiry windows (read-only for consumers).
+  licence_check_valid_until: string | null;
   poa1_valid_until: string | null;
   poa2_valid_until: string | null;
   dvla_valid_until: string | null;

@@ -14,6 +14,7 @@ import { generateDriverSnapshot, loadDriverDocuments, type DriverSnapshotData } 
 import { uploadToR2 } from '../config/r2';
 import { fetchLogo } from '../services/hire-form-pdf';
 import { encryptDriverPiiInto, decryptDriverRow, decryptDriverRows } from '../services/driver-pii';
+import { persistableWindows, touchesValidity, backfillFromDates } from '../services/driver-validity';
 
 const router = Router();
 router.use(authenticate);
@@ -52,7 +53,15 @@ const createDriverSchema = z.object({
   licence_restrictions: z.string().nullable().optional(),
   licence_next_check_due: z.string().nullable().optional(),
   date_passed_test: z.string().nullable().optional(),
-  // Document expiry dates
+  // Document FROM dates (migration 192) — staff/system set these; the
+  // matching *_valid_until columns are DERIVED from them by
+  // services/driver-validity.ts on write. See that file's header.
+  poa1_doc_date: z.string().nullable().optional(),
+  poa2_doc_date: z.string().nullable().optional(),
+  passport_check_date: z.string().nullable().optional(),
+  passport_expiry: z.string().nullable().optional(),
+  // Derived expiry columns. Still accepted so legacy callers don't 400, but
+  // any value sent is overwritten by the derivation below — set the FROM date.
   poa1_valid_until: z.string().nullable().optional(),
   poa2_valid_until: z.string().nullable().optional(),
   dvla_valid_until: z.string().nullable().optional(),
@@ -354,6 +363,12 @@ router.post('/', validate(createDriverSchema), async (req: AuthRequest, res: Res
   try {
     const d = req.body;
 
+    // Derive the *_valid_until columns from the FROM dates before inserting, so
+    // a newly created driver can never start life with stale windows. Derived
+    // values win over anything the caller sent directly (see
+    // services/driver-validity.ts).
+    const derived = persistableWindows(d);
+
     const result = await query(
       `INSERT INTO drivers (
         person_id, full_name, email, phone, phone_country, date_of_birth, nationality,
@@ -369,7 +384,9 @@ router.post('/', validate(createDriverSchema), async (req: AuthRequest, res: Res
         insurance_status, overall_status,
         requires_referral, referral_status, referral_date, referral_notes,
         idenfy_check_date, idenfy_scan_ref, signature_date,
-        source, created_by
+        source, created_by,
+        poa1_doc_date, poa2_doc_date, passport_check_date, passport_expiry,
+        licence_check_valid_until
       ) VALUES (
         $1, $2, $3, $4, $5, $6, $7,
         $8, $9, $10, $11, $12, $13,
@@ -384,7 +401,9 @@ router.post('/', validate(createDriverSchema), async (req: AuthRequest, res: Res
         $40, $41,
         $42, $43, $44, $45,
         $46, $47, $48,
-        $49, $50
+        $49, $50,
+        $51, $52, $53, $54,
+        $55
       ) RETURNING *`,
       [
         d.person_id || null, d.full_name, d.email || null, d.phone || null,
@@ -395,7 +414,7 @@ router.post('/', validate(createDriverSchema), async (req: AuthRequest, res: Res
         d.licence_issue_country, d.licence_issued_by || null, d.licence_points,
         JSON.stringify(d.licence_endorsements), d.licence_restrictions || null,
         d.licence_next_check_due || null, d.date_passed_test || null,
-        d.poa1_valid_until || null, d.poa2_valid_until || null, d.dvla_valid_until || null, d.passport_valid_until || null,
+        derived.poa1_valid_until, derived.poa2_valid_until, derived.dvla_valid_until, derived.passport_valid_until,
         d.poa1_provider || null, d.poa2_provider || null,
         d.dvla_check_code || null, d.dvla_check_date || null,
         d.has_disability, d.has_convictions, d.has_prosecution, d.has_accidents,
@@ -404,6 +423,9 @@ router.post('/', validate(createDriverSchema), async (req: AuthRequest, res: Res
         d.requires_referral, d.referral_status || null, d.referral_date || null, d.referral_notes || null,
         d.idenfy_check_date || null, d.idenfy_scan_ref || null, d.signature_date || null,
         d.source, req.user!.id,
+        d.poa1_doc_date || null, d.poa2_doc_date || null,
+        d.passport_check_date || null, d.passport_expiry || null,
+        derived.licence_check_valid_until,
       ]
     );
 
@@ -468,14 +490,41 @@ router.put('/:id', authorize('admin', 'manager'), validate(updateDriverSchema), 
       fields.licence_endorsements = JSON.stringify(fields.licence_endorsements);
     }
 
+    // Re-derive the *_valid_until columns whenever a FROM date moves.
+    //
+    // This is what stops the gate columns going stale behind the displayed
+    // windows — the failure that made a driver read green on their own page
+    // and 400 out of the assign picker (job 16291, Aug 2026). Derived values
+    // are applied LAST so they win over anything a caller sent directly.
+    // A caller that knows only the expiry (older API clients, import scripts)
+    // gets its FROM date back-computed first, so the pair never splits.
+    Object.assign(fields, backfillFromDates(fields));
+    if (touchesValidity(Object.keys(fields))) {
+      Object.assign(fields, persistableWindows({ ...previousValues, ...fields }));
+    }
+
     // Track what actually changed for audit
     const changedFields: Record<string, { old: unknown; new: unknown }> = {};
+
+    // Normalise before comparing, or nothing ever compares equal: pg returns
+    // DATE columns as JS Date objects (String() => "Wed May 28 2026 01:00:00
+    // GMT+0100…") while the form posts "2026-05-28". Every date field therefore
+    // logged as "changed" on every save, burying the one field staff actually
+    // touched in a wall of noise — which is exactly what made the job 16291
+    // audit trail hard to read.
+    const normaliseForCompare = (v: unknown): string => {
+      if (v === null || v === undefined) return '';
+      if (v instanceof Date) return isNaN(v.getTime()) ? '' : v.toISOString().slice(0, 10);
+      const str = String(v);
+      // "2026-05-28T00:00:00.000Z" and "2026-05-28" are the same day.
+      const iso = str.match(/^(\d{4}-\d{2}-\d{2})T/);
+      return iso ? iso[1] : str;
+    };
 
     for (const [key, value] of Object.entries(fields)) {
       const prev = previousValues[key];
       const newVal = value ?? null;
-      // Compare stringified to handle date/number coercion
-      if (String(prev ?? '') !== String(newVal ?? '')) {
+      if (normaliseForCompare(prev) !== normaliseForCompare(newVal)) {
         changedFields[key] = { old: prev, new: newVal };
       }
       params.push(newVal);
