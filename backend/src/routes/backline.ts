@@ -102,6 +102,13 @@ router.get('/overview', async (req: AuthRequest, res: Response) => {
     // HH status 8 (Requires Attention) is included — represents "returned with problems".
     // DISTINCT ON prefers the POST-HIRE (de-prep) card so "Coming Back" reflects de-prep,
     // not the already-done prep card.
+    //
+    // DEPARTURE-DATE GATE: the warehouse checks items out in HH the day BEFORE a van
+    // physically leaves, so a not-yet-departed job can already be HH-5 while OP holds
+    // it at 'prepped'. That HH-5 alone would wrongly pull it into Coming Back. Require
+    // the outgoing date to have actually arrived (COALESCE(out_date, job_date) <= today)
+    // — HH 6/7/8 (definitively returned) always satisfy this anyway. A not-yet-left job
+    // stays where it belongs, in Going Out.
     const returningResult = await query(
       `SELECT DISTINCT ON (j.id) ${ROW_COLS}, jr.phase
        FROM jobs j
@@ -110,6 +117,7 @@ router.get('/overview', async (req: AuthRequest, res: Response) => {
        WHERE j.is_deleted = false
          AND j.return_date >= $1
          AND j.return_date <= $2
+         AND COALESCE(j.out_date, j.job_date)::date <= CURRENT_DATE
          AND (j.status IN (5, 6, 7, 8)
               OR j.pipeline_status IN ('dispatched', 'returned_incomplete', 'returned'))
        ORDER BY j.id, CASE WHEN jr.phase = 'post_hire' THEN 0 ELSE 1 END`,
@@ -148,6 +156,7 @@ router.get('/overview', async (req: AuthRequest, res: Response) => {
        WHERE j.is_deleted = false
          AND j.return_date < $1
          AND j.return_date >= $1::date - INTERVAL '30 days'
+         AND COALESCE(j.out_date, j.job_date)::date <= CURRENT_DATE
          AND (j.status IN (5, 6) OR j.pipeline_status IN ('dispatched', 'returned_incomplete'))
        ORDER BY j.id, CASE WHEN jr.phase = 'post_hire' THEN 0 ELSE 1 END`,
       [nowStr]
