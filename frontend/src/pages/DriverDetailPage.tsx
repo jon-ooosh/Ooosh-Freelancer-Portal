@@ -1,4 +1,6 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
+import { EvidenceGroup, type EvidenceGroupSpec, type EvidenceFile } from '../components/drivers/EvidenceGroup';
+import { StageTracker, WhatNeedsDoing, type DriverVerificationState, type VerificationAction } from '../components/drivers/VerificationCockpit';
 import { deriveDriverStatus } from '../lib/driverStatus';
 import { hasManagerRole } from '../lib/roles';
 import { useParams, useNavigate, Link } from 'react-router-dom';
@@ -194,33 +196,6 @@ function toInputDate(d: string | null): string {
   }
 }
 
-function isDateExpired(d: string | null): boolean {
-  if (!d) return false;
-  try { return new Date(d) < new Date(); } catch { return false; }
-}
-
-function daysUntil(d: string | null): number | null {
-  if (!d) return null;
-  try {
-    const diff = new Date(d).getTime() - Date.now();
-    return Math.ceil(diff / (1000 * 60 * 60 * 24));
-  } catch { return null; }
-}
-
-/**
- * Compute Ooosh acceptance validity windows.
- * - Licence: 90 days from iDenfy check, capped at actual licence expiry
- * - DVLA: 30 days from DVLA check date
- * - Passport: 30 days from iDenfy check (non-UK) or passport_valid_until
- */
-/**
- * Identity review panel — staff adjudication of a failed iDenfy face match.
- *
- * Renders only when there is something to say. The whole point is that a
- * mismatch is usually innocent (an older licence photo, a changed appearance),
- * so this presents the machine's verdict and sends staff to the two images
- * rather than pronouncing on the driver.
- */
 function IdentityReviewPanel({ driver, onDriverUpdate }: {
   driver: DriverDetail;
   onDriverUpdate: (d: DriverDetail) => void;
@@ -324,80 +299,79 @@ function IdentityReviewPanel({ driver, onDriverUpdate }: {
 }
 
 /**
- * One row of the Document Validity card: the FROM date staff set, and the
- * expiry OP derived from it.
+ * The evidence groups shown on the driver cockpit.
  *
- * There is deliberately no arithmetic here. Every window is computed once, in
- * backend/src/services/driver-validity.ts, and stored on the driver row. This
- * page used to re-implement the rules locally, which is how it came to render a
- * confident green "16 Nov 2026" for a driver whose iDenfy check had been DENIED
- * and who had no licence, no name and no files (manjagoproduction@, Aug 2026) —
- * the backend refused to trust that record, the page didn't know to.
+ * Grouped by the WINDOW they share, not one row per file — the licence front,
+ * back and selfie are three images behind a single 90-day identity check, which
+ * is why the date is asked once per group. POA1 and POA2 are deliberately
+ * separate groups: policy is that both must be valid, but they lapse
+ * independently, so only the expired one gets asked for again.
+ *
+ * No arithmetic here. Every `until` is read straight off the driver row, where
+ * backend/src/services/driver-validity.ts wrote it.
  */
-interface ValidityRow {
-  key: string;
-  label: string;
-  /** Column holding the FROM date — the editable field. */
-  fromField: string;
-  fromLabel: string;
-  /** Derived expiry, read straight off the driver row. */
-  until: string | null;
-  /** The document's own expiry, where it has one. Also editable. */
-  docExpiryField?: string;
-  docExpiryLabel?: string;
-  /** Shown when there is no derived window, in place of a misleading date. */
-  emptyHint?: string;
-}
-
-function buildValidityRows(driver: DriverDetail): ValidityRow[] {
+function buildEvidenceGroups(driver: DriverDetail): EvidenceGroupSpec[] {
   const licenceUntrusted = !!driver.idenfy_check_date && !driver.licence_issued_by?.trim();
   return [
     {
-      key: 'licence',
-      label: 'Licence',
+      key: 'identity',
+      title: 'Identity — licence & selfie',
+      slots: [
+        { label: 'Licence Front', match: ['Licence Front', 'licence_front', 'License Front', 'license_front'] },
+        { label: 'Licence Back', match: ['Licence Back', 'licence_back', 'License Back', 'license_back'] },
+        { label: 'Selfie', match: ['Selfie', 'selfie', 'face', 'idenfy_face'] },
+      ],
       fromField: 'idenfy_check_date',
       fromLabel: 'Identity checked',
-      until: driver.licence_check_valid_until,
       docExpiryField: 'licence_valid_to',
       docExpiryLabel: 'Licence expires',
+      until: driver.licence_check_valid_until,
       emptyHint: licenceUntrusted
         ? 'Identity check recorded but no licence details came back — needs re-verification'
         : undefined,
     },
     {
       key: 'dvla',
-      label: 'DVLA check',
+      title: 'DVLA check',
+      slots: [{ label: 'DVLA Check', match: ['DVLA Check Code', 'DVLA Check', 'dvla_check', 'dvla'] }],
       fromField: 'dvla_check_date',
-      fromLabel: 'Checked',
+      fromLabel: 'Checked on',
       until: driver.dvla_valid_until,
     },
     {
       key: 'poa1',
-      label: `Proof of address 1${driver.poa1_provider ? ` (${driver.poa1_provider})` : ''}`,
+      title: `Proof of address 1${driver.poa1_provider ? ` — ${driver.poa1_provider}` : ''}`,
+      slots: [{ label: 'Proof of Address 1', match: ['Proof of Address', 'POA 1', 'poa1', 'Proof of Address 1'] }],
       fromField: 'poa1_doc_date',
-      fromLabel: 'Document dated',
+      fromLabel: 'Date on document',
       until: driver.poa1_valid_until,
     },
     {
       key: 'poa2',
-      label: `Proof of address 2${driver.poa2_provider ? ` (${driver.poa2_provider})` : ''}`,
+      title: `Proof of address 2${driver.poa2_provider ? ` — ${driver.poa2_provider}` : ''}`,
+      slots: [{ label: 'Proof of Address 2', match: ['POA 2', 'poa2', 'Proof of Address 2'] }],
       fromField: 'poa2_doc_date',
-      fromLabel: 'Document dated',
+      fromLabel: 'Date on document',
       until: driver.poa2_valid_until,
     },
     {
       key: 'passport',
-      label: 'Passport',
+      title: 'Passport',
+      slots: [{ label: 'Passport', match: ['Passport', 'passport'] }],
       fromField: 'passport_check_date',
-      fromLabel: 'Checked',
-      until: driver.passport_valid_until,
+      fromLabel: 'Checked on',
       docExpiryField: 'passport_expiry',
       docExpiryLabel: 'Passport expires',
+      until: driver.passport_valid_until,
+    },
+    {
+      key: 'signature',
+      title: 'Signature',
+      slots: [{ label: 'Signature', match: ['Signature', 'signature', 'sig'] }],
     },
   ];
 }
 
-// Normalise address for comparison — strip whitespace, punctuation, lowercase
 function normaliseAddress(addr: string): string {
   return addr.toLowerCase().replace(/[,.\-\/\\]/g, ' ').replace(/\s+/g, ' ').trim();
 }
@@ -489,6 +463,7 @@ export default function DriverDetailPage() {
   const [excessModalInitialAction, setExcessModalInitialAction] = useState<'edit_required' | undefined>(undefined);
   const [editingCalcExcess, setEditingCalcExcess] = useState(false);
   const [auditLog, setAuditLog] = useState<AuditLogEntry[]>([]);
+  const [verificationState, setVerificationState] = useState<DriverVerificationState | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'details' | 'hires' | 'excess' | 'ooh' | 'pcns'>('details');
   const [pcnCount, setPcnCount] = useState<{ open: number; total: number } | null>(null);
@@ -498,7 +473,7 @@ export default function DriverDetailPage() {
   const [saveError, setSaveError] = useState('');
 
   useEffect(() => {
-    if (id) loadDriver();
+    if (id) { loadDriver(); loadVerificationState(); }
   }, [id]);
 
   // Reset tab + per-tab caches when switching drivers (component instance
@@ -563,6 +538,48 @@ export default function DriverDetailPage() {
       console.error('Failed to load excess record:', err);
     } finally {
       setExcessModalLoadingId(null);
+    }
+  }
+
+  async function loadVerificationState() {
+    if (!id) return;
+    try {
+      const res = await api.get<{ data: DriverVerificationState }>(`/drivers/${id}/verification-state`);
+      setVerificationState(res.data);
+    } catch (err) {
+      // Non-fatal: the cockpit hides itself rather than blocking the page.
+      console.error('Failed to load verification state:', err);
+      setVerificationState(null);
+    }
+  }
+
+  /**
+   * Save one date immediately and re-derive.
+   *
+   * Inline rather than behind the Edit form: the date is asked for right after
+   * an upload, which is the moment staff actually know it. The backend derives
+   * the matching *_valid_until on write, so we re-read the driver rather than
+   * patching state locally.
+   */
+  async function handleDateChange(field: string, value: string) {
+    if (!id) return;
+    await api.put(`/drivers/${id}`, { [field]: value || null });
+    const refreshed = await api.get<{ data: DriverDetail }>(`/drivers/${id}`);
+    setDriver(refreshed.data);
+    await loadVerificationState();
+  }
+
+  /** "What needs doing" click-through — scroll to the group that needs work. */
+  function handleVerificationAction(action: VerificationAction) {
+    if (action.slot) {
+      const el = document.getElementById(`evidence-${action.slot}`);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        return;
+      }
+    }
+    if (action.kind === 'send_hire_form' && driver?.current_job_number) {
+      navigate(`/jobs?search=${driver.current_job_number}`);
     }
   }
 
@@ -831,8 +848,12 @@ export default function DriverDetailPage() {
             saveError={saveError}
             onSave={handleSave}
             onCancel={() => setEditing(false)}
-            onDriverUpdate={setDriver}
+            onDriverUpdate={(d) => { setDriver(d); loadVerificationState(); }}
             auditLog={auditLog}
+            canEdit={canEdit}
+            onDateChanged={handleDateChange}
+            verificationState={verificationState}
+            onVerificationAction={handleVerificationAction}
           />
         )}
         {activeTab === 'hires' && <HireHistoryTab history={hireHistory} />}
@@ -888,166 +909,6 @@ export default function DriverDetailPage() {
 }
 
 // ── Validity date pill ──
-
-function ValidityPill({ date, label }: { date: string | null; label?: string }) {
-  if (!date) return <span className="text-gray-400 text-xs">Not set</span>;
-  const expired = isDateExpired(date);
-  const days = daysUntil(date);
-  const isExpiringSoon = days !== null && days > 0 && days <= 30;
-
-  return (
-    <span className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full ${
-      expired ? 'bg-red-100 text-red-700' :
-      isExpiringSoon ? 'bg-amber-100 text-amber-700' :
-      'bg-green-100 text-green-700'
-    }`}>
-      {label && <span className="font-medium">{label}:</span>}
-      {formatDate(date)}
-      {expired && ' (expired)'}
-      {isExpiringSoon && ` (${days}d)`}
-    </span>
-  );
-}
-
-// ── Document Category Row ──
-
-function DocumentCategoryRow({
-  category,
-  files,
-  driverId,
-  onFilesChanged,
-}: {
-  category: { label: string; fileLabels: string[]; description: string };
-  files: FileAttachment[];
-  driverId: string;
-  onFilesChanged: (files: FileAttachment[]) => void;
-}) {
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const [uploading, setUploading] = useState(false);
-  const [error, setError] = useState('');
-  const [showHistory, setShowHistory] = useState(false);
-
-  const matchingFiles = files.filter(f =>
-    category.fileLabels.some(cl => f.label?.toLowerCase() === cl.toLowerCase())
-  );
-
-  const latestFile = matchingFiles.length > 0
-    ? matchingFiles.reduce((a, b) => new Date(a.uploaded_at) > new Date(b.uploaded_at) ? a : b)
-    : null;
-
-  const olderFiles = matchingFiles.filter(f => f !== latestFile);
-
-  async function handleUpload(e: React.ChangeEvent<HTMLInputElement>) {
-    const selectedFile = e.target.files?.[0];
-    if (!selectedFile) return;
-    setUploading(true);
-    setError('');
-    try {
-      const formData = new FormData();
-      formData.append('file', selectedFile);
-      formData.append('entity_type', 'drivers');
-      formData.append('entity_id', driverId);
-      formData.append('label', category.label);
-      const result = await api.upload<FileAttachment>('/files/upload', formData);
-      onFilesChanged([...files, result]);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Upload failed');
-    } finally {
-      setUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = '';
-    }
-  }
-
-  async function handleDownload(file: FileAttachment) {
-    try {
-      const { blob, contentType } = await api.blob(`/files/download?key=${encodeURIComponent(file.url)}`);
-      const blobUrl = URL.createObjectURL(new Blob([blob], { type: contentType }));
-      window.open(blobUrl, '_blank');
-      setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
-    } catch {
-      setError('Download failed');
-    }
-  }
-
-  async function handleDelete(file: FileAttachment) {
-    if (!confirm(`Delete "${file.label || file.name}"?`)) return;
-    try {
-      await api.deleteWithBody('/files/delete', { key: file.url, entity_type: 'drivers', entity_id: driverId });
-      onFilesChanged(files.filter(f => f.url !== file.url));
-    } catch {
-      setError('Delete failed');
-    }
-  }
-
-  return (
-    <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3 py-3 border-b border-gray-50 last:border-0">
-      {/* Single hidden file input — both the mobile-inline and desktop-rail
-          buttons trigger it via the shared ref. */}
-      <input ref={fileInputRef} type="file" onChange={handleUpload} className="hidden" accept=".pdf,.jpg,.jpeg,.png,.gif,.webp,.doc,.docx" />
-      <div className="sm:w-40 sm:flex-shrink-0 flex items-center justify-between gap-2">
-        <span className="text-xs font-semibold text-gray-700 sm:font-medium">{category.label}</span>
-        {/* Upload button shown inline next to label on mobile, moved to the
-            right rail on desktop (see flex-shrink-0 wrapper below). */}
-        <button
-          onClick={() => fileInputRef.current?.click()}
-          disabled={uploading}
-          className="sm:hidden text-xs px-2.5 py-1.5 rounded border border-gray-300 text-gray-600 hover:border-ooosh-400 hover:text-ooosh-600 transition-colors disabled:opacity-50"
-        >
-          {uploading ? 'Uploading...' : latestFile ? 'Replace' : 'Upload'}
-        </button>
-      </div>
-      <div className="flex-1 min-w-0">
-        {latestFile ? (
-          <div className="flex items-center gap-2 flex-wrap">
-            <button onClick={() => handleDownload(latestFile)} className="text-sm text-ooosh-600 hover:text-ooosh-700 truncate max-w-[60vw] sm:max-w-none" title={latestFile.name}>
-              {latestFile.name}
-            </button>
-            <span className="text-xs text-gray-400 whitespace-nowrap">{formatDate(latestFile.uploaded_at)}</span>
-            {olderFiles.length > 0 && (
-              <button onClick={() => setShowHistory(!showHistory)} className="text-xs text-gray-400 hover:text-gray-600 whitespace-nowrap">
-                +{olderFiles.length} older
-              </button>
-            )}
-            <button onClick={() => handleDelete(latestFile)} className="text-gray-400 hover:text-red-500 p-1 -m-1" title="Delete" aria-label="Delete file">
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-          </div>
-        ) : (
-          <span className="text-xs text-gray-400">{category.description}</span>
-        )}
-        {showHistory && olderFiles.length > 0 && (
-          <div className="mt-1.5 ml-2 space-y-1 border-l-2 border-gray-100 pl-2">
-            {olderFiles.sort((a, b) => new Date(b.uploaded_at).getTime() - new Date(a.uploaded_at).getTime()).map((f, i) => (
-              <div key={i} className="flex items-center gap-2 text-xs text-gray-400 flex-wrap">
-                <button onClick={() => handleDownload(f)} className="hover:text-ooosh-600 truncate max-w-[55vw] sm:max-w-none">{f.name}</button>
-                <span>{formatDate(f.uploaded_at)}</span>
-                <button onClick={() => handleDelete(f)} className="hover:text-red-500 p-1 -m-1" aria-label="Delete file">
-                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-        {error && <p className="text-xs text-red-600 mt-1">{error}</p>}
-      </div>
-      {/* Desktop-only Upload button on the right rail. Mobile shows it inline
-          with the label above to keep the row compact and tap targets large. */}
-      <button
-        onClick={() => fileInputRef.current?.click()}
-        disabled={uploading}
-        className="hidden sm:inline-block flex-shrink-0 text-xs px-2.5 py-1 rounded border border-gray-200 text-gray-500 hover:border-ooosh-400 hover:text-ooosh-600 transition-colors disabled:opacity-50"
-      >
-        {uploading ? 'Uploading...' : latestFile ? 'Replace' : 'Upload'}
-      </button>
-    </div>
-  );
-}
-
-// ── Snapshot PDF Button ──
 
 function SnapshotPdfButton({ driverId, driverName }: { driverId: string; driverName: string }) {
   const [generating, setGenerating] = useState(false);
@@ -1362,6 +1223,10 @@ function DetailsTab({
   onCancel,
   onDriverUpdate,
   auditLog,
+  canEdit,
+  onDateChanged,
+  verificationState,
+  onVerificationAction,
 }: {
   driver: DriverDetail;
   editing: boolean;
@@ -1373,6 +1238,10 @@ function DetailsTab({
   onCancel: () => void;
   onDriverUpdate: (d: DriverDetail) => void;
   auditLog: AuditLogEntry[];
+  canEdit: boolean;
+  onDateChanged: (field: string, value: string) => Promise<void>;
+  verificationState: DriverVerificationState | null;
+  onVerificationAction: (action: VerificationAction) => void;
 }) {
   const field = (label: string, key: string, opts?: { type?: string; mono?: boolean }) => {
     const rawValue = editing ? (editData[key] ?? '') : ((driver as any)[key] ?? '');
@@ -1458,78 +1327,39 @@ function DetailsTab({
         </div>
       )}
 
+      {verificationState && <StageTracker stages={verificationState.stages} />}
+      {verificationState && (
+        <WhatNeedsDoing state={verificationState} onAction={onVerificationAction} />
+      )}
+
       <IdentityReviewPanel driver={driver} onDriverUpdate={onDriverUpdate} />
 
-      {/* Document Validity — one FROM date in, OP-derived expiry out */}
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-        <h3 className="text-sm font-semibold text-gray-700 mb-1">Document Validity</h3>
-        <p className="text-xs text-gray-400 mb-4">
-          Enter the date <strong>on the document</strong> (or the day the check was run) — Ooosh
-          works out when it lapses. Expiry triggers a renewal request via the hire form.
-        </p>
-        <div className="space-y-2">
-          {buildValidityRows(driver).map((row) => (
-            <div
-              key={row.key}
-              className="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_auto] gap-2 sm:gap-4 items-center py-2 border-b border-gray-100 last:border-0"
-            >
-              <div className="min-w-0">
-                <div className="text-sm text-gray-900">{row.label}</div>
-                {editing ? (
-                  <div className="flex flex-wrap gap-3 mt-1.5">
-                    <label className="block">
-                      <span className="block text-[11px] text-gray-500 mb-0.5">{row.fromLabel}</span>
-                      <input
-                        type="date"
-                        value={editData[row.fromField] || ''}
-                        onChange={(e) => setEditData({ ...editData, [row.fromField]: e.target.value })}
-                        className="rounded border border-gray-300 px-2 py-1 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                      />
-                    </label>
-                    {row.docExpiryField && (
-                      <label className="block">
-                        <span className="block text-[11px] text-gray-500 mb-0.5">{row.docExpiryLabel}</span>
-                        <input
-                          type="date"
-                          value={editData[row.docExpiryField] || ''}
-                          onChange={(e) => setEditData({ ...editData, [row.docExpiryField!]: e.target.value })}
-                          className="rounded border border-gray-300 px-2 py-1 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                        />
-                      </label>
-                    )}
-                  </div>
-                ) : (
-                  <div className="text-xs text-gray-500 mt-0.5">
-                    {(driver as unknown as Record<string, string | null>)[row.fromField]
-                      ? `${row.fromLabel} ${formatDate((driver as unknown as Record<string, string | null>)[row.fromField])}`
-                      : `${row.fromLabel} — not recorded`}
-                    {row.docExpiryField &&
-                      (driver as unknown as Record<string, string | null>)[row.docExpiryField] && (
-                        <> · {row.docExpiryLabel} {formatDate((driver as unknown as Record<string, string | null>)[row.docExpiryField!])}</>
-                      )}
-                  </div>
-                )}
-              </div>
-              <div className="sm:text-right">
-                {row.until ? (
-                  <ValidityPill date={row.until} />
-                ) : (
-                  <span className="text-xs text-gray-400">Not set</span>
-                )}
-                {!row.until && row.emptyHint && (
-                  <div className="text-[11px] text-amber-600 mt-0.5 sm:max-w-[16rem]">{row.emptyHint}</div>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-        {editing && (
-          <p className="text-[11px] text-gray-400 mt-3">
-            Expiry dates are calculated on save — licence 90 days from the identity check
-            (capped at the licence&rsquo;s own expiry), DVLA and passport 30 days, proof of
-            address 90 days from the document date.
-          </p>
-        )}
+      {/* Evidence — image, the date staff set, and the expiry OP derived, all in
+          one block. Replaces the old split where "Document Validity" was one card
+          and "Documents" a separate card 400px below, with nothing tying an image
+          to its date — which is why staff kept forgetting the date when they
+          uploaded a replacement by hand. */}
+      <div className="space-y-4">
+        {buildEvidenceGroups(driver).map((spec) => (
+          <EvidenceGroup
+            key={spec.key}
+            spec={spec}
+            files={(driver.files || []) as EvidenceFile[]}
+            driverId={driver.id}
+            canEdit={canEdit}
+            dates={{
+              idenfy_check_date: toInputDate(driver.idenfy_check_date),
+              licence_valid_to: toInputDate(driver.licence_valid_to),
+              dvla_check_date: toInputDate(driver.dvla_check_date),
+              poa1_doc_date: toInputDate(driver.poa1_doc_date),
+              poa2_doc_date: toInputDate(driver.poa2_doc_date),
+              passport_check_date: toInputDate(driver.passport_check_date),
+              passport_expiry: toInputDate(driver.passport_expiry),
+            }}
+            onFilesChanged={(files) => onDriverUpdate({ ...driver, files: files as FileAttachment[] })}
+            onDateChanged={onDateChanged}
+          />
+        ))}
       </div>
 
       {/* Addresses */}
@@ -1646,21 +1476,9 @@ function DetailsTab({
         )}
       </div>
 
-      {/* Documents — categorised file slots */}
+      {/* Anything uploaded outside the groups above — kept visible so a
+          mis-labelled file is never silently invisible. */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 sm:p-6">
-        <h3 className="text-sm font-semibold text-gray-700 mb-4">Documents</h3>
-        <div className="divide-y divide-gray-50">
-          {DOCUMENT_CATEGORIES.map((cat) => (
-            <DocumentCategoryRow
-              key={cat.label}
-              category={cat}
-              files={driver.files || []}
-              driverId={driver.id}
-              onFilesChanged={(files) => onDriverUpdate({ ...driver, files })}
-            />
-          ))}
-        </div>
-
         {/* Uncategorised files */}
         {(() => {
           const allCategoryLabels = DOCUMENT_CATEGORIES.flatMap(c => c.fileLabels.map(l => l.toLowerCase()));
