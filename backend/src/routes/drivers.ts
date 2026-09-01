@@ -16,6 +16,7 @@ import { fetchLogo } from '../services/hire-form-pdf';
 import { encryptDriverPiiInto, decryptDriverRow, decryptDriverRows } from '../services/driver-pii';
 import { persistableWindows, touchesValidity, backfillFromDates } from '../services/driver-validity';
 import { sendIdentityReviewAlert } from '../services/identity-review';
+import { computeVerificationState } from '../services/driver-verification-state';
 
 const router = Router();
 router.use(authenticate);
@@ -648,6 +649,27 @@ router.patch('/:id/calculated-excess', authorize('admin', 'manager'), validate(e
   } catch (error) {
     console.error('[drivers] Edit calculated excess error:', error);
     res.status(500).json({ error: 'Failed to edit calculated excess' });
+  }
+});
+
+// ── GET /api/drivers/:id/verification-state — the staff cockpit payload ──
+//
+// Stage tracker + "what needs doing", derived from the SAME validity engine the
+// hire-form router uses. That equivalence is deliberate: staff are looking at
+// what the driver's own journey is being told, not a second opinion assembled
+// from the same columns by different rules — which is exactly how the router
+// and the staff UI came to disagree about job 16291.
+router.get('/:id/verification-state', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await query(`SELECT * FROM drivers WHERE id = $1`, [req.params.id]);
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Driver not found' });
+      return;
+    }
+    res.json({ data: computeVerificationState(decryptDriverRow(result.rows[0])) });
+  } catch (error) {
+    console.error('[drivers] Verification state error:', error);
+    res.status(500).json({ error: 'Failed to compute verification state' });
   }
 });
 
