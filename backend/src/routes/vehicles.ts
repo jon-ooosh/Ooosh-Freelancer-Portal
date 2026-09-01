@@ -6895,7 +6895,12 @@ function formatDate(val: unknown): string {
   if (!val) return '';
   // Handle Date objects (returned by pg for DATE/TIMESTAMP columns)
   if (val instanceof Date) {
-    const y = val.getFullYear();
+    if (Number.isNaN(val.getTime())) return '';
+    // The year MUST be zero-padded to 4 digits. Postgres happily stores a
+    // mistyped year like 0006, and `${6}-08-25` is not a parseable date in JS
+    // — `new Date('6-08-25T00:00:00')` is Invalid, which threw out of the
+    // fleet table's Rossetts calc and blanked the page (RX73TBZ, Sep 2026).
+    const y = String(val.getFullYear()).padStart(4, '0');
     const m = String(val.getMonth() + 1).padStart(2, '0');
     const d = String(val.getDate()).padStart(2, '0');
     return `${y}-${m}-${d}`;
