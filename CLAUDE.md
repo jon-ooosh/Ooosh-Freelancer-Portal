@@ -4129,6 +4129,22 @@ if (suppress) return;  // or `continue` inside a loop
 - Staff report "stopped getting allocation emails" → check `portal_notifications_paused_until` on their `people` row. Pre-May-2026, `freelancer_assignment` ignored mute entirely; the May 2026 fix correctly stops sending when muted.
 - Staff report "didn't get a completion chase" → NOT mute-related. Check `qa.is_ooosh_crew`, `qa.status`, `q.ops_status`, `q.completion_reminder_level` and the `completion-chaser.ts` query.
 
+### Render-crash safety: error boundaries + date parsing ✅ (Sep 2026)
+
+**The incident.** Switching Fleet to **table** view threw `RangeError: Invalid time value` and blanked the entire SPA. `RX73TBZ` had `last_rossetts_service_date` stored as `0006-08-25` (mistyped year); `formatDate()` in `routes/vehicles.ts` padded month and day but **not** the year, so it reached the frontend as `"6-08-25"` — and **any year that isn't exactly 4 digits is an Invalid Date in JS**. `getRossettsStatus()` → `addMonths()` → `toISOString()` threw inside the fleet table's row `.map()`, so one bad van took the whole page down. Only the table view calls `getRossettsStatus`, which is why cards/finance were fine — the finance view's `sellByDate()` already had the guard `service-status.ts` was missing.
+
+**Three conventions came out of it:**
+
+1. **Never call `toISOString()` on a Date you haven't range-checked.** Any helper that parses a date string and re-serialises it MUST `Number.isNaN(d.getTime())`-guard both *after parsing* and *after shifting* (a shift can overflow the Date range, or land on NaN if an interval argument is non-numeric — e.g. a garbage `rossetts_interval_months` compliance setting). `service-status.ts` `shiftDate()` and `vehicle-lifecycle.ts` `sellByDate()` are the reference implementations; return `null` and let the caller render `—`. There's a standing comment on the same trap in `prep-trends.ts`.
+
+2. **Zero-pad the year when hand-building a `YYYY-MM-DD` string.** `backend/src/routes/vehicles.ts` `formatDate()` is the shared helper behind every date on every vehicle payload; it pads the year to 4 and returns `''` for an Invalid Date rather than `"NaN-NaN-NaN"`. Postgres will happily store year 6 or year 202, so this is not hypothetical. Any new date serialiser must do the same.
+
+3. **A render throw must not be able to blank the platform.** `frontend/src/components/ErrorBoundary.tsx` is mounted **twice** in the tree: once **inside `Layout`** wrapping the page `<Routes>` (so a page crash keeps the nav usable and staff can navigate away), and once around the whole app in `main.tsx` (backstop for crashes in `Layout` itself and the public, Layout-less routes). It resets its error state when `location.pathname` changes — deliberately **without** re-keying its children, so normal navigation keeps page state exactly as before.
+
+**The trap that made it unrecoverable, and the escape hatch.** The crash alone was survivable; what made staff *stuck* was `fleet-view-mode` persisting in `localStorage`, so every reload restored the table and re-crashed before anything could be clicked. The boundary's **"Reset saved view settings"** button clears all of `localStorage` **except** an allowlist of session keys (`SESSION_KEYS` in `ErrorBoundary.tsx` — the `ooosh_*` staff tokens plus the `vehicleApp*` vehicle-module/freelancer session), so the user stays logged in. Allowlisting sessions rather than listing pref keys means dynamically-named prefs are covered and **a new persisted preference needs no change here** — but **any new *session* key MUST be added to `SESSION_KEYS`**, or the reset button will log people out.
+
+**When adding a persisted view preference,** remember it can pin a page into a crashing state on reload. That's now recoverable via the boundary, but prefer validating a stored value on read (as `VehiclesPage` does for `fleet-view-mode`) over trusting it blindly.
+
 ### Hire Date Resolution
 
 **Canonical hire-window source for PDFs / emails / overlap checks:**
