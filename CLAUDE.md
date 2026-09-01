@@ -506,6 +506,188 @@ tends to get this wrong on first pass, so it's pinned here:
 with the SAME `vehicle_id`. The Allocations UI cascades van picks
 across siblings so staff only picks once per van slot.
 
+##### Document validity: FROM dates in, derived expiry out (migration 192, Aug 2026)
+
+**Staff and the hire form set ONLY a FROM date** — the date on the document, or
+the day the check was run. OP derives every expiry and writes it to the
+`*_valid_until` columns on **every** driver write. Both dates are displayed.
+
+| group | FROM (input) | doc's own expiry (input) | derived window (OP-written) |
+|---|---|---|---|
+| licence | `idenfy_check_date` | `licence_valid_to` | `licence_check_valid_until` |
+| dvla | `dvla_check_date` | — | `dvla_valid_until` |
+| poa1 | `poa1_doc_date` | — | `poa1_valid_until` |
+| poa2 | `poa2_doc_date` | — | `poa2_valid_until` |
+| passport | `passport_check_date` | `passport_expiry` | `passport_valid_until` |
+
+Windows: licence = `min(from+90d, licence_valid_to)`; dvla = `from+30d`;
+poa = `from+90d`; passport = `min(from+30d, passport_expiry)`.
+
+**`services/driver-validity.ts` is THE definition — never re-implement it.**
+`computeDriverValidity()` computes the windows, `persistableWindows()` returns
+the columns to store, `touchesValidity()` says whether a write needs
+re-deriving, `backfillFromDates()` reconciles a caller that knows only the
+expiry. The hire-form router (`analyzeDocuments`) delegates to it, so the router
+and the staff UI physically cannot disagree.
+
+**NEVER write a `*_valid_until` column directly, and never add a new writer.**
+Set the FROM date and let the derivation run. They stay real stored columns
+(rather than moving the arithmetic into the app) so the SQL consumers — the
+drivers-list status CASE, the assign picker, the quick-assign gate — keep
+working unchanged and simply become correct.
+
+**The incident (job 16291, Peter Christopherson, 19 Aug 2026).** Validity was
+stored in two families of columns with six consumers split across them and
+nothing keeping them in step: the router and the driver-detail pills read the
+CHECK dates, while the drivers list, the assign picker and the hard book-out
+gate read the VALID-UNTIL columns. Neither `dvla_valid_until` nor
+`licence_valid_to` was editable anywhere in the OP UI, and nothing except the
+driver's own DVLA upload ever wrote `dvla_valid_until` — so every staff-side fix
+moved the displayed pill and left the gate reading a stale value. Peter showed
+green pills on his own page and was hard-400'd out of the assign picker, with no
+field in the UI able to reconcile them.
+
+**Integrity guard.** A check date with no licence identity behind it
+(`licence_issued_by` blank) yields **no window** — `trusted: false`, and
+`licence_check_valid_until` NULL. A DENIED iDenfy check writes a checkDate with
+no document data, and the detail page was rendering that as a confident green
+expiry for a driver with no licence, no name and no files
+(`manjagoproduction@`, Aug 2026). Any new surface reading licence validity must
+go through the service so it inherits this.
+
+**Frontend mirror:** `frontend/src/lib/driverStatus.ts` `deriveDriverStatus()`
+is the single status-badge definition, mirroring the SQL CASE in
+`routes/drivers.ts`. It was implemented twice and the copies disagreed (the list
+checked DVLA, the detail page didn't). Keep the two in step — the `/drivers`
+filter pills run through the SQL, so a mismatch means clicking "Expired" returns
+rows badged "Approved".
+
+**Gate policy is separate from the date model, and deliberately unchanged.** The
+picker and book-out gate still red-flag on `licence_valid_to` (the physical
+licence expiry), NOT on `licence_check_valid_until`. Tightening that would
+newly block **186** drivers whose iDenfy check has aged past 90 days — over half
+the signed roster, because most people hire once and never return. The honest
+split, per jon: a dead licence is **red** (they cannot drive); a stale *check* is
+**amber** ("send them a hire form"). Don't flip the check window into the red
+tier.
+
+##### Identity review — staff adjudication of a failed face match (migration 193, Aug 2026)
+
+`drivers.identity_check_status`: `NULL` (never flagged — the overwhelming case)
+/ `needs_review` / `accepted` / `rejected`. Owned by
+`services/identity-review.ts`.
+
+**What was thrown away.** `idenfy-webhook.js` computed the full verdict —
+`faceValid`, `autoFace`/`manualFace`, `autoDocument`/`manualDocument`,
+`mismatchTags`, `fraudTags`, `suspicionReasons` — into a local object and
+persisted none of it, and saved only `fileUrls.FRONT`/`BACK` while discarding
+the **selfie** in the same payload. The face-match result, the entire point of
+the check, had zero effect on anything. Two opposite failures:
+
+- **DENIED** → no document data, so OP got a bare check date +
+  `overall_status='Stuck'`. The router refuses to trust that shape, and
+  `calculateNextStep` has **no branch for "we tried and it failed"** — every
+  such path falls through to `{ step: 'idenfy' }`. The driver re-verified,
+  failed identically, and was sent again, indefinitely. `'Stuck'` was written
+  and never read by the router.
+- **SUSPECTED** → document data IS returned, so everything wrote and the driver
+  sailed through despite the face not matching.
+
+**The gate.** `needs_review`/`rejected` blocks `POST /hire-forms/quick-assign`
+(`driver_identity_unverified`) and withholds the hire agreement via
+`isDriverAuthorisedForAgreement` — the same treatment as a pending insurance
+referral, so staff meet ONE pattern for "a human must decide". It is a
+**separate flag, not `requires_referral`**, because the decider differs: an
+insurer answering over days about risk, versus whoever is on the desk comparing
+two photographs. Alert to info@ + will@ fires **once** (atomic claim on
+`identity_alert_sent_at`, released on failure — same discipline as
+`sendReferralAlert`).
+
+**Conventions:**
+- **Route every new "is this driver authorised" surface through
+  `isIdentityAuthorised()`** rather than re-deriving the status inline.
+- **It fails OPEN** on an unknown/absent status, matching the referral arm — a
+  data gap must never silently block a driver.
+- **Only an explicit non-match trips review** (`faceNeedsReview`). An absent
+  face result is NOT a failure: a passport-only session runs no comparison, so
+  treating "no result" as a mismatch would flag every second-document upload.
+- **A staff decision wins.** Once accepted/rejected, a repeat webhook carrying
+  the same stale verdict does not re-open it.
+- **The hire-form app cannot set the status** — it reports what iDenfy said, OP
+  decides what that means. `identity_check_status` is stripped from the
+  `/driver-verification/update` whitelist for the same reason `referral_status`
+  is (Meadham / HH 16330).
+- Resolution (`POST /drivers/:id/resolve-identity`) is **STAFF_ROLES, not
+  manager-only** — it is a visual comparison anyone on the desk can make, and
+  gating it narrowly would rebuild the bottleneck the selfie capture exists to
+  remove.
+
+**The loop-breaker.** `POST /driver-verification/next-step` returns a terminal
+**`manual-review`** step BEFORE `calculateNextStep` runs, so a flagged driver
+stops rather than being handed back to the machine that just rejected them.
+`/status` reports `manual_review` so ProcessingHub stops polling for a state
+only a human can change. ⚠️ **ProcessingHub's `stepMapping[nextStep] || 'poa1'`
+silently sends an unrecognised step to the POA upload page** — any new router
+step MUST be added to BOTH map sites in `ProcessingHub.js`.
+
+**`drivers.current_job_number`** — the HH job whose form the driver is currently
+completing, captured at iDenfy session creation. Closes the blind spot where a
+driver part-way through has no `vehicle_hire_assignments` row yet (created on
+signature), so Hire History is empty and nothing said which hire a stuck driver
+belonged to. Surfaces as `In Progress · #16291` on `/drivers`.
+
+**Open / deliberately left:** the passport branch
+(`updateBoardAWithPassportData`) returns early when not approved, so a failed
+**passport** face check still writes nothing to OP. POA policy is "both must be
+valid, independently" (jon, Aug 2026) — the router already enforces it, but the
+picker/gate only red-flag when BOTH have lapsed, so they are currently too
+lenient; tightening would newly red-flag 35 drivers.
+
+##### Phase 3 — driver verification cockpit ← NEXT (specced Aug 2026, not built)
+
+Rebuild the DriverDetailPage **Overview tab** (replace it — a second tab
+recreates the disconnection this is meant to kill) into one surface that shows
+what the driver and the system see, rather than making staff reassemble it.
+jon's framing: *"make us see what they/the system sees, rather than try to bodge
+it together."*
+
+**Why:** staff kept forgetting to update validity dates because the layout is
+spread out and disconnected — "Document Validity" is one card, "Documents" is a
+separate card 400px below, and nothing ties an image to its date. Phases 1–2
+made the data honest and complete; Phase 3 makes it usable.
+
+- **Stage tracker** across the top: Contact → Insurance Qs → Identity → POA1 →
+  POA2 → DVLA → Signature, each ✅/⏳/❌. **Drive it from the same
+  `analyzeDocuments`/`driver-validity` the router uses**, so the tracker and the
+  driver's actual journey cannot disagree — that equivalence is the whole point.
+- **Evidence groups, not 8 flat rows** — image + FROM date + derived expiry +
+  status together in one block per group: Identity (licence front + back +
+  selfie → one window, plus the licence's own expiry), DVLA, POA1, POA2
+  (**independent of each other** — one may lapse while the other stands),
+  Passport, Signature.
+- **"What needs doing?" panel** off the same analysis, each line a single-click
+  action: *"❌ Selfie didn't match licence — compare below"*, *"⚠ DVLA check
+  expired 12 Sep — request new"*.
+- **Soft-forced date on manual upload** — uploading a document prompts for its
+  FROM date, and uploading a licence front prompts for the back. **Amber, not
+  red** (jon's standing preference, and the lesson of the 16291 hard gate):
+  saving without a date is allowed but leaves a visible "no expiry set" marker.
+- **Phase 4 — extraction:** point the existing `services/document-extract.ts`
+  (already doing PCN notices + cost receipts) at driver documents so the FROM
+  date pre-fills from the DVLA summary / POA / licence and staff only confirm.
+
+**Also queued (small, deliberately deferred from Phases 1–2):**
+- **Amber tier for a stale identity check** — `licence_check_valid_until` in the
+  past should be amber ("send them a hire form"), never red. See the gate-policy
+  note above; 186 drivers are affected, so it must not go in the red tier.
+- **POA gate correction** — policy is "both must be valid, independently"
+  (jon, Aug 2026). The router enforces it; the picker/gate only red-flag when
+  BOTH have lapsed, so they are too lenient. 35 drivers would newly red-flag.
+- **Manager override on the quick-assign gate**, with mandatory reason +
+  audit. Today a red driver has NO route past it, which is what forced the
+  16291 workaround. jon: *"no point having an emergency escape hatch if it's
+  glued shut."*
+
 ##### Driver-level liability model (migration 065, Apr 2026)
 
 **Two distinct concepts, separated:**
@@ -664,7 +846,8 @@ Replaces the prominent "+ Assign Driver" Quick Assign button with per-card next-
 
 - [x] Per-card state-aware next-action button on each Drivers & Vehicles assignment card. Self-drive only; D&C / driven lifecycles stay in Crew & Transport:
   - `soft`/`confirmed`, no van → **🚐 Allocate Van** (deep-links `/vehicles/allocations?job=<hh>`, job auto-expanded + scrolled into view + page filter forced to `'all'` so jobs beyond the current week are still visible. AllocationsPage's data-fetch lookahead is 30 days; deep-links to jobs further out won't surface — they need the page opened directly with the filter set wider, or a future on-demand widening.)
-  - `soft`/`confirmed`, van linked → **📋 Book Out** (deep-links BookOutPage with `?vehicle=&job=` pre-fill)
+  - `soft`/`confirmed`, van linked, van still in the warehouse → **📋 Book Out** (deep-links BookOutPage with `?vehicle=&job=` pre-fill)
+  - `soft`/`confirmed`, **the van is already `booked_out`/`active` on this job** → **🚐 Add to Hire** (mid-tour link, no walkaround). ⚠️ Keyed on *"is the van already out?"*, NOT *"has this driver got a van?"* — quick-assign offers a vehicle picker, so a late driver added to a departed van arrives WITH a `vehicle_id`; the original `!a.vehicle_id` test skipped this branch and offered Book Out, inviting a walkaround on a van 200 miles away, while the backend rejected the same case with a 400 (job 16291, Aug 2026). The backend now refuses only a move to a *different* van — that is Swap Vehicle's job.
   - `booked_out`/`active` → **↩️ Check In** (deep-links CheckInPage with `?vehicle=` pre-fill)
   - `returned`/`cancelled`/`swapped` → no button, status badge only
 - [x] Sibling-staff-allocation inference: when a hire-form-driven row has `vehicle_id IS NULL` but a separate staff-allocation row on the same `van_requirement_index` has a vehicle, the card surfaces "Book Out" (not "Allocate Van") pointing at the inferred vehicle. `loadVehicleAssignments` does two parallel fetches (`?job_id=` + `?hirehop_job_id=`) and composes `effective_vehicle_id` per row. BookOutPage's PATCH cements the link at submit time.
@@ -3709,6 +3892,34 @@ await syncFleetHireStatusByReg(reg);
 **NOT wired into:** the manual override paths (`PATCH /api/vehicles/fleet/:id`, `PATCH /api/vehicles/fleet/by-reg/:reg/hire-status`, bulk import). These are explicit user actions that should stand as written.
 
 **Backfill:** `backend/src/scripts/backfill-fleet-hire-status.ts` runs the same rules across the entire fleet to clean up historical drift. Dry-run by default; `--commit` to apply.
+
+### Driver Document Validity ✅ COMPLETE (Aug 2026)
+
+**File:** `backend/src/services/driver-validity.ts`
+**Frontend mirror:** `frontend/src/lib/driverStatus.ts` (status badge only)
+
+THE single definition of "is this driver's paperwork valid". Full model,
+incident history and conventions under **Document validity: FROM dates in,
+derived expiry out** in Step 2 above. Headline: humans set a FROM date, OP
+derives the expiry into the `*_valid_until` columns on every write, and the
+hire-form router delegates here so it can never disagree with the staff UI.
+
+Call `persistableWindows()` from any new driver write path; never set a
+`*_valid_until` column by hand. `computeDriverValidity()` carries the integrity
+guard that stops a check date with no licence identity rendering as a valid
+window. Unit-tested (`src/services/__tests__/driver-validity.test.ts`) — the
+first tests in the backend; `jest.config.js` exists for exactly this class of
+pure, high-risk helper and does not attempt a broad suite.
+
+### Identity Review ✅ COMPLETE (Aug 2026)
+
+**File:** `backend/src/services/identity-review.ts`
+
+Staff adjudication of a failed iDenfy face match, modelled on the insurance
+referral. `isIdentityAuthorised()` is the gate helper — route every new "may
+this driver be assigned / receive paperwork" surface through it rather than
+re-deriving the status. Fails OPEN on an unknown status. Full detail under
+**Identity review** in Step 2 above.
 
 ### HireHop Deposit Push ✅ COMPLETE
 
