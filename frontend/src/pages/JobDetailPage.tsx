@@ -395,6 +395,7 @@ interface VehicleAssignment {
     excess_amount_required: number | null;
     excess_amount_taken: number | null;
     dispute_status?: 'open' | 'won' | 'lost' | null;
+    auto_covered?: boolean;
   } | null;
   /**
    * Driver's personal insurance liability — source of truth for "what is
@@ -2821,6 +2822,7 @@ export default function JobDetailPage() {
             excess_amount_required: r.excess_amount_required,
             excess_amount_taken: r.excess_amount_taken,
             dispute_status: r.dispute_status ?? null,
+            auto_covered: r.excess_auto_covered ?? false,
           } : null,
           effective_vehicle_id: r.vehicle_id || inferred?.id || null,
           // Referral state (aliased driver_* on the API row) → the card fields
@@ -4803,10 +4805,12 @@ export default function JobDetailPage() {
                                     a.excess.excess_status === 'fully_claimed' ? 'bg-red-100 text-red-700' :
                                     ['needed', 'pending'].includes(a.excess.excess_status) ? 'bg-amber-100 text-amber-700' :
                                     a.excess.excess_status === 'partially_paid' ? 'bg-yellow-100 text-yellow-700' :
+                                    a.excess.auto_covered && a.excess.excess_status === 'waived' ? 'bg-purple-100 text-purple-700' :
                                     a.excess.excess_status === 'not_required' ? 'bg-gray-100 text-gray-500' :
                                     'bg-gray-100 text-gray-600'
                                   }`}>
-                                    {a.excess.excess_status === 'taken' ? 'Taken' :
+                                    {a.excess.auto_covered && a.excess.excess_status === 'waived' ? 'Covered by account' :
+                                     a.excess.excess_status === 'taken' ? 'Taken' :
                                      a.excess.excess_status === 'pre_auth' ? 'Pre-auth' :
                                      a.excess.excess_status === 'waived' ? 'Waived' :
                                      a.excess.excess_status === 'reimbursed' ? 'Reimbursed' :

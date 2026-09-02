@@ -36,6 +36,7 @@ import { syncFleetHireStatus } from '../services/fleet-hire-status-sync';
 import { autoDispatchJob } from '../services/auto-dispatch';
 import { runHookWithRecovery } from '../services/post-hook-recovery';
 import { cancelOrphanSiblingAllocations } from '../services/vha-dedup';
+import { applyAccountAutoCover } from '../services/hh-requirement-derivation';
 
 /** Format a date string/Date to "18 Mar 2026" */
 function fmtDate(d?: string | Date | null): string {
@@ -621,6 +622,20 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
 
     console.log(`[hire-forms] Created: driver=${driverId}, assignment=${assignment.id}, vehicle=${vehicleId || 'none'}, job=${f.hirehop_job_id || 'none'}, excess=${excessAmount || 'none'}`);
 
+    // Auto-cover from the client's standing held-on-account balance (opt-in,
+    // admin-set per client). The absorb/insert above may have created or
+    // un-waived a chargeable driver record; cover it now so an opted-in client's
+    // hire never reads "Required". Runs on the pool AFTER commit (not the hire-
+    // form transaction) so a failure here can never roll back the hire form.
+    // No-op for every non-opted client.
+    if (jobId) {
+      try {
+        await applyAccountAutoCover(query, jobId);
+      } catch (coverErr) {
+        console.error('[hire-forms] applyAccountAutoCover (POST) failed (non-fatal):', coverErr);
+      }
+    }
+
     // Advance the hire_forms requirement on successful submission so the
     // Job Requirements view reflects "forms in" without waiting for book-
     // out. If this submission triggers a referral, we step the card back
@@ -1066,6 +1081,18 @@ router.post('/quick-assign', authenticate, validate(quickAssignSchema), async (r
       }
     }
     } // end !isInternalJob
+
+    // Auto-cover from the client's standing held-on-account balance (opt-in,
+    // admin-set per client). Covers the record just created/absorbed above so an
+    // opted-in client's quick-assign never leaves a driver reading "Required".
+    // No-op for every non-opted client. Best-effort — never fails the assign.
+    if (f.job_id) {
+      try {
+        await applyAccountAutoCover(query, f.job_id);
+      } catch (coverErr) {
+        console.error('[hire-forms] applyAccountAutoCover (quick-assign) failed (non-fatal):', coverErr);
+      }
+    }
 
     console.log(`[hire-forms] Quick assignment created: ${assignment.id} (driver ${f.driver_id} → vehicle ${f.vehicle_id || 'unassigned'} on job ${f.job_id}, van_count=${vanCount})`);
 

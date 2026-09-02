@@ -841,6 +841,11 @@ export interface JobExcess {
   held_on_account?: boolean;
   person_id: string | null;
   notes: string | null;
+  // Computed (not a stored column): true when this record was auto-covered from
+  // the client's standing held-on-account balance (waived + [Auto-covered by
+  // account] marker). Drives the distinct "Covered by account" pill. Set by the
+  // per-job excess selects (money summary, /excess by-org/by-person).
+  auto_covered?: boolean;
   // HH deposit reconciliation (migration 039)
   hh_deposit_id: number | null;
   hh_reconciled_at: string | null;
