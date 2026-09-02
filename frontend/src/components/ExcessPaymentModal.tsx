@@ -118,7 +118,14 @@ const REIMBURSE_METHODS = [
   { value: 'lloyds_bank', label: 'Lloyds Bank' },
 ];
 
-function statusLabel(status: ExcessStatus): string {
+// A record auto-covered from a client's standing held-on-account balance is
+// stored as `waived` (so every terminal/covered whitelist Just Works) but must
+// read distinctly — staff should see WHY it's covered, not a bare "Waived" that
+// looks like a manual staff decision. `autoCovered` (from the backend
+// `auto_covered` flag / the [Auto-covered by account] notes marker) upgrades the
+// label + colour on those records.
+function statusLabel(status: ExcessStatus, autoCovered?: boolean): string {
+  if (autoCovered && status === 'waived') return 'Covered by account';
   const labels: Record<string, string> = {
     not_required: 'Covered',  // covered by another driver's excess on this hire
     needed: 'Required',
@@ -138,7 +145,8 @@ function statusLabel(status: ExcessStatus): string {
   return labels[status] || status;
 }
 
-function statusColor(status: ExcessStatus): string {
+function statusColor(status: ExcessStatus, autoCovered?: boolean): string {
+  if (autoCovered && status === 'waived') return 'bg-purple-100 text-purple-800';
   const colors: Record<string, string> = {
     not_required: 'bg-gray-100 text-gray-700',
     needed: 'bg-amber-100 text-amber-800',

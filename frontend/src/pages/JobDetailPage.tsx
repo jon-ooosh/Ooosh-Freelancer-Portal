@@ -41,6 +41,7 @@ import QuoteEditModal from '../components/QuoteEditModal';
 import type { FileAttachment, PipelineStatus, HoldReason, ConfirmedMethod } from '@shared/index';
 import { PIPELINE_STATUS_CONFIG, LOST_REASON_OPTIONS, PAUSED_REASON_OPTIONS } from '@shared/index';
 import { defaultRevisitDate, REVISIT_LEAD_DAYS_UNDER_MINIMUM } from '../lib/revisitDate';
+import { jobClientName, jobClientNameOr } from '../lib/jobOrgName';
 
 
 // Stable reference — HeldItemsSection takes `kinds` as an effect dependency, so
@@ -401,6 +402,7 @@ interface VehicleAssignment {
     excess_amount_required: number | null;
     excess_amount_taken: number | null;
     dispute_status?: 'open' | 'won' | 'lost' | null;
+    auto_covered?: boolean;
   } | null;
   /**
    * Driver's personal insurance liability — source of truth for "what is
@@ -2915,6 +2917,7 @@ export default function JobDetailPage() {
             excess_amount_required: r.excess_amount_required,
             excess_amount_taken: r.excess_amount_taken,
             dispute_status: r.dispute_status ?? null,
+            auto_covered: r.excess_auto_covered ?? false,
           } : null,
           effective_vehicle_id: r.vehicle_id || inferred?.id || null,
           // Referral state (aliased driver_* on the API row) → the card fields
@@ -4113,7 +4116,7 @@ export default function JobDetailPage() {
             <span className="text-xs font-medium text-gray-500 uppercase tracking-wider">Organisations:</span>
             {(() => {
               const hasExplicitLead = jobOrgs.some(jo => jo.is_primary);
-              const clientName = job.client_org_name || job.company_name || job.client_name;
+              const clientName = jobClientName(job);
               return (
                 <span
                   ref={clientSearchRef}
@@ -4482,7 +4485,7 @@ export default function JobDetailPage() {
             hhJobNumber={job.hh_job_number}
             pipelineStatus={job.pipeline_status}
             clientOrgId={job.client_id}
-            clientOrgName={job.client_name}
+            clientOrgName={jobClientName(job) ?? undefined}
             derivedFlags={hhSyncResult?.derivation?.flags || null}
             seatAvailability={hhSyncResult?.derivation?.seatAvailability || null}
             assignedVehicleRegs={jobAssignedVehicles.map(v => v.reg).filter(Boolean)}
@@ -4903,10 +4906,12 @@ export default function JobDetailPage() {
                                     a.excess.excess_status === 'fully_claimed' ? 'bg-red-100 text-red-700' :
                                     ['needed', 'pending'].includes(a.excess.excess_status) ? 'bg-amber-100 text-amber-700' :
                                     a.excess.excess_status === 'partially_paid' ? 'bg-yellow-100 text-yellow-700' :
+                                    a.excess.auto_covered && a.excess.excess_status === 'waived' ? 'bg-purple-100 text-purple-700' :
                                     a.excess.excess_status === 'not_required' ? 'bg-gray-100 text-gray-500' :
                                     'bg-gray-100 text-gray-600'
                                   }`}>
-                                    {a.excess.excess_status === 'taken' ? 'Taken' :
+                                    {a.excess.auto_covered && a.excess.excess_status === 'waived' ? 'Covered by account' :
+                                     a.excess.excess_status === 'taken' ? 'Taken' :
                                      a.excess.excess_status === 'pre_auth' ? 'Pre-auth' :
                                      a.excess.excess_status === 'waived' ? 'Waived' :
                                      a.excess.excess_status === 'reimbursed' ? 'Reimbursed' :
@@ -5970,7 +5975,7 @@ export default function JobDetailPage() {
         onSaved={() => { loadJob(); loadQuotes(); }}
         jobId={job.id}
         jobName={job.job_name || undefined}
-        clientName={job.client_name || job.company_name || undefined}
+        clientName={jobClientName(job) ?? undefined}
         venueName={job.venue_name || undefined}
         venueId={job.venue_id || undefined}
         jobDate={job.job_date || undefined}
@@ -6326,7 +6331,7 @@ export default function JobDetailPage() {
           saving={transitionSaving}
           jobId={id}
           clientId={job?.client_id}
-          clientName={job?.client_name || job?.company_name}
+          clientName={jobClientName(job) ?? undefined}
           hireStart={job?.job_date || job?.out_date}
           onConfirm={(data) => handleStatusTransition(transitionTarget, data)}
           onCancel={() => { setShowTransitionModal(false); setTransitionTarget(null); }}
@@ -6398,7 +6403,7 @@ export default function JobDetailPage() {
           )}
           <div className="sticky top-4 bg-white rounded-xl shadow-sm border border-gray-200 p-4">
             <h3 className="text-sm font-semibold text-gray-700 mb-3">
-              Client History — {job.client_name || job.company_name}
+              Client History — {jobClientNameOr(job, '')}
             </h3>
 
             {/* Do Not Hire warning */}

@@ -334,9 +334,22 @@ export interface Job {
   colour: string | null;
   // Client
   client_id: string | null;
+  // client_name / company_name are HireHop's raw CLIENT / COMPANY strings.
+  // company_name is never written by OP and client_name only survives a
+  // deliberate client change because the sync guards it on client_locked_at,
+  // so neither is the canonical name. Prefer jobDisplayOrgName() (frontend
+  // lib/jobOrgName.ts), which reads the joined org name instead.
   client_name: string | null;
   company_name: string | null;
   client_ref: string | null;
+  // Canonical client org name, joined from organisations via client_id.
+  // Present on the single-job, job-list, pipeline and cancellations responses;
+  // absent elsewhere (hence optional).
+  client_org_name?: string | null;
+  // Name of the org explicitly flagged to headline this job on lists
+  // (job_organisations.is_primary). NULL = no explicit lead, fall back to the
+  // client. Display only — client_id stays authoritative for accounting.
+  lead_org_name?: string | null;
   // Venue
   venue_id: string | null;
   venue_name: string | null;
@@ -851,6 +864,11 @@ export interface JobExcess {
   held_on_account?: boolean;
   person_id: string | null;
   notes: string | null;
+  // Computed (not a stored column): true when this record was auto-covered from
+  // the client's standing held-on-account balance (waived + [Auto-covered by
+  // account] marker). Drives the distinct "Covered by account" pill. Set by the
+  // per-job excess selects (money summary, /excess by-org/by-person).
+  auto_covered?: boolean;
   // HH deposit reconciliation (migration 039)
   hh_deposit_id: number | null;
   hh_reconciled_at: string | null;

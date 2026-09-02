@@ -9,6 +9,7 @@ import type {
 } from '@shared/index';
 import { PIPELINE_STATUS_CONFIG, LOST_REASON_OPTIONS, PAUSED_REASON_OPTIONS, PERSON_ORG_ROLES } from '@shared/index';
 import { defaultRevisitDate, REVISIT_LEAD_DAYS_UNDER_MINIMUM } from '../lib/revisitDate';
+import { jobDisplayOrgNameOr } from '../lib/jobOrgName';
 
 // Roles available for the "Linked organisations" picker on a job. These map
 // to `job_organisations.role` (VARCHAR(50), free-text). Keep aligned with the
@@ -472,7 +473,7 @@ function PipelineCard({
       {/* Row 3: Lead organisation, else the client. One line either way — a
           lead org no longer demotes the client to a "Billed to:" sub-line. */}
       <div className="text-xs text-gray-500 truncate mb-1">
-        {(job as any).lead_org_name || job.company_name || job.client_name || '—'}
+        {jobDisplayOrgNameOr(job)}
       </div>
 
       {/* Row 4: Dates */}
@@ -3741,7 +3742,7 @@ export default function PipelinePage() {
                     </div>
                   </td>
                   <td className="px-4 py-3 text-sm text-gray-600">
-                    {job.company_name || job.client_name || '—'}
+                    {jobDisplayOrgNameOr(job)}
                   </td>
                   <td className="px-4 py-3">
                     <span

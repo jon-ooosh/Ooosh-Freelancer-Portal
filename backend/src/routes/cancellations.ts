@@ -720,9 +720,18 @@ router.get('/list', async (req: AuthRequest, res: Response) => {
               j.cancelled_at, j.cancellation_reason, j.cancellation_fee,
               j.cancellation_refund, j.cancellation_tier, j.cancellation_notice_days,
               j.cancellation_notes, j.reopened_to_job_id,
-              m1p.first_name as manager1_first_name, m1p.last_name as manager1_last_name
+              m1p.first_name as manager1_first_name, m1p.last_name as manager1_last_name,
+              -- Canonical client name + the org ★'d to headline this job. The
+              -- list previously showed HireHop's raw company_name/client_name,
+              -- so a job whose client had been changed in OP kept showing the
+              -- old name here while Job Detail showed the new one.
+              o.name AS client_org_name,
+              (SELECT lo.name FROM job_organisations jo
+                 JOIN organisations lo ON lo.id = jo.organisation_id
+                WHERE jo.job_id = j.id AND jo.is_primary = true LIMIT 1) AS lead_org_name
        FROM jobs j
        LEFT JOIN people m1p ON m1p.id = j.manager1_person_id
+       LEFT JOIN organisations o ON o.id = j.client_id AND o.is_deleted = false
        WHERE ${whereClause}
        ORDER BY ${orderBy}
        LIMIT $${pIdx} OFFSET $${pIdx + 1}`,

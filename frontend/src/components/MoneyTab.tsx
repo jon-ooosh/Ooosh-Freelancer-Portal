@@ -911,8 +911,8 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
               >
                 <div className="flex-1">
                   <div className="flex items-center gap-2">
-                    <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${statusColor(record.excess_status)}`}>
-                      {statusLabel(record.excess_status)}
+                    <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${statusColor(record.excess_status, record.auto_covered)}`}>
+                      {statusLabel(record.excess_status, record.auto_covered)}
                     </span>
                     {record.hh_deposit_id && (
                       <span className="text-[10px] text-green-600 font-medium" title={`HH Deposit #${record.hh_deposit_id} (${record.hh_reconcile_source || 'linked'})`}>
@@ -1112,7 +1112,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                   </p>
                   <p className="text-xs text-gray-500">
                     Required: {record.excess_amount_required != null ? `£${Number(record.excess_amount_required).toFixed(2)}` : '—'}
-                    {' · '}Status: {statusLabel(record.excess_status)}
+                    {' · '}Status: {statusLabel(record.excess_status, record.auto_covered)}
                     {record.hh_deposit_id && ' · Already linked'}
                   </p>
                 </button>
