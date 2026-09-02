@@ -2955,7 +2955,7 @@ Standalone OP-native module replacing the Monday.com "Storage Clients" board. Oo
 - **Round 4–5 tenancy editability + contact picker (Jun 2026):** the tenancy detail modal gained an **Edit details** form (`EditTenancyForm`) covering every mutable field post-move-in (access type/code/key location, billing mode, cadence, next invoice + rate-review dates, lead contact, org, move-in date, status, notes) via the existing `PUT /tenancies/:id`; weekly rate stays on Change rate (history) and room is fixed. Access is **always shown** in the read view (was hidden when no code set). The lead-contact picker is now an org-scoped `ContactPicker` backed by **`GET /api/organisations/:id/contact-candidates`** — active roles only (`por.status='active'`; ended roles are `status='historical'` and must never surface) expanded across related orgs via `organisation_relationships` (Org>Org & Org>person, mirroring the New Enquiry job cascade). Falls back to global people search.
 - Temp storage / incoming deliveries — deliberately NOT here; belongs with the Holding module (Step 10).
 
-#### Step 10: Holding Module — one page for everything we're keeping that isn't ours ← UNIFIED (Aug 2026)
+#### Step 10: Holding Module — one page for everything we're keeping that isn't ours ← UNIFIED + LIVE (Sep 2026)
 
 The unified "things we're temporarily holding for a client" module. **One engine** (`held_items`), one
 `kind` discriminator — **`incoming` / `lost_property` only since Aug 2026**; `temp_storage` was folded
@@ -3140,8 +3140,15 @@ unanswerable.
   optional note posts into the item's **discussion thread** (as well as the notes trail), so "why did
   2 boxes never show up?" is answerable later. Note failure is best-effort — the count correction is
   the important half and must not be lost to a failed note.
+- **Two columns were deliberately folded into "Next action" — don't restore them.** The dedicated
+  "Next chase due" and "Hold until" columns are gone: a paused chase renders as a blue ⏸ inside
+  `ActionDueCell`, and hold-until urgency surfaces through the "Time's up" bucket. Re-adding either
+  column would put the same signal on screen twice.
 
 **Remaining / open:**
+- ⚠️ **jon has post-deploy feedback on the unified page that has NOT been captured yet** (flagged
+  2 Sep 2026, session ran out of room before he gave it). Ask for it before starting new Holding
+  work — it may reorder everything below.
 - IRL feedback from the chase + hold-until flows (staff trialling over the following weeks).
 - **Merch pip label doesn't split awaiting vs here.** `in_progress` reads "To hand over" even when
   nothing has arrived yet (`RequirementCard` `TYPE_STATUS_LABELS`), because the 4-state requirement
