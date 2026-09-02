@@ -227,8 +227,11 @@ export default function App() {
                 <Route path="/operations/issues/:id" element={<IssuesPage />} />
                 <Route path="/operations/problems" element={<ProblemsPage />} />
                 <Route path="/storage" element={<StoragePage />} />
-                <Route path="/holding" element={<HoldingPage view="held" />} />
-                <Route path="/holding/lost-property" element={<HoldingPage view="lost_property" />} />
+                <Route path="/holding" element={<HoldingPage />} />
+                {/* Kept forever — the chase digest's ?review=1 link is already
+                    in staff inboxes and on historical notification rows. Same
+                    page, lost-property filter pre-applied. */}
+                <Route path="/holding/lost-property" element={<HoldingPage defaultKind="lost_property" />} />
                 <Route path="/holding/receipt/:id" element={<HoldingReceiptPage />} />
                 <Route path="/operations/problems/:id" element={<IssueDetailPage />} />
                 <Route path="/drivers" element={<DriversPage />} />

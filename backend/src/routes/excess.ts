@@ -3212,7 +3212,8 @@ router.get('/by-person/:personId', async (req: AuthRequest, res: Response) => {
         fv.reg AS vehicle_reg,
         d.full_name AS driver_name,
         j.job_name,
-        COALESCE(h.held_amount, 0) AS held_amount
+        COALESCE(h.held_amount, 0) AS held_amount,
+        (je.notes LIKE '%[Auto-covered by account]%') AS auto_covered
       FROM job_excess je
       LEFT JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
       LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
@@ -3270,7 +3271,8 @@ router.get('/by-org/:orgId', async (req: AuthRequest, res: Response) => {
         fv.reg AS vehicle_reg,
         d.full_name AS driver_name,
         j.job_name,
-        COALESCE(h.held_amount, 0) AS held_amount
+        COALESCE(h.held_amount, 0) AS held_amount,
+        (je.notes LIKE '%[Auto-covered by account]%') AS auto_covered
       FROM job_excess je
       LEFT JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
       LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
