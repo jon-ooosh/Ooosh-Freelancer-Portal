@@ -3185,9 +3185,13 @@ things sat unnoticed. It now reads `HELD_ITEM_SELECT` from two places, split on 
 carries a real date:
 - **Dated → "On Today / Tomorrow"** (`on_today` in `routes/dashboard.ts`): `decide` (a hold/dispose
   date has passed) and `receive` (a delivery due within a day). CLAUDE.md's own note on that section
-  says to union new ad-hoc sources into `on_today` — this is that. ⚠️ **`receive` is narrowed to
-  items due within a day**: on the Holding page EVERY expected delivery carries that action (it's the
-  standing "what does this need" answer), but a Today surface only wants the imminent ones.
+  says to union new ad-hoc sources into `on_today` — this is that. ⚠️ **`receive` is capped at
+  `action_due <= CURRENT_DATE + 1`**: on the Holding page EVERY expected delivery carries that action
+  (it's the standing "what does this need" answer), but a Today surface only wants the imminent ones.
+  That is an UPPER bound with no lower bound, so **anything overdue is already included** and sorts
+  to the top (OnToday's `dueLabel` gives it a red "Overdue" pill) — don't "fix" this by adding an
+  overdue arm, and note that narrowing it to "today + overdue" would drop tomorrow, which the section
+  is named for and which the storage source also includes.
 - **Undated → a NeedsAttention card, "Unidentified items"** (`holding_unlinked` /
   `holding_unlinked_count`): `link_owner` only — the mystery-box backlog, ranked by how cold the
   trail is. This is the genuine gap, because **the daily digest only chases items whose owner is
