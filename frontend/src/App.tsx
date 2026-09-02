@@ -58,6 +58,7 @@ import MobileReceiptUploadPage from './pages/MobileReceiptUploadPage';
 import PcnReceiptUploadPage from './pages/PcnReceiptUploadPage';
 import WarehouseCollectionDetailPage from './pages/WarehouseCollectionDetailPage';
 import Layout from './components/Layout';
+import ErrorBoundary from './components/ErrorBoundary';
 import { VehicleRoutes, initVehicleModule } from './modules/vehicles';
 import { BookOutPage as StaffBookOutPage } from './modules/vehicles/pages/BookOutPage';
 import { CheckInPage as StaffCheckInPage } from './modules/vehicles/pages/CheckInPage';
@@ -196,6 +197,9 @@ export default function App() {
         element={
           <ProtectedRoute>
             <Layout>
+              {/* Inside Layout, so a page crash leaves the nav usable and the
+                  user can navigate away instead of facing a white screen. */}
+              <ErrorBoundary>
               <Routes>
                 <Route path="/" element={<DashboardPage />} />
                 <Route path="/people" element={<PeoplePage />} />
@@ -223,8 +227,11 @@ export default function App() {
                 <Route path="/operations/issues/:id" element={<IssuesPage />} />
                 <Route path="/operations/problems" element={<ProblemsPage />} />
                 <Route path="/storage" element={<StoragePage />} />
-                <Route path="/holding" element={<HoldingPage view="held" />} />
-                <Route path="/holding/lost-property" element={<HoldingPage view="lost_property" />} />
+                <Route path="/holding" element={<HoldingPage />} />
+                {/* Kept forever — the chase digest's ?review=1 link is already
+                    in staff inboxes and on historical notification rows. Same
+                    page, lost-property filter pre-applied. */}
+                <Route path="/holding/lost-property" element={<HoldingPage defaultKind="lost_property" />} />
                 <Route path="/holding/receipt/:id" element={<HoldingReceiptPage />} />
                 <Route path="/operations/problems/:id" element={<IssueDetailPage />} />
                 <Route path="/drivers" element={<DriversPage />} />
@@ -246,6 +253,7 @@ export default function App() {
                 <Route path="/team" element={<Navigate to="/settings" replace />} />
                 <Route path="/settings" element={<SettingsPage />} />
               </Routes>
+              </ErrorBoundary>
             </Layout>
           </ProtectedRoute>
         }

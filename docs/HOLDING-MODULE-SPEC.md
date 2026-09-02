@@ -359,6 +359,74 @@ for linked items; for unknown/unlinked items, capture a recipient at notify time
 
 ---
 
+## 11a. Count vocabulary + the two physical actions (Aug 2026)
+
+**Three words, one helper.** `frontend/src/components/holding/counts.ts` `describeHeldCounts()`:
+
+| Term | Column | Meaning |
+|---|---|---|
+| Expected | `box_count` | what the client said they'd send |
+| Here | `received_count` | what actually turned up |
+| Outstanding | derived | expected − here |
+
+Renders `3 of 5 here · 2 outstanding` on the Holding list, the detail modal, the picker and the
+Job-View panel. `services/holding-requirement-sync.ts` mirrors the wording for the merch pip notes
+(backend can't import `shared/` at runtime). **The `description` says WHAT it is, never HOW MANY** —
+the merch form baked the count in (`"5 box(es) of merch/equipment"`), which froze at declaration
+time and stayed wrong once a partial arrival was booked in. Any new quantity surface calls the
+helper; nothing parses the description.
+
+**Expected vs here.** `HeldItemForm` has an "It's already here" toggle (+ how many arrived) — without
+it every item logged from `/holding` was born `expected`, so an arrived-but-unlogged delivery could
+only be backfilled via `/quick`.
+
+**Receive + hand over on both surfaces.** `components/holding/HeldItemPicker.tsx` exports
+`HeldItemPicker` + `HandoverFlow`, shared by `/quick` and the `/holding` header. Same
+don't-let-them-drift convention as `HeldItemForm`.
+
+**Job View panel** takes `actions` + `onChanged`: rows deep-link (`/holding?item=<id>`) and carry the
+one next physical step. Everything else stays on the Holding pages.
+
+**Short delivery** → "📦 Nothing more coming" corrects `box_count` down to `received_count` (an
+update); "✕ Won't arrive" (cancel) is now reserved for nothing-arrived-at-all.
+
+---
+
+## 11b. One page, organised by next action (Aug 2026)
+
+`/holding` is the single page. Kind is a filter + a row icon, never a separate page.
+
+**Derived, server-side, once** (`routes/holding.ts` `SELECT_WITH_JOINS`): `next_action` +
+`action_due`. The chase expressions moved into a `LEFT JOIN LATERAL` so the action CASE can
+reference `next_chase_due` without restating the logic. Precedence is by urgency, not kind:
+
+| next_action | When | action_due |
+|---|---|---|
+| `link_owner` | `owner_unknown` | found/logged date — rendered as an AGE, never overdue |
+| `decide` | `hold_until` / `dispose_after` passed | that date |
+| `chase_owner` | lost property, owner known | `next_chase_due` (⏸ when paused) |
+| `receive` | `expected` | `expected_date` → `needed_by` |
+| `hand_over` | here, owner known | `needed_by` → `hold_until` |
+| `none` | terminal | null |
+
+Default order: `action_due` ascending, resolved rows last. **Any new "what does this need" surface
+reads these two columns rather than re-deriving.**
+
+**Layout:** clickable action strip (counts) over a flat sortable table — the `/money/overview`
+pattern. Buckets were rejected: ~17 open rows, 20–30 max. One fetch, client-side filtering, so strip
+counts stay stable under a filter. `?kind=` / `?action=` / `?item=` / `?review=1` round-trip.
+
+**Route rule — never remove, only add.** `/holding/lost-property` mounts the same page pre-filtered
+and stays permanently: the chase digest's `?review=1` link is in sent inboxes and on historical
+`notifications.action_url` rows, and `/holding/receipt/:id` is printed on box labels in the post.
+
+**`temp_storage` folded into `incoming`** (migration 195). It only ever gated the visibility of the
+"hold until" field — `holding-reminders.ts` and the `needed_by` derivation already treated the two
+kinds identically. The CHECK constraint still permits the value; the UI never offers it. Two kinds
+remain, split on *does the client know we've got it?*
+
+---
+
 ## 12. Deferred for v1 (noted, not built)
 
 - **£ / billing.** `chargeable` flag + `storage_started_at` + `charge_notes` captured; surface

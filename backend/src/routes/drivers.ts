@@ -8,12 +8,15 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
-import { authenticate, authorize, AuthRequest } from '../middleware/auth';
+import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { generateDriverSnapshot, loadDriverDocuments, type DriverSnapshotData } from '../services/driver-snapshot-pdf';
 import { uploadToR2 } from '../config/r2';
 import { fetchLogo } from '../services/hire-form-pdf';
 import { encryptDriverPiiInto, decryptDriverRow, decryptDriverRows } from '../services/driver-pii';
+import { persistableWindows, touchesValidity, backfillFromDates } from '../services/driver-validity';
+import { sendIdentityReviewAlert } from '../services/identity-review';
+import { computeVerificationState } from '../services/driver-verification-state';
 
 const router = Router();
 router.use(authenticate);
@@ -52,7 +55,15 @@ const createDriverSchema = z.object({
   licence_restrictions: z.string().nullable().optional(),
   licence_next_check_due: z.string().nullable().optional(),
   date_passed_test: z.string().nullable().optional(),
-  // Document expiry dates
+  // Document FROM dates (migration 192) — staff/system set these; the
+  // matching *_valid_until columns are DERIVED from them by
+  // services/driver-validity.ts on write. See that file's header.
+  poa1_doc_date: z.string().nullable().optional(),
+  poa2_doc_date: z.string().nullable().optional(),
+  passport_check_date: z.string().nullable().optional(),
+  passport_expiry: z.string().nullable().optional(),
+  // Derived expiry columns. Still accepted so legacy callers don't 400, but
+  // any value sent is overwritten by the derivation below — set the FROM date.
   poa1_valid_until: z.string().nullable().optional(),
   poa2_valid_until: z.string().nullable().optional(),
   dvla_valid_until: z.string().nullable().optional(),
@@ -354,6 +365,12 @@ router.post('/', validate(createDriverSchema), async (req: AuthRequest, res: Res
   try {
     const d = req.body;
 
+    // Derive the *_valid_until columns from the FROM dates before inserting, so
+    // a newly created driver can never start life with stale windows. Derived
+    // values win over anything the caller sent directly (see
+    // services/driver-validity.ts).
+    const derived = persistableWindows(d);
+
     const result = await query(
       `INSERT INTO drivers (
         person_id, full_name, email, phone, phone_country, date_of_birth, nationality,
@@ -369,7 +386,9 @@ router.post('/', validate(createDriverSchema), async (req: AuthRequest, res: Res
         insurance_status, overall_status,
         requires_referral, referral_status, referral_date, referral_notes,
         idenfy_check_date, idenfy_scan_ref, signature_date,
-        source, created_by
+        source, created_by,
+        poa1_doc_date, poa2_doc_date, passport_check_date, passport_expiry,
+        licence_check_valid_until
       ) VALUES (
         $1, $2, $3, $4, $5, $6, $7,
         $8, $9, $10, $11, $12, $13,
@@ -384,7 +403,9 @@ router.post('/', validate(createDriverSchema), async (req: AuthRequest, res: Res
         $40, $41,
         $42, $43, $44, $45,
         $46, $47, $48,
-        $49, $50
+        $49, $50,
+        $51, $52, $53, $54,
+        $55
       ) RETURNING *`,
       [
         d.person_id || null, d.full_name, d.email || null, d.phone || null,
@@ -395,7 +416,7 @@ router.post('/', validate(createDriverSchema), async (req: AuthRequest, res: Res
         d.licence_issue_country, d.licence_issued_by || null, d.licence_points,
         JSON.stringify(d.licence_endorsements), d.licence_restrictions || null,
         d.licence_next_check_due || null, d.date_passed_test || null,
-        d.poa1_valid_until || null, d.poa2_valid_until || null, d.dvla_valid_until || null, d.passport_valid_until || null,
+        derived.poa1_valid_until, derived.poa2_valid_until, derived.dvla_valid_until, derived.passport_valid_until,
         d.poa1_provider || null, d.poa2_provider || null,
         d.dvla_check_code || null, d.dvla_check_date || null,
         d.has_disability, d.has_convictions, d.has_prosecution, d.has_accidents,
@@ -404,6 +425,9 @@ router.post('/', validate(createDriverSchema), async (req: AuthRequest, res: Res
         d.requires_referral, d.referral_status || null, d.referral_date || null, d.referral_notes || null,
         d.idenfy_check_date || null, d.idenfy_scan_ref || null, d.signature_date || null,
         d.source, req.user!.id,
+        d.poa1_doc_date || null, d.poa2_doc_date || null,
+        d.passport_check_date || null, d.passport_expiry || null,
+        derived.licence_check_valid_until,
       ]
     );
 
@@ -468,14 +492,41 @@ router.put('/:id', authorize('admin', 'manager'), validate(updateDriverSchema), 
       fields.licence_endorsements = JSON.stringify(fields.licence_endorsements);
     }
 
+    // Re-derive the *_valid_until columns whenever a FROM date moves.
+    //
+    // This is what stops the gate columns going stale behind the displayed
+    // windows — the failure that made a driver read green on their own page
+    // and 400 out of the assign picker (job 16291, Aug 2026). Derived values
+    // are applied LAST so they win over anything a caller sent directly.
+    // A caller that knows only the expiry (older API clients, import scripts)
+    // gets its FROM date back-computed first, so the pair never splits.
+    Object.assign(fields, backfillFromDates(fields));
+    if (touchesValidity(Object.keys(fields))) {
+      Object.assign(fields, persistableWindows({ ...previousValues, ...fields }));
+    }
+
     // Track what actually changed for audit
     const changedFields: Record<string, { old: unknown; new: unknown }> = {};
+
+    // Normalise before comparing, or nothing ever compares equal: pg returns
+    // DATE columns as JS Date objects (String() => "Wed May 28 2026 01:00:00
+    // GMT+0100…") while the form posts "2026-05-28". Every date field therefore
+    // logged as "changed" on every save, burying the one field staff actually
+    // touched in a wall of noise — which is exactly what made the job 16291
+    // audit trail hard to read.
+    const normaliseForCompare = (v: unknown): string => {
+      if (v === null || v === undefined) return '';
+      if (v instanceof Date) return isNaN(v.getTime()) ? '' : v.toISOString().slice(0, 10);
+      const str = String(v);
+      // "2026-05-28T00:00:00.000Z" and "2026-05-28" are the same day.
+      const iso = str.match(/^(\d{4}-\d{2}-\d{2})T/);
+      return iso ? iso[1] : str;
+    };
 
     for (const [key, value] of Object.entries(fields)) {
       const prev = previousValues[key];
       const newVal = value ?? null;
-      // Compare stringified to handle date/number coercion
-      if (String(prev ?? '') !== String(newVal ?? '')) {
+      if (normaliseForCompare(prev) !== normaliseForCompare(newVal)) {
         changedFields[key] = { old: prev, new: newVal };
       }
       params.push(newVal);
@@ -600,6 +651,183 @@ router.patch('/:id/calculated-excess', authorize('admin', 'manager'), validate(e
     res.status(500).json({ error: 'Failed to edit calculated excess' });
   }
 });
+
+// ── PATCH /api/drivers/:id/document-dates — staff-editable validity dates ──
+//
+// Uploading a document is open to all staff; PUT /drivers/:id is manager-tier
+// because it can also move penalty points, insurance status and the referral
+// flags. That split is why dates went missing: the person who uploads the
+// replacement is usually not the person allowed to date it, so the date got
+// left for someone else and then forgotten.
+//
+// So rather than widening the whole record to staff, this exposes exactly the
+// FROM dates — the fields the cockpit prompts for right after an upload. The
+// derived *_valid_until columns follow automatically (see driver-validity.ts);
+// nothing else on the driver is reachable through here.
+const DOCUMENT_DATE_FIELDS = [
+  'idenfy_check_date',
+  'licence_valid_to',
+  'dvla_check_date',
+  'poa1_doc_date',
+  'poa2_doc_date',
+  'passport_check_date',
+  'passport_expiry',
+] as const;
+
+const documentDatesSchema = z
+  .object(Object.fromEntries(
+    DOCUMENT_DATE_FIELDS.map(f => [f, z.string().nullable().optional()]),
+  ) as Record<(typeof DOCUMENT_DATE_FIELDS)[number], z.ZodOptional<z.ZodNullable<z.ZodString>>>)
+  .strict();
+
+router.patch(
+  '/:id/document-dates',
+  authorize(...STAFF_ROLES),
+  validate(documentDatesSchema),
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const { id } = req.params;
+      const updates = req.body as Record<string, string | null>;
+
+      const previous = await query('SELECT * FROM drivers WHERE id = $1', [id]);
+      if (previous.rows.length === 0) {
+        res.status(404).json({ error: 'Driver not found' });
+        return;
+      }
+
+      const fields: Record<string, unknown> = {};
+      for (const key of DOCUMENT_DATE_FIELDS) {
+        if (key in updates) fields[key] = updates[key] || null;
+      }
+      if (Object.keys(fields).length === 0) {
+        res.status(400).json({ error: 'No document dates to update' });
+        return;
+      }
+
+      // Same derivation as the full PUT — the gate columns follow the FROM date.
+      Object.assign(fields, persistableWindows({ ...previous.rows[0], ...fields }));
+
+      const params: unknown[] = [];
+      const setClauses = Object.entries(fields).map(([col, value]) => {
+        params.push(value);
+        return `${col} = $${params.length}`;
+      });
+      setClauses.push('updated_at = NOW()');
+      params.push(id);
+
+      const result = await query(
+        `UPDATE drivers SET ${setClauses.join(', ')} WHERE id = $${params.length} RETURNING *`,
+        params,
+      );
+
+      await query(
+        `INSERT INTO audit_log (user_id, entity_type, entity_id, action, previous_values, new_values)
+         VALUES ($1, 'driver', $2, 'update_document_dates', $3, $4)`,
+        [
+          req.user!.id, id,
+          JSON.stringify(Object.fromEntries(
+            Object.keys(fields).map(k => [k, previous.rows[0][k] ?? null]))),
+          JSON.stringify(fields),
+        ],
+      );
+
+      res.json({ data: decryptDriverRow(result.rows[0]) });
+    } catch (error) {
+      console.error('[drivers] Document dates error:', error);
+      res.status(500).json({ error: 'Failed to update document dates' });
+    }
+  },
+);
+
+// ── GET /api/drivers/:id/verification-state — the staff cockpit payload ──
+//
+// Stage tracker + "what needs doing", derived from the SAME validity engine the
+// hire-form router uses. That equivalence is deliberate: staff are looking at
+// what the driver's own journey is being told, not a second opinion assembled
+// from the same columns by different rules — which is exactly how the router
+// and the staff UI came to disagree about job 16291.
+router.get('/:id/verification-state', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await query(`SELECT * FROM drivers WHERE id = $1`, [req.params.id]);
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Driver not found' });
+      return;
+    }
+    res.json({ data: computeVerificationState(decryptDriverRow(result.rows[0])) });
+  } catch (error) {
+    console.error('[drivers] Verification state error:', error);
+    res.status(500).json({ error: 'Failed to compute verification state' });
+  }
+});
+
+// ── POST /api/drivers/:id/resolve-identity — accept or reject a face match ──
+//
+// The staff counterpart to the automatic flag raised when iDenfy cannot match a
+// driver's selfie to their licence photo. A mismatch is usually innocent (an
+// older licence photo, a change in appearance), so the resolution is a human
+// looking at the two images on the driver record and saying which it is.
+//
+// Deliberately STAFF_ROLES, not manager-only: unlike an insurance referral —
+// which needs the insurer's answer — this is a visual comparison anyone on the
+// desk can make, and keeping it narrow would rebuild the bottleneck this whole
+// piece of work exists to remove.
+const resolveIdentitySchema = z.object({
+  outcome: z.enum(['accepted', 'rejected']),
+  notes: z.string().max(2000).optional().default(''),
+});
+
+router.post(
+  '/:id/resolve-identity',
+  authorize(...STAFF_ROLES),
+  validate(resolveIdentitySchema),
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const { id } = req.params;
+      const { outcome, notes } = req.body as { outcome: 'accepted' | 'rejected'; notes: string };
+
+      const result = await query(
+        `UPDATE drivers
+            SET identity_check_status = $1,
+                identity_reviewed_by  = $2,
+                identity_reviewed_at  = NOW(),
+                identity_review_notes = NULLIF($3, ''),
+                updated_at            = NOW()
+          WHERE id = $4
+          RETURNING id, full_name, identity_check_status`,
+        [outcome, req.user!.id, notes, id],
+      );
+      if (result.rows.length === 0) {
+        res.status(404).json({ error: 'Driver not found' });
+        return;
+      }
+
+      await query(
+        `INSERT INTO audit_log (user_id, entity_type, entity_id, action, new_values)
+         VALUES ($1, 'driver', $2, 'resolve_identity', $3)`,
+        [req.user!.id, id, JSON.stringify({ outcome, notes })],
+      );
+
+      res.json({ data: result.rows[0] });
+    } catch (error) {
+      console.error('[drivers] Resolve identity error:', error);
+      res.status(500).json({ error: 'Failed to resolve identity check' });
+    }
+  },
+);
+
+// ── POST /api/drivers/:id/resend-identity-alert — re-send the review email ──
+router.post(
+  '/:id/resend-identity-alert',
+  authorize(...STAFF_ROLES),
+  async (req: AuthRequest, res: Response) => {
+    const result = await sendIdentityReviewAlert(req.params.id as string, { force: true });
+    if (!result.sent) {
+      res.status(400).json({ error: `Could not send alert (${result.reason})` });
+      return;
+    }
+    res.json({ data: { sent: true } });
+  },
+);
 
 // ── POST /api/drivers/:id/resolve-referral — Resolve insurance referral ──
 

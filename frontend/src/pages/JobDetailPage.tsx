@@ -40,6 +40,12 @@ import FileEmailModal from '../components/FileEmailModal';
 import QuoteEditModal from '../components/QuoteEditModal';
 import type { FileAttachment, PipelineStatus, HoldReason, ConfirmedMethod } from '@shared/index';
 import { PIPELINE_STATUS_CONFIG, LOST_REASON_OPTIONS, PAUSED_REASON_OPTIONS } from '@shared/index';
+import { defaultRevisitDate, REVISIT_LEAD_DAYS_UNDER_MINIMUM } from '../lib/revisitDate';
+
+
+// Stable reference — HeldItemsSection takes `kinds` as an effect dependency, so
+// an inline array literal would refetch on every parent render.
+const HELD_KINDS = ['incoming', 'temp_storage', 'lost_property'] as const;
 
 const STATUS_MAP: Record<number, string> = {
   0: 'Enquiry', 1: 'Provisional', 2: 'Booked', 3: 'Prepped',
@@ -1054,8 +1060,25 @@ function computeDriverValidity(d: {
   today.setHours(0, 0, 0, 0);
   const ms30 = 30 * 24 * 60 * 60 * 1000;
 
-  function check(label: string, raw: string | null | undefined): 'green' | 'amber' | 'red' {
-    if (!raw) return 'amber';
+  /**
+   * `missingIsRed` makes an absent date a hard fail rather than a warning.
+   *
+   * Used for the proofs of address, where "no date on record" means we cannot
+   * evidence the address at all. Licence expiry stays amber-on-missing because
+   * iDenfy frequently fails to extract it, and reding that would block drivers
+   * over an extraction gap rather than a real problem.
+   */
+  function check(
+    label: string,
+    raw: string | null | undefined,
+    missingIsRed = false,
+  ): 'green' | 'amber' | 'red' {
+    if (!raw) {
+      if (!missingIsRed) return 'amber';
+      reasons.push(`${label} not on record`);
+      expiredDocs.push(label);
+      return 'red';
+    }
     const exp = new Date(raw);
     const ms = exp.getTime() - today.getTime();
     if (ms < 0) {
@@ -1079,26 +1102,14 @@ function computeDriverValidity(d: {
   bump(check('Licence', d.licence_valid_to));
   bump(check('DVLA check', d.dvla_valid_until));
 
-  // POA: at least one must be valid. Both expired → red.
-  const poa1 = d.poa1_valid_until ? new Date(d.poa1_valid_until) : null;
-  const poa2 = d.poa2_valid_until ? new Date(d.poa2_valid_until) : null;
-  const poa1Expired = poa1 && poa1 < today;
-  const poa2Expired = poa2 && poa2 < today;
-  if ((!poa1 && !poa2) || (poa1Expired && poa2Expired) || (!poa1 && poa2Expired) || (poa1Expired && !poa2)) {
-    reasons.push('Proof of address expired');
-    expiredDocs.push('Proof of address');
-    bump('red');
-  } else {
-    // Use the latest-expiring POA for the amber check
-    const latest = poa1 && poa2 ? (poa1 > poa2 ? poa1 : poa2) : (poa1 || poa2);
-    if (latest) {
-      const ms = latest.getTime() - today.getTime();
-      if (ms <= ms30) {
-        reasons.push(`POA expires ${latest.toLocaleDateString('en-GB')}`);
-        bump('amber');
-      }
-    }
-  }
+  // BOTH proofs of address must be valid, independently (jon, Aug 2026).
+  //
+  // This used to red-flag only when BOTH had lapsed, so a driver with one dead
+  // POA looked assignable here while the hire-form router — reading the same
+  // policy correctly — was sending them off to re-upload it. Named separately
+  // so staff ask for the one that's actually gone, not both.
+  bump(check('Proof of address 1', d.poa1_valid_until ?? null, true));
+  bump(check('Proof of address 2', d.poa2_valid_until ?? null, true));
 
   if (d.requires_referral && d.referral_status !== 'approved') {
     reasons.push(`Insurance referral ${d.referral_status || 'pending'}`);
@@ -1127,6 +1138,12 @@ function QuickAssignButton({ jobId, jobDate, jobEnd, onCreated, subtle }: { jobI
   const [driverId, setDriverId] = useState('');
   const [driverSearch, setDriverSearch] = useState('');
   const [driverFocus, setDriverFocus] = useState(false);
+  // Manager override of the document gate. Offered only after the gate has
+  // actually refused AND the backend has confirmed this user may override —
+  // there is no point showing staff a door they can't open.
+  const [canOverride, setCanOverride] = useState(false);
+  const [overrideOpen, setOverrideOpen] = useState(false);
+  const [overrideReason, setOverrideReason] = useState('');
   const [vehicleId, setVehicleId] = useState('');
   const [vehicleSearch, setVehicleSearch] = useState('');
   const [vehicleFocus, setVehicleFocus] = useState(false);
@@ -1152,10 +1169,15 @@ function QuickAssignButton({ jobId, jobDate, jobEnd, onCreated, subtle }: { jobI
   function resetForm() {
     setDriverId(''); setDriverSearch('');
     setVehicleId(''); setVehicleSearch('');
+    setCanOverride(false); setOverrideOpen(false); setOverrideReason('');
   }
 
   async function handleSubmit() {
     if (!driverId) { setError('Select a driver'); return; }
+    if (overrideOpen && overrideReason.trim().length < 10) {
+      setError('Give a reason for the override — at least a few words, it goes in the audit log.');
+      return;
+    }
     setSaving(true);
     setError('');
     try {
@@ -1165,11 +1187,18 @@ function QuickAssignButton({ jobId, jobDate, jobEnd, onCreated, subtle }: { jobI
         job_id: jobId,
         hire_start: hireStart || undefined,
         hire_end: hireEnd || undefined,
+        override_reason: overrideOpen ? overrideReason.trim() : undefined,
       });
       setOpen(false);
       resetForm();
       onCreated();
     } catch (err) {
+      // A document-gate refusal tells us whether this user may override it, so
+      // the escape hatch is offered exactly when it can actually be opened.
+      const detail = (err as { body?: { code?: string; can_override?: boolean } })?.body;
+      if (detail?.code === 'driver_documents_expired' && detail.can_override) {
+        setCanOverride(true);
+      }
       setError(err instanceof Error ? err.message : 'Failed');
     } finally {
       setSaving(false);
@@ -1231,6 +1260,46 @@ function QuickAssignButton({ jobId, jobDate, jobEnd, onCreated, subtle }: { jobI
             <p className="text-xs text-gray-500 mb-4">Vehicle is optional — assign a driver now and pick the vehicle during prep.</p>
 
             {error && <div className="text-xs text-red-600 bg-red-50 px-3 py-2 rounded mb-3">{error}</div>}
+
+            {/* The escape hatch. It exists because the gate previously had no
+                route past it at all — a driver whose paperwork was genuinely in
+                order but whose stored dates said otherwise simply could not be
+                assigned, and the hire went out under someone else's name
+                instead (job 16291). Manager-tier, reason mandatory, audited. */}
+            {canOverride && (
+              <div className="mb-3 rounded-lg border border-amber-300 bg-amber-50 p-3">
+                {!overrideOpen ? (
+                  <button
+                    type="button"
+                    onClick={() => setOverrideOpen(true)}
+                    className="text-xs font-medium text-amber-900 underline"
+                  >
+                    Assign anyway (manager override)
+                  </button>
+                ) : (
+                  <>
+                    <p className="text-xs text-amber-900 mb-2">
+                      You&rsquo;re assigning a driver whose documents Ooosh considers out of date.
+                      Say why &mdash; it goes in the audit log against this driver and hire.
+                    </p>
+                    <textarea
+                      value={overrideReason}
+                      onChange={(e) => setOverrideReason(e.target.value)}
+                      rows={2}
+                      placeholder="e.g. seen paper DVLA summary in person, dated today — updating record after"
+                      className="w-full rounded border border-amber-300 px-2 py-1.5 text-xs focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => { setOverrideOpen(false); setOverrideReason(''); }}
+                      className="mt-1 text-xs text-amber-800 underline"
+                    >
+                      Cancel override
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
 
             <div className="space-y-3">
               {/* Driver picker — searchable, with traffic-light validity */}
@@ -2645,6 +2714,26 @@ export default function JobDetailPage() {
     }
   }
 
+  // Set (or clear) which organisation headlines this job. Passing null clears
+  // the flag so the headline falls back to the client. Purely a display flag —
+  // `client_id` stays authoritative for accounting either way, so swapping the
+  // lead leaves nothing to unpick.
+  async function handleSetLeadOrg(organisationId: string | null) {
+    if (!id || jobOrgSaving) return;
+    setJobOrgSaving(true);
+    try {
+      const data = await api.put<{ data: typeof jobOrgs }>(
+        `/pipeline/${id}/organisations/lead`,
+        { organisation_id: organisationId }
+      );
+      setJobOrgs(data.data);
+    } catch (err: any) {
+      alert(err?.response?.data?.error || err?.message || 'Failed to set lead organisation');
+    } finally {
+      setJobOrgSaving(false);
+    }
+  }
+
   async function handleAddJobOrg() {
     if (!jobOrgSelectedOrg || !id) return;
     setJobOrgSaving(true);
@@ -2689,8 +2778,13 @@ export default function JobDetailPage() {
     }
   }
 
-  async function handleRemoveJobOrg(linkId: string) {
+  // The × sits right next to the ☆ on a small chip, so confirm before removing —
+  // a fat-fingered tap otherwise silently drops an org off the job.
+  async function handleRemoveJobOrg(linkId: string, orgName: string) {
     if (!id) return;
+    if (!confirm(`Remove "${orgName}" from this job?\n\nThis only unlinks it from this hire — the organisation itself is untouched.`)) {
+      return;
+    }
     try {
       await api.delete(`/pipeline/${id}/organisations/${linkId}`);
       loadJobOrgs();
@@ -3433,122 +3527,13 @@ export default function JobDetailPage() {
               </h1>
             )}
 
-            {/* Client, Venue, Dates summary row */}
+            {/* Venue, Dates summary row.
+                NO organisation here — every org on the job (client included) lives
+                in the ORGANISATIONS row below, which is the single place they're
+                shown and managed. This line used to repeat the client/lead org,
+                so the same name appeared twice in the header with two different
+                edit affordances. Don't re-add it. */}
             <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-sm text-gray-600 items-center">
-              {/* Client headline — prefer band → linked client org (canonical name via
-                  client_id) → HH company_name → HH client_name. Reading the linked org's
-                  own name (not the volatile HH company_name string) means changing the
-                  client actually updates the headline immediately. */}
-              <div className="relative inline-flex items-center gap-1" ref={clientSearchRef}>
-                {(() => {
-                  const bandOrg = jobOrgs.find(jo => jo.role === 'band');
-                  const hasClient = !!(job.client_org_name || job.client_name || job.company_name);
-                  if (!bandOrg && !hasClient) {
-                    return (
-                      <button
-                        onClick={startEditClient}
-                        className="text-gray-400 hover:text-ooosh-600 transition-colors text-xs border border-dashed border-gray-300 px-2 py-0.5 rounded"
-                      >
-                        + Add client
-                      </button>
-                    );
-                  }
-                  const headlineText = bandOrg?.organisation_name
-                    || job.client_org_name
-                    || job.company_name
-                    || job.client_name;
-                  const headlineLinkId = bandOrg?.organisation_id || job.client_id;
-                  return (
-                    <>
-                      {headlineLinkId ? (
-                        <Link to={`/organisations/${headlineLinkId}`} className="text-ooosh-600 hover:text-ooosh-700">
-                          {headlineText}
-                        </Link>
-                      ) : (
-                        <span>{headlineText}</span>
-                      )}
-                      {bandOrg && (
-                        <span className="text-xs text-purple-500 font-medium">(Band)</span>
-                      )}
-                      <button
-                        onClick={startEditClient}
-                        className="text-gray-300 hover:text-gray-500 transition-colors"
-                        title="Change client"
-                      >
-                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-                        </svg>
-                      </button>
-                    </>
-                  );
-                })()}
-                {editingClient && (
-                  <div className="absolute top-full left-0 mt-1 z-50 bg-white border border-gray-200 rounded-lg shadow-lg w-64">
-                    <input
-                      type="text"
-                      value={clientSearch}
-                      onChange={(e) => setClientSearch(e.target.value)}
-                      placeholder="Search organisations..."
-                      className="w-full border-b border-gray-200 px-3 py-2 text-sm focus:ring-0 focus:outline-none rounded-t-lg"
-                      autoFocus
-                    />
-                    {clientSearchResults.length > 0 && (
-                      <div className="max-h-48 overflow-y-auto">
-                        {clientSearchResults.map((o) => (
-                          <button
-                            key={o.id}
-                            onClick={() => selectClient(o)}
-                            className="w-full text-left px-3 py-2 hover:bg-gray-50 text-sm flex items-center gap-2 border-b border-gray-50 last:border-b-0"
-                          >
-                            <span className="font-medium">{o.name}</span>
-                            <span className="text-gray-400 text-xs">{o.type}</span>
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                    {(() => {
-                      const trimmed = clientSearch.trim();
-                      if (trimmed.length < 2) return null;
-                      const exactMatch = clientSearchResults.some(
-                        (o) => o.name.toLowerCase() === trimmed.toLowerCase()
-                      );
-                      if (exactMatch) return null;
-                      return (
-                        <button
-                          onClick={() => createAndSelectClient(trimmed)}
-                          disabled={creatingClient}
-                          className="w-full text-left px-3 py-2 hover:bg-green-50 text-sm flex items-center gap-2 border-t border-gray-100 disabled:opacity-60"
-                        >
-                          <span className="text-xs font-medium bg-green-100 text-green-700 px-1.5 py-0.5 rounded">+ New</span>
-                          <span className="text-gray-900 truncate">
-                            {creatingClient ? 'Creating…' : <>Create &ldquo;{trimmed}&rdquo; as new client</>}
-                          </span>
-                        </button>
-                      );
-                    })()}
-                  </div>
-                )}
-              </div>
-              {/* Billed to sub-line (when Band takes top slot) */}
-              {(() => {
-                const bandOrg = jobOrgs.find(jo => jo.role === 'band');
-                if (!bandOrg) return null;
-                const billedToText = job.client_org_name || job.company_name || job.client_name;
-                if (!billedToText) return null;
-                return (
-                  <span className="text-xs text-gray-500">
-                    Billed to:{' '}
-                    {job.client_id ? (
-                      <Link to={`/organisations/${job.client_id}`} className="text-gray-600 hover:text-ooosh-600 underline decoration-dotted">
-                        {billedToText}
-                      </Link>
-                    ) : (
-                      <span className="text-gray-600">{billedToText}</span>
-                    )}
-                  </span>
-                );
-              })()}
-
               {/* Venue */}
               {job.venue_name && (
                 <span>
@@ -4118,10 +4103,117 @@ export default function JobDetailPage() {
           </div>
         )}
 
-        {/* Linked Organisations (Band, Promoter, etc.) */}
+        {/* Associated organisations — the SINGLE place every org on this job is
+            shown and managed. Nothing above repeats them.
+            The ★ picks which one represents the job on job lists / pipeline cards
+            (job_organisations.is_primary → `lead_org_name` on the list query).
+            The client chip comes from `client_id` rather than a job_organisations
+            row, so it's always present; its ★ clears the flag (lists fall back to
+            the client) and it's CHANGED via its pencil, never removed. */}
         <div className="mt-3 pt-3 border-t border-gray-100">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-xs font-medium text-gray-500 uppercase tracking-wider">Organisations:</span>
+            {(() => {
+              const hasExplicitLead = jobOrgs.some(jo => jo.is_primary);
+              const clientName = job.client_org_name || job.company_name || job.client_name;
+              return (
+                <span
+                  ref={clientSearchRef}
+                  className={`relative inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border ${
+                    clientName
+                      ? 'bg-blue-100 text-blue-700 border-blue-200'
+                      : 'border-dashed border-gray-300 text-gray-500'
+                  }`}
+                >
+                  {clientName ? (
+                    <>
+                      <button
+                        onClick={() => handleSetLeadOrg(null)}
+                        disabled={jobOrgSaving || !hasExplicitLead}
+                        className={`transition-opacity ${!hasExplicitLead ? 'opacity-100 cursor-default' : 'opacity-30 hover:opacity-100'}`}
+                        title={!hasExplicitLead ? 'Represents this job on job lists and pipeline cards' : 'Show this org on job lists and pipeline cards instead'}
+                      >
+                        {!hasExplicitLead ? '★' : '☆'}
+                      </button>
+                      <span className="opacity-70">Client:</span>
+                      {job.client_id ? (
+                        <Link to={`/organisations/${job.client_id}`} className="hover:underline font-semibold">
+                          {clientName}
+                        </Link>
+                      ) : (
+                        <span className="font-semibold">{clientName}</span>
+                      )}
+                    </>
+                  ) : (
+                    <button onClick={startEditClient} className="hover:text-ooosh-600 transition-colors">
+                      + Add client
+                    </button>
+                  )}
+                  {/* The client is CHANGED, never removed — it's a single FK driving
+                      the excess ledger / Xero bucketing / cross-job credit boundary,
+                      so it gets a pencil where the other chips get an ×. This is the
+                      ONLY client-edit affordance; the summary line above no longer
+                      repeats the client at all. */}
+                  {clientName && (
+                    <button
+                      onClick={startEditClient}
+                      className="ml-0.5 opacity-40 hover:opacity-100 transition-opacity"
+                      title="Change client"
+                    >
+                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                      </svg>
+                    </button>
+                  )}
+                  {editingClient && (
+                    <div className="absolute top-full left-0 mt-1 z-50 bg-white border border-gray-200 rounded-lg shadow-lg w-64 font-normal text-gray-900">
+                      <input
+                        type="text"
+                        value={clientSearch}
+                        onChange={(e) => setClientSearch(e.target.value)}
+                        placeholder="Search organisations..."
+                        className="w-full border-b border-gray-200 px-3 py-2 text-sm focus:ring-0 focus:outline-none rounded-t-lg"
+                        autoFocus
+                      />
+                      {clientSearchResults.length > 0 && (
+                        <div className="max-h-48 overflow-y-auto">
+                          {clientSearchResults.map((o) => (
+                            <button
+                              key={o.id}
+                              onClick={() => selectClient(o)}
+                              className="w-full text-left px-3 py-2 hover:bg-gray-50 text-sm flex items-center gap-2 border-b border-gray-50 last:border-b-0"
+                            >
+                              <span className="font-medium">{o.name}</span>
+                              <span className="text-gray-400 text-xs">{o.type}</span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      {(() => {
+                        const trimmed = clientSearch.trim();
+                        if (trimmed.length < 2) return null;
+                        const exactMatch = clientSearchResults.some(
+                          (o) => o.name.toLowerCase() === trimmed.toLowerCase()
+                        );
+                        if (exactMatch) return null;
+                        return (
+                          <button
+                            onClick={() => createAndSelectClient(trimmed)}
+                            disabled={creatingClient}
+                            className="w-full text-left px-3 py-2 hover:bg-green-50 text-sm flex items-center gap-2 border-t border-gray-100 disabled:opacity-60"
+                          >
+                            <span className="text-xs font-medium bg-green-100 text-green-700 px-1.5 py-0.5 rounded">+ New</span>
+                            <span className="text-gray-900 truncate">
+                              {creatingClient ? 'Creating…' : <>Create &ldquo;{trimmed}&rdquo; as new client</>}
+                            </span>
+                          </button>
+                        );
+                      })()}
+                    </div>
+                  )}
+                </span>
+              );
+            })()}
             {jobOrgs.map((jo) => {
               const roleColors: Record<string, string> = {
                 band: 'bg-purple-100 text-purple-700 border-purple-200',
@@ -4135,14 +4227,22 @@ export default function JobDetailPage() {
               };
               return (
                 <span key={jo.id} className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border ${roleColors[jo.role] || 'bg-gray-100 text-gray-700 border-gray-200'}`}>
+                  <button
+                    onClick={() => handleSetLeadOrg(jo.is_primary ? null : jo.organisation_id)}
+                    disabled={jobOrgSaving}
+                    className={`transition-opacity ${jo.is_primary ? 'opacity-100' : 'opacity-30 hover:opacity-100'}`}
+                    title={jo.is_primary ? 'Represents this job on job lists and pipeline cards — click to hand that back to the client' : 'Show this org on job lists and pipeline cards instead'}
+                  >
+                    {jo.is_primary ? '★' : '☆'}
+                  </button>
                   <span className="opacity-70 capitalize">{jo.role.replace('_', ' ')}:</span>
                   <Link to={`/organisations/${jo.organisation_id}`} className="hover:underline font-semibold">
                     {jo.organisation_name}
                   </Link>
                   <button
-                    onClick={() => handleRemoveJobOrg(jo.id)}
+                    onClick={() => handleRemoveJobOrg(jo.id, jo.organisation_name)}
                     className="ml-0.5 opacity-40 hover:opacity-100 transition-opacity"
-                    title="Remove"
+                    title="Remove from this job"
                   >
                     &times;
                   </button>
@@ -5038,16 +5138,26 @@ export default function JobDetailPage() {
                         const baseClass = 'inline-flex items-center gap-1.5 px-3 py-2 bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700 text-sm font-medium';
                         const effectiveVehicleId = a.effective_vehicle_id || a.vehicle_id;
                         if (a.status === 'soft' || a.status === 'confirmed') {
-                          // Mid-tour Add-to-Hire: this driver has signed a hire form
-                          // but isn't linked to a van, AND at least one van on the
-                          // job is already physically out (booked_out / active).
+                          // Mid-tour Add-to-Hire: the van this driver would go out
+                          // on is ALREADY physically out (booked_out / active).
                           // Takes precedence over Allocate Van / Book Out — those
                           // assume the van is still in the warehouse.
-                          if (!a.vehicle_id) {
+                          //
+                          // Keyed on "is the van already out?", NOT on "has this
+                          // driver got a van?". Quick-assign offers a vehicle
+                          // picker, so a late driver added to a van that has
+                          // already left arrives here WITH a vehicle_id — and the
+                          // old `!a.vehicle_id` test skipped straight past this
+                          // branch to "Book Out", inviting a walkaround on a van
+                          // that was 200 miles away (job 16291, Aug 2026).
+                          {
                             const bookedOutSiblings = vehicleAssignments.filter(other =>
                               other.id !== a.id &&
                               other.vehicle_id &&
-                              (other.status === 'booked_out' || other.status === 'active')
+                              (other.status === 'booked_out' || other.status === 'active') &&
+                              // Once this driver has a van, only THAT van counts —
+                              // another van being out doesn't make theirs out.
+                              (!effectiveVehicleId || other.vehicle_id === effectiveVehicleId)
                             );
                             if (bookedOutSiblings.length > 0) {
                               return (
@@ -6221,6 +6331,7 @@ export default function JobDetailPage() {
           jobId={id}
           clientId={job?.client_id}
           clientName={job?.client_name || job?.company_name}
+          hireStart={job?.job_date || job?.out_date}
           onConfirm={(data) => handleStatusTransition(transitionTarget, data)}
           onCancel={() => { setShowTransitionModal(false); setTransitionTarget(null); }}
         />
@@ -6285,7 +6396,7 @@ export default function JobDetailPage() {
           {job.client_id && (
             <div className="empty:hidden mb-4">
               <HeldItemsSection entityType="organisation" entityId={job.client_id}
-                kinds={['incoming', 'temp_storage', 'lost_property']} excludeJobId={job.id}
+                kinds={HELD_KINDS} excludeJobId={job.id}
                 openOnly hideWhenEmpty heading="📦 Also holding (FYI)" />
             </div>
           )}
@@ -7346,8 +7457,12 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, cli
                 {hhJobNumber && <SendMerchFormButton jobId={jobId} hhJobNumber={hhJobNumber} />}
               </div>
             </div>
+            {/* actions: the two physical steps (receive / hand over) inline, so
+                the job screen doesn't bounce to /holding for them. onChanged
+                reloads the job so the derived merch pip re-reads the items. */}
             <HeldItemsSection key={heldItemsRefreshKey} entityType="job" entityId={jobId}
-              kinds={['incoming', 'temp_storage', 'lost_property']} bare emptyHint="Nothing held for this job yet." />
+              kinds={HELD_KINDS} bare actions onChanged={loadAll}
+              emptyHint="Nothing held for this job yet." />
           </div>
         );
         if (!merchReq) return <div className="mt-2">{panel}</div>;
@@ -8030,6 +8145,7 @@ function StatusTransitionModal({
   jobId,
   clientId,
   clientName,
+  hireStart,
 }: {
   targetStatus: PipelineStatus | 'completed';
   saving: boolean;
@@ -8038,11 +8154,14 @@ function StatusTransitionModal({
   jobId?: string;
   clientId?: string | null;
   clientName?: string | null;
+  hireStart?: string | null;
 }) {
   const [holdReason, setHoldReason] = useState<HoldReason>('fully_booked');
   const [holdDetail, setHoldDetail] = useState('');
   const [setRevisit, setSetRevisit] = useState(false);
   const [revisitDate, setRevisitDate] = useState('');
+  // Staff has taken manual control of the revisit fields — stop re-defaulting them.
+  const [revisitTouched, setRevisitTouched] = useState(false);
   const [confirmedMethod, setConfirmedMethod] = useState<ConfirmedMethod>('deposit');
   const [lostReason, setLostReason] = useState('Price');
   const [lostDetail, setLostDetail] = useState('');
@@ -8063,6 +8182,23 @@ function StatusTransitionModal({
     { text: '', date: '', delivery: 'both', priority: 'normal', userId: '' },
   ]);
   const [teamUsers, setTeamUsers] = useState<Array<{ id: string; first_name: string; last_name: string; email: string }>>([]);
+
+  // "Under 4-day window" pauses get a pre-filled revisit date — the hire is worth
+  // another swing once the diary loosens, so default it to a fortnight before the
+  // hire starts rather than making staff work it out. Any other reason is a
+  // judgement call and stays opt-in. Re-running on reason change also CLEARS the
+  // default when staff switch away, so a stale date can't be submitted by accident.
+  const autoRevisit = defaultRevisitDate(hireStart);
+  useEffect(() => {
+    if (targetStatus !== 'paused' || revisitTouched) return;
+    if (holdReason === 'under_minimum' && autoRevisit) {
+      setSetRevisit(true);
+      setRevisitDate(autoRevisit);
+    } else {
+      setSetRevisit(false);
+      setRevisitDate('');
+    }
+  }, [targetStatus, holdReason, autoRevisit, revisitTouched]);
 
   // Load team users for "remind someone else"
   useEffect(() => {
@@ -8190,7 +8326,7 @@ function StatusTransitionModal({
                 <input
                   type="checkbox"
                   checked={setRevisit}
-                  onChange={(e) => setSetRevisit(e.target.checked)}
+                  onChange={(e) => { setRevisitTouched(true); setSetRevisit(e.target.checked); }}
                   className="rounded border-gray-300 text-ooosh-600 focus:ring-ooosh-500"
                 />
                 Set a revisit date?
@@ -8202,10 +8338,15 @@ function StatusTransitionModal({
                 <input
                   type="date"
                   value={revisitDate}
-                  onChange={(e) => setRevisitDate(e.target.value)}
+                  onChange={(e) => { setRevisitTouched(true); setRevisitDate(e.target.value); }}
                   min={new Date().toISOString().split('T')[0]}
                   className="mt-2 w-full border border-gray-300 rounded px-3 py-2 text-sm"
                 />
+              )}
+              {setRevisit && !revisitTouched && revisitDate === autoRevisit && autoRevisit && (
+                <p className="text-xs text-ooosh-600 mt-1">
+                  Defaulted to {REVISIT_LEAD_DAYS_UNDER_MINIMUM} days before the hire starts — change it if you'd rather come back sooner or later.
+                </p>
               )}
             </div>
           </div>

@@ -1,25 +1,36 @@
 import { useEffect, useState, useCallback, ReactNode } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { EntitySearch } from '../components/holding/EntitySearch';
 import { NotifyClientModal } from '../components/holding/NotifyClientModal';
 import { HeldItemForm } from '../components/holding/HeldItemForm';
+import { HeldItemPicker, HandoverFlow } from '../components/holding/HeldItemPicker';
+import { describeHeldCounts, heldCountClass, isPartiallyArrived } from '../components/holding/counts';
 import { locationLabelOrDash } from '../components/holding/format';
 import { ChaseReviewPanel } from '../components/holding/ChaseReviewPanel';
 import ThreadView from '../components/messaging/ThreadView';
 import { MentionComposer } from '../components/messaging/MentionComposer';
 import { useAttachments } from '../components/messaging/Attachments';
-import type { HeldItem, HeldItemKind, HeldItemLocation } from '../../../shared/types';
+import type { HeldItem, HeldItemKind, HeldItemLocation, HeldItemNextAction } from '../../../shared/types';
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 const fmtDate = (d: string | null | undefined) => (d ? new Date(d).toLocaleDateString('en-GB') : '—');
 const inputCls = 'w-full border border-slate-300 rounded-lg px-3 py-2 text-sm';
 
-type View = 'held' | 'lost_property';
-const VIEW_KINDS: Record<View, HeldItemKind[]> = {
-  held: ['incoming', 'temp_storage'],
-  lost_property: ['lost_property'],
-};
+// One page, two kinds. `temp_storage` is folded into `incoming` (Aug 2026) —
+// historical rows still carry it, so it maps to the same filter + label.
+// The kind split that survives is "does the client know we've got it?":
+//   incoming      → they sent it / left it with us  → ends in a handover
+//   lost_property → we found it                     → ends in collection or
+//                                                     disposal, chase ladder
+type KindFilter = 'all' | 'incoming' | 'lost_property';
+const KIND_FILTERS: { id: KindFilter; label: string }[] = [
+  { id: 'all', label: 'Everything' },
+  { id: 'incoming', label: '📦 Held for a client' },
+  { id: 'lost_property', label: '🔍 Lost property' },
+];
+const matchesKind = (h: HeldItem, f: KindFilter) =>
+  f === 'all' || (f === 'incoming' ? h.kind !== 'lost_property' : h.kind === 'lost_property');
 
 const STATUS_COLOUR: Record<string, string> = {
   expected: 'bg-slate-100 text-slate-600',
@@ -36,27 +47,57 @@ const STATUS_COLOUR: Record<string, string> = {
 };
 const statusLabel = (s: string) => s.replace(/_/g, ' ');
 const KIND_LABEL: Record<HeldItemKind, string> = {
-  incoming: 'Delivery', temp_storage: 'Temp storage', lost_property: 'Lost property',
+  incoming: 'Held for a client', temp_storage: 'Held for a client', lost_property: 'Lost property',
+};
+const KIND_EMOJI: Record<HeldItemKind, string> = {
+  incoming: '📦', temp_storage: '📦', lost_property: '🔍',
 };
 
-// ── Lost-property list sorting + chase-due rendering ─────────────────────────
-type SortKey = 'found_date' | 'last_chased_at' | 'escalation_level' | 'next_chase_due' | 'expected_collection_date';
+// ── Next action — the organising principle of the page ──────────────────────
+// Derived server-side (routes/holding.ts) so the strip, the table and any
+// future dashboard bucket read ONE definition of "what does this need".
+const ACTION_BUCKETS: { id: HeldItemNextAction; label: string; emoji: string; accent: string }[] = [
+  { id: 'link_owner',  label: 'Needs linking',  emoji: '❓', accent: 'border-amber-300 bg-amber-50 text-amber-900' },
+  { id: 'receive',     label: 'Awaiting arrival', emoji: '⏳', accent: 'border-slate-300 bg-slate-50 text-slate-800' },
+  { id: 'hand_over',   label: 'To hand over',   emoji: '📦', accent: 'border-blue-300 bg-blue-50 text-blue-900' },
+  { id: 'chase_owner', label: 'Chase owner',    emoji: '📨', accent: 'border-purple-300 bg-purple-50 text-purple-900' },
+  { id: 'decide',      label: "Time's up",      emoji: '🕑', accent: 'border-red-300 bg-red-50 text-red-900' },
+];
+const ACTION_LABEL: Record<string, string> = Object.fromEntries(
+  ACTION_BUCKETS.map((b) => [b.id, b.label]),
+);
+
+// Colour the due date by urgency — overdue red, today/tomorrow amber, else quiet.
+function ActionDueCell({ item }: { item: HeldItem }) {
+  const action = item.next_action;
+  if (!action || action === 'none') return <span className="text-slate-300">—</span>;
+  const label = ACTION_LABEL[action] || action;
+  if (!item.action_due) return <span className="text-slate-600">{label}</span>;
+  const days = Math.floor((new Date(item.action_due).getTime() - Date.now()) / 86400000);
+  // link_owner ranks by AGE (how long the trail's been cold), so its date is a
+  // "found/logged on" not a deadline — render it as an age, never as overdue.
+  if (action === 'link_owner') {
+    return <span className="text-amber-700">{label} <span className="text-xs text-slate-500">· {Math.max(0, -days)}d old</span></span>;
+  }
+  // A lost-property chase paused by a client-given collection date isn't
+  // overdue — it's waiting on them. Preserves the signal the old dedicated
+  // "next chase due" column carried.
+  if (action === 'chase_owner' && item.chase_state === 'paused') {
+    return <span className="text-blue-600" title="Paused — client gave a collection date">{label} <span className="text-xs">· ⏸ {fmtDate(item.action_due)}</span></span>;
+  }
+  const cls = days < 0 ? 'text-red-600 font-medium' : days <= 1 ? 'text-amber-700 font-medium' : 'text-slate-600';
+  return <span className={cls}>{label} <span className="text-xs font-normal">· {fmtDate(item.action_due)}</span></span>;
+}
+
+// ── Table sorting ───────────────────────────────────────────────────────────
+// Default order is the server's (action_due asc, resolved last); a header click
+// overrides it.
+type SortKey = 'action_due' | 'found_date' | 'last_chased_at' | 'escalation_level' | 'next_chase_due' | 'expected_collection_date';
 function sortVal(h: HeldItem, key: SortKey): number | null {
   if (key === 'escalation_level') return h.escalation_level ?? 0;
   const v = h[key] as string | null | undefined;
   return v ? Date.parse(v) : null;
 }
-// Colour-coded next-chase cell — reads the backend-computed chase_state so the
-// list agrees with the detail card and the daily chase scanner.
-function NextChaseCell({ item }: { item: HeldItem }) {
-  if (!item.next_chase_due || !item.chase_state || item.chase_state === 'none') return <span className="text-slate-300">—</span>;
-  const d = fmtDate(item.next_chase_due);
-  if (item.chase_state === 'due') return <span className="text-red-600 font-medium" title="Due a chase">{d}</span>;
-  if (item.chase_state === 'paused') return <span className="text-blue-600" title="Paused — client gave a collection date">⏸ {d}</span>;
-  return <span className="text-slate-600">{d}</span>;
-}
-
-// Inline photo thumbnail — authenticated blob fetch (download endpoint needs the JWT header)
 function PhotoThumb({ photoKey, onOpen }: { photoKey: string; onOpen: () => void }) {
   const [src, setSrc] = useState('');
   useEffect(() => {
@@ -73,16 +114,6 @@ function PhotoThumb({ photoKey, onOpen }: { photoKey: string; onOpen: () => void
 const FOUND_IN_LABEL: Record<string, string> = {
   van: 'Van', rehearsal: 'Rehearsal room', backline: 'Backline', elsewhere: 'Somewhere else',
 };
-
-// Hold-until on the held list: amber within 3 days, red once passed — mirrors
-// the reminder window in services/holding-reminders.ts.
-function HoldUntilCell({ value }: { value: string | null | undefined }) {
-  if (!value) return <span className="text-slate-300">—</span>;
-  const days = Math.floor((new Date(value).getTime() - Date.now()) / 86400000);
-  const cls = days < 0 ? 'text-red-600 font-medium' : days <= 3 ? 'text-amber-600' : 'text-slate-600';
-  const title = days < 0 ? 'Hold date passed' : days <= 3 ? 'Hold ending soon' : '';
-  return <span className={cls} title={title}>{fmtDate(value)}</span>;
-}
 
 function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
   useEffect(() => {
@@ -104,37 +135,65 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
 }
 
 // ════════════════════════════════════════════════════════════════════════
-export default function HoldingPage({ view }: { view: View }) {
+/**
+ * Holding — one page for everything we're keeping that isn't ours.
+ *
+ * Organised by NEXT ACTION, not by kind: the strip at the top is the triage
+ * answer ("what needs doing"), the table below is the find-a-thing answer.
+ * Kind is a filter + a row icon, never a separate page.
+ *
+ * `/holding/lost-property` still resolves — it mounts this same page with the
+ * lost-property filter pre-applied. That route can never be removed: the daily
+ * chase digest's `?review=1` link is already sitting in staff inboxes and on
+ * historical notification rows.
+ *
+ * One fetch drives everything; filtering is client-side so the strip counts
+ * stay stable while a filter is applied (tens of open rows — see the note on
+ * GET /holding in routes/holding.ts).
+ */
+export default function HoldingPage({ defaultKind }: { defaultKind?: KindFilter }) {
   const [items, setItems] = useState<HeldItem[]>([]);
   const [locations, setLocations] = useState<HeldItemLocation[]>([]);
   const [search, setSearch] = useState('');
   const [showDone, setShowDone] = useState(false);
-  const [unknownOnly, setUnknownOnly] = useState(false);
   const [creating, setCreating] = useState(false);
+  // The two physical actions — receiving and handing over — used to exist only
+  // on the mobile /quick page, so backfilling an arrived delivery meant leaving
+  // this page entirely. Same shared components as /quick.
+  const [receiving, setReceiving] = useState(false);
+  const [handingOver, setHandingOver] = useState(false);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  // Lost-property list defaults to "what needs chasing now" at the top.
-  const [sort, setSort] = useState<{ key: SortKey; dir: 'asc' | 'desc' }>({ key: 'next_chase_due', dir: 'asc' });
+  // null = server order (next action due, resolved last).
+  const [sort, setSort] = useState<{ key: SortKey; dir: 'asc' | 'desc' } | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
       const qs = new URLSearchParams();
       if (showDone) qs.set('include_done', 'true');
-      if (search.trim()) qs.set('search', search.trim());
       const r = await api.get<{ data: HeldItem[] }>(`/holding?${qs.toString()}`);
       setItems(r.data);
     } finally { setLoading(false); }
-  }, [showDone, search]);
+  }, [showDone]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => { api.get<{ data: HeldItemLocation[] }>('/holding/locations').then((r) => setLocations(r.data)).catch(() => {}); }, []);
 
   const [searchParams, setSearchParams] = useSearchParams();
 
-  // Deep-link: ?item=<id> (e.g. from a discussion @mention notification)
-  // pre-opens that held item's detail modal. Clear it again on close so a
-  // refresh doesn't keep re-opening.
+  // Filters live in the URL so every bucket + kind view is linkable (and the
+  // legacy /holding/lost-property route just seeds the kind).
+  const kindFilter: KindFilter = (searchParams.get('kind') as KindFilter) || defaultKind || 'all';
+  const actionFilter = searchParams.get('action') as HeldItemNextAction | null;
+  const setParam = useCallback((key: string, value: string | null) => {
+    const next = new URLSearchParams(searchParams);
+    if (value) next.set(key, value); else next.delete(key);
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
+
+  // Deep-link: ?item=<id> (from a discussion @mention, the hold-until nudge, or
+  // a job/person/org panel row) pre-opens that item's detail modal.
   const itemParam = searchParams.get('item');
   useEffect(() => { if (itemParam) setDetailId(itemParam); }, [itemParam]);
   const closeDetail = useCallback(() => {
@@ -146,13 +205,22 @@ export default function HoldingPage({ view }: { view: View }) {
     }
   }, [searchParams, setSearchParams]);
 
-  const kinds = VIEW_KINDS[view];
-  const rows = items.filter((i) => kinds.includes(i.kind) && (!unknownOnly || i.owner_unknown));
-  const openCount = items.filter((i) => kinds.includes(i.kind) && !['collected', 'given_to_client', 'shipped_back', 'disposed', 'cancelled'].includes(i.status)).length;
+  const inKind = items.filter((i) => matchesKind(i, kindFilter));
+  const openInKind = inKind.filter((i) => i.next_action && i.next_action !== 'none');
+  const bucketCount = (id: HeldItemNextAction) => openInKind.filter((i) => i.next_action === id).length;
 
-  // Sorting is lost-property only (held keeps its needed-by server order). Nulls
-  // always sink to the bottom regardless of direction.
-  const sortedRows = view === 'lost_property'
+  const q = search.trim().toLowerCase();
+  const rows = inKind.filter((h) => {
+    if (actionFilter && h.next_action !== actionFilter) return false;
+    if (!q) return true;
+    return [h.description, h.owner_person_name, h.owner_organisation_name, h.client_name_text, h.notes,
+      h.hh_job_number ? `#${h.hh_job_number}` : null]
+      .some((v) => v && String(v).toLowerCase().includes(q));
+  });
+
+  // Server already orders by "when does this need me"; a header click overrides.
+  // Nulls always sink to the bottom regardless of direction.
+  const sortedRows = sort
     ? [...rows].sort((a, b) => {
         const va = sortVal(a, sort.key), vb = sortVal(b, sort.key);
         if (va === vb) return 0;
@@ -162,30 +230,77 @@ export default function HoldingPage({ view }: { view: View }) {
       })
     : rows;
 
+  const showChaseCols = kindFilter === 'lost_property';
+  // The chase review queue is the "chase owner" bucket's action surface.
+  const showChasePanel = kindFilter === 'lost_property' || actionFilter === 'chase_owner' || searchParams.get('review') === '1';
+
   const SortTh = ({ label, k }: { label: string; k: SortKey }) => (
-    <th onClick={() => setSort((s) => ({ key: k, dir: s.key === k && s.dir === 'asc' ? 'desc' : 'asc' }))}
+    <th onClick={() => setSort((s) => (s && s.key === k && s.dir === 'asc' ? { key: k, dir: 'desc' } : { key: k, dir: 'asc' }))}
       className="text-left px-3 py-2 cursor-pointer select-none hover:text-slate-700 whitespace-nowrap">
-      {label}{sort.key === k ? (sort.dir === 'asc' ? ' ▲' : ' ▼') : ''}
+      {label}{sort?.key === k ? (sort.dir === 'asc' ? ' ▲' : ' ▼') : ''}
     </th>
   );
 
   return (
     <div className="p-4 sm:p-6 max-w-7xl mx-auto">
-      <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-        <h1 className="text-2xl font-bold text-slate-800">{view === 'held' ? 'Held for Clients' : 'Lost Property'}</h1>
-        <button onClick={() => setCreating(true)} className="bg-[#7B5EA7] text-white px-4 py-2 rounded-lg text-sm font-medium">
-          {view === 'held' ? '+ Log Item' : '+ Log Lost Property'}
-        </button>
+      <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-800">Holding</h1>
+          <p className="text-sm text-slate-500">Things we're keeping that aren't ours.</p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <button onClick={() => setReceiving(true)} className="bg-white border border-slate-300 text-slate-700 px-4 py-2 rounded-lg text-sm font-medium hover:bg-slate-50">
+            📦 Receive delivery
+          </button>
+          <button onClick={() => setHandingOver(true)} className="bg-white border border-slate-300 text-slate-700 px-4 py-2 rounded-lg text-sm font-medium hover:bg-slate-50">
+            ✅ Hand over
+          </button>
+          <button onClick={() => setCreating(true)} className="bg-[#7B5EA7] text-white px-4 py-2 rounded-lg text-sm font-medium">
+            + Log Item
+          </button>
+        </div>
       </div>
 
-      {view === 'lost_property' && <ChaseReviewPanel defaultOpen={searchParams.get('review') === '1'} onChanged={load} />}
+      {/* Action strip — what needs doing, at a glance. Click to filter. */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 mb-4">
+        {ACTION_BUCKETS.map((b) => {
+          const n = bucketCount(b.id);
+          const active = actionFilter === b.id;
+          return (
+            <button key={b.id} onClick={() => setParam('action', active ? null : b.id)}
+              className={`text-left border rounded-xl px-3 py-2 transition-colors ${
+                n === 0 ? 'border-slate-200 bg-white text-slate-400' : b.accent
+              } ${active ? 'ring-2 ring-[#7B5EA7] ring-offset-1' : ''}`}>
+              <div className="text-xl font-bold leading-tight">{n}</div>
+              <div className="text-xs font-medium leading-tight">{b.emoji} {b.label}</div>
+            </button>
+          );
+        })}
+      </div>
+
+      {showChasePanel && <ChaseReviewPanel defaultOpen={searchParams.get('review') === '1'} onChanged={load} />}
 
       <div className="flex flex-wrap items-center gap-3 mb-4">
+        {/* `setParam('kind', k.id)` always writes the param, including 'all' —
+            deleting it would fall back to the route's defaultKind, so
+            "Everything" would be unselectable on /holding/lost-property. */}
+        <div className="flex gap-1">
+          {KIND_FILTERS.map((k) => (
+            <button key={k.id} onClick={() => setParam('kind', k.id)}
+              className={`px-3 py-1.5 rounded-lg text-sm border ${
+                kindFilter === k.id ? 'bg-[#7B5EA7] text-white border-[#7B5EA7]' : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50'
+              }`}>
+              {k.label}
+            </button>
+          ))}
+        </div>
         <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search description / client / job # / notes…"
           className="border border-slate-300 rounded-lg px-3 py-2 text-sm flex-1 min-w-[200px]" />
-        <label className="text-sm text-slate-600 flex items-center gap-2"><input type="checkbox" checked={unknownOnly} onChange={(e) => setUnknownOnly(e.target.checked)} /> Unknown owner</label>
         <label className="text-sm text-slate-600 flex items-center gap-2"><input type="checkbox" checked={showDone} onChange={(e) => setShowDone(e.target.checked)} /> Show done</label>
-        <span className="text-xs text-slate-400">{openCount} open</span>
+        <span className="text-xs text-slate-400">{openInKind.length} open</span>
+        {(actionFilter || search) && (
+          <button onClick={() => { setParam('action', null); setSearch(''); }} className="text-xs text-[#7B5EA7] font-medium">Clear filters</button>
+        )}
       </div>
 
       <div className="overflow-x-auto border border-slate-200 rounded-xl bg-white">
@@ -193,39 +308,36 @@ export default function HoldingPage({ view }: { view: View }) {
           <thead className="bg-slate-50 text-slate-500 text-xs"><tr>
             <th className="text-left px-3 py-2">Item</th>
             <th className="text-left px-3 py-2">Client</th>
-            {view === 'held' ? (
-              <>
-                <th className="text-left px-3 py-2">Job</th>
-                <th className="text-left px-3 py-2">Boxes</th>
-                <th className="text-left px-3 py-2">Needed by</th>
-                <th className="text-left px-3 py-2">Hold until</th>
-                <th className="text-left px-3 py-2">Location</th>
-                <th className="text-left px-3 py-2">Status</th>
-              </>
-            ) : (
+            {showChaseCols ? (
               <>
                 <SortTh label="Found" k="found_date" />
                 <SortTh label="Last contacted" k="last_chased_at" />
                 <SortTh label="Chases" k="escalation_level" />
-                <SortTh label="Next chase due" k="next_chase_due" />
                 <SortTh label="Expected collection" k="expected_collection_date" />
-                <th className="text-left px-3 py-2">Status</th>
+              </>
+            ) : (
+              <>
+                <th className="text-left px-3 py-2">Job</th>
+                <th className="text-left px-3 py-2">Boxes</th>
+                <th className="text-left px-3 py-2">Location</th>
               </>
             )}
+            <SortTh label="Next action" k="action_due" />
+            <th className="text-left px-3 py-2">Status</th>
           </tr></thead>
           <tbody>
             {sortedRows.map((h) => {
               const client = h.owner_person_name || h.owner_organisation_name || h.client_name_text;
-              const received = h.received_count != null && h.box_count != null ? `${h.received_count}/${h.box_count}` : (h.box_count != null ? String(h.box_count) : '—');
+              const counts = describeHeldCounts(h);
               return (
                 <tr key={h.id} onClick={() => setDetailId(h.id)} className="border-t hover:bg-slate-50 cursor-pointer">
                   <td className="px-3 py-2 font-medium text-slate-800">
+                    <span className="mr-1">{KIND_EMOJI[h.kind]}</span>
                     {h.description || <span className="text-slate-400 italic">No description</span>}
-                    {view === 'held' && <span className="ml-1 text-xs text-slate-400">· {KIND_LABEL[h.kind]}</span>}
                     {!!h.discussion_count && (
                       <span className="ml-1.5 text-xs text-slate-400" title={`${h.discussion_count} discussion note${h.discussion_count === 1 ? '' : 's'}`}>💬 {h.discussion_count}</span>
                     )}
-                    {view === 'lost_property' && h.found_in && (
+                    {h.kind === 'lost_property' && h.found_in && (
                       <span className="block text-xs font-normal text-slate-400">
                         {FOUND_IN_LABEL[h.found_in]}{h.found_vehicle_reg ? ` · ${h.found_vehicle_reg}` : (h.found_location_text ? ` · ${h.found_location_text}` : '')}
                       </span>
@@ -236,46 +348,105 @@ export default function HoldingPage({ view }: { view: View }) {
                       ? <span className="text-xs px-2 py-0.5 rounded bg-amber-100 text-amber-800">❓ Unknown</span>
                       : (client || <span className="text-slate-400">—</span>)}
                   </td>
-                  {view === 'held' ? (
-                    <>
-                      <td className="px-3 py-2">{h.hh_job_number ? `#${h.hh_job_number}` : '—'}</td>
-                      <td className="px-3 py-2">{received}</td>
-                      <td className="px-3 py-2">{fmtDate(h.needed_by)}</td>
-                      <td className="px-3 py-2"><HoldUntilCell value={h.hold_until} /></td>
-                      <td className="px-3 py-2">{locationLabelOrDash(h)}</td>
-                      <td className="px-3 py-2"><span className={`px-2 py-0.5 rounded text-xs font-medium capitalize ${STATUS_COLOUR[h.status] || 'bg-slate-100'}`}>{statusLabel(h.status)}</span></td>
-                    </>
-                  ) : (
+                  {showChaseCols ? (
                     <>
                       <td className="px-3 py-2 whitespace-nowrap">{fmtDate(h.found_date)}</td>
                       <td className="px-3 py-2 whitespace-nowrap">{h.last_chased_at ? fmtDate(h.last_chased_at) : <span className="text-slate-400">Not yet</span>}</td>
                       <td className="px-3 py-2 text-center">{h.escalation_level || 0}</td>
-                      <td className="px-3 py-2 whitespace-nowrap"><NextChaseCell item={h} /></td>
                       <td className="px-3 py-2 whitespace-nowrap">{h.expected_collection_date ? fmtDate(h.expected_collection_date) : <span className="text-slate-400">—</span>}</td>
-                      <td className="px-3 py-2"><span className={`px-2 py-0.5 rounded text-xs font-medium capitalize ${STATUS_COLOUR[h.status] || 'bg-slate-100'}`}>{statusLabel(h.status)}</span></td>
+                    </>
+                  ) : (
+                    <>
+                      <td className="px-3 py-2">{h.hh_job_number ? `#${h.hh_job_number}` : '—'}</td>
+                      <td className="px-3 py-2">
+                        {counts
+                          ? <span className={`font-medium ${heldCountClass(counts.tone)}`} title={counts.text}>{counts.short}</span>
+                          : <span className="text-slate-400">—</span>}
+                      </td>
+                      <td className="px-3 py-2">{locationLabelOrDash(h)}</td>
                     </>
                   )}
+                  <td className="px-3 py-2 whitespace-nowrap"><ActionDueCell item={h} /></td>
+                  <td className="px-3 py-2"><span className={`px-2 py-0.5 rounded text-xs font-medium capitalize ${STATUS_COLOUR[h.status] || 'bg-slate-100'}`}>{statusLabel(h.status)}</span></td>
                 </tr>
               );
             })}
-            {sortedRows.length === 0 && <tr><td colSpan={8} className="px-3 py-8 text-center text-slate-400">{loading ? 'Loading…' : 'Nothing here.'}</td></tr>}
+            {sortedRows.length === 0 && (
+              <tr><td colSpan={8} className="px-3 py-8 text-center text-slate-400">
+                {loading ? 'Loading…' : actionFilter || search ? 'Nothing matching those filters.' : 'Nothing held right now.'}
+              </td></tr>
+            )}
           </tbody>
         </table>
       </div>
 
-      {creating && <CreateModal view={view} locations={locations} onClose={() => setCreating(false)} onSaved={() => { setCreating(false); load(); }} />}
+      {creating && <CreateModal kindFilter={kindFilter} locations={locations} onClose={() => setCreating(false)} onSaved={() => { setCreating(false); load(); }} />}
+      {receiving && <ReceiveModal locations={locations} onClose={() => setReceiving(false)} onSaved={() => { setReceiving(false); load(); }} />}
+      {handingOver && (
+        <Modal title="Hand over an item" onClose={() => setHandingOver(false)}>
+          <HandoverFlow compact onDone={() => { setHandingOver(false); load(); }} />
+        </Modal>
+      )}
       {detailId && <DetailModal id={detailId} locations={locations} onClose={closeDetail} onChange={load} />}
     </div>
   );
 }
 
-// ════════════════════════ CREATE ════════════════════════
+// ════════════════════════ RECEIVE / CREATE ════════════════════════
+/**
+ * Receive a delivery — search first (so an expected one gets booked in against
+ * its existing record rather than duplicated), falling through to a fresh log
+ * with "it's already here" pre-ticked. Mirrors /quick's Package-arrived tile.
+ */
+function ReceiveModal({ locations, onClose, onSaved }: { locations: HeldItemLocation[]; onClose: () => void; onSaved: () => void }) {
+  const navigate = useNavigate();
+  const [mode, setMode] = useState<'search' | 'create'>('search');
+
+  if (mode === 'create') {
+    return (
+      <Modal title="Log a delivery that's already here" onClose={onClose}>
+        <HeldItemForm variant="desktop" kinds={['incoming']} locations={locations} arrivedDefault
+          onDone={onSaved} onCancel={() => setMode('search')} />
+      </Modal>
+    );
+  }
+
+  return (
+    <Modal title="Receive a delivery" onClose={onClose}>
+      <div className="space-y-3">
+        <p className="text-sm text-slate-500">
+          Is it already expected? Search by job #, client or description — pick it to book it in.
+          If nobody told us it was coming, log it as new.
+        </p>
+        <HeldItemPicker compact kinds={['incoming', 'temp_storage']}
+          placeholder="Search expected deliveries…"
+          emptyHint="Nothing matching — log it as new below."
+          onPick={(h) => navigate(`/holding/receipt/${h.id}`)} />
+        <button onClick={() => setMode('create')}
+          className="w-full border-2 border-dashed border-slate-300 rounded-lg py-2.5 text-sm text-slate-600 font-medium hover:bg-slate-50">
+          + Not listed — log a delivery that's already here
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
 // Thin wrapper around the shared HeldItemForm (also used by the mobile /quick
 // launcher) so the desktop + mobile capture flows can never drift apart.
-function CreateModal({ view, locations, onClose, onSaved }: { view: View; locations: HeldItemLocation[]; onClose: () => void; onSaved: () => void }) {
+function CreateModal({ kindFilter, locations, onClose, onSaved }: {
+  kindFilter: KindFilter; locations: HeldItemLocation[]; onClose: () => void; onSaved: () => void;
+}) {
+  // Offer both kinds unless the page is already filtered to one — logging is
+  // where the "is this held-for-a-client or lost property?" question gets
+  // answered, and on the unfiltered view staff should still get the choice.
+  // `temp_storage` is deliberately not offered (folded into `incoming`).
+  const kinds: HeldItemKind[] =
+    kindFilter === 'lost_property' ? ['lost_property']
+    : kindFilter === 'incoming' ? ['incoming']
+    : ['incoming', 'lost_property'];
   return (
-    <Modal title={view === 'held' ? 'Log Held Item' : 'Log Lost Property'} onClose={onClose}>
-      <HeldItemForm variant="desktop" kinds={VIEW_KINDS[view]} locations={locations} onDone={onSaved} onCancel={onClose} />
+    <Modal title="Log an item" onClose={onClose}>
+      <HeldItemForm variant="desktop" kinds={kinds} locations={locations} onDone={onSaved} onCancel={onClose} />
     </Modal>
   );
 }
@@ -287,7 +458,7 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
   const [msg, setMsg] = useState('');
   const [linkOpen, setLinkOpen] = useState(false);
   const [notifyOpen, setNotifyOpen] = useState(false);
-  const [openAction, setOpenAction] = useState<null | 'collect' | 'ship' | 'location'>(null);
+  const [openAction, setOpenAction] = useState<null | 'collect' | 'ship' | 'location' | 'shortfall'>(null);
 
   const load = useCallback(async () => { setH((await api.get<{ data: HeldItem }>(`/holding/${id}`)).data); }, [id]);
   useEffect(() => { load(); }, [load]);
@@ -327,7 +498,10 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
                   : <p className="text-slate-800">#{h.hh_job_number} <span className="text-xs text-slate-400">(not linked in OP)</span></p>)
               : <p className="text-slate-800">—</p>}
           </div>
-          {h.kind !== 'lost_property' && <Field label="Boxes" value={h.received_count != null && h.box_count != null ? `${h.received_count}/${h.box_count}` : (h.box_count != null ? String(h.box_count) : '—')} />}
+          {h.kind !== 'lost_property' && (() => {
+            const c = describeHeldCounts(h);
+            return <Field label="Boxes" plain className={c ? heldCountClass(c.tone) : ''} value={c ? c.text : '—'} />;
+          })()}
           {/* Dates (expected / needed-by / hold-until) are editable in the
               Dates section below. Here we just show the arrival log once it's in. */}
           {h.kind !== 'lost_property' && h.status !== 'expected' && h.arrived_at &&
@@ -379,6 +553,10 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
             {openAction === 'collect' && <CollectButton id={id} kind={h.kind} busy={busy} open onClose={() => setOpenAction(null)} onAction={action} />}
             {openAction === 'ship' && <ShipBackButton id={id} busy={busy} open onClose={() => setOpenAction(null)} onAction={action} />}
             {openAction === 'location' && <LocationButton id={id} locations={locations} current={h.storage_location_id} open onClose={() => setOpenAction(null)} onDone={() => { load(); onChange(); }} />}
+            {openAction === 'shortfall' && (
+              <ShortfallForm item={h} busy={busy} onClose={() => setOpenAction(null)}
+                onDone={() => { setOpenAction(null); setMsg('Expected count corrected.'); load(); onChange(); }} />
+            )}
             {openAction === null && (
               <>
                 {(h.status === 'expected' || h.status === 'arrived' || h.status === 'stored' || h.status === 'client_notified') && (
@@ -387,9 +565,21 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
                 )}
                 <CollectButton id={id} kind={h.kind} busy={busy} onOpen={() => setOpenAction('collect')} onAction={action} />
                 <ShipBackButton id={id} busy={busy} onOpen={() => setOpenAction('ship')} onAction={action} />
-                {h.kind === 'incoming' && h.status === 'expected' && (
+                {/* Two different outcomes for a delivery that isn't complete:
+                    - nothing turned up at all  → cancel the record outright
+                    - some turned up, rest isn't coming → CORRECT the expected
+                      count so the shortfall stops reading as outstanding. That's
+                      an update, not a cancellation: what's here is still ours to
+                      hand over. Previously only the first existed, and only while
+                      the item was still `expected` — so a part-arrived delivery
+                      had no way to be closed off at all. */}
+                {h.kind === 'incoming' && !h.received_count && h.status === 'expected' && (
                   <button disabled={!!busy} onClick={() => { if (confirm("Mark this as not arriving? It'll drop off the prep checklist.")) action('cancel', async () => { await api.put(`/holding/${id}`, { status: 'cancelled' }); onClose(); }); }}
                     className="px-3 py-1.5 bg-white border border-slate-300 text-slate-600 rounded-lg text-xs">✕ Won't arrive</button>
+                )}
+                {h.kind !== 'lost_property' && isPartiallyArrived(h) && (
+                  <button disabled={!!busy} onClick={() => setOpenAction('shortfall')}
+                    className="px-3 py-1.5 bg-white border border-amber-300 text-amber-700 rounded-lg text-xs">📦 Nothing more coming</button>
                 )}
                 {h.kind === 'lost_property' && (
                   <button disabled={!!busy} onClick={() => action('chase', async () => { await api.post(`/holding/${id}/chase`, {}); setMsg('Chase logged (escalation bumped).'); })}
@@ -416,8 +606,76 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
   );
 }
 
-function Field({ label, value }: { label: string; value: string }) {
-  return <div><p className="text-xs text-slate-400">{label}</p><p className="text-slate-800 capitalize">{value}</p></div>;
+/**
+ * "Nothing more coming" — correct a short delivery's expected count down to what
+ * actually arrived, so the shortfall stops reading as outstanding while what IS
+ * here stays open to hand over. An UPDATE, not a cancellation.
+ *
+ * The optional note goes into the item's discussion thread (not just the notes
+ * field) so "why did 2 boxes never show up?" is answerable later, and anyone
+ * @mentioned on the thread sees it. The declared figure is preserved on `notes`
+ * either way — the correction shouldn't quietly erase what we were told.
+ */
+function ShortfallForm({ item, busy, onClose, onDone }: {
+  item: HeldItem; busy: string; onClose: () => void; onDone: () => void;
+}) {
+  const here = item.received_count ?? 0;
+  const was = item.box_count ?? 0;
+  const [note, setNote] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  async function submit() {
+    setSaving(true); setErr('');
+    try {
+      const trail = `[${new Date().toLocaleDateString('en-GB')}] Expected count corrected ${was} → ${here} (nothing more coming).`;
+      await api.put(`/holding/${item.id}`, {
+        box_count: here,
+        notes: item.notes ? `${item.notes}\n${trail}` : trail,
+      });
+      const trimmed = note.trim();
+      if (trimmed) {
+        // Best-effort — the count correction is the important bit; a failed
+        // note shouldn't leave staff thinking nothing saved.
+        await api.post('/interactions', {
+          type: 'note',
+          content: `📦 Nothing more coming — expected count corrected ${was} → ${here}.\n${trimmed}`,
+          held_item_id: item.id,
+        }).catch((e) => console.warn('Shortfall note failed:', e));
+      }
+      onDone();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Failed');
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="w-full border border-amber-200 bg-amber-50/60 rounded-lg p-3 space-y-2">
+      <p className="text-xs text-amber-900">
+        Only <strong>{here}</strong> of <strong>{was}</strong> turned up. Marking {here} as the full amount —
+        the {was - here} outstanding stop showing as expected, and the {here} here still needs handing over.
+      </p>
+      <div>
+        <label className="text-xs text-slate-500 block mb-0.5">Why? (optional — posts to this item's discussion)</label>
+        <textarea autoFocus value={note} onChange={(e) => setNote(e.target.value)} rows={2}
+          placeholder="e.g. client shipped the rest direct to the venue"
+          className="w-full border border-slate-300 rounded px-2 py-1 text-xs" />
+      </div>
+      {err && <p className="text-xs text-red-600">{err}</p>}
+      <div className="flex gap-2">
+        <button onClick={submit} disabled={saving || !!busy}
+          className="px-3 py-1.5 bg-amber-600 text-white rounded-lg text-xs disabled:opacity-50">
+          {saving ? 'Saving…' : 'Confirm'}
+        </button>
+        <button onClick={onClose} className="px-3 py-1.5 text-xs text-slate-600">Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+function Field({ label, value, plain, className }: { label: string; value: string; plain?: boolean; className?: string }) {
+  return <div><p className="text-xs text-slate-400">{label}</p><p className={`${plain ? 'text-slate-800' : 'text-slate-800 capitalize'} ${className || ''}`}>{value}</p></div>;
 }
 
 // Internal @mentionable discussion thread on a held item. Reuses the shared
