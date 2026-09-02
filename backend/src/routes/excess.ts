@@ -1160,6 +1160,23 @@ router.post('/:id/payment', validate(paymentSchema), async (req: AuthRequest, re
     }
 
     // Positive delta — real new payment. Update the record absolutely.
+    //
+    // receipt_required: a Worldpay/Amex excess payment goes through the physical
+    // card terminal and prints a slip we need scanned for audit — exactly as a
+    // hold does. Until Sep 2026 only record-preauth and capture raised this
+    // to-do, so a straight card-machine excess PAYMENT produced no receipt
+    // prompt at all (no QR handoff, no amber banner, nothing under Manage) —
+    // which is why the prompt appeared inconsistently depending on which button
+    // staff had pressed. Stripe has an electronic trail and cash/BACS produce no
+    // card slip, so neither flags one.
+    //
+    // receipt_uploaded_at is cleared alongside it because this is a NEW money
+    // event with its own new slip; the UI gates on `required && !uploaded`, so
+    // leaving an earlier scan's timestamp in place would silently swallow the
+    // to-do. (Per-EVENT receipts remain the known limitation — the record still
+    // carries one receipt_url, which the new scan replaces.)
+    const needsReceipt = method === 'worldpay' || method === 'amex';
+
     const result = await query(
       `UPDATE job_excess SET
         excess_amount_taken = $1,
@@ -1170,10 +1187,12 @@ router.post('/:id/payment', validate(paymentSchema), async (req: AuthRequest, re
         payment_method = $2,
         payment_reference = $3,
         payment_date = NOW(),
+        receipt_required = CASE WHEN $5::boolean THEN TRUE ELSE receipt_required END,
+        receipt_uploaded_at = CASE WHEN $5::boolean THEN NULL ELSE receipt_uploaded_at END,
         updated_at = NOW()
       WHERE id = $4
       RETURNING *`,
-      [newTotal, method, reference || null, id]
+      [newTotal, method, reference || null, id, needsReceipt]
     );
 
     // Rolled-over payments need extra bookkeeping so the cash chain stays linked
@@ -1956,6 +1975,13 @@ router.post('/:id/capture', validate(captureSchema), async (req: AuthRequest, re
     // receipt_required: TRUE only for card-machine CARD methods (Worldpay/Amex)
     // when no scan was supplied. Stripe (electronic trail) and cash-held (no card
     // receipt) don't flag one.
+    //
+    // The capture prints its OWN slip on the terminal, distinct from the hold's.
+    // So when we raise the to-do we also clear receipt_uploaded_at (below): the
+    // UI gates on `required && !uploaded`, and a record whose hold receipt was
+    // already scanned would otherwise come back from capture with the flag set
+    // but the to-do invisible — no amber banner, no "Upload Receipt Scan" under
+    // Manage. That inconsistent pair is what hid the prompt on job 16371.
     const needsReceipt = (method === 'worldpay' || method === 'amex') && !receipt_url;
 
     const result = await query(
@@ -1975,9 +2001,13 @@ router.post('/:id/capture', validate(captureSchema), async (req: AuthRequest, re
         claim_date               = CASE WHEN $8 THEN NOW() ELSE claim_date END,
         claim_notes              = $9,
         notes                    = $10,
-        receipt_required         = $11,
+        receipt_required         = $11::boolean,
         receipt_url              = COALESCE($13, receipt_url),
-        receipt_uploaded_at      = CASE WHEN $13 IS NOT NULL THEN NOW() ELSE receipt_uploaded_at END,
+        receipt_uploaded_at      = CASE
+                                     WHEN $13 IS NOT NULL THEN NOW()
+                                     WHEN $11::boolean THEN NULL
+                                     ELSE receipt_uploaded_at
+                                   END,
         updated_at               = NOW()
       WHERE id = $12
       RETURNING *`,
