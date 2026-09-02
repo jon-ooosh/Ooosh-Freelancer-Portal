@@ -6,7 +6,7 @@ import { NotifyClientModal } from '../components/holding/NotifyClientModal';
 import { HeldItemForm } from '../components/holding/HeldItemForm';
 import { HeldItemPicker, HandoverFlow } from '../components/holding/HeldItemPicker';
 import { describeHeldCounts, heldCountClass, isPartiallyArrived } from '../components/holding/counts';
-import { locationLabelOrDash } from '../components/holding/format';
+import { locationLabel, locationLabelOrDash } from '../components/holding/format';
 import { ChaseReviewPanel } from '../components/holding/ChaseReviewPanel';
 import ThreadView from '../components/messaging/ThreadView';
 import { MentionComposer } from '../components/messaging/MentionComposer';
@@ -54,13 +54,17 @@ const KIND_EMOJI: Record<HeldItemKind, string> = {
 };
 
 // ── Next action — the organising principle of the page ──────────────────────
-// Derived server-side (routes/holding.ts) so the strip, the table and any
-// future dashboard bucket read ONE definition of "what does this need".
+// Derived server-side (services/held-item-query.ts) so the strip, the table and
+// the dashboard all read ONE definition of "what does this need".
+// Strip order is WORKFLOW order (commonest first), deliberately NOT the
+// server-side precedence order in services/held-item-query.ts — that decides
+// which single action a row gets; this decides how the buckets read
+// left-to-right. Changing one does not imply changing the other.
 const ACTION_BUCKETS: { id: HeldItemNextAction; label: string; emoji: string; accent: string }[] = [
-  { id: 'link_owner',  label: 'Needs linking',  emoji: '❓', accent: 'border-amber-300 bg-amber-50 text-amber-900' },
-  { id: 'receive',     label: 'Awaiting arrival', emoji: '⏳', accent: 'border-slate-300 bg-slate-50 text-slate-800' },
   { id: 'hand_over',   label: 'To hand over',   emoji: '📦', accent: 'border-blue-300 bg-blue-50 text-blue-900' },
+  { id: 'receive',     label: 'Awaiting arrival', emoji: '⏳', accent: 'border-slate-300 bg-slate-50 text-slate-800' },
   { id: 'chase_owner', label: 'Chase owner',    emoji: '📨', accent: 'border-purple-300 bg-purple-50 text-purple-900' },
+  { id: 'link_owner',  label: 'Needs linking',  emoji: '❓', accent: 'border-amber-300 bg-amber-50 text-amber-900' },
   { id: 'decide',      label: "Time's up",      emoji: '🕑', accent: 'border-red-300 bg-red-50 text-red-900' },
 ];
 const ACTION_LABEL: Record<string, string> = Object.fromEntries(
@@ -91,12 +95,37 @@ function ActionDueCell({ item }: { item: HeldItem }) {
 
 // ── Table sorting ───────────────────────────────────────────────────────────
 // Default order is the server's (action_due asc, resolved last); a header click
-// overrides it.
-type SortKey = 'action_due' | 'found_date' | 'last_chased_at' | 'escalation_level' | 'next_chase_due' | 'expected_collection_date';
-function sortVal(h: HeldItem, key: SortKey): number | null {
-  if (key === 'escalation_level') return h.escalation_level ?? 0;
-  const v = h[key] as string | null | undefined;
-  return v ? Date.parse(v) : null;
+// overrides it. Every column is sortable — text keys compare with localeCompare,
+// dates/numbers numerically, and a null ALWAYS sinks to the bottom regardless of
+// direction (an item with no date isn't "the earliest").
+type SortKey =
+  | 'description' | 'client' | 'hh_job_number' | 'boxes' | 'location' | 'status'
+  | 'action_due' | 'found_date' | 'last_chased_at' | 'escalation_level'
+  | 'next_chase_due' | 'expected_collection_date';
+
+function sortVal(h: HeldItem, key: SortKey): string | number | null {
+  switch (key) {
+    case 'description': return h.description?.trim() || null;
+    case 'client': return (h.owner_person_name || h.owner_organisation_name || h.client_name_text)?.trim() || null;
+    case 'hh_job_number': return h.hh_job_number ?? null;
+    // Sort Boxes by what was DECLARED, not by the "3 of 5" display string —
+    // a predictable numeric order beats an alphabetical one over rendered text.
+    case 'boxes': return h.box_count ?? null;
+    case 'location': return locationLabel(h) || null;
+    case 'status': return h.status || null;
+    case 'escalation_level': return h.escalation_level ?? 0;
+    default: {
+      const v = h[key] as string | null | undefined;
+      return v ? Date.parse(v) : null;
+    }
+  }
+}
+
+function compareSortVals(a: string | number, b: string | number): number {
+  if (typeof a === 'string' || typeof b === 'string') {
+    return String(a).localeCompare(String(b), 'en-GB', { sensitivity: 'base', numeric: true });
+  }
+  return a - b;
 }
 function PhotoThumb({ photoKey, onOpen }: { photoKey: string; onOpen: () => void }) {
   const [src, setSrc] = useState('');
@@ -115,7 +144,7 @@ const FOUND_IN_LABEL: Record<string, string> = {
   van: 'Van', rehearsal: 'Rehearsal room', backline: 'Backline', elsewhere: 'Somewhere else',
 };
 
-function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
+function Modal({ title, onClose, children }: { title: ReactNode; onClose: () => void; children: ReactNode }) {
   useEffect(() => {
     const h = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
     window.addEventListener('keydown', h);
@@ -125,7 +154,7 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
     <div className="fixed inset-0 z-40 bg-black/40 flex items-start justify-center p-4 overflow-y-auto" onClick={onClose}>
       <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl my-8" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between px-5 py-4 border-b">
-          <h3 className="font-semibold text-slate-800">{title}</h3>
+          <h3 className="font-semibold text-slate-800 flex-1 min-w-0 mr-3">{title}</h3>
           <button onClick={onClose} className="text-slate-400 hover:text-slate-600 text-xl leading-none">×</button>
         </div>
         <div className="p-5">{children}</div>
@@ -223,10 +252,11 @@ export default function HoldingPage({ defaultKind }: { defaultKind?: KindFilter 
   const sortedRows = sort
     ? [...rows].sort((a, b) => {
         const va = sortVal(a, sort.key), vb = sortVal(b, sort.key);
-        if (va === vb) return 0;
+        if (va === null && vb === null) return 0;
         if (va === null) return 1;
         if (vb === null) return -1;
-        return sort.dir === 'asc' ? va - vb : vb - va;
+        const d = compareSortVals(va, vb);
+        return sort.dir === 'asc' ? d : -d;
       })
     : rows;
 
@@ -246,7 +276,7 @@ export default function HoldingPage({ defaultKind }: { defaultKind?: KindFilter 
       <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
         <div>
           <h1 className="text-2xl font-bold text-slate-800">Holding</h1>
-          <p className="text-sm text-slate-500">Things we're keeping that aren't ours.</p>
+          <p className="text-sm text-slate-500">Things we're holding that aren't ours.</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <button onClick={() => setReceiving(true)} className="bg-white border border-slate-300 text-slate-700 px-4 py-2 rounded-lg text-sm font-medium hover:bg-slate-50">
@@ -306,8 +336,8 @@ export default function HoldingPage({ defaultKind }: { defaultKind?: KindFilter 
       <div className="overflow-x-auto border border-slate-200 rounded-xl bg-white">
         <table className="w-full text-sm">
           <thead className="bg-slate-50 text-slate-500 text-xs"><tr>
-            <th className="text-left px-3 py-2">Item</th>
-            <th className="text-left px-3 py-2">Client</th>
+            <SortTh label="Item" k="description" />
+            <SortTh label="Client" k="client" />
             {showChaseCols ? (
               <>
                 <SortTh label="Found" k="found_date" />
@@ -317,13 +347,13 @@ export default function HoldingPage({ defaultKind }: { defaultKind?: KindFilter 
               </>
             ) : (
               <>
-                <th className="text-left px-3 py-2">Job</th>
-                <th className="text-left px-3 py-2">Boxes</th>
-                <th className="text-left px-3 py-2">Location</th>
+                <SortTh label="Job" k="hh_job_number" />
+                <SortTh label="Boxes" k="boxes" />
+                <SortTh label="Location" k="location" />
               </>
             )}
             <SortTh label="Next action" k="action_due" />
-            <th className="text-left px-3 py-2">Status</th>
+            <SortTh label="Status" k="status" />
           </tr></thead>
           <tbody>
             {sortedRows.map((h) => {
@@ -480,7 +510,12 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
   }
 
   return (
-    <Modal title={h.description || KIND_LABEL[h.kind]} onClose={onClose}>
+    <Modal
+      title={isOpen
+        ? <EditableTitle item={h} onChange={() => { load(); onChange(); }} />
+        : (h.description || KIND_LABEL[h.kind])}
+      onClose={onClose}
+    >
       <div className="space-y-4 text-sm">
         <div className="flex flex-wrap items-center gap-2">
           <span className={`px-2 py-0.5 rounded text-xs font-medium capitalize ${STATUS_COLOUR[h.status] || 'bg-slate-100'}`}>{statusLabel(h.status)}</span>
@@ -489,14 +524,27 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
         </div>
 
         <div className="grid grid-cols-2 gap-3">
-          <Field label="Client" value={client || (h.owner_unknown ? 'Unknown' : '—')} />
+          {/* Client + Job are where you'd instinctively go to fix an owner, so
+              the link/edit affordance lives ON them — there's no separate
+              "Link owner / job" button any more. Both open the same LinkForm
+              (it edits owner AND job together). */}
+          <div>
+            <p className="text-xs text-slate-400">Client</p>
+            <p className="text-slate-800 flex items-center gap-1.5 flex-wrap">
+              <span className={h.owner_unknown ? 'text-amber-700' : ''}>{client || (h.owner_unknown ? 'Unknown' : '—')}</span>
+              {isOpen && <LinkEditButton unknown={!client} onClick={() => setLinkOpen(true)} />}
+            </p>
+          </div>
           <div>
             <p className="text-xs text-slate-400">Job (HH #)</p>
-            {h.hh_job_number
-              ? (h.job_id
-                  ? <Link to={`/jobs/${h.job_id}`} title="Opens the job in the operations portal" className="text-ooosh-600 hover:underline">#{h.hh_job_number} · open job in OP →</Link>
-                  : <p className="text-slate-800">#{h.hh_job_number} <span className="text-xs text-slate-400">(not linked in OP)</span></p>)
-              : <p className="text-slate-800">—</p>}
+            <p className="text-slate-800 flex items-center gap-1.5 flex-wrap">
+              {h.hh_job_number
+                ? (h.job_id
+                    ? <Link to={`/jobs/${h.job_id}`} title="Opens the job in the operations portal" className="text-ooosh-600 hover:underline">#{h.hh_job_number} · open job in OP →</Link>
+                    : <span>#{h.hh_job_number} <span className="text-xs text-slate-400">(not linked in OP)</span></span>)
+                : <span>—</span>}
+              {isOpen && <LinkEditButton unknown={!h.hh_job_number} onClick={() => setLinkOpen(true)} />}
+            </p>
           </div>
           {h.kind !== 'lost_property' && (() => {
             const c = describeHeldCounts(h);
@@ -525,8 +573,11 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
 
         {msg && <p className="text-red-600">{msg}</p>}
 
-        {/* Details — editable description + box counts (not locked to first input) */}
-        {isOpen && <DetailsSection item={h} onChange={() => { load(); onChange(); }} />}
+        {/* Box counts. The description used to live here too, duplicating the
+            modal heading a few hundred pixels above it — it's now the editable
+            title instead, so this section is delivery-only and disappears
+            entirely for lost property (which has no declared quantity). */}
+        {isOpen && h.kind !== 'lost_property' && <DetailsSection item={h} onChange={() => { load(); onChange(); }} />}
 
         {/* Chase & collection (lost property) */}
         {h.kind === 'lost_property' && isOpen && <ChaseCollectionSection item={h} onChange={() => { load(); onChange(); }} />}
@@ -536,13 +587,16 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
         {(h.kind === 'incoming' || h.kind === 'temp_storage') && isOpen &&
           <DatesSection item={h} onChange={() => { load(); onChange(); }} />}
 
-        {/* Link / backfill owner */}
-        {isOpen && (
+        {/* Link / backfill owner — opened from the Client or Job field above,
+            so there's one obvious place to fix an owner rather than a button
+            floating below unrelated sections. */}
+        {isOpen && linkOpen && (
           <div>
-            <button onClick={() => setLinkOpen((v) => !v)} className="text-xs text-[#7B5EA7] font-medium">
-              {h.owner_unknown ? '🔗 Link owner / job' : '✎ Change owner / job'}
-            </button>
-            {linkOpen && <LinkForm item={h} onDone={() => { setLinkOpen(false); load(); onChange(); }} />}
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-semibold text-slate-500">Owner / job</p>
+              <button onClick={() => setLinkOpen(false)} className="text-xs text-slate-400 hover:text-slate-600">Cancel</button>
+            </div>
+            <LinkForm item={h} onDone={() => { setLinkOpen(false); load(); onChange(); }} />
           </div>
         )}
 
@@ -800,45 +854,62 @@ function ChaseCollectionSection({ item, onChange }: { item: HeldItem; onChange: 
   );
 }
 
-// Temp storage: hold-until date (staff reminded 3 days before).
-// Editable description + box counts — so a held item isn't locked to its
-// first input. Description applies to all kinds; box counts only to deliveries
-// / temp storage (lost property has no declared quantity).
+// Box counts — so a delivery isn't locked to what was declared at first input.
+// The description is NOT here: it's the modal's editable heading (EditableTitle),
+// because a "Details > Description" block repeating the title verbatim was pure
+// duplication. Lost property has no declared quantity, so callers skip this
+// section for that kind entirely rather than render an empty box.
 function DetailsSection({ item, onChange }: { item: HeldItem; onChange: () => void }) {
   return (
     <div className="border border-slate-200 rounded-lg p-3 bg-slate-50/50 space-y-2">
-      <p className="text-xs font-semibold text-slate-500">Details</p>
-      <InlineText label="Description" value={item.description} field="description" itemId={item.id} onChange={onChange} />
-      {item.kind !== 'lost_property' && (
-        <div className="grid grid-cols-2 gap-3">
-          <InlineNumber label="Boxes expected" value={item.box_count} field="box_count" itemId={item.id} onChange={onChange} />
-          <InlineNumber label="Received" value={item.received_count} field="received_count" itemId={item.id} onChange={onChange} />
-        </div>
-      )}
+      <p className="text-xs font-semibold text-slate-500">Boxes</p>
+      <div className="grid grid-cols-2 gap-3">
+        <InlineNumber label="Boxes expected" value={item.box_count} field="box_count" itemId={item.id} onChange={onChange} />
+        <InlineNumber label="Received" value={item.received_count} field="received_count" itemId={item.id} onChange={onChange} />
+      </div>
     </div>
   );
 }
 
-// Inline text field — saves on blur, clears to null when emptied.
-function InlineText({ label, value, field, itemId, onChange }: {
-  label: string; value: string | null | undefined; field: 'description'; itemId: string; onChange: () => void;
-}) {
-  const [val, setVal] = useState(value ?? '');
+/**
+ * The modal heading, editable in place — the item's description IS its title,
+ * so there's no reason to show it twice. Borderless until you hover or focus it,
+ * so it still reads as a heading rather than a form field. Saves on blur; an
+ * empty value clears to null and falls back to the kind as a placeholder.
+ */
+function EditableTitle({ item, onChange }: { item: HeldItem; onChange: () => void }) {
+  const [val, setVal] = useState(item.description ?? '');
   const [saving, setSaving] = useState(false);
-  useEffect(() => { setVal(value ?? ''); }, [value]);
+  useEffect(() => { setVal(item.description ?? ''); }, [item.description]);
   async function save() {
     const next = val.trim();
-    if (next === (value ?? '').trim()) return;
+    if (next === (item.description ?? '').trim()) return;
     setSaving(true);
-    try { await api.put(`/holding/${itemId}`, { [field]: next || null }); onChange(); }
+    try { await api.put(`/holding/${item.id}`, { description: next || null }); onChange(); }
     finally { setSaving(false); }
   }
   return (
-    <div>
-      <label className="text-xs text-slate-400 block mb-0.5">{label}</label>
-      <input value={val} disabled={saving} onChange={(e) => setVal(e.target.value)} onBlur={save}
-        className="border border-slate-300 rounded px-2 py-1 text-xs w-full" />
-    </div>
+    <input
+      value={val}
+      disabled={saving}
+      placeholder={KIND_LABEL[item.kind]}
+      title="Click to rename"
+      onChange={(e) => setVal(e.target.value)}
+      onBlur={save}
+      onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+      className="w-full font-semibold text-slate-800 bg-transparent rounded px-1 -mx-1 py-0.5
+                 border border-transparent hover:border-slate-200 hover:bg-slate-50
+                 focus:border-slate-300 focus:bg-white focus:outline-none disabled:opacity-60"
+    />
+  );
+}
+
+/** Small affordance on the Client / Job fields that opens the owner-link form. */
+function LinkEditButton({ unknown, onClick }: { unknown: boolean; onClick: () => void }) {
+  return (
+    <button type="button" onClick={onClick} className="text-xs text-[#7B5EA7] font-medium hover:underline whitespace-nowrap">
+      {unknown ? '🔗 Link' : '✎'}
+    </button>
   );
 }
 

@@ -270,6 +270,15 @@ export interface OnTodayItem {
   href: string;
 }
 
+export interface HoldingUnlinkedItem {
+  id: string;
+  description: string | null;
+  found_in: string | null;
+  found_vehicle_reg: string | null;
+  /** For link_owner this is the found/logged date — an AGE, never a deadline. */
+  action_due: string | null;
+}
+
 export interface PcnAttentionItem {
   id: string;
   reference: string | null;
@@ -317,6 +326,9 @@ export interface OperationsData {
     total_overdue_count?: number;
     client_intros: ClientIntroJob[];
     carnet_count?: number;
+    /** Held items nobody has identified yet (Holding next_action = 'link_owner'). */
+    holding_unlinked_count?: number;
+    holding_unlinked?: HoldingUnlinkedItem[];
     referral_count: number;
     referrals: PendingReferral[];
     excess_count: number;
