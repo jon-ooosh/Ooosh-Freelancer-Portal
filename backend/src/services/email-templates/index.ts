@@ -2040,7 +2040,7 @@ const templates: Record<string, EmailTemplate> = {
       <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Parking / Traffic Charge Notice</h2>
       <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Dear {{driverName}},</p>
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
-        We've received a charge notice for a vehicle that was hired to you at the time of the alleged offence{{jobRefSentence}}. Details below:
+        We've received a charge notice {{noticeContext}}{{jobRefSentence}}. Details below:
       </p>
       <table role="presentation" width="100%" style="margin:0 0 16px;border-collapse:collapse;font-size:14px;color:#1e293b;">
         <tr><td style="padding:4px 0;color:#64748b;">Reference</td><td style="padding:4px 0;font-weight:600;">{{pcnReference}}</td></tr>
@@ -2067,7 +2067,7 @@ const templates: Record<string, EmailTemplate> = {
       <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Parking / Traffic Charge Notice</h2>
       <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Dear {{driverName}},</p>
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
-        We've received a charge notice for a vehicle hired to you at the time of the alleged offence{{jobRefSentence}}:
+        We've received a charge notice {{noticeContext}}{{jobRefSentence}}:
       </p>
       <table role="presentation" width="100%" style="margin:0 0 16px;border-collapse:collapse;font-size:14px;color:#1e293b;">
         <tr><td style="padding:4px 0;color:#64748b;">Reference</td><td style="padding:4px 0;font-weight:600;">{{pcnReference}}</td></tr>
@@ -2188,6 +2188,38 @@ const templates: Record<string, EmailTemplate> = {
         We're legally required to provide driver details to the police within <strong>28 days</strong> of the offence. Failure to do so is a criminal offence. Please reply <strong>URGENTLY</strong> with the full name, address and date of birth of the person driving at the above time.
       </p>
       <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">If you have any questions, call us immediately on {{oooshPhone}}.</p>
+    `,
+  },
+
+  // Opt-in heads-up to a freelancer who was driving one of our vans when a PCN
+  // was issued. Only ever sent to the freelancer themselves — the resolver's
+  // 'freelancer_only' audience has no client / info@ fallback, because this is
+  // our business and the client must never receive it.
+  pcn_internal_freelancer: {
+    variant: 'client',
+    preheader: 'A charge notice was issued for a vehicle you were driving',
+    subject: 'Charge Notice — {{vehicleReg}} — for your awareness ({{jobRef}})',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Parking / Traffic Charge Notice</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Hi {{recipientName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        A charge notice has come in for one of our vehicles you were driving{{jobRefSentence}}. Letting you know so you've got the details:
+      </p>
+      <table role="presentation" width="100%" style="margin:0 0 16px;border-collapse:collapse;font-size:14px;color:#1e293b;">
+        <tr><td style="padding:4px 0;color:#64748b;">Reference</td><td style="padding:4px 0;font-weight:600;">{{pcnReference}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Issuing authority</td><td style="padding:4px 0;">{{issuer}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Vehicle</td><td style="padding:4px 0;">{{vehicleReg}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Date / time</td><td style="padding:4px 0;">{{offenceDateTime}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Location</td><td style="padding:4px 0;">{{location}}</td></tr>
+        <tr><td style="padding:4px 0;color:#64748b;">Fine</td><td style="padding:4px 0;">{{fineLine}}</td></tr>
+      </table>
+      {{#if staffMessage}}
+      <p style="margin:0 0 16px;padding:12px 14px;background-color:#f1f5f9;border-radius:8px;font-size:15px;color:#334155;line-height:1.6;">{{staffMessage}}</p>
+      {{/if}}
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        A copy of the notice is attached. If you think this shouldn't have been issued, or you know something about it we don't, do let us know.
+      </p>
+      <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">Reply to this email or call {{oooshPhone}}.</p>
     `,
   },
 

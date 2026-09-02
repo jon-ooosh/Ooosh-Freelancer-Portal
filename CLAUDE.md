@@ -3294,6 +3294,49 @@ ids and logs a `matched` event on change. List + detail render the person (with 
 "crew" tag, link to `/people/:id`); the Person PCN tab (`by-person`, gated to
 freelancers) shows their PCN history.
 
+**Recipient routing — `services/pcn-recipient.ts` is THE definition (Sep 2026, job
+16373).** A PCN's responsible driver lives in one of TWO columns: `pcns.driver_id`
+→ `drivers` (a client's self-drive hirer) or `pcns.driver_person_id` → `people` (a
+freelancer/crew member in one of our vans, migration 140). The READ path
+(`SELECT_WITH_JOINS`) always joined both; the SEND path in `pcn-actions.ts` joined
+only `drivers`, so for a freelancer driver `driver_email` came back NULL, the
+driver-facing branch was skipped, and it fell **silently** through to
+`resolveClientEmailTarget` — emailing the CLIENT about a PCN their hirer never
+incurred. `pcn-chase.ts` carried the identical bug, so all three rungs of the
+3/5/7-day receipt ladder would have chased the client for proof of a payment
+nobody had asked them to make.
+
+- **Route every PCN recipient decision through `resolvePcnRecipient`** — never
+  re-derive it, and never join `drivers` alone. `PCN_RECIPIENT_JOINS` /
+  `PCN_RECIPIENT_FIELDS` / `loadPcnWithDrivers` exist so a new query gets both
+  identities for free. Three consumers today: the action sender, the chase
+  ladder, and the preview endpoint.
+- **`audience` is set per action in `ACTION_MAP`**: `driver` (override → driver →
+  freelancer → client → info@), `client` (override → client → info@), or
+  `freelancer_only`. **`freelancer_only` has NO client / info@ fallback by
+  design** — an "Internal — Freelancer" notice is our business, not the client's,
+  so no freelancer on file must mean *no email*, not "send it to whoever
+  answers". Don't add a fallback arm to it.
+- **The fall-through is now loud, not silent.** `GET /pcns/:id/recipient` runs the
+  same resolver pre-send and feeds the confirm panel, so staff see the resolved
+  address *and where it came from* before committing. A driver-facing action that
+  lands on the client raises an amber warning + a tick that gates Confirm
+  (warn-not-block, per house convention — a client self-drive hire with no driver
+  record legitimately does go to the client), and offers the assign-driver picker
+  inline. The timeline records the recipient KIND ("emailed x@y (CLIENT — no
+  driver contact on file)"), not just a bare address.
+- **`internal_freelancer` can now email, opt-in** (`notify_freelancer` +
+  `pcn_internal_freelancer`). Its optional `freelancer_message` is deliberately
+  SEPARATE from `resolution_note` — the note is an internal record and must never
+  leave the building.
+- **`{{noticeContext}}`** swaps "a vehicle hired to you" for "one of our vehicles
+  you were driving" on the driver-facing templates when the recipient is a
+  freelancer. Both senders supply it; a new sender of `pcn_pay_direct` /
+  `pcn_transfer_liability` must too, or the placeholder renders literally.
+- **`{{driverName}}` and `{{clientName}}` are not interchangeable** — driver-facing
+  templates greet the person (`rcpt.name`), client-facing ones greet the
+  organisation (`rcpt.clientName`).
+
 **List UX (this session):** click-to-sort column headers (a `<field>_asc/_desc`
 pair per column in the `/pcns` SORTS whitelist) + last-used sort/filter persisted
 to localStorage (`ooosh_pcns_prefs`; dashboard deep-link URL params still win on
