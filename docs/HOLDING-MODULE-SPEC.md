@@ -392,6 +392,41 @@ update); "✕ Won't arrive" (cancel) is now reserved for nothing-arrived-at-all.
 
 ---
 
+## 11b. One page, organised by next action (Aug 2026)
+
+`/holding` is the single page. Kind is a filter + a row icon, never a separate page.
+
+**Derived, server-side, once** (`routes/holding.ts` `SELECT_WITH_JOINS`): `next_action` +
+`action_due`. The chase expressions moved into a `LEFT JOIN LATERAL` so the action CASE can
+reference `next_chase_due` without restating the logic. Precedence is by urgency, not kind:
+
+| next_action | When | action_due |
+|---|---|---|
+| `link_owner` | `owner_unknown` | found/logged date — rendered as an AGE, never overdue |
+| `decide` | `hold_until` / `dispose_after` passed | that date |
+| `chase_owner` | lost property, owner known | `next_chase_due` (⏸ when paused) |
+| `receive` | `expected` | `expected_date` → `needed_by` |
+| `hand_over` | here, owner known | `needed_by` → `hold_until` |
+| `none` | terminal | null |
+
+Default order: `action_due` ascending, resolved rows last. **Any new "what does this need" surface
+reads these two columns rather than re-deriving.**
+
+**Layout:** clickable action strip (counts) over a flat sortable table — the `/money/overview`
+pattern. Buckets were rejected: ~17 open rows, 20–30 max. One fetch, client-side filtering, so strip
+counts stay stable under a filter. `?kind=` / `?action=` / `?item=` / `?review=1` round-trip.
+
+**Route rule — never remove, only add.** `/holding/lost-property` mounts the same page pre-filtered
+and stays permanently: the chase digest's `?review=1` link is in sent inboxes and on historical
+`notifications.action_url` rows, and `/holding/receipt/:id` is printed on box labels in the post.
+
+**`temp_storage` folded into `incoming`** (migration 195). It only ever gated the visibility of the
+"hold until" field — `holding-reminders.ts` and the `needed_by` derivation already treated the two
+kinds identically. The CHECK constraint still permits the value; the UI never offers it. Two kinds
+remain, split on *does the client know we've got it?*
+
+---
+
 ## 12. Deferred for v1 (noted, not built)
 
 - **£ / billing.** `chargeable` flag + `storage_started_at` + `charge_notes` captured; surface

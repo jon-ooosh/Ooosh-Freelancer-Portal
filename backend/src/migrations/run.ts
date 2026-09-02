@@ -229,6 +229,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '192_driver_validity_from_dates.sql',
         '193_idenfy_verdict_identity_review.sql',
         '194_driver_licence_categories.sql',
+        '195_holding_fold_temp_storage.sql',
       ];
 
       for (const migration of migrations) {

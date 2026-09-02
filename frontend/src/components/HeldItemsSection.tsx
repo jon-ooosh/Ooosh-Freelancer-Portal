@@ -29,7 +29,8 @@ const STATUS_CHIP: Record<string, string> = {
   collected: 'bg-green-100 text-green-700', given_to_client: 'bg-green-100 text-green-700', shipped_back: 'bg-green-100 text-green-700',
   disposed: 'bg-gray-100 text-gray-500', unclaimed: 'bg-red-100 text-red-700', cancelled: 'bg-gray-100 text-gray-500',
 };
-const KIND_EMOJI: Record<HeldItemKind, string> = { incoming: '📦', temp_storage: '🗄️', lost_property: '🔍' };
+// temp_storage is folded into incoming (Aug 2026) — same icon, historical rows only.
+const KIND_EMOJI: Record<HeldItemKind, string> = { incoming: '📦', temp_storage: '📦', lost_property: '🔍' };
 const fmtDate = (d: string | null | undefined) => (d ? new Date(d).toLocaleDateString('en-GB') : '');
 const statusLabel = (s: string) => s.replace(/_/g, ' ');
 

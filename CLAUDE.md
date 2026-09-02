@@ -2955,11 +2955,11 @@ Standalone OP-native module replacing the Monday.com "Storage Clients" board. Oo
 - **Round 4–5 tenancy editability + contact picker (Jun 2026):** the tenancy detail modal gained an **Edit details** form (`EditTenancyForm`) covering every mutable field post-move-in (access type/code/key location, billing mode, cadence, next invoice + rate-review dates, lead contact, org, move-in date, status, notes) via the existing `PUT /tenancies/:id`; weekly rate stays on Change rate (history) and room is fixed. Access is **always shown** in the read view (was hidden when no code set). The lead-contact picker is now an org-scoped `ContactPicker` backed by **`GET /api/organisations/:id/contact-candidates`** — active roles only (`por.status='active'`; ended roles are `status='historical'` and must never surface) expanded across related orgs via `organisation_relationships` (Org>Org & Org>person, mirroring the New Enquiry job cascade). Falls back to global people search.
 - Temp storage / incoming deliveries — deliberately NOT here; belongs with the Holding module (Step 10).
 
-#### Step 10: Holding Module — "Held for Clients" / "Lost Property" / temp storage ← FEATURE-COMPLETE (Jun 2026)
+#### Step 10: Holding Module — one page for everything we're keeping that isn't ours ← UNIFIED (Aug 2026)
 
 The unified "things we're temporarily holding for a client" module. **One engine** (`held_items`), one
-`kind` discriminator (`incoming` / `lost_property` / `temp_storage`) that drives behaviour + display
-home. Replaces the Monday "Things being sent to us" + "Lost property & temporary storage" boards and
+`kind` discriminator — **`incoming` / `lost_property` only since Aug 2026**; `temp_storage` was folded
+into `incoming` (migration 195). Replaces the Monday "Things being sent to us" + "Lost property & temporary storage" boards and
 the merch/lost-property JotForms. **Full spec: `docs/HOLDING-MODULE-SPEC.md`.**
 
 **Storage:** migrations 113 (`held_items` + `held_item_locations` seeded picklist), 115
@@ -3099,19 +3099,63 @@ figure is appended to `notes` so the correction doesn't quietly erase what we we
 Previously the cancel action was gated to `status='expected'`, so a part-arrived delivery had no
 closing action at all.
 
+**ONE PAGE, organised by NEXT ACTION (Aug 2026).** `/holding` is the single page; kind is a filter +
+a row icon, never a separate page. The old split was purely a frontend constant — one table, one
+endpoint, one component rendering two views — and it forced staff to classify an item ("held for a
+client or lost property?") *before* logging it, which for a mystery box in the corridor is
+unanswerable.
+
+- **`next_action` + `action_due` are derived server-side** in `routes/holding.ts` `SELECT_WITH_JOINS`
+  (the chase expressions moved into a `LEFT JOIN LATERAL` so the action CASE can reference
+  `next_chase_due` without restating it). ONE definition, so the strip, the table, the ordering and
+  any future dashboard bucket cannot disagree — same reasoning as `chase_state`. Precedence is by
+  URGENCY, not kind: `link_owner` (owner unknown — you can't chase who you haven't identified) →
+  `decide` (`hold_until`/`dispose_after` passed) → `chase_owner` → `receive` → `hand_over` → `none`
+  (terminal). `action_due` is the matching date; for `link_owner` it's the found/logged date and
+  renders as an AGE, never as overdue. Default list order is `action_due` ascending with resolved
+  rows sunk to the bottom. **Any new "what does this need" surface reads these two columns.**
+- **The page**: a clickable action strip (counts per bucket) over a flat sortable table — the
+  `/money/overview` pattern. Buckets were considered and rejected: 17 open rows at unification, 20–30
+  at absolute max, so an accordion would be pure overhead. Filtering is **client-side off one fetch**
+  so the strip counts stay stable while a filter is applied; `?kind=` / `?action=` / `?item=` /
+  `?review=1` all round-trip through the URL. Column set follows the kind filter (chase columns for
+  lost property, job/boxes/location otherwise). The chase review queue renders as the `chase_owner`
+  bucket's action surface.
+- **⚠️ `/holding/lost-property` must never be removed.** It mounts the same page with the kind
+  pre-filtered. The daily chase digest's `?review=1` link is already sitting in staff inboxes and on
+  historical `notifications.action_url` rows, and the printed box-label QR (`/holding/receipt/:id`)
+  is on labels physically in the post. **The rule for this module: never remove a route, only add.**
+  Nav collapsed to one "Holding" entry; the route stays forever.
+- **`temp_storage` folded into `incoming`** (migration 195 — 2 rows, both already terminal). It
+  earned nothing: `hold_until` already applied to `incoming` in `holding-reminders.ts`, and the
+  `needed_by` derivation already treated the two identically. Its only distinct behaviour was the
+  visibility of the "hold until" form field, now shown for any held-for-a-client item and feeding the
+  "Time's up" bucket. The CHECK constraint still permits the value (no constraint migration, no risk;
+  historical rows and any in-flight caller keep working) — **the UI simply never offers it**, and
+  `KIND_LABEL`/`KIND_EMOJI`/`matchesKind`/`pre-hire-briefing.ts` all treat it as `incoming`. The two
+  kinds that remain split on a question staff can always answer: **does the client know we've got
+  it?** — `incoming` = they sent/left it (ends in a handover); `lost_property` = we found it (ends in
+  collection or disposal, chase ladder).
+- **"Nothing more coming" captures a reason.** The `confirm()` was replaced by an inline form whose
+  optional note posts into the item's **discussion thread** (as well as the notes trail), so "why did
+  2 boxes never show up?" is answerable later. Note failure is best-effort — the count correction is
+  the important half and must not be lost to a failed note.
+
 **Remaining / open:**
 - IRL feedback from the chase + hold-until flows (staff trialling over the following weeks).
 - **Merch pip label doesn't split awaiting vs here.** `in_progress` reads "To hand over" even when
   nothing has arrived yet (`RequirementCard` `TYPE_STATUS_LABELS`), because the 4-state requirement
   status can't carry the distinction and the card has no access to the items. The notes line beneath
-  it now says "Nothing here yet · 5 outstanding", which carries the meaning. Fix properly when the
-  Holding pages are unified (the action-bucket rework) rather than string-sniffing the notes.
-- **Unify `/holding` + `/holding/lost-property`** into one action-bucketed page (they are already one
-  table + one endpoint — the split is purely `VIEW_KINDS` in `HoldingPage.tsx` plus two nav entries).
+  it says "Nothing here yet · 5 outstanding", which carries the meaning.
+- **Dashboard bucket.** Holding still surfaces nowhere on the dashboard — one daily 09:25 digest
+  email and the review panel, which is the real reason things sit unnoticed. Next slice: a
+  NeedsAttention bucket reading the same `next_action`.
+- **`unknown owner` checkbox was dropped** from the filter bar — the `link_owner` bucket covers the
+  live case (terminal unknown items are the only thing it no longer reaches).
 
-**Migrations:** 113/115/116 (initial) + 119 (chase/hold). `qrcode` dep added at the initial build.
-The Aug 2026 round (counts vocabulary, receive/handover on `/holding`, job-panel actions) added **no
-migration** — every column it needed already existed.
+**Migrations:** 113/115/116 (initial) + 119 (chase/hold) + **195 (fold temp_storage → incoming)**.
+`qrcode` dep added at the initial build. The Aug 2026 counts/receive/handover round added no
+migration — every column it needed already existed.
 
 ### External Tools (already built, need repointing from Monday.com → Ooosh API)
 
