@@ -1043,8 +1043,8 @@ export default function ExcessPaymentModal({ excess: excessProp, onClose, onUpda
             </div>
             <div>
               <p className="text-xs text-gray-500">Status</p>
-              <span className={`inline-block mt-1 px-2 py-0.5 rounded-full text-xs font-medium ${statusColor(excess.excess_status)}`}>
-                {statusLabel(excess.excess_status)}
+              <span className={`inline-block mt-1 px-2 py-0.5 rounded-full text-xs font-medium ${statusColor(excess.excess_status, excess.auto_covered)}`}>
+                {statusLabel(excess.excess_status, excess.auto_covered)}
               </span>
             </div>
           </div>
