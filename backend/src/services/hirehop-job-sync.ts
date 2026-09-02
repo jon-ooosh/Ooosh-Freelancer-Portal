@@ -449,6 +449,14 @@ export async function syncJobsFromHireHop(userId: string): Promise<JobSyncResult
         // OP-set) client would still be overwritten by HireHop's COMPANY on
         // every pass. The CASE preserves it; the mismatch is queued for review
         // below rather than silently reverted.
+        // client_name gets the SAME guard. It is the display string ~25 read
+        // sites fall back to (job lists, dashboard, Money overview, ChaseModal)
+        // and the only thing job search matches on, so leaving it unguarded
+        // meant a deliberately-changed client reverted to HireHop's old name on
+        // the next pass and became unfindable by its new one. company_name is
+        // deliberately NOT guarded: nothing in OP ever writes it, so freezing
+        // it would pin a stale value forever, and keeping it live means the
+        // search OR still finds the job under its old HireHop name too.
         const updated = await client.query(
           `UPDATE jobs SET
              job_name = $1, job_type = $2, status = $3, status_name = $4,
@@ -456,7 +464,10 @@ export async function syncJobsFromHireHop(userId: string): Promise<JobSyncResult
              client_id = CASE WHEN client_locked_at IS NOT NULL
                               THEN client_id
                               ELSE COALESCE($6, client_id) END,
-             client_name = $7, company_name = $8, client_ref = $9,
+             client_name = CASE WHEN client_locked_at IS NOT NULL
+                                THEN client_name
+                                ELSE $7 END,
+             company_name = $8, client_ref = $9,
              venue_id = COALESCE($10, venue_id), venue_name = $11,
              out_date = $12, job_date = $13, job_end = $14, return_date = $15,
              created_date = $16, manager1_name = $17, manager2_name = $18,
@@ -929,7 +940,10 @@ export async function syncSingleHireHopJob(
            client_id = CASE WHEN client_locked_at IS NOT NULL
                             THEN client_id
                             ELSE COALESCE($6, client_id) END,
-           client_name = $7, company_name = $8, client_ref = $9,
+           client_name = CASE WHEN client_locked_at IS NOT NULL
+                              THEN client_name
+                              ELSE $7 END,
+           company_name = $8, client_ref = $9,
            venue_id = COALESCE($10, venue_id), venue_name = $11,
            out_date = $12, job_date = $13, job_end = $14, return_date = $15,
            created_date = $16, manager1_name = $17, manager2_name = $18,

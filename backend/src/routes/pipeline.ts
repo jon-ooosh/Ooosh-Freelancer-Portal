@@ -147,7 +147,10 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 
     // Search
     if (search) {
-      conditions.push(`(j.job_name ILIKE $${paramIndex} OR j.client_name ILIKE $${paramIndex} OR j.company_name ILIKE $${paramIndex} OR CAST(j.hh_job_number AS TEXT) ILIKE $${paramIndex})`);
+      conditions.push(`(j.job_name ILIKE $${paramIndex} OR j.client_name ILIKE $${paramIndex} OR j.company_name ILIKE $${paramIndex} OR CAST(j.hh_job_number AS TEXT) ILIKE $${paramIndex}
+        OR EXISTS (SELECT 1 FROM organisations co WHERE co.id = j.client_id AND co.is_deleted = false AND co.name ILIKE $${paramIndex})
+        OR EXISTS (SELECT 1 FROM job_organisations sjo JOIN organisations so ON so.id = sjo.organisation_id
+                    WHERE sjo.job_id = j.id AND so.is_deleted = false AND so.name ILIKE $${paramIndex}))`);
       params.push(`%${search}%`);
       paramIndex++;
     }
@@ -184,10 +187,17 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         -- (Was band_name -- a band automatically took the headline and pushed
         -- the client into a "Billed to:" sub-line, which asserted a billing
         -- split that often was not true. The lead is now chosen, not inferred.)
-        (SELECT o.name FROM job_organisations jo JOIN organisations o ON o.id = jo.organisation_id
+        (SELECT lo.name FROM job_organisations jo JOIN organisations lo ON lo.id = jo.organisation_id
          WHERE jo.job_id = j.id AND jo.is_primary = true LIMIT 1) as lead_org_name,
-        (SELECT json_agg(json_build_object('id', jo.id, 'role', jo.role, 'organisation_name', o.name, 'organisation_type', o.type, 'organisation_id', jo.organisation_id))
-         FROM job_organisations jo JOIN organisations o ON o.id = jo.organisation_id
+        -- Canonical client name. Without it the card fell back to HireHop's raw
+        -- company_name/client_name when no lead was set, so a job whose client
+        -- had been changed showed the old name on the card.
+        o.name as client_org_name,
+        -- NB alias xo, not o: the outer query now joins organisations AS o
+        -- for client_org_name. An inner o would shadow it -- legal, but a trap
+        -- for the next person editing this subquery.
+        (SELECT json_agg(json_build_object('id', jo.id, 'role', jo.role, 'organisation_name', xo.name, 'organisation_type', xo.type, 'organisation_id', jo.organisation_id))
+         FROM job_organisations jo JOIN organisations xo ON xo.id = jo.organisation_id
          WHERE jo.job_id = j.id) as linked_organisations,
         (j.next_chase_date IS NOT NULL
          AND j.next_chase_date <= CURRENT_DATE
@@ -197,6 +207,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       LEFT JOIN people m1p ON m1p.id = j.manager1_person_id
       LEFT JOIN people m2p ON m2p.id = j.manager2_person_id
       LEFT JOIN job_financials jf ON jf.job_id = j.id
+      LEFT JOIN organisations o ON o.id = j.client_id AND o.is_deleted = false
       WHERE ${where}
       ORDER BY ${sortCol} ${sortOrder} NULLS LAST, j.created_at DESC
       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`,
