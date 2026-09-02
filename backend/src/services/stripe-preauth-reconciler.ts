@@ -28,6 +28,7 @@ import { query } from '../config/database';
 import { getStripeClient, isStripeConfigured } from '../config/stripe';
 import { emailService } from './email-service';
 import jwt from 'jsonwebtoken';
+import { frontendLink } from '../config/app-urls';
 
 const ALERT_EMAIL = 'info@oooshtours.co.uk';
 
@@ -62,6 +63,8 @@ interface Orphan {
   hhJob: number;
   amount: number;
   reason: string;
+  /** OP job uuid, when we resolved one — lets the alert deep-link to the Money tab. */
+  jobUuid?: string | null;
 }
 
 /**
@@ -161,17 +164,18 @@ export async function reconcileStripePreauths(
       toAlert.push({ ...o, reason: `job #${o.hhJob} not found in OP` });
       continue;
     }
-    const job = jobRes.rows[0] as { pipeline_status: string | null; hire_end: Date | null };
+    const job = jobRes.rows[0] as { id: string; pipeline_status: string | null; hire_end: Date | null };
+    const withJob = { ...o, jobUuid: job.id };
 
     if (job.pipeline_status && FINISHED_STATUSES.includes(job.pipeline_status)) {
-      toAlert.push({ ...o, reason: `hire already ${job.pipeline_status} — not auto-applying` });
+      toAlert.push({ ...withJob, reason: `hire already ${job.pipeline_status} — not auto-applying` });
       continue;
     }
     if (job.hire_end && new Date(job.hire_end).getTime() < Date.now() - 86400_000) {
-      toAlert.push({ ...o, reason: 'hire end date has passed — not auto-applying' });
+      toAlert.push({ ...withJob, reason: 'hire end date has passed — not auto-applying' });
       continue;
     }
-    toHeal.push(o);
+    toHeal.push(withJob);
   }
 
   // ── 5. Self-heal via the LIVE payment-event endpoint (one computation path) ─
@@ -262,15 +266,24 @@ async function sendOrphanAlert(orphans: Orphan[], healed: number): Promise<void>
     '',
   ];
   for (const o of orphans) {
-    const url = `https://dashboard.stripe.com/payments/${o.pi.id}`;
+    const stripeUrl = `https://dashboard.stripe.com/payments/${o.pi.id}`;
+    const opUrl = o.jobUuid ? frontendLink(`/jobs/${o.jobUuid}?tab=money`) : null;
     lines.push(
-      `<strong>£${o.amount.toFixed(2)}</strong> — job #${o.hhJob || '(unknown)'} — ` +
-        `${o.reason || 'not present in OP'} — <a href="${url}">view in Stripe</a>`
+      `<strong>£${o.amount.toFixed(2)}</strong> — ` +
+        (opUrl ? `<a href="${opUrl}">job #${o.hhJob}</a>` : `job #${o.hhJob || '(unknown)'}`) +
+        ` — ${o.reason || 'not present in OP'} — <a href="${stripeUrl}">view in Stripe</a>` +
+        // The raw PaymentIntent id, not just the link: recording the hold in OP
+        // needs it pasted into the "Stripe PaymentIntent ID" box on Record
+        // Pre-Auth, and that's what stops this alert re-firing tomorrow.
+        `<br><code style="font-size:12px;color:#666">${o.pi.id}</code>`
     );
   }
   lines.push('');
   lines.push(
-    'Decide per hold: capture / release it in Stripe, or record it against the job on the Money tab.'
+    'Decide per hold: capture / release it in Stripe, or record it against the job on the ' +
+      'Money tab (Insurance Excess → Manage → Record Pre-Auth Hold, method Stripe GBP, ' +
+      'pasting the PaymentIntent id above). Recording it links the hold to the job, lets ' +
+      'you capture or release it from OP, and stops this alert.'
   );
   if (healed > 0) {
     lines.push('');

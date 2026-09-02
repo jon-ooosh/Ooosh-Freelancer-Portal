@@ -15,6 +15,7 @@ import CostCaptureModal from './CostCaptureModal';
 import CostAllocationModal from './CostAllocationModal';
 import RechargeResolveModal, { RechargeStatusPill } from './RechargeResolveModal';
 import ResendConfirmationModal from './ResendConfirmationModal';
+import { ReceiptThumb, ReceiptPreview } from './costs/CostReceipt';
 import type { JobExcess, Cost } from '../../../shared/types';
 
 // HireHop bank accounts (id → label) for the cross-job apply bank field.
@@ -149,6 +150,12 @@ interface JobCostLite {
   // split-in rows; the full invoice + recharge live there).
   job_id?: string | null;
   capture_hh_job_number?: number | null;
+  // Paperwork. /costs/by-job returns `c.*`, so these have always been on the
+  // wire — the panel just never rendered them. The receipt is the thing staff
+  // reach for when a client queries a line, so it's one click from here now.
+  receipt_r2_key?: string | null;
+  receipt_filename?: string | null;
+  invoice_number?: string | null;
 }
 interface JobQuoteLite {
   id: string;
@@ -1858,6 +1865,30 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   );
 }
 
+// Deep-link to a cost on the Costs hub. Narrows the hub to the CAPTURE job
+// (`c.job_id`) — for a split-in row that's a different job than the one we're
+// looking at, and it's where the invoice and the recharge actually live. The
+// `job` filter also keeps the target row inside the hub's 200-row page cap.
+function costHubHref(cost: JobCostLite): string {
+  return cost.job_id
+    ? `/money/costs?view=all&job=${cost.job_id}&cost=${cost.id}`
+    : `/money/costs?view=all&cost=${cost.id}`;
+}
+
+// Receipt cell for a cost row — the thumb (image / 📎, opens a lightbox) or a
+// soft marker when there's no paperwork attached. The click-through to the hub
+// lives on the row title instead: an arrow this size was too small to aim at.
+function CostReceiptCell({ cost, onPreview }: { cost: JobCostLite; onPreview: (c: JobCostLite) => void }) {
+  if (!cost.receipt_r2_key) {
+    return (
+      <span className="text-[10px] text-gray-300 whitespace-nowrap" title="No receipt or invoice attached to this cost">
+        no receipt
+      </span>
+    );
+  }
+  return <ReceiptThumb cost={cost} size="sm" onOpen={() => onPreview(cost)} />;
+}
+
 // Quoted-vs-actual variance + extra/recharge breakdown for a job's captured
 // costs. "Quoted (our cost)" sums the job's quote freelancer fees — the
 // expected transport/crew cost. "Actuals" sums the quote_actual costs. Extra
@@ -1868,6 +1899,7 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
   const num = (n: number | null | undefined) => Number(n || 0);
   const [resolving, setResolving] = useState<JobCostLite | null>(null);
   const [rechargeBusy, setRechargeBusy] = useState(false);
+  const [receiptPreview, setReceiptPreview] = useState<JobCostLite | null>(null);
 
   // Lightweight "recharge running costs" toggle — the flag is normally set by a
   // Recharge line on a quote; this covers the no-quote / mid-hire case. Sets the
@@ -2006,7 +2038,10 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
                 <li key={isSplit ? `a-${c.allocation_id || c.id}` : `c-${c.id}`} className="flex items-center justify-between text-sm gap-2">
                   <span className="text-gray-600 truncate min-w-0">
                     <span className="inline-block px-1.5 py-0.5 mr-1.5 text-[10px] font-medium bg-gray-100 text-gray-500 rounded align-middle">Quote</span>
-                    {c.supplier_name || c.description || c.category || 'Cost'}
+                    <a href={costHubHref(c)} title="Open this cost on the Costs hub" className="hover:text-purple-700 hover:underline">
+                      {c.supplier_name || c.description || c.category || 'Cost'}
+                      {c.invoice_number && <span className="ml-1.5 text-xs text-gray-400">#{c.invoice_number}</span>}
+                    </a>
                     {isSplit && (
                       captureJobId ? (
                         <a href={`/jobs/${captureJobId}`} className="ml-1 text-xs text-purple-600 hover:underline"
@@ -2018,7 +2053,10 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
                       )
                     )}
                   </span>
-                  <span className="text-gray-900 shrink-0">{m(num(c.amount_gross))}</span>
+                  <span className="flex items-center gap-2 shrink-0">
+                    <span className="text-gray-900">{m(num(c.amount_gross))}</span>
+                    <CostReceiptCell cost={c} onPreview={setReceiptPreview} />
+                  </span>
                 </li>
               );
             })}
@@ -2044,11 +2082,15 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
               return (
                 <li key={isSplit ? `a-${c.allocation_id || c.id}` : `c-${c.id}`} className="flex items-center justify-between text-sm gap-2">
                   <span className="text-gray-600 truncate">
-                    {c.supplier_name || c.description || c.category || 'Cost'}
+                    <a href={costHubHref(c)} title="Open this cost on the Costs hub" className="hover:text-purple-700 hover:underline">
+                      {c.supplier_name || c.description || c.category || 'Cost'}
+                      {c.invoice_number && <span className="ml-1.5 text-xs text-gray-400">#{c.invoice_number}</span>}
+                    </a>
                     {isSplit && <span className="ml-1 text-xs text-purple-600" title={`This job's share of a ${m(num(c.full_amount_gross))} cost split across jobs`}>· split ({m(num(c.full_amount_gross))} total)</span>}
                   </span>
                   <span className="flex items-center gap-2 shrink-0">
                     <span className="text-gray-900">{m(num(c.amount_gross))}</span>
+                    <CostReceiptCell cost={c} onPreview={setReceiptPreview} />
                     {!isSplit && c.recharge_mode !== 'none' && <RechargeStatusPill status={c.recharge_status} mode={c.recharge_mode} />}
                     {pending && (
                       <button onClick={() => setResolving(c)}
@@ -2070,6 +2112,10 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
           onClose={() => setResolving(null)}
           onResolved={() => { setResolving(null); onChanged(); }}
         />
+      )}
+
+      {receiptPreview && (
+        <ReceiptPreview cost={receiptPreview} onClose={() => setReceiptPreview(null)} />
       )}
 
       {unclassified.length > 0 && (

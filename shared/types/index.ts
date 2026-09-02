@@ -310,7 +310,7 @@ export const LOST_REASON_OPTIONS = [
   'Timing',
   'No Decision',
   'Cancelled Event',
-  'Confirmed Alternative Quote',
+  'Confirmed Alternative Quote (from us)',
   'Other',
 ] as const;
 
