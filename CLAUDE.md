@@ -670,7 +670,10 @@ asked once. POA1 and POA2 stay separate — both required, independently lapsing
   "Other Files" list derives from it, so a new slot can't orphan its files.
 - **`DocumentThumb` decides image-vs-file from the fetched blob's MIME type**,
   never the filename. DVLA checks arrive as PDFs (sometimes with no extension),
-  so an extension test rendered a broken `<img>`.
+  so an extension test rendered a broken `<img>`. PDFs preview their first page
+  through the browser's own viewer (`<embed>` at page size, CSS-scaled into the
+  80px box) — no pdf.js dependency, with the generic icon underneath as the
+  fallback.
 - **Uploading prompts for the FROM date — amber, with a Skip.** Refusing to
   store a document because someone can't read a date off it would repeat the
   hard-gate mistake. A licence front also prompts for the back.
@@ -727,23 +730,32 @@ made the data honest and complete; Phase 3 makes it usable.
   (already doing PCN notices + cost receipts) at driver documents so the FROM
   date pre-fills from the DVLA summary / POA / licence and staff only confirm.
 
-**STILL OPEN — the last piece, and the two halves must ship TOGETHER:**
+**Both shipped together, Aug 2026** — deliberately in one PR, because
+tightening POA alone would have blocked 35 drivers with no route through,
+recreating the dead end that caused this whole body of work:
 
-- **POA gate correction.** Policy is "both must be valid, independently" (jon,
-  Aug 2026). The router enforces it; the assign picker and the quick-assign gate
-  only red-flag when BOTH have lapsed, so they are too lenient — a driver with
-  one dead POA can be assigned today. **35 drivers newly red-flag**, and a
-  breakdown confirmed all 35 are genuine lapses (both POAs recorded, one
-  expired) with zero never-recorded cases, so it is a straight tightening with
-  no amber sub-case needed.
-- **Manager override on the quick-assign gate**, with mandatory reason + audit.
-  Today a red driver has NO route past the 400, which is what forced the 16291
-  workaround. jon: *"no point having an emergency escape hatch if it's glued
-  shut."*
+- **POA gate: BOTH proofs must be valid, independently.** The picker and
+  quick-assign previously red-flagged only when BOTH had lapsed, so a driver
+  with one dead POA looked assignable while the router (reading the policy
+  correctly) sent them off to re-upload. They are now named separately —
+  `Proof of address 1` / `Proof of address 2` — so staff ask for the one that
+  actually lapsed rather than re-collecting both. A MISSING POA date is red too,
+  and the frontend `check(label, raw, missingIsRed)` mirrors that exactly.
+  ⚠️ `missingIsRed` is POA-only: licence expiry stays amber-on-missing because
+  iDenfy frequently fails to extract it, and reding that would block drivers
+  over an extraction gap rather than a real problem.
+- **Manager override** — `override_reason` on `POST /hire-forms/quick-assign`
+  (min 10 chars, `MANAGER_ROLES`). Audit-logged as `override_document_gate` with
+  the expired list + reason, and `console.warn`ed. The 400 returns
+  `can_override` so the UI offers the hatch only to someone who can open it.
+  **It covers the DOCUMENT gate ONLY** — identity review and insurance referral
+  are somebody else's decision, and a manager must not be able to self-serve
+  past "the insurer hasn't answered" or "nobody has confirmed this is the person
+  on the licence".
 
-⚠️ **Do not ship the POA tightening without the override.** Tightening alone
-newly blocks 35 drivers with no way through — recreating exactly the dead end
-that caused the incident this whole body of work came out of.
+**`api.ts` errors now carry the parsed response `body`** so callers can branch
+on a machine-readable field. NB the long-standing `code` property on those
+errors is the error MESSAGE, not a code — read `body.code`.
 
 **Already delivered from the earlier queue:** the amber tier for a stale
 identity check now lives in `driver-verification-state.ts` as an amber action
