@@ -41,6 +41,7 @@ import QuoteEditModal from '../components/QuoteEditModal';
 import type { FileAttachment, PipelineStatus, HoldReason, ConfirmedMethod } from '@shared/index';
 import { PIPELINE_STATUS_CONFIG, LOST_REASON_OPTIONS, PAUSED_REASON_OPTIONS } from '@shared/index';
 import { defaultRevisitDate, REVISIT_LEAD_DAYS_UNDER_MINIMUM } from '../lib/revisitDate';
+import { jobClientName, jobClientNameOr } from '../lib/jobOrgName';
 
 
 // Stable reference — HeldItemsSection takes `kinds` as an effect dependency, so
@@ -4115,7 +4116,7 @@ export default function JobDetailPage() {
             <span className="text-xs font-medium text-gray-500 uppercase tracking-wider">Organisations:</span>
             {(() => {
               const hasExplicitLead = jobOrgs.some(jo => jo.is_primary);
-              const clientName = job.client_org_name || job.company_name || job.client_name;
+              const clientName = jobClientName(job);
               return (
                 <span
                   ref={clientSearchRef}
@@ -4484,7 +4485,7 @@ export default function JobDetailPage() {
             hhJobNumber={job.hh_job_number}
             pipelineStatus={job.pipeline_status}
             clientOrgId={job.client_id}
-            clientOrgName={job.client_name}
+            clientOrgName={jobClientName(job) ?? undefined}
             derivedFlags={hhSyncResult?.derivation?.flags || null}
             seatAvailability={hhSyncResult?.derivation?.seatAvailability || null}
             assignedVehicleRegs={jobAssignedVehicles.map(v => v.reg).filter(Boolean)}
@@ -5974,7 +5975,7 @@ export default function JobDetailPage() {
         onSaved={() => { loadJob(); loadQuotes(); }}
         jobId={job.id}
         jobName={job.job_name || undefined}
-        clientName={job.client_name || job.company_name || undefined}
+        clientName={jobClientName(job) ?? undefined}
         venueName={job.venue_name || undefined}
         venueId={job.venue_id || undefined}
         jobDate={job.job_date || undefined}
@@ -6330,7 +6331,7 @@ export default function JobDetailPage() {
           saving={transitionSaving}
           jobId={id}
           clientId={job?.client_id}
-          clientName={job?.client_name || job?.company_name}
+          clientName={jobClientName(job) ?? undefined}
           hireStart={job?.job_date || job?.out_date}
           onConfirm={(data) => handleStatusTransition(transitionTarget, data)}
           onCancel={() => { setShowTransitionModal(false); setTransitionTarget(null); }}
@@ -6402,7 +6403,7 @@ export default function JobDetailPage() {
           )}
           <div className="sticky top-4 bg-white rounded-xl shadow-sm border border-gray-200 p-4">
             <h3 className="text-sm font-semibold text-gray-700 mb-3">
-              Client History — {job.client_name || job.company_name}
+              Client History — {jobClientNameOr(job, '')}
             </h3>
 
             {/* Do Not Hire warning */}

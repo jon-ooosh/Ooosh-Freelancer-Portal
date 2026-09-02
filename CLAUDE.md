@@ -2530,6 +2530,23 @@ Moving the ★ is a single flag flip — fully reversible, rewrites no attributi
 
 **Client lock — `jobs.client_locked_at` / `client_locked_by`.** The HH job sync wrote `client_id = COALESCE($n, client_id)`, which only guards NULL — so an OP-side client change silently reverted within 30 minutes, because HireHop's `COMPANY` string won every pass. Changing the client via `PATCH /api/pipeline/:id/edit` now stamps the lock, and both sync paths guard with `client_id = CASE WHEN client_locked_at IS NOT NULL THEN client_id ELSE COALESCE($n, client_id) END`. When locked AND HireHop disagrees, the sync queues a **`client_mismatch`** review (Data Cleanup page) instead of reverting — visible disagreement beats silent revert. Staff resolve it by pushing OP's client to HH (`sync-client-to-hh`) or changing it back in OP.
 
+**Display names: `jobDisplayOrgName` / `jobClientName` are THE definitions (Sep 2026).** The client lock protected `client_id`, but NOT the display strings — the sync still overwrote `client_name`/`company_name` unconditionally, and the list endpoints had no org join, so a changed client reverted to HireHop's old name on ~25 read sites while Job Detail (which has always joined) showed the new one. Three layers fix it, and all three matter:
+
+1. **`client_name` is now gated on `client_locked_at`** in both sync UPDATEs, exactly like `client_id`. It is the string most surfaces fall back to and the only thing job search matched, so leaving it unguarded meant a deliberate rename reverted within 30 minutes and became unfindable by its new name. **`company_name` is deliberately NOT gated** — nothing in OP ever writes it (it is absent from the `PATCH /edit` allowlist), so freezing it would pin a stale value forever; leaving it live also means the search `OR` still finds the job under its old HireHop name.
+2. **The three list endpoints join the client org** (`GET /api/hirehop/jobs`, `/api/cancellations/list`, the pipeline/kanban query) exposing `client_org_name`, and all three now also expose `lead_org_name` — before this the ★ only affected the kanban card despite claiming to represent the job on job lists. ⚠️ **`organisations` has an `is_deleted` column too**, so the jobs-list `whereClause` had to be qualified to `jobs.is_deleted` — a bare reference is ambiguous once the join is added, and it is shared with a join-free `COUNT` query, so qualification (not aliasing) is the fix. In the pipeline query the `linked_organisations` subquery was re-aliased `o` → `xo` to stop it shadowing the new outer join.
+3. **Search matches the names actually displayed.** Both list searches gained `EXISTS` clauses over the client org and any linked org (incl. the ★ lead) — `EXISTS` rather than a join so the join-free `COUNT` queries keep agreeing. Without this the lists could show a name that search could not find.
+
+**Two frontend helpers, and the distinction is load-bearing** (`frontend/src/lib/jobOrgName.ts`):
+
+| Helper | Precedence | Use for |
+|---|---|---|
+| `jobDisplayOrgName` / `…Or` | `lead_org_name → client_org_name → company_name → client_name` | "Whose job is this" on a LIST row or pipeline card. Honours the ★. |
+| `jobClientName` / `…Or` | `client_org_name → company_name → client_name` (**ignores the ★**) | "What is the CLIENT called" — anywhere the name sits beside `client_id`: the Client chip, the Client History panel, any `clientName`/`clientOrgName` passed to a child. |
+
+Starring a band must **not** relabel the client in the second group — the ★ changes which org headlines a LIST, never who the hire is billed to. **Any new surface showing a job's org MUST call one of these** rather than hand-rolling the fallback chain; that chain is exactly what drifted (some sites read `client_name` first, some `company_name` first, so the same job showed different names on different pages).
+
+**The ★ lead org is NOT pushed to HireHop.** Both push paths (`push-hirehop`, `sync-client-to-hh`) resolve `COMPANY` from `organisations WHERE id = jobs.client_id` — the Client chip. `job_organisations.is_primary` appears in neither. Note there are **two stars on Job Detail** and only one reaches HH: the ★ on the CONTACTS row (`job_contacts.is_primary`) becomes the HH contact `NAME`; the ★ on the ORGANISATIONS row is display-only.
+
 **Renaming an org to "fix" a job is still the wrong move** — the sync matches the client org by NAME against HH `COMPANY`, so renaming means the next pass finds no match, creates a fresh duplicate shell, and (pre-lock) re-pointed `client_id` at the duplicate. Use the org **merge** tool for genuine duplicates, and the lead flag for "which name shows".
 
 **Job-sync `possible_band` guard rail.** The contact sync has flagged suspicious org names since Stream C, but the JOB sync — which auto-creates one org per distinct HH `COMPANY` string — had none, so ~20 junk orgs (`WOH26 / ARTHUR VEROCAI`, `WOH26 / Lush Life / Aja Monet`, …) accumulated silently when a colleague used HireHop's company field as a notes field. Both syncs now share `services/sync-review.ts` (`flagForReview` + `looksLikeCompanyName`), and the job sync's shell-create path is a single shared helper (`resolveClientOrgFromCompany`) rather than two hand-copied blocks — which is exactly how the guard rail ended up on one sync and not the other. **Any new org-creating sync path must go through that helper.**
@@ -3107,17 +3124,25 @@ endpoint, one component rendering two views — and it forced staff to classify 
 client or lost property?") *before* logging it, which for a mystery box in the corridor is
 unanswerable.
 
-- **`next_action` + `action_due` are derived server-side** in `routes/holding.ts` `SELECT_WITH_JOINS`
-  (the chase expressions moved into a `LEFT JOIN LATERAL` so the action CASE can reference
-  `next_chase_due` without restating it). ONE definition, so the strip, the table, the ordering and
-  any future dashboard bucket cannot disagree — same reasoning as `chase_state`. Precedence is by
+- **`next_action` + `action_due` are derived server-side** in **`services/held-item-query.ts`
+  `HELD_ITEM_SELECT`** (the chase expressions sit in a `LEFT JOIN LATERAL` so the action CASE can
+  reference `next_chase_due` without restating it). It moved out of `routes/holding.ts` in Sep 2026
+  when the dashboard became a second consumer — `SELECT_WITH_JOINS` there is now just an alias.
+  ONE definition, so the strip, the table, the ordering and the dashboard cannot disagree — same
+  reasoning as `chase_state`. **Import it; never re-derive the CASE in a second query** (the first
+  cut of the dashboard work did exactly that and was reverted). Precedence is by
   URGENCY, not kind: `link_owner` (owner unknown — you can't chase who you haven't identified) →
   `decide` (`hold_until`/`dispose_after` passed) → `chase_owner` → `receive` → `hand_over` → `none`
   (terminal). `action_due` is the matching date; for `link_owner` it's the found/logged date and
   renders as an AGE, never as overdue. Default list order is `action_due` ascending with resolved
   rows sunk to the bottom. **Any new "what does this need" surface reads these two columns.**
 - **The page**: a clickable action strip (counts per bucket) over a flat sortable table — the
-  `/money/overview` pattern. Buckets were considered and rejected: 17 open rows at unification, 20–30
+  `/money/overview` pattern. **Every column header sorts** (text via `localeCompare`, dates/numbers
+  numerically, nulls always sinking to the bottom regardless of direction); Boxes sorts on the
+  DECLARED `box_count`, not the rendered "3 of 5" string. **The strip's left-to-right order is
+  workflow order** (To hand over · Awaiting arrival · Chase owner · Needs linking · Time's up) and is
+  deliberately NOT the server-side precedence order — that decides which single action a row gets,
+  this decides how the buckets read. Changing one does not imply changing the other. Buckets were considered and rejected: 17 open rows at unification, 20–30
   at absolute max, so an accordion would be pure overhead. Filtering is **client-side off one fetch**
   so the strip counts stay stable while a filter is applied; `?kind=` / `?action=` / `?item=` /
   `?review=1` all round-trip through the URL. Column set follows the kind filter (chase columns for
@@ -3138,6 +3163,15 @@ unanswerable.
   kinds that remain split on a question staff can always answer: **does the client know we've got
   it?** — `incoming` = they sent/left it (ends in a handover); `lost_property` = we found it (ends in
   collection or disposal, chase ladder).
+- **The description IS the title — it appears once.** The detail modal's heading is an editable
+  input (`EditableTitle`, borderless until hover/focus, saves on blur); the old "Details >
+  Description" block repeating it verbatim a few hundred pixels below is gone. What's left of that
+  section is box counts only, so it renders for deliveries and disappears entirely for lost property.
+  **Don't re-add a Description field** — rename in the heading.
+- **Linking an owner is done FROM the Client / Job fields**, not a separate button. Both carry a
+  small `LinkEditButton` ("🔗 Link" when empty, "✎" when set) opening the same `LinkForm` — it edits
+  owner and job together, so either entry point reaches both. That's where staff instinctively go to
+  fix an owner; the floating "Link owner / job" button below unrelated sections is gone.
 - **"Nothing more coming" captures a reason.** The `confirm()` was replaced by an inline form whose
   optional note posts into the item's **discussion thread** (as well as the notes trail), so "why did
   2 boxes never show up?" is answerable later. Note failure is best-effort — the count correction is
@@ -3147,24 +3181,40 @@ unanswerable.
   `ActionDueCell`, and hold-until urgency surfaces through the "Time's up" bucket. Re-adding either
   column would put the same signal on screen twice.
 
+**Dashboard surfacing (Sep 2026) — split by SHAPE, not one bucket.** Holding used to surface
+nowhere on the dashboard (one daily 09:25 digest email + the review panel), which was the real reason
+things sat unnoticed. It now reads `HELD_ITEM_SELECT` from two places, split on whether the action
+carries a real date:
+- **Dated → "On Today / Tomorrow"** (`on_today` in `routes/dashboard.ts`): `decide` (a hold/dispose
+  date has passed) and `receive` (a delivery due within a day). CLAUDE.md's own note on that section
+  says to union new ad-hoc sources into `on_today` — this is that. ⚠️ **`receive` is narrowed to
+  items due within a day**: on the Holding page EVERY expected delivery carries that action (it's the
+  standing "what does this need" answer), but a Today surface only wants the imminent ones.
+- **Undated → a NeedsAttention card, "Unidentified items"** (`holding_unlinked` /
+  `holding_unlinked_count`): `link_owner` only — the mystery-box backlog, ranked by how cold the
+  trail is. This is the genuine gap, because **the daily digest only chases items whose owner is
+  already known**, so an unidentified box had nothing nudging anyone at all.
+- The card is **self-hiding at zero** (the `selfHiding` array in `NeedsAttention.tsx`, same treatment
+  as the PCN buckets). The secondary row otherwise renders 13 cards unconditionally, greying the
+  empty ones — a surface meant to say "a human is needed here" shouldn't grow another permanent grey
+  tile. NB CLAUDE.md's Dashboard section claims secondary cards hide at zero; **only the PCN buckets
+  and this one actually do**. The wider crowding of that row is a known, separate problem (jon,
+  Sep 2026: "a different problem for a different day").
+- The headline count is the FULL total via `COUNT(*) OVER ()`, not the LIMIT-10 row count — the bug
+  the overdue-completions bucket carried until May 2026.
+
 **Remaining / open:**
-- ⚠️ **jon has post-deploy feedback on the unified page that has NOT been captured yet** (flagged
-  2 Sep 2026, session ran out of room before he gave it). Ask for it before starting new Holding
-  work — it may reorder everything below.
 - IRL feedback from the chase + hold-until flows (staff trialling over the following weeks).
 - **Merch pip label doesn't split awaiting vs here.** `in_progress` reads "To hand over" even when
   nothing has arrived yet (`RequirementCard` `TYPE_STATUS_LABELS`), because the 4-state requirement
   status can't carry the distinction and the card has no access to the items. The notes line beneath
-  it says "Nothing here yet · 5 outstanding", which carries the meaning.
-- **Dashboard bucket.** Holding still surfaces nowhere on the dashboard — one daily 09:25 digest
-  email and the review panel, which is the real reason things sit unnoticed. Next slice: a
-  NeedsAttention bucket reading the same `next_action`.
+  it says "Nothing here yet · 5 outstanding", which carries the meaning. Cosmetic — parked.
 - **`unknown owner` checkbox was dropped** from the filter bar — the `link_owner` bucket covers the
   live case (terminal unknown items are the only thing it no longer reaches).
 
 **Migrations:** 113/115/116 (initial) + 119 (chase/hold) + **195 (fold temp_storage → incoming)**.
-`qrcode` dep added at the initial build. The Aug 2026 counts/receive/handover round added no
-migration — every column it needed already existed.
+`qrcode` dep added at the initial build. Neither the Aug 2026 counts/receive/handover round nor the
+Sep 2026 simplification + dashboard round added a migration — every column they needed existed.
 
 ### External Tools (already built, need repointing from Monday.com → Ooosh API)
 
