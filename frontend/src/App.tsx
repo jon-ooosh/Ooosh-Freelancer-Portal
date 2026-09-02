@@ -58,6 +58,7 @@ import MobileReceiptUploadPage from './pages/MobileReceiptUploadPage';
 import PcnReceiptUploadPage from './pages/PcnReceiptUploadPage';
 import WarehouseCollectionDetailPage from './pages/WarehouseCollectionDetailPage';
 import Layout from './components/Layout';
+import ErrorBoundary from './components/ErrorBoundary';
 import { VehicleRoutes, initVehicleModule } from './modules/vehicles';
 import { BookOutPage as StaffBookOutPage } from './modules/vehicles/pages/BookOutPage';
 import { CheckInPage as StaffCheckInPage } from './modules/vehicles/pages/CheckInPage';
@@ -196,6 +197,9 @@ export default function App() {
         element={
           <ProtectedRoute>
             <Layout>
+              {/* Inside Layout, so a page crash leaves the nav usable and the
+                  user can navigate away instead of facing a white screen. */}
+              <ErrorBoundary>
               <Routes>
                 <Route path="/" element={<DashboardPage />} />
                 <Route path="/people" element={<PeoplePage />} />
@@ -249,6 +253,7 @@ export default function App() {
                 <Route path="/team" element={<Navigate to="/settings" replace />} />
                 <Route path="/settings" element={<SettingsPage />} />
               </Routes>
+              </ErrorBoundary>
             </Layout>
           </ProtectedRoute>
         }

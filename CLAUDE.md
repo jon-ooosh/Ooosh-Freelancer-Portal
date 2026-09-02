@@ -506,6 +506,262 @@ tends to get this wrong on first pass, so it's pinned here:
 with the SAME `vehicle_id`. The Allocations UI cascades van picks
 across siblings so staff only picks once per van slot.
 
+##### Document validity: FROM dates in, derived expiry out (migration 192, Aug 2026)
+
+**Staff and the hire form set ONLY a FROM date** — the date on the document, or
+the day the check was run. OP derives every expiry and writes it to the
+`*_valid_until` columns on **every** driver write. Both dates are displayed.
+
+| group | FROM (input) | doc's own expiry (input) | derived window (OP-written) |
+|---|---|---|---|
+| licence | `idenfy_check_date` | `licence_valid_to` | `licence_check_valid_until` |
+| dvla | `dvla_check_date` | — | `dvla_valid_until` |
+| poa1 | `poa1_doc_date` | — | `poa1_valid_until` |
+| poa2 | `poa2_doc_date` | — | `poa2_valid_until` |
+| passport | `passport_check_date` | `passport_expiry` | `passport_valid_until` |
+
+Windows: licence = `min(from+90d, licence_valid_to)`; dvla = `from+30d`;
+poa = `from+90d`; passport = `min(from+30d, passport_expiry)`.
+
+**`services/driver-validity.ts` is THE definition — never re-implement it.**
+`computeDriverValidity()` computes the windows, `persistableWindows()` returns
+the columns to store, `touchesValidity()` says whether a write needs
+re-deriving, `backfillFromDates()` reconciles a caller that knows only the
+expiry. The hire-form router (`analyzeDocuments`) delegates to it, so the router
+and the staff UI physically cannot disagree.
+
+**NEVER write a `*_valid_until` column directly, and never add a new writer.**
+Set the FROM date and let the derivation run. They stay real stored columns
+(rather than moving the arithmetic into the app) so the SQL consumers — the
+drivers-list status CASE, the assign picker, the quick-assign gate — keep
+working unchanged and simply become correct.
+
+**The incident (job 16291, Peter Christopherson, 19 Aug 2026).** Validity was
+stored in two families of columns with six consumers split across them and
+nothing keeping them in step: the router and the driver-detail pills read the
+CHECK dates, while the drivers list, the assign picker and the hard book-out
+gate read the VALID-UNTIL columns. Neither `dvla_valid_until` nor
+`licence_valid_to` was editable anywhere in the OP UI, and nothing except the
+driver's own DVLA upload ever wrote `dvla_valid_until` — so every staff-side fix
+moved the displayed pill and left the gate reading a stale value. Peter showed
+green pills on his own page and was hard-400'd out of the assign picker, with no
+field in the UI able to reconcile them.
+
+**Integrity guard.** A check date with no licence identity behind it
+(`licence_issued_by` blank) yields **no window** — `trusted: false`, and
+`licence_check_valid_until` NULL. A DENIED iDenfy check writes a checkDate with
+no document data, and the detail page was rendering that as a confident green
+expiry for a driver with no licence, no name and no files
+(`manjagoproduction@`, Aug 2026). Any new surface reading licence validity must
+go through the service so it inherits this.
+
+**Frontend mirror:** `frontend/src/lib/driverStatus.ts` `deriveDriverStatus()`
+is the single status-badge definition, mirroring the SQL CASE in
+`routes/drivers.ts`. It was implemented twice and the copies disagreed (the list
+checked DVLA, the detail page didn't). Keep the two in step — the `/drivers`
+filter pills run through the SQL, so a mismatch means clicking "Expired" returns
+rows badged "Approved".
+
+**Gate policy is separate from the date model, and deliberately unchanged.** The
+picker and book-out gate still red-flag on `licence_valid_to` (the physical
+licence expiry), NOT on `licence_check_valid_until`. Tightening that would
+newly block **186** drivers whose iDenfy check has aged past 90 days — over half
+the signed roster, because most people hire once and never return. The honest
+split, per jon: a dead licence is **red** (they cannot drive); a stale *check* is
+**amber** ("send them a hire form"). Don't flip the check window into the red
+tier.
+
+##### Identity review — staff adjudication of a failed face match (migration 193, Aug 2026)
+
+`drivers.identity_check_status`: `NULL` (never flagged — the overwhelming case)
+/ `needs_review` / `accepted` / `rejected`. Owned by
+`services/identity-review.ts`.
+
+**What was thrown away.** `idenfy-webhook.js` computed the full verdict —
+`faceValid`, `autoFace`/`manualFace`, `autoDocument`/`manualDocument`,
+`mismatchTags`, `fraudTags`, `suspicionReasons` — into a local object and
+persisted none of it, and saved only `fileUrls.FRONT`/`BACK` while discarding
+the **selfie** in the same payload. The face-match result, the entire point of
+the check, had zero effect on anything. Two opposite failures:
+
+- **DENIED** → no document data, so OP got a bare check date +
+  `overall_status='Stuck'`. The router refuses to trust that shape, and
+  `calculateNextStep` has **no branch for "we tried and it failed"** — every
+  such path falls through to `{ step: 'idenfy' }`. The driver re-verified,
+  failed identically, and was sent again, indefinitely. `'Stuck'` was written
+  and never read by the router.
+- **SUSPECTED** → document data IS returned, so everything wrote and the driver
+  sailed through despite the face not matching.
+
+**The gate.** `needs_review`/`rejected` blocks `POST /hire-forms/quick-assign`
+(`driver_identity_unverified`) and withholds the hire agreement via
+`isDriverAuthorisedForAgreement` — the same treatment as a pending insurance
+referral, so staff meet ONE pattern for "a human must decide". It is a
+**separate flag, not `requires_referral`**, because the decider differs: an
+insurer answering over days about risk, versus whoever is on the desk comparing
+two photographs. Alert to info@ + will@ fires **once** (atomic claim on
+`identity_alert_sent_at`, released on failure — same discipline as
+`sendReferralAlert`).
+
+**Conventions:**
+- **Route every new "is this driver authorised" surface through
+  `isIdentityAuthorised()`** rather than re-deriving the status inline.
+- **It fails OPEN** on an unknown/absent status, matching the referral arm — a
+  data gap must never silently block a driver.
+- **Only an explicit non-match trips review** (`faceNeedsReview`). An absent
+  face result is NOT a failure: a passport-only session runs no comparison, so
+  treating "no result" as a mismatch would flag every second-document upload.
+- **A staff decision wins.** Once accepted/rejected, a repeat webhook carrying
+  the same stale verdict does not re-open it.
+- **The hire-form app cannot set the status** — it reports what iDenfy said, OP
+  decides what that means. `identity_check_status` is stripped from the
+  `/driver-verification/update` whitelist for the same reason `referral_status`
+  is (Meadham / HH 16330).
+- Resolution (`POST /drivers/:id/resolve-identity`) is **STAFF_ROLES, not
+  manager-only** — it is a visual comparison anyone on the desk can make, and
+  gating it narrowly would rebuild the bottleneck the selfie capture exists to
+  remove.
+
+**The loop-breaker.** `POST /driver-verification/next-step` returns a terminal
+**`manual-review`** step BEFORE `calculateNextStep` runs, so a flagged driver
+stops rather than being handed back to the machine that just rejected them.
+`/status` reports `manual_review` so ProcessingHub stops polling for a state
+only a human can change. ⚠️ **ProcessingHub's `stepMapping[nextStep] || 'poa1'`
+silently sends an unrecognised step to the POA upload page** — any new router
+step MUST be added to BOTH map sites in `ProcessingHub.js`.
+
+**`drivers.current_job_number`** — the HH job whose form the driver is currently
+completing, captured at iDenfy session creation. Closes the blind spot where a
+driver part-way through has no `vehicle_hire_assignments` row yet (created on
+signature), so Hire History is empty and nothing said which hire a stuck driver
+belonged to. Surfaces as `In Progress · #16291` on `/drivers`.
+
+**Open / deliberately left:** the passport branch
+(`updateBoardAWithPassportData`) returns early when not approved, so a failed
+**passport** face check still writes nothing to OP. POA policy is "both must be
+valid, independently" (jon, Aug 2026) — the router already enforces it, but the
+picker/gate only red-flag when BOTH have lapsed, so they are currently too
+lenient; tightening would newly red-flag 35 drivers.
+
+##### Driver verification cockpit ✅ SHIPPED (Aug 2026)
+
+The DriverDetailPage Overview tab, rebuilt so staff see what the driver and the
+router see. `services/driver-verification-state.ts` derives the stage tracker
+(Contact → Insurance Qs → Identity → POA1 → POA2 → DVLA/Passport → Signature)
+and the "what needs doing" list from the SAME `driver-validity` engine the
+hire-form router uses — that equivalence is the point, and any new surface
+answering "where is this driver up to" must go through it rather than re-deriving.
+
+**Page order mirrors the hire form**, which mirrors the tracker: contact →
+insurance questionnaire → identity evidence → licence details → addresses →
+POA1/POA2 → DVLA → passport → signature. Evidence groups are rendered
+individually (`renderGroup(key)`), NOT mapped, precisely so the cards that
+describe a document sit with it. Keep that shape if you add a group.
+
+**Evidence groups are keyed by the WINDOW they share**, not one row per file:
+licence front + back + selfie sit behind a single identity check, so the date is
+asked once. POA1 and POA2 stay separate — both required, independently lapsing.
+
+**Conventions:**
+- **Slot matching is on a normalised token** (tag first, then label) — the same
+  lesson as `DOC_MATCH_TOKENS`: upload paths spell things `licence_front` /
+  `license_front` / `Licence Front`, and exact-string matching silently drops
+  images. `buildEvidenceGroups` is now the single source of those spellings; the
+  "Other Files" list derives from it, so a new slot can't orphan its files.
+- **`DocumentThumb` decides image-vs-file from the fetched blob's MIME type**,
+  never the filename. DVLA checks arrive as PDFs (sometimes with no extension),
+  so an extension test rendered a broken `<img>`. PDFs preview their first page
+  through the browser's own viewer (`<embed>` at page size, CSS-scaled into the
+  80px box) — no pdf.js dependency, with the generic icon underneath as the
+  fallback.
+- **Uploading prompts for the FROM date — amber, with a Skip.** Refusing to
+  store a document because someone can't read a date off it would repeat the
+  hard-gate mistake. A licence front also prompts for the back.
+- **Document dates are STAFF-editable via `PATCH /drivers/:id/document-dates`**,
+  while the rest of the record stays manager-tier on `PUT /drivers/:id` (which
+  can also move penalty points, insurance status and referral flags). That split
+  is deliberate: whoever uploads a replacement must be able to date it, or the
+  date gets left for someone else and forgotten — the original complaint. Don't
+  "simplify" by widening the whole PUT.
+- **A stale identity check raises an AMBER action, never red** — there is a test
+  asserting this. See the gate-policy note above: red would block 186 drivers.
+
+**Fixed in the same pass:** `{value || '—'}` rendered 0 penalty points as a
+dash (0 is falsy) — a clean licence looked like missing data. `licence_type` and
+`licence_categories` now come from iDenfy's `driverLicenseCategory`, which the
+webhook has always read (to test for PROVISIONAL/LEARNER) and always discarded,
+which is why "Type" read "—" on every driver. `licence_restrictions` still has
+no writer and is dropped from the UI rather than shown as a permanent dash —
+categories (what you may drive) and restrictions (conditions on you) are
+different things and must not share a column.
+
+##### Phase 4 — extraction ← NEXT (not built)
+
+##### Cockpit brief as specced (delivered — kept for the deferred items below)
+
+Rebuild the DriverDetailPage **Overview tab** (replace it — a second tab
+recreates the disconnection this is meant to kill) into one surface that shows
+what the driver and the system see, rather than making staff reassemble it.
+jon's framing: *"make us see what they/the system sees, rather than try to bodge
+it together."*
+
+**Why:** staff kept forgetting to update validity dates because the layout is
+spread out and disconnected — "Document Validity" is one card, "Documents" is a
+separate card 400px below, and nothing ties an image to its date. Phases 1–2
+made the data honest and complete; Phase 3 makes it usable.
+
+- **Stage tracker** across the top: Contact → Insurance Qs → Identity → POA1 →
+  POA2 → DVLA → Signature, each ✅/⏳/❌. **Drive it from the same
+  `analyzeDocuments`/`driver-validity` the router uses**, so the tracker and the
+  driver's actual journey cannot disagree — that equivalence is the whole point.
+- **Evidence groups, not 8 flat rows** — image + FROM date + derived expiry +
+  status together in one block per group: Identity (licence front + back +
+  selfie → one window, plus the licence's own expiry), DVLA, POA1, POA2
+  (**independent of each other** — one may lapse while the other stands),
+  Passport, Signature.
+- **"What needs doing?" panel** off the same analysis, each line a single-click
+  action: *"❌ Selfie didn't match licence — compare below"*, *"⚠ DVLA check
+  expired 12 Sep — request new"*.
+- **Soft-forced date on manual upload** — uploading a document prompts for its
+  FROM date, and uploading a licence front prompts for the back. **Amber, not
+  red** (jon's standing preference, and the lesson of the 16291 hard gate):
+  saving without a date is allowed but leaves a visible "no expiry set" marker.
+- **Phase 4 — extraction:** point the existing `services/document-extract.ts`
+  (already doing PCN notices + cost receipts) at driver documents so the FROM
+  date pre-fills from the DVLA summary / POA / licence and staff only confirm.
+
+**Both shipped together, Aug 2026** — deliberately in one PR, because
+tightening POA alone would have blocked 35 drivers with no route through,
+recreating the dead end that caused this whole body of work:
+
+- **POA gate: BOTH proofs must be valid, independently.** The picker and
+  quick-assign previously red-flagged only when BOTH had lapsed, so a driver
+  with one dead POA looked assignable while the router (reading the policy
+  correctly) sent them off to re-upload. They are now named separately —
+  `Proof of address 1` / `Proof of address 2` — so staff ask for the one that
+  actually lapsed rather than re-collecting both. A MISSING POA date is red too,
+  and the frontend `check(label, raw, missingIsRed)` mirrors that exactly.
+  ⚠️ `missingIsRed` is POA-only: licence expiry stays amber-on-missing because
+  iDenfy frequently fails to extract it, and reding that would block drivers
+  over an extraction gap rather than a real problem.
+- **Manager override** — `override_reason` on `POST /hire-forms/quick-assign`
+  (min 10 chars, `MANAGER_ROLES`). Audit-logged as `override_document_gate` with
+  the expired list + reason, and `console.warn`ed. The 400 returns
+  `can_override` so the UI offers the hatch only to someone who can open it.
+  **It covers the DOCUMENT gate ONLY** — identity review and insurance referral
+  are somebody else's decision, and a manager must not be able to self-serve
+  past "the insurer hasn't answered" or "nobody has confirmed this is the person
+  on the licence".
+
+**`api.ts` errors now carry the parsed response `body`** so callers can branch
+on a machine-readable field. NB the long-standing `code` property on those
+errors is the error MESSAGE, not a code — read `body.code`.
+
+**Already delivered from the earlier queue:** the amber tier for a stale
+identity check now lives in `driver-verification-state.ts` as an amber action
+("Identity check lapsed … — send a hire form to re-verify"), with a test
+asserting it can never be red.
+
 ##### Driver-level liability model (migration 065, Apr 2026)
 
 **Two distinct concepts, separated:**
@@ -664,7 +920,8 @@ Replaces the prominent "+ Assign Driver" Quick Assign button with per-card next-
 
 - [x] Per-card state-aware next-action button on each Drivers & Vehicles assignment card. Self-drive only; D&C / driven lifecycles stay in Crew & Transport:
   - `soft`/`confirmed`, no van → **🚐 Allocate Van** (deep-links `/vehicles/allocations?job=<hh>`, job auto-expanded + scrolled into view + page filter forced to `'all'` so jobs beyond the current week are still visible. AllocationsPage's data-fetch lookahead is 30 days; deep-links to jobs further out won't surface — they need the page opened directly with the filter set wider, or a future on-demand widening.)
-  - `soft`/`confirmed`, van linked → **📋 Book Out** (deep-links BookOutPage with `?vehicle=&job=` pre-fill)
+  - `soft`/`confirmed`, van linked, van still in the warehouse → **📋 Book Out** (deep-links BookOutPage with `?vehicle=&job=` pre-fill)
+  - `soft`/`confirmed`, **the van is already `booked_out`/`active` on this job** → **🚐 Add to Hire** (mid-tour link, no walkaround). ⚠️ Keyed on *"is the van already out?"*, NOT *"has this driver got a van?"* — quick-assign offers a vehicle picker, so a late driver added to a departed van arrives WITH a `vehicle_id`; the original `!a.vehicle_id` test skipped this branch and offered Book Out, inviting a walkaround on a van 200 miles away, while the backend rejected the same case with a 400 (job 16291, Aug 2026). The backend now refuses only a move to a *different* van — that is Swap Vehicle's job.
   - `booked_out`/`active` → **↩️ Check In** (deep-links CheckInPage with `?vehicle=` pre-fill)
   - `returned`/`cancelled`/`swapped` → no button, status badge only
 - [x] Sibling-staff-allocation inference: when a hire-form-driven row has `vehicle_id IS NULL` but a separate staff-allocation row on the same `van_requirement_index` has a vehicle, the card surfaces "Book Out" (not "Allocate Van") pointing at the inferred vehicle. `loadVehicleAssignments` does two parallel fetches (`?job_id=` + `?hirehop_job_id=`) and composes `effective_vehicle_id` per row. BookOutPage's PATCH cements the link at submit time.
@@ -1171,6 +1428,13 @@ Built on branch `claude/excess-preauth-lifecycle-ZvUQA` as one PR (jon's call). 
 **Release Hold is Stripe-only (May 2026):** a pre-auth on a card machine (Worldpay/Amex/cash) is controlled by the acquirer — we CAN'T release it, it auto-voids on the card company's clock. The "Release Hold" action only renders when `excess.payment_method === 'stripe_gbp'` (where cancelling the PaymentIntent genuinely voids the hold via the API). For card-machine holds, capture is the only action; un-captured holds just expire (PR 4's scheduler will reconcile them to `released`).
 
 **Modal refresh gotcha (May 2026) — DON'T call `onUpdated()` mid-flow:** `ExcessPaymentModal`'s `onUpdated` is `loadData`/`loadVehicleAssignments` on the parent. On the Money tab, `loadData` sets `loading=true` and MoneyTab early-returns a spinner — so calling `onUpdated()` while the modal is open **unmounts the modal**. This caused the joined-up receipt step to "flash and disappear". Fix: the modal tracks a `madeChange` flag and defers the parent refresh to close-time via `handleClose()` (wired to the backdrop, X, and footer button). Any action that wants to keep the modal open after a change (capture/payment/reimburse warning banners, the pre-auth→receipt advance) sets `madeChange=true` instead of calling `onUpdated()` directly. Only call `onUpdated()` immediately before `onClose()` (close-time), never to keep the modal open.
+
+
+**Card-machine receipt scans — one rule, four paths (Sep 2026).** `job_excess.receipt_required` is the "a terminal slip needs scanning for audit" to-do. It is raised by **every** path that moves excess money through the physical card machine — `POST /excess/:id/payment`, `POST /excess/:id/record-preauth`, `POST /excess/:id/capture`, and the excess branch of `POST /money/:jobId/record-payment` — for **`worldpay`/`amex` only** (Stripe has an electronic trail; cash/BACS produce no card slip) and for **excess only** (the Money-tab rule lives INSIDE the `payment_type === 'excess'` branch — hire deposits and balances go through the same terminal but are not part of the excess receipt trail, and must never raise it). **Any new excess-money surface must raise it too**, or the prompt goes back to being a lottery: until Sep 2026 only record-preauth and capture set it, so a card-machine excess *payment* produced no QR handoff, no amber banner and no "Upload Receipt Scan" under Manage — staff saw the prompt appear inconsistently depending on which button they had pressed. The Money-tab route has no receipt step of its own: it sets the flag and relies on the Manage modal (where the phone/QR handoff lives) to collect the scan.
+
+**The flag and the timestamp must move together.** The UI gates on `receipt_required && !receipt_uploaded_at`, so raising the flag on a record that already carries an earlier scan yields an inconsistent pair — flag set, to-do invisible. That is exactly what hid the prompt after a capture on a hold whose slip had already been scanned (job 16371, Sep 2026). Every path that raises the flag for a NEW money event therefore clears `receipt_uploaded_at` alongside it; `receipt_url` is left standing until the new scan replaces it, because **per-event receipts remain the known limitation** (one receipt per record, not one per payment / capture / refund). Corollary when hand-fixing data: a record whose correct slip is ALREADY on file wants `receipt_required = FALSE`, **not** a cleared timestamp — clearing it nags staff for a slip that doesn't exist. (The Sep 2026 corrections were paperwork-only, so no second slip was ever printed.)
+
+**The modal holds a LIVE record (Sep 2026)** — the other half of the mid-flow gotcha above. `ExcessPaymentModal` shadows its `excess` prop with local state and merges each action's response into it (`applyRecord`). Without that, deferring the parent refresh meant the modal kept rendering PRE-action state after any action that stays open: a finished capture still offered a live `Confirm`, and "Back to actions" re-listed Capture/Release on an already-captured hold instead of the receipt to-do the capture had just raised. **Merge, never replace** — the action endpoints return the row via `RETURNING *`, which does NOT carry the joined display fields the parent selects alongside it (`driver_name`, `vehicle_reg`, `display_name`, `hirehop_job_name`), so a straight replace blanks the modal header. An `actionDone` flag retires `Confirm` once an action has succeeded (offering "Upload receipt scan" / "Done" instead): re-firing was never a money risk — the backend guards reject the replay (capture 400s on a non-`pre_auth` record, a same-total payment no-ops) — but a live Confirm sitting on finished work invites the click.
 
 **Post-deploy polish (May 2026, jon feedback round):**
 - [x] **Hide Edit/Manage on "Covered" (`not_required`) excess rows** — these are the top-N losers (£0 sibling of another driver's excess on the same hire), nothing actionable. The Manage modal only offered "Move to Different Entity" which is meaningless on a £0 record. Hidden on both the Job Detail Drivers & Vehicles card (`JobDetailPage.tsx`) and the Money tab / `/money/excess` list (`MoneyTab.tsx`). Note: there's deliberately NO UI to reassign *which* driver bears the excess — it's the same £1,200 for the job whichever row it's attached to, so it doesn't matter operationally. Build a "swap who's charged" control only if a real case ever demands it.
@@ -3754,6 +4018,34 @@ await syncFleetHireStatusByReg(reg);
 
 **Backfill:** `backend/src/scripts/backfill-fleet-hire-status.ts` runs the same rules across the entire fleet to clean up historical drift. Dry-run by default; `--commit` to apply.
 
+### Driver Document Validity ✅ COMPLETE (Aug 2026)
+
+**File:** `backend/src/services/driver-validity.ts`
+**Frontend mirror:** `frontend/src/lib/driverStatus.ts` (status badge only)
+
+THE single definition of "is this driver's paperwork valid". Full model,
+incident history and conventions under **Document validity: FROM dates in,
+derived expiry out** in Step 2 above. Headline: humans set a FROM date, OP
+derives the expiry into the `*_valid_until` columns on every write, and the
+hire-form router delegates here so it can never disagree with the staff UI.
+
+Call `persistableWindows()` from any new driver write path; never set a
+`*_valid_until` column by hand. `computeDriverValidity()` carries the integrity
+guard that stops a check date with no licence identity rendering as a valid
+window. Unit-tested (`src/services/__tests__/driver-validity.test.ts`) — the
+first tests in the backend; `jest.config.js` exists for exactly this class of
+pure, high-risk helper and does not attempt a broad suite.
+
+### Identity Review ✅ COMPLETE (Aug 2026)
+
+**File:** `backend/src/services/identity-review.ts`
+
+Staff adjudication of a failed iDenfy face match, modelled on the insurance
+referral. `isIdentityAuthorised()` is the gate helper — route every new "may
+this driver be assigned / receive paperwork" surface through it rather than
+re-deriving the status. Fails OPEN on an unknown status. Full detail under
+**Identity review** in Step 2 above.
+
 ### HireHop Deposit Push ✅ COMPLETE
 
 **File:** `backend/src/services/hh-deposit.ts`
@@ -4172,6 +4464,22 @@ if (suppress) return;  // or `continue` inside a loop
 **Watch list:**
 - Staff report "stopped getting allocation emails" → check `portal_notifications_paused_until` on their `people` row. Pre-May-2026, `freelancer_assignment` ignored mute entirely; the May 2026 fix correctly stops sending when muted.
 - Staff report "didn't get a completion chase" → NOT mute-related. Check `qa.is_ooosh_crew`, `qa.status`, `q.ops_status`, `q.completion_reminder_level` and the `completion-chaser.ts` query.
+
+### Render-crash safety: error boundaries + date parsing ✅ (Sep 2026)
+
+**The incident.** Switching Fleet to **table** view threw `RangeError: Invalid time value` and blanked the entire SPA. `RX73TBZ` had `last_rossetts_service_date` stored as `0006-08-25` (mistyped year); `formatDate()` in `routes/vehicles.ts` padded month and day but **not** the year, so it reached the frontend as `"6-08-25"` — and **any year that isn't exactly 4 digits is an Invalid Date in JS**. `getRossettsStatus()` → `addMonths()` → `toISOString()` threw inside the fleet table's row `.map()`, so one bad van took the whole page down. Only the table view calls `getRossettsStatus`, which is why cards/finance were fine — the finance view's `sellByDate()` already had the guard `service-status.ts` was missing.
+
+**Three conventions came out of it:**
+
+1. **Never call `toISOString()` on a Date you haven't range-checked.** Any helper that parses a date string and re-serialises it MUST `Number.isNaN(d.getTime())`-guard both *after parsing* and *after shifting* (a shift can overflow the Date range, or land on NaN if an interval argument is non-numeric — e.g. a garbage `rossetts_interval_months` compliance setting). `service-status.ts` `shiftDate()` and `vehicle-lifecycle.ts` `sellByDate()` are the reference implementations; return `null` and let the caller render `—`. There's a standing comment on the same trap in `prep-trends.ts`.
+
+2. **Zero-pad the year when hand-building a `YYYY-MM-DD` string.** `backend/src/routes/vehicles.ts` `formatDate()` is the shared helper behind every date on every vehicle payload; it pads the year to 4 and returns `''` for an Invalid Date rather than `"NaN-NaN-NaN"`. Postgres will happily store year 6 or year 202, so this is not hypothetical. Any new date serialiser must do the same.
+
+3. **A render throw must not be able to blank the platform.** `frontend/src/components/ErrorBoundary.tsx` is mounted **twice** in the tree: once **inside `Layout`** wrapping the page `<Routes>` (so a page crash keeps the nav usable and staff can navigate away), and once around the whole app in `main.tsx` (backstop for crashes in `Layout` itself and the public, Layout-less routes). It resets its error state when `location.pathname` changes — deliberately **without** re-keying its children, so normal navigation keeps page state exactly as before.
+
+**The trap that made it unrecoverable, and the escape hatch.** The crash alone was survivable; what made staff *stuck* was `fleet-view-mode` persisting in `localStorage`, so every reload restored the table and re-crashed before anything could be clicked. The boundary's **"Reset saved view settings"** button clears all of `localStorage` **except** an allowlist of session keys (`SESSION_KEYS` in `ErrorBoundary.tsx` — the `ooosh_*` staff tokens plus the `vehicleApp*` vehicle-module/freelancer session), so the user stays logged in. Allowlisting sessions rather than listing pref keys means dynamically-named prefs are covered and **a new persisted preference needs no change here** — but **any new *session* key MUST be added to `SESSION_KEYS`**, or the reset button will log people out.
+
+**When adding a persisted view preference,** remember it can pin a page into a crashing state on reload. That's now recoverable via the boundary, but prefer validating a stored value on read (as `VehiclesPage` does for `fleet-view-mode`) over trusting it blindly.
 
 ### Hire Date Resolution
 
