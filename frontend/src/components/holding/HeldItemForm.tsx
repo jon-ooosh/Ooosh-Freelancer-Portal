@@ -25,8 +25,10 @@ import type { HeldItem, HeldItemKind, HeldItemLocation } from '../../../../share
 
 const PURPLE = '#7B5EA7';
 const GIVEN = '__given__';
+// `temp_storage` is folded into `incoming` (Aug 2026) — kept in the map for
+// historical rows, never offered as a choice. See shared/types HeldItemKind.
 const KIND_LABEL: Record<HeldItemKind, string> = {
-  incoming: 'Delivery', temp_storage: 'Temp storage', lost_property: 'Lost property',
+  incoming: '📦 Held for a client', temp_storage: '📦 Held for a client', lost_property: '🔍 Lost property',
 };
 
 async function uploadPhotos(
@@ -122,7 +124,7 @@ export function HeldItemForm({ variant, kinds, locations, initial, arrivedDefaul
         status: givenStraight ? 'given_to_client' : undefined,
         expected_date: f.kind === 'incoming' && f.expected_date ? f.expected_date : null,
         import_charge_flag: f.kind === 'incoming' && f.import_charge_flag ? f.import_charge_flag : null,
-        hold_until: f.kind === 'temp_storage' && f.hold_until ? f.hold_until : null,
+        hold_until: !isLost && f.hold_until ? f.hold_until : null,
         notes: f.notes || null,
         photos,
       });
@@ -238,8 +240,11 @@ export function HeldItemForm({ variant, kinds, locations, initial, arrivedDefaul
           </select></div>
       )}
 
-      {f.kind === 'temp_storage' && (
-        <div><label className={labelCls}>Hold until (optional)</label>
+      {/* Parked-until date — the field temp_storage used to exist for. Applies
+          to anything we're holding for a client (kit left between tour legs,
+          flightcases awaiting a courier). Drives the "Time's up" bucket. */}
+      {!isLost && !mobile && (
+        <div><label className={labelCls}>Hold until / review (optional)</label>
           <input className={inputCls} type="date" value={f.hold_until} onChange={(e) => setF({ ...f, hold_until: e.target.value })} />
           <p className="text-[11px] text-slate-400 mt-1">We'll remind the team 3 days before this date.</p></div>
       )}

@@ -225,6 +225,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '188_stripe_event_dedup.sql',
         '189_booked_split_alert_marker.sql',
         '190_job_lead_org_and_client_lock.sql',
+        '191_holding_fold_temp_storage.sql',
       ];
 
       for (const migration of migrations) {

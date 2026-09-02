@@ -178,7 +178,15 @@ router.get('/:id/label', async (req: AuthRequest, res: Response) => {
 
 const TERMINAL = ['collected', 'given_to_client', 'shipped_back', 'disposed', 'cancelled'];
 
-// Shared SELECT with the joined display fields the frontend expects
+// Shared SELECT with the joined display fields the frontend expects.
+//
+// Two derived pairs live here so every surface agrees:
+//   next_chase_due / chase_state — the lost-property chase ladder
+//   next_action    / action_due  — "what does this item need from me, and when"
+//
+// The chase expressions are computed once in a LATERAL so the action CASE can
+// reference them without restating the logic (and so callers can keep appending
+// plain `WHERE h.…` clauses).
 const SELECT_WITH_JOINS = `
   SELECT h.*,
          (p.first_name || ' ' || p.last_name)      AS owner_person_name,
@@ -188,33 +196,34 @@ const SELECT_WITH_JOINS = `
          fv.reg                                    AS found_vehicle_reg,
          (rbp.first_name || ' ' || rbp.last_name)  AS received_by_name,
          (SELECT COUNT(*)::int FROM interactions i WHERE i.held_item_id = h.id) AS discussion_count,
-         -- Chase derivation — single source of truth; mirrors the daily scan in
-         -- services/holding-reminders.ts so the list, detail card and review
-         -- queue can never disagree about "what's due".
+         ch.next_chase_due,
+         ch.chase_state,
+         -- ── Next action ─────────────────────────────────────────────────
+         -- One question per row: what does this need from a human? Ordered by
+         -- precedence, not by kind — you cannot chase an owner you have not
+         -- identified, and a passed review date outranks routine waiting.
+         -- Consumed by the Holding page's action strip + filter, and (later)
+         -- the dashboard bucket. Keep this and action_due in step.
          CASE
-           WHEN h.kind <> 'lost_property'
-             OR h.status IN ('collected','shipped_back','disposed','cancelled')
-             OR (h.owner_person_id IS NULL AND h.owner_organisation_id IS NULL)
-             OR h.found_date IS NULL THEN NULL
-           WHEN h.expected_collection_date IS NOT NULL AND h.expected_collection_date >= CURRENT_DATE
-             THEN h.expected_collection_date
-           ELSE GREATEST(
-             (h.found_date + INTERVAL '7 days')::date,
-             COALESCE((h.last_chased_at + INTERVAL '7 days')::date, (h.found_date + INTERVAL '7 days')::date)
-           )
-         END                                       AS next_chase_due,
+           WHEN h.status IN ('collected','given_to_client','shipped_back','disposed','cancelled') THEN 'none'
+           WHEN h.owner_unknown THEN 'link_owner'
+           WHEN h.hold_until IS NOT NULL AND h.hold_until <= CURRENT_DATE THEN 'decide'
+           WHEN h.dispose_after IS NOT NULL AND h.dispose_after <= CURRENT_DATE THEN 'decide'
+           WHEN h.kind = 'lost_property' THEN 'chase_owner'
+           WHEN h.status = 'expected' THEN 'receive'
+           ELSE 'hand_over'
+         END                                       AS next_action,
          CASE
-           WHEN h.kind <> 'lost_property' THEN NULL
-           WHEN h.status IN ('collected','shipped_back','disposed','cancelled')
-             OR (h.owner_person_id IS NULL AND h.owner_organisation_id IS NULL)
-             OR h.found_date IS NULL THEN 'none'
-           WHEN h.expected_collection_date IS NOT NULL AND h.expected_collection_date >= CURRENT_DATE THEN 'paused'
-           WHEN GREATEST(
-             (h.found_date + INTERVAL '7 days')::date,
-             COALESCE((h.last_chased_at + INTERVAL '7 days')::date, (h.found_date + INTERVAL '7 days')::date)
-           ) <= CURRENT_DATE THEN 'due'
-           ELSE 'scheduled'
-         END                                       AS chase_state
+           WHEN h.status IN ('collected','given_to_client','shipped_back','disposed','cancelled') THEN NULL
+           -- Unlinked items are ranked by age: the longer a mystery box sits,
+           -- the colder the trail.
+           WHEN h.owner_unknown THEN COALESCE(h.found_date, h.created_at::date)
+           WHEN h.hold_until IS NOT NULL AND h.hold_until <= CURRENT_DATE THEN h.hold_until
+           WHEN h.dispose_after IS NOT NULL AND h.dispose_after <= CURRENT_DATE THEN h.dispose_after
+           WHEN h.kind = 'lost_property' THEN ch.next_chase_due
+           WHEN h.status = 'expected' THEN COALESCE(h.expected_date, h.needed_by)
+           ELSE COALESCE(h.needed_by, h.hold_until)
+         END                                       AS action_due
   FROM held_items h
   LEFT JOIN people p              ON p.id = h.owner_person_id
   LEFT JOIN organisations o       ON o.id = h.owner_organisation_id
@@ -223,6 +232,36 @@ const SELECT_WITH_JOINS = `
   LEFT JOIN fleet_vehicles fv     ON fv.id = h.found_vehicle_id
   LEFT JOIN users rb              ON rb.id = h.received_by
   LEFT JOIN people rbp            ON rbp.id = rb.person_id
+  -- Chase derivation — single source of truth; mirrors the daily scan in
+  -- services/holding-reminders.ts so the list, detail card and review queue
+  -- can never disagree about "what's due".
+  LEFT JOIN LATERAL (
+    SELECT
+      CASE
+        WHEN h.kind <> 'lost_property'
+          OR h.status IN ('collected','shipped_back','disposed','cancelled')
+          OR (h.owner_person_id IS NULL AND h.owner_organisation_id IS NULL)
+          OR h.found_date IS NULL THEN NULL
+        WHEN h.expected_collection_date IS NOT NULL AND h.expected_collection_date >= CURRENT_DATE
+          THEN h.expected_collection_date
+        ELSE GREATEST(
+          (h.found_date + INTERVAL '7 days')::date,
+          COALESCE((h.last_chased_at + INTERVAL '7 days')::date, (h.found_date + INTERVAL '7 days')::date)
+        )
+      END AS next_chase_due,
+      CASE
+        WHEN h.kind <> 'lost_property' THEN NULL
+        WHEN h.status IN ('collected','shipped_back','disposed','cancelled')
+          OR (h.owner_person_id IS NULL AND h.owner_organisation_id IS NULL)
+          OR h.found_date IS NULL THEN 'none'
+        WHEN h.expected_collection_date IS NOT NULL AND h.expected_collection_date >= CURRENT_DATE THEN 'paused'
+        WHEN GREATEST(
+          (h.found_date + INTERVAL '7 days')::date,
+          COALESCE((h.last_chased_at + INTERVAL '7 days')::date, (h.found_date + INTERVAL '7 days')::date)
+        ) <= CURRENT_DATE THEN 'due'
+        ELSE 'scheduled'
+      END AS chase_state
+  ) ch ON TRUE
 `;
 
 // ════════════════════════ LOCATIONS (picklist) ════════════════════════
@@ -337,20 +376,32 @@ router.get('/by-job/:jobId', async (req: AuthRequest, res: Response) => {
 
 router.get('/', async (req: AuthRequest, res: Response) => {
   const { kind, status, search, owner_unknown, include_done } = req.query;
-  let sql = `${SELECT_WITH_JOINS} WHERE 1=1`;
+  // Wrapped so the ORDER BY can use the derived action_due inside a COALESCE
+  // (Postgres allows a bare output alias in ORDER BY, but not one inside an
+  // expression). Negligible at this table's size — tens of open rows.
+  //
+  // The Holding page filters by next_action CLIENT-side off this one response,
+  // so the action-strip counts stay stable while a filter is applied. No
+  // server-side next_action param — one filter implementation, not two.
+  let sql = `SELECT * FROM (${SELECT_WITH_JOINS}) q WHERE 1=1`;
   const params: unknown[] = [];
   let i = 1;
-  if (kind) { sql += ` AND h.kind = $${i++}`; params.push(kind); }
-  if (status) { sql += ` AND h.status = $${i++}`; params.push(status); }
-  if (owner_unknown === 'true') { sql += ` AND h.owner_unknown = true`; }
-  if (include_done !== 'true') { sql += ` AND h.status NOT IN ('collected','given_to_client','shipped_back','disposed','cancelled')`; }
+  if (kind) { sql += ` AND q.kind = $${i++}`; params.push(kind); }
+  if (status) { sql += ` AND q.status = $${i++}`; params.push(status); }
+  if (owner_unknown === 'true') { sql += ` AND q.owner_unknown = true`; }
+  if (include_done !== 'true') { sql += ` AND q.status NOT IN ('collected','given_to_client','shipped_back','disposed','cancelled')`; }
   if (search) {
-    sql += ` AND (h.description ILIKE $${i} OR h.client_name_text ILIKE $${i} OR h.notes ILIKE $${i}
-                  OR CAST(h.hh_job_number AS TEXT) ILIKE $${i})`;
+    sql += ` AND (q.description ILIKE $${i} OR q.client_name_text ILIKE $${i} OR q.notes ILIKE $${i}
+                  OR CAST(q.hh_job_number AS TEXT) ILIKE $${i})`;
     params.push(`%${search}%`);
     i++;
   }
-  sql += ` ORDER BY COALESCE(h.needed_by, h.dispose_after, h.created_at::date) ASC, h.created_at DESC`;
+  // Resolved rows sink to the bottom when "show done" is on (false < true in
+  // Postgres), then "when does this need me" — action_due, falling back to the
+  // legacy needed-by ordering for rows with no action date.
+  sql += ` ORDER BY (q.next_action = 'none') ASC,
+                    COALESCE(q.action_due, q.needed_by, q.dispose_after, q.created_at::date) ASC,
+                    q.created_at DESC`;
   const result = await query(sql, params);
   res.json({ data: result.rows });
 });

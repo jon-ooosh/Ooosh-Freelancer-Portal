@@ -1113,7 +1113,26 @@ export interface CostAllocation {
 
 // Holding module — "Held for Clients" / "Lost Property" / temp storage
 // One engine; `kind` drives behaviour + display home. See docs/HOLDING-MODULE-SPEC.md.
+// `temp_storage` is DEPRECATED (Aug 2026) — folded into `incoming`. The value
+// stays in the union (and the DB CHECK constraint) so historical rows and any
+// in-flight API caller keep working; the UI no longer offers it. Two kinds
+// remain, split by a question staff can always answer — does the client know
+// we've got it? incoming = they sent/left it (ends in a handover);
+// lost_property = we found it (ends in collection/disposal, chase ladder).
 export type HeldItemKind = 'incoming' | 'lost_property' | 'temp_storage';
+
+/**
+ * What this item needs from a human next — derived server-side in
+ * routes/holding.ts so the list, the action strip, the filters and any future
+ * dashboard bucket all read one definition. Ordered by precedence, not by kind.
+ */
+export type HeldItemNextAction =
+  | 'link_owner'   // owner unknown — can't chase or hand over until identified
+  | 'receive'      // declared, not arrived
+  | 'chase_owner'  // lost property, owner known
+  | 'hand_over'    // here, owner known
+  | 'decide'       // hold_until / dispose_after has passed
+  | 'none';        // terminal
 
 export type HeldItemStatus =
   | 'expected'
@@ -1223,6 +1242,9 @@ export interface HeldItem {
   // list, detail card and review queue all agree. null for non-lost-property.
   next_chase_due?: string | null;
   chase_state?: 'none' | 'paused' | 'due' | 'scheduled' | null;
+  // Derived server-side (routes/holding.ts) — see HeldItemNextAction.
+  next_action?: HeldItemNextAction;
+  action_due?: string | null;
 }
 
 // API response wrappers
