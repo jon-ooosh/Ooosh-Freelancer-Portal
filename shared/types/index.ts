@@ -660,6 +660,8 @@ export interface Driver {
   licence_points: number;
   licence_endorsements: LicenceEndorsement[];
   licence_restrictions: string | null;
+  /** Entitlement categories as iDenfy reports them, e.g. "B,BE,C1". */
+  licence_categories: string | null;
   licence_next_check_due: string | null;
   date_passed_test: string | null;
   // Document FROM dates — the validity backbone. Staff and the hire form set

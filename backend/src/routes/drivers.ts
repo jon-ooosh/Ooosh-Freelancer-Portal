@@ -652,6 +652,93 @@ router.patch('/:id/calculated-excess', authorize('admin', 'manager'), validate(e
   }
 });
 
+// ── PATCH /api/drivers/:id/document-dates — staff-editable validity dates ──
+//
+// Uploading a document is open to all staff; PUT /drivers/:id is manager-tier
+// because it can also move penalty points, insurance status and the referral
+// flags. That split is why dates went missing: the person who uploads the
+// replacement is usually not the person allowed to date it, so the date got
+// left for someone else and then forgotten.
+//
+// So rather than widening the whole record to staff, this exposes exactly the
+// FROM dates — the fields the cockpit prompts for right after an upload. The
+// derived *_valid_until columns follow automatically (see driver-validity.ts);
+// nothing else on the driver is reachable through here.
+const DOCUMENT_DATE_FIELDS = [
+  'idenfy_check_date',
+  'licence_valid_to',
+  'dvla_check_date',
+  'poa1_doc_date',
+  'poa2_doc_date',
+  'passport_check_date',
+  'passport_expiry',
+] as const;
+
+const documentDatesSchema = z
+  .object(Object.fromEntries(
+    DOCUMENT_DATE_FIELDS.map(f => [f, z.string().nullable().optional()]),
+  ) as Record<(typeof DOCUMENT_DATE_FIELDS)[number], z.ZodOptional<z.ZodNullable<z.ZodString>>>)
+  .strict();
+
+router.patch(
+  '/:id/document-dates',
+  authorize(...STAFF_ROLES),
+  validate(documentDatesSchema),
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const { id } = req.params;
+      const updates = req.body as Record<string, string | null>;
+
+      const previous = await query('SELECT * FROM drivers WHERE id = $1', [id]);
+      if (previous.rows.length === 0) {
+        res.status(404).json({ error: 'Driver not found' });
+        return;
+      }
+
+      const fields: Record<string, unknown> = {};
+      for (const key of DOCUMENT_DATE_FIELDS) {
+        if (key in updates) fields[key] = updates[key] || null;
+      }
+      if (Object.keys(fields).length === 0) {
+        res.status(400).json({ error: 'No document dates to update' });
+        return;
+      }
+
+      // Same derivation as the full PUT — the gate columns follow the FROM date.
+      Object.assign(fields, persistableWindows({ ...previous.rows[0], ...fields }));
+
+      const params: unknown[] = [];
+      const setClauses = Object.entries(fields).map(([col, value]) => {
+        params.push(value);
+        return `${col} = $${params.length}`;
+      });
+      setClauses.push('updated_at = NOW()');
+      params.push(id);
+
+      const result = await query(
+        `UPDATE drivers SET ${setClauses.join(', ')} WHERE id = $${params.length} RETURNING *`,
+        params,
+      );
+
+      await query(
+        `INSERT INTO audit_log (user_id, entity_type, entity_id, action, previous_values, new_values)
+         VALUES ($1, 'driver', $2, 'update_document_dates', $3, $4)`,
+        [
+          req.user!.id, id,
+          JSON.stringify(Object.fromEntries(
+            Object.keys(fields).map(k => [k, previous.rows[0][k] ?? null]))),
+          JSON.stringify(fields),
+        ],
+      );
+
+      res.json({ data: decryptDriverRow(result.rows[0]) });
+    } catch (error) {
+      console.error('[drivers] Document dates error:', error);
+      res.status(500).json({ error: 'Failed to update document dates' });
+    }
+  },
+);
+
 // ── GET /api/drivers/:id/verification-state — the staff cockpit payload ──
 //
 // Stage tracker + "what needs doing", derived from the SAME validity engine the

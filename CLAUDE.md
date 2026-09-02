@@ -643,7 +643,58 @@ valid, independently" (jon, Aug 2026) — the router already enforces it, but th
 picker/gate only red-flag when BOTH have lapsed, so they are currently too
 lenient; tightening would newly red-flag 35 drivers.
 
-##### Phase 3 — driver verification cockpit ← NEXT (specced Aug 2026, not built)
+##### Driver verification cockpit ✅ SHIPPED (Aug 2026)
+
+The DriverDetailPage Overview tab, rebuilt so staff see what the driver and the
+router see. `services/driver-verification-state.ts` derives the stage tracker
+(Contact → Insurance Qs → Identity → POA1 → POA2 → DVLA/Passport → Signature)
+and the "what needs doing" list from the SAME `driver-validity` engine the
+hire-form router uses — that equivalence is the point, and any new surface
+answering "where is this driver up to" must go through it rather than re-deriving.
+
+**Page order mirrors the hire form**, which mirrors the tracker: contact →
+insurance questionnaire → identity evidence → licence details → addresses →
+POA1/POA2 → DVLA → passport → signature. Evidence groups are rendered
+individually (`renderGroup(key)`), NOT mapped, precisely so the cards that
+describe a document sit with it. Keep that shape if you add a group.
+
+**Evidence groups are keyed by the WINDOW they share**, not one row per file:
+licence front + back + selfie sit behind a single identity check, so the date is
+asked once. POA1 and POA2 stay separate — both required, independently lapsing.
+
+**Conventions:**
+- **Slot matching is on a normalised token** (tag first, then label) — the same
+  lesson as `DOC_MATCH_TOKENS`: upload paths spell things `licence_front` /
+  `license_front` / `Licence Front`, and exact-string matching silently drops
+  images. `buildEvidenceGroups` is now the single source of those spellings; the
+  "Other Files" list derives from it, so a new slot can't orphan its files.
+- **`DocumentThumb` decides image-vs-file from the fetched blob's MIME type**,
+  never the filename. DVLA checks arrive as PDFs (sometimes with no extension),
+  so an extension test rendered a broken `<img>`.
+- **Uploading prompts for the FROM date — amber, with a Skip.** Refusing to
+  store a document because someone can't read a date off it would repeat the
+  hard-gate mistake. A licence front also prompts for the back.
+- **Document dates are STAFF-editable via `PATCH /drivers/:id/document-dates`**,
+  while the rest of the record stays manager-tier on `PUT /drivers/:id` (which
+  can also move penalty points, insurance status and referral flags). That split
+  is deliberate: whoever uploads a replacement must be able to date it, or the
+  date gets left for someone else and forgotten — the original complaint. Don't
+  "simplify" by widening the whole PUT.
+- **A stale identity check raises an AMBER action, never red** — there is a test
+  asserting this. See the gate-policy note above: red would block 186 drivers.
+
+**Fixed in the same pass:** `{value || '—'}` rendered 0 penalty points as a
+dash (0 is falsy) — a clean licence looked like missing data. `licence_type` and
+`licence_categories` now come from iDenfy's `driverLicenseCategory`, which the
+webhook has always read (to test for PROVISIONAL/LEARNER) and always discarded,
+which is why "Type" read "—" on every driver. `licence_restrictions` still has
+no writer and is dropped from the UI rather than shown as a permanent dash —
+categories (what you may drive) and restrictions (conditions on you) are
+different things and must not share a column.
+
+##### Phase 4 — extraction ← NEXT (not built)
+
+##### Cockpit brief as specced (delivered — kept for the deferred items below)
 
 Rebuild the DriverDetailPage **Overview tab** (replace it — a second tab
 recreates the disconnection this is meant to kill) into one surface that shows
@@ -676,17 +727,28 @@ made the data honest and complete; Phase 3 makes it usable.
   (already doing PCN notices + cost receipts) at driver documents so the FROM
   date pre-fills from the DVLA summary / POA / licence and staff only confirm.
 
-**Also queued (small, deliberately deferred from Phases 1–2):**
-- **Amber tier for a stale identity check** — `licence_check_valid_until` in the
-  past should be amber ("send them a hire form"), never red. See the gate-policy
-  note above; 186 drivers are affected, so it must not go in the red tier.
-- **POA gate correction** — policy is "both must be valid, independently"
-  (jon, Aug 2026). The router enforces it; the picker/gate only red-flag when
-  BOTH have lapsed, so they are too lenient. 35 drivers would newly red-flag.
-- **Manager override on the quick-assign gate**, with mandatory reason +
-  audit. Today a red driver has NO route past it, which is what forced the
-  16291 workaround. jon: *"no point having an emergency escape hatch if it's
-  glued shut."*
+**STILL OPEN — the last piece, and the two halves must ship TOGETHER:**
+
+- **POA gate correction.** Policy is "both must be valid, independently" (jon,
+  Aug 2026). The router enforces it; the assign picker and the quick-assign gate
+  only red-flag when BOTH have lapsed, so they are too lenient — a driver with
+  one dead POA can be assigned today. **35 drivers newly red-flag**, and a
+  breakdown confirmed all 35 are genuine lapses (both POAs recorded, one
+  expired) with zero never-recorded cases, so it is a straight tightening with
+  no amber sub-case needed.
+- **Manager override on the quick-assign gate**, with mandatory reason + audit.
+  Today a red driver has NO route past the 400, which is what forced the 16291
+  workaround. jon: *"no point having an emergency escape hatch if it's glued
+  shut."*
+
+⚠️ **Do not ship the POA tightening without the override.** Tightening alone
+newly blocks 35 drivers with no way through — recreating exactly the dead end
+that caused the incident this whole body of work came out of.
+
+**Already delivered from the earlier queue:** the amber tier for a stale
+identity check now lives in `driver-verification-state.ts` as an amber action
+("Identity check lapsed … — send a hire form to re-verify"), with a test
+asserting it can never be red.
 
 ##### Driver-level liability model (migration 065, Apr 2026)
 
