@@ -643,7 +643,58 @@ valid, independently" (jon, Aug 2026) — the router already enforces it, but th
 picker/gate only red-flag when BOTH have lapsed, so they are currently too
 lenient; tightening would newly red-flag 35 drivers.
 
-##### Phase 3 — driver verification cockpit ← NEXT (specced Aug 2026, not built)
+##### Driver verification cockpit ✅ SHIPPED (Aug 2026)
+
+The DriverDetailPage Overview tab, rebuilt so staff see what the driver and the
+router see. `services/driver-verification-state.ts` derives the stage tracker
+(Contact → Insurance Qs → Identity → POA1 → POA2 → DVLA/Passport → Signature)
+and the "what needs doing" list from the SAME `driver-validity` engine the
+hire-form router uses — that equivalence is the point, and any new surface
+answering "where is this driver up to" must go through it rather than re-deriving.
+
+**Page order mirrors the hire form**, which mirrors the tracker: contact →
+insurance questionnaire → identity evidence → licence details → addresses →
+POA1/POA2 → DVLA → passport → signature. Evidence groups are rendered
+individually (`renderGroup(key)`), NOT mapped, precisely so the cards that
+describe a document sit with it. Keep that shape if you add a group.
+
+**Evidence groups are keyed by the WINDOW they share**, not one row per file:
+licence front + back + selfie sit behind a single identity check, so the date is
+asked once. POA1 and POA2 stay separate — both required, independently lapsing.
+
+**Conventions:**
+- **Slot matching is on a normalised token** (tag first, then label) — the same
+  lesson as `DOC_MATCH_TOKENS`: upload paths spell things `licence_front` /
+  `license_front` / `Licence Front`, and exact-string matching silently drops
+  images. `buildEvidenceGroups` is now the single source of those spellings; the
+  "Other Files" list derives from it, so a new slot can't orphan its files.
+- **`DocumentThumb` decides image-vs-file from the fetched blob's MIME type**,
+  never the filename. DVLA checks arrive as PDFs (sometimes with no extension),
+  so an extension test rendered a broken `<img>`.
+- **Uploading prompts for the FROM date — amber, with a Skip.** Refusing to
+  store a document because someone can't read a date off it would repeat the
+  hard-gate mistake. A licence front also prompts for the back.
+- **Document dates are STAFF-editable via `PATCH /drivers/:id/document-dates`**,
+  while the rest of the record stays manager-tier on `PUT /drivers/:id` (which
+  can also move penalty points, insurance status and referral flags). That split
+  is deliberate: whoever uploads a replacement must be able to date it, or the
+  date gets left for someone else and forgotten — the original complaint. Don't
+  "simplify" by widening the whole PUT.
+- **A stale identity check raises an AMBER action, never red** — there is a test
+  asserting this. See the gate-policy note above: red would block 186 drivers.
+
+**Fixed in the same pass:** `{value || '—'}` rendered 0 penalty points as a
+dash (0 is falsy) — a clean licence looked like missing data. `licence_type` and
+`licence_categories` now come from iDenfy's `driverLicenseCategory`, which the
+webhook has always read (to test for PROVISIONAL/LEARNER) and always discarded,
+which is why "Type" read "—" on every driver. `licence_restrictions` still has
+no writer and is dropped from the UI rather than shown as a permanent dash —
+categories (what you may drive) and restrictions (conditions on you) are
+different things and must not share a column.
+
+##### Phase 4 — extraction ← NEXT (not built)
+
+##### Phase 3 brief (delivered — kept for the deferred items below)
 
 Rebuild the DriverDetailPage **Overview tab** (replace it — a second tab
 recreates the disconnection this is meant to kill) into one surface that shows

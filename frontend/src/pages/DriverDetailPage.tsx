@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { EvidenceGroup, type EvidenceGroupSpec, type EvidenceFile } from '../components/drivers/EvidenceGroup';
 import { StageTracker, WhatNeedsDoing, type DriverVerificationState, type VerificationAction } from '../components/drivers/VerificationCockpit';
 import { deriveDriverStatus } from '../lib/driverStatus';
-import { hasManagerRole } from '../lib/roles';
+import { hasManagerRole, roleAllowed } from '../lib/roles';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
@@ -52,6 +52,7 @@ interface DriverDetail {
   licence_points: number;
   licence_endorsements: LicenceEndorsement[];
   licence_restrictions: string | null;
+  licence_categories: string | null;
   licence_next_check_due: string | null;
   date_passed_test: string | null;
   // FROM dates — what staff and the hire form actually set (migration 192).
@@ -420,19 +421,6 @@ function excessStatusBadge(status: string) {
 }
 
 // Document categories — labels match what the hire form app sends
-const DOCUMENT_CATEGORIES: { label: string; fileLabels: string[]; description: string }[] = [
-  { label: 'Licence Front', fileLabels: ['Licence Front', 'licence_front', 'License Front', 'license_front'], description: 'Photo of front of driving licence' },
-  { label: 'Licence Back', fileLabels: ['Licence Back', 'licence_back', 'License Back', 'license_back'], description: 'Photo of back of driving licence' },
-  // Captured by iDenfy and discarded until Aug 2026. Sits directly under the
-  // licence images so the comparison staff are asked to make is one glance.
-  { label: 'Selfie', fileLabels: ['Selfie', 'selfie', 'face', 'FACE', 'idenfy_face'], description: 'Photo taken during identity verification — compare against the licence' },
-  { label: 'DVLA Check', fileLabels: ['DVLA Check Code', 'DVLA Check', 'dvla_check', 'dvla check', 'dvla'], description: 'DVLA check code screenshot' },
-  { label: 'Proof of Address 1', fileLabels: ['Proof of Address', 'POA 1', 'poa1', 'Proof of Address 1'], description: 'Utility bill, council tax, or bank statement' },
-  { label: 'Proof of Address 2', fileLabels: ['POA 2', 'poa2', 'Proof of Address 2'], description: 'Second proof of address document' },
-  { label: 'Passport', fileLabels: ['Passport', 'passport'], description: 'Passport photo page' },
-  { label: 'Signature', fileLabels: ['Signature', 'signature', 'sig'], description: 'Driver signature' },
-];
-
 // Friendly field name mapping for audit log display
 const FIELD_LABELS: Record<string, string> = {
   full_name: 'Full Name', email: 'Email', phone: 'Phone', phone_country: 'Phone Country',
@@ -440,7 +428,8 @@ const FIELD_LABELS: Record<string, string> = {
   licence_address: 'Licence Address', address_line1: 'Address Line 1', address_line2: 'Address Line 2',
   city: 'City', postcode: 'Postcode', licence_number: 'Licence Number', licence_type: 'Licence Type',
   licence_issued_by: 'Issued By', licence_valid_from: 'Valid From', licence_valid_to: 'Valid To',
-  licence_issue_country: 'Issue Country', licence_points: 'Points', licence_restrictions: 'Restrictions',
+  licence_issue_country: 'Issue Country', licence_points: 'Points',
+  licence_restrictions: 'Restrictions', licence_categories: 'Licence Categories',
   date_passed_test: 'Date Passed Test', dvla_check_code: 'DVLA Check Code', dvla_check_date: 'DVLA Check Date',
   dvla_valid_until: 'DVLA Valid Until', poa1_valid_until: 'POA 1 Valid Until', poa2_valid_until: 'POA 2 Valid Until',
   passport_valid_until: 'Passport Valid Until', referral_notes: 'Referral Notes',
@@ -454,6 +443,11 @@ export default function DriverDetailPage() {
   const navigate = useNavigate();
   const user = useAuthStore((s) => s.user);
   const canEdit = hasManagerRole(user?.role);
+  // Document dates are deliberately wider than the rest of the record: whoever
+  // uploads a replacement must be able to date it, or the date gets left for
+  // someone else and forgotten. Scoped by PATCH /drivers/:id/document-dates,
+  // which reaches nothing but the FROM dates.
+  const canEditDates = roleAllowed(user?.role, ['admin', 'manager', 'staff', 'general_assistant']);
 
   const [driver, setDriver] = useState<DriverDetail | null>(null);
   const [hireHistory, setHireHistory] = useState<HireHistoryItem[]>([]);
@@ -563,7 +557,7 @@ export default function DriverDetailPage() {
    */
   async function handleDateChange(field: string, value: string) {
     if (!id) return;
-    await api.put(`/drivers/${id}`, { [field]: value || null });
+    await api.patch(`/drivers/${id}/document-dates`, { [field]: value || null });
     const refreshed = await api.get<{ data: DriverDetail }>(`/drivers/${id}`);
     setDriver(refreshed.data);
     await loadVerificationState();
@@ -850,7 +844,7 @@ export default function DriverDetailPage() {
             onCancel={() => setEditing(false)}
             onDriverUpdate={(d) => { setDriver(d); loadVerificationState(); }}
             auditLog={auditLog}
-            canEdit={canEdit}
+            canEditDates={canEditDates}
             onDateChanged={handleDateChange}
             verificationState={verificationState}
             onVerificationAction={handleVerificationAction}
@@ -1223,7 +1217,7 @@ function DetailsTab({
   onCancel,
   onDriverUpdate,
   auditLog,
-  canEdit,
+  canEditDates,
   onDateChanged,
   verificationState,
   onVerificationAction,
@@ -1238,11 +1232,45 @@ function DetailsTab({
   onCancel: () => void;
   onDriverUpdate: (d: DriverDetail) => void;
   auditLog: AuditLogEntry[];
-  canEdit: boolean;
+  canEditDates: boolean;
   onDateChanged: (field: string, value: string) => Promise<void>;
   verificationState: DriverVerificationState | null;
   onVerificationAction: (action: VerificationAction) => void;
 }) {
+  /**
+   * One evidence group by key.
+   *
+   * Rendered individually rather than mapped over, so cards that describe a
+   * document (Licence Details, Addresses) can sit with it — the page then reads
+   * in the same order as the tracker above, and as the driver's own form.
+   */
+  const evidenceGroups = buildEvidenceGroups(driver);
+  const evidenceDates: Record<string, string | null> = {
+    idenfy_check_date: toInputDate(driver.idenfy_check_date),
+    licence_valid_to: toInputDate(driver.licence_valid_to),
+    dvla_check_date: toInputDate(driver.dvla_check_date),
+    poa1_doc_date: toInputDate(driver.poa1_doc_date),
+    poa2_doc_date: toInputDate(driver.poa2_doc_date),
+    passport_check_date: toInputDate(driver.passport_check_date),
+    passport_expiry: toInputDate(driver.passport_expiry),
+  };
+  const renderGroup = (key: string) => {
+    const spec = evidenceGroups.find(g => g.key === key);
+    if (!spec) return null;
+    return (
+      <EvidenceGroup
+        key={spec.key}
+        spec={spec}
+        files={(driver.files || []) as EvidenceFile[]}
+        driverId={driver.id}
+        canEdit={canEditDates}
+        dates={evidenceDates}
+        onFilesChanged={(files) => onDriverUpdate({ ...driver, files: files as FileAttachment[] })}
+        onDateChanged={onDateChanged}
+      />
+    );
+  };
+
   const field = (label: string, key: string, opts?: { type?: string; mono?: boolean }) => {
     const rawValue = editing ? (editData[key] ?? '') : ((driver as any)[key] ?? '');
     const displayValue = !editing && opts?.type === 'date' ? formatDate(rawValue || null) : rawValue;
@@ -1264,7 +1292,9 @@ function DetailsTab({
     return (
       <div>
         <dt className="text-xs text-gray-500">{label}</dt>
-        <dd className={`text-sm text-gray-900 ${opts?.mono ? 'font-mono' : ''}`}>{displayValue || '—'}</dd>
+        <dd className={`text-sm text-gray-900 ${opts?.mono ? 'font-mono' : ''}`}>
+          {displayValue === 0 || (displayValue !== '' && displayValue != null) ? displayValue : '—'}
+        </dd>
       </div>
     );
   };
@@ -1287,6 +1317,13 @@ function DetailsTab({
       {saveError && (
         <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded text-sm">{saveError}</div>
       )}
+
+      {verificationState && <StageTracker stages={verificationState.stages} />}
+      {verificationState && (
+        <WhatNeedsDoing state={verificationState} onAction={onVerificationAction} />
+      )}
+
+      <IdentityReviewPanel driver={driver} onDriverUpdate={onDriverUpdate} />
 
       {/* Identity */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
@@ -1326,106 +1363,6 @@ function DetailsTab({
           {driver.current_job_started_at && <> &middot; started {formatDate(driver.current_job_started_at)}</>}
         </div>
       )}
-
-      {verificationState && <StageTracker stages={verificationState.stages} />}
-      {verificationState && (
-        <WhatNeedsDoing state={verificationState} onAction={onVerificationAction} />
-      )}
-
-      <IdentityReviewPanel driver={driver} onDriverUpdate={onDriverUpdate} />
-
-      {/* Evidence — image, the date staff set, and the expiry OP derived, all in
-          one block. Replaces the old split where "Document Validity" was one card
-          and "Documents" a separate card 400px below, with nothing tying an image
-          to its date — which is why staff kept forgetting the date when they
-          uploaded a replacement by hand. */}
-      <div className="space-y-4">
-        {buildEvidenceGroups(driver).map((spec) => (
-          <EvidenceGroup
-            key={spec.key}
-            spec={spec}
-            files={(driver.files || []) as EvidenceFile[]}
-            driverId={driver.id}
-            canEdit={canEdit}
-            dates={{
-              idenfy_check_date: toInputDate(driver.idenfy_check_date),
-              licence_valid_to: toInputDate(driver.licence_valid_to),
-              dvla_check_date: toInputDate(driver.dvla_check_date),
-              poa1_doc_date: toInputDate(driver.poa1_doc_date),
-              poa2_doc_date: toInputDate(driver.poa2_doc_date),
-              passport_check_date: toInputDate(driver.passport_check_date),
-              passport_expiry: toInputDate(driver.passport_expiry),
-            }}
-            onFilesChanged={(files) => onDriverUpdate({ ...driver, files: files as FileAttachment[] })}
-            onDateChanged={onDateChanged}
-          />
-        ))}
-      </div>
-
-      {/* Addresses */}
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-        <h3 className="text-sm font-semibold text-gray-700 mb-4">Addresses</h3>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <div>
-            <h4 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Home Address</h4>
-            {editing ? (
-              <div className="space-y-2">
-                <input type="text" value={editData.address_full || ''} onChange={(e) => setEditData({ ...editData, address_full: e.target.value })} placeholder="Full address (from hire form)" className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500" />
-                <p className="text-xs text-gray-400">Or individual fields:</p>
-                <input type="text" value={editData.address_line1 || ''} onChange={(e) => setEditData({ ...editData, address_line1: e.target.value })} placeholder="Line 1" className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500" />
-                <input type="text" value={editData.address_line2 || ''} onChange={(e) => setEditData({ ...editData, address_line2: e.target.value })} placeholder="Line 2" className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500" />
-                <div className="grid grid-cols-2 gap-2">
-                  <input type="text" value={editData.city || ''} onChange={(e) => setEditData({ ...editData, city: e.target.value })} placeholder="City" className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500" />
-                  <input type="text" value={editData.postcode || ''} onChange={(e) => setEditData({ ...editData, postcode: e.target.value })} placeholder="Postcode" className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500" />
-                </div>
-              </div>
-            ) : (
-              <p className="text-sm text-gray-900">{homeAddress || '—'}</p>
-            )}
-          </div>
-          <div>
-            <h4 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Licence Address</h4>
-            {editing ? (
-              <textarea value={editData.licence_address || ''} onChange={(e) => setEditData({ ...editData, licence_address: e.target.value })} placeholder="Address as shown on licence" rows={3} className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500" />
-            ) : (
-              <p className="text-sm text-gray-900">{driver.licence_address || '—'}</p>
-            )}
-            {!editing && homeAddress && driver.licence_address && addressesDiffer(homeAddress, driver.licence_address) && (
-              <p className="text-xs text-amber-600 mt-1">Address differs from home address</p>
-            )}
-          </div>
-        </div>
-      </div>
-
-      {/* Licence Details */}
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-        <h3 className="text-sm font-semibold text-gray-700 mb-4">Licence Details</h3>
-        <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-          {field('Licence Number', 'licence_number', { mono: true })}
-          {field('Type', 'licence_type')}
-          {field('Issued By', 'licence_issued_by')}
-          {field('Country', 'licence_issue_country')}
-          {field('Valid From', 'licence_valid_from', { type: 'date' })}
-          {field('Date Passed Test', 'date_passed_test', { type: 'date' })}
-          {field('Points', 'licence_points', { type: 'number' })}
-          {field('Restrictions', 'licence_restrictions')}
-        </div>
-        {!editing && driver.licence_endorsements && driver.licence_endorsements.length > 0 && (
-          <div className="mt-4 pt-4 border-t border-gray-100">
-            <h4 className="text-xs text-gray-500 mb-2">Endorsements</h4>
-            <div className="space-y-1">
-              {driver.licence_endorsements.map((e, i) => (
-                <div key={i} className="flex items-center gap-3 text-sm">
-                  <span className="font-mono bg-red-50 text-red-700 px-2 py-0.5 rounded text-xs">{e.code}</span>
-                  <span className="text-gray-600">{e.points} pts</span>
-                  {e.date && <span className="text-gray-400">{formatDate(e.date)}</span>}
-                  {e.expiry && <span className="text-gray-400">expires {formatDate(e.expiry)}</span>}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
 
       {/* Insurance Questionnaire — now always shown and editable */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
@@ -1476,44 +1413,125 @@ function DetailsTab({
         )}
       </div>
 
-      {/* Anything uploaded outside the groups above — kept visible so a
-          mis-labelled file is never silently invisible. */}
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 sm:p-6">
-        {/* Uncategorised files */}
-        {(() => {
-          const allCategoryLabels = DOCUMENT_CATEGORIES.flatMap(c => c.fileLabels.map(l => l.toLowerCase()));
-          const uncategorised = (driver.files || []).filter(f =>
-            !f.label || !allCategoryLabels.includes(f.label.toLowerCase())
-          );
-          if (uncategorised.length === 0) return null;
-          return (
-            <div className="mt-4 pt-4 border-t border-gray-100">
-              <h4 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Other Files</h4>
-              <div className="space-y-1.5">
-                {uncategorised.map((file, idx) => (
-                  <div key={idx} className="flex items-center gap-2 text-sm flex-wrap">
-                    <span className="text-gray-400 text-xs">{file.label || 'Unlabelled'}</span>
-                    <button
-                      onClick={async () => {
-                        try {
-                          const { blob, contentType } = await api.blob(`/files/download?key=${encodeURIComponent(file.url)}`);
-                          const blobUrl = URL.createObjectURL(new Blob([blob], { type: contentType }));
-                          window.open(blobUrl, '_blank');
-                          setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
-                        } catch { /* ignore */ }
-                      }}
-                      className="text-ooosh-600 hover:text-ooosh-700 truncate max-w-[60vw] sm:max-w-none"
-                    >
-                      {file.name}
-                    </button>
-                    <span className="text-xs text-gray-400">{formatDate(file.uploaded_at)}</span>
-                  </div>
-                ))}
-              </div>
+      {/* Rendered individually rather than mapped, so the cards that describe a
+          document can sit with it. */}
+      {renderGroup('identity')}
+      {/* Licence Details */}
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+        <h3 className="text-sm font-semibold text-gray-700 mb-4">Licence Details</h3>
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+          {field('Licence Number', 'licence_number', { mono: true })}
+          {field('Type', 'licence_type')}
+          {field('Issued By', 'licence_issued_by')}
+          {field('Country', 'licence_issue_country')}
+          {field('Valid From', 'licence_valid_from', { type: 'date' })}
+          {field('Date Passed Test', 'date_passed_test', { type: 'date' })}
+          {field('Points', 'licence_points', { type: 'number' })}
+          {field('Categories', 'licence_categories')}
+        </div>
+        {!editing && driver.licence_endorsements && driver.licence_endorsements.length > 0 && (
+          <div className="mt-4 pt-4 border-t border-gray-100">
+            <h4 className="text-xs text-gray-500 mb-2">Endorsements</h4>
+            <div className="space-y-1">
+              {driver.licence_endorsements.map((e, i) => (
+                <div key={i} className="flex items-center gap-3 text-sm">
+                  <span className="font-mono bg-red-50 text-red-700 px-2 py-0.5 rounded text-xs">{e.code}</span>
+                  <span className="text-gray-600">{e.points} pts</span>
+                  {e.date && <span className="text-gray-400">{formatDate(e.date)}</span>}
+                  {e.expiry && <span className="text-gray-400">expires {formatDate(e.expiry)}</span>}
+                </div>
+              ))}
             </div>
-          );
-        })()}
+          </div>
+        )}
       </div>
+
+      {/* Addresses */}
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+        <h3 className="text-sm font-semibold text-gray-700 mb-4">Addresses</h3>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div>
+            <h4 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Home Address</h4>
+            {editing ? (
+              <div className="space-y-2">
+                <input type="text" value={editData.address_full || ''} onChange={(e) => setEditData({ ...editData, address_full: e.target.value })} placeholder="Full address (from hire form)" className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500" />
+                <p className="text-xs text-gray-400">Or individual fields:</p>
+                <input type="text" value={editData.address_line1 || ''} onChange={(e) => setEditData({ ...editData, address_line1: e.target.value })} placeholder="Line 1" className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500" />
+                <input type="text" value={editData.address_line2 || ''} onChange={(e) => setEditData({ ...editData, address_line2: e.target.value })} placeholder="Line 2" className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500" />
+                <div className="grid grid-cols-2 gap-2">
+                  <input type="text" value={editData.city || ''} onChange={(e) => setEditData({ ...editData, city: e.target.value })} placeholder="City" className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500" />
+                  <input type="text" value={editData.postcode || ''} onChange={(e) => setEditData({ ...editData, postcode: e.target.value })} placeholder="Postcode" className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500" />
+                </div>
+              </div>
+            ) : (
+              <p className="text-sm text-gray-900">{homeAddress || '—'}</p>
+            )}
+          </div>
+          <div>
+            <h4 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Licence Address</h4>
+            {editing ? (
+              <textarea value={editData.licence_address || ''} onChange={(e) => setEditData({ ...editData, licence_address: e.target.value })} placeholder="Address as shown on licence" rows={3} className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500" />
+            ) : (
+              <p className="text-sm text-gray-900">{driver.licence_address || '—'}</p>
+            )}
+            {!editing && homeAddress && driver.licence_address && addressesDiffer(homeAddress, driver.licence_address) && (
+              <p className="text-xs text-amber-600 mt-1">Address differs from home address</p>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {renderGroup('poa1')}
+      {renderGroup('poa2')}
+      {renderGroup('dvla')}
+      {renderGroup('passport')}
+      {renderGroup('signature')}
+
+      {/* Anything uploaded outside the groups above — kept visible so a
+          mis-labelled file is never silently invisible. Membership is tested
+          against the evidence groups themselves, so a slot added there can't
+          leave its files orphaned here. */}
+      {(() => {
+        const known = new Set(
+          buildEvidenceGroups(driver)
+            .flatMap(g => g.slots)
+            .flatMap(sl => sl.match)
+            .map(m => m.toLowerCase().replace(/[^a-z0-9]/g, ''))
+        );
+        const tokenOf = (v?: string) => (v || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+        const uncategorised = (driver.files || []).filter(f =>
+          !known.has(tokenOf(f.label)) && !known.has(tokenOf((f as { tag?: string }).tag))
+        );
+        // Render nothing at all when there's nothing to show — an empty card is
+        // just a mystery box on the page.
+        if (uncategorised.length === 0) return null;
+        return (
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 sm:p-6">
+            <h4 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Other Files</h4>
+            <div className="space-y-1.5">
+              {uncategorised.map((file, idx) => (
+                <div key={idx} className="flex items-center gap-2 text-sm flex-wrap">
+                  <span className="text-gray-400 text-xs">{file.label || 'Unlabelled'}</span>
+                  <button
+                    onClick={async () => {
+                      try {
+                        const { blob, contentType } = await api.blob(`/files/download?key=${encodeURIComponent(file.url)}`);
+                        const blobUrl = URL.createObjectURL(new Blob([blob], { type: contentType }));
+                        window.open(blobUrl, '_blank');
+                        setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+                      } catch { /* ignore */ }
+                    }}
+                    className="text-ooosh-600 hover:text-ooosh-700 truncate max-w-[60vw] sm:max-w-none"
+                  >
+                    {file.name}
+                  </button>
+                  <span className="text-xs text-gray-400">{formatDate(file.uploaded_at)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Record Info */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">

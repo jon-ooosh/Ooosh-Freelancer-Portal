@@ -17,17 +17,24 @@ export function DocumentThumb({ fileKey, filename, onOpen }: {
 }) {
   const [src, setSrc] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
-
-  const isImage = /\.(jpe?g|png|gif|webp|heic)$/i.test(filename || fileKey);
+  // Decided from the fetched blob's real MIME type, not the filename.
+  //
+  // Guessing by extension gets DVLA checks wrong: they come through as PDFs (and
+  // sometimes with no extension at all), so an extension test either renders a
+  // broken <img> or mislabels a real image. The bytes are authoritative and we
+  // are fetching them anyway.
+  const [isImage, setIsImage] = useState<boolean | null>(null);
 
   useEffect(() => {
-    if (!isImage) return;
     let objectUrl: string | null = null;
     let cancelled = false;
 
     api.blob(`/files/download?key=${encodeURIComponent(fileKey)}`)
-      .then(({ blob }) => {
+      .then(({ blob, contentType }) => {
         if (cancelled) return;
+        const type = contentType || blob.type || '';
+        if (!type.startsWith('image/')) { setIsImage(false); return; }
+        setIsImage(true);
         objectUrl = URL.createObjectURL(blob);
         setSrc(objectUrl);
       })
@@ -37,7 +44,11 @@ export function DocumentThumb({ fileKey, filename, onOpen }: {
       cancelled = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [fileKey, isImage]);
+  }, [fileKey]);
+
+  if (isImage === null && !failed) {
+    return <div className="w-20 h-20 rounded-lg border border-gray-200 bg-gray-100 animate-pulse" />;
+  }
 
   if (!isImage) {
     return (
@@ -48,7 +59,9 @@ export function DocumentThumb({ fileKey, filename, onOpen }: {
         className="w-20 h-20 flex flex-col items-center justify-center gap-1 rounded-lg border border-gray-200 bg-gray-50 text-gray-500 hover:border-ooosh-400 hover:text-ooosh-600"
       >
         <span className="text-xl leading-none">📄</span>
-        <span className="text-[10px] uppercase tracking-wide">PDF</span>
+        <span className="text-[10px] uppercase tracking-wide">
+          {/\.pdf$/i.test(filename || fileKey) ? 'PDF' : 'File'}
+        </span>
       </button>
     );
   }
@@ -72,7 +85,12 @@ export function DocumentThumb({ fileKey, filename, onOpen }: {
       className="w-20 h-20 rounded-lg border border-gray-200 overflow-hidden hover:border-ooosh-400 focus:outline-none focus:ring-2 focus:ring-ooosh-500"
       title={filename || 'Open full size'}
     >
-      <img src={src} alt={filename || 'Document'} className="w-full h-full object-cover" />
+      <img
+        src={src}
+        alt={filename || 'Document'}
+        onError={() => setFailed(true)}
+        className="w-full h-full object-cover"
+      />
     </button>
   );
 }
