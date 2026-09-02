@@ -2959,7 +2959,7 @@ Standalone OP-native module replacing the Monday.com "Storage Clients" board. Oo
 
 The unified "things we're temporarily holding for a client" module. **One engine** (`held_items`), one
 `kind` discriminator — **`incoming` / `lost_property` only since Aug 2026**; `temp_storage` was folded
-into `incoming` (migration 191). Replaces the Monday "Things being sent to us" + "Lost property & temporary storage" boards and
+into `incoming` (migration 195). Replaces the Monday "Things being sent to us" + "Lost property & temporary storage" boards and
 the merch/lost-property JotForms. **Full spec: `docs/HOLDING-MODULE-SPEC.md`.**
 
 **Storage:** migrations 113 (`held_items` + `held_item_locations` seeded picklist), 115
@@ -3126,7 +3126,7 @@ unanswerable.
   historical `notifications.action_url` rows, and the printed box-label QR (`/holding/receipt/:id`)
   is on labels physically in the post. **The rule for this module: never remove a route, only add.**
   Nav collapsed to one "Holding" entry; the route stays forever.
-- **`temp_storage` folded into `incoming`** (migration 191 — 2 rows, both already terminal). It
+- **`temp_storage` folded into `incoming`** (migration 195 — 2 rows, both already terminal). It
   earned nothing: `hold_until` already applied to `incoming` in `holding-reminders.ts`, and the
   `needed_by` derivation already treated the two identically. Its only distinct behaviour was the
   visibility of the "hold until" form field, now shown for any held-for-a-client item and feeding the
@@ -3153,7 +3153,7 @@ unanswerable.
 - **`unknown owner` checkbox was dropped** from the filter bar — the `link_owner` bucket covers the
   live case (terminal unknown items are the only thing it no longer reaches).
 
-**Migrations:** 113/115/116 (initial) + 119 (chase/hold) + **191 (fold temp_storage → incoming)**.
+**Migrations:** 113/115/116 (initial) + 119 (chase/hold) + **195 (fold temp_storage → incoming)**.
 `qrcode` dep added at the initial build. The Aug 2026 counts/receive/handover round added no
 migration — every column it needed already existed.
 

@@ -420,7 +420,7 @@ counts stay stable under a filter. `?kind=` / `?action=` / `?item=` / `?review=1
 and stays permanently: the chase digest's `?review=1` link is in sent inboxes and on historical
 `notifications.action_url` rows, and `/holding/receipt/:id` is printed on box labels in the post.
 
-**`temp_storage` folded into `incoming`** (migration 191). It only ever gated the visibility of the
+**`temp_storage` folded into `incoming`** (migration 195). It only ever gated the visibility of the
 "hold until" field — `holding-reminders.ts` and the `needed_by` derivation already treated the two
 kinds identically. The CHECK constraint still permits the value; the UI never offers it. Two kinds
 remain, split on *does the client know we've got it?*
