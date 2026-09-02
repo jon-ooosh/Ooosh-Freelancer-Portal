@@ -694,7 +694,7 @@ different things and must not share a column.
 
 ##### Phase 4 — extraction ← NEXT (not built)
 
-##### Phase 3 brief (delivered — kept for the deferred items below)
+##### Cockpit brief as specced (delivered — kept for the deferred items below)
 
 Rebuild the DriverDetailPage **Overview tab** (replace it — a second tab
 recreates the disconnection this is meant to kill) into one surface that shows
@@ -727,17 +727,28 @@ made the data honest and complete; Phase 3 makes it usable.
   (already doing PCN notices + cost receipts) at driver documents so the FROM
   date pre-fills from the DVLA summary / POA / licence and staff only confirm.
 
-**Also queued (small, deliberately deferred from Phases 1–2):**
-- **Amber tier for a stale identity check** — `licence_check_valid_until` in the
-  past should be amber ("send them a hire form"), never red. See the gate-policy
-  note above; 186 drivers are affected, so it must not go in the red tier.
-- **POA gate correction** — policy is "both must be valid, independently"
-  (jon, Aug 2026). The router enforces it; the picker/gate only red-flag when
-  BOTH have lapsed, so they are too lenient. 35 drivers would newly red-flag.
-- **Manager override on the quick-assign gate**, with mandatory reason +
-  audit. Today a red driver has NO route past it, which is what forced the
-  16291 workaround. jon: *"no point having an emergency escape hatch if it's
-  glued shut."*
+**STILL OPEN — the last piece, and the two halves must ship TOGETHER:**
+
+- **POA gate correction.** Policy is "both must be valid, independently" (jon,
+  Aug 2026). The router enforces it; the assign picker and the quick-assign gate
+  only red-flag when BOTH have lapsed, so they are too lenient — a driver with
+  one dead POA can be assigned today. **35 drivers newly red-flag**, and a
+  breakdown confirmed all 35 are genuine lapses (both POAs recorded, one
+  expired) with zero never-recorded cases, so it is a straight tightening with
+  no amber sub-case needed.
+- **Manager override on the quick-assign gate**, with mandatory reason + audit.
+  Today a red driver has NO route past the 400, which is what forced the 16291
+  workaround. jon: *"no point having an emergency escape hatch if it's glued
+  shut."*
+
+⚠️ **Do not ship the POA tightening without the override.** Tightening alone
+newly blocks 35 drivers with no way through — recreating exactly the dead end
+that caused the incident this whole body of work came out of.
+
+**Already delivered from the earlier queue:** the amber tier for a stale
+identity check now lives in `driver-verification-state.ts` as an amber action
+("Identity check lapsed … — send a hire form to re-verify"), with a test
+asserting it can never be red.
 
 ##### Driver-level liability model (migration 065, Apr 2026)
 
