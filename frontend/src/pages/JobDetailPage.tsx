@@ -1059,8 +1059,25 @@ function computeDriverValidity(d: {
   today.setHours(0, 0, 0, 0);
   const ms30 = 30 * 24 * 60 * 60 * 1000;
 
-  function check(label: string, raw: string | null | undefined): 'green' | 'amber' | 'red' {
-    if (!raw) return 'amber';
+  /**
+   * `missingIsRed` makes an absent date a hard fail rather than a warning.
+   *
+   * Used for the proofs of address, where "no date on record" means we cannot
+   * evidence the address at all. Licence expiry stays amber-on-missing because
+   * iDenfy frequently fails to extract it, and reding that would block drivers
+   * over an extraction gap rather than a real problem.
+   */
+  function check(
+    label: string,
+    raw: string | null | undefined,
+    missingIsRed = false,
+  ): 'green' | 'amber' | 'red' {
+    if (!raw) {
+      if (!missingIsRed) return 'amber';
+      reasons.push(`${label} not on record`);
+      expiredDocs.push(label);
+      return 'red';
+    }
     const exp = new Date(raw);
     const ms = exp.getTime() - today.getTime();
     if (ms < 0) {
@@ -1084,26 +1101,14 @@ function computeDriverValidity(d: {
   bump(check('Licence', d.licence_valid_to));
   bump(check('DVLA check', d.dvla_valid_until));
 
-  // POA: at least one must be valid. Both expired → red.
-  const poa1 = d.poa1_valid_until ? new Date(d.poa1_valid_until) : null;
-  const poa2 = d.poa2_valid_until ? new Date(d.poa2_valid_until) : null;
-  const poa1Expired = poa1 && poa1 < today;
-  const poa2Expired = poa2 && poa2 < today;
-  if ((!poa1 && !poa2) || (poa1Expired && poa2Expired) || (!poa1 && poa2Expired) || (poa1Expired && !poa2)) {
-    reasons.push('Proof of address expired');
-    expiredDocs.push('Proof of address');
-    bump('red');
-  } else {
-    // Use the latest-expiring POA for the amber check
-    const latest = poa1 && poa2 ? (poa1 > poa2 ? poa1 : poa2) : (poa1 || poa2);
-    if (latest) {
-      const ms = latest.getTime() - today.getTime();
-      if (ms <= ms30) {
-        reasons.push(`POA expires ${latest.toLocaleDateString('en-GB')}`);
-        bump('amber');
-      }
-    }
-  }
+  // BOTH proofs of address must be valid, independently (jon, Aug 2026).
+  //
+  // This used to red-flag only when BOTH had lapsed, so a driver with one dead
+  // POA looked assignable here while the hire-form router — reading the same
+  // policy correctly — was sending them off to re-upload it. Named separately
+  // so staff ask for the one that's actually gone, not both.
+  bump(check('Proof of address 1', d.poa1_valid_until ?? null, true));
+  bump(check('Proof of address 2', d.poa2_valid_until ?? null, true));
 
   if (d.requires_referral && d.referral_status !== 'approved') {
     reasons.push(`Insurance referral ${d.referral_status || 'pending'}`);
@@ -1132,6 +1137,12 @@ function QuickAssignButton({ jobId, jobDate, jobEnd, onCreated, subtle }: { jobI
   const [driverId, setDriverId] = useState('');
   const [driverSearch, setDriverSearch] = useState('');
   const [driverFocus, setDriverFocus] = useState(false);
+  // Manager override of the document gate. Offered only after the gate has
+  // actually refused AND the backend has confirmed this user may override —
+  // there is no point showing staff a door they can't open.
+  const [canOverride, setCanOverride] = useState(false);
+  const [overrideOpen, setOverrideOpen] = useState(false);
+  const [overrideReason, setOverrideReason] = useState('');
   const [vehicleId, setVehicleId] = useState('');
   const [vehicleSearch, setVehicleSearch] = useState('');
   const [vehicleFocus, setVehicleFocus] = useState(false);
@@ -1157,10 +1168,15 @@ function QuickAssignButton({ jobId, jobDate, jobEnd, onCreated, subtle }: { jobI
   function resetForm() {
     setDriverId(''); setDriverSearch('');
     setVehicleId(''); setVehicleSearch('');
+    setCanOverride(false); setOverrideOpen(false); setOverrideReason('');
   }
 
   async function handleSubmit() {
     if (!driverId) { setError('Select a driver'); return; }
+    if (overrideOpen && overrideReason.trim().length < 10) {
+      setError('Give a reason for the override — at least a few words, it goes in the audit log.');
+      return;
+    }
     setSaving(true);
     setError('');
     try {
@@ -1170,11 +1186,18 @@ function QuickAssignButton({ jobId, jobDate, jobEnd, onCreated, subtle }: { jobI
         job_id: jobId,
         hire_start: hireStart || undefined,
         hire_end: hireEnd || undefined,
+        override_reason: overrideOpen ? overrideReason.trim() : undefined,
       });
       setOpen(false);
       resetForm();
       onCreated();
     } catch (err) {
+      // A document-gate refusal tells us whether this user may override it, so
+      // the escape hatch is offered exactly when it can actually be opened.
+      const detail = (err as { body?: { code?: string; can_override?: boolean } })?.body;
+      if (detail?.code === 'driver_documents_expired' && detail.can_override) {
+        setCanOverride(true);
+      }
       setError(err instanceof Error ? err.message : 'Failed');
     } finally {
       setSaving(false);
@@ -1236,6 +1259,46 @@ function QuickAssignButton({ jobId, jobDate, jobEnd, onCreated, subtle }: { jobI
             <p className="text-xs text-gray-500 mb-4">Vehicle is optional — assign a driver now and pick the vehicle during prep.</p>
 
             {error && <div className="text-xs text-red-600 bg-red-50 px-3 py-2 rounded mb-3">{error}</div>}
+
+            {/* The escape hatch. It exists because the gate previously had no
+                route past it at all — a driver whose paperwork was genuinely in
+                order but whose stored dates said otherwise simply could not be
+                assigned, and the hire went out under someone else's name
+                instead (job 16291). Manager-tier, reason mandatory, audited. */}
+            {canOverride && (
+              <div className="mb-3 rounded-lg border border-amber-300 bg-amber-50 p-3">
+                {!overrideOpen ? (
+                  <button
+                    type="button"
+                    onClick={() => setOverrideOpen(true)}
+                    className="text-xs font-medium text-amber-900 underline"
+                  >
+                    Assign anyway (manager override)
+                  </button>
+                ) : (
+                  <>
+                    <p className="text-xs text-amber-900 mb-2">
+                      You&rsquo;re assigning a driver whose documents Ooosh considers out of date.
+                      Say why &mdash; it goes in the audit log against this driver and hire.
+                    </p>
+                    <textarea
+                      value={overrideReason}
+                      onChange={(e) => setOverrideReason(e.target.value)}
+                      rows={2}
+                      placeholder="e.g. seen paper DVLA summary in person, dated today — updating record after"
+                      className="w-full rounded border border-amber-300 px-2 py-1.5 text-xs focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => { setOverrideOpen(false); setOverrideReason(''); }}
+                      className="mt-1 text-xs text-amber-800 underline"
+                    >
+                      Cancel override
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
 
             <div className="space-y-3">
               {/* Driver picker — searchable, with traffic-light validity */}

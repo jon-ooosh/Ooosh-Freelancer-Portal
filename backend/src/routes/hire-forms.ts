@@ -836,6 +836,17 @@ const quickAssignSchema = z.object({
   hire_start: z.string().optional(),
   hire_end: z.string().optional(),
   client_email: z.string().email().optional(),
+  /**
+   * Manager override for the document gate.
+   *
+   * The gate had NO route past it, which is what forced the workaround on job
+   * 16291 — a driver whose paperwork was genuinely in order but whose stored
+   * dates said otherwise simply could not be assigned, so the hire went out
+   * under someone else's name. An escape hatch nobody can open isn't one.
+   *
+   * Manager-tier, reason mandatory, written to the audit log.
+   */
+  override_reason: z.string().min(10).max(500).optional(),
 });
 
 router.post('/quick-assign', authenticate, validate(quickAssignSchema), async (req: AuthRequest, res: Response) => {
@@ -868,15 +879,31 @@ router.post('/quick-assign', authenticate, validate(quickAssignSchema), async (r
     if (isExpired(dr.licence_valid_to)) expiredDocs.push('Licence');
     if (isExpired(dr.dvla_valid_until)) expiredDocs.push('DVLA check');
     // POA: at least one needs to be valid (matches the existing validator).
-    const poa1Expired = isExpired(dr.poa1_valid_until);
-    const poa2Expired = isExpired(dr.poa2_valid_until);
-    if (poa1Expired && poa2Expired) expiredDocs.push('Proof of address');
+    // BOTH proofs of address must be valid, independently (jon, Aug 2026).
+    //
+    // This gate previously only fired when BOTH had lapsed, which let a driver
+    // with one dead POA through — while the hire-form router, reading the same
+    // policy correctly, sent them off to re-upload. 35 drivers newly red-flag,
+    // all confirmed genuine lapses (both recorded, one expired). Named
+    // separately so staff know which one to ask for back rather than
+    // re-collecting both.
+    if (isExpired(dr.poa1_valid_until) || !dr.poa1_valid_until) expiredDocs.push('Proof of address 1');
+    if (isExpired(dr.poa2_valid_until) || !dr.poa2_valid_until) expiredDocs.push('Proof of address 2');
 
-    if (expiredDocs.length > 0) {
+    // The override deliberately covers the DOCUMENT gate only. Identity review
+    // and insurance referral below are somebody else's decision to make — a
+    // manager cannot self-serve past "the insurer hasn't answered" or "nobody
+    // has confirmed this is the person on the licence".
+    const overrideReason = (f.override_reason || '').trim();
+    const canOverride = MANAGER_ROLES.includes(req.user?.role as never);
+    if (expiredDocs.length > 0 && !(overrideReason && canOverride)) {
       return res.status(400).json({
         error: `Cannot assign ${dr.full_name} — expired documents: ${expiredDocs.join(', ')}. Send a fresh hire form to refresh.`,
         code: 'driver_documents_expired',
         expiredDocs,
+        // Tells the frontend whether to offer the override, so a member of
+        // staff without the tier isn't shown a door they can't open.
+        can_override: canOverride,
       });
     }
     // Photo ID review sits alongside the insurance referral: same "a human must
@@ -966,6 +993,29 @@ router.post('/quick-assign', authenticate, validate(quickAssignSchema), async (r
         req.user!.id,
       ]
     );
+
+    // Audit an overridden assignment. Written after the row exists so the log
+    // points at a real assignment, and kept loud: this is a manager knowingly
+    // putting a driver on a hire whose paperwork the system considers stale.
+    if (overrideReason && expiredDocs.length > 0) {
+      await query(
+        `INSERT INTO audit_log (user_id, entity_type, entity_id, action, new_values)
+         VALUES ($1, 'driver', $2, 'override_document_gate', $3)`,
+        [
+          req.user!.id, f.driver_id,
+          JSON.stringify({
+            assignment_id: result.rows[0].id,
+            job_id: f.job_id,
+            expired_documents: expiredDocs,
+            reason: overrideReason,
+          }),
+        ],
+      ).catch(err => console.error('[hire-forms] override audit failed:', err));
+      console.warn(
+        `[hire-forms] Document gate OVERRIDDEN for driver ${f.driver_id} on job ${f.job_id} ` +
+        `by ${req.user?.email} — expired: ${expiredDocs.join(', ')} — reason: ${overrideReason}`,
+      );
+    }
 
     // Also create an excess record.
     //

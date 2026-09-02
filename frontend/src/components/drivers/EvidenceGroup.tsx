@@ -214,7 +214,8 @@ export function EvidenceGroup({
         </div>
       </div>
 
-      <div className="flex flex-wrap gap-4 mb-4">
+      <div className="flex flex-wrap items-start gap-x-8 gap-y-4">
+      <div className="flex flex-wrap gap-4">
         {spec.slots.map((slot) => {
           const slotFiles = filesForSlot(files, slot);
           const newest = latest(slotFiles);
@@ -247,7 +248,7 @@ export function EvidenceGroup({
       </div>
 
       {spec.fromField && (
-        <div className="flex flex-wrap items-end gap-4 pt-3 border-t border-gray-100">
+        <div className="flex flex-wrap items-end gap-4">
           <label className="block">
             <span className="block text-[11px] text-gray-500 mb-0.5">{spec.fromLabel}</span>
             <input
@@ -281,6 +282,7 @@ export function EvidenceGroup({
           )}
         </div>
       )}
+      </div>
 
       {askDate && spec.fromField && (
         <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3">
