@@ -1644,7 +1644,8 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     // Get OP excess data for this job
     const excessResult = await query(
       `SELECT je.*, d.full_name AS driver_name, fv.reg AS vehicle_reg,
-              COALESCE(d.full_name, je.client_name, 'Job-level excess') AS display_name
+              COALESCE(d.full_name, je.client_name, 'Job-level excess') AS display_name,
+              (je.notes LIKE '%[Auto-covered by account]%') AS auto_covered
        FROM job_excess je
        LEFT JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
        LEFT JOIN drivers d ON d.id = vha.driver_id
@@ -2023,6 +2024,18 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
 
     // If this is an excess payment, update the excess record too
     if (payment_type === 'excess' && excess_id) {
+      // Card-machine EXCESS payments print a slip that needs scanning for audit
+      // — same rule as routes/excess.ts (Worldpay/Amex only; Stripe has an
+      // electronic trail, cash/BACS produce no card receipt). Deliberately gated
+      // on payment_type === 'excess' by living inside this branch: hire deposits
+      // and balances go through the same terminal but are NOT part of the excess
+      // receipt trail, so they must never raise this to-do.
+      //
+      // This route has no receipt-upload step of its own — the flag is what
+      // makes the amber banner and the "Upload Receipt Scan" action appear under
+      // Manage, which is where staff attach it (with the phone/QR handoff).
+      const needsReceipt = payment_method === 'worldpay' || payment_method === 'amex';
+
       await query(
         `UPDATE job_excess SET
           excess_amount_taken = COALESCE(excess_amount_taken, 0) + $1,
@@ -2033,9 +2046,11 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
           payment_method = $2,
           payment_reference = $3,
           payment_date = NOW(),
+          receipt_required = CASE WHEN $5::boolean THEN TRUE ELSE receipt_required END,
+          receipt_uploaded_at = CASE WHEN $5::boolean THEN NULL ELSE receipt_uploaded_at END,
           updated_at = NOW()
         WHERE id = $4`,
-        [amount, payment_method, payment_reference || null, excess_id]
+        [amount, payment_method, payment_reference || null, excess_id, needsReceipt]
       );
 
       // Promote the excess requirement to 'done' if coverage is now met

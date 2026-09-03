@@ -1054,6 +1054,32 @@ export function startScheduler() {
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: Pre-auth expiry reconciliation scheduled daily at 09:40 Europe/London');
 
+  // ── Stripe → OP pre-auth discovery ──────────────────────────────────────
+  // Daily at 09:50 Europe/London, right after the 09:40 expiry sweep — that one
+  // reconciles holds OP already knows about; this one finds holds OP NEVER LEARNED
+  // ABOUT. A missed charge self-heals (it leaves a HireHop deposit for the Money-tab
+  // reconciliation to match), but a pre-auth creates no HH artefact at all, so until
+  // now a dropped portal webhook meant a live hold on a client's card that was
+  // completely invisible to us (job 16523, Aug 2026). Asks Stripe directly for
+  // requires_capture excess pre-auths, self-heals the ones on live hires via the real
+  // payment-event endpoint, and emails info@ about anything it deliberately left alone.
+  cron.schedule('50 9 * * *', async () => {
+    try {
+      const { reconcileStripePreauths } = await import('../services/stripe-preauth-reconciler');
+      const r = await reconcileStripePreauths();
+      if (r.skipped) {
+        console.log(`Scheduler: Stripe pre-auth discovery skipped (${r.skipped})`);
+      } else if (r.candidates > 0) {
+        console.log(
+          `Scheduler: Stripe pre-auth discovery — ${r.candidates} orphan(s): ${r.healed} healed, ${r.alerted} alerted, ${r.failed} failed (examined ${r.examined})`,
+        );
+      }
+    } catch (err) {
+      console.error('Scheduler: Stripe pre-auth discovery failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: Stripe pre-auth discovery scheduled daily at 09:50 Europe/London');
+
   // ── Stripe reimbursement silent-failure detector ────────────────────────
   // Daily at 09:42 Europe/London. Safety net for the "no silent failures"
   // principle: catch any stripe_gbp reimbursement recorded in OP that has NO

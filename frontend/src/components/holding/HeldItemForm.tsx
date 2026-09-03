@@ -25,8 +25,10 @@ import type { HeldItem, HeldItemKind, HeldItemLocation } from '../../../../share
 
 const PURPLE = '#7B5EA7';
 const GIVEN = '__given__';
+// `temp_storage` is folded into `incoming` (Aug 2026) — kept in the map for
+// historical rows, never offered as a choice. See shared/types HeldItemKind.
 const KIND_LABEL: Record<HeldItemKind, string> = {
-  incoming: 'Delivery', temp_storage: 'Temp storage', lost_property: 'Lost property',
+  incoming: '📦 Held for a client', temp_storage: '📦 Held for a client', lost_property: '🔍 Lost property',
 };
 
 async function uploadPhotos(
@@ -41,15 +43,20 @@ async function uploadPhotos(
   finally { setBusy(false); }
 }
 
-export function HeldItemForm({ variant, kinds, locations, initial, onDone, onCancel }: {
+export function HeldItemForm({ variant, kinds, locations, initial, arrivedDefault, onDone, onCancel }: {
   variant: 'desktop' | 'mobile';
   kinds: HeldItemKind[];          // selectable kinds (1 = fixed, >1 = toggle buttons)
   locations: HeldItemLocation[];
+  // Seed the "it's already here" toggle. Mobile quick-log means you're holding
+  // the box, so it defaults on there; the desktop "+ Log Item" is usually a
+  // forward declaration, so it defaults off — but the desktop Receive flow
+  // passes true when it falls through to "not listed, log a new one".
   initial?: {                     // optional prefill (e.g. logging from a job's Overview)
     hh_job_number?: string;
     owner_organisation_id?: string | null;
     org_name?: string;
   };
+  arrivedDefault?: boolean;
   onDone: () => void;             // saved (and notify, if any, finished)
   onCancel: () => void;
 }) {
@@ -70,6 +77,11 @@ export function HeldItemForm({ variant, kinds, locations, initial, onDone, onCan
     storage_location_id: '', storage_location_text: '',
     expected_date: '', import_charge_flag: '', hold_until: '', notes: '',
   });
+  // "Already here" — the difference between declaring an expected delivery and
+  // booking one in. Without it every item logged here was born `expected`, so
+  // an arrived-but-never-logged delivery could not be backfilled from /holding.
+  const [arrived, setArrived] = useState(arrivedDefault ?? variant === 'mobile');
+  const [receivedCount, setReceivedCount] = useState('');
   const [notifyClient, setNotifyClient] = useState(true);
   const [photos, setPhotos] = useState<{ name: string; url: string; type: string }[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -79,6 +91,10 @@ export function HeldItemForm({ variant, kinds, locations, initial, onDone, onCan
 
   const isLost = f.kind === 'lost_property';
   const givenStraight = f.storage_location_id === GIVEN;
+  // Only deliveries have an "expected vs here" distinction — temp storage and
+  // lost property are, by definition, already in the building.
+  const canBeExpected = f.kind === 'incoming' && !givenStraight;
+  const isHere = !canBeExpected || arrived;
   const somewhereElse = locations.find((l) => l.id === f.storage_location_id)?.name === 'Somewhere else';
   // Can't notify with nobody to email, and no point if it's been handed over.
   const canNotify = !f.owner_unknown && !givenStraight;
@@ -91,6 +107,12 @@ export function HeldItemForm({ variant, kinds, locations, initial, onDone, onCan
         owner_unknown: f.owner_unknown,
         description: f.description || null,
         box_count: !isLost && f.box_count ? Number(f.box_count) : null,
+        // received_count is what flips the record from `expected` to `stored`
+        // server-side (routes/holding.ts). Blank "how many arrived" falls back
+        // to the declared count, else 1 — "it's here" always means at least one.
+        received_count: !isLost && isHere
+          ? (receivedCount ? Number(receivedCount) : (f.box_count ? Number(f.box_count) : 1))
+          : null,
         owner_organisation_id: f.owner_unknown ? null : f.owner_organisation_id,
         owner_person_id: f.owner_unknown ? null : f.owner_person_id,
         client_name_text: f.owner_unknown ? null : (f.client_name_text || null),
@@ -102,7 +124,7 @@ export function HeldItemForm({ variant, kinds, locations, initial, onDone, onCan
         status: givenStraight ? 'given_to_client' : undefined,
         expected_date: f.kind === 'incoming' && f.expected_date ? f.expected_date : null,
         import_charge_flag: f.kind === 'incoming' && f.import_charge_flag ? f.import_charge_flag : null,
-        hold_until: f.kind === 'temp_storage' && f.hold_until ? f.hold_until : null,
+        hold_until: !isLost && f.hold_until ? f.hold_until : null,
         notes: f.notes || null,
         photos,
       });
@@ -137,10 +159,35 @@ export function HeldItemForm({ variant, kinds, locations, initial, onDone, onCan
 
       {!isLost && (
         <div className={mobile ? '' : 'grid grid-cols-2 gap-3'}>
-          <div><label className={labelCls}>Number of boxes/items</label>
+          <div><label className={labelCls}>Boxes/items expected</label>
             <input className={inputCls} type="number" inputMode="numeric" value={f.box_count} onChange={(e) => setF({ ...f, box_count: e.target.value })} /></div>
-          {!mobile && f.kind === 'incoming' && <div><label className={labelCls}>Expected date</label>
+          {!mobile && f.kind === 'incoming' && !arrived && <div><label className={labelCls}>Expected date</label>
             <input className={inputCls} type="date" value={f.expected_date} onChange={(e) => setF({ ...f, expected_date: e.target.value })} /></div>}
+        </div>
+      )}
+
+      {/* Expected vs here — the toggle that lets a delivery be booked straight
+          in (backfilling one that arrived without being logged) rather than
+          only ever declared as a future arrival. */}
+      {canBeExpected && (
+        <div className="border border-slate-200 rounded-lg p-3 space-y-2">
+          <label className="flex items-center gap-2 text-sm text-slate-700">
+            <input type="checkbox" className="w-4 h-4" checked={arrived} onChange={(e) => setArrived(e.target.checked)} />
+            <span className="font-medium">It's already here</span>
+          </label>
+          {arrived ? (
+            <div>
+              <label className={labelCls}>How many arrived?</label>
+              <input className={inputCls} type="number" inputMode="numeric" min="0" value={receivedCount}
+                onChange={(e) => setReceivedCount(e.target.value)}
+                placeholder={f.box_count ? `All ${f.box_count}` : 'e.g. 3'} />
+              <p className="text-[11px] text-slate-400 mt-1">
+                Leave blank if the whole lot turned up. Fewer than expected is fine — the rest shows as outstanding.
+              </p>
+            </div>
+          ) : (
+            <p className="text-[11px] text-slate-400">Logs it as expected — book it in when it turns up.</p>
+          )}
         </div>
       )}
 
@@ -193,8 +240,11 @@ export function HeldItemForm({ variant, kinds, locations, initial, onDone, onCan
           </select></div>
       )}
 
-      {f.kind === 'temp_storage' && (
-        <div><label className={labelCls}>Hold until (optional)</label>
+      {/* Parked-until date — the field temp_storage used to exist for. Applies
+          to anything we're holding for a client (kit left between tour legs,
+          flightcases awaiting a courier). Drives the "Time's up" bucket. */}
+      {!isLost && !mobile && (
+        <div><label className={labelCls}>Hold until / review (optional)</label>
           <input className={inputCls} type="date" value={f.hold_until} onChange={(e) => setF({ ...f, hold_until: e.target.value })} />
           <p className="text-[11px] text-slate-400 mt-1">We'll remind the team 3 days before this date.</p></div>
       )}

@@ -92,6 +92,7 @@ const BASE_SELECT = `
     d.licence_points AS driver_points,
     d.requires_referral AS driver_requires_referral,
     d.referral_status AS driver_referral_status,
+    d.identity_check_status AS driver_identity_check_status,
     d.calculated_excess_amount AS driver_calculated_excess,
     p.first_name || ' ' || p.last_name AS freelancer_name,
     je.id AS excess_id,
@@ -100,7 +101,8 @@ const BASE_SELECT = `
     je.excess_amount_taken,
     je.amount_held,
     je.amount_released,
-    je.dispute_status
+    je.dispute_status,
+    (je.notes LIKE '%[Auto-covered by account]%') AS excess_auto_covered
   FROM vehicle_hire_assignments vha
   LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
   LEFT JOIN drivers d ON d.id = vha.driver_id

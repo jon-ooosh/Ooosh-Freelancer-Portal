@@ -506,6 +506,286 @@ tends to get this wrong on first pass, so it's pinned here:
 with the SAME `vehicle_id`. The Allocations UI cascades van picks
 across siblings so staff only picks once per van slot.
 
+##### Document validity: FROM dates in, derived expiry out (migration 192, Aug 2026)
+
+**Staff and the hire form set ONLY a FROM date** — the date on the document, or
+the day the check was run. OP derives every expiry and writes it to the
+`*_valid_until` columns on **every** driver write. Both dates are displayed.
+
+| group | FROM (input) | doc's own expiry (input) | derived window (OP-written) |
+|---|---|---|---|
+| licence | `idenfy_check_date` | `licence_valid_to` | `licence_check_valid_until` |
+| dvla | `dvla_check_date` | — | `dvla_valid_until` |
+| poa1 | `poa1_doc_date` | — | `poa1_valid_until` |
+| poa2 | `poa2_doc_date` | — | `poa2_valid_until` |
+| passport | `passport_check_date` | `passport_expiry` | `passport_valid_until` |
+
+Windows: licence = `min(from+90d, licence_valid_to)`; dvla = `from+30d`;
+poa = `from+90d`; passport = `min(from+30d, passport_expiry)`.
+
+**`services/driver-validity.ts` is THE definition — never re-implement it.**
+`computeDriverValidity()` computes the windows, `persistableWindows()` returns
+the columns to store, `touchesValidity()` says whether a write needs
+re-deriving, `backfillFromDates()` reconciles a caller that knows only the
+expiry. The hire-form router (`analyzeDocuments`) delegates to it, so the router
+and the staff UI physically cannot disagree.
+
+**NEVER write a `*_valid_until` column directly, and never add a new writer.**
+Set the FROM date and let the derivation run. They stay real stored columns
+(rather than moving the arithmetic into the app) so the SQL consumers — the
+drivers-list status CASE, the assign picker, the quick-assign gate — keep
+working unchanged and simply become correct.
+
+**The incident (job 16291, Peter Christopherson, 19 Aug 2026).** Validity was
+stored in two families of columns with six consumers split across them and
+nothing keeping them in step: the router and the driver-detail pills read the
+CHECK dates, while the drivers list, the assign picker and the hard book-out
+gate read the VALID-UNTIL columns. Neither `dvla_valid_until` nor
+`licence_valid_to` was editable anywhere in the OP UI, and nothing except the
+driver's own DVLA upload ever wrote `dvla_valid_until` — so every staff-side fix
+moved the displayed pill and left the gate reading a stale value. Peter showed
+green pills on his own page and was hard-400'd out of the assign picker, with no
+field in the UI able to reconcile them.
+
+**Integrity guard.** A check date with no licence identity behind it
+(`licence_issued_by` blank) yields **no window** — `trusted: false`, and
+`licence_check_valid_until` NULL. A DENIED iDenfy check writes a checkDate with
+no document data, and the detail page was rendering that as a confident green
+expiry for a driver with no licence, no name and no files
+(`manjagoproduction@`, Aug 2026). Any new surface reading licence validity must
+go through the service so it inherits this.
+
+**Frontend mirror:** `frontend/src/lib/driverStatus.ts` `deriveDriverStatus()`
+is the single status-badge definition, mirroring the SQL CASE in
+`routes/drivers.ts`. It was implemented twice and the copies disagreed (the list
+checked DVLA, the detail page didn't). Keep the two in step — the `/drivers`
+filter pills run through the SQL, so a mismatch means clicking "Expired" returns
+rows badged "Approved".
+
+**Gate policy is separate from the date model, and deliberately unchanged.** The
+picker and book-out gate still red-flag on `licence_valid_to` (the physical
+licence expiry), NOT on `licence_check_valid_until`. Tightening that would
+newly block **186** drivers whose iDenfy check has aged past 90 days — over half
+the signed roster, because most people hire once and never return. The honest
+split, per jon: a dead licence is **red** (they cannot drive); a stale *check* is
+**amber** ("send them a hire form"). Don't flip the check window into the red
+tier.
+
+##### Identity review — staff adjudication of a failed face match (migration 193, Aug 2026)
+
+`drivers.identity_check_status`: `NULL` (never flagged — the overwhelming case)
+/ `needs_review` / `accepted` / `rejected`. Owned by
+`services/identity-review.ts`.
+
+**What was thrown away.** `idenfy-webhook.js` computed the full verdict —
+`faceValid`, `autoFace`/`manualFace`, `autoDocument`/`manualDocument`,
+`mismatchTags`, `fraudTags`, `suspicionReasons` — into a local object and
+persisted none of it, and saved only `fileUrls.FRONT`/`BACK` while discarding
+the **selfie** in the same payload. The face-match result, the entire point of
+the check, had zero effect on anything. Two opposite failures:
+
+- **DENIED** → no document data, so OP got a bare check date +
+  `overall_status='Stuck'`. The router refuses to trust that shape, and
+  `calculateNextStep` has **no branch for "we tried and it failed"** — every
+  such path falls through to `{ step: 'idenfy' }`. The driver re-verified,
+  failed identically, and was sent again, indefinitely. `'Stuck'` was written
+  and never read by the router.
+- **SUSPECTED** → document data IS returned, so everything wrote and the driver
+  sailed through despite the face not matching.
+
+**The gate.** `needs_review`/`rejected` blocks `POST /hire-forms/quick-assign`
+(`driver_identity_unverified`) and withholds the hire agreement via
+`isDriverAuthorisedForAgreement` — the same treatment as a pending insurance
+referral, so staff meet ONE pattern for "a human must decide". It is a
+**separate flag, not `requires_referral`**, because the decider differs: an
+insurer answering over days about risk, versus whoever is on the desk comparing
+two photographs. Alert to info@ + will@ fires **once** (atomic claim on
+`identity_alert_sent_at`, released on failure — same discipline as
+`sendReferralAlert`).
+
+**Conventions:**
+- **Route every new "is this driver authorised" surface through
+  `isIdentityAuthorised()`** rather than re-deriving the status inline.
+- **It fails OPEN** on an unknown/absent status, matching the referral arm — a
+  data gap must never silently block a driver.
+- **Only an explicit non-match trips review** (`faceNeedsReview`). An absent
+  face result is NOT a failure: a passport-only session runs no comparison, so
+  treating "no result" as a mismatch would flag every second-document upload.
+- **A staff decision wins.** Once accepted/rejected, a repeat webhook carrying
+  the same stale verdict does not re-open it.
+- **The hire-form app cannot set the status** — it reports what iDenfy said, OP
+  decides what that means. `identity_check_status` is stripped from the
+  `/driver-verification/update` whitelist for the same reason `referral_status`
+  is (Meadham / HH 16330).
+- Resolution (`POST /drivers/:id/resolve-identity`) is **STAFF_ROLES, not
+  manager-only** — it is a visual comparison anyone on the desk can make, and
+  gating it narrowly would rebuild the bottleneck the selfie capture exists to
+  remove.
+
+**The loop-breaker.** `POST /driver-verification/next-step` returns a terminal
+**`manual-review`** step BEFORE `calculateNextStep` runs, so a flagged driver
+stops rather than being handed back to the machine that just rejected them.
+`/status` reports `manual_review` so ProcessingHub stops polling for a state
+only a human can change. ⚠️ **ProcessingHub's `stepMapping[nextStep] || 'poa1'`
+silently sends an unrecognised step to the POA upload page** — any new router
+step MUST be added to BOTH map sites in `ProcessingHub.js`.
+
+**`drivers.current_job_number`** — the HH job whose form the driver is currently
+completing, captured at iDenfy session creation. Closes the blind spot where a
+driver part-way through has no `vehicle_hire_assignments` row yet (created on
+signature), so Hire History is empty and nothing said which hire a stuck driver
+belonged to. Surfaces as `In Progress · #16291` on `/drivers`.
+
+**Open / deliberately left:** the passport branch
+(`updateBoardAWithPassportData`) returns early when not approved, so a failed
+**passport** face check still writes nothing to OP. POA policy is "both must be
+valid, independently" (jon, Aug 2026) — the router already enforces it, but the
+picker/gate only red-flag when BOTH have lapsed, so they are currently too
+lenient; tightening would newly red-flag 35 drivers.
+
+##### Driver verification cockpit ✅ SHIPPED (Aug 2026)
+
+The DriverDetailPage Overview tab, rebuilt so staff see what the driver and the
+router see. `services/driver-verification-state.ts` derives the stage tracker
+(Contact → Insurance Qs → Identity → POA1 → POA2 → DVLA/Passport → Signature)
+and the "what needs doing" list from the SAME `driver-validity` engine the
+hire-form router uses — that equivalence is the point, and any new surface
+answering "where is this driver up to" must go through it rather than re-deriving.
+
+**Page order mirrors the hire form**, which mirrors the tracker: contact →
+insurance questionnaire → identity evidence → licence details → addresses →
+POA1/POA2 → DVLA → passport → signature. Evidence groups are rendered
+individually (`renderGroup(key)`), NOT mapped, precisely so the cards that
+describe a document sit with it. Keep that shape if you add a group.
+
+**Evidence groups are keyed by the WINDOW they share**, not one row per file:
+licence front + back + selfie sit behind a single identity check, so the date is
+asked once. POA1 and POA2 stay separate — both required, independently lapsing.
+
+**Conventions:**
+- **Slot matching is on a normalised token** (tag first, then label) — the same
+  lesson as `DOC_MATCH_TOKENS`: upload paths spell things `licence_front` /
+  `license_front` / `Licence Front`, and exact-string matching silently drops
+  images. `buildEvidenceGroups` is now the single source of those spellings; the
+  "Other Files" list derives from it, so a new slot can't orphan its files.
+- **`DocumentThumb` decides image-vs-file from the fetched blob's MIME type**,
+  never the filename. DVLA checks arrive as PDFs (sometimes with no extension),
+  so an extension test rendered a broken `<img>`. PDFs preview their first page
+  through the browser's own viewer (`<embed>` at page size, CSS-scaled into the
+  80px box) — no pdf.js dependency, with the generic icon underneath as the
+  fallback.
+- **Uploading prompts for the FROM date — amber, with a Skip.** Refusing to
+  store a document because someone can't read a date off it would repeat the
+  hard-gate mistake. A licence front also prompts for the back.
+- **Document dates are STAFF-editable via `PATCH /drivers/:id/document-dates`**,
+  while the rest of the record stays manager-tier on `PUT /drivers/:id` (which
+  can also move penalty points, insurance status and referral flags). That split
+  is deliberate: whoever uploads a replacement must be able to date it, or the
+  date gets left for someone else and forgotten — the original complaint. Don't
+  "simplify" by widening the whole PUT.
+- **A stale identity check raises an AMBER action, never red** — there is a test
+  asserting this. See the gate-policy note above: red would block 186 drivers.
+
+**Sep 2026 follow-ups:**
+- **A missing DVLA document is a HIRE-FORM upload gap, not a rendering bug.** Steven
+  Aldridge (job 16116) had a check date, code and points but no file and no "Other
+  Files" entry — the file was never sent. The hire form uploaded the DVLA evidence
+  copy only on its Continue click, while the DATA landed server-side during
+  validation, so the router already treated the step as done; a reload between the
+  two skipped straight to Signature. Fixed on the hire-form side (upload fires at
+  validation). Diagnostic: `drivers.files` has no `dvla%` tag AND the Netlify
+  `monday-integration` log shows no `upload-file-board-a` for the driver. The
+  cockpit cannot render what was never stored; check the index before the UI.
+- **Single-slot groups render no caption under the thumbnail** — it repeated the
+  card title. The Identity group keeps Front / Back / Selfie because there it
+  disambiguates.
+- **POA provider is STAFF-editable** (`PATCH /drivers/:id/document-dates` also
+  takes `poa1_provider` / `poa2_provider`, via `textField` on the group spec). The
+  hire form sets it when the driver's document is read, but a staff Replace only
+  stores a file, so "— Barclays" stayed put after a different statement was
+  uploaded over it.
+- **`addressesDiffer` tests the MATERIAL difference** — same UK postcode and same
+  leading house number — because the home and licence addresses are two AI reads
+  of two different documents and the licence read tends to repeat the postcode.
+  No postcode on either side falls back to a de-duplicated word-set comparison.
+  Display only; nothing gates on it.
+
+**Fixed in the same pass:** `{value || '—'}` rendered 0 penalty points as a
+dash (0 is falsy) — a clean licence looked like missing data. `licence_type` and
+`licence_categories` now come from iDenfy's `driverLicenseCategory`, which the
+webhook has always read (to test for PROVISIONAL/LEARNER) and always discarded,
+which is why "Type" read "—" on every driver. `licence_restrictions` still has
+no writer and is dropped from the UI rather than shown as a permanent dash —
+categories (what you may drive) and restrictions (conditions on you) are
+different things and must not share a column.
+
+##### Phase 4 — extraction ← NEXT (not built)
+
+##### Cockpit brief as specced (delivered — kept for the deferred items below)
+
+Rebuild the DriverDetailPage **Overview tab** (replace it — a second tab
+recreates the disconnection this is meant to kill) into one surface that shows
+what the driver and the system see, rather than making staff reassemble it.
+jon's framing: *"make us see what they/the system sees, rather than try to bodge
+it together."*
+
+**Why:** staff kept forgetting to update validity dates because the layout is
+spread out and disconnected — "Document Validity" is one card, "Documents" is a
+separate card 400px below, and nothing ties an image to its date. Phases 1–2
+made the data honest and complete; Phase 3 makes it usable.
+
+- **Stage tracker** across the top: Contact → Insurance Qs → Identity → POA1 →
+  POA2 → DVLA → Signature, each ✅/⏳/❌. **Drive it from the same
+  `analyzeDocuments`/`driver-validity` the router uses**, so the tracker and the
+  driver's actual journey cannot disagree — that equivalence is the whole point.
+- **Evidence groups, not 8 flat rows** — image + FROM date + derived expiry +
+  status together in one block per group: Identity (licence front + back +
+  selfie → one window, plus the licence's own expiry), DVLA, POA1, POA2
+  (**independent of each other** — one may lapse while the other stands),
+  Passport, Signature.
+- **"What needs doing?" panel** off the same analysis, each line a single-click
+  action: *"❌ Selfie didn't match licence — compare below"*, *"⚠ DVLA check
+  expired 12 Sep — request new"*.
+- **Soft-forced date on manual upload** — uploading a document prompts for its
+  FROM date, and uploading a licence front prompts for the back. **Amber, not
+  red** (jon's standing preference, and the lesson of the 16291 hard gate):
+  saving without a date is allowed but leaves a visible "no expiry set" marker.
+- **Phase 4 — extraction:** point the existing `services/document-extract.ts`
+  (already doing PCN notices + cost receipts) at driver documents so the FROM
+  date pre-fills from the DVLA summary / POA / licence and staff only confirm.
+
+**Both shipped together, Aug 2026** — deliberately in one PR, because
+tightening POA alone would have blocked 35 drivers with no route through,
+recreating the dead end that caused this whole body of work:
+
+- **POA gate: BOTH proofs must be valid, independently.** The picker and
+  quick-assign previously red-flagged only when BOTH had lapsed, so a driver
+  with one dead POA looked assignable while the router (reading the policy
+  correctly) sent them off to re-upload. They are now named separately —
+  `Proof of address 1` / `Proof of address 2` — so staff ask for the one that
+  actually lapsed rather than re-collecting both. A MISSING POA date is red too,
+  and the frontend `check(label, raw, missingIsRed)` mirrors that exactly.
+  ⚠️ `missingIsRed` is POA-only: licence expiry stays amber-on-missing because
+  iDenfy frequently fails to extract it, and reding that would block drivers
+  over an extraction gap rather than a real problem.
+- **Manager override** — `override_reason` on `POST /hire-forms/quick-assign`
+  (min 10 chars, `MANAGER_ROLES`). Audit-logged as `override_document_gate` with
+  the expired list + reason, and `console.warn`ed. The 400 returns
+  `can_override` so the UI offers the hatch only to someone who can open it.
+  **It covers the DOCUMENT gate ONLY** — identity review and insurance referral
+  are somebody else's decision, and a manager must not be able to self-serve
+  past "the insurer hasn't answered" or "nobody has confirmed this is the person
+  on the licence".
+
+**`api.ts` errors now carry the parsed response `body`** so callers can branch
+on a machine-readable field. NB the long-standing `code` property on those
+errors is the error MESSAGE, not a code — read `body.code`.
+
+**Already delivered from the earlier queue:** the amber tier for a stale
+identity check now lives in `driver-verification-state.ts` as an amber action
+("Identity check lapsed … — send a hire form to re-verify"), with a test
+asserting it can never be red.
+
 ##### Driver-level liability model (migration 065, Apr 2026)
 
 **Two distinct concepts, separated:**
@@ -664,7 +944,8 @@ Replaces the prominent "+ Assign Driver" Quick Assign button with per-card next-
 
 - [x] Per-card state-aware next-action button on each Drivers & Vehicles assignment card. Self-drive only; D&C / driven lifecycles stay in Crew & Transport:
   - `soft`/`confirmed`, no van → **🚐 Allocate Van** (deep-links `/vehicles/allocations?job=<hh>`, job auto-expanded + scrolled into view + page filter forced to `'all'` so jobs beyond the current week are still visible. AllocationsPage's data-fetch lookahead is 30 days; deep-links to jobs further out won't surface — they need the page opened directly with the filter set wider, or a future on-demand widening.)
-  - `soft`/`confirmed`, van linked → **📋 Book Out** (deep-links BookOutPage with `?vehicle=&job=` pre-fill)
+  - `soft`/`confirmed`, van linked, van still in the warehouse → **📋 Book Out** (deep-links BookOutPage with `?vehicle=&job=` pre-fill)
+  - `soft`/`confirmed`, **the van is already `booked_out`/`active` on this job** → **🚐 Add to Hire** (mid-tour link, no walkaround). ⚠️ Keyed on *"is the van already out?"*, NOT *"has this driver got a van?"* — quick-assign offers a vehicle picker, so a late driver added to a departed van arrives WITH a `vehicle_id`; the original `!a.vehicle_id` test skipped this branch and offered Book Out, inviting a walkaround on a van 200 miles away, while the backend rejected the same case with a 400 (job 16291, Aug 2026). The backend now refuses only a move to a *different* van — that is Swap Vehicle's job.
   - `booked_out`/`active` → **↩️ Check In** (deep-links CheckInPage with `?vehicle=` pre-fill)
   - `returned`/`cancelled`/`swapped` → no button, status badge only
 - [x] Sibling-staff-allocation inference: when a hire-form-driven row has `vehicle_id IS NULL` but a separate staff-allocation row on the same `van_requirement_index` has a vehicle, the card surfaces "Book Out" (not "Allocate Van") pointing at the inferred vehicle. `loadVehicleAssignments` does two parallel fetches (`?job_id=` + `?hirehop_job_id=`) and composes `effective_vehicle_id` per row. BookOutPage's PATCH cements the link at submit time.
@@ -895,6 +1176,8 @@ The hire form process calculates excess. The principle: charge the excess of the
 
 **"Held on account" — parked excess is `taken` + a flag, NOT `rolled_over` (migration 154, Jul 2026).** Clients routinely leave excess with us on account for ages, booking vans as and when. The old "Roll Over to Next Hire" button flipped the record to `rolled_over` immediately — but with no destination job, `rolled_over` is excluded from `v_excess_held` (it assumes the cash moved to a forward child), so the money **vanished from Total Held** while physically sitting on the job in HH (job 16099 incident: £1,200 "lost"). Fix: **"held on account" is an ATTRIBUTE, not a status.** The record stays `taken` (so it's still counted in `v_excess_held`, visible, clickable, fully actionable — reimburse or apply to a real hire whenever); the "Hold on Account for Next Hire" action just sets `job_excess.held_on_account = true` (purple badge on the card + `/money/excess`). **`rolled_over` is now set ONLY by the apply-forward flow** (genuine move to a child; that path + reimburse clear the flag), so `v_excess_held` can keep excluding it with no fragile chain-check. `syncExcessRequirementStatus` treats a `held_on_account` record as **resolved** for the post-hire `excess_resolve` card, so a completed job closes out cleanly instead of nagging on deliberately-parked money. `/available-rollover` already treats `taken` as a rollover candidate, so parked money is auto-offered when a next hire appears. Migration 154 backfilled parked `rolled_over`-with-no-forward-child → `taken` + `held_on_account`.
 
+**Auto-cover from a client's standing held-on-account balance (migration 174; whole-hire coverage Sep 2026).** For the ~3-4 regulars who leave a standing excess deposit with us (historic Stripe/pre-HireHop money past any card-refund window, returned by BACS when they stop), the admin-only **"Auto-cover excess from held account"** toggle on Org Detail (`organisations.auto_cover_excess_from_account`, `POST /api/organisations/:id/auto-cover-excess`) opts their self-drive hires into being auto-covered. **STANDING cover, NOT roll-forward:** the held balance is never consumed — each new hire's excess is `waived` in place with an `[Auto-covered by account]` marker, and the held money stays put. The engine is **`applyAccountAutoCover(q, jobId, opts?)` in `hh-requirement-derivation.ts`** (exported): when opted-in AND the client's `v_excess_held` `held_on_account` balance (this job excluded) ≥ the job total (`self_drive_count × £1,200`), it set-waives **EVERY** `needed`/`pending` record on the job — the pre-hire derivation stub AND the assignment-linked driver records (top-N). Records with money (`taken`/`partially_paid`/`pre_auth`) and top-N `not_required` losers are never touched; opting out / balance shortfall reverts ONLY marker-tagged waives back to `needed` (a manual staff waive has no marker, so it's safe). It runs from THREE places so a driver is never briefly "Required": derivation (sync/webhook/on-demand + revert), and — post-commit, on the pool — the **hire-form POST** and **quick-assign** (because the hire-form absorb at `hire-forms.ts` ~492 does NOT exclude `waived`, so submitting a form absorbs the auto-covered stub and un-waives it; the post-commit re-cover fixes that). **Why whole-hire, not just the stub (the original bug, Sep 2026):** the pre-fix `autoCoverExcessFromAccount` only touched the `assignment_id IS NULL` stub, so any job where a hire form / driver landed left a "Required £1,200" driver record and staff wondered whether that client was an on-account one. **Display:** an auto-covered record (`waived` + the marker) renders a distinct purple **"Covered by account"** pill instead of "Waived" everywhere staff look — Job Detail Drivers & Vehicles card, Money tab (list + Manage modal header), and the org/person Excess History. Driven by a computed `auto_covered` boolean (`(je.notes LIKE '%[Auto-covered by account]%')`) added to every per-job/per-entity excess select (assignments `BASE_SELECT` as `excess_auto_covered`, money `/summary`, `GET /excess/:id`, `/excess/by-org` + `/by-person`); the shared `statusLabel(status, autoCovered?)`/`statusColor(status, autoCovered?)` in `ExcessPaymentModal.tsx` map `autoCovered && waived → "Covered by account"` purple. **Any new surface rendering an excess status pill MUST pass the `auto_covered` flag through those helpers**, and any new excess select feeding a pill MUST expose the computed column. **NOT the same as roll-forward:** the historic on-account money has no `hh_deposit_id`, so `/available-rollover` (which requires one) can't see it — the "Apply Rolled Over Excess" button never appears for these clients, and it shouldn't; the standing-waive model is the intended path. The green "Client has £X on account" banner is informational text only (no apply button on it).
+
 **`released` is terminal — keep it out of "resurrect" lookups (migration 087; enforced Jul 2026).** Four pre-087 `NOT IN (...)` exclusion lists (hire-form absorb ×2, quick-assign top-N counts, `money.ts` payment-event find-or-create) didn't exclude `released`. A hire-form resubmission or a late/duplicate `excess_pre_auth` event could resurrect a released pre-auth to `pending`/`pre_auth`, re-surfacing stale `amount_held` in Total Held (job 15934 incident). Any lookup that finds "an existing non-terminal excess record to reuse/absorb/re-arm" MUST exclude `released` alongside `reimbursed`/`fully_claimed`/`rolled_over`/`not_required`/`waived`.
 
 **⚠️ `pre_auth` semantics changed (migration 087, May 2026):** A `pre_auth` record now stores the hold value in `amount_held`, NOT `excess_amount_taken` (which is 0 until capture). See "Excess Pre-Auth Lifecycle" section below — this is the held-vs-taken separation. Pre-087 code that summed `excess_amount_taken` to mean "money we have including holds" is wrong post-087; coverage = `excess_amount_taken + amount_held`.
@@ -1050,6 +1333,20 @@ A `job_excess` row is created exactly once per self-drive slot and enriched thro
 
 Coverage rule used by `all_cleared` and `syncExcessRequirementStatus`: **covered = terminal status (waived/reimbursed/claimed/rolled_over/not_required) OR amount_taken >= amount_required**.
 
+##### Money-tab clarity pass (Sep 2026) — conventions to preserve
+
+**1. Never compare a money figure against 0 — use `frontend/src/lib/money.ts`.** HireHop gives us the ex-VAT accrued value and `routes/money.ts:1608` derives VAT (`exVat * 0.20`), so a job whose ex-VAT value isn't a clean multiple of 5p carries a sub-penny residue that `toFixed(2)` hides: `530.41 → VAT 106.082 → inc-VAT 636.492`, client pays the invoiced `636.49`, balance `0.002`. That single residue produced THREE wrong things on one screen — a **red** "Balance Outstanding: £0.00", a green "Deposit secured. Remaining balance: £0.00" banner that should not have rendered at all, and a **"Deposit secured"** pill next to "100% paid" (`deposit_percent` was 99.9997). It is real arithmetic, not float noise (HireHop invoices the rounded figure, we carry the unrounded one), so rounding alone isn't reliable. `isSettled` / `hasOutstanding` / `isNonZero` (half-penny tolerance) are the single definition; `getPaymentState` now settles "paid in full" on the BALANCE via `isSettled` rather than `deposit_percent >= 100`, so the pill and the balance line cannot disagree. **Any new surface asking "is this settled / paid in full / anything outstanding" MUST go through these helpers.**
+
+**2. `syncExcessRequirementStatus` pre-hire card is THREE-way, not binary.** It was `covered ? done : in_progress`, so an excess where *nothing had happened* reported amber "In progress" on the card, the dashboard pip and the pre-hire staff briefing email. There is now a `not_started` arm → maps to `todo` in `job-progress-strip.ts` → **"To do"** in the email, so one status fix corrects every surface. ⚠️ **"Started" deliberately does NOT count a `not_required` record** — those are top-N losers, created automatically the moment a second driver joins a one-van hire, so counting them would flip a multi-driver job to amber on arrival (the same lie in a new place). It counts real money (`taken + held > 0`) or a deliberate staff decision (`waived`/`rolled_over`/`reimbursed`/`fully_claimed`/`partially_reimbursed`/`released`). `blocked`/`cancelled` and no-records jobs stay untouched.
+
+**3. `waived` must be excluded from EVERY "find an existing record to absorb" lookup.** `routes/hire-forms.ts` ~494 (the job-level `assignment_id IS NULL` absorb) was the one query in that file that didn't exclude it — every sibling did — so waiving a pre-hire stub was silently un-waived back to `pending` at £1,200 the moment the driver's hire form landed, with nothing telling staff. Same class as the `released` resurrection bug above. **A waive is per-hire and per-record only** (`POST /excess/:id/waive` is a single-row UPDATE on `job_excess`; it touches nothing on `drivers` or `organisations`) — there is deliberately NO standing "this client never pays an excess" flag, and `organisations.auto_cover_excess_from_account` is not one (it requires a real held balance).
+
+**4. Excess is charged per HIRE but stored per DRIVER — the Money tab collapses, the Drivers tab does not.** A 2-driver/1-van job rendered two cards, the second reading `Required: £0.00 · Collected: £0.00 · Covered`, which says nothing. The Money tab now renders only chargeable records and NAMES the covered drivers on the row that carries the money for their van ("Also covered by this excess: …"). **Collapse, never hide** — a `not_required` row still answers "did we forget to take an excess off X?", so covered rows whose van matches no chargeable row fall through to an `orphanCovered` line rather than vanishing. Two guards that must survive any rework: a job where EVERY record is `not_required` (internal / V&D / nothing chargeable) must NOT fall to the "No insurance excess tracked" empty state — that invited staff to create a spurious record — and the HH-deposit link picker must read the same `chargeableRecords` list as its enabling button or it opens empty. **The Drivers & Vehicles tab deliberately still shows excess per driver**: there it means the driver's PERSONAL liability (`drivers.calculated_excess_amount`, £1,200 if they prang it), a different fact that stays true whoever holds the money for this hire.
+
+**5. Pill colours carry meaning — `statusLabel`/`statusColor` in `ExcessPaymentModal.tsx` are the ONLY definition.** `needed`/`pending` is now **RED and uppercase**: it is the one state meaning money we should hold and don't, and it is what the dispatch gate warns on — `ExcessGateBanner` was moved amber→red for the same fact, and the two must never shout at different volumes. `released` is now an **outlined** pill (border + near-white fill, dark green) rather than filled grey: a release is an EVENT ("£1,200 was held and has gone back"), not a resting state, and as filled grey it was indistinguishable from `Covered` and easy to miss entirely — the outline carries that distinction, so the green reads "closed, nothing owed" rather than the "we hold money" that filled green means on `taken`/`reimbursed`. `JobDetailPage.tsx` hand-wrote its own duplicate label + colour maps and they HAD drifted (the same record read "£1,200 / Covered" there and "Required: £0.00 / Covered" on the Money tab); it now imports the shared helpers aliased as `excessStatusLabel`/`excessStatusColor` (the file has its own `statusLabel` for pipeline status). The helpers take `ExcessStatus | string` deliberately — they render whatever the DB holds, including legacy `partial`/`claimed`, and both maps fall back to the raw value.
+
+**6. A rolled-over record's `payment_date` is when the ROLLOVER was applied, not when the cash arrived.** Rendering it as "Collected: £1,200.00 on 2 Sept 2026" was a plain untruth for money taken weeks earlier on another hire (job 16605, whose cash is on 16371). The row now reads "Carried over" for `payment_method = 'rolled_over'`, and the breadcrumb names the **ORIGIN** — the earliest hop that took money in its own right rather than inheriting it (💷 marker + "Money originally taken on #16371 on 25 Jul · Worldpay"). Every hop links to its own job's Money tab, so staff can jump to wherever the money actually is; `GET /excess/:id/rollover-chain` returns `job_id`/`payment_date`/`payment_method` for this. The child's status pill deliberately stays **`Taken`** — we genuinely do hold £1,200 against that hire, the DB agrees, and the breadcrumb below carries the nuance. Zero-value fields (`Collected: £0.00`, `Released: £0.00`) are suppressed throughout, and "Required" was renamed to "Excess" as a field label so the word appears in exactly one place (it was doing double duty as both a field label and a status).
+
 ##### Excess multi-claim "nibble" flow + apply-to-invoice (May 2026)
 
 The Phase B claim endpoint was a single-shot operation that flipped status to `fully_claimed` and didn't push to HireHop at all. Damage-charge accounting drifted because OP showed claimed-£X but HH still held the full deposit. Rewritten to a **multi-claim apply-to-invoice model** where each claim consumes part of the held deposit by paying a HireHop invoice on the current job, and reimbursement of the remainder is a separate later step.
@@ -1163,7 +1460,7 @@ Gates live on `routes/excess.ts`: a router-level `authorize(...STAFF_ROLES)` clo
 
 Built on branch `claude/excess-preauth-lifecycle-ZvUQA` as one PR (jon's call). Migrations 094 (bank details + `receipt_url`) and 095 (mobile upload tokens). Note: rebased onto main, so the bank-details migration is **094** not 091 (091–093 were taken by other work that landed first).
 
-- [x] **Manual pre-auth entry** (jon's actual need — recording a hold taken on the Worldpay machine). `POST /api/excess/:id/record-preauth` + "Record Pre-Auth Hold" action in `ExcessPaymentModal`. Sets `amount_held` (NOT `excess_amount_taken` — no money in account yet), `held_at`, `held_expires_at = NOW() + N days` (default 5), `excess_status='pre_auth'`, flags `receipt_required` for card-machine methods. **No HireHop deposit pushed** — that happens at capture time. Guarded to `needed`/`pending` records with nothing collected/held (can't stack a hold on existing money). Inserts a `job_payments` audit row (`payment_status='pre_auth'`). Flows straight into the existing Capture/Release lifecycle. Method options: worldpay / amex / cash / manual-stripe. The action only renders on a clean `needed`/`pending` record (frontend + backend both enforce).
+- [x] **Manual pre-auth entry** (jon's actual need — recording a hold taken on the Worldpay machine). `POST /api/excess/:id/record-preauth` + "Record Pre-Auth Hold" action in `ExcessPaymentModal`. Sets `amount_held` (NOT `excess_amount_taken` — no money in account yet), `held_at`, `held_expires_at = NOW() + N days` (default 5), `excess_status='pre_auth'`, flags `receipt_required` for card-machine methods. **No HireHop deposit pushed** — that happens at capture time. Guarded to `needed`/`pending` records with nothing collected/held (can't stack a hold on existing money). Inserts a `job_payments` audit row (`payment_status='pre_auth'`). Flows straight into the existing Capture/Release lifecycle. Method options: worldpay / amex / cash / manual-stripe. The action only renders on a clean `needed`/`pending` record (frontend + backend both enforce). **For a Stripe-channel hold the `stripe_payment_intent_id` (`pi_...`) is load-bearing and must be captured** — it's written to BOTH `job_excess.stripe_payment_intent_id` and the `job_payments` audit row, because Capture 422s without it, Release cancels the PI through it, and `stripe-preauth-reconciler` diffs live Stripe holds against those two columns. Until Aug 2026 the modal had no field for it and never sent it (the backend had always accepted it), so a hand-recorded Stripe hold stayed uncapturable, unreleasable, AND kept re-alerting info@ every morning as "not present in OP" — the exact advice the alert email gives you was a dead end. The field renders only for method `stripe_gbp`; a `pi_` pasted into the Auth-ref box is also accepted.
 - [x] **Encryption layer** — `services/encryption.ts` (AES-256-GCM, `ENCRYPTION_KEY` env, `iv:authTag:ciphertext`, `encrypt`/`decrypt`/`encryptJson`/`decryptJson`/`tryDecrypt*`/`isEncryptionConfigured`). See "PII Encryption" under Shared Utilities for full docs + the retrofit checklist. **`ENCRYPTION_KEY` still needs adding to the server `.env`** when this deploys (jon holds the key) — until then bank-detail storage refuses cleanly (no plaintext fallback) and the decrypt endpoints 503; everything else works.
 - [x] **Client bank details for reimbursement** — encrypted on `job_excess.bank_details_encrypted` (migration 094), scoped to the record. Captured in the reimburse form when method is a bank transfer (`wise_bacs`/`lloyds_bank`). UK = holder + sort code + account number; international = holder + IBAN + SWIFT/BIC + bank country. `GET /api/excess/:id/previous-bank-details` powers the "reuse from previous hire" offer with a `bank_details_last_used_at` staleness heads-up; `GET /api/excess/:id/bank-details` decrypts for display (admin/manager). `bank_details_last_used_at` stamped on every reimbursement against the details.
 - [x] **Receipt scans** — `receipt_url` column added (094; 087 only had the flag + timestamp). `POST /api/excess/:id/receipt` attaches a scan (uploaded via `/api/files/upload?attachment_only=true`), clears `receipt_required`. "Upload Receipt Scan" modal action + amber "receipt outstanding" banner in the modal summary (non-blocking). Capture endpoint now stores `receipt_url` too (was accepting it in the body but discarding it). "Receipts Outstanding" NeedsAttention dashboard bucket (amber) added. The receipt also appears on the job's **Files tab** — `services/excess-receipt.ts` `attachExcessReceipt()` is the single source of truth: it sets `receipt_url` on the excess AND appends a `FileAttachment` (label "Excess receipt") to `jobs.files`. Both the direct endpoint and the phone-upload side-effect call it.
@@ -1171,6 +1468,13 @@ Built on branch `claude/excess-preauth-lifecycle-ZvUQA` as one PR (jon's call). 
 **Release Hold is Stripe-only (May 2026):** a pre-auth on a card machine (Worldpay/Amex/cash) is controlled by the acquirer — we CAN'T release it, it auto-voids on the card company's clock. The "Release Hold" action only renders when `excess.payment_method === 'stripe_gbp'` (where cancelling the PaymentIntent genuinely voids the hold via the API). For card-machine holds, capture is the only action; un-captured holds just expire (PR 4's scheduler will reconcile them to `released`).
 
 **Modal refresh gotcha (May 2026) — DON'T call `onUpdated()` mid-flow:** `ExcessPaymentModal`'s `onUpdated` is `loadData`/`loadVehicleAssignments` on the parent. On the Money tab, `loadData` sets `loading=true` and MoneyTab early-returns a spinner — so calling `onUpdated()` while the modal is open **unmounts the modal**. This caused the joined-up receipt step to "flash and disappear". Fix: the modal tracks a `madeChange` flag and defers the parent refresh to close-time via `handleClose()` (wired to the backdrop, X, and footer button). Any action that wants to keep the modal open after a change (capture/payment/reimburse warning banners, the pre-auth→receipt advance) sets `madeChange=true` instead of calling `onUpdated()` directly. Only call `onUpdated()` immediately before `onClose()` (close-time), never to keep the modal open.
+
+
+**Card-machine receipt scans — one rule, four paths (Sep 2026).** `job_excess.receipt_required` is the "a terminal slip needs scanning for audit" to-do. It is raised by **every** path that moves excess money through the physical card machine — `POST /excess/:id/payment`, `POST /excess/:id/record-preauth`, `POST /excess/:id/capture`, and the excess branch of `POST /money/:jobId/record-payment` — for **`worldpay`/`amex` only** (Stripe has an electronic trail; cash/BACS produce no card slip) and for **excess only** (the Money-tab rule lives INSIDE the `payment_type === 'excess'` branch — hire deposits and balances go through the same terminal but are not part of the excess receipt trail, and must never raise it). **Any new excess-money surface must raise it too**, or the prompt goes back to being a lottery: until Sep 2026 only record-preauth and capture set it, so a card-machine excess *payment* produced no QR handoff, no amber banner and no "Upload Receipt Scan" under Manage — staff saw the prompt appear inconsistently depending on which button they had pressed. The Money-tab route has no receipt step of its own: it sets the flag and relies on the Manage modal (where the phone/QR handoff lives) to collect the scan.
+
+**The flag and the timestamp must move together.** The UI gates on `receipt_required && !receipt_uploaded_at`, so raising the flag on a record that already carries an earlier scan yields an inconsistent pair — flag set, to-do invisible. That is exactly what hid the prompt after a capture on a hold whose slip had already been scanned (job 16371, Sep 2026). Every path that raises the flag for a NEW money event therefore clears `receipt_uploaded_at` alongside it; `receipt_url` is left standing until the new scan replaces it, because **per-event receipts remain the known limitation** (one receipt per record, not one per payment / capture / refund). Corollary when hand-fixing data: a record whose correct slip is ALREADY on file wants `receipt_required = FALSE`, **not** a cleared timestamp — clearing it nags staff for a slip that doesn't exist. (The Sep 2026 corrections were paperwork-only, so no second slip was ever printed.)
+
+**The modal holds a LIVE record (Sep 2026)** — the other half of the mid-flow gotcha above. `ExcessPaymentModal` shadows its `excess` prop with local state and merges each action's response into it (`applyRecord`). Without that, deferring the parent refresh meant the modal kept rendering PRE-action state after any action that stays open: a finished capture still offered a live `Confirm`, and "Back to actions" re-listed Capture/Release on an already-captured hold instead of the receipt to-do the capture had just raised. **Merge, never replace** — the action endpoints return the row via `RETURNING *`, which does NOT carry the joined display fields the parent selects alongside it (`driver_name`, `vehicle_reg`, `display_name`, `hirehop_job_name`), so a straight replace blanks the modal header. An `actionDone` flag retires `Confirm` once an action has succeeded (offering "Upload receipt scan" / "Done" instead): re-firing was never a money risk — the backend guards reject the replay (capture 400s on a non-`pre_auth` record, a same-total payment no-ops) — but a live Confirm sitting on finished work invites the click.
 
 **Post-deploy polish (May 2026, jon feedback round):**
 - [x] **Hide Edit/Manage on "Covered" (`not_required`) excess rows** — these are the top-N losers (£0 sibling of another driver's excess on the same hire), nothing actionable. The Manage modal only offered "Move to Different Entity" which is meaningless on a £0 record. Hidden on both the Job Detail Drivers & Vehicles card (`JobDetailPage.tsx`) and the Money tab / `/money/excess` list (`MoneyTab.tsx`). Note: there's deliberately NO UI to reassign *which* driver bears the excess — it's the same £1,200 for the job whichever row it's attached to, so it doesn't matter operationally. Build a "swap who's charged" control only if a real case ever demands it.
@@ -2237,6 +2541,54 @@ Organisation-to-organisation relationships and multi-org job links. Makes "bands
 - [x] Org-to-org relationship types: manages↔managed_by, books_for↔booked_by, does_accounts_for↔accounts_done_by, promotes↔promoted_by, supplies↔supplied_by, represents↔represented_by
 - [x] Person-to-org role types: Tour Manager, Manager, Production Manager, Engineer, Accountant, Promoter, Crew, Band Member, Driver, Agent, Site Contact, Owner, General Contact, Other
 
+##### Lead organisation + client lock (migration 190, Aug 2026)
+
+**Two parallel mechanisms attach an org to a job, and they stay separate on purpose:**
+
+| Mechanism | What it is | Who owns it |
+|---|---|---|
+| `jobs.client_id` | The **accounting client** — single FK, HireHop-derived. Drives the excess ledger, Xero contact bucketing, cross-job credit's same-client boundary, `client_excess_ledger`. | HireHop sync, unless locked (below) |
+| `job_organisations` | **Every other org on the hire** — band, promoter, management, label, etc. Many-to-many with a role picklist. | Staff, via the Job Detail Organisations row |
+
+**The ORGANISATIONS row on Job Detail is the ONE place every org is shown and managed.** The header's summary line (under the job title) carries venue + dates only — **no organisation at all**. It used to repeat the client / lead org, so the same name appeared twice in the header, with two competing edit affordances. **Don't re-add an org to that line.**
+
+| Chip in the row | Affordances | Why |
+|---|---|---|
+| **Client** (from `client_id`, always present; renders `+ Add client` when the job has none) | ★/☆ · ✏️ **change** | A single FK driving accounting — it's swapped, never unlinked, so it gets a pencil where the others get an ×. This is the ONLY client-edit affordance in the UI; the search dropdown is anchored to this chip (`clientSearchRef`). |
+| Every `job_organisations` row | ★/☆ · × remove | × confirms first (`"Remove X from this job?"`) — it sits beside the ★ on a small chip, so a mis-tap would otherwise silently drop an org. Removing only unlinks it from the hire; the org itself is untouched. |
+
+**The ★ is CHOSEN, not inferred, and its only job is list representation.** `job_organisations.is_primary` (dormant since migration 027) flags which org represents the hire wherever a list has room for one name — today that's `lead_org_name` on the pipeline/kanban query. No flagged row = the client represents it, so nothing needed backfilling. A partial unique index (`uq_job_org_primary`) keeps it to one per job, mirroring the `job_contacts.is_primary` convention.
+
+**What this replaced:** the kanban card and the Job Detail header both used `jobOrgs.find(jo => jo.role === 'band')` — adding a band automatically stole the top slot and demoted the client to a grey "Billed to:" sub-line, asserting a billing split that often wasn't true (job 16352: adding "Motrik" as the band demoted sole contact "Rob Jones" to "Billed to"). **Do NOT reintroduce a role-inferred top slot or a "Billed to" line.**
+
+Moving the ★ is a single flag flip — fully reversible, rewrites no attribution, and `client_id` stays authoritative for accounting whichever org is starred. That's the answer to "swap the names without ghost trails": don't rename the org and don't re-point the client, just move the star.
+
+- **Endpoint:** `PUT /api/pipeline/:jobId/organisations/lead` — `{ organisation_id: uuid | null }`, null clears. Transactional (clear-then-set; the unique index means the old one must go first). Returns the full refreshed list.
+- **Kanban:** the pipeline list query exposes `lead_org_name` (was `band_name`). Cards render one line: starred org → client → `—`.
+
+**Client lock — `jobs.client_locked_at` / `client_locked_by`.** The HH job sync wrote `client_id = COALESCE($n, client_id)`, which only guards NULL — so an OP-side client change silently reverted within 30 minutes, because HireHop's `COMPANY` string won every pass. Changing the client via `PATCH /api/pipeline/:id/edit` now stamps the lock, and both sync paths guard with `client_id = CASE WHEN client_locked_at IS NOT NULL THEN client_id ELSE COALESCE($n, client_id) END`. When locked AND HireHop disagrees, the sync queues a **`client_mismatch`** review (Data Cleanup page) instead of reverting — visible disagreement beats silent revert. Staff resolve it by pushing OP's client to HH (`sync-client-to-hh`) or changing it back in OP.
+
+**Display names: `jobDisplayOrgName` / `jobClientName` are THE definitions (Sep 2026).** The client lock protected `client_id`, but NOT the display strings — the sync still overwrote `client_name`/`company_name` unconditionally, and the list endpoints had no org join, so a changed client reverted to HireHop's old name on ~25 read sites while Job Detail (which has always joined) showed the new one. Three layers fix it, and all three matter:
+
+1. **`client_name` is now gated on `client_locked_at`** in both sync UPDATEs, exactly like `client_id`. It is the string most surfaces fall back to and the only thing job search matched, so leaving it unguarded meant a deliberate rename reverted within 30 minutes and became unfindable by its new name. **`company_name` is deliberately NOT gated** — nothing in OP ever writes it (it is absent from the `PATCH /edit` allowlist), so freezing it would pin a stale value forever; leaving it live also means the search `OR` still finds the job under its old HireHop name.
+2. **The three list endpoints join the client org** (`GET /api/hirehop/jobs`, `/api/cancellations/list`, the pipeline/kanban query) exposing `client_org_name`, and all three now also expose `lead_org_name` — before this the ★ only affected the kanban card despite claiming to represent the job on job lists. ⚠️ **`organisations` has an `is_deleted` column too**, so the jobs-list `whereClause` had to be qualified to `jobs.is_deleted` — a bare reference is ambiguous once the join is added, and it is shared with a join-free `COUNT` query, so qualification (not aliasing) is the fix. In the pipeline query the `linked_organisations` subquery was re-aliased `o` → `xo` to stop it shadowing the new outer join.
+3. **Search matches the names actually displayed.** Both list searches gained `EXISTS` clauses over the client org and any linked org (incl. the ★ lead) — `EXISTS` rather than a join so the join-free `COUNT` queries keep agreeing. Without this the lists could show a name that search could not find.
+
+**Two frontend helpers, and the distinction is load-bearing** (`frontend/src/lib/jobOrgName.ts`):
+
+| Helper | Precedence | Use for |
+|---|---|---|
+| `jobDisplayOrgName` / `…Or` | `lead_org_name → client_org_name → company_name → client_name` | "Whose job is this" on a LIST row or pipeline card. Honours the ★. |
+| `jobClientName` / `…Or` | `client_org_name → company_name → client_name` (**ignores the ★**) | "What is the CLIENT called" — anywhere the name sits beside `client_id`: the Client chip, the Client History panel, any `clientName`/`clientOrgName` passed to a child. |
+
+Starring a band must **not** relabel the client in the second group — the ★ changes which org headlines a LIST, never who the hire is billed to. **Any new surface showing a job's org MUST call one of these** rather than hand-rolling the fallback chain; that chain is exactly what drifted (some sites read `client_name` first, some `company_name` first, so the same job showed different names on different pages).
+
+**The ★ lead org is NOT pushed to HireHop.** Both push paths (`push-hirehop`, `sync-client-to-hh`) resolve `COMPANY` from `organisations WHERE id = jobs.client_id` — the Client chip. `job_organisations.is_primary` appears in neither. Note there are **two stars on Job Detail** and only one reaches HH: the ★ on the CONTACTS row (`job_contacts.is_primary`) becomes the HH contact `NAME`; the ★ on the ORGANISATIONS row is display-only.
+
+**Renaming an org to "fix" a job is still the wrong move** — the sync matches the client org by NAME against HH `COMPANY`, so renaming means the next pass finds no match, creates a fresh duplicate shell, and (pre-lock) re-pointed `client_id` at the duplicate. Use the org **merge** tool for genuine duplicates, and the lead flag for "which name shows".
+
+**Job-sync `possible_band` guard rail.** The contact sync has flagged suspicious org names since Stream C, but the JOB sync — which auto-creates one org per distinct HH `COMPANY` string — had none, so ~20 junk orgs (`WOH26 / ARTHUR VEROCAI`, `WOH26 / Lush Life / Aja Monet`, …) accumulated silently when a colleague used HireHop's company field as a notes field. Both syncs now share `services/sync-review.ts` (`flagForReview` + `looksLikeCompanyName`), and the job sync's shell-create path is a single shared helper (`resolveClientOrgFromCompany`) rather than two hand-copied blocks — which is exactly how the guard rail ended up on one sync and not the other. **Any new org-creating sync path must go through that helper.**
+
 **Stream C: HireHop Data Cleanup** (depends on Stream A "Create in HireHop" button)
 HireHop sync imported contacts literally — bands became people, management companies got typed as "client", etc.
 The cleanup strategy is: OP becomes master for relationship data, HH gets what it needs via push.
@@ -2660,11 +3012,11 @@ Standalone OP-native module replacing the Monday.com "Storage Clients" board. Oo
 - **Round 4–5 tenancy editability + contact picker (Jun 2026):** the tenancy detail modal gained an **Edit details** form (`EditTenancyForm`) covering every mutable field post-move-in (access type/code/key location, billing mode, cadence, next invoice + rate-review dates, lead contact, org, move-in date, status, notes) via the existing `PUT /tenancies/:id`; weekly rate stays on Change rate (history) and room is fixed. Access is **always shown** in the read view (was hidden when no code set). The lead-contact picker is now an org-scoped `ContactPicker` backed by **`GET /api/organisations/:id/contact-candidates`** — active roles only (`por.status='active'`; ended roles are `status='historical'` and must never surface) expanded across related orgs via `organisation_relationships` (Org>Org & Org>person, mirroring the New Enquiry job cascade). Falls back to global people search.
 - Temp storage / incoming deliveries — deliberately NOT here; belongs with the Holding module (Step 10).
 
-#### Step 10: Holding Module — "Held for Clients" / "Lost Property" / temp storage ← FEATURE-COMPLETE (Jun 2026)
+#### Step 10: Holding Module — one page for everything we're keeping that isn't ours ← UNIFIED + LIVE (Sep 2026)
 
 The unified "things we're temporarily holding for a client" module. **One engine** (`held_items`), one
-`kind` discriminator (`incoming` / `lost_property` / `temp_storage`) that drives behaviour + display
-home. Replaces the Monday "Things being sent to us" + "Lost property & temporary storage" boards and
+`kind` discriminator — **`incoming` / `lost_property` only since Aug 2026**; `temp_storage` was folded
+into `incoming` (migration 195). Replaces the Monday "Things being sent to us" + "Lost property & temporary storage" boards and
 the merch/lost-property JotForms. **Full spec: `docs/HOLDING-MODULE-SPEC.md`.**
 
 **Storage:** migrations 113 (`held_items` + `held_item_locations` seeded picklist), 115
@@ -2761,10 +3113,150 @@ upgrades after first-live feedback that the chase/notify state was buried behind
   `NotifyClientModal` mid-flow — pick recipients (resolved from job#/org/person, or free-enter
   name+email), or untick to just log without emailing. Applies to lost property AND incoming/merch.
 
+**Count vocabulary — THREE words, one helper (Aug 2026).** `frontend/src/components/holding/counts.ts`
+`describeHeldCounts()` is the single source for how quantities read: **expected** (`box_count`,
+what the client said they'd send) · **here** (`received_count`, what turned up) · **outstanding**
+(the difference). It renders `3 of 5 here · 2 outstanding` on the Holding list, the detail modal,
+the picker and the Job-View panel, so they cannot drift. `services/holding-requirement-sync.ts`
+mirrors the same wording for the merch pip's notes (the backend can't import `shared/` at runtime —
+keep the two in step, same convention as `DOC_MATCH_TOKENS`). **The `description` says WHAT the
+thing is, never HOW MANY** — the merch form used to generate `"5 box(es) of merch/equipment"`, which
+froze at declaration time and stayed wrong forever once a partial arrival was booked in (job 15912:
+client declared 5, 3 turned up, every surface still read "5"). It now writes `'Merch/equipment'`.
+**Any new surface showing a quantity MUST call `describeHeldCounts`, not read the description.**
+Pre-Aug-2026 records keep their baked-in description — it's editable inline on the detail modal.
+
+**Expected vs here — the create form can book straight in.** `HeldItemForm` gained an **"It's
+already here"** toggle (+ "how many arrived"). Without it every item logged from `/holding` was born
+`expected` (the backend defaults `status` off `received_count` — `routes/holding.ts`), so an arrived-
+but-unlogged delivery could only be backfilled via `/quick`. Defaults on for `variant='mobile'` (you're
+holding the box) and via `arrivedDefault` from the desktop Receive flow; off for a plain "+ Log Item"
+(a forward declaration). Only meaningful for `incoming` — temp storage / lost property are by
+definition already in the building.
+
+**Receive + hand over live on BOTH surfaces.** The two things that physically happen used to exist
+only on the mobile `/quick` page. `components/holding/HeldItemPicker.tsx` exports `HeldItemPicker`
+(search-first list) + `HandoverFlow` (pick → who took it → `POST /:id/collected`), used by `/quick`
+AND the `/holding` header buttons (📦 Receive delivery · ✅ Hand over). Same convention as
+`HeldItemForm` — **add a new capture/handover field there, not in either page.**
+
+**Job View panel is no longer read-only.** `HeldItemsSection` takes `actions` + `onChanged`: rows
+deep-link to `/holding?item=<id>` (HoldingPage has honoured `?item=` all along — the rows just used
+to link at the bare list) and carry the ONE next physical step (Receive → the receipt page, or Hand
+over → inline confirm). `onChanged` reloads the job so the derived merch pip re-reads the items.
+Everything else (notify / ship back / dispose / relink) deliberately stays on the Holding pages.
+`kinds` is an effect dependency — pass a **stable** reference (`HELD_KINDS` on JobDetailPage), not an
+inline array literal.
+
+**Short delivery: "Nothing more coming" is an UPDATE, not a cancellation.** `✕ Won't arrive`
+(cancels the record) now only shows when nothing at all turned up, and a part-arrived delivery gets
+**📦 Nothing more coming** instead — it corrects `box_count` down to `received_count` so the shortfall
+stops reading as outstanding, while what IS here stays open to be handed over. The original declared
+figure is appended to `notes` so the correction doesn't quietly erase what we were told was coming.
+Previously the cancel action was gated to `status='expected'`, so a part-arrived delivery had no
+closing action at all.
+
+**ONE PAGE, organised by NEXT ACTION (Aug 2026).** `/holding` is the single page; kind is a filter +
+a row icon, never a separate page. The old split was purely a frontend constant — one table, one
+endpoint, one component rendering two views — and it forced staff to classify an item ("held for a
+client or lost property?") *before* logging it, which for a mystery box in the corridor is
+unanswerable.
+
+- **`next_action` + `action_due` are derived server-side** in **`services/held-item-query.ts`
+  `HELD_ITEM_SELECT`** (the chase expressions sit in a `LEFT JOIN LATERAL` so the action CASE can
+  reference `next_chase_due` without restating it). It moved out of `routes/holding.ts` in Sep 2026
+  when the dashboard became a second consumer — `SELECT_WITH_JOINS` there is now just an alias.
+  ONE definition, so the strip, the table, the ordering and the dashboard cannot disagree — same
+  reasoning as `chase_state`. **Import it; never re-derive the CASE in a second query** (the first
+  cut of the dashboard work did exactly that and was reverted). Precedence is by
+  URGENCY, not kind: `link_owner` (owner unknown — you can't chase who you haven't identified) →
+  `decide` (`hold_until`/`dispose_after` passed) → `chase_owner` → `receive` → `hand_over` → `none`
+  (terminal). `action_due` is the matching date; for `link_owner` it's the found/logged date and
+  renders as an AGE, never as overdue. Default list order is `action_due` ascending with resolved
+  rows sunk to the bottom. **Any new "what does this need" surface reads these two columns.**
+- **The page**: a clickable action strip (counts per bucket) over a flat sortable table — the
+  `/money/overview` pattern. **Every column header sorts** (text via `localeCompare`, dates/numbers
+  numerically, nulls always sinking to the bottom regardless of direction); Boxes sorts on the
+  DECLARED `box_count`, not the rendered "3 of 5" string. **The strip's left-to-right order is
+  workflow order** (To hand over · Awaiting arrival · Chase owner · Needs linking · Time's up) and is
+  deliberately NOT the server-side precedence order — that decides which single action a row gets,
+  this decides how the buckets read. Changing one does not imply changing the other. Buckets were considered and rejected: 17 open rows at unification, 20–30
+  at absolute max, so an accordion would be pure overhead. Filtering is **client-side off one fetch**
+  so the strip counts stay stable while a filter is applied; `?kind=` / `?action=` / `?item=` /
+  `?review=1` all round-trip through the URL. Column set follows the kind filter (chase columns for
+  lost property, job/boxes/location otherwise). The chase review queue renders as the `chase_owner`
+  bucket's action surface.
+- **⚠️ `/holding/lost-property` must never be removed.** It mounts the same page with the kind
+  pre-filtered. The daily chase digest's `?review=1` link is already sitting in staff inboxes and on
+  historical `notifications.action_url` rows, and the printed box-label QR (`/holding/receipt/:id`)
+  is on labels physically in the post. **The rule for this module: never remove a route, only add.**
+  Nav collapsed to one "Holding" entry; the route stays forever.
+- **`temp_storage` folded into `incoming`** (migration 195 — 2 rows, both already terminal). It
+  earned nothing: `hold_until` already applied to `incoming` in `holding-reminders.ts`, and the
+  `needed_by` derivation already treated the two identically. Its only distinct behaviour was the
+  visibility of the "hold until" form field, now shown for any held-for-a-client item and feeding the
+  "Time's up" bucket. The CHECK constraint still permits the value (no constraint migration, no risk;
+  historical rows and any in-flight caller keep working) — **the UI simply never offers it**, and
+  `KIND_LABEL`/`KIND_EMOJI`/`matchesKind`/`pre-hire-briefing.ts` all treat it as `incoming`. The two
+  kinds that remain split on a question staff can always answer: **does the client know we've got
+  it?** — `incoming` = they sent/left it (ends in a handover); `lost_property` = we found it (ends in
+  collection or disposal, chase ladder).
+- **The description IS the title — it appears once.** The detail modal's heading is an editable
+  input (`EditableTitle`, borderless until hover/focus, saves on blur); the old "Details >
+  Description" block repeating it verbatim a few hundred pixels below is gone. What's left of that
+  section is box counts only, so it renders for deliveries and disappears entirely for lost property.
+  **Don't re-add a Description field** — rename in the heading.
+- **Linking an owner is done FROM the Client / Job fields**, not a separate button. Both carry a
+  small `LinkEditButton` ("🔗 Link" when empty, "✎" when set) opening the same `LinkForm` — it edits
+  owner and job together, so either entry point reaches both. That's where staff instinctively go to
+  fix an owner; the floating "Link owner / job" button below unrelated sections is gone.
+- **"Nothing more coming" captures a reason.** The `confirm()` was replaced by an inline form whose
+  optional note posts into the item's **discussion thread** (as well as the notes trail), so "why did
+  2 boxes never show up?" is answerable later. Note failure is best-effort — the count correction is
+  the important half and must not be lost to a failed note.
+- **Two columns were deliberately folded into "Next action" — don't restore them.** The dedicated
+  "Next chase due" and "Hold until" columns are gone: a paused chase renders as a blue ⏸ inside
+  `ActionDueCell`, and hold-until urgency surfaces through the "Time's up" bucket. Re-adding either
+  column would put the same signal on screen twice.
+
+**Dashboard surfacing (Sep 2026) — split by SHAPE, not one bucket.** Holding used to surface
+nowhere on the dashboard (one daily 09:25 digest email + the review panel), which was the real reason
+things sat unnoticed. It now reads `HELD_ITEM_SELECT` from two places, split on whether the action
+carries a real date:
+- **Dated → "On Today / Tomorrow"** (`on_today` in `routes/dashboard.ts`): `decide` (a hold/dispose
+  date has passed) and `receive` (a delivery due within a day). CLAUDE.md's own note on that section
+  says to union new ad-hoc sources into `on_today` — this is that. ⚠️ **`receive` is capped at
+  `action_due <= CURRENT_DATE + 1`**: on the Holding page EVERY expected delivery carries that action
+  (it's the standing "what does this need" answer), but a Today surface only wants the imminent ones.
+  That is an UPPER bound with no lower bound, so **anything overdue is already included** and sorts
+  to the top (OnToday's `dueLabel` gives it a red "Overdue" pill) — don't "fix" this by adding an
+  overdue arm, and note that narrowing it to "today + overdue" would drop tomorrow, which the section
+  is named for and which the storage source also includes.
+- **Undated → a NeedsAttention card, "Unidentified items"** (`holding_unlinked` /
+  `holding_unlinked_count`): `link_owner` only — the mystery-box backlog, ranked by how cold the
+  trail is. This is the genuine gap, because **the daily digest only chases items whose owner is
+  already known**, so an unidentified box had nothing nudging anyone at all.
+- The card is **self-hiding at zero** (the `selfHiding` array in `NeedsAttention.tsx`, same treatment
+  as the PCN buckets). The secondary row otherwise renders 13 cards unconditionally, greying the
+  empty ones — a surface meant to say "a human is needed here" shouldn't grow another permanent grey
+  tile. NB CLAUDE.md's Dashboard section claims secondary cards hide at zero; **only the PCN buckets
+  and this one actually do**. The wider crowding of that row is a known, separate problem (jon,
+  Sep 2026: "a different problem for a different day").
+- The headline count is the FULL total via `COUNT(*) OVER ()`, not the LIMIT-10 row count — the bug
+  the overdue-completions bucket carried until May 2026.
+
 **Remaining / open:**
 - IRL feedback from the chase + hold-until flows (staff trialling over the following weeks).
+- **Merch pip label doesn't split awaiting vs here.** `in_progress` reads "To hand over" even when
+  nothing has arrived yet (`RequirementCard` `TYPE_STATUS_LABELS`), because the 4-state requirement
+  status can't carry the distinction and the card has no access to the items. The notes line beneath
+  it says "Nothing here yet · 5 outstanding", which carries the meaning. Cosmetic — parked.
+- **`unknown owner` checkbox was dropped** from the filter bar — the `link_owner` bucket covers the
+  live case (terminal unknown items are the only thing it no longer reaches).
 
-**Migrations:** 113/115/116 (initial) + 119 (chase/hold). `qrcode` dep added at the initial build.
+**Migrations:** 113/115/116 (initial) + 119 (chase/hold) + **195 (fold temp_storage → incoming)**.
+`qrcode` dep added at the initial build. Neither the Aug 2026 counts/receive/handover round nor the
+Sep 2026 simplification + dashboard round added a migration — every column they needed existed.
 
 ### External Tools (already built, need repointing from Monday.com → Ooosh API)
 
@@ -2839,6 +3331,49 @@ toggle (`/drivers` / `/people?is_freelancer=true`). PATCH `/pcns/:id` accepts bo
 ids and logs a `matched` event on change. List + detail render the person (with a
 "crew" tag, link to `/people/:id`); the Person PCN tab (`by-person`, gated to
 freelancers) shows their PCN history.
+
+**Recipient routing — `services/pcn-recipient.ts` is THE definition (Sep 2026, job
+16373).** A PCN's responsible driver lives in one of TWO columns: `pcns.driver_id`
+→ `drivers` (a client's self-drive hirer) or `pcns.driver_person_id` → `people` (a
+freelancer/crew member in one of our vans, migration 140). The READ path
+(`SELECT_WITH_JOINS`) always joined both; the SEND path in `pcn-actions.ts` joined
+only `drivers`, so for a freelancer driver `driver_email` came back NULL, the
+driver-facing branch was skipped, and it fell **silently** through to
+`resolveClientEmailTarget` — emailing the CLIENT about a PCN their hirer never
+incurred. `pcn-chase.ts` carried the identical bug, so all three rungs of the
+3/5/7-day receipt ladder would have chased the client for proof of a payment
+nobody had asked them to make.
+
+- **Route every PCN recipient decision through `resolvePcnRecipient`** — never
+  re-derive it, and never join `drivers` alone. `PCN_RECIPIENT_JOINS` /
+  `PCN_RECIPIENT_FIELDS` / `loadPcnWithDrivers` exist so a new query gets both
+  identities for free. Three consumers today: the action sender, the chase
+  ladder, and the preview endpoint.
+- **`audience` is set per action in `ACTION_MAP`**: `driver` (override → driver →
+  freelancer → client → info@), `client` (override → client → info@), or
+  `freelancer_only`. **`freelancer_only` has NO client / info@ fallback by
+  design** — an "Internal — Freelancer" notice is our business, not the client's,
+  so no freelancer on file must mean *no email*, not "send it to whoever
+  answers". Don't add a fallback arm to it.
+- **The fall-through is now loud, not silent.** `GET /pcns/:id/recipient` runs the
+  same resolver pre-send and feeds the confirm panel, so staff see the resolved
+  address *and where it came from* before committing. A driver-facing action that
+  lands on the client raises an amber warning + a tick that gates Confirm
+  (warn-not-block, per house convention — a client self-drive hire with no driver
+  record legitimately does go to the client), and offers the assign-driver picker
+  inline. The timeline records the recipient KIND ("emailed x@y (CLIENT — no
+  driver contact on file)"), not just a bare address.
+- **`internal_freelancer` can now email, opt-in** (`notify_freelancer` +
+  `pcn_internal_freelancer`). Its optional `freelancer_message` is deliberately
+  SEPARATE from `resolution_note` — the note is an internal record and must never
+  leave the building.
+- **`{{noticeContext}}`** swaps "a vehicle hired to you" for "one of our vehicles
+  you were driving" on the driver-facing templates when the recipient is a
+  freelancer. Both senders supply it; a new sender of `pcn_pay_direct` /
+  `pcn_transfer_liability` must too, or the placeholder renders literally.
+- **`{{driverName}}` and `{{clientName}}` are not interchangeable** — driver-facing
+  templates greet the person (`rcpt.name`), client-facing ones greet the
+  organisation (`rcpt.clientName`).
 
 **List UX (this session):** click-to-sort column headers (a `<field>_asc/_desc`
 pair per column in the `/pcns` SORTS whitelist) + last-used sort/filter persisted
@@ -3627,6 +4162,34 @@ await syncFleetHireStatusByReg(reg);
 
 **Backfill:** `backend/src/scripts/backfill-fleet-hire-status.ts` runs the same rules across the entire fleet to clean up historical drift. Dry-run by default; `--commit` to apply.
 
+### Driver Document Validity ✅ COMPLETE (Aug 2026)
+
+**File:** `backend/src/services/driver-validity.ts`
+**Frontend mirror:** `frontend/src/lib/driverStatus.ts` (status badge only)
+
+THE single definition of "is this driver's paperwork valid". Full model,
+incident history and conventions under **Document validity: FROM dates in,
+derived expiry out** in Step 2 above. Headline: humans set a FROM date, OP
+derives the expiry into the `*_valid_until` columns on every write, and the
+hire-form router delegates here so it can never disagree with the staff UI.
+
+Call `persistableWindows()` from any new driver write path; never set a
+`*_valid_until` column by hand. `computeDriverValidity()` carries the integrity
+guard that stops a check date with no licence identity rendering as a valid
+window. Unit-tested (`src/services/__tests__/driver-validity.test.ts`) — the
+first tests in the backend; `jest.config.js` exists for exactly this class of
+pure, high-risk helper and does not attempt a broad suite.
+
+### Identity Review ✅ COMPLETE (Aug 2026)
+
+**File:** `backend/src/services/identity-review.ts`
+
+Staff adjudication of a failed iDenfy face match, modelled on the insurance
+referral. `isIdentityAuthorised()` is the gate helper — route every new "may
+this driver be assigned / receive paperwork" surface through it rather than
+re-deriving the status. Fails OPEN on an unknown status. Full detail under
+**Identity review** in Step 2 above.
+
 ### HireHop Deposit Push ✅ COMPLETE
 
 **File:** `backend/src/services/hh-deposit.ts`
@@ -3679,6 +4242,51 @@ Singleton Stripe SDK client for OP's direct Stripe operations (pre-auth capture,
 - **The reconciler heals silently; the scanner is the loud backstop.** `booked-status-reconciler.ts` `reconcileBookedStatus()` (wired into the 30-min sync) re-pushes HH status 2 for `pipeline_status='confirmed' AND status<2` jobs — no bell, no email. `runBookedSplitScan` (2h grace, jon@ alert) only fires when that keeps failing. See the sanity-scanner entry above.
 - **Harmless historical scar:** `job_payments` is append-only, so a duplicate-deposit incident leaves n=2 audit rows forever even after the HH-side cleanup — the double-intent detection query still shows the old event. Not a live problem; don't try to delete audit rows.
 
+### `stripe_events` keyspace separation — the cross-endpoint collision (Aug 2026) — job 16523
+
+**Read this before touching `stripe_events`, `services/stripe-event-claim.ts`, or `services/stripe-webhook.ts`.**
+
+**The incident.** A client authorised a £1,200 excess pre-auth through the Payment Portal (15 Aug 2026, 15:52). Stripe delivered `payment_intent.amount_capturable_updated` and BOTH webhook destinations returned `200 OK`. The Netlify log showed one clean attempt, `✅ OP MODE: Pre-auth event recorded`, 1.1s total. And yet OP had **nothing** — no `job_payments` row, no `job_excess` movement (`excess_status` still `pending`, `amount_held` 0). A live hold on a client's card, completely invisible to us. Found only because the client mentioned it.
+
+**Root cause: TWO Stripe destinations, ONE event id, ONE `stripe_events` table meaning two different things.**
+
+| Consumer | Writes | Means |
+|---|---|---|
+| OP's own receiver (`services/stripe-webhook.ts`, `/api/webhooks/stripe`) | raw `evt_...` | "I received this event" — a RECEIPT log |
+| Payment Portal via `payment-event` / `claimStripeEvent` (`services/stripe-event-claim.ts`) | same raw `evt_...` | "the MONEY EFFECT of this event has been applied to a job" |
+
+Both destinations are subscribed to overlapping event types on the same Stripe account, so both receive the **same** `evt_` id. The receiver's flow is: `INSERT stripe_events` → run the handler → `UPDATE … SET processed_at = NOW()`. But `payment_intent.amount_capturable_updated` has **no `case`** in its switch — it fell to `default:` ("Ignoring unhandled event type"), did nothing, and **still got stamped `processed_at`**. Three milliseconds later (`claimed_at` 15:52:57.624 → `processed_at` .627 — a no-op handler's fingerprint), the portal's `payment-event` arrived carrying the same `stripe_event_id`, `isStripeEventProcessed()` returned true, and it returned `200 {deduplicated:true}` before reaching even the `job_payments` INSERT.
+
+**Why it started on 13 Aug:** the job-16513 idempotency fix (`83938a4`) threaded `stripe_event_id` into the pre-auth path for the first time. Every pre-auth before that sent no event id and so never hit the dedup gate — 20 clean portal pre-auths from 25 Jun to 7 Aug, then the first one attempted after the deploy (16523, 15 Aug) failed. The fix for the duplicate-deposit problem created a silent-drop problem on the one path that shares an event id with OP's own receiver.
+
+**Deposits were unaffected** — the charge path keys off `checkout.session.completed`, which OP's endpoint is not subscribed to, so no collision.
+
+**The fixes (all three, belt and braces):**
+1. **Keyspace separation (load-bearing).** `stripe-event-claim.ts` prefixes every portal-facing key with `pe:` via `portalKey()`, applied inside all four helpers (`claimStripeEvent` / `recordStripeEventDeposit` / `markStripeEventProcessed` / `isStripeEventProcessed`). The receiver stays on RAW ids. The two consumers now occupy disjoint keyspaces and **cannot collide regardless of what gets subscribed to which endpoint in the Stripe dashboard** — which is the point, since that config is a dashboard click, not code. Historical portal-written rows are orphaned by design (a Stripe re-delivery of a days-old event isn't a real scenario, and treating a receiver row as "the portal did this" is the bug).
+2. **An honest receipt log.** `processStripeEvent` now returns `handled: boolean` (only `default:` returns false — new `case` branches inherit "handled" automatically, so this can't silently regress). `handleStripeWebhook` stamps `processed_at` only when handled, and DELETEs the receipt row when it deliberately ignored the event. This also keeps `claimStripeEvent`'s fresh-`claimed_at` staleness window out of the way — note that leaving an unstamped row would NOT have been enough on its own, because the claim's `WHERE processed_at IS NULL AND claimed_at < NOW() - 60s` would still have blocked a portal claim for 60s.
+3. **Portal-side propagation** (netlify-functions) — the pre-auth path's OP call is bounded and its failures now propagate instead of being swallowed. See that repo's CLAUDE.md.
+
+**Also removed:** `payment_intent.amount_capturable_updated` was unticked from OP's Stripe destination (it only ever hit `default:`). That was the same-day mitigation; fixes 1+2 are what make re-adding it safe. `payment_intent.succeeded` remains subscribed on both endpoints — harmless today because the portal's handler for it just logs, and now structurally safe anyway.
+
+**Conventions:**
+- **Never read/write `stripe_events` with a raw `evt_` id from a portal/business-effect path** — go through the `stripe-event-claim.ts` helpers so the prefix is applied.
+- **"I ignored it" ≠ "it's processed."** Any new receiver-side event handling must keep the handled/ignored distinction; don't stamp `processed_at` for a no-op.
+- **A `stripe_events` row does not tell you WHO wrote it** unless you look at the key prefix (and, for legacy rows, `type` — the receiver writes the real Stripe event type, `markStripeEventProcessed` defaults to `'payment_event'`).
+
+### Stripe → OP pre-auth discovery (`services/stripe-preauth-reconciler.ts`, daily 09:50)
+
+The safety net that would have caught 16523 without a human. **A missed CHARGE self-heals** — it leaves a HireHop deposit for the Money-tab passive reconciliation to match. **A missed PRE-AUTH leaves no HH artefact at all** (only a job note), so nothing existed to reconcile against; the 09:40 expiry sweep only reconciles holds OP already knows about. This closes the only direction left: ask Stripe what it is actually holding.
+
+Lists `requires_capture` PaymentIntents created in the last 10 days (Stripe auths live ~7), keeps only ours (same metadata gate the portal webhook uses — `jobId` + `paymentType='excess'` + `isPreAuth='true'`), and diffs against `job_excess.stripe_payment_intent_id` ∪ `job_payments.stripe_payment_intent`.
+
+**Self-heal vs alert — the rule:**
+- Hold live **AND** the hire hasn't finished → **self-heal**: replay the exact `payment-event` call the portal should have made, over localhost with a short-lived admin JWT (the `job-financials-backfill` pattern — one computation path, so excess creation, requirement sync, the dispatch gate and the client email all behave identically to the happy path). Idempotency key `reconcile:<pi_id>`.
+- Finished hire / unknown job / anything ambiguous → **alert info@ only, never auto-write.** Emailing a client "we've taken your £1,200 hold" days after their hire ended would be worse than the gap it fixes.
+
+Runs right after the 09:40 expiry sweep — that one reconciles known holds, this one finds unknown ones. Silent when clean.
+
+**Clearing an alert (it re-fires daily until you do).** The scan is a pure diff, so an alerted hold keeps alerting until it leaves `requires_capture` in Stripe OR OP carries its PaymentIntent. Two valid resolutions: (a) capture/release it in Stripe — it drops out next morning; (b) record it against the job (Money tab → Insurance Excess → Manage → **Record Pre-Auth Hold**, method Stripe GBP, pasting the `pi_...`), which links the hold so OP can capture or release it itself. **Leaving it alone is not a resolution** — Stripe auto-voids the auth at ~7 days, so the money gets released by default rather than by decision. The alert email carries the raw `pi_...` (not just a dashboard link) and a deep-link to the job's Money tab precisely so route (b) is a copy-paste.
+
 ### Cost Capture & Xero Push ✅ (Jun 2026)
 
 Staff capture supplier costs (`costs` table, migration 092) on `/money/costs`
@@ -3690,7 +4298,8 @@ methods). Engine: `services/cost-xero-push.ts`; routes: `routes/costs.ts`; UI:
 **Feedback-round additions (Jun 2026)** — all in `docs/COST-CAPTURE-RECHARGE-SPEC.md`:
 - **Bundled-invoice allocation split** (`cost_allocations`, migration 092): split one cost across jobs via `PUT /costs/:id/allocations` — `CostAllocationModal`, surfaced both as a `⑂` row action AND a "Split across multiple jobs" tick at capture time (`onSavedAndSplit`). **Model = "Option A": one cost = one payable = one Xero bill; `cost_allocations` is a pure OP-side attribution layer** — a split NEVER changes what we owe the supplier or what's pushed to Xero, it only re-attributes the cost across jobs for OP cost tracking. Under-allocation is allowed (the modal shows an amber "£X unallocated (our cost) — OK to save" nudge; the remainder stays as our own cost, surfaced on no job); only OVER-allocation is blocked. When splitting a captured cost, the modal pre-seeds the capture job at the full amount as the first line, so the common "split the captured job's cost across others" flow is one add.
   - **⚠️ THE cost read that honours allocations is `GET /costs/by-job/:jobId`** (allocation-aware UNION — see the big comment block on that route). A job's costs = (A) costs captured on it with NO allocations at `full amount_gross` UNION (B) allocations TO it at the allocation amount. A split cost is attributed **purely by its allocations** (surfaces once per allocated job via clause B, never double-counted on its capture job). This was the fix for the write-only-`cost_allocations` bug (Jul 2026, PR #1060): the ⑂ fork wrote rows but nothing read them, so a £150 invoice split £75/£75 stayed £150 on its capture job with nothing on the other job. **Any NEW per-job cost read MUST go through `/by-job` (or replicate the UNION) — never `SELECT … FROM costs WHERE job_id = $1` alone**, which ignores splits. Recharge stays cost-level (on `costs.job_id` = capture job); splits never move it — allocation-in rows render read-only on other jobs' Money tabs (no recharge/Resolve controls).
-  - **Money-tab itemisation:** the Job Costs panel (`MoneyTab.tsx` `JobCostsPanel`) itemises every cost applied to the job — "Costs applied to this job" (quote_actual) + "Extra costs" (extra) lists, each row tagged + amount + a "· split from #<capture HH job>" deeplink to the capture job for allocation-in rows. `/by-job` returns `is_allocation`, `full_amount_gross`, `allocation_id`, `job_id` (capture job uuid on a split-in row) + `capture_hh_job_number` so the frontend can name/link the source.
+  - **Money-tab itemisation:** the Job Costs panel (`MoneyTab.tsx` `JobCostsPanel`) itemises every cost applied to the job — "Costs applied to this job" (quote_actual) + "Extra costs" (extra) lists, each row tagged + amount + a "· split from #<capture HH job>" deeplink to the capture job for allocation-in rows. `/by-job` returns `is_allocation`, `full_amount_gross`, `allocation_id`, `job_id` (capture job uuid on a split-in row) + `capture_hh_job_number` so the frontend can name/link the source. Each row also carries its **paperwork**: the receipt/invoice thumb (image thumbnail, 📎 for PDFs, lightbox on click), the `invoice_number` beside the supplier, a soft grey "no receipt" marker when nothing's attached, and a click-through to that cost on the Costs hub (the row TITLE is the link — an ↗ icon was tried first and was too small to aim at; the "split from #N" link stays a sibling so the anchors never nest). `/by-job` selects `c.*`, so `receipt_r2_key` / `receipt_filename` / `invoice_number` were always on the wire — only the render was missing (added Aug 2026). **The receipt viewer is shared** — `components/costs/CostReceipt.tsx` (`ReceiptThumb` + `ReceiptPreview`), used by BOTH the Costs hub and the Money tab; typed against a minimal `ReceiptLike` shape so any future cost surface can mount it. Receipts live in the PRIVATE R2 bucket, so they MUST be fetched through the authenticated `api.blob()` helper — a plain `<img src="/files/download">` won't carry the JWT.
+  - **Cost deep-link:** `/money/costs?view=all&job=<captureJobUuid>&cost=<costId>`. `job` narrows the hub via the existing `job_id` list filter (which also guarantees the target row is inside the 200-row page cap — see the LIMIT lesson above), `cost` scrolls to and ring-highlights the row, and a purple chip explains the narrowing with a "Show all costs" escape. The link always points at the **capture** job (`c.job_id`), which on a split-in row is a different job than the one you're viewing — that's where the invoice and the recharge actually live.
 - **Edit-after-push → manual re-sync** (migration 147, `costs.xero_stale`): editing a Xero-affecting field on an already-pushed cost flags it stale (amber "Re-sync" pill) rather than silently diverging or auto-mutating a reconciled object. `POST /costs/:id/resync-xero` updates the Xero object IN PLACE (`updateBill`/`updateSpendMoney`, POST-with-ID, never duplicates); 409 + dismiss for Xero-locked (paid/reconciled). **Delete is OP-only — it does NOT delete the Xero bill/txn** (the delete confirm warns when `xero_object_id` is set; void in Xero separately).
 - **COT receipt chaser** (migration 148): weekly digest (Wed 12:00 London) to each card-holder about company-card costs missing a receipt (3-day grace), `services/cost-receipt-chaser.ts`; `?missing_receipt=1[&mine=1]` list filter + "COT Receipts" dashboard bucket.
 - **COT card register** (migration 148, `users.cot_card_label`): admin-managed card per staff (Settings → COT Card Register, `GET /users/cot-cards` + `PATCH /users/:id/cot-card`); capture stamps holder + last4 server-side, staff never type card details.
@@ -3999,6 +4608,22 @@ if (suppress) return;  // or `continue` inside a loop
 **Watch list:**
 - Staff report "stopped getting allocation emails" → check `portal_notifications_paused_until` on their `people` row. Pre-May-2026, `freelancer_assignment` ignored mute entirely; the May 2026 fix correctly stops sending when muted.
 - Staff report "didn't get a completion chase" → NOT mute-related. Check `qa.is_ooosh_crew`, `qa.status`, `q.ops_status`, `q.completion_reminder_level` and the `completion-chaser.ts` query.
+
+### Render-crash safety: error boundaries + date parsing ✅ (Sep 2026)
+
+**The incident.** Switching Fleet to **table** view threw `RangeError: Invalid time value` and blanked the entire SPA. `RX73TBZ` had `last_rossetts_service_date` stored as `0006-08-25` (mistyped year); `formatDate()` in `routes/vehicles.ts` padded month and day but **not** the year, so it reached the frontend as `"6-08-25"` — and **any year that isn't exactly 4 digits is an Invalid Date in JS**. `getRossettsStatus()` → `addMonths()` → `toISOString()` threw inside the fleet table's row `.map()`, so one bad van took the whole page down. Only the table view calls `getRossettsStatus`, which is why cards/finance were fine — the finance view's `sellByDate()` already had the guard `service-status.ts` was missing.
+
+**Three conventions came out of it:**
+
+1. **Never call `toISOString()` on a Date you haven't range-checked.** Any helper that parses a date string and re-serialises it MUST `Number.isNaN(d.getTime())`-guard both *after parsing* and *after shifting* (a shift can overflow the Date range, or land on NaN if an interval argument is non-numeric — e.g. a garbage `rossetts_interval_months` compliance setting). `service-status.ts` `shiftDate()` and `vehicle-lifecycle.ts` `sellByDate()` are the reference implementations; return `null` and let the caller render `—`. There's a standing comment on the same trap in `prep-trends.ts`.
+
+2. **Zero-pad the year when hand-building a `YYYY-MM-DD` string.** `backend/src/routes/vehicles.ts` `formatDate()` is the shared helper behind every date on every vehicle payload; it pads the year to 4 and returns `''` for an Invalid Date rather than `"NaN-NaN-NaN"`. Postgres will happily store year 6 or year 202, so this is not hypothetical. Any new date serialiser must do the same.
+
+3. **A render throw must not be able to blank the platform.** `frontend/src/components/ErrorBoundary.tsx` is mounted **twice** in the tree: once **inside `Layout`** wrapping the page `<Routes>` (so a page crash keeps the nav usable and staff can navigate away), and once around the whole app in `main.tsx` (backstop for crashes in `Layout` itself and the public, Layout-less routes). It resets its error state when `location.pathname` changes — deliberately **without** re-keying its children, so normal navigation keeps page state exactly as before.
+
+**The trap that made it unrecoverable, and the escape hatch.** The crash alone was survivable; what made staff *stuck* was `fleet-view-mode` persisting in `localStorage`, so every reload restored the table and re-crashed before anything could be clicked. The boundary's **"Reset saved view settings"** button clears all of `localStorage` **except** an allowlist of session keys (`SESSION_KEYS` in `ErrorBoundary.tsx` — the `ooosh_*` staff tokens plus the `vehicleApp*` vehicle-module/freelancer session), so the user stays logged in. Allowlisting sessions rather than listing pref keys means dynamically-named prefs are covered and **a new persisted preference needs no change here** — but **any new *session* key MUST be added to `SESSION_KEYS`**, or the reset button will log people out.
+
+**When adding a persisted view preference,** remember it can pin a page into a crashing state on reload. That's now recoverable via the boundary, but prefer validating a stored value on read (as `VehiclesPage` does for `fleet-view-mode`) over trusting it blindly.
 
 ### Hire Date Resolution
 
@@ -4660,6 +5285,18 @@ When you wire a new auto-bump source (e.g. for a new interaction type or status 
 
 The contact-type interaction path accepts `skip_chase_bump: true` on the request body to bypass the bump for that single call. The `ActivityTimeline` form surfaces this as a "Don't update chase date" checkbox, only shown when the type is call/email/meeting AND the entity is a job. Use for backdated entries (logging a call from last week) or non-consequential events (CC of an email thread that happens to be about something else).
 
+### Paused enquiries — revisit date, and the "Under 4-day window" default
+
+Pausing an enquiry clears `next_chase_date`, so the card drops out of the derived Chasing pile entirely. The **revisit date** on the pause modal is what puts it back: it writes `next_chase_date`, so the card resurfaces on that day.
+
+**`under_minimum` ("Under 4-day window") pre-fills that date to `hire start − 14 days`** (`REVISIT_LEAD_DAYS_UNDER_MINIMUM` in `frontend/src/lib/revisitDate.ts`). The reasoning is that this pause reason is the one with a predictable comeback — we can't take a short hire while the diary is tight, but it's worth another swing once it loosens. Every other reason (`fully_booked`, `other`) is a judgement call and stays blank + opt-in.
+
+Conventions:
+- **`defaultRevisitDate()` is the single source** — both pause modals (`JobDetailPage` `StatusTransitionModal` and `PipelinePage` `TransitionModal`) call it, so they can't drift. Hire start = `job_date || out_date`.
+- **Returns `''` when the computed date is today or past.** A revisit date that's already due would drop the job straight back into Chasing the moment it was paused — the opposite of pausing. Short-notice enquiries therefore get no default and staff pick (or don't).
+- **Date-only arithmetic anchored to UTC midnight**, never `new Date()` + local `toISOString()` — the stored timestamps carry a 09:00 time and only the calendar day matters, so this stays stable under BST.
+- **A `revisitTouched` flag suppresses re-defaulting** once staff edit either field; switching reason away from `under_minimum` clears an untouched default so a stale date can't be submitted by accident. `PipelinePage`'s modal stays mounted between opens (it early-returns on `!isOpen`), so it re-arms the flag on open — without that, one manual edit would kill the default for the rest of the session.
+
 ### Chase-date clearing on lifecycle moves
 
 `next_chase_date` is auto-nulled when a job moves to `confirmed` / `lost` / `cancelled` (`pipeline.ts` `/:id/status`). Same applies on inbound HireHop webhooks via `webhooks.ts`. Migration 070 was the historical backfill for jobs that had drifted before this rule landed.
@@ -4677,6 +5314,8 @@ If they complain "I logged a call but the chase didn't move" → it's the sacred
 
 ### Jobs (migration 002-006)
 `jobs` — synced from HireHop, pipeline fields (status, likelihood, chase dates, lost_reason)
+
+**`jobs.lost_reason` stores the display LABEL verbatim** — it's free text (`z.string()`, no enum, no lookup table) sourced from `LOST_REASON_OPTIONS` in `shared/types/index.ts`, and `/jobs/lost-cancelled` filters on exact string match. **So renaming an option REQUIRES a data migration** rewriting the stored rows, or every historic job tagged with the old label silently stops matching the new filter value and vanishes from the filtered view. Precedent: migration 191 (`Confirmed Alternative Quote` → `Confirmed Alternative Quote (from us)`, Aug 2026 — the "(from us)" makes it explicit that the client took a different job from US, i.e. the revenue moved rather than was lost; `Competitor` covers the someone-else case). Same applies to `CANCELLATION_REASON_OPTIONS` and any other label-as-value picklist.
 `sync_log` — tracks automated sync runs
 
 ### Quotes & Transport (migration 007-009)

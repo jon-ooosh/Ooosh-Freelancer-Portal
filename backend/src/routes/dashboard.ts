@@ -3,6 +3,7 @@ import { query } from '../config/database';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { buildProgressStrips, StripPhase } from '../services/job-progress-strip';
 import { getRoster } from '../services/studio-sitter';
+import { HELD_ITEM_SELECT } from '../services/held-item-query';
 
 const router = Router();
 router.use(authenticate);
@@ -938,6 +939,69 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       console.warn('Dashboard on_today (storage) skipped:', (err as Error).message);
     }
 
+    // Holding — the DATED half of the module's next_action. `decide` (a hold or
+    // dispose date has passed) and `receive` (a delivery is due) are
+    // deadline-shaped, so they belong here rather than in a Needs-attention
+    // bucket; the undated `link_owner` backlog gets its own NA card instead.
+    //
+    // Reads the SHARED derivation (services/held-item-query.ts) — the same
+    // next_action/action_due the Holding page reads. Never re-derive the CASE
+    // here: one definition is the whole point.
+    //
+    // `receive` is narrowed to items actually due within a day. On the Holding
+    // page every expected delivery carries that action (it's the standing "what
+    // does this need" answer); on a Today surface only the imminent ones belong.
+    try {
+      const holdingDue = await query(`
+        SELECT q.id, q.description, q.hh_job_number, q.next_action, q.action_due,
+               COALESCE(q.owner_person_name, q.owner_organisation_name, q.client_name_text) AS client
+        FROM (${HELD_ITEM_SELECT}) q
+        WHERE q.next_action IN ('decide', 'receive')
+          AND (q.next_action = 'decide'
+               OR (q.action_due IS NOT NULL AND q.action_due <= CURRENT_DATE + 1))
+        ORDER BY q.action_due NULLS FIRST
+        LIMIT 25
+      `);
+      onToday = onToday.concat(holdingDue.rows.map((h) => ({
+        source: 'holding',
+        id: h.id,
+        title: `${h.next_action === 'decide' ? '🕑' : '📦'} ${h.description || 'Held item'}`,
+        detail: [
+          h.next_action === 'decide' ? 'Hold date passed — collect / return / extend' : 'Delivery due',
+          h.client,
+          h.hh_job_number ? `#${h.hh_job_number}` : null,
+        ].filter(Boolean).join(' · '),
+        due: h.action_due,
+        href: `/holding?item=${h.id}`,
+      })));
+    } catch (err) {
+      console.warn('Dashboard on_today (holding) skipped:', (err as Error).message);
+    }
+
+    // Holding — unidentified items (next_action = 'link_owner'). Undated by
+    // design: ranked by how long the trail has been cold. This is the gap the
+    // daily digest doesn't cover — it only chases items whose owner is already
+    // known, so a mystery box can sit forever with nothing nudging anyone.
+    // The row list is LIMITed for display but the headline count must be the
+    // FULL total — a capped count misreports the backlog (the bug the
+    // overdue-completions bucket carried until May 2026).
+    let holdingUnlinked: Record<string, unknown>[] = [];
+    let holdingUnlinkedTotal = 0;
+    try {
+      const unlinked = await query(`
+        SELECT q.id, q.description, q.found_in, q.found_vehicle_reg, q.action_due,
+               COUNT(*) OVER ()::int AS total_count
+        FROM (${HELD_ITEM_SELECT}) q
+        WHERE q.next_action = 'link_owner'
+        ORDER BY q.action_due ASC NULLS LAST
+        LIMIT 10
+      `);
+      holdingUnlinked = unlinked.rows;
+      holdingUnlinkedTotal = unlinked.rows[0] ? Number(unlinked.rows[0].total_count) : 0;
+    } catch (err) {
+      console.warn('Dashboard holding unlinked skipped:', (err as Error).message);
+    }
+
     // ── PCN needs-attention buckets (Step 8) ──────────────────────────────
     // Defensive (pre-migration env / missing table can't 500 the dashboard).
     // Shares the exact classification the deadline-nudge scheduler uses.
@@ -996,6 +1060,9 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
           + overdueTransportOpsResult.rows.length,
         client_intros: clientIntrosResult.rows,
         carnet_count: parseInt(carnetCountResult.rows[0].count as string),
+        // Held items nobody has identified yet — the mystery-box backlog.
+        holding_unlinked_count: holdingUnlinkedTotal,
+        holding_unlinked: holdingUnlinked,
         cot_receipts_outstanding_count: parseInt(cotReceiptsResult.rows[0].count as string),
         // Recharges flagged but not yet resolved (push to HH / bill externally /
         // absorb). Amber bucket — the cost lifecycle "don't let it get buried".

@@ -36,6 +36,8 @@ import { syncFleetHireStatus } from '../services/fleet-hire-status-sync';
 import { autoDispatchJob } from '../services/auto-dispatch';
 import { runHookWithRecovery } from '../services/post-hook-recovery';
 import { cancelOrphanSiblingAllocations } from '../services/vha-dedup';
+import { applyAccountAutoCover } from '../services/hh-requirement-derivation';
+import { isIdentityAuthorised, identityHoldReason } from '../services/identity-review';
 
 /** Format a date string/Date to "18 Mar 2026" */
 function fmtDate(d?: string | Date | null): string {
@@ -486,10 +488,15 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
     // This handles the case where the payment portal collected excess before the driver submitted the hire form.
     let excessResult;
     const existingPortalExcess = jobId ? await client.query(
+      // 'waived' MUST stay excluded (added Sep 2026). A waive is a deliberate
+      // staff decision on this hire; absorbing one here silently un-waived it
+      // back to 'pending' at £1,200 the moment the driver's hire form landed,
+      // with nothing to tell staff it had happened. Every sibling query in this
+      // file already excluded it — this was the one that did not.
       `SELECT id, excess_amount_taken, excess_status, payment_method, payment_reference, payment_date, hh_deposit_id
        FROM job_excess
        WHERE job_id = $1 AND assignment_id IS NULL
-         AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required', 'released')
+         AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required', 'waived', 'released')
        ORDER BY created_at DESC LIMIT 1`,
       [jobId]
     ) : { rows: [] };
@@ -620,6 +627,20 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
     await client.query('COMMIT');
 
     console.log(`[hire-forms] Created: driver=${driverId}, assignment=${assignment.id}, vehicle=${vehicleId || 'none'}, job=${f.hirehop_job_id || 'none'}, excess=${excessAmount || 'none'}`);
+
+    // Auto-cover from the client's standing held-on-account balance (opt-in,
+    // admin-set per client). The absorb/insert above may have created or
+    // un-waived a chargeable driver record; cover it now so an opted-in client's
+    // hire never reads "Required". Runs on the pool AFTER commit (not the hire-
+    // form transaction) so a failure here can never roll back the hire form.
+    // No-op for every non-opted client.
+    if (jobId) {
+      try {
+        await applyAccountAutoCover(query, jobId);
+      } catch (coverErr) {
+        console.error('[hire-forms] applyAccountAutoCover (POST) failed (non-fatal):', coverErr);
+      }
+    }
 
     // Advance the hire_forms requirement on successful submission so the
     // Job Requirements view reflects "forms in" without waiting for book-
@@ -835,6 +856,17 @@ const quickAssignSchema = z.object({
   hire_start: z.string().optional(),
   hire_end: z.string().optional(),
   client_email: z.string().email().optional(),
+  /**
+   * Manager override for the document gate.
+   *
+   * The gate had NO route past it, which is what forced the workaround on job
+   * 16291 — a driver whose paperwork was genuinely in order but whose stored
+   * dates said otherwise simply could not be assigned, so the hire went out
+   * under someone else's name. An escape hatch nobody can open isn't one.
+   *
+   * Manager-tier, reason mandatory, written to the audit log.
+   */
+  override_reason: z.string().min(10).max(500).optional(),
 });
 
 router.post('/quick-assign', authenticate, validate(quickAssignSchema), async (req: AuthRequest, res: Response) => {
@@ -850,6 +882,7 @@ router.post('/quick-assign', authenticate, validate(quickAssignSchema), async (r
     const driverCheck = await query(
       `SELECT licence_valid_to, dvla_valid_until,
               poa1_valid_until, poa2_valid_until,
+              identity_check_status,
               requires_referral, referral_status, full_name
          FROM drivers WHERE id = $1`,
       [f.driver_id]
@@ -866,17 +899,44 @@ router.post('/quick-assign', authenticate, validate(quickAssignSchema), async (r
     if (isExpired(dr.licence_valid_to)) expiredDocs.push('Licence');
     if (isExpired(dr.dvla_valid_until)) expiredDocs.push('DVLA check');
     // POA: at least one needs to be valid (matches the existing validator).
-    const poa1Expired = isExpired(dr.poa1_valid_until);
-    const poa2Expired = isExpired(dr.poa2_valid_until);
-    if (poa1Expired && poa2Expired) expiredDocs.push('Proof of address');
+    // BOTH proofs of address must be valid, independently (jon, Aug 2026).
+    //
+    // This gate previously only fired when BOTH had lapsed, which let a driver
+    // with one dead POA through — while the hire-form router, reading the same
+    // policy correctly, sent them off to re-upload. 35 drivers newly red-flag,
+    // all confirmed genuine lapses (both recorded, one expired). Named
+    // separately so staff know which one to ask for back rather than
+    // re-collecting both.
+    if (isExpired(dr.poa1_valid_until) || !dr.poa1_valid_until) expiredDocs.push('Proof of address 1');
+    if (isExpired(dr.poa2_valid_until) || !dr.poa2_valid_until) expiredDocs.push('Proof of address 2');
 
-    if (expiredDocs.length > 0) {
+    // The override deliberately covers the DOCUMENT gate only. Identity review
+    // and insurance referral below are somebody else's decision to make — a
+    // manager cannot self-serve past "the insurer hasn't answered" or "nobody
+    // has confirmed this is the person on the licence".
+    const overrideReason = (f.override_reason || '').trim();
+    const canOverride = MANAGER_ROLES.includes(req.user?.role as never);
+    if (expiredDocs.length > 0 && !(overrideReason && canOverride)) {
       return res.status(400).json({
         error: `Cannot assign ${dr.full_name} — expired documents: ${expiredDocs.join(', ')}. Send a fresh hire form to refresh.`,
         code: 'driver_documents_expired',
         expiredDocs,
+        // Tells the frontend whether to offer the override, so a member of
+        // staff without the tier isn't shown a door they can't open.
+        can_override: canOverride,
       });
     }
+    // Photo ID review sits alongside the insurance referral: same "a human must
+    // decide" shape, different decider. Checked first because it is the more
+    // fundamental question — we do not yet know this is the person on the licence.
+    if (!isIdentityAuthorised(dr.identity_check_status)) {
+      return res.status(400).json({
+        error: `Cannot assign ${dr.full_name} — ${identityHoldReason(dr.identity_check_status)}`,
+        code: 'driver_identity_unverified',
+        identity_check_status: dr.identity_check_status,
+      });
+    }
+
     if (dr.requires_referral && dr.referral_status !== 'approved') {
       return res.status(400).json({
         error: `Cannot assign ${dr.full_name} — insurance referral is ${dr.referral_status || 'pending'}. Resolve the referral on the driver detail page first.`,
@@ -953,6 +1013,29 @@ router.post('/quick-assign', authenticate, validate(quickAssignSchema), async (r
         req.user!.id,
       ]
     );
+
+    // Audit an overridden assignment. Written after the row exists so the log
+    // points at a real assignment, and kept loud: this is a manager knowingly
+    // putting a driver on a hire whose paperwork the system considers stale.
+    if (overrideReason && expiredDocs.length > 0) {
+      await query(
+        `INSERT INTO audit_log (user_id, entity_type, entity_id, action, new_values)
+         VALUES ($1, 'driver', $2, 'override_document_gate', $3)`,
+        [
+          req.user!.id, f.driver_id,
+          JSON.stringify({
+            assignment_id: result.rows[0].id,
+            job_id: f.job_id,
+            expired_documents: expiredDocs,
+            reason: overrideReason,
+          }),
+        ],
+      ).catch(err => console.error('[hire-forms] override audit failed:', err));
+      console.warn(
+        `[hire-forms] Document gate OVERRIDDEN for driver ${f.driver_id} on job ${f.job_id} ` +
+        `by ${req.user?.email} — expired: ${expiredDocs.join(', ')} — reason: ${overrideReason}`,
+      );
+    }
 
     // Also create an excess record.
     //
@@ -1066,6 +1149,18 @@ router.post('/quick-assign', authenticate, validate(quickAssignSchema), async (r
       }
     }
     } // end !isInternalJob
+
+    // Auto-cover from the client's standing held-on-account balance (opt-in,
+    // admin-set per client). Covers the record just created/absorbed above so an
+    // opted-in client's quick-assign never leaves a driver reading "Required".
+    // No-op for every non-opted client. Best-effort — never fails the assign.
+    if (f.job_id) {
+      try {
+        await applyAccountAutoCover(query, f.job_id);
+      } catch (coverErr) {
+        console.error('[hire-forms] applyAccountAutoCover (quick-assign) failed (non-fatal):', coverErr);
+      }
+    }
 
     console.log(`[hire-forms] Quick assignment created: ${assignment.id} (driver ${f.driver_id} → vehicle ${f.vehicle_id || 'unassigned'} on job ${f.job_id}, van_count=${vanCount})`);
 
@@ -1258,17 +1353,22 @@ const FREELANCER_PATCH_ALLOW = new Set([
  */
 async function isDriverAuthorisedForAgreement(assignmentId: string): Promise<boolean> {
   const res = await query(
-    `SELECT d.requires_referral, d.referral_status
+    `SELECT d.requires_referral, d.referral_status, d.identity_check_status
        FROM vehicle_hire_assignments vha
        JOIN drivers d ON d.id = vha.driver_id
       WHERE vha.id = $1`,
     [assignmentId],
   );
   if (res.rows.length === 0) return true; // no driver row resolvable — fail open
-  const { requires_referral, referral_status } = res.rows[0] as {
+  const { requires_referral, referral_status, identity_check_status } = res.rows[0] as {
     requires_referral: boolean | null;
     referral_status: string | null;
+    identity_check_status: string | null;
   };
+  // An unresolved photo ID check holds the agreement for the same reason a
+  // pending referral does: we are not yet cleared to treat this person as an
+  // authorised driver. Fails OPEN on an unknown status, like the referral arm.
+  if (!isIdentityAuthorised(identity_check_status)) return false;
   if (!requires_referral) return true;
   return referral_status === 'approved' || referral_status === 'waived';
 }
@@ -1965,9 +2065,22 @@ router.post(
       const source = sourceResult.rows[0];
 
       // 2. Validate source is in a state to be added mid-tour
-      if (source.vehicle_id) {
+      //
+      // Having a van linked is NOT itself a blocker. Quick-assign offers a
+      // vehicle picker, so a staff member adding a late driver to an already-out
+      // van naturally picks that van — and the old `if (source.vehicle_id)`
+      // guard then rejected the exact case this endpoint exists to serve, while
+      // the Job Detail card fell through to "Book Out" and invited a full
+      // walkaround on a van that had already left (job 16291, Aug 2026).
+      //
+      // What we must still refuse is using Add to Hire to MOVE a driver onto a
+      // different van — that is Swap Vehicle's job. So the check is scoped: the
+      // van already on this row has to be among the ones requested. Step 3
+      // below independently proves every requested van is genuinely booked out
+      // on this job, which is the real safety property.
+      if (source.vehicle_id && !requestedVehicleIds.includes(source.vehicle_id)) {
         return res.status(400).json({
-          error: 'Driver is already linked to a vehicle. Use Swap Vehicle if you need to change it.',
+          error: 'Driver is already linked to a different vehicle. Use Swap Vehicle if you need to change it.',
         });
       }
       if (!['soft', 'confirmed'].includes(source.status)) {

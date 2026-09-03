@@ -477,12 +477,35 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
     viewAllHref: '/operations/studio-sitters',
   };
 
+  // Holding — items nobody has identified. Self-hiding (like the PCN buckets):
+  // the secondary row already renders 13 cards unconditionally, greying the
+  // empty ones, and a surface meant to say "a human is needed here" shouldn't
+  // grow another permanent grey tile. Filtered out below when zero.
+  const holdingUnlinked: NABucket = {
+    key: 'holding-unlinked',
+    title: 'Unidentified items',
+    accent: 'amber',
+    count: na.holding_unlinked_count || 0,
+    items: (na.holding_unlinked || []).map((h) => ({
+      id: h.id,
+      label: h.description || 'Held item',
+      // action_due here is the found/logged date, so it reads as an age.
+      age: h.action_due
+        ? `${Math.max(0, Math.floor((Date.now() - new Date(h.action_due).getTime()) / 86400000))}d old`
+        : undefined,
+      tag: h.found_vehicle_reg || undefined,
+      href: `/holding?item=${h.id}`,
+    })),
+    viewAllHref: '/holding?action=link_owner',
+  };
+
   const allClear = overdueTotal === 0;
   const overdueBuckets = [departures, completions, backline, transport];
   // expiringHolds leads the secondary row — red accent, time-critical (hold
   // auto-voids at day 5). Sits ahead of the amber/blue/purple buckets so it
   // catches the eye when present.
-  const secondaryBuckets = [expiringHolds, receiptsOutstanding, cotReceipts, staffDocs, rechargesToResolve, ...pcnBuckets, carnets, referrals, excess, sitterGaps, backlineToBuy, transportArrangements, fleetBucket, problemsBucket];
+  const selfHiding = [holdingUnlinked].filter((b) => b.count > 0);
+  const secondaryBuckets = [expiringHolds, receiptsOutstanding, cotReceipts, staffDocs, rechargesToResolve, ...pcnBuckets, ...selfHiding, carnets, referrals, excess, sitterGaps, backlineToBuy, transportArrangements, fleetBucket, problemsBucket];
   const secondaryAny = secondaryBuckets.some(b => b.count > 0);
 
   return (

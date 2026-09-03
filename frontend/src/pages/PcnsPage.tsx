@@ -518,7 +518,7 @@ function CreatePcnModal({ onClose, onCreated }: { onClose: () => void; onCreated
           <p className="text-sm text-slate-500 mb-4">
             {actionTaken ? 'Action taken. Anything else, or close.' : 'What do you want to do with it?'}
           </p>
-          <PcnActionChooser pcnId={created.id} driverEmail={created.driver_email} onActioned={() => setActionTaken(true)} />
+          <PcnActionChooser pcnId={created.id} onActioned={() => setActionTaken(true)} />
           <div className="flex justify-between items-center gap-2 mt-5">
             <button
               onClick={() => { onCreated(); navigate(`/vehicles/pcns/${created.id}`); }}

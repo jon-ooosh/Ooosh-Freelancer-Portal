@@ -11,6 +11,7 @@
  */
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { hasManagerRole } from '../lib/roles';
+import { ReceiptThumb, ReceiptPreview } from '../components/costs/CostReceipt';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
@@ -130,6 +131,11 @@ export default function CostsPage() {
   const [view, setView] = useState<ViewMode>((searchParams.get('view') as ViewMode) || 'all');
   const missingReceipt = searchParams.get('missing_receipt') === '1';
   const mineOnly = searchParams.get('mine') === '1';
+  // Deep-link from a job's Money tab: `job` narrows the list to that job's costs
+  // (so the linked cost is guaranteed to be in the 200-row page), `cost` scrolls
+  // to and highlights the specific row.
+  const jobFilter = searchParams.get('job') || '';
+  const focusCostId = searchParams.get('cost') || '';
   const [rows, setRows] = useState<CostRow[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [loading, setLoading] = useState(true);
@@ -189,6 +195,13 @@ export default function CostsPage() {
     });
   }, [rows, sortKey, sortDir, view, dueFilter, supplierFilter]);
 
+  // The list join already returns hh_job_number per row, so the "filtered to job"
+  // chip can name the job without a second fetch.
+  const jobHhNumber = useMemo(
+    () => (jobFilter ? rows.find((r) => r.job_id === jobFilter)?.hh_job_number ?? null : null),
+    [rows, jobFilter],
+  );
+
   const supplierOptions = useMemo(
     () => Array.from(new Set(rows.map((r) => r.supplier_name).filter((s): s is string => !!s))).sort((a, b) => a.localeCompare(b)),
     [rows],
@@ -215,6 +228,7 @@ export default function CostsPage() {
       if (searchDebounced) params.set('search', searchDebounced);
       if (missingReceipt) params.set('missing_receipt', '1');
       if (mineOnly) params.set('mine', '1');
+      if (jobFilter) params.set('job_id', jobFilter);
       if (view === 'recharge' && rechargeStatusFilter) params.set('recharge_status', rechargeStatusFilter);
       const res = await api.get<{ data: CostRow[]; stats: Stats }>(`/costs?${params.toString()}`);
       setRows(res.data);
@@ -224,9 +238,17 @@ export default function CostsPage() {
     } finally {
       if (!quiet) setLoading(false);
     }
-  }, [view, typeFilter, searchDebounced, missingReceipt, mineOnly, rechargeStatusFilter]);
+  }, [view, typeFilter, searchDebounced, missingReceipt, mineOnly, rechargeStatusFilter, jobFilter]);
 
   useEffect(() => { load(); }, [load]);
+
+  // Scroll the deep-linked cost into view and pulse it, once the row exists.
+  useEffect(() => {
+    if (!focusCostId || loading) return;
+    const el = document.getElementById(`cost-row-${focusCostId}`);
+    if (!el) return;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, [focusCostId, loading, rows]);
 
   // Deep-link from /quick "Upload receipt" → open the capture modal directly.
   useEffect(() => {
@@ -371,6 +393,18 @@ export default function CostsPage() {
       </div>
 
       {/* Filters */}
+      {jobFilter && (
+        <div className="flex items-center justify-between gap-2 mb-4 bg-purple-50 border border-purple-200 text-purple-800 rounded-md px-3 py-2 text-sm">
+          <span>
+            Showing costs captured against one job
+            {jobHhNumber ? <> (<Link to={`/jobs/${jobFilter}`} className="underline">#{jobHhNumber}</Link>)</> : null}
+            .
+          </span>
+          <button
+            onClick={() => { searchParams.delete('job'); searchParams.delete('cost'); setSearchParams(searchParams, { replace: true }); }}
+            className="text-purple-700 hover:underline whitespace-nowrap">Show all costs</button>
+        </div>
+      )}
       {missingReceipt && (
         <div className="flex items-center justify-between gap-2 mb-4 bg-amber-50 border border-amber-200 text-amber-800 rounded-md px-3 py-2 text-sm">
           <span>Showing company-card costs with no receipt attached{mineOnly ? ' (yours)' : ''}. Open each one to attach its receipt.</span>
@@ -467,7 +501,8 @@ export default function CostsPage() {
             </thead>
             <tbody className="divide-y divide-gray-100">
               {sortedRows.map((c) => (
-                <tr key={c.id} className="hover:bg-gray-50">
+                <tr key={c.id} id={`cost-row-${c.id}`}
+                  className={focusCostId === c.id ? 'bg-purple-50 ring-2 ring-inset ring-purple-300' : 'hover:bg-gray-50'}>
                   <td className="px-2.5 py-2 whitespace-nowrap text-gray-700" title={fmtDate(c.cost_date)}>{fmtDayMonth(c.cost_date)}</td>
                   {view === 'payable' && (() => {
                     const due = dueInfo(c);
@@ -725,80 +760,6 @@ function SupplierTermsModal({ cost, onClose, onSaved }: {
             className="px-4 py-2 text-sm text-white bg-purple-600 hover:bg-purple-700 rounded-md disabled:opacity-50">
             {saving ? 'Saving…' : 'Save terms'}
           </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// Small receipt thumbnail in the Supplier cell — authenticated blob fetch (the
-// JWT isn't sent on a plain <img src> to /files/download). Image → thumbnail,
-// PDF/other → 📎 icon. Click opens the lightbox.
-function ReceiptThumb({ cost, onOpen }: { cost: CostRow; onOpen: () => void }) {
-  const [url, setUrl] = useState<string | null>(null);
-  const [isImage, setIsImage] = useState(false);
-  useEffect(() => {
-    if (!cost.receipt_r2_key) return;
-    let objUrl = ''; let cancelled = false;
-    api.blob(`/files/download?key=${encodeURIComponent(cost.receipt_r2_key)}`)
-      .then(({ blob, contentType }) => {
-        if (cancelled) return;
-        if (contentType.startsWith('image/')) {
-          setIsImage(true);
-          objUrl = URL.createObjectURL(blob);
-          setUrl(objUrl);
-        }
-      })
-      .catch(() => {});
-    return () => { cancelled = true; if (objUrl) URL.revokeObjectURL(objUrl); };
-  }, [cost.receipt_r2_key]);
-  return (
-    <button onClick={onOpen} title="View receipt"
-      className="shrink-0 w-8 h-8 rounded border border-gray-200 overflow-hidden bg-gray-50 flex items-center justify-center hover:border-purple-400">
-      {isImage && url ? <img src={url} alt="receipt" className="w-full h-full object-cover" /> : <span className="text-sm">📎</span>}
-    </button>
-  );
-}
-
-// Lightbox — fetches the receipt blob and shows it large (image inline, PDF in
-// an iframe). Backdrop / ✕ / Escape to close.
-function ReceiptPreview({ cost, onClose }: { cost: CostRow; onClose: () => void }) {
-  const [url, setUrl] = useState<string | null>(null);
-  const [type, setType] = useState('');
-  const [err, setErr] = useState('');
-  useEffect(() => {
-    if (!cost.receipt_r2_key) { setErr('No receipt on file'); return; }
-    let objUrl = ''; let cancelled = false;
-    api.blob(`/files/download?key=${encodeURIComponent(cost.receipt_r2_key)}`)
-      .then(({ blob, contentType }) => {
-        if (cancelled) return;
-        setType(contentType);
-        objUrl = URL.createObjectURL(blob);
-        setUrl(objUrl);
-      })
-      .catch(() => { if (!cancelled) setErr('Failed to load receipt'); });
-    return () => { cancelled = true; if (objUrl) URL.revokeObjectURL(objUrl); };
-  }, [cost.receipt_r2_key]);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
-  return (
-    <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4" onClick={onClose}>
-      <div className="bg-white rounded-lg shadow-xl max-w-3xl w-full max-h-[90vh] overflow-hidden flex flex-col" onClick={(e) => e.stopPropagation()}>
-        <div className="px-4 py-2.5 border-b border-gray-200 flex items-center justify-between">
-          <span className="text-sm font-medium text-gray-700 truncate">{cost.receipt_filename || cost.supplier_name || 'Receipt'}</span>
-          <div className="flex items-center gap-3">
-            {url && <a href={url} target="_blank" rel="noreferrer" className="text-xs text-purple-600 hover:underline">Open full</a>}
-            <button onClick={onClose} className="text-gray-400 hover:text-gray-700">✕</button>
-          </div>
-        </div>
-        <div className="flex-1 overflow-auto bg-gray-100 flex items-center justify-center min-h-[300px]">
-          {err ? <p className="text-sm text-gray-500 p-6">{err}</p>
-            : !url ? <p className="text-sm text-gray-400 p-6">Loading…</p>
-            : type.includes('pdf') ? <iframe src={url} title="receipt" className="w-full h-[75vh]" />
-            : <img src={url} alt="receipt" className="max-w-full max-h-[80vh] object-contain" />}
         </div>
       </div>
     </div>

@@ -9,6 +9,7 @@
  */
 import { query, getClient } from '../config/database';
 import { hhBroker } from './hirehop-broker';
+import { flagForReview, looksLikeCompanyName } from './sync-review';
 
 // HireHop status code → human-readable name
 const HH_JOB_STATUS_MAP: Record<number, string> = {
@@ -122,6 +123,128 @@ async function linkMatchingPersonToShellOrg(
   return { linked: false, flagged: true };
 }
 
+/**
+ * Resolve HireHop's `job.COMPANY` string to an OP organisation, creating a
+ * lightweight shell org when no name match exists.
+ *
+ * Shared by the bulk sync and the single-job sync — they had two hand-copied
+ * versions of this block, which is exactly how the `possible_band` guard rail
+ * ended up on the contact sync but never on the job sync.
+ *
+ * The shell-create path raises TWO guard rails:
+ *  - `possible_band`  — the new org's name doesn't look like a trading entity,
+ *    so it may be a band/artist/festival-stage string typed into HireHop's
+ *    company field. Surfaces on the Data Cleanup page rather than silently
+ *    joining the org list.
+ *  - person auto-link — a name matching an existing Person gets a Main Contact
+ *    role so client emails can reach a real address (the sole-trader case).
+ */
+async function resolveClientOrgFromCompany(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  dbClient: any,
+  companyName: string,
+  externalId: string
+): Promise<{
+  orgId: string;
+  created: boolean;
+  personLinked: boolean;
+  personFlagged: boolean;
+  bandFlagged: boolean;
+}> {
+  const orgMatch = await dbClient.query(
+    `SELECT id FROM organisations
+     WHERE lower(name) = lower($1) AND is_deleted = false
+     LIMIT 1`,
+    [companyName]
+  );
+  if (orgMatch.rows.length > 0) {
+    return {
+      orgId: orgMatch.rows[0].id,
+      created: false,
+      personLinked: false,
+      personFlagged: false,
+      bandFlagged: false,
+    };
+  }
+
+  const newOrg = await dbClient.query(
+    `INSERT INTO organisations (name, type, created_by)
+     VALUES ($1, 'client', $2)
+     RETURNING id`,
+    [companyName, 'hirehop_sync']
+  );
+  const orgId: string = newOrg.rows[0].id;
+
+  // Guard rail 1 — does this even look like a company?
+  let bandFlagged = false;
+  if (!looksLikeCompanyName(companyName)) {
+    bandFlagged = await flagForReview(dbClient, {
+      entity_type: 'organisation',
+      entity_id: orgId,
+      external_id: `job:${externalId}`,
+      review_type: 'possible_band',
+      summary: `New org "${companyName}" created from HireHop job #${externalId}'s company field — could this be a band/artist, or a note typed into the wrong box?`,
+      details: { name: companyName, source: 'hirehop_job_sync', hh_job_number: externalId },
+    });
+  }
+
+  // Guard rail 2 — sole-trader bridge (name matches an existing Person).
+  const linkResult = await linkMatchingPersonToShellOrg(
+    dbClient,
+    orgId,
+    companyName,
+    externalId
+  );
+
+  return {
+    orgId,
+    created: true,
+    personLinked: linkResult.linked,
+    personFlagged: linkResult.flagged,
+    bandFlagged,
+  };
+}
+
+/**
+ * When a job's client is LOCKED (a human deliberately set it in OP) and
+ * HireHop's COMPANY resolves to a different organisation, the sync leaves OP's
+ * choice alone — see the `client_id` CASE in the UPDATE statements — and
+ * queues a review so the disagreement is visible rather than silent.
+ *
+ * Without the lock the sync overwrote `client_id` on every 30-minute pass, so
+ * an OP-side client change reverted within half an hour.
+ */
+async function flagClientMismatch(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  dbClient: any,
+  args: {
+    jobId: string;
+    hhJobNumber: number | string;
+    hhCompanyName: string;
+    hhOrgId: string;
+    opClientId: string | null;
+  }
+): Promise<boolean> {
+  const opName = await dbClient.query(
+    `SELECT name FROM organisations WHERE id = $1`,
+    [args.opClientId]
+  );
+  const opClientName = opName.rows[0]?.name || '(none)';
+  return flagForReview(dbClient, {
+    entity_type: 'job',
+    entity_id: args.jobId,
+    external_id: String(args.hhJobNumber),
+    review_type: 'client_mismatch',
+    summary: `Job #${args.hhJobNumber}: HireHop's client is "${args.hhCompanyName}" but OP has "${opClientName}" set deliberately. HireHop was NOT applied — push OP's client to HireHop, or change it back in OP.`,
+    details: {
+      hh_company: args.hhCompanyName,
+      hh_organisation_id: args.hhOrgId,
+      op_client_id: args.opClientId,
+      op_client_name: opClientName,
+    },
+  });
+}
+
 // ── Project prefix stripping ─────────────────────────────────────────────
 // HireHop's search_list.php and webhook payloads decorate JOB_NAME with the
 // containing project's name as "<Project> ► <JobName>" for sub-jobs. The
@@ -229,6 +352,7 @@ export interface JobSyncResult {
   venuesLinked: number;
   personLinksCreated: number;      // auto-linked Person ↔ shell org via name match
   personLinksFlagged: number;      // ambiguous matches queued for review
+  reviewsFlagged: number;          // possible_band + client_mismatch queue rows
   errors: string[];
   total: number;
 }
@@ -242,6 +366,7 @@ export async function syncJobsFromHireHop(userId: string): Promise<JobSyncResult
     venuesLinked: 0,
     personLinksCreated: 0,
     personLinksFlagged: 0,
+    reviewsFlagged: 0,
     errors: [],
     total: 0,
   };
@@ -284,39 +409,19 @@ export async function syncJobsFromHireHop(userId: string): Promise<JobSyncResult
       // headline and Money tab have a linkable client from day one, and
       // future contact-detail enrichment has somewhere to hang.
       let clientOrgId: string | null = null;
-      if (job.COMPANY && job.COMPANY.trim()) {
-        const companyName = job.COMPANY.trim();
-        const orgMatch = await client.query(
-          `SELECT id FROM organisations
-           WHERE lower(name) = lower($1) AND is_deleted = false
-           LIMIT 1`,
-          [companyName]
+      const hhCompanyName = job.COMPANY?.trim() || '';
+      if (hhCompanyName) {
+        const resolved = await resolveClientOrgFromCompany(
+          client,
+          hhCompanyName,
+          String(jobNumber)
         );
-        if (orgMatch.rows.length > 0) {
-          clientOrgId = orgMatch.rows[0].id;
-          result.clientsLinked++;
-        } else {
-          const newOrg = await client.query(
-            `INSERT INTO organisations (name, type, created_by)
-             VALUES ($1, 'client', $2)
-             RETURNING id`,
-            [companyName, 'hirehop_sync']
-          );
-          clientOrgId = newOrg.rows[0].id;
-          result.clientsCreated++;
-
-          // Solo-trader bridge: if the new shell org's name matches an
-          // existing Person, link them so email recipient lookup can find
-          // the contact. Ambiguous matches get queued for manual review.
-          const linkResult = await linkMatchingPersonToShellOrg(
-            client,
-            clientOrgId!,
-            companyName,
-            String(jobNumber)
-          );
-          if (linkResult.linked) result.personLinksCreated++;
-          if (linkResult.flagged) result.personLinksFlagged++;
-        }
+        clientOrgId = resolved.orgId;
+        if (resolved.created) result.clientsCreated++;
+        else result.clientsLinked++;
+        if (resolved.personLinked) result.personLinksCreated++;
+        if (resolved.personFlagged) result.personLinksFlagged++;
+        if (resolved.bandFlagged) result.reviewsFlagged++;
       }
 
       // Try to link venue
@@ -340,17 +445,36 @@ export async function syncJobsFromHireHop(userId: string): Promise<JobSyncResult
         // field is empty/0 for most jobs and used to clobber the cached value
         // back to £0 every 30 minutes. job_value is owned by the billing-accrued
         // path (Money tab side-effect + services/job-value-sync gap-filler).
-        await client.query(
+        // client_id: COALESCE only guards NULL, so a locked (deliberately
+        // OP-set) client would still be overwritten by HireHop's COMPANY on
+        // every pass. The CASE preserves it; the mismatch is queued for review
+        // below rather than silently reverted.
+        // client_name gets the SAME guard. It is the display string ~25 read
+        // sites fall back to (job lists, dashboard, Money overview, ChaseModal)
+        // and the only thing job search matches on, so leaving it unguarded
+        // meant a deliberately-changed client reverted to HireHop's old name on
+        // the next pass and became unfindable by its new one. company_name is
+        // deliberately NOT guarded: nothing in OP ever writes it, so freezing
+        // it would pin a stale value forever, and keeping it live means the
+        // search OR still finds the job under its old HireHop name too.
+        const updated = await client.query(
           `UPDATE jobs SET
              job_name = $1, job_type = $2, status = $3, status_name = $4,
-             colour = $5, client_id = COALESCE($6, client_id),
-             client_name = $7, company_name = $8, client_ref = $9,
+             colour = $5,
+             client_id = CASE WHEN client_locked_at IS NOT NULL
+                              THEN client_id
+                              ELSE COALESCE($6, client_id) END,
+             client_name = CASE WHEN client_locked_at IS NOT NULL
+                                THEN client_name
+                                ELSE $7 END,
+             company_name = $8, client_ref = $9,
              venue_id = COALESCE($10, venue_id), venue_name = $11,
              out_date = $12, job_date = $13, job_end = $14, return_date = $15,
              created_date = $16, manager1_name = $17, manager2_name = $18,
              custom_index = $19, hh_status = $3,
              updated_at = NOW()
-           WHERE hh_job_number = $20`,
+           WHERE hh_job_number = $20
+           RETURNING id, client_id, client_locked_at`,
           [
             stripProjectPrefix(job.JOB_NAME),
             job.JOB_TYPE || null,
@@ -375,6 +499,22 @@ export async function syncJobsFromHireHop(userId: string): Promise<JobSyncResult
           ]
         );
         result.jobsUpdated++;
+
+        const updatedRow = updated.rows[0];
+        if (
+          updatedRow?.client_locked_at &&
+          clientOrgId &&
+          updatedRow.client_id !== clientOrgId
+        ) {
+          const flagged = await flagClientMismatch(client, {
+            jobId: updatedRow.id,
+            hhJobNumber: jobNumber,
+            hhCompanyName: hhCompanyName,
+            hhOrgId: clientOrgId,
+            opClientId: updatedRow.client_id,
+          });
+          if (flagged) result.reviewsFlagged++;
+        }
       } else {
         // Create new job — set pipeline_status based on HH status
         const initialPipelineStatus =
@@ -752,38 +892,20 @@ export async function syncSingleHireHopJob(
     const statusCode = Math.floor(job.STATUS);
     const statusName = HH_JOB_STATUS_MAP[statusCode] || `Unknown (${statusCode})`;
 
-    // Link / create client organisation (mirrors bulk sync)
+    // Link / create client organisation (shared with bulk sync)
     let clientOrgId: string | null = null;
-    if (job.COMPANY && job.COMPANY.trim()) {
-      const companyName = job.COMPANY.trim();
-      const orgMatch = await client.query(
-        `SELECT id FROM organisations
-         WHERE lower(name) = lower($1) AND is_deleted = false
-         LIMIT 1`,
-        [companyName],
+    const hhCompanyName = job.COMPANY?.trim() || '';
+    if (hhCompanyName) {
+      const resolved = await resolveClientOrgFromCompany(
+        client,
+        hhCompanyName,
+        String(job.NUMBER),
       );
-      if (orgMatch.rows.length > 0) {
-        clientOrgId = orgMatch.rows[0].id;
-        result.clientLinked = true;
-      } else {
-        const newOrg = await client.query(
-          `INSERT INTO organisations (name, type, created_by)
-           VALUES ($1, 'client', $2)
-           RETURNING id`,
-          [companyName, 'hirehop_sync'],
-        );
-        clientOrgId = newOrg.rows[0].id;
-        result.clientCreated = true;
-
-        const linkResult = await linkMatchingPersonToShellOrg(
-          client,
-          clientOrgId!,
-          companyName,
-          String(job.NUMBER),
-        );
-        if (linkResult.linked) result.personLinked = true;
-        if (linkResult.flagged) result.personFlagged = true;
-      }
+      clientOrgId = resolved.orgId;
+      if (resolved.created) result.clientCreated = true;
+      else result.clientLinked = true;
+      if (resolved.personLinked) result.personLinked = true;
+      if (resolved.personFlagged) result.personFlagged = true;
     }
 
     // Try to link venue
@@ -809,17 +931,26 @@ export async function syncSingleHireHopJob(
     if (existing.rows.length > 0) {
       // job_value deliberately not written — owned by the billing-accrued
       // path (Money tab side-effect + services/job-value-sync gap-filler).
-      await client.query(
+      // client_id CASE: preserve a deliberately OP-set client — see the bulk
+      // sync's identical guard and flagClientMismatch below.
+      const updated = await client.query(
         `UPDATE jobs SET
            job_name = $1, job_type = $2, status = $3, status_name = $4,
-           colour = $5, client_id = COALESCE($6, client_id),
-           client_name = $7, company_name = $8, client_ref = $9,
+           colour = $5,
+           client_id = CASE WHEN client_locked_at IS NOT NULL
+                            THEN client_id
+                            ELSE COALESCE($6, client_id) END,
+           client_name = CASE WHEN client_locked_at IS NOT NULL
+                              THEN client_name
+                              ELSE $7 END,
+           company_name = $8, client_ref = $9,
            venue_id = COALESCE($10, venue_id), venue_name = $11,
            out_date = $12, job_date = $13, job_end = $14, return_date = $15,
            created_date = $16, manager1_name = $17, manager2_name = $18,
            custom_index = $19, hh_status = $3,
            updated_at = NOW()
-         WHERE hh_job_number = $20`,
+         WHERE hh_job_number = $20
+         RETURNING id, client_id, client_locked_at`,
         [
           stripProjectPrefix(job.JOB_NAME),
           job.JOB_TYPE,
@@ -845,6 +976,21 @@ export async function syncSingleHireHopJob(
       );
       result.jobId = existing.rows[0].id;
       result.created = false;
+
+      const updatedRow = updated.rows[0];
+      if (
+        updatedRow?.client_locked_at &&
+        clientOrgId &&
+        updatedRow.client_id !== clientOrgId
+      ) {
+        await flagClientMismatch(client, {
+          jobId: updatedRow.id,
+          hhJobNumber: job.NUMBER,
+          hhCompanyName,
+          hhOrgId: clientOrgId,
+          opClientId: updatedRow.client_id,
+        });
+      }
     } else {
       // Match bulk sync's mapping for consistency (statusCode 11 → 'confirmed').
       // Staff can manually adjust after import if a more granular status is wanted.
