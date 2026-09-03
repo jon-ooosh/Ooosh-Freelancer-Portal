@@ -18,6 +18,7 @@ import {
 import { reactivateAutoCancelledRequirements } from '../services/requirement-cleanup';
 import { pushDepositToHH, reverseDepositOnHH, getMethodForBankId } from '../services/hh-deposit';
 import { getJobBillingFacts, getNetHireDepositTotal, HireDeposit } from '../services/hh-billing-deposits';
+import { createPipelineEnquiry, EnquiryValidationError } from '../services/pipeline-enquiry';
 
 const router = Router();
 router.use(authenticate);
@@ -353,17 +354,14 @@ const createEnquirySchema = z.object({
 router.post('/enquiry', validate(createEnquirySchema), async (req: AuthRequest, res: Response) => {
   try {
     const {
-      client_name, out_date, job_date, job_end, return_date, job_name,
-      client_id, venue_id, venue_name, enquiry_source,
-      job_value, likelihood, notes, manager1_person_id,
-      next_chase_date, chase_interval_days, chase_alert_user_id,
-      service_types, band_name,
-      contact_person_ids, primary_contact_person_id,
+      out_date, job_date, job_end, return_date,
       out_time, start_time, return_time, end_time,
     } = req.body;
-    let { details } = req.body;
 
-    // Sanity-check the date/time ordering before we persist
+    // Sanity-check the date/time ordering before we persist. This lives here
+    // (not in createPipelineEnquiry) because validateJobDateTimes is woven into
+    // the HireHop-push helpers in this file. The intake route does its own
+    // light start<=end check before calling the shared helper.
     const dateTimeError = validateJobDateTimes({
       out_date: out_date ?? null,
       job_date: job_date ?? null,
@@ -379,193 +377,13 @@ router.post('/enquiry', validate(createEnquirySchema), async (req: AuthRequest, 
       return;
     }
 
-    // Service type labels
-    const serviceLabels: Record<string, string> = {
-      self_drive_van: 'Self-drive van',
-      backline: 'Backline',
-      rehearsal: 'Rehearsal',
-    };
-    const selectionPart = service_types && service_types.length > 0
-      ? service_types.map((t: string) => serviceLabels[t] || t).join(' + ')
-      : null;
-
-    // Require either details or service_types
-    if (!details && !selectionPart) {
-      res.status(400).json({ error: 'Please provide a description or select a service type' });
+    const job = await createPipelineEnquiry(req.body, req.user!.id);
+    res.status(201).json(job);
+  } catch (error) {
+    if (error instanceof EnquiryValidationError) {
+      res.status(400).json({ error: error.message });
       return;
     }
-
-    // If no details text, use service type labels
-    if (!details && selectionPart) {
-      details = selectionPart;
-    }
-
-    // Auto-generate job name: "Band - Client - Selection" (with regular dashes)
-    let finalJobName = job_name;
-    if (!finalJobName) {
-      const parts: string[] = [];
-      if (band_name) parts.push(band_name);
-      parts.push(client_name);
-      if (selectionPart) parts.push(selectionPart);
-      finalJobName = parts.join(' - ');
-    }
-
-    // Server-side fallback: if the form sent only client_name (no client_id)
-    // and an existing organisation has that exact name, auto-link it. Catches
-    // cases where the user typed a known client but didn't click the
-    // dropdown row, leaving the job stranded as text-only.
-    let resolvedClientId = client_id || null;
-    if (!resolvedClientId && client_name) {
-      const lookup = await query(
-        `SELECT id FROM organisations
-         WHERE LOWER(TRIM(name)) = LOWER(TRIM($1)) AND is_deleted = false
-         LIMIT 2`,
-        [client_name]
-      );
-      if (lookup.rows.length === 1) {
-        resolvedClientId = lookup.rows[0].id;
-      }
-      // 0 matches → leave null (text only — possibly a new client). 2+ matches
-      // → ambiguous, also leave null and let staff link manually.
-    }
-
-    // Resolve manager: use provided person_id, or look up the current user's person_id
-    let managerId = manager1_person_id || null;
-    if (!managerId) {
-      const userResult = await query(
-        `SELECT person_id FROM users WHERE id = $1`,
-        [req.user!.id]
-      );
-      managerId = userResult.rows[0]?.person_id || null;
-    }
-
-    const chaseIntervalDays = chase_interval_days || 3;
-    const chaseDate = next_chase_date || null;
-    // If no chase date given, default to interval from today
-    const chaseDateSql = chaseDate
-      ? `$17::date`
-      : `CURRENT_DATE + ($17 || ' days')::interval`;
-
-    const result = await query(
-      `INSERT INTO jobs (
-        job_name, details, out_date, job_date, job_end, return_date,
-        out_time, start_time, return_time, end_time,
-        client_id, client_name, company_name,
-        venue_id, venue_name,
-        enquiry_source, job_value, likelihood, notes,
-        manager1_person_id,
-        status, status_name,
-        pipeline_status, pipeline_status_changed_at,
-        chase_interval_days, next_chase_date,
-        created_by
-      ) VALUES (
-        $1, $2, $3, $4, $5, $6,
-        $19, $20, $21, $22,
-        $7, $8, $8,
-        $9, $10,
-        $11, $12, $13, $14,
-        $15,
-        0, 'Enquiry',
-        'new_enquiry', NOW(),
-        $18, ${chaseDateSql},
-        $16
-      ) RETURNING *`,
-      [
-        finalJobName, details, out_date || null, job_date || null, job_end || null, return_date || null,
-        resolvedClientId, client_name,
-        venue_id || null, venue_name || null,
-        enquiry_source || null, job_value || null, likelihood || 'warm', notes || null,
-        managerId,
-        req.user!.id,
-        chaseDate || String(chaseIntervalDays),
-        chaseIntervalDays,
-        out_time || '09:00', start_time || out_time || '09:00', return_time || '09:00', end_time || '09:00',
-      ]
-    );
-
-    // Log creation as an interaction on the job timeline
-    await query(
-      `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation, source)
-       VALUES ('status_transition', $1, $2, $3, 'new_enquiry', 'system')`,
-      [`New enquiry created: ${finalJobName}`, result.rows[0].id, req.user!.id]
-    );
-
-    await logAudit(req.user!.id, 'jobs', result.rows[0].id, 'create', null, result.rows[0]);
-
-    // Create chase alert notification if requested
-    if (chase_alert_user_id) {
-      await query(
-        `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, priority, action_url, source_user_id)
-         VALUES ($1, 'chase_alert', $2, $3, 'jobs', $4, 'normal', $5, $6)`,
-        [
-          chase_alert_user_id,
-          `Chase reminder: ${finalJobName}`,
-          `Chase due for ${client_name} — ${finalJobName}`,
-          result.rows[0].id,
-          `/jobs/${result.rows[0].id}`,
-          req.user!.id,
-        ]
-      );
-    }
-
-    // Auto-create job requirements based on service type selections
-    if (service_types && service_types.length > 0) {
-      const jobId = result.rows[0].id;
-      // Map service types to requirement types
-      const requirementMap: Record<string, string[]> = {
-        self_drive_van: ['vehicle', 'hire_forms', 'excess'],
-        backline: ['backline'],
-        rehearsal: ['rehearsal'],
-      };
-      const reqTypes = new Set<string>();
-      for (const st of service_types) {
-        const mapped = requirementMap[st];
-        if (mapped) mapped.forEach(t => reqTypes.add(t));
-      }
-      for (const reqType of reqTypes) {
-        try {
-          // Check if already exists (unique constraint is deferred so ON CONFLICT won't work)
-          const exists = await query(
-            `SELECT 1 FROM job_requirements WHERE job_id = $1 AND requirement_type = $2 LIMIT 1`,
-            [jobId, reqType]
-          );
-          if (exists.rows.length === 0) {
-            await query(
-              `INSERT INTO job_requirements (job_id, requirement_type, status, created_by, source)
-               VALUES ($1, $2, 'not_started', $3, 'enquiry_form')`,
-              [jobId, reqType, req.user!.id]
-            );
-          }
-        } catch (reqErr) {
-          console.error(`Failed to create requirement ${reqType} for job ${jobId}:`, reqErr);
-        }
-      }
-    }
-
-    // Per-job contact selection (migration 086). Stores which of the
-    // client org's people are actually on THIS hire. Routing graduation
-    // (Phase C) will read this; for now it's just the audit + display
-    // signal so the cascade picker in the modal has somewhere to land
-    // its ticks.
-    if (contact_person_ids && contact_person_ids.length > 0) {
-      const createdJobId = result.rows[0].id;
-      for (const personId of contact_person_ids) {
-        try {
-          const isPrimary = primary_contact_person_id === personId;
-          await query(
-            `INSERT INTO job_contacts (job_id, person_id, is_primary, created_by)
-             VALUES ($1, $2, $3, $4)
-             ON CONFLICT (job_id, person_id) DO NOTHING`,
-            [createdJobId, personId, isPrimary, req.user!.id]
-          );
-        } catch (contactErr) {
-          console.error(`Failed to link contact ${personId} to job ${createdJobId}:`, contactErr);
-        }
-      }
-    }
-
-    res.status(201).json(result.rows[0]);
-  } catch (error) {
     console.error('Create enquiry error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }

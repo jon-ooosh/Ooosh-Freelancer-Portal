@@ -53,6 +53,7 @@ import autoChaseRouter from './auto-chase';
 import leadsRouter from './leads';
 import staffDocumentsRouter from './staff-documents';
 import freelancersRouter from './freelancers';
+import enquiryIntakeRouter from './enquiry-intake';
 
 const router = Router();
 
@@ -110,6 +111,7 @@ router.use('/data-cleanup', dataCleanupRouter);
 router.use('/pre-hire-briefing', preHireBriefingRouter);
 router.use('/webhooks', webhooksRouter);  // No JWT auth — uses export_key / API key
 router.use('/driver-verification', driverVerificationRouter);  // Public-facing — hire form auth (not OP JWT)
+router.use('/enquiry-intake', enquiryIntakeRouter);  // Website enquiry form → OP enquiry (API-key auth, service='enquiry_form')
 
 // Alias: /api/jobs/:jobNumber → /api/driver-verification/validate-job/:jobNumber
 // Needed because Netlify validate-job.js calls opFetch('/jobs/{jobId}')
