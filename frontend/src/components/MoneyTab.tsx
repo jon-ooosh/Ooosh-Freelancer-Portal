@@ -5,11 +5,13 @@
  * record payment form, client account balance.
  */
 import { useState, useEffect, useCallback } from 'react';
+import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
 import { describePreauth, paymentMethodLabel } from '../lib/preauth';
 import { getPaymentState, PAYMENT_STATE_LABELS, PAYMENT_STATE_CLASSES } from '../services/paymentState';
+import { hasOutstanding, isNonZero } from '../lib/money';
 import ExcessPaymentModal, { statusLabel, statusColor, computeHireDays } from './ExcessPaymentModal';
 import CostCaptureModal from './CostCaptureModal';
 import CostAllocationModal from './CostAllocationModal';
@@ -206,7 +208,16 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
 
   // Rollover chains — "follow the thread" of a rolled-over excess. Keyed by
   // excess record id → ordered chain of records sharing the HH deposit.
-  type ChainEntry = { id: string; excess_status: string; hh_job_number: number | null; job_name: string | null };
+  type ChainEntry = {
+    id: string;
+    excess_status: string;
+    job_id: string | null;
+    hh_job_number: number | null;
+    job_name: string | null;
+    excess_amount_taken: string | number | null;
+    payment_date: string | null;
+    payment_method: string | null;
+  };
   const [rolloverChains, setRolloverChains] = useState<Record<string, ChainEntry[]>>({});
 
   // Link deposit state
@@ -687,6 +698,33 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
     ? Math.min(100, ((financial.total_hire_deposits + (financial.credit_note_write_off || 0)) / financial.hire_value_inc_vat) * 100)
     : 0;
 
+  /*
+   * Excess is charged per HIRE (per van, top-N drivers), but stored per DRIVER
+   * — so a 2-driver/1-van job used to render two cards, the second reading
+   * "Required: £0.00 · Collected: £0.00 · Covered", which says nothing.
+   *
+   * Collapse instead of hide. A `not_required` row still answers a real
+   * question ("did we forget to take an excess off Lewis?" — no, deliberately),
+   * so the covered drivers are NAMED on the chargeable row for their van rather
+   * than deleted. Nothing is silently dropped: covered rows whose van doesn't
+   * match a chargeable row fall through to `orphanCovered` below.
+   *
+   * The Drivers & Vehicles tab deliberately still shows excess per driver —
+   * there it means the driver's PERSONAL liability (£1,200 if they prang it),
+   * which is a different fact and stays true whoever holds the money.
+   */
+  const coveredRecords = excess.records.filter((r) => r.excess_status === 'not_required');
+  const chargeableRecords = excess.records.filter((r) => r.excess_status !== 'not_required');
+  const coveredName = (r: JobExcess) => r.driver_name || r.client_name || 'Unnamed driver';
+  const coveredNamesForVan = (reg: string | null | undefined) =>
+    coveredRecords.filter((c) => (c.vehicle_reg || null) === (reg || null)).map(coveredName);
+  const claimedCoveredIds = new Set(
+    chargeableRecords.flatMap((rec) =>
+      coveredRecords.filter((c) => (c.vehicle_reg || null) === (rec.vehicle_reg || null)).map((c) => c.id),
+    ),
+  );
+  const orphanCovered = coveredRecords.filter((c) => !claimedCoveredIds.has(c.id));
+
   return (
     <div className="space-y-6">
       {/* Financial Summary */}
@@ -761,13 +799,13 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
             </div>
 
             <div className="flex items-center justify-between">
-              <p className={`text-sm font-semibold ${financial.balance_override ? 'text-gray-400 line-through' : financial.balance_outstanding > 0 ? 'text-red-600' : 'text-green-600'}`}>
+              <p className={`text-sm font-semibold ${financial.balance_override ? 'text-gray-400 line-through' : hasOutstanding(financial.balance_outstanding) ? 'text-red-600' : 'text-green-600'}`}>
                 Balance Outstanding: £{financial.balance_outstanding.toFixed(2)}
               </p>
               {/* Admin: resolve a stray HH balance the business considers settled
                   (Xero source of truth). Only when there's a balance + not already
                   resolved. */}
-              {isAdmin && !financial.balance_override && financial.balance_outstanding > 0.01 && (
+              {isAdmin && !financial.balance_override && hasOutstanding(financial.balance_outstanding) && (
                 <button
                   onClick={() => { setBalError(''); setShowResolveBalance(true); }}
                   className="text-xs text-gray-500 hover:text-ooosh-700 underline"
@@ -820,7 +858,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                 </p>
               </div>
             )}
-            {financial.deposit_paid && financial.balance_outstanding > 0 && (
+            {financial.deposit_paid && hasOutstanding(financial.balance_outstanding) && (
               <div className="mt-3 p-3 bg-green-50 border border-green-200 rounded-lg">
                 <p className="text-xs text-green-700">
                   Deposit secured. Remaining balance: <span className="font-semibold">£{financial.balance_outstanding.toFixed(2)}</span>
@@ -902,9 +940,9 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
       {/* Insurance Excess */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
         <h3 className="text-lg font-semibold text-gray-900 mb-4">Insurance Excess</h3>
-        {excess.records.length > 0 ? (
+        {chargeableRecords.length > 0 ? (
           <div className="space-y-3">
-            {excess.records.map((record) => (
+            {chargeableRecords.map((record) => (
               <div
                 key={record.id}
                 className="flex items-center justify-between p-3 bg-gray-50 rounded-lg border border-gray-200"
@@ -940,32 +978,48 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                     {record.driver_name || record.client_name || 'Job-level excess'}
                     {record.vehicle_reg && ` — ${record.vehicle_reg}`}
                   </p>
+                  {/* Money line. Zero-value fields are SUPPRESSED — "Collected:
+                      £0.00" is noise next to a REQUIRED pill that already says
+                      nothing has been collected. "Required" is also renamed to
+                      "Excess" here so the word only appears in one place (it was
+                      doing double duty as both a field label and a status). */}
                   <p className="text-xs text-gray-500">
-                    Required: {record.excess_amount_required != null ? `£${Number(record.excess_amount_required).toFixed(2)}` : '—'}
-                    {Number(record.amount_held || 0) > 0 ? (
+                    Excess: {record.excess_amount_required != null ? `£${Number(record.excess_amount_required).toFixed(2)}` : '—'}
+                    {isNonZero(record.amount_held) ? (
                       <>
                         {' · '}
                         <span className="text-sky-700">Held: £{Number(record.amount_held).toFixed(2)}</span>
                       </>
-                    ) : (
+                    ) : isNonZero(record.excess_amount_taken) ? (
                       <>
                         {' · '}
-                        Collected: £{Number(record.excess_amount_taken || 0).toFixed(2)}
-                        {/* When + how it was collected, inline. Pre-auth held/released
-                            records show their own dated line below (describePreauth). */}
-                        {Number(record.excess_amount_taken || 0) > 0 && record.payment_date &&
+                        {/* A rolled-over record's payment_date is the day the
+                            rollover was APPLIED, not when the cash arrived — it
+                            landed on the origin hire, possibly weeks earlier.
+                            Saying "Collected on <that date>" was a plain untruth
+                            (job 16605). The breadcrumb below names the origin. */}
+                        {record.payment_method === 'rolled_over' ? 'Carried over: ' : 'Collected: '}
+                        £{Number(record.excess_amount_taken).toFixed(2)}
+                        {record.payment_date &&
                           ` on ${new Date(record.payment_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`}
-                        {Number(record.excess_amount_taken || 0) > 0 && record.payment_method &&
+                        {record.payment_method && record.payment_method !== 'rolled_over' &&
                           ` · ${paymentMethodLabel(record.payment_method)}`}
                       </>
-                    )}
-                    {Number(record.amount_released || 0) > 0 && (
+                    ) : null}
+                    {isNonZero(record.amount_released) && (
                       <>
                         {' · '}
-                        <span className="text-gray-400">Released: £{Number(record.amount_released).toFixed(2)}</span>
+                        <span className="text-gray-500">Released: £{Number(record.amount_released).toFixed(2)}</span>
                       </>
                     )}
                   </p>
+                  {/* Covered drivers, folded onto the row that actually carries
+                      the money for their van. */}
+                  {coveredNamesForVan(record.vehicle_reg).length > 0 && (
+                    <p className="text-xs text-gray-500 mt-0.5">
+                      Also covered by this excess: {coveredNamesForVan(record.vehicle_reg).join(', ')}
+                    </p>
+                  )}
                   {/* Resolution breakdown — what actually happened to collected
                       excess. Without this the card showed only collected vs
                       required, hiding claim/reimburse splits (job 15291). */}
@@ -987,22 +1041,79 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                   {/* Rollover chain — "follow the thread". Shows the money's
                       journey across jobs (#A → #B → #C), current job highlighted,
                       until it's finally reimbursed/claimed. */}
-                  {rolloverChains[record.id] && rolloverChains[record.id].length > 1 && (
-                    <p className="text-xs text-purple-700 mt-0.5 flex flex-wrap items-center gap-1">
-                      <span className="font-medium">↪ Rollover thread:</span>
-                      {rolloverChains[record.id].map((link, i) => (
-                        <span key={link.id} className="flex items-center gap-1">
-                          {i > 0 && <span className="text-purple-300">→</span>}
-                          <span
-                            className={link.id === record.id ? 'font-semibold underline decoration-dotted' : ''}
-                            title={link.job_name || undefined}
-                          >
-                            #{link.hh_job_number ?? '—'} <span className="text-purple-400">({statusLabel(link.excess_status as Parameters<typeof statusLabel>[0])})</span>
-                          </span>
-                        </span>
-                      ))}
-                    </p>
-                  )}
+                  {rolloverChains[record.id] && rolloverChains[record.id].length > 1 && (() => {
+                    const chain = rolloverChains[record.id];
+                    /* The ORIGIN is the hire the cash actually landed on — the
+                       earliest hop that took money in its own right rather than
+                       inheriting it. Naming it is the whole point: without it a
+                       child hire reads "Taken £1,200" with no clue that the
+                       money is sitting on a different job (#16605 / #16371). */
+                    const origin = chain.find(
+                      (l) => l.payment_method !== 'rolled_over' && Number(l.excess_amount_taken || 0) > 0,
+                    ) || chain[0];
+                    const originDate = origin?.payment_date
+                      ? new Date(origin.payment_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+                      : null;
+                    return (
+                      <div className="text-xs text-purple-700 mt-1">
+                        <p className="flex flex-wrap items-center gap-1">
+                          <span className="font-medium">↪ Rollover thread:</span>
+                          {chain.map((link, i) => {
+                            const isHere = link.id === record.id;
+                            const isOrigin = origin && link.id === origin.id;
+                            const label = (
+                              <>
+                                {isOrigin && <span title="The hire the money was originally taken on">💷 </span>}
+                                #{link.hh_job_number ?? '—'}{' '}
+                                <span className="text-purple-400">
+                                  ({isHere ? 'here' : statusLabel(link.excess_status)})
+                                </span>
+                              </>
+                            );
+                            return (
+                              <span key={link.id} className="flex items-center gap-1">
+                                {i > 0 && <span className="text-purple-300">→</span>}
+                                {/* Each hop links to its own job's Money tab so
+                                    staff can jump straight to wherever the money
+                                    actually is, rather than searching for it. */}
+                                {link.job_id && !isHere ? (
+                                  <Link
+                                    to={`/jobs/${link.job_id}`}
+                                    title={link.job_name || undefined}
+                                    className="underline decoration-dotted hover:text-purple-900"
+                                  >
+                                    {label}
+                                  </Link>
+                                ) : (
+                                  <span
+                                    className={isHere ? 'font-semibold underline decoration-dotted' : ''}
+                                    title={link.job_name || undefined}
+                                  >
+                                    {label}
+                                  </span>
+                                )}
+                              </span>
+                            );
+                          })}
+                        </p>
+                        {origin && origin.id !== record.id && Number(origin.excess_amount_taken || 0) > 0 && (
+                          <p className="text-purple-500 mt-0.5">
+                            Money originally taken on{' '}
+                            {origin.job_id ? (
+                              <Link to={`/jobs/${origin.job_id}`} className="underline decoration-dotted hover:text-purple-900">
+                                #{origin.hh_job_number ?? '—'}
+                              </Link>
+                            ) : (
+                              <>#{origin.hh_job_number ?? '—'}</>
+                            )}
+                            {originDate && ` on ${originDate}`}
+                            {origin.payment_method && origin.payment_method !== 'rolled_over' &&
+                              ` · ${paymentMethodLabel(origin.payment_method)}`}
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })()}
                   {(record.excess_status === 'pre_auth' || record.excess_status === 'released') && (() => {
                     // Shared wording — see lib/preauth.ts. Binary held/released,
                     // never a "maybe"; the server-side self-heal resolves a stuck
@@ -1031,6 +1142,28 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                 )}
               </div>
             ))}
+            {/* Covered rows whose van doesn't match any chargeable row (a swap,
+                a deleted record, a job-level excess with no reg). Shown rather
+                than dropped — collapsing must never lose a driver. */}
+            {orphanCovered.length > 0 && (
+              <p className="text-xs text-gray-500 px-1">
+                Also covered on this hire: {orphanCovered.map(coveredName).join(', ')}
+              </p>
+            )}
+          </div>
+        ) : coveredRecords.length > 0 ? (
+          /* Every record on the job is a £0 "covered" row — an internal job, a
+             Van & Driver hire, or a top-N result with nothing chargeable. This
+             is NOT "no excess tracked": showing the empty state here invited
+             staff to create a spurious record. Say what's actually true. */
+          <div className="text-sm text-gray-500">
+            <p>
+              No excess chargeable on this hire.{' '}
+              <span className="text-gray-400">
+                {coveredRecords.length} driver{coveredRecords.length === 1 ? '' : 's'} covered:{' '}
+                {coveredRecords.map(coveredName).join(', ')}
+              </span>
+            </p>
           </div>
         ) : (
           <div className="text-sm text-gray-500">
@@ -1063,7 +1196,9 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                       {dep.description && ` — ${dep.description}`}
                     </p>
                   </div>
-                  {excess.records.length > 0 ? (
+                  {/* Must match the picker's source (chargeableRecords) or the
+                      button opens an empty modal. */}
+                  {chargeableRecords.length > 0 ? (
                     <button
                       onClick={() => setLinkingDeposit({ hh_deposit_id: dep.hh_deposit_id, amount: dep.amount })}
                       className="px-2.5 py-1 text-xs font-medium text-amber-700 hover:text-amber-900 border border-amber-300 rounded-md hover:bg-amber-100"
@@ -1099,7 +1234,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
               Select which excess record to link it to:
             </p>
             <div className="space-y-2 mb-4">
-              {excess.records.map((record) => (
+              {chargeableRecords.map((record) => (
                 <button
                   key={record.id}
                   onClick={() => handleLinkDeposit(record.id)}

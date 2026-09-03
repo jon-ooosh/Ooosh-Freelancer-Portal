@@ -16,7 +16,12 @@ import BacklineMatcherModal from '../components/BacklineMatcherModal';
 import RequirementCard from '../components/RequirementCard';
 import type { JobRequirement } from '../components/RequirementCard';
 import ExcessGateBanner from '../components/ExcessGateBanner';
-import ExcessPaymentModal, { computeHireDays } from '../components/ExcessPaymentModal';
+import ExcessPaymentModal, {
+  computeHireDays,
+  // Aliased: this file has its own `statusLabel` for the pipeline status.
+  statusLabel as excessStatusLabel,
+  statusColor as excessStatusColor,
+} from '../components/ExcessPaymentModal';
 import OohReturnModal from '../components/OohReturnModal';
 import JobOohReturns from '../components/JobOohReturns';
 import AddToHireModal, { type AddToHireCandidate } from '../components/AddToHireModal';
@@ -4897,30 +4902,16 @@ export default function JobDetailPage() {
                                 <span className="inline-flex items-center gap-1.5">
                                   <span className="text-gray-400">Excess</span>
                                   <span className="font-medium text-gray-700">£{displayAmount.toFixed(2)}</span>
-                                  <span className={`px-2 py-0.5 rounded-full font-medium ${
-                                    a.excess.excess_status === 'taken' ? 'bg-green-100 text-green-700' :
-                                    a.excess.excess_status === 'pre_auth' ? 'bg-sky-100 text-sky-700' :
-                                    a.excess.excess_status === 'waived' ? 'bg-blue-100 text-blue-700' :
-                                    a.excess.excess_status === 'reimbursed' ? 'bg-emerald-100 text-emerald-700' :
-                                    a.excess.excess_status === 'partially_reimbursed' ? 'bg-orange-100 text-orange-700' :
-                                    a.excess.excess_status === 'fully_claimed' ? 'bg-red-100 text-red-700' :
-                                    ['needed', 'pending'].includes(a.excess.excess_status) ? 'bg-amber-100 text-amber-700' :
-                                    a.excess.excess_status === 'partially_paid' ? 'bg-yellow-100 text-yellow-700' :
-                                    a.excess.auto_covered && a.excess.excess_status === 'waived' ? 'bg-purple-100 text-purple-700' :
-                                    a.excess.excess_status === 'not_required' ? 'bg-gray-100 text-gray-500' :
-                                    'bg-gray-100 text-gray-600'
-                                  }`}>
-                                    {a.excess.auto_covered && a.excess.excess_status === 'waived' ? 'Covered by account' :
-                                     a.excess.excess_status === 'taken' ? 'Taken' :
-                                     a.excess.excess_status === 'pre_auth' ? 'Pre-auth' :
-                                     a.excess.excess_status === 'waived' ? 'Waived' :
-                                     a.excess.excess_status === 'reimbursed' ? 'Reimbursed' :
-                                     a.excess.excess_status === 'partially_reimbursed' ? 'Part Reimbursed' :
-                                     a.excess.excess_status === 'fully_claimed' ? 'Claimed' :
-                                     ['needed', 'pending'].includes(a.excess.excess_status) ? 'Required' :
-                                     a.excess.excess_status === 'partially_paid' ? 'Part Paid' :
-                                     a.excess.excess_status === 'not_required' ? 'Covered' :
-                                     a.excess.excess_status}
+                                  {/* Shared pill helpers — this block used to
+                                      hand-write its own label + colour maps, and
+                                      they had already drifted from the Money
+                                      tab's (same record read "£1,200 / Covered"
+                                      here and "Required: £0.00 / Covered"
+                                      there). Route every excess pill through
+                                      excessStatusLabel/excessStatusColor so the
+                                      two surfaces cannot disagree again. */}
+                                  <span className={`px-2 py-0.5 rounded-full font-medium ${excessStatusColor(a.excess.excess_status, a.excess.auto_covered)}`}>
+                                    {excessStatusLabel(a.excess.excess_status, a.excess.auto_covered)}
                                   </span>
                                   {a.excess.dispute_status && (
                                     <span className={`px-2 py-0.5 rounded-full font-semibold ${a.excess.dispute_status === 'won' ? 'bg-gray-100 text-gray-600' : 'bg-red-100 text-red-700'}`}>

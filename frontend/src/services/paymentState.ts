@@ -1,11 +1,25 @@
+import { isSettled } from '../lib/money';
+
 export type PaymentState = 'paid_full' | 'deposit_secured' | 'deposit_short' | 'no_payment';
 
+/**
+ * `deposit_percent` carries the same sub-penny residue as the balance (see
+ * lib/money.ts), so `>= 100` fails on a fully-paid job whose ex-VAT value isn't
+ * a clean multiple of 5p — it renders "100% paid" next to a "Deposit secured"
+ * pill. Settle the question on the BALANCE via the shared tolerance instead, so
+ * this pill and the "Balance Outstanding" line can never disagree.
+ */
 export function getPaymentState(f: {
   deposit_percent: number;
   deposit_paid: boolean;
   total_hire_deposits: number;
+  balance_outstanding?: number;
 }): PaymentState {
-  if (f.deposit_percent >= 100) return 'paid_full';
+  const balanceKnown = typeof f.balance_outstanding === 'number';
+  const paidInFull = balanceKnown
+    ? isSettled(f.balance_outstanding) && f.total_hire_deposits > 0
+    : f.deposit_percent >= 100;
+  if (paidInFull) return 'paid_full';
   if (f.deposit_paid) return 'deposit_secured';
   if (f.total_hire_deposits > 0) return 'deposit_short';
   return 'no_payment';

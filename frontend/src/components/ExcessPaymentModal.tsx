@@ -124,12 +124,19 @@ const REIMBURSE_METHODS = [
 // looks like a manual staff decision. `autoCovered` (from the backend
 // `auto_covered` flag / the [Auto-covered by account] notes marker) upgrades the
 // label + colour on those records.
-function statusLabel(status: ExcessStatus, autoCovered?: boolean): string {
+/*
+ * `status` is deliberately widened to `string`. These render whatever the DB
+ * actually holds, which includes legacy values the ExcessStatus union no longer
+ * lists (`partial`, `claimed`) and anything a future migration adds — both maps
+ * fall back to the raw value rather than crashing. Callers pass plain strings
+ * off API payloads; narrowing here just forced dishonest casts at call sites.
+ */
+function statusLabel(status: ExcessStatus | string, autoCovered?: boolean): string {
   if (autoCovered && status === 'waived') return 'Covered by account';
   const labels: Record<string, string> = {
     not_required: 'Covered',  // covered by another driver's excess on this hire
-    needed: 'Required',
-    pending: 'Required',
+    needed: 'REQUIRED',
+    pending: 'REQUIRED',
     taken: 'Taken',
     partially_paid: 'Partially Paid',
     partial: 'Partially Paid', // legacy compat
@@ -145,17 +152,32 @@ function statusLabel(status: ExcessStatus, autoCovered?: boolean): string {
   return labels[status] || status;
 }
 
-function statusColor(status: ExcessStatus, autoCovered?: boolean): string {
+/**
+ * Pill colours. Two deliberate choices worth keeping (Sep 2026):
+ *
+ *  - `needed`/`pending` is RED, not amber. It is the one state that means money
+ *    we should be holding and are not, and it is what the dispatch gate warns
+ *    on — ExcessGateBanner is red for the same fact, and the two must not shout
+ *    at different volumes about the same thing.
+ *
+ *  - `released` is OUTLINED (border + near-white fill) rather than filled. A
+ *    release is an EVENT ("£1,200 was held and has gone back"), not a resting
+ *    state, and as a filled grey pill it was indistinguishable from `Covered`
+ *    and easy to miss entirely. The outline is what carries that distinction;
+ *    the green then reads "closed, nothing owed, no action" rather than the
+ *    "we hold money" that filled green means on `taken`/`reimbursed`.
+ */
+function statusColor(status: ExcessStatus | string, autoCovered?: boolean): string {
   if (autoCovered && status === 'waived') return 'bg-purple-100 text-purple-800';
   const colors: Record<string, string> = {
     not_required: 'bg-gray-100 text-gray-700',
-    needed: 'bg-amber-100 text-amber-800',
-    pending: 'bg-amber-100 text-amber-800',
+    needed: 'bg-red-100 text-red-800 tracking-wide',
+    pending: 'bg-red-100 text-red-800 tracking-wide',
     taken: 'bg-green-100 text-green-800',
     partially_paid: 'bg-yellow-100 text-yellow-800',
     partial: 'bg-yellow-100 text-yellow-800',
     pre_auth: 'bg-sky-100 text-sky-800',
-    released: 'bg-gray-100 text-gray-600',
+    released: 'bg-white text-green-800 border border-green-700',
     waived: 'bg-blue-100 text-blue-800',
     fully_claimed: 'bg-red-100 text-red-800',
     claimed: 'bg-red-100 text-red-800',

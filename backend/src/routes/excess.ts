@@ -759,8 +759,14 @@ router.get('/:id/rollover-chain', async (req: AuthRequest, res: Response) => {
     if (!depositId) { res.json({ data: { deposit_id: null, current_id: id, chain: [] } }); return; }
 
     const chain = await query(
-      `SELECT je.id, je.excess_status,
+      // job_id/payment_date/payment_method added Sep 2026 so the UI can link
+      // each hop to its job AND name the ORIGIN — the hire the cash actually
+      // landed on. A rolled-over child shows payment_date = the day the rollover
+      // was applied, which read as "collected on 2 Sept" for money taken weeks
+      // earlier on another hire.
+      `SELECT je.id, je.excess_status, je.job_id,
               je.excess_amount_taken, je.claim_amount, je.reimbursement_amount, je.amount_held,
+              je.payment_date, je.payment_method,
               je.created_at, j.hh_job_number, j.job_name
          FROM job_excess je LEFT JOIN jobs j ON j.id = je.job_id
         WHERE je.hh_deposit_id = $1

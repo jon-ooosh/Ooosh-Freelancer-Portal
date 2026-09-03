@@ -488,10 +488,15 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
     // This handles the case where the payment portal collected excess before the driver submitted the hire form.
     let excessResult;
     const existingPortalExcess = jobId ? await client.query(
+      // 'waived' MUST stay excluded (added Sep 2026). A waive is a deliberate
+      // staff decision on this hire; absorbing one here silently un-waived it
+      // back to 'pending' at £1,200 the moment the driver's hire form landed,
+      // with nothing to tell staff it had happened. Every sibling query in this
+      // file already excluded it — this was the one that did not.
       `SELECT id, excess_amount_taken, excess_status, payment_method, payment_reference, payment_date, hh_deposit_id
        FROM job_excess
        WHERE job_id = $1 AND assignment_id IS NULL
-         AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required', 'released')
+         AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required', 'waived', 'released')
        ORDER BY created_at DESC LIMIT 1`,
       [jobId]
     ) : { rows: [] };
