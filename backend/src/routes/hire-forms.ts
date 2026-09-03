@@ -37,6 +37,7 @@ import { autoDispatchJob } from '../services/auto-dispatch';
 import { runHookWithRecovery } from '../services/post-hook-recovery';
 import { cancelOrphanSiblingAllocations } from '../services/vha-dedup';
 import { applyAccountAutoCover } from '../services/hh-requirement-derivation';
+import { reconcileJobExcessTopN } from '../services/excess-topn';
 import { isIdentityAuthorised, identityHoldReason } from '../services/identity-review';
 
 /** Format a date string/Date to "18 Mar 2026" */
@@ -635,6 +636,29 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
     // form transaction) so a failure here can never roll back the hire form.
     // No-op for every non-opted client.
     if (jobId) {
+      // Top-N by AMOUNT, not by arrival. Runs before auto-cover so an opted-in
+      // client's waive lands on the corrected figures. Money-guarded and
+      // idempotent — see services/excess-topn.ts. Best-effort: a failure here
+      // must never undo a hire form that has already committed.
+      try {
+        const topn = await reconcileJobExcessTopN(query, jobId);
+        if (topn.changed) {
+          console.log(`[hire-forms] Top-N reconciled (POST): ${topn.summary}`);
+          // Promoting a covered record to chargeable can flip the job from
+          // covered to outstanding, so the pre-hire card must re-derive.
+          const { syncExcessRequirementStatus } = await import('../services/excess-requirement-sync');
+          await syncExcessRequirementStatus(jobId);
+        }
+        if (topn.blocked.length > 0) {
+          console.warn(
+            `[hire-forms] Top-N blocked by collected money on job ${jobId} — ` +
+            `hire should total £${topn.correctTotal}, chargeable records total £${topn.chargeableTotal}`,
+          );
+        }
+      } catch (topnErr) {
+        console.error('[hire-forms] reconcileJobExcessTopN (POST) failed (non-fatal):', topnErr);
+      }
+
       try {
         await applyAccountAutoCover(query, jobId);
       } catch (coverErr) {
@@ -1155,6 +1179,29 @@ router.post('/quick-assign', authenticate, validate(quickAssignSchema), async (r
     // opted-in client's quick-assign never leaves a driver reading "Required".
     // No-op for every non-opted client. Best-effort — never fails the assign.
     if (f.job_id) {
+      // Top-N by AMOUNT, not by arrival. Runs before auto-cover so an opted-in
+      // client's waive lands on the corrected figures. Money-guarded and
+      // idempotent — see services/excess-topn.ts. Best-effort: a failure here
+      // must never undo a hire form that has already committed.
+      try {
+        const topn = await reconcileJobExcessTopN(query, f.job_id);
+        if (topn.changed) {
+          console.log(`[hire-forms] Top-N reconciled (quick-assign): ${topn.summary}`);
+          // Promoting a covered record to chargeable can flip the job from
+          // covered to outstanding, so the pre-hire card must re-derive.
+          const { syncExcessRequirementStatus } = await import('../services/excess-requirement-sync');
+          await syncExcessRequirementStatus(f.job_id);
+        }
+        if (topn.blocked.length > 0) {
+          console.warn(
+            `[hire-forms] Top-N blocked by collected money on job ${f.job_id} — ` +
+            `hire should total £${topn.correctTotal}, chargeable records total £${topn.chargeableTotal}`,
+          );
+        }
+      } catch (topnErr) {
+        console.error('[hire-forms] reconcileJobExcessTopN (quick-assign) failed (non-fatal):', topnErr);
+      }
+
       try {
         await applyAccountAutoCover(query, f.job_id);
       } catch (coverErr) {

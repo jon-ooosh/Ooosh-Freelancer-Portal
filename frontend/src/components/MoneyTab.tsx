@@ -97,6 +97,12 @@ interface FinancialData {
     records: (JobExcess & { driver_name?: string; vehicle_reg?: string })[];
     total_required: number;
     total_collected: number;
+    topn_shortfall?: {
+      correctTotal: number;
+      chargeableTotal: number;
+      short: number;
+      drivers: string[];
+    } | null;
     status: string | null;
   };
   client_balance_on_account: number;
@@ -716,14 +722,16 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   const coveredRecords = excess.records.filter((r) => r.excess_status === 'not_required');
   const chargeableRecords = excess.records.filter((r) => r.excess_status !== 'not_required');
   const coveredName = (r: JobExcess) => r.driver_name || r.client_name || 'Unnamed driver';
-  const coveredNamesForVan = (reg: string | null | undefined) =>
-    coveredRecords.filter((c) => (c.vehicle_reg || null) === (reg || null)).map(coveredName);
-  const claimedCoveredIds = new Set(
-    chargeableRecords.flatMap((rec) =>
-      coveredRecords.filter((c) => (c.vehicle_reg || null) === (rec.vehicle_reg || null)).map((c) => c.id),
-    ),
-  );
-  const orphanCovered = coveredRecords.filter((c) => !claimedCoveredIds.has(c.id));
+  /*
+   * Attribution is JOB-level, not per-van — because the top-N ranking is. The
+   * rule is "the N highest driver liabilities on the hire, where N = van
+   * count", not "the highest driver on each van", and drivers on a multi-van
+   * hire can drive any of its vans. Matching covered drivers to a chargeable
+   * row by registration therefore asserted a pairing the algorithm never made.
+   * With one chargeable row we fold the covered names onto it; with several we
+   * list them once beneath, rather than repeating them on each.
+   */
+  const soleChargeable = chargeableRecords.length === 1 ? chargeableRecords[0] : null;
 
   return (
     <div className="space-y-6">
@@ -940,6 +948,25 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
       {/* Insurance Excess */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
         <h3 className="text-lg font-semibold text-gray-900 mb-4">Insurance Excess</h3>
+        {/* Under-collected: a higher-risk driver joined after the money had
+            already been taken on someone else's record, so the correct top-N
+            can't be applied without stranding a deposit. Warn, never auto-move
+            — same convention as referral authorise. */}
+        {excess.topn_shortfall && (
+          <div className="mb-4 rounded-lg border border-red-300 bg-red-50 p-3">
+            <p className="text-sm font-semibold text-red-800">
+              This hire is under-collected by £{excess.topn_shortfall.short.toFixed(2)}
+            </p>
+            <p className="text-xs text-red-700 mt-1">
+              {excess.topn_shortfall.drivers.join(' and ')}{' '}
+              {excess.topn_shortfall.drivers.length === 1 ? 'carries' : 'carry'} a higher excess than the
+              driver holding the charge, so the hire should total £{excess.topn_shortfall.correctTotal.toFixed(2)}
+              {' '}rather than £{excess.topn_shortfall.chargeableTotal.toFixed(2)}. The money already collected
+              can't be moved automatically — collect the difference, or adjust the required amount if you've
+              agreed otherwise.
+            </p>
+          </div>
+        )}
         {chargeableRecords.length > 0 ? (
           <div className="space-y-3">
             {chargeableRecords.map((record) => (
@@ -1015,9 +1042,9 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                   </p>
                   {/* Covered drivers, folded onto the row that actually carries
                       the money for their van. */}
-                  {coveredNamesForVan(record.vehicle_reg).length > 0 && (
+                  {soleChargeable?.id === record.id && coveredRecords.length > 0 && (
                     <p className="text-xs text-gray-500 mt-0.5">
-                      Also covered by this excess: {coveredNamesForVan(record.vehicle_reg).join(', ')}
+                      Also covered by this excess: {coveredRecords.map(coveredName).join(', ')}
                     </p>
                   )}
                   {/* Resolution breakdown — what actually happened to collected
@@ -1145,9 +1172,9 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
             {/* Covered rows whose van doesn't match any chargeable row (a swap,
                 a deleted record, a job-level excess with no reg). Shown rather
                 than dropped — collapsing must never lose a driver. */}
-            {orphanCovered.length > 0 && (
+            {!soleChargeable && coveredRecords.length > 0 && (
               <p className="text-xs text-gray-500 px-1">
-                Also covered on this hire: {orphanCovered.map(coveredName).join(', ')}
+                Also covered on this hire: {coveredRecords.map(coveredName).join(', ')}
               </p>
             )}
           </div>
