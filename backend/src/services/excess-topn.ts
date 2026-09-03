@@ -89,6 +89,17 @@ const EMPTY = (vanCount = 0): TopNReconcileResult => ({
  */
 const UNTOUCHABLE = ['reimbursed', 'fully_claimed', 'rolled_over', 'waived', 'released'];
 
+/**
+ * Hire is over — do not reshuffle it. Mirrors the dispatch gate's lifecycle cut.
+ *
+ * A finished hire's excess is history: whatever was collected has been
+ * reimbursed, claimed or rolled forward, and moving the charge between drivers
+ * achieves nothing except retrospectively inflating "required" on a settled
+ * job. `dispatched` is deliberately NOT here — a mid-tour driver joining a live
+ * hire still needs ranking.
+ */
+const FINISHED_PIPELINE = ['returned_incomplete', 'returned', 'completed', 'cancelled', 'lost'];
+
 interface Candidate {
   id: string;
   status: string;
@@ -99,6 +110,9 @@ interface Candidate {
   /** False for a cancelled/swapped assignment: can never win a slot, and is
    *  demoted out of one if it money-free-ly holds it. */
   eligible: boolean;
+  /** Terminal/deliberate state (UNTOUCHABLE). Never modified, but OCCUPIES a
+   *  slot — see the slot-accounting note below. */
+  terminal: boolean;
 }
 
 /**
@@ -120,25 +134,38 @@ export async function reconcileJobExcessTopN(
   // UNTOUCHABLE filter below already excludes.
   const jobRow = await q(
     `SELECT COALESCE(is_internal, false) AS is_internal,
+            pipeline_status,
             COALESCE((hh_derived_flags->>'self_drive_count')::int, 0) AS self_drive_count
        FROM jobs WHERE id = $1`,
     [jobId],
   );
   if (jobRow.rows.length === 0) return EMPTY();
   if (jobRow.rows[0].is_internal === true) return EMPTY();
+  if (FINISHED_PIPELINE.includes(String(jobRow.rows[0].pipeline_status || ''))) return EMPTY();
 
   const vanCount = Math.max(Number(jobRow.rows[0].self_drive_count) || 1, 1);
 
-  // Candidate set: every driver-linked, non-terminal record on the job.
+  // Candidate set: EVERY driver-linked record on the job. Nothing is filtered
+  // out of the query — records we must not modify are flagged instead, because
+  // a record's slot matters even when its contents are untouchable.
   //
-  // Cancelled/swapped assignments are INCLUDED but marked ineligible, rather
-  // than filtered out. Filtering them would leave a removed driver's stale
-  // chargeable record standing while a live driver was promoted alongside it —
-  // £3,000 of "required" on a one-van hire. That was a second quiet leak in the
-  // original count query, which tested excess status only and never asked
-  // whether the assignment was still live. A money-free ineligible record is
-  // demoted; one holding money stays frozen, because the cash still has to be
-  // reimbursed or claimed whatever happened to the driver.
+  // ⚠️ TERMINAL RECORDS OCCUPY SLOTS. Filtering them out of the query (the
+  // first cut of this function) made the slot they hold look EMPTY, so a
+  // covered sibling was promoted into it. Job 15777 (Florrie Arnold): one van,
+  // Cameron's £1,200 collected and reimbursed, Robbie covered at £0 — the
+  // reconcile could not see Cameron, so it "fixed" the hire by charging Robbie
+  // £1,200 on a settled job. It reported 71 such jobs, every one a false
+  // positive; the tell was that every line promoted to exactly the £1,200
+  // floor, when the whole premise of a genuine fix is a HIGHER driver having
+  // been passed over. A waive, a reimbursement, a claim and a rollover are all
+  // statements that this hire's excess has been dealt with.
+  //
+  // Cancelled/swapped assignments are likewise INCLUDED but marked ineligible.
+  // Filtering them would leave a removed driver's stale chargeable record
+  // standing while a live driver was promoted alongside it — £3,000 of
+  // "required" on a one-van hire. A money-free ineligible record is demoted;
+  // one holding money stays frozen, because the cash still has to be reimbursed
+  // or claimed whatever happened to the driver.
   const rows = await q(
     `SELECT je.id,
             je.excess_status                              AS status,
@@ -146,6 +173,7 @@ export async function reconcileJobExcessTopN(
             GREATEST(COALESCE(d.calculated_excess_amount, $2), $2)::float AS liability,
             d.full_name                                   AS driver_name,
             (vha.status NOT IN ('cancelled', 'swapped'))  AS eligible,
+            (je.excess_status = ANY($3::text[]))          AS terminal,
             (
               COALESCE(je.excess_amount_taken, 0) > 0
               OR COALESCE(je.amount_held, 0) > 0
@@ -159,9 +187,8 @@ export async function reconcileJobExcessTopN(
        LEFT JOIN drivers d ON d.id = vha.driver_id
       WHERE je.job_id = $1
         AND je.assignment_id IS NOT NULL
-        AND je.excess_status NOT IN (${UNTOUCHABLE.map((_, i) => `$${i + 3}`).join(', ')})
       ORDER BY je.created_at ASC`,
-    [jobId, STANDARD_EXCESS_PER_DRIVER, ...UNTOUCHABLE],
+    [jobId, STANDARD_EXCESS_PER_DRIVER, UNTOUCHABLE],
   );
 
   const candidates: Candidate[] = rows.rows.map((r: any) => ({
@@ -172,28 +199,51 @@ export async function reconcileJobExcessTopN(
     driverName: r.driver_name || null,
     frozen: r.frozen === true,
     eligible: r.eligible === true,
+    terminal: r.terminal === true,
   }));
   if (candidates.length === 0) return EMPTY(vanCount);
+
+  /*
+   * SLOT ACCOUNTING. There are `vanCount` chargeable slots on the hire. Two
+   * kinds of record hold one immovably:
+   *
+   *   • terminal — waived / reimbursed / claimed / rolled over / released.
+   *     The hire's excess for that slot has been dealt with, one way or
+   *     another. We never modify these, and crucially they still COUNT.
+   *   • frozen   — holds money, a HireHop deposit, a Stripe PI or a rollover
+   *     chain. Can't be demoted (the money would be stranded) and can't be
+   *     re-priced (that's a money decision, not a reconciliation).
+   *
+   * Reserve those slots first; only what's left is filled from the ranking.
+   */
+  const occupants = candidates.filter(
+    (c) => c.terminal || (c.frozen && c.status !== 'not_required'),
+  );
+  const occupantIds = new Set(occupants.map((o) => o.id));
+  const slotsLeft = Math.max(vanCount - occupants.length, 0);
 
   // Rank by liability DESC. `rows` is already ordered by created_at ASC and
   // Array.prototype.sort is stable, so equal liabilities keep arrival order —
   // the incumbent holds the slot and repeated runs don't churn.
-  const ranked = candidates.filter((c) => c.eligible).sort((a, b) => b.liability - a.liability);
-  const correctTotal = ranked.slice(0, vanCount).reduce((sum, c) => sum + c.liability, 0);
-
-  // A frozen record keeps whatever slot it currently occupies: we can neither
-  // demote it (its money would be stranded) nor safely re-price it. Reserve
-  // those slots first, then fill what's left from the ranking.
-  const frozenChargeable = candidates.filter((c) => c.frozen && c.status !== 'not_required');
-  const slotsLeft = Math.max(vanCount - frozenChargeable.length, 0);
-  const promotable = ranked.filter((c) => !frozenChargeable.some((f) => f.id === c.id));
+  const promotable = candidates
+    .filter((c) => c.eligible && !occupantIds.has(c.id))
+    .sort((a, b) => b.liability - a.liability);
   const winners = promotable.slice(0, slotsLeft);
   const winnerIds = new Set(winners.map((w) => w.id));
 
+  // What the hire SHOULD total: the immovable slots at their stored amounts,
+  // plus the best of the rest.
+  const correctTotal =
+    occupants.reduce((sum, o) => sum + o.required, 0) +
+    winners.reduce((sum, w) => sum + w.liability, 0);
+
   const blocked: TopNBlockedSlot[] = [];
-  if (frozenChargeable.length > 0) {
-    // Anyone outranking a frozen incumbent, who we therefore couldn't promote.
-    const lowestFrozen = Math.min(...frozenChargeable.map((f) => f.liability));
+  // Only a MONEY-frozen occupant produces a warning. A terminal one is a
+  // deliberate decision (a staff waive, a settled reimbursement) — flagging
+  // "under-collected" against it would be nagging about a closed question.
+  const moneyOccupants = occupants.filter((o) => !o.terminal);
+  if (moneyOccupants.length > 0) {
+    const lowestFrozen = Math.min(...moneyOccupants.map((f) => f.liability));
     for (const c of promotable) {
       if (winnerIds.has(c.id)) continue;
       if (c.liability > lowestFrozen) {
@@ -206,6 +256,11 @@ export async function reconcileJobExcessTopN(
   let chargeableTotal = 0;
 
   for (const c of candidates) {
+    if (c.terminal) {
+      // Untouched, but its money still counts toward the hire's total.
+      chargeableTotal += c.required;
+      continue;
+    }
     const isFrozen = c.frozen && c.status !== 'not_required';
     const shouldCharge = isFrozen || winnerIds.has(c.id);
 
