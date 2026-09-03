@@ -127,6 +127,9 @@ function formatAddress(a?: z.infer<typeof addressSchema> | null): string | null 
 function buildNotesBlock(p: IntakePayload): string {
   const lines: string[] = ['— Website enquiry —'];
   if (p.enquiry_types?.length) lines.push(`Enquiring about: ${p.enquiry_types.join(', ')}`);
+  const reqStart = [p.start_date, p.start_time].filter(Boolean).join(' ');
+  const reqEnd = [p.end_date, p.end_time].filter(Boolean).join(' ');
+  if (reqStart || reqEnd) lines.push(`Requested dates (as submitted): ${reqStart || '?'} → ${reqEnd || '?'}`);
   if (p.phone) lines.push(`Phone: ${p.phone}`);
   else if (p.phone_number) lines.push(`Phone: ${[p.phone_code, p.phone_number].filter(Boolean).join(' ')}`);
   if (p.van_styles?.length) lines.push(`Van style(s): ${p.van_styles.join(', ')}`);
@@ -143,6 +146,76 @@ function buildNotesBlock(p: IntakePayload): string {
   if (p.file_names?.length) lines.push(`Attached files (in the notification email): ${p.file_names.join(', ')}`);
   if (p.mailing_list) lines.push('Opted in to mailing list.');
   return lines.join('\n');
+}
+
+// ── Date derivation ─────────────────────────────────────────────────────────
+// Ooosh's booking conventions differ by service type, so the stored job dates
+// are TRANSFORMED from the raw form request (raw request preserved in notes):
+//   nine_to_nine — vans + backline run 9am→9am regardless of pickup time. A hire
+//     whose last use day is `end` is due back 9am the NEXT morning (end+1), and
+//     Returning is inflated one more day for the turnaround buffer (end+2).
+//   rehearsal    — runs 10am→10pm on the actual days: no date shift, times
+//     clamped into [10:00, 22:00].
+//   asis         — delivery / collection / other: keep what they said.
+type DateMode = 'nine_to_nine' | 'rehearsal' | 'asis';
+
+function pickDateMode(types: string[] | null | undefined): DateMode {
+  const t = new Set((types || []).map(x => x.trim().toLowerCase()));
+  if (t.has('van hire')) return 'nine_to_nine';   // van (+ backline/+ rehearsal) → van timing; staff split any rehearsal manually
+  if (t.has('rehearsals')) return 'rehearsal';     // rehearsal (+ backline) → rehearsal timing
+  if (t.has('backline hire')) return 'nine_to_nine'; // backline only
+  return 'asis';                                    // delivery / collection / something else
+}
+
+function addDays(dateStr: string, n: number): string {
+  const d = new Date(dateStr + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+function clampTime(t: string | null | undefined, min: string, max: string, fallback: string): string {
+  const v = t && /^\d{2}:\d{2}$/.test(t) ? t : fallback;
+  if (v < min) return min;
+  if (v > max) return max;
+  return v;
+}
+
+interface DerivedDates {
+  out_date: string | null; job_date: string | null; job_end: string | null; return_date: string | null;
+  out_time: string; start_time: string; return_time: string; end_time: string;
+}
+
+function deriveEnquiryDates(p: IntakePayload, mode: DateMode): DerivedDates {
+  const start = p.start_date || null;
+  const end = p.end_date || start;
+  const empty: DerivedDates = {
+    out_date: null, job_date: null, job_end: null, return_date: null,
+    out_time: '09:00', start_time: '09:00', return_time: '09:00', end_time: '09:00',
+  };
+  if (!start || !end) return empty;
+
+  if (mode === 'rehearsal') {
+    const st = clampTime(p.start_time, '10:00', '22:00', '10:00');
+    const et = clampTime(p.end_time, '10:00', '22:00', '22:00');
+    return {
+      out_date: start, job_date: start, job_end: end, return_date: end,
+      out_time: st, start_time: st, return_time: et, end_time: et,
+    };
+  }
+
+  if (mode === 'nine_to_nine') {
+    return {
+      out_date: start, job_date: start, job_end: addDays(end, 1), return_date: addDays(end, 2),
+      out_time: '09:00', start_time: '09:00', return_time: '09:00', end_time: '09:00',
+    };
+  }
+
+  // asis — keep the submitted dates/times (default 09:00)
+  return {
+    out_date: start, job_date: start, job_end: end, return_date: end,
+    out_time: p.start_time || '09:00', start_time: p.start_time || '09:00',
+    return_time: p.end_time || '09:00', end_time: p.end_time || '09:00',
+  };
 }
 
 router.post('/', intakeLimiter, authenticateEnquiryIntake, async (req: Request, res: Response) => {
@@ -254,6 +327,11 @@ router.post('/', intakeLimiter, authenticateEnquiryIntake, async (req: Request, 
         .filter((t): t is 'self_drive_van' | 'backline' | 'rehearsal' => Boolean(t))
     ));
 
+    // Transform the raw form dates per Ooosh's per-service booking conventions
+    // (9am→9am +buffer for vans/backline, 10am–10pm for rehearsals). Raw request
+    // stays in the notes block.
+    const dates = deriveEnquiryDates(payload, pickDateMode(payload.enquiry_types));
+
     const job = await createPipelineEnquiry(
       {
         client_name: orgName,
@@ -262,10 +340,14 @@ router.post('/', intakeLimiter, authenticateEnquiryIntake, async (req: Request, 
         notes: buildNotesBlock(payload),
         enquiry_source: 'web_form',
         likelihood: 'warm',
-        job_date: payload.start_date || null,
-        job_end: payload.end_date || null,
-        start_time: payload.start_time || null,
-        end_time: payload.end_time || null,
+        out_date: dates.out_date,
+        job_date: dates.job_date,
+        job_end: dates.job_end,
+        return_date: dates.return_date,
+        out_time: dates.out_time,
+        start_time: dates.start_time,
+        return_time: dates.return_time,
+        end_time: dates.end_time,
         service_types: serviceTypes.length ? serviceTypes : null,
         contact_person_ids: [personId],
         primary_contact_person_id: personId,
