@@ -4895,13 +4895,30 @@ export default function JobDetailPage() {
                               const perJobRequired = a.excess?.excess_amount_required != null
                                 ? Number(a.excess.excess_amount_required)
                                 : null;
+                              /* An unassessed driver shows "—", not "£1,200".
+                                 calculated_excess_amount is only written once a
+                                 hire form is submitted (or staff set it), so a
+                                 driver mid-flow genuinely has no known liability
+                                 — printing the floor dressed a guess up as a
+                                 fact. Matches how /drivers already renders them. */
                               const displayAmount = personalLiability && personalLiability >= 1200
                                 ? personalLiability
-                                : (perJobRequired && perJobRequired > 0 ? perJobRequired : 1200);
+                                : (perJobRequired && perJobRequired > 0 ? perJobRequired : null);
+                              /* Name who actually carries the hire's excess, so
+                                 a "Covered" driver doesn't leave staff asking
+                                 "why them and not this one?" — the top-N rule
+                                 that picked the bearer is otherwise invisible. */
+                              const bearer = a.excess.excess_status === 'not_required'
+                                ? vehicleAssignments.find((o) => o.excess
+                                    && o.excess.excess_status !== 'not_required'
+                                    && Number(o.excess.excess_amount_required || 0) > 0)?.driver_name || null
+                                : null;
                               return (
                                 <span className="inline-flex items-center gap-1.5">
                                   <span className="text-gray-400">Excess</span>
-                                  <span className="font-medium text-gray-700">£{displayAmount.toFixed(2)}</span>
+                                  <span className="font-medium text-gray-700">
+                                    {displayAmount != null ? `£${displayAmount.toFixed(2)}` : '—'}
+                                  </span>
                                   {/* Shared pill helpers — this block used to
                                       hand-write its own label + colour maps, and
                                       they had already drifted from the Money
@@ -4913,6 +4930,11 @@ export default function JobDetailPage() {
                                   <span className={`px-2 py-0.5 rounded-full font-medium ${excessStatusColor(a.excess.excess_status, a.excess.auto_covered)}`}>
                                     {excessStatusLabel(a.excess.excess_status, a.excess.auto_covered)}
                                   </span>
+                                  {bearer && (
+                                    <span className="text-gray-400" title="This hire's excess is charged to the highest-liability driver">
+                                      on {bearer}
+                                    </span>
+                                  )}
                                   {a.excess.dispute_status && (
                                     <span className={`px-2 py-0.5 rounded-full font-semibold ${a.excess.dispute_status === 'won' ? 'bg-gray-100 text-gray-600' : 'bg-red-100 text-red-700'}`}>
                                       {a.excess.dispute_status === 'open' ? '⚠ Chargeback' : `Chargeback ${a.excess.dispute_status}`}

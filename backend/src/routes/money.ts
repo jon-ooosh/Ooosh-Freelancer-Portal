@@ -14,6 +14,7 @@ import { authenticate, authorize, STAFF_ROLES, AuthRequest } from '../middleware
 import { validate } from '../middleware/validate';
 import { verifyApiKey } from '../middleware/api-key';
 import { hhBroker } from '../services/hirehop-broker';
+import { reconcileJobExcessTopN } from '../services/excess-topn';
 import { pushDepositToHH, HH_BANK_IDS, getMethodForBankId } from '../services/hh-deposit';
 import { getStripeClient, isStripeConfigured, isStripeError } from '../config/stripe';
 import { sendPaymentEmail, sendExcessEmail, sendLastMinuteAlert, sendPaymentStatementEmail, logResendToTimeline, type StatementPaymentLine } from '../services/money-emails';
@@ -1835,6 +1836,26 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
       ).catch((e) => console.error('[money] job_financials write-through failed (non-fatal):', e.message));
     }
 
+    // Read-only top-N check: run the reconcile inside a transaction we always
+    // roll back, so the Money tab reports the shortfall without ever writing
+    // from a GET. Best-effort — a failure here must not break the tab.
+    let topnShortfall: { correctTotal: number; chargeableTotal: number; short: number; drivers: string[] } | null = null;
+    if (job.id) {
+      try {
+        const topn = await reconcileJobExcessTopN(query, job.id, { dryRun: true });
+        if (topn.blocked.length > 0 && topn.correctTotal > topn.chargeableTotal + 0.005) {
+          topnShortfall = {
+            correctTotal: topn.correctTotal,
+            chargeableTotal: topn.chargeableTotal,
+            short: topn.correctTotal - topn.chargeableTotal,
+            drivers: topn.blocked.map((b) => b.driverName || 'a driver'),
+          };
+        }
+      } catch (e) {
+        console.error('[money] top-N shortfall check failed (non-fatal):', e);
+      }
+    }
+
     // Business-level balance override (admin flagged the HH balance as settled
     // in Xero / written off — migration 117). Surfaced as a banner on the Money
     // tab; the live HH balance above is still shown (staff source of truth).
@@ -1882,6 +1903,14 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
           total_required: excessRequired,
           total_collected: excessCollected,
           status: excessStatus,
+          // Under-collection check. The live write paths now reconcile top-N by
+          // AMOUNT, but they cannot fix a hire where money already sits on the
+          // wrong record — moving it would strand a HireHop deposit / Stripe PI.
+          // Those cases surface here so staff can decide to top up rather than
+          // the shortfall staying invisible (which is exactly how it went
+          // unnoticed before: the old referral-authorise "recompute" summed the
+          // chargeable records and excluded the £0 driver it needed to see).
+          topn_shortfall: topnShortfall,
         },
         vat_adjustment: vatAdjustment,
         client_balance_on_account: clientBalance,
