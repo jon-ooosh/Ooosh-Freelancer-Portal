@@ -345,6 +345,8 @@ function buildEvidenceGroups(driver: DriverDetail): EvidenceGroupSpec[] {
       slots: [{ label: 'Proof of Address 1', match: ['Proof of Address', 'POA 1', 'poa1', 'Proof of Address 1'] }],
       fromField: 'poa1_doc_date',
       fromLabel: 'Date on document',
+      textField: 'poa1_provider',
+      textLabel: 'Provider',
       until: driver.poa1_valid_until,
     },
     {
@@ -353,6 +355,8 @@ function buildEvidenceGroups(driver: DriverDetail): EvidenceGroupSpec[] {
       slots: [{ label: 'Proof of Address 2', match: ['POA 2', 'poa2', 'Proof of Address 2'] }],
       fromField: 'poa2_doc_date',
       fromLabel: 'Date on document',
+      textField: 'poa2_provider',
+      textLabel: 'Provider',
       until: driver.poa2_valid_until,
     },
     {
@@ -373,12 +377,58 @@ function buildEvidenceGroups(driver: DriverDetail): EvidenceGroupSpec[] {
   ];
 }
 
-function normaliseAddress(addr: string): string {
-  return addr.toLowerCase().replace(/[,.\-\/\\]/g, ' ').replace(/\s+/g, ' ').trim();
+/**
+ * Does the licence address MATERIALLY differ from the home address?
+ *
+ * The two strings are two AI reads of two different documents — the home
+ * address is lifted off the POA statement, the licence address off the licence
+ * image — so they are never byte-identical and punctuation/spacing/case noise
+ * is the norm. The Claude read of a licence also tends to repeat the postcode
+ * ("…, B17 8JS, B17 8JS"), which a plain normalise-and-compare flagged as a
+ * different address (Steven Aldridge, Sep 2026).
+ *
+ * The material test is: same UK postcode AND same house number. A move nearly
+ * always changes the postcode; a different flat at the same postcode changes
+ * the leading number. Where no UK postcode can be found on one side (an
+ * overseas licence) it falls back to comparing the de-duplicated word sets,
+ * which is today's behaviour minus the duplicate-token trap.
+ *
+ * Display only — nothing gates on this. The hire form does its own comparison
+ * at POA upload time, and a driver who declares they have moved is routed to
+ * a passport check there.
+ */
+const UK_POSTCODE = /\b([A-Z]{1,2}\d{1,2}[A-Z]?)\s*(\d[A-Z]{2})\b/i;
+
+function extractPostcode(addr: string): string | null {
+  const m = addr.match(UK_POSTCODE);
+  return m ? `${m[1]}${m[2]}`.toUpperCase() : null;
+}
+
+function leadingNumber(addr: string): string | null {
+  const m = addr.match(/\d+[a-z]?/i);
+  return m ? m[0].toLowerCase() : null;
+}
+
+function addressTokens(addr: string): Set<string> {
+  return new Set(
+    addr.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean),
+  );
 }
 
 function addressesDiffer(a: string, b: string): boolean {
-  return normaliseAddress(a) !== normaliseAddress(b);
+  const pa = extractPostcode(a);
+  const pb = extractPostcode(b);
+  if (pa && pb) {
+    if (pa !== pb) return true;
+    const na = leadingNumber(a);
+    const nb = leadingNumber(b);
+    return !!(na && nb && na !== nb);
+  }
+  const ta = addressTokens(a);
+  const tb = addressTokens(b);
+  if (ta.size !== tb.size) return true;
+  for (const t of ta) if (!tb.has(t)) return true;
+  return false;
 }
 
 /**
@@ -1253,6 +1303,9 @@ function DetailsTab({
     poa2_doc_date: toInputDate(driver.poa2_doc_date),
     passport_check_date: toInputDate(driver.passport_check_date),
     passport_expiry: toInputDate(driver.passport_expiry),
+    // Not dates, but they live on the same cards and go through the same PATCH.
+    poa1_provider: driver.poa1_provider,
+    poa2_provider: driver.poa2_provider,
   };
   const renderGroup = (key: string) => {
     const spec = evidenceGroups.find(g => g.key === key);
