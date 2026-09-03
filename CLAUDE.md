@@ -686,6 +686,30 @@ asked once. POA1 and POA2 stay separate — both required, independently lapsing
 - **A stale identity check raises an AMBER action, never red** — there is a test
   asserting this. See the gate-policy note above: red would block 186 drivers.
 
+**Sep 2026 follow-ups:**
+- **A missing DVLA document is a HIRE-FORM upload gap, not a rendering bug.** Steven
+  Aldridge (job 16116) had a check date, code and points but no file and no "Other
+  Files" entry — the file was never sent. The hire form uploaded the DVLA evidence
+  copy only on its Continue click, while the DATA landed server-side during
+  validation, so the router already treated the step as done; a reload between the
+  two skipped straight to Signature. Fixed on the hire-form side (upload fires at
+  validation). Diagnostic: `drivers.files` has no `dvla%` tag AND the Netlify
+  `monday-integration` log shows no `upload-file-board-a` for the driver. The
+  cockpit cannot render what was never stored; check the index before the UI.
+- **Single-slot groups render no caption under the thumbnail** — it repeated the
+  card title. The Identity group keeps Front / Back / Selfie because there it
+  disambiguates.
+- **POA provider is STAFF-editable** (`PATCH /drivers/:id/document-dates` also
+  takes `poa1_provider` / `poa2_provider`, via `textField` on the group spec). The
+  hire form sets it when the driver's document is read, but a staff Replace only
+  stores a file, so "— Barclays" stayed put after a different statement was
+  uploaded over it.
+- **`addressesDiffer` tests the MATERIAL difference** — same UK postcode and same
+  leading house number — because the home and licence addresses are two AI reads
+  of two different documents and the licence read tends to repeat the postcode.
+  No postcode on either side falls back to a de-duplicated word-set comparison.
+  Display only; nothing gates on it.
+
 **Fixed in the same pass:** `{value || '—'}` rendered 0 penalty points as a
 dash (0 is falsy) — a clean licence looked like missing data. `licence_type` and
 `licence_categories` now come from iDenfy's `driverLicenseCategory`, which the

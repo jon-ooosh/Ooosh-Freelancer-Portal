@@ -40,6 +40,9 @@ export interface EvidenceGroupSpec {
   /** The FROM date column staff edit, e.g. 'dvla_check_date'. */
   fromField?: string;
   fromLabel?: string;
+  /** A free-text field that travels with the document, e.g. 'poa1_provider'. */
+  textField?: string;
+  textLabel?: string;
   /** The document's own expiry, where it has one. */
   docExpiryField?: string;
   docExpiryLabel?: string;
@@ -98,9 +101,11 @@ export function EvidenceGroup({
   spec: EvidenceGroupSpec;
   files: EvidenceFile[];
   driverId: string;
+  /** Current values for every editable field on the spec (dates AND text). */
   dates: Record<string, string | null>;
   canEdit: boolean;
   onFilesChanged: (files: EvidenceFile[]) => void;
+  /** Persists one field — dates and the provider text go through the same PATCH. */
   onDateChanged: (field: string, value: string) => Promise<void>;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -228,7 +233,12 @@ export function EvidenceGroup({
                   Not uploaded
                 </div>
               )}
-              <span className="text-[11px] text-gray-600 text-center leading-tight">{slot.label}</span>
+              {/* The caption only earns its space when it tells slots apart
+                  (Front / Back / Selfie). Under a lone thumbnail it just
+                  repeated the card title. */}
+              {spec.slots.length > 1 && (
+                <span className="text-[11px] text-gray-600 text-center leading-tight">{slot.label}</span>
+              )}
               {canEdit && (
                 <button
                   type="button"
@@ -262,6 +272,20 @@ export function EvidenceGroup({
               }`}
             />
           </label>
+          {spec.textField && (
+            <label className="block">
+              <span className="block text-[11px] text-gray-500 mb-0.5">{spec.textLabel}</span>
+              <input
+                type="text"
+                disabled={!canEdit}
+                value={shown(spec.textField)}
+                placeholder="e.g. Barclays"
+                onChange={(e) => setDraft(d => ({ ...d, [spec.textField!]: e.target.value }))}
+                onBlur={() => commit(spec.textField!)}
+                className="w-36 rounded border border-gray-300 px-2 py-1 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+              />
+            </label>
+          )}
           {spec.docExpiryField && (
             <label className="block">
               <span className="block text-[11px] text-gray-500 mb-0.5">{spec.docExpiryLabel}</span>

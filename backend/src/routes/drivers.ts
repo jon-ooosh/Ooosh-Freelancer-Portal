@@ -664,6 +664,12 @@ router.patch('/:id/calculated-excess', authorize('admin', 'manager'), validate(e
 // FROM dates — the fields the cockpit prompts for right after an upload. The
 // derived *_valid_until columns follow automatically (see driver-validity.ts);
 // nothing else on the driver is reachable through here.
+//
+// The POA provider names ride along (Sep 2026): the hire form sets them when
+// the driver's document is read, but a staff "Replace" only stores a file, so
+// "Proof of address 1 — Barclays" stayed Barclays after a Lloyds statement had
+// been uploaded over it. Same rule as the dates — whoever uploads must be able
+// to label it.
 const DOCUMENT_DATE_FIELDS = [
   'idenfy_check_date',
   'licence_valid_to',
@@ -673,11 +679,17 @@ const DOCUMENT_DATE_FIELDS = [
   'passport_check_date',
   'passport_expiry',
 ] as const;
+const DOCUMENT_TEXT_FIELDS = ['poa1_provider', 'poa2_provider'] as const;
 
 const documentDatesSchema = z
-  .object(Object.fromEntries(
-    DOCUMENT_DATE_FIELDS.map(f => [f, z.string().nullable().optional()]),
-  ) as Record<(typeof DOCUMENT_DATE_FIELDS)[number], z.ZodOptional<z.ZodNullable<z.ZodString>>>)
+  .object({
+    ...Object.fromEntries(
+      DOCUMENT_DATE_FIELDS.map(f => [f, z.string().nullable().optional()]),
+    ) as Record<(typeof DOCUMENT_DATE_FIELDS)[number], z.ZodOptional<z.ZodNullable<z.ZodString>>>,
+    ...Object.fromEntries(
+      DOCUMENT_TEXT_FIELDS.map(f => [f, z.string().max(100).nullable().optional()]),
+    ) as Record<(typeof DOCUMENT_TEXT_FIELDS)[number], z.ZodOptional<z.ZodNullable<z.ZodString>>>,
+  })
   .strict();
 
 router.patch(
@@ -698,6 +710,9 @@ router.patch(
       const fields: Record<string, unknown> = {};
       for (const key of DOCUMENT_DATE_FIELDS) {
         if (key in updates) fields[key] = updates[key] || null;
+      }
+      for (const key of DOCUMENT_TEXT_FIELDS) {
+        if (key in updates) fields[key] = updates[key]?.trim() || null;
       }
       if (Object.keys(fields).length === 0) {
         res.status(400).json({ error: 'No document dates to update' });
