@@ -1686,6 +1686,14 @@ export default function JobDetailPage() {
   // Phase D2b: assignment currently being authorised after a referral resolve.
   const [authorisingAssignmentId, setAuthorisingAssignmentId] = useState<string | null>(null);
   const [vehicleAssignmentsLoading, setVehicleAssignmentsLoading] = useState(false);
+  // Drivers who STARTED the hire form for this hire but haven't signed — no
+  // assignment row exists yet, so nothing else on this tab knows they're
+  // there. Rendered as greyed "not signed" cards above the assignments.
+  const [unsignedDrivers, setUnsignedDrivers] = useState<Array<{
+    id: string; full_name: string; email: string | null; phone: string | null;
+    signature_date: string | null; current_job_started_at: string | null; updated_at: string | null;
+  }>>([]);
+  const [copiedHireFormLink, setCopiedHireFormLink] = useState(false);
   const [dispatchCheck, setDispatchCheck] = useState<DispatchCheckResult | null>(null);
   // Cross-job allocation conflicts — van also booked on another job over
   // overlapping dates. Populated from /assignments/allocation-conflicts/:jobId
@@ -2324,6 +2332,7 @@ export default function JobDetailPage() {
       setQuotes([]);
       setVehicleAssignments([]);
       setJobAssignedVehicles([]);
+      setUnsignedDrivers([]);
       setDispatchCheck(null);
       setAllocationConflicts([]);
       setDateMismatches([]);
@@ -2844,12 +2853,16 @@ export default function JobDetailPage() {
       // Fetch both so we can see staff allocations for sibling-vehicle
       // inference, then dedupe by id.
       const hhJobNum = job?.hh_job_number ?? null;
-      const [byJobId, byHhJob] = await Promise.all([
+      const [byJobId, byHhJob, unsigned] = await Promise.all([
         api.get<{ data: any[] }>(`/assignments?job_id=${id}`),
         hhJobNum
           ? api.get<{ data: any[] }>(`/assignments?hirehop_job_id=${hhJobNum}`)
           : Promise.resolve({ data: [] }),
+        hhJobNum
+          ? api.get<{ data: any[] }>(`/drivers/unsigned-for-job/${hhJobNum}`).catch(() => ({ data: [] }))
+          : Promise.resolve({ data: [] }),
       ]);
+      setUnsignedDrivers(unsigned.data || []);
       const merged = new Map<string, any>();
       for (const r of (byJobId.data || [])) merged.set(r.id, r);
       for (const r of (byHhJob.data || [])) {
@@ -4726,6 +4739,60 @@ export default function JobDetailPage() {
               </div>
             );
           })()}
+
+          {/* Started-but-not-signed drivers. A driver who verified every
+              document and closed the tab one screen short of signing has no
+              assignment row, so without this they are invisible here — the
+              "hey, Cameron hasn't finished his hire form" reminder. Greyed
+              and dashed so it can't be mistaken for a live assignment. */}
+          {unsignedDrivers.length > 0 && (
+            <div className="space-y-2 mb-3">
+              {unsignedDrivers.map((d) => {
+                const fmt = (iso: string | null) => iso
+                  ? new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+                  : '—';
+                const link = `https://hireforms.oooshtours.co.uk/?job=${job.hh_job_number}`;
+                return (
+                  <div key={d.id} className="bg-gray-50 rounded-xl border border-dashed border-gray-300 p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs bg-gray-200 text-gray-600">
+                          ⏳ Started hire form — not signed
+                        </span>
+                        <Link to={`/drivers/${d.id}`} className="font-semibold text-gray-700 hover:underline">
+                          {d.full_name}
+                        </Link>
+                        {d.email && <span className="text-sm text-gray-400">{d.email}</span>}
+                      </div>
+                      <span className="text-xs text-gray-400">
+                        last activity {fmt(d.updated_at)}
+                      </span>
+                    </div>
+                    <p className="mt-1.5 text-xs text-gray-500">
+                      Nothing links them to this hire until they sign.
+                      {d.signature_date
+                        ? ` They signed for a previous hire on ${fmt(d.signature_date)}, but not this one.`
+                        : ''}
+                      {' '}If they've gone quiet, send them the hire form link again.
+                      {' '}
+                      <button
+                        type="button"
+                        className="text-ooosh-600 hover:underline"
+                        onClick={() => {
+                          navigator.clipboard?.writeText(link).then(() => {
+                            setCopiedHireFormLink(true);
+                            setTimeout(() => setCopiedHireFormLink(false), 2000);
+                          }).catch(() => undefined);
+                        }}
+                      >
+                        {copiedHireFormLink ? 'Link copied' : 'Copy hire form link'}
+                      </button>
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+          )}
 
           {vehicleAssignmentsLoading ? (
             <div className="flex justify-center py-12">

@@ -74,6 +74,8 @@ interface DriverDetail {
   identity_review_notes: string | null;
   current_job_number: number | null;
   current_job_started_at: string | null;
+  /** current_job_number ONLY while they haven't signed for it and the job is live. */
+  unsigned_job_number: number | null;
   poa1_valid_until: string | null;
   poa2_valid_until: string | null;
   dvla_valid_until: string | null;
@@ -373,6 +375,20 @@ function buildEvidenceGroups(driver: DriverDetail): EvidenceGroupSpec[] {
       key: 'signature',
       title: 'Signature',
       slots: [{ label: 'Signature', match: ['Signature', 'signature', 'sig'] }],
+      // A signature doesn't expire — it's per HIRE. So instead of an expiry
+      // pill, say when they last signed and, if they're mid-form for a hire
+      // they haven't signed for, say so in amber. That second state is the
+      // one every surface used to miss (Cameron Williams-Hill / 16618).
+      headerRight: driver.unsigned_job_number ? (
+        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs bg-amber-100 text-amber-800">
+          Not yet signed for #{driver.unsigned_job_number}
+          {driver.signature_date ? ` · last signed ${formatDate(driver.signature_date)}` : ''}
+        </span>
+      ) : driver.signature_date ? (
+        <span className="text-xs text-gray-500">Signed {formatDate(driver.signature_date)}</span>
+      ) : (
+        <span className="text-xs text-gray-400">Not signed</span>
+      ),
     },
   ];
 }
@@ -1407,13 +1423,20 @@ function DetailsTab({
       {/* Which hire is this? A driver part-way through the form has no
           vehicle_hire_assignments row yet, so the Hire History tab is empty and
           nothing tells staff what a stuck driver relates to. */}
-      {driver.current_job_number && !driver.signature_date && (
-        <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900">
-          Currently completing a hire form for job{' '}
-          <Link to={`/jobs?search=${driver.current_job_number}`} className="font-semibold underline">
-            #{driver.current_job_number}
+      {/* Keyed on "not signed FOR THIS HIRE", not "no signature at all" — a
+          returning driver carries last time's signature_date, and that hid
+          exactly this state for Cameron Williams-Hill / 16618 (Sep 2026). */}
+      {driver.unsigned_job_number && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          Started the hire form for job{' '}
+          <Link to={`/jobs?search=${driver.unsigned_job_number}`} className="font-semibold underline">
+            #{driver.unsigned_job_number}
           </Link>
-          {driver.current_job_started_at && <> &middot; started {formatDate(driver.current_job_started_at)}</>}
+          {driver.current_job_started_at && <> on {formatDate(driver.current_job_started_at)}</>}
+          {' '}but hasn't signed it yet &mdash; nothing links them to the hire until they do.
+          {driver.signature_date && (
+            <> They last signed on {formatDate(driver.signature_date)}, for a previous hire.</>
+          )}
         </div>
       )}
 

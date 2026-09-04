@@ -59,6 +59,13 @@ export interface VerificationStateInput {
   identity_check_status?: unknown;
   idenfy_face_result?: unknown;
   licence_issued_by?: unknown;
+  /**
+   * HH job the driver has started a hire form for but NOT signed for — from
+   * `unsignedJobNumberSql()` in driver-hire-progress.ts. A signature never
+   * expires, so `signature_date` alone can't say whether they are joined to
+   * the hire in front of them; this can.
+   */
+  unsigned_job_number?: unknown;
   [key: string]: unknown;
 }
 
@@ -157,12 +164,19 @@ export function computeVerificationState(
   });
 
   // ── 7. Signature ────────────────────────────────────────────────────────
+  //
+  // "Signed" is per-HIRE, not per-driver. A returning driver carries last
+  // time's signature_date, so a driver mid-form for a new hire read ✓ here
+  // while nothing joined them to it (Cameron Williams-Hill / 16618, Sep 2026).
   const signed = !!driver.signature_date;
+  const unsignedFor = Number(driver.unsigned_job_number) || null;
   stages.push({
     key: 'signature',
     label: 'Signature',
-    state: signed ? 'done' : 'todo',
-    detail: signed ? null : 'Hire agreement not signed',
+    state: signed && !unsignedFor ? 'done' : 'todo',
+    detail: unsignedFor
+      ? (signed ? `Signed before — not yet for #${unsignedFor}` : `Not yet signed for #${unsignedFor}`)
+      : (signed ? null : 'Hire agreement not signed'),
   });
 
   // ── What needs doing ────────────────────────────────────────────────────
@@ -235,7 +249,14 @@ export function computeVerificationState(
     });
   }
 
-  if (!signed && hasContact) {
+  if (unsignedFor) {
+    // Amber, not red: nothing is wrong with the driver, they just stopped one
+    // screen short. Nothing links them to the hire until they sign.
+    actions.push({
+      severity: 'amber', kind: 'none', slot: 'signature',
+      message: `Started the hire form for #${unsignedFor} but hasn't signed it — they're not on the hire until they do. Send the hire form link again.`,
+    });
+  } else if (!signed && hasContact) {
     actions.push({
       severity: 'info', kind: 'none', slot: 'signature',
       message: 'Hire agreement not signed yet',

@@ -427,8 +427,16 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       'dvla_check_date', 'signature_date', 'referral_date',
     ]);
 
+    // Every JSONB column the hire-form app is allowed to write. A JS array
+    // sent to pg as-is becomes a Postgres ARRAY literal (`{"..."}`), which a
+    // JSONB column rejects with `invalid input syntax for type json`. An
+    // EMPTY array happens to survive (`{}` parses as an empty JSON object), so
+    // the DVLA-points write only ever failed for drivers WITH endorsements —
+    // silently, since Apr 2026 (Chris Kirkham / job 16618, Sep 2026). Any new
+    // JSONB column added to `allowedFields` MUST be listed here too.
     const JSONB_FIELDS = new Set([
       'idenfy_mismatch_tags', 'idenfy_suspicion_reasons',
+      'licence_endorsements',
     ]);
 
     function normaliseDate(raw: unknown): string | null {
@@ -468,6 +476,15 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       setClauses.push(`${dbField} = $${params.length}`);
       writtenCols[dbField] = coerced;
       if (piiFieldSet.has(dbField)) writtenPii[dbField] = coerced;
+      // Stamp WHEN the driver started this hire's form, but only when the job
+      // actually changes — the number is re-sent on every step, and the
+      // "started" time is what the unsigned-form nudge and the staff card key
+      // their ages off.
+      if (dbField === 'current_job_number') {
+        setClauses.push(
+          `current_job_started_at = CASE WHEN current_job_number IS DISTINCT FROM $${params.length} THEN NOW() ELSE current_job_started_at END`
+        );
+      }
     }
 
     if (setClauses.length === 0) {
