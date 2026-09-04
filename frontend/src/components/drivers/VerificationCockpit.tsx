@@ -96,7 +96,11 @@ export function WhatNeedsDoing({ state, onAction }: {
       <ul className="space-y-2">
         {state.actions.map((action, i) => {
           const tone = SEVERITY[action.severity];
-          const actionable = action.kind !== 'none';
+          // `send_hire_form` gets no button: hire forms are generated and linked
+          // per HIRE, so the send lives on the hire's Job page (vehicle card),
+          // not here. The line still tells staff what to do; a button that only
+          // scrolled the page while reading "Send hire form" was a false promise.
+          const actionable = action.kind !== 'none' && action.kind !== 'send_hire_form';
           return (
             <li key={i} className={`flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2 ${tone.box}`}>
               <span className={`text-sm ${tone.dot}`} aria-hidden>
@@ -124,6 +128,5 @@ const ACTION_LABEL: Record<string, string> = {
   compare_identity: 'Compare photos',
   set_date: 'Add the date',
   replace_document: 'Replace document',
-  send_hire_form: 'Send hire form',
   resolve_referral: 'Resolve referral',
 };

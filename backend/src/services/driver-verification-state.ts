@@ -35,6 +35,12 @@ export interface VerificationAction {
   /**
    * What the cockpit should offer. `slot` names the evidence group to scroll to
    * or act on, matching the frontend's group keys.
+   *
+   * `send_hire_form` is deliberately NOT actionable from the driver page: hire
+   * forms are generated and linked PER HIRE, so the send lives on the hire's
+   * Job page (the vehicle requirement card), not on the driver record. The kind
+   * survives so the message can name that remedy; the cockpit renders it as a
+   * plain line with no button (Sep 2026).
    */
   kind: 'compare_identity' | 'set_date' | 'replace_document' | 'send_hire_form' | 'resolve_referral' | 'none';
   slot?: string;
@@ -201,7 +207,7 @@ export function computeVerificationState(
   if (v.licence.trusted === false) {
     actions.push({
       severity: 'red', kind: 'send_hire_form', slot: 'identity',
-      message: v.licence.untrustedReason || 'Licence could not be verified — send a new hire form',
+      message: v.licence.untrustedReason || 'Licence could not be verified — send a new hire form from the hire\'s Job page',
     });
   }
 
@@ -227,7 +233,7 @@ export function computeVerificationState(
     if (doc.win.until && !doc.win.valid) {
       actions.push({
         severity: 'amber', kind: 'send_hire_form', slot: doc.slot,
-        message: `${doc.label} expired ${formatUk(doc.win.until)} — request a new one`,
+        message: `${doc.label} expired ${formatUk(doc.win.until)} — send a hire form from the hire's Job page`,
       });
     } else if (!doc.win.until) {
       actions.push({
@@ -245,7 +251,7 @@ export function computeVerificationState(
   if (v.licence.trusted && v.licence.until && !v.licence.valid) {
     actions.push({
       severity: 'amber', kind: 'send_hire_form', slot: 'identity',
-      message: `Identity check lapsed ${formatUk(v.licence.until)} — send a hire form to re-verify`,
+      message: `Identity check lapsed ${formatUk(v.licence.until)} — send a hire form from the hire's Job page to re-verify`,
     });
   }
 
