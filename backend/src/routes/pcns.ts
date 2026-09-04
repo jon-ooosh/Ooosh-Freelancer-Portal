@@ -22,6 +22,8 @@ import { logAudit } from '../middleware/audit';
 import { getSystemSettings } from './system-settings';
 import { isAnthropicConfigured } from '../config/anthropic';
 import { uploadToR2 } from '../config/r2';
+import { loadPcnWithDrivers, resolvePcnRecipient } from '../services/pcn-recipient';
+import { ACTION_MAP, applyPcnAction, templateForAction, type PcnAction } from '../services/pcn-actions';
 
 const router = Router();
 
@@ -614,9 +616,69 @@ const actionSchema = z.object({
   add_charge: z.boolean().optional(),
   email_override: z.string().email().optional().nullable(),
   resolution_note: z.string().max(2000).optional().nullable(),
+  // internal_freelancer only — opt in to a heads-up email to the freelancer.
+  notify_freelancer: z.boolean().optional(),
+  // Optional line included in that email. Kept separate from resolution_note,
+  // which is an internal record and must never be sent to anyone.
+  freelancer_message: z.string().max(2000).optional().nullable(),
 });
 
 const MANAGER_TIER_ACTIONS = new Set(['transfer_liability', 'pay_recharge']);
+
+// ─────────────────────────────────────────────────────────────────────────
+// Pre-send recipient preview — "who will this actually email?"
+//
+// Feeds the confirm panel so staff see the resolved address AND where it came
+// from before they commit. Runs the exact same resolver as the send, so the
+// preview cannot disagree with what goes out. Read-only.
+//
+// Exists because the fall-through from driver → client was invisible: a PCN
+// against a freelancer emailed the client with nothing on screen or in the
+// timeline to say so (job 16373).
+// ─────────────────────────────────────────────────────────────────────────
+
+router.get('/:id/recipient', async (req: AuthRequest, res: Response) => {
+  const action = String(req.query.action || '') as PcnAction;
+  if (!(action in ACTION_MAP)) { res.status(400).json({ error: 'Unknown action' }); return; }
+
+  const pcn = await loadPcnWithDrivers(String(req.params.id));
+  if (!pcn) { res.status(404).json({ error: 'PCN not found' }); return; }
+
+  const map = ACTION_MAP[action];
+  // internal_freelancer only mails when staff opt in, so the preview needs to
+  // know which way that tick is set to answer honestly.
+  const notifyFreelancer = req.query.notify_freelancer === 'true' || req.query.notify_freelancer === '1';
+  const sendsEmail = action === 'internal_freelancer'
+    ? notifyFreelancer
+    : templateForAction(action, pcn.fine_type as string | null) !== null;
+  const templateId = templateForAction(action, pcn.fine_type as string | null);
+
+  const rcpt = await resolvePcnRecipient(pcn, {
+    audience: map.audience,
+    templateId,
+    emailOverride: typeof req.query.email_override === 'string' ? req.query.email_override : null,
+  });
+
+  res.json({
+    data: {
+      action,
+      sends_email: sendsEmail,
+      // Does this action have an email at all (regardless of the opt-in tick)?
+      can_email: templateId !== null,
+      audience: map.audience,
+      to: rcpt.to,
+      cc: rcpt.cc,
+      kind: rcpt.kind,
+      label: rcpt.label,
+      is_client_fallback: rcpt.isClientFallback,
+      is_info_fallback: rcpt.isInfoFallback,
+      reason: rcpt.reason,
+      // So the panel can offer "assign the driver instead" with the right copy.
+      has_driver: Boolean(pcn.driver_id || pcn.driver_person_id),
+      driver_label: (pcn.driver_name as string | null) || (pcn.driver_person_name as string | null) || null,
+    },
+  });
+});
 
 router.post('/:id/action', validate(actionSchema), async (req: AuthRequest, res: Response) => {
   const b = req.body as z.infer<typeof actionSchema>;
@@ -631,10 +693,17 @@ router.post('/:id/action', validate(actionSchema), async (req: AuthRequest, res:
   if (exists.rows.length === 0) { res.status(404).json({ error: 'PCN not found' }); return; }
 
   try {
-    const { applyPcnAction } = await import('../services/pcn-actions');
     const result = await applyPcnAction(
       String(req.params.id),
-      { action: b.action, send_email: b.send_email !== false, add_charge: b.add_charge, email_override: b.email_override, resolution_note: b.resolution_note },
+      {
+        action: b.action,
+        send_email: b.send_email !== false,
+        add_charge: b.add_charge,
+        email_override: b.email_override,
+        resolution_note: b.resolution_note,
+        notify_freelancer: b.notify_freelancer,
+        freelancer_message: b.freelancer_message,
+      },
       req.user!.id
     );
     await logAudit(req.user!.id, 'pcns', String(req.params.id), 'update', null, { action: b.action, ...result });

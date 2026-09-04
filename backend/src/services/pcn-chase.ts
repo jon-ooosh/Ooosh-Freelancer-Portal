@@ -17,7 +17,7 @@
 import { query } from '../config/database';
 import { emailService } from '../services/email-service';
 import { getSystemSettings } from '../routes/system-settings';
-import { resolveClientEmailTarget } from '../services/money-emails';
+import { resolvePcnRecipient, PCN_RECIPIENT_FIELDS, PCN_RECIPIENT_JOINS, type PcnRow } from './pcn-recipient';
 import { collectNoticeAttachments } from './pcn-documents';
 import { getFrontendUrl } from '../config/app-urls';
 
@@ -36,10 +36,15 @@ export async function runPcnChases(): Promise<{ chased: number; escalations: num
   const today = new Date().toISOString().slice(0, 10);
 
   const r = await query(
-    `SELECT p.*, fv.reg AS fleet_reg, d.full_name AS driver_name, d.email AS driver_email
+    // Both driver identities — a freelancer driver lives on driver_person_id,
+    // and chasing only `drivers` sent every rung of the ladder to the client
+    // instead (job 16373). Resolution itself is services/pcn-recipient.ts.
+    `SELECT p.*, fv.reg AS fleet_reg, ${PCN_RECIPIENT_FIELDS},
+            o.name AS client_organisation_name
      FROM pcns p
      LEFT JOIN fleet_vehicles fv ON fv.id = p.vehicle_id
-     LEFT JOIN drivers d ON d.id = p.driver_id
+     LEFT JOIN organisations o   ON o.id = p.client_organisation_id
+     ${PCN_RECIPIENT_JOINS}
      WHERE p.status = 'driver_notified_pay'
        AND p.receipt_url IS NULL
        AND p.is_deleted = false
@@ -86,15 +91,13 @@ export async function runPcnChases(): Promise<{ chased: number; escalations: num
 }
 
 // Re-send the pay-direct email (carries the existing upload token link).
-async function sendChase(pcn: Record<string, unknown>, handlingFee: string): Promise<boolean> {
+async function sendChase(pcn: PcnRow, handlingFee: string): Promise<boolean> {
   try {
-    let to: string | null = (pcn.driver_email as string) || null;
-    let cc: string[] = [];
-    if (!to && pcn.job_id) {
-      const tgt = await resolveClientEmailTarget(pcn.job_id as string, 'pcn_pay_direct');
-      to = tgt.primaryEmail;
-      cc = tgt.ccEmails || [];
-    }
+    // Same resolver as the original send, so a rung of the ladder can't land
+    // somewhere the first email didn't.
+    const rcpt = await resolvePcnRecipient(pcn, { audience: 'driver', templateId: 'pcn_pay_direct' });
+    const to = rcpt.to;
+    const cc = rcpt.cc;
     if (!to) return false;  // nobody to chase — the info@ alert still fires
 
     const receiptUploadUrl = pcn.receipt_upload_token
@@ -119,8 +122,13 @@ async function sendChase(pcn: Record<string, unknown>, handlingFee: string): Pro
       cc: cc.length ? cc : undefined,
       attachments: attachments.length ? attachments : undefined,
       variables: {
-        driverName: (pcn.driver_name as string) || 'Sir/Madam',
-        clientName: (pcn.client_organisation_name as string) || 'Sir/Madam',
+        driverName: rcpt.name,
+        clientName: rcpt.clientName || 'Sir/Madam',
+        recipientName: rcpt.name,
+        noticeContext: rcpt.kind === 'freelancer'
+          ? 'for one of our vehicles you were driving at the time of the alleged offence'
+          : 'for a vehicle hired to you at the time of the alleged offence',
+        staffMessage: '',
         vehicleReg: (pcn.fleet_reg as string) || (pcn.vehicle_reg as string) || '—',
         pcnReference: (pcn.reference as string) || '—',
         issuer: (pcn.issuing_authority as string) || '—',
@@ -147,7 +155,7 @@ async function sendChase(pcn: Record<string, unknown>, handlingFee: string): Pro
 }
 
 async function alertInfo(
-  pcn: Record<string, unknown>, level: number, total: number, escalate: boolean, daysPast: number
+  pcn: PcnRow, level: number, total: number, escalate: boolean, daysPast: number
 ): Promise<void> {
   const reg = (pcn.fleet_reg as string) || (pcn.vehicle_reg as string) || '—';
   const ref = (pcn.reference as string) || '—';
@@ -160,7 +168,7 @@ async function alertInfo(
       subjectLine,
       vehicleReg: reg,
       pcnReference: ref,
-      driverName: (pcn.driver_name as string) || 'the driver',
+      driverName: (pcn.driver_name as string) || (pcn.driver_person_name as string) || 'the driver',
       level: String(level),
       total: String(total),
       daysPast: String(daysPast),

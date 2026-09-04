@@ -51,7 +51,7 @@ export default function AddHeldItemButton({
             <div className="p-5">
               <HeldItemForm
                 variant="desktop"
-                kinds={['temp_storage', 'incoming', 'lost_property']}
+                kinds={['incoming', 'lost_property']}
                 locations={locations}
                 initial={{
                   hh_job_number: hhJobNumber ? String(hhJobNumber) : '',

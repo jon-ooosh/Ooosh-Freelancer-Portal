@@ -78,9 +78,7 @@ export default function PcnDetailPage() {
 
   return (
     <div className="max-w-5xl mx-auto p-4 sm:p-6">
-      <Link to="/vehicles/pcns" className="text-sm text-[#7B5EA7] hover:underline">← Back to PCNs</Link>
-
-      <div className="flex flex-wrap items-center justify-between gap-3 mt-2 mb-4">
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
         <div className="flex items-center gap-3">
           <h1 className="text-xl sm:text-2xl font-bold text-slate-800">{pcn.reference || '(no ref)'}</h1>
           <PcnStatusPill status={pcn.status} />
@@ -157,7 +155,8 @@ export default function PcnDetailPage() {
         {/* Action panel — the "what next?" chooser */}
         <div className="bg-white rounded-lg border p-4">
           <h2 className="text-sm font-semibold text-slate-700 mb-3">What next?</h2>
-          <PcnActionChooser pcnId={pcn.id} driverEmail={pcn.driver_email} onActioned={() => load()} />
+          <PcnActionChooser pcnId={pcn.id} onActioned={() => load()} onAssignDriver={() => setAssignOpen(true)}
+            refreshKey={`${pcn.driver_id || ''}:${pcn.driver_person_id || ''}`} />
 
           {/* Manual override — set status / action path directly without firing email or charge */}
           <details className="mt-4 border-t pt-3">
@@ -472,7 +471,7 @@ function PcnDocuments({ pcn, reload }: { pcn: PcnDetail; reload: () => Promise<v
             <button onClick={() => setShowNext(true)} className="text-sm text-[#7B5EA7] hover:underline mt-1">Choose next step →</button>
           ) : (
             <div className="mt-2">
-              <PcnActionChooser pcnId={pcn.id} driverEmail={pcn.driver_email}
+              <PcnActionChooser pcnId={pcn.id}
                 onActioned={() => { setShowNext(false); setJustAdded(false); reload(); }} />
             </div>
           )}

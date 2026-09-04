@@ -3,6 +3,7 @@ import { query } from '../config/database';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { buildProgressStrips, StripPhase } from '../services/job-progress-strip';
 import { getRoster } from '../services/studio-sitter';
+import { HELD_ITEM_SELECT } from '../services/held-item-query';
 
 const router = Router();
 router.use(authenticate);
@@ -730,6 +731,72 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       rechargesToResolveResult,
     ] = results;
 
+    // ── Allocated-vehicle enrichment for the Today section ──
+    // For each of today's going-out + returning jobs, attach the allocated van
+    // reg(s) + their fleet prep-readiness (`fleet_vehicles.hire_status`) so
+    // staff can see "what's going out + is it prepped" at a glance. Only used
+    // by the Today block; kept out of the big Promise.all because it keys off
+    // the going-out/returning job ids we've just resolved.
+    const goingOutIds: string[] = goingOutResult.rows.map((r: any) => r.id);
+    const returningIds: string[] = returningResult.rows.map((r: any) => r.id);
+    const todayJobIds = Array.from(new Set([...goingOutIds, ...returningIds]));
+
+    const vehiclesByJob = new Map<string, Array<{ reg: string; hire_status: string | null }>>();
+    const vanRequiredJobIds = new Set<string>();
+    if (todayJobIds.length > 0) {
+      const [vehiclesRes, vanReqRes] = await Promise.all([
+        // Distinct allocated vans per job. DISTINCT collapses the dual-row
+        // pattern (staff-allocation + hire-form rows share the same van/job)
+        // and multiple drivers sharing one van, so each reg appears once.
+        // Dual-match join (job_id OR hirehop_job_id) surfaces V&D
+        // staff-allocation rows that carry only hirehop_job_id.
+        query(
+          `SELECT DISTINCT j.id AS job_id, fv.reg, fv.hire_status
+           FROM vehicle_hire_assignments vha
+           JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+           JOIN jobs j ON (
+             vha.job_id = j.id
+             OR (vha.job_id IS NULL AND vha.hirehop_job_id = j.hh_job_number)
+           )
+           WHERE j.id = ANY($1)
+             AND vha.status IN ('soft', 'confirmed', 'booked_out', 'active')
+           ORDER BY j.id, fv.reg`,
+          [todayJobIds],
+        ),
+        // Which of today's going-out jobs actually need a van (have a live
+        // pre-hire vehicle requirement) — drives the "van unassigned" flag.
+        goingOutIds.length > 0
+          ? query(
+              `SELECT DISTINCT job_id
+               FROM job_requirements
+               WHERE job_id = ANY($1)
+                 AND requirement_type = 'vehicle'
+                 AND phase = 'pre_hire'
+                 AND (notes IS NULL OR notes NOT LIKE '%[Suspended:%')`,
+              [goingOutIds],
+            )
+          : Promise.resolve({ rows: [] as any[] }),
+      ]);
+      for (const r of vehiclesRes.rows as any[]) {
+        const arr = vehiclesByJob.get(r.job_id) || [];
+        arr.push({ reg: r.reg, hire_status: r.hire_status ?? null });
+        vehiclesByJob.set(r.job_id, arr);
+      }
+      for (const r of vanReqRes.rows as any[]) vanRequiredJobIds.add(r.job_id);
+    }
+
+    const attachVehicles = (rows: any[], goingOut: boolean) =>
+      rows.map((j: any) => {
+        const vehicles = vehiclesByJob.get(j.id) || [];
+        return {
+          ...j,
+          vehicles,
+          // Only flag "van needed but none allocated" on the going-out side —
+          // it's the yard-planning signal. Returning rows just show reg(s).
+          van_unassigned: goingOut && vehicles.length === 0 && vanRequiredJobIds.has(j.id),
+        };
+      });
+
     // Build the 14-day on-hire series — oldest day first, today last.
     const onHireSpark: number[] = onHireSparkResult.rows.map(
       (row: { on_hire_count: string | number }) => parseInt(String(row.on_hire_count), 10) || 0,
@@ -746,6 +813,41 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         .filter((r) => r.needs_sitter && !r.assignee)
         .map((r) => ({ date: r.date, jobs: r.jobs.map((j) => j.label).slice(0, 2) }));
     } catch { /* non-fatal — bucket just won't populate */ }
+
+    // Outstanding staff documents — pending/lapsed assignments on active,
+    // tracked (non-read-only) documents for active staff. Manager-facing only
+    // (it's about other people's compliance), so compute 0 for everyone else →
+    // the frontend bucket hides. Non-fatal.
+    let staffDocsOutstanding = 0;
+    if (['admin', 'manager', 'weekend_manager'].includes(req.user?.role || '')) {
+      try {
+        const sd = await query(`
+          SELECT COUNT(*) AS count
+          FROM staff_document_assignments a
+          JOIN staff_documents d ON d.id = a.document_id
+          JOIN users u ON u.id = a.user_id AND u.is_active = true
+          WHERE d.is_active = true AND d.completion_mode <> 'read_only'
+            AND a.status IN ('pending', 'lapsed')
+        `);
+        staffDocsOutstanding = parseInt(sd.rows[0].count as string, 10) || 0;
+      } catch { /* non-fatal */ }
+    }
+
+    // Backline to buy — high-priority gaps with no acquisition plan yet: kit
+    // we've marked high priority that we don't stock (not / similar / used-to)
+    // and haven't decided to get. Turns the demand tracker from a passive log
+    // into a prompt. Defensively wrapped so a pre-183 DB can't 500 the dashboard.
+    let backlineToBuy = 0;
+    try {
+      const bb = await query(`
+        SELECT COUNT(*) AS count
+        FROM backline_demand
+        WHERE priority = 'high'
+          AND have_it_status IN ('no', 'sort_of', 'used_to')
+          AND acquisition_status = 'none'
+      `);
+      backlineToBuy = parseInt(bb.rows[0].count as string, 10) || 0;
+    } catch { /* non-fatal — pre-migration or table absent */ }
 
     // Build prep time estimates by day
     const prepEstimates: Record<string, {
@@ -837,6 +939,69 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       console.warn('Dashboard on_today (storage) skipped:', (err as Error).message);
     }
 
+    // Holding — the DATED half of the module's next_action. `decide` (a hold or
+    // dispose date has passed) and `receive` (a delivery is due) are
+    // deadline-shaped, so they belong here rather than in a Needs-attention
+    // bucket; the undated `link_owner` backlog gets its own NA card instead.
+    //
+    // Reads the SHARED derivation (services/held-item-query.ts) — the same
+    // next_action/action_due the Holding page reads. Never re-derive the CASE
+    // here: one definition is the whole point.
+    //
+    // `receive` is narrowed to items actually due within a day. On the Holding
+    // page every expected delivery carries that action (it's the standing "what
+    // does this need" answer); on a Today surface only the imminent ones belong.
+    try {
+      const holdingDue = await query(`
+        SELECT q.id, q.description, q.hh_job_number, q.next_action, q.action_due,
+               COALESCE(q.owner_person_name, q.owner_organisation_name, q.client_name_text) AS client
+        FROM (${HELD_ITEM_SELECT}) q
+        WHERE q.next_action IN ('decide', 'receive')
+          AND (q.next_action = 'decide'
+               OR (q.action_due IS NOT NULL AND q.action_due <= CURRENT_DATE + 1))
+        ORDER BY q.action_due NULLS FIRST
+        LIMIT 25
+      `);
+      onToday = onToday.concat(holdingDue.rows.map((h) => ({
+        source: 'holding',
+        id: h.id,
+        title: `${h.next_action === 'decide' ? '🕑' : '📦'} ${h.description || 'Held item'}`,
+        detail: [
+          h.next_action === 'decide' ? 'Hold date passed — collect / return / extend' : 'Delivery due',
+          h.client,
+          h.hh_job_number ? `#${h.hh_job_number}` : null,
+        ].filter(Boolean).join(' · '),
+        due: h.action_due,
+        href: `/holding?item=${h.id}`,
+      })));
+    } catch (err) {
+      console.warn('Dashboard on_today (holding) skipped:', (err as Error).message);
+    }
+
+    // Holding — unidentified items (next_action = 'link_owner'). Undated by
+    // design: ranked by how long the trail has been cold. This is the gap the
+    // daily digest doesn't cover — it only chases items whose owner is already
+    // known, so a mystery box can sit forever with nothing nudging anyone.
+    // The row list is LIMITed for display but the headline count must be the
+    // FULL total — a capped count misreports the backlog (the bug the
+    // overdue-completions bucket carried until May 2026).
+    let holdingUnlinked: Record<string, unknown>[] = [];
+    let holdingUnlinkedTotal = 0;
+    try {
+      const unlinked = await query(`
+        SELECT q.id, q.description, q.found_in, q.found_vehicle_reg, q.action_due,
+               COUNT(*) OVER ()::int AS total_count
+        FROM (${HELD_ITEM_SELECT}) q
+        WHERE q.next_action = 'link_owner'
+        ORDER BY q.action_due ASC NULLS LAST
+        LIMIT 10
+      `);
+      holdingUnlinked = unlinked.rows;
+      holdingUnlinkedTotal = unlinked.rows[0] ? Number(unlinked.rows[0].total_count) : 0;
+    } catch (err) {
+      console.warn('Dashboard holding unlinked skipped:', (err as Error).message);
+    }
+
     // ── PCN needs-attention buckets (Step 8) ──────────────────────────────
     // Defensive (pre-migration env / missing table can't 500 the dashboard).
     // Shares the exact classification the deadline-nudge scheduler uses.
@@ -855,8 +1020,8 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       stat_cards: { ...statCardsResult.rows[0], on_hire_spark: onHireSpark },
       on_today: onToday,
       today: {
-        going_out: goingOutResult.rows,
-        returning: returningResult.rows,
+        going_out: attachVehicles(goingOutResult.rows, true),
+        returning: attachVehicles(returningResult.rows, false),
         transport_quotes: todayTransportResult.rows,
         vehicle_assignments: todayVehiclesResult.rows,
       },
@@ -895,6 +1060,9 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
           + overdueTransportOpsResult.rows.length,
         client_intros: clientIntrosResult.rows,
         carnet_count: parseInt(carnetCountResult.rows[0].count as string),
+        // Held items nobody has identified yet — the mystery-box backlog.
+        holding_unlinked_count: holdingUnlinkedTotal,
+        holding_unlinked: holdingUnlinked,
         cot_receipts_outstanding_count: parseInt(cotReceiptsResult.rows[0].count as string),
         // Recharges flagged but not yet resolved (push to HH / bill externally /
         // absorb). Amber bucket — the cost lifecycle "don't let it get buried".
@@ -918,6 +1086,12 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         // Evenings in the next 14 days needing a sitter with none assigned.
         sitter_gap_count: sitterGaps.length,
         sitter_gaps: sitterGaps.slice(0, 5),
+        // ── Backline to buy (demand tracker) ──
+        // High-priority gaps with no acquisition plan yet — purchasing prompt.
+        backline_to_buy_count: backlineToBuy,
+        // ── Outstanding staff documents (managers) ──
+        // Pending/lapsed tracked-document assignments across active staff.
+        staff_documents_outstanding_count: staffDocsOutstanding,
         // ── Card-machine receipt scans outstanding (migration 087) ──
         // Excess collected/held on a physical terminal needs a receipt scan
         // attached. Amber to-do, non-blocking.

@@ -13,6 +13,8 @@
 
 import { query, getClient } from '../config/database';
 import type { RehearsalDetail } from './rehearsal-plan';
+import { getPresignedDownloadUrl } from '../config/r2';
+import { getLockupTemplate, computeExceptions } from './studio-sitter-lockup';
 
 const STUDIO_SITTER_TAG = 'studio sitter'; // matched case-insensitively
 export const STUDIO_SITTER_DEFAULT_FEE_KEY = 'studio_sitter_default_fee';
@@ -42,6 +44,7 @@ export interface RosterJobEntry {
   hh_job_number: number | null;
   label: string;          // band / client / job name
   rooms: string[];        // sitter-needed room labels, e.g. ["Room 1 · Lockout"]
+  speculative?: boolean;  // true = pre-confirmation (enquiry/provisional) job
 }
 
 export interface RosterAssignee {
@@ -54,6 +57,7 @@ export interface RosterAssignee {
 export interface RosterRow {
   date: string;                       // YYYY-MM-DD
   needs_sitter: boolean;              // derived from jobs, or a manual-override shift exists
+  speculative: boolean;              // every rehearsal job that night is pre-confirmation
   jobs: RosterJobEntry[];            // who's in that night
   shift: {
     id: string;
@@ -62,6 +66,12 @@ export interface RosterRow {
     override_reason: string | null;
     planned_start: string | null;
     planned_end: string | null;
+    note_count: number;
+    report: {
+      submitted_at: string;
+      submitted_by_name: string | null;
+      exceptions_count: number;
+    } | null;
   } | null;
   assignee: RosterAssignee | null;
 }
@@ -84,16 +94,25 @@ function isStudioSitterTag(tags: unknown): boolean {
   return Array.isArray(tags) && tags.some((t) => typeof t === 'string' && t.toLowerCase() === STUDIO_SITTER_TAG);
 }
 
-/** Load rehearsal jobs whose sitter-needed evenings intersect [from,to]. */
-async function loadRehearsalJobs(from: string, to: string): Promise<Array<{
-  id: string; hh_job_number: number | null; job_name: string | null; client_name: string | null; detail: RehearsalDetail;
+// Pre-confirmation ("speculative") pipeline statuses. Excluded from the staff
+// roster by default (you can't sensibly assign a sitter to a maybe-booking);
+// staff opt in via the "Include enquiries" toggle for forward planning.
+const SPECULATIVE_STATUSES = new Set(['new_enquiry', 'quoting', 'paused', 'provisional']);
+
+/** Load rehearsal jobs whose sitter-needed evenings intersect [from,to].
+ *  Default excludes speculative (enquiry/provisional) jobs — pass
+ *  includeSpeculative=true to surface them for planning. */
+async function loadRehearsalJobs(from: string, to: string, includeSpeculative = false): Promise<Array<{
+  id: string; hh_job_number: number | null; job_name: string | null; client_name: string | null;
+  pipeline_status: string | null; detail: RehearsalDetail;
 }>> {
   const res = await query(
-    `SELECT id, hh_job_number, job_name, client_name,
+    `SELECT id, hh_job_number, job_name, client_name, pipeline_status,
             hh_derived_flags->'rehearsal_detail' AS rehearsal_detail
      FROM jobs
      WHERE is_deleted = false
        AND pipeline_status NOT IN ('lost','cancelled')
+       ${includeSpeculative ? '' : `AND pipeline_status NOT IN ('new_enquiry','quoting','paused','provisional')`}
        AND COALESCE(is_internal, false) = false
        AND hh_derived_flags->'rehearsal_detail'->>'sitter_needed' = 'true'
        AND (hh_derived_flags->'rehearsal_detail'->>'last_session_date') >= $1
@@ -106,6 +125,7 @@ async function loadRehearsalJobs(from: string, to: string): Promise<Array<{
       hh_job_number: r.hh_job_number ?? null,
       job_name: r.job_name ?? null,
       client_name: r.client_name ?? null,
+      pipeline_status: r.pipeline_status ?? null,
       detail: r.rehearsal_detail as RehearsalDetail,
     }))
     .filter((r: any) => r.detail && Array.isArray(r.detail.evenings));
@@ -116,12 +136,16 @@ async function loadShifts(from: string, to: string): Promise<Map<string, any>> {
   const res = await query(
     `SELECT s.id, s.shift_date::text AS shift_date, s.status, s.manual_override, s.override_reason,
             s.planned_start, s.planned_end,
+            s.report_submitted_at, s.report_answers,
+            rp.first_name AS report_first, rp.last_name AS report_last,
             a.status AS assignment_status, a.person_id,
-            p.first_name, p.last_name, p.tags
+            p.first_name, p.last_name, p.tags,
+            (SELECT COUNT(*) FROM interactions i WHERE i.shift_id = s.id)::int AS note_count
      FROM studio_sitter_shifts s
      LEFT JOIN studio_sitter_shift_assignments a
        ON a.shift_id = s.id AND a.status IN ('assigned','confirmed')
      LEFT JOIN people p ON p.id = a.person_id
+     LEFT JOIN people rp ON rp.id = s.report_submitted_by
      WHERE s.shift_date BETWEEN $1 AND $2 AND s.status <> 'cancelled'`,
     [from, to]
   );
@@ -134,19 +158,26 @@ async function loadShifts(from: string, to: string): Promise<Map<string, any>> {
   return map;
 }
 
-/** The roster: one row per evening (derived needed nights ∪ manual shifts). */
-export async function getRoster(from: string, to: string): Promise<RosterRow[]> {
-  const [jobs, shifts] = await Promise.all([loadRehearsalJobs(from, to), loadShifts(from, to)]);
+/** The roster: one row per evening (derived needed nights ∪ manual shifts).
+ *  Default excludes speculative (enquiry/provisional) rehearsals; pass
+ *  includeSpeculative=true to surface them for planning. */
+export async function getRoster(from: string, to: string, includeSpeculative = false): Promise<RosterRow[]> {
+  const [jobs, shifts] = await Promise.all([loadRehearsalJobs(from, to, includeSpeculative), loadShifts(from, to)]);
+
+  // Template needed to count exceptions on any submitted lock-up reports in range.
+  const hasReport = Array.from(shifts.values()).some((s: any) => s.report_submitted_at);
+  const lockupTemplate = hasReport ? await getLockupTemplate() : null;
 
   const dateJobs = new Map<string, RosterJobEntry[]>();
   for (const job of jobs) {
     const rooms = roomLabels(job.detail);
     const label = job.job_name || job.client_name || (job.hh_job_number ? `#${job.hh_job_number}` : 'Rehearsal');
+    const speculative = SPECULATIVE_STATUSES.has(job.pipeline_status || '');
     for (const eve of job.detail.evenings) {
       if (!eve.sitter_needed) continue;
       if (eve.date < from || eve.date > to) continue;
       const arr = dateJobs.get(eve.date) ?? [];
-      arr.push({ job_id: job.id, hh_job_number: job.hh_job_number, label, rooms });
+      arr.push({ job_id: job.id, hh_job_number: job.hh_job_number, label, rooms, speculative });
       dateJobs.set(eve.date, arr);
     }
   }
@@ -159,6 +190,7 @@ export async function getRoster(from: string, to: string): Promise<RosterRow[]> 
     rows.push({
       date,
       needs_sitter: jobsForDate.length > 0 || (shiftRow?.manual_override ?? false),
+      speculative: jobsForDate.length > 0 && jobsForDate.every((j) => j.speculative),
       jobs: jobsForDate,
       shift: shiftRow
         ? {
@@ -168,6 +200,19 @@ export async function getRoster(from: string, to: string): Promise<RosterRow[]> 
             override_reason: shiftRow.override_reason,
             planned_start: shiftRow.planned_start,
             planned_end: shiftRow.planned_end,
+            note_count: shiftRow.note_count ?? 0,
+            report: shiftRow.report_submitted_at && lockupTemplate
+              ? {
+                  submitted_at: shiftRow.report_submitted_at,
+                  submitted_by_name: personName(shiftRow.report_first, shiftRow.report_last) === 'Unknown'
+                    ? null : personName(shiftRow.report_first, shiftRow.report_last),
+                  exceptions_count: computeExceptions(
+                    lockupTemplate,
+                    shiftRow.report_answers?.answers ?? {},
+                    shiftRow.report_answers?.continuing_tomorrow ?? false,
+                  ).length,
+                }
+              : null,
           }
         : null,
       assignee: shiftRow?.person_id
@@ -189,6 +234,8 @@ export interface JobCoverageEvening {
   shift_id: string | null;
   status: string;                    // shift status, or 'needed' if no shift
   assignee: { id: string; name: string } | null;
+  note_count: number;                // handover-thread messages on this shift
+  report_submitted_at: string | null; // lock-up report submitted (null if not)
 }
 
 /** Per-job coverage for the job's sitter-needed evenings (drives the card chips). */
@@ -204,7 +251,9 @@ export async function getJobCoverage(jobId: string): Promise<JobCoverageEvening[
   if (dates.length === 0) return [];
 
   const shiftRes = await query(
-    `SELECT s.id, s.shift_date::text AS shift_date, s.status, a.person_id, p.first_name, p.last_name
+    `SELECT s.id, s.shift_date::text AS shift_date, s.status, s.report_submitted_at,
+            a.person_id, p.first_name, p.last_name,
+            (SELECT COUNT(*) FROM interactions i WHERE i.shift_id = s.id)::int AS note_count
      FROM studio_sitter_shifts s
      LEFT JOIN studio_sitter_shift_assignments a
        ON a.shift_id = s.id AND a.status IN ('assigned','confirmed')
@@ -225,6 +274,8 @@ export async function getJobCoverage(jobId: string): Promise<JobCoverageEvening[
       shift_id: s?.id ?? null,
       status: s?.status ?? 'needed',
       assignee: s?.person_id ? { id: s.person_id, name: personName(s.first_name, s.last_name) } : null,
+      note_count: s?.note_count ?? 0,
+      report_submitted_at: s?.report_submitted_at ?? null,
     };
   });
 }
@@ -387,6 +438,136 @@ export async function syncRehearsalStatusForDate(date: string): Promise<void> {
   for (const row of res.rows) {
     await syncRehearsalRequirementStatus(row.id);
   }
+}
+
+// ── Freelancer portal surface (Phase D) ────────────────────────────────────
+
+export interface SitterSharedFile { name: string; url: string; fileType: string | null; }
+export interface SitterShiftJob extends RosterJobEntry { files?: SitterSharedFile[]; }
+export interface SitterShift {
+  date: string;
+  planned_start: string | null;
+  planned_end: string | null;
+  status: string;                 // shift status ('closed' once locked up)
+  assignment_status: string;      // assigned / confirmed
+  fee: number | null;
+  report_submitted_at: string | null; // lock-up submitted → surfaces as "Completed"
+  jobs: SitterShiftJob[];         // who's in that night
+}
+
+/** Group a job set into per-date "who's in" entries (sitter-needed evenings only). */
+function jobsByDate(jobs: Array<{ id: string; hh_job_number: number | null; job_name: string | null; client_name: string | null; detail: RehearsalDetail }>): Map<string, RosterJobEntry[]> {
+  const map = new Map<string, RosterJobEntry[]>();
+  for (const job of jobs) {
+    const rooms = roomLabels(job.detail);
+    const label = job.job_name || job.client_name || (job.hh_job_number ? `#${job.hh_job_number}` : 'Rehearsal');
+    for (const eve of job.detail.evenings) {
+      if (!eve.sitter_needed) continue;
+      const arr = map.get(eve.date) ?? [];
+      arr.push({ job_id: job.id, hh_job_number: job.hh_job_number, label, rooms });
+      map.set(eve.date, arr);
+    }
+  }
+  return map;
+}
+
+/** A sitter's own live-assigned shifts in [from,to], with who's in each night. */
+export async function getSitterShifts(personId: string, from: string, to: string): Promise<SitterShift[]> {
+  const res = await query(
+    `SELECT s.shift_date::text AS shift_date, s.status, s.planned_start, s.planned_end,
+            s.report_submitted_at, a.status AS assignment_status, a.fee
+     FROM studio_sitter_shift_assignments a
+     JOIN studio_sitter_shifts s ON s.id = a.shift_id
+     WHERE a.person_id = $1 AND a.status IN ('assigned','confirmed')
+       AND s.status <> 'cancelled' AND s.shift_date BETWEEN $2 AND $3
+     ORDER BY s.shift_date`,
+    [personId, from, to]
+  );
+  // Sitters see every band booked that night (incl. still-provisional ones).
+  const dateJobs = jobsByDate(await loadRehearsalJobs(from, to, true));
+  return res.rows.map((r: any) => ({
+    date: r.shift_date,
+    planned_start: r.planned_start,
+    planned_end: r.planned_end,
+    status: r.status,
+    assignment_status: r.assignment_status,
+    fee: r.fee != null ? Number(r.fee) : null,
+    report_submitted_at: r.report_submitted_at ?? null,
+    jobs: dateJobs.get(r.shift_date) ?? [],
+  }));
+}
+
+/** True if a person is live-assigned to the shift on `date` (portal access check). */
+export async function isSitterAssignedTo(personId: string, date: string): Promise<boolean> {
+  const r = await query(
+    `SELECT 1 FROM studio_sitter_shift_assignments a
+     JOIN studio_sitter_shifts s ON s.id = a.shift_id
+     WHERE a.person_id = $1 AND a.status IN ('assigned','confirmed')
+       AND s.status <> 'cancelled' AND s.shift_date = $2 LIMIT 1`,
+    [personId, date]
+  );
+  return r.rows.length > 0;
+}
+
+export interface SitterShiftDetail {
+  date: string;
+  planned_start: string | null;
+  planned_end: string | null;
+  status: string;                 // shift status, or 'needed' if no shift row exists
+  fee: number | null;             // the requesting sitter's fee (null if unknown / no personId)
+  assignment_status: string | null; // the requesting sitter's assignment status (assigned/confirmed)
+  jobs: SitterShiftJob[];         // who's in that night, with each job's shared specs
+}
+
+/** Detail for one evening: envelope + who's in each room + that job's shared
+ *  specs/files. When `personId` is given, also returns that sitter's fee +
+ *  assignment status so the portal detail page is self-sufficient on a direct
+ *  load (bookmark / refresh) without needing the shifts list for context. */
+export async function getSitterShiftDetail(date: string, personId?: string): Promise<SitterShiftDetail> {
+  const shiftRes = await query(
+    `SELECT s.status, s.planned_start, s.planned_end, a.status AS assignment_status, a.fee
+     FROM studio_sitter_shifts s
+     LEFT JOIN studio_sitter_shift_assignments a
+       ON a.shift_id = s.id AND a.status IN ('assigned','confirmed')
+       AND ($2::uuid IS NULL OR a.person_id = $2)
+     WHERE s.shift_date = $1 AND s.status <> 'cancelled'
+     LIMIT 1`,
+    [date, personId ?? null]
+  );
+  const shift = shiftRes.rows[0];
+
+  const jobs = await loadRehearsalJobs(date, date, true);
+  const out: SitterShiftJob[] = [];
+  for (const job of jobs) {
+    if (!job.detail.evenings.some((e) => e.sitter_needed && e.date === date)) continue;
+    const fRes = await query(`SELECT files FROM jobs WHERE id = $1`, [job.id]);
+    const raw: any[] = Array.isArray(fRes.rows[0]?.files) ? fRes.rows[0].files : [];
+    const files: SitterSharedFile[] = [];
+    for (const x of raw) {
+      if (!x?.share_with_freelancer) continue;
+      let url: string = x.url || '';
+      if (url && typeof url === 'string' && url.startsWith('files/')) {
+        try { url = await getPresignedDownloadUrl(url); } catch { /* keep raw */ }
+      }
+      files.push({ name: x.name || 'File', url, fileType: x.type || x.fileType || null });
+    }
+    out.push({
+      job_id: job.id,
+      hh_job_number: job.hh_job_number,
+      label: job.job_name || job.client_name || (job.hh_job_number ? `#${job.hh_job_number}` : 'Rehearsal'),
+      rooms: roomLabels(job.detail),
+      files,
+    });
+  }
+  return {
+    date,
+    planned_start: shift?.planned_start ?? null,
+    planned_end: shift?.planned_end ?? null,
+    status: shift?.status ?? 'needed',
+    fee: shift?.fee != null ? Number(shift.fee) : null,
+    assignment_status: shift?.assignment_status ?? null,
+    jobs: out,
+  };
 }
 
 export interface SitterOption {

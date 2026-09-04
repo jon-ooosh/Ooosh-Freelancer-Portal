@@ -13,6 +13,10 @@
 import { apiFetch } from '../config/api-config'
 
 interface PdfData {
+  // Vehicle event this report belongs to. When set, the backend freezes
+  // the generated PDF at condition-reports/{REG}/{eventId}.pdf so a later
+  // regeneration serves the exact original bytes.
+  eventId?: string
   vehicleReg: string
   vehicleType: string
   vehicleMake?: string

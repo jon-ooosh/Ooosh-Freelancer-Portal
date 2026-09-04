@@ -5,14 +5,20 @@
  * record payment form, client account balance.
  */
 import { useState, useEffect, useCallback } from 'react';
+import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
+import { describePreauth, paymentMethodLabel } from '../lib/preauth';
 import { getPaymentState, PAYMENT_STATE_LABELS, PAYMENT_STATE_CLASSES } from '../services/paymentState';
+import { hasOutstanding, isNonZero } from '../lib/money';
 import ExcessPaymentModal, { statusLabel, statusColor, computeHireDays } from './ExcessPaymentModal';
 import CostCaptureModal from './CostCaptureModal';
+import CostAllocationModal from './CostAllocationModal';
 import RechargeResolveModal, { RechargeStatusPill } from './RechargeResolveModal';
-import type { JobExcess } from '../../../shared/types';
+import ResendConfirmationModal from './ResendConfirmationModal';
+import { ReceiptThumb, ReceiptPreview } from './costs/CostReceipt';
+import type { JobExcess, Cost } from '../../../shared/types';
 
 // HireHop bank accounts (id → label) for the cross-job apply bank field.
 const HH_BANKS: Array<{ id: number; label: string }> = [
@@ -91,6 +97,12 @@ interface FinancialData {
     records: (JobExcess & { driver_name?: string; vehicle_reg?: string })[];
     total_required: number;
     total_collected: number;
+    topn_shortfall?: {
+      correctTotal: number;
+      chargeableTotal: number;
+      short: number;
+      drivers: string[];
+    } | null;
     status: string | null;
   };
   client_balance_on_account: number;
@@ -137,6 +149,21 @@ interface JobCostLite {
   recharge_amount: number | null;
   recharged_to_hh_at: string | null;
   recharge_status: string | null;
+  // Allocation-aware read: a row split IN from a cost captured on another job.
+  // amount_gross is this job's share; full_amount_gross is the cost's total.
+  is_allocation?: boolean;
+  full_amount_gross?: number | null;
+  allocation_id?: string | null;
+  // Capture job — where the cost was actually entered (differs from this job on
+  // split-in rows; the full invoice + recharge live there).
+  job_id?: string | null;
+  capture_hh_job_number?: number | null;
+  // Paperwork. /costs/by-job returns `c.*`, so these have always been on the
+  // wire — the panel just never rendered them. The receipt is the thing staff
+  // reach for when a client queries a line, so it's one click from here now.
+  receipt_r2_key?: string | null;
+  receipt_filename?: string | null;
+  invoice_number?: string | null;
 }
 interface JobQuoteLite {
   id: string;
@@ -144,6 +171,12 @@ interface JobQuoteLite {
   freelancer_fee_rounded: number | null;
   client_fee: number | null;
   status: string | null;
+  // Cost components (for the Expected make-up). Admin fee is deliberately NOT a
+  // column — it's a markup, never an invoice we reconcile against — so summing
+  // these four gives the outlay we actually expect to pay out.
+  expected_fuel_cost: number | null;
+  expenses_included: number | null;
+  travel_cost: number | null;
 }
 
 export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
@@ -158,6 +191,10 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   const [balNotes, setBalNotes] = useState('');
   const [balSaving, setBalSaving] = useState(false);
   const [balError, setBalError] = useState('');
+
+  // Resend client confirmation email (manual re-fire, e.g. after an SMTP blip)
+  const [resendMsg, setResendMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [showResendModal, setShowResendModal] = useState(false);
 
   // Record payment form
   const [showPaymentForm, setShowPaymentForm] = useState(false);
@@ -177,7 +214,16 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
 
   // Rollover chains — "follow the thread" of a rolled-over excess. Keyed by
   // excess record id → ordered chain of records sharing the HH deposit.
-  type ChainEntry = { id: string; excess_status: string; hh_job_number: number | null; job_name: string | null };
+  type ChainEntry = {
+    id: string;
+    excess_status: string;
+    job_id: string | null;
+    hh_job_number: number | null;
+    job_name: string | null;
+    excess_amount_taken: string | number | null;
+    payment_date: string | null;
+    payment_method: string | null;
+  };
   const [rolloverChains, setRolloverChains] = useState<Record<string, ChainEntry[]>>({});
 
   // Link deposit state
@@ -245,6 +291,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   const [jobCosts, setJobCosts] = useState<JobCostLite[]>([]);
   const [jobQuotes, setJobQuotes] = useState<JobQuoteLite[]>([]);
   const [showAddCost, setShowAddCost] = useState(false);
+  const [splittingCost, setSplittingCost] = useState<Cost | null>(null);
 
   const openRefundModal = (dep: FinancialData['financial']['deposits'][number]) => {
     setRefundingDep(dep);
@@ -657,6 +704,35 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
     ? Math.min(100, ((financial.total_hire_deposits + (financial.credit_note_write_off || 0)) / financial.hire_value_inc_vat) * 100)
     : 0;
 
+  /*
+   * Excess is charged per HIRE (per van, top-N drivers), but stored per DRIVER
+   * — so a 2-driver/1-van job used to render two cards, the second reading
+   * "Required: £0.00 · Collected: £0.00 · Covered", which says nothing.
+   *
+   * Collapse instead of hide. A `not_required` row still answers a real
+   * question ("did we forget to take an excess off Lewis?" — no, deliberately),
+   * so the covered drivers are NAMED on the chargeable row for their van rather
+   * than deleted. Nothing is silently dropped: covered rows whose van doesn't
+   * match a chargeable row fall through to `orphanCovered` below.
+   *
+   * The Drivers & Vehicles tab deliberately still shows excess per driver —
+   * there it means the driver's PERSONAL liability (£1,200 if they prang it),
+   * which is a different fact and stays true whoever holds the money.
+   */
+  const coveredRecords = excess.records.filter((r) => r.excess_status === 'not_required');
+  const chargeableRecords = excess.records.filter((r) => r.excess_status !== 'not_required');
+  const coveredName = (r: JobExcess) => r.driver_name || r.client_name || 'Unnamed driver';
+  /*
+   * Attribution is JOB-level, not per-van — because the top-N ranking is. The
+   * rule is "the N highest driver liabilities on the hire, where N = van
+   * count", not "the highest driver on each van", and drivers on a multi-van
+   * hire can drive any of its vans. Matching covered drivers to a chargeable
+   * row by registration therefore asserted a pairing the algorithm never made.
+   * With one chargeable row we fold the covered names onto it; with several we
+   * list them once beneath, rather than repeating them on each.
+   */
+  const soleChargeable = chargeableRecords.length === 1 ? chargeableRecords[0] : null;
+
   return (
     <div className="space-y-6">
       {/* Financial Summary */}
@@ -731,13 +807,13 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
             </div>
 
             <div className="flex items-center justify-between">
-              <p className={`text-sm font-semibold ${financial.balance_override ? 'text-gray-400 line-through' : financial.balance_outstanding > 0 ? 'text-red-600' : 'text-green-600'}`}>
+              <p className={`text-sm font-semibold ${financial.balance_override ? 'text-gray-400 line-through' : hasOutstanding(financial.balance_outstanding) ? 'text-red-600' : 'text-green-600'}`}>
                 Balance Outstanding: £{financial.balance_outstanding.toFixed(2)}
               </p>
               {/* Admin: resolve a stray HH balance the business considers settled
                   (Xero source of truth). Only when there's a balance + not already
                   resolved. */}
-              {isAdmin && !financial.balance_override && financial.balance_outstanding > 0.01 && (
+              {isAdmin && !financial.balance_override && hasOutstanding(financial.balance_outstanding) && (
                 <button
                   onClick={() => { setBalError(''); setShowResolveBalance(true); }}
                   className="text-xs text-gray-500 hover:text-ooosh-700 underline"
@@ -790,7 +866,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                 </p>
               </div>
             )}
-            {financial.deposit_paid && financial.balance_outstanding > 0 && (
+            {financial.deposit_paid && hasOutstanding(financial.balance_outstanding) && (
               <div className="mt-3 p-3 bg-green-50 border border-green-200 rounded-lg">
                 <p className="text-xs text-green-700">
                   Deposit secured. Remaining balance: <span className="font-semibold">£{financial.balance_outstanding.toFixed(2)}</span>
@@ -872,17 +948,36 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
       {/* Insurance Excess */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
         <h3 className="text-lg font-semibold text-gray-900 mb-4">Insurance Excess</h3>
-        {excess.records.length > 0 ? (
+        {/* Under-collected: a higher-risk driver joined after the money had
+            already been taken on someone else's record, so the correct top-N
+            can't be applied without stranding a deposit. Warn, never auto-move
+            — same convention as referral authorise. */}
+        {excess.topn_shortfall && (
+          <div className="mb-4 rounded-lg border border-red-300 bg-red-50 p-3">
+            <p className="text-sm font-semibold text-red-800">
+              This hire is under-collected by £{excess.topn_shortfall.short.toFixed(2)}
+            </p>
+            <p className="text-xs text-red-700 mt-1">
+              {excess.topn_shortfall.drivers.join(' and ')}{' '}
+              {excess.topn_shortfall.drivers.length === 1 ? 'carries' : 'carry'} a higher excess than the
+              driver holding the charge, so the hire should total £{excess.topn_shortfall.correctTotal.toFixed(2)}
+              {' '}rather than £{excess.topn_shortfall.chargeableTotal.toFixed(2)}. The money already collected
+              can't be moved automatically — collect the difference, or adjust the required amount if you've
+              agreed otherwise.
+            </p>
+          </div>
+        )}
+        {chargeableRecords.length > 0 ? (
           <div className="space-y-3">
-            {excess.records.map((record) => (
+            {chargeableRecords.map((record) => (
               <div
                 key={record.id}
                 className="flex items-center justify-between p-3 bg-gray-50 rounded-lg border border-gray-200"
               >
                 <div className="flex-1">
                   <div className="flex items-center gap-2">
-                    <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${statusColor(record.excess_status)}`}>
-                      {statusLabel(record.excess_status)}
+                    <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${statusColor(record.excess_status, record.auto_covered)}`}>
+                      {statusLabel(record.excess_status, record.auto_covered)}
                     </span>
                     {record.hh_deposit_id && (
                       <span className="text-[10px] text-green-600 font-medium" title={`HH Deposit #${record.hh_deposit_id} (${record.hh_reconcile_source || 'linked'})`}>
@@ -910,26 +1005,48 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                     {record.driver_name || record.client_name || 'Job-level excess'}
                     {record.vehicle_reg && ` — ${record.vehicle_reg}`}
                   </p>
+                  {/* Money line. Zero-value fields are SUPPRESSED — "Collected:
+                      £0.00" is noise next to a REQUIRED pill that already says
+                      nothing has been collected. "Required" is also renamed to
+                      "Excess" here so the word only appears in one place (it was
+                      doing double duty as both a field label and a status). */}
                   <p className="text-xs text-gray-500">
-                    Required: {record.excess_amount_required != null ? `£${Number(record.excess_amount_required).toFixed(2)}` : '—'}
-                    {Number(record.amount_held || 0) > 0 ? (
+                    Excess: {record.excess_amount_required != null ? `£${Number(record.excess_amount_required).toFixed(2)}` : '—'}
+                    {isNonZero(record.amount_held) ? (
                       <>
                         {' · '}
                         <span className="text-sky-700">Held: £{Number(record.amount_held).toFixed(2)}</span>
                       </>
-                    ) : (
+                    ) : isNonZero(record.excess_amount_taken) ? (
                       <>
                         {' · '}
-                        Collected: £{Number(record.excess_amount_taken || 0).toFixed(2)}
+                        {/* A rolled-over record's payment_date is the day the
+                            rollover was APPLIED, not when the cash arrived — it
+                            landed on the origin hire, possibly weeks earlier.
+                            Saying "Collected on <that date>" was a plain untruth
+                            (job 16605). The breadcrumb below names the origin. */}
+                        {record.payment_method === 'rolled_over' ? 'Carried over: ' : 'Collected: '}
+                        £{Number(record.excess_amount_taken).toFixed(2)}
+                        {record.payment_date &&
+                          ` on ${new Date(record.payment_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`}
+                        {record.payment_method && record.payment_method !== 'rolled_over' &&
+                          ` · ${paymentMethodLabel(record.payment_method)}`}
                       </>
-                    )}
-                    {Number(record.amount_released || 0) > 0 && (
+                    ) : null}
+                    {isNonZero(record.amount_released) && (
                       <>
                         {' · '}
-                        <span className="text-gray-400">Released: £{Number(record.amount_released).toFixed(2)}</span>
+                        <span className="text-gray-500">Released: £{Number(record.amount_released).toFixed(2)}</span>
                       </>
                     )}
                   </p>
+                  {/* Covered drivers, folded onto the row that actually carries
+                      the money for their van. */}
+                  {soleChargeable?.id === record.id && coveredRecords.length > 0 && (
+                    <p className="text-xs text-gray-500 mt-0.5">
+                      Also covered by this excess: {coveredRecords.map(coveredName).join(', ')}
+                    </p>
+                  )}
                   {/* Resolution breakdown — what actually happened to collected
                       excess. Without this the card showed only collected vs
                       required, hiding claim/reimburse splits (job 15291). */}
@@ -943,7 +1060,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                         <span className="text-emerald-700">
                           Reimbursed: £{Number(record.reimbursement_amount).toFixed(2)}
                           {record.reimbursement_date && ` on ${new Date(record.reimbursement_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`}
-                          {record.reimbursement_method && ` (${record.reimbursement_method.replace(/_/g, ' ')})`}
+                          {record.reimbursement_method && ` (${paymentMethodLabel(record.reimbursement_method)})`}
                         </span>
                       )}
                     </p>
@@ -951,32 +1068,91 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                   {/* Rollover chain — "follow the thread". Shows the money's
                       journey across jobs (#A → #B → #C), current job highlighted,
                       until it's finally reimbursed/claimed. */}
-                  {rolloverChains[record.id] && rolloverChains[record.id].length > 1 && (
-                    <p className="text-xs text-purple-700 mt-0.5 flex flex-wrap items-center gap-1">
-                      <span className="font-medium">↪ Rollover thread:</span>
-                      {rolloverChains[record.id].map((link, i) => (
-                        <span key={link.id} className="flex items-center gap-1">
-                          {i > 0 && <span className="text-purple-300">→</span>}
-                          <span
-                            className={link.id === record.id ? 'font-semibold underline decoration-dotted' : ''}
-                            title={link.job_name || undefined}
-                          >
-                            #{link.hh_job_number ?? '—'} <span className="text-purple-400">({statusLabel(link.excess_status as Parameters<typeof statusLabel>[0])})</span>
-                          </span>
-                        </span>
-                      ))}
-                    </p>
-                  )}
-                  {record.excess_status === 'pre_auth' && record.held_expires_at && (() => {
-                    const daysLeft = Math.ceil((new Date(record.held_expires_at).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
-                    const cls = daysLeft <= 1 ? 'text-red-600' : daysLeft <= 2 ? 'text-amber-600' : 'text-sky-600';
+                  {rolloverChains[record.id] && rolloverChains[record.id].length > 1 && (() => {
+                    const chain = rolloverChains[record.id];
+                    /* The ORIGIN is the hire the cash actually landed on — the
+                       earliest hop that took money in its own right rather than
+                       inheriting it. Naming it is the whole point: without it a
+                       child hire reads "Taken £1,200" with no clue that the
+                       money is sitting on a different job (#16605 / #16371). */
+                    const origin = chain.find(
+                      (l) => l.payment_method !== 'rolled_over' && Number(l.excess_amount_taken || 0) > 0,
+                    ) || chain[0];
+                    const originDate = origin?.payment_date
+                      ? new Date(origin.payment_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+                      : null;
+                    return (
+                      <div className="text-xs text-purple-700 mt-1">
+                        <p className="flex flex-wrap items-center gap-1">
+                          <span className="font-medium">↪ Rollover thread:</span>
+                          {chain.map((link, i) => {
+                            const isHere = link.id === record.id;
+                            const isOrigin = origin && link.id === origin.id;
+                            const label = (
+                              <>
+                                {isOrigin && <span title="The hire the money was originally taken on">💷 </span>}
+                                #{link.hh_job_number ?? '—'}{' '}
+                                <span className="text-purple-400">
+                                  ({isHere ? 'here' : statusLabel(link.excess_status)})
+                                </span>
+                              </>
+                            );
+                            return (
+                              <span key={link.id} className="flex items-center gap-1">
+                                {i > 0 && <span className="text-purple-300">→</span>}
+                                {/* Each hop links to its own job's Money tab so
+                                    staff can jump straight to wherever the money
+                                    actually is, rather than searching for it. */}
+                                {link.job_id && !isHere ? (
+                                  <Link
+                                    to={`/jobs/${link.job_id}`}
+                                    title={link.job_name || undefined}
+                                    className="underline decoration-dotted hover:text-purple-900"
+                                  >
+                                    {label}
+                                  </Link>
+                                ) : (
+                                  <span
+                                    className={isHere ? 'font-semibold underline decoration-dotted' : ''}
+                                    title={link.job_name || undefined}
+                                  >
+                                    {label}
+                                  </span>
+                                )}
+                              </span>
+                            );
+                          })}
+                        </p>
+                        {origin && origin.id !== record.id && Number(origin.excess_amount_taken || 0) > 0 && (
+                          <p className="text-purple-500 mt-0.5">
+                            Money originally taken on{' '}
+                            {origin.job_id ? (
+                              <Link to={`/jobs/${origin.job_id}`} className="underline decoration-dotted hover:text-purple-900">
+                                #{origin.hh_job_number ?? '—'}
+                              </Link>
+                            ) : (
+                              <>#{origin.hh_job_number ?? '—'}</>
+                            )}
+                            {originDate && ` on ${originDate}`}
+                            {origin.payment_method && origin.payment_method !== 'rolled_over' &&
+                              ` · ${paymentMethodLabel(origin.payment_method)}`}
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })()}
+                  {(record.excess_status === 'pre_auth' || record.excess_status === 'released') && (() => {
+                    // Shared wording — see lib/preauth.ts. Binary held/released,
+                    // never a "maybe"; the server-side self-heal resolves a stuck
+                    // past-expiry hold to its true state on this tab's load.
+                    const d = describePreauth(record);
+                    if (!d.compact) return null;
+                    const cls = d.isHold
+                      ? (d.pastExpiry ? 'text-amber-600' : 'text-sky-600')
+                      : 'text-gray-500';
                     return (
                       <p className={`text-[11px] mt-0.5 font-medium ${cls}`}>
-                        {daysLeft <= 0
-                          ? 'Hold expired — capture or release'
-                          : daysLeft === 1
-                            ? 'Hold expires tomorrow'
-                            : `Hold expires in ${daysLeft} days`}
+                        {d.compact}{record.payment_method ? ` · ${paymentMethodLabel(record.payment_method)}` : ''}
                       </p>
                     );
                   })()}
@@ -993,6 +1169,28 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                 )}
               </div>
             ))}
+            {/* Covered rows whose van doesn't match any chargeable row (a swap,
+                a deleted record, a job-level excess with no reg). Shown rather
+                than dropped — collapsing must never lose a driver. */}
+            {!soleChargeable && coveredRecords.length > 0 && (
+              <p className="text-xs text-gray-500 px-1">
+                Also covered on this hire: {coveredRecords.map(coveredName).join(', ')}
+              </p>
+            )}
+          </div>
+        ) : coveredRecords.length > 0 ? (
+          /* Every record on the job is a £0 "covered" row — an internal job, a
+             Van & Driver hire, or a top-N result with nothing chargeable. This
+             is NOT "no excess tracked": showing the empty state here invited
+             staff to create a spurious record. Say what's actually true. */
+          <div className="text-sm text-gray-500">
+            <p>
+              No excess chargeable on this hire.{' '}
+              <span className="text-gray-400">
+                {coveredRecords.length} driver{coveredRecords.length === 1 ? '' : 's'} covered:{' '}
+                {coveredRecords.map(coveredName).join(', ')}
+              </span>
+            </p>
           </div>
         ) : (
           <div className="text-sm text-gray-500">
@@ -1025,7 +1223,9 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                       {dep.description && ` — ${dep.description}`}
                     </p>
                   </div>
-                  {excess.records.length > 0 ? (
+                  {/* Must match the picker's source (chargeableRecords) or the
+                      button opens an empty modal. */}
+                  {chargeableRecords.length > 0 ? (
                     <button
                       onClick={() => setLinkingDeposit({ hh_deposit_id: dep.hh_deposit_id, amount: dep.amount })}
                       className="px-2.5 py-1 text-xs font-medium text-amber-700 hover:text-amber-900 border border-amber-300 rounded-md hover:bg-amber-100"
@@ -1061,7 +1261,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
               Select which excess record to link it to:
             </p>
             <div className="space-y-2 mb-4">
-              {excess.records.map((record) => (
+              {chargeableRecords.map((record) => (
                 <button
                   key={record.id}
                   onClick={() => handleLinkDeposit(record.id)}
@@ -1074,7 +1274,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                   </p>
                   <p className="text-xs text-gray-500">
                     Required: {record.excess_amount_required != null ? `£${Number(record.excess_amount_required).toFixed(2)}` : '—'}
-                    {' · '}Status: {statusLabel(record.excess_status)}
+                    {' · '}Status: {statusLabel(record.excess_status, record.auto_covered)}
                     {record.hh_deposit_id && ' · Already linked'}
                   </p>
                 </button>
@@ -1114,7 +1314,47 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
 
       {/* Payment History */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-        <h3 className="text-lg font-semibold text-gray-900 mb-4">Payment History</h3>
+        <div className="flex items-center justify-between mb-4 gap-3">
+          <h3 className="text-lg font-semibold text-gray-900">Payment History</h3>
+          <button
+            onClick={() => { setResendMsg(null); setShowResendModal(true); }}
+            title="Re-send the client's booking/payment confirmation email — pick who gets it"
+            className="px-3 py-1.5 text-sm font-medium text-ooosh-700 border border-ooosh-200 hover:bg-ooosh-50 rounded-md whitespace-nowrap"
+          >
+            Resend confirmation
+          </button>
+        </div>
+        {resendMsg && (
+          <div
+            className={`mb-4 text-sm rounded-md px-3 py-2 border ${
+              resendMsg.ok
+                ? 'bg-green-50 border-green-200 text-green-800'
+                : 'bg-amber-50 border-amber-200 text-amber-800'
+            }`}
+          >
+            {resendMsg.text}
+          </div>
+        )}
+        {showResendModal && (
+          <ResendConfirmationModal
+            jobId={jobId}
+            amount={data.financial.total_hire_deposits || 0}
+            hireValueIncVat={data.financial.hire_value_inc_vat || 0}
+            balanceOwed={data.financial.balance_override ? 0 : (data.financial.balance_outstanding || 0)}
+            payments={data.financial.deposits
+              // Hire payments only — excess has its own lifecycle/emails. Application
+              // lines (excess/credit applied to an invoice) aren't real client payments.
+              .filter((d) => !d.is_excess && d.is_deposit !== false)
+              .map((d) => ({
+                date: d.date,
+                method: d.bank_name || 'Card',
+                amount: Math.abs(d.amount),
+                isRefund: d.is_refund,
+              }))}
+            onClose={() => setShowResendModal(false)}
+            onResult={(r) => setResendMsg(r)}
+          />
+        )}
 
         {/* Payment history — hire payments from HireHop (excess payments tracked in Insurance Excess section above) */}
         {(() => {
@@ -1213,6 +1453,14 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
           presetJobId={jobId}
           onClose={() => setShowAddCost(false)}
           onSaved={() => { setShowAddCost(false); loadJobCosts(); }}
+          onSavedAndSplit={(c) => { setShowAddCost(false); loadJobCosts(); setSplittingCost(c); }}
+        />
+      )}
+      {splittingCost && (
+        <CostAllocationModal
+          cost={splittingCost}
+          onClose={() => setSplittingCost(null)}
+          onSaved={() => { setSplittingCost(null); loadJobCosts(); }}
         />
       )}
 
@@ -1779,6 +2027,30 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   );
 }
 
+// Deep-link to a cost on the Costs hub. Narrows the hub to the CAPTURE job
+// (`c.job_id`) — for a split-in row that's a different job than the one we're
+// looking at, and it's where the invoice and the recharge actually live. The
+// `job` filter also keeps the target row inside the hub's 200-row page cap.
+function costHubHref(cost: JobCostLite): string {
+  return cost.job_id
+    ? `/money/costs?view=all&job=${cost.job_id}&cost=${cost.id}`
+    : `/money/costs?view=all&cost=${cost.id}`;
+}
+
+// Receipt cell for a cost row — the thumb (image / 📎, opens a lightbox) or a
+// soft marker when there's no paperwork attached. The click-through to the hub
+// lives on the row title instead: an arrow this size was too small to aim at.
+function CostReceiptCell({ cost, onPreview }: { cost: JobCostLite; onPreview: (c: JobCostLite) => void }) {
+  if (!cost.receipt_r2_key) {
+    return (
+      <span className="text-[10px] text-gray-300 whitespace-nowrap" title="No receipt or invoice attached to this cost">
+        no receipt
+      </span>
+    );
+  }
+  return <ReceiptThumb cost={cost} size="sm" onOpen={() => onPreview(cost)} />;
+}
+
 // Quoted-vs-actual variance + extra/recharge breakdown for a job's captured
 // costs. "Quoted (our cost)" sums the job's quote freelancer fees — the
 // expected transport/crew cost. "Actuals" sums the quote_actual costs. Extra
@@ -1789,6 +2061,7 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
   const num = (n: number | null | undefined) => Number(n || 0);
   const [resolving, setResolving] = useState<JobCostLite | null>(null);
   const [rechargeBusy, setRechargeBusy] = useState(false);
+  const [receiptPreview, setReceiptPreview] = useState<JobCostLite | null>(null);
 
   // Lightweight "recharge running costs" toggle — the flag is normally set by a
   // Recharge line on a quote; this covers the no-quote / mid-hire case. Sets the
@@ -1833,7 +2106,22 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
   }
 
   const liveQuotes = quotes.filter((q) => q.status !== 'cancelled');
-  const quotedCost = liveQuotes.reduce((s, q) => s + num(q.freelancer_fee_rounded ?? q.freelancer_fee), 0);
+  // Expected outlay = what we actually expect to PAY OUT (and reconcile invoices
+  // against): freelancer labour + van fuel + fronted (absorbed) expenses +
+  // transport fares. Admin fee is EXCLUDED — it's a markup baked into our_total_cost,
+  // never a real invoice. Previously this summed only the freelancer fee, so it
+  // understated the expected cost by fuel/expenses/transport.
+  const expFreelancer = liveQuotes.reduce((s, q) => s + num(q.freelancer_fee_rounded ?? q.freelancer_fee), 0);
+  const expFuel = liveQuotes.reduce((s, q) => s + num(q.expected_fuel_cost), 0);
+  const expExpenses = liveQuotes.reduce((s, q) => s + num(q.expenses_included), 0);
+  const expTransport = liveQuotes.reduce((s, q) => s + num(q.travel_cost), 0);
+  const quotedCost = expFreelancer + expFuel + expExpenses + expTransport;
+  const expectedMakeup: { label: string; amount: number }[] = [
+    { label: 'Freelancer', amount: expFreelancer },
+    { label: 'Fuel', amount: expFuel },
+    { label: 'Fronted expenses', amount: expExpenses },
+    { label: 'Transport', amount: expTransport },
+  ].filter((c) => c.amount > 0.005);
   const clientQuoted = liveQuotes.reduce((s, q) => s + num(q.client_fee), 0);
 
   const actualCosts = costs.filter((c) => c.cost_intent === 'quote_actual');
@@ -1869,7 +2157,19 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
         <div className="rounded-md border border-gray-200 p-3">
           <div className="text-xs text-gray-500">Expected (from quotes)</div>
           <div className="text-lg font-semibold text-gray-900">{m(quotedCost)}</div>
-          <div className="text-xs text-gray-400">crew / transport cost</div>
+          {expectedMakeup.length > 0 ? (
+            <div className="mt-1 space-y-0.5">
+              {expectedMakeup.map((c) => (
+                <div key={c.label} className="flex items-center justify-between text-xs text-gray-400">
+                  <span>{c.label}</span>
+                  <span>{m(c.amount)}</span>
+                </div>
+              ))}
+              <div className="text-[10px] text-gray-300 pt-0.5">admin fee excluded</div>
+            </div>
+          ) : (
+            <div className="text-xs text-gray-400">crew / transport cost</div>
+          )}
         </div>
         <div className="rounded-md border border-gray-200 p-3">
           <div className="text-xs text-gray-500">Actuals (part of quote)</div>
@@ -1885,6 +2185,48 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
         <p className="text-xs text-gray-400 -mt-2 mb-4">Client quoted {m(clientQuoted)} for transport / crew.</p>
       )}
 
+      {/* Actual costs (part of quote) — itemised, so staff can see WHICH bills make up the total */}
+      {actualCosts.length > 0 && (
+        <div className="border-t border-gray-100 pt-3 mb-3">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-sm font-medium text-gray-700">Costs applied to this job</span>
+            <span className="text-sm font-semibold text-gray-900">{m(actualsTotal)}</span>
+          </div>
+          <ul className="space-y-1">
+            {actualCosts.map((c) => {
+              const isSplit = !!c.is_allocation;
+              const captureJobId = c.job_id;
+              return (
+                <li key={isSplit ? `a-${c.allocation_id || c.id}` : `c-${c.id}`} className="flex items-center justify-between text-sm gap-2">
+                  <span className="text-gray-600 truncate min-w-0">
+                    <span className="inline-block px-1.5 py-0.5 mr-1.5 text-[10px] font-medium bg-gray-100 text-gray-500 rounded align-middle">Quote</span>
+                    <a href={costHubHref(c)} title="Open this cost on the Costs hub" className="hover:text-purple-700 hover:underline">
+                      {c.supplier_name || c.description || c.category || 'Cost'}
+                      {c.invoice_number && <span className="ml-1.5 text-xs text-gray-400">#{c.invoice_number}</span>}
+                    </a>
+                    {isSplit && (
+                      captureJobId ? (
+                        <a href={`/jobs/${captureJobId}`} className="ml-1 text-xs text-purple-600 hover:underline"
+                          title={`This job's share of a ${m(num(c.full_amount_gross))} cost captured on ${c.capture_hh_job_number ? `job #${c.capture_hh_job_number}` : 'another job'}`}>
+                          · split from {c.capture_hh_job_number ? `#${c.capture_hh_job_number}` : 'another job'}
+                        </a>
+                      ) : (
+                        <span className="ml-1 text-xs text-purple-600" title={`This job's share of a ${m(num(c.full_amount_gross))} cost split across jobs`}>· split ({m(num(c.full_amount_gross))} total)</span>
+                      )
+                    )}
+                  </span>
+                  <span className="flex items-center gap-2 shrink-0">
+                    <span className="text-gray-900">{m(num(c.amount_gross))}</span>
+                    <CostReceiptCell cost={c} onPreview={setReceiptPreview} />
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+          <p className="text-[11px] text-gray-400 mt-1.5">Manage individual costs on the <a href="/money/costs" className="text-purple-600 hover:underline">Costs hub</a>.</p>
+        </div>
+      )}
+
       {/* Extra (rechargeable) costs */}
       {extraCosts.length > 0 && (
         <div className="border-t border-gray-100 pt-3">
@@ -1894,13 +2236,24 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
           </div>
           <ul className="space-y-1">
             {extraCosts.map((c) => {
-              const pending = c.recharge_mode !== 'none' && (c.recharge_status ?? 'pending') === 'pending';
+              // Allocation-in rows are a share of a cost captured on ANOTHER
+              // job — recharge (and its resolution) belongs to that capture job,
+              // so we show them read-only here, tagged as a split.
+              const isSplit = !!c.is_allocation;
+              const pending = !isSplit && c.recharge_mode !== 'none' && (c.recharge_status ?? 'pending') === 'pending';
               return (
-                <li key={c.id} className="flex items-center justify-between text-sm gap-2">
-                  <span className="text-gray-600 truncate">{c.supplier_name || c.description || c.category || 'Cost'}</span>
+                <li key={isSplit ? `a-${c.allocation_id || c.id}` : `c-${c.id}`} className="flex items-center justify-between text-sm gap-2">
+                  <span className="text-gray-600 truncate">
+                    <a href={costHubHref(c)} title="Open this cost on the Costs hub" className="hover:text-purple-700 hover:underline">
+                      {c.supplier_name || c.description || c.category || 'Cost'}
+                      {c.invoice_number && <span className="ml-1.5 text-xs text-gray-400">#{c.invoice_number}</span>}
+                    </a>
+                    {isSplit && <span className="ml-1 text-xs text-purple-600" title={`This job's share of a ${m(num(c.full_amount_gross))} cost split across jobs`}>· split ({m(num(c.full_amount_gross))} total)</span>}
+                  </span>
                   <span className="flex items-center gap-2 shrink-0">
                     <span className="text-gray-900">{m(num(c.amount_gross))}</span>
-                    {c.recharge_mode !== 'none' && <RechargeStatusPill status={c.recharge_status} mode={c.recharge_mode} />}
+                    <CostReceiptCell cost={c} onPreview={setReceiptPreview} />
+                    {!isSplit && c.recharge_mode !== 'none' && <RechargeStatusPill status={c.recharge_status} mode={c.recharge_mode} />}
                     {pending && (
                       <button onClick={() => setResolving(c)}
                         className="px-2 py-0.5 text-xs text-white bg-blue-600 hover:bg-blue-700 rounded">
@@ -1921,6 +2274,10 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
           onClose={() => setResolving(null)}
           onResolved={() => { setResolving(null); onChanged(); }}
         />
+      )}
+
+      {receiptPreview && (
+        <ReceiptPreview cost={receiptPreview} onClose={() => setReceiptPreview(null)} />
       )}
 
       {unclassified.length > 0 && (

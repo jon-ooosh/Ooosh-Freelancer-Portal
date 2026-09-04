@@ -1,37 +1,21 @@
-/** 
+/**
  * Job Completion API Endpoint
- * 
+ *
  * POST /api/jobs/[id]/complete
- * 
- * FAST SYNCHRONOUS OPERATIONS (~8 seconds):
- * - Uploads signature image to Monday file column (when customer present)
- * - Uploads photo(s) to Monday file column
- * - Saves completion notes
- * - Updates status to "All done!"
- * - Sets completion timestamp
- * - Returns success to user immediately
- * 
- * BACKGROUND OPERATIONS (triggered async, user doesn't wait):
- * - Fetch mirror data (client name, venue)
- * - Send client delivery note (PDF) or collection confirmation
- * - Send driver notes alert to staff
- * 
+ *
+ * Forwards the completion (notes, signature, photos) to the OP backend,
+ * which uploads the artefacts, marks the job complete, and handles client
+ * delivery-note / confirmation emails and staff alerts on its side.
+ *
  * Validation:
  * - Customer present: signature required, photos optional (0-5)
  * - Customer not present: at least 1 photo required (up to 5), no signature
+ * - Van-only book-out: signature/photo validation skipped
  */
 
 import { NextRequest, NextResponse } from 'next/server'
 import { getSessionUser } from '@/lib/session'
-import {
-  getJobById,
-  DC_COLUMNS,
-  uploadBase64ImageToColumn,
-  getBoardIds,
-  mondayQuery,
-  getFreelancerNameByEmail
-} from '@/lib/monday'
-import { isOpMode, submitCompletionToOP, reportFallback, mondayFallbackAllowed, isOpClientError, OpApiError } from '@/lib/op-api'
+import { submitCompletionToOP, isOpClientError, OpApiError } from '@/lib/op-api'
 
 // =============================================================================
 // TYPES
@@ -87,7 +71,7 @@ export async function POST(
       )
     }
 
-    const { notes, signature, photos, customerPresent, clientEmails, sendClientEmail, vanOnly, staffName } = body
+    const { notes, signature, photos, customerPresent, vanOnly, staffName } = body
 
     // Van-only completions skip signature/photo validation
     if (!vanOnly) {
@@ -118,248 +102,72 @@ export async function POST(
     console.log(`Complete API: Processing completion for job ${jobId} by ${session.email}`)
     console.log(`Complete API: customerPresent=${customerPresent}, signature=${!!signature}, photos=${photos?.length || 0}`)
 
-    // ── OP Backend mode ──────────────────────────────────────────
-    if (isOpMode()) {
-      const sessionToken = request.cookies.get('session')?.value
-      if (!sessionToken) {
-        return NextResponse.json(
-          { success: false, error: 'Session token missing' },
-          { status: 401 }
-        )
-      }
+    const sessionToken = request.cookies.get('session')?.value
+    if (!sessionToken) {
+      return NextResponse.json(
+        { success: false, error: 'Session token missing' },
+        { status: 401 }
+      )
+    }
 
-      try {
-        // Build FormData for the OP backend
-        const formData = new FormData()
-        formData.append('notes', notes || '')
-        formData.append('customerPresent', String(customerPresent))
-        if (staffName) formData.append('staffName', staffName)
-        // Forward vanOnly so the OP backend skips the equipment delivery
-        // note PDF + email — there's no equipment to acknowledge for a
-        // van-only book-out (the vehicle condition report is the relevant
-        // artefact and is sent separately by the OP book-out flow).
-        if (vanOnly) formData.append('vanOnly', 'true')
+    try {
+      // Build FormData for the OP backend
+      const formData = new FormData()
+      formData.append('notes', notes || '')
+      formData.append('customerPresent', String(customerPresent))
+      if (staffName) formData.append('staffName', staffName)
+      // Forward vanOnly so the OP backend skips the equipment delivery
+      // note PDF + email — there's no equipment to acknowledge for a
+      // van-only book-out (the vehicle condition report is the relevant
+      // artefact and is sent separately by the OP book-out flow).
+      if (vanOnly) formData.append('vanOnly', 'true')
 
-        // Convert base64 photos to blobs
-        if (photos) {
-          for (const photoBase64 of photos) {
-            const match = photoBase64.match(/^data:([^;]+);base64,(.+)$/)
-            if (match) {
-              const buffer = Buffer.from(match[2], 'base64')
-              const blob = new Blob([buffer], { type: match[1] })
-              formData.append('photos', blob, `photo-${Date.now()}.jpg`)
-            }
-          }
-        }
-
-        // Convert base64 signature to blob
-        if (signature) {
-          const match = signature.match(/^data:([^;]+);base64,(.+)$/)
+      // Convert base64 photos to blobs
+      if (photos) {
+        for (const photoBase64 of photos) {
+          const match = photoBase64.match(/^data:([^;]+);base64,(.+)$/)
           if (match) {
             const buffer = Buffer.from(match[2], 'base64')
             const blob = new Blob([buffer], { type: match[1] })
-            formData.append('signature', blob, `signature-${Date.now()}.png`)
+            formData.append('photos', blob, `photo-${Date.now()}.jpg`)
           }
         }
-
-        const result = await submitCompletionToOP(sessionToken, jobId, formData)
-        return NextResponse.json({
-          ...result,
-          success: true,
-          jobId,
-          completedAt: new Date().toISOString(),
-          backgroundProcessing: false,
-        })
-      } catch (opError) {
-        // 4xx (already completed, validation error, not assigned to you) =
-        // legit response — propagate without alerting.
-        if (isOpClientError(opError)) {
-          const status = (opError as OpApiError).status
-          return NextResponse.json(
-            { success: false, error: opError.message },
-            { status }
-          )
-        }
-        console.error('OP backend completion error:', opError)
-        reportFallback('completion', opError, { email: session.email })
-        if (!mondayFallbackAllowed()) {
-          return NextResponse.json(
-            { success: false, error: 'Unable to submit completion. Please try again in a moment.' },
-            { status: 502 }
-          )
-        }
-        console.log('Complete API: Falling back to Monday.com')
-      }
-    }
-    // ── End OP Backend mode ──────────────────────────────────────
-
-    // Verify the job exists and is assigned to this user
-    const job = await getJobById(jobId, session.email)
-
-    if (!job) {
-      return NextResponse.json(
-        { success: false, error: 'Job not found or not assigned to you' },
-        { status: 404 }
-      )
-    }
-
-    // Check if already completed
-    if (job.completedAtDate) {
-      return NextResponse.json(
-        { success: false, error: 'This job has already been completed' },
-        { status: 400 }
-      )
-    }
-
-    const completedDate = new Date()
-    const errors: string[] = []
-
-    // =========================================================================
-    // PHASE 1: FAST SYNCHRONOUS OPERATIONS (user waits for these)
-    // =========================================================================
-
-    // 1. Upload signature if provided (customer present)
-    if (signature) {
-      console.log(`Complete API: Uploading signature for job ${jobId}`)
-      try {
-        const signatureResult = await uploadBase64ImageToColumn(
-          jobId,
-          DC_COLUMNS.signature,
-          signature,
-          `signature-${jobId}-${Date.now()}.png`
-        )
-        
-        if (!signatureResult.success) {
-          console.error('Failed to upload signature:', signatureResult.error)
-          errors.push(`Signature upload: ${signatureResult.error}`)
-        }
-      } catch (err) {
-        console.error('Signature upload error:', err)
-        errors.push('Signature upload failed')
-      }
-    }
-
-    // 2. Upload photos if provided
-    if (photos && photos.length > 0) {
-      console.log(`Complete API: Uploading ${photos.length} photo(s) for job ${jobId}`)
-      
-      for (let i = 0; i < photos.length; i++) {
-        try {
-          const photoResult = await uploadBase64ImageToColumn(
-            jobId,
-            DC_COLUMNS.completionPhotos,
-            photos[i],
-            `delivery-photo-${jobId}-${Date.now()}-${i + 1}.jpg`
-          )
-          
-          if (!photoResult.success) {
-            console.error(`Failed to upload photo ${i + 1}:`, photoResult.error)
-            errors.push(`Photo ${i + 1} upload: ${photoResult.error}`)
-          }
-        } catch (err) {
-          console.error(`Photo ${i + 1} upload error:`, err)
-          errors.push(`Photo ${i + 1} upload failed`)
-        }
-      }
-    }
-
-    // 3. Update completion fields (notes, timestamp, status)
-    console.log(`Complete API: Updating completion fields for job ${jobId}`)
-    try {
-      const boardId = getBoardIds().deliveries
-      const dateStr = completedDate.toISOString().split('T')[0]
-      const hours = completedDate.getHours()
-      const minutes = completedDate.getMinutes()
-      
-      // Add "Customer not present" prefix if applicable
-      const finalNotes = customerPresent 
-        ? (notes || '')
-        : `Customer not present\n\n${notes || ''}`.trim()
-
-      const mutation = `
-        mutation ($boardId: ID!, $itemId: ID!, $columnValues: JSON!) {
-          change_multiple_column_values(
-            board_id: $boardId, 
-            item_id: $itemId, 
-            column_values: $columnValues
-          ) {
-            id
-          }
-        }
-      `
-
-      const columnValues = {
-        [DC_COLUMNS.completionNotes]: finalNotes || (customerPresent ? '' : 'Customer not present'),
-        [DC_COLUMNS.completedAtDate]: { date: dateStr },
-        [DC_COLUMNS.completedAtTime]: { hour: hours, minute: minutes },
-        [DC_COLUMNS.status]: { label: 'All done!' },
       }
 
-      await mondayQuery(mutation, { 
-        boardId, 
-        itemId: jobId, 
-        columnValues: JSON.stringify(columnValues)
+      // Convert base64 signature to blob
+      if (signature) {
+        const match = signature.match(/^data:([^;]+);base64,(.+)$/)
+        if (match) {
+          const buffer = Buffer.from(match[2], 'base64')
+          const blob = new Blob([buffer], { type: match[1] })
+          formData.append('signature', blob, `signature-${Date.now()}.png`)
+        }
+      }
+
+      const result = await submitCompletionToOP(sessionToken, jobId, formData)
+      return NextResponse.json({
+        ...result,
+        success: true,
+        jobId,
+        completedAt: new Date().toISOString(),
+        backgroundProcessing: false,
       })
-    } catch (err) {
-      console.error('Failed to update completion fields:', err)
+    } catch (opError) {
+      // 4xx (already completed, validation error, not assigned to you) =
+      // legit response — propagate without alerting.
+      if (isOpClientError(opError)) {
+        const status = (opError as OpApiError).status
+        return NextResponse.json(
+          { success: false, error: opError.message },
+          { status }
+        )
+      }
+      console.error('OP backend completion error:', opError)
       return NextResponse.json(
-        { success: false, error: 'Failed to update job status' },
-        { status: 500 }
+        { success: false, error: 'Unable to submit completion. Please try again in a moment.' },
+        { status: 502 }
       )
     }
-
-    console.log(`Complete API: Job ${jobId} marked complete - triggering background processing`)
-
-    // =========================================================================
-    // PHASE 2: TRIGGER BACKGROUND PROCESSING (user doesn't wait)
-    // =========================================================================
-    
-    // Get driver name for background function
-    let driverName = session.email
-    try {
-      driverName = await getFreelancerNameByEmail(session.email) || session.email
-    } catch {
-      // Non-critical
-    }
-
-    // Fire off background function - don't await!
-    const backgroundPayload = {
-      jobId,
-      jobName: job.name,
-      jobType: job.type,
-      jobDate: job.date || completedDate.toISOString(),
-      jobHhRef: job.hhRef,
-      jobVenueId: job.venueId,
-      driverEmail: session.email,
-      driverName,
-      notes: notes?.trim() || null,
-      customerPresent,
-      clientEmails: clientEmails || [],
-      sendClientEmail: sendClientEmail || false,
-      completedAt: completedDate.toISOString(),
-      signatureBase64: customerPresent && signature ? signature : null,
-      photos: photos || [],
-    }
-
-    // Trigger background function (fire and forget)
-    triggerBackgroundProcessing(backgroundPayload).catch(err => {
-      // Log but don't fail - the main completion succeeded
-      console.error('Failed to trigger background processing:', err)
-    })
-
-    // =========================================================================
-    // RETURN SUCCESS IMMEDIATELY
-    // =========================================================================
-
-    console.log(`Complete API: Returning success for job ${jobId}`)
-
-    return NextResponse.json({
-      success: true,
-      jobId,
-      completedAt: completedDate.toISOString(),
-      warnings: errors.length > 0 ? errors : undefined,
-      backgroundProcessing: true, // Indicate that emails etc are processing in background
-    })
 
   } catch (error) {
     console.error('Complete API error:', error)
@@ -368,67 +176,4 @@ export async function POST(
       { status: 500 }
     )
   }
-}
-
-// =============================================================================
-// BACKGROUND TRIGGER
-// =============================================================================
-
-interface BackgroundPayload {
-  jobId: string
-  jobName: string
-  jobType: 'delivery' | 'collection'
-  jobDate: string
-  jobHhRef?: string
-  jobVenueId?: string
-  jobVenueAddress?: string
-  driverEmail: string
-  driverName: string
-  notes: string | null
-  customerPresent: boolean
-  clientEmails: string[]
-  sendClientEmail: boolean
-  completedAt: string
-  signatureBase64: string | null
-  photos: string[]
-}
-
-/**
- * Trigger the background function to handle:
- * - Mirror data fetch
- * - Client emails (with PDF for deliveries)
- * - Driver notes alerts
- * 
- * This is fire-and-forget - we don't await the result
- */
-async function triggerBackgroundProcessing(payload: BackgroundPayload): Promise<void> {
-  const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://ooosh-freelancer-portal.netlify.app'
-  const backgroundSecret = process.env.BACKGROUND_FUNCTION_SECRET || process.env.MONDAY_WEBHOOK_SECRET
-  
-  if (!backgroundSecret) {
-    console.warn('No BACKGROUND_FUNCTION_SECRET configured, skipping background processing')
-    return
-  }
-
-  const backgroundUrl = `${appUrl.replace(/\/$/, '')}/.netlify/functions/completion-background`
-  
-  console.log(`Complete API: Triggering background function at ${backgroundUrl}`)
-
-  // Fire and forget - don't await
-  fetch(backgroundUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Background-Secret': backgroundSecret,
-    },
-    body: JSON.stringify(payload),
-  }).then(response => {
-    if (!response.ok) {
-      console.error(`Background function returned ${response.status}`)
-    } else {
-      console.log('Background function triggered successfully')
-    }
-  }).catch(err => {
-    console.error('Failed to call background function:', err)
-  })
 }

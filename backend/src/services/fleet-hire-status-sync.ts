@@ -89,8 +89,15 @@ export async function syncFleetHireStatus(
   }
 
   if (nextStatus !== currentStatus) {
+    // Clear the stuck-On-Hire detection marker whenever the van leaves 'On Hire'
+    // so a re-entered stuck state can alert afresh (see runStuckOnHireScan in
+    // services/sanity-check-scanner.ts + docs/MULTI-VAN-BOOKOUT-SCRAMBLE.md).
+    const clearStuckMarker = nextStatus !== 'On Hire';
     await run(
-      `UPDATE fleet_vehicles SET hire_status = $1, updated_at = NOW() WHERE id = $2`,
+      `UPDATE fleet_vehicles
+          SET hire_status = $1,
+              updated_at = NOW()${clearStuckMarker ? ', stuck_onhire_alerted_at = NULL' : ''}
+        WHERE id = $2`,
       [nextStatus, vehicleId],
     );
   }

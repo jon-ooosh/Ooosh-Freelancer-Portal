@@ -12,10 +12,10 @@ import emailService from '../services/email-service';
 const router = Router();
 router.use(authenticate);
 
-// 10MB limit, common file types for an operations platform
+// 25MB limit, common file types for an operations platform
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 },
+  limits: { fileSize: 25 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
     const allowed = [
       // Documents
@@ -155,7 +155,7 @@ router.post('/upload', upload.single('file'), async (req: AuthRequest, res: Resp
     console.error('File upload error:', error);
     if (error instanceof multer.MulterError) {
       if (error.code === 'LIMIT_FILE_SIZE') {
-        res.status(413).json({ error: 'File too large (max 10MB)' });
+        res.status(413).json({ error: 'File too large (max 25MB)' });
         return;
       }
     }
@@ -181,6 +181,7 @@ router.get('/download', async (req: AuthRequest, res: Response) => {
       'completion/',     // portal completion photos + signatures
       'delivery-notes/', // completion delivery-note PDFs
       'carnet-authority/', // carnet Letter of Authorisation PDFs
+      'email-quotes/',   // harvested quote PDFs (auto-chase §7.3 version diff)
     ];
     if (!allowedPrefixes.some((p) => key.startsWith(p))) {
       res.status(403).json({ error: 'Invalid file key' });
