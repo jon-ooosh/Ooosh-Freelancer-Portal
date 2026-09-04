@@ -16,6 +16,13 @@ export interface DriverStatusInput {
   requires_referral: boolean;
   referral_status: string | null;
   signature_date: string | null;
+  /**
+   * HH job the driver has started a hire form for but NOT signed for (from
+   * `unsignedJobNumberSql` on the backend). A signature never expires, so a
+   * returning driver mid-form for a new hire otherwise reads "Approved" while
+   * nothing joins them to it (Cameron Williams-Hill / 16618, Sep 2026).
+   */
+  unsigned_job_number?: number | null;
   licence_valid_to: string | null;
   dvla_valid_until?: string | null;
   poa1_valid_until: string | null;
@@ -53,7 +60,9 @@ export function deriveDriverStatus(driver: DriverStatusInput): DriverStatus {
     return { label: 'Refer to Insurers', colour: red };
   }
 
-  if (!driver.signature_date) return { label: 'In Progress', colour: 'bg-blue-100 text-blue-700' };
+  if (driver.unsigned_job_number || !driver.signature_date) {
+    return { label: 'In Progress', colour: 'bg-blue-100 text-blue-700' };
+  }
 
   if (
     isExpired(driver.licence_valid_to) ||

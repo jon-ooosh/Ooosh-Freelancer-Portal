@@ -778,6 +778,25 @@ export function startScheduler() {
   });
   console.log('Scheduler: Completion chaser scheduled every 30 minutes');
 
+  // ── Unsigned hire-form nudge ─────────────────────────────────────────
+  // Hourly, business hours (the service self-gates). Emails a driver who has
+  // verified every document for a hire but stopped short of signing — once per
+  // (driver, hire). Cameron Williams-Hill / job 16618, Sep 2026.
+  cron.schedule('20 * * * *', async () => {
+    try {
+      const { runUnsignedHireFormNudge } = await import('../services/unsigned-hire-form-nudge');
+      const result = await runUnsignedHireFormNudge();
+      if (result.scanned > 0 || result.errors.length > 0) {
+        console.log(
+          `Scheduler: Unsigned hire-form nudge — scanned ${result.scanned}, sent ${result.sent}, skipped ${result.skipped}, errors ${result.errors.length}`
+        );
+      }
+    } catch (err) {
+      console.error('Scheduler: Unsigned hire-form nudge failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: Unsigned hire-form nudge scheduled hourly at :20');
+
   // ── Transport/crew arranging chaser ──────────────────────────────────
   // Daily at 08:30 — nudge STAFF (info@oooshtours.co.uk) about transport
   // quotes still sat in ops_status='todo' as the job date approaches.

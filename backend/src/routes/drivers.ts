@@ -17,6 +17,7 @@ import { encryptDriverPiiInto, decryptDriverRow, decryptDriverRows } from '../se
 import { persistableWindows, touchesValidity, backfillFromDates } from '../services/driver-validity';
 import { sendIdentityReviewAlert } from '../services/identity-review';
 import { computeVerificationState } from '../services/driver-verification-state';
+import { unsignedJobNumberSql, findUnsignedDriversForJob } from '../services/driver-hire-progress';
 
 const router = Router();
 router.use(authenticate);
@@ -163,6 +164,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         WHEN d.requires_referral = true AND d.referral_status = 'declined' THEN 'not_approved'
         WHEN d.requires_referral = true AND d.referral_status = 'pending' THEN 'referred_waiting'
         WHEN d.requires_referral = true THEN 'refer_insurers'
+        WHEN ${unsignedJobNumberSql('d')} IS NOT NULL THEN 'in_progress'
         WHEN d.signature_date IS NULL THEN 'in_progress'
         WHEN d.licence_valid_to < CURRENT_DATE
           OR d.dvla_valid_until < CURRENT_DATE
@@ -189,6 +191,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     const dataParams = [...params, pageLimit, offset];
     const result = await query(
       `SELECT d.*,
+        ${unsignedJobNumberSql('d')} AS unsigned_job_number,
         p.first_name AS person_first_name,
         p.last_name AS person_last_name,
         latest_excess.excess_id AS latest_excess_id,
@@ -274,12 +277,33 @@ router.get('/lookup', async (req: AuthRequest, res: Response) => {
 
 // ── GET /api/drivers/:id — Get single driver with hire + excess history ──
 
+// ── GET /api/drivers/unsigned-for-job/:hhJobNumber ──
+//
+// Drivers who have STARTED the hire form for this hire but not signed it — so
+// no vehicle_hire_assignments row exists and nothing else on Job Detail knows
+// they are there. Feeds the greyed "started, not signed" card. Mounted before
+// /:id so the literal segment isn't swallowed as a driver id.
+router.get('/unsigned-for-job/:hhJobNumber', async (req: AuthRequest, res: Response) => {
+  try {
+    const hh = parseInt(String(req.params.hhJobNumber), 10);
+    if (!Number.isFinite(hh)) {
+      res.status(400).json({ error: 'hhJobNumber must be a number' });
+      return;
+    }
+    res.json({ data: await findUnsignedDriversForJob(hh) });
+  } catch (error) {
+    console.error('[drivers] Unsigned-for-job error:', error);
+    res.status(500).json({ error: 'Failed to load unsigned drivers' });
+  }
+});
+
 router.get('/:id', async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
 
     const result = await query(
       `SELECT d.*,
+        ${unsignedJobNumberSql('d')} AS unsigned_job_number,
         p.first_name AS person_first_name,
         p.last_name AS person_last_name,
         p.email AS person_email
@@ -763,7 +787,10 @@ router.patch(
 // and the staff UI came to disagree about job 16291.
 router.get('/:id/verification-state', async (req: AuthRequest, res: Response) => {
   try {
-    const result = await query(`SELECT * FROM drivers WHERE id = $1`, [req.params.id]);
+    const result = await query(
+      `SELECT d.*, ${unsignedJobNumberSql('d')} AS unsigned_job_number FROM drivers d WHERE d.id = $1`,
+      [req.params.id]
+    );
     if (result.rows.length === 0) {
       res.status(404).json({ error: 'Driver not found' });
       return;

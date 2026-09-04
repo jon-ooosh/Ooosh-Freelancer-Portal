@@ -719,6 +719,54 @@ no writer and is dropped from the UI rather than shown as a permanent dash —
 categories (what you may drive) and restrictions (conditions on you) are
 different things and must not share a column.
 
+##### "Signed FOR THIS HIRE" — the unsigned-form derivation (Sep 2026, migration 196)
+
+**A signature never expires, so `signature_date` cannot answer "are they on the hire in
+front of them?"** The only thing that joins a driver to a hire is the
+`vehicle_hire_assignments` row, created at exactly one moment: the Signature step of the
+hire form. Every earlier step (iDenfy, POA, DVLA) writes only to the driver record.
+
+**The incident (Cameron Williams-Hill / job 16618, 3 Sep 2026).** Returning driver, April
+signature on file. Re-verified iDenfy + both POAs + DVLA in 15 minutes, then closed the tab
+on the DVLA "validated" screen (it renders before Continue is pressed). No assignment row.
+Every surface read green — "Approved" pill, "Last signed 24 Apr", cockpit Signature ✓ —
+because all of them keyed off the April signature, and the blue "currently completing a
+form for #N" banner keyed off `!signature_date`. Staff had to reason it out by hand.
+
+**`services/driver-hire-progress.ts` `unsignedJobNumberSql(alias)` is THE derivation** —
+`current_job_number` when (a) the job is live (not lost/cancelled/returned/completed) and
+(b) no non-cancelled assignment exists for (driver, that job); else NULL. Exposed as
+`unsigned_job_number` on the drivers list, `GET /drivers/:id`, the verification-state
+payload, and `GET /drivers/unsigned-for-job/:hh`. **Every "is this driver joined to the hire"
+surface reads it; never re-derive from `signature_date`:**
+- `/drivers` status CASE + `deriveDriverStatus` → **In Progress · #N** (was "Approved").
+- Cockpit Signature stage → todo, "Signed before — not yet for #N", amber action. Test in
+  `__tests__/driver-verification-state.test.ts`.
+- DriverDetailPage: amber banner + the Signature card's header (no fake "No expiry set"
+  pill — it says "Signed 24 Apr 2026" or "Not yet signed for #N").
+- Job Detail Drivers & Vehicles: **greyed dashed "⏳ Started hire form — not signed" card**
+  above the assignments (also on the empty state), with a copy-link button.
+- `services/unsigned-hire-form-nudge.ts` (hourly at :20, business hours): emails the DRIVER
+  the form link once per (driver, hire) after 2h quiet — `hire_form_unsigned_nudge`,
+  claimed on `drivers.unsigned_nudge_job_number` BEFORE the send, released on failure.
+  No staff bell; the card + cockpit action are the staff signal.
+
+**`current_job_number` is written at OTP verification** (`verify-code.js` in the hire-form
+app), not only at iDenfy session creation — a returning driver with a valid licence check
+skips iDenfy, so the old write point never fired for exactly the drivers this is for.
+`current_job_started_at` is stamped by the `/update` handler when the number CHANGES.
+
+**JSONB columns in `/driver-verification/update` MUST be in `JSONB_FIELDS`.** node-postgres
+sends a JS array as a Postgres ARRAY literal (`{"…"}`), which JSONB rejects — but an EMPTY
+array survives (`{}` is valid JSON), so `licence_endorsements` failed only for drivers WITH
+points, silently, from the Apr 2026 cutover until Sep 2026. That write also carries any
+DVLA-points-triggered `requires_referral`, and `copy-a-to-b` builds the hire-form payload
+from the OP driver record, so a points-triggered referral could be lost end to end.
+Deterministic (3 retries, same payload), and the DVLA page never read the response — it
+now `reportError`s at `critical`. Points/endorsements on affected drivers are NOT
+backfilled: the data only exists in Netlify function logs; check `licence_points` against
+the DVLA PDF on any driver whose check landed in that window.
+
 ##### Phase 4 — extraction ← NEXT (not built)
 
 ##### Cockpit brief as specced (delivered — kept for the deferred items below)
@@ -804,6 +852,8 @@ The driver liability **flows in** to the per-job calculation (top-N drivers' lia
 1. **`POST /api/hire-forms`** — writes `calculated_excess_amount = max(hireFormCalculated, £1,200)` on the driver, alongside creating the per-job excess record. Skipped if `excess_locked = true`.
 2. **`POST /api/driver-verification/update`** — when `signature_date` is set in the update and the driver has no calculated_excess_amount yet, seed it with £1,200. Covers the case where the SignaturePage chain doesn't reach `POST /api/hire-forms` (a known intermittent gap).
 3. **`PATCH /api/drivers/:id/calculated-excess`** — staff-edit endpoint (admin/manager only). Audit-logged.
+
+**Which surface actually changes a LIVE hire's excess (Sep 2026).** Easy to misremember, so: `PATCH /api/drivers/:id/calculated-excess` (the Drivers board) writes ONLY `drivers.calculated_excess_amount` and deliberately does not propagate — its own comment says so. The paths that DO change a live hire are `PUT /api/excess/:id` (the "Edit" on the Job Detail driver card and the `/money/excess` Manage modal) and referral resolution with `adjusted_excess`. Since Sep 2026 a Drivers-board edit also reaches a live hire INDIRECTLY: `services/excess-topn.ts` reads that column, so the next driver write on the job re-ranks and can raise the charge to it — but it can never lower a figure set on the job record itself (see the `effective` note under Top-N reconciliation).
 
 **For "In Progress" drivers (no `signature_date` yet):** display shows "—" (their actual liability hasn't been determined — might land on referral and need higher). The edit affordance is still present — staff can pre-set if needed.
 
@@ -1364,8 +1414,10 @@ Coverage rule used by `all_cleared` and `syncExcessRequirementStatus`: **covered
 **THE MONEY GUARD is the whole safety story.** Reshuffling is arithmetic on two rows *until money lands*; after that a record accumulates things that cannot move with it — `hh_deposit_id` (+ its Xero posting), `stripe_payment_intent_id`, `refund_legs`, `bank_details_encrypted`, and membership of a cross-job rollover chain. So a record holding **any** of those is FROZEN: never demoted, never re-priced (a frozen record keeps its STORED amount — re-pricing money already held is a money decision, not a reconciliation). Where a frozen incumbent occupies a slot the ranking would reassign, we leave it and return it in `blocked` — matching the standing "never silently move money" convention.
 
 **Conventions:**
+- **⚠️ NEVER LOWER A DELIBERATELY-SET AMOUNT.** Ranking and pricing use `effective = max(drivers.calculated_excess_amount, job_excess.excess_amount_required)`, not the driver column alone. A hire's record can legitimately sit ABOVE the driver's standing liability — an insurer surcharge from referral resolution (`routes/drivers.ts` resolve-referral `adjusted_excess`) or a staff edit via `PUT /excess/:id`. **Neither writes `drivers.calculated_excess_amount`, and neither should** (an insurer's surcharge for one hire is not that person's permanent liability — the two columns are separate on purpose, see the driver-level liability model above). Without `effective`, the reconcile re-priced an £1,800 insurer-imposed excess back to the £1,200 floor the moment a second driver joined, silently undoing the insurer's decision — and because that money had not been collected yet, the money guard did not catch it either. Raising a record to the driver's liability is a correction; lowering it below a figure a human set is not.
 - **Ranking ties break on `created_at ASC`** (the SQL orders by it and `Array.sort` is stable), so equal-liability drivers leave the incumbent in place. Without this the record set would churn on every write.
-- **Internal jobs return early** — they deliberately record every driver `not_required` £0, so promoting one would invent a charge. V&D suspension and auto-cover both land in `waived`, which the `UNTOUCHABLE` filter already excludes.
+- **Internal jobs return early**, and so does any FINISHED hire (`returned_incomplete`/`returned`/`completed`/`cancelled`/`lost` — `dispatched` is deliberately NOT in that list, since a mid-tour driver joining a live hire still needs ranking). A settled hire's excess is history; moving the charge between drivers achieves nothing but retrospectively inflating "required".
+- **⚠️ TERMINAL RECORDS OCCUPY SLOTS — the 71-false-positive bug (caught in review, Sep 2026).** The first cut filtered `UNTOUCHABLE` statuses out of the candidate query, which made the slot they hold look EMPTY, so a covered sibling was promoted into it. Job 15777: one van, Cameron's £1,200 collected and reimbursed, Robbie covered at £0 — the reconcile couldn't see Cameron and "fixed" the hire by charging Robbie £1,200 on a settled job. The sweep reported **71 such jobs, every one a false positive**. The tell was that every line promoted to exactly the £1,200 floor: a genuine fix promotes a driver with a HIGHER liability, so a report full of floor-value promotions means the ranking found nothing wrong. A waive, a reimbursement, a claim, a rollover and a released hold are all statements that the hire's excess for that slot has been dealt with — they are never modified, and they still COUNT against `vanCount`. Only a MONEY-frozen occupant raises a `blocked` warning; a terminal one is a closed question and nagging about it would be noise.
 - **`dryRun: true` is read-only BY CONSTRUCTION**, not by BEGIN/ROLLBACK — a rollback still needs a dedicated pool connection per call, and this pool has been saturated before (Jun 2026). The Money tab uses it on a GET; the sweep script uses it for its dry run.
 - **Callers:** `POST /hire-forms` and `POST /hire-forms/quick-assign`, both **before** `applyAccountAutoCover` (so an opted-in client's waive lands on the corrected figures) and both followed by `syncExcessRequirementStatus` when something changed (promoting a covered record can flip the job from covered to outstanding). Best-effort — a failure must never undo a committed hire form.
 - **Backfill:** `scripts/reconcile-excess-topn.ts` (dry-run default, `--commit`, `--job=<hh>`, `--upcoming`). Touches no HireHop, Stripe or email. Jobs it CANNOT fix because money sits on the wrong record are reported as UNDER-COLLECTED with the shortfall, never auto-changed.

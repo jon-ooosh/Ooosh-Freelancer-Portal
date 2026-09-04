@@ -230,7 +230,8 @@ async function runMigrations(direction: 'up' | 'down') {
         '193_idenfy_verdict_identity_review.sql',
         '194_driver_licence_categories.sql',
         '195_holding_fold_temp_storage.sql',
-        '196_enquiry_dismissal.sql',
+        '196_unsigned_hire_form_nudge.sql',
+        '197_enquiry_dismissal.sql',
       ];
 
       for (const migration of migrations) {

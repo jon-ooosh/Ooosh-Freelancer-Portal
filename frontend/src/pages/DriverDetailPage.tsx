@@ -74,6 +74,8 @@ interface DriverDetail {
   identity_review_notes: string | null;
   current_job_number: number | null;
   current_job_started_at: string | null;
+  /** current_job_number ONLY while they haven't signed for it and the job is live. */
+  unsigned_job_number: number | null;
   poa1_valid_until: string | null;
   poa2_valid_until: string | null;
   dvla_valid_until: string | null;
@@ -176,6 +178,16 @@ function formatDateTime(d: string | null): string {
   } catch {
     return d;
   }
+}
+
+/** "just now" / "3 min ago" / "2 hr ago" for the header refresh stamp. */
+function formatAgo(at: Date, now: number): string {
+  const secs = Math.max(0, Math.round((now - at.getTime()) / 1000));
+  if (secs < 60) return 'just now';
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `${mins} min ago`;
+  const hrs = Math.round(mins / 60);
+  return `${hrs} hr ago`;
 }
 
 function toInputDate(d: string | null): string {
@@ -373,6 +385,20 @@ function buildEvidenceGroups(driver: DriverDetail): EvidenceGroupSpec[] {
       key: 'signature',
       title: 'Signature',
       slots: [{ label: 'Signature', match: ['Signature', 'signature', 'sig'] }],
+      // A signature doesn't expire — it's per HIRE. So instead of an expiry
+      // pill, say when they last signed and, if they're mid-form for a hire
+      // they haven't signed for, say so in amber. That second state is the
+      // one every surface used to miss (Cameron Williams-Hill / 16618).
+      headerRight: driver.unsigned_job_number ? (
+        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs bg-amber-100 text-amber-800">
+          Not yet signed for #{driver.unsigned_job_number}
+          {driver.signature_date ? ` · last signed ${formatDate(driver.signature_date)}` : ''}
+        </span>
+      ) : driver.signature_date ? (
+        <span className="text-xs text-gray-500">Signed {formatDate(driver.signature_date)}</span>
+      ) : (
+        <span className="text-xs text-gray-400">Not signed</span>
+      ),
     },
   ];
 }
@@ -509,6 +535,11 @@ export default function DriverDetailPage() {
   const [auditLog, setAuditLog] = useState<AuditLogEntry[]>([]);
   const [verificationState, setVerificationState] = useState<DriverVerificationState | null>(null);
   const [loading, setLoading] = useState(true);
+  // Refresh button (top right): staff "watch" a driver complete a form live
+  // and want a one-click re-read plus an honest "how stale is this?" stamp.
+  const [refreshing, setRefreshing] = useState(false);
+  const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null);
+  const [nowTick, setNowTick] = useState(() => Date.now());
   const [activeTab, setActiveTab] = useState<'details' | 'hires' | 'excess' | 'ooh' | 'pcns'>('details');
   const [pcnCount, setPcnCount] = useState<{ open: number; total: number } | null>(null);
   const [editing, setEditing] = useState(false);
@@ -519,6 +550,12 @@ export default function DriverDetailPage() {
   useEffect(() => {
     if (id) { loadDriver(); loadVerificationState(); }
   }, [id]);
+
+  // Re-render the "Refreshed N min ago" label without refetching anything.
+  useEffect(() => {
+    const t = setInterval(() => setNowTick(Date.now()), 30_000);
+    return () => clearInterval(t);
+  }, []);
 
   // Reset tab + per-tab caches when switching drivers (component instance
   // is reused across /drivers/A → /drivers/B). Without this the active
@@ -542,15 +579,36 @@ export default function DriverDetailPage() {
     if (id && activeTab === 'details') loadAuditLog();
   }, [id, activeTab]);
 
-  async function loadDriver() {
-    setLoading(true);
+  async function loadDriver(opts: { silent?: boolean } = {}) {
+    // `silent` keeps the page mounted: `loading=true` swaps the whole page for
+    // the "Loading driver..." placeholder, which is right on first mount but
+    // would flash the page away on a refresh click.
+    if (!opts.silent) setLoading(true);
     try {
       const data = await api.get<{ data: DriverDetail }>(`/drivers/${id}`);
       setDriver(data.data);
+      setLastRefreshedAt(new Date());
     } catch (err) {
       console.error('Failed to load driver:', err);
     } finally {
-      setLoading(false);
+      if (!opts.silent) setLoading(false);
+    }
+  }
+
+  /** Top-right Refresh: re-read everything the current view is showing. */
+  async function refreshAll() {
+    if (!id || refreshing) return;
+    setRefreshing(true);
+    try {
+      await Promise.all([
+        loadDriver({ silent: true }),
+        loadVerificationState(),
+        activeTab === 'details' ? loadAuditLog() : Promise.resolve(),
+        activeTab === 'hires' ? loadHireHistory() : Promise.resolve(),
+        activeTab === 'excess' ? loadExcessHistory() : Promise.resolve(),
+      ]);
+    } finally {
+      setRefreshing(false);
     }
   }
 
@@ -613,18 +671,15 @@ export default function DriverDetailPage() {
     await loadVerificationState();
   }
 
-  /** "What needs doing" click-through — scroll to the group that needs work. */
+  /**
+   * "What needs doing" click-through — scroll to the group that needs work.
+   * `send_hire_form` lines never reach here (the cockpit renders them without a
+   * button): hire forms are sent per HIRE from the Job page, not from a driver.
+   */
   function handleVerificationAction(action: VerificationAction) {
-    if (action.slot) {
-      const el = document.getElementById(`evidence-${action.slot}`);
-      if (el) {
-        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        return;
-      }
-    }
-    if (action.kind === 'send_hire_form' && driver?.current_job_number) {
-      navigate(`/jobs?search=${driver.current_job_number}`);
-    }
+    if (!action.slot) return;
+    const el = document.getElementById(`evidence-${action.slot}`);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }
 
   async function loadAuditLog() {
@@ -781,7 +836,32 @@ export default function DriverDetailPage() {
             </span>
           </div>
         </div>
-        <div className="flex flex-wrap justify-end gap-2">
+        <div className="flex flex-wrap justify-end items-center gap-2">
+          {!editing && (
+            <div className="flex items-center gap-2 mr-1">
+              {lastRefreshedAt && (
+                <span className="text-xs text-gray-400" title={lastRefreshedAt.toLocaleString('en-GB')}>
+                  Refreshed {formatAgo(lastRefreshedAt, nowTick)}
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={refreshAll}
+                disabled={refreshing}
+                title="Re-read this driver's record — useful while watching someone complete a form"
+                className="inline-flex items-center gap-1.5 border border-gray-300 text-gray-700 px-3 py-2 rounded text-sm font-medium hover:bg-gray-50 disabled:opacity-60 transition-colors"
+              >
+                <svg
+                  className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`}
+                  fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                    d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+                {refreshing ? 'Refreshing…' : 'Refresh'}
+              </button>
+            </div>
+          )}
           {!editing && (
             <SnapshotPdfButton driverId={driver.id} driverName={driver.full_name} />
           )}
@@ -1407,13 +1487,20 @@ function DetailsTab({
       {/* Which hire is this? A driver part-way through the form has no
           vehicle_hire_assignments row yet, so the Hire History tab is empty and
           nothing tells staff what a stuck driver relates to. */}
-      {driver.current_job_number && !driver.signature_date && (
-        <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900">
-          Currently completing a hire form for job{' '}
-          <Link to={`/jobs?search=${driver.current_job_number}`} className="font-semibold underline">
-            #{driver.current_job_number}
+      {/* Keyed on "not signed FOR THIS HIRE", not "no signature at all" — a
+          returning driver carries last time's signature_date, and that hid
+          exactly this state for Cameron Williams-Hill / 16618 (Sep 2026). */}
+      {driver.unsigned_job_number && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          Started the hire form for job{' '}
+          <Link to={`/jobs?search=${driver.unsigned_job_number}`} className="font-semibold underline">
+            #{driver.unsigned_job_number}
           </Link>
-          {driver.current_job_started_at && <> &middot; started {formatDate(driver.current_job_started_at)}</>}
+          {driver.current_job_started_at && <> on {formatDate(driver.current_job_started_at)}</>}
+          {' '}but hasn't signed it yet &mdash; nothing links them to the hire until they do.
+          {driver.signature_date && (
+            <> They last signed on {formatDate(driver.signature_date)}, for a previous hire.</>
+          )}
         </div>
       )}
 
