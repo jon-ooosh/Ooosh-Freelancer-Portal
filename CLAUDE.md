@@ -719,6 +719,54 @@ no writer and is dropped from the UI rather than shown as a permanent dash —
 categories (what you may drive) and restrictions (conditions on you) are
 different things and must not share a column.
 
+##### "Signed FOR THIS HIRE" — the unsigned-form derivation (Sep 2026, migration 196)
+
+**A signature never expires, so `signature_date` cannot answer "are they on the hire in
+front of them?"** The only thing that joins a driver to a hire is the
+`vehicle_hire_assignments` row, created at exactly one moment: the Signature step of the
+hire form. Every earlier step (iDenfy, POA, DVLA) writes only to the driver record.
+
+**The incident (Cameron Williams-Hill / job 16618, 3 Sep 2026).** Returning driver, April
+signature on file. Re-verified iDenfy + both POAs + DVLA in 15 minutes, then closed the tab
+on the DVLA "validated" screen (it renders before Continue is pressed). No assignment row.
+Every surface read green — "Approved" pill, "Last signed 24 Apr", cockpit Signature ✓ —
+because all of them keyed off the April signature, and the blue "currently completing a
+form for #N" banner keyed off `!signature_date`. Staff had to reason it out by hand.
+
+**`services/driver-hire-progress.ts` `unsignedJobNumberSql(alias)` is THE derivation** —
+`current_job_number` when (a) the job is live (not lost/cancelled/returned/completed) and
+(b) no non-cancelled assignment exists for (driver, that job); else NULL. Exposed as
+`unsigned_job_number` on the drivers list, `GET /drivers/:id`, the verification-state
+payload, and `GET /drivers/unsigned-for-job/:hh`. **Every "is this driver joined to the hire"
+surface reads it; never re-derive from `signature_date`:**
+- `/drivers` status CASE + `deriveDriverStatus` → **In Progress · #N** (was "Approved").
+- Cockpit Signature stage → todo, "Signed before — not yet for #N", amber action. Test in
+  `__tests__/driver-verification-state.test.ts`.
+- DriverDetailPage: amber banner + the Signature card's header (no fake "No expiry set"
+  pill — it says "Signed 24 Apr 2026" or "Not yet signed for #N").
+- Job Detail Drivers & Vehicles: **greyed dashed "⏳ Started hire form — not signed" card**
+  above the assignments (also on the empty state), with a copy-link button.
+- `services/unsigned-hire-form-nudge.ts` (hourly at :20, business hours): emails the DRIVER
+  the form link once per (driver, hire) after 2h quiet — `hire_form_unsigned_nudge`,
+  claimed on `drivers.unsigned_nudge_job_number` BEFORE the send, released on failure.
+  No staff bell; the card + cockpit action are the staff signal.
+
+**`current_job_number` is written at OTP verification** (`verify-code.js` in the hire-form
+app), not only at iDenfy session creation — a returning driver with a valid licence check
+skips iDenfy, so the old write point never fired for exactly the drivers this is for.
+`current_job_started_at` is stamped by the `/update` handler when the number CHANGES.
+
+**JSONB columns in `/driver-verification/update` MUST be in `JSONB_FIELDS`.** node-postgres
+sends a JS array as a Postgres ARRAY literal (`{"…"}`), which JSONB rejects — but an EMPTY
+array survives (`{}` is valid JSON), so `licence_endorsements` failed only for drivers WITH
+points, silently, from the Apr 2026 cutover until Sep 2026. That write also carries any
+DVLA-points-triggered `requires_referral`, and `copy-a-to-b` builds the hire-form payload
+from the OP driver record, so a points-triggered referral could be lost end to end.
+Deterministic (3 retries, same payload), and the DVLA page never read the response — it
+now `reportError`s at `critical`. Points/endorsements on affected drivers are NOT
+backfilled: the data only exists in Netlify function logs; check `licence_points` against
+the DVLA PDF on any driver whose check landed in that window.
+
 ##### Phase 4 — extraction ← NEXT (not built)
 
 ##### Cockpit brief as specced (delivered — kept for the deferred items below)

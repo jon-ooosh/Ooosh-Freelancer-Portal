@@ -9,6 +9,8 @@ import { TelLink } from '../components/mobile/TapTargets';
 interface DriverListItem {
   /** HH job whose form the driver is mid-way through (no assignment row yet). */
   current_job_number?: number | null;
+  /** current_job_number ONLY while they haven't signed for it and the job is live. */
+  unsigned_job_number?: number | null;
   id: string;
   full_name: string;
   email: string | null;
@@ -311,8 +313,8 @@ export default function DriversPage() {
                       <td className="px-4 py-4 whitespace-nowrap">
                         <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs ${status.colour}`}>
                           {status.label}
-                          {status.label === 'In Progress' && driver.current_job_number
-                            ? ` · #${driver.current_job_number}`
+                          {status.label === 'In Progress' && (driver.unsigned_job_number || driver.current_job_number)
+                            ? ` · #${driver.unsigned_job_number || driver.current_job_number}`
                             : ''}
                         </span>
                       </td>
@@ -355,8 +357,8 @@ export default function DriversPage() {
                         {/* A driver mid-form has no assignment row yet, so Hire
                             History is empty and nothing else says which hire
                             they belong to. */}
-                        {status.label === 'In Progress' && driver.current_job_number
-                          ? ` · #${driver.current_job_number}`
+                        {status.label === 'In Progress' && (driver.unsigned_job_number || driver.current_job_number)
+                          ? ` · #${driver.unsigned_job_number || driver.current_job_number}`
                           : ''}
                       </span>
                     }

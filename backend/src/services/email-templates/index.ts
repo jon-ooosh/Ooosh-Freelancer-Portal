@@ -1227,6 +1227,42 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  // Sent to the DRIVER (not the client) when they have verified every document
+  // for a hire but stopped short of signing. Nothing joins them to the hire
+  // until they sign, so this is the one email that closes that gap.
+  // services/unsigned-hire-form-nudge.ts, once per (driver, hire).
+  hire_form_unsigned_nudge: {
+    variant: 'client',
+    preheader: 'One last step — sign your hire agreement',
+    subject: 'One last step: sign your hire agreement for #{{jobNumber}}',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Nearly there — one step left</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        Hi {{driverName}},
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Thanks for uploading your documents for hire <strong>#{{jobNumber}}</strong>{{#if jobName}} (<strong>{{jobName}}</strong>){{/if}}{{#if startDate}}, starting <strong>{{startDate}}</strong>{{/if}}. They've all been checked and are fine.
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        There's just one thing left: <strong>signing the hire agreement</strong>. Until you sign, you're not yet added as a driver on this hire.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;">
+        <tr>
+          <td style="padding:16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;text-align:center;">
+            <p style="margin:0 0 8px;font-size:13px;color:#64748b;">Takes under a minute — your documents are already done</p>
+            <a href="{{hireFormUrl}}" style="display:inline-block;padding:12px 28px;background-color:#7B5EA7;color:#ffffff;border-radius:8px;text-decoration:none;font-weight:600;font-size:15px;">Sign the hire agreement</a>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Open the link, enter your email and the code we send you, and you'll be taken straight to the signature page.
+      </p>
+      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
+        Any questions or problems, please be in touch.
+      </p>
+    `,
+  },
+
   // ── Cancellation templates ──────────────────────────────────────────────
 
   job_cancelled_client: {

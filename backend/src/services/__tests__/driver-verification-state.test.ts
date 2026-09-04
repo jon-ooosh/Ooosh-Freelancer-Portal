@@ -137,3 +137,27 @@ describe('a missing date is surfaced as its own to-do', () => {
     expect(action?.message).toMatch(/no date recorded/i);
   });
 });
+
+describe('signed before, but not for the hire in front of them', () => {
+  // Cameron Williams-Hill / job 16618: every document re-verified, April
+  // signature still on file, closed the tab before signing. Everything read
+  // green while nothing linked him to the hire.
+  const state = computeVerificationState({ ...healthy, unsigned_job_number: 16618 }, TODAY);
+
+  it('does not show the signature stage as done', () => {
+    expect(stage(state, 'signature').state).toBe('todo');
+    expect(stage(state, 'signature').detail).toContain('#16618');
+  });
+
+  it('raises an amber action naming the hire', () => {
+    const a = state.actions.find(x => x.slot === 'signature');
+    expect(a?.severity).toBe('amber');
+    expect(a?.message).toContain('#16618');
+    expect(state.allClear).toBe(false);
+  });
+
+  it('is done again once they have signed for it', () => {
+    const done = computeVerificationState({ ...healthy, unsigned_job_number: null }, TODAY);
+    expect(stage(done, 'signature').state).toBe('done');
+  });
+});

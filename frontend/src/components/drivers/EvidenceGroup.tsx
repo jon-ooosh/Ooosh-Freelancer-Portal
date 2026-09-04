@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { api } from '../../services/api';
 import { DocumentThumb } from './DocumentThumb';
 
@@ -50,6 +50,11 @@ export interface EvidenceGroupSpec {
   until?: string | null;
   /** Explanation shown when there is no derived window. */
   emptyHint?: string;
+  /**
+   * Replaces the expiry pill. For groups that don't HAVE an expiry — the
+   * signature — where "No expiry set" reads as a data gap when it isn't one.
+   */
+  headerRight?: React.ReactNode;
 }
 
 /**
@@ -212,8 +217,8 @@ export function EvidenceGroup({
       <div className="flex flex-wrap items-start justify-between gap-2 mb-4">
         <h3 className="text-sm font-semibold text-gray-700">{spec.title}</h3>
         <div className="text-right">
-          <ExpiryPill until={spec.until} />
-          {!spec.until && spec.emptyHint && (
+          {spec.headerRight ?? <ExpiryPill until={spec.until} />}
+          {!spec.headerRight && !spec.until && spec.emptyHint && (
             <p className="text-[11px] text-amber-600 mt-0.5 max-w-[18rem]">{spec.emptyHint}</p>
           )}
         </div>
