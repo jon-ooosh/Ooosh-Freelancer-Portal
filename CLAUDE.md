@@ -5387,6 +5387,16 @@ If staff complain "my chase keeps moving when I don't want it to" → point them
 
 If they complain "I logged a call but the chase didn't move" → it's the sacred-future rule. The chase was already future-dated; auto-bump correctly skipped it. They can manually reschedule via the chase modal if they actually want it shortened.
 
+## Enquiry dismissal ("dud-ing") — overlay flag, NOT a status (migration 197)
+
+A dud / spam / orphan enquiry is dismissed via `POST /api/pipeline/:id/dismiss`, which stamps `jobs.dismissed_at` (nullable TIMESTAMPTZ) plus `dismissed_by` / `dismissal_reason` / `dismissal_notes`. **`pipeline_status` is deliberately left untouched** — a dismissed enquiry keeps its pre-confirmation value (`new_enquiry` / `quoting` / `paused`). Dismissal is an OVERLAY flag, not a new `pipeline_status` enum value.
+
+**So the dismissal test EVERYWHERE is `dismissed_at IS NOT NULL`, never a `pipeline_status` check.** `DISMISSABLE_STAGES = ['new_enquiry', 'quoting', 'paused']` — only pre-confirmation enquiries can be dud-ed.
+
+**⚠️ Any surface that derives display/eligibility from `pipeline_status` alone must ALSO check `dismissed_at`**, or it silently mislabels a dud as a live enquiry. This exact bug hit global search: `search.ts` exposed no dismissal column and `GlobalSearch.tsx`'s `jobBadge()` derived the blue "Enquiries" badge purely from `pipeline_status`, so a dud-ed enquiry kept showing "Enquiries". Fix: `search.ts` exposes `(dismissed_at IS NOT NULL) AS is_dismissed` and `jobBadge()` short-circuits to a grey "Dismissed" pill (`#6B7280`) before the `pipeline_status` derivation (Sep 2026).
+
+NB the `pipeline.ts` code comments still say "migration 196" for dismissal — the actual migration file is `197_enquiry_dismissal.sql` (renumbered to avoid a collision with main's `196_unsigned_hire_form_nudge.sql`). Cosmetic; the runner keys off the filename array in `run.ts`.
+
 ## Database Tables Overview
 
 ### Core (migration 001)
