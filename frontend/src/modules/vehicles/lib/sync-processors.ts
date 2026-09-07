@@ -327,6 +327,11 @@ export async function processCheckInSubmission(
         clientEmail: (formData.bookOutClientEmail as string) || null,
         hireStatus: 'Prep Needed',
         driverName: (formData.bookOutDriverName as string) || null,
+        // Gates the post-hire `damage_review` close-out card. NB the offline
+        // replay does NOT create job_issues rows (the live CheckInPage loop
+        // isn't mirrored here) — so on a queued check-in the card is the only
+        // damage signal that reaches OP. Known gap, tracked separately.
+        hasDamage: damageItems.length > 0,
       }),
     'Offline sync: Check-in Monday event',
   )

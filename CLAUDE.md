@@ -4773,6 +4773,53 @@ Two invariants that, when broken, silently strand a hire and mis-attribute its c
 
 **Historical backlog (cleared Jun 2026):** `16149`, `15769` (×4), `15738` — hires booked out via the PATCH path before the fix that never got a proper check-in, leaving rows stuck `booked_out` on already-`completed` jobs (and the van wrongly reading "Check In available" / `fleet_vehicles.hire_status='On Hire'`). Flipped to `returned` by hand. The fleet-wide finder for any future occurrence: `booked_out`/`active` assignments whose linked job is already `returned`/`completed`/`cancelled`/`lost` (dual job-match on `job_id` OR `hh_job_number`). Flipping the assignment does NOT recompute `fleet_vehicles.hire_status` (raw SQL skips `syncFleetHireStatus`), so correct the cached fleet status separately if the stale row was pinning the van `On Hire`.
 
+### Check-in damage → Problems register (Sept 2026) — job 15428 / RX24SZD
+
+**Damage flagged at check-in reaches OP by TWO independent routes, and both were broken.** A dent
+photographed on RX24SZD's check-in appeared on the condition-report PDF and nowhere else: no
+`job_issues` row, no `damage_review` card, an empty Problems panel.
+
+1. **`job_issues` (the Problems register)** — `CheckInPage` posts one
+   `POST /api/problems/auto-create` per damage item. It used to `continue` past any item whose
+   **description was blank**, and the Description box is an optional textarea behind a
+   `canAdvance() => true` step. Location + severity + three photos with no typed description
+   produced no issue at all. **A damage item is now always posted**, falling back to
+   `"<Severity> damage flagged at check-in — see photos"`. Don't reintroduce a content gate here —
+   the PDF happily renders a description-less damage item, so any gate the PDF doesn't share
+   silently splits the two records.
+2. **`vehicle_hire_assignments.has_damage` → the post-hire `damage_review` card** — dead twice
+   over. `createVehicleEvent` had no `hasDamage` param and no caller sent one, so
+   `event.hasDamage === true` was always false; and the write was
+   `has_damage = COALESCE(has_damage, $4)` on a `BOOLEAN DEFAULT false` (never NULL) column, so it
+   could only ever return the existing `false`. **COALESCE is right for `mileage_in`/`fuel_level_in`
+   and wrong for a not-null-defaulted boolean** — it is now
+   `has_damage = COALESCE(has_damage, false) OR $4` (forward-only; a later corrective event can't
+   clear a flagged hire). Verified: `has_damage` had never been `true` on a single row in
+   production, so that card had never once fired.
+
+**The silence is the part that cost the day.** The results panel only rendered its
+"Damage issues logged" row when `created || reflagged || failed` was non-zero, so a fully-skipped
+damage set showed a clean success screen. It now **always** renders once `damageItems.length > 0`,
+reading `0 logged from N damage item(s) — log manually on the job` in the bad case. Any new
+post-submit side-effect on a walkaround page should report itself the same way — a step that can
+no-op must say so.
+
+**Consequence for anything already checked in:** damage lives in `job_issues`, not the event JSON
+(`createVehicleEvent` persists neither `damageItems` nor a damage flag — only a free-text
+`Damage items: N` line in `details`). So for a pre-fix check-in, **regenerating the condition report
+reconstructs "NO DAMAGE REPORTED"** — the frozen PDF at `condition-reports/<REG>/<eventId>.pdf` is
+the real record. Log the damage manually via **+ Log Problem** on the job.
+
+**Two latent gaps closed alongside:** the `damage_review` derivation query tested `job_id` only, so
+it missed damage on staff-allocation / V&D rows (which carry only `hirehop_job_id`) — now dual-match;
+and `POST /api/assignments/:id/check-in` (the *other*, correct `has_damage` writer, which has **no
+frontend caller**) did `SELECT registration FROM fleet_vehicles` against a column actually named
+`reg` — it would have thrown on every run, which is itself the proof that path has never executed.
+
+**Still open:** the offline queue replay (`sync-processors.ts processCheckInSubmission`) does not
+mirror the `auto-create` loop, so a queued check-in creates the `damage_review` card (it now sends
+`hasDamage`) but no `job_issues` rows.
+
 ### Multi-van book-out scramble (Jul 2026) — read before touching the book-out write path
 
 **Full incident + root cause + cleanup + fix design: `docs/MULTI-VAN-BOOKOUT-SCRAMBLE.md`.**
