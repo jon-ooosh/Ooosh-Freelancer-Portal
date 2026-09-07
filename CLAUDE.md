@@ -3455,6 +3455,33 @@ nobody had asked them to make.
   templates greet the person (`rcpt.name`), client-facing ones greet the
   organisation (`rcpt.clientName`).
 
+**Extracted date/time must be normalised before it's glued into a timestamp
+(Sep 2026, RX21UOB / job 16261).** `pcn-extract.ts` had NO post-parse repair
+(unlike its sibling `cost-receipt-extract.ts`), and `PcnsPage.tsx` built
+`offence_at` by concatenating the two form fields with a `:00` seconds suffix.
+A notice printing the offence time to the second gave `07:54:33` → the glue
+produced `07:54:33:00` → invalid moment → `/pcns/match` 400 → the UI's catch-all
+**"Driver match failed"**, which pointed staff at hire data that was perfectly
+correct. The trap that hides it: an `<input type="date"|"time">` silently
+refuses to DISPLAY a value it can't parse while React still holds the bad string
+underneath, so the field looks empty and the junk is invisible.
+- **`toIsoDate` / `toHhMm` in `pcn-extract.ts` repair every extracted date field
+  + the time; unrepairable values are NULLED, confidence downgraded, and the
+  original noted.** Never trust an AI-returned date/time to match the format the
+  prompt asked for.
+- **`buildOffenceAt` in `PcnsPage.tsx` is the ONE builder** for the timestamp the
+  matcher AND the save send — it can only return a valid ISO string or null.
+  Don't rebuild it inline; that's how the two drifted.
+- **`offence_time_raw` keeps the time exactly as printed** (seconds and all) for
+  `offence_time_text`, the client-facing figure — we normalise for machine use,
+  never tidy up what we quote back. Cleared when staff edit the time by hand.
+- **`/pcns/match` reads the calendar date off the leading `YYYY-MM-DD`**, not via
+  `toISOString()` — the UTC round-trip put a 00:30 BST offence on the previous
+  day and missed its hire.
+- **`offence_at` is validated in `createSchema`** — a malformed value used to
+  reach Postgres and 500 on the timestamptz cast, losing the whole entry.
+- Unit-covered in `backend/src/services/__tests__/pcn-extract.test.ts`.
+
 **List UX (this session):** click-to-sort column headers (a `<field>_asc/_desc`
 pair per column in the `/pcns` SORTS whitelist) + last-used sort/filter persisted
 to localStorage (`ooosh_pcns_prefs`; dashboard deep-link URL params still win on

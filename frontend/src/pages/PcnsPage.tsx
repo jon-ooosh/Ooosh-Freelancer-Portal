@@ -53,6 +53,7 @@ interface ExtractedPcn {
   vehicle_reg: string | null;
   offence_date: string | null;
   offence_time: string | null;
+  offence_time_raw: string | null;
   issued_date: string | null;
   location: string | null;
   issuing_authority: string | null;
@@ -68,6 +69,55 @@ interface ExtractedPcn {
 
 const fmtDate = (d: string | null | undefined) => (d ? new Date(d).toLocaleDateString('en-GB') : '—');
 const money = (n: number | null | undefined) => (n == null ? '—' : `£${Number(n).toFixed(2)}`);
+
+/**
+ * Coerce whatever is sitting in the time field into 24-hour HH:MM, or null.
+ *
+ * Mirrors `toHhMm` in backend/src/services/pcn-extract.ts — keep the two in
+ * step. The backend normalises what the AI extracts; this covers the paths that
+ * bypass extraction (manual typing, a paste, an older draft).
+ */
+function toHhMmInput(raw: string): string | null {
+  const s = raw.trim().toLowerCase();
+  if (!s) return null;
+  const ampm = /(a\.?m\.?|p\.?m\.?)\.?$/.exec(s);
+  const core = (ampm ? s.slice(0, ampm.index) : s).trim();
+  let h: number, mi: number;
+  let m = core.match(/^(\d{1,2})[:.h ](\d{2})(?:[:.](\d{2}))?$/);
+  if (m) {
+    h = Number(m[1]); mi = Number(m[2]);
+  } else {
+    m = core.match(/^(\d{3,4})$/);
+    if (!m) return null;
+    const n = m[1].padStart(4, '0');
+    h = Number(n.slice(0, 2)); mi = Number(n.slice(2));
+  }
+  if (ampm) {
+    const pm = ampm[1].startsWith('p');
+    if (h === 12) h = pm ? 12 : 0;
+    else if (pm) h += 12;
+  }
+  if (h > 23 || mi > 59) return null;
+  return `${String(h).padStart(2, '0')}:${String(mi).padStart(2, '0')}`;
+}
+
+/**
+ * Build the `offence_at` timestamp that BOTH the driver matcher and the save
+ * send. One helper so the two can never drift.
+ *
+ * Returns null when the date is unusable — it CANNOT return a malformed string.
+ * The old inline version glued the two fields together unchecked, so an
+ * extracted time carrying seconds ("07:54:33" + ":00") produced an invalid
+ * moment, the API 400'd, and the UI blamed the hire data instead of the input
+ * (RX21UOB / job 16261, Sep 2026). Time is best-effort: an unreadable one falls
+ * back to midday rather than blocking, since matching works to the day.
+ */
+function buildOffenceAt(date: string, time: string): string | null {
+  const d = date.trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return null;
+  const iso = `${d}T${toHhMmInput(time) || '12:00'}:00`;
+  return isNaN(new Date(iso).getTime()) ? null : iso;
+}
 
 // ── Page ────────────────────────────────────────────────────────────────
 export default function PcnsPage() {
@@ -323,7 +373,7 @@ export default function PcnsPage() {
 // ── Create modal: extraction-first, manual fallback ───────────────────────
 const EMPTY_FORM = {
   reference: '', fine_type: 'private_pcn', vehicle_reg: '',
-  offence_date: '', offence_time: '', issued_date: '', location: '', issuing_authority: '',
+  offence_date: '', offence_time: '', offence_time_raw: '', issued_date: '', location: '', issuing_authority: '',
   fine_amount: '', reduced_amount: '', reduced_deadline: '', final_deadline: '',
   notes: '',
 };
@@ -407,6 +457,7 @@ function CreatePcnModal({ onClose, onCreated }: { onClose: () => void; onCreated
         vehicle_reg: d.vehicle_reg || '',
         offence_date: d.offence_date || '',
         offence_time: d.offence_time || '',
+        offence_time_raw: d.offence_time_raw || '',
         issued_date: d.issued_date || '',
         location: d.location || '',
         issuing_authority: d.issuing_authority || '',
@@ -436,17 +487,24 @@ function CreatePcnModal({ onClose, onCreated }: { onClose: () => void; onCreated
       setError('Enter vehicle reg and offence date first.');
       return;
     }
+    const offenceAt = buildOffenceAt(form.offence_date, form.offence_time);
+    if (!offenceAt) {
+      setError('The offence date isn’t a valid date — check that field and try again.');
+      return;
+    }
     setMatching(true); setError(null); setPicked(null);
     try {
-      const offenceAt = `${form.offence_date}T${form.offence_time || '12:00'}:00`;
       const r = await api.get<{ data: { drivers: MatchedDriver[]; crew_candidates?: CrewCandidate[] } }>(
         `/pcns/match?reg=${encodeURIComponent(form.vehicle_reg)}&offence_at=${encodeURIComponent(offenceAt)}`
       );
       setMatches(r.data.drivers);
       setCrewCandidates(r.data.crew_candidates || []);
       if (r.data.drivers.length === 1) setPicked(r.data.drivers[0]);
-    } catch {
-      setError('Driver match failed.');
+    } catch (e) {
+      // Say WHAT failed. The bare "Driver match failed." sent staff hunting
+      // through hire data when the real fault was the input we'd just sent.
+      const msg = (e as { message?: string })?.message?.trim();
+      setError(msg ? `Driver match failed — ${msg}` : 'Driver match failed.');
     } finally {
       setMatching(false);
     }
@@ -470,14 +528,19 @@ function CreatePcnModal({ onClose, onCreated }: { onClose: () => void; onCreated
       // email-attach + existing readers keep working.
       const documentUrl = documents.find((d) => d.kind === 'notice_front')?.r2_key ?? documents[0]?.r2_key ?? null;
       const offenceAt = form.offence_date
-        ? `${form.offence_date}T${form.offence_time || '12:00'}:00`
+        ? buildOffenceAt(form.offence_date, form.offence_time)
         : null;
+      if (form.offence_date && !offenceAt) {
+        setError('The offence date isn’t a valid date — check that field before saving.');
+        setSaving(false);
+        return;
+      }
       const body: Record<string, unknown> = {
         reference: form.reference || null,
         fine_type: form.fine_type,
         vehicle_reg: form.vehicle_reg.toUpperCase().replace(/\s/g, '') || null,
         offence_at: offenceAt,
-        offence_time_text: form.offence_time || null,
+        offence_time_text: form.offence_time_raw || form.offence_time || null,
         issued_date: form.issued_date || null,
         location: form.location || null,
         issuing_authority: form.issuing_authority || null,
@@ -637,7 +700,11 @@ function CreatePcnModal({ onClose, onCreated }: { onClose: () => void; onCreated
                 <input type="date" className={input} value={form.offence_date} onChange={(e) => set('offence_date', e.target.value)} />
               </label>
               <label className="text-sm">Offence time
-                <input type="time" className={input} value={form.offence_time} onChange={(e) => set('offence_time', e.target.value)} />
+                <input type="time" className={input} value={form.offence_time}
+                  onChange={(e) => setForm((f) => ({ ...f, offence_time: e.target.value, offence_time_raw: '' }))} />
+                {form.offence_time_raw && (
+                  <span className="text-xs text-slate-500">Notice reads {form.offence_time_raw} — kept on the record</span>
+                )}
               </label>
               <label className="text-sm">PCN issued date
                 <input type="date" className={input} value={form.issued_date} onChange={(e) => set('issued_date', e.target.value)} />
