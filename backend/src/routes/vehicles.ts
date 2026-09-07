@@ -2882,6 +2882,15 @@ router.post('/save-event', async (req: FlexibleVehicleRequest, res: Response) =>
           const userId = req.user?.id || null;
           const mileageIn = event.mileage ? Number(event.mileage) : null;
           const fuelIn = event.fuelLevel || null;
+          // Forward-only: once a hire is flagged as damaged it stays flagged,
+          // so a later corrective event can't quietly clear it. NB the SQL
+          // below is `COALESCE(has_damage, false) OR $4`, NOT the COALESCE
+          // used for mileage/fuel — has_damage is `BOOLEAN DEFAULT false`, so
+          // it is never NULL and `COALESCE(has_damage, $4)` could only ever
+          // return the existing false. Between that and the fact that
+          // `event.hasDamage` was never sent by any caller, has_damage had
+          // never been true on a single row in production (verified Sept
+          // 2026) and the `damage_review` close-out card had never fired.
           const hasDamage = event.hasDamage === true;
           if (matchedRows.length > 0) {
             for (const row of matchedRows) {
@@ -2894,7 +2903,7 @@ router.post('/save-event', async (req: FlexibleVehicleRequest, res: Response) =>
                      checked_in_by = COALESCE(checked_in_by, $1),
                      mileage_in = COALESCE(mileage_in, $2),
                      fuel_level_in = COALESCE(fuel_level_in, $3),
-                     has_damage = COALESCE(has_damage, $4),
+                     has_damage = COALESCE(has_damage, false) OR $4,
                      updated_at = NOW()
                  WHERE id = $5`,
                 [userId, mileageIn, fuelIn, hasDamage, row.id, reg]
@@ -2927,7 +2936,7 @@ router.post('/save-event', async (req: FlexibleVehicleRequest, res: Response) =>
                      checked_in_by = COALESCE(checked_in_by, $1),
                      mileage_in = COALESCE(mileage_in, $2),
                      fuel_level_in = COALESCE(fuel_level_in, $3),
-                     has_damage = COALESCE(has_damage, $4),
+                     has_damage = COALESCE(has_damage, false) OR $4,
                      updated_at = NOW()
                  WHERE id = $5`,
                 [userId, mileageIn, fuelIn, hasDamage, swappedMatch.rows[0].id]

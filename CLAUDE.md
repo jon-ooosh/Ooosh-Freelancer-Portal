@@ -3455,6 +3455,33 @@ nobody had asked them to make.
   templates greet the person (`rcpt.name`), client-facing ones greet the
   organisation (`rcpt.clientName`).
 
+**Extracted date/time must be normalised before it's glued into a timestamp
+(Sep 2026, RX21UOB / job 16261).** `pcn-extract.ts` had NO post-parse repair
+(unlike its sibling `cost-receipt-extract.ts`), and `PcnsPage.tsx` built
+`offence_at` by concatenating the two form fields with a `:00` seconds suffix.
+A notice printing the offence time to the second gave `07:54:33` → the glue
+produced `07:54:33:00` → invalid moment → `/pcns/match` 400 → the UI's catch-all
+**"Driver match failed"**, which pointed staff at hire data that was perfectly
+correct. The trap that hides it: an `<input type="date"|"time">` silently
+refuses to DISPLAY a value it can't parse while React still holds the bad string
+underneath, so the field looks empty and the junk is invisible.
+- **`toIsoDate` / `toHhMm` in `pcn-extract.ts` repair every extracted date field
+  + the time; unrepairable values are NULLED, confidence downgraded, and the
+  original noted.** Never trust an AI-returned date/time to match the format the
+  prompt asked for.
+- **`buildOffenceAt` in `PcnsPage.tsx` is the ONE builder** for the timestamp the
+  matcher AND the save send — it can only return a valid ISO string or null.
+  Don't rebuild it inline; that's how the two drifted.
+- **`offence_time_raw` keeps the time exactly as printed** (seconds and all) for
+  `offence_time_text`, the client-facing figure — we normalise for machine use,
+  never tidy up what we quote back. Cleared when staff edit the time by hand.
+- **`/pcns/match` reads the calendar date off the leading `YYYY-MM-DD`**, not via
+  `toISOString()` — the UTC round-trip put a 00:30 BST offence on the previous
+  day and missed its hire.
+- **`offence_at` is validated in `createSchema`** — a malformed value used to
+  reach Postgres and 500 on the timestamptz cast, losing the whole entry.
+- Unit-covered in `backend/src/services/__tests__/pcn-extract.test.ts`.
+
 **List UX (this session):** click-to-sort column headers (a `<field>_asc/_desc`
 pair per column in the `/pcns` SORTS whitelist) + last-used sort/filter persisted
 to localStorage (`ooosh_pcns_prefs`; dashboard deep-link URL params still win on
@@ -4402,7 +4429,7 @@ methods). Engine: `services/cost-xero-push.ts`; routes: `routes/costs.ts`; UI:
 - **`GET /costs/due-date-preview`** answers "what would the rules give?" for a cost that does not exist yet, so the capture modal can show the real default at upload time. Same engine, so what staff see is what lands. Multi-segment path so it doesn't hit `/:id`.
 - **Extraction:** `cost_receipt_extract` now reads a printed `due_date` (or resolves stated terms like "Net 30" against the invoice date). `normaliseDueDate` is deliberately SEPARATE from `normaliseCostDate` — a due date legitimately points forward, so the future-date day/month repair must never be applied to it; it only rejects unparseable values, dates before the invoice date, and anything over a year out. An extracted due date lands as an override (the document's own answer beats our derived guess) and staff can clear it back to the rule.
 
-**Supporting documents — `services/cost-documents.ts` is THE definition (Sep 2026, migration 199).** A payable often arrives with more evidence than the one document the AI reads: a freelancer invoices £250 labour + £60 fuel and encloses the fuel receipt, and that receipt is what makes the £10 VAT reclaimable. `costs.supporting_documents` (JSONB array of `{r2_key, filename, content_type, size_bytes, uploaded_at, uploaded_by}`) holds them; the main receipt stays on `receipt_r2_key`/`receipt_filename`.
+**Supporting documents — `services/cost-documents.ts` is THE definition (Sep 2026, migration 200).** A payable often arrives with more evidence than the one document the AI reads: a freelancer invoices £250 labour + £60 fuel and encloses the fuel receipt, and that receipt is what makes the £10 VAT reclaimable. `costs.supporting_documents` (JSONB array of `{r2_key, filename, content_type, size_bytes, uploaded_at, uploaded_by}`) holds them; the main receipt stays on `receipt_r2_key`/`receipt_filename`.
 
 - **⚠️ Xero keys an attachment by FILENAME.** A `PUT` to `/Attachments/{name}` on an object that already has that name OVERWRITES it — silently, with a 200. Two files both called `receipt.pdf` on one bill means the second simply does not exist. `collectDocuments()` renames duplicates **in the payload only** (`receipt.pdf`, `receipt-1.pdf`); OP keeps the name staff uploaded. The rename is deterministic — same order in, same suffix out — so a re-sync overwrites the same attachments rather than piling up new ones. **Never write a second attach loop that reads the array directly.**
 - **The cap is 10 per Xero object**, and the main receipt claims one, so the modal + the Zod schema cap supporting docs at **9** (`MAX_SUPPORTING_DOCS` frontend / `MAX_SUPPORTING_DOCUMENTS` in `routes/costs.ts`). `collectDocuments` truncates at 10 with the receipt first, so the receipt is never the one dropped.
@@ -4754,6 +4781,53 @@ Two invariants that, when broken, silently strand a hire and mis-attribute its c
 **Tripwire:** `runBookedOutNoTimestampScan` (`services/sanity-check-scanner.ts`, wired into the 15-min sanity cron) flags any `booked_out` row with `booked_out_at IS NULL` for > 3h — impossible post-fix, so a hit means a new path has regressed invariant 1. One alert per job to info@, deduped via a `[Tripwire: …]` notes marker (stamp-first, like the other scans).
 
 **Historical backlog (cleared Jun 2026):** `16149`, `15769` (×4), `15738` — hires booked out via the PATCH path before the fix that never got a proper check-in, leaving rows stuck `booked_out` on already-`completed` jobs (and the van wrongly reading "Check In available" / `fleet_vehicles.hire_status='On Hire'`). Flipped to `returned` by hand. The fleet-wide finder for any future occurrence: `booked_out`/`active` assignments whose linked job is already `returned`/`completed`/`cancelled`/`lost` (dual job-match on `job_id` OR `hh_job_number`). Flipping the assignment does NOT recompute `fleet_vehicles.hire_status` (raw SQL skips `syncFleetHireStatus`), so correct the cached fleet status separately if the stale row was pinning the van `On Hire`.
+
+### Check-in damage → Problems register (Sept 2026) — job 15428 / RX24SZD
+
+**Damage flagged at check-in reaches OP by TWO independent routes, and both were broken.** A dent
+photographed on RX24SZD's check-in appeared on the condition-report PDF and nowhere else: no
+`job_issues` row, no `damage_review` card, an empty Problems panel.
+
+1. **`job_issues` (the Problems register)** — `CheckInPage` posts one
+   `POST /api/problems/auto-create` per damage item. It used to `continue` past any item whose
+   **description was blank**, and the Description box is an optional textarea behind a
+   `canAdvance() => true` step. Location + severity + three photos with no typed description
+   produced no issue at all. **A damage item is now always posted**, falling back to
+   `"<Severity> damage flagged at check-in — see photos"`. Don't reintroduce a content gate here —
+   the PDF happily renders a description-less damage item, so any gate the PDF doesn't share
+   silently splits the two records.
+2. **`vehicle_hire_assignments.has_damage` → the post-hire `damage_review` card** — dead twice
+   over. `createVehicleEvent` had no `hasDamage` param and no caller sent one, so
+   `event.hasDamage === true` was always false; and the write was
+   `has_damage = COALESCE(has_damage, $4)` on a `BOOLEAN DEFAULT false` (never NULL) column, so it
+   could only ever return the existing `false`. **COALESCE is right for `mileage_in`/`fuel_level_in`
+   and wrong for a not-null-defaulted boolean** — it is now
+   `has_damage = COALESCE(has_damage, false) OR $4` (forward-only; a later corrective event can't
+   clear a flagged hire). Verified: `has_damage` had never been `true` on a single row in
+   production, so that card had never once fired.
+
+**The silence is the part that cost the day.** The results panel only rendered its
+"Damage issues logged" row when `created || reflagged || failed` was non-zero, so a fully-skipped
+damage set showed a clean success screen. It now **always** renders once `damageItems.length > 0`,
+reading `0 logged from N damage item(s) — log manually on the job` in the bad case. Any new
+post-submit side-effect on a walkaround page should report itself the same way — a step that can
+no-op must say so.
+
+**Consequence for anything already checked in:** damage lives in `job_issues`, not the event JSON
+(`createVehicleEvent` persists neither `damageItems` nor a damage flag — only a free-text
+`Damage items: N` line in `details`). So for a pre-fix check-in, **regenerating the condition report
+reconstructs "NO DAMAGE REPORTED"** — the frozen PDF at `condition-reports/<REG>/<eventId>.pdf` is
+the real record. Log the damage manually via **+ Log Problem** on the job.
+
+**Two latent gaps closed alongside:** the `damage_review` derivation query tested `job_id` only, so
+it missed damage on staff-allocation / V&D rows (which carry only `hirehop_job_id`) — now dual-match;
+and `POST /api/assignments/:id/check-in` (the *other*, correct `has_damage` writer, which has **no
+frontend caller**) did `SELECT registration FROM fleet_vehicles` against a column actually named
+`reg` — it would have thrown on every run, which is itself the proof that path has never executed.
+
+**Still open:** the offline queue replay (`sync-processors.ts processCheckInSubmission`) does not
+mirror the `auto-create` loop, so a queued check-in creates the `damage_review` card (it now sends
+`hasDamage`) but no `job_issues` rows.
 
 ### Multi-van book-out scramble (Jul 2026) — read before touching the book-out write path
 

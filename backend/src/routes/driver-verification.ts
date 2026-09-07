@@ -152,6 +152,263 @@ router.post('/auth/verify', async (req: Request, res: Response) => {
 });
 
 // ============================================================================
+// Email OTP — generate / store / email / validate the login code IN OP.
+// Replaces the old Google Apps Script + Sheet path entirely. The hire form
+// app's send-verification-code.js / verify-code.js are thin proxies to these.
+// ============================================================================
+
+const OTP_EXPIRY_MINUTES = 10;
+const OTP_MAX_ATTEMPTS = 5;
+const OTP_RESEND_THROTTLE_SECONDS = 30;
+
+const sendCodeSchema = z.object({
+  email: z.string().email(),
+  jobId: z.union([z.string(), z.number()]).optional(),
+});
+
+// POST /api/driver-verification/send-code — generate + store + email a 6-digit code
+router.post('/send-code', authenticateApiKey, async (req: Request, res: Response) => {
+  try {
+    const parsed = sendCodeSchema.parse(req.body);
+    const email = parsed.email.trim().toLowerCase();
+    const jobId = parsed.jobId != null ? String(parsed.jobId) : null;
+
+    // Throttle rapid re-requests for the same email.
+    const recent = await query(
+      `SELECT 1 FROM driver_verification_codes
+        WHERE lower(email) = $1
+          AND created_at > NOW() - ($2 || ' seconds')::interval
+        LIMIT 1`,
+      [email, String(OTP_RESEND_THROTTLE_SECONDS)]
+    );
+    if (recent.rows.length > 0) {
+      res.status(429).json({ error: 'A code was just sent. Please wait a moment before requesting another.' });
+      return;
+    }
+
+    // Crypto-strong 6-digit code, zero-padded.
+    const code = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+    const expiresAt = new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000);
+
+    // Invalidate any prior live codes for this email, then store the new one.
+    await query(
+      `UPDATE driver_verification_codes SET consumed_at = NOW()
+        WHERE lower(email) = $1 AND consumed_at IS NULL`,
+      [email]
+    );
+    await query(
+      `INSERT INTO driver_verification_codes (email, code, job_id, expires_at)
+       VALUES ($1, $2, $3, $4)`,
+      [email, code, jobId, expiresAt]
+    );
+
+    // Email via the live email service (Resend). Throws on hard failure.
+    await emailService.send('verification_code', {
+      to: email,
+      variables: {
+        code,
+        jobRef: jobId || '',
+        expiryMinutes: String(OTP_EXPIRY_MINUTES),
+      },
+    });
+
+    res.json({ success: true, message: 'Verification code sent' });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: 'Invalid request', details: error.errors });
+      return;
+    }
+    console.error('[driver-verification] send-code error:', error);
+    res.status(500).json({ error: 'Failed to send verification code' });
+  }
+});
+
+const verifyCodeSchema = z.object({
+  email: z.string().email(),
+  code: z.string().min(4).max(10),
+});
+
+// POST /api/driver-verification/verify-code — validate a code (single-use)
+router.post('/verify-code', authenticateApiKey, async (req: Request, res: Response) => {
+  try {
+    const parsed = verifyCodeSchema.parse(req.body);
+    const email = parsed.email.trim().toLowerCase();
+    const code = parsed.code.trim();
+
+    const result = await query(
+      `SELECT id, code, attempts, expires_at
+         FROM driver_verification_codes
+        WHERE lower(email) = $1 AND consumed_at IS NULL
+        ORDER BY created_at DESC
+        LIMIT 1`,
+      [email]
+    );
+
+    if (result.rows.length === 0) {
+      res.status(400).json({ success: false, error: 'No verification code found. Please request a new one.' });
+      return;
+    }
+
+    const row = result.rows[0];
+
+    if (new Date(row.expires_at).getTime() < Date.now()) {
+      res.status(400).json({ success: false, error: 'This code has expired. Please request a new one.' });
+      return;
+    }
+
+    if (row.attempts >= OTP_MAX_ATTEMPTS) {
+      await query(`UPDATE driver_verification_codes SET consumed_at = NOW() WHERE id = $1`, [row.id]);
+      res.status(429).json({ success: false, error: 'Too many attempts. Please request a new code.' });
+      return;
+    }
+
+    // Constant-time compare.
+    const stored = Buffer.from(String(row.code));
+    const provided = Buffer.from(code);
+    const match = stored.length === provided.length && crypto.timingSafeEqual(stored, provided);
+
+    if (!match) {
+      await query(`UPDATE driver_verification_codes SET attempts = attempts + 1 WHERE id = $1`, [row.id]);
+      const attemptsRemaining = Math.max(0, OTP_MAX_ATTEMPTS - (row.attempts + 1));
+      res.status(400).json({ success: false, error: 'Incorrect code.', attemptsRemaining });
+      return;
+    }
+
+    // Success — mark single-use consumed.
+    await query(`UPDATE driver_verification_codes SET consumed_at = NOW() WHERE id = $1`, [row.id]);
+    res.json({ success: true });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ success: false, error: 'Invalid request', details: error.errors });
+      return;
+    }
+    console.error('[driver-verification] verify-code error:', error);
+    res.status(500).json({ success: false, error: 'Verification failed' });
+  }
+});
+
+// POST /api/driver-verification/send-confirmation — hire-form completion receipt
+const sendConfirmationSchema = z.object({
+  email: z.string().email(),
+  jobId: z.union([z.string(), z.number()]).optional(),
+  driverName: z.string().optional(),
+  summary: z.record(z.any()),
+  jobDetails: z.record(z.any()).optional().nullable(),
+  signatureDate: z.string().optional().nullable(),
+});
+
+router.post('/send-confirmation', authenticateApiKey, async (req: Request, res: Response) => {
+  try {
+    const parsed = sendConfirmationSchema.parse(req.body);
+    const email = parsed.email.trim().toLowerCase();
+    const jobId = parsed.jobId != null ? String(parsed.jobId) : '';
+    const summary: Record<string, unknown> = parsed.summary || {};
+    const iq: Record<string, unknown> = (summary.insuranceQuestions as Record<string, unknown>) || {};
+    const docs: Record<string, unknown> = (summary.documents as Record<string, unknown>) || {};
+
+    // ── Formatters (ported verbatim from the hire form app's send-confirmation.js) ──
+    const formatYesNo = (value: unknown): string => {
+      if (value === true || value === 'yes' || value === 'Yes') return 'Yes';
+      if (value === false || value === 'no' || value === 'No') return 'No';
+      return 'Not answered';
+    };
+    // "11 September 2026" → "11th September 2026" — the ordinal suffix on the day.
+    const ordinalSuffix = (day: number): string => {
+      if (day >= 11 && day <= 13) return 'th';
+      switch (day % 10) {
+        case 1: return 'st';
+        case 2: return 'nd';
+        case 3: return 'rd';
+        default: return 'th';
+      }
+    };
+    const formatDateWithOrdinal = (date: Date): string => {
+      const day = date.getDate();
+      const rest = date.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+      return `${day}${ordinalSuffix(day)} ${rest}`;
+    };
+    const formatDate = (d: unknown): string => {
+      if (!d || d === 'Invalid Date') return 'Not set';
+      const date = new Date(d as string);
+      if (isNaN(date.getTime())) return 'Not set';
+      return formatDateWithOrdinal(date);
+    };
+    const formatDateOrNull = (d: unknown): string => {
+      if (!d) return '';
+      const date = new Date(d as string);
+      if (isNaN(date.getTime())) return '';
+      return formatDateWithOrdinal(date);
+    };
+    const formatLicenceEnding = (ending: unknown): string => {
+      if (!ending || ending === 'null' || ending === 'undefined') return 'Not available';
+      const str = String(ending);
+      return str.length <= 4 ? str : '****' + str.slice(-4);
+    };
+    const docStatus = (v: unknown): string => (v ? '✅ Verified' : '⏳ Pending');
+
+    const issuedBy = summary.licenseIssuedBy != null ? String(summary.licenseIssuedBy) : '';
+    const isDvla = issuedBy === 'DVLA';
+    const showDvlaPoints = isDvla && summary.dvlaPoints !== undefined && summary.dvlaPoints !== null;
+
+    // Intro line — gracefully handles a missing job number / start date.
+    const startDate = parsed.jobDetails ? (parsed.jobDetails as Record<string, unknown>).startDate : null;
+    const startFormatted = formatDateOrNull(startDate);
+    const jobPart = jobId ? `job ${jobId}` : 'your hire';
+    const introLine =
+      `Many thanks for completing your hire form for ${jobPart}` +
+      (startFormatted ? `, which starts ${startFormatted}.` : '.');
+
+    await emailService.send('hire_form_confirmation', {
+      to: email,
+      variables: {
+        driverName: parsed.driverName || 'Driver',
+        jobRef: jobId,
+        introLine,
+        name: (summary.name as string) || 'Not provided',
+        email: (summary.email as string) || email,
+        phone: (summary.phone as string) || 'Not provided',
+        nationality: (summary.nationality as string) || 'Not provided',
+        dateOfBirth: formatDate(summary.dateOfBirth),
+        licenceEnding: formatLicenceEnding(summary.licenseEnding),
+        licenceIssuedBy: issuedBy || 'Not provided',
+        licenceValidUntil: formatDateOrNull(summary.licenseValidTo),
+        datePassedTest: formatDateOrNull(summary.datePassedTest),
+        homeAddress: (summary.homeAddress as string) || 'Not provided',
+        licenceAddress: (summary.licenseAddress as string) || 'Not provided',
+        showDvlaPoints: showDvlaPoints ? '1' : '',
+        dvlaPoints: summary.dvlaPoints === 0 ? 'Clean licence' : `${summary.dvlaPoints} points`,
+        dvlaEndorsements: (summary.dvlaEndorsements as string) || 'None',
+        dvlaExcess: (summary.dvlaCalculatedExcess as string) || '£1,200',
+        hasDisability: formatYesNo(iq.hasDisability),
+        hasConvictions: formatYesNo(iq.hasConvictions),
+        hasProsecution: formatYesNo(iq.hasProsecution),
+        hasAccidents: formatYesNo(iq.hasAccidents),
+        hasInsuranceIssues: formatYesNo(iq.hasInsuranceIssues),
+        hasDrivingBan: formatYesNo(iq.hasDrivingBan),
+        additionalDetails: (iq.additionalDetails as string) || '',
+        docLicence: docStatus(docs.license),
+        docPoa1: docStatus(docs.poa1),
+        docPoa2: docStatus(docs.poa2),
+        isDvla: isDvla ? '1' : '',
+        isNotDvla: isDvla ? '' : '1',
+        docDvlaCheck: docStatus(docs.dvlaCheck),
+        docPassport: docStatus(docs.passport),
+        signatureDate: formatDate(parsed.signatureDate),
+      },
+    });
+
+    res.json({ success: true, message: 'Confirmation email sent' });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: 'Invalid request', details: error.errors });
+      return;
+    }
+    console.error('[driver-verification] send-confirmation error:', error);
+    res.status(500).json({ error: 'Failed to send confirmation email' });
+  }
+});
+
+// ============================================================================
 // GET /api/driver-verification/status — Driver status + document validity
 // ============================================================================
 

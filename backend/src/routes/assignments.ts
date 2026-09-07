@@ -679,10 +679,10 @@ router.post('/:id/check-in', validate(checkInSchema), async (req: AuthRequest, r
         let vehicleReg = '';
         if (assignment.vehicle_id) {
           const vResult = await query(
-            `SELECT registration FROM fleet_vehicles WHERE id = $1`,
+            `SELECT reg FROM fleet_vehicles WHERE id = $1`,
             [assignment.vehicle_id]
           );
-          vehicleReg = vResult.rows[0]?.registration || '';
+          vehicleReg = vResult.rows[0]?.reg || '';
         }
 
         const noteText = vehicleReg
