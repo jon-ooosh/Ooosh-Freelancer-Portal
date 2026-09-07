@@ -88,6 +88,28 @@ const PAYMENT_STATUSES: { value: CostPaymentStatus; label: string }[] = [
   { value: 'awaiting_invoice', label: 'Awaiting invoice' },
 ];
 
+// Plain-English label for the terms behind a derived due date, so staff can see
+// WHY the default is what it is (and whether it's worth correcting).
+function describeTerms(t?: { basis: string; days: number; source: string } | null): string {
+  if (!t) return '';
+  if (t.source === 'freelancer') return 'Ooosh freelancer terms — first Friday a week after the invoice date';
+  const base = t.basis === 'end_of_invoice_month' ? 'end of invoice month' : 'invoice date';
+  const when = t.days === 0 ? base : `${base} + ${t.days} days`;
+  if (t.source === 'manual') return `Supplier terms (set by us) — ${when}`;
+  if (t.source === 'xero') return `Supplier terms (from Xero) — ${when}`;
+  return `Default terms — ${when}`;
+}
+
+/** DD Mon YYYY for a YYYY-MM-DD string, without timezone drift. */
+function fmtDate(iso: string | null | undefined): string {
+  if (!iso) return '';
+  const [y, m, d] = iso.slice(0, 10).split('-').map(Number);
+  if (!y || !m || !d) return '';
+  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('en-GB', {
+    day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC',
+  });
+}
+
 const SPLIT_KEY = 'ooosh_cost_modal_split_pct';
 const round2 = (n: number) => Math.round(n * 100) / 100;
 // Normalise a UK reg for comparison — strip spaces/punctuation, uppercase.
@@ -124,6 +146,13 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
   const [invoiceNumber, setInvoiceNumber] = useState(existing?.invoice_number || '');
   // De-dup: warn if this supplier+invoice number was already captured.
   const [invoiceDup, setInvoiceDup] = useState<{ id: string; cost_date: string | null; amount_gross: number | null; payment_status: string } | null>(null);
+  // Due date. `dueDateOverride` is what staff typed (persisted as
+  // costs.due_date_override); `derivedDueDate` is what the rules alone give and
+  // is shown as the default + the "reset" target. Blank override = follow the
+  // rules, so a cost staff never touch behaves exactly as it always did.
+  const [dueDateOverride, setDueDateOverride] = useState(existing?.due_date_override ? existing.due_date_override.slice(0, 10) : '');
+  const [derivedDueDate, setDerivedDueDate] = useState<string | null>(existing?.due_date_derived ?? null);
+  const [derivedDueTermsLabel, setDerivedDueTermsLabel] = useState<string>('');
   const [amountGross, setAmountGross] = useState(existing?.amount_gross != null ? String(existing.amount_gross) : '');
   const [amountVat, setAmountVat] = useState(existing?.amount_vat != null ? String(existing.amount_vat) : '');
   const [amountNet, setAmountNet] = useState(existing?.amount_net != null ? String(existing.amount_net) : '');
@@ -249,6 +278,33 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
     }, 400);
     return () => clearTimeout(t);
   }, [invoiceNumber, supplierName, existing?.id]);
+
+  // Derived due date — debounced preview of what the rules give for this
+  // supplier + date + cost type, so staff see the real default at capture time
+  // rather than discovering it on the Bills-to-Pay list a day later. Same
+  // engine as the list / Xero push, so the number shown is the number that
+  // lands. Suggestion only: staff can override, and the override wins.
+  useEffect(() => {
+    if (!costDate) { setDerivedDueDate(null); setDerivedDueTermsLabel(''); return; }
+    const costType = COST_CATEGORIES.find((c) => c.xeroCode === categoryCode)?.costType || '';
+    const t = setTimeout(async () => {
+      try {
+        const params = new URLSearchParams({ cost_date: costDate });
+        if (costType) params.set('cost_type', costType);
+        if (supplierName.trim()) params.set('supplier_name', supplierName.trim());
+        if (xeroContactId) params.set('xero_contact_id', xeroContactId);
+        const r = await api.get<{ data: { due_date: string | null; terms: { basis: string; days: number; source: string } } }>(
+          `/costs/due-date-preview?${params}`,
+        );
+        setDerivedDueDate(r.data.due_date);
+        setDerivedDueTermsLabel(describeTerms(r.data.terms));
+      } catch {
+        setDerivedDueDate(null);
+        setDerivedDueTermsLabel('');
+      }
+    }, 350);
+    return () => clearTimeout(t);
+  }, [costDate, supplierName, xeroContactId, categoryCode]);
 
   // Fleet list (small, ~20 vans) — fetched once for the vehicle picker, filtered
   // client-side. Active vehicles only.
@@ -527,6 +583,7 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
         data: {
           supplier: string | null;
           cost_date: string | null;
+          due_date: string | null;
           amount_gross: number | null;
           amount_vat: number | null;
           amount_net: number | null;
@@ -546,6 +603,9 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
       if (ex.supplier) setSupplierName(ex.supplier);
       if (ex.cost_date) setCostDate(ex.cost_date);
       if (ex.invoice_number) setInvoiceNumber(ex.invoice_number);
+      // A printed due date is the document's own answer, so it beats our derived
+      // default — stored as an override (staff can clear it back to the rule).
+      if (ex.due_date) setDueDateOverride(ex.due_date);
       if (ex.description) setDescription(ex.description);
       if (ex.category_code) setCategoryCode(ex.category_code);
       // The document is authoritative on VAT: no VAT shown → No VAT, never an
@@ -703,6 +763,9 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
         amount_net: amountNet ? Number(amountNet) : null,
         vat_treatment: vatMode === 'reclaim' ? 'reclaim_split' : 'standard',
         invoice_number: invoiceNumber.trim() || null,
+        // Blank = follow the derived rule; a value always wins (and marks the
+        // Xero bill stale so it can be re-synced).
+        due_date_override: dueDateOverride || null,
         description: description || null,
         category: cat?.label || null,
         xero_account_code: cat?.xeroCode || null,
@@ -964,6 +1027,26 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
               <label className="block text-sm font-medium text-gray-700 mb-1">
                 Link to job <span className="text-gray-400 font-normal">(optional — needed to recharge)</span>
               </label>
+              {/* The split lives HERE, not in the footer: it's a statement about
+                  which job(s) this invoice covers, so it belongs with the job
+                  picker. The picker still seeds the first allocation line at the
+                  full amount, so ticking this is additive, never a mode switch. */}
+              {!isEdit && onSavedAndSplit && (
+                <label className="flex items-start gap-2 text-sm text-gray-600 cursor-pointer mb-2">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={splitAfterSave}
+                    onChange={(e) => setSplitAfterSave(e.target.checked)}
+                  />
+                  <span>
+                    This invoice covers several jobs
+                    <span className="block text-xs text-gray-400">
+                      Split the amount across them after saving{linkedJobId ? ' — the job above is the first line' : ''}.
+                    </span>
+                  </span>
+                </label>
+              )}
               {linkedJobId ? (
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="px-3 py-1.5 text-sm bg-purple-50 text-purple-700 rounded-md border border-purple-200">
@@ -1166,6 +1249,40 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
               </div>
             </div>
 
+            {/* Due date — only meaningful on a pay-later bill; a paid-now cost owes
+                nothing. Shows the derived default (supplier terms, or the Ooosh
+                freelancer Friday rule) and lets staff correct it. */}
+            {BILL_METHODS.includes(paymentMethod) && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Payment due{' '}
+                  <span className="text-gray-400 font-normal">
+                    {dueDateOverride ? '(edited)' : '(from terms — edit if the invoice says otherwise)'}
+                  </span>
+                </label>
+                <input
+                  type="date"
+                  className={inputCls}
+                  value={dueDateOverride || derivedDueDate || ''}
+                  onChange={(e) => setDueDateOverride(e.target.value)}
+                />
+                {dueDateOverride ? (
+                  <p className="text-xs text-amber-600 mt-1">
+                    Using your date{derivedDueDate ? <> instead of <strong>{fmtDate(derivedDueDate)}</strong></> : null}.{' '}
+                    <button type="button" onClick={() => setDueDateOverride('')} className="underline hover:no-underline">
+                      Use the default
+                    </button>
+                  </p>
+                ) : derivedDueDate ? (
+                  <p className="text-xs text-gray-400 mt-1">
+                    <strong>{fmtDate(derivedDueDate)}</strong>{derivedDueTermsLabel ? ` · ${derivedDueTermsLabel}` : ''}
+                  </p>
+                ) : (
+                  <p className="text-xs text-gray-400 mt-1">Set a date above to derive the due date from the supplier's terms.</p>
+                )}
+              </div>
+            )}
+
             {paymentMethod === 'cot_card' && !freshCardLast4 && (
               <p className="text-xs text-gray-500 italic">
                 No company card on file for you — ask an admin to add it in Settings → COT Card Register (enables Xero reconciliation matching).
@@ -1251,12 +1368,7 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
             );
           })()}
           <div className="flex items-center justify-between gap-2">
-          {!isEdit && onSavedAndSplit ? (
-            <label className="flex items-center gap-2 text-sm text-gray-600 cursor-pointer" title="One invoice covering several jobs — split the amount across them after saving">
-              <input type="checkbox" checked={splitAfterSave} onChange={(e) => setSplitAfterSave(e.target.checked)} />
-              Split across multiple jobs
-            </label>
-          ) : <span />}
+          <span />
           <div className="flex gap-2">
           <button onClick={onClose} className="px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded-md">Cancel</button>
           {!isEdit && paymentStatus !== 'paid' && hasManagerRole(user?.role) && (

@@ -64,6 +64,7 @@ Extraction rules:
 - service_type: when the document is a vehicle servicing/repair/garage invoice, classify the PRIMARY work into ONE of: "service" (routine/scheduled service, oil/filter change, inspection), "repair" (mechanical, bodywork, glass, accident or breakage fixes), "mot" (MOT test), "tyre" (tyres, wheels, balancing, alignment, tracking, punctures), "insurance" (insurance-related work), "tax" (road tax / VED), "other" (anything else). If the invoice clearly covers ONE kind of work, return that specific type (e.g. an invoice only for replacing tyres → "tyre"). If it's a genuine mix of different work, return "service". Null when the document is NOT a vehicle servicing/repair document (fuel, parking, non-vehicle costs).
 - supplier: the merchant's canonical company name as printed on the receipt header (e.g. "TTS360 Ltd", "Shell U.K. Limited", "Halfords Autocentres") — NOT the tagline, address line, or "thank you" line. Strip trailing punctuation.
 - cost_date: format YYYY-MM-DD. Receipt dates are UK DAY-FIRST (DD/MM/YYYY) — when a date is ambiguous (both parts ≤ 12, e.g. 11/06), read it day-first (11 June, NOT 6 November). The cost date is normally TODAY or in the recent past; it should not be months in the future. Null if not visible.
+- due_date: the date payment is DUE, format YYYY-MM-DD — only when the document explicitly prints one (labelled "Due Date", "Payment Due", "Pay By", "Date Due"). A due date is normally ON or AFTER the invoice date and in the near future, so it is the one date here that legitimately looks forward. Also return it when the document states plain terms you can resolve against the invoice date (e.g. "Net 30", "Payment terms: 14 days" → invoice date + that many days). Null when the document says nothing about when payment is due — do NOT invent one from a default assumption.
 - job_number: if the document clearly references an Ooosh job/booking number (e.g. "Job 15291", "#15291", "Attention: Ooosh Tours (#15291)", "your ref 15291"), return JUST the digits as a string. Otherwise null. Do NOT guess from invoice numbers, phone numbers, postcodes, dates, or amounts — only a clear job/booking reference.
 - description: 1-2 line summary of what was bought (e.g. "Brake pads and disc rotors", "5 packs of D'Addario strings").
 - confidence: "high" when every key field reads cleanly; "medium" with some guessing on amounts or supplier; "low" on poor image quality or non-receipt input.
@@ -76,6 +77,7 @@ const SCHEMA = {
   properties: {
     supplier: { type: ['string', 'null'] },
     cost_date: { type: ['string', 'null'] },
+    due_date: { type: ['string', 'null'] },
     amount_gross: { type: ['number', 'null'] },
     amount_vat: { type: ['number', 'null'] },
     amount_net: { type: ['number', 'null'] },
@@ -100,7 +102,7 @@ const SCHEMA = {
     confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
   },
   required: [
-    'supplier', 'cost_date', 'amount_gross', 'amount_vat', 'amount_net',
+    'supplier', 'cost_date', 'due_date', 'amount_gross', 'amount_vat', 'amount_net',
     'vat_treatment', 'invoice_number', 'job_number', 'vehicle_reg', 'mileage',
     'service_type', 'description', 'category_code', 'confidence',
   ],
@@ -110,6 +112,8 @@ const SCHEMA = {
 export interface ExtractedReceipt {
   supplier: string | null;
   cost_date: string | null;
+  /** Payment due date as printed / derivable from stated terms. Suggestion only. */
+  due_date: string | null;
   amount_gross: number | null;
   amount_vat: number | null;
   amount_net: number | null;
@@ -228,6 +232,32 @@ function normaliseCostDate(p: ExtractedReceipt): void {
 }
 
 /**
+ * Sanity-check the extracted DUE date. Unlike cost_date this one legitimately
+ * points forward, so the future-date repair in normaliseCostDate must NOT be
+ * applied to it. We only reject shapes that can't be a real due date: an
+ * unparseable string, a date before the invoice date, or one absurdly far out
+ * (a misread year). Left as a plain suggestion — the modal shows it against the
+ * derived default and staff confirm.
+ */
+function normaliseDueDate(p: ExtractedReceipt): void {
+  if (!p.due_date) return;
+  const m = p.due_date.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) { p.due_date = null; return; }
+  const due = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  if (Number.isNaN(due)) { p.due_date = null; return; }
+
+  // Before the invoice date → a misread (or the invoice date itself repeated).
+  if (p.cost_date && /^\d{4}-\d{2}-\d{2}$/.test(p.cost_date)) {
+    const [cy, cm, cd] = p.cost_date.split('-').map(Number);
+    if (due < Date.UTC(cy, cm - 1, cd)) { p.due_date = null; return; }
+  }
+  // More than a year out is not a payment term we'd ever see on a supplier bill.
+  const now = new Date();
+  const todayUTC = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  if (due > todayUTC + 366 * 86_400_000) p.due_date = null;
+}
+
+/**
  * Tidy the extracted vehicle reg + mileage. The fleet-match + sanity-check
  * happens in the modal (against the loaded fleet list) — here we just normalise
  * the shapes so matching is reliable: reg → uppercase alphanumerics only,
@@ -284,6 +314,7 @@ export async function extractReceipt(buffer: Buffer, mimeType: string): Promise<
   // when a correction was needed so the modal flags it for a human check).
   normaliseAmounts(parsed);
   normaliseCostDate(parsed);
+  normaliseDueDate(parsed);
   normaliseVehicle(parsed);
 
   // Xero supplier canonicalisation — non-blocking, best-effort.

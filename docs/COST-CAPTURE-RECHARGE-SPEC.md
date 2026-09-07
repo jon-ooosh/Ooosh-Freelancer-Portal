@@ -947,9 +947,41 @@ threshold in the T&Cs is a dispute nuance, not modelled — "overdue" in the UI 
 simply past the Friday due date.)
 
 ### Capture-time split
-The "split across jobs" allocation modal now surfaces at capture: a **"Split
-across multiple jobs"** tick in the capture modal footer (new-cost only) hands the
-saved cost straight to the allocation modal via a new `onSavedAndSplit` callback.
+The "split across jobs" allocation modal now surfaces at capture: a tick in the
+capture modal (new-cost only) hands the saved cost straight to the allocation
+modal via an `onSavedAndSplit` callback.
+
+**Moved beside the job picker (Sep 2026).** It originally sat in the modal footer,
+where it read as "do a thing after saving" and was easy to miss. It now sits
+directly under **Link to job**, worded as a statement about the invoice — *"This
+invoice covers several jobs"* — because that is the decision staff are actually
+making, at the moment they're making it. The job picker stays visible when it's
+ticked: the allocation modal seeds its first line from that job at the full
+amount, so ticking the box is additive, never a mode switch.
+
+### Due date at capture (Sep 2026, migration 197)
+The due date is derived, not stored — but staff couldn't see it until the cost
+reached the Bills-to-Pay list. The capture modal now shows it at upload time,
+with the derived default and the terms behind it, and lets staff correct it.
+
+- **`costs.due_date_override`** (DATE, nullable). NULL = follow the rules.
+- **`resolveDueDate()` in `services/supplier-terms.ts` is the single definition** —
+  override → the freelancer Friday rule → supplier/Xero terms. Every surface
+  (list, get-one, mark-paid modal, Xero bill push, Xero re-sync) reads it, so
+  what staff confirm at capture is what Xero is told. It's in `XERO_AFFECTING`,
+  so editing it on a pushed bill flags `xero_stale` for re-sync.
+- **The freelancer anchor moved from `approved_at` to the invoice date** — the
+  real rule is "their invoice date, first Friday +7 days" (due 8–14 days after
+  they submit). Anchoring on approval meant the date didn't exist until a manager
+  approved, so it couldn't be shown at capture at all.
+- **`GET /costs/due-date-preview`** gives the modal the derived default for a
+  cost that doesn't exist yet, from the same engine.
+- The field renders **only for pay-later methods** — a cost already paid on the
+  company card owes nobody anything, so a due date there is noise.
+- The AI extractor reads a printed due date (or resolves stated terms like
+  "Net 30" against the invoice date) and lands it as an override, since the
+  document's own answer beats our derived guess. Cleared back to the rule in one
+  click.
 
 ### Bills to Pay — sortable Due + filters
 The Due column is now click-to-sort, and the payable view gained due-date filter

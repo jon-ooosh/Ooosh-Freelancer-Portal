@@ -128,6 +128,7 @@ interface CostRow {
   description: string | null;
   category: string | null;
   cost_date: string | null;
+  due_date_override: string | null;
   xero_contact_id: string | null;
   paid_method: string | null;
   paid_value_date: string | null;
@@ -354,7 +355,7 @@ async function pushBill(cost: CostRow): Promise<PushResult> {
     const description = (isReimburse && cost.supplier_name ? `${cost.supplier_name} — ${baseDesc}` : baseDesc).slice(0, 4000);
 
     const { lineItems, lineAmountTypes } = await buildCostLineItems(cost, description);
-    const { resolveTermsForSupplier, computeDueDate, freelancerDueDate, seedTermsFromXeroIfMissing } = await import('./supplier-terms');
+    const { seedTermsFromXeroIfMissing, resolveDueDateForCost } = await import('./supplier-terms');
 
     // Resolve the Xero contact FIRST so we can (a) persist its id back on the
     // cost — which is what lets Xero supplier terms seed + pull through on this
@@ -378,15 +379,10 @@ async function pushBill(cost: CostRow): Promise<PushResult> {
       }
     }
 
-    // Freelancer invoices use Ooosh terms (first Friday +1wk after approval),
-    // overriding any supplier/Xero terms; everything else uses resolved terms.
-    let billDueDate: string | undefined;
-    if (cost.cost_type === 'freelancer_invoice') {
-      billDueDate = freelancerDueDate(cost.approved_at) ?? addDaysISO(dateOnly(cost.cost_date), 30) ?? dateOnly(cost.cost_date);
-    } else {
-      const billTerms = await resolveTermsForSupplier(cost.xero_contact_id, cost.supplier_name);
-      billDueDate = computeDueDate(dateOnly(cost.cost_date), billTerms) ?? addDaysISO(dateOnly(cost.cost_date), 30);
-    }
+    // Staff override → freelancer Friday terms → supplier/Xero terms. Same
+    // engine as the costs list, so what staff saw is what Xero gets.
+    const billDueDate = (await resolveDueDateForCost(cost)).dueDate
+      ?? addDaysISO(dateOnly(cost.cost_date), 30);
 
     let invoiceID: string;
     try {
@@ -591,14 +587,9 @@ async function resyncCostToXeroLocked(costId: string): Promise<PushResult & { lo
       const baseDesc = (cost.description || cost.category || 'Cost').toString();
       const description = (isReimburse && cost.supplier_name ? `${cost.supplier_name} — ${baseDesc}` : baseDesc).slice(0, 4000);
       const { lineItems, lineAmountTypes } = await buildCostLineItems(cost, description);
-      const { resolveTermsForSupplier, computeDueDate, freelancerDueDate } = await import('./supplier-terms');
-      let billDueDate: string | undefined;
-      if (cost.cost_type === 'freelancer_invoice') {
-        billDueDate = freelancerDueDate(cost.approved_at) ?? addDaysISO(dateOnly(cost.cost_date), 30) ?? dateOnly(cost.cost_date);
-      } else {
-        const billTerms = await resolveTermsForSupplier(cost.xero_contact_id, cost.supplier_name);
-        billDueDate = computeDueDate(dateOnly(cost.cost_date), billTerms) ?? addDaysISO(dateOnly(cost.cost_date), 30);
-      }
+      const { resolveDueDateForCost } = await import('./supplier-terms');
+      const billDueDate = (await resolveDueDateForCost(cost)).dueDate
+        ?? addDaysISO(dateOnly(cost.cost_date), 30);
       await xeroBroker.updateBill(cost.xero_object_id, {
         contactName,
         date: dateOnly(cost.cost_date),
