@@ -807,11 +807,15 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
         await ensureCloseout('freelancer_followup', 'Check in with freelancers — expenses, feedback, issues');
       }
 
-      // Conditional: damage review — only if any vehicle assignment has has_damage=true
+      // Conditional: damage review — only if any vehicle assignment has has_damage=true.
+      // Dual job match: a staff-allocation / V&D row carries only
+      // hirehop_job_id (job_id stays NULL until a hire form is submitted),
+      // so a job_id-only test misses damage flagged on exactly those hires.
       const damageCount = await client.query(
         `SELECT COUNT(*) AS cnt FROM vehicle_hire_assignments
-         WHERE job_id = $1 AND has_damage = true`,
-        [jobId]
+         WHERE has_damage = true
+           AND (job_id = $1 OR ($2::int IS NOT NULL AND hirehop_job_id = $2::int))`,
+        [jobId, hhJobNumber ?? null]
       );
       if (parseInt(damageCount.rows[0]?.cnt || '0') > 0) {
         await ensureCloseout('damage_review', 'Vehicle damage flagged during hire — review and resolve');

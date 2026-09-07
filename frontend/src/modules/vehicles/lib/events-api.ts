@@ -49,6 +49,14 @@ export async function createVehicleEvent(params: {
   // optional extras like "Pre-existing chip — driver side"), since the
   // R2 keys only encode the angle slug.
   photoMeta?: Array<{ angle: string; label: string }> | null
+  /**
+   * Whether any damage was flagged during this walkaround. Drives
+   * `vehicle_hire_assignments.has_damage` server-side, which is what
+   * gates the post-hire `damage_review` close-out card. Historically
+   * never sent, so the backend's `event.hasDamage === true` was always
+   * false and the card never appeared (job 15428 / RX24SZD, Sept 2026).
+   */
+  hasDamage?: boolean | null
 }): Promise<{ id: string; error?: string }> {
   const dateStr = params.eventDate || new Date().toISOString().split('T')[0]!
   const eventId = `evt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
@@ -71,6 +79,7 @@ export async function createVehicleEvent(params: {
     signatureBase64: params.signatureBase64 ?? null,
     deliveredBy: params.deliveredBy ?? null,
     photoMeta: params.photoMeta ?? null,
+    hasDamage: params.hasDamage ?? null,
     createdAt: new Date().toISOString(),
   }
 
