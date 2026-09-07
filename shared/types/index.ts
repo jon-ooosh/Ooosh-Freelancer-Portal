@@ -1069,8 +1069,15 @@ export interface Cost {
   vat_treatment?: 'standard' | 'reclaim_split';
   invoice_number?: string | null;
   xero_contact_id?: string | null;
-  // Computed server-side from the supplier's payment terms (list + get-one).
+  // THE due date (list + get-one), resolved server-side by resolveDueDate():
+  // staff override → the freelancer Friday rule → the supplier's payment terms.
   due_date?: string | null;
+  // What the rules alone would give — lets the UI offer "reset to default".
+  due_date_derived?: string | null;
+  due_date_is_override?: boolean;
+  // Staff override. NULL = follow the derived rule. Never read this raw for
+  // display; `due_date` above already accounts for it.
+  due_date_override?: string | null;
   terms?: SupplierPaymentTerms;
   currency: string;
   description: string | null;

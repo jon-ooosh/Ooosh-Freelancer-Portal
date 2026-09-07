@@ -78,6 +78,9 @@ const createSchema = z.object({
   amount_net: money.optional().nullable(),
   vat_treatment: z.enum(['standard', 'reclaim_split']).optional(),
   invoice_number: z.string().trim().max(100).optional().nullable(),
+  // Staff override for the bill due date. NULL/'' = follow the derived rule
+  // (supplier terms, or the freelancer Friday rule). See resolveDueDate().
+  due_date_override: z.string().trim().max(20).optional().nullable(),
   // Xero contact id captured when staff pick a real Xero supplier in the
   // autocomplete — lets terms resolve by stable id + seed from Xero.
   xero_contact_id: z.string().trim().max(60).optional().nullable(),
@@ -131,7 +134,7 @@ const allocationSchema = z.object({
 // workflow timestamps + Xero state are server-controlled).
 const WRITABLE = [
   'supplier_name', 'cost_date', 'amount_gross', 'amount_vat', 'amount_net', 'vat_treatment',
-  'invoice_number', 'xero_contact_id', 'currency',
+  'invoice_number', 'due_date_override', 'xero_contact_id', 'currency',
   'description', 'category', 'xero_account_code', 'cost_type', 'payment_method',
   'cot_card_holder', 'cot_card_last4', 'payment_status', 'job_id', 'vehicle_id',
   'quote_assignment_id', 'platform_issue_id', 'vehicle_service_log_id', 'vehicle_fuel_log_id',
@@ -269,20 +272,19 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     // due date (+ the terms that produced it) to each row. Single source of
     // truth for the bill due date — the list, mark-paid modal and Xero push all
     // read these. See docs/COSTS-PAYMENT-AUTOMATION-SPEC.md.
-    const { buildTermsResolver, computeDueDate, freelancerDueDate } = await import('../services/supplier-terms');
+    const { buildTermsResolver, resolveDueDate } = await import('../services/supplier-terms');
     const resolve = await buildTermsResolver(
       result.rows.map((r) => ({ xeroContactId: r.xero_contact_id, supplierName: r.supplier_name })),
     );
     const rows = result.rows.map((r) => {
-      // Freelancer invoices follow Ooosh terms (first Friday +1wk after approval),
-      // not supplier/Xero terms. The Friday date only exists once approved — until
-      // then we fall back to the standard terms display.
-      if (r.cost_type === 'freelancer_invoice' && r.approved_at) {
-        const terms = { basis: 'invoice_date' as const, days: 0, source: 'freelancer' as const };
-        return { ...r, terms, due_date: freelancerDueDate(r.approved_at) };
-      }
-      const terms = resolve({ xeroContactId: r.xero_contact_id, supplierName: r.supplier_name });
-      return { ...r, terms, due_date: computeDueDate(r.cost_date, terms) };
+      // resolveDueDate picks the rule (staff override → freelancer Friday terms →
+      // supplier terms) — don't branch on cost_type out here, or this list drifts
+      // from the Xero push again.
+      const { dueDate, derivedDueDate, terms, isOverride } = resolveDueDate(
+        r,
+        resolve({ xeroContactId: r.xero_contact_id, supplierName: r.supplier_name }),
+      );
+      return { ...r, terms, due_date: dueDate, due_date_derived: derivedDueDate, due_date_is_override: isOverride };
     });
 
     // Headline counts for the hub tabs.
@@ -432,6 +434,26 @@ router.get('/check-invoice', async (req: AuthRequest, res: Response) => {
     res.json({ data: { duplicate: r.rows.length > 0, match: r.rows[0] || null } });
   } catch (err) {
     console.error('[costs] check-invoice error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Due-date preview for the capture modal — what the rules WOULD give for a
+// cost that doesn't exist yet, so staff see the derived date at upload time and
+// can correct it. Same engine as the list / get-one / Xero push, so the number
+// shown here is the number that lands. Multi-segment so it doesn't hit /:id.
+router.get('/due-date-preview', async (req: AuthRequest, res: Response) => {
+  try {
+    const { resolveDueDateForCost } = await import('../services/supplier-terms');
+    const { dueDate, terms } = await resolveDueDateForCost({
+      cost_type: req.query.cost_type ? String(req.query.cost_type) : null,
+      cost_date: req.query.cost_date ? String(req.query.cost_date) : null,
+      supplier_name: req.query.supplier_name ? String(req.query.supplier_name) : null,
+      xero_contact_id: req.query.xero_contact_id ? String(req.query.xero_contact_id) : null,
+    });
+    res.json({ data: { due_date: dueDate, terms } });
+  } catch (err) {
+    console.error('[costs] due-date-preview error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -720,9 +742,18 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
       [req.params.id],
     );
     const cost = result.rows[0];
-    const { resolveTermsForSupplier, computeDueDate } = await import('../services/supplier-terms');
-    const terms = await resolveTermsForSupplier(cost.xero_contact_id, cost.supplier_name);
-    res.json({ data: { ...cost, terms, due_date: computeDueDate(cost.cost_date, terms), allocations: allocations.rows } });
+    const { resolveDueDateForCost } = await import('../services/supplier-terms');
+    const { dueDate, derivedDueDate, terms, isOverride } = await resolveDueDateForCost(cost);
+    res.json({
+      data: {
+        ...cost,
+        terms,
+        due_date: dueDate,
+        due_date_derived: derivedDueDate,
+        due_date_is_override: isOverride,
+        allocations: allocations.rows,
+      },
+    });
   } catch (err) {
     console.error('[costs] get error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -853,7 +884,10 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
       // Xero-affecting field changed, flag it stale so the UI warns + offers a
       // manual "Re-sync to Xero". Non-Xero edits (notes, payment_status) leave it alone.
       const XERO_AFFECTING = ['amount_net', 'amount_vat', 'amount_gross', 'xero_account_code',
-        'supplier_name', 'description', 'vat_treatment', 'cost_date', 'payment_method', 'invoice_number'];
+        'supplier_name', 'description', 'vat_treatment', 'cost_date', 'payment_method', 'invoice_number',
+        // The bill's Xero DueDate comes from resolveDueDate(), so an override edit
+        // has to be re-syncable or OP and Xero disagree about when it's due.
+        'due_date_override'];
       if (XERO_AFFECTING.some((f) => data[f] !== undefined) && !updated.xero_stale) {
         const s = await query(`UPDATE costs SET xero_stale=TRUE WHERE id=$1 RETURNING xero_stale`, [updated.id]);
         updated.xero_stale = s.rows[0]?.xero_stale ?? true;
