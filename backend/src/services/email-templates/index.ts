@@ -19,6 +19,112 @@ const templates: Record<string, EmailTemplate> = {
 
   // ── Client-facing templates ────────────────────────────────────────────
 
+  // Driver hire-form email verification code (OTP). Sent by the hire form app
+  // via POST /api/driver-verification/send-code. Time-sensitive.
+  verification_code: {
+    variant: 'client',
+    preheader: 'Your Ooosh Tours verification code',
+    subject: 'Your Ooosh Tours verification code',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Your verification code</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Hello,</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Here is your code to continue your Ooosh Tours hire form{{#if jobRef}} for job {{jobRef}}{{/if}}:
+      </p>
+      <p style="margin:0 0 20px;font-size:34px;font-weight:700;letter-spacing:8px;color:#7B5EA7;text-align:center;">{{code}}</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Enter this code to verify your email address. For your security it will expire in {{expiryMinutes}} minutes.
+      </p>
+      <p style="margin:0;font-size:14px;color:#64748b;line-height:1.6;">
+        If you didn't request this, you can safely ignore this email.
+      </p>
+    `,
+  },
+
+  // Driver hire-form completion confirmation ("here's what you submitted").
+  // Sent by the hire form app via POST /api/driver-verification/send-confirmation.
+  // Values are pre-formatted in the endpoint and passed as escaped variables;
+  // structure + conditional rows live here (all single-level {{#if}} blocks).
+  hire_form_confirmation: {
+    variant: 'client',
+    preheader: 'Your Ooosh Tours hire form is complete',
+    subject: 'Hire form completed{{#if jobRef}} — job {{jobRef}}{{/if}}',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Hire form completed</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Dear {{driverName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">{{introLine}}</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Subject to any additional checks that may be required, you will be emailed a completed hire form once the
+        hire has started and the vehicle booked out.
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#b91c1c;line-height:1.6;">
+        <strong>Important:</strong> until you have received that hire form you are NOT insured and you must NOT drive
+        the vehicle.
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Please retain this email for your reference — some of your answers are recorded below. If anything is
+        incorrect, or anything changes before or during your hire, please let us know as soon as possible.
+      </p>
+      <p style="margin:0 0 20px;font-size:15px;color:#334155;line-height:1.6;">
+        In the meantime, please review our driver T&amp;Cs
+        <a href="https://www.oooshtours.co.uk/files/Ooosh_vehicle_hire_terms.pdf" style="color:#7B5EA7;">here</a>.
+      </p>
+
+      <h3 style="margin:24px 0 8px;font-size:16px;color:#1e293b;">Your details</h3>
+      <ul style="margin:0 0 8px;padding-left:20px;font-size:15px;color:#334155;line-height:1.7;">
+        <li>Name: {{name}}</li>
+        <li>Email: {{email}}</li>
+        <li>Phone: {{phone}}</li>
+        <li>Nationality: {{nationality}}</li>
+        <li>Date of birth: {{dateOfBirth}}</li>
+      </ul>
+
+      <h3 style="margin:24px 0 8px;font-size:16px;color:#1e293b;">Licence details</h3>
+      <ul style="margin:0 0 8px;padding-left:20px;font-size:15px;color:#334155;line-height:1.7;">
+        <li>Licence ending: {{licenceEnding}}</li>
+        <li>Issued by: {{licenceIssuedBy}}</li>
+        {{#if licenceValidUntil}}<li>Valid until: {{licenceValidUntil}}</li>{{/if}}
+        {{#if datePassedTest}}<li>Date passed test: {{datePassedTest}}</li>{{/if}}
+      </ul>
+
+      <h3 style="margin:24px 0 8px;font-size:16px;color:#1e293b;">Addresses</h3>
+      <ul style="margin:0 0 8px;padding-left:20px;font-size:15px;color:#334155;line-height:1.7;">
+        <li>Home address: {{homeAddress}}</li>
+        <li>Licence address: {{licenceAddress}}</li>
+      </ul>
+
+      <h3 style="margin:24px 0 8px;font-size:16px;color:#1e293b;">Insurance declaration</h3>
+      <ul style="margin:0 0 8px;padding-left:20px;font-size:15px;color:#334155;line-height:1.7;">
+        {{#if showDvlaPoints}}<li>Licence points: <strong>{{dvlaPoints}}</strong></li>{{/if}}
+        {{#if showDvlaPoints}}<li>Endorsements: <strong>{{dvlaEndorsements}}</strong></li>{{/if}}
+        {{#if showDvlaPoints}}<li>Insurance excess (per incident): <strong>{{dvlaExcess}}</strong></li>{{/if}}
+        <li>Disability/medical conditions: <strong>{{hasDisability}}</strong></li>
+        <li>Motoring convictions: <strong>{{hasConvictions}}</strong></li>
+        <li>Pending prosecutions: <strong>{{hasProsecution}}</strong></li>
+        <li>Accidents (last 5 years): <strong>{{hasAccidents}}</strong></li>
+        <li>Insurance issues: <strong>{{hasInsuranceIssues}}</strong></li>
+        <li>Driving bans: <strong>{{hasDrivingBan}}</strong></li>
+      </ul>
+      {{#if additionalDetails}}<p style="margin:0 0 8px;font-size:15px;color:#334155;line-height:1.6;"><strong>Additional details:</strong> {{additionalDetails}}</p>{{/if}}
+
+      <h3 style="margin:24px 0 8px;font-size:16px;color:#1e293b;">Documents verified</h3>
+      <ul style="margin:0 0 8px;padding-left:20px;font-size:15px;color:#334155;line-height:1.7;">
+        <li>Driving licence: {{docLicence}}</li>
+        <li>Proof of address 1: {{docPoa1}}</li>
+        <li>Proof of address 2: {{docPoa2}}</li>
+        {{#if isDvla}}<li>DVLA check: {{docDvlaCheck}}</li>{{/if}}
+        {{#if isNotDvla}}<li>Passport: {{docPassport}}</li>{{/if}}
+      </ul>
+
+      <p style="margin:16px 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Your digital signature was captured on <strong>{{signatureDate}}</strong>.
+      </p>
+      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
+        If you have any questions, just reply to this email.<br>Thanks,<br><strong>Ooosh Tours</strong>
+      </p>
+    `,
+  },
+
   freelancer_invite: {
     variant: 'client',
     preheader: 'Complete your freelancer sign-up with Ooosh Tours',

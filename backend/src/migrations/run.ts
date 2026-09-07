@@ -233,6 +233,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '196_unsigned_hire_form_nudge.sql',
         '197_enquiry_dismissal.sql',
         '198_cost_due_date_override.sql',
+        '199_driver_verification_codes.sql',
       ];
 
       for (const migration of migrations) {
