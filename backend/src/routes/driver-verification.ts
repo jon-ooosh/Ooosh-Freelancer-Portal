@@ -312,17 +312,32 @@ router.post('/send-confirmation', authenticateApiKey, async (req: Request, res: 
       if (value === false || value === 'no' || value === 'No') return 'No';
       return 'Not answered';
     };
+    // "11 September 2026" → "11th September 2026" — the ordinal suffix on the day.
+    const ordinalSuffix = (day: number): string => {
+      if (day >= 11 && day <= 13) return 'th';
+      switch (day % 10) {
+        case 1: return 'st';
+        case 2: return 'nd';
+        case 3: return 'rd';
+        default: return 'th';
+      }
+    };
+    const formatDateWithOrdinal = (date: Date): string => {
+      const day = date.getDate();
+      const rest = date.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+      return `${day}${ordinalSuffix(day)} ${rest}`;
+    };
     const formatDate = (d: unknown): string => {
       if (!d || d === 'Invalid Date') return 'Not set';
       const date = new Date(d as string);
       if (isNaN(date.getTime())) return 'Not set';
-      return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
+      return formatDateWithOrdinal(date);
     };
     const formatDateOrNull = (d: unknown): string => {
       if (!d) return '';
       const date = new Date(d as string);
       if (isNaN(date.getTime())) return '';
-      return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
+      return formatDateWithOrdinal(date);
     };
     const formatLicenceEnding = (ending: unknown): string => {
       if (!ending || ending === 'null' || ending === 'undefined') return 'Not available';
