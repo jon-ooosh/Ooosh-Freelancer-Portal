@@ -231,7 +231,8 @@ async function runMigrations(direction: 'up' | 'down') {
         '194_driver_licence_categories.sql',
         '195_holding_fold_temp_storage.sql',
         '196_unsigned_hire_form_nudge.sql',
-        '197_cost_due_date_override.sql',
+        '197_enquiry_dismissal.sql',
+        '198_cost_due_date_override.sql',
       ];
 
       for (const migration of migrations) {

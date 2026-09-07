@@ -50,12 +50,23 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       value_min, value_max,    // Job value bucket bounds (£)
       chase_count_min,         // e.g. "3" for "chased 3+ times"
       chase_count_max,         // e.g. "0" for "never chased"
+      dismissed,               // '1' = ONLY dismissed enquiries (review view); default hides them
       page = '1', limit = '50', sort = 'next_chase_date', order = 'asc',
     } = req.query;
 
     const params: unknown[] = [];
     let paramIndex = 1;
     const conditions: string[] = ['j.is_deleted = false'];
+
+    // Dismissal overlay filter (migration 196). Dud/spam/orphan enquiries keep
+    // their pipeline_status but carry a dismissed_at stamp — hidden from the
+    // board + analytics by default, surfaced only via ?dismissed=1 for review
+    // + undismiss. See CLAUDE.md → Enquiry dismissal.
+    if (dismissed === '1') {
+      conditions.push(`j.dismissed_at IS NOT NULL`);
+    } else {
+      conditions.push(`j.dismissed_at IS NULL`);
+    }
 
     // Pipeline status filter (comma-separated)
     if (status) {
@@ -242,6 +253,7 @@ router.get('/stats', async (_req: AuthRequest, res: Response) => {
         COALESCE(SUM(job_value), 0) as total_value
       FROM jobs
       WHERE is_deleted = false
+        AND dismissed_at IS NULL
         AND pipeline_status IS NOT NULL
       GROUP BY pipeline_status
       ORDER BY pipeline_status
@@ -255,6 +267,7 @@ router.get('/stats', async (_req: AuthRequest, res: Response) => {
         COUNT(*) FILTER (WHERE next_chase_date BETWEEN CURRENT_DATE + 1 AND CURRENT_DATE + 7) as due_this_week
       FROM jobs
       WHERE is_deleted = false
+        AND dismissed_at IS NULL
         AND pipeline_status NOT IN ('confirmed', 'lost', 'cancelled')
         AND next_chase_date IS NOT NULL
     `);
@@ -264,6 +277,7 @@ router.get('/stats', async (_req: AuthRequest, res: Response) => {
       SELECT COALESCE(SUM(job_value), 0) as total
       FROM jobs
       WHERE is_deleted = false
+        AND dismissed_at IS NULL
         AND pipeline_status NOT IN ('confirmed', 'lost', 'cancelled')
     `);
 
@@ -3088,6 +3102,259 @@ router.post('/:id/sync-client-to-hh', async (req: AuthRequest, res: Response) =>
     const msg = error?.message || String(error);
     console.error('Sync client to HireHop error:', msg, error);
     res.status(500).json({ error: `Failed to sync client to HireHop: ${msg}` });
+  }
+});
+
+// ── Dismiss / undismiss enquiry (migration 196) ────────────────────────────
+//
+// A dismissal marks a dud/spam/orphaned enquiry as "never a genuine enquiry".
+// It is distinct from Lost/Cancelled (real commercial outcomes that belong in
+// analytics). Overlay-flag model: the job keeps its pipeline_status, gains a
+// dismissed_at stamp, and drops out of the pipeline board + analytics (default
+// `dismissed_at IS NULL` filter). Undismiss is a one-column clear.
+//
+// Enquiry-stage only — you can't dismiss a job that's progressed past an
+// enquiry (that's what Lost/Cancelled are for). See CLAUDE.md → Enquiry
+// dismissal.
+
+const DISMISSABLE_STAGES = ['new_enquiry', 'quoting', 'paused'];
+const DISMISSAL_REASONS = ['spam', 'not_an_enquiry', 'about_an_existing_job', 'duplicate', 'other'];
+
+// The exact note the website enquiry intake writes on org/person records it
+// auto-creates (services/routes/enquiry-intake.ts). Used as the strong signal
+// that a record is an intake-created orphan safe to soft-delete on dismissal.
+const WEB_FORM_CREATED_NOTE = 'Created from website enquiry form.';
+
+const dismissSchema = z.object({
+  reason: z.enum(['spam', 'not_an_enquiry', 'about_an_existing_job', 'duplicate', 'other']),
+  notes: z.string().max(2000).optional().nullable(),
+  cleanup_orphans: z.boolean().optional(),
+});
+
+router.post('/:id/dismiss', validate(dismissSchema), async (req: AuthRequest, res: Response) => {
+  const client = await getClient();
+  try {
+    const jobId = req.params.id as string;
+    const { reason, notes, cleanup_orphans = true } = req.body as {
+      reason: string; notes?: string | null; cleanup_orphans?: boolean;
+    };
+
+    await client.query('BEGIN');
+
+    const current = await client.query(
+      `SELECT * FROM jobs WHERE id = $1 AND is_deleted = false FOR UPDATE`,
+      [jobId]
+    );
+    if (current.rows.length === 0) {
+      await client.query('ROLLBACK');
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+    const job = current.rows[0];
+
+    if (job.dismissed_at) {
+      await client.query('ROLLBACK');
+      res.status(409).json({ error: 'Enquiry is already dismissed' });
+      return;
+    }
+    if (!DISMISSABLE_STAGES.includes(job.pipeline_status)) {
+      await client.query('ROLLBACK');
+      res.status(400).json({
+        error: 'Only enquiry-stage jobs can be dismissed. Use Lost or Cancelled for jobs that have progressed further.',
+      });
+      return;
+    }
+
+    // Flag dismissed + clear anything that would keep a scanner poking at it.
+    const dismissalNote = notes?.trim() || null;
+    const updated = await client.query(
+      `UPDATE jobs
+         SET dismissed_at = NOW(),
+             dismissed_by = $2,
+             dismissal_reason = $3,
+             dismissal_notes = $4,
+             next_chase_date = NULL,
+             chase_alert_user_id = NULL,
+             updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [jobId, req.user!.id, reason, dismissalNote]
+    );
+
+    // Sweep open requirements to cancelled so scanners (reminders, hire-form
+    // chase, excess) never fire on a dismissed enquiry. Mirrors the lost sweep.
+    await client.query(
+      `UPDATE job_requirements
+         SET status = 'cancelled',
+             notes = COALESCE(notes, '') || E'\n[Auto-cancelled: enquiry dismissed]',
+             updated_at = NOW()
+       WHERE job_id = $1
+         AND status NOT IN ('done', 'cancelled')`,
+      [jobId]
+    );
+
+    // ── Conditional orphan cleanup ─────────────────────────────────────────
+    // Soft-delete the client org + primary contact person(s) ONLY when they
+    // were auto-created by the web-form intake (exact note marker) AND are
+    // referenced by nothing except this now-dismissed enquiry. Conservative by
+    // design — a record touched by anything else is left alone.
+    const cleaned: { orgs: string[]; people: string[] } = { orgs: [], people: [] };
+
+    if (cleanup_orphans) {
+      // Person(s): every job_contact on this job that looks like an intake orphan.
+      const contactPeople = await client.query(
+        `SELECT p.id, p.first_name, p.last_name
+           FROM job_contacts jc
+           JOIN people p ON p.id = jc.person_id
+          WHERE jc.job_id = $1
+            AND p.is_deleted = false
+            AND p.notes = $2
+            AND COALESCE(p.is_freelancer, false) = false
+            AND COALESCE(p.is_approved, false) = false
+            -- not a platform user
+            AND NOT EXISTS (SELECT 1 FROM users u WHERE u.person_id = p.id)
+            -- not a driver record
+            AND NOT EXISTS (SELECT 1 FROM drivers d WHERE d.person_id = p.id)
+            -- not crew on any quote
+            AND NOT EXISTS (SELECT 1 FROM quote_assignments qa WHERE qa.person_id = p.id)
+            -- not a manager on any job
+            AND NOT EXISTS (SELECT 1 FROM jobs j2 WHERE j2.manager1_person_id = p.id OR j2.manager2_person_id = p.id)
+            -- not a contact on any OTHER job
+            AND NOT EXISTS (SELECT 1 FROM job_contacts jc2 WHERE jc2.person_id = p.id AND jc2.job_id <> $1)`,
+        [jobId, WEB_FORM_CREATED_NOTE]
+      );
+
+      for (const p of contactPeople.rows) {
+        await client.query(
+          `UPDATE people SET is_deleted = true, updated_at = NOW() WHERE id = $1`,
+          [p.id]
+        );
+        // End their active org roles so they don't linger as "active" contacts.
+        await client.query(
+          `UPDATE person_organisation_roles
+             SET status = 'historical', updated_at = NOW()
+           WHERE person_id = $1 AND status = 'active'`,
+          [p.id]
+        );
+        cleaned.people.push(`${p.first_name || ''} ${p.last_name || ''}`.trim() || 'Unnamed');
+      }
+
+      // Client org: intake-created AND not referenced by any other job.
+      if (job.client_id) {
+        const org = await client.query(
+          `SELECT o.id, o.name
+             FROM organisations o
+            WHERE o.id = $1
+              AND o.is_deleted = false
+              AND o.notes = $2
+              AND o.xero_contact_id IS NULL
+              -- not the client on any OTHER job
+              AND NOT EXISTS (SELECT 1 FROM jobs j2 WHERE j2.client_id = o.id AND j2.id <> $3)
+              -- not linked to any OTHER job
+              AND NOT EXISTS (SELECT 1 FROM job_organisations jo WHERE jo.organisation_id = o.id AND jo.job_id <> $3)
+              -- no external system ids (never synced to HH/Xero)
+              AND NOT EXISTS (SELECT 1 FROM external_id_map em WHERE em.entity_type = 'organisations' AND em.entity_id = o.id)`,
+          [job.client_id, WEB_FORM_CREATED_NOTE, jobId]
+        );
+        if (org.rows.length > 0) {
+          await client.query(
+            `UPDATE organisations SET is_deleted = true, updated_at = NOW() WHERE id = $1`,
+            [org.rows[0].id]
+          );
+          cleaned.orgs.push(org.rows[0].name || 'Unnamed');
+        }
+      }
+    }
+
+    // Timeline interaction + audit
+    const reasonLabel: Record<string, string> = {
+      spam: 'Spam',
+      not_an_enquiry: 'Not an enquiry',
+      about_an_existing_job: 'About an existing job',
+      duplicate: 'Duplicate',
+      other: 'Other',
+    };
+    const cleanupSummary =
+      cleaned.orgs.length || cleaned.people.length
+        ? ` Removed orphan records: ${[...cleaned.orgs, ...cleaned.people].join(', ')}.`
+        : '';
+    const content =
+      `🗑️ Enquiry dismissed — ${reasonLabel[reason] || reason}` +
+      (dismissalNote ? ` — ${dismissalNote}` : '') +
+      cleanupSummary;
+
+    await client.query(
+      `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation, source)
+       VALUES ('note', $1, $2, $3, $4, 'system')`,
+      [content, jobId, req.user!.id, job.pipeline_status]
+    );
+
+    await client.query('COMMIT');
+
+    await logAudit(req.user!.id, 'jobs', jobId, 'update', job, updated.rows[0]);
+
+    res.json({
+      success: true,
+      message: 'Enquiry dismissed',
+      cleaned,
+    });
+  } catch (error: any) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('Dismiss enquiry error:', error?.message || error);
+    res.status(500).json({ error: 'Failed to dismiss enquiry' });
+  } finally {
+    client.release();
+  }
+});
+
+router.post('/:id/undismiss', async (req: AuthRequest, res: Response) => {
+  try {
+    const jobId = req.params.id as string;
+    const current = await query(
+      `SELECT * FROM jobs WHERE id = $1 AND is_deleted = false`,
+      [jobId]
+    );
+    if (current.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+    const job = current.rows[0];
+    if (!job.dismissed_at) {
+      res.status(409).json({ error: 'Enquiry is not dismissed' });
+      return;
+    }
+
+    const updated = await query(
+      `UPDATE jobs
+         SET dismissed_at = NULL, dismissed_by = NULL,
+             dismissal_reason = NULL, dismissal_notes = NULL,
+             updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [jobId]
+    );
+
+    // Reverse the requirement sweep (marker-gated), so anything auto-cancelled
+    // on dismissal comes back. Reuses the lost/cancelled resurrection helper —
+    // it re-activates rows carrying an auto-cancel marker in notes.
+    try {
+      await reactivateAutoCancelledRequirements(jobId);
+    } catch (e) {
+      console.warn('[Pipeline] undismiss requirement reactivation failed:', e);
+    }
+
+    await query(
+      `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation, source)
+       VALUES ('note', $1, $2, $3, $4, 'system')`,
+      ['↩️ Enquiry restored from dismissed', jobId, req.user!.id, job.pipeline_status]
+    );
+
+    await logAudit(req.user!.id, 'jobs', jobId, 'update', job, updated.rows[0]);
+
+    res.json({ success: true, message: 'Enquiry restored' });
+  } catch (error: any) {
+    console.error('Undismiss enquiry error:', error?.message || error);
+    res.status(500).json({ error: 'Failed to restore enquiry' });
   }
 });
 

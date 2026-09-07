@@ -105,6 +105,8 @@ interface Candidate {
   status: string;
   required: number;
   liability: number;
+  /** max(liability, stored required) — see the note where this is computed. */
+  effective: number;
   driverName: string | null;
   frozen: boolean;
   /** False for a cancelled/swapped assignment: can never win a slot, and is
@@ -200,6 +202,29 @@ export async function reconcileJobExcessTopN(
     frozen: r.frozen === true,
     eligible: r.eligible === true,
     terminal: r.terminal === true,
+    /*
+     * ⚠️ NEVER LOWER A DELIBERATELY-SET AMOUNT.
+     *
+     * `drivers.calculated_excess_amount` is the driver's standing liability,
+     * but a hire's record can legitimately be priced ABOVE it — an insurer
+     * surcharge written by referral resolution (`routes/drivers.ts`
+     * resolve-referral `adjusted_excess`), or a staff edit through
+     * `PUT /excess/:id`. NEITHER of those touches the driver column, and they
+     * shouldn't: an insurer's surcharge for one hire is not that person's
+     * permanent liability. The two are separate on purpose.
+     *
+     * So the reconcile ranks and prices on the GREATER of the two. Without
+     * this it re-priced an £1,800 insurer-imposed excess back down to the
+     * £1,200 floor the moment a second driver joined the hire — silently
+     * undoing the insurer's decision on money not yet collected (so the money
+     * guard, which only protects records that already hold cash, didn't catch
+     * it either). Raising to the driver's liability is a correction; lowering
+     * below a figure a human set is not.
+     */
+    effective: Math.max(
+      Number(r.liability) || STANDARD_EXCESS_PER_DRIVER,
+      Number(r.required) || 0,
+    ),
   }));
   if (candidates.length === 0) return EMPTY(vanCount);
 
@@ -227,7 +252,7 @@ export async function reconcileJobExcessTopN(
   // the incumbent holds the slot and repeated runs don't churn.
   const promotable = candidates
     .filter((c) => c.eligible && !occupantIds.has(c.id))
-    .sort((a, b) => b.liability - a.liability);
+    .sort((a, b) => b.effective - a.effective);
   const winners = promotable.slice(0, slotsLeft);
   const winnerIds = new Set(winners.map((w) => w.id));
 
@@ -235,7 +260,7 @@ export async function reconcileJobExcessTopN(
   // plus the best of the rest.
   const correctTotal =
     occupants.reduce((sum, o) => sum + o.required, 0) +
-    winners.reduce((sum, w) => sum + w.liability, 0);
+    winners.reduce((sum, w) => sum + w.effective, 0);
 
   const blocked: TopNBlockedSlot[] = [];
   // Only a MONEY-frozen occupant produces a warning. A terminal one is a
@@ -243,11 +268,11 @@ export async function reconcileJobExcessTopN(
   // "under-collected" against it would be nagging about a closed question.
   const moneyOccupants = occupants.filter((o) => !o.terminal);
   if (moneyOccupants.length > 0) {
-    const lowestFrozen = Math.min(...moneyOccupants.map((f) => f.liability));
+    const lowestFrozen = Math.min(...moneyOccupants.map((f) => f.effective));
     for (const c of promotable) {
       if (winnerIds.has(c.id)) continue;
-      if (c.liability > lowestFrozen) {
-        blocked.push({ driverName: c.driverName, shouldBe: c.liability, reason: 'frozen_incumbent' });
+      if (c.effective > lowestFrozen) {
+        blocked.push({ driverName: c.driverName, shouldBe: c.effective, reason: 'frozen_incumbent' });
       }
     }
   }
@@ -267,7 +292,7 @@ export async function reconcileJobExcessTopN(
     if (shouldCharge) {
       // Frozen records keep their stored amount untouched — re-pricing a record
       // that already holds cash is a money decision, not a reconciliation.
-      const target = isFrozen ? c.required : c.liability;
+      const target = isFrozen ? c.required : c.effective;
       chargeableTotal += target;
       const needsStatus = c.status === 'not_required';
       const needsAmount = !isFrozen && Math.abs(c.required - target) > 0.005;

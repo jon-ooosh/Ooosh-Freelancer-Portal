@@ -959,7 +959,7 @@ making, at the moment they're making it. The job picker stays visible when it's
 ticked: the allocation modal seeds its first line from that job at the full
 amount, so ticking the box is additive, never a mode switch.
 
-### Due date at capture (Sep 2026, migration 197)
+### Due date at capture (Sep 2026, migration 198)
 The due date is derived, not stored — but staff couldn't see it until the cost
 reached the Bills-to-Pay list. The capture modal now shows it at upload time,
 with the derived default and the terms behind it, and lets staff correct it.
