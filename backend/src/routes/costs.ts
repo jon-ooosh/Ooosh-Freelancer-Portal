@@ -70,6 +70,10 @@ const RUNNING_COST_CODES = new Set(['410', '411', '325']);
 
 const money = z.number().nonnegative().finite();
 
+// Xero allows 10 attachments per object and the main receipt takes one of them,
+// so a cost may carry at most 9 supporting documents.
+const MAX_SUPPORTING_DOCUMENTS = 9;
+
 const createSchema = z.object({
   supplier_name: z.string().trim().max(200).optional().nullable(),
   cost_date: z.string().trim().max(20).optional().nullable(),
@@ -104,6 +108,18 @@ const createSchema = z.object({
   cost_intent: z.enum(['quote_actual', 'extra']).optional().nullable(),
   receipt_r2_key: z.string().trim().max(500).optional().nullable(),
   receipt_filename: z.string().trim().max(200).optional().nullable(),
+  // Supporting evidence filed alongside the main receipt. Sent whole (idempotent
+  // replace) — the modal always posts the full list, so a removal is just a
+  // shorter array. Capped at MAX_SUPPORTING_DOCUMENTS so one cost can't blow the
+  // Xero per-object attachment limit.
+  supporting_documents: z.array(z.object({
+    r2_key: z.string().trim().min(1).max(500),
+    filename: z.string().trim().min(1).max(200),
+    content_type: z.string().trim().max(200).optional().nullable(),
+    size_bytes: z.number().int().nonnegative().optional().nullable(),
+    uploaded_at: z.string().trim().max(40).optional().nullable(),
+    uploaded_by: z.string().uuid().optional().nullable(),
+  })).max(MAX_SUPPORTING_DOCUMENTS).optional(),
   status: z.enum(['draft', 'confirmed', 'resolved']).optional(),
   notes: z.string().trim().max(10000).optional().nullable(),
   // Control flag (not a column): one-click "Approve & save" on a payable.
@@ -138,8 +154,19 @@ const WRITABLE = [
   'description', 'category', 'xero_account_code', 'cost_type', 'payment_method',
   'cot_card_holder', 'cot_card_last4', 'payment_status', 'job_id', 'vehicle_id',
   'quote_assignment_id', 'platform_issue_id', 'vehicle_service_log_id', 'vehicle_fuel_log_id',
-  'recharge_mode', 'recharge_amount', 'recharge_status', 'cost_intent', 'receipt_r2_key', 'receipt_filename', 'status', 'notes',
+  'recharge_mode', 'recharge_amount', 'recharge_status', 'cost_intent', 'receipt_r2_key', 'receipt_filename',
+  'supporting_documents', 'status', 'notes',
 ] as const;
+
+// ⚠️ node-postgres sends a JS array as a Postgres ARRAY literal ({"..."}), which
+// JSONB rejects — and an EMPTY array survives, so the bug only shows once
+// someone actually attaches something. Stringify before the generic column loop
+// writes it. Same lesson as JSONB_FIELDS in driver-verification.
+function serialiseJsonbForWrite(data: Record<string, unknown>) {
+  if (data.supporting_documents !== undefined) {
+    data.supporting_documents = JSON.stringify(data.supporting_documents ?? []);
+  }
+}
 
 // A quote_actual cost is already billed via its quote — it can never carry a
 // recharge. Coerce recharge off server-side (defence-in-depth; the modal also
@@ -783,6 +810,7 @@ router.post('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respon
 
     coerceRechargeForIntent(data);
     deriveRechargeStatusForWrite(data);
+    serialiseJsonbForWrite(data);
 
     // A payable (anything not already paid) enters the approval workflow. If the
     // booker is uploading it, they vouch for it inline → 'verified'. An approver
@@ -854,6 +882,7 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
     if (!parse.success) { res.status(400).json({ error: 'Invalid input', issues: parse.error.issues }); return; }
     const data = parse.data as Record<string, unknown>;
     coerceRechargeForIntent(data);
+    serialiseJsonbForWrite(data);
 
     // Keep recharge_status in step if recharge_mode is being changed — but never
     // clobber a terminal resolution (already pushed/absorbed) back to pending.
@@ -887,7 +916,10 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
         'supplier_name', 'description', 'vat_treatment', 'cost_date', 'payment_method', 'invoice_number',
         // The bill's Xero DueDate comes from resolveDueDate(), so an override edit
         // has to be re-syncable or OP and Xero disagree about when it's due.
-        'due_date_override'];
+        'due_date_override',
+        // Adding/removing supporting evidence after the push only reaches Xero
+        // via a re-sync — without this the doc sits in OP and never lands.
+        'supporting_documents'];
       if (XERO_AFFECTING.some((f) => data[f] !== undefined) && !updated.xero_stale) {
         const s = await query(`UPDATE costs SET xero_stale=TRUE WHERE id=$1 RETURNING xero_stale`, [updated.id]);
         updated.xero_stale = s.rows[0]?.xero_stale ?? true;

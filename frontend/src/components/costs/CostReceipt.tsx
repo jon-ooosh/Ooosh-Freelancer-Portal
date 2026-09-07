@@ -16,6 +16,8 @@ export interface ReceiptLike {
   receipt_r2_key?: string | null;
   receipt_filename?: string | null;
   supplier_name?: string | null;
+  /** Extra evidence filed with the same payable — surfaced as a "+N" pip. */
+  supporting_documents?: { r2_key: string; filename: string }[] | null;
 }
 
 /**
@@ -48,11 +50,22 @@ export function ReceiptThumb({ cost, onOpen, size = 'md' }: {
   }, [key]);
   if (!key) return null;
   const box = size === 'sm' ? 'w-6 h-6' : 'w-8 h-8';
+  // Supporting docs are extra evidence on the same payable. A count pip is
+  // enough here — the documents themselves are managed in the capture modal.
+  const extra = cost.supporting_documents?.length ?? 0;
   return (
-    <button onClick={onOpen} title="View receipt"
-      className={`shrink-0 ${box} rounded border border-gray-200 overflow-hidden bg-gray-50 flex items-center justify-center hover:border-purple-400`}>
-      {isImage && url ? <img src={url} alt="receipt" className="w-full h-full object-cover" /> : <span className="text-sm">📎</span>}
-    </button>
+    <span className="relative inline-flex shrink-0">
+      <button onClick={onOpen} title={extra ? `View receipt (+${extra} supporting)` : 'View receipt'}
+        className={`shrink-0 ${box} rounded border border-gray-200 overflow-hidden bg-gray-50 flex items-center justify-center hover:border-purple-400`}>
+        {isImage && url ? <img src={url} alt="receipt" className="w-full h-full object-cover" /> : <span className="text-sm">📎</span>}
+      </button>
+      {extra > 0 && (
+        <span className="absolute -top-1 -right-1 px-1 min-w-[14px] text-[9px] leading-[14px] text-center font-semibold
+                         text-white bg-purple-600 rounded-full pointer-events-none">
+          +{extra}
+        </span>
+      )}
+    </span>
   );
 }
 

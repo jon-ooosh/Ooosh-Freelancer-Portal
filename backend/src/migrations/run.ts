@@ -234,6 +234,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '197_enquiry_dismissal.sql',
         '198_cost_due_date_override.sql',
         '199_driver_verification_codes.sql',
+        '200_cost_supporting_documents.sql',
       ];
 
       for (const migration of migrations) {
