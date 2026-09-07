@@ -4,8 +4,8 @@
  * Two flows, picked by payment_method:
  *
  *   Paid-now (cot_card / amex / lloyds_cc / petty_cash / paypal / wise /
- *   lloyds_transfer) → a Spend Money on the mapped bank account + receipt
- *   attach. Codat's bank-feed line auto-suggests it for one-click reconcile.
+ *   lloyds_transfer) → a Spend Money on the mapped bank account + the
+ *   document set attached. Codat's bank-feed line auto-suggests it for one-click reconcile.
  *
  *   Pay-later (not_yet_paid / reimburse_me) → an AUTHORISED ACCPAY bill, created
  *   when the cost is APPROVED in OP (so it lands in Xero's "Bills to pay"). When
@@ -22,7 +22,7 @@
  * State machine (costs.xero_sync_state):
  *   pending      → fresh / unpushed / awaiting approval
  *   bill_created → Spend Money OR bill created in Xero
- *   attached     → + receipt attached
+ *   attached     → + receipt (and any supporting documents) attached
  *   reconciled   → bank line matched in Xero (future, set by reconcile sync)
  *   error        → push failed; xero_error has the message; manual retry surfaces
  *
@@ -37,6 +37,7 @@ import { getFromR2, isR2Configured } from '../config/r2';
 import { isXeroConfigured } from '../config/xero';
 import { xeroBroker, XeroApiError, XeroLineItem } from './xero-broker';
 import { getSystemSetting } from '../routes/system-settings';
+import { collectDocuments, hasDocuments, type CostDocumentRow } from './cost-documents';
 
 // Paid-now methods → Spend Money on the mapped bank/card account.
 // (Exported for the reconcile sync — cost-xero-reconcile-sync.ts.)
@@ -52,19 +53,6 @@ async function streamToBuffer(stream: Readable): Promise<Buffer> {
     chunks.push(chunk instanceof Buffer ? chunk : Buffer.from(chunk));
   }
   return Buffer.concat(chunks);
-}
-
-function guessContentType(filename: string): string {
-  const ext = filename.toLowerCase().split('.').pop() || '';
-  return {
-    pdf: 'application/pdf',
-    png: 'image/png',
-    jpg: 'image/jpeg',
-    jpeg: 'image/jpeg',
-    gif: 'image/gif',
-    webp: 'image/webp',
-    heic: 'image/heic',
-  }[ext] || 'application/octet-stream';
 }
 
 async function recordError(costId: string, message: string): Promise<void> {
@@ -135,6 +123,7 @@ interface CostRow {
   paid_at: string | null;
   receipt_r2_key: string | null;
   receipt_filename: string | null;
+  supporting_documents: CostDocumentRow[] | null;
   uploaded_by_name: string | null;
 }
 
@@ -244,18 +233,33 @@ async function buildCostLineItems(
   };
 }
 
-async function attachReceipt(
+/**
+ * Attach the receipt + every supporting document to the Xero object.
+ *
+ * The set (and its collision-safe filenames) comes from collectDocuments — see
+ * services/cost-documents.ts for why the renaming matters.
+ *
+ * Throws on the FIRST failure so the caller can surface it. The part of the set
+ * that did land stays attached (Xero attachments are independent) and a re-sync
+ * re-attaches the lot idempotently by filename.
+ */
+async function attachDocuments(
   cost: CostRow,
   entity: 'Invoices' | 'BankTransactions',
   entityId: string,
-): Promise<string | null> {
-  if (!(cost.receipt_r2_key && cost.receipt_filename && isR2Configured())) return null;
-  const r2obj = await getFromR2(cost.receipt_r2_key);
-  const body = r2obj.Body as Readable | undefined;
-  if (!body) throw new Error('Receipt body unavailable from R2');
-  const buffer = await streamToBuffer(body);
-  await xeroBroker.attachReceipt(entity, entityId, cost.receipt_filename, buffer, guessContentType(cost.receipt_filename));
-  return entityId;
+): Promise<number> {
+  if (!isR2Configured()) return 0;
+  const docs = collectDocuments(cost);
+  let attached = 0;
+  for (const doc of docs) {
+    const r2obj = await getFromR2(doc.r2Key);
+    const body = r2obj.Body as Readable | undefined;
+    if (!body) throw new Error(`Document body unavailable from R2: ${doc.filename}`);
+    const buffer = await streamToBuffer(body);
+    await xeroBroker.attachReceipt(entity, entityId, doc.filename, buffer, doc.contentType);
+    attached += 1;
+  }
+  return attached;
 }
 
 // ── Spend Money flow (paid-now methods) ──────────────────────────────────────
@@ -308,10 +312,10 @@ async function pushSpendMoney(cost: CostRow): Promise<PushResult> {
     [bankTransactionID, cost.id]
   );
 
-  // Receipt attach is non-fatal — the Spend Money is the important leg.
-  if (cost.receipt_r2_key) {
+  // Document attach is non-fatal — the Spend Money is the important leg.
+  if (hasDocuments(cost)) {
     try {
-      await attachReceipt(cost, 'BankTransactions', bankTransactionID);
+      await attachDocuments(cost, 'BankTransactions', bankTransactionID);
       await query(`UPDATE costs SET xero_sync_state='attached', xero_synced_at=NOW() WHERE id=$1`, [cost.id]);
     } catch (err) {
       const msg = err instanceof XeroApiError ? `Receipt attach: ${err.message}` : err instanceof Error ? err.message : String(err);
@@ -415,9 +419,9 @@ async function pushBill(cost: CostRow): Promise<PushResult> {
     cost.xero_object_id = invoiceID;
     cost.xero_sync_state = 'bill_created';
 
-    if (cost.receipt_r2_key) {
+    if (hasDocuments(cost)) {
       try {
-        await attachReceipt(cost, 'Invoices', invoiceID);
+        await attachDocuments(cost, 'Invoices', invoiceID);
         await query(`UPDATE costs SET xero_sync_state='attached', xero_synced_at=NOW() WHERE id=$1`, [cost.id]);
         cost.xero_sync_state = 'attached';
       } catch (err) {
@@ -630,9 +634,22 @@ async function resyncCostToXeroLocked(costId: string): Promise<PushResult & { lo
     return { pushed: false, error: msg };
   }
 
+  // Re-attach the document set. A supporting doc added after the original push
+  // has no other route to Xero, and re-attaching is idempotent (same filenames
+  // overwrite in place). Non-fatal — the figures are the important leg.
+  let attachError: string | undefined;
+  if (hasDocuments(cost)) {
+    try {
+      await attachDocuments(cost, isBill ? 'Invoices' : 'BankTransactions', cost.xero_object_id);
+    } catch (err) {
+      attachError = err instanceof XeroApiError ? `Document attach: ${err.message}`
+        : err instanceof Error ? err.message : String(err);
+    }
+  }
+
   await query(
-    `UPDATE costs SET xero_stale=FALSE, xero_synced_at=NOW(), xero_error=NULL WHERE id=$1`,
-    [cost.id]
+    `UPDATE costs SET xero_stale=FALSE, xero_synced_at=NOW(), xero_error=$2 WHERE id=$1`,
+    [cost.id, attachError ? attachError.slice(0, 500) : null]
   );
-  return { pushed: true, invoiceID: cost.xero_object_id };
+  return { pushed: true, invoiceID: cost.xero_object_id, ...(attachError ? { error: attachError } : {}) };
 }

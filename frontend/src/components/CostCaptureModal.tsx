@@ -16,7 +16,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { hasManagerRole } from '../lib/roles';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
-import type { Cost, CostType, CostPaymentMethod, CostPaymentStatus, CostRechargeMode, CostIntent } from '../../../shared/types';
+import type { Cost, CostDocument, CostType, CostPaymentMethod, CostPaymentStatus, CostRechargeMode, CostIntent } from '../../../shared/types';
 
 interface Props {
   onClose: () => void;
@@ -76,6 +76,10 @@ const PAYMENT_METHODS: { group: string; value: CostPaymentMethod; label: string 
 const PAYMENT_METHOD_GROUPS = Array.from(new Set(PAYMENT_METHODS.map((m) => m.group)));
 // Keep in step with BILL_METHODS in backend routes/costs.ts + cost-xero-push.ts.
 const BILL_METHODS: CostPaymentMethod[] = ['not_yet_paid', 'reimburse_me'];
+
+// Xero takes 10 attachments per object; the main receipt claims one of them.
+// Mirrors MAX_SUPPORTING_DOCUMENTS in backend routes/costs.ts.
+const MAX_SUPPORTING_DOCS = 9;
 
 // 'reclaim' = non-standard "VAT-only" invoice (insurance claim): enter the
 // No-VAT amount (the excess) as Net + the reclaimable VAT; gross = net + vat.
@@ -204,6 +208,15 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
   const [aiPrefilled, setAiPrefilled] = useState(false);
   const [aiConfidence, setAiConfidence] = useState<'high' | 'medium' | 'low' | null>(null);
   const [receiptIsPdf, setReceiptIsPdf] = useState(false);
+  // Supporting evidence filed alongside the main receipt (the freelancer's fuel
+  // receipt behind their invoice, a delivery note). Deliberately opt-in and out
+  // of the way — the overwhelming majority of costs are one receipt and nothing
+  // else, and those staff shouldn't pay for this at all.
+  const [supportingDocs, setSupportingDocs] = useState<CostDocument[]>(existing?.supporting_documents ?? []);
+  const [newSupportingFiles, setNewSupportingFiles] = useState<File[]>([]);
+  const [showSupporting, setShowSupporting] = useState(
+    Boolean(existing?.supporting_documents?.length),
+  );
   // AI-spotted job number (suggestion only — staff confirm to link).
   const [suggestedJobNumber, setSuggestedJobNumber] = useState<string | null>(null);
   const [linkingSuggestion, setLinkingSuggestion] = useState(false);
@@ -677,6 +690,18 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
     } catch { setError('Could not open the saved receipt.'); }
   }, [existing]);
 
+  const viewSupportingDoc = useCallback(async (doc: CostDocument) => {
+    try {
+      const { blob } = await api.blob(`/files/download?key=${encodeURIComponent(doc.r2_key)}`);
+      window.open(URL.createObjectURL(blob), '_blank');
+    } catch { setError(`Could not open ${doc.filename}.`); }
+  }, []);
+
+  const totalSupporting = supportingDocs.length + newSupportingFiles.length;
+  // Whether this cost becomes a Xero bill (pay-later) or a spend-money
+  // transaction — only affects the wording on the supporting-docs block.
+  const isBillMethod = BILL_METHODS.includes(paymentMethod);
+
   // Recharge is only possible on a job-linked cost that's flagged "extra" — a
   // quote_actual cost is already billed via its quote.
   const canRecharge = Boolean(linkedJobId) && costIntent === 'extra';
@@ -723,6 +748,27 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
         const up = await api.upload<{ r2_key: string; filename: string }>('/files/upload', fd);
         receiptKey = up.r2_key;
         receiptName = up.filename;
+      }
+
+      // Supporting docs: upload the pending files, then send the WHOLE list
+      // (already-saved + new). The array is an idempotent replace server-side,
+      // so a removal is simply a shorter list.
+      let allSupporting = supportingDocs;
+      if (newSupportingFiles.length) {
+        const uploaded = await Promise.all(newSupportingFiles.map(async (file) => {
+          const dfd = new FormData();
+          dfd.append('file', file);
+          dfd.append('attachment_only', 'true');
+          const up = await api.upload<{ r2_key: string; filename: string }>('/files/upload', dfd);
+          return {
+            r2_key: up.r2_key,
+            filename: up.filename,
+            content_type: file.type || null,
+            size_bytes: file.size,
+            uploaded_at: new Date().toISOString(),
+          } as CostDocument;
+        }));
+        allSupporting = [...supportingDocs, ...uploaded];
       }
       // cot_card_holder + cot_card_last4 are stamped server-side from the
       // uploader's user record — staff don't enter them on the modal.
@@ -777,6 +823,7 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
         cost_intent: linkedJobId ? costIntent : null,
         receipt_r2_key: receiptKey,
         receipt_filename: receiptName,
+        supporting_documents: allSupporting,
         notes: notes || null,
         // Always send job_id + vehicle_id so edit-mode can change/clear the links.
         job_id: linkedJobId || null,
@@ -905,6 +952,70 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
               )}
               {!receiptFile && !existing?.receipt_filename && (
                 <div className="text-sm text-gray-400 italic">No receipt attached yet — choose a file above.</div>
+              )}
+            </div>
+
+            {/* Supporting documents. Collapsed to one quiet link until asked for
+                — a fuel receipt captured in twenty seconds must not have to
+                walk past this. Everything filed here rides to Xero on the same
+                bill, so the evidence sits with the payable. */}
+            <div className="mt-3 pt-3 border-t border-gray-100">
+              {!showSupporting && totalSupporting === 0 ? (
+                <button type="button" onClick={() => setShowSupporting(true)}
+                  className="text-xs text-gray-500 hover:text-purple-700 hover:underline">
+                  ＋ Add supporting documents
+                </button>
+              ) : (
+                <div>
+                  <div className="flex items-baseline justify-between mb-1">
+                    <span className="text-sm font-medium text-gray-700">Supporting documents</span>
+                    <span className="text-xs text-gray-400">{totalSupporting}/{MAX_SUPPORTING_DOCS}</span>
+                  </div>
+                  <p className="text-xs text-gray-500 mb-2">
+                    Extra evidence for the same invoice — a fuel receipt, a delivery note.
+                    Sent to Xero with the {isBillMethod ? 'bill' : 'transaction'}.
+                  </p>
+
+                  {supportingDocs.map((doc, i) => (
+                    <div key={`${doc.r2_key}-${i}`} className="flex items-center gap-2 text-sm text-gray-700 py-1">
+                      <span className="truncate">📄 {doc.filename}</span>
+                      <button type="button" onClick={() => viewSupportingDoc(doc)}
+                        className="text-purple-700 hover:underline text-xs shrink-0">View</button>
+                      <button type="button" title="Remove"
+                        onClick={() => setSupportingDocs((prev) => prev.filter((_, j) => j !== i))}
+                        className="ml-auto text-gray-400 hover:text-red-600 shrink-0">&times;</button>
+                    </div>
+                  ))}
+                  {newSupportingFiles.map((file, i) => (
+                    <div key={`new-${file.name}-${i}`} className="flex items-center gap-2 text-sm text-gray-700 py-1">
+                      <span className="truncate">📄 {file.name}</span>
+                      <span className="text-xs text-gray-400 shrink-0">not saved yet</span>
+                      <button type="button" title="Remove"
+                        onClick={() => setNewSupportingFiles((prev) => prev.filter((_, j) => j !== i))}
+                        className="ml-auto text-gray-400 hover:text-red-600 shrink-0">&times;</button>
+                    </div>
+                  ))}
+
+                  {totalSupporting < MAX_SUPPORTING_DOCS ? (
+                    <input type="file" multiple accept="image/*,application/pdf"
+                      className="text-xs mt-2 w-full"
+                      onChange={(e) => {
+                        // Capture the list BEFORE clearing the input — reading
+                        // e.target.files inside the deferred updater finds it
+                        // already emptied.
+                        const picked = Array.from(e.target.files || []);
+                        e.target.value = '';
+                        if (picked.length) {
+                          setNewSupportingFiles((prev) =>
+                            [...prev, ...picked].slice(0, MAX_SUPPORTING_DOCS - supportingDocs.length));
+                        }
+                      }} />
+                  ) : (
+                    <p className="text-xs text-amber-700 mt-2">
+                      That&apos;s the maximum Xero accepts on one {isBillMethod ? 'bill' : 'transaction'}.
+                    </p>
+                  )}
+                </div>
               )}
             </div>
           </div>
@@ -1356,7 +1467,6 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
           {(() => {
             const serviceOnlySave = serviceOnlyEligible && (vatMode === 'reclaim' ? Number(amountNet) <= 0 : Number(amountGross) <= 0);
             if (serviceOnlySave) return null;
-            const isBillMethod = BILL_METHODS.includes(paymentMethod);
             return (
               <p className="text-xs text-gray-500">
                 {isBillMethod ? (

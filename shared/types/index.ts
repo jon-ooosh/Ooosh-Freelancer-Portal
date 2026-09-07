@@ -1056,6 +1056,20 @@ export interface SupplierPaymentTerms {
   source: 'manual' | 'xero' | 'default' | 'freelancer';
 }
 
+/**
+ * One supporting document filed against a cost. `r2_key` is a private-bucket
+ * key — fetch it through the authenticated /files/download helper, never as a
+ * plain <img src>.
+ */
+export interface CostDocument {
+  r2_key: string;
+  filename: string;
+  content_type?: string | null;
+  size_bytes?: number | null;
+  uploaded_at?: string | null;
+  uploaded_by?: string | null;
+}
+
 export interface Cost {
   id: string;
   uploaded_by: string | null;
@@ -1121,6 +1135,12 @@ export interface Cost {
   remittance_email?: string | null;
   receipt_r2_key: string | null;
   receipt_filename: string | null;
+  /**
+   * Extra evidence filed with this payable alongside the main receipt — a
+   * freelancer's fuel receipt behind their invoice, a delivery note, a warranty
+   * card. One payable, one Xero bill; these ride along as extra attachments.
+   */
+  supporting_documents?: CostDocument[];
   xero_sync_state: CostXeroSyncState;
   xero_object_id: string | null;
   xero_payment_id: string | null;

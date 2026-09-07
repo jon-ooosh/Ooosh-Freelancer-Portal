@@ -983,6 +983,47 @@ with the derived default and the terms behind it, and lets staff correct it.
   document's own answer beats our derived guess. Cleared back to the rule in one
   click.
 
+### Supporting documents (Sep 2026, migration 199)
+A payable often arrives with more evidence than the one document the AI reads. A
+freelancer invoices £250 labour + £60 fuel + £15 train and encloses the fuel
+receipt — and that receipt is what makes the £10 VAT reclaimable. Previously
+there was nowhere to put it: `costs` had exactly one `receipt_r2_key`.
+
+**Model.** `costs.supporting_documents` — a JSONB array of
+`{r2_key, filename, content_type, size_bytes, uploaded_at, uploaded_by}`. The
+main receipt is unchanged. **One payable, one Xero bill, several attachments** —
+this adds evidence, not lines. Splitting a payable into differently-coded /
+differently-VAT-rated lines is a separate piece of work (`cost_lines`).
+
+**Filename collisions are the real hazard.** Xero keys an attachment by its
+FILENAME: a `PUT` to a name the object already has overwrites it, silently, with
+a 200. Two files both called `receipt.pdf` on one bill means the second does not
+exist. `services/cost-documents.ts` `collectDocuments()` renames duplicates in
+the **payload only** (`receipt.pdf`, `receipt-1.pdf`) — OP keeps the name staff
+uploaded. The rename is deterministic, so a re-sync overwrites the same
+attachments rather than piling up new ones. It's a pure module with unit tests
+precisely because the failure it prevents is invisible.
+
+**Limits.** Xero takes 10 attachments per object; the main receipt claims one,
+so supporting docs cap at 9 (enforced in the Zod schema and the modal, truncated
+receipt-first in `collectDocuments` so the receipt is never the one dropped).
+
+**Reaching Xero.** Attached on the original push (both the Spend Money and bill
+paths) and re-attached on `resyncCostToXero` — a doc added after the push has no
+other route. `supporting_documents` is in `XERO_AFFECTING` so adding one flags
+`xero_stale`. Attach failure stays non-fatal: the figures are the important leg.
+
+**UI.** One quiet "＋ Add supporting documents" link under the receipt pane,
+expanding only when asked for or when docs already exist — a fuel receipt
+captured in twenty seconds must not have to walk past it. The shared
+`ReceiptThumb` carries a `+N` pip so the Costs hub and the Money tab both show
+that extra paperwork is filed.
+
+**Worked example** — the £325 freelancer invoice. Labour £250, fuel £50 + £10
+VAT, train £15 (zero-rated, so no VAT to recover there). Today this is one cost
+at £325 with the invoice as the receipt and the fuel receipt filed alongside as
+evidence; the VAT split across lines is the `cost_lines` work.
+
 ### Bills to Pay — sortable Due + filters
 The Due column is now click-to-sort, and the payable view gained due-date filter
 pills: **Overdue / This Friday / This week / Next 7 days** (client-side over the
