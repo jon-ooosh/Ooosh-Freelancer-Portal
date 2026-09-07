@@ -53,6 +53,19 @@ import { jobClientName, jobClientNameOr } from '../lib/jobOrgName';
 // an inline array literal would refetch on every parent render.
 const HELD_KINDS = ['incoming', 'temp_storage', 'lost_property'] as const;
 
+// Enquiry dismissal reasons (migration 196) — keep in step with the backend
+// DISMISSAL_REASONS enum in routes/pipeline.ts.
+const DISMISSAL_REASON_OPTIONS: { value: string; label: string; hint: string }[] = [
+  { value: 'spam', label: 'Spam', hint: 'Bot / junk submission' },
+  { value: 'not_an_enquiry', label: 'Not an enquiry', hint: 'A message that isn’t a booking request' },
+  { value: 'about_an_existing_job', label: 'About an existing job', hint: 'Belongs on another job, not a new one' },
+  { value: 'duplicate', label: 'Duplicate', hint: 'Same enquiry already logged' },
+  { value: 'other', label: 'Other', hint: 'Something else — add a note' },
+];
+const DISMISSAL_REASON_LABELS: Record<string, string> = Object.fromEntries(
+  DISMISSAL_REASON_OPTIONS.map((o) => [o.value, o.label])
+);
+
 const STATUS_MAP: Record<number, string> = {
   0: 'Enquiry', 1: 'Provisional', 2: 'Booked', 3: 'Prepped',
   4: 'Part Dispatched', 5: 'Dispatched', 6: 'Returned Incomplete',
@@ -167,6 +180,10 @@ interface JobDetail {
   lost_at?: string | null;
   lost_reason?: string | null;
   lost_detail?: string | null;
+  // Dismissal (migration 196) — dud/spam/orphan enquiry, distinct from Lost
+  dismissed_at?: string | null;
+  dismissal_reason?: string | null;
+  dismissal_notes?: string | null;
   has_client_email?: boolean;
 }
 
@@ -2233,6 +2250,9 @@ export default function JobDetailPage() {
   const [showTransitionModal, setShowTransitionModal] = useState(false);
   const [transitionTarget, setTransitionTarget] = useState<PipelineStatus | null>(null);
   const [transitionSaving, setTransitionSaving] = useState(false);
+
+  // Dismiss enquiry (dud/spam/orphan) state
+  const [showDismissModal, setShowDismissModal] = useState(false);
   const statusDropdownRef = useRef<HTMLDivElement>(null);
 
   // Close status dropdown on outside click
@@ -2287,6 +2307,18 @@ export default function JobDetailPage() {
       }
     } else {
       handleStatusTransition(targetStatus);
+    }
+  }
+
+  async function handleUndismiss() {
+    if (!job) return;
+    if (!window.confirm('Restore this enquiry? It will return to the pipeline board.')) return;
+    try {
+      await api.post(`/pipeline/${job.id}/undismiss`, {});
+      await loadJob();
+    } catch (err) {
+      console.error('Undismiss failed:', err);
+      alert('Failed to restore enquiry');
     }
   }
 
@@ -3388,6 +3420,33 @@ export default function JobDetailPage() {
         </div>
       )}
 
+      {/* Dismissed banner — dud/spam/orphan enquiry. Grey (not red/orange):
+          this isn't a commercial outcome, it's noise removed from the board.
+          Restore returns it to the pipeline. */}
+      {job.dismissed_at && (
+        <div className="bg-gray-100 border border-gray-300 rounded-xl p-4 mb-4">
+          <div className="flex items-start gap-3 flex-wrap">
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-bold text-gray-700">
+                🗑️ Enquiry dismissed
+                {` on ${new Date(job.dismissed_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`}
+                {job.dismissal_reason ? ` — ${DISMISSAL_REASON_LABELS[job.dismissal_reason] || job.dismissal_reason}` : ''}
+              </p>
+              {job.dismissal_notes && (
+                <p className="text-xs text-gray-600 mt-1">{job.dismissal_notes}</p>
+              )}
+              <p className="text-xs text-gray-500 mt-1">Hidden from the pipeline board and analytics. Not counted as Lost.</p>
+            </div>
+            <button
+              onClick={handleUndismiss}
+              className="text-xs px-3 py-1.5 bg-gray-700 text-white rounded-lg hover:bg-gray-800 whitespace-nowrap text-center shrink-0"
+            >
+              ↩️ Restore enquiry
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* No client email warning — automated emails for this job will be
           redirected to info@. Suppressed on internal jobs (garage visits etc.)
           where there's deliberately no client to email. */}
@@ -3509,6 +3568,21 @@ export default function JobDetailPage() {
                           </button>
                         );
                       })}
+                      {/* Dismiss — dud/spam/orphan enquiry. Enquiry-stage only;
+                          distinct from Lost (a real commercial outcome). */}
+                      {['new_enquiry', 'quoting', 'paused'].includes(job.pipeline_status || '') && (
+                        <>
+                          <div className="my-1 border-t border-gray-100" />
+                          <button
+                            onClick={() => { setShowStatusDropdown(false); setShowDismissModal(true); }}
+                            className="w-full text-left px-3 py-1.5 text-sm text-gray-500 hover:bg-gray-50 flex items-center gap-2"
+                            title="Dud / spam / not a real enquiry — hides it from the pipeline without counting as Lost"
+                          >
+                            <span className="w-2 h-2 rounded-full bg-gray-400" />
+                            Dismiss enquiry…
+                          </button>
+                        </>
+                      )}
                     </div>
                   )}
                 </div>
@@ -6464,6 +6538,19 @@ export default function JobDetailPage() {
           onCancel={() => { setShowTransitionModal(false); setTransitionTarget(null); }}
         />
       )}
+
+      {showDismissModal && job && (
+        <DismissEnquiryModal
+          jobName={job.job_name || 'this enquiry'}
+          onClose={() => setShowDismissModal(false)}
+          onDismissed={async () => {
+            setShowDismissModal(false);
+            await loadJob();
+            await loadInteractions();
+          }}
+          submit={(payload) => api.post(`/pipeline/${job.id}/dismiss`, payload)}
+        />
+      )}
       </div>
 
       {/* Client trading history sidebar (desktop only) */}
@@ -8217,6 +8304,103 @@ function JobFilesSection({
 }
 
 // ── Helper Components ─────────────────────────────────────────────────────
+
+function DismissEnquiryModal({
+  jobName,
+  onClose,
+  onDismissed,
+  submit,
+}: {
+  jobName: string;
+  onClose: () => void;
+  onDismissed: () => void;
+  submit: (payload: { reason: string; notes: string | null; cleanup_orphans: boolean }) => Promise<{ cleaned?: { orgs: string[]; people: string[] } }>;
+}) {
+  const [reason, setReason] = useState('spam');
+  const [notes, setNotes] = useState('');
+  const [cleanupOrphans, setCleanupOrphans] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleSubmit = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      await submit({ reason, notes: notes.trim() || null, cleanup_orphans: cleanupOrphans });
+      onDismissed();
+    } catch (err: unknown) {
+      const body = (err as { body?: { error?: string } })?.body;
+      setError(body?.error || 'Failed to dismiss enquiry');
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-5" onClick={(e) => e.stopPropagation()}>
+        <h3 className="text-lg font-bold text-gray-900">Dismiss enquiry</h3>
+        <p className="text-sm text-gray-500 mt-1">
+          Removes <strong>{jobName}</strong> from the pipeline board and analytics.
+          This is for duds — it does <strong>not</strong> count as a Lost enquiry, and you can restore it later.
+        </p>
+
+        <label className="block mt-4 text-xs font-semibold text-gray-600 uppercase tracking-wide">Reason</label>
+        <div className="mt-2 space-y-1.5">
+          {DISMISSAL_REASON_OPTIONS.map((o) => (
+            <label key={o.value} className="flex items-start gap-2 cursor-pointer p-1.5 rounded hover:bg-gray-50">
+              <input
+                type="radio"
+                name="dismiss-reason"
+                value={o.value}
+                checked={reason === o.value}
+                onChange={() => setReason(o.value)}
+                className="mt-0.5"
+              />
+              <span className="text-sm text-gray-800">
+                {o.label}
+                <span className="block text-xs text-gray-400">{o.hint}</span>
+              </span>
+            </label>
+          ))}
+        </div>
+
+        <label className="block mt-3 text-xs font-semibold text-gray-600 uppercase tracking-wide">Notes (optional)</label>
+        <textarea
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          rows={2}
+          className="mt-1 w-full border border-gray-300 rounded-md px-2.5 py-1.5 text-sm resize-y"
+          placeholder="Anything worth recording…"
+        />
+
+        <label className="flex items-start gap-2 mt-3 cursor-pointer">
+          <input type="checkbox" checked={cleanupOrphans} onChange={(e) => setCleanupOrphans(e.target.checked)} className="mt-0.5" />
+          <span className="text-sm text-gray-700">
+            Tidy up orphan records
+            <span className="block text-xs text-gray-400">
+              Delete the client/contact that this enquiry created, if nothing else uses them. Records linked to other jobs are always left alone.
+            </span>
+          </span>
+        </label>
+
+        {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
+
+        <div className="flex justify-end gap-2 mt-5">
+          <button onClick={onClose} disabled={saving} className="px-3.5 py-1.5 text-sm text-gray-600 hover:text-gray-800 disabled:opacity-50">
+            Cancel
+          </button>
+          <button
+            onClick={handleSubmit}
+            disabled={saving}
+            className="px-3.5 py-1.5 text-sm font-semibold bg-gray-700 text-white rounded-md hover:bg-gray-800 disabled:opacity-50"
+          >
+            {saving ? 'Dismissing…' : 'Dismiss enquiry'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function StatusTransitionModal({
   targetStatus,
