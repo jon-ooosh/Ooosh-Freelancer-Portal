@@ -2082,6 +2082,228 @@ const addToHireSchema = z.object({
   vehicle_ids: z.array(z.string().uuid()).min(1).max(10),
 });
 
+interface AddToHireSibling {
+  vehicle_id: string;
+  vehicle_reg: string;
+  hire_end: Date | null;
+  return_overnight: boolean | null;
+}
+
+interface AddToHireAffected {
+  id: string;
+  vehicle_id: string;
+  vehicle_reg: string;
+  is_clone: boolean;
+}
+
+/**
+ * Core add-to-hire: link a mid-tour driver's soft/confirmed assignment to one or
+ * more already-booked-out vans on the same job, then fire the standard
+ * post-book-out hook chain per resulting assignment (agreement PDF + email,
+ * fleet status, OOH, auto-dispatch, requirement sync).
+ *
+ * Shared by the staff `POST /:id/add-to-hire` route and the automatic
+ * clean-mid-tour-driver path in post-signature. Callers own pre-validation
+ * (source state, sibling resolution); this just performs the transactional
+ * link/clone + hooks. `siblings` MUST be non-empty and each MUST be a van
+ * genuinely booked out on the job. Manages its own transaction connection.
+ */
+async function executeAddToHire(opts: {
+  source: Record<string, any>;
+  siblings: AddToHireSibling[];
+  actorUserId: string;
+  actorLabel: string;
+}): Promise<AddToHireAffected[]> {
+  const { source, siblings, actorUserId, actorLabel } = opts;
+  const sourceId: string = source.id;
+  const dbClient = await getPool().connect();
+
+  try {
+    await dbClient.query('BEGIN');
+
+    const affected: Array<AddToHireAffected & {
+      return_overnight: boolean | null;
+      hire_form_emailed_at: Date | null;
+    }> = [];
+
+    // First van: update source row. start_time = LOCALTIME (now) because the
+    // driver only became authorised at this moment.
+    const first = siblings[0];
+    const firstUpdate = await dbClient.query(
+      `UPDATE vehicle_hire_assignments
+       SET vehicle_id = $1,
+           hire_start = CURRENT_DATE,
+           start_time = LOCALTIME,
+           hire_end = COALESCE($2, hire_end),
+           return_overnight = $3,
+           status = 'booked_out',
+           status_changed_at = NOW(),
+           booked_out_at = NOW(),
+           booked_out_by = $4,
+           updated_at = NOW()
+       WHERE id = $5
+       RETURNING id, vehicle_id, return_overnight, hire_form_emailed_at`,
+      [first.vehicle_id, first.hire_end, first.return_overnight, actorUserId, sourceId]
+    );
+    const firstRow = firstUpdate.rows[0];
+    affected.push({
+      id: firstRow.id,
+      vehicle_id: firstRow.vehicle_id,
+      vehicle_reg: first.vehicle_reg,
+      return_overnight: firstRow.return_overnight,
+      hire_form_emailed_at: firstRow.hire_form_emailed_at,
+      is_clone: false,
+    });
+
+    // Additional vans: clone source row, one per van.
+    for (let i = 1; i < siblings.length; i++) {
+      const sib = siblings[i];
+      const cloneResult = await dbClient.query(
+        `INSERT INTO vehicle_hire_assignments (
+           vehicle_id, job_id, hirehop_job_id, hirehop_job_name,
+           driver_id, assignment_type, van_requirement_index,
+           required_type, required_gearbox,
+           status, status_changed_at,
+           hire_start, hire_end, start_time, end_time, return_overnight,
+           booked_out_at, booked_out_by,
+           client_email,
+           notes, allocated_by_name, created_by
+         )
+         VALUES (
+           $1, $2, $3, $4,
+           $5, $6, $7,
+           $8, $9,
+           'booked_out', NOW(),
+           CURRENT_DATE, $10, LOCALTIME, $11, $12,
+           NOW(), $13,
+           $14,
+           $15, $16, $17
+         )
+         RETURNING id, vehicle_id, return_overnight, hire_form_emailed_at`,
+        [
+          sib.vehicle_id,
+          source.job_id,
+          source.hirehop_job_id,
+          source.hirehop_job_name,
+          source.driver_id,
+          source.assignment_type,
+          source.van_requirement_index ?? 0,
+          source.required_type,
+          source.required_gearbox,
+          sib.hire_end,
+          source.end_time,
+          sib.return_overnight,
+          actorUserId,
+          source.client_email,
+          `Cloned from assignment ${sourceId} for mid-tour add-to-hire (multi-van).`,
+          source.allocated_by_name,
+          actorUserId,
+        ]
+      );
+      const cloneRow = cloneResult.rows[0];
+      affected.push({
+        id: cloneRow.id,
+        vehicle_id: cloneRow.vehicle_id,
+        vehicle_reg: sib.vehicle_reg,
+        return_overnight: cloneRow.return_overnight,
+        hire_form_emailed_at: cloneRow.hire_form_emailed_at,
+        is_clone: true,
+      });
+    }
+
+    // Log interaction on the job timeline — one auditable trail line.
+    if (source.job_id) {
+      const regList = affected.map(a => a.vehicle_reg).join(', ');
+      const driverDisplay = source.driver_name || 'Driver';
+      await dbClient.query(
+        `INSERT INTO interactions (type, content, job_id, created_by, source)
+         VALUES ('note', $1, $2, $3, 'system')`,
+        [
+          `🚐 ${driverDisplay} added mid-hire to ${regList} (hire window inherited from existing booking; hire start set to ${new Date().toLocaleString('en-GB')}).`,
+          source.job_id,
+          actorUserId,
+        ]
+      );
+    }
+
+    await dbClient.query('COMMIT');
+
+    // Fire the post-book-out hook chain per affected assignment (fleet status,
+    // agreement PDF + email, multi-van fan-out, OOH, auto-dispatch). Per-van
+    // hooks need per-row calls; per-job hooks are idempotent.
+    for (const a of affected) {
+      firePostBookOutHooks({
+        assignmentId: a.id,
+        vehicleId: a.vehicle_id,
+        jobId: source.job_id ?? null,
+        hhJobNumber: source.hirehop_job_id ?? null,
+        returnOvernight: a.return_overnight,
+        hireFormEmailedAt: a.hire_form_emailed_at,
+        actorLabel,
+        actorUserId,
+      });
+    }
+
+    // Vehicle requirement sync — once per job.
+    if (source.job_id) {
+      const jobIdForSync: string = source.job_id;
+      const hhJobIdForSync: number | null = source.hirehop_job_id ?? null;
+      const assignmentIdForSync: string = affected[0].id;
+      setImmediate(() => {
+        runHookWithRecovery(
+          {
+            hookLabel: 'Vehicle requirement sync',
+            jobId: jobIdForSync,
+            hhJobNumber: hhJobIdForSync,
+            assignmentId: assignmentIdForSync,
+          },
+          async () => {
+            const { syncVehicleRequirementStatus } = await import('../services/vehicle-requirement-sync');
+            await syncVehicleRequirementStatus(jobIdForSync);
+          }
+        ).catch((err) => {
+          console.warn(`[hire-forms] Vehicle requirement sync failed for job ${jobIdForSync}:`, err);
+        });
+      });
+    }
+
+    return affected.map(({ id, vehicle_id, vehicle_reg, is_clone }) => ({ id, vehicle_id, vehicle_reg, is_clone }));
+  } catch (err) {
+    try { await dbClient.query('ROLLBACK'); } catch { /* swallow */ }
+    throw err;
+  } finally {
+    dbClient.release();
+  }
+}
+
+/**
+ * Resolve the distinct vans currently booked out / active on a job — the
+ * add-to-hire sibling set. One row per van (most-recently-booked-out wins).
+ */
+async function resolveBookedOutVans(
+  excludeAssignmentId: string,
+  jobId: string | null,
+  hirehopJobId: number | null,
+): Promise<AddToHireSibling[]> {
+  const result = await query(
+    `SELECT DISTINCT ON (a.vehicle_id)
+            a.vehicle_id, a.hire_end, a.return_overnight, fv.reg AS vehicle_reg
+       FROM vehicle_hire_assignments a
+       JOIN fleet_vehicles fv ON fv.id = a.vehicle_id
+      WHERE a.vehicle_id IS NOT NULL
+        AND a.id != $1
+        AND a.status IN ('booked_out', 'active')
+        AND (
+          ($2::uuid IS NOT NULL AND a.job_id = $2::uuid)
+          OR
+          ($3::integer IS NOT NULL AND a.hirehop_job_id = $3::integer)
+        )
+      ORDER BY a.vehicle_id, a.booked_out_at DESC NULLS LAST`,
+    [excludeAssignmentId, jobId, hirehopJobId]
+  );
+  return result.rows as AddToHireSibling[];
+}
+
 router.post(
   '/:id/add-to-hire',
   authenticate,
@@ -2184,165 +2406,14 @@ router.post(
         siblings.push(siblingResult.rows[0]);
       }
 
-      // 4. Transactional update + cloning
-      await dbClient.query('BEGIN');
-
-      const affected: Array<{
-        id: string;
-        vehicle_id: string;
-        vehicle_reg: string;
-        return_overnight: boolean | null;
-        hire_form_emailed_at: Date | null;
-        is_clone: boolean;
-      }> = [];
-
-      // First van: update source row. start_time is set to LOCALTIME (now)
-      // because the driver only became authorised at this moment — the
-      // original hire form's nominal 09:00 start no longer applies.
-      const first = siblings[0];
-      const firstUpdate = await dbClient.query(
-        `UPDATE vehicle_hire_assignments
-         SET vehicle_id = $1,
-             hire_start = CURRENT_DATE,
-             start_time = LOCALTIME,
-             hire_end = COALESCE($2, hire_end),
-             return_overnight = $3,
-             status = 'booked_out',
-             status_changed_at = NOW(),
-             booked_out_at = NOW(),
-             booked_out_by = $4,
-             updated_at = NOW()
-         WHERE id = $5
-         RETURNING id, vehicle_id, return_overnight, hire_form_emailed_at`,
-        [first.vehicle_id, first.hire_end, first.return_overnight, req.user!.id, sourceId]
-      );
-      const firstRow = firstUpdate.rows[0];
-      affected.push({
-        id: firstRow.id,
-        vehicle_id: firstRow.vehicle_id,
-        vehicle_reg: first.vehicle_reg,
-        return_overnight: firstRow.return_overnight,
-        hire_form_emailed_at: firstRow.hire_form_emailed_at,
-        is_clone: false,
-      });
-
-      // Additional vans: clone source row, one per van
-      for (let i = 1; i < siblings.length; i++) {
-        const sib = siblings[i];
-        const cloneResult = await dbClient.query(
-          `INSERT INTO vehicle_hire_assignments (
-             vehicle_id, job_id, hirehop_job_id, hirehop_job_name,
-             driver_id, assignment_type, van_requirement_index,
-             required_type, required_gearbox,
-             status, status_changed_at,
-             hire_start, hire_end, start_time, end_time, return_overnight,
-             booked_out_at, booked_out_by,
-             client_email,
-             notes, allocated_by_name, created_by
-           )
-           VALUES (
-             $1, $2, $3, $4,
-             $5, $6, $7,
-             $8, $9,
-             'booked_out', NOW(),
-             CURRENT_DATE, $10, LOCALTIME, $11, $12,
-             NOW(), $13,
-             $14,
-             $15, $16, $17
-           )
-           RETURNING id, vehicle_id, return_overnight, hire_form_emailed_at`,
-          [
-            sib.vehicle_id,
-            source.job_id,
-            source.hirehop_job_id,
-            source.hirehop_job_name,
-            source.driver_id,
-            source.assignment_type,
-            source.van_requirement_index ?? 0,
-            source.required_type,
-            source.required_gearbox,
-            sib.hire_end,
-            source.end_time,
-            sib.return_overnight,
-            req.user!.id,
-            source.client_email,
-            `Cloned from assignment ${sourceId} for mid-tour add-to-hire (multi-van).`,
-            source.allocated_by_name,
-            req.user!.id,
-          ]
-        );
-        const cloneRow = cloneResult.rows[0];
-        affected.push({
-          id: cloneRow.id,
-          vehicle_id: cloneRow.vehicle_id,
-          vehicle_reg: sib.vehicle_reg,
-          return_overnight: cloneRow.return_overnight,
-          hire_form_emailed_at: cloneRow.hire_form_emailed_at,
-          is_clone: true,
-        });
-      }
-
-      // 5. Log interaction(s) on the job timeline — one per van for an
-      //    auditable trail. created_by must be UUID; req.user.id is fine.
-      if (source.job_id) {
-        const regList = affected.map(a => a.vehicle_reg).join(', ');
-        const driverDisplay = source.driver_name || 'Driver';
-        await dbClient.query(
-          `INSERT INTO interactions (type, content, job_id, created_by, source)
-           VALUES ('note', $1, $2, $3, 'system')`,
-          [
-            `🚐 ${driverDisplay} added mid-hire to ${regList} (hire window inherited from existing booking; hire start set to ${new Date().toLocaleString('en-GB')}).`,
-            source.job_id,
-            req.user!.id,
-          ]
-        );
-      }
-
-      await dbClient.query('COMMIT');
-
-      // 6. Fire the post-book-out hook chain for each affected assignment.
-      //    Per-vehicle hooks (fleet status, PDF + email) need to fire per
-      //    row. Per-job hooks (requirement advance, OOH, auto-dispatch) are
-      //    idempotent so the cost of multiple calls is minimal.
+      // 4. Transactional link + clone + post-book-out hooks (shared helper).
       const actorLabel = req.user?.email ? `${req.user.email} (add-to-hire)` : 'staff (add-to-hire)';
-      const actorUserId = req.user?.id || null;
-
-      for (const a of affected) {
-        firePostBookOutHooks({
-          assignmentId: a.id,
-          vehicleId: a.vehicle_id,
-          jobId: source.job_id ?? null,
-          hhJobNumber: source.hirehop_job_id ?? null,
-          returnOvernight: a.return_overnight,
-          hireFormEmailedAt: a.hire_form_emailed_at,
-          actorLabel,
-          actorUserId,
-        });
-      }
-
-      // 7. Vehicle requirement sync — same as standard PATCH does on any
-      //    vehicle state change. Once per job.
-      if (source.job_id) {
-        const jobIdForSync: string = source.job_id;
-        const hhJobIdForSync: number | null = source.hirehop_job_id ?? null;
-        const assignmentIdForSync: string = affected[0].id;
-        setImmediate(() => {
-          runHookWithRecovery(
-            {
-              hookLabel: 'Vehicle requirement sync',
-              jobId: jobIdForSync,
-              hhJobNumber: hhJobIdForSync,
-              assignmentId: assignmentIdForSync,
-            },
-            async () => {
-              const { syncVehicleRequirementStatus } = await import('../services/vehicle-requirement-sync');
-              await syncVehicleRequirementStatus(jobIdForSync);
-            }
-          ).catch((err) => {
-            console.warn(`[hire-forms] Vehicle requirement sync failed for job ${jobIdForSync}:`, err);
-          });
-        });
-      }
+      const affected = await executeAddToHire({
+        source,
+        siblings,
+        actorUserId: req.user!.id,
+        actorLabel,
+      });
 
       console.log(
         `[hire-forms] Add-to-Hire: linked assignment ${sourceId} to ${affected.length} van(s): ${affected.map(a => a.vehicle_reg).join(', ')}`
@@ -3233,53 +3304,117 @@ router.post('/:id/post-signature', authenticateOrApiKey, async (req: AuthRequest
           if (isDispatched) {
             console.log(`[post-signature] MID-TOUR DETECTED — HH job ${hhJobId} status ${hhStatus}`);
 
-            // Set hire_start to NOW (driver shouldn't have been driving before form submission)
-            await query(
-              `UPDATE vehicle_hire_assignments SET hire_start = NOW() WHERE id = $1 AND hire_start IS NULL`,
-              [id]
-            );
+            // Is this a CLEAN driver we can auto-add? "Clean" = no insurer
+            // referral pending AND identity check cleared (isDriverAuthorisedFor
+            // Agreement covers both). The AI verification has already validated
+            // the driver's documents — they couldn't have reached signature
+            // otherwise — so a clean driver needs no human decision.
+            const clean = await isDriverAuthorisedForAgreement(String(id));
+            // Only a fresh self-drive hire-form row is auto-addable (a mid-tour
+            // driver's assignment lands soft/confirmed with vehicle_id NULL).
+            const addableState =
+              assignment.assignment_type === 'self_drive' &&
+              ['soft', 'confirmed'].includes(assignment.status);
 
-            // Send notification to team
-            const frontendUrl = getFrontendUrl();
-            try {
-              const { getVehicleNotificationTargets } = await import('../services/vehicle-notify');
-              const targets = await getVehicleNotificationTargets();
+            // Resolve the vans currently out on the job. jon's call: add the
+            // clean driver to EVERY van out ("everyone drives everything").
+            const vansOut = clean && addableState
+              ? await resolveBookedOutVans(String(id), assignment.job_id, hhJobId)
+              : [];
 
-              // Bell notification to vehicle manager only (no fan-out to all admins).
-              // email_sent_at = NOW() so the escalation scheduler doesn't fire a
-              // duplicate email — the direct mid_tour_driver send below covers it.
-              for (const userId of targets.bellUserIds) {
-                await query(
-                  `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, priority, action_url, email_sent_at)
-                   VALUES ($1, 'hire_form', $2, $3, 'vehicle_hire_assignments', $4, 'high', $5, NOW())`,
-                  [
-                    userId,
-                    `Mid-tour driver — ${assignment.driver_name || 'Unknown'}`,
-                    `${assignment.driver_name || 'A driver'} submitted a hire form for job #${hhJobId} (${assignment.hirehop_job_name || ''}) which is already dispatched. Hire form assigned to ${assignment.vehicle_reg || 'unassigned vehicle'}.`,
-                    id,
-                    assignment.job_id ? `/jobs/${assignment.job_id}` : null,
-                  ]
-                );
+            if (clean && addableState && vansOut.length > 0) {
+              // AUTO-ADD: link the driver to every van out + send their hire
+              // agreement automatically. No "to do" email — nothing for staff
+              // to action. executeAddToHire stamps hire_start itself.
+              const affected = await executeAddToHire({
+                source: assignment,
+                siblings: vansOut,
+                actorUserId: req.user?.id || '00000000-0000-0000-0000-000000000000',
+                actorLabel: 'system (mid-tour auto-add)',
+              });
+
+              // Low-priority informational bell so staff still have visibility
+              // (not a to-do). email_sent_at = NOW() so it never escalates to email.
+              try {
+                const { getVehicleNotificationTargets } = await import('../services/vehicle-notify');
+                const targets = await getVehicleNotificationTargets();
+                const regList = affected.map(a => a.vehicle_reg).join(', ');
+                for (const userId of targets.bellUserIds) {
+                  await query(
+                    `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, priority, action_url, email_sent_at)
+                     VALUES ($1, 'hire_form', $2, $3, 'vehicle_hire_assignments', $4, 'low', $5, NOW())`,
+                    [
+                      userId,
+                      `Mid-tour driver auto-added — ${assignment.driver_name || 'Unknown'}`,
+                      `${assignment.driver_name || 'A driver'} submitted a clean hire form for job #${hhJobId} (${assignment.hirehop_job_name || ''}), already dispatched — auto-added to ${regList} and their hire agreement has been sent. No action needed.`,
+                      id,
+                      assignment.job_id ? `/jobs/${assignment.job_id}` : null,
+                    ]
+                  );
+                }
+              } catch (notifyErr) {
+                console.warn('[post-signature] Mid-tour auto-add notification failed:', (notifyErr as Error).message);
               }
 
-              // Email notification — info@ + will@ CC
-              await emailService.send('mid_tour_driver', {
-                to: targets.to,
-                cc: targets.cc,
-                variables: {
-                  driverName: assignment.driver_name || 'Unknown Driver',
-                  driverEmail: assignment.driver_email || 'N/A',
-                  vehicleReg: assignment.vehicle_reg || 'Not assigned',
-                  jobNumber: String(hhJobId),
-                  jobName: assignment.hirehop_job_name || '',
-                  jobUrl: `${frontendUrl}/jobs/${assignment.job_id || ''}`,
-                },
-              });
-            } catch (notifyErr) {
-              console.warn('[post-signature] Mid-tour notification failed:', (notifyErr as Error).message);
-            }
+              console.log(`[post-signature] MID-TOUR AUTO-ADD — assignment ${id} linked to ${affected.length} van(s): ${affected.map(a => a.vehicle_reg).join(', ')}`);
+              results.midTour = { detected: true, hhStatus, autoAdded: true, vans: affected.map(a => a.vehicle_reg) };
+            } else {
+              // Fall back to the manual "to do" flow. Reasons: driver held for
+              // review (referral/identity — the referral alert email fires
+              // separately via sendReferralAlert), no van resolvable, or not a
+              // fresh self-drive row. Staff add + authorise the driver manually.
+              await query(
+                `UPDATE vehicle_hire_assignments SET hire_start = NOW() WHERE id = $1 AND hire_start IS NULL`,
+                [id]
+              );
 
-            results.midTour = { detected: true, hhStatus, notified: true };
+              const frontendUrl = getFrontendUrl();
+              try {
+                const { getVehicleNotificationTargets } = await import('../services/vehicle-notify');
+                const targets = await getVehicleNotificationTargets();
+
+                // Bell notification to vehicle manager only (no fan-out to all admins).
+                // email_sent_at = NOW() so the escalation scheduler doesn't fire a
+                // duplicate email — the direct mid_tour_driver send below covers it.
+                for (const userId of targets.bellUserIds) {
+                  await query(
+                    `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, priority, action_url, email_sent_at)
+                     VALUES ($1, 'hire_form', $2, $3, 'vehicle_hire_assignments', $4, 'high', $5, NOW())`,
+                    [
+                      userId,
+                      `Mid-tour driver — ${assignment.driver_name || 'Unknown'}`,
+                      `${assignment.driver_name || 'A driver'} submitted a hire form for job #${hhJobId} (${assignment.hirehop_job_name || ''}) which is already dispatched. Hire form assigned to ${assignment.vehicle_reg || 'unassigned vehicle'}.`,
+                      id,
+                      assignment.job_id ? `/jobs/${assignment.job_id}` : null,
+                    ]
+                  );
+                }
+
+                // Email notification — info@ + will@ CC
+                await emailService.send('mid_tour_driver', {
+                  to: targets.to,
+                  cc: targets.cc,
+                  variables: {
+                    driverName: assignment.driver_name || 'Unknown Driver',
+                    driverEmail: assignment.driver_email || 'N/A',
+                    vehicleReg: assignment.vehicle_reg || 'Not assigned',
+                    jobNumber: String(hhJobId),
+                    jobName: assignment.hirehop_job_name || '',
+                    jobUrl: `${frontendUrl}/jobs/${assignment.job_id || ''}`,
+                  },
+                });
+              } catch (notifyErr) {
+                console.warn('[post-signature] Mid-tour notification failed:', (notifyErr as Error).message);
+              }
+
+              results.midTour = {
+                detected: true,
+                hhStatus,
+                notified: true,
+                autoAdded: false,
+                reason: !clean ? 'held_for_review' : (!addableState ? 'not_addable' : 'no_van_out'),
+              };
+            }
           } else {
             results.midTour = { detected: false, hhStatus };
           }
