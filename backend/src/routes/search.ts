@@ -74,7 +74,8 @@ router.get('/', async (req: AuthRequest, res: Response) => {
               company_name as subtitle,
               'job' as type,
               pipeline_status,
-              status as hh_status
+              status as hh_status,
+              (dismissed_at IS NOT NULL) as is_dismissed
        FROM jobs
        WHERE is_deleted = false AND (
          job_name ILIKE $1 OR company_name ILIKE $1 OR client_name ILIKE $1
