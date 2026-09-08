@@ -66,10 +66,11 @@ export interface EvidenceGroupSpec {
  * rather than an exact string means a new variant doesn't break the group.
  *
  * ⚠️ This answers "which file goes in which thumbnail slot" and needs the file
- * objects. Whether a document EXISTS — what "What needs doing" tells staff — is
- * decided by backend/src/services/driver-documents.ts, which holds the same
- * spellings. Add a new spelling to BOTH, or the page will show a thumbnail the
- * list above it says is missing (or the reverse).
+ * objects. The other two questions — which document IS this file (the snapshot
+ * PDF) and does it EXIST at all (what "What needs doing" tells staff) — are both
+ * answered by backend/src/services/driver-documents.ts, which holds the same
+ * spellings and is the only other copy. Add a new spelling to BOTH, or the page
+ * will show a thumbnail the list above it says is missing (or the reverse).
  */
 const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
 
