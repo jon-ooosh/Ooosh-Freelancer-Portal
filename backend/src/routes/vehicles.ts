@@ -137,6 +137,89 @@ async function authoriseFreelancerOnQuote(
   return { ok: true, person, jobId, hhJobNumber, venueName };
 }
 
+// ── Multi-van jobs: the freelancer picks which van ──────────────────
+//
+// A job can have several vans out at once, delivered/collected by different
+// freelancers from different places. Both resolvers below used to answer
+// "THE van on this job" with a LIMIT 1, so every freelancer on the job got the
+// same row: HH 15307 (8 Sep) handed Lewis the van Charlie had already
+// collected while Lewis stood in front of a different one, with no way to
+// change it. When more than one van is in play we return the list and let the
+// person looking at the number plate choose.
+
+/** One selectable van — what the freelancer picker renders. */
+interface FreelancerVanCandidate {
+  assignmentId: string;
+  vehicleId: string | null;
+  registration: string | null;
+  makeModel: string;
+  vehicleType: string | null;
+  status: string;
+  customerDriverName: string | null;
+  /**
+   * When this van's leg is already done (soft_checked_in_at on a collection,
+   * booked_out_at on a delivery), ISO or null. Surfaced as a warning badge —
+   * NOT a hard block: warnings, not gates.
+   */
+  alreadyDoneAt: string | null;
+}
+
+/**
+ * Collapse assignment rows to ONE per VEHICLE, keeping the first row seen for
+ * each. Callers must order `rows` best-first.
+ *
+ * A single van routinely has several live rows on one job — HH 15307 carried
+ * three booked_out rows for RX24SZG (one per named driver, plus a bare
+ * allocation). The freelancer picks a registration, not a database row, so
+ * offering the same reg three times would be worse than offering one.
+ */
+function dedupeCandidatesByVehicle<T extends { vehicle_id: string | null }>(rows: T[]): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const row of rows) {
+    if (!row.vehicle_id || seen.has(row.vehicle_id)) continue;
+    seen.add(row.vehicle_id);
+    out.push(row);
+  }
+  return out;
+}
+
+/** Shape an assignment row for the picker. */
+function toVanCandidate(
+  row: {
+    assignment_id: string;
+    vehicle_id: string | null;
+    registration: string | null;
+    make: string | null;
+    model: string | null;
+    vehicle_type: string | null;
+    status: string;
+    customer_driver_name: string | null;
+  },
+  alreadyDoneAt: Date | string | null
+): FreelancerVanCandidate {
+  return {
+    assignmentId: row.assignment_id,
+    vehicleId: row.vehicle_id,
+    registration: row.registration,
+    makeModel: [row.make, row.model].filter(Boolean).join(' '),
+    vehicleType: row.vehicle_type || null,
+    status: row.status,
+    customerDriverName: row.customer_driver_name,
+    alreadyDoneAt: alreadyDoneAt ? new Date(alreadyDoneAt).toISOString() : null,
+  };
+}
+
+/**
+ * The van the freelancer picked in the multi-van picker, if any. Never trusted
+ * on its own — each resolver checks the id is genuinely one of THIS job's
+ * candidates before minting a session against it.
+ */
+function readChosenAssignmentId(req: Request): string | null {
+  const raw = (req.body as Record<string, unknown> | undefined)?.assignmentId;
+  return typeof raw === 'string' && raw.trim() ? raw.trim() : null;
+}
+
 // Best-effort "the freelancer has started the van leg" stamp (§7.3). Never
 // throws — a stamping failure must not block the resolve response.
 async function stampVanLegStarted(quoteId: string): Promise<void> {
@@ -275,15 +358,21 @@ router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) =
     type ResolveOutcome =
       | { kind: 'ok'; row: VhaRow }
       | { kind: 'no_allocation' }
-      | { kind: 'no_hire_form' };
+      | { kind: 'no_hire_form' }
+      // More than one van on the job and the freelancer hasn't said which is
+      // theirs — hand back the list (see the multi-van note above).
+      | { kind: 'needs_selection'; candidates: Array<VhaRow & { booked_out_at: Date | null }> }
+      // A van id came back from the picker that isn't a candidate on this job.
+      | { kind: 'invalid_selection' };
 
-    async function fetchAllocatedVehicleRow(): Promise<ResolveOutcome> {
+    async function fetchAllocatedVehicleRow(chosenAssignmentId: string | null): Promise<ResolveOutcome> {
       // Pull all currently-active rows on the job once and pick from them
       // in JS — we need to inspect the set as a whole to decide whether to
       // merge, and a single result row hides that.
       const result = await query(
         `SELECT vha.id AS assignment_id, vha.vehicle_id, vha.driver_id, vha.status,
                 vha.assignment_type, vha.created_at, vha.van_requirement_index,
+                vha.booked_out_at,
                 fv.reg AS registration, fv.make, fv.model, fv.vehicle_type,
                 d.full_name AS customer_driver_name, d.email AS customer_driver_email
            FROM vehicle_hire_assignments vha
@@ -294,27 +383,70 @@ router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) =
           ORDER BY vha.created_at DESC`,
         [jobId, hhJobNumber]
       );
-      const rows = result.rows as Array<VhaRow & { created_at: string; van_requirement_index: number | null }>;
+      const rows = result.rows as Array<
+        VhaRow & { created_at: string; van_requirement_index: number | null; booked_out_at: Date | null }
+      >;
       if (rows.length === 0) return { kind: 'no_allocation' };
+
+      // Which VANS are in play? One candidate per vehicle, best row first,
+      // following the dedup contract: most-progressed status wins, then a row
+      // that already carries a driver (so the picker can name the hirer),
+      // then most recently created. Rows with no vehicle are the customer
+      // hire-form rows — merge material below, not something to pick from.
+      const STATUS_RANK: Record<string, number> = { active: 0, booked_out: 1, confirmed: 2, soft: 3 };
+      const candidates = dedupeCandidatesByVehicle(
+        [...rows]
+          .filter(r => r.vehicle_id)
+          .sort((a, b) => {
+            const as = STATUS_RANK[a.status] ?? 9;
+            const bs = STATUS_RANK[b.status] ?? 9;
+            if (as !== bs) return as - bs;
+            const ad = a.driver_id ? 0 : 1;
+            const bd = b.driver_id ? 0 : 1;
+            if (ad !== bd) return ad - bd;
+            return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+          })
+      );
+
+      // `scoped` is the row set the merge logic below works from: everything
+      // when there's only one van, or the chosen van's rows plus the
+      // vehicle-less customer rows once a van has been picked.
+      let scoped = rows;
+      if (chosenAssignmentId) {
+        const picked = candidates.find(r => r.assignment_id === chosenAssignmentId);
+        if (!picked) return { kind: 'invalid_selection' };
+        scoped = rows.filter(r => r.vehicle_id === picked.vehicle_id || !r.vehicle_id);
+      } else if (candidates.length > 1) {
+        return { kind: 'needs_selection', candidates };
+      }
 
       // First preference: a row that already has BOTH vehicle and driver —
       // this is the post-merge steady state, or a job that was created the
       // tidy way from the start. Just use it.
-      const merged = rows.find(r => r.vehicle_id && r.driver_id);
+      const merged = scoped.find(r => r.vehicle_id && r.driver_id);
       if (merged) return { kind: 'ok', row: merged };
 
       // Second preference: smart-merge candidate. Find the freelancer's
       // allocation row (vehicle, no driver) and the customer's hire-form
       // row (driver, no vehicle) and combine them.
-      const allocationRow = rows.find(r => r.vehicle_id && !r.driver_id);
-      const customerRow = rows
+      const allocationRow = scoped.find(r => r.vehicle_id && !r.driver_id);
+      const customerRows = scoped
         .filter(r => r.driver_id && !r.vehicle_id)
         .sort((a, b) => {
           const ai = a.van_requirement_index ?? Number.POSITIVE_INFINITY;
           const bi = b.van_requirement_index ?? Number.POSITIVE_INFINITY;
           if (ai !== bi) return ai - bi;
           return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
-        })[0];
+        });
+      // On a multi-van job the customer rows are NOT interchangeable: pair by
+      // van_requirement_index so van #2's allocation doesn't get van #1's
+      // customer (and excess, and hire agreement) stapled to it. Falls back to
+      // the plain lowest-index-first pick when nothing matches, which is
+      // exactly the single-van behaviour.
+      const customerRow =
+        (allocationRow?.van_requirement_index != null
+          ? customerRows.find(r => r.van_requirement_index === allocationRow.van_requirement_index)
+          : undefined) || customerRows[0];
 
       if (allocationRow && customerRow) {
         // Atomic merge: stamp vehicle onto customer row, cancel allocation
@@ -386,13 +518,49 @@ router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) =
       // exists, block with a distinct reason; otherwise it's a plain
       // no-allocation. (Staff book-out doesn't use this endpoint — they go
       // through the normal allocations flow with its own soft guidance.)
-      if (rows.some(r => r.vehicle_id)) {
+      if (scoped.some(r => r.vehicle_id)) {
         return { kind: 'no_hire_form' };
       }
       return { kind: 'no_allocation' };
     }
 
-    const outcome = await fetchAllocatedVehicleRow();
+    const chosenAssignmentId = readChosenAssignmentId(req);
+    const outcome = await fetchAllocatedVehicleRow(chosenAssignmentId);
+    if (outcome.kind === 'needs_selection') {
+      // More than one van allocated — ask which one they're loading rather
+      // than guessing (the HH 15307 failure, delivery side). Stamp the leg as
+      // started so the stalled-leg scanner still notices an abandoned pick.
+      console.log('[freelancer-bookout] Multiple vans allocated — asking the freelancer to pick', {
+        jobId,
+        hhJobNumber,
+        regs: outcome.candidates.map(r => r.registration),
+      });
+      await stampVanLegStarted(quoteId);
+      res.json({
+        success: true,
+        needsVehicleSelection: true,
+        candidates: outcome.candidates.map(r => toVanCandidate(r, r.booked_out_at)),
+        job: { id: jobId, hhJobNumber, venueName },
+        driver: {
+          name: `${person.first_name} ${person.last_name}`.trim(),
+          email: freelancerEmail,
+        },
+      });
+      return;
+    }
+    if (outcome.kind === 'invalid_selection') {
+      console.warn('[freelancer-bookout] Rejected van selection that is not a candidate on this job', {
+        jobId,
+        hhJobNumber,
+        chosenAssignmentId,
+      });
+      res.status(409).json({
+        error: 'That van is no longer allocated to this job',
+        code: 'invalid_selection',
+        hint: 'Head back to the portal and start the delivery again.',
+      });
+      return;
+    }
     if (outcome.kind === 'no_allocation') {
       console.warn('[freelancer-bookout] No allocated vehicle for job', { jobId, hhJobNumber });
       res.status(409).json({
@@ -505,11 +673,16 @@ router.post('/freelancer-checkin/resolve', async (req: Request, res: Response) =
     }
     const { person, jobId, hhJobNumber, venueName } = auth;
 
-    // Resolve the van currently OUT on this job. Most-progressed status first
-    // (active > booked_out), then most-recently booked out. Dual job-match
-    // because staff-allocation rows carry only hirehop_job_id.
+    // Resolve the van(s) currently OUT on this job. Most-progressed status
+    // first (active > booked_out), then a row carrying the customer driver
+    // (their name goes on the interim assessment), then most-recently booked
+    // out. Dual job-match because staff-allocation rows carry only
+    // hirehop_job_id.
+    //
+    // No LIMIT 1 — see the multi-van note above. Several vans can be out on
+    // one job and collected by different freelancers.
     const outResult = await query(
-      `SELECT vha.id AS assignment_id, vha.vehicle_id, vha.status,
+      `SELECT vha.id AS assignment_id, vha.vehicle_id, vha.status, vha.soft_checked_in_at,
               fv.reg AS registration, fv.make, fv.model, fv.vehicle_type,
               d.full_name AS customer_driver_name, d.email AS customer_driver_email
          FROM vehicle_hire_assignments vha
@@ -519,8 +692,8 @@ router.post('/freelancer-checkin/resolve', async (req: Request, res: Response) =
           AND vha.status IN ('booked_out', 'active')
           AND vha.vehicle_id IS NOT NULL
         ORDER BY CASE vha.status WHEN 'active' THEN 0 WHEN 'booked_out' THEN 1 ELSE 2 END,
-                 vha.booked_out_at DESC NULLS LAST
-        LIMIT 1`,
+                 CASE WHEN vha.driver_id IS NOT NULL THEN 0 ELSE 1 END,
+                 vha.booked_out_at DESC NULLS LAST`,
       [jobId, hhJobNumber]
     );
     if (outResult.rows.length === 0) {
@@ -532,11 +705,69 @@ router.post('/freelancer-checkin/resolve', async (req: Request, res: Response) =
       });
       return;
     }
-    const vha = outResult.rows[0];
+
+    type CheckinVhaRow = {
+      assignment_id: string;
+      vehicle_id: string | null;
+      status: string;
+      soft_checked_in_at: Date | null;
+      registration: string | null;
+      make: string | null;
+      model: string | null;
+      vehicle_type: string | null;
+      customer_driver_name: string | null;
+      customer_driver_email: string | null;
+    };
+    const candidateRows = dedupeCandidatesByVehicle(outResult.rows as CheckinVhaRow[]);
+
+    const chosenAssignmentId = readChosenAssignmentId(req);
+    let vha = candidateRows[0];
+    if (chosenAssignmentId) {
+      const picked = candidateRows.find(r => r.assignment_id === chosenAssignmentId);
+      if (!picked) {
+        console.warn('[freelancer-checkin] Rejected van selection that is not a candidate on this job', {
+          jobId,
+          hhJobNumber,
+          chosenAssignmentId,
+        });
+        res.status(409).json({
+          error: 'That van is no longer out on this job',
+          code: 'invalid_selection',
+          hint: 'Head back to the portal and start the collection again.',
+        });
+        return;
+      }
+      vha = picked;
+    } else if (candidateRows.length > 1) {
+      // More than one van out — ask which one they're standing in front of
+      // rather than guessing (the HH 15307 failure). Stamp the leg as started
+      // here too: the freelancer HAS arrived, so the stalled-leg scanner
+      // should notice if they never pick a van.
+      console.log('[freelancer-checkin] Multiple vans out — asking the freelancer to pick', {
+        jobId,
+        hhJobNumber,
+        regs: candidateRows.map(r => r.registration),
+      });
+      await stampVanLegStarted(quoteId);
+      res.json({
+        success: true,
+        needsVehicleSelection: true,
+        candidates: candidateRows.map(r => toVanCandidate(r, r.soft_checked_in_at)),
+        job: { id: jobId, hhJobNumber, venueName },
+        driver: {
+          name: `${person.first_name} ${person.last_name}`.trim(),
+          email: freelancerEmail,
+        },
+      });
+      return;
+    }
+
     console.log('[freelancer-checkin] Vehicle resolved', {
       assignmentId: vha.assignment_id,
       registration: vha.registration,
       status: vha.status,
+      candidateCount: candidateRows.length,
+      chosenByFreelancer: !!chosenAssignmentId,
     });
 
     const sessionToken = mintFreelancerBookoutSession({
