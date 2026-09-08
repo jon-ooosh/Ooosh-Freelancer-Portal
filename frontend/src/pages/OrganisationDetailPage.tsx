@@ -5,7 +5,7 @@ import { api } from '../services/api';
 import SlidePanel from '../components/SlidePanel';
 import OrganisationForm from '../components/OrganisationForm';
 import OrganisationMergeModal from '../components/OrganisationMergeModal';
-import FileUpload from '../components/FileUpload';
+import EntityFilesSection from '../components/EntityFilesSection';
 import ActivityTimeline from '../components/ActivityTimeline';
 import ExcessHistorySection from '../components/ExcessHistorySection';
 import RehearsalProfileSection from '../components/RehearsalProfileSection';
@@ -15,7 +15,7 @@ import HeldItemsSection from '../components/HeldItemsSection';
 import StorageHistorySection from '../components/StorageHistorySection';
 import PcnHistorySection from '../components/PcnHistorySection';
 import OohOrgIncidents from '../components/OohOrgIncidents';
-import { ORG_RELATIONSHIP_LABELS, PERSON_ORG_ROLES_WITH_MAIN_CONTACT, type OrgRelationshipType, type OrganisationRelationship } from '../../../shared/types';
+import { ORG_RELATIONSHIP_LABELS, PERSON_ORG_ROLES_WITH_MAIN_CONTACT, type OrgRelationshipType, type OrganisationRelationship, type FileAttachment } from '../../../shared/types';
 import { useAuthStore } from '../hooks/useAuthStore';
 
 interface OrgDetail {
@@ -29,7 +29,7 @@ interface OrgDetail {
   location: string | null;
   notes: string | null;
   tags: string[];
-  files: Array<{ name: string; url: string; type: 'document' | 'image' | 'other'; uploaded_at: string; uploaded_by: string }>;
+  files: FileAttachment[];
   parent_name: string | null;
   parent_id: string | null;
   do_not_hire: boolean;
@@ -115,7 +115,7 @@ const INFERRED_ORG_TYPE: Record<string, string> = {
 };
 
 const VALID_ORG_TABS = [
-  'people', 'relationships', 'hire_history', 'timeline', 'details', 'excess',
+  'people', 'relationships', 'hire_history', 'timeline', 'files', 'details', 'excess',
   'issues', 'held', 'storage', 'rehearsal', 'pcns', 'ooh',
 ] as const;
 type OrgTab = (typeof VALID_ORG_TABS)[number];
@@ -724,7 +724,7 @@ export default function OrganisationDetailPage() {
       {/* Tabs */}
       <div className="border-b border-gray-200 mb-6">
         <nav className="flex gap-6">
-          {(['people', 'relationships', 'hire_history', 'timeline', 'details', 'excess', 'issues', 'held', 'storage', 'rehearsal', 'pcns', 'ooh'] as const).map((tab) => {
+          {(['people', 'relationships', 'hire_history', 'timeline', 'files', 'details', 'excess', 'issues', 'held', 'storage', 'rehearsal', 'pcns', 'ooh'] as const).map((tab) => {
             const relCount = (org.relationships || []).filter(r => r.status === 'active').length;
             // linked_job_count comes from the backend's UNION of job_organisations + jobs.client_id,
             // matching the Hire History tab content. Falls back to local linked_jobs.length only
@@ -736,6 +736,7 @@ export default function OrganisationDetailPage() {
               : tab === 'relationships' ? `Relationships${relCount ? ` (${relCount})` : ''}`
               : tab === 'hire_history' ? `Hire History${linkedJobCount ? ` (${linkedJobCount})` : ''}`
               : tab === 'timeline' ? 'Activity Timeline'
+              : tab === 'files' ? `Files${(org.files || []).length ? ` (${(org.files || []).length})` : ''}`
               : tab === 'excess' ? 'Excess History'
               : tab === 'issues' ? `Issues${issuesCount ? ` (${issuesCount})` : ''}`
               : tab === 'held' ? (heldCount ? `Held Items (${heldCount})` : 'Held Items')
@@ -1344,14 +1345,23 @@ export default function OrganisationDetailPage() {
             )}
           </div>
 
+          {/* Files moved to their own first-class tab (Phase 2 of
+              docs/CROSS-ENTITY-FILES-SPEC.md) — this is just a signpost. */}
           <div className="mt-6 pt-4 border-t">
-            <FileUpload
-              entityType="organisations"
-              entityId={org.id}
-              files={org.files || []}
-              onFilesChanged={(files) => setOrg(prev => prev ? { ...prev, files } : prev)}
-              onActivityCreated={loadInteractions}
-            />
+            <h3 className="text-sm font-semibold text-gray-700 mb-2">Files</h3>
+            <button
+              onClick={() => {
+                setActiveTab('files');
+                const next = new URLSearchParams(searchParams);
+                next.set('tab', 'files');
+                setSearchParams(next, { replace: true });
+              }}
+              className="text-sm text-ooosh-600 hover:text-ooosh-700 font-medium"
+            >
+              {(org.files || []).length
+                ? `${(org.files || []).length} file${(org.files || []).length === 1 ? '' : 's'} — open the Files tab →`
+                : 'Open the Files tab to add files →'}
+            </button>
           </div>
         </div>
       )}
@@ -1544,6 +1554,17 @@ export default function OrganisationDetailPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Files Tab — the org's single Files surface (docs/CROSS-ENTITY-FILES-SPEC.md).
+          Same component as the Job Files tab, over `organisations.files`. */}
+      {activeTab === 'files' && id && (
+        <EntityFilesSection
+          entityType="organisations"
+          entityId={id}
+          files={org.files || []}
+          onChanged={() => { loadOrg(); loadInteractions(); }}
+        />
       )}
 
       {/* Hire History Tab */}

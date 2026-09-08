@@ -112,14 +112,34 @@ risk). The public `enquiryform.html` needs **no** change.
 
 ---
 
-## Phase 2 — Org Files tab + reusable component
+## Phase 2 — Org Files tab + reusable component (SHIPPED)
 
-- Extract the inline `JobFilesSection` (in `JobDetailPage.tsx`) into a shared
-  `<EntityFilesSection entityType entityId files onChanged>` — upload, tag, comment,
-  share toggle, view, email, delete, add-link. Job Detail switches to it.
-- Add a first-class **"Files" tab** on `OrganisationDetailPage` mounting
-  `<EntityFilesSection entityType="organisations">` on `organisations.files`. Retire the
-  buried uploader in the Details tab.
+**Frontend only — no migration, no backend change.** The `/api/files/*` routes
+(`upload`, `add-link`, `delete`, `update-metadata`, `email`) were already generic over
+`entity_type` and already accepted `organisations`, and `organisations.files` has
+existed since migration 001. Phase 2 is purely a UI wiring job.
+
+- The inline `JobFilesSection` moved out of `JobDetailPage.tsx` into
+  `frontend/src/components/EntityFilesSection.tsx` as
+  `<EntityFilesSection entityType entityId files onChanged>` — upload, drag & drop,
+  external links, tag + comment, freelancer share toggle, inline view, email, delete.
+  Job Detail mounts it with `entityType="jobs"`.
+- The extraction had to take its private dependencies with it, or they'd have been
+  duplicated: `FILE_TAGS`, `fileTagColour()`, `isPreviewable()`, `SpreadsheetPreview`
+  and `FileViewerModal` now live in (and are exported from) the same component file.
+  Phase 3's new tags go in `FILE_TAGS` there. `PipelinePage.tsx` still has its own
+  older copy of `FILE_TAGS` — left alone, out of scope.
+- `OrganisationDetailPage` gains a first-class **"Files"** tab (deep-linkable as
+  `?tab=files`, count in the tab label) mounting the same component over
+  `organisations.files`. `onChanged` refetches the org *and* its interactions, because
+  the upload route writes a companion `📎 Uploaded file` timeline entry.
+- `OrgDetail.files` is now typed as the shared `FileAttachment[]` rather than a local
+  narrower shape, so tags, comments, share state and `type: 'link'` entries render.
+- The buried `FileUpload` in the org **Details** tab is retired; a one-line signpost
+  pointing at the Files tab replaced it. `FileUpload` is untouched and still in use on
+  Person and Venue detail pages.
+- Copy fix carried along: the uploader said "Max 10MB" while multer has always
+  allowed 25MB. Now says 25MB.
 
 ## Phase 3 — Unify rehearsal desk files into org files
 
