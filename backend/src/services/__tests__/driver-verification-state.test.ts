@@ -5,7 +5,11 @@ const TODAY = '2026-08-19';
 const stage = (s: ReturnType<typeof computeVerificationState>, key: string) =>
   s.stages.find(x => x.key === key)!;
 
-/** A UK driver with everything in order. */
+/**
+ * A UK driver with everything in order — dates AND the documents behind them.
+ * The files matter: a date with no document on file is now its own to-do, so a
+ * fixture carrying only dates is not a healthy driver, it is an incomplete one.
+ */
 const healthy = {
   full_name: 'Test Driver',
   email: 'test@example.com',
@@ -18,6 +22,10 @@ const healthy = {
   dvla_check_date: addDaysYmd(TODAY, -5),
   poa1_doc_date: addDaysYmd(TODAY, -10),
   poa2_doc_date: addDaysYmd(TODAY, -10),
+  files: [
+    { tag: 'licence_front' }, { tag: 'licence_back' }, { tag: 'selfie' },
+    { tag: 'poa1' }, { tag: 'poa2' }, { tag: 'dvla_check' }, { tag: 'signature' },
+  ],
 };
 
 describe('healthy driver', () => {
@@ -134,7 +142,48 @@ describe('a missing date is surfaced as its own to-do', () => {
     const state = computeVerificationState({ ...healthy, dvla_check_date: null }, TODAY);
     const action = state.actions.find(a => a.slot === 'dvla');
     expect(action?.kind).toBe('set_date');
-    expect(action?.message).toMatch(/no date recorded/i);
+    expect(action?.message).toMatch(/on file but has no date recorded/i);
+  });
+});
+
+// The remedy depends on whether the DOCUMENT is there, not just its date.
+// "Add the date on the document" was being shown — with a button — for
+// documents that had never been uploaded (Sep 2026).
+describe('the document behind the date', () => {
+  const noPoa1File = { ...healthy, files: healthy.files.filter(f => f.tag !== 'poa1') };
+
+  it('does not ask for a date on a document that was never uploaded', () => {
+    const state = computeVerificationState({ ...noPoa1File, poa1_doc_date: null }, TODAY);
+    const action = state.actions.find(a => a.slot === 'poa1');
+    expect(action?.message).toMatch(/hasn't been uploaded/i);
+    // send_hire_form gets no button — an Add-the-date button pointing at an
+    // empty slot is the thing this replaces.
+    expect(action?.kind).toBe('send_hire_form');
+  });
+
+  it('flags a date sitting on nothing', () => {
+    // Steven Aldridge / job 16116: DVLA data written server-side, file never
+    // uploaded. The window read green over an empty slot.
+    const state = computeVerificationState({ ...healthy, files: healthy.files.filter(f => f.tag !== 'dvla_check') }, TODAY);
+    const action = state.actions.find(a => a.slot === 'dvla');
+    expect(action?.severity).toBe('amber');
+    expect(action?.kind).toBe('upload_document');
+    expect(action?.message).toMatch(/no document on file/i);
+    expect(state.allClear).toBe(false);
+  });
+
+  it('says nothing extra when a document is missing AND expired', () => {
+    // A new document is needed either way, so the expired line stands alone.
+    const state = computeVerificationState(
+      { ...noPoa1File, poa1_doc_date: addDaysYmd(TODAY, -120) }, TODAY);
+    const poa1 = state.actions.filter(a => a.slot === 'poa1');
+    expect(poa1).toHaveLength(1);
+    expect(poa1[0].message).toMatch(/expired/i);
+  });
+
+  it('never chases a passport file for a UK driver', () => {
+    const state = computeVerificationState(healthy, TODAY);
+    expect(state.actions.some(a => a.slot === 'passport')).toBe(false);
   });
 });
 

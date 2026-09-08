@@ -18,6 +18,7 @@
 
 import { computeDriverValidity, todayYmd, toYmd, type DocWindow } from './driver-validity';
 import { isIdentityAuthorised } from './identity-review';
+import { documentPresence, type DocumentSlot } from './driver-documents';
 
 export type StageState = 'done' | 'todo' | 'blocked' | 'not_required';
 
@@ -42,7 +43,7 @@ export interface VerificationAction {
    * survives so the message can name that remedy; the cockpit renders it as a
    * plain line with no button (Sep 2026).
    */
-  kind: 'compare_identity' | 'set_date' | 'replace_document' | 'send_hire_form' | 'resolve_referral' | 'none';
+  kind: 'compare_identity' | 'set_date' | 'replace_document' | 'upload_document' | 'send_hire_form' | 'resolve_referral' | 'none';
   slot?: string;
   /**
    * HH job number named in `message`. Set only where the line refers to a
@@ -80,6 +81,11 @@ export interface VerificationStateInput {
   unsigned_job_number?: unknown;
   /** When the driver started the form for `unsigned_job_number`. */
   current_job_started_at?: unknown;
+  /**
+   * The `drivers.files` JSONB array. Read for one thing: whether a document
+   * actually exists behind a date. See services/driver-documents.ts.
+   */
+  files?: unknown;
   [key: string]: unknown;
 }
 
@@ -230,7 +236,14 @@ export function computeVerificationState(
   }
 
   // Expired / missing documents, each with the specific remedy.
-  const docs: Array<{ slot: string; label: string; win: DocWindow; applies: boolean }> = [
+  //
+  // The remedy depends on whether the DOCUMENT is there, not just its date —
+  // "add the date on the document" with an Add-the-date button was being shown
+  // for documents that had never been uploaded, pointing staff at an empty
+  // slot (Sep 2026). The file index sits on the same row; see
+  // services/driver-documents.ts for why it is read there and not here.
+  const onFile = documentPresence(driver.files);
+  const docs: Array<{ slot: DocumentSlot; label: string; win: DocWindow; applies: boolean }> = [
     { slot: 'dvla', label: 'DVLA check', win: v.dvla, applies: v.isUkDriver },
     { slot: 'poa1', label: 'Proof of address 1', win: v.poa1, applies: true },
     { slot: 'poa2', label: 'Proof of address 2', win: v.poa2, applies: true },
@@ -239,14 +252,39 @@ export function computeVerificationState(
   for (const doc of docs) {
     if (!doc.applies) continue;
     if (doc.win.until && !doc.win.valid) {
+      // Expired. A new document is needed either way, so the file makes no
+      // difference to the remedy.
       actions.push({
         severity: 'amber', kind: 'send_hire_form', slot: doc.slot,
         message: `${doc.label} expired ${formatUk(doc.win.until)} — send a hire form from the hire's Job page`,
       });
     } else if (!doc.win.until) {
+      actions.push(onFile[doc.slot]
+        ? {
+            severity: 'amber', kind: 'set_date', slot: doc.slot,
+            message: `${doc.label} is on file but has no date recorded — add the date on the document`,
+          }
+        : {
+            severity: 'amber', kind: 'send_hire_form', slot: doc.slot,
+            message: `${doc.label} hasn't been uploaded — send a hire form from the hire's Job page`,
+          });
+    } else if (!onFile[doc.slot]) {
+      // In date, with nothing behind it. Steven Aldridge / job 16116: the DVLA
+      // DATA is written server-side during validation while the FILE is a
+      // separate upload that can silently not happen, so the window can be
+      // green over an empty slot. Staff can also set a date by hand without
+      // ever uploading.
+      //
+      // Only reachable for a CURRENTLY VALID window, which keeps this off the
+      // pre-OP roster: a driver whose documents lived on Monday.com has no
+      // files here, but their dates lapsed long ago and they take the expired
+      // branch above.
+      // `upload_document`, not `send_hire_form`: the driver has done their part.
+      // The button scrolls to the group, where the Upload control is — staff
+      // usually have the document itself, or can ask for it directly.
       actions.push({
-        severity: 'amber', kind: 'set_date', slot: doc.slot,
-        message: `${doc.label} has no date recorded — add the date on the document`,
+        severity: 'amber', kind: 'upload_document', slot: doc.slot,
+        message: `${doc.label} has a date recorded but no document on file — the evidence is missing`,
       });
     }
   }

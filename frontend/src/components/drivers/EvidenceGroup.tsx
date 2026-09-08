@@ -64,6 +64,12 @@ export interface EvidenceGroupSpec {
  * 'license_front' / 'Licence Front'), which is how the driver snapshot PDF
  * silently dropped licence and POA images for months. Matching on a token
  * rather than an exact string means a new variant doesn't break the group.
+ *
+ * ⚠️ This answers "which file goes in which thumbnail slot" and needs the file
+ * objects. Whether a document EXISTS — what "What needs doing" tells staff — is
+ * decided by backend/src/services/driver-documents.ts, which holds the same
+ * spellings. Add a new spelling to BOTH, or the page will show a thumbnail the
+ * list above it says is missing (or the reverse).
  */
 const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
 
