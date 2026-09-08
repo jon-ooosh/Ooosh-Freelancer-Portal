@@ -153,5 +153,6 @@ const ACTION_LABEL: Record<string, string> = {
   compare_identity: 'Compare photos',
   set_date: 'Add the date',
   replace_document: 'Replace document',
+  upload_document: 'Upload it',
   resolve_referral: 'Resolve referral',
 };
