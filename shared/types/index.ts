@@ -17,6 +17,11 @@ export interface FileAttachment {
   uploaded_at: string;
   uploaded_by: string;
   share_with_freelancer?: boolean;
+  // Org files only. Whether this file reads through onto the jobs that org is
+  // on (docs/CROSS-ENTITY-FILES-SPEC.md). ABSENT MEANS TRUE — the default is to
+  // surface, so a rider is reusable the moment it's uploaded; set false to keep
+  // something internal (a contract) on the org alone.
+  show_on_jobs?: boolean;
 }
 
 export interface Person {

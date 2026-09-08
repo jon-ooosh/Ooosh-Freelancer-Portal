@@ -2,6 +2,14 @@
 
 Two related pieces of work, plus a unification, agreed Sep 2026.
 
+**Phases 3 and 4 were swapped after Phase 2 shipped.** As originally written,
+Phase 3 removed `RehearsalProfileFiles` from Job Detail on the strength of a
+general org→job derivation that Phase 4 hadn't built yet — pulling down the
+ladder before the staircase existed, and leaving every band's desk files
+invisible from jobs between the two deploys. Phase 4 went first instead, so
+Phase 3 is now a clean cutover: the copied files surface through the general
+mechanism the moment they land.
+
 1. **Client enquiry-form attachments → the Job's Files tab** (Phase 1, shipped).
 2. **One Files surface per organisation, linked bidirectionally with job files** — a
    band's rider/spec uploaded once is reusable across every hire (Phases 2–4).
@@ -152,16 +160,39 @@ existed since migration 001. Phase 2 is purely a UI wiring job.
   `RehearsalProfileSection` (it keeps its structured fields + hotel-book preferences).
   Those files now surface on jobs via the general org→job derivation (Phase 4).
 
-## Phase 4 — The link layer + both surfacing directions
+## Phase 4 — The link layer + both surfacing directions (SHIPPED)
 
-- Create `file_links` + the `show_on_jobs` flag (see Data model).
-- **Org → Job (derived):** the Job Files tab renders a collapsible "From [Org]" group per
-  org on the job (`job_organisations` + `client_id`), filtered to `show_on_jobs`, deduped
-  by `r2_key` against the job's own files. View/download + "manage on [Org] →" link.
-- **Job → Org (explicit):** a per-file "Link to org ▾" action (org picker for multi-org
-  jobs) creates a `file_links` row. The Org Files tab renders its own files + a "Linked
-  from jobs" group.
-- **Delete guard:** block deleting an owned file while `file_links` rows reference it.
+Built **before** Phase 3 — see the note at the top of this doc.
+
+- **Migration 202** creates `file_links` (registered in the runner's hardcoded list).
+  `show_on_jobs` needed no migration: it's a key inside the existing `files` JSONB,
+  added to the `PATCH /files/update-metadata` allowlist. **Absent means `true`** —
+  a rider is reusable the moment it's uploaded, without anyone ticking anything.
+- **Org → Job (derived):** `GET /api/files/for-job/:jobId` resolves the job's orgs from
+  `job_organisations` UNION `jobs.client_id`, returns their files grouped per org,
+  filtered to `show_on_jobs`, deduped by R2 key against the job's own files (and against
+  each other, so a file on two of the job's orgs shows once). Rendered as collapsible
+  "From [Org]" cards with a "manage on [Org] →" link. Derived server-side, not in the
+  browser: doing it client-side would mean N requests *and* shipping hidden files to the
+  client where they'd be readable in the network tab.
+- **Job → Org (explicit):** `POST /api/files/link` writes one row; the per-file
+  "Link to org" action picks from the orgs on that job (skipping straight past the
+  picker when there's only one candidate). Linked files then surface on that org's
+  *other* jobs through the same derivation — the reuse win. The Org Files tab grows a
+  "Linked from jobs" group with an Unlink action.
+- **Delete guard:** deleting a file with live `file_links` rows returns 409 naming the
+  orgs. **Only the explicit direction is guarded** — the derived org→job direction has
+  no rows to check, so deleting an org's own file does remove it from every job it was
+  surfacing on. That's correct (the org owns it) but it's the opposite of what the
+  guard's wording suggests, so it's worth knowing.
+- A link row **is** the decision to surface, so `show_on_jobs` is deliberately *not*
+  re-checked on linked job files — the flag only gates the derived direction, where
+  nobody opted in file-by-file.
+- The three new read/write routes are `authorize(...STAFF_ROLES)`; the older `/files/*`
+  routes remain authenticate-only, which is pre-existing.
+- One thing left alone: the Job Detail **Files tab badge** still counts the job's own
+  files (plus rehearsal-profile files) and not the derived org files. Surfaced files
+  are labelled as someone else's, so inflating the job's own count would mislead.
 
 ## Edge cases
 

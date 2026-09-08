@@ -14,12 +14,54 @@
  * See docs/CROSS-ENTITY-FILES-SPEC.md (Phase 2).
  */
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import FileEmailModal from './FileEmailModal';
 import type { FileAttachment } from '@shared/index';
 
 /** Entities with a `files` JSONB column and a Files surface. */
 export type FileEntityType = 'jobs' | 'organisations' | 'people' | 'venues' | 'drivers';
+
+/**
+ * A file surfaced onto a job from one of its orgs — a window, not a copy. The
+ * bytes still belong to whoever owns it, which is what `source` records:
+ * 'org' = the organisation itself, 'job' = another job that linked the file up
+ * to this organisation, so it now appears on the org's other hires too.
+ */
+export interface SurfacedFile extends FileAttachment {
+  source: 'org' | 'job';
+  source_job_id?: string;
+  source_job_name?: string | null;
+  source_job_number?: number | null;
+}
+
+/** One explicit job → org link, as seen from the owning job. */
+interface FileLink {
+  id: string;
+  r2_key: string;
+  org_id: string;
+  org_name: string;
+}
+
+/** Everything the Job Files tab needs beyond the job's own `files` array. */
+interface JobSurfacing {
+  groups: { org_id: string; org_name: string; files: SurfacedFile[] }[];
+  links: FileLink[];
+  orgs: { id: string; name: string }[];
+}
+
+/** A job's file linked up to this org — shown in "Linked from jobs". */
+interface LinkedFile extends FileAttachment {
+  link_id: string;
+  source_job_id: string;
+  source_job_name: string | null;
+  source_job_number: number | null;
+}
+
+/** A job's display name, however little of it we have. */
+function jobLabel(name: string | null | undefined, number: number | null | undefined): string {
+  return name || (number ? `Job ${number}` : 'a job');
+}
 
 // Wording for the "email this file" modal heading, per surface.
 const EMAIL_CONTEXT: Record<FileEntityType, string> = {
@@ -325,6 +367,51 @@ export default function EntityFilesSection({
   const [emailingFile, setEmailingFile] = useState<FileAttachment | null>(null);
   const [dragOver, setDragOver] = useState(false);
 
+  // ── Cross-entity surfacing (docs/CROSS-ENTITY-FILES-SPEC.md, Phase 4) ────
+  // Fetched in here rather than by the caller, so every surface still mounts
+  // this component with the same four props. A job reads through to its orgs'
+  // files; an org shows what jobs have linked up to it.
+  const [surfacing, setSurfacing] = useState<JobSurfacing | null>(null);
+  const [linkedFromJobs, setLinkedFromJobs] = useState<LinkedFile[]>([]);
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+  const [linkingFile, setLinkingFile] = useState<string | null>(null);
+  const [busyLink, setBusyLink] = useState(false);
+  // Bumped by `refresh()` — the owner refetch goes through the caller's
+  // `onChanged`, but the surfaced sets are ours to reload.
+  const [surfaceNonce, setSurfaceNonce] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (entityType === 'jobs') {
+      api.get<{ data: JobSurfacing }>(`/files/for-job/${entityId}`)
+        .then((r) => { if (!cancelled) setSurfacing(r.data); })
+        .catch(() => { if (!cancelled) setSurfacing(null); });
+    } else if (entityType === 'organisations') {
+      api.get<{ data: LinkedFile[] }>(`/files/for-org/${entityId}`)
+        .then((r) => { if (!cancelled) setLinkedFromJobs(r.data || []); })
+        .catch(() => { if (!cancelled) setLinkedFromJobs([]); });
+    }
+    return () => { cancelled = true; };
+  }, [entityType, entityId, surfaceNonce]);
+
+  const refresh = () => { onChanged(); setSurfaceNonce((n) => n + 1); };
+
+  const toggleGroup = (orgId: string) => setCollapsedGroups((prev) => {
+    const next = new Set(prev);
+    if (next.has(orgId)) next.delete(orgId); else next.add(orgId);
+    return next;
+  });
+
+  /** The orgs this file is already linked to. */
+  const linksFor = (fileUrl: string) =>
+    (surfacing?.links || []).filter((l) => l.r2_key === fileUrl);
+
+  /** Orgs on this job that this file isn't linked to yet. */
+  const availableOrgsFor = (fileUrl: string) => {
+    const taken = new Set(linksFor(fileUrl).map((l) => l.org_id));
+    return (surfacing?.orgs || []).filter((o) => !taken.has(o.id));
+  };
+
   // Link-adding mode (external URLs — Dropbox/WeTransfer/Drive links etc.)
   const [linkMode, setLinkMode] = useState(false);
   const [linkUrl, setLinkUrl] = useState('');
@@ -376,7 +463,7 @@ export default function EntityFilesSection({
         },
       });
       cancelEdit();
-      onChanged();
+      refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to update file');
     } finally {
@@ -392,7 +479,7 @@ export default function EntityFilesSection({
         file_url: file.url,
         updates: { share_with_freelancer: !file.share_with_freelancer },
       });
-      onChanged();
+      refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to update share status');
     }
@@ -411,7 +498,7 @@ export default function EntityFilesSection({
 
       await api.upload('/files/upload', formData);
       resetMeta();
-      onChanged();
+      refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Upload failed');
     } finally {
@@ -449,7 +536,7 @@ export default function EntityFilesSection({
       setLinkName('');
       setLinkMode(false);
       resetMeta();
-      onChanged();
+      refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to add link');
     } finally {
@@ -466,11 +553,62 @@ export default function EntityFilesSection({
         entity_type: entityType,
         entity_id: entityId,
       });
-      onChanged();
+      refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Delete failed');
     } finally {
       setDeleting(null);
+    }
+  };
+
+  // Job → org: explicit, opt-in, and it targets a SPECIFIC org, so it survives
+  // the job's client later being changed — the rider stays with the band.
+  const linkToOrg = async (file: FileAttachment, orgId: string) => {
+    setBusyLink(true);
+    setError('');
+    try {
+      await api.post('/files/link', {
+        r2_key: file.url,
+        owner_entity_type: 'jobs',
+        owner_entity_id: entityId,
+        linked_entity_type: 'organisations',
+        linked_entity_id: orgId,
+      });
+      setLinkingFile(null);
+      refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to link file');
+    } finally {
+      setBusyLink(false);
+    }
+  };
+
+  // Closes the window only — the file stays owned by, and visible on, its job.
+  const unlink = async (linkId: string) => {
+    setBusyLink(true);
+    setError('');
+    try {
+      await api.delete(`/files/link/${linkId}`);
+      refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to unlink file');
+    } finally {
+      setBusyLink(false);
+    }
+  };
+
+  // Org files only. Absent means true, so the toggle reads "is it NOT hidden".
+  const handleToggleShowOnJobs = async (file: FileAttachment) => {
+    try {
+      await api.patch('/files/update-metadata', {
+        entity_type: entityType,
+        entity_id: entityId,
+        file_url: file.url,
+        updates: { show_on_jobs: file.show_on_jobs === false },
+      });
+      refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update visibility');
     }
   };
 
@@ -764,6 +902,63 @@ export default function EntityFilesSection({
                       >
                         {file.share_with_freelancer ? 'Shared' : 'Share'}
                       </button>
+                      {entityType === 'organisations' && (
+                        <button
+                          onClick={() => handleToggleShowOnJobs(file)}
+                          className={`text-xs px-2 py-0.5 rounded border transition-colors ${
+                            file.show_on_jobs === false
+                              ? 'bg-gray-50 border-gray-200 text-gray-400'
+                              : 'bg-sky-50 border-sky-200 text-sky-700'
+                          }`}
+                          title={file.show_on_jobs === false
+                            ? 'Hidden from this organisation\u2019s jobs \u2014 click to show it on them'
+                            : 'Shows on every job this organisation is on \u2014 click to hide it'}
+                        >
+                          {file.show_on_jobs === false ? 'Hidden on jobs' : 'On jobs'}
+                        </button>
+                      )}
+                      {entityType === 'jobs' && linksFor(file.url).map(l => (
+                        <button
+                          key={l.id}
+                          onClick={() => unlink(l.id)}
+                          disabled={busyLink}
+                          className="text-xs px-2 py-0.5 rounded border bg-sky-50 border-sky-200 text-sky-700 disabled:opacity-50"
+                          title={`Also showing on ${l.org_name} \u2014 click to unlink`}
+                        >
+                          🔗 {l.org_name} ✕
+                        </button>
+                      ))}
+                      {entityType === 'jobs' && availableOrgsFor(file.url).length > 0 && (
+                        linkingFile === file.url ? (
+                          <select
+                            autoFocus
+                            disabled={busyLink}
+                            defaultValue=""
+                            onChange={(e) => { if (e.target.value) void linkToOrg(file, e.target.value); }}
+                            onBlur={() => setLinkingFile(null)}
+                            className="text-xs border border-gray-300 rounded px-1 py-0.5 focus:border-ooosh-500 focus:outline-none"
+                          >
+                            <option value="">Choose org…</option>
+                            {availableOrgsFor(file.url).map(o => (
+                              <option key={o.id} value={o.id}>{o.name}</option>
+                            ))}
+                          </select>
+                        ) : (
+                          <button
+                            onClick={() => {
+                              const only = availableOrgsFor(file.url);
+                              // One candidate — no point making them pick from a list of one.
+                              if (only.length === 1) void linkToOrg(file, only[0].id);
+                              else setLinkingFile(file.url);
+                            }}
+                            disabled={busyLink}
+                            className="text-xs text-gray-600 hover:text-gray-800 font-medium disabled:opacity-50 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity"
+                            title="Also show this file on an organisation, so it appears on their other jobs"
+                          >
+                            Link to org
+                          </button>
+                        )
+                      )}
                       {!isLink && (
                         <button
                           onClick={() => setEmailingFile(file)}
@@ -804,6 +999,81 @@ export default function EntityFilesSection({
         )}
       </div>
 
+      {/* Org → Job. Derived from the job's organisations at read time, so
+          changing them re-derives this set for free — no rows to maintain.
+          Read-only here: the files are managed where they're owned. */}
+      {entityType === 'jobs' && (surfacing?.groups || []).map(group => {
+        const collapsed = collapsedGroups.has(group.org_id);
+        return (
+          <div key={group.org_id} className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <button
+                onClick={() => toggleGroup(group.org_id)}
+                className="flex items-center gap-2 text-sm font-semibold text-gray-700 hover:text-gray-900"
+              >
+                <span className="text-gray-400 text-xs">{collapsed ? '▶' : '▼'}</span>
+                From {group.org_name} ({group.files.length})
+              </button>
+              <Link
+                to={`/organisations/${group.org_id}?tab=files`}
+                className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium"
+              >
+                manage on {group.org_name} →
+              </Link>
+            </div>
+            {!collapsed && (
+              <>
+                <p className="text-xs text-gray-400 mt-1 mb-3">
+                  Uploaded once on the organisation and shown on every job they're on. Not a copy — edit or delete it there.
+                </p>
+                <div className="space-y-2">
+                  {group.files.map(file => (
+                    <SurfacedFileRow
+                      key={file.url}
+                      file={file}
+                      onView={setViewingFile}
+                      sourceNote={file.source === 'job'
+                        ? `via ${jobLabel(file.source_job_name, file.source_job_number)}`
+                        : null}
+                      sourceHref={file.source === 'job' && file.source_job_id
+                        ? `/jobs/${file.source_job_id}`
+                        : null}
+                    />
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        );
+      })}
+
+      {/* Job → Org. The explicit direction: these rows exist because someone
+          chose to surface a job's file on this organisation. */}
+      {entityType === 'organisations' && linkedFromJobs.length > 0 && (
+        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+          <h3 className="text-sm font-semibold text-gray-700">
+            Linked from jobs ({linkedFromJobs.length})
+          </h3>
+          <p className="text-xs text-gray-400 mt-1 mb-3">
+            Uploaded on a job and linked up to this organisation, so it now shows on their other jobs too.
+            The job still owns the file — unlinking here leaves it there.
+          </p>
+          <div className="space-y-2">
+            {linkedFromJobs.map(file => (
+              <SurfacedFileRow
+                key={file.link_id}
+                file={file}
+                onView={setViewingFile}
+                sourceNote={`on ${jobLabel(file.source_job_name, file.source_job_number)}`}
+                sourceHref={`/jobs/${file.source_job_id}`}
+                onUnlink={() => unlink(file.link_id)}
+                unlinkDisabled={busyLink}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* File viewer modal */}
       {viewingFile && (
         <FileViewerModal
@@ -827,11 +1097,105 @@ export default function EntityFilesSection({
           onClose={() => setEmailingFile(null)}
           onSent={() => {
             setEmailingFile(null);
-            onChanged();
+            refresh();
           }}
         />
       )}
 
+    </div>
+  );
+}
+
+/**
+ * One row in a surfaced group — a file this entity can SEE but doesn't own.
+ * Deliberately thin: view/open, its tag and comment, and where it comes from.
+ * No edit, share, email or delete, because none of those belong to the entity
+ * looking through the window. The one exception is unlinking, which closes the
+ * window without touching the file.
+ */
+function SurfacedFileRow({
+  file,
+  onView,
+  sourceNote,
+  sourceHref,
+  onUnlink,
+  unlinkDisabled,
+}: {
+  file: FileAttachment;
+  onView: (file: FileAttachment) => void;
+  sourceNote?: string | null;
+  sourceHref?: string | null;
+  onUnlink?: () => void;
+  unlinkDisabled?: boolean;
+}) {
+  const isLink = file.type === 'link';
+  const open = () => {
+    if (isLink) window.open(file.url, '_blank', 'noopener,noreferrer');
+    else onView(file);
+  };
+
+  return (
+    <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between p-3 rounded-lg border border-gray-100 hover:border-gray-200 hover:bg-gray-50 group">
+      <div className="flex items-start gap-3 min-w-0 flex-1">
+        <div className={`w-8 h-8 rounded flex items-center justify-center text-xs font-bold flex-shrink-0 ${
+          isLink ? 'bg-sky-100 text-sky-600' :
+          file.type === 'image' ? 'bg-purple-100 text-purple-600' :
+          file.type === 'document' ? 'bg-blue-100 text-blue-600' :
+          'bg-gray-100 text-gray-500'
+        }`}>
+          {isLink ? '🔗' : file.type === 'image' ? 'IMG' : file.type === 'document' ? 'DOC' : 'FILE'}
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 min-w-0 flex-wrap">
+            <button
+              onClick={open}
+              className="text-sm font-medium text-gray-900 hover:text-ooosh-600 truncate text-left"
+            >
+              {file.name}
+              {isLink ? <span className="text-xs text-gray-400 ml-1">(open link ↗)</span> : null}
+            </button>
+            {file.label && (
+              <span className={`inline-flex px-1.5 py-0.5 rounded text-xs font-medium flex-shrink-0 ${fileTagColour(file.label)}`}>
+                {file.label}
+              </span>
+            )}
+          </div>
+          {file.comment && <p className="text-xs text-gray-500 mt-0.5 truncate">{file.comment}</p>}
+          <p className="text-xs text-gray-400">
+            {file.uploaded_by} &middot; {new Date(file.uploaded_at).toLocaleDateString('en-GB', {
+              day: 'numeric', month: 'short', year: 'numeric',
+            })}
+            {sourceNote && (
+              <>
+                {' '}&middot;{' '}
+                {sourceHref
+                  ? <Link to={sourceHref} className="text-ooosh-600 hover:underline">{sourceNote}</Link>
+                  : sourceNote}
+              </>
+            )}
+          </p>
+        </div>
+      </div>
+      <div className="flex items-center gap-2 flex-shrink-0 pl-11 sm:pl-0 sm:ml-2">
+        {!isLink && (
+          <button
+            onClick={() => onView(file)}
+            className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity"
+          >
+            View
+          </button>
+        )}
+        {onUnlink && (
+          <button
+            onClick={onUnlink}
+            disabled={unlinkDisabled}
+            className="text-xs text-gray-500 hover:text-gray-700 font-medium disabled:opacity-50 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity"
+            title="Stop showing this file here — the job keeps it"
+          >
+            Unlink
+          </button>
+        )}
+      </div>
     </div>
   );
 }
