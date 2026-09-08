@@ -1,65 +1,113 @@
 /**
- * Which driver documents are actually ON FILE.
+ * Driver document files — THE match, and "is it actually on file".
  *
  * `drivers.files` is a JSONB array of `{ name, url, type, label?, tag?, … }`
- * appended by every upload path — the hire form (`POST
- * /driver-verification/upload`, which sets a `tag`) and staff uploads on the
- * driver page (which set a `label`). Nothing in OP read it to answer "does this
- * document exist", so the whole staff cockpit was derived from DATES alone and
- * could say two untrue things:
+ * appended by every upload path: the hire form (`POST
+ * /driver-verification/upload`, which sets a `tag`), staff uploads on the
+ * driver page (which set a `label`), and the Monday migration (which used yet
+ * another spelling).
+ *
+ * TWO QUESTIONS, ONE SET OF SPELLINGS
+ * -----------------------------------
+ *   which document is this file?  → `resolveDocumentKey()`, used by the
+ *                                    snapshot PDF to pick the image for a page
+ *   is this document on file?     → `hasDocumentFor()` / `documentPresence()`,
+ *                                    used by the staff cockpit
+ *
+ * They used to be two independent copies of the same token lists (this map was
+ * `DOC_MATCH_TOKENS`, inline in driver-snapshot-pdf.ts). That is the drift this
+ * codebase keeps getting bitten by — and this exact list has already caused it
+ * once: the snapshot PDF matched on exact strings, so it silently dropped every
+ * licence and POA image for months while `passport` and `signature` happened to
+ * line up (Adam Coelho / job 16063).
+ *
+ * WHY THE MATCH IS ON A NORMALISED TOKEN
+ * --------------------------------------
+ * Lowercase, strip every non-alphanumeric, so British/American spelling and
+ * space/underscore/hyphen variants all collapse together:
+ *   'Licence Front' | 'licence_front' | 'License Front' | 'licence-front'
+ *   'POA 1' | 'poa1' | 'Proof of Address 1'
+ * Match on `tag` first, then fall back to `label`.
+ *
+ * WHY PRESENCE IS A SEPARATE QUESTION FROM VALIDITY
+ * -------------------------------------------------
+ * Nothing in OP read this index to ask "does this document exist", so the staff
+ * cockpit was derived from DATES alone and could say two untrue things:
  *
  *   no file, no date  → "has no date recorded — add the date on the document",
  *                       with an Add-the-date button pointing at an empty slot.
  *                       There is no document to read a date off.
- *   no file, date set → green. The validity window rests on nothing. This is
- *                       not hypothetical: Steven Aldridge / job 16116 (Sep 2026)
- *                       had a DVLA check date, code and points written
- *                       server-side while the DVLA evidence file was never
- *                       uploaded, and nothing anywhere said so.
+ *   no file, date set → green. The validity window rests on nothing. Steven
+ *                       Aldridge / job 16116 (Sep 2026): a DVLA check date,
+ *                       code and points written server-side while the evidence
+ *                       file was never uploaded, and nothing anywhere said so.
  *
- * WHY THE MATCH IS ON A NORMALISED TOKEN
- * --------------------------------------
- * Upload paths spell the same document several ways — `licence_front`,
- * `license_front`, `Licence Front` — which is how the driver snapshot PDF
- * silently dropped licence and POA images for months. Matching a lowercase
- * alphanumeric token rather than an exact string means a new variant doesn't
- * break the group.
+ * Presence changes what staff are TOLD, never a window. The hire-form router is
+ * date-based too, so letting a missing file invalidate a window would put OP
+ * and the driver's own form back to disagreeing about the same driver.
  *
- * WHY THIS IS THE ONE THAT DECIDES
- * --------------------------------
- * `filesForSlot()` on the frontend answers a different question — WHICH file
- * goes in which thumbnail slot — and needs the file objects, not a boolean. It
- * keeps its own copy of these spellings for that. This module is the one that
- * decides what staff are TOLD, and its answer is served through
- * /verification-state so the two can't tell staff different things: if a file
- * exists under a spelling neither recognises, the slot on screen already reads
- * "Not uploaded" and this line agrees with it.
+ * THE ONE REMAINING MIRROR
+ * ------------------------
+ * `filesForSlot()` in frontend/.../EvidenceGroup.tsx holds these spellings for a
+ * third job — which file goes in which thumbnail slot — and needs the file
+ * objects, not a boolean or a key. It can't import this module (the backend and
+ * frontend don't share runtime code; `shared/` is types-only as far as the
+ * backend's `rootDir` is concerned), so **a new spelling goes in both**.
  */
 
-/** Evidence groups that have a document behind them, as the cockpit groups them. */
-export type DocumentSlot = 'identity' | 'poa1' | 'poa2' | 'dvla' | 'passport' | 'signature';
+/** Canonical document keys — one per physical document we hold. */
+export const DOCUMENT_TOKENS = {
+  licenceFront: ['licencefront', 'licensefront'],
+  licenceBack: ['licenceback', 'licenseback'],
+  /** The iDenfy selfie, stored so staff can compare it against the licence photo. */
+  selfie: ['selfie', 'face', 'idenfyface'],
+  dvlaCheck: ['dvlacheck', 'dvlacheckcode', 'dvla'],
+  poa1: ['poa1', 'proofofaddress1', 'proofofaddress'],
+  poa2: ['poa2', 'proofofaddress2'],
+  passport: ['passport'],
+  signature: ['signature', 'sig'],
+} as const;
+
+export type DocumentKey = keyof typeof DOCUMENT_TOKENS;
 
 /**
- * Accepted label/tag spellings per slot — the same lists the cockpit's evidence
- * groups use. Compared after `normaliseTag()`, so punctuation and case here are
- * only for readability.
+ * Evidence groups as the staff cockpit groups them — the licence front, back
+ * and selfie are three files behind ONE 90-day identity check, which is why
+ * they share a group (and a date).
  */
-const SLOT_TAGS: Record<DocumentSlot, string[]> = {
-  identity: [
-    'Licence Front', 'licence_front', 'License Front', 'license_front',
-    'Licence Back', 'licence_back', 'License Back', 'license_back',
-    'Selfie', 'selfie', 'face', 'idenfy_face',
-  ],
-  poa1: ['Proof of Address', 'POA 1', 'poa1', 'Proof of Address 1'],
-  poa2: ['POA 2', 'poa2', 'Proof of Address 2'],
-  dvla: ['DVLA Check Code', 'DVLA Check', 'dvla_check', 'dvla'],
-  passport: ['Passport', 'passport'],
-  signature: ['Signature', 'signature', 'sig'],
-};
+export const SLOT_DOCUMENTS = {
+  identity: ['licenceFront', 'licenceBack', 'selfie'],
+  poa1: ['poa1'],
+  poa2: ['poa2'],
+  dvla: ['dvlaCheck'],
+  passport: ['passport'],
+  signature: ['signature'],
+} as const satisfies Record<string, readonly DocumentKey[]>;
+
+export type DocumentSlot = keyof typeof SLOT_DOCUMENTS;
+
+/**
+ * token → document key. Built as an exact reverse lookup so 'proofofaddress2'
+ * resolves to poa2 and never falls into poa1's 'proofofaddress'.
+ */
+const TOKEN_TO_KEY: Record<string, DocumentKey> = (() => {
+  const out: Record<string, DocumentKey> = {};
+  for (const [key, tokens] of Object.entries(DOCUMENT_TOKENS) as Array<[DocumentKey, readonly string[]]>) {
+    for (const token of tokens) out[token] = key;
+  }
+  return out;
+})();
 
 /** Lowercase, strip everything that isn't a letter or digit. */
-export function normaliseTag(value: unknown): string {
+export function normaliseDocToken(value: unknown): string {
   return typeof value === 'string' ? value.toLowerCase().replace(/[^a-z0-9]/g, '') : '';
+}
+
+/** Which document a file is, from its `tag` (preferred) or `label`. */
+export function resolveDocumentKey(file: { label?: unknown; tag?: unknown }): DocumentKey | null {
+  return TOKEN_TO_KEY[normaliseDocToken(file.tag)]
+    ?? TOKEN_TO_KEY[normaliseDocToken(file.label)]
+    ?? null;
 }
 
 /**
@@ -81,19 +129,18 @@ function toFileList(files: unknown): Array<Record<string, unknown>> {
 
 /** Is there at least one file on this driver row for `slot`? */
 export function hasDocumentFor(slot: DocumentSlot, files: unknown): boolean {
-  const wanted = new Set(SLOT_TAGS[slot].map(normaliseTag));
+  const wanted = new Set<DocumentKey>(SLOT_DOCUMENTS[slot]);
   return toFileList(files).some(f => {
-    const tag = normaliseTag(f.tag);
-    const label = normaliseTag(f.label);
-    return (!!tag && wanted.has(tag)) || (!!label && wanted.has(label));
+    const key = resolveDocumentKey(f);
+    return !!key && wanted.has(key);
   });
 }
 
-/** Presence for every slot at once — one pass over the file list per slot. */
+/** Presence for every slot at once. */
 export function documentPresence(files: unknown): Record<DocumentSlot, boolean> {
   const list = toFileList(files);
   const out = {} as Record<DocumentSlot, boolean>;
-  for (const slot of Object.keys(SLOT_TAGS) as DocumentSlot[]) {
+  for (const slot of Object.keys(SLOT_DOCUMENTS) as DocumentSlot[]) {
     out[slot] = hasDocumentFor(slot, list);
   }
   return out;
