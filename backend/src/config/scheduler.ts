@@ -44,7 +44,9 @@ export function startScheduler() {
       console.log('Scheduler: Starting daily backup...');
       try {
         const result = await runBackup();
-        console.log(`Scheduler: Backup complete — ${result.key}`);
+        if (result) {
+          console.log(`Scheduler: Backup complete — ${result.key}`);
+        }
       } catch (err) {
         console.error('Scheduler: Backup failed:', err);
       }
