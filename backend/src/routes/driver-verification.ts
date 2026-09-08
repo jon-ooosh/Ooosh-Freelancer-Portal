@@ -1450,7 +1450,7 @@ function calculateNextStep(
 // Response builders
 // ============================================================================
 
-function buildDriverStatusResponse(driver: Record<string, unknown>) {
+export function buildDriverStatusResponse(driver: Record<string, unknown>) {
   const analysis = analyzeDocuments(driver);
 
   const licenceEnding = (driver.licence_number as string)?.slice(-8) || null;
@@ -1543,7 +1543,16 @@ function buildDriverStatusResponse(driver: Record<string, unknown>) {
       },
     },
     insuranceData: {
-      datePassedTest: driver.date_passed_test ? String(driver.date_passed_test).split('T')[0] : '',
+      // MUST go through toYmd like every other date on this response. pg hands
+      // back a DATE column as a JS Date object, so the old
+      // String(driver.date_passed_test).split('T')[0] produced
+      // "Mon Dec 27 2021 00:00:00 GM" — it split on the T in "GMT". The hire
+      // form drops that straight into <input type="date">, which SILENTLY
+      // refuses to render a value it can't parse, so a returning driver saw an
+      // empty "Date passed driving test" box and had to retype it every hire.
+      // Same class of bug as the hire-agreement PDF fix in hire-forms.ts
+      // (toISODate) — that sweep missed this endpoint.
+      datePassedTest: toYmd(driver.date_passed_test) || '',
       hasDisability: (driver.has_disability as boolean) || false,
       hasConvictions: (driver.has_convictions as boolean) || false,
       hasProsecution: (driver.has_prosecution as boolean) || false,

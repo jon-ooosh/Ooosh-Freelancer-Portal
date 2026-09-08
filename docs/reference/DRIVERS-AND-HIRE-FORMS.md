@@ -252,6 +252,25 @@ asked once. POA1 and POA2 stay separate — both required, independently lapsing
   of two different documents and the licence read tends to repeat the postcode.
   No postcode on either side falls back to a de-duplicated word-set comparison.
   Display only; nothing gates on it.
+- **⚠️ Every date the hire form consumes must leave OP as `YYYY-MM-DD` — use the
+  response's `toYmd`, never `String(v).split('T')[0]`.** node-postgres returns a
+  DATE column as a **JS Date object**, so `String(d)` gives
+  `"Mon Dec 27 2021 00:00:00 GMT+0000 (…)"` — and `.split('T')[0]` splits on the
+  **T in "GMT"**, yielding `"Mon Dec 27 2021 00:00:00 GM"`. That value is
+  **truthy**, so it sails through every `|| ''` fallback between OP and the
+  browser, and an `<input type="date">` **silently refuses to render a value it
+  cannot parse** — the field just looks empty, with no error anywhere. This bug
+  class has now surfaced three times: the Idenfy passport `BAD_VALUE` (Ernie, job
+  15644), the hire-agreement PDF printing `"Sun Jan 09 1983 00:00:00 GM"`
+  (`hire-forms.ts` `toISODate`), and `insuranceData.datePassedTest` on
+  `/driver-verification/status` — the one field on that response that didn't go
+  through `toYmd`, so returning drivers had to retype "Date passed driving test"
+  on every hire while the value sat correctly in `drivers.date_passed_test`
+  (Sep 2026). Pinned by `routes/__tests__/driver-status-response.test.ts`, which
+  asserts EVERY date on that payload matches `YYYY-MM-DD`; add new ones to it.
+  The hire form's `driver-status.js` also now blanks any non-`YYYY-MM-DD` date as
+  a tripwire, so a future regression shows as a missing value rather than an
+  invisible one.
 
 **Fixed in the same pass:** `{value || '—'}` rendered 0 penalty points as a
 dash (0 is falsy) — a clean licence looked like missing data. `licence_type` and
