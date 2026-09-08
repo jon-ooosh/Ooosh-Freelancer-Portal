@@ -194,6 +194,29 @@ function deriveRechargeStatusForWrite(data: Record<string, unknown>, current?: s
   }
 }
 
+// `RETURNING *` gives the raw costs row — no hh_job_number / job_name / vehicle_reg,
+// because those live on the joined tables. Callers hand that row straight to the
+// UI (the capture modal's job chip, and the split modal it can open next), which
+// then had nothing to print and fell back to "(linked job)" / "(captured job)".
+// Enrich the row with the display fields the list query already exposes so the
+// real job number is shown wherever a saved cost is rendered.
+async function withJobLabels<T extends { id?: string; job_id?: string | null; vehicle_id?: string | null }>(row: T): Promise<T> {
+  if (!row || (!row.job_id && !row.vehicle_id)) return row;
+  try {
+    const r = await query(
+      `SELECT j.hh_job_number, j.job_name, fv.reg AS vehicle_reg
+         FROM costs c
+         LEFT JOIN jobs j ON j.id = c.job_id
+         LEFT JOIN fleet_vehicles fv ON fv.id = c.vehicle_id
+        WHERE c.id = $1`,
+      [row.id],
+    );
+    return r.rows.length ? { ...row, ...r.rows[0] } : row;
+  } catch {
+    return row; // display sugar only — never fail a save over it
+  }
+}
+
 async function audit(userId: string, costId: string, action: string, prev: unknown, next: unknown) {
   try {
     await query(
@@ -867,7 +890,7 @@ router.post('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respon
         .catch(() => { /* non-fatal — staff can set terms manually */ });
     }
 
-    res.status(201).json({ data: created });
+    res.status(201).json({ data: await withJobLabels(created) });
   } catch (err) {
     console.error('[costs] create error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -937,7 +960,7 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
         .catch(() => { /* non-fatal — staff can set terms manually */ });
     }
 
-    res.json({ data: updated });
+    res.json({ data: await withJobLabels(updated) });
   } catch (err) {
     console.error('[costs] update error:', err);
     res.status(500).json({ error: 'Internal server error' });

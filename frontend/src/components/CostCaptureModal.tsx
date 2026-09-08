@@ -180,7 +180,8 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
   // Job link (needed to enable recharge). Pre-fill from existing cost or preset.
   const initialJobLabel = existingRow?.hh_job_number
     ? `#${existingRow.hh_job_number}${existingRow.job_name ? ' – ' + existingRow.job_name : ''}`
-    : existingRow?.job_id ? '(linked job)' : '';
+    : existingRow?.job_name ? existingRow.job_name
+    : existingRow?.job_id ? 'Linked job (no HireHop number)' : '';
   const [linkedJobId, setLinkedJobId] = useState<string | null>(existing?.job_id || presetJobId || null);
   const [linkedJobLabel, setLinkedJobLabel] = useState<string>(initialJobLabel);
   const [jobSearch, setJobSearch] = useState('');
@@ -969,11 +970,16 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
                 <div>
                   <div className="flex items-baseline justify-between mb-1">
                     <span className="text-sm font-medium text-gray-700">Supporting documents</span>
-                    <span className="text-xs text-gray-400">{totalSupporting}/{MAX_SUPPORTING_DOCS}</span>
+                    <span className="text-xs text-gray-400">
+                      {totalSupporting} of {MAX_SUPPORTING_DOCS}
+                      {totalSupporting > 0 && totalSupporting < MAX_SUPPORTING_DOCS
+                        ? ` · ${MAX_SUPPORTING_DOCS - totalSupporting} more allowed` : ''}
+                    </span>
                   </div>
                   <p className="text-xs text-gray-500 mb-2">
                     Extra evidence for the same invoice — a fuel receipt, a delivery note.
-                    Sent to Xero with the {isBillMethod ? 'bill' : 'transaction'}.
+                    Attach as many as you need (up to {MAX_SUPPORTING_DOCS}); they all go to Xero
+                    with the {isBillMethod ? 'bill' : 'transaction'}.
                   </p>
 
                   {supportingDocs.map((doc, i) => (
@@ -997,19 +1003,23 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
                   ))}
 
                   {totalSupporting < MAX_SUPPORTING_DOCS ? (
-                    <input type="file" multiple accept="image/*,application/pdf"
-                      className="text-xs mt-2 w-full"
-                      onChange={(e) => {
-                        // Capture the list BEFORE clearing the input — reading
-                        // e.target.files inside the deferred updater finds it
-                        // already emptied.
-                        const picked = Array.from(e.target.files || []);
-                        e.target.value = '';
-                        if (picked.length) {
-                          setNewSupportingFiles((prev) =>
-                            [...prev, ...picked].slice(0, MAX_SUPPORTING_DOCS - supportingDocs.length));
-                        }
-                      }} />
+                    <label className="mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium
+                                      text-purple-700 bg-purple-50 border border-purple-200 rounded-md
+                                      cursor-pointer hover:bg-purple-100">
+                      ＋ {totalSupporting === 0 ? 'Attach a document' : 'Add another document'}
+                      <input type="file" multiple accept="image/*,application/pdf" className="hidden"
+                        onChange={(e) => {
+                          // Capture the list BEFORE clearing the input — reading
+                          // e.target.files inside the deferred updater finds it
+                          // already emptied.
+                          const picked = Array.from(e.target.files || []);
+                          e.target.value = '';
+                          if (picked.length) {
+                            setNewSupportingFiles((prev) =>
+                              [...prev, ...picked].slice(0, MAX_SUPPORTING_DOCS - supportingDocs.length));
+                          }
+                        }} />
+                    </label>
                   ) : (
                     <p className="text-xs text-amber-700 mt-2">
                       That&apos;s the maximum Xero accepts on one {isBillMethod ? 'bill' : 'transaction'}.
@@ -1070,7 +1080,7 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
               </label>
               <input className={inputCls} value={invoiceNumber} onChange={(e) => setInvoiceNumber(e.target.value)} placeholder="e.g. INV-10472 (leave blank for fuel/till receipts)" />
               {invoiceDup && (
-                <p className="text-xs text-amber-600 mt-1">
+                <p className="text-xs text-red-600 font-medium mt-1">
                   ⚠ Already captured: a cost with this invoice number{supplierName.trim() ? ` for ${supplierName.trim()}` : ''} exists
                   {invoiceDup.amount_gross != null ? ` (£${Number(invoiceDup.amount_gross).toFixed(2)}` : ''}{invoiceDup.cost_date ? `, ${new Date(invoiceDup.cost_date).toLocaleDateString('en-GB')}` : ''}{invoiceDup.amount_gross != null ? ', ' + invoiceDup.payment_status.replace(/_/g, ' ') + ')' : ''}. Check you're not submitting it twice.
                 </p>
@@ -1161,7 +1171,7 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
               {linkedJobId ? (
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="px-3 py-1.5 text-sm bg-purple-50 text-purple-700 rounded-md border border-purple-200">
-                    {linkedJobLabel || '(linked job)'}
+                    {linkedJobLabel || 'Linked job (no HireHop number)'}
                   </span>
                   <button type="button"
                     onClick={() => { setLinkedJobId(null); setLinkedJobLabel(''); setJobSearch(''); setJobSuggestions([]); }}
@@ -1379,7 +1389,7 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
                 />
                 {dueDateOverride ? (
                   <p className="text-xs text-amber-600 mt-1">
-                    Using your date{derivedDueDate ? <> instead of <strong>{fmtDate(derivedDueDate)}</strong></> : null}.{' '}
+                    Using invoice due date{derivedDueDate ? <> instead of <strong>{fmtDate(derivedDueDate)}</strong></> : null}.{' '}
                     <button type="button" onClick={() => setDueDateOverride('')} className="underline hover:no-underline">
                       Use the default
                     </button>

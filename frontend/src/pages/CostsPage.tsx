@@ -492,22 +492,20 @@ export default function CostsPage() {
                 <SortableTh label="Description" k="description" sortKey={sortKey} sortDir={sortDir} onSort={clickSort} />
                 <SortableTh label="Gross" k="gross" sortKey={sortKey} sortDir={sortDir} onSort={clickSort} align="right" />
                 <SortableTh label="Type" k="type" sortKey={sortKey} sortDir={sortDir} onSort={clickSort} />
-                <th className="px-2.5 py-2 text-left font-medium">Linked</th>
-                {view === 'all' && <th className="px-2.5 py-2 text-left font-medium">Uploaded by</th>}
+                <th className="px-2 py-2 text-left font-medium">Linked</th>
                 <SortableTh label="Status" k="status" sortKey={sortKey} sortDir={sortDir} onSort={clickSort} />
-                <th className="px-2.5 py-2 text-left font-medium">Xero</th>
-                <th className="px-2.5 py-2 text-right font-medium">Actions</th>
+                <th className="px-2 py-2 text-right font-medium">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {sortedRows.map((c) => (
                 <tr key={c.id} id={`cost-row-${c.id}`}
                   className={focusCostId === c.id ? 'bg-purple-50 ring-2 ring-inset ring-purple-300' : 'hover:bg-gray-50'}>
-                  <td className="px-2.5 py-2 whitespace-nowrap text-gray-700" title={fmtDate(c.cost_date)}>{fmtDayMonth(c.cost_date)}</td>
+                  <td className="px-2 py-2 whitespace-nowrap text-gray-700" title={fmtDate(c.cost_date)}>{fmtDayMonth(c.cost_date)}</td>
                   {view === 'payable' && (() => {
                     const due = dueInfo(c);
                     return (
-                      <td className="px-2.5 py-2 whitespace-nowrap">
+                      <td className="px-2 py-2 whitespace-nowrap">
                         <button onClick={() => setTermsTarget(c)}
                           title={due ? `Due ${due.fullLabel} · terms: ${termsLabel(c.terms)} · click to set this supplier's terms` : 'Set this supplier’s payment terms'}
                           className="flex items-center gap-1.5 text-gray-700 hover:text-purple-700">
@@ -521,21 +519,29 @@ export default function CostsPage() {
                       </td>
                     );
                   })()}
-                  <td className="px-2.5 py-2 text-gray-900">
+                  <td className="px-2 py-2 text-gray-900">
                     <div className="flex items-center gap-2">
                       {c.receipt_r2_key && <ReceiptThumb cost={c} onOpen={() => setPreview(c)} />}
                       <div className="min-w-0">
-                        <div className="truncate max-w-[160px]">{c.supplier_name || '—'}</div>
-                        {c.invoice_number && <div className="text-xs text-gray-400 truncate max-w-[160px]">#{c.invoice_number}</div>}
+                        <div className="truncate max-w-[150px]">{c.supplier_name || '—'}</div>
+                        {c.invoice_number && <div className="text-xs text-gray-400 truncate max-w-[150px]">#{c.invoice_number}</div>}
+                        {/* "Uploaded by" used to be its own column on the All costs tab,
+                            which pushed the row actions off-screen. It rides here instead;
+                            the other tabs keep it as the Type tooltip, as before. */}
+                        {view === 'all' && c.uploaded_by_name && (
+                          <div className="text-xs text-gray-400 truncate max-w-[150px]" title={`Uploaded by ${c.uploaded_by_name}`}>
+                            {c.uploaded_by_name}
+                          </div>
+                        )}
                       </div>
                     </div>
                   </td>
-                  <td className="px-2.5 py-2 text-gray-600 max-w-[180px] truncate" title={c.description || undefined}>{c.description || '—'}</td>
-                  <td className="px-2.5 py-2 text-right font-medium text-gray-900">{gbp(c.amount_gross)}</td>
-                  <td className="px-2.5 py-2 text-gray-600 max-w-[110px] truncate whitespace-nowrap" title={`${c.category || c.cost_type.replace('_', ' ')}${view !== 'all' && c.uploaded_by_name ? ` · uploaded by ${c.uploaded_by_name}` : ''}`}>
+                  <td className="px-2 py-2 text-gray-600 max-w-[180px] truncate" title={c.description || undefined}>{c.description || '—'}</td>
+                  <td className="px-2 py-2 text-right font-medium text-gray-900">{gbp(c.amount_gross)}</td>
+                  <td className="px-2 py-2 text-gray-600 max-w-[110px] truncate whitespace-nowrap" title={`${c.category || c.cost_type.replace('_', ' ')}${view !== 'all' && c.uploaded_by_name ? ` · uploaded by ${c.uploaded_by_name}` : ''}`}>
                     {c.category || c.cost_type.replace('_', ' ')}
                   </td>
-                  <td className="px-2.5 py-2 text-gray-600 whitespace-nowrap">
+                  <td className="px-2 py-2 text-gray-600 whitespace-nowrap">
                     {c.hh_job_number && c.job_id ? (
                       <Link to={`/jobs/${c.job_id}`} title={c.job_name || undefined} className="text-purple-700 hover:underline">#{c.hh_job_number}</Link>
                     ) : c.hh_job_number ? <span className="text-purple-700">#{c.hh_job_number}</span>
@@ -556,8 +562,7 @@ export default function CostsPage() {
                       </div>
                     )}
                   </td>
-                  {view === 'all' && <td className="px-2.5 py-2 text-gray-600 whitespace-nowrap">{c.uploaded_by_name || '—'}</td>}
-                  <td className="px-2.5 py-2">
+                  <td className="px-2 py-2">
                     {c.approval_state ? (
                       <span className={`px-2 py-0.5 text-xs rounded-full ${APPROVAL_COLOURS[c.approval_state] || 'bg-gray-100 text-gray-700'}`}>
                         {c.approval_state}
@@ -571,12 +576,15 @@ export default function CostsPage() {
                     {c.remittance_sent_at && (
                       <span className="ml-1 text-xs text-gray-400" title={`Remittance advice sent${c.remittance_email ? ` to ${c.remittance_email}` : ''}`}>✉︎</span>
                     )}
+                    {/* Xero state rides in the same cell as the OP status — both answer
+                        "where has this cost got to", and a separate column pushed the
+                        row actions off-screen. */}
+                    <span className="ml-1 inline-block align-middle">
+                      <XeroCell cost={c} busy={actionBusy === c.id + 'sync'} onRetry={() => retrySync(c)}
+                        resyncBusy={actionBusy === c.id + 'resync'} onResync={() => resyncStale(c)} />
+                    </span>
                   </td>
-                  <td className="px-2.5 py-2 whitespace-nowrap">
-                    <XeroCell cost={c} busy={actionBusy === c.id + 'sync'} onRetry={() => retrySync(c)}
-                      resyncBusy={actionBusy === c.id + 'resync'} onResync={() => resyncStale(c)} />
-                  </td>
-                  <td className="px-2.5 py-2 text-right whitespace-nowrap">
+                  <td className="px-2 py-2 text-right whitespace-nowrap">
                     <div className="flex items-center justify-end gap-2">
                       {view === 'payable' && (
                         <PayableActions cost={c} isManager={isManager} isAdmin={isAdmin} busy={actionBusy} onAction={runAction} onPay={() => setPayTarget(c)} />
@@ -998,7 +1006,7 @@ function SortableTh({ label, k, sortKey, sortDir, onSort, align }: {
 }) {
   return (
     <th onClick={() => onSort(k)}
-      className={`px-2.5 py-2 font-medium cursor-pointer select-none hover:text-gray-900 whitespace-nowrap ${align === 'right' ? 'text-right' : 'text-left'}`}>
+      className={`px-2 py-2 font-medium cursor-pointer select-none hover:text-gray-900 whitespace-nowrap ${align === 'right' ? 'text-right' : 'text-left'}`}>
       {label}
       {sortKey === k && <span className="ml-1">{sortDir === 'asc' ? '▲' : '▼'}</span>}
     </th>
