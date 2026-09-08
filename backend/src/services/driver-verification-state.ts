@@ -16,7 +16,7 @@
  * must not drift from the router.
  */
 
-import { computeDriverValidity, todayYmd, type DocWindow } from './driver-validity';
+import { computeDriverValidity, todayYmd, toYmd, type DocWindow } from './driver-validity';
 import { isIdentityAuthorised } from './identity-review';
 
 export type StageState = 'done' | 'todo' | 'blocked' | 'not_required';
@@ -44,6 +44,12 @@ export interface VerificationAction {
    */
   kind: 'compare_identity' | 'set_date' | 'replace_document' | 'send_hire_form' | 'resolve_referral' | 'none';
   slot?: string;
+  /**
+   * HH job number named in `message`. Set only where the line refers to a
+   * specific hire, so the cockpit can turn the "#16643" in the text into a
+   * link. The message stays readable without it (emails, logs, tests).
+   */
+  jobNumber?: number;
 }
 
 export interface DriverVerificationState {
@@ -72,6 +78,8 @@ export interface VerificationStateInput {
    * the hire in front of them; this can.
    */
   unsigned_job_number?: unknown;
+  /** When the driver started the form for `unsigned_job_number`. */
+  current_job_started_at?: unknown;
   [key: string]: unknown;
 }
 
@@ -256,11 +264,22 @@ export function computeVerificationState(
   }
 
   if (unsignedFor) {
-    // Amber, not red: nothing is wrong with the driver, they just stopped one
-    // screen short. Nothing links them to the hire until they sign.
+    // Amber, not red: nothing is wrong with the driver, they just stopped short.
+    // Nothing links them to the hire until they sign.
+    //
+    // This line carries the whole story because it is now the ONLY place the
+    // driver page tells it — a second amber box below the Identity card said
+    // the same thing again (Sep 2026 tidy-up). The date and the "for a previous
+    // hire" clause came from there: the stale signature is exactly what made
+    // this state invisible in the first place (Cameron Williams-Hill / 16618).
+    const startedOn = toYmd(driver.current_job_started_at);
+    const lastSigned = toYmd(driver.signature_date);
     actions.push({
-      severity: 'amber', kind: 'none', slot: 'signature',
-      message: `Started the hire form for #${unsignedFor} but hasn't signed it — they're not on the hire until they do. Send the hire form link again.`,
+      severity: 'amber', kind: 'none', slot: 'signature', jobNumber: unsignedFor,
+      message: `Started the hire form for #${unsignedFor}${startedOn ? ` on ${formatUk(startedOn)}` : ''}`
+        + ` but hasn't signed it — they're not on the hire until they do.`
+        + (lastSigned ? ` They last signed on ${formatUk(lastSigned)}, for a previous hire.` : '')
+        + ` Send the hire form link again.`,
     });
   } else if (!signed && hasContact) {
     actions.push({

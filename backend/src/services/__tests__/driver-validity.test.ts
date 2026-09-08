@@ -4,6 +4,8 @@ import {
   addDaysYmd,
   toYmd,
   touchesValidity,
+  outstandingDocuments,
+  hasAllRequiredDocuments,
 } from '../driver-validity';
 
 // Fixed "today" so these never rot.
@@ -153,5 +155,60 @@ describe('touchesValidity', () => {
     expect(touchesValidity(['dvla_check_date'])).toBe(true);
     expect(touchesValidity(['poa1_doc_date', 'phone'])).toBe(true);
     expect(touchesValidity(['phone', 'address_full'])).toBe(false);
+  });
+});
+
+describe('outstandingDocuments', () => {
+  // Everything in date on TODAY.
+  const complete = {
+    idenfy_check_date: '2026-08-09',
+    licence_issued_by: 'DVLA',
+    dvla_check_date: '2026-08-09',
+    poa1_doc_date: '2026-08-09',
+    poa2_doc_date: '2026-08-09',
+  };
+
+  it('reports nothing outstanding for a complete UK driver', () => {
+    const v = computeDriverValidity(complete, TODAY);
+    expect(outstandingDocuments(v)).toEqual({
+      licence: false, poa1: false, poa2: false, dvla: false, passport: false,
+    });
+    expect(hasAllRequiredDocuments(v)).toBe(true);
+  });
+
+  it('asks a UK driver for DVLA and never for a passport', () => {
+    const v = computeDriverValidity({ ...complete, dvla_check_date: null }, TODAY);
+    const out = outstandingDocuments(v);
+    expect(out.dvla).toBe(true);
+    expect(out.passport).toBe(false);
+    expect(hasAllRequiredDocuments(v)).toBe(false);
+  });
+
+  it('asks a non-UK driver for a passport and never for DVLA', () => {
+    const v = computeDriverValidity({
+      idenfy_check_date: '2026-08-09',
+      licence_issued_by: 'Bundesdruckerei',
+      licence_issue_country: 'DE',
+      poa1_doc_date: '2026-08-09',
+      poa2_doc_date: '2026-08-09',
+    }, TODAY);
+    const out = outstandingDocuments(v);
+    expect(out.passport).toBe(true);
+    expect(out.dvla).toBe(false);
+  });
+
+  it('counts an untrusted licence as outstanding', () => {
+    // A check date with no licence identity behind it is not evidence — the
+    // nudge must chase for the licence, not tell them their documents are fine.
+    const v = computeDriverValidity({ ...complete, licence_issued_by: null }, TODAY);
+    expect(outstandingDocuments(v).licence).toBe(true);
+    expect(hasAllRequiredDocuments(v)).toBe(false);
+  });
+
+  it('counts each proof of address separately', () => {
+    const v = computeDriverValidity({ ...complete, poa2_doc_date: '2026-01-01' }, TODAY);
+    const out = outstandingDocuments(v);
+    expect(out.poa1).toBe(false);
+    expect(out.poa2).toBe(true);
   });
 });

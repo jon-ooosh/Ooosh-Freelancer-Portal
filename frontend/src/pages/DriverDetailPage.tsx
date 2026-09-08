@@ -773,11 +773,6 @@ export default function DriverDetailPage() {
     );
   }
 
-  const dvlaCheckAge = driver.dvla_check_date
-    ? Math.floor((Date.now() - new Date(driver.dvla_check_date).getTime()) / (1000 * 60 * 60 * 24))
-    : null;
-  const dvlaCheckStale = dvlaCheckAge !== null && dvlaCheckAge > 180;
-
   return (
     <div>
       {/* Header */}
@@ -928,12 +923,10 @@ export default function DriverDetailPage() {
         </button>
       </div>
 
-      {/* DVLA stale warning */}
-      {dvlaCheckStale && (
-        <div className="mt-4 bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 text-sm text-amber-700">
-          DVLA check is {dvlaCheckAge} days old (last: {formatDate(driver.dvla_check_date)}). Consider requesting a fresh check code.
-        </div>
-      )}
+      {/* No DVLA-age banner here. It predated services/driver-validity.ts and
+          used a 180-day threshold of its own, while the policy window is 30 —
+          so it could only ever fire when "What needs doing" already carried the
+          DVLA line, in softer and less accurate words. (Sep 2026) */}
 
       {/* Tabs */}
       <div className="mt-6 border-b border-gray-200">
@@ -1484,25 +1477,11 @@ function DetailsTab({
         </div>
       </div>
 
-      {/* Which hire is this? A driver part-way through the form has no
-          vehicle_hire_assignments row yet, so the Hire History tab is empty and
-          nothing tells staff what a stuck driver relates to. */}
-      {/* Keyed on "not signed FOR THIS HIRE", not "no signature at all" — a
-          returning driver carries last time's signature_date, and that hid
-          exactly this state for Cameron Williams-Hill / 16618 (Sep 2026). */}
-      {driver.unsigned_job_number && (
-        <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-          Started the hire form for job{' '}
-          <Link to={`/jobs?search=${driver.unsigned_job_number}`} className="font-semibold underline">
-            #{driver.unsigned_job_number}
-          </Link>
-          {driver.current_job_started_at && <> on {formatDate(driver.current_job_started_at)}</>}
-          {' '}but hasn't signed it yet &mdash; nothing links them to the hire until they do.
-          {driver.signature_date && (
-            <> They last signed on {formatDate(driver.signature_date)}, for a previous hire.</>
-          )}
-        </div>
-      )}
+      {/* "Started the hire form for #N but hasn't signed it" is NOT repeated
+          here. It was a second amber box saying what the amber line in "What
+          needs doing" already says; that line now carries the start date, the
+          previous signature and the link to the job, so this one only added
+          scrolling. (Sep 2026) */}
 
       {/* Insurance Questionnaire — now always shown and editable */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">

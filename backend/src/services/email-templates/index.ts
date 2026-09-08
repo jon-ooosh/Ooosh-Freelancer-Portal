@@ -1369,6 +1369,64 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  // Sent to the DRIVER when they have started a hire form and gone quiet with
+  // documents still outstanding. The sibling of hire_form_unsigned_nudge above:
+  // that one says "only the signature is left", this one says what is actually
+  // left. Sending the optimistic copy to a driver who has barely started tells
+  // them their documents are fine when they have not been uploaded at all.
+  //
+  // ⚠️ The {{#if}} blocks below must stay FLAT — the template engine does not
+  // support nesting (see substituteVariables in email-service.ts) — and the
+  // outstanding items cannot be passed as pre-built HTML because variables are
+  // HTML-escaped. One top-level block per item is the shape that works.
+  // services/unsigned-hire-form-nudge.ts, once per (driver, hire).
+  hire_form_incomplete_nudge: {
+    variant: 'client',
+    preheader: 'Your hire form is still waiting for a few things',
+    subject: 'Please finish your hire form for #{{jobNumber}}',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Your hire form isn&rsquo;t finished yet</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        Hi {{driverName}},
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        You started the hire form for <strong>#{{jobNumber}}</strong>{{#if jobName}} (<strong>{{jobName}}</strong>){{/if}}{{#if startDate}}, starting <strong>{{startDate}}</strong>{{/if}}, but it&rsquo;s not complete &mdash; so you&rsquo;re not yet added as a driver on this hire.
+      </p>
+      <p style="margin:0 0 8px;font-size:15px;color:#334155;line-height:1.6;">
+        Here&rsquo;s what&rsquo;s still needed:
+      </p>
+      <ul style="margin:0 0 16px;padding-left:24px;font-size:15px;color:#334155;line-height:1.8;">
+        {{#if needLicence}}<li>Verify your driving licence &mdash; photos of the front and back, plus a quick selfie check</li>{{/if}}
+        {{#if needPoa1}}<li>Proof of address #1 &mdash; dated within the last 3 months (utility or phone bill, bank statement, etc.)</li>{{/if}}
+        {{#if needPoa2}}<li>Proof of address #2 &mdash; a second, different document, also dated within the last 3 months</li>{{/if}}
+        {{#if needDvla}}<li>A DVLA check code from <a href="https://www.gov.uk/view-driving-licence" style="color:#7B5EA7;text-decoration:none;font-weight:600;">gov.uk/view-driving-licence</a></li>{{/if}}
+        {{#if needPassport}}<li>A photo of your passport</li>{{/if}}
+        <li>Sign the hire agreement &mdash; the last step, once the above are done</li>
+      </ul>
+      {{#if needDvla}}
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Not sure how to get a check code? See our guide:
+        <a href="https://www.oooshtours.co.uk/how-to-get-a-dvla-check-code" style="color:#7B5EA7;text-decoration:none;font-weight:600;">How to get a DVLA check code</a>.
+        If your licence wasn&rsquo;t issued in the UK, the form will ask for a photo of your passport instead &mdash; it works that out once your licence is verified, so just follow what it asks for.
+      </p>
+      {{/if}}
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;">
+        <tr>
+          <td style="padding:16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;text-align:center;">
+            <p style="margin:0 0 8px;font-size:13px;color:#64748b;">Pick up where you left off &mdash; nothing you&rsquo;ve already done is lost</p>
+            <a href="{{hireFormUrl}}" style="display:inline-block;padding:12px 28px;background-color:#7B5EA7;color:#ffffff;border-radius:8px;text-decoration:none;font-weight:600;font-size:15px;">Continue your hire form</a>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        The form is best completed on a smartphone or tablet. Open the link, enter your email and the code we send you, and you&rsquo;ll go straight back to where you got to.
+      </p>
+      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
+        Any questions or problems, please be in touch.
+      </p>
+    `,
+  },
+
   // ── Cancellation templates ──────────────────────────────────────────────
 
   job_cancelled_client: {

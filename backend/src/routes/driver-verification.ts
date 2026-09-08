@@ -21,7 +21,7 @@ import path from 'path';
 import { v4 as uuid } from 'uuid';
 import { query } from '../config/database';
 import { encryptDriverPiiInto, decryptDriverRow, DRIVER_PII_FIELDS } from '../services/driver-pii';
-import { computeDriverValidity, persistableWindows, touchesValidity, backfillFromDates } from '../services/driver-validity';
+import { computeDriverValidity, persistableWindows, touchesValidity, backfillFromDates, hasAllRequiredDocuments } from '../services/driver-validity';
 import { faceNeedsReview, sendIdentityReviewAlert } from '../services/identity-review';
 import { uploadToR2, isR2Configured } from '../config/r2';
 import { emailService } from '../services/email-service';
@@ -1316,10 +1316,10 @@ function analyzeDocuments(driver: Record<string, unknown> | null): DocumentAnaly
   };
 
   // Policy unchanged: a UK driver needs licence + both POAs + DVLA; everyone
-  // else needs licence + both POAs + passport.
-  analysis.allValid = analysis.isUkDriver
-    ? analysis.licence.valid && analysis.poa1.valid && analysis.poa2.valid && analysis.dvla.valid
-    : analysis.licence.valid && analysis.poa1.valid && analysis.poa2.valid && analysis.passport.valid;
+  // else needs licence + both POAs + passport. The rule itself now lives in
+  // driver-validity.ts beside the windows, because the unsigned-form nudge asks
+  // the same question to decide which email to send (Sep 2026).
+  analysis.allValid = hasAllRequiredDocuments(v);
 
   return analysis;
 }
