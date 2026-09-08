@@ -507,6 +507,28 @@ held_amount = max(excess_amount_taken + amount_held − claim_amount − reimbur
 - **Stale backlog:** `scripts/reconcile-stale-excess.ts` (dry-run default, `--commit`, `--days=N`) clears the historic backlog — finished-hire `taken`/`partially_paid` records with NO claims/holds, marked `reimbursed` (reimbursement_amount topped to taken → held→0). Direct DB update, **no client emails / HH pushes / Stripe calls**. Records with claims or partial reimbursements are reported for manual review, never auto-committed.
 - **Receipts Outstanding bucket** is forward-only from **1 Jun 2026** (migration 110 cleared the migration-087 historic backfill flags; dashboard query also guards `created_at >= 1 Jun` + self-retires once the hire is `completed`). **Pre-auth Holds Expiring bucket** is now action-only (`held_expires_at` between today and +2 days — past-expiry holds, which can't be actioned, are dropped).
 
+##### Refund double-count + link-deposit add-vs-set (Sep 2026, job 15187)
+
+Job 15187 showed **£3,300 collected / £1,800 reimbursed** against a £2,100 excess where the truth was £2,100 collected, £900 refunded, £1,200 still held — and the client was holding an OP-sent email saying exactly that. Two independent bugs, both of which had been quietly doubling money for months.
+
+**1. The same Stripe refund applied twice (`excess-refund.ts`, `excess.ts` reimburse, `stripe-webhook.ts`).** The reimburse endpoint fires the refund via the Stripe API and writes a `refund_legs` entry so the incoming `charge.refunded` webhook no-ops. It wrote that leg **after `res.json()`** — 2.4s after the refund existed on 15187 — while Stripe called back in **290ms**. The webhook found an empty ledger and applied the £900 a second time. Compounding it, dedup compared `(source, ref)`: the endpoint claims legs as `manual`, the webhook reports `stripe_webhook`, so even a leg that HAD been written could never match. Timestamps on 15187: record updated `15:21:14.127`, webhook leg `15:21:14.417`, endpoint's own leg `15:21:16.487`.
+- **The window is bigger than it looks.** Everything between `stripe.refunds.create` and the Step 3 UPDATE — the HireHop payment-application push and the Xero `post_payment` — sits inside it. Records where the webhook won that race ended up at `reimbursement_amount` = exactly **2 × `excess_amount_taken`** (two found in the Sep 2026 sweep); a FULL refund only escaped when the endpoint got there first, because the webhook's unwind short-circuits on `excess_status = 'reimbursed'`.
+- **Fixes:** the leg is now **claimed immediately after `stripe.refunds.create` succeeds**, before the HH push (safe: once a Stripe refund exists, every remaining path reaches the Step 3 UPDATE — the 422/502 aborts are all gated on `!stripeRefundPath`). Dedup is by **`ref` alone** — `isDuplicateLeg()` in `excess-refund.ts`, unit-tested. One refund id = one leg, whoever reports it first. The webhook also now unwinds the **individual refund's** amount, not `charge.amount_refunded` (that field is the CUMULATIVE refunded total on the charge, so a second partial refund would re-apply the first on top of itself).
+- **Sweep query** for duplicate-ref legs (finds them regardless of status — the 15187 record had been flipped back to `taken` by bug 2, which is why a status-filtered sweep missed it):
+  ```sql
+  SELECT id, job_id, excess_status, excess_amount_taken, reimbursement_amount
+  FROM job_excess
+  WHERE jsonb_array_length(COALESCE(refund_legs,'[]'::jsonb)) > 1
+    AND (SELECT count(DISTINCT l->>'ref') FROM jsonb_array_elements(refund_legs) l)
+        < jsonb_array_length(refund_legs);
+  ```
+  Most hits are harmless (full refund → status `reimbursed` → second leg logged, not applied). The ones that matter have `reimbursement_amount > excess_amount_taken`.
+
+**2. Link HH Deposit ADDED instead of SET (`excess.ts` `/link-deposit`, `MoneyTab.tsx`).** It did `excess_amount_taken += amount`, and a HireHop deposit showing as "unlinked" is very often money OP has **already counted** — the classic shape is a portal payment overwriting `hh_deposit_id`, which leaves the ORIGINAL deposit looking unmatched and offers it back up for linking. On 15187 that re-added the March £1,200 at `15:24` (three minutes after the refund, `hh_reconcile_source = 'manual_link'`), taking collected to £3,300 **and** recomputing status from the raw amounts — which wiped `partially_reimbursed` back to `taken`, hiding the refund entirely.
+- **Fixes:** link-deposit takes **`total_collected`** (absolute) like the payment endpoint; the Money-tab dialog now has a confirm step showing "total collected after linking", pre-filled as *already-collected + deposit* and editable down to *already-collected* for the re-point case. Status goes through **`deriveExcessStatus`**, which protects `reimbursed`/`partially_reimbursed`/`waived` — linking is bookkeeping and must never demote a resolved record. `amount` (delta) is still accepted for older callers.
+
+**Known gap left in place:** OP treats any positive kind=6 HireHop deposit as live excess, and a refund pushed as a kind=3 **payment application** doesn't change that (only NEGATIVE kind=6 rows feed `hhExcessRefunds`). So a reversed deposit still reads as money held: unlink such a record and the Money-tab passive reconciler re-links and re-adds it on the very next page load (job 15956, Sep 2026 — an excess re-taken on a different card). Harmless while the record stays linked; the workaround for a genuine card swap is to re-point with Link HH Deposit at the *new* deposit and leave the total unchanged.
+
 #### Step 4: Status Transition Engine ← MOSTLY COMPLETE
 Bidirectional job status sync — depends on excess tracking for gate conditions.
 

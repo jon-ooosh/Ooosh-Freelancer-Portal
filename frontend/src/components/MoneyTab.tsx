@@ -226,8 +226,13 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   };
   const [rolloverChains, setRolloverChains] = useState<Record<string, ChainEntry[]>>({});
 
-  // Link deposit state
+  // Link deposit state. Picking a record no longer links immediately — it opens
+  // a confirm step showing the resulting TOTAL collected, because linking used
+  // to silently ADD the deposit to whatever was already on the record (job
+  // 15187: £2,100 + a £1,200 deposit OP had already counted = £3,300).
   const [linkingDeposit, setLinkingDeposit] = useState<{ hh_deposit_id: number; amount: number } | null>(null);
+  const [linkTarget, setLinkTarget] = useState<JobExcess | null>(null);
+  const [linkTotal, setLinkTotal] = useState('');
   const [linkLoading, setLinkLoading] = useState(false);
 
   // Refund modal — hire-side payment refund (deposit/balance/etc.). Stripe-paid
@@ -627,15 +632,33 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
     }
   }
 
-  async function handleLinkDeposit(excessId: string) {
+  // Step 1 — pick the record. Pre-fill the resulting total as "what's already
+  // collected + this deposit", which is right for genuinely new money and
+  // obvious to correct when it isn't.
+  function handlePickLinkTarget(record: JobExcess) {
     if (!linkingDeposit) return;
+    const already = Number(record.excess_amount_taken || 0);
+    setLinkTarget(record);
+    setLinkTotal((already + Number(linkingDeposit.amount)).toFixed(2));
+  }
+
+  // Step 2 — confirm the total. Sends total_collected (absolute), never a delta.
+  async function handleLinkDeposit() {
+    if (!linkingDeposit || !linkTarget) return;
+    const total = parseFloat(linkTotal);
+    if (isNaN(total) || total < 0) {
+      alert('Enter the total collected on this record after linking.');
+      return;
+    }
     setLinkLoading(true);
     try {
-      await api.post(`/excess/${excessId}/link-deposit`, {
+      await api.post(`/excess/${linkTarget.id}/link-deposit`, {
         hh_deposit_id: linkingDeposit.hh_deposit_id,
-        amount: linkingDeposit.amount,
+        total_collected: total,
       });
       setLinkingDeposit(null);
+      setLinkTarget(null);
+      setLinkTotal('');
       loadData();
     } catch (err: any) {
       alert(err.message || 'Failed to link deposit');
@@ -1253,51 +1276,109 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
 
       {/* Link Deposit to Excess modal */}
       {linkingDeposit && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setLinkingDeposit(null)}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => { setLinkingDeposit(null); setLinkTarget(null); }}>
           <div className="bg-white rounded-xl shadow-xl w-full max-w-sm mx-4 p-6" onClick={(e) => e.stopPropagation()}>
             <h3 className="text-lg font-semibold text-gray-900 mb-2">Link HH Deposit to Excess Record</h3>
             <p className="text-sm text-gray-600 mb-4">
               HireHop deposit <strong>#{linkingDeposit.hh_deposit_id}</strong> for <strong>£{Number(linkingDeposit.amount).toFixed(2)}</strong>.
-              Select which excess record to link it to:
+              {linkTarget ? ' Confirm the total collected:' : ' Select which excess record to link it to:'}
             </p>
-            <div className="space-y-2 mb-4">
-              {chargeableRecords.map((record) => (
+
+            {/* Step 2 — confirm the resulting total. Linking is bookkeeping, and
+                a HireHop deposit showing as "unlinked" is often money OP has
+                already counted, so the number is always shown and always
+                editable rather than being added behind the scenes. */}
+            {linkTarget ? (
+              <div className="mb-4">
+                <p className="text-sm font-medium text-gray-900">
+                  {linkTarget.driver_name || linkTarget.client_name || 'Job-level excess'}
+                  {linkTarget.vehicle_reg && ` — ${linkTarget.vehicle_reg}`}
+                </p>
+                <p className="text-xs text-gray-500 mb-3">
+                  Already collected on this record: £{Number(linkTarget.excess_amount_taken || 0).toFixed(2)}
+                  {linkTarget.hh_deposit_id && ` · currently linked to HH deposit #${linkTarget.hh_deposit_id}`}
+                </p>
+                <label className="block text-xs font-medium text-gray-700 mb-1">
+                  Total collected after linking
+                </label>
+                <div className="relative">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">£</span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    value={linkTotal}
+                    onChange={(e) => setLinkTotal(e.target.value)}
+                    className="w-full pl-7 pr-3 py-2 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-ooosh-500 focus:border-ooosh-500"
+                  />
+                </div>
+                <p className="text-xs text-gray-500 mt-1">
+                  Pre-filled as £{Number(linkTarget.excess_amount_taken || 0).toFixed(2)} already collected
+                  {' + '}£{Number(linkingDeposit.amount).toFixed(2)} deposit. If this deposit is money OP has
+                  already counted, set it back to £{Number(linkTarget.excess_amount_taken || 0).toFixed(2)} —
+                  the record just gets re-pointed at this deposit.
+                </p>
+                <div className="flex gap-2 mt-4">
+                  <button
+                    onClick={() => setLinkTarget(null)}
+                    disabled={linkLoading}
+                    className="flex-1 px-4 py-2 text-sm font-medium text-gray-600 border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50"
+                  >
+                    Back
+                  </button>
+                  <button
+                    onClick={handleLinkDeposit}
+                    disabled={linkLoading}
+                    className="flex-1 px-4 py-2 text-sm font-medium text-white bg-ooosh-600 rounded-md hover:bg-ooosh-700 disabled:opacity-50"
+                  >
+                    {linkLoading ? 'Linking…' : 'Link deposit'}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-2 mb-4">
+                {chargeableRecords.map((record) => (
+                  <button
+                    key={record.id}
+                    onClick={() => handlePickLinkTarget(record)}
+                    disabled={linkLoading}
+                    className="w-full text-left p-3 border border-gray-200 rounded-lg hover:border-ooosh-300 hover:bg-ooosh-50/50 transition-colors disabled:opacity-50"
+                  >
+                    <p className="text-sm font-medium text-gray-900">
+                      {record.driver_name || record.client_name || 'Job-level excess'}
+                      {record.vehicle_reg && ` — ${record.vehicle_reg}`}
+                    </p>
+                    <p className="text-xs text-gray-500">
+                      Required: {record.excess_amount_required != null ? `£${Number(record.excess_amount_required).toFixed(2)}` : '—'}
+                      {' · '}Collected: £{Number(record.excess_amount_taken || 0).toFixed(2)}
+                      {' · '}Status: {statusLabel(record.excess_status, record.auto_covered)}
+                      {record.hh_deposit_id && ' · Already linked'}
+                    </p>
+                  </button>
+                ))}
+
+                {/* Create new excess record from HH deposit */}
                 <button
-                  key={record.id}
-                  onClick={() => handleLinkDeposit(record.id)}
+                  onClick={handleCreateAndLinkExcess}
                   disabled={linkLoading}
-                  className="w-full text-left p-3 border border-gray-200 rounded-lg hover:border-ooosh-300 hover:bg-ooosh-50/50 transition-colors disabled:opacity-50"
+                  className="w-full text-left p-3 border-2 border-dashed border-ooosh-300 rounded-lg hover:border-ooosh-400 hover:bg-ooosh-50/50 transition-colors disabled:opacity-50"
                 >
-                  <p className="text-sm font-medium text-gray-900">
-                    {record.driver_name || record.client_name || 'Job-level excess'}
-                    {record.vehicle_reg && ` — ${record.vehicle_reg}`}
-                  </p>
+                  <p className="text-sm font-medium text-ooosh-700">+ Create new excess record</p>
                   <p className="text-xs text-gray-500">
-                    Required: {record.excess_amount_required != null ? `£${Number(record.excess_amount_required).toFixed(2)}` : '—'}
-                    {' · '}Status: {statusLabel(record.excess_status, record.auto_covered)}
-                    {record.hh_deposit_id && ' · Already linked'}
+                    Creates an OP record for £{Number(linkingDeposit.amount).toFixed(2)} linked to this HireHop deposit
                   </p>
                 </button>
-              ))}
+              </div>
+            )}
 
-              {/* Create new excess record from HH deposit */}
+            {!linkTarget && (
               <button
-                onClick={handleCreateAndLinkExcess}
-                disabled={linkLoading}
-                className="w-full text-left p-3 border-2 border-dashed border-ooosh-300 rounded-lg hover:border-ooosh-400 hover:bg-ooosh-50/50 transition-colors disabled:opacity-50"
+                onClick={() => setLinkingDeposit(null)}
+                className="w-full px-4 py-2 text-sm font-medium text-gray-600 border border-gray-300 rounded-md hover:bg-gray-50"
               >
-                <p className="text-sm font-medium text-ooosh-700">+ Create new excess record</p>
-                <p className="text-xs text-gray-500">
-                  Creates an OP record for £{Number(linkingDeposit.amount).toFixed(2)} linked to this HireHop deposit
-                </p>
+                Cancel
               </button>
-            </div>
-            <button
-              onClick={() => setLinkingDeposit(null)}
-              className="w-full px-4 py-2 text-sm font-medium text-gray-600 border border-gray-300 rounded-md hover:bg-gray-50"
-            >
-              Cancel
-            </button>
+            )}
           </div>
         </div>
       )}
