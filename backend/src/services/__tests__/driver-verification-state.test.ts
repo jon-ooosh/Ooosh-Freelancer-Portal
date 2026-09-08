@@ -160,4 +160,31 @@ describe('signed before, but not for the hire in front of them', () => {
     const done = computeVerificationState({ ...healthy, unsigned_job_number: null }, TODAY);
     expect(stage(done, 'signature').state).toBe('done');
   });
+
+  // The driver page used to say all of this a second time, in its own amber box
+  // below the Identity card. The box is gone (Sep 2026), so this line has to
+  // carry everything it did — including the previous signature, which is the
+  // fact that made this state invisible in the first place.
+  it('carries the start date, the previous signature and the job to link to', () => {
+    const full = computeVerificationState({
+      ...healthy,
+      unsigned_job_number: 16618,
+      current_job_started_at: '2026-09-07T21:55:00.000Z',
+      signature_date: '2026-04-24',
+    }, TODAY);
+    const a = full.actions.find(x => x.slot === 'signature');
+    expect(a?.message).toContain('on 07/09/2026');
+    expect(a?.message).toContain('last signed on 24/04/2026, for a previous hire');
+    expect(a?.jobNumber).toBe(16618);
+  });
+
+  it('reads cleanly when there is no start date or previous signature', () => {
+    const bare = computeVerificationState({
+      ...healthy, unsigned_job_number: 16618, current_job_started_at: null, signature_date: null,
+    }, TODAY);
+    const a = bare.actions.find(x => x.slot === 'signature');
+    expect(a?.message).toBe(
+      "Started the hire form for #16618 but hasn't signed it — they're not on the hire until they do. Send the hire form link again."
+    );
+  });
 });

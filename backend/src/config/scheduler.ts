@@ -779,9 +779,10 @@ export function startScheduler() {
   console.log('Scheduler: Completion chaser scheduled every 30 minutes');
 
   // ── Unsigned hire-form nudge ─────────────────────────────────────────
-  // Hourly, business hours (the service self-gates). Emails a driver who has
-  // verified every document for a hire but stopped short of signing — once per
-  // (driver, hire). Cameron Williams-Hill / job 16618, Sep 2026.
+  // Hourly, business hours (the service self-gates). Emails a driver who
+  // started a hire form and went quiet: "here's what's still needed" while
+  // documents are outstanding, "only the signature is left" once they aren't.
+  // One of each kind per (driver, hire). Cameron Williams-Hill / job 16618.
   cron.schedule('20 * * * *', async () => {
     try {
       const { runUnsignedHireFormNudge } = await import('../services/unsigned-hire-form-nudge');

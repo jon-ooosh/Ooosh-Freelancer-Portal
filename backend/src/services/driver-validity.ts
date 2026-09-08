@@ -260,6 +260,48 @@ export function computeDriverValidity(
   return { licence, dvla, poa1, poa2, passport, isUkDriver };
 }
 
+/** Which of the documents this driver actually needs are missing or lapsed. */
+export interface OutstandingDocuments {
+  licence: boolean;
+  poa1: boolean;
+  poa2: boolean;
+  /** UK licence holders only — false for everyone else. */
+  dvla: boolean;
+  /** Non-UK licence holders only — false for everyone else. */
+  passport: boolean;
+}
+
+/**
+ * THE definition of "which documents is this driver still missing".
+ *
+ * Policy: everybody needs a licence check and both proofs of address; UK
+ * licence holders also need a DVLA check, everyone else a passport. That rule
+ * used to live only inside `analyzeDocuments()` in routes/driver-verification.ts
+ * (as the `allValid` line), which was fine while the hire-form router was its
+ * only consumer. The unsigned-form nudge needs the same answer to decide
+ * whether to chase for documents or for a signature, so it lives here with the
+ * windows it is derived from rather than being written out a second time.
+ *
+ * NOT covered: the extra passport a UK driver needs when their proof-of-address
+ * doesn't match their licence address. That mismatch is detected in the
+ * driver's browser and passed into the router per request (`addressMismatch`);
+ * nothing on the driver row records it, so no server-side caller can see it.
+ */
+export function outstandingDocuments(v: DriverValidity): OutstandingDocuments {
+  return {
+    licence: !v.licence.valid,
+    poa1: !v.poa1.valid,
+    poa2: !v.poa2.valid,
+    dvla: v.isUkDriver && !v.dvla.valid,
+    passport: !v.isUkDriver && !v.passport.valid,
+  };
+}
+
+/** True when nothing on `outstandingDocuments()` is outstanding. */
+export function hasAllRequiredDocuments(v: DriverValidity): boolean {
+  return !Object.values(outstandingDocuments(v)).some(Boolean);
+}
+
 /**
  * The derived `*_valid_until` values to persist for a driver.
  *

@@ -8,6 +8,8 @@
  * how the router and the staff UI came to disagree (job 16291).
  */
 
+import { Link } from 'react-router-dom';
+
 export type StageState = 'done' | 'todo' | 'blocked' | 'not_required';
 
 export interface VerificationStage {
@@ -22,6 +24,8 @@ export interface VerificationAction {
   message: string;
   kind: string;
   slot?: string;
+  /** HH job named in `message` — rendered as a link to the job (see below). */
+  jobNumber?: number;
 }
 
 export interface DriverVerificationState {
@@ -72,6 +76,27 @@ export function StageTracker({ stages }: { stages: VerificationStage[] }) {
   );
 }
 
+/**
+ * Turn the "#16643" inside an action's message into a link to that job.
+ *
+ * A driver part-way through a form has no vehicle_hire_assignments row yet, so
+ * the Hire History tab is empty and this line is staff's only route to the hire
+ * it belongs to. The backend owns the wording; all this does is linkify the one
+ * token it already names, so the message stays readable everywhere else.
+ */
+function actionMessage(action: VerificationAction) {
+  const token = action.jobNumber ? `#${action.jobNumber}` : '';
+  const at = token ? action.message.indexOf(token) : -1;
+  if (at === -1) return action.message;
+  return (
+    <>
+      {action.message.slice(0, at)}
+      <Link to={`/jobs?search=${action.jobNumber}`} className="font-semibold underline">{token}</Link>
+      {action.message.slice(at + token.length)}
+    </>
+  );
+}
+
 const SEVERITY: Record<VerificationAction['severity'], { box: string; dot: string; label: string }> = {
   red:   { box: 'border-red-200 bg-red-50',     dot: 'text-red-600',   label: 'text-red-900' },
   amber: { box: 'border-amber-200 bg-amber-50', dot: 'text-amber-600', label: 'text-amber-900' },
@@ -106,7 +131,7 @@ export function WhatNeedsDoing({ state, onAction }: {
               <span className={`text-sm ${tone.dot}`} aria-hidden>
                 {action.severity === 'red' ? '✕' : action.severity === 'amber' ? '⚠' : 'ℹ'}
               </span>
-              <span className={`text-sm flex-1 min-w-[12rem] ${tone.label}`}>{action.message}</span>
+              <span className={`text-sm flex-1 min-w-[12rem] ${tone.label}`}>{actionMessage(action)}</span>
               {actionable && (
                 <button
                   type="button"
