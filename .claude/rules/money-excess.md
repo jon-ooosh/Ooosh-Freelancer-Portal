@@ -48,11 +48,19 @@ Full history, incident forensics and design rationale: `docs/reference/MONEY-AND
 
 ## HireHop money mechanics
 
+- **Link HH Deposit takes a TOTAL, not a delta**, and derives status via `deriveExcessStatus`. A HireHop deposit showing as "unlinked" is very often money OP already counted (a portal payment overwrites `hh_deposit_id` and orphans the original), so adding it doubles the collected figure — and recomputing status from raw amounts wiped a `partially_reimbursed` record back to `taken` (job 15187).
+- **A refund pushed to HH is a kind=3 payment application, so the kind=6 deposit still reads as live money to OP.** Never unlink a record whose deposit has been reversed that way — the Money-tab reconciler re-links and re-adds it on the next page load. Re-point with Link HH Deposit at the new deposit instead, leaving the total unchanged.
 - **Never call `billing_deposit_save.php` inline** — go through `hh-deposit.ts` so the failure-surfacing contract holds. Bubble `hh_push_error` to the client; the frontend shows "Saved in OP — HireHop push failed".
 - **HireHop REJECTS negative deposits.** To reduce/remove a deposit anywhere, post a refund **payment application** (`reverseDepositOnHH` → `billing_payments_save.php` with `OWNER=0`), never a negative deposit.
 - **⚠️ The broker RESOLVES `{success:false}` on a 327 rate-limit — it does NOT throw.** A bare `try { await hhBroker.post(...); UPDATE jobs SET status=2 } catch {}` never enters the catch and mirrors a FAILED push locally. Gate every local status mirror on `pushResult.success`.
 - **`kind=3` applications publish TWICE** (once under the deposit, once under the invoice, same `data.ID`) — dedup by id or you double-count. Distinguish source-vs-target by **invoice ownership**, never by description text (deposit-side twins are blank).
 - Money is pushed to Xero in **two steps** — the write, then `accounting/tasks.php` `post_payment`. Every money-out path does both.
+
+## Refunds
+
+- **One refund id = one leg.** `refund_legs` dedup is by `ref` ALONE (`isDuplicateLeg()` in `excess-refund.ts`) — the same refund arrives as `manual` (our reimburse endpoint), `stripe_webhook` and `hh_reconcile`. Keying on `(source, ref)` meant they never matched each other and the same £900 was applied twice (job 15187).
+- **Claim the leg the moment the money moves, not after the response.** Stripe's `charge.refunded` lands ~300ms after `refunds.create`; the HH push + Xero sync take seconds. Any new refund path must write its leg BEFORE that work, or the webhook re-applies the amount.
+- **Never unwind `charge.amount_refunded`** — it's the CUMULATIVE refunded total on the charge. Use the individual refund's amount, or a second partial refund re-applies the first.
 
 ## Stripe
 

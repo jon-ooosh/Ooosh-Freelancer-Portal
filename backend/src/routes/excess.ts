@@ -2579,6 +2579,34 @@ router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSch
         });
         stripeRefundId = refund.id;
         console.log(`[excess] Stripe refund created: ${refund.id} (£${amount.toFixed(2)} on PI ${resolvedPi})`);
+
+        // CLAIM THE REFUND LEG NOW — before the HireHop/Xero work below, not
+        // after the response. Stripe fires `charge.refunded` within a few
+        // hundred milliseconds of the refund being created, and that webhook
+        // applies the refund to this record unless it finds a leg carrying the
+        // same refund id. Writing the leg at the END of this handler (which is
+        // what we used to do) left a window of seconds — the whole HH push —
+        // in which the webhook saw an empty ledger and applied the £ a second
+        // time. Job 15187 lost that race by 2 seconds; the records sitting at
+        // reimbursement_amount = 2 × excess_amount_taken lost it too.
+        //
+        // Safe to claim before the money is recorded: once a Stripe refund
+        // exists, every remaining path through this handler reaches the Step 3
+        // UPDATE (the 422/502 aborts below are all gated on `!stripeRefundPath`).
+        await query(
+          `UPDATE job_excess
+           SET refund_legs = COALESCE(refund_legs, '[]'::jsonb) || $1::jsonb
+           WHERE id = $2`,
+          [
+            JSON.stringify([{
+              source: 'manual',
+              ref: `stripe_refund_${refund.id}`,
+              amount,
+              at: new Date().toISOString(),
+            }]),
+            id,
+          ]
+        ).catch(e => console.error('[excess] Refund leg claim failed (non-fatal, webhook may double-apply):', e));
       } catch (err) {
         const msg = isStripeError(err) ? err.message : (err instanceof Error ? err.message : 'Unknown error');
         console.error('[excess] Stripe refund failed:', msg);
@@ -2805,26 +2833,11 @@ router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSch
       );
     }
 
-    // Refund-leg ledger: when OP initiated a Stripe refund, pre-record the
-    // dedup leg so the incoming `charge.refunded` webhook (which always fires
-    // for OP-initiated refunds too) sees an existing entry and no-ops. Source
-    // ref shape MUST match what `stripe-webhook.ts charge.refunded` produces.
-    if (stripeRefundId) {
-      await query(
-        `UPDATE job_excess
-         SET refund_legs = COALESCE(refund_legs, '[]'::jsonb) || $1::jsonb
-         WHERE id = $2`,
-        [
-          JSON.stringify([{
-            source: 'manual',
-            ref: `stripe_refund_${stripeRefundId}`,
-            amount,
-            at: new Date().toISOString(),
-          }]),
-          id,
-        ]
-      ).catch(e => console.error('[excess] Refund leg append failed (non-fatal):', e));
-    } else if (method === 'stripe_gbp') {
+    // Refund-leg ledger: the OP-initiated Stripe refund already claimed its leg
+    // in Step 0 (see the comment there — it has to happen before the HH push,
+    // not here, or the charge.refunded webhook wins the race). Only the
+    // record-only path still needs a leg written at this point.
+    if (!stripeRefundId && method === 'stripe_gbp') {
       // Record-only path: staff acknowledged they refunded in the Stripe dashboard
       // (no PI on record to fire the API). Stamp a leg so the silent-failure
       // detector (scheduler) treats this as resolved, not a swallowed refund.
@@ -3082,15 +3095,28 @@ router.post('/:id/move', authorize(...MANAGER_ROLES), validate(moveExcessSchema)
 // ── POST /api/excess/:id/link-deposit — Manually link an HH deposit to this excess record ──
 // Used when auto-reconciliation can't match (e.g. deposit description doesn't contain excess keywords)
 
+// Link-deposit takes the resulting TOTAL collected, not a delta to add.
+//
+// It used to take `amount` and do `excess_amount_taken += amount`, which
+// silently doubled the collected figure whenever the deposit's money was
+// already on the record — money HireHop reports as an unlinked deposit is very
+// often money OP has already counted (a portal payment that overwrote the
+// deposit pointer leaves the ORIGINAL deposit looking unmatched). Job 15187
+// went to £3,300 collected against a £2,100 excess that way, wiping its
+// `partially_reimbursed` status in the process. Same add-vs-set trap the
+// payment endpoint fixed with `total_collected`; same fix, same name.
+//
+// `amount` is still accepted (delta) for any caller that hasn't moved over.
 const linkDepositSchema = z.object({
   hh_deposit_id: z.number().int().min(1),
-  amount: z.number().min(0.01).optional(), // If provided, also updates excess_amount_taken
+  total_collected: z.number().min(0).optional(), // Absolute set — preferred.
+  amount: z.number().min(0.01).optional(),       // Legacy delta — added to what's there.
 });
 
 router.post('/:id/link-deposit', validate(linkDepositSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
-    const { hh_deposit_id, amount } = req.body;
+    const { hh_deposit_id, total_collected, amount } = req.body;
 
     // Check the excess record exists
     const currentResult = await query(`SELECT * FROM job_excess WHERE id = $1`, [id]);
@@ -3120,12 +3146,24 @@ router.post('/:id/link-deposit', validate(linkDepositSchema), async (req: AuthRe
     ];
     const params: unknown[] = [hh_deposit_id];
 
-    // If amount provided, update the excess amount taken and status
-    if (amount) {
-      const currentTaken = parseFloat(current.excess_amount_taken || 0);
-      const newTaken = currentTaken + amount;
+    // Update the collected figure + status when the caller gave us one.
+    // `total_collected` is the resulting total (absolute); `amount` is the old
+    // delta form. Neither → link only, leave the money alone (that's the
+    // "this record already has the money, just re-point it at the right HH
+    // deposit" case, e.g. after a deposit has been reversed and replaced).
+    const currentTaken = parseFloat(current.excess_amount_taken || 0);
+    const newTaken =
+      total_collected !== undefined ? total_collected
+      : amount ? currentTaken + amount
+      : null;
+
+    if (newTaken !== null) {
       const required = parseFloat(current.excess_amount_required || 0);
-      const newStatus = required > 0 && newTaken >= required ? 'taken' : 'partially_paid';
+      // Don't demote a record that has resolved beyond simple collection —
+      // deriveExcessStatus protects reimbursed/partially_reimbursed/waived and
+      // friends. Linking a deposit is bookkeeping; it must not flip a record
+      // that's been part-refunded back to a plain 'taken' (job 15187).
+      const newStatus = deriveExcessStatus(current.excess_status, required, newTaken);
 
       params.push(newTaken, newStatus);
       updateParts.push(`excess_amount_taken = $${params.length - 1}`);
