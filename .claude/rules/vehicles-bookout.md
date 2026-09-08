@@ -39,6 +39,9 @@ invariants and multi-van scramble write-up in `docs/reference/SHARED-UTILITIES.m
 - **A freelancer collection is a SOFT check-in** — stamp `soft_checked_in_at`, do NOT flip status to `returned`. The warehouse owns the final check-in, and the server enforces this per session mode.
 - **Any new leg-completion path MUST call `maybeCloseQuote`** — quote closure is server-side and independent of the freelancer's browser making it back across the domain boundary.
 - The two entrypoints are `/vehicles/book-out` and `/vehicles/check-in`; both share one HMAC token format, and the **resolve endpoint** (not a discriminator in the token) sets the session mode.
+- **Neither resolver may answer "THE van on this job" — a job can have several.** Both used to take the top row with a `LIMIT 1`, so every freelancer on a multi-van job got the same one: HH 15307 (8 Sep) showed Lewis the van Charlie had already collected, and the van Lewis was standing at never got collected on the system. When more than one van is in play the resolver returns `needsVehicleSelection` + `candidates` and mints no session until the freelancer picks. A resolver may never widen this to trust a client-supplied `assignmentId` without re-deriving that job's candidate set.
+- **Candidates are deduped per VEHICLE, not per assignment row.** One van routinely has several live rows on a job (HH 15307 carried three for RX24SZG). The freelancer is reading a number plate, so offering the same reg three times is worse than offering it once.
+- **On a multi-van job the customer hire-form rows are NOT interchangeable.** Pair the allocation row to its customer row by `van_requirement_index` before falling back to lowest-index-first, or van #2 gets van #1's hirer, excess and hire agreement stapled to it.
 
 ## Condition report PDFs
 
