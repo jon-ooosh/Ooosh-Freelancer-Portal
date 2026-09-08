@@ -261,6 +261,9 @@ export function VehicleDetailPage() {
   const parsed = parseTabParam(searchParams.get('tab'))
   const [activeTab, setActiveTab] = useState<TopTab>(parsed.top)
   const [historySub, setHistorySub] = useState<HistorySub>(parsed.sub ?? 'service')
+  // Set by the "View prep →" deep-link on a Prep Completed row in the Events
+  // sub-tab; hands the Preps sub-tab the prep to open straight into.
+  const [focusPrepEventId, setFocusPrepEventId] = useState<string | null>(null)
 
   // Reset tab when switching vehicles — component instance is reused
   // across /vehicles/fleet/A → /B so without this the active tab
@@ -269,6 +272,7 @@ export function VehicleDetailPage() {
     const p = parseTabParam(searchParams.get('tab'))
     setActiveTab(p.top)
     setHistorySub(p.sub ?? 'service')
+    setFocusPrepEventId(null)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id])
   const [editingTracker, setEditingTracker] = useState(false)
@@ -525,10 +529,17 @@ export function VehicleDetailPage() {
           {/* Events — book-outs, check-ins, preps. Rows link through to the
               full "life of a hire" comparison page. */}
           {historySub === 'events' && (
-            <VehicleEventsHistory vehicleReg={vehicle.reg} vehicleId={vehicle.id} />
+            <VehicleEventsHistory
+              vehicleReg={vehicle.reg}
+              vehicleId={vehicle.id}
+              onOpenPrep={eventId => {
+                setFocusPrepEventId(eventId)
+                setHistorySub('preps')
+              }}
+            />
           )}
           {historySub === 'preps' && (
-            <PrepHistoryTab vehicleReg={vehicle.reg} />
+            <PrepHistoryTab vehicleReg={vehicle.reg} focusEventId={focusPrepEventId} />
           )}
           {/* OP job_issues backed, open issues surfaced by default */}
           {historySub === 'issues' && (
