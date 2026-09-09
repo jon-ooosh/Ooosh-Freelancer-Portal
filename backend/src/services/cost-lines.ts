@@ -6,10 +6,18 @@
  * Without lines that is one cost with one category and one VAT rate, so
  * whichever category staff pick, the rest is quietly wrong.
  *
- * THE ONE RULE EVERYTHING ELSE HANGS OFF: the HEADER is authoritative.
- * `costs.amount_gross` / `amount_vat` are what we owe and what we pay. Lines
- * only describe how that total breaks down, and must sum back to it. Nothing
- * here ever writes the header.
+ * THE ONE RULE EVERYTHING ELSE HANGS OFF: `costs.amount_gross` is authoritative.
+ * It is what we owe and what we pay, it is typed by a human, and nothing here
+ * ever writes it — the lines must sum back to it.
+ *
+ * VAT is different, and used to be modelled wrongly. It is not part of what we
+ * owe; it is an ANALYSIS of what we owe. Requiring staff to type it both on the
+ * header and on every line meant two figures that could disagree, and a save
+ * that failed with "the gross balances but the VAT doesn't" — a confusing state
+ * with no good fix. So when a cost HAS lines, each line carries its own VAT and
+ * the header's `amount_vat` / `amount_net` are DERIVED from them
+ * (`headerVatFromLines`). With no lines nothing changes: the header's own VAT
+ * mode decides, exactly as it always has.
  *
  * Both the routes and the Xero push read lines through THIS module — see
  * `buildCostLineItems` in cost-xero-push.ts — so the shape is defined once.
@@ -103,10 +111,11 @@ export function validateCostLines(
     }
   }
 
+  // ONE balance rule: do the lines add up to the invoice total? There is no
+  // second VAT check because there is nothing for the VAT to disagree WITH —
+  // the header's VAT is the sum of these lines by construction.
   const grossTotal = lines.reduce((t, l) => t + pence(l.amount_gross), 0);
-  const vatTotal = lines.reduce((t, l) => t + pence(l.amount_vat), 0);
   const headerGross = pence(cost.amount_gross);
-  const headerVat = pence(cost.amount_vat);
   const tolerance = Math.round(LINE_TOLERANCE * 100);
   const gbp = (p: number) => `£${(p / 100).toFixed(2)}`;
 
@@ -116,13 +125,26 @@ export function validateCostLines(
       diff > 0 ? `${gbp(diff)} too much` : `${gbp(-diff)} short`
     }. Adjust the lines so they match the invoice total.`;
   }
-  if (Math.abs(vatTotal - headerVat) > tolerance) {
-    const diff = vatTotal - headerVat;
-    return `The lines carry ${gbp(vatTotal)} of VAT but the cost records ${gbp(headerVat)} — ${
-      diff > 0 ? `${gbp(diff)} too much` : `${gbp(-diff)} short`
-    }. Adjust the VAT on the lines so it matches the invoice.`;
-  }
   return null;
+}
+
+/**
+ * The header's VAT and net, derived from the lines.
+ *
+ * VAT is an analysis of the total, not part of it, so a cost WITH lines takes
+ * its VAT from them rather than from a separately-typed header figure that
+ * could disagree. `amount_gross` is passed through untouched — that is the
+ * figure staff typed off the invoice and the one thing lines may never change.
+ *
+ * Callers apply this on write, so `costs.amount_vat` always agrees with
+ * `SUM(cost_lines.amount_vat)` for a cost that has lines.
+ */
+export function headerVatFromLines(
+  lines: CostLineInput[],
+  headerGross: unknown,
+): { amount_vat: number; amount_net: number } {
+  const vat = lines.reduce((t, l) => t + pence(l.amount_vat), 0);
+  return { amount_vat: vat / 100, amount_net: (pence(headerGross) - vat) / 100 };
 }
 
 /**

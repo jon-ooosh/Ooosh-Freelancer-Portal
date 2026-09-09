@@ -15,7 +15,7 @@ import multer from 'multer';
 import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
 import { resolveRemittanceContact, getCostForRemittance, sendRemittance } from '../services/remittance';
-import { fetchCostLines, validateCostLines, replaceCostLines, type CostLineInput } from '../services/cost-lines';
+import { fetchCostLines, validateCostLines, replaceCostLines, headerVatFromLines, type CostLineInput } from '../services/cost-lines';
 
 const router = Router();
 router.use(authenticate);
@@ -861,6 +861,11 @@ router.post('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respon
     if (newLines?.length) {
       const problem = validateCostLines(data as never, newLines);
       if (problem) { res.status(400).json({ error: problem }); return; }
+      // VAT is an analysis of the total, not part of it, so a cost with lines
+      // takes its VAT (and hence net) FROM them. The gross — what we actually
+      // owe — is untouched. Derived here rather than trusted from the client so
+      // the header can't disagree with its own lines whatever the caller sends.
+      Object.assign(data, headerVatFromLines(newLines, data.amount_gross));
     }
 
     // A payable (anything not already paid) enters the approval workflow. If the
@@ -978,6 +983,9 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
       const merged = { ...before.rows[0], ...data };
       const problem = validateCostLines(merged as never, editedLines);
       if (problem) { res.status(400).json({ error: problem }); return; }
+      // Lines own the VAT split (see create). Clearing the lines leaves the
+      // header's own figures alone — whatever the modal sent with them.
+      if (editedLines.length) Object.assign(data, headerVatFromLines(editedLines, merged.amount_gross));
     }
 
     const sets: string[] = [];
