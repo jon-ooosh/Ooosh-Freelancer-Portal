@@ -142,6 +142,9 @@ interface JobCostLite {
   supplier_name: string | null;
   description: string | null;
   category: string | null;
+  // Xero nominal code — /costs/by-job returns c.*, so it was always on the wire.
+  // Drives the actuals make-up buckets on the quoted-vs-actual cards.
+  xero_account_code?: string | null;
   amount_gross: number | null;
   amount_net: number | null;
   cost_intent: 'quote_actual' | 'extra' | null;
@@ -2197,10 +2200,16 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
   const expExpenses = liveQuotes.reduce((s, q) => s + num(q.expenses_included), 0);
   const expTransport = liveQuotes.reduce((s, q) => s + num(q.travel_cost), 0);
   const quotedCost = expFreelancer + expFuel + expExpenses + expTransport;
-  const expectedMakeup: { label: string; amount: number }[] = [
+  const expectedMakeup: { label: string; amount: number; hint?: string }[] = [
     { label: 'Freelancer', amount: expFreelancer },
     { label: 'Fuel', amount: expFuel },
-    { label: 'Fronted expenses', amount: expExpenses },
+    {
+      label: 'Fronted expenses',
+      amount: expExpenses,
+      // Deliberately has no matching bucket on the actuals side — see the
+      // actualsMakeup comment below.
+      hint: 'Money the crew lays out and reclaims. On the actuals side it lands under whatever it was bought as (fuel, transport, other) — nothing on a captured cost records who fronted it.',
+    },
     { label: 'Transport', amount: expTransport },
   ].filter((c) => c.amount > 0.005);
   const clientQuoted = liveQuotes.reduce((s, q) => s + num(q.client_fee), 0);
@@ -2210,6 +2219,35 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
   const unclassified = costs.filter((c) => c.cost_intent == null);
 
   const actualsTotal = actualCosts.reduce((s, c) => s + num(c.amount_gross), 0);
+  // Actuals broken down the same way as the Expected card, so the two read side
+  // by side and a variance points at WHERE it came from rather than just how big
+  // it is. Buckets come off the Xero nominal code, which is what the category
+  // picker already writes.
+  //
+  // "Fronted expenses" deliberately gets NO actuals bucket. Fronting is a fact
+  // about who paid, not about what was bought, and nothing on a cost row records
+  // it — a freelancer's £40 parking receipt is coded 411 exactly like parking we
+  // put on the company card. So fronted spend falls into Fuel / Transport /
+  // Other by what it actually was. Cost lines will fix the related-but-different
+  // problem of one invoice covering two things; they still won't say who fronted
+  // it without a flag of their own.
+  //
+  // Whole-invoice coding is the other known blind spot: a £250 freelancer
+  // invoice that is really £190 fee + £60 fuel lands entirely under Freelancer.
+  const actualsMakeup = (() => {
+    const byLabel = new Map<string, number>();
+    for (const c of actualCosts) {
+      const code = (c.xero_account_code || '').trim();
+      const label = code === '320' ? 'Freelancer'
+        : code === '410' ? 'Fuel'
+        : code === '325' ? 'Transport'
+        : 'Other';
+      byLabel.set(label, (byLabel.get(label) || 0) + num(c.amount_gross));
+    }
+    return ['Freelancer', 'Fuel', 'Transport', 'Other']
+      .map((label) => ({ label, amount: byLabel.get(label) || 0 }))
+      .filter((c) => c.amount > 0.005);
+  })();
   const extraTotal = extraCosts.reduce((s, c) => s + num(c.amount_gross), 0);
   const unclassifiedTotal = unclassified.reduce((s, c) => s + num(c.amount_gross), 0);
   const variance = actualsTotal - quotedCost;
@@ -2241,8 +2279,8 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
           {expectedMakeup.length > 0 ? (
             <div className="mt-1 space-y-0.5">
               {expectedMakeup.map((c) => (
-                <div key={c.label} className="flex items-center justify-between text-xs text-gray-400">
-                  <span>{c.label}</span>
+                <div key={c.label} title={c.hint} className="flex items-center justify-between text-xs text-gray-400">
+                  <span className={c.hint ? 'border-b border-dotted border-gray-300' : undefined}>{c.label}</span>
                   <span>{m(c.amount)}</span>
                 </div>
               ))}
@@ -2255,7 +2293,22 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
         <div className="rounded-md border border-gray-200 p-3">
           <div className="text-xs text-gray-500">Actuals (part of quote)</div>
           <div className="text-lg font-semibold text-gray-900">{m(actualsTotal)}</div>
-          <div className="text-xs text-gray-400">{actualCosts.length} cost{actualCosts.length === 1 ? '' : 's'}</div>
+          {actualsMakeup.length > 0 ? (
+            <div className="mt-1 space-y-0.5">
+              {actualsMakeup.map((c) => (
+                <div key={c.label} className="flex items-center justify-between text-xs text-gray-400">
+                  <span>{c.label}</span>
+                  <span>{m(c.amount)}</span>
+                </div>
+              ))}
+              <div className="text-[10px] text-gray-300 pt-0.5"
+                title="Grouped by the cost's Xero category. A whole invoice sits in one bucket, so a freelancer bill that also covered fuel counts entirely as Freelancer.">
+                {actualCosts.length} cost{actualCosts.length === 1 ? '' : 's'} · by category
+              </div>
+            </div>
+          ) : (
+            <div className="text-xs text-gray-400">{actualCosts.length} cost{actualCosts.length === 1 ? '' : 's'}</div>
+          )}
         </div>
         <div className="rounded-md border border-gray-200 p-3">
           <div className="text-xs text-gray-500">Variance</div>
