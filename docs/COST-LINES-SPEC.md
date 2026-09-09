@@ -98,14 +98,21 @@ Notes on the columns that aren't obvious:
 
 These are the load-bearing rules. Everything else is UI.
 
-**1. The header stays authoritative.** `costs.amount_gross` / `amount_net` / `amount_vat`
-are what we owe and what we pay. Lines describe how that total breaks down; they never
-determine it. Nothing — not the AI, not a line edit — may write the header total.
+**1. `amount_gross` is authoritative; VAT is derived.** *(Amended 10 Sep 2026 — the
+original said the whole header was authoritative.)* The gross is what we owe and what we
+pay; it is typed by a human off the invoice, and nothing — not the AI, not a line edit —
+may write it. **VAT is not part of what we owe, it is an analysis of it.** Requiring it to
+be typed on the header AND on every line created two figures that could disagree, and a
+save that failed with "the gross balances but the VAT doesn't" — a confusing state with no
+good fix. So a cost WITH lines takes its `amount_vat` (and hence `amount_net`) from them,
+via `headerVatFromLines()`, applied server-side on write so the header can never disagree
+with its own lines whatever a caller sends. With no lines nothing changes: the header's
+own VAT mode decides, exactly as before.
 
-**2. Lines must sum to the header, within 1p — on gross AND on VAT.** On save,
-`SUM(lines.amount_gross)` must equal `costs.amount_gross` and `SUM(lines.amount_vat)` must
-equal `costs.amount_vat`, each to within £0.01. Outside that, the save is **rejected** with
-the difference named. **Agreed: reject the lot.** Saving an unbalanced cost just defers the
+**2. ONE balance rule: lines must sum to the invoice total, within 1p.**
+`SUM(lines.amount_gross)` must equal `costs.amount_gross` to within £0.01, or the save is
+**rejected** with the difference named. There is deliberately no second VAT check — under
+invariant 1 there is nothing for the VAT to disagree with. **Agreed: reject the lot.** Saving an unbalanced cost just defers the
 problem onto whoever finds it later, unflagged, with no owner. Corollary the UI owes the
 user: closing the modal on an unbalanced split must warn plainly that **nothing will be
 saved and the receipt will not be uploaded** — the one way this rule could quietly cost
@@ -166,10 +173,20 @@ The push stays `lineAmountTypes: 'Inclusive'`; each line simply resolves its own
 through the *same* `resolveLineTaxType` logic, fed the line's figures instead of the
 header's. That is a two-line generalisation of an existing function, not new machinery.
 
-So the cost of getting VAT right here is: one column (`amount_vat` on the line), one extra
-balance check (§4.2), one extra input in the UI, and a function that takes `{amount_vat,
-amount_net}` instead of a whole `CostRow`. Cheap, and it closes a live accounting error
-rather than deferring one.
+So the cost of getting VAT right here is: one column (`amount_vat` on the line), a function
+that takes `{amount_vat, amount_net}` instead of a whole `CostRow`, and a rate picker in
+the UI. Cheap, and it closes a live accounting error rather than deferring one.
+
+**How it's entered (10 Sep 2026).** A line states an amount **inclusive of VAT** plus a
+**rate** — No VAT / 20% / 5% / Manual £ — not two money boxes. Two boxes said nothing about
+whether the total included the VAT, and sat next to a header that used a mode *toggle* for
+the same idea: two mental models on one screen. A rate is how Xero and every other
+accounting package does it, it's one fewer figure to type, and it makes the header's own
+VAT toggle legible as what it always was — the default rate for the whole invoice, which a
+line may override. The rate itself is NOT stored: `amount_vat` is what gets written and
+pushed, and reopening a cost infers the rate back from `(gross, vat)` — the same trick
+`inferVatMode` already uses for the header, and it avoids a column that would only ever
+restore a dropdown.
 
 ---
 
@@ -279,20 +296,32 @@ Guards, all of which belong in the prompt AND in server-side validation:
 
 ## 10. UI
 
-Minimum viable, inside the existing capture/edit modal:
+Built inside the existing capture/edit modal, which was regrouped at the same time into
+four labelled sections — **The invoice** (supplier · invoice date · invoice number + due
+date · amounts) · **What it was for** (category, lines, description) · **Where it goes**
+(job, quote intent, recharge, vehicle) · **How it's paid** (method, status, notes). It was
+thirteen unlabelled blocks in a flat column; the problem was grouping, not space, which is
+why this is sections rather than a wizard — the receipt sits in the left pane throughout,
+and paging the form would hide fields behind clicks without reducing what has to be read.
 
-- Costs open with **no lines** and look exactly as they do now. A single "Split this cost
-  into lines" control adds line 1 pre-filled with the full amount + the cost's category.
-- Each line: description, amount, VAT (defaults to 0 — most lines have none), category
-  picker (the existing `COST_CATEGORIES` list), optional job picker, a "crew fronted this"
-  checkbox.
-- A running **"lines total £X of £Y · VAT £A of £B"** with either difference called out in
-  red when it doesn't balance. The save button is disabled while it doesn't (per invariant 2).
-- On the Costs hub table, a cost with lines gets a small count badge — no new column
-  (the costs table must fit the viewport; adding a column means folding another one in).
-- On the Money tab, lines feed the Actuals buckets directly instead of the header code, and
-  `crew_fronted` lines populate the **Fronted expenses** bucket — closing the gap left open
-  in Sep 2026.
+- Costs open with **no lines** and look exactly as they did. "Split into lines" seeds line 1
+  holding the whole invoice plus an empty second row, so splitting is "take some off this,
+  put it on that" rather than typing everything twice. A blank trailing row is dropped on
+  save rather than being an error.
+- **Lines sit directly under the category picker, which sits directly under Amounts.** They
+  can't go above the category: a line's category dropdown reads "Same category as above",
+  and "above" is that picker.
+- Each line is **two rows**, not one — description across the top, then amount / rate /
+  category / fronted / delete. The form pane is only ~500px beside the receipt and six
+  controls in one row there is unreadable.
+- The header's Amounts box shows **"VAT comes from the lines below"** in place of its mode
+  toggle when lines exist, with VAT and net read-only. The total stays editable — it's the
+  one figure lines may not touch.
+- A running **"£X of £Y"** goes red when it doesn't balance and names what's missing; save
+  is blocked and closing the modal warns that nothing will be saved, receipt included.
+- Still to come (PR 2): a count badge on the Costs hub table — no new column, the table must
+  fit the viewport; and Money-tab Actuals buckets fed from lines, with `crew_fronted`
+  populating the **Fronted expenses** bucket left open in Sep 2026.
 
 ---
 
