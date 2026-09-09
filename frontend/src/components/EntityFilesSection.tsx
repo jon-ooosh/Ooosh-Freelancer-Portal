@@ -84,7 +84,10 @@ const EMAIL_CONTEXT: Record<FileEntityType, string> = {
 
 export const FILE_TAGS = [
   'Stage Plot', 'Rider', 'Tour Dates', 'Quote', 'Invoice',
-  'Contract', 'Production Schedule', 'Site Map', 'Risk Assessment', 'Other',
+  'Contract', 'Production Schedule', 'Site Map', 'Risk Assessment',
+  // Folded in from the retired rehearsal-profile desk-file store (migration 204).
+  'Desk settings', 'Saved mix', 'Tech spec',
+  'Other',
 ] as const;
 
 export function fileTagColour(label: string): string {
@@ -98,6 +101,9 @@ export function fileTagColour(label: string): string {
     'Production Schedule': 'bg-indigo-100 text-indigo-700',
     'Site Map': 'bg-teal-100 text-teal-700',
     'Risk Assessment': 'bg-orange-100 text-orange-700',
+    'Desk settings': 'bg-cyan-100 text-cyan-700',
+    'Saved mix': 'bg-fuchsia-100 text-fuchsia-700',
+    'Tech spec': 'bg-slate-200 text-slate-700',
   };
   return map[label] || 'bg-gray-100 text-gray-600';
 }
