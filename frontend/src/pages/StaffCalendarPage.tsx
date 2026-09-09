@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 
@@ -127,6 +128,12 @@ export default function StaffCalendarPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {isAdmin && (
+            <Link to="/staff/admin"
+              className="px-3 py-1.5 text-sm rounded border border-ooosh-300 text-ooosh-700 hover:bg-ooosh-50">
+              Set-up
+            </Link>
+          )}
           <button onClick={() => setFrom(addDays(from, -weeks * 7))}
             className="px-3 py-1.5 text-sm rounded border border-gray-300 hover:bg-gray-50">← Back</button>
           <button onClick={() => setFrom(mondayOf(TODAY))}
@@ -151,7 +158,7 @@ export default function StaffCalendarPage() {
       ) : people.length === 0 ? (
         <div className="p-6 rounded border border-dashed border-gray-300 text-sm text-gray-500">
           No staff have an employment record yet.
-          {isAdmin && ' Add one from the employee directory to see them here.'}
+          {isAdmin && <> <Link to="/staff/admin" className="text-ooosh-600 hover:underline">Set one up</Link> to see them here.</>}
         </div>
       ) : (
         /* Wide grids scroll inside their own container — the page body must not. */
