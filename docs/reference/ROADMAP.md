@@ -37,6 +37,7 @@ shipped, so treat it as a map of what exists rather than a queue to work through
 | — | External tools (PCN, staging calculator, backline matcher, leads, auto-chase) | All integrated into OP | `INTEGRATIONS.md` |
 | — | Freelancer onboarding | Phases A–C shipped; D next | `INTEGRATIONS.md` |
 | — | Staff documents & training | Live | `INTEGRATIONS.md` |
+| 11 | Staff calendar & time (holiday, TOIL, absence, freelancer day bookings) | Spec'd Sep 2026, not built. Replaces BrightHR — **hard deadline 1 Jan 2027** (subscription expiry + calendar leave year) | `docs/STAFF-CALENDAR-SPEC.md` |
 
 **Monday.com is fully retired** (Jul 2026). Some fallback code and unused env vars
 remain in the portal repos and can be swept.
@@ -62,6 +63,7 @@ to come up:
 - Interim assessment PDF on the swapped-out van.
 
 **Not started**
+- Staff calendar & time module — the largest not-started item, and the only one with a fixed external deadline (BrightHR expires ~Dec 2026). Spec: `docs/STAFF-CALENDAR-SPEC.md`.
 - Sub-hires module (`job_subhires`).
 - Global operations dashboard widgets (transport, crew, deliveries, carnets, lost property, rehearsals, payments).
 - Initial card collection from OP (PaymentIntent create) — staff still walk to the terminal.
