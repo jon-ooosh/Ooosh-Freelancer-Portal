@@ -993,7 +993,8 @@ there was nowhere to put it: `costs` had exactly one `receipt_r2_key`.
 `{r2_key, filename, content_type, size_bytes, uploaded_at, uploaded_by}`. The
 main receipt is unchanged. **One payable, one Xero bill, several attachments** —
 this adds evidence, not lines. Splitting a payable into differently-coded /
-differently-VAT-rated lines is a separate piece of work (`cost_lines`).
+differently-VAT-rated lines is a separate piece of work (`cost_lines`) — now specced in
+`docs/COST-LINES-SPEC.md`.
 
 **Filename collisions are the real hazard.** Xero keys an attachment by its
 FILENAME: a `PUT` to a name the object already has overwrites it, silently, with
@@ -1022,7 +1023,8 @@ that extra paperwork is filed.
 **Worked example** — the £325 freelancer invoice. Labour £250, fuel £50 + £10
 VAT, train £15 (zero-rated, so no VAT to recover there). Today this is one cost
 at £325 with the invoice as the receipt and the fuel receipt filed alongside as
-evidence; the VAT split across lines is the `cost_lines` work.
+evidence; the VAT split across lines is the `cost_lines` work
+(`docs/COST-LINES-SPEC.md` §5 walks this exact example through).
 
 ### Bills to Pay — sortable Due + filters
 The Due column is now click-to-sort, and the payable view gained due-date filter
