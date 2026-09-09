@@ -34,6 +34,7 @@ import VE103BCertificatesPage from './pages/VE103BCertificatesPage';
 import InboxPage from './pages/InboxPage';
 import StaffDocumentsPage from './pages/StaffDocumentsPage';
 import StaffCalendarPage from './pages/StaffCalendarPage';
+import StaffAdminPage from './pages/StaffAdminPage';
 import StaffDocumentsAdminPage from './pages/StaffDocumentsAdminPage';
 import StaffReceiptsPage from './pages/StaffReceiptsPage';
 import LostCancelledPage from './pages/LostCancelledPage';
@@ -248,6 +249,7 @@ export default function App() {
                 <Route path="/vehicles/*" element={<VehicleRoutes />} />
                 <Route path="/inbox" element={<InboxPage />} />
                 <Route path="/staff/calendar" element={<StaffCalendarPage />} />
+                <Route path="/staff/admin" element={<StaffAdminPage />} />
                 <Route path="/staff/documents" element={<StaffDocumentsPage />} />
                 <Route path="/staff/documents/admin" element={<StaffDocumentsAdminPage />} />
                 <Route path="/my-receipts" element={<StaffReceiptsPage />} />
