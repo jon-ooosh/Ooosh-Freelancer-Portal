@@ -15,6 +15,7 @@ import multer from 'multer';
 import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
 import { resolveRemittanceContact, getCostForRemittance, sendRemittance } from '../services/remittance';
+import { fetchCostLines, validateCostLines, replaceCostLines, type CostLineInput } from '../services/cost-lines';
 
 const router = Router();
 router.use(authenticate);
@@ -74,6 +75,18 @@ const money = z.number().nonnegative().finite();
 // so a cost may carry at most 9 supporting documents.
 const MAX_SUPPORTING_DOCUMENTS = 9;
 
+// One cost line. Shared by the create/update payload and PUT /:id/lines so the
+// two can't drift.
+const costLineInputSchema = z.object({
+  description: z.string().trim().max(2000).optional().nullable(),
+  amount_gross: money,
+  amount_vat: money.optional().nullable(),
+  xero_account_code: z.string().trim().max(20).optional().nullable(),
+  job_id: z.string().uuid().optional().nullable(),
+  crew_fronted: z.boolean().optional(),
+  source: z.enum(['manual', 'ai']).optional(),
+});
+
 const createSchema = z.object({
   supplier_name: z.string().trim().max(200).optional().nullable(),
   cost_date: z.string().trim().max(20).optional().nullable(),
@@ -125,6 +138,11 @@ const createSchema = z.object({
   // Control flag (not a column): one-click "Approve & save" on a payable.
   // Honoured only for admin/manager + a payable; ignored otherwise.
   approve: z.boolean().optional(),
+
+  // Cost lines. Written in the same request as the header so the background
+  // Xero push (fired immediately below) sees them — a separate PUT would race
+  // it and push a one-line bill. See services/cost-lines.ts.
+  lines: z.array(costLineInputSchema).max(50).optional(),
 });
 
 // Update accepts the same fields, all optional.
@@ -802,6 +820,7 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
         due_date_derived: derivedDueDate,
         due_date_is_override: isOverride,
         allocations: allocations.rows,
+        lines: await fetchCostLines(String(req.params.id)),
       },
     });
   } catch (err) {
@@ -834,6 +853,15 @@ router.post('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respon
     coerceRechargeForIntent(data);
     deriveRechargeStatusForWrite(data);
     serialiseJsonbForWrite(data);
+
+    // Lines are validated BEFORE the insert so a set that doesn't add up can't
+    // leave a half-saved cost behind. `lines` is not in WRITABLE, so it never
+    // reaches the column loop below.
+    const newLines = (data.lines as CostLineInput[] | undefined);
+    if (newLines?.length) {
+      const problem = validateCostLines(data as never, newLines);
+      if (problem) { res.status(400).json({ error: problem }); return; }
+    }
 
     // A payable (anything not already paid) enters the approval workflow. If the
     // booker is uploading it, they vouch for it inline → 'verified'. An approver
@@ -876,6 +904,10 @@ router.post('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respon
       vals,
     );
 
+    // Lines BEFORE the push, not after: the push reads them to build the Xero
+    // line items, and a separate round-trip would race it onto a one-line bill.
+    if (newLines?.length) await replaceCostLines(result.rows[0].id, newLines);
+
     // Background push to Xero for paid costs — non-blocking; the cost row's
     // xero_sync_state + xero_error carry success/failure for the UI.
     const { pushCostToXeroBackground } = await import('../services/cost-xero-push');
@@ -914,6 +946,40 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
       deriveRechargeStatusForWrite(data, cur.rows[0]?.recharge_status ?? null);
     }
 
+    // Lines are checked against the row as it WILL be — the same PATCH may be
+    // changing the total they have to add up to. Validating first means an
+    // unbalanced set is refused with nothing written, header included.
+    const editedLines = (data.lines as CostLineInput[] | undefined);
+    if (editedLines !== undefined) {
+      const before = await query(
+        'SELECT amount_gross, amount_vat, vat_treatment, xero_sync_state FROM costs WHERE id = $1',
+        [req.params.id],
+      );
+      if (!before.rows.length) { res.status(404).json({ error: 'Cost not found' }); return; }
+      if (before.rows[0].xero_sync_state === 'reconciled') {
+        res.status(409).json({ error: 'This cost is reconciled in Xero and can no longer be changed.' });
+        return;
+      }
+      // Lines and a hand-made job split are two answers to the same question,
+      // and lines are the better one (they carry the category too). Rather than
+      // guess which wins, refuse and let staff clear the split.
+      // NB when derived allocations land (COST-LINES-SPEC §7) this narrows to
+      // allocations that were NOT derived from lines.
+      if (editedLines.length) {
+        const split = await query('SELECT COUNT(*)::int AS n FROM cost_allocations WHERE cost_id = $1', [req.params.id]);
+        if (split.rows[0]?.n > 0) {
+          res.status(400).json({
+            error: 'This cost already has a manual job split. Clear the split first — lines carry the job themselves.',
+          });
+          return;
+        }
+      }
+
+      const merged = { ...before.rows[0], ...data };
+      const problem = validateCostLines(merged as never, editedLines);
+      if (problem) { res.status(400).json({ error: problem }); return; }
+    }
+
     const sets: string[] = [];
     const vals: unknown[] = [];
     for (const c of WRITABLE) {
@@ -929,6 +995,8 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
     if (!result.rows.length) { res.status(404).json({ error: 'Cost not found' }); return; }
 
     const updated = result.rows[0];
+    // Same ordering rule as create: lines land before any push reads them.
+    if (editedLines !== undefined) await replaceCostLines(String(req.params.id), editedLines);
     const alreadyPushed = Boolean(updated.xero_object_id) && ['bill_created', 'attached', 'reconciled'].includes(updated.xero_sync_state);
 
     if (alreadyPushed) {
@@ -942,7 +1010,9 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
         'due_date_override',
         // Adding/removing supporting evidence after the push only reaches Xero
         // via a re-sync — without this the doc sits in OP and never lands.
-        'supporting_documents'];
+        'supporting_documents',
+        // Lines ARE the Xero line items. Changing them changes the bill.
+        'lines'];
       if (XERO_AFFECTING.some((f) => data[f] !== undefined) && !updated.xero_stale) {
         const s = await query(`UPDATE costs SET xero_stale=TRUE WHERE id=$1 RETURNING xero_stale`, [updated.id]);
         updated.xero_stale = s.rows[0]?.xero_stale ?? true;

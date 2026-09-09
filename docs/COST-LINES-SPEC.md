@@ -1,6 +1,6 @@
 # Cost Lines — Implementation Spec
 
-**Status:** Drafted for review — NOT agreed, NOT started
+**Status:** Agreed 9 Sep 2026 (§11 records the answers). PR 1 built; PR 2 not started.
 **Branch:** `claude/receipt-uploader-tweaks-81g0z8`
 **Depends on:** cost capture ✓, `cost_allocations` ✓, Xero push ✓, receipt AI extraction ✓
 **Extends:** `docs/COST-CAPTURE-RECHARGE-SPEC.md` (which mentions `cost_lines` twice as "a separate piece of work" — this is that work)
@@ -105,9 +105,11 @@ determine it. Nothing — not the AI, not a line edit — may write the header t
 **2. Lines must sum to the header, within 1p — on gross AND on VAT.** On save,
 `SUM(lines.amount_gross)` must equal `costs.amount_gross` and `SUM(lines.amount_vat)` must
 equal `costs.amount_vat`, each to within £0.01. Outside that, the save is **rejected** with
-the difference named. *(Decision to confirm — the alternative is to allow the save and block
-only the Xero push. Rejecting on save is the simpler contract and stops an unbalanced cost
-sitting in the payables queue looking fine. Reversible either way.)*
+the difference named. **Agreed: reject the lot.** Saving an unbalanced cost just defers the
+problem onto whoever finds it later, unflagged, with no owner. Corollary the UI owes the
+user: closing the modal on an unbalanced split must warn plainly that **nothing will be
+saved and the receipt will not be uploaded** — the one way this rule could quietly cost
+someone their work.
 
 **3. The 1p residue is absorbed at push time, on the largest line, and is never stored.**
 Three-way splits of an odd total don't divide cleanly. The stored lines stay exactly as
@@ -260,6 +262,14 @@ Guards, all of which belong in the prompt AND in server-side validation:
 
 - **Never touch the header total.** Lines are a proposal against a total the human confirms.
 - **Only emit more than one line when the document itemises.** Ambiguous → one line.
+- **Bundle printed items that share BOTH an account code and a VAT rate into one line.** An
+  invoice listing a train, a taxi and a flight is one `325 Travel` line, not three: nothing
+  downstream distinguishes them (Xero gets one code and one rate; the Money-tab buckets group
+  by code), so three lines is noise. The test is mechanical — same code AND same VAT — never
+  "these feel like the same sort of thing". Two travel items at different VAT rates stay
+  apart, because bundling them is exactly the blended-rate error in §5. The bundled line's
+  description names its parts ("Travel: train, taxi, flight") so a human can split it back
+  out without re-reading the invoice.
 - **The lines must sum to `amount_gross` AND to `amount_vat`.** If they don't, discard the lines and return the
   header alone rather than adjusting either side to fit. A silently-adjusted total is worse
   than no split.
@@ -286,29 +296,40 @@ Minimum viable, inside the existing capture/edit modal:
 
 ---
 
-## 11. Open questions for Jon
+## 11. Decisions (answered 9 Sep 2026)
 
-1. **Reject the save when lines don't balance, or allow it and block only the Xero push?**
-   Spec assumes reject (§4.2).
-2. **A cost that already has a hand-made split, then gains lines** — refuse until the split
-   is cleared, or let the lines overwrite it? Spec assumes refuse-and-explain (§7).
-3. **Should the AI attempt to split a freelancer invoice from its narrative text**
-   ("3 days + fuel"), or only from printed line items? Spec assumes printed only (§9) — text
-   inference is where it will invent numbers.
-4. **Is line-level recharge needed sooner than v2?** Spec keeps recharge cost-level (§6).
+1. **Unbalanced lines → reject the save.** "Otherwise it's just an unflagged stale problem
+   sitting there." Plus the close-the-modal warning, now written into §4.2.
+2. **A cost with a hand-made split refuses lines** until the split is cleared. As specced.
+3. **The AI reads only what's printed** — no narrative inference. It *may* bundle printed
+   items that share a code and a VAT rate into one line (§9).
+4. **Recharge stays cost-level in v1** (§6) — no strong preference either way, so the
+   smaller change wins.
+
 
 ---
 
 ## 12. Build order
 
-Small, each shippable on its own:
+**PR 1 — the vertical slice** (BUILT, migration 205), so it can actually be tested rather than trusted:
 
-1. Migration + `cost_lines` table + read/write endpoints. Nothing consumes them yet.
-2. Xero push: lines → multi-line bill (§8). Testable immediately against a real invoice.
-3. Derived allocations (§7).
+1. Migration + `cost_lines` table.
+2. Read/write endpoints, with the balance rules of §4.
+3. Xero push: lines → multi-line bill with per-line tax types (§5, §8).
 4. Capture-modal lines UI (§10).
-5. Money-tab buckets from lines, incl. the Fronted bucket.
-6. AI `lines` extraction (§9) — deliberately last, once the manual path is proven.
+
+One thing PR 1 changed from this spec as written: the standalone `PUT /:id/lines`
+was built and then removed. Lines have to be written in the SAME request as the
+header, because the create route fires `pushCostToXeroBackground` immediately
+after the INSERT — a second round-trip races it onto a one-line bill. One write
+path also means the guards (reclaim, existing manual split, reconciled lock)
+can't drift between two callers.
+
+**PR 2 — the consumers**, once real invoices have been split by hand:
+
+5. Derived allocations (§7).
+6. Money-tab buckets from lines, incl. the `crew_fronted` Fronted bucket.
+7. AI `lines` extraction (§9) — deliberately last, once the manual path is proven.
 
 **Reminder:** the migration runner has a hardcoded file list in
 `backend/src/migrations/run.ts`. Take the next free number at build time.
