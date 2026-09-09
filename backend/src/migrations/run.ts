@@ -237,6 +237,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '200_cost_supporting_documents.sql',
         '201_unsigned_nudge_stage.sql',
         '202_file_links.sql',
+        '203_free_enquiry_file_label.sql',
       ];
 
       for (const migration of migrations) {
