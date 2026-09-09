@@ -199,16 +199,27 @@ export default function OrganisationDetailPage() {
   // Land on the tab named in ?tab= (deep-links from Job Detail etc.), else
   // People. Also resets on org switch — the component instance is reused across
   // /organisations/A → /organisations/B so without this the active tab "drags
-  // across". Consolidated with the ?tab= handling so the reset can't clobber a
-  // deep-link (both used to be separate [id] effects; the reset ran last and
-  // won, sending ?tab=rehearsal to People).
+  // across".
+  //
+  // Keyed on the ?tab= VALUE, not just `id`: a same-page link (the Rehearsals
+  // tab's pointer at Files, say) changes only the query string, so an [id]-only
+  // effect left the URL updated and the view stuck on the old tab.
+  //
+  // The count resets live in their own [id] effect below. They used to share
+  // this one, and before that both were separate [id] effects that each set the
+  // tab — the reset ran last and won, sending ?tab=rehearsal to People. Only
+  // this effect touches activeTab now, so that can't come back.
+  const tabParam = searchParams.get('tab');
   useEffect(() => {
-    const t = searchParams.get('tab');
-    setActiveTab(VALID_ORG_TABS.includes(t as OrgTab) ? (t as OrgTab) : 'people');
+    setActiveTab(VALID_ORG_TABS.includes(tabParam as OrgTab) ? (tabParam as OrgTab) : 'people');
+  }, [id, tabParam]);
+
+  // Counts belong to the org, not to the tab — reset them only on an org switch,
+  // or every tab click would throw away counts that are still valid.
+  useEffect(() => {
     setIssuesCount(null);
     setPcnCount(null);
     setHeldCount(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
   async function loadOrg() {
