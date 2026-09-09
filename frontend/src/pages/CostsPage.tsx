@@ -549,16 +549,28 @@ export default function CostsPage() {
                         <Link to={`/vehicles/fleet/${c.vehicle_id}`} className="text-purple-700 hover:underline">{c.vehicle_reg}</Link>
                       ) : c.vehicle_reg ? <span className="text-purple-700">{c.vehicle_reg}</span> : '—'}
                     {c.allocation_jobs && c.allocation_jobs.length > 0 && (
-                      <div className="text-[11px] text-gray-500 mt-0.5" title="Cost split across these jobs (OP cost tracking only)">
-                        ⑂ {c.allocation_jobs.map((a, i) => (
-                          <span key={a.job_id || i}>
-                            {i > 0 && ' '}
+                      /* One job per line, not a single inline run. Inline, a three-way
+                         split was ~250px wide and set the whole column's width, which is
+                         what pushed the row actions off the right edge. Stacked, the
+                         column is only ever as wide as one entry. Capped at three so a
+                         many-way split can't make the row absurdly tall; the tooltip
+                         always lists the lot. */
+                      <div className="text-[11px] text-gray-500 mt-0.5"
+                        title={`Split across ${c.allocation_jobs.length} job(s), OP cost tracking only: ${c.allocation_jobs
+                          .map((a) => `${a.hh_job_number ? '#' + a.hh_job_number : a.job_name || 'job'} £${Number(a.amount).toFixed(2)}`)
+                          .join(', ')}`}>
+                        {c.allocation_jobs.slice(0, 3).map((a, i) => (
+                          <div key={a.job_id || i} className={i === 0 ? '' : 'pl-3'}>
+                            {i === 0 ? '⑂ ' : ''}
                             {a.job_id && a.hh_job_number
                               ? <Link to={`/jobs/${a.job_id}`} className="text-purple-600 hover:underline">#{a.hh_job_number}</Link>
                               : a.hh_job_number ? <span className="text-purple-600">#{a.hh_job_number}</span> : '(job)'}
                             <span className="text-gray-400"> £{Number(a.amount).toFixed(0)}</span>
-                          </span>
+                          </div>
                         ))}
+                        {c.allocation_jobs.length > 3 && (
+                          <div className="pl-3 text-gray-400">+{c.allocation_jobs.length - 3} more</div>
+                        )}
                       </div>
                     )}
                   </td>

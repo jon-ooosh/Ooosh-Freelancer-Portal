@@ -92,7 +92,7 @@ Full history, incident forensics and design rationale: `docs/reference/MONEY-AND
 - **Don't call `onUpdated()` mid-flow** in `ExcessPaymentModal` — the parent's reload unmounts the modal. Set `madeChange` and refresh at close.
 - **Merge action responses into the modal's record, never replace** — `RETURNING *` omits the joined display fields and blanks the header.
 - Excess is charged per HIRE but stored per DRIVER: the Money tab collapses to chargeable rows (naming covered drivers); the Drivers & Vehicles tab deliberately shows per-driver personal liability. **Collapse, never hide.**
-- **The costs table must fit the viewport — adding a column means folding another one in, not widening.** At 10 columns the Actions cell sat off-screen; "Uploaded by" now rides in the Supplier cell and the Xero pill in the Status cell.
+- **The costs table must fit the viewport — adding a column means folding another one in, not widening.** At 10 columns the Actions cell sat off-screen; "Uploaded by" now rides in the Supplier cell and the Xero pill in the Status cell. Multi-value cells (split allocations) stack vertically — one wide inline row sets the whole column.
 - **A repeatable file picker is a labelled button, never a bare `<input type="file">`.** We clear `e.target.value` after each pick so the same file can be re-chosen, which leaves a raw input reading "No file chosen" forever — staff couldn't tell a second supporting document was possible.
 
 ## Policy
