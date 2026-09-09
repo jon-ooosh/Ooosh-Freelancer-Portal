@@ -442,6 +442,25 @@ router.get('/by-job/:jobId', async (req: AuthRequest, res: Response) => {
       [jobId],
     );
 
+    // Lines, so the Money tab can bucket a bundled invoice by what each part
+    // actually was rather than dumping the whole thing under the header's
+    // category. One query for the lot — a cost with no lines simply gets none,
+    // which is the overwhelmingly common case.
+    const costIds = [...new Set(result.rows.map((r) => r.id))];
+    const linesByCost = new Map<string, unknown[]>();
+    if (costIds.length) {
+      const lr = await query(
+        `SELECT cost_id, line_no, description, amount_gross, amount_vat,
+                xero_account_code, job_id, crew_fronted
+           FROM cost_lines WHERE cost_id = ANY($1::uuid[]) ORDER BY line_no ASC`,
+        [costIds],
+      );
+      for (const l of lr.rows) {
+        if (!linesByCost.has(l.cost_id)) linesByCost.set(l.cost_id, []);
+        linesByCost.get(l.cost_id)!.push(l);
+      }
+    }
+
     const rows = result.rows.map((r) => {
       const fullGross = r.amount_gross;
       const effective = r.is_allocation ? r.alloc_amount : r.amount_gross;
@@ -451,6 +470,10 @@ router.get('/by-job/:jobId', async (req: AuthRequest, res: Response) => {
         full_amount_gross: fullGross,   // the cost's true total
         allocation_recharge: r.alloc_recharge,
         allocation_notes: r.alloc_notes,
+        // Only on a whole-cost row. A split-in row is a SHARE of someone else's
+        // payable, so its lines describe a total this job doesn't carry —
+        // bucketing by them here would overstate the job.
+        lines: r.is_allocation ? [] : (linesByCost.get(r.id) ?? []),
       };
     });
 

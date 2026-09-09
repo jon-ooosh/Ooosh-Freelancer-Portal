@@ -145,6 +145,10 @@ interface JobCostLite {
   // Xero nominal code — /costs/by-job returns c.*, so it was always on the wire.
   // Drives the actuals make-up buckets on the quoted-vs-actual cards.
   xero_account_code?: string | null;
+  // Cost lines, when the invoice was split. Each carries its own code, so a
+  // bundled bill buckets by what each part WAS rather than by the header's
+  // single category. Empty on a split-in row and on any unsplit cost.
+  lines?: Array<{ amount_gross: number | string; xero_account_code: string | null; crew_fronted: boolean }>;
   amount_gross: number | null;
   amount_net: number | null;
   cost_intent: 'quote_actual' | 'extra' | null;
@@ -2208,7 +2212,7 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
       amount: expExpenses,
       // Deliberately has no matching bucket on the actuals side — see the
       // actualsMakeup comment below.
-      hint: 'Money the crew lays out and reclaims. On the actuals side it lands under whatever it was bought as (fuel, transport, other) — nothing on a captured cost records who fronted it.',
+      hint: 'Money the crew lays out and reclaims. Tick “fronted” on a cost line and it lands here on the actuals side too; an unsplit cost has nowhere to record who paid, so it falls under whatever it was bought as.',
     },
     { label: 'Transport', amount: expTransport },
   ].filter((c) => c.amount > 0.005);
@@ -2224,27 +2228,40 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
   // it is. Buckets come off the Xero nominal code, which is what the category
   // picker already writes.
   //
-  // "Fronted expenses" deliberately gets NO actuals bucket. Fronting is a fact
-  // about who paid, not about what was bought, and nothing on a cost row records
-  // it — a freelancer's £40 parking receipt is coded 411 exactly like parking we
-  // put on the company card. So fronted spend falls into Fuel / Transport /
-  // Other by what it actually was. Cost lines will fix the related-but-different
-  // problem of one invoice covering two things; they still won't say who fronted
-  // it without a flag of their own.
+  // Both blind spots this used to carry are now closed by cost lines:
   //
-  // Whole-invoice coding is the other known blind spot: a £250 freelancer
-  // invoice that is really £190 fee + £60 fuel lands entirely under Freelancer.
+  //  - Whole-invoice coding. A £250 freelancer bill that was really £190 fee +
+  //    £60 fuel counted entirely as Freelancer. Split into lines, each part
+  //    lands in its own bucket.
+  //  - "Fronted expenses" had NO actuals bucket at all, because fronting is a
+  //    fact about WHO PAID and no Xero code carries it. A line's `crew_fronted`
+  //    flag does, so it finally has one — and fronted WINS over the line's
+  //    category, because that is what the quote means by the word: money the
+  //    crew laid out and reclaims, whatever they spent it on.
+  //
+  // A cost with no lines still buckets by its header code, exactly as before.
   const actualsMakeup = (() => {
     const byLabel = new Map<string, number>();
-    for (const c of actualCosts) {
-      const code = (c.xero_account_code || '').trim();
-      const label = code === '320' ? 'Freelancer'
-        : code === '410' ? 'Fuel'
-        : code === '325' ? 'Transport'
+    const add = (code: string | null | undefined, fronted: boolean, amount: number) => {
+      const c = (code || '').trim();
+      const label = fronted ? 'Fronted expenses'
+        : c === '320' ? 'Freelancer'
+        : c === '410' ? 'Fuel'
+        : c === '325' ? 'Transport'
         : 'Other';
-      byLabel.set(label, (byLabel.get(label) || 0) + num(c.amount_gross));
+      byLabel.set(label, (byLabel.get(label) || 0) + amount);
+    };
+    for (const c of actualCosts) {
+      if (c.lines?.length) {
+        for (const l of c.lines) {
+          add(l.xero_account_code || c.xero_account_code, Boolean(l.crew_fronted), Number(l.amount_gross) || 0);
+        }
+      } else {
+        add(c.xero_account_code, false, num(c.amount_gross));
+      }
     }
-    return ['Freelancer', 'Fuel', 'Transport', 'Other']
+    // Same order as the Expected card above, so the two read side by side.
+    return ['Freelancer', 'Fuel', 'Fronted expenses', 'Transport', 'Other']
       .map((label) => ({ label, amount: byLabel.get(label) || 0 }))
       .filter((c) => c.amount > 0.005);
   })();
@@ -2302,7 +2319,7 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
                 </div>
               ))}
               <div className="text-[10px] text-gray-300 pt-0.5"
-                title="Grouped by the cost's Xero category. A whole invoice sits in one bucket, so a freelancer bill that also covered fuel counts entirely as Freelancer.">
+                title="Grouped by category — per line where an invoice was split, otherwise by the whole cost's category. An unsplit freelancer bill that also covered fuel still counts entirely as Freelancer; split it into lines to break it out.">
                 {actualCosts.length} cost{actualCosts.length === 1 ? '' : 's'} · by category
               </div>
             </div>
