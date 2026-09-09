@@ -149,16 +149,44 @@ existed since migration 001. Phase 2 is purely a UI wiring job.
 - Copy fix carried along: the uploader said "Max 10MB" while multer has always
   allowed 25MB. Now says 25MB.
 
-## Phase 3 — Unify rehearsal desk files into org files
+## Phase 3 — Unify rehearsal desk files into org files (SHIPPED)
 
-- Add tags `Desk settings`, `Saved mix`, `Tech spec` to `FILE_TAGS`.
-- **One-shot data migration:** copy each `organisation_rehearsal_profile.files` entry
-  into that org's `organisations.files`, defaulting `label` to `Desk settings`
-  (preserving any existing label). Leave the old column in place but unused; drop it in a
-  later cleanup migration.
-- Remove `RehearsalProfileFiles` from Job Detail and the file uploader/viewer from
-  `RehearsalProfileSection` (it keeps its structured fields + hotel-book preferences).
-  Those files now surface on jobs via the general org→job derivation (Phase 4).
+Ran last, after Phase 4/4b, so the general org→job surfacing already existed and the
+bespoke component could be removed with nothing lost in between.
+
+- Tags `Desk settings`, `Saved mix`, `Tech spec` added to `FILE_TAGS` (+ chip colours).
+- **Migration 204** maps each `organisation_rehearsal_profile.files` entry into that
+  org's `organisations.files`. It's a MAPPING, not a copy — the two shapes differ:
+
+  | profile file | `FileAttachment` |
+  |---|---|
+  | `r2_key` | `url` |
+  | `filename` | `name` |
+  | *(nothing)* | `type` — derived from the extension |
+  | `uploaded_by` = a **user UUID** | `uploaded_by` = that user's **email** |
+  | `label` (usually absent) | `label`, defaulting to `Desk settings` |
+
+  `content_type` / `size_bytes` are dropped — `FileAttachment` has no home for them and
+  nothing read them. Entries already on the org (matched by R2 key) are skipped, so the
+  migration is idempotent and can't double up.
+- `RehearsalProfileFiles` is deleted; Job Detail no longer fetches
+  `/rehearsals/job/:id` for files, and the Files tab badge counts the job's own files.
+- `RehearsalProfileSection` keeps its structured fields, preferences and internal notes;
+  its uploader/viewer is replaced by a signpost to the org Files tab.
+- `RehearsalDetailsCard` stopped counting profile files in its "N things" badge and its
+  band-extras summary — those files are counted on the Files tab now, so leaving them
+  would have double-counted them.
+
+**Deliberately left behind, for a later cleanup migration once this has been live a
+while:** the `organisation_rehearsal_profile.files` column itself (still populated, no
+longer read) and the `POST`/`PATCH`/`DELETE /api/rehearsals/profile/:orgId/files`
+routes, which now have no caller.
+
+**One behaviour change worth knowing.** Desk files used to surface only on jobs where
+that band was the *rehearsal anchor*. As ordinary org files they surface on **every** job
+the org is on — so a band's saved desk file will also appear on their van hire. That
+follows from having one Files store rather than two, and the per-file **Hidden on jobs**
+toggle is the escape hatch.
 
 ## Phase 4 — The link layer + both surfacing directions (SHIPPED)
 

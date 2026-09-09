@@ -36,7 +36,6 @@ import RackPlanModal from '../components/rackplan/RackPlanModal';
 import RackPlanOverviewCard from '../components/rackplan/RackPlanOverviewCard';
 import StudioHandoverCard from '../components/StudioHandoverCard';
 import RehearsalDetailsCard from '../components/RehearsalDetailsCard';
-import RehearsalProfileFiles from '../components/RehearsalProfileFiles';
 import DatePicker from '../components/DatePicker';
 import { TimeInput } from '../components/TimeInput';
 import ChaseModal from '../components/ChaseModal';
@@ -1852,24 +1851,10 @@ export default function JobDetailPage() {
   const [pushingStatusToHH, setPushingStatusToHH] = useState(false);
   const [prepChecklistKey, setPrepChecklistKey] = useState(0);
   const [internalToggling, setInternalToggling] = useState(false);
-  // Band rehearsal-profile files surfaced on the Files tab (read-only). Fetched
-  // at page level so the count feeds the Files tab badge without opening the tab.
-  const [rehearsalFiles, setRehearsalFiles] = useState<
-    { r2_key: string; filename: string; label?: string | null; comment?: string | null }[]
-  >([]);
-  const [rehearsalAnchor, setRehearsalAnchor] = useState<{ id: string; name: string | null } | null>(null);
-  const hasRehearsal = !!hhSyncResult?.derivation?.flags?.has_rehearsal;
-  useEffect(() => {
-    if (!id || !hasRehearsal) { setRehearsalFiles([]); setRehearsalAnchor(null); return; }
-    let cancelled = false;
-    api.get<{ data: { anchorOrg: { id: string; name: string | null } | null; profile: { files?: typeof rehearsalFiles } | null } }>(
-      `/rehearsals/job/${id}`
-    )
-      .then((r) => { if (!cancelled) { setRehearsalFiles(r.data.profile?.files ?? []); setRehearsalAnchor(r.data.anchorOrg); } })
-      .catch(() => { if (!cancelled) { setRehearsalFiles([]); setRehearsalAnchor(null); } });
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, hasRehearsal]);
+  // Band rehearsal desk files used to be fetched here and rendered as their own
+  // read-only card. They now live in organisations.files (migration 204) and reach
+  // the Files tab through the ordinary org → job surfacing, so there is nothing
+  // rehearsal-specific left to fetch. See docs/CROSS-ENTITY-FILES-SPEC.md Phase 3.
   const editNameRef = useRef<HTMLInputElement>(null);
   const editHHRef = useRef<HTMLInputElement>(null);
   const clientSearchRef = useRef<HTMLDivElement>(null);
@@ -3239,7 +3224,7 @@ export default function JobDetailPage() {
   })();
   // ─────────────────────────────────────────────────────────────────────────
 
-  const fileCount = (job.files || []).length + rehearsalFiles.length;
+  const fileCount = (job.files || []).length;
   const hhJobUrl = job.hh_job_number
     ? `https://myhirehop.com/job.php?id=${job.hh_job_number}`
     : null;
@@ -5384,15 +5369,12 @@ export default function JobDetailPage() {
 
       {/* Files Tab */}
       {activeTab === 'files' && id && (
-        <>
-          <RehearsalProfileFiles anchorOrg={rehearsalAnchor} files={rehearsalFiles} />
-          <EntityFilesSection
-            entityType="jobs"
-            entityId={id}
-            files={job.files || []}
-            onChanged={loadJob}
-          />
-        </>
+        <EntityFilesSection
+          entityType="jobs"
+          entityId={id}
+          files={job.files || []}
+          onChanged={loadJob}
+        />
       )}
 
       {/* Crew & Transport Tab */}
