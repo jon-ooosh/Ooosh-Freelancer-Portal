@@ -240,6 +240,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '203_free_enquiry_file_label.sql',
         '204_fold_rehearsal_files_into_org.sql',
         '205_cost_lines.sql',
+        '206_staff_calendar_phase_a.sql',
       ];
 
       for (const migration of migrations) {
