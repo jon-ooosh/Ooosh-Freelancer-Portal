@@ -25,22 +25,51 @@ undo once there is a year of real data in the table.
 Every stored quantity — entitlement, a booked day off, an overtime chunk, a contracted
 shift — is an integer count of minutes. Days and hours are a **display** concern only.
 
-Ooosh has three staff on non-standard patterns, including one working a five-day week
-compressed into four ten-hour days. For that person a day off is not "a day":
+Ooosh has three staff on non-standard patterns, including one (Will Parish) working a
+compressed week across four days of **unequal length**. For him a day off is emphatically
+not "a day":
 
-| Person | Pattern | Weekly | Statutory 5.6 wks | Shown as |
+| Day | Hours | Gross | Break | Net |
 |---|---|---|---|---|
-| Standard | Mon–Fri 9–5 (8h) | 2400 min | 13,440 min | 28.0 days / 224.0 h |
-| Compressed | 4 × 10h | 2400 min | 13,440 min | 22.4 days / 224.0 h |
-| 4-day Thu–Sun | 4 × 8h | 1920 min | 10,752 min | 22.4 days / 179.2 h |
+| Mon | 08:30–16:30 | 8h 00 | 30 min | **450 min** (7h 30) |
+| Tue | 08:30–16:30 | 8h 00 | 30 min | **450 min** (7h 30) |
+| Wed | 09:15–19:00 | 9h 45 | 30 min | **555 min** (9h 15) |
+| Thu | — | — | — | not scheduled |
+| Fri | 08:00–19:00 | 11h 00 | 30 min | **630 min** (10h 30) |
+| | | | | **2,085 min = 34h 45m** |
 
-Note the first two get **identical hours** — which is the correct and fair answer, and is
-only obvious once you stop counting in days. The compressed person's Thursday off costs
-600 minutes; the standard person's Thursday off costs 480.
+Against the standard week (Mon–Fri, 40h gross less 5 × 1h lunch = 35h paid = 2,100 min),
+that is **15 minutes short per week** — about 13 hours a year. Invisible if you count in
+days; unmissable the moment you count in minutes. Confirm against his contract before
+entering the pattern (§17.7); the pattern is data, so whatever the contract says is what
+gets typed in.
 
-**Display rule:** always show both, `"22.4 days (224.0 hours)"`. A person's "day" for
-display = their weekly contracted minutes ÷ their number of working days per week, taken
-from the pattern in force *on the date being displayed*.
+Comparative entitlement (5.6 statutory weeks × weekly contracted minutes):
+
+| Person | Weekly | Statutory entitlement | Shown as |
+|---|---|---|---|
+| Standard Mon–Fri (7h paid/day) | 2,100 min | 11,760 min | 28.0 days / 196.0 h |
+| Will (compressed, unequal) | 2,085 min | 11,676 min | ≈22.4 days / 194.6 h |
+| 4-day Thu–Sun (4 × 7h) | 1,680 min | 9,408 min | 22.4 days / 156.8 h |
+
+**Display rule:** always show both — `"≈22.4 days (194.6 hours)"`. A person's nominal
+"day" for display = weekly contracted minutes ÷ working days per week, from the pattern in
+force *on the date being displayed*. For Will that nominal day is 521 min (8h 41m) — a
+number he never actually works, which is exactly why hours lead and days follow.
+
+*(Working Time Regulations sanity check on the long Friday: an 11-hour day with a
+30-minute break is fine — the entitlement is a 20-minute uninterrupted break over 6
+hours. Daily rest between shifts is 16h 45m at the tightest, weekly rest is three clear
+days, and the week totals 34h 45m against the 48h limit. Nothing to flag.)*
+
+**Unequal days: a deliberate consequence, not a bug.** A leave day is charged at the
+*actual* minutes of that weekday (§0.3). So Will's Friday off costs 630 minutes and his
+Monday off costs 450. Spending his whole entitlement on Mondays would yield ~25.9 days
+away; on Fridays, ~18.5. That is correct — in both cases he is relieved of exactly 194.6
+hours of work, which is what the entitlement is. Do **not** "fix" this by charging an
+average day: that would make a Friday off cheaper than it costs and a Monday off dearer,
+and staff would (rightly) notice. Any clustering it causes is an operational matter for
+the coverage warnings in §11, not an accounting one.
 
 ### 0.2 Balances are DERIVED from an immutable ledger. There is no balance column.
 
@@ -107,13 +136,16 @@ shape. Full records are never sent to the browser and hidden in React.
 
 **In scope:**
 - Employment records for the 7 staff: hours, pattern, start date, salary history,
-  review scheduling (admin-only directory).
+  review scheduling, right-to-work, emergency contacts (admin-only directory, built on
+  the existing `people` columns — see §3.1).
 - Effective-dated working patterns, incl. 2-week cycles and compressed hours.
 - One-off pattern exceptions and self-swaps; manager-created person-to-person swaps.
 - Holiday entitlement, requests, approval, cancellation, corrections, half days.
 - Overtime logged in 5-minute increments into a **bank**, drawn down as either TOIL
   time off or payroll cash-out, at whatever moment the person decides.
 - Unpaid leave.
+- Timed appointment markers ("out 14:00–15:00") that flag absence from the building
+  without deducting anything (§7.5).
 - Sickness, parental, bereavement, goodwill and other absence, with return-to-work.
 - Global "who's in" calendar + dashboard strip + personal calendar.
 - Approval flow with operational context attached.
@@ -155,6 +187,48 @@ shape. Full records are never sent to the browser and hidden in React.
 All new tables. Migration numbers taken at build time (next free after 201).
 
 ### 3.1 Employment & directory (admin-only)
+
+**Most of the employee record already exists on `people` — do not duplicate it.** Per the
+CLAUDE.md "there is probably already a helper" rule, the employee module is a *view* over
+existing columns plus the genuinely employment-specific tables below.
+
+Already on `people`, reused as-is:
+
+| Field | Origin |
+|---|---|
+| `date_of_birth`, `home_address` | mig 001 |
+| `emergency_contact_name`, `emergency_contact_phone` | mig 001 |
+| `licence_number`, `licence_issued_by`, `licence_expiry`, `licence_passed_date`, `dvla_check_date`, `licence_categories` | mig 184 / 194 |
+| `passport_expiry` | mig 184 |
+| `files` (JSONB) — contracts, certificates, letters | mig 001 |
+| `phone` / `mobile`, `preferred_name`, `skills`, `tags` | mig 001 / 184 |
+
+Genuinely missing, added here:
+
+```sql
+ALTER TABLE people ADD COLUMN IF NOT EXISTS emergency_contact_relationship TEXT;
+ALTER TABLE people ADD COLUMN IF NOT EXISTS emergency_contact_2_name  VARCHAR(255);
+ALTER TABLE people ADD COLUMN IF NOT EXISTS emergency_contact_2_phone VARCHAR(50);
+ALTER TABLE people ADD COLUMN IF NOT EXISTS emergency_contact_2_relationship TEXT;
+
+-- Right to work. Legally required to hold and produce; nothing covers it today.
+ALTER TABLE people ADD COLUMN IF NOT EXISTS rtw_checked_on     DATE;
+ALTER TABLE people ADD COLUMN IF NOT EXISTS rtw_document_type  VARCHAR(50);
+ALTER TABLE people ADD COLUMN IF NOT EXISTS rtw_expires_on     DATE;   -- time-limited leave
+ALTER TABLE people ADD COLUMN IF NOT EXISTS rtw_checked_by     UUID REFERENCES users(id);
+
+-- NI number: identity PII. ENCRYPTED via services/encryption.ts, like driver licence
+-- data. Never plaintext, never in a list view, never in an export.
+ALTER TABLE people ADD COLUMN IF NOT EXISTS ni_number_encrypted TEXT;
+```
+
+**Bank details are deliberately NOT stored.** The accountants already hold them for
+payroll, so keeping a second copy adds real fraud exposure (payroll-diversion attacks
+target exactly this) for no operational benefit. This is a decision, not an oversight —
+do not add them later "for completeness".
+
+`rtw_expires_on` joins the existing document-expiry scanner alongside licence and
+passport expiry, so time-limited right to work chases itself.
 
 ```sql
 staff_employment
@@ -390,7 +464,10 @@ staff_absences
 
 staff_absence_days
   id, absence_id, absence_date DATE, minutes INT,
-  portion VARCHAR(10) DEFAULT 'full',
+  portion VARCHAR(10) NOT NULL DEFAULT 'full'
+    CHECK (portion IN ('full','am','pm','hours')),
+  start_time TIME,          -- set when portion = 'hours' (§7.5)
+  end_time   TIME,
   UNIQUE (absence_id, absence_date)
 ```
 
@@ -471,8 +548,9 @@ absence. Three sources means drift, so exactly one resolver merges them:
 getDayStatus(personId, date): {
   scheduledMinutes: number,
   status: 'working' | 'not_scheduled' | 'leave' | 'absent' | 'partial',
-  portion?: 'full' | 'am' | 'pm',
-  detail?: { leaveType?, absenceType? }    // ADMIN ONLY — masked for peers
+  portion?: 'full' | 'am' | 'pm' | 'hours',
+  window?: { start: string, end: string },  // set when portion = 'hours' (§7.5)
+  detail?: { leaveType?, absenceType? }     // ADMIN ONLY — stripped for peers
 }
 getTeamDayStatus(date, viewerRole): TeamDayStatus[]   // masking applied here
 ```
@@ -619,7 +697,44 @@ Accepting posts a `correction` credit for those days' minutes and stamps
 and still shows in history — the reclaim is visible as its own ledger line, which is
 exactly what you want if it is ever questioned.
 
-### 7.5 Reporting
+### 7.5 Timed appointments — "I'm at the dentist 2–3 on Tuesday"
+
+Two different needs get conflated here, and separating them is what keeps the rules
+simple:
+
+| Need | Mechanism | Deducts? |
+|---|---|---|
+| **Taking time off** | Leave request | Yes — **minimum half a day**, always |
+| **Flagging an absence from the building** | Timed absence marker | No, by default |
+
+**Leave stays in half-day chunks.** `staff_leave_request_days.portion` remains
+`full / am / pm` and the request UI offers nothing finer. Nobody books 40 minutes of
+holiday.
+
+**Appointments are a presence marker, not leave.** An hour at the dentist creates a
+`staff_absences` row of type `medical_appointment` with `deducts_allowance = false` and a
+day row of `portion = 'hours'`, 14:00–15:00. It costs nothing, needs no approval, and
+exists purely so the calendar and the coverage warnings know the person is out — which is
+the whole point: not discovering at 14:00 on Tuesday that the office is empty.
+
+**Staff can create these themselves.** This is the one absence type staff may self-record
+(everything else is admin-entered). Auto-approved, editable by the person while it is in
+the future, and admin sees them in the approvals feed as information rather than as a
+decision.
+
+**Masking (§0.5) still applies, and matters here.** Peers see the *time window* and
+nothing else:
+
+> `Will — out 14:00–15:00`
+
+Never the type. The time is operational information the team needs; "medical appointment"
+is health-adjacent and stays admin-only. `staff-day-status.ts` returns `status: 'partial'`
+with the window, and strips `detail.absenceType` for non-admin viewers.
+
+If policy ever wants an appointment to be deducted, flipping `deducts_allowance` on that
+absence posts the ledger debit — no new mechanism.
+
+### 7.6 Reporting
 
 Admin-only. Per person and team-wide, over a rolling window:
 - number of separate absence **spells** and total days (spells matter more than days —
@@ -876,9 +991,23 @@ is a settings change and not a deploy — that is why they are settings.
    say. If a contract implies bank holidays are given, the setting must match the
    contract, not the other way round.
 4. **The compressed-hours contract** — confirm entitlement is expressed in hours, not
-   days. If the contract says "28 days", it is ambiguous for a 4×10h week and should be
-   restated in hours at the next review.
-5. **Sickness data retention** — how long absence records are kept. Feeds the outstanding
+   days. If the contract says "28 days", it is ambiguous for an unequal-length week and
+   should be restated in hours at the next review.
+5. **Will Parish's 15-minute weekly shortfall** (§0.1). His stated hours total 34h 45m
+   against a 35h week. Either the contract says something different from the hours he
+   works, or one day needs 15 minutes adding. Resolve before entering the pattern — it is
+   a data question, not a design one, but it will be visible in every report once live.
+6. **The standard working day.** The spec assumes 9–5 with a 1h unpaid lunch = 7h paid
+   (35h week), inferred from the "40 hours less 5 × 1h lunch" framing. Confirm, because
+   it sets everyone's entitlement. Note Will takes 30-minute lunches against the standard
+   hour — fine under WTR (a 20-minute break covers a 6h+ day), but it should be what his
+   contract says.
+7. **Right-to-work records** (§3.1) — check what evidence is currently held for the 7
+   staff and where, since the module will expect to hold it.
+8. **NI numbers** — confirm they are wanted in OP at all before building the encrypted
+   column. If payroll is the only consumer and the accountants already hold them, the
+   safest version of this field is the one that does not exist.
+9. **Sickness data retention** — how long absence records are kept. Feeds the outstanding
    GDPR retention policy item in `ROADMAP.md`.
-6. **Payroll report format** — show the accountants a sample CSV before Phase C ships and
+10. **Payroll report format** — show the accountants a sample CSV before Phase C ships and
    shape the columns to what they actually want.
