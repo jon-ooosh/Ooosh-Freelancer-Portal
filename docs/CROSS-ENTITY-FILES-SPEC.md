@@ -194,6 +194,41 @@ Built **before** Phase 3 — see the note at the top of this doc.
   files (plus rehearsal-profile files) and not the derived org files. Surfaced files
   are labelled as someone else's, so inflating the job's own count would mislead.
 
+## Phase 4b — one flat Files list (SHIPPED)
+
+Phase 4 shipped surfaced files as separate cards — "From [Org]" groups on a job,
+a "Linked from jobs" group on an org. In use that was wrong three ways, so it was
+flattened immediately:
+
+1. **Separate surfaces re-created the problem the project exists to solve.** The
+   whole premise is ONE Files place per entity; three cards is three places.
+2. **Borrowed files had a crippled action set** (view only) for no reason anyone
+   could state — a file's provenance shouldn't decide whether you can email it.
+3. **A file could appear twice.** Two cards meant two dedupe scopes.
+
+**Now:** one `Files (n)` list per surface, owned and borrowed rows together,
+deduped by R2 key in a single pass with **owned winning**. Provenance moved from
+a card heading to a per-row **origin chip** — muted and outlined, visually
+distinct from the coloured staff tag, so "Rider" and "From Bandy McBandface" sit
+side by side. The chip links to the owner. The filter row carries tags **and**
+origins, which gives back the grouping affordance for one click and no cards.
+
+**Actions are unified except one.** View, Email, Share and Edit work on every
+row and are aimed at the file's OWNER (`owner_entity_type` / `owner_entity_id`,
+now returned by both surfacing endpoints) — the tooltips say so, because editing
+a band's tag from a job page changes it everywhere. **Delete stays owner-only**:
+a borrowed row offers Unlink (where this surface holds the link) or nothing.
+Deleting someone else's file from a borrowed view is the one irreversible action,
+and flattening removes the visual "this isn't yours" cue that a separate card gave.
+
+**Migration 203 frees the `label` field.** Phase 1 wrote provenance into the
+staff tag (`label: 'From enquiry form'`), so a client's rider could be marked as
+*from the enquiry form* or as a *Rider*, never both — and the tag filter row
+carried a pseudo-tag forever. Provenance is now derived from the
+`uploaded_by = 'enquiry form'` that Phase 1 already stored, so no replacement
+column was needed: the migration just clears the squatted label, and
+`routes/enquiry-intake.ts` stops writing it.
+
 ## Edge cases
 
 - **Enquiry files with no firm org yet** — Phase 1 just lands them on the job; linking to

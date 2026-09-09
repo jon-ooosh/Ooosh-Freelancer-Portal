@@ -23,16 +23,18 @@ import type { FileAttachment } from '@shared/index';
 export type FileEntityType = 'jobs' | 'organisations' | 'people' | 'venues' | 'drivers';
 
 /**
- * A file surfaced onto a job from one of its orgs — a window, not a copy. The
- * bytes still belong to whoever owns it, which is what `source` records:
- * 'org' = the organisation itself, 'job' = another job that linked the file up
- * to this organisation, so it now appears on the org's other hires too.
+ * A file borrowed from somewhere else — a window, not a copy. The bytes still
+ * belong to `owner_entity_*`, which is where any edit, share or email has to be
+ * aimed. `source` says how it got here: 'org' = the organisation itself,
+ * 'job' = another job that linked it up to a shared organisation.
  */
 export interface SurfacedFile extends FileAttachment {
   source: 'org' | 'job';
-  source_job_id?: string;
-  source_job_name?: string | null;
-  source_job_number?: number | null;
+  owner_entity_type: FileEntityType;
+  owner_entity_id: string;
+  owner_name: string | null;
+  /** Present only on the org surface: the link that put it there, for Unlink. */
+  link_id?: string;
 }
 
 /** One explicit job → org link, as seen from the owning job. */
@@ -45,22 +47,30 @@ interface FileLink {
 
 /** Everything the Job Files tab needs beyond the job's own `files` array. */
 interface JobSurfacing {
-  groups: { org_id: string; org_name: string; files: SurfacedFile[] }[];
+  surfaced: SurfacedFile[];
   links: FileLink[];
   orgs: { id: string; name: string }[];
 }
 
-/** A job's file linked up to this org — shown in "Linked from jobs". */
-interface LinkedFile extends FileAttachment {
-  link_id: string;
-  source_job_id: string;
-  source_job_name: string | null;
-  source_job_number: number | null;
-}
-
-/** A job's display name, however little of it we have. */
-function jobLabel(name: string | null | undefined, number: number | null | undefined): string {
-  return name || (number ? `Job ${number}` : 'a job');
+/**
+ * One line in the single Files list.
+ *
+ * Owned and borrowed files sit in the SAME list — staff think "the files on this
+ * job", not "the files this job happens to hold the bytes for". What differs is
+ * only where writes are aimed (`ownerType`/`ownerId`) and what's allowed:
+ * borrowed rows never offer Delete, because deleting a band's rider from a job
+ * page is how a rider disappears from twenty other hires.
+ */
+interface FileRow {
+  file: FileAttachment;
+  owned: boolean;
+  ownerType: FileEntityType;
+  ownerId: string;
+  /** Muted chip: where this file actually lives. Null for a plain owned file. */
+  origin: string | null;
+  originHref: string | null;
+  /** Set when this surface can close the window without touching the file. */
+  linkId?: string;
 }
 
 // Wording for the "email this file" modal heading, per surface.
@@ -364,7 +374,7 @@ export default function EntityFilesSection({
   const [error, setError] = useState('');
   const [filterTag, setFilterTag] = useState('');
   const [viewingFile, setViewingFile] = useState<FileAttachment | null>(null);
-  const [emailingFile, setEmailingFile] = useState<FileAttachment | null>(null);
+  const [emailingRow, setEmailingRow] = useState<FileRow | null>(null);
   const [dragOver, setDragOver] = useState(false);
 
   // ── Cross-entity surfacing (docs/CROSS-ENTITY-FILES-SPEC.md, Phase 4) ────
@@ -372,8 +382,7 @@ export default function EntityFilesSection({
   // this component with the same four props. A job reads through to its orgs'
   // files; an org shows what jobs have linked up to it.
   const [surfacing, setSurfacing] = useState<JobSurfacing | null>(null);
-  const [linkedFromJobs, setLinkedFromJobs] = useState<LinkedFile[]>([]);
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+  const [linkedFromJobs, setLinkedFromJobs] = useState<SurfacedFile[]>([]);
   const [linkingFile, setLinkingFile] = useState<string | null>(null);
   const [busyLink, setBusyLink] = useState(false);
   // Bumped by `refresh()` — the owner refetch goes through the caller's
@@ -387,7 +396,7 @@ export default function EntityFilesSection({
         .then((r) => { if (!cancelled) setSurfacing(r.data); })
         .catch(() => { if (!cancelled) setSurfacing(null); });
     } else if (entityType === 'organisations') {
-      api.get<{ data: LinkedFile[] }>(`/files/for-org/${entityId}`)
+      api.get<{ data: SurfacedFile[] }>(`/files/for-org/${entityId}`)
         .then((r) => { if (!cancelled) setLinkedFromJobs(r.data || []); })
         .catch(() => { if (!cancelled) setLinkedFromJobs([]); });
     }
@@ -395,12 +404,6 @@ export default function EntityFilesSection({
   }, [entityType, entityId, surfaceNonce]);
 
   const refresh = () => { onChanged(); setSurfaceNonce((n) => n + 1); };
-
-  const toggleGroup = (orgId: string) => setCollapsedGroups((prev) => {
-    const next = new Set(prev);
-    if (next.has(orgId)) next.delete(orgId); else next.add(orgId);
-    return next;
-  });
 
   /** The orgs this file is already linked to. */
   const linksFor = (fileUrl: string) =>
@@ -449,13 +452,14 @@ export default function EntityFilesSection({
     setEditCustomTag('');
     setEditComment('');
   };
-  const saveEdit = async (file: FileAttachment) => {
+  const saveEdit = async (row: FileRow) => {
+    const file = row.file;
     setSavingEdit(true);
     setError('');
     try {
       await api.patch('/files/update-metadata', {
-        entity_type: entityType,
-        entity_id: entityId,
+        entity_type: row.ownerType,
+        entity_id: row.ownerId,
         file_url: file.url,
         updates: {
           label: effectiveEditTag.trim() || null,
@@ -471,11 +475,14 @@ export default function EntityFilesSection({
     }
   };
 
-  const handleToggleShare = async (file: FileAttachment) => {
+  // Writes to whoever owns the file — a borrowed file's share state lives with
+  // its owner, so toggling it here changes it everywhere. The title text says so.
+  const handleToggleShare = async (row: FileRow) => {
+    const file = row.file;
     try {
       await api.patch('/files/update-metadata', {
-        entity_type: entityType,
-        entity_id: entityId,
+        entity_type: row.ownerType,
+        entity_id: row.ownerId,
         file_url: file.url,
         updates: { share_with_freelancer: !file.share_with_freelancer },
       });
@@ -598,11 +605,12 @@ export default function EntityFilesSection({
   };
 
   // Org files only. Absent means true, so the toggle reads "is it NOT hidden".
-  const handleToggleShowOnJobs = async (file: FileAttachment) => {
+  const handleToggleShowOnJobs = async (row: FileRow) => {
+    const file = row.file;
     try {
       await api.patch('/files/update-metadata', {
-        entity_type: entityType,
-        entity_id: entityId,
+        entity_type: row.ownerType,
+        entity_id: row.ownerId,
         file_url: file.url,
         updates: { show_on_jobs: file.show_on_jobs === false },
       });
@@ -612,10 +620,57 @@ export default function EntityFilesSection({
     }
   };
 
-  const existingTags = [...new Set(files.map(f => f.label).filter(Boolean))] as string[];
-  const filteredFiles = filterTag
-    ? files.filter(f => f.label === filterTag)
-    : files;
+  // ── One list ────────────────────────────────────────────────────────────
+  // Owned files first (they're the ones with the full action set), then anything
+  // borrowed. Deduped by R2 key with owned winning, so a file this entity holds
+  // AND borrows can't appear twice — which is exactly the loop you get once you
+  // link a job's file up to an org that the same job is on.
+  const rows: FileRow[] = [];
+  const seenUrls = new Set<string>();
+
+  for (const file of files) {
+    if (seenUrls.has(file.url)) continue;
+    seenUrls.add(file.url);
+    rows.push({
+      file,
+      owned: true,
+      ownerType: entityType,
+      ownerId: entityId,
+      // Phase 1 used to write this into `label`, squatting on the staff tag.
+      // It's derived from uploaded_by now — see migration 203.
+      origin: file.uploaded_by === 'enquiry form' ? 'From enquiry form' : null,
+      originHref: null,
+    });
+  }
+
+  const borrowed: SurfacedFile[] =
+    entityType === 'jobs' ? (surfacing?.surfaced || [])
+    : entityType === 'organisations' ? linkedFromJobs
+    : [];
+
+  for (const file of borrowed) {
+    if (seenUrls.has(file.url)) continue;
+    seenUrls.add(file.url);
+    rows.push({
+      file,
+      owned: false,
+      ownerType: file.owner_entity_type,
+      ownerId: file.owner_entity_id,
+      origin: `From ${file.owner_name || 'elsewhere'}`,
+      originHref: file.owner_entity_type === 'organisations'
+        ? `/organisations/${file.owner_entity_id}?tab=files`
+        : `/jobs/${file.owner_entity_id}`,
+      linkId: file.link_id,
+    });
+  }
+
+  // The filter row carries staff tags AND origins, so "show me what came off the
+  // enquiry form" or "just the band's files" costs one click and no extra cards.
+  const existingTags = [...new Set(rows.map(r => r.file.label).filter(Boolean))] as string[];
+  const existingOrigins = [...new Set(rows.map(r => r.origin).filter(Boolean))] as string[];
+  const filteredRows = filterTag
+    ? rows.filter(r => r.file.label === filterTag || r.origin === filterTag)
+    : rows;
 
   return (
     <div className="space-y-6">
@@ -745,9 +800,9 @@ export default function EntityFilesSection({
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-sm font-semibold text-gray-700">
-            Files {files.length > 0 && `(${files.length})`}
+            Files {rows.length > 0 && `(${rows.length})`}
           </h3>
-          {existingTags.length > 0 && (
+          {existingTags.length + existingOrigins.length > 0 && (
             <div className="flex items-center gap-2 flex-wrap">
               <span className="text-xs text-gray-400">Filter:</span>
               <button
@@ -758,7 +813,7 @@ export default function EntityFilesSection({
               >
                 All
               </button>
-              {existingTags.map(tag => (
+              {[...existingTags, ...existingOrigins].map(tag => (
                 <button
                   key={tag}
                   onClick={() => setFilterTag(tag === filterTag ? '' : tag)}
@@ -773,13 +828,14 @@ export default function EntityFilesSection({
           )}
         </div>
 
-        {filteredFiles.length === 0 ? (
+        {filteredRows.length === 0 ? (
           <p className="text-sm text-gray-400 py-8 text-center">
-            {files.length === 0 ? 'No files uploaded yet' : 'No files match this filter'}
+            {rows.length === 0 ? 'No files uploaded yet' : 'No files match this filter'}
           </p>
         ) : (
           <div className="space-y-2">
-            {filteredFiles.map((file, idx) => {
+            {filteredRows.map((row, idx) => {
+              const file = row.file;
               const isLink = file.type === 'link';
               const canPreview = !isLink && isPreviewable(file.name);
               const isEditing = editingFileUrl === file.url;
@@ -822,6 +878,24 @@ export default function EntityFilesSection({
                             {file.label}
                           </span>
                         )}
+                        {/* Origin chip — muted and visually distinct from the staff
+                            tag above, so "Rider" and "From Bandy McBandface" can sit
+                            side by side without competing. Links to the owner. */}
+                        {!isEditing && row.origin && (
+                          row.originHref ? (
+                            <Link
+                              to={row.originHref}
+                              className="inline-flex px-1.5 py-0.5 rounded text-xs font-medium flex-shrink-0 border border-gray-200 text-gray-500 hover:border-gray-300 hover:text-gray-700"
+                              title={`Managed on ${row.origin.replace(/^From /, '')} — click to open it there`}
+                            >
+                              {row.origin}
+                            </Link>
+                          ) : (
+                            <span className="inline-flex px-1.5 py-0.5 rounded text-xs font-medium flex-shrink-0 border border-gray-200 text-gray-500">
+                              {row.origin}
+                            </span>
+                          )
+                        )}
                       </div>
                       {isEditing ? (
                         <div className="mt-2 space-y-2">
@@ -860,7 +934,7 @@ export default function EntityFilesSection({
                           />
                           <div className="flex items-center gap-2">
                             <button
-                              onClick={() => saveEdit(file)}
+                              onClick={() => saveEdit(row)}
                               disabled={savingEdit}
                               className="text-xs px-3 py-1 bg-ooosh-600 text-white rounded hover:bg-ooosh-700 disabled:opacity-50"
                             >
@@ -892,19 +966,21 @@ export default function EntityFilesSection({
                   {!isEditing && (
                     <div className="flex items-center gap-2 flex-wrap flex-shrink-0 pl-11 sm:pl-0 sm:ml-2">
                       <button
-                        onClick={() => handleToggleShare(file)}
+                        onClick={() => handleToggleShare(row)}
                         className={`text-xs px-2 py-0.5 rounded border transition-colors ${
                           file.share_with_freelancer
                             ? 'bg-green-50 border-green-200 text-green-700'
                             : 'bg-gray-50 border-gray-200 text-gray-400 opacity-100 sm:opacity-0 sm:group-hover:opacity-100'
                         }`}
-                        title={file.share_with_freelancer ? 'Shared with freelancers — click to unshare' : 'Share with freelancers'}
+                        title={row.owned
+                          ? (file.share_with_freelancer ? 'Shared with freelancers — click to unshare' : 'Share with freelancers')
+                          : `Share state lives with ${row.origin?.replace(/^From /, '') || 'the owner'} — changing it here changes it everywhere`}
                       >
                         {file.share_with_freelancer ? 'Shared' : 'Share'}
                       </button>
-                      {entityType === 'organisations' && (
+                      {row.owned && entityType === 'organisations' && (
                         <button
-                          onClick={() => handleToggleShowOnJobs(file)}
+                          onClick={() => handleToggleShowOnJobs(row)}
                           className={`text-xs px-2 py-0.5 rounded border transition-colors ${
                             file.show_on_jobs === false
                               ? 'bg-gray-50 border-gray-200 text-gray-400'
@@ -917,7 +993,7 @@ export default function EntityFilesSection({
                           {file.show_on_jobs === false ? 'Hidden on jobs' : 'On jobs'}
                         </button>
                       )}
-                      {entityType === 'jobs' && linksFor(file.url).map(l => (
+                      {row.owned && entityType === 'jobs' && linksFor(file.url).map(l => (
                         <button
                           key={l.id}
                           onClick={() => unlink(l.id)}
@@ -928,7 +1004,7 @@ export default function EntityFilesSection({
                           🔗 {l.org_name} ✕
                         </button>
                       ))}
-                      {entityType === 'jobs' && availableOrgsFor(file.url).length > 0 && (
+                      {row.owned && entityType === 'jobs' && availableOrgsFor(file.url).length > 0 && (
                         linkingFile === file.url ? (
                           <select
                             autoFocus
@@ -961,7 +1037,7 @@ export default function EntityFilesSection({
                       )}
                       {!isLink && (
                         <button
-                          onClick={() => setEmailingFile(file)}
+                          onClick={() => setEmailingRow(row)}
                           className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity"
                           title="Email this file"
                         >
@@ -971,7 +1047,9 @@ export default function EntityFilesSection({
                       <button
                         onClick={() => startEdit(file)}
                         className="text-xs text-gray-600 hover:text-gray-800 font-medium opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity"
-                        title="Edit tag / comment"
+                        title={row.owned
+                          ? 'Edit tag / comment'
+                          : `Edit tag / comment — saves on ${row.origin?.replace(/^From /, '') || 'the owner'}, so it changes everywhere`}
                       >
                         Edit
                       </button>
@@ -983,13 +1061,28 @@ export default function EntityFilesSection({
                           View
                         </button>
                       )}
-                      <button
-                        onClick={() => handleDelete(file.url)}
-                        disabled={deleting === file.url}
-                        className="text-xs text-red-500 hover:text-red-700 font-medium disabled:opacity-50 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity"
-                      >
-                        {deleting === file.url ? '...' : 'Delete'}
-                      </button>
+                      {/* Delete is owner-only, deliberately. A borrowed row can
+                          close its own window (Unlink) but can't destroy someone
+                          else's file — that's how a rider vanishes from twenty
+                          hires because one job page was tidied up. */}
+                      {row.owned ? (
+                        <button
+                          onClick={() => handleDelete(file.url)}
+                          disabled={deleting === file.url}
+                          className="text-xs text-red-500 hover:text-red-700 font-medium disabled:opacity-50 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity"
+                        >
+                          {deleting === file.url ? '...' : 'Delete'}
+                        </button>
+                      ) : row.linkId ? (
+                        <button
+                          onClick={() => unlink(row.linkId!)}
+                          disabled={busyLink}
+                          className="text-xs text-gray-500 hover:text-gray-700 font-medium disabled:opacity-50 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity"
+                          title="Stop showing this file here — the job that owns it keeps it"
+                        >
+                          Unlink
+                        </button>
+                      ) : null}
                     </div>
                   )}
                 </div>
@@ -999,81 +1092,6 @@ export default function EntityFilesSection({
         )}
       </div>
 
-      {/* Org → Job. Derived from the job's organisations at read time, so
-          changing them re-derives this set for free — no rows to maintain.
-          Read-only here: the files are managed where they're owned. */}
-      {entityType === 'jobs' && (surfacing?.groups || []).map(group => {
-        const collapsed = collapsedGroups.has(group.org_id);
-        return (
-          <div key={group.org_id} className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-            <div className="flex items-center justify-between gap-3 flex-wrap">
-              <button
-                onClick={() => toggleGroup(group.org_id)}
-                className="flex items-center gap-2 text-sm font-semibold text-gray-700 hover:text-gray-900"
-              >
-                <span className="text-gray-400 text-xs">{collapsed ? '▶' : '▼'}</span>
-                From {group.org_name} ({group.files.length})
-              </button>
-              <Link
-                to={`/organisations/${group.org_id}?tab=files`}
-                className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium"
-              >
-                manage on {group.org_name} →
-              </Link>
-            </div>
-            {!collapsed && (
-              <>
-                <p className="text-xs text-gray-400 mt-1 mb-3">
-                  Uploaded once on the organisation and shown on every job they're on. Not a copy — edit or delete it there.
-                </p>
-                <div className="space-y-2">
-                  {group.files.map(file => (
-                    <SurfacedFileRow
-                      key={file.url}
-                      file={file}
-                      onView={setViewingFile}
-                      sourceNote={file.source === 'job'
-                        ? `via ${jobLabel(file.source_job_name, file.source_job_number)}`
-                        : null}
-                      sourceHref={file.source === 'job' && file.source_job_id
-                        ? `/jobs/${file.source_job_id}`
-                        : null}
-                    />
-                  ))}
-                </div>
-              </>
-            )}
-          </div>
-        );
-      })}
-
-      {/* Job → Org. The explicit direction: these rows exist because someone
-          chose to surface a job's file on this organisation. */}
-      {entityType === 'organisations' && linkedFromJobs.length > 0 && (
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-          <h3 className="text-sm font-semibold text-gray-700">
-            Linked from jobs ({linkedFromJobs.length})
-          </h3>
-          <p className="text-xs text-gray-400 mt-1 mb-3">
-            Uploaded on a job and linked up to this organisation, so it now shows on their other jobs too.
-            The job still owns the file — unlinking here leaves it there.
-          </p>
-          <div className="space-y-2">
-            {linkedFromJobs.map(file => (
-              <SurfacedFileRow
-                key={file.link_id}
-                file={file}
-                onView={setViewingFile}
-                sourceNote={`on ${jobLabel(file.source_job_name, file.source_job_number)}`}
-                sourceHref={`/jobs/${file.source_job_id}`}
-                onUnlink={() => unlink(file.link_id)}
-                unlinkDisabled={busyLink}
-              />
-            ))}
-          </div>
-        </div>
-      )}
-
       {/* File viewer modal */}
       {viewingFile && (
         <FileViewerModal
@@ -1082,120 +1100,28 @@ export default function EntityFilesSection({
         />
       )}
 
-      {/* File email modal */}
-      {emailingFile && (
+      {/* File email modal. Aimed at whoever OWNS the file — the send route reads
+          the bytes out of that entity's files array, so a borrowed row has to
+          name its owner or the lookup 404s. */}
+      {emailingRow && (
         <FileEmailModal
           file={{
-            name: emailingFile.name,
-            url: emailingFile.url,
-            label: emailingFile.label,
-            comment: emailingFile.comment,
+            name: emailingRow.file.name,
+            url: emailingRow.file.url,
+            label: emailingRow.file.label,
+            comment: emailingRow.file.comment,
           }}
-          entityType={entityType}
-          entityId={entityId}
-          contextLabel={EMAIL_CONTEXT[entityType]}
-          onClose={() => setEmailingFile(null)}
+          entityType={emailingRow.ownerType}
+          entityId={emailingRow.ownerId}
+          contextLabel={EMAIL_CONTEXT[emailingRow.ownerType]}
+          onClose={() => setEmailingRow(null)}
           onSent={() => {
-            setEmailingFile(null);
+            setEmailingRow(null);
             refresh();
           }}
         />
       )}
 
-    </div>
-  );
-}
-
-/**
- * One row in a surfaced group — a file this entity can SEE but doesn't own.
- * Deliberately thin: view/open, its tag and comment, and where it comes from.
- * No edit, share, email or delete, because none of those belong to the entity
- * looking through the window. The one exception is unlinking, which closes the
- * window without touching the file.
- */
-function SurfacedFileRow({
-  file,
-  onView,
-  sourceNote,
-  sourceHref,
-  onUnlink,
-  unlinkDisabled,
-}: {
-  file: FileAttachment;
-  onView: (file: FileAttachment) => void;
-  sourceNote?: string | null;
-  sourceHref?: string | null;
-  onUnlink?: () => void;
-  unlinkDisabled?: boolean;
-}) {
-  const isLink = file.type === 'link';
-  const open = () => {
-    if (isLink) window.open(file.url, '_blank', 'noopener,noreferrer');
-    else onView(file);
-  };
-
-  return (
-    <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between p-3 rounded-lg border border-gray-100 hover:border-gray-200 hover:bg-gray-50 group">
-      <div className="flex items-start gap-3 min-w-0 flex-1">
-        <div className={`w-8 h-8 rounded flex items-center justify-center text-xs font-bold flex-shrink-0 ${
-          isLink ? 'bg-sky-100 text-sky-600' :
-          file.type === 'image' ? 'bg-purple-100 text-purple-600' :
-          file.type === 'document' ? 'bg-blue-100 text-blue-600' :
-          'bg-gray-100 text-gray-500'
-        }`}>
-          {isLink ? '🔗' : file.type === 'image' ? 'IMG' : file.type === 'document' ? 'DOC' : 'FILE'}
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2 min-w-0 flex-wrap">
-            <button
-              onClick={open}
-              className="text-sm font-medium text-gray-900 hover:text-ooosh-600 truncate text-left"
-            >
-              {file.name}
-              {isLink ? <span className="text-xs text-gray-400 ml-1">(open link ↗)</span> : null}
-            </button>
-            {file.label && (
-              <span className={`inline-flex px-1.5 py-0.5 rounded text-xs font-medium flex-shrink-0 ${fileTagColour(file.label)}`}>
-                {file.label}
-              </span>
-            )}
-          </div>
-          {file.comment && <p className="text-xs text-gray-500 mt-0.5 truncate">{file.comment}</p>}
-          <p className="text-xs text-gray-400">
-            {file.uploaded_by} &middot; {new Date(file.uploaded_at).toLocaleDateString('en-GB', {
-              day: 'numeric', month: 'short', year: 'numeric',
-            })}
-            {sourceNote && (
-              <>
-                {' '}&middot;{' '}
-                {sourceHref
-                  ? <Link to={sourceHref} className="text-ooosh-600 hover:underline">{sourceNote}</Link>
-                  : sourceNote}
-              </>
-            )}
-          </p>
-        </div>
-      </div>
-      <div className="flex items-center gap-2 flex-shrink-0 pl-11 sm:pl-0 sm:ml-2">
-        {!isLink && (
-          <button
-            onClick={() => onView(file)}
-            className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity"
-          >
-            View
-          </button>
-        )}
-        {onUnlink && (
-          <button
-            onClick={onUnlink}
-            disabled={unlinkDisabled}
-            className="text-xs text-gray-500 hover:text-gray-700 font-medium disabled:opacity-50 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity"
-            title="Stop showing this file here — the job keeps it"
-          >
-            Unlink
-          </button>
-        )}
-      </div>
     </div>
   );
 }

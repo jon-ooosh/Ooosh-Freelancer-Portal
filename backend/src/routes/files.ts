@@ -627,9 +627,12 @@ function isShownOnJobs(file: Record<string, unknown>): boolean {
 // GET /api/files/for-job/:jobId — everything the Job Files tab needs beyond the
 // job's own `files` array, in one round trip:
 //
-//   groups — the "From [Org]" read-through sets, one per org on the job
-//   links  — this job's own files' outgoing links, for the per-file chips
-//   orgs   — the orgs on this job, for the "Link to org" picker
+//   surfaced — a FLAT list of files borrowed from the job's orgs. Each carries
+//              the entity that OWNS it (owner_entity_type / owner_entity_id /
+//              owner_name), so the tab can render one list with an origin chip
+//              and still write metadata back to the record that holds the file.
+//   links    — this job's own files' outgoing links, for the per-file chips
+//   orgs     — the orgs on this job, for the "Link to org" picker
 router.get('/for-job/:jobId', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
   try {
     const jobId = String(req.params.jobId);
@@ -692,14 +695,18 @@ router.get('/for-job/:jobId', authorize(...STAFF_ROLES), async (req: AuthRequest
       (jobResult.rows[0].files as StoredFile[]).map((f) => f.url)
     );
 
-    const groups = [];
+    const surfaced: Record<string, unknown>[] = [];
     for (const org of orgs) {
-      const files: Record<string, unknown>[] = [];
-
       for (const file of org.files) {
         if (!isShownOnJobs(file) || seen.has(file.url)) continue;
         seen.add(file.url);
-        files.push({ ...file, source: 'org' });
+        surfaced.push({
+          ...file,
+          source: 'org',
+          owner_entity_type: 'organisations',
+          owner_entity_id: org.id,
+          owner_name: org.name,
+        });
       }
 
       for (const link of linkedIn.filter((l) => l.org_id === org.id)) {
@@ -712,17 +719,15 @@ router.get('/for-job/:jobId', authorize(...STAFF_ROLES), async (req: AuthRequest
         const meta = link.job_files.find((f) => f.url === link.r2_key);
         if (!meta) continue;
         seen.add(link.r2_key);
-        files.push({
+        surfaced.push({
           ...meta,
           source: 'job',
-          source_job_id: link.job_id,
-          source_job_name: link.job_name,
-          source_job_number: link.hh_job_number,
+          // Owned by the JOB that uploaded it, not by the org it travelled
+          // through — that's where an edit or an email has to be aimed.
+          owner_entity_type: 'jobs',
+          owner_entity_id: link.job_id,
+          owner_name: link.job_name || (link.hh_job_number ? `Job ${link.hh_job_number}` : 'a job'),
         });
-      }
-
-      if (files.length > 0) {
-        groups.push({ org_id: org.id, org_name: org.name, files });
       }
     }
 
@@ -739,7 +744,7 @@ router.get('/for-job/:jobId', authorize(...STAFF_ROLES), async (req: AuthRequest
 
     res.json({
       data: {
-        groups,
+        surfaced,
         links: linksResult.rows,
         orgs: orgs.map((o) => ({ id: o.id, name: o.name })),
       },
@@ -750,9 +755,10 @@ router.get('/for-job/:jobId', authorize(...STAFF_ROLES), async (req: AuthRequest
   }
 });
 
-// GET /api/files/for-org/:orgId — the "Linked from jobs" group on an Org Files
-// tab. These files stay owned by the job that uploaded them; the org just has a
-// window onto them, so they are read-only here bar the unlink.
+// GET /api/files/for-org/:orgId — files that jobs have linked up to this org.
+// They stay OWNED by the uploading job; the org just has a window onto them. The
+// owner identity rides along so the Org Files tab can show them in the same flat
+// list as the org's own files and still write metadata to the right job.
 router.get('/for-org/:orgId', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
   try {
     const orgId = String(req.params.orgId);
@@ -780,10 +786,11 @@ router.get('/for-org/:orgId', authorize(...STAFF_ROLES), async (req: AuthRequest
       if (!meta) continue; // link outlived the file — nothing to show
       linked.push({
         ...meta,
+        source: 'job',
         link_id: row.link_id,
-        source_job_id: row.job_id,
-        source_job_name: row.job_name,
-        source_job_number: row.hh_job_number,
+        owner_entity_type: 'jobs',
+        owner_entity_id: row.job_id,
+        owner_name: row.job_name || (row.hh_job_number ? `Job ${row.hh_job_number}` : 'a job'),
       });
     }
 

@@ -197,8 +197,10 @@ function enquiryFileAttachments(payload: IntakePayload): Record<string, unknown>
       url: key,
       type: fileTypeFromExt(path.extname(key).toLowerCase()),
       uploaded_at: new Date().toISOString(),
+      // No `label` — that field belongs to the staff tag ("Rider", "Stage
+      // Plot"). Where the file came from is derived from `uploaded_by` and
+      // rendered as a separate origin chip. See migration 203.
       uploaded_by: 'enquiry form',
-      label: 'From enquiry form',
     });
   }
   return out;
