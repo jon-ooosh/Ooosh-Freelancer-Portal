@@ -122,11 +122,36 @@ const round2 = (n: number) => Math.round(n * 100) / 100;
 interface LineDraft {
   key: string;
   description: string;
-  amount_gross: string;
-  amount_vat: string;
+  amount_gross: string;   // INCLUSIVE of VAT — the figure printed on the invoice
+  vatRate: LineVatRate;   // how much of amount_gross is VAT
+  amount_vat: string;     // only edited directly on 'manual'; derived otherwise
   xero_account_code: string; // '' = inherit the cost's category
   crew_fronted: boolean;
   source: 'manual' | 'ai';
+}
+
+// A line states its amount INC VAT and a RATE, the way Xero and every other
+// accounting package does it — rather than two money boxes where nothing says
+// whether the total includes the VAT or not. The header's own VAT toggle is the
+// same idea one level up: it sets the default rate for the whole invoice.
+type LineVatRate = 'none' | 'vat20' | 'vat5' | 'manual';
+const LINE_VAT_RATES: { v: LineVatRate; label: string; rate: number | null }[] = [
+  { v: 'none', label: 'No VAT', rate: 0 },
+  { v: 'vat20', label: '20%', rate: 0.20 },
+  { v: 'vat5', label: '5%', rate: 0.05 },
+  { v: 'manual', label: 'Manual £', rate: null },
+];
+// VAT contained in a VAT-inclusive amount: gross − gross/(1+rate).
+const vatWithin = (gross: number, rate: number) => Math.round(gross * rate / (1 + rate) * 100) / 100;
+// Read a stored line back into a rate. Nothing records which button was pressed —
+// the same inference the header already does in inferVatMode, and for the same
+// reason: it avoids a column that would only ever restore a radio button.
+function inferLineRate(gross: number, vat: number): LineVatRate {
+  if (vat <= 0) return 'none';
+  for (const o of LINE_VAT_RATES) {
+    if (o.rate) if (Math.abs(vat - vatWithin(gross, o.rate)) < 0.005) return o.v;
+  }
+  return 'manual';
 }
 const newLineKey = () => Math.random().toString(36).slice(2);
 const gbp = (n: number) => `£${n.toFixed(2)}`;
@@ -312,15 +337,20 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
           `/costs/${existing.id}`,
         );
         if (cancelled || !r.data.lines?.length) return;
-        setLines(r.data.lines.map((l) => ({
-          key: newLineKey(),
-          description: l.description || '',
-          amount_gross: String(Number(l.amount_gross ?? 0)),
-          amount_vat: String(Number(l.amount_vat ?? 0)),
-          xero_account_code: l.xero_account_code || '',
-          crew_fronted: Boolean(l.crew_fronted),
-          source: l.source || 'manual',
-        })));
+        setLines(r.data.lines.map((l) => {
+          const g = Number(l.amount_gross ?? 0);
+          const v = Number(l.amount_vat ?? 0);
+          return {
+            key: newLineKey(),
+            description: l.description || '',
+            amount_gross: String(g),
+            vatRate: inferLineRate(g, v),
+            amount_vat: String(v),
+            xero_account_code: l.xero_account_code || '',
+            crew_fronted: Boolean(l.crew_fronted),
+            source: l.source || 'manual',
+          };
+        }));
       } catch { /* leave lines untouched — see above */ }
     })();
     return () => { cancelled = true; };
@@ -772,30 +802,46 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
   const serviceOnlyEligible = wantsService && !isEdit;
 
   // ── Cost-lines maths ───────────────────────────────────────────────────────
-  // The header is the invoice; lines only describe it. Unbalanced lines are
-  // refused rather than saved-and-flagged — a cost saved with lines that don't
-  // add up is an unflagged problem with no owner, sitting in the payables queue
-  // looking fine.
+  // The invoice TOTAL is authoritative and staff-typed; lines only describe how
+  // it breaks down, and are refused rather than saved-and-flagged if they don't
+  // add up — an unbalanced saved cost is an unflagged problem with no owner.
+  //
+  // VAT is NOT checked, because it can't disagree: each line states its own rate
+  // and the header's VAT is simply their sum. That removes the confusing failure
+  // where the amounts balanced but the VAT didn't, and halves the typing.
   const lineNum = (v: string) => { const n = parseFloat(v); return isNaN(n) ? 0 : n; };
+  const lineVat = (l: LineDraft) => {
+    const rate = LINE_VAT_RATES.find((o) => o.v === l.vatRate)?.rate;
+    return rate == null ? lineNum(l.amount_vat) : vatWithin(lineNum(l.amount_gross), rate);
+  };
   const linesGross = round2(lines.reduce((t, l) => t + lineNum(l.amount_gross), 0));
-  const linesVat = round2(lines.reduce((t, l) => t + lineNum(l.amount_vat), 0));
+  const linesVat = round2(lines.reduce((t, l) => t + lineVat(l), 0));
   const headerGross = round2(lineNum(amountGross));
-  const headerVat = round2(lineNum(amountVat));
   const grossDiff = round2(linesGross - headerGross);
-  const vatDiff = round2(linesVat - headerVat);
-  const linesBalanced = !lines.length || (Math.abs(grossDiff) <= 0.01 && Math.abs(vatDiff) <= 0.01);
+  const linesBalanced = !lines.length || Math.abs(grossDiff) <= 0.01;
+  // With lines, the header's VAT is theirs — shown, not typed. The gross stays
+  // staff-entered because it is what we owe; the VAT is only an analysis of it.
+  const vatFromLines = lines.length > 0 && vatMode !== 'reclaim';
+  const shownVat = vatFromLines ? linesVat.toFixed(2) : amountVat;
+  const shownNet = vatFromLines ? round2(headerGross - linesVat).toFixed(2) : amountNet;
   // reclaim_split pushes its own three-line structure to Xero, so it can't also
   // carry lines — the backend rejects the combination outright.
   const linesAvailable = vatMode !== 'reclaim';
 
   function addLine() {
     setLinesTouched(true);
+    // A new line inherits the header's VAT treatment as its starting rate — the
+    // header toggle IS the invoice-wide default, so most lines want it.
+    const inherited: LineVatRate = vatMode === 'vat20' ? 'vat20' : vatMode === 'manual' ? 'manual' : 'none';
+    const blank = () => ({ key: newLineKey(), description: '', amount_gross: '', vatRate: inherited,
+      amount_vat: '', xero_account_code: '', crew_fronted: false, source: 'manual' as const });
     setLines((prev) => prev.length
       // First click seeds one line holding the whole invoice, so splitting is
       // "take some off this and put it on the next" rather than typing it twice.
-      ? [...prev, { key: newLineKey(), description: '', amount_gross: '', amount_vat: '', xero_account_code: '', crew_fronted: false, source: 'manual' as const }]
-      : [{ key: newLineKey(), description: description || '', amount_gross: amountGross, amount_vat: amountVat, xero_account_code: categoryCode, crew_fronted: false, source: 'manual' as const },
-         { key: newLineKey(), description: '', amount_gross: '', amount_vat: '', xero_account_code: '', crew_fronted: false, source: 'manual' as const }]);
+      ? [...prev, blank()]
+      : [{ ...blank(), description: description || '', amount_gross: amountGross,
+           amount_vat: amountVat, xero_account_code: categoryCode },
+         blank()]);
   }
   function patchLine(key: string, patch: Partial<LineDraft>) {
     setLinesTouched(true);
@@ -835,12 +881,13 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
       return;
     }
     if (lines.length && !linesBalanced) {
-      setError(Math.abs(grossDiff) > 0.01
-        ? `The lines add up to £${linesGross.toFixed(2)} but the cost is £${headerGross.toFixed(2)}. Adjust them so they match the invoice.`
-        : `The lines carry £${linesVat.toFixed(2)} of VAT but the cost records £${headerVat.toFixed(2)}. Adjust the VAT on the lines.`);
+      setError(`The lines add up to £${linesGross.toFixed(2)} but the cost is £${headerGross.toFixed(2)}. Adjust them so they match the invoice.`);
       return;
     }
-    if (lines.some((l) => !(lineNum(l.amount_gross) > 0))) {
+    // "Split into lines" seeds an empty second row to type into. Saving with it
+    // still blank is a no-op, not a mistake, so drop it rather than scolding.
+    const filledLines = lines.filter((l) => lineNum(l.amount_gross) > 0 || l.description.trim());
+    if (filledLines.some((l) => !(lineNum(l.amount_gross) > 0))) {
       setError('Every line needs an amount greater than zero — remove the empty one or fill it in.');
       return;
     }
@@ -942,10 +989,16 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
       // separate call would race that push onto a one-line bill. Only sent once
       // the user has actually touched them, so a failed load can't wipe a split.
       if (linesTouched) {
-        payload.lines = lines.map((l) => ({
+        if (filledLines.length) {
+          payload.amount_vat = round2(filledLines.reduce((t, l) => t + lineVat(l), 0));
+          payload.amount_net = round2(headerGross - (payload.amount_vat as number));
+        }
+        payload.lines = filledLines.map((l) => ({
           description: l.description.trim() || null,
           amount_gross: lineNum(l.amount_gross),
-          amount_vat: lineNum(l.amount_vat),
+          // The rate is a UI convenience; what's stored (and pushed to Xero) is
+          // the money. The server re-derives the header's VAT from these.
+          amount_vat: lineVat(l),
           xero_account_code: l.xero_account_code || null,
           crew_fronted: l.crew_fronted,
           source: l.source,
@@ -1166,6 +1219,11 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
           <div className="flex-1 px-6 py-4 space-y-4 md:overflow-y-auto">
             {error && <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-md px-3 py-2">{error}</div>}
 
+            <div className="pt-1 first:pt-0">
+              <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400 border-b border-gray-100 pb-1">The invoice</h3>
+              <p className="text-xs text-gray-400 mt-1">What the paperwork says.</p>
+            </div>
+
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div className="relative">
                 <label className="block text-sm font-medium text-gray-700 mb-1">Supplier</label>
@@ -1187,7 +1245,7 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
                 )}
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Date</label>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Invoice date</label>
                 <input type="date" className={inputCls} value={costDate} onChange={(e) => setCostDate(e.target.value)} />
                 {costDate && costDate > new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10) && (
                   <p className="text-xs text-amber-600 mt-1">⚠️ This date is in the future — is that right? Receipt dates are usually today or earlier (UK day/month).</p>
@@ -1195,22 +1253,63 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
               </div>
             </div>
 
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Invoice number <span className="text-gray-400 font-normal">(optional)</span>
-              </label>
-              <input className={inputCls} value={invoiceNumber} onChange={(e) => setInvoiceNumber(e.target.value)} placeholder="e.g. INV-10472 (leave blank for fuel/till receipts)" />
-              {invoiceDup && (
-                <p className="text-xs text-red-600 font-medium mt-1">
-                  ⚠ Already captured: a cost with this invoice number{supplierName.trim() ? ` for ${supplierName.trim()}` : ''} exists
-                  {invoiceDup.amount_gross != null ? ` (£${Number(invoiceDup.amount_gross).toFixed(2)}` : ''}{invoiceDup.cost_date ? `, ${new Date(invoiceDup.cost_date).toLocaleDateString('en-GB')}` : ''}{invoiceDup.amount_gross != null ? ', ' + invoiceDup.payment_status.replace(/_/g, ' ') + ')' : ''}. Check you're not submitting it twice.
-                </p>
+            {/* Both come off the paperwork, so they share a row — and the invoice
+                number no longer needs the full width. Due date only exists for a
+                pay-later bill (a paid-now cost owes nothing), so the row is one
+                column wide until the payment method further down says otherwise.
+                Its default is derived from the supplier’s terms AND the cost type,
+                so it can fill itself in once the category below is picked. */}
+            <div className={`grid grid-cols-1 gap-4 ${BILL_METHODS.includes(paymentMethod) ? 'sm:grid-cols-2' : ''}`}>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Invoice number <span className="text-gray-400 font-normal">(optional)</span>
+                </label>
+                <input className={inputCls} value={invoiceNumber} onChange={(e) => setInvoiceNumber(e.target.value)} placeholder="e.g. INV-10472 (leave blank for fuel/till receipts)" />
+                {invoiceDup && (
+                  <p className="text-xs text-red-600 font-medium mt-1">
+                    ⚠ Already captured: a cost with this invoice number{supplierName.trim() ? ` for ${supplierName.trim()}` : ''} exists
+                    {invoiceDup.amount_gross != null ? ` (£${Number(invoiceDup.amount_gross).toFixed(2)}` : ''}{invoiceDup.cost_date ? `, ${new Date(invoiceDup.cost_date).toLocaleDateString('en-GB')}` : ''}{invoiceDup.amount_gross != null ? ', ' + invoiceDup.payment_status.replace(/_/g, ' ') + ')' : ''}. Check you're not submitting it twice.
+                  </p>
+                )}
+              </div>
+              {BILL_METHODS.includes(paymentMethod) && (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Payment due{' '}
+                    <span className="text-gray-400 font-normal">
+                      {dueDateOverride ? '(edited)' : '(from terms — edit if the invoice says otherwise)'}
+                    </span>
+                  </label>
+                  <input
+                    type="date"
+                    className={inputCls}
+                    value={dueDateOverride || derivedDueDate || ''}
+                    onChange={(e) => setDueDateOverride(e.target.value)}
+                  />
+                  {dueDateOverride ? (
+                    <p className="text-xs text-amber-600 mt-1">
+                      Using invoice due date{derivedDueDate ? <> instead of <strong>{fmtDate(derivedDueDate)}</strong></> : null}.{' '}
+                      <button type="button" onClick={() => setDueDateOverride('')} className="underline hover:no-underline">
+                        Use the default
+                      </button>
+                    </p>
+                  ) : derivedDueDate ? (
+                    <p className="text-xs text-gray-400 mt-1">
+                      <strong>{fmtDate(derivedDueDate)}</strong>{derivedDueTermsLabel ? ` · ${derivedDueTermsLabel}` : ''}
+                    </p>
+                  ) : (
+                    <p className="text-xs text-gray-400 mt-1">Set a date above to derive the due date from the supplier's terms.</p>
+                  )}
+                </div>
               )}
             </div>
 
             <div>
               <div className="flex items-center justify-between mb-1 flex-wrap gap-2">
                 <span className="text-sm font-medium text-gray-700">Amounts</span>
+                {vatFromLines ? (
+                  <span className="text-xs text-gray-500">VAT comes from the lines below</span>
+                ) : (
                 <div className="inline-flex rounded-md border border-gray-300 overflow-hidden text-xs">
                   {([
                     { v: 'vat20' as VatMode, label: '20% VAT' },
@@ -1226,6 +1325,7 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
                     </button>
                   ))}
                 </div>
+                )}
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div>
@@ -1239,9 +1339,9 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
                 <div>
                   <label className="block text-xs text-gray-500 mb-1">{vatMode === 'reclaim' ? 'Reclaimable VAT (£) *' : 'VAT (£)'}</label>
                   <input type="number" step="0.01" min="0"
-                    className={`${inputCls} ${vatMode !== 'manual' && vatMode !== 'reclaim' ? 'bg-gray-100' : ''}`}
-                    value={amountVat} onChange={(e) => onVatChange(e.target.value)}
-                    disabled={vatMode !== 'manual' && vatMode !== 'reclaim'}
+                    className={`${inputCls} ${vatFromLines || (vatMode !== 'manual' && vatMode !== 'reclaim') ? 'bg-gray-100' : ''}`}
+                    value={shownVat} onChange={(e) => onVatChange(e.target.value)}
+                    disabled={vatFromLines || (vatMode !== 'manual' && vatMode !== 'reclaim')}
                     placeholder={vatMode === 'reclaim' ? 'e.g. 702.68' : undefined} />
                 </div>
                 <div>
@@ -1249,20 +1349,171 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
                   {vatMode === 'reclaim' ? (
                     <input type="number" className={`${inputCls} bg-gray-100`} value={amountGross} disabled />
                   ) : (
-                    <input type="number" step="0.01" min="0" className={`${inputCls} ${vatMode === 'none' ? 'bg-gray-100' : ''}`}
-                      value={amountNet} onChange={(e) => onNetChange(e.target.value)} disabled={vatMode === 'none'} />
+                    <input type="number" step="0.01" min="0" className={`${inputCls} ${vatFromLines || vatMode === 'none' ? 'bg-gray-100' : ''}`}
+                      value={shownNet} onChange={(e) => onNetChange(e.target.value)} disabled={vatFromLines || vatMode === 'none'} />
                   )}
                 </div>
               </div>
-              {vatMode === 'vat20' && <p className="text-xs text-gray-400 mt-1">20% VAT — enter gross or net, the other two fill in.</p>}
-              {vatMode === 'none' && <p className="text-xs text-gray-400 mt-1">No VAT (e.g. a non-VAT-registered freelancer) — gross = net, no VAT reclaimed.</p>}
-              {vatMode === 'manual' && <p className="text-xs text-gray-400 mt-1">Manual — enter all three figures exactly as shown on the receipt.</p>}
+              {vatFromLines && <p className="text-xs text-gray-400 mt-1">The total is what we owe and stays yours to set. VAT and net are the sum of the lines below.</p>}
+              {!vatFromLines && vatMode === 'vat20' && <p className="text-xs text-gray-400 mt-1">20% VAT — enter gross or net, the other two fill in.</p>}
+              {!vatFromLines && vatMode === 'none' && <p className="text-xs text-gray-400 mt-1">No VAT (e.g. a non-VAT-registered freelancer) — gross = net, no VAT reclaimed.</p>}
+              {!vatFromLines && vatMode === 'manual' && <p className="text-xs text-gray-400 mt-1">Manual — enter all three figures exactly as shown on the receipt.</p>}
               {vatMode === 'reclaim' && <p className="text-xs text-amber-600 mt-1">Insurance-claim / VAT-only invoice: enter the No-VAT amount (the excess) + the reclaimable VAT. Pushed to Xero as a 3-line VAT-only entry (net @ No VAT, VAT base @ 20%, adjustment), so exactly £{amountVat || '0.00'} VAT is reclaimed.</p>}
             </div>
+
+            <div className="pt-1 first:pt-0">
+              <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400 border-b border-gray-100 pb-1">What it was for</h3>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">What's this cost for?</label>
+              <select className={inputCls} value={categoryCode} onChange={(e) => setCategoryCode(e.target.value)}>
+                <option value="">— select —</option>
+                {groups.map((group) => (
+                  <optgroup key={group} label={group}>
+                    {COST_CATEGORIES.filter((c) => c.group === group).map((c) => (
+                      <option key={c.xeroCode} value={c.xeroCode}>{c.label}</option>
+                    ))}
+                  </optgroup>
+                ))}
+              </select>
+            </div>
+
+            {/* Cost lines. One invoice often covers several things — a freelancer
+                bills £325 that is really £250 of fee, £60 of fuel and £15 of
+                train. Without lines whichever category is picked above makes the
+                rest quietly wrong, in the job's cost buckets AND in the VAT (a
+                header rate is a blend of what's underneath it, and a blend is
+                never a real rate). Lines each carry their own category and VAT.
+                The header stays the invoice; lines just say how it breaks down. */}
+            {(linesAvailable || lines.length > 0) && (
+              <div>
+                {lines.length === 0 ? (
+                  <button type="button" onClick={addLine}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium
+                               text-purple-700 bg-purple-50 border border-purple-200 rounded-md hover:bg-purple-100">
+                    ＋ Split into lines
+                    <span className="font-normal text-purple-500">(different categories or VAT rates on one invoice)</span>
+                  </button>
+                ) : (
+                  <div className="border border-gray-200 rounded-md p-3 bg-gray-50">
+                    {!linesAvailable && (
+                      <p className="text-xs text-red-600 font-medium mb-2">
+                        A VAT-reclaim cost pushes its own three-line structure to Xero, so it can’t also be
+                        split into lines. Remove these lines, or switch the VAT handling back.
+                      </p>
+                    )}
+                    <div className="flex items-baseline justify-between mb-2 gap-2 flex-wrap">
+                      <span className="text-sm font-medium text-gray-700">
+                        Lines on this invoice <span className="font-normal text-gray-400">(amounts inc. VAT)</span>
+                      </span>
+                      <span className={`text-xs ${linesBalanced ? 'text-gray-500' : 'text-red-600 font-medium'}`}>
+                        {gbp(linesGross)} of {gbp(headerGross)}
+                        {linesVat > 0 && <span className="text-gray-400"> · VAT {gbp(linesVat)}</span>}
+                      </span>
+                    </div>
+
+                    <div className="space-y-2">
+                      {lines.map((l, i) => (
+                        /* Two rows per line, not one: the form pane is only ~500px
+                           beside the receipt, and six controls in a single row there
+                           is unreadable. Description on top, the money underneath. */
+                        <div key={l.key} className="rounded border border-gray-200 bg-white p-2 space-y-1.5">
+                          <div className="flex items-center gap-2">
+                            <span className="text-[11px] text-gray-400 w-4 shrink-0">{i + 1}</span>
+                            <input
+                              className="flex-1 min-w-0 border border-gray-300 rounded px-2 py-1.5 text-sm"
+                              placeholder="What was this part of the invoice for?"
+                              value={l.description}
+                              onChange={(e) => patchLine(l.key, { description: e.target.value })}
+                            />
+                            <button type="button" onClick={() => removeLine(l.key)} title="Remove this line"
+                              className="px-1.5 text-sm text-gray-400 hover:text-red-600 shrink-0">✕</button>
+                          </div>
+                          <div className="flex items-center gap-2 pl-6 flex-wrap">
+                            <input
+                              type="number" step="0.01" inputMode="decimal"
+                              className="w-24 border border-gray-300 rounded px-2 py-1.5 text-sm text-right"
+                              placeholder="0.00" value={l.amount_gross}
+                              title="The amount on the invoice for this line, including any VAT"
+                              onChange={(e) => patchLine(l.key, { amount_gross: e.target.value })}
+                            />
+                            <select
+                              className="border border-gray-300 rounded px-1.5 py-1.5 text-sm"
+                              value={l.vatRate} title="How much of that amount is VAT"
+                              onChange={(e) => patchLine(l.key, { vatRate: e.target.value as LineVatRate })}
+                            >
+                              {LINE_VAT_RATES.map((o) => <option key={o.v} value={o.v}>{o.label}</option>)}
+                            </select>
+                            {l.vatRate === 'manual' ? (
+                              <input
+                                type="number" step="0.01" inputMode="decimal"
+                                className="w-20 border border-gray-300 rounded px-2 py-1.5 text-sm text-right"
+                                placeholder="VAT" value={l.amount_vat}
+                                onChange={(e) => patchLine(l.key, { amount_vat: e.target.value })}
+                              />
+                            ) : (
+                              <span className="text-xs text-gray-400 w-20">
+                                {lineVat(l) > 0 ? `incl. ${gbp(lineVat(l))}` : 'no VAT'}
+                              </span>
+                            )}
+                            <select
+                              className="flex-1 min-w-[9rem] border border-gray-300 rounded px-1.5 py-1.5 text-sm"
+                              value={l.xero_account_code}
+                              onChange={(e) => patchLine(l.key, { xero_account_code: e.target.value })}
+                            >
+                              <option value="">Same category as above</option>
+                              {groups.map((group) => (
+                                <optgroup key={group} label={group}>
+                                  {COST_CATEGORIES.filter((c) => c.group === group).map((c) => (
+                                    <option key={c.xeroCode} value={c.xeroCode}>{c.label}</option>
+                                  ))}
+                                </optgroup>
+                              ))}
+                            </select>
+                            <label className="flex items-center gap-1 text-xs text-gray-500 shrink-0"
+                              title="Crew paid this out of pocket and reclaims it — no Xero category records that">
+                              <input type="checkbox" checked={l.crew_fronted}
+                                onChange={(e) => patchLine(l.key, { crew_fronted: e.target.checked })} />
+                              fronted
+                            </label>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="flex items-center justify-between gap-3 mt-2 flex-wrap">
+                      <button type="button" onClick={addLine}
+                        className="text-xs font-medium text-purple-700 hover:underline">＋ Add another line</button>
+                      <button type="button" onClick={() => { setLinesTouched(true); setLines([]); }}
+                        className="text-xs text-gray-400 hover:text-gray-600 hover:underline">Remove all lines</button>
+                    </div>
+
+                    {!linesBalanced && (
+                      <p className="text-xs text-red-600 font-medium mt-2">
+                        {grossDiff > 0
+                          ? `The lines are ${gbp(grossDiff)} MORE than the invoice total.`
+                          : `${gbp(-grossDiff)} of the invoice isn’t on a line yet.`}{' '}
+                        This won’t save until it matches.
+                      </p>
+                    )}
+                    <p className="text-[11px] text-gray-400 mt-1">
+                      Each line’s amount is what’s printed on the invoice, VAT included; the rate says how much of
+                      that is VAT. “Fronted” means the crew paid that line out of pocket and reclaims it.
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
 
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
               <input className={inputCls} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What was this for?" />
+            </div>
+
+            <div className="pt-1 first:pt-0">
+              <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400 border-b border-gray-100 pb-1">Where it goes</h3>
+              <p className="text-xs text-gray-400 mt-1">Leave blank for a plain overhead.</p>
             </div>
 
             <div>
@@ -1341,6 +1592,63 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
                 <div className="text-gray-400">Use this to decide if this cost is covered by the quote (Part of the quote) or above-and-beyond (Extra).</div>
               </div>
             )}
+
+            {linkedJobId && jobRechargesRunningCosts && (
+              <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1.5">
+                ⛽ This job recharges running costs — defaulted to <strong>Extra + recharge</strong>. Resolve it to the client at actual + 20% post-hire.
+              </p>
+            )}
+
+
+            {linkedJobId && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Is this part of a quote?</label>
+                <div className="grid grid-cols-2 gap-2">
+                  {([
+                    { v: 'quote_actual' as CostIntent, label: 'Part of the quote', sub: "Actual against the job's quote — not recharged" },
+                    { v: 'extra' as CostIntent, label: 'Extra', sub: 'Above-and-beyond — can recharge the client' },
+                  ]).map((o) => (
+                    <button key={o.v} type="button"
+                      onClick={() => { setCostIntent(o.v); setIntentTouched(true); }}
+                      className={`text-left px-3 py-2 rounded-md border text-sm ${
+                        costIntent === o.v ? 'border-purple-500 bg-purple-50 ring-1 ring-purple-500' : 'border-gray-300 hover:bg-gray-50'
+                      }`}>
+                      <div className="font-medium text-gray-800">{o.label}</div>
+                      <div className="text-xs text-gray-500">{o.sub}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+
+            {linkedJobId && costIntent === 'quote_actual' && (
+              <p className="text-xs text-gray-500 italic">
+                Already billed to the client via the quote — no recharge. It'll show as an actual against the job on the Money tab.
+              </p>
+            )}
+
+
+            {canRecharge && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Recharge to client</label>
+                  <select className={inputCls} value={rechargeMode} onChange={(e) => setRechargeMode(e.target.value as CostRechargeMode)}>
+                    <option value="none">No recharge</option>
+                    <option value="full">Full</option>
+                    <option value="partial">Partial</option>
+                  </select>
+                </div>
+                {rechargeMode === 'partial' && (
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Recharge amount (£, net of VAT)</label>
+                    <input type="number" step="0.01" min="0" className={inputCls} value={rechargeAmount} onChange={(e) => setRechargeAmount(e.target.value)} />
+                    <p className="text-xs text-gray-400 mt-1">VAT will be added when this is billed via HireHop.</p>
+                  </div>
+                )}
+              </div>
+            )}
+
 
             {/* Vehicle link — optional. Picking a van offers a one-step service-history record. */}
             <div>
@@ -1456,133 +1764,9 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
               </div>
             )}
 
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">What's this cost for?</label>
-              <select className={inputCls} value={categoryCode} onChange={(e) => setCategoryCode(e.target.value)}>
-                <option value="">— select —</option>
-                {groups.map((group) => (
-                  <optgroup key={group} label={group}>
-                    {COST_CATEGORIES.filter((c) => c.group === group).map((c) => (
-                      <option key={c.xeroCode} value={c.xeroCode}>{c.label}</option>
-                    ))}
-                  </optgroup>
-                ))}
-              </select>
+            <div className="pt-1 first:pt-0">
+              <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400 border-b border-gray-100 pb-1">How it’s paid</h3>
             </div>
-
-            {/* Cost lines. One invoice often covers several things — a freelancer
-                bills £325 that is really £250 of fee, £60 of fuel and £15 of
-                train. Without lines whichever category is picked above makes the
-                rest quietly wrong, in the job's cost buckets AND in the VAT (a
-                header rate is a blend of what's underneath it, and a blend is
-                never a real rate). Lines each carry their own category and VAT.
-                The header stays the invoice; lines just say how it breaks down. */}
-            {(linesAvailable || lines.length > 0) && (
-              <div>
-                {lines.length === 0 ? (
-                  <button type="button" onClick={addLine}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium
-                               text-purple-700 bg-purple-50 border border-purple-200 rounded-md hover:bg-purple-100">
-                    ＋ Split into lines
-                    <span className="font-normal text-purple-500">(different categories or VAT rates on one invoice)</span>
-                  </button>
-                ) : (
-                  <div className="border border-gray-200 rounded-md p-3 bg-gray-50">
-                    {!linesAvailable && (
-                      <p className="text-xs text-red-600 font-medium mb-2">
-                        A VAT-reclaim cost pushes its own three-line structure to Xero, so it can’t also be
-                        split into lines. Remove these lines, or switch the VAT handling back.
-                      </p>
-                    )}
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-sm font-medium text-gray-700">Lines on this invoice</span>
-                      <span className={`text-xs ${linesBalanced ? 'text-gray-500' : 'text-red-600 font-medium'}`}>
-                        {gbp(linesGross)} of {gbp(headerGross)}
-                        {(headerVat > 0 || linesVat > 0) && <> · VAT {gbp(linesVat)} of {gbp(headerVat)}</>}
-                      </span>
-                    </div>
-
-                    <div className="space-y-2">
-                      {lines.map((l, i) => (
-                        <div key={l.key} className="grid grid-cols-12 gap-2 items-start">
-                          <input
-                            className="col-span-12 sm:col-span-4 border border-gray-300 rounded px-2 py-1.5 text-sm"
-                            placeholder={`Line ${i + 1} — what was it?`}
-                            value={l.description}
-                            onChange={(e) => patchLine(l.key, { description: e.target.value })}
-                          />
-                          <select
-                            className="col-span-7 sm:col-span-3 border border-gray-300 rounded px-2 py-1.5 text-sm"
-                            value={l.xero_account_code}
-                            onChange={(e) => patchLine(l.key, { xero_account_code: e.target.value })}
-                          >
-                            <option value="">Same as above</option>
-                            {groups.map((group) => (
-                              <optgroup key={group} label={group}>
-                                {COST_CATEGORIES.filter((c) => c.group === group).map((c) => (
-                                  <option key={c.xeroCode} value={c.xeroCode}>{c.label}</option>
-                                ))}
-                              </optgroup>
-                            ))}
-                          </select>
-                          <input
-                            type="number" step="0.01" inputMode="decimal"
-                            className="col-span-3 sm:col-span-2 border border-gray-300 rounded px-2 py-1.5 text-sm text-right"
-                            placeholder="Total" value={l.amount_gross}
-                            onChange={(e) => patchLine(l.key, { amount_gross: e.target.value })}
-                          />
-                          <input
-                            type="number" step="0.01" inputMode="decimal"
-                            className="col-span-2 sm:col-span-2 border border-gray-300 rounded px-2 py-1.5 text-sm text-right"
-                            placeholder="VAT" title="VAT on this line — leave at 0 where there is none"
-                            value={l.amount_vat}
-                            onChange={(e) => patchLine(l.key, { amount_vat: e.target.value })}
-                          />
-                          <div className="col-span-12 sm:col-span-1 flex items-center justify-between sm:justify-end gap-2">
-                            <label className="flex items-center gap-1 text-xs text-gray-500 sm:hidden">
-                              <input type="checkbox" checked={l.crew_fronted}
-                                onChange={(e) => patchLine(l.key, { crew_fronted: e.target.checked })} />
-                              Crew paid this out of pocket
-                            </label>
-                            <input type="checkbox" className="hidden sm:block" checked={l.crew_fronted}
-                              title="Crew paid this out of pocket and reclaims it"
-                              onChange={(e) => patchLine(l.key, { crew_fronted: e.target.checked })} />
-                            <button type="button" onClick={() => removeLine(l.key)} title="Remove this line"
-                              className="px-1.5 text-sm text-gray-400 hover:text-red-600">✕</button>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-
-                    <div className="flex items-center justify-between gap-3 mt-2 flex-wrap">
-                      <button type="button" onClick={addLine}
-                        className="text-xs font-medium text-purple-700 hover:underline">＋ Add another line</button>
-                      <button type="button" onClick={() => { setLinesTouched(true); setLines([]); }}
-                        className="text-xs text-gray-400 hover:text-gray-600 hover:underline">Remove all lines</button>
-                    </div>
-
-                    {!linesBalanced && (
-                      <p className="text-xs text-red-600 font-medium mt-2">
-                        {Math.abs(grossDiff) > 0.01 && (
-                          <>{grossDiff > 0
-                            ? `The lines are ${gbp(grossDiff)} MORE than the invoice total.`
-                            : `${gbp(-grossDiff)} of the invoice isn’t on a line yet.`}{' '}</>
-                        )}
-                        {Math.abs(vatDiff) > 0.01 && (
-                          <>{vatDiff > 0
-                            ? `The lines carry ${gbp(vatDiff)} too much VAT.`
-                            : `${gbp(-vatDiff)} of VAT isn’t on a line yet.`}{' '}</>
-                        )}
-                        This won’t save until it matches.
-                      </p>
-                    )}
-                    <p className="text-[11px] text-gray-400 mt-1">
-                      The tick means the crew paid that line out of pocket and reclaims it — no Xero category records that.
-                    </p>
-                  </div>
-                )}
-              </div>
-            )}
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
@@ -1605,98 +1789,12 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
               </div>
             </div>
 
-            {/* Due date — only meaningful on a pay-later bill; a paid-now cost owes
-                nothing. Shows the derived default (supplier terms, or the Ooosh
-                freelancer Friday rule) and lets staff correct it. */}
-            {BILL_METHODS.includes(paymentMethod) && (
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Payment due{' '}
-                  <span className="text-gray-400 font-normal">
-                    {dueDateOverride ? '(edited)' : '(from terms — edit if the invoice says otherwise)'}
-                  </span>
-                </label>
-                <input
-                  type="date"
-                  className={inputCls}
-                  value={dueDateOverride || derivedDueDate || ''}
-                  onChange={(e) => setDueDateOverride(e.target.value)}
-                />
-                {dueDateOverride ? (
-                  <p className="text-xs text-amber-600 mt-1">
-                    Using invoice due date{derivedDueDate ? <> instead of <strong>{fmtDate(derivedDueDate)}</strong></> : null}.{' '}
-                    <button type="button" onClick={() => setDueDateOverride('')} className="underline hover:no-underline">
-                      Use the default
-                    </button>
-                  </p>
-                ) : derivedDueDate ? (
-                  <p className="text-xs text-gray-400 mt-1">
-                    <strong>{fmtDate(derivedDueDate)}</strong>{derivedDueTermsLabel ? ` · ${derivedDueTermsLabel}` : ''}
-                  </p>
-                ) : (
-                  <p className="text-xs text-gray-400 mt-1">Set a date above to derive the due date from the supplier's terms.</p>
-                )}
-              </div>
-            )}
-
             {paymentMethod === 'cot_card' && !freshCardLast4 && (
               <p className="text-xs text-gray-500 italic">
                 No company card on file for you — ask an admin to add it in Settings → COT Card Register (enables Xero reconciliation matching).
               </p>
             )}
 
-            {linkedJobId && jobRechargesRunningCosts && (
-              <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1.5">
-                ⛽ This job recharges running costs — defaulted to <strong>Extra + recharge</strong>. Resolve it to the client at actual + 20% post-hire.
-              </p>
-            )}
-
-            {linkedJobId && (
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Is this part of a quote?</label>
-                <div className="grid grid-cols-2 gap-2">
-                  {([
-                    { v: 'quote_actual' as CostIntent, label: 'Part of the quote', sub: "Actual against the job's quote — not recharged" },
-                    { v: 'extra' as CostIntent, label: 'Extra', sub: 'Above-and-beyond — can recharge the client' },
-                  ]).map((o) => (
-                    <button key={o.v} type="button"
-                      onClick={() => { setCostIntent(o.v); setIntentTouched(true); }}
-                      className={`text-left px-3 py-2 rounded-md border text-sm ${
-                        costIntent === o.v ? 'border-purple-500 bg-purple-50 ring-1 ring-purple-500' : 'border-gray-300 hover:bg-gray-50'
-                      }`}>
-                      <div className="font-medium text-gray-800">{o.label}</div>
-                      <div className="text-xs text-gray-500">{o.sub}</div>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {linkedJobId && costIntent === 'quote_actual' && (
-              <p className="text-xs text-gray-500 italic">
-                Already billed to the client via the quote — no recharge. It'll show as an actual against the job on the Money tab.
-              </p>
-            )}
-
-            {canRecharge && (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Recharge to client</label>
-                  <select className={inputCls} value={rechargeMode} onChange={(e) => setRechargeMode(e.target.value as CostRechargeMode)}>
-                    <option value="none">No recharge</option>
-                    <option value="full">Full</option>
-                    <option value="partial">Partial</option>
-                  </select>
-                </div>
-                {rechargeMode === 'partial' && (
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Recharge amount (£, net of VAT)</label>
-                    <input type="number" step="0.01" min="0" className={inputCls} value={rechargeAmount} onChange={(e) => setRechargeAmount(e.target.value)} />
-                    <p className="text-xs text-gray-400 mt-1">VAT will be added when this is billed via HireHop.</p>
-                  </div>
-                )}
-              </div>
-            )}
 
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Notes</label>

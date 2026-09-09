@@ -8,7 +8,7 @@
  */
 jest.mock('../../config/database', () => ({ query: jest.fn() }));
 
-import { validateCostLines, grossesWithResidue } from '../cost-lines';
+import { validateCostLines, grossesWithResidue, headerVatFromLines } from '../cost-lines';
 
 const header = (gross: number, vat = 0, vat_treatment = 'standard') => ({
   amount_gross: gross, amount_vat: vat, vat_treatment,
@@ -34,15 +34,14 @@ describe('validateCostLines', () => {
     expect(validateCostLines(header(100), [line(60), line(50)])).toMatch(/£10.00 too much/);
   });
 
-  it('rejects a gross that balances while the VAT does not', () => {
-    // The trap this exists for: the amounts look right, so nothing else would
-    // catch it, and the bill goes to Xero with the wrong VAT.
-    const err = validateCostLines(header(325, 10), [line(250), line(60, 20), line(15)]);
-    expect(err).toMatch(/VAT/);
-    expect(err).toMatch(/£10.00 too much/);
+  it('does NOT second-guess the header VAT — the lines define it', () => {
+    // There is deliberately no VAT balance check: the header's amount_vat is
+    // DERIVED from the lines on write, so it cannot disagree with them. A
+    // header VAT that looks wrong here is simply about to be overwritten.
+    expect(validateCostLines(header(325, 999), [line(250), line(60, 10), line(15)])).toBeNull();
   });
 
-  it('allows a 1p residue on both gross and VAT', () => {
+  it('allows a 1p residue on the gross', () => {
     expect(validateCostLines(header(100, 20), [line(33.33, 6.67), line(33.33, 6.67), line(33.33, 6.67)])).toBeNull();
   });
 
@@ -61,6 +60,24 @@ describe('validateCostLines', () => {
 
   it('refuses lines on a VAT-reclaim cost, which pushes its own structure', () => {
     expect(validateCostLines(header(100, 20, 'reclaim_split'), [line(100, 20)])).toMatch(/VAT-reclaim/);
+  });
+});
+
+describe('headerVatFromLines', () => {
+  it('sums the lines for the worked example, leaving gross alone', () => {
+    expect(headerVatFromLines([line(250), line(60, 10), line(15)], 325))
+      .toEqual({ amount_vat: 10, amount_net: 315 });
+  });
+
+  it('gives zero VAT and net = gross when nothing is VAT-bearing', () => {
+    expect(headerVatFromLines([line(250), line(15)], 265))
+      .toEqual({ amount_vat: 0, amount_net: 265 });
+  });
+
+  it('adds line VAT in pence, so thirds do not drift', () => {
+    // 3 × £6.67 is 20.009999999999998 as floats; the header must read £20.01.
+    expect(headerVatFromLines([line(33.33, 6.67), line(33.33, 6.67), line(33.34, 6.67)], 100).amount_vat)
+      .toBe(20.01);
   });
 });
 
