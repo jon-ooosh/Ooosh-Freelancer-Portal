@@ -14,7 +14,7 @@
  * toggle + textarea when clicked, so the card stays neat until you edit.
  *
  * Genuinely per-hire fields (cars / drop-off / notes) stay on the job. The band's
- * bulky extras (preference rows, files, internal notes) are summarised with a
+ * bulky extras (preference rows, internal notes) are summarised with a
  * "manage →" link to the org Rehearsals tab (their editors live there).
  *
  * Collapsed by default with an "N things" content count. Same setup-field list is
@@ -45,7 +45,6 @@ interface Profile {
   regular_contact: string | null;
   preferences: { label: string; value: string }[];
   internal_notes?: string | null;
-  files?: { r2_key: string }[];
 }
 interface AnchorOrg { id: string; name: string | null }
 interface LastSent { sent_at: string; job_id: string; hh_job_number: number | null }
@@ -256,11 +255,12 @@ export default function RehearsalDetailsCard({
   };
 
   const prefCount = profile?.preferences?.length ?? 0;
-  const fileCount = profile?.files?.length ?? 0;
+  // Desk files left the profile in migration 204 — they're ordinary org files
+  // now, counted on the Files tab, so they no longer belong in this summary.
   const hasInternalNotes = !!profile?.internal_notes?.trim();
   const setupFilled = REHEARSAL_SETUP_FIELDS.filter((f) => setupForm[f.key]?.value.trim()).length;
   const perFilled = [perHire.cars_count, perHire.dropoff_pickup, perHire.notes].filter(nonEmpty).length;
-  const thingCount = setupFilled + perFilled + prefCount + fileCount;
+  const thingCount = setupFilled + perFilled + prefCount;
 
   const targetToggle = (key: RehearsalSetupKey, target: SaveTarget) => (
     <div className="inline-flex rounded border border-gray-200 overflow-hidden text-[11px] leading-none">
@@ -416,7 +416,7 @@ export default function RehearsalDetailsCard({
           </div>
 
           {/* Band-only extras — summarised, edited on the org Rehearsals tab. */}
-          {anchorOrg && (prefCount > 0 || fileCount > 0 || hasInternalNotes) && (
+          {anchorOrg && (prefCount > 0 || hasInternalNotes) && (
             <div className="rounded-md bg-ooosh-50 border border-ooosh-100 p-3 text-sm">
               <div className="text-xs font-semibold text-ooosh-800 mb-1.5">
                 {anchorOrg.name || 'Band'}'s extras ·{' '}
@@ -432,10 +432,9 @@ export default function RehearsalDetailsCard({
                   ))}
                 </dl>
               )}
-              {(fileCount > 0 || hasInternalNotes) && (
+              {hasInternalNotes && (
                 <div className="mt-1 flex gap-3 text-xs text-gray-500">
-                  {fileCount > 0 && <span>📎 {fileCount} file{fileCount !== 1 ? 's' : ''}</span>}
-                  {hasInternalNotes && <span>📝 Internal notes</span>}
+                  <span>📝 Internal notes</span>
                 </div>
               )}
             </div>
