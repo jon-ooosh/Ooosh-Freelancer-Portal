@@ -38,6 +38,7 @@ import { isXeroConfigured } from '../config/xero';
 import { xeroBroker, XeroApiError, XeroLineItem } from './xero-broker';
 import { getSystemSetting } from '../routes/system-settings';
 import { collectDocuments, hasDocuments, type CostDocumentRow } from './cost-documents';
+import { fetchCostLines, grossesWithResidue } from './cost-lines';
 
 // Paid-now methods → Spend Money on the mapped bank/card account.
 // (Exported for the reconcile sync — cost-xero-reconcile-sync.ts.)
@@ -153,13 +154,20 @@ function addDaysISO(iso: string | undefined, days: number): string {
   return base.toISOString().slice(0, 10);
 }
 
-// Resolve the Xero TaxType for a cost's line. No VAT recorded → 'NONE' (so a
+// Resolve the Xero TaxType for a line. No VAT recorded → 'NONE' (so a
 // freelancer's no-VAT invoice doesn't inherit the account's 20% default). VAT
 // recorded → the org's purchase tax type for the implied rate (fallback: leave
 // undefined so Xero applies the account default, which is correct for 20%).
-async function resolveLineTaxType(cost: CostRow): Promise<string | undefined> {
-  const vat = Number(cost.amount_vat || 0);
-  const net = Number(cost.amount_net || 0);
+//
+// Takes the two figures rather than a whole CostRow so it serves a cost LINE as
+// well as the header. That matters: the rate is DERIVED, so a header covering
+// mixed rates yields a blend that is not a real rate at all — £250 no-VAT labour
+// + £60 fuel (£10 VAT) + £15 zero-rated travel implies round(10/315*100) = 3%,
+// nothing matches, and the whole £325 falls through to the account default.
+// Only a homogeneous line produces a true rate. See docs/COST-LINES-SPEC.md §5.
+async function resolveLineTaxType(amounts: { amount_vat?: unknown; amount_net?: unknown }): Promise<string | undefined> {
+  const vat = Number(amounts.amount_vat || 0);
+  const net = Number(amounts.amount_net || 0);
   if (vat <= 0) return 'NONE';
   const rate = net > 0 ? Math.round((vat / net) * 100) : 20;
   return (await xeroBroker.getPurchaseTaxType(rate)) || undefined;
@@ -222,6 +230,28 @@ async function buildCostLineItems(
         { Description: 'VAT adjustment', Quantity: 1, UnitAmount: -vatBase, AccountCode: account, TaxType: 'NONE' },
       ],
     };
+  }
+
+  // Split into lines? One Xero line each, with its OWN account code and its own
+  // derived tax rate — the whole point of lines (see resolveLineTaxType above).
+  // A line with no code of its own inherits the cost's.
+  const lines = await fetchCostLines(String(cost.id));
+  if (lines.length) {
+    const grosses = grossesWithResidue(lines, cost.amount_gross);
+
+    const items: XeroLineItem[] = [];
+    for (const [i, l] of lines.entries()) {
+      const lineVat = round2(Number(l.amount_vat || 0));
+      const lineTax = await resolveLineTaxType({ amount_vat: lineVat, amount_net: round2(grosses[i] - lineVat) });
+      items.push({
+        Description: (l.description || description || '').toString().slice(0, 4000) || description,
+        Quantity: 1,
+        UnitAmount: grosses[i],
+        AccountCode: String(l.xero_account_code || account),
+        ...(lineTax ? { TaxType: lineTax } : {}),
+      });
+    }
+    return { lineAmountTypes: 'Inclusive', lineItems: items };
   }
 
   const taxType = await resolveLineTaxType(cost);

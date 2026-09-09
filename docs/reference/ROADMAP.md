@@ -52,6 +52,9 @@ to come up:
 - D&C venue connect-column parser doesn't extract `linkedPulseIds` — ~196 migrated rows show "No venue".
 - Nav dropdown z-index — Leaflet map overlays the dropdown on the fleet map page.
 
+**Specced, awaiting sign-off**
+- **`cost_lines`** (`docs/COST-LINES-SPEC.md`) — one payable, N lines, each with its own amount, VAT, Xero code and optional job. Fixes whole-invoice coding (a £250 freelancer bill that was really £190 fee + £60 fuel), the blended-rate VAT error on mixed invoices, and gives the Money tab a real "Fronted expenses" actuals bucket via a per-line `crew_fronted` flag. Four open questions in §11 need Jon's answers before build.
+
 **Deliberately deferred, revisit when it hurts**
 - Inline "Allocate Van" modal scoped to job (the AllocationsPage hop is acceptable for now).
 - Slot-grouped cards — one card per van with sibling drivers nested, on both Allocations and Job Detail.

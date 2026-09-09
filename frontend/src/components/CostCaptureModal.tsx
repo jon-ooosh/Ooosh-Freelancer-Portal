@@ -116,6 +116,20 @@ function fmtDate(iso: string | null | undefined): string {
 
 const SPLIT_KEY = 'ooosh_cost_modal_split_pct';
 const round2 = (n: number) => Math.round(n * 100) / 100;
+
+// One row of the cost-lines editor. Amounts stay strings while being typed —
+// they only become numbers on save, same as the header amount fields.
+interface LineDraft {
+  key: string;
+  description: string;
+  amount_gross: string;
+  amount_vat: string;
+  xero_account_code: string; // '' = inherit the cost's category
+  crew_fronted: boolean;
+  source: 'manual' | 'ai';
+}
+const newLineKey = () => Math.random().toString(36).slice(2);
+const gbp = (n: number) => `£${n.toFixed(2)}`;
 // Normalise a UK reg for comparison — strip spaces/punctuation, uppercase.
 const normReg = (s: string) => s.replace(/[^a-z0-9]/gi, '').toUpperCase();
 
@@ -180,13 +194,21 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
   // Job link (needed to enable recharge). Pre-fill from existing cost or preset.
   const initialJobLabel = existingRow?.hh_job_number
     ? `#${existingRow.hh_job_number}${existingRow.job_name ? ' – ' + existingRow.job_name : ''}`
-    : existingRow?.job_id ? '(linked job)' : '';
+    : existingRow?.job_name ? existingRow.job_name
+    : existingRow?.job_id ? 'Linked job (no HireHop number)' : '';
   const [linkedJobId, setLinkedJobId] = useState<string | null>(existing?.job_id || presetJobId || null);
   const [linkedJobLabel, setLinkedJobLabel] = useState<string>(initialJobLabel);
   const [jobSearch, setJobSearch] = useState('');
   const [jobSuggestions, setJobSuggestions] = useState<JobSuggestion[]>([]);
   const [jobFocused, setJobFocused] = useState(false);
   const [categoryCode, setCategoryCode] = useState(existing?.xero_account_code || (presetVehicleId ? '406' : presetIssueId ? '473' : ''));
+
+  // Cost lines — one payable split into parts that carry their own category and
+  // VAT. The header (gross/VAT above) stays authoritative; lines only say how it
+  // breaks down, and must add back up to it before we'll save. See
+  // docs/COST-LINES-SPEC.md.
+  const [lines, setLines] = useState<LineDraft[]>([]);
+  const [linesTouched, setLinesTouched] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState<CostPaymentMethod>(existing?.payment_method || 'cot_card');
   const [paymentStatus, setPaymentStatus] = useState<CostPaymentStatus>(existing?.payment_status || 'paid');
   const [rechargeMode, setRechargeMode] = useState<CostRechargeMode>(existing?.recharge_mode || 'none');
@@ -275,6 +297,34 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
     }, 300);
     return () => clearTimeout(t);
   }, [supplierName]);
+
+  // Existing lines. The list query the table hands us doesn't carry them (only
+  // GET /costs/:id does), so fetch once on open in edit mode. On failure `lines`
+  // stays empty AND `linesTouched` stays false, which is what stops the save
+  // sending an empty array and silently wiping a split we simply couldn't read.
+  useEffect(() => {
+    if (!isEdit || !existing?.id) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await api.get<{ data: { lines?: Array<{ description: string | null; amount_gross: number | string;
+          amount_vat: number | string; xero_account_code: string | null; crew_fronted: boolean; source: 'manual' | 'ai' }> } }>(
+          `/costs/${existing.id}`,
+        );
+        if (cancelled || !r.data.lines?.length) return;
+        setLines(r.data.lines.map((l) => ({
+          key: newLineKey(),
+          description: l.description || '',
+          amount_gross: String(Number(l.amount_gross ?? 0)),
+          amount_vat: String(Number(l.amount_vat ?? 0)),
+          xero_account_code: l.xero_account_code || '',
+          crew_fronted: Boolean(l.crew_fronted),
+          source: l.source || 'manual',
+        })));
+      } catch { /* leave lines untouched — see above */ }
+    })();
+    return () => { cancelled = true; };
+  }, [isEdit, existing?.id]);
 
   // Invoice-number de-dup — debounced; warns if this supplier+invoice number was
   // already captured (non-blocking). Skips while editing the same cost.
@@ -721,6 +771,49 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
   // always has a cost row, so amounts stay required.
   const serviceOnlyEligible = wantsService && !isEdit;
 
+  // ── Cost-lines maths ───────────────────────────────────────────────────────
+  // The header is the invoice; lines only describe it. Unbalanced lines are
+  // refused rather than saved-and-flagged — a cost saved with lines that don't
+  // add up is an unflagged problem with no owner, sitting in the payables queue
+  // looking fine.
+  const lineNum = (v: string) => { const n = parseFloat(v); return isNaN(n) ? 0 : n; };
+  const linesGross = round2(lines.reduce((t, l) => t + lineNum(l.amount_gross), 0));
+  const linesVat = round2(lines.reduce((t, l) => t + lineNum(l.amount_vat), 0));
+  const headerGross = round2(lineNum(amountGross));
+  const headerVat = round2(lineNum(amountVat));
+  const grossDiff = round2(linesGross - headerGross);
+  const vatDiff = round2(linesVat - headerVat);
+  const linesBalanced = !lines.length || (Math.abs(grossDiff) <= 0.01 && Math.abs(vatDiff) <= 0.01);
+  // reclaim_split pushes its own three-line structure to Xero, so it can't also
+  // carry lines — the backend rejects the combination outright.
+  const linesAvailable = vatMode !== 'reclaim';
+
+  function addLine() {
+    setLinesTouched(true);
+    setLines((prev) => prev.length
+      // First click seeds one line holding the whole invoice, so splitting is
+      // "take some off this and put it on the next" rather than typing it twice.
+      ? [...prev, { key: newLineKey(), description: '', amount_gross: '', amount_vat: '', xero_account_code: '', crew_fronted: false, source: 'manual' as const }]
+      : [{ key: newLineKey(), description: description || '', amount_gross: amountGross, amount_vat: amountVat, xero_account_code: categoryCode, crew_fronted: false, source: 'manual' as const },
+         { key: newLineKey(), description: '', amount_gross: '', amount_vat: '', xero_account_code: '', crew_fronted: false, source: 'manual' as const }]);
+  }
+  function patchLine(key: string, patch: Partial<LineDraft>) {
+    setLinesTouched(true);
+    setLines((prev) => prev.map((l) => (l.key === key ? { ...l, ...patch } : l)));
+  }
+  function removeLine(key: string) {
+    setLinesTouched(true);
+    setLines((prev) => prev.filter((l) => l.key !== key));
+  }
+
+  // Closing on an unbalanced split loses the work AND the receipt, so say so
+  // rather than letting a stray backdrop click bin it.
+  function guardedClose() {
+    if (lines.length && !linesBalanced
+      && !window.confirm('The lines don\u2019t add up to the invoice total, so nothing will be saved \u2014 including the receipt. Close and lose these changes?')) return;
+    onClose();
+  }
+
   async function handleSave(approveOnSave = false) {
     setError('');
     if (vatMode === 'reclaim') {
@@ -735,6 +828,20 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
       && (vatMode === 'reclaim' ? !(Number(amountNet) > 0) : !(Number(amountGross) > 0));
     if (!savingServiceOnly && !categoryCode) {
       setError('Pick "What\'s this cost for?" — it sets the Xero category, and the push to Xero fails without it.');
+      return;
+    }
+    if (lines.length && !linesAvailable) {
+      setError('A VAT-reclaim cost can’t also be split into lines — remove the lines, or switch the VAT handling back.');
+      return;
+    }
+    if (lines.length && !linesBalanced) {
+      setError(Math.abs(grossDiff) > 0.01
+        ? `The lines add up to £${linesGross.toFixed(2)} but the cost is £${headerGross.toFixed(2)}. Adjust them so they match the invoice.`
+        : `The lines carry £${linesVat.toFixed(2)} of VAT but the cost records £${headerVat.toFixed(2)}. Adjust the VAT on the lines.`);
+      return;
+    }
+    if (lines.some((l) => !(lineNum(l.amount_gross) > 0))) {
+      setError('Every line needs an amount greater than zero — remove the empty one or fill it in.');
       return;
     }
     setSaving(true);
@@ -829,6 +936,21 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
         job_id: linkedJobId || null,
         vehicle_id: vehicleId || null,
       };
+
+      // Lines ride in the SAME request as the header — the backend writes them
+      // before it fires the Xero push, so the bill is built from them. A
+      // separate call would race that push onto a one-line bill. Only sent once
+      // the user has actually touched them, so a failed load can't wipe a split.
+      if (linesTouched) {
+        payload.lines = lines.map((l) => ({
+          description: l.description.trim() || null,
+          amount_gross: lineNum(l.amount_gross),
+          amount_vat: lineNum(l.amount_vat),
+          xero_account_code: l.xero_account_code || null,
+          crew_fronted: l.crew_fronted,
+          source: l.source,
+        }));
+      }
       if (!isEdit) {
         payload.platform_issue_id = presetIssueId || null;
         payload.status = 'confirmed';
@@ -873,11 +995,11 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
   const leftPaneStyle: React.CSSProperties = isDesktop ? { width: `${leftPct}%` } : {};
 
   return (
-    <div className="fixed inset-0 bg-black/40 flex items-stretch sm:items-start justify-center z-50 sm:overflow-y-auto sm:p-4" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/40 flex items-stretch sm:items-start justify-center z-50 sm:overflow-y-auto sm:p-4" onClick={guardedClose}>
       <div className="bg-white shadow-xl w-full max-h-screen sm:max-w-5xl sm:my-4 sm:rounded-lg sm:max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
           <h2 className="text-lg font-semibold text-gray-900">{isEdit ? 'Edit Cost' : 'Capture Cost'}</h2>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
+          <button onClick={guardedClose} className="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
         </div>
 
         <div ref={containerRef} className="flex flex-col md:flex-row flex-1 min-h-0 overflow-y-auto md:overflow-hidden">
@@ -969,11 +1091,16 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
                 <div>
                   <div className="flex items-baseline justify-between mb-1">
                     <span className="text-sm font-medium text-gray-700">Supporting documents</span>
-                    <span className="text-xs text-gray-400">{totalSupporting}/{MAX_SUPPORTING_DOCS}</span>
+                    <span className="text-xs text-gray-400">
+                      {totalSupporting} of {MAX_SUPPORTING_DOCS}
+                      {totalSupporting > 0 && totalSupporting < MAX_SUPPORTING_DOCS
+                        ? ` · ${MAX_SUPPORTING_DOCS - totalSupporting} more allowed` : ''}
+                    </span>
                   </div>
                   <p className="text-xs text-gray-500 mb-2">
                     Extra evidence for the same invoice — a fuel receipt, a delivery note.
-                    Sent to Xero with the {isBillMethod ? 'bill' : 'transaction'}.
+                    Attach as many as you need (up to {MAX_SUPPORTING_DOCS}); they all go to Xero
+                    with the {isBillMethod ? 'bill' : 'transaction'}.
                   </p>
 
                   {supportingDocs.map((doc, i) => (
@@ -997,19 +1124,23 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
                   ))}
 
                   {totalSupporting < MAX_SUPPORTING_DOCS ? (
-                    <input type="file" multiple accept="image/*,application/pdf"
-                      className="text-xs mt-2 w-full"
-                      onChange={(e) => {
-                        // Capture the list BEFORE clearing the input — reading
-                        // e.target.files inside the deferred updater finds it
-                        // already emptied.
-                        const picked = Array.from(e.target.files || []);
-                        e.target.value = '';
-                        if (picked.length) {
-                          setNewSupportingFiles((prev) =>
-                            [...prev, ...picked].slice(0, MAX_SUPPORTING_DOCS - supportingDocs.length));
-                        }
-                      }} />
+                    <label className="mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium
+                                      text-purple-700 bg-purple-50 border border-purple-200 rounded-md
+                                      cursor-pointer hover:bg-purple-100">
+                      ＋ {totalSupporting === 0 ? 'Attach a document' : 'Add another document'}
+                      <input type="file" multiple accept="image/*,application/pdf" className="hidden"
+                        onChange={(e) => {
+                          // Capture the list BEFORE clearing the input — reading
+                          // e.target.files inside the deferred updater finds it
+                          // already emptied.
+                          const picked = Array.from(e.target.files || []);
+                          e.target.value = '';
+                          if (picked.length) {
+                            setNewSupportingFiles((prev) =>
+                              [...prev, ...picked].slice(0, MAX_SUPPORTING_DOCS - supportingDocs.length));
+                          }
+                        }} />
+                    </label>
                   ) : (
                     <p className="text-xs text-amber-700 mt-2">
                       That&apos;s the maximum Xero accepts on one {isBillMethod ? 'bill' : 'transaction'}.
@@ -1070,7 +1201,7 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
               </label>
               <input className={inputCls} value={invoiceNumber} onChange={(e) => setInvoiceNumber(e.target.value)} placeholder="e.g. INV-10472 (leave blank for fuel/till receipts)" />
               {invoiceDup && (
-                <p className="text-xs text-amber-600 mt-1">
+                <p className="text-xs text-red-600 font-medium mt-1">
                   ⚠ Already captured: a cost with this invoice number{supplierName.trim() ? ` for ${supplierName.trim()}` : ''} exists
                   {invoiceDup.amount_gross != null ? ` (£${Number(invoiceDup.amount_gross).toFixed(2)}` : ''}{invoiceDup.cost_date ? `, ${new Date(invoiceDup.cost_date).toLocaleDateString('en-GB')}` : ''}{invoiceDup.amount_gross != null ? ', ' + invoiceDup.payment_status.replace(/_/g, ' ') + ')' : ''}. Check you're not submitting it twice.
                 </p>
@@ -1161,7 +1292,7 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
               {linkedJobId ? (
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="px-3 py-1.5 text-sm bg-purple-50 text-purple-700 rounded-md border border-purple-200">
-                    {linkedJobLabel || '(linked job)'}
+                    {linkedJobLabel || 'Linked job (no HireHop number)'}
                   </span>
                   <button type="button"
                     onClick={() => { setLinkedJobId(null); setLinkedJobLabel(''); setJobSearch(''); setJobSuggestions([]); }}
@@ -1339,6 +1470,120 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
               </select>
             </div>
 
+            {/* Cost lines. One invoice often covers several things — a freelancer
+                bills £325 that is really £250 of fee, £60 of fuel and £15 of
+                train. Without lines whichever category is picked above makes the
+                rest quietly wrong, in the job's cost buckets AND in the VAT (a
+                header rate is a blend of what's underneath it, and a blend is
+                never a real rate). Lines each carry their own category and VAT.
+                The header stays the invoice; lines just say how it breaks down. */}
+            {(linesAvailable || lines.length > 0) && (
+              <div>
+                {lines.length === 0 ? (
+                  <button type="button" onClick={addLine}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium
+                               text-purple-700 bg-purple-50 border border-purple-200 rounded-md hover:bg-purple-100">
+                    ＋ Split into lines
+                    <span className="font-normal text-purple-500">(different categories or VAT rates on one invoice)</span>
+                  </button>
+                ) : (
+                  <div className="border border-gray-200 rounded-md p-3 bg-gray-50">
+                    {!linesAvailable && (
+                      <p className="text-xs text-red-600 font-medium mb-2">
+                        A VAT-reclaim cost pushes its own three-line structure to Xero, so it can’t also be
+                        split into lines. Remove these lines, or switch the VAT handling back.
+                      </p>
+                    )}
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-sm font-medium text-gray-700">Lines on this invoice</span>
+                      <span className={`text-xs ${linesBalanced ? 'text-gray-500' : 'text-red-600 font-medium'}`}>
+                        {gbp(linesGross)} of {gbp(headerGross)}
+                        {(headerVat > 0 || linesVat > 0) && <> · VAT {gbp(linesVat)} of {gbp(headerVat)}</>}
+                      </span>
+                    </div>
+
+                    <div className="space-y-2">
+                      {lines.map((l, i) => (
+                        <div key={l.key} className="grid grid-cols-12 gap-2 items-start">
+                          <input
+                            className="col-span-12 sm:col-span-4 border border-gray-300 rounded px-2 py-1.5 text-sm"
+                            placeholder={`Line ${i + 1} — what was it?`}
+                            value={l.description}
+                            onChange={(e) => patchLine(l.key, { description: e.target.value })}
+                          />
+                          <select
+                            className="col-span-7 sm:col-span-3 border border-gray-300 rounded px-2 py-1.5 text-sm"
+                            value={l.xero_account_code}
+                            onChange={(e) => patchLine(l.key, { xero_account_code: e.target.value })}
+                          >
+                            <option value="">Same as above</option>
+                            {groups.map((group) => (
+                              <optgroup key={group} label={group}>
+                                {COST_CATEGORIES.filter((c) => c.group === group).map((c) => (
+                                  <option key={c.xeroCode} value={c.xeroCode}>{c.label}</option>
+                                ))}
+                              </optgroup>
+                            ))}
+                          </select>
+                          <input
+                            type="number" step="0.01" inputMode="decimal"
+                            className="col-span-3 sm:col-span-2 border border-gray-300 rounded px-2 py-1.5 text-sm text-right"
+                            placeholder="Total" value={l.amount_gross}
+                            onChange={(e) => patchLine(l.key, { amount_gross: e.target.value })}
+                          />
+                          <input
+                            type="number" step="0.01" inputMode="decimal"
+                            className="col-span-2 sm:col-span-2 border border-gray-300 rounded px-2 py-1.5 text-sm text-right"
+                            placeholder="VAT" title="VAT on this line — leave at 0 where there is none"
+                            value={l.amount_vat}
+                            onChange={(e) => patchLine(l.key, { amount_vat: e.target.value })}
+                          />
+                          <div className="col-span-12 sm:col-span-1 flex items-center justify-between sm:justify-end gap-2">
+                            <label className="flex items-center gap-1 text-xs text-gray-500 sm:hidden">
+                              <input type="checkbox" checked={l.crew_fronted}
+                                onChange={(e) => patchLine(l.key, { crew_fronted: e.target.checked })} />
+                              Crew paid this out of pocket
+                            </label>
+                            <input type="checkbox" className="hidden sm:block" checked={l.crew_fronted}
+                              title="Crew paid this out of pocket and reclaims it"
+                              onChange={(e) => patchLine(l.key, { crew_fronted: e.target.checked })} />
+                            <button type="button" onClick={() => removeLine(l.key)} title="Remove this line"
+                              className="px-1.5 text-sm text-gray-400 hover:text-red-600">✕</button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="flex items-center justify-between gap-3 mt-2 flex-wrap">
+                      <button type="button" onClick={addLine}
+                        className="text-xs font-medium text-purple-700 hover:underline">＋ Add another line</button>
+                      <button type="button" onClick={() => { setLinesTouched(true); setLines([]); }}
+                        className="text-xs text-gray-400 hover:text-gray-600 hover:underline">Remove all lines</button>
+                    </div>
+
+                    {!linesBalanced && (
+                      <p className="text-xs text-red-600 font-medium mt-2">
+                        {Math.abs(grossDiff) > 0.01 && (
+                          <>{grossDiff > 0
+                            ? `The lines are ${gbp(grossDiff)} MORE than the invoice total.`
+                            : `${gbp(-grossDiff)} of the invoice isn’t on a line yet.`}{' '}</>
+                        )}
+                        {Math.abs(vatDiff) > 0.01 && (
+                          <>{vatDiff > 0
+                            ? `The lines carry ${gbp(vatDiff)} too much VAT.`
+                            : `${gbp(-vatDiff)} of VAT isn’t on a line yet.`}{' '}</>
+                        )}
+                        This won’t save until it matches.
+                      </p>
+                    )}
+                    <p className="text-[11px] text-gray-400 mt-1">
+                      The tick means the crew paid that line out of pocket and reclaims it — no Xero category records that.
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
+
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Payment method</label>
@@ -1379,7 +1624,7 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
                 />
                 {dueDateOverride ? (
                   <p className="text-xs text-amber-600 mt-1">
-                    Using your date{derivedDueDate ? <> instead of <strong>{fmtDate(derivedDueDate)}</strong></> : null}.{' '}
+                    Using invoice due date{derivedDueDate ? <> instead of <strong>{fmtDate(derivedDueDate)}</strong></> : null}.{' '}
                     <button type="button" onClick={() => setDueDateOverride('')} className="underline hover:no-underline">
                       Use the default
                     </button>
@@ -1480,7 +1725,7 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
           <div className="flex items-center justify-between gap-2">
           <span />
           <div className="flex gap-2">
-          <button onClick={onClose} className="px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded-md">Cancel</button>
+          <button onClick={guardedClose} className="px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded-md">Cancel</button>
           {!isEdit && paymentStatus !== 'paid' && hasManagerRole(user?.role) && (
             <button onClick={() => handleSave(true)} disabled={saving}
               className="px-4 py-2 text-sm text-white bg-green-600 hover:bg-green-700 rounded-md disabled:opacity-50"

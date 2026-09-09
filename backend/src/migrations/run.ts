@@ -236,6 +236,10 @@ async function runMigrations(direction: 'up' | 'down') {
         '199_driver_verification_codes.sql',
         '200_cost_supporting_documents.sql',
         '201_unsigned_nudge_stage.sql',
+        '202_file_links.sql',
+        '203_free_enquiry_file_label.sql',
+        '204_fold_rehearsal_files_into_org.sql',
+        '205_cost_lines.sql',
       ];
 
       for (const migration of migrations) {

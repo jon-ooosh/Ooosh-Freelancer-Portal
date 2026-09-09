@@ -227,7 +227,6 @@ async function processStripeEvent(event: StripeEventLike): Promise<boolean> {
     case 'charge.refunded': {
       const charge = event.data.object as ChargeObj;
       const piRef = piId(charge.payment_intent);
-      const refunded = (charge.amount_refunded / 100).toFixed(2);
 
       // Use the latest refund's id for dedup — OP-initiated reimburse (Jun 2026)
       // pre-records a refund_leg keyed `stripe_refund_<id>` so this webhook
@@ -241,6 +240,14 @@ async function processStripeEvent(event: StripeEventLike): Promise<boolean> {
         ? `stripe_refund_${latestRefund.id}`
         : `stripe_charge_${charge.id}`;
       const stripeRefundId = latestRefund?.id || null;
+
+      // The amount this event is about is THIS refund, not
+      // `charge.amount_refunded` — that field is the CUMULATIVE refunded total
+      // on the charge, so a second partial refund reports the running total and
+      // unwinding it would re-apply the first refund on top of itself. Each leg
+      // is one refund. Fall back to the cumulative figure only when Stripe
+      // didn't send the refunds list (defensive — charge.refunded always does).
+      const refunded = (latestRefund ? latestRefund.amount / 100 : charge.amount_refunded / 100).toFixed(2);
 
       // Two paths arrive here: refund of an EXCESS (stripe_payment_intent_id
       // on job_excess matches) or refund of a HIRE PAYMENT (stripe_payment_intent

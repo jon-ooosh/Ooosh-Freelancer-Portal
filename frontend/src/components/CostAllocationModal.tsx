@@ -69,13 +69,17 @@ export default function CostAllocationModal({ cost, onClose, onSaved }: {
           setLines(existing.map((a) => ({
             key: nextKey(),
             job_id: a.job_id as string,
-            label: a.hh_job_number ? `#${a.hh_job_number}${a.job_name ? ' – ' + a.job_name : ''}` : '(job)',
+            label: a.hh_job_number
+              ? `#${a.hh_job_number}${a.job_name ? ' – ' + a.job_name : ''}`
+              : a.job_name || 'Linked job (no HireHop number)',
             amount: String(a.amount ?? ''),
             recharge: !!a.recharge,
             notes: a.notes || '',
           })));
         } else if (cost.job_id) {
-          const label = cost.hh_job_number ? `#${cost.hh_job_number}${cost.job_name ? ' – ' + cost.job_name : ''}` : '(captured job)';
+          const label = cost.hh_job_number
+            ? `#${cost.hh_job_number}${cost.job_name ? ' – ' + cost.job_name : ''}`
+            : cost.job_name || 'Captured job (no HireHop number)';
           const seed: Line = { key: nextKey(), job_id: cost.job_id, label, amount: gross > 0 ? gross.toFixed(2) : '', recharge: false, notes: '' };
           setLines([seed]);
           fetchExpected(cost.job_id);

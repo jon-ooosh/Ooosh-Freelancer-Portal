@@ -48,11 +48,19 @@ Full history, incident forensics and design rationale: `docs/reference/MONEY-AND
 
 ## HireHop money mechanics
 
+- **Link HH Deposit takes a TOTAL, not a delta**, and derives status via `deriveExcessStatus`. A HireHop deposit showing as "unlinked" is very often money OP already counted (a portal payment overwrites `hh_deposit_id` and orphans the original), so adding it doubles the collected figure — and recomputing status from raw amounts wiped a `partially_reimbursed` record back to `taken` (job 15187).
+- **A refund pushed to HH is a kind=3 payment application, so the kind=6 deposit still reads as live money to OP.** Never unlink a record whose deposit has been reversed that way — the Money-tab reconciler re-links and re-adds it on the next page load. Re-point with Link HH Deposit at the new deposit instead, leaving the total unchanged.
 - **Never call `billing_deposit_save.php` inline** — go through `hh-deposit.ts` so the failure-surfacing contract holds. Bubble `hh_push_error` to the client; the frontend shows "Saved in OP — HireHop push failed".
 - **HireHop REJECTS negative deposits.** To reduce/remove a deposit anywhere, post a refund **payment application** (`reverseDepositOnHH` → `billing_payments_save.php` with `OWNER=0`), never a negative deposit.
 - **⚠️ The broker RESOLVES `{success:false}` on a 327 rate-limit — it does NOT throw.** A bare `try { await hhBroker.post(...); UPDATE jobs SET status=2 } catch {}` never enters the catch and mirrors a FAILED push locally. Gate every local status mirror on `pushResult.success`.
 - **`kind=3` applications publish TWICE** (once under the deposit, once under the invoice, same `data.ID`) — dedup by id or you double-count. Distinguish source-vs-target by **invoice ownership**, never by description text (deposit-side twins are blank).
 - Money is pushed to Xero in **two steps** — the write, then `accounting/tasks.php` `post_payment`. Every money-out path does both.
+
+## Refunds
+
+- **One refund id = one leg.** `refund_legs` dedup is by `ref` ALONE (`isDuplicateLeg()` in `excess-refund.ts`) — the same refund arrives as `manual` (our reimburse endpoint), `stripe_webhook` and `hh_reconcile`. Keying on `(source, ref)` meant they never matched each other and the same £900 was applied twice (job 15187).
+- **Claim the leg the moment the money moves, not after the response.** Stripe's `charge.refunded` lands ~300ms after `refunds.create`; the HH push + Xero sync take seconds. Any new refund path must write its leg BEFORE that work, or the webhook re-applies the amount.
+- **Never unwind `charge.amount_refunded`** — it's the CUMULATIVE refunded total on the charge. Use the individual refund's amount, or a second partial refund re-applies the first.
 
 ## Stripe
 
@@ -68,6 +76,11 @@ Full history, incident forensics and design rationale: `docs/reference/MONEY-AND
 - **JSONB columns must be `JSON.stringify`d on write** (node-postgres sends a JS array as a Postgres ARRAY literal, which JSONB rejects — and an EMPTY array survives, so the bug only appears once someone uses the feature).
 - On a Bill, the invoice number users SEE is Xero `InvoiceNumber`, not the API `Reference`. Set both.
 - `resolveDueDate()` precedence: staff override → freelancer Friday rule → supplier terms. Don't branch on `cost_type` at a call site.
+- **Cost lines: the HEADER is authoritative.** `costs.amount_gross`/`amount_vat` are what we owe; `cost_lines` only says how that breaks down and must sum back to it within 1p (`validateCostLines`). Nothing may write the header from lines.
+- **Send `lines` in the SAME create/update request as the header, never a separate call.** The create route fires `pushCostToXeroBackground` immediately after the INSERT, so a follow-up write races it onto a one-line bill.
+- **Compare money in whole pence, never floats.** `33.33 * 3` is `99.99000000000001`, so `Math.abs(sum - total) > 0.01` rejects an exactly-1p residue — the case the tolerance exists to allow. (Caught by a test, not by review.)
+- **`resolveLineTaxType` takes `{amount_vat, amount_net}`, not a whole cost** — the rate is DERIVED, so a header spanning mixed rates yields a blend that is not a real rate (£250 no-VAT + £60 fuel w/ £10 VAT + £15 zero-rated implies 3%, matches nothing, and falls through to the account default). Only a homogeneous LINE gives a true rate.
+- **A cost row returned to the UI must go through `withJobLabels()`** (`routes/costs.ts`) — `RETURNING *` omits `hh_job_number`/`job_name`/`vehicle_reg`, so the capture + split modals had nothing to print and fell back to a bracketed "(linked job)" where staff needed the number.
 
 ## Card-machine receipts
 
@@ -83,6 +96,8 @@ Full history, incident forensics and design rationale: `docs/reference/MONEY-AND
 - **Don't call `onUpdated()` mid-flow** in `ExcessPaymentModal` — the parent's reload unmounts the modal. Set `madeChange` and refresh at close.
 - **Merge action responses into the modal's record, never replace** — `RETURNING *` omits the joined display fields and blanks the header.
 - Excess is charged per HIRE but stored per DRIVER: the Money tab collapses to chargeable rows (naming covered drivers); the Drivers & Vehicles tab deliberately shows per-driver personal liability. **Collapse, never hide.**
+- **The costs table must fit the viewport — adding a column means folding another one in, not widening.** At 10 columns the Actions cell sat off-screen; "Uploaded by" now rides in the Supplier cell and the Xero pill in the Status cell. Multi-value cells (split allocations) stack vertically — one wide inline row sets the whole column.
+- **A repeatable file picker is a labelled button, never a bare `<input type="file">`.** We clear `e.target.value` after each pick so the same file can be re-chosen, which leaves a raw input reading "No file chosen" forever — staff couldn't tell a second supporting document was possible.
 
 ## Policy
 
