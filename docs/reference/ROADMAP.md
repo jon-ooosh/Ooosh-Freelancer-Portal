@@ -52,10 +52,10 @@ to come up:
 - D&C venue connect-column parser doesn't extract `linkedPulseIds` — ~196 migrated rows show "No venue".
 - Nav dropdown z-index — Leaflet map overlays the dropdown on the fleet map page.
 
-**Specced, awaiting sign-off**
-- **`cost_lines`** (`docs/COST-LINES-SPEC.md`) — one payable, N lines, each with its own amount, VAT, Xero code and optional job. Fixes whole-invoice coding (a £250 freelancer bill that was really £190 fee + £60 fuel), the blended-rate VAT error on mixed invoices, and gives the Money tab a real "Fronted expenses" actuals bucket via a per-line `crew_fronted` flag. Four open questions in §11 need Jon's answers before build.
-
 **Deliberately deferred, revisit when it hurts**
+- **Derived allocations from cost lines** (`docs/COST-LINES-SPEC.md` §7, §12) — BLOCKED, not merely unscheduled: nothing in the UI can set a line's `job_id`, so every line inherits the cost's and the derivation would no-op on every real cost. Needs a per-line job picker first (a search-autocomplete in a ~500px pane). The split modal covers multi-job attribution meanwhile.
+- **Removing a supporting document doesn't remove the Xero attachment** — nothing deletes it there today; decide the semantics before adding a per-document delete.
+- **A cost with supporting docs but NO main receipt renders no `+N` pip** — the pip hangs off the receipt thumb.
 - Inline "Allocate Van" modal scoped to job (the AllocationsPage hop is acceptable for now).
 - Slot-grouped cards — one card per van with sibling drivers nested, on both Allocations and Job Detail.
 - Auto-cascade staff allocations onto matching hire forms at hire-form arrival.
