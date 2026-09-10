@@ -58,7 +58,12 @@ export const VALIDITY_WINDOW_DAYS = {
   licence: 90,
   dvla: 30,
   poa: 90,
-  passport: 30,
+  // 90 days from the date of checking, same as the licence, capped by the
+  // passport's own printed expiry. Was 30 while the hire-form app wrote
+  // `passportValidUntil = today + 90` — so backfillFromDates back-computed a
+  // check date 60 days AFTER the real one and staff read that as "Checked on"
+  // (Louis Salanson / 16507). Resolved to 90 both sides, migration 207.
+  passport: 90,
 } as const;
 
 export interface DocWindow {
@@ -278,7 +283,7 @@ export function computeDriverValidity(
     from: toYmd(driver.poa2_doc_date), days: VALIDITY_WINDOW_DAYS.poa, today,
   });
 
-  // Passport: checked like the DVLA (check + 30d), capped at the passport's
+  // Passport: checked like the licence (check + 90d), capped at the passport's
   // own printed expiry.
   const passport = buildWindow({
     from: toYmd(driver.passport_check_date), days: VALIDITY_WINDOW_DAYS.passport,

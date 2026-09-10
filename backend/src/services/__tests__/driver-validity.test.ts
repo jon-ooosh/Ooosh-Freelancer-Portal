@@ -7,6 +7,7 @@ import {
   outstandingDocuments,
   hasAllRequiredDocuments,
   isUkLicence,
+  backfillFromDates,
 } from '../driver-validity';
 
 // Fixed "today" so these never rot.
@@ -104,6 +105,22 @@ describe('window derivation', () => {
     expect(v.dvla.from).toBe('2026-08-13');
     expect(v.dvla.until).toBe('2026-09-12');
     expect(v.dvla.valid).toBe(true);
+  });
+
+  it('gives a passport 90 days from the check date', () => {
+    // Was 30 while the hire-form app sent `today + 90`, so backfillFromDates
+    // back-computed a check date 60 days AFTER the real check and staff read
+    // that as "Checked on" (Louis Salanson / 16507). Migration 207.
+    const v = computeDriverValidity({ passport_check_date: '2026-08-01' }, TODAY);
+    expect(v.passport.until).toBe('2026-10-30');
+    expect(v.passport.cappedBy).toBeNull();
+  });
+
+  it('round-trips a passport expiry back to the same check date', () => {
+    // backfillFromDates and persistableWindows must agree, or a caller that
+    // writes one end silently moves the other.
+    const back = backfillFromDates({ passport_valid_until: '2026-10-30' });
+    expect(back.passport_check_date).toBe('2026-08-01');
   });
 
   it("caps the passport window at the passport's printed expiry", () => {
