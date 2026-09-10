@@ -241,6 +241,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '204_fold_rehearsal_files_into_org.sql',
         '205_cost_lines.sql',
         '206_staff_calendar_phase_a.sql',
+        '207_passport_window_90_days.sql',
       ];
 
       for (const migration of migrations) {
