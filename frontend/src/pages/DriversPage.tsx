@@ -21,10 +21,15 @@ interface DriverListItem {
   licence_valid_to: string | null;
   requires_referral: boolean;
   referral_status: string | null;
+  /** Staff adjudication of the iDenfy verdict — outranks the date-based states. */
+  identity_check_status: string | null;
+  licence_issued_by: string | null;
+  licence_issue_country: string | null;
   dvla_check_date: string | null;
   dvla_valid_until: string | null;
   poa1_valid_until: string | null;
   poa2_valid_until: string | null;
+  passport_valid_until: string | null;
   signature_date: string | null;
   is_active: boolean;
   source: string;
@@ -60,7 +65,7 @@ interface DriversResponse {
   };
 }
 
-type StatusKey = 'in_progress' | 'approved' | 'expired' | 'referred_waiting' | 'refer_insurers' | 'not_approved';
+type StatusKey = 'in_progress' | 'approved' | 'expired' | 'referred_waiting' | 'refer_insurers' | 'not_approved' | 'id_check_needed' | 'id_rejected';
 type SortKey = 'last_activity' | 'name' | 'dvla_expiring' | 'points_desc';
 
 
@@ -94,6 +99,8 @@ const STATUS_PILLS: { key: StatusKey; label: string; pillColour: string }[] = [
   { key: 'referred_waiting', label: 'Referred & Waiting', pillColour: 'bg-amber-100 text-amber-700 border-amber-300' },
   { key: 'refer_insurers', label: 'Refer to Insurers', pillColour: 'bg-red-100 text-red-700 border-red-300' },
   { key: 'not_approved', label: 'Not Approved', pillColour: 'bg-red-100 text-red-700 border-red-300' },
+  { key: 'id_check_needed', label: 'ID Check Needed', pillColour: 'bg-red-100 text-red-700 border-red-300' },
+  { key: 'id_rejected', label: 'ID Rejected', pillColour: 'bg-red-100 text-red-700 border-red-300' },
 ];
 
 const SORT_OPTIONS: { key: SortKey; label: string }[] = [

@@ -103,6 +103,34 @@ export interface DriverValidityInput {
   passport_valid_until?: unknown;
 }
 
+/**
+ * THE definition of "is this a UK (DVLA) licence?".
+ *
+ * Lives here because it decides which DOCUMENT REGIME applies — a UK driver
+ * needs a DVLA check, a non-UK driver needs a passport — so it belongs beside
+ * the windows it gates.
+ *
+ * Accepts the country as either an ISO code or a full name. The hire-form
+ * webhook writes `licence_issue_country` through getCountryName(), i.e. the
+ * NAME ("United Kingdom"), while every consumer compared it to the CODE
+ * ("GB") — so that half of the test never once matched and UK detection has
+ * always rested entirely on `licence_issued_by === 'DVLA'`. That mattered the
+ * day an expired PASSPORT session leaked into the licence path and overwrote
+ * `licence_issued_by` with 'HMPO' (Charlie McWilliams / 15727, Sep 2026):
+ * nothing was left to recognise him by, his passed DVLA check stopped
+ * counting, and OP started demanding a passport he did not need.
+ */
+export function isUkLicence(driver: {
+  licence_issued_by?: unknown;
+  licence_issue_country?: unknown;
+} | null | undefined): boolean {
+  if (!driver) return false;
+  const issuedBy = String(driver.licence_issued_by ?? '').trim().toUpperCase();
+  if (issuedBy.includes('DVLA') || issuedBy === 'DVA') return true;   // DVA = Northern Ireland
+  const country = String(driver.licence_issue_country ?? '').trim().toUpperCase();
+  return ['GB', 'UK', 'GBR', 'UNITED KINGDOM', 'GREAT BRITAIN'].includes(country);
+}
+
 const EMPTY_WINDOW: DocWindow = {
   from: null, until: null, cappedBy: null,
   valid: false, trusted: true, untrustedReason: null,
@@ -207,7 +235,7 @@ export function computeDriverValidity(
 
   const issuedBy = typeof driver.licence_issued_by === 'string'
     ? driver.licence_issued_by.trim() : '';
-  const isUkDriver = issuedBy === 'DVLA' || driver.licence_issue_country === 'GB';
+  const isUkDriver = isUkLicence(driver);
 
   // ── Licence: iDenfy check + 90d, capped at the licence's own expiry ────────
   // Untrusted without a licence identity (see INTEGRITY GUARD above).

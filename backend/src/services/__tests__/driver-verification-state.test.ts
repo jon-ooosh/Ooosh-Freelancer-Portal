@@ -59,6 +59,25 @@ describe('identity review', () => {
     expect(state.allClear).toBe(false);
   });
 
+  it('names the DOCUMENT verdict when that is what iDenfy rejected', () => {
+    // Jo Walker / 16249 and Simon Halliday / 15551 both had a perfect face
+    // match and a rejected document. The old wording asserted a face mismatch
+    // unconditionally, sending staff to compare two faces that plainly match.
+    const state = computeVerificationState(
+      {
+        ...healthy,
+        identity_check_status: 'needs_review',
+        idenfy_overall: 'DENIED',
+        idenfy_doc_result: 'DOC_SPOOF_DETECTED',
+        idenfy_face_result: 'FACE_MATCH',
+      },
+      TODAY,
+    );
+    expect(state.actions[0].kind).toBe('compare_identity');
+    expect(state.actions[0].message).toMatch(/DOC_SPOOF_DETECTED/);
+    expect(state.actions[0].message).not.toMatch(/FACE_MATCH/);
+  });
+
   it('clears once staff accept', () => {
     const state = computeVerificationState({ ...healthy, identity_check_status: 'accepted' }, TODAY);
     expect(stage(state, 'identity').state).toBe('done');
