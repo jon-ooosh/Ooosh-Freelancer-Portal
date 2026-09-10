@@ -16,6 +16,7 @@ import { verifyApiKey } from '../middleware/api-key';
 import { hhBroker } from '../services/hirehop-broker';
 import { reconcileJobExcessTopN } from '../services/excess-topn';
 import { pushDepositToHH, HH_BANK_IDS, getMethodForBankId } from '../services/hh-deposit';
+import { fetchDepositAvailability, releaseFromInvoice, revertRelease, type ReleaseResult } from '../services/hh-deposit-release';
 import { getStripeClient, isStripeConfigured, isStripeError } from '../config/stripe';
 import { sendPaymentEmail, sendExcessEmail, sendLastMinuteAlert, sendPaymentStatementEmail, logResendToTimeline, type StatementPaymentLine } from '../services/money-emails';
 import {
@@ -715,6 +716,11 @@ const refundPaymentSchema = z.object({
   // When set, an existing OP `job_payments` pending-refund IOU (e.g. created by
   // a cancellation) is marked completed instead of inserting a new refund row.
   pending_refund_id: z.string().uuid().nullable().optional(),
+  // Staff have seen the "this deposit is fully applied to invoice X — I'll
+  // release £Y back from it first" panel and confirmed. Without it a refund
+  // needing a release returns 409 `release_required` rather than quietly
+  // rewriting HireHop paperwork nobody asked about.
+  allow_release: z.boolean().optional(),
 });
 
 // ── GET /api/money/job-lookup/:hhJobNumber — Look up OP job by HireHop job number ──
@@ -1128,6 +1134,9 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
       id: number; amount: number; date: string; description: string | null;
       memo: string | null; is_excess: boolean; is_refund: boolean;
       is_deposit?: boolean; acc_account_id?: number | null;
+      /** Unallocated money on this deposit — what HireHop will let us refund.
+       *  null when HH published neither reading. */
+      available_to_refund?: number | null;
       bank_name: string | null; entered_by: string | null;
     }> = [];
     // Track HH excess deposits separately for reconciliation
@@ -1236,6 +1245,19 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
 
           if (absAmount > 0) {
             if (!isExcess) {
+              // How much of this deposit is still unallocated — i.e. what
+              // HireHop will actually let us refund out of it. HH publishes it
+              // as `owing` NEGATED, and also as `credit - paid`; take the
+              // smaller of the two readings so we never over-state it and walk
+              // into a 370 after moving Stripe money (job 15628). The Refund
+              // modal warns off this before anything is submitted.
+              const rawOwing = row.owing ?? data.owing;
+              const rawPaid = row.paid ?? data.paid;
+              const viaOwing = rawOwing == null || rawOwing === '' ? null : -parseFloat(String(rawOwing));
+              const viaPaid = rawPaid == null || rawPaid === '' ? null : absAmount - parseFloat(String(rawPaid));
+              const readings = [viaOwing, viaPaid].filter((v): v is number => v != null && Number.isFinite(v));
+              const availableToRefund = readings.length > 0 ? Math.max(Math.min(...readings), 0) : null;
+
               // Hire deposit — show in Payment History
               deposits.push({
                 id: depositId,
@@ -1246,6 +1268,7 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
                 is_excess: false,
                 is_refund: isRefund,
                 is_deposit: true, // real kind:6 deposit — can be refunded or applied cross-job
+                available_to_refund: isRefund ? null : availableToRefund,
                 bank_name: getBankName(data.ACC_ACCOUNT_ID),
                 acc_account_id: data.ACC_ACCOUNT_ID != null ? Number(data.ACC_ACCOUNT_ID) : null,
                 entered_by: data.CREATE_USER_NAME || null,
@@ -2462,7 +2485,7 @@ router.post('/:jobId/apply-credit', authorize('admin', 'manager'), validate(appl
 router.post('/:jobId/refund-payment', validate(refundPaymentSchema), async (req: AuthRequest, res: Response) => {
   try {
     const jobId = String(req.params.jobId);
-    const { hh_deposit_id, amount, method, reference, notes, pending_refund_id } = req.body;
+    const { hh_deposit_id, amount, method, reference, notes, pending_refund_id, allow_release } = req.body;
 
     const isUuid = /^[0-9a-f]{8}-/.test(jobId);
     const jobResult = await query(
@@ -2565,7 +2588,129 @@ router.post('/:jobId/refund-payment', validate(refundPaymentSchema), async (req:
       return;
     }
 
-    // ── Step 0: Stripe refund (only when method=stripe_gbp + PI on the row) ──
+    // ── Phase 1: make sure HireHop CAN take the refund, before any cash moves ──
+    // HireHop rejects a refund (`OWNER: 0`) against a deposit that has been fully
+    // applied to an invoice — error 370 — and on job 15628 that fired AFTER the
+    // Stripe refund had already gone through, leaving £91.12 moved and recorded
+    // nowhere. So the fragile HireHop work happens first, while nothing is at
+    // stake, and the irreversible Stripe call happens only once it has landed.
+    //
+    // Ordering note: the refund PAPERWORK still comes after Stripe (Step 1
+    // below). Doing it before would mean HireHop and Xero can say "refunded"
+    // while the money never left — a lying ledger nobody would ever spot —
+    // whereas this way round the failure is a visible phantom balance on a job.
+    // Reversible things first, the irreversible thing last.
+    let releaseUndo: ReleaseResult['undo'] = null;
+    /**
+     * Put a Phase 1 release back when a later step aborts without refunding, and
+     * describe the outcome for the error we're about to return. If the revert
+     * itself fails (it retries once inside), say precisely what to fix by hand:
+     * a wrong figure someone knows about beats a wrong figure they don't.
+     */
+    const undoReleaseNote = async (): Promise<string> => {
+      if (!releaseUndo) return '';
+      const undo = releaseUndo;
+      const reverted = await revertRelease(hh_deposit_id, undo);
+      releaseUndo = null;
+      return reverted.ok
+        ? ' The HireHop release made for this refund has been undone.'
+        : ` ⚠️ OP also could NOT undo the HireHop release: ${reverted.error}. Until HireHop application ${undo.application.applicationId} is set back to £${undo.originalAmount.toFixed(2)} by hand, invoice ${undo.application.invoiceNumber || undo.application.invoiceId} will wrongly show money owing. No money has moved — this is paperwork only.`;
+    };
+    if (job.hh_job_number) {
+      let readFailed = false;
+      const availability = await fetchDepositAvailability(job.hh_job_number, hh_deposit_id).catch((e) => {
+        console.error('[money] Deposit availability read failed:', e instanceof Error ? e.message : e);
+        readFailed = true;
+        return null;
+      });
+
+      // A failed read is not permission to guess. Refunding blind is exactly how
+      // 15628 happened, so stop and say so — and distinguish "HireHop didn't
+      // answer" from "that deposit isn't there", which send staff looking in
+      // completely different places.
+      if (!availability) {
+        res.status(502).json(readFailed ? {
+          error: 'Could not read the deposit from HireHop',
+          detail: 'OP needs HireHop\'s current figures to know whether this deposit can be refunded. Nothing has been refunded. Try again shortly, or check HireHop is responding.',
+        } : {
+          error: 'Deposit not found in HireHop',
+          detail: `HireHop job ${job.hh_job_number} has no deposit ${hh_deposit_id}. It may have been deleted or moved to another job. Nothing has been refunded.`,
+        });
+        return;
+      }
+
+      if (availability.available + 0.005 < amount) {
+        const shortfall = Number((amount - availability.available).toFixed(2));
+        const apps = availability.applications;
+
+        // Scope limit (v1): exactly one invoice application. Spread across
+        // several invoices there is no obvious right one to take it from, and
+        // guessing moves money between invoices nobody asked us to touch.
+        if (apps.length === 0) {
+          res.status(422).json({
+            error: 'Nothing left on this deposit to refund',
+            detail: `HireHop shows £${availability.available.toFixed(2)} unallocated on deposit ${hh_deposit_id}, but £${amount.toFixed(2)} was requested, and there is no invoice application to release it from. It may already have been refunded. Nothing has been refunded.`,
+          });
+          return;
+        }
+        if (apps.length > 1) {
+          res.status(422).json({
+            error: 'This deposit is split across several invoices',
+            detail: `Deposit ${hh_deposit_id} is applied to ${apps.length} invoices (${apps.map((a) => a.invoiceNumber || a.invoiceId).join(', ')}), so OP can't tell which to release £${shortfall.toFixed(2)} from. Do it by hand in HireHop first — see the 370 runbook in MONEY-AND-EXCESS.md. Nothing has been refunded.`,
+          });
+          return;
+        }
+
+        const app = apps[0];
+        if (app.amount + 0.005 < shortfall) {
+          res.status(422).json({
+            error: 'Not enough applied to release',
+            detail: `Releasing £${shortfall.toFixed(2)} would need more than the £${app.amount.toFixed(2)} applied to invoice ${app.invoiceNumber || app.invoiceId}. Nothing has been refunded.`,
+          });
+          return;
+        }
+
+        // Never rewrite HireHop paperwork the user didn't ask about. 409 hands
+        // the frontend everything it needs to explain the change and confirm it.
+        if (!allow_release) {
+          res.status(409).json({
+            error: 'Release needed before this refund',
+            code: 'release_required',
+            detail: `Deposit ${hh_deposit_id} is fully applied to invoice ${app.invoiceNumber || app.invoiceId}, so HireHop has nothing to refund from it. £${shortfall.toFixed(2)} can be released back off that invoice first.`,
+            release: {
+              deposit_id: hh_deposit_id,
+              available: availability.available,
+              shortfall,
+              invoice_id: app.invoiceId,
+              invoice_number: app.invoiceNumber,
+              application_id: app.applicationId,
+              application_amount: app.amount,
+              new_application_amount: Number((app.amount - shortfall).toFixed(2)),
+            },
+          });
+          return;
+        }
+
+        const release = await releaseFromInvoice({
+          hhJobNumber: job.hh_job_number,
+          depositId: hh_deposit_id,
+          application: app,
+          shortfall,
+          requiredAvailable: amount,
+        });
+        if (!release.released) {
+          res.status(502).json({
+            error: 'Could not free up the money in HireHop',
+            detail: `${release.error || 'The release did not complete.'} Nothing has been refunded.`,
+          });
+          return;
+        }
+        releaseUndo = release.undo;
+        console.log(`[money] Released £${shortfall.toFixed(2)} on job ${job.hh_job_number}; deposit ${hh_deposit_id} now has £${release.availableAfter.toFixed(2)} available`);
+      }
+    }
+
+    // ── Phase 2: Stripe refund (only when method=stripe_gbp + PI on the row) ──
     let stripeRefundId: string | null = null;
     const stripeRefundPath = method === 'stripe_gbp' && stripePaymentIntent;
     if (stripeRefundPath) {
@@ -2584,12 +2729,20 @@ router.post('/:jobId/refund-payment', validate(refundPaymentSchema), async (req:
       } catch (err) {
         const msg = isStripeError(err) ? err.message : (err instanceof Error ? err.message : 'Unknown error');
         console.error('[money] Stripe refund failed:', msg);
-        res.status(502).json({ error: 'Stripe refund failed', detail: msg });
+        // No money moved, so put any Phase 1 release back — otherwise HireHop
+        // shows the invoice owing money the client has already paid. If the
+        // revert also fails (it retries once), say exactly what needs fixing:
+        // a wrong figure someone knows about beats a wrong figure they don't.
+        res.status(502).json({ error: 'Stripe refund failed', detail: `${msg}.${await undoReleaseNote()}` });
         return;
       }
     }
 
-    // ── Step 1: Push negative HH payment application against the deposit ──
+    // ── Phase 3: Push the refund payment application against the deposit ──
+    // Phase 1 guaranteed the deposit has the balance, so a 370 here should now
+    // be impossible; what's left is transient (rate limit, outage), which the
+    // broker retries. If it still fails, the money HAS moved — hence the
+    // hh_push_error surfacing below rather than a silent success.
     let hhPushError: string | null = null;
     let hhPaymentAppId: number | null = null;
     if (job.hh_job_number) {
@@ -2615,7 +2768,9 @@ router.post('/:jobId/refund-payment', validate(refundPaymentSchema), async (req:
             hhPushError = `Stripe refund processed, but HireHop paperwork push failed: ${errText}. Please retry the HH push manually or contact engineering.`;
             console.error('[money] HH refund push failed after Stripe success:', errText);
           } else {
-            res.status(502).json({ error: 'HireHop refund failed', detail: errText });
+            // Record-only method: nothing was refunded and nothing is recorded,
+            // so a Phase 1 release must not be left behind.
+            res.status(502).json({ error: 'HireHop refund failed', detail: `${errText}${await undoReleaseNote()}` });
             return;
           }
         } else {
@@ -2630,13 +2785,13 @@ router.post('/:jobId/refund-payment', validate(refundPaymentSchema), async (req:
           hhPushError = `Stripe refund processed, but HireHop push threw: ${msg}.`;
           console.error('[money] HH refund push threw after Stripe success:', msg);
         } else {
-          res.status(502).json({ error: 'HireHop push error', detail: msg });
+          res.status(502).json({ error: 'HireHop push error', detail: `${msg}${await undoReleaseNote()}` });
           return;
         }
       }
     }
 
-    // ── Step 2: Record in OP job_payments as a refund leg ──
+    // ── Phase 4: Record in OP job_payments as a refund leg ──
     const auditNotes = [
       reference ? `Ref: ${reference}` : null,
       notes || null,
@@ -2704,7 +2859,7 @@ router.post('/:jobId/refund-payment', validate(refundPaymentSchema), async (req:
       );
     }
 
-    // ── Step 3: Trigger Xero sync (best-effort — HH push already succeeded, so
+    // ── Phase 5: Trigger Xero sync (best-effort — HH push already succeeded, so
     // OP and HH are in sync. Without this the refund lands in HH billing but
     // never posts through to Xero. Mirrors the excess reimburse path. ────────
     if (hhPaymentAppId) {
