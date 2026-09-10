@@ -15,6 +15,13 @@
 export interface DriverStatusInput {
   requires_referral: boolean;
   referral_status: string | null;
+  /**
+   * Staff adjudication of the iDenfy verdict. Outranks everything below it: a
+   * driver iDenfy rejected is not "Approved" and not merely "In Progress",
+   * whatever their dates say. Omitted here until Sep 2026, so a flagged driver
+   * still badged green in the list while their own page said otherwise.
+   */
+  identity_check_status?: string | null;
   signature_date: string | null;
   /**
    * HH job the driver has started a hire form for but NOT signed for (from
@@ -26,6 +33,14 @@ export interface DriverStatusInput {
   licence_valid_to: string | null;
   dvla_valid_until?: string | null;
   poa1_valid_until: string | null;
+  /**
+   * Only applies to non-UK licence holders — UK drivers do a DVLA check
+   * instead. Which regime a driver is in is decided by the two licence fields
+   * below, mirroring services/driver-validity.ts `isUkLicence`.
+   */
+  passport_valid_until?: string | null;
+  licence_issued_by?: string | null;
+  licence_issue_country?: string | null;
 }
 
 export interface DriverStatus {
@@ -47,10 +62,32 @@ function isExpired(date: string | null | undefined): boolean {
   return d < today;
 }
 
+/**
+ * Mirrors `isUkLicence` in backend/src/services/driver-validity.ts. Accepts the
+ * country as a code OR a name — the hire-form webhook writes the name
+ * ("United Kingdom"), not the code.
+ */
+function isUkLicence(driver: DriverStatusInput): boolean {
+  const issuedBy = (driver.licence_issued_by || '').trim().toUpperCase();
+  if (issuedBy.includes('DVLA') || issuedBy === 'DVA') return true;
+  const country = (driver.licence_issue_country || '').trim().toUpperCase();
+  return ['GB', 'UK', 'GBR', 'UNITED KINGDOM', 'GREAT BRITAIN'].includes(country);
+}
+
 export function deriveDriverStatus(driver: DriverStatusInput): DriverStatus {
   const green = 'bg-green-100 text-green-700';
   const amber = 'bg-amber-100 text-amber-700';
   const red = 'bg-red-100 text-red-700';
+
+  // Photo ID adjudication comes FIRST — an unresolved or rejected iDenfy check
+  // already blocks assignment and withholds the agreement, so the badge has to
+  // say so rather than reading "Approved" off dates iDenfy didn't accept.
+  if (driver.identity_check_status === 'needs_review') {
+    return { label: 'ID Check Needed', colour: red };
+  }
+  if (driver.identity_check_status === 'rejected') {
+    return { label: 'ID Rejected', colour: red };
+  }
 
   if (driver.requires_referral) {
     if (driver.referral_status === 'approved') return { label: 'Approved', colour: green };
@@ -67,7 +104,8 @@ export function deriveDriverStatus(driver: DriverStatusInput): DriverStatus {
   if (
     isExpired(driver.licence_valid_to) ||
     isExpired(driver.dvla_valid_until) ||
-    isExpired(driver.poa1_valid_until)
+    isExpired(driver.poa1_valid_until) ||
+    (!isUkLicence(driver) && isExpired(driver.passport_valid_until))
   ) {
     return { label: 'Expired', colour: amber };
   }

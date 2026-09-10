@@ -6,6 +6,7 @@ import {
   touchesValidity,
   outstandingDocuments,
   hasAllRequiredDocuments,
+  isUkLicence,
 } from '../driver-validity';
 
 // Fixed "today" so these never rot.
@@ -210,5 +211,41 @@ describe('outstandingDocuments', () => {
     const out = outstandingDocuments(v);
     expect(out.poa1).toBe(false);
     expect(out.poa2).toBe(true);
+  });
+});
+
+describe('isUkLicence', () => {
+  it('recognises a DVLA licence', () => {
+    expect(isUkLicence({ licence_issued_by: 'DVLA' })).toBe(true);
+    expect(isUkLicence({ licence_issued_by: ' dvla ' })).toBe(true);
+    expect(isUkLicence({ licence_issued_by: 'DVA' })).toBe(true);   // Northern Ireland
+  });
+
+  it('accepts the country as a NAME, not just the ISO code', () => {
+    // The hire-form webhook writes licence_issue_country through
+    // getCountryName(), i.e. "United Kingdom" — while every consumer compared
+    // it to "GB", so that half of the test never once matched.
+    expect(isUkLicence({ licence_issue_country: 'GB' })).toBe(true);
+    expect(isUkLicence({ licence_issue_country: 'United Kingdom' })).toBe(true);
+    expect(isUkLicence({ licence_issue_country: 'UNITED KINGDOM' })).toBe(true);
+  });
+
+  it('does not treat a passport authority as a UK licence', () => {
+    // HMPO is the UK Passport Office. It reached licence_issued_by because an
+    // expired PASSPORT session was processed down the licence path
+    // (Charlie McWilliams / 15727). It is UK, but it is not a licence
+    // authority — so the driver must not be classed as a DVLA driver on it.
+    expect(isUkLicence({ licence_issued_by: 'HMPO' })).toBe(false);
+  });
+
+  it('is false for a genuinely foreign licence and for no data at all', () => {
+    expect(isUkLicence({ licence_issued_by: 'ZA', licence_issue_country: 'South Africa' })).toBe(false);
+    expect(isUkLicence({})).toBe(false);
+    expect(isUkLicence(null)).toBe(false);
+  });
+
+  it('drives isUkDriver on computeDriverValidity', () => {
+    expect(computeDriverValidity({ licence_issue_country: 'United Kingdom' }, TODAY).isUkDriver).toBe(true);
+    expect(computeDriverValidity({ licence_issued_by: 'HMPO' }, TODAY).isUkDriver).toBe(false);
   });
 });

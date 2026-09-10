@@ -71,6 +71,8 @@ export interface VerificationStateInput {
   referral_status?: unknown;
   identity_check_status?: unknown;
   idenfy_face_result?: unknown;
+  idenfy_doc_result?: unknown;
+  idenfy_overall?: unknown;
   licence_issued_by?: unknown;
   /**
    * HH job the driver has started a hire form for but NOT signed for — from
@@ -203,13 +205,20 @@ export function computeVerificationState(
   // Ordered worst-first so the top line is the thing to act on.
 
   if (identityStatus === 'needs_review') {
+    // Says what iDenfy actually objected to. This used to assert a face
+    // mismatch unconditionally, which since the Sep 2026 widening is usually
+    // wrong — the common case is a REJECTED DOCUMENT with a perfectly matching
+    // face (Jo Walker / 16249, Simon Halliday / 15551), and telling staff to
+    // compare two faces that plainly match sends them looking for the wrong
+    // thing. Prefers the specific verdict, falls back to the overall one.
+    const detail = str(driver.idenfy_doc_result) || str(driver.idenfy_face_result) || str(driver.idenfy_overall);
     actions.push({
       severity: 'red',
       kind: 'compare_identity',
       slot: 'identity',
-      message: str(driver.idenfy_face_result)
-        ? `Selfie didn't match the licence photo (${str(driver.idenfy_face_result)}) — compare the two images and accept or reject`
-        : "Selfie didn't match the licence photo — compare the two images and accept or reject",
+      message: detail
+        ? `iDenfy didn't accept this ID check (${detail}) — review the licence and selfie, then accept or reject`
+        : "iDenfy didn't accept this ID check — review the licence and selfie, then accept or reject",
     });
   } else if (identityStatus === 'rejected') {
     actions.push({

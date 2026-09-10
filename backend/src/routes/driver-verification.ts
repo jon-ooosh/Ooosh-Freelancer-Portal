@@ -22,7 +22,7 @@ import { v4 as uuid } from 'uuid';
 import { query } from '../config/database';
 import { encryptDriverPiiInto, decryptDriverRow, DRIVER_PII_FIELDS } from '../services/driver-pii';
 import { computeDriverValidity, persistableWindows, touchesValidity, backfillFromDates, hasAllRequiredDocuments } from '../services/driver-validity';
-import { faceNeedsReview, sendIdentityReviewAlert } from '../services/identity-review';
+import { idenfyNeedsReview, sendIdentityReviewAlert } from '../services/identity-review';
 import { uploadToR2, isR2Configured } from '../config/r2';
 import { emailService } from '../services/email-service';
 
@@ -786,18 +786,23 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       }
     }
 
-    // ── Derive the identity-review flag from the face verdict ───────────────
+    // ── Derive the identity-review flag from the iDenfy verdict ─────────────
     //
     // The hire-form app reports what iDenfy said; OP decides what that means.
-    // Only an explicit non-match trips review — an absent face result (e.g. a
-    // passport-only session, where no comparison was run) must not raise a
-    // false flag.
+    // Widened from the face result alone in Sep 2026 — see idenfyNeedsReview()
+    // for why (a DENIED document with a matching face passed straight through).
+    // An absent verdict (e.g. a step that posts only POA dates) must not raise
+    // a false flag, so this only runs when the write actually carries one.
     //
     // A staff decision always wins: once someone has accepted or rejected the
-    // match, a repeat webhook carrying the same stale verdict does not re-open
+    // check, a repeat webhook carrying the same stale verdict does not re-open
     // it. Staff can re-open from the driver page if genuinely re-verified.
     let identityFlagRaised = false;
-    if ('idenfy_face_result' in writtenCols && faceNeedsReview(String(writtenCols.idenfy_face_result || ''))) {
+    const carriesVerdict = 'idenfy_overall' in writtenCols || 'idenfy_face_result' in writtenCols;
+    if (carriesVerdict && idenfyNeedsReview({
+      overall: writtenCols.idenfy_overall as string | null,
+      faceResult: writtenCols.idenfy_face_result as string | null,
+    })) {
       const current = await query(
         `SELECT identity_check_status FROM drivers WHERE email = $1 AND is_active = true LIMIT 1`,
         [email],
