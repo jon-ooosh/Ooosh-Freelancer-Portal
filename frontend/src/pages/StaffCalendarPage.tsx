@@ -131,7 +131,7 @@ export default function StaffCalendarPage() {
           {isAdmin && (
             <Link to="/staff/admin"
               className="px-3 py-1.5 text-sm rounded border border-ooosh-300 text-ooosh-700 hover:bg-ooosh-50">
-              Set-up
+              Staff
             </Link>
           )}
           <button onClick={() => setFrom(addDays(from, -weeks * 7))}

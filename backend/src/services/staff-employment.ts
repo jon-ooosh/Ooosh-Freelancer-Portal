@@ -450,3 +450,150 @@ export async function listReviews(personId: string) {
   );
   return r.rows;
 }
+
+// ── Unified staff roster ────────────────────────────────────────────────────
+
+export interface RosterRow {
+  personId: string;
+  userId: string | null;
+  name: string;
+  preferredName: string | null;
+  email: string | null;
+  avatarUrl: string | null;
+  account: { role: string; isActive: boolean; hhUserId: number | null } | null;
+  employment: {
+    status: string;
+    startDate: string;
+    endDate: string | null;
+    jobTitle: string | null;
+    department: string | null;
+    bankHolidayPolicy: 'use_allowance' | 'granted' | null;
+    entitlementWeeks: string | null;
+  } | null;
+  weeklyMinutes: number | null;
+  hasPattern: boolean;
+  cotCard: {
+    last4: string | null;
+    label: string | null;
+    /** Card-agreement state from the staff-documents module, carried over from
+     *  the old Settings register so the "who hasn't signed" signal is not lost. */
+    agreementStatus: string | null;
+    agreementCompletedAt: string | null;
+  } | null;
+}
+
+/**
+ * Everyone who either holds a user account OR has an employment record.
+ *
+ * The two sets genuinely differ and neither is a subset of the other: service
+ * and test accounts (System Service, TEST Wood) have logins but are not
+ * employees, and an employee could exist before their login is created. Keying
+ * this page on one table alone would make the other set unmanageable, so the
+ * roster is the UNION and each row says plainly what it has and what it lacks.
+ *
+ * `isAdmin` decides how much comes back. Employment, hours and card details are
+ * admin-only and are omitted entirely — not blanked client-side — so a manager's
+ * response never carries them. Account fields are manager-tier, matching the
+ * access PUT /users/:id already grants.
+ */
+export async function getStaffRoster(isAdmin: boolean): Promise<RosterRow[]> {
+  const r = await query(
+    `SELECT p.id                                   AS person_id,
+            (p.first_name || ' ' || p.last_name)   AS name,
+            p.preferred_name,
+            u.id                                   AS user_id,
+            COALESCE(u.email, p.email)             AS email,
+            u.avatar_url,
+            u.role,
+            u.is_active,
+            u.hh_user_id,
+            u.cot_card_last4,
+            u.cot_card_label,
+            se.employment_status,
+            se.start_date::text                    AS start_date,
+            se.end_date::text                      AS end_date,
+            se.job_title,
+            se.department,
+            se.bank_holiday_policy,
+            se.entitlement_weeks,
+            pat.weekly_minutes,
+            agr.status       AS agreement_status,
+            agr.completed_at AS agreement_completed_at
+       FROM people p
+       -- One account per person. A person with more than one row (shouldn't
+       -- happen, but nothing enforces it) resolves to the active/newest.
+       LEFT JOIN LATERAL (
+         SELECT * FROM users u2
+          WHERE u2.person_id = p.id
+          ORDER BY u2.is_active DESC, u2.created_at DESC
+          LIMIT 1
+       ) u ON true
+       LEFT JOIN staff_employment se ON se.person_id = p.id
+       -- Contracted minutes per week under the pattern in force TODAY,
+       -- normalised for a 2-week cycle so the figure is comparable across staff.
+       LEFT JOIN LATERAL (
+         SELECT ROUND(SUM(d.minutes)::numeric / wp.cycle_weeks) AS weekly_minutes
+           FROM staff_working_patterns wp
+           JOIN staff_working_pattern_days d ON d.pattern_id = wp.id
+          WHERE wp.person_id = p.id
+            AND wp.effective_from <= CURRENT_DATE
+            AND (wp.effective_to IS NULL OR wp.effective_to >= CURRENT_DATE)
+          GROUP BY wp.id, wp.cycle_weeks
+          LIMIT 1
+       ) pat ON true
+       -- COT card agreement, from the staff-documents module. LATERAL rather
+       -- than a plain join so a second document version can never fan a person
+       -- into two roster rows.
+       LEFT JOIN LATERAL (
+         SELECT a.status, c.completed_at
+           FROM staff_documents d
+           JOIN staff_document_assignments a ON a.user_id = u.id AND a.document_id = d.id
+           LEFT JOIN staff_document_completions c ON c.id = a.current_completion_id
+          WHERE d.slug = 'cot-card-agreement'
+          ORDER BY c.completed_at DESC NULLS LAST
+          LIMIT 1
+       ) agr ON true
+      WHERE p.is_deleted = false
+        AND (u.id IS NOT NULL OR se.person_id IS NOT NULL)
+      ORDER BY (se.person_id IS NULL),          -- employees first
+               (u.is_active IS NOT TRUE),        -- then inactive accounts last
+               p.first_name, p.last_name`
+  );
+
+  return r.rows.map((row: Record<string, unknown>): RosterRow => ({
+    personId: row.person_id as string,
+    userId: (row.user_id as string) ?? null,
+    name: row.name as string,
+    preferredName: (row.preferred_name as string) ?? null,
+    email: (row.email as string) ?? null,
+    avatarUrl: (row.avatar_url as string) ?? null,
+    account: row.user_id
+      ? { role: row.role as string, isActive: row.is_active === true, hhUserId: (row.hh_user_id as number) ?? null }
+      : null,
+    employment: isAdmin && row.start_date
+      ? {
+          status: row.employment_status as string,
+          startDate: row.start_date as string,
+          endDate: (row.end_date as string) ?? null,
+          jobTitle: (row.job_title as string) ?? null,
+          department: (row.department as string) ?? null,
+          bankHolidayPolicy: (row.bank_holiday_policy as 'use_allowance' | 'granted') ?? null,
+          entitlementWeeks: row.entitlement_weeks != null ? String(row.entitlement_weeks) : null,
+        }
+      : null,
+    // A non-admin must not learn someone's hours, so this is null rather than 0
+    // — the UI distinguishes "not set up" from "not yours to see".
+    weeklyMinutes: isAdmin && row.weekly_minutes != null ? Number(row.weekly_minutes) : null,
+    hasPattern: isAdmin ? row.weekly_minutes != null : false,
+    cotCard: isAdmin && row.user_id
+      ? {
+          last4: (row.cot_card_last4 as string) ?? null,
+          label: (row.cot_card_label as string) ?? null,
+          agreementStatus: (row.agreement_status as string) ?? null,
+          agreementCompletedAt: row.agreement_completed_at
+            ? new Date(row.agreement_completed_at as string).toISOString()
+            : null,
+        }
+      : null,
+  }));
+}
