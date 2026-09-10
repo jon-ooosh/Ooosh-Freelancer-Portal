@@ -145,6 +145,10 @@ interface JobCostLite {
   // Xero nominal code — /costs/by-job returns c.*, so it was always on the wire.
   // Drives the actuals make-up buckets on the quoted-vs-actual cards.
   xero_account_code?: string | null;
+  // Cost lines, when the invoice was split. Each carries its own code, so a
+  // bundled bill buckets by what each part WAS rather than by the header's
+  // single category. Empty on a split-in row and on any unsplit cost.
+  lines?: Array<{ amount_gross: number | string; xero_account_code: string | null; crew_fronted: boolean }>;
   amount_gross: number | null;
   amount_net: number | null;
   cost_intent: 'quote_actual' | 'extra' | null;
@@ -182,6 +186,68 @@ interface JobQuoteLite {
   travel_cost: number | null;
 }
 
+// ── Rollover chain outcome ────────────────────────────────────────────────
+// A record whose money rolled forward keeps excess_status='rolled_over' FOREVER
+// — that status is a fact about THIS hire ("the money left here"), and it can't
+// know what later happened to the money. So once a downstream hire reimbursed
+// or claimed it, the origin card still headlined a purple "Rolled Over" and the
+// outcome was only readable in the small rollover-thread breadcrumb (job 16371:
+// £1,200 rolled to #16605 and reimbursed there, while #16371 still read as
+// money in motion).
+//
+// This resolves the chain's TERMINAL state so the origin card can headline the
+// outcome instead. Deliberately conservative — it only claims closure when
+// EVERY hop after this record is either a pass-through ('rolled_over') or a
+// settled state, and the last hop is settled. A fork that left one branch open,
+// or a tail still sitting on 'taken'/'partially_paid', falls through to today's
+// rendering rather than announcing a closure that hasn't happened.
+
+/** Statuses that mean the money's journey has finished — nothing left to chase. */
+const CHAIN_SETTLED_STATUSES = ['reimbursed', 'fully_claimed', 'claimed', 'waived', 'released', 'not_required'];
+
+type RolloverChainEntry = {
+  id: string;
+  excess_status: string;
+  job_id: string | null;
+  hh_job_number: number | null;
+  job_name: string | null;
+  excess_amount_taken: string | number | null;
+  payment_date: string | null;
+  payment_method: string | null;
+  claim_amount: string | number | null;
+  reimbursement_amount: string | number | null;
+  reimbursement_date: string | null;
+};
+
+/**
+ * The settled tail of `recordId`'s rollover chain, or null when the chain is
+ * still live (or `recordId` IS the tail — then its own status already tells the
+ * truth and nothing needs promoting).
+ */
+function resolveChainOutcome(chain: RolloverChainEntry[], recordId: string): RolloverChainEntry | null {
+  const here = chain.findIndex((l) => l.id === recordId);
+  if (here === -1) return null;
+  const downstream = chain.slice(here + 1);
+  if (downstream.length === 0) return null;
+  const tail = downstream[downstream.length - 1];
+  if (!CHAIN_SETTLED_STATUSES.includes(tail.excess_status)) return null;
+  // Every intermediate hop must be a pass-through or settled. Anything else
+  // (e.g. a fork branch still holding money) means the chain is not closed.
+  const allResolved = downstream.every(
+    (l) => l.excess_status === 'rolled_over' || CHAIN_SETTLED_STATUSES.includes(l.excess_status)
+  );
+  return allResolved ? tail : null;
+}
+
+/** The amount that actually settled the chain, for the outcome line. */
+function chainOutcomeAmount(tail: RolloverChainEntry): number | null {
+  const reimbursed = Number(tail.reimbursement_amount || 0);
+  const claimed = Number(tail.claim_amount || 0);
+  if (tail.excess_status === 'reimbursed' && reimbursed > 0) return reimbursed;
+  if ((tail.excess_status === 'fully_claimed' || tail.excess_status === 'claimed') && claimed > 0) return claimed;
+  return null;
+}
+
 export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   const [data, setData] = useState<FinancialData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -217,16 +283,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
 
   // Rollover chains — "follow the thread" of a rolled-over excess. Keyed by
   // excess record id → ordered chain of records sharing the HH deposit.
-  type ChainEntry = {
-    id: string;
-    excess_status: string;
-    job_id: string | null;
-    hh_job_number: number | null;
-    job_name: string | null;
-    excess_amount_taken: string | number | null;
-    payment_date: string | null;
-    payment_method: string | null;
-  };
+  type ChainEntry = RolloverChainEntry;
   const [rolloverChains, setRolloverChains] = useState<Record<string, ChainEntry[]>>({});
 
   // Link deposit state. Picking a record no longer links immediately — it opens
@@ -995,15 +1052,33 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
         )}
         {chargeableRecords.length > 0 ? (
           <div className="space-y-3">
-            {chargeableRecords.map((record) => (
+            {chargeableRecords.map((record) => {
+              // Where this record's money finally ended up, when it rolled
+              // forward and a later hire settled it. Null while the chain is
+              // still live — then the record's own status is the whole truth.
+              const chainOutcome = rolloverChains[record.id]
+                ? resolveChainOutcome(rolloverChains[record.id], record.id)
+                : null;
+              return (
               <div
                 key={record.id}
                 className="flex items-center justify-between p-3 bg-gray-50 rounded-lg border border-gray-200"
               >
                 <div className="flex-1">
                   <div className="flex items-center gap-2">
-                    <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${statusColor(record.excess_status, record.auto_covered)}`}>
+                    {/* A closed rollover chain headlines its OUTCOME, coloured
+                        by the settled state, rather than a purple "Rolled Over"
+                        that outlived the money (job 16371 → #16605). The arrow
+                        keeps this hire's own fact — the money left here — which
+                        replacing the label outright would have thrown away. */}
+                    <span
+                      className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${chainOutcome ? statusColor(chainOutcome.excess_status) : statusColor(record.excess_status, record.auto_covered)}`}
+                      title={chainOutcome
+                        ? `Rolled forward to job #${chainOutcome.hh_job_number ?? '—'}, where it was ${statusLabel(chainOutcome.excess_status).toLowerCase()}.`
+                        : undefined}
+                    >
                       {statusLabel(record.excess_status, record.auto_covered)}
+                      {chainOutcome && ` → ${statusLabel(chainOutcome.excess_status)}`}
                     </span>
                     {record.hh_deposit_id && (
                       <span className="text-[10px] text-green-600 font-medium" title={`HH Deposit #${record.hh_deposit_id} (${record.hh_reconcile_source || 'linked'})`}>
@@ -1066,6 +1141,39 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                       </>
                     )}
                   </p>
+                  {/* Outcome line — the answer to "so where did my money go?".
+                      The money line above is about THIS hire and reads as if the
+                      cash is still sitting here; this says where it actually
+                      went and how it ended, with the amount and date the
+                      rollover-thread breadcrumb below can't carry. */}
+                  {chainOutcome && (() => {
+                    const settledAmount = chainOutcomeAmount(chainOutcome);
+                    const settledDate = chainOutcome.reimbursement_date
+                      ? new Date(chainOutcome.reimbursement_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+                      : null;
+                    const outcomeWord = statusLabel(chainOutcome.excess_status).toLowerCase();
+                    const jobLabel = `#${chainOutcome.hh_job_number ?? '—'}`;
+                    return (
+                      <p className="text-xs text-gray-600 mt-0.5">
+                        <span aria-hidden="true">→ </span>
+                        Carried to{' '}
+                        {chainOutcome.job_id ? (
+                          <Link
+                            to={`/jobs/${chainOutcome.job_id}`}
+                            title={chainOutcome.job_name || undefined}
+                            className="underline decoration-dotted hover:text-gray-900"
+                          >
+                            {jobLabel}
+                          </Link>
+                        ) : (
+                          jobLabel
+                        )}
+                        {' — '}{outcomeWord}
+                        {settledAmount != null && ` £${settledAmount.toFixed(2)}`}
+                        {settledDate && ` on ${settledDate}`}
+                      </p>
+                    );
+                  })()}
                   {/* Covered drivers, folded onto the row that actually carries
                       the money for their van. */}
                   {soleChargeable?.id === record.id && coveredRecords.length > 0 && (
@@ -1194,7 +1302,8 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                   </button>
                 )}
               </div>
-            ))}
+              );
+            })}
             {/* Covered rows whose van doesn't match any chargeable row (a swap,
                 a deleted record, a job-level excess with no reg). Shown rather
                 than dropped — collapsing must never lose a driver. */}
@@ -2208,7 +2317,7 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
       amount: expExpenses,
       // Deliberately has no matching bucket on the actuals side — see the
       // actualsMakeup comment below.
-      hint: 'Money the crew lays out and reclaims. On the actuals side it lands under whatever it was bought as (fuel, transport, other) — nothing on a captured cost records who fronted it.',
+      hint: 'Money the crew lays out and reclaims. Tick “fronted” on a cost line and it lands here on the actuals side too; an unsplit cost has nowhere to record who paid, so it falls under whatever it was bought as.',
     },
     { label: 'Transport', amount: expTransport },
   ].filter((c) => c.amount > 0.005);
@@ -2224,27 +2333,40 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
   // it is. Buckets come off the Xero nominal code, which is what the category
   // picker already writes.
   //
-  // "Fronted expenses" deliberately gets NO actuals bucket. Fronting is a fact
-  // about who paid, not about what was bought, and nothing on a cost row records
-  // it — a freelancer's £40 parking receipt is coded 411 exactly like parking we
-  // put on the company card. So fronted spend falls into Fuel / Transport /
-  // Other by what it actually was. Cost lines will fix the related-but-different
-  // problem of one invoice covering two things; they still won't say who fronted
-  // it without a flag of their own.
+  // Both blind spots this used to carry are now closed by cost lines:
   //
-  // Whole-invoice coding is the other known blind spot: a £250 freelancer
-  // invoice that is really £190 fee + £60 fuel lands entirely under Freelancer.
+  //  - Whole-invoice coding. A £250 freelancer bill that was really £190 fee +
+  //    £60 fuel counted entirely as Freelancer. Split into lines, each part
+  //    lands in its own bucket.
+  //  - "Fronted expenses" had NO actuals bucket at all, because fronting is a
+  //    fact about WHO PAID and no Xero code carries it. A line's `crew_fronted`
+  //    flag does, so it finally has one — and fronted WINS over the line's
+  //    category, because that is what the quote means by the word: money the
+  //    crew laid out and reclaims, whatever they spent it on.
+  //
+  // A cost with no lines still buckets by its header code, exactly as before.
   const actualsMakeup = (() => {
     const byLabel = new Map<string, number>();
-    for (const c of actualCosts) {
-      const code = (c.xero_account_code || '').trim();
-      const label = code === '320' ? 'Freelancer'
-        : code === '410' ? 'Fuel'
-        : code === '325' ? 'Transport'
+    const add = (code: string | null | undefined, fronted: boolean, amount: number) => {
+      const c = (code || '').trim();
+      const label = fronted ? 'Fronted expenses'
+        : c === '320' ? 'Freelancer'
+        : c === '410' ? 'Fuel'
+        : c === '325' ? 'Transport'
         : 'Other';
-      byLabel.set(label, (byLabel.get(label) || 0) + num(c.amount_gross));
+      byLabel.set(label, (byLabel.get(label) || 0) + amount);
+    };
+    for (const c of actualCosts) {
+      if (c.lines?.length) {
+        for (const l of c.lines) {
+          add(l.xero_account_code || c.xero_account_code, Boolean(l.crew_fronted), Number(l.amount_gross) || 0);
+        }
+      } else {
+        add(c.xero_account_code, false, num(c.amount_gross));
+      }
     }
-    return ['Freelancer', 'Fuel', 'Transport', 'Other']
+    // Same order as the Expected card above, so the two read side by side.
+    return ['Freelancer', 'Fuel', 'Fronted expenses', 'Transport', 'Other']
       .map((label) => ({ label, amount: byLabel.get(label) || 0 }))
       .filter((c) => c.amount > 0.005);
   })();
@@ -2302,7 +2424,7 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
                 </div>
               ))}
               <div className="text-[10px] text-gray-300 pt-0.5"
-                title="Grouped by the cost's Xero category. A whole invoice sits in one bucket, so a freelancer bill that also covered fuel counts entirely as Freelancer.">
+                title="Grouped by category — per line where an invoice was split, otherwise by the whole cost's category. An unsplit freelancer bill that also covered fuel still counts entirely as Freelancer; split it into lines to break it out.">
                 {actualCosts.length} cost{actualCosts.length === 1 ? '' : 's'} · by category
               </div>
             </div>

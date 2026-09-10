@@ -58,7 +58,12 @@ export const VALIDITY_WINDOW_DAYS = {
   licence: 90,
   dvla: 30,
   poa: 90,
-  passport: 30,
+  // 90 days from the date of checking, same as the licence, capped by the
+  // passport's own printed expiry. Was 30 while the hire-form app wrote
+  // `passportValidUntil = today + 90` — so backfillFromDates back-computed a
+  // check date 60 days AFTER the real one and staff read that as "Checked on"
+  // (Louis Salanson / 16507). Resolved to 90 both sides, migration 207.
+  passport: 90,
 } as const;
 
 export interface DocWindow {
@@ -101,6 +106,34 @@ export interface DriverValidityInput {
   passport_check_date?: unknown;
   passport_expiry?: unknown;
   passport_valid_until?: unknown;
+}
+
+/**
+ * THE definition of "is this a UK (DVLA) licence?".
+ *
+ * Lives here because it decides which DOCUMENT REGIME applies — a UK driver
+ * needs a DVLA check, a non-UK driver needs a passport — so it belongs beside
+ * the windows it gates.
+ *
+ * Accepts the country as either an ISO code or a full name. The hire-form
+ * webhook writes `licence_issue_country` through getCountryName(), i.e. the
+ * NAME ("United Kingdom"), while every consumer compared it to the CODE
+ * ("GB") — so that half of the test never once matched and UK detection has
+ * always rested entirely on `licence_issued_by === 'DVLA'`. That mattered the
+ * day an expired PASSPORT session leaked into the licence path and overwrote
+ * `licence_issued_by` with 'HMPO' (Charlie McWilliams / 15727, Sep 2026):
+ * nothing was left to recognise him by, his passed DVLA check stopped
+ * counting, and OP started demanding a passport he did not need.
+ */
+export function isUkLicence(driver: {
+  licence_issued_by?: unknown;
+  licence_issue_country?: unknown;
+} | null | undefined): boolean {
+  if (!driver) return false;
+  const issuedBy = String(driver.licence_issued_by ?? '').trim().toUpperCase();
+  if (issuedBy.includes('DVLA') || issuedBy === 'DVA') return true;   // DVA = Northern Ireland
+  const country = String(driver.licence_issue_country ?? '').trim().toUpperCase();
+  return ['GB', 'UK', 'GBR', 'UNITED KINGDOM', 'GREAT BRITAIN'].includes(country);
 }
 
 const EMPTY_WINDOW: DocWindow = {
@@ -207,7 +240,7 @@ export function computeDriverValidity(
 
   const issuedBy = typeof driver.licence_issued_by === 'string'
     ? driver.licence_issued_by.trim() : '';
-  const isUkDriver = issuedBy === 'DVLA' || driver.licence_issue_country === 'GB';
+  const isUkDriver = isUkLicence(driver);
 
   // ── Licence: iDenfy check + 90d, capped at the licence's own expiry ────────
   // Untrusted without a licence identity (see INTEGRITY GUARD above).
@@ -250,7 +283,7 @@ export function computeDriverValidity(
     from: toYmd(driver.poa2_doc_date), days: VALIDITY_WINDOW_DAYS.poa, today,
   });
 
-  // Passport: checked like the DVLA (check + 30d), capped at the passport's
+  // Passport: checked like the licence (check + 90d), capped at the passport's
   // own printed expiry.
   const passport = buildWindow({
     from: toYmd(driver.passport_check_date), days: VALIDITY_WINDOW_DAYS.passport,

@@ -478,6 +478,65 @@ OP is now the staff control surface for the FULL post-collection money loop. Ini
 - [x] **Process pending cancellation refunds (Jun 2026)** — cancellations create a bare `job_payments` IOU (`payment_type='refund'`, `payment_status='pending'`, no HH/Stripe link) that nothing ever actioned. Now: `/summary` returns `financial.pending_refunds`; `/refund-payment` accepts an optional `pending_refund_id` that validates the IOU (belongs to job + still pending, **before** any money moves) then marks it `completed` in place (reusing the Stripe + HH + Xero path) rather than inserting a duplicate. MoneyTab renders pending refunds as an amber "Awaiting refund" row with a "Process refund" button → modal with a deposit picker + an explicit **"When you confirm:"** panel (Stripe auto-refund vs record-only, HH+Xero paperwork, IOU marked complete).
 - [x] **Clear (dismiss) pending refunds without moving money (Jun 2026)** — the "Process refund" path above moves money via Stripe/HH; but some IOUs never need processing through OP (already refunded out-of-band directly in HireHop / Stripe / bank, pre-refund-tracking artifacts, wrong amount / duplicate). The IOU was previously un-clearable — and "Process refund" is disabled when there's no deposit on the job to refund against (e.g. job 15840 showed £93 owing when £150 had already been refunded direct in HH, leaving staff stuck). Sibling of the balance `resolve-balance` + excess `mark-externally-resolved` actions. `POST /api/money/:jobId/dismiss-refund` (`{ refund_id, reason, notes? }`, MANAGER_ROLES) validates the IOU belongs to the job + is still pending, flips `payment_status='cancelled'`, annotates `notes`, logs a job-timeline interaction + audit. **Touches NO money / HireHop / Stripe / Xero.** `POST /api/money/refunds/bulk-dismiss` (`{ reason, notes?, refund_ids[] | logged_before: YYYY-MM-DD }`, admin) for the pre-refund-tracking backlog sweep (mirrors `balances/bulk-resolve`). Dismissed IOUs drop out of the `/overview` Pending Refunds list + per-job MoneyTab (both filter `payment_status='pending'`). UI: "Clear" link beside "Process refund" on the MoneyTab pending-refund row + per-row "Clear" / "Bulk clear old refunds…" on the `/money/overview` Refunds tab. Reasons: `refunded_externally | not_required | duplicate | other`.
 
+##### HireHop error 370 — refunding a deposit that has already been spent (Sep 2026, job 15628)
+
+**Symptom.** Money tab → Refund on a hire payment: *"Refund recorded successfully. Stripe refund: re_… "* followed by *"HireHop paperwork push failed: 370."* The Stripe refund is real and irreversible; the HireHop leg never lands; and the refund then appears **nowhere in OP**.
+
+**What 370 means.** `billing_payments_save.php` with `OWNER: 0, deposit: <id>` is HireHop's grammar for *"take money back OUT of this deposit"* (contrast `OWNER: <invoice id>`, which applies deposit money TO an invoice — see `/apply-credit`). HireHop returns **370 when the deposit has no unallocated balance left to refund**. Retrying is pointless; it will fail identically forever. The same code is already noted in `BACKLOG.md` for the Pom Poko / RX22SWN shape, where a colleague had refunded in HireHop first.
+
+**Why it fired on 15628.** The £1,419.28 balance deposit (9025) had been applied to invoice OT-INV-12182 **in full** — `Owed £0.00`, with a child `Payment [OT-INV-12182] −£1,419.28`. A £199.11 credit note (drum heads + mic stand not supplied) then left the invoice £91.12 overpaid, and £91.12 was correctly refunded to the client in Stripe. But the envelope was empty: nothing on deposit 9025 was left to refund out of.
+
+```
+Invoice raised                    £2,209.61
+Credit note OT-CRE-1218          −  £199.11
+Genuinely owed                    £2,010.50
+Paid (682.34 + 1,419.28)          £2,101.62
+Overpaid → refunded                  £91.12   ← correct; only the paperwork failed
+```
+
+**Three separate defects made it invisible.** Worth reading together — the arithmetic came out right by luck, and the clamps are what hid that:
+
+1. **No pre-flight.** `refundableDeposits` (`MoneyTab.tsx`) filters only on `!is_refund && !is_excess`; the backend validates the amount against OP's own `job_payments` original, never against HireHop's remaining unallocated balance. OP offers a Refund button on an empty envelope and **moves irreversible Stripe money before the step most likely to fail**.
+2. **The gap isn't recorded anywhere.** `hh_push_error` is returned in the HTTP response, rendered once, and gone. Nothing on the job records that OP and HireHop disagree by £91.12.
+3. **A completed refund renders nowhere.** Step 2 of `/refund-payment` writes the `job_payments` row regardless of the HH failure — but Payment History renders `financial.deposits`, which is 100 % HireHop-derived, and `/summary` reads `job_payments` only for **pending** refunds. A refund that succeeded in Stripe and failed its HH push lands in the one state OP displays nowhere.
+
+**And two clamps discard the overpayment signal.** OP showed `PAID IN FULL / £0.00 / Includes £108.00 written off by credit note`. The credit note is £199.11, not £108 — `creditNoteWriteOff` clamps to `max(hireValueIncVat − totalHireDeposits, 0)` = £108.00. PASS 3 independently computes `directInvoicePayments = max(2209.61 − 2101.62 − 199.11, 0) = max(−91.12, 0) = 0`, and `approvedInvoices` stores `owing: Math.max(invoiceOwing, 0)`, throwing away HireHop's own `−91.12`. **That negative number is the refund due, falling out of the reconciliation correctly, and three places bin it.** Keep the clamps for the balance (they exist for the job-15627 billing-correction shape) but surface the negative gap.
+
+**The manual fix — verified in the HireHop UI, admin mode.** Two steps, in this order:
+
+1. **Reduce the deposit→invoice application** by the refund amount — edit the CHILD row `Payment [OT-INV-12182] −£1,419.28` down to `−£1,328.16`. **Not the deposit itself.** The deposit row is the record of cash received (£1,419.28, untouched); the child is only *how much of that envelope was pointed at this invoice*. Deposit 9025 then reads `Owed −£91.12` — an unallocated balance.
+2. **Create the refund** of £91.12 against deposit 9025 (bank = Stripe, 267). Invoice owing → £0.00, deposit owing → £0.00.
+
+HireHop refuses a manual *payment* here because the invoice is already over-satisfied — you need money **out**, not in. Targeting the credit note doesn't help either: it is already fully consumed by the invoice (it is what created the overpayment), and HireHop nets credit notes into `owing` rather than allocating them as an editable line.
+
+**Why the one-way Xero sync is fine here.** HireHop posts deposits into Xero as **unallocated Overpayments** (`15628 - balance`, `15628 - deposit`), not as payments allocated to the invoice — Xero's copy of OT-INV-12182 still reads `Paid 0.00`. So step 1 edits a HireHop-only allocation with **no Xero counterpart to break**. Only step 2 must reach Xero, and that is a new payment row, which syncs via `post_payment`. Do not generalise this to "amendments are safe" — it is safe *because* of where the HH/Xero boundary falls.
+
+**Do NOT fix this in Xero instead.** It was considered and rejected: OP reads from HireHop, so a correction made only in Xero is invisible to OP and to everyone using it. Someone will see the refund "not done" and do it again. Operational truth lives in HireHop; Xero is back-office. The `hh_xero_corrected` balance-override reason exists for genuinely stuck cases — this shape is no longer one.
+
+**⚠️ After a 370, do not press Refund again.** The guard computes `refundable = original − alreadyRefunded` (£1,419.28 − £91.12 = £1,328.16), so a second £91.12 request passes validation and issues a **second real Stripe refund**. The money has already moved; only the paperwork is missing.
+
+**The release IS automatable — proven against test job 16668, 10 Sep 2026** (`scripts/hh-deposit-release-probe.ts`, read-only by default, `--commit` to write, refuses any job but the disposable one without `--allow-live`). Four findings, all load-bearing:
+
+- **A deposit's refundable balance is `owing`, NEGATED** — `available = −owing`. Deposit 9222 read credit £50, applied £40, `owing: −10`. The kind=6 row also carries `paid` (the amount spent), so `credit − paid` is a second, independent reading. **Only PARTLY-applied deposits prove anything about the sign** — `0` and `−0` are the same number, so a fully-applied deposit "matches" either reading and, counted as evidence, produces a bogus "inconsistent sign" verdict.
+- **⚠️ A NEGATIVE application does NOT work, and it fails SILENTLY.** `billing_payments_save.php` with `OWNER: <invoice>, deposit: <id>, paid: −10` was **accepted** — `success: true`, a real application row created (ID 12482) — with **the amount clamped to £0.00**. The deposit's free balance did not move. This was the *preferred* variant going in (append-only, clean audit trail) and it is the most dangerous thing found: a caller trusting the success response would march on to refund the client in Stripe and then hit 370 again. **Never trust the save response. Verify a release by re-reading the deposit.**
+- **EDITING the application down DOES work** — `id: <appId>, paid: <reduced>` (all other fields carried over from the existing row). Deposit 9222 moved to `paid: 40, owing: −10`; free balance £0 → £10, exactly the amount asked for. Destructive, but it is the only variant that works.
+- **The refund then succeeds** — `OWNER: 0, deposit: <id>, paid: <amount>` was accepted where it had previously returned 370. Release → refund is proven end to end.
+
+**Xero: fire `post_payment` on the RELEASE leg too, not just the refund.** Every `billing_payments_save.php` response carries `hh_task`, `hh_id`, `hh_acc_package_id` and `hh_package_type` — HireHop naming its own sync parameters, so read them back rather than assuming the hardcoded `1`/`3` used elsewhere. During the probe the release landed in HireHop and never reached Xero until the row was re-saved by hand in the HireHop UI. An amended application that doesn't sync leaves HireHop and Xero disagreeing — worse than the problem being fixed.
+
+**Ordering, and why it is not the obvious one.** Keep Stripe BEFORE the refund paperwork: money-moved-without-paperwork is recoverable and staff-facing, whereas paperwork-saying-refunded-without-money is client-facing and they will chase you for it. Instead make the HireHop step *certain to succeed* before any cash moves:
+
+| Phase | Action | On failure |
+|---|---|---|
+| **1 — no cash** | Release the refund amount off the invoice (edit), fire `post_payment`, then **re-read and verify the free balance actually rose by that amount** | Abort. Nothing has happened |
+| **2 — cash** | Stripe refund | Abort. No money moved. Attempt to re-apply the release; if that also fails, flag for manual attention (the invoice will show money owing — visible and recoverable) |
+| **3 — paperwork** | Refund row on the deposit + `post_payment` | Now very unlikely: Phase 1 guaranteed the balance exists |
+
+Phase 1 must be **offered, never silent** — "This deposit is fully applied to invoice X. To refund £Y I'll first release that much back from the invoice, then refund it." One click, explicit. Scope v1 to deposits applied to a SINGLE invoice; anything more complex falls through to a warning and this runbook.
+
+**Sign trap for anything reading these rows.** HireHop dual-publishes each application as two `kind=3` rows sharing one `data.ID` — deposit-side (`credit < 0`, `parent_is="deposit"`) and invoice-side (`credit > 0`, `parent_is="invoice"`). `routes/money.ts` dedups on `data.ID` and takes `Math.abs()`, which is safe there only because `OWNER` supplies the direction. It is **not** safe for a release: a negative application's twins carry the opposite signs, so `abs()` reads a release as *more* money leaving the deposit. Key on the deposit-side twin and keep the sign (`movedOut = −credit`). Also remember a deposit-child row with `OWNER = 0` is a **refund**, which spends the deposit just as an application does — omit it and a fully-refunded deposit reads as still refundable, inviting a double refund.
+
+
 **Still future:**
 - [ ] **Initial card collection from OP** (PaymentIntent create). "Take Card Payment" button on Money tab → amount → Stripe payment link or embedded checkout → portal-style flow without leaving OP.
 - [ ] Auto-record OP-collected payments in HH as deposit + OP as `job_payment`.

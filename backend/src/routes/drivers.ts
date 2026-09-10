@@ -14,7 +14,7 @@ import { generateDriverSnapshot, loadDriverDocuments, type DriverSnapshotData } 
 import { uploadToR2 } from '../config/r2';
 import { fetchLogo } from '../services/hire-form-pdf';
 import { encryptDriverPiiInto, decryptDriverRow, decryptDriverRows } from '../services/driver-pii';
-import { persistableWindows, touchesValidity, backfillFromDates } from '../services/driver-validity';
+import { persistableWindows, touchesValidity, backfillFromDates, isUkLicence } from '../services/driver-validity';
 import { sendIdentityReviewAlert } from '../services/identity-review';
 import { computeVerificationState } from '../services/driver-verification-state';
 import { unsignedJobNumberSql, findUnsignedDriversForJob } from '../services/driver-hire-progress';
@@ -157,8 +157,13 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     // Status filter — SQL mirror of the frontend deriveDriverStatus so
     // a single set of pills filters server-side. Keep this in sync with
     // DriversPage.tsx/DriverDetailPage.tsx if the status rules change.
+    // NB the licence-country arm accepts both the ISO code and the country
+    // NAME — the hire-form webhook writes the name. Mirrors isUkLicence() in
+    // services/driver-validity.ts.
     const statusCase = `
       CASE
+        WHEN d.identity_check_status = 'needs_review' THEN 'id_check_needed'
+        WHEN d.identity_check_status = 'rejected' THEN 'id_rejected'
         WHEN d.requires_referral = true AND d.referral_status = 'approved' THEN 'approved'
         WHEN d.requires_referral = true AND d.referral_status = 'waived' THEN 'approved'
         WHEN d.requires_referral = true AND d.referral_status = 'declined' THEN 'not_approved'
@@ -168,7 +173,13 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         WHEN d.signature_date IS NULL THEN 'in_progress'
         WHEN d.licence_valid_to < CURRENT_DATE
           OR d.dvla_valid_until < CURRENT_DATE
-          OR d.poa1_valid_until < CURRENT_DATE THEN 'expired'
+          OR d.poa1_valid_until < CURRENT_DATE
+          OR (d.passport_valid_until < CURRENT_DATE
+              AND NOT (UPPER(COALESCE(d.licence_issued_by, '')) LIKE '%DVLA%'
+                       OR UPPER(COALESCE(d.licence_issued_by, '')) = 'DVA'
+                       OR UPPER(COALESCE(d.licence_issue_country, '')) IN
+                          ('GB','UK','GBR','UNITED KINGDOM','GREAT BRITAIN')))
+          THEN 'expired'
         ELSE 'approved'
       END`;
     if (statuses.length > 0) {
@@ -1020,8 +1031,7 @@ router.post('/:id/snapshot', authorize('admin', 'manager'), async (req: AuthRequ
     let logoImage: Buffer | null = null;
     try { logoImage = await fetchLogo(); } catch { /* no logo is fine */ }
 
-    const isUk = (d.licence_issue_country || '').toUpperCase() === 'GB' ||
-      (d.licence_issued_by || '').toUpperCase().includes('DVLA');
+    const isUk = isUkLicence(d);
 
     const snapshotData: DriverSnapshotData = {
       driverName: d.full_name || '',
@@ -1126,8 +1136,7 @@ router.post('/:id/generate-snapshot', authenticate, async (req: AuthRequest, res
     let logoImage: Buffer | null = null;
     try { logoImage = await fetchLogo(); } catch { /* skip */ }
 
-    const isUk = (driver.licence_issue_country || '').toUpperCase() === 'GB' ||
-      (driver.licence_issued_by || '').toUpperCase().includes('DVLA');
+    const isUk = isUkLicence(driver);
 
     const snapshotData = {
       driverName: driver.full_name || 'Unknown',

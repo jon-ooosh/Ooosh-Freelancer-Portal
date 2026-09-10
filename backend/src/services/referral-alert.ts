@@ -27,6 +27,7 @@ import { query } from '../config/database';
 import { emailService } from './email-service';
 import { getFrontendUrl } from '../config/app-urls';
 import { decryptDriverRow } from './driver-pii';
+import { isUkLicence } from './driver-validity';
 
 export interface ReferralAlertResult {
   sent: boolean;
@@ -144,7 +145,7 @@ async function buildAndSend(
   if (driver.has_insurance_issues) reasons.push('Declared insurance issues');
   if (driver.has_driving_ban) reasons.push('Declared previous driving ban');
   if (driver.licence_points >= 9) reasons.push(`${driver.licence_points} penalty points on licence`);
-  if (driver.licence_issue_country && !['GB', 'UK', 'DVLA'].includes(String(driver.licence_issue_country).toUpperCase())) {
+  if (driver.licence_issue_country && !isUkLicence(driver)) {
     reasons.push(`Non-standard licence country: ${driver.licence_issue_country}`);
   }
   if (reasons.length === 0) reasons.push('Flagged by hire form verification process');
@@ -161,8 +162,7 @@ async function buildAndSend(
     let logoImage: Buffer | null = null;
     try { logoImage = await fetchLogo(); } catch { /* skip */ }
 
-    const isUk = (driver.licence_issue_country || '').toUpperCase() === 'GB' ||
-      (driver.licence_issued_by || '').toUpperCase().includes('DVLA');
+    const isUk = isUkLicence(driver);
 
     const snapshotData = {
       driverName: driver.full_name || driverName,
