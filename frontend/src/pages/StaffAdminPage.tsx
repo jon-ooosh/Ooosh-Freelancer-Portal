@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
+import { useAuthStore } from '../hooks/useAuthStore';
 
 /**
  * Staff set-up — employee records and working patterns (Staff Calendar, Phase A).
@@ -27,6 +28,8 @@ interface EmployeeRow {
   employment_status: string;
   start_date: string;
   end_date: string | null;
+  bank_holiday_policy: 'use_allowance' | 'granted' | null;
+  entitlement_weeks: string | number | null;
 }
 interface PatternDay {
   cycle_week: number;
@@ -90,6 +93,7 @@ function blankDays(cycleWeeks: number): DraftDay[] {
 }
 
 export default function StaffAdminPage() {
+  const role = useAuthStore(s => s.user?.role);
   const [employees, setEmployees] = useState<EmployeeRow[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -108,6 +112,21 @@ export default function StaffAdminPage() {
   }, []);
 
   useEffect(() => { void loadEmployees(); }, [loadEmployees]);
+
+  // Self-gate at the page, mirroring SettingsPage. The API already refuses a
+  // non-admin on every employment endpoint, so this is about not rendering a
+  // surface that cannot work rather than about holding the data back.
+  if (role !== 'admin') {
+    return (
+      <div className="p-6">
+        <h1 className="text-xl font-semibold text-gray-900 mb-1">Staff set-up</h1>
+        <p className="text-sm text-gray-600">
+          Employment records are admin-only. You can still see who&apos;s in on the{' '}
+          <Link to="/staff/calendar" className="text-ooosh-600 hover:underline">staff calendar</Link>.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="p-4 sm:p-6 max-w-6xl">
@@ -328,6 +347,7 @@ function EmployeeCard({ employee, open, onToggle, onSaved, onError }: {
             <div className="text-sm text-gray-500">Loading…</div>
           ) : (
             <>
+              <EmploymentDetails employee={employee} onSaved={onSaved} onError={onError} />
               <PatternHistory patterns={patterns} />
               <PatternEditor
                 personId={employee.person_id}
@@ -607,6 +627,164 @@ function PatternEditor({ personId, seed, onSaved, onError }: {
       <button onClick={() => void save()} disabled={saving || invalid.length > 0 || weeklyMinutes <= 0}
         className="mt-3 px-3 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
         {saving ? 'Saving…' : 'Save working hours'}
+      </button>
+    </div>
+  );
+}
+
+// ── Employment details ──────────────────────────────────────────────────────
+
+/**
+ * The company-wide default when a person has no explicit policy.
+ *
+ * Current Ooosh policy: bank holidays are ordinary working days — anyone
+ * wanting one off books holiday or TOIL like any other day (spec §5.1). This
+ * becomes the `staff.bank_holidays_policy` system setting in Phase B; the
+ * per-person override below already overrides whatever that ends up saying.
+ */
+const COMPANY_BANK_HOLIDAY_DEFAULT = 'use_allowance';
+const BH_LABEL: Record<string, string> = {
+  use_allowance: 'Normal working days — they book holiday or TOIL to take one off',
+  granted: 'Given as paid leave, on top of their allowance',
+};
+
+function EmploymentDetails({ employee, onSaved, onError }: {
+  employee: EmployeeRow;
+  onSaved: (msg: string) => void | Promise<void>;
+  onError: (msg: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [startDate, setStartDate] = useState(employee.start_date);
+  const [endDate, setEndDate] = useState(employee.end_date ?? '');
+  const [status, setStatus] = useState(employee.employment_status);
+  const [jobTitle, setJobTitle] = useState(employee.job_title ?? '');
+  const [department, setDepartment] = useState(employee.department ?? '');
+  const [bankHolidays, setBankHolidays] = useState<string>(employee.bank_holiday_policy ?? '');
+  const [entitlement, setEntitlement] = useState(
+    employee.entitlement_weeks != null ? String(employee.entitlement_weeks) : ''
+  );
+  const [saving, setSaving] = useState(false);
+
+  async function save() {
+    setSaving(true);
+    try {
+      await api.put(`/staff-calendar/employees/${employee.person_id}`, {
+        startDate,
+        endDate: endDate || null,
+        employmentStatus: status === 'left' ? 'left' : 'employed',
+        jobTitle: jobTitle || null,
+        department: department || null,
+        bankHolidayPolicy: bankHolidays === '' ? null : bankHolidays,
+        entitlementWeeks: entitlement === '' ? null : Number(entitlement),
+      });
+      setEditing(false);
+      await onSaved('Employment details saved.');
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Failed to save employment details');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const effectiveBh = employee.bank_holiday_policy ?? COMPANY_BANK_HOLIDAY_DEFAULT;
+
+  if (!editing) {
+    return (
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <h3 className="text-sm font-medium text-gray-900">Employment</h3>
+          <button onClick={() => setEditing(true)} className="text-xs text-ooosh-600 hover:underline">Edit</button>
+        </div>
+        <dl className="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-2 text-sm">
+          <div><dt className="text-xs text-gray-500">Started</dt><dd className="text-gray-900">{fmtDate(employee.start_date)}</dd></div>
+          <div><dt className="text-xs text-gray-500">Job title</dt><dd className="text-gray-900">{employee.job_title || '—'}</dd></div>
+          <div><dt className="text-xs text-gray-500">Department</dt><dd className="text-gray-900">{employee.department || '—'}</dd></div>
+          <div>
+            <dt className="text-xs text-gray-500">Holiday allowance</dt>
+            <dd className="text-gray-900">
+              {employee.entitlement_weeks != null ? `${employee.entitlement_weeks} weeks` : '5.6 weeks (statutory)'}
+            </dd>
+          </div>
+          <div className="col-span-2 sm:col-span-4">
+            <dt className="text-xs text-gray-500">Bank holidays</dt>
+            <dd className="text-gray-900">
+              {BH_LABEL[effectiveBh]}
+              {employee.bank_holiday_policy === null && (
+                <span className="text-xs text-gray-500"> (company default)</span>
+              )}
+            </dd>
+          </div>
+        </dl>
+      </div>
+    );
+  }
+
+  return (
+    <div className="p-3 rounded border border-ooosh-200 bg-ooosh-50/40">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-sm font-medium text-gray-900">Employment</h3>
+        <button onClick={() => setEditing(false)} className="text-sm text-gray-500 hover:text-gray-700">Cancel</button>
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3">
+        <label className="text-sm">
+          <span className="block text-xs text-gray-600 mb-1">Start date</span>
+          <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)}
+            className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white" />
+        </label>
+        <label className="text-sm">
+          <span className="block text-xs text-gray-600 mb-1">Job title</span>
+          <input value={jobTitle} onChange={e => setJobTitle(e.target.value)}
+            className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white" />
+        </label>
+        <label className="text-sm">
+          <span className="block text-xs text-gray-600 mb-1">Department</span>
+          <input value={department} onChange={e => setDepartment(e.target.value)}
+            className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white" />
+        </label>
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+        <label className="text-sm">
+          <span className="block text-xs text-gray-600 mb-1">Bank holidays</span>
+          <select value={bankHolidays} onChange={e => setBankHolidays(e.target.value)}
+            className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white">
+            <option value="">Company default — {BH_LABEL[COMPANY_BANK_HOLIDAY_DEFAULT]}</option>
+            <option value="use_allowance">{BH_LABEL.use_allowance}</option>
+            <option value="granted">{BH_LABEL.granted}</option>
+          </select>
+          <span className="block text-xs text-gray-500 mt-1">
+            Leave on the company default unless this person&apos;s contract differs — then a
+            future policy change follows them automatically.
+          </span>
+        </label>
+        <label className="text-sm">
+          <span className="block text-xs text-gray-600 mb-1">Holiday allowance (weeks)</span>
+          <input type="number" min={0} max={52} step={0.1} value={entitlement}
+            onChange={e => setEntitlement(e.target.value)} placeholder="5.6 (statutory)"
+            className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white" />
+          <span className="block text-xs text-gray-500 mt-1">
+            Blank uses the statutory 5.6 weeks. Applied to their own contracted hours, so
+            part-timers pro-rata automatically.
+          </span>
+        </label>
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+        <label className="text-sm">
+          <span className="block text-xs text-gray-600 mb-1">Status</span>
+          <select value={status} onChange={e => setStatus(e.target.value)}
+            className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white">
+            <option value="employed">Employed</option>
+            <option value="left">Left</option>
+          </select>
+        </label>
+        <label className="text-sm">
+          <span className="block text-xs text-gray-600 mb-1">Leaving date (if applicable)</span>
+          <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)}
+            className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white" />
+        </label>
+      </div>
+      <button onClick={() => void save()} disabled={saving}
+        className="px-3 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
+        {saving ? 'Saving…' : 'Save employment details'}
       </button>
     </div>
   );
