@@ -159,14 +159,16 @@ export async function createPattern(
   try {
     await client.query('BEGIN');
 
-    // Anything starting on or after the new date is superseded outright — this
-    // is a correction of a future-dated pattern, not history.
+    // Replace a pattern starting on the SAME day — that is a correction of this
+    // pattern, so the old version goes. Deliberately NOT `>=`: a later pattern
+    // is somebody else's future arrangement and must survive an insertion in
+    // front of it, otherwise adding a June pattern silently destroys October.
     await client.query(
-      `DELETE FROM staff_working_patterns WHERE person_id = $1 AND effective_from >= $2::date`,
+      `DELETE FROM staff_working_patterns WHERE person_id = $1 AND effective_from = $2::date`,
       [personId, effectiveFrom]
     );
 
-    // Close the pattern that was running.
+    // Close the pattern that was running when this one starts.
     await client.query(
       `UPDATE staff_working_patterns
           SET effective_to = $2::date, updated_at = NOW()
@@ -176,11 +178,24 @@ export async function createPattern(
       [personId, addDaysYmd(effectiveFrom, -1), effectiveFrom]
     );
 
+    // If a later pattern already exists, this one ends the day before it starts.
+    // Without this the new row would be open-ended and overlap it, and the
+    // resolver's "pattern in force on this date" .find() would depend on row
+    // order — i.e. give a different answer on different days.
+    const next = await client.query(
+      `SELECT MIN(effective_from)::text AS next_from
+         FROM staff_working_patterns
+        WHERE person_id = $1 AND effective_from > $2::date`,
+      [personId, effectiveFrom]
+    );
+    const nextFrom: string | null = next.rows[0]?.next_from ?? null;
+    const effectiveTo = nextFrom ? addDaysYmd(nextFrom, -1) : null;
+
     const pat = await client.query(
-      `INSERT INTO staff_working_patterns (person_id, effective_from, cycle_weeks, notes, created_by)
-       VALUES ($1, $2::date, $3, $4, $5)
+      `INSERT INTO staff_working_patterns (person_id, effective_from, effective_to, cycle_weeks, notes, created_by)
+       VALUES ($1, $2::date, $3::date, $4, $5, $6)
        RETURNING id`,
-      [personId, effectiveFrom, cycleWeeks, opts.notes ?? null, userId ?? null]
+      [personId, effectiveFrom, effectiveTo, cycleWeeks, opts.notes ?? null, userId ?? null]
     );
     const patternId = pat.rows[0].id as string;
 
@@ -194,7 +209,7 @@ export async function createPattern(
     }
 
     await client.query('COMMIT');
-    return { id: patternId, effectiveFrom, cycleWeeks, days: rows };
+    return { id: patternId, effectiveFrom, effectiveTo, cycleWeeks, days: rows };
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;

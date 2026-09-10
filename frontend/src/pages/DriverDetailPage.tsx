@@ -209,6 +209,39 @@ function toInputDate(d: string | null): string {
   }
 }
 
+/**
+ * iDenfy's verdict codes in English.
+ *
+ * The panel used to print the raw codes ("Document check: DOC_SPOOF_DETECTED"),
+ * which tells a member of staff nothing about what to look for in the images.
+ * Deliberately non-judgemental wording: the commonest cause of a spoof flag is
+ * glare on a real licence photographed flat under a light, not fraud.
+ *
+ * Unknown codes fall through to the raw value rather than being swallowed —
+ * iDenfy adds tags, and a code we can't translate is still evidence.
+ */
+const IDENFY_VERDICT_PLAIN: Record<string, string> = {
+  DOC_SPOOF_DETECTED: 'iDenfy judged the document image to be a photo of a SCREEN or a printout rather than the physical card. Glare on the laminate, or photographing it off a monitor, both trigger this.',
+  DOC_SIDE_MISMATCH: 'The front and back images don\u2019t belong to the same document \u2014 usually the front was uploaded twice.',
+  DOC_FACE_MISMATCH: 'The selfie didn\u2019t match the photo on the document.',
+  FACE_MISMATCH: 'The selfie didn\u2019t match the photo on the document.',
+  NO_FACE_FOUND: 'No face could be found in the selfie.',
+  TOO_MANY_FACES: 'More than one face was visible in the selfie.',
+  FACE_TOO_BLURRY: 'The selfie was too blurry to compare.',
+  AUTO_UNVERIFIABLE: 'iDenfy could not run the comparison automatically.',
+  DOC_EXPIRED: 'The document had already expired.',
+  DOC_NOT_FOUND: 'No document could be read from the images.',
+  DOC_DOB_ERROR: 'The date of birth on the document didn\u2019t match what the driver entered.',
+  DOC_NAME_ERROR: 'The name on the document didn\u2019t match what the driver entered.',
+  DOC_NUMBER_ERROR: 'The document number could not be read or did not validate.',
+  DOC_ANALYSIS_ERROR: 'iDenfy could not analyse the document images.',
+};
+
+function plainVerdict(code: string | null | undefined): string | null {
+  if (!code) return null;
+  return IDENFY_VERDICT_PLAIN[code.toUpperCase().trim()] || null;
+}
+
 function IdentityReviewPanel({ driver, onDriverUpdate }: {
   driver: DriverDetail;
   onDriverUpdate: (d: DriverDetail) => void;
@@ -226,6 +259,19 @@ function IdentityReviewPanel({ driver, onDriverUpdate }: {
   if (driver.idenfy_doc_result) detail.push(`Document check: ${driver.idenfy_doc_result}`);
   for (const t of driver.idenfy_mismatch_tags || []) detail.push(`Mismatch: ${t}`);
   for (const r of driver.idenfy_suspicion_reasons || []) detail.push(`Flag: ${r}`);
+
+  // What actually went wrong, in English, worst-first. The document verdict
+  // leads because that is what the widened Sep 2026 trigger mostly catches —
+  // both drivers that prompted it had a PERFECT face match and a rejected
+  // document, so leading with the face would have described the wrong problem.
+  const plainReasons = [
+    plainVerdict(driver.idenfy_doc_result),
+    plainVerdict(driver.idenfy_face_result),
+    ...(driver.idenfy_mismatch_tags || []).map(plainVerdict),
+    ...(driver.idenfy_suspicion_reasons || []).map(plainVerdict),
+  ].filter((x): x is string => !!x);
+  const uniquePlainReasons = Array.from(new Set(plainReasons));
+  const faceMatched = (driver.idenfy_face_result || '').toUpperCase() === 'FACE_MATCH';
 
   async function resolve(outcome: 'accepted' | 'rejected') {
     setBusy(outcome);
@@ -256,12 +302,36 @@ function IdentityReviewPanel({ driver, onDriverUpdate }: {
       </h3>
 
       {status === 'needs_review' && (
-        <p className="text-sm text-gray-700 mb-3">
-          iDenfy couldn&rsquo;t match this driver&rsquo;s selfie to the photo on their licence. That&rsquo;s
-          often just an old licence photo or a change in appearance &mdash; compare the
-          <strong> Selfie</strong> and <strong>Licence Front</strong> images below and decide.
-          Until then they can&rsquo;t be assigned to a hire and won&rsquo;t be sent a hire agreement.
-        </p>
+        <div className="mb-3">
+          <p className="text-sm text-gray-700">
+            iDenfy did not accept this check
+            {driver.idenfy_overall ? <> (<strong>{driver.idenfy_overall}</strong>)</> : null}.
+            Look at the <strong>Licence Front</strong>, <strong>Licence Back</strong> and{' '}
+            <strong>Selfie</strong> images on this page and decide. Until you do, this driver
+            can&rsquo;t be assigned to a hire and won&rsquo;t be sent a hire agreement.
+          </p>
+          {uniquePlainReasons.length > 0 && (
+            <ul className="mt-2 text-sm text-gray-700 space-y-1">
+              {uniquePlainReasons.map((r) => <li key={r}>&bull; {r}</li>)}
+            </ul>
+          )}
+          {faceMatched && (
+            <p className="mt-2 text-sm text-gray-700">
+              Note: the <strong>face matched</strong> the photo on the document &mdash; whatever
+              iDenfy objected to, it wasn&rsquo;t the driver&rsquo;s appearance.
+            </p>
+          )}
+          <button
+            type="button"
+            onClick={() => {
+              const el = document.getElementById('evidence-identity');
+              if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }}
+            className="mt-3 text-sm font-medium text-ooosh-700 hover:text-ooosh-900 hover:underline"
+          >
+            Show the licence &amp; selfie images &darr;
+          </button>
+        </div>
       )}
 
       {detail.length > 0 && (
@@ -775,9 +845,12 @@ export default function DriverDetailPage() {
 
   return (
     <div>
-      {/* Header */}
-      <div className="flex items-start justify-between">
-        <div>
+      {/* Header — stacks below `sm`. Side by side at every width, the four
+          action buttons overflowed the viewport on a phone while the rest of
+          the page tucked correctly (Sep 2026). `min-w-0` lets the identity
+          column shrink instead of forcing the row wider than the screen. */}
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
           <button
             onClick={() => navigate('/drivers')}
             className="text-sm text-gray-500 hover:text-gray-700 mb-2 inline-flex items-center gap-1"
@@ -831,7 +904,7 @@ export default function DriverDetailPage() {
             </span>
           </div>
         </div>
-        <div className="flex flex-wrap justify-end items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2 justify-start sm:justify-end">
           {!editing && (
             <div className="flex items-center gap-2 mr-1">
               {lastRefreshedAt && (
@@ -1114,13 +1187,20 @@ function ReferralPanel({ driver, onDriverUpdate }: { driver: DriverDetail; onDri
   if (driver.has_insurance_issues) reasons.push('Declared insurance issues (declined/cancelled/special terms)');
   if (driver.has_driving_ban) reasons.push('Declared previous driving ban');
   if (driver.licence_points >= 9) reasons.push(`${driver.licence_points} penalty points on licence`);
-  if (driver.licence_issue_country && !['GB', 'UK', 'DVLA'].includes(driver.licence_issue_country.toUpperCase())) {
+  if (driver.licence_issue_country && !['GB', 'UK', 'GBR', 'DVLA', 'UNITED KINGDOM', 'GREAT BRITAIN'].includes(driver.licence_issue_country.toUpperCase())) {
     reasons.push(`Non-standard licence country: ${driver.licence_issue_country}`);
   }
   if (reasons.length === 0 && driver.additional_details) reasons.push(driver.additional_details);
   if (reasons.length === 0) reasons.push('Flagged by hire form verification process');
 
-  const isResolved = driver.referral_status === 'approved' || driver.referral_status === 'declined';
+  // 'waived' is a resolution like any other — staff judged no insurer referral
+  // was needed. Omitting it here left the panel amber and still offering
+  // "Resolve Referral" on a driver the backend had already cleared
+  // (requires_referral = false), so the record read as outstanding forever
+  // (Thomas Coyne / 16116, Sep 2026).
+  const isResolved = driver.referral_status === 'approved'
+    || driver.referral_status === 'declined'
+    || driver.referral_status === 'waived';
 
   async function handleResolve() {
     setResolving(true);
@@ -1148,7 +1228,7 @@ function ReferralPanel({ driver, onDriverUpdate }: { driver: DriverDetail; onDri
 
   return (
     <div className={`bg-white rounded-xl shadow-sm border-2 p-6 ${
-      driver.referral_status === 'approved' ? 'border-green-200'
+      driver.referral_status === 'approved' || driver.referral_status === 'waived' ? 'border-green-200'
         : driver.referral_status === 'declined' ? 'border-red-200'
         : 'border-amber-300'
     }`}>
