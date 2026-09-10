@@ -106,6 +106,7 @@ export async function getEmployeeRecord(personId: string) {
 export async function listEmployees() {
   const r = await query(
     `SELECT se.person_id, se.job_title, se.department, se.employment_status,
+            se.bank_holiday_policy, se.entitlement_weeks,
             se.start_date::text AS start_date,
             se.end_date::text   AS end_date,
             (p.first_name || ' ' || p.last_name) AS name,

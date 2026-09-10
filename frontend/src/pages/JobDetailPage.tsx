@@ -5147,7 +5147,6 @@ export default function JobDetailPage() {
                           );
                         }
                         const wasReferred = a.referral_status === 'approved' || a.referral_status === 'waived';
-                        const effectiveVehicleId = a.effective_vehicle_id || a.vehicle_id;
                         // Keyed on hire_form_emailed_at, NOT hire_form_pdf_key.
                         // The book-out agreement is generated asynchronously
                         // (setImmediate → generateAndEmailHireFormPdf), so for
@@ -5160,10 +5159,19 @@ export default function JobDetailPage() {
                         // firing in between). The email timestamp is claimed
                         // atomically at the start of the send, so it is the
                         // honest "has the agreement gone out?" signal.
+                        //
+                        // Gated on a.vehicle_id, NOT effectiveVehicleId. The
+                        // endpoint requires the van to be linked to THIS row
+                        // (it generates the agreement against it) and 400s with
+                        // "No vehicle linked to this assignment" otherwise — so
+                        // keying the button on a sibling allocation offered an
+                        // action that could only fail. With no vehicle_id the
+                        // Allocate Van / Book Out CTA below is the correct next
+                        // step and appears in its place.
                         const needsAuthorise = wasReferred
                           && !a.hire_form_emailed_at
                           && !a.hire_form_pdf_key
-                          && !!effectiveVehicleId
+                          && !!a.vehicle_id
                           && ['soft', 'confirmed', 'booked_out', 'active'].includes(a.status);
                         if (needsAuthorise) {
                           return (

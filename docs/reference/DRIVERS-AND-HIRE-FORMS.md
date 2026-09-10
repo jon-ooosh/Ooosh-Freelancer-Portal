@@ -151,9 +151,12 @@ two photographs. Alert to info@ + will@ fires **once** (atomic claim on
   `isIdentityAuthorised()`** rather than re-deriving the status inline.
 - **It fails OPEN** on an unknown/absent status, matching the referral arm — a
   data gap must never silently block a driver.
-- **Only an explicit non-match trips review** (`faceNeedsReview`). An absent
-  face result is NOT a failure: a passport-only session runs no comparison, so
-  treating "no result" as a mismatch would flag every second-document upload.
+- ~~**Only an explicit non-match trips review** (`faceNeedsReview`)~~ —
+  **superseded Sep 2026, see "The verdict OP never read" below.** The trigger is
+  now `idenfyNeedsReview()`, which keys on the OVERALL verdict as well as the
+  face. An absent verdict is still NOT a failure: a passport-only session runs
+  no face comparison and a step posting only POA dates carries no verdict at
+  all, so treating "no result" as a mismatch would flag half the roster.
 - **A staff decision wins.** Once accepted/rejected, a repeat webhook carrying
   the same stale verdict does not re-open it.
 - **The hire-form app cannot set the status** — it reports what iDenfy said, OP
@@ -179,12 +182,117 @@ driver part-way through has no `vehicle_hire_assignments` row yet (created on
 signature), so Hire History is empty and nothing said which hire a stuck driver
 belonged to. Surfaces as `In Progress · #16291` on `/drivers`.
 
-**Open / deliberately left:** the passport branch
-(`updateBoardAWithPassportData`) returns early when not approved, so a failed
-**passport** face check still writes nothing to OP. POA policy is "both must be
-valid, independently" (jon, Aug 2026) — the router already enforces it, but the
+**Open / deliberately left:** POA policy is "both must be valid,
+independently" (jon, Aug 2026) — the router already enforces it, but the
 picker/gate only red-flag when BOTH have lapsed, so they are currently too
-lenient; tightening would newly red-flag 35 drivers.
+lenient; tightening would newly red-flag 35 drivers. (The passport branch
+writing nothing on a failed check was closed Sep 2026 — see below.)
+
+##### The verdict OP never read (Sep 2026)
+
+The Aug 2026 work above **persisted** the verdict. It did not make anything
+**decide** on it. `idenfy_overall`, `idenfy_doc_result` and the two tag arrays
+were written on every webhook and then read by exactly two things: the alert
+email body, and a panel that only renders once the flag is already raised. The
+sole trigger was `faceNeedsReview(idenfy_face_result)`.
+
+So iDenfy could reject a licence outright and OP waved the driver through:
+
+| Driver | overall | face | doc | OP said |
+|---|---|---|---|---|
+| Jo Walker / 16249 | `DENIED` | `FACE_MATCH` | `DOC_SPOOF_DETECTED` | Identity ✓, green 90-day window |
+| Simon Halliday / 15551 | `DENIED` | `FACE_MATCH` | `DOC_SIDE_MISMATCH` | Identity ✓, signed and out |
+
+Both had a **perfect face match** and a rejected DOCUMENT. The face-only test
+was never going to catch either — and the driver-facing half of it is worse than
+the staff half: Jo tried four times, was told each time that verification had
+failed, and reasonably concluded his *face* hadn't matched. It had. What iDenfy
+objected to was a licence photographed flat under a downlight with glare across
+the laminate, which reads to a spoof detector as a photo of a screen. He was a
+real man with a real licence the whole time (jon verified the images by hand,
+Sep 2026).
+
+**The trigger is now `idenfyNeedsReview({ overall, faceResult })`** — `DENIED`
+or `SUSPECTED`, **or** an explicit face non-match. Keyed on `overall`
+deliberately: that is independent of iDenfy's tag vocabulary, which varies a
+spoof between `fraudTags`, `mismatchTags` and `autoDocument` depending on schema
+version, whereas a rejection is always `DENIED`. Nothing downstream needed
+building — the `manual-review` exit, the alert email, the withheld agreement,
+the blocked quick-assign and the blocked stage all already existed. This landed
+a wire that was never connected.
+
+**`EXPIRED` must never trip review.** It is iDenfy's *session timeout* — "the
+user never completes the verification and the token reaches its `tokenExpiry`" —
+not a rejection; an expired **document** comes back as `DENIED`. It is common
+(three of five rows in the first sweep), and flagging abandoned tabs would raise
+false reviews weekly until nobody believed the flag. What an expired session
+must not do is leave EVIDENCE, and that is enforced on the hire-form side: it
+now records `idenfyOverall` and nothing else — no check date, no identity field,
+no file. Before that it stamped a fresh `idenfy_check_date`, which for a
+RETURNING driver (who already has `licence_issued_by`, so the integrity guard
+passes) silently minted a green 90-day licence window for walking away from
+their phone.
+
+**The flag outranks every date, and that is why the review panel has no date
+field.** `next-step` checks `identity_check_status` BEFORE `calculateNextStep`
+runs, and `isDriverAuthorisedForAgreement` / quick-assign gate on the flag, not
+on any `*_valid_until`. So a driver in review cannot be released by extending a
+date. Offering staff a date in the Accept/Reject panel would therefore either do
+nothing, or have to clear the flag as a side effect — and one click must not
+both accept an identity and mint a validity window. Accept uses the check date
+already on file, which is the date the check really happened.
+
+Where a DENIED check returns **no** document data there is nothing to adjudicate
+and no date to trust: the integrity guard (`trusted: false`) already says
+"re-verification needed", and the honest remedy is a fresh hire form, not an
+override.
+
+##### `HMPO`, and how one abandoned session changed a driver's document regime
+
+Charlie McWilliams / 15727 verified cleanly at 12:24Z on 8 Sep. At 12:50Z a
+**passport** session he had abandoned (POA address mismatch had pushed him to
+one) expired — and came back with `docType` absent. The hire-form split was a
+single `data.docType === 'PASSPORT'` test, so anything else, including missing,
+took the LICENCE branch. It wrote the passport's issuing authority into
+`licence_issued_by` (**`HMPO`** — the UK Passport Office) and the passport's
+expiry into `licence_valid_to`.
+
+`isUkDriver` was `issuedBy === 'DVLA' || licence_issue_country === 'GB'`, and the
+second half had **never once matched**: the webhook writes
+`licence_issue_country` through `getCountryName()`, i.e. the NAME
+("United Kingdom"), while every consumer compared it to the CODE. So UK
+detection rested entirely on `licence_issued_by`, `HMPO` was not `DVLA`, and a
+driver who had **passed his DVLA check that morning** was reclassified non-UK,
+had that check greyed out as "not required", and was asked for a passport he did
+not need.
+
+**`isUkLicence()` in `services/driver-validity.ts` is now THE test** — it decides
+which document regime applies, so never re-derive it inline — and it accepts the
+country as a code OR a name. On the hire-form side `classifyDocType()` returns
+`passport` / `licence` / `unknown`, in both the routing and the file-upload path
+(which decides the evidence slot every image lands in); unknown writes no
+identity data at all, reports the verdict, and lets OP park the driver.
+
+##### The passport window: 90 days, both sides (migration 207, Sep 2026)
+
+`VALIDITY_WINDOW_DAYS.passport` was 30 while `updateBoardAWithPassportData` sent
+`passportValidUntil = today + 90`. Handed only an expiry, `backfillFromDates`
+back-computed the FROM date from it — `(today + 90) − 30 = today + 60` — so every
+passport check recorded a check date **sixty days after the check happened**, and
+staff read that fiction as "Checked on". Louis Salanson / 16507 is the worked
+example: stored `31 Jul → 30 Aug`, from a check that really happened around
+1 June.
+
+Resolved to **90 days from the date of checking**, still capped by the passport's
+own printed expiry (`computeDriverValidity` already applied that cap). The
+hire-form app now sends `passportCheckDate` — the FROM date — so nothing is
+back-computed. Migration 207 re-derives the stored column for existing rows,
+because `passport_valid_until` is a STORED derived column that the SQL consumers
+read directly: changing the constant alone would have left the driver page
+(computed, 90d) disagreeing with the drivers-list pills (stored, 30d) until each
+driver happened to be touched. Rows whose check date is itself a back-computed
+fiction stay wrong by up to 60 days — nothing on the row can recover the true
+date — and correct themselves on the driver's next passport check.
 
 ##### Driver verification cockpit ✅ SHIPPED (Aug 2026)
 
