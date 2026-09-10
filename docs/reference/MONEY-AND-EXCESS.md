@@ -515,12 +515,24 @@ HireHop refuses a manual *payment* here because the invoice is already over-sati
 
 **⚠️ After a 370, do not press Refund again.** The guard computes `refundable = original − alreadyRefunded` (£1,419.28 − £91.12 = £1,328.16), so a second £91.12 request passes validation and issues a **second real Stripe refund**. The money has already moved; only the paperwork is missing.
 
-**Probing the API before automating.** Every `billing_payments_save.php` callsite in this repo passes `id: 0` — we have only ever *created* rows, never *edited* one, so step 1 is unproven over the API. `scripts/hh-deposit-release-probe.ts` (read-only by default, `--commit` to write, refuses any job but the disposable test job without `--allow-live`) answers four questions against HireHop directly:
+**The release IS automatable — proven against test job 16668, 10 Sep 2026** (`scripts/hh-deposit-release-probe.ts`, read-only by default, `--commit` to write, refuses any job but the disposable one without `--allow-live`). Four findings, all load-bearing:
 
-- **Q1** Does the kind=6 deposit row publish its unallocated balance as `owing`? The 15628 screenshots say yes (`Owed −£91.12` after the release, `£0.00` after the refund). If confirmed, OP's pre-flight is a field read, not derived arithmetic.
-- **Q2** Does a **new negative application** (`OWNER: <invoice>, deposit: <id>, paid: −x`) release the money? Append-only, keeps an audit trail — strongly preferred.
-- **Q3** Failing that, does **editing** the existing application down work over the API as it does in the UI? Destructive, second choice.
-- **Q4** Does the refund then succeed where it previously returned 370?
+- **A deposit's refundable balance is `owing`, NEGATED** — `available = −owing`. Deposit 9222 read credit £50, applied £40, `owing: −10`. The kind=6 row also carries `paid` (the amount spent), so `credit − paid` is a second, independent reading. **Only PARTLY-applied deposits prove anything about the sign** — `0` and `−0` are the same number, so a fully-applied deposit "matches" either reading and, counted as evidence, produces a bogus "inconsistent sign" verdict.
+- **⚠️ A NEGATIVE application does NOT work, and it fails SILENTLY.** `billing_payments_save.php` with `OWNER: <invoice>, deposit: <id>, paid: −10` was **accepted** — `success: true`, a real application row created (ID 12482) — with **the amount clamped to £0.00**. The deposit's free balance did not move. This was the *preferred* variant going in (append-only, clean audit trail) and it is the most dangerous thing found: a caller trusting the success response would march on to refund the client in Stripe and then hit 370 again. **Never trust the save response. Verify a release by re-reading the deposit.**
+- **EDITING the application down DOES work** — `id: <appId>, paid: <reduced>` (all other fields carried over from the existing row). Deposit 9222 moved to `paid: 40, owing: −10`; free balance £0 → £10, exactly the amount asked for. Destructive, but it is the only variant that works.
+- **The refund then succeeds** — `OWNER: 0, deposit: <id>, paid: <amount>` was accepted where it had previously returned 370. Release → refund is proven end to end.
+
+**Xero: fire `post_payment` on the RELEASE leg too, not just the refund.** Every `billing_payments_save.php` response carries `hh_task`, `hh_id`, `hh_acc_package_id` and `hh_package_type` — HireHop naming its own sync parameters, so read them back rather than assuming the hardcoded `1`/`3` used elsewhere. During the probe the release landed in HireHop and never reached Xero until the row was re-saved by hand in the HireHop UI. An amended application that doesn't sync leaves HireHop and Xero disagreeing — worse than the problem being fixed.
+
+**Ordering, and why it is not the obvious one.** Keep Stripe BEFORE the refund paperwork: money-moved-without-paperwork is recoverable and staff-facing, whereas paperwork-saying-refunded-without-money is client-facing and they will chase you for it. Instead make the HireHop step *certain to succeed* before any cash moves:
+
+| Phase | Action | On failure |
+|---|---|---|
+| **1 — no cash** | Release the refund amount off the invoice (edit), fire `post_payment`, then **re-read and verify the free balance actually rose by that amount** | Abort. Nothing has happened |
+| **2 — cash** | Stripe refund | Abort. No money moved. Attempt to re-apply the release; if that also fails, flag for manual attention (the invoice will show money owing — visible and recoverable) |
+| **3 — paperwork** | Refund row on the deposit + `post_payment` | Now very unlikely: Phase 1 guaranteed the balance exists |
+
+Phase 1 must be **offered, never silent** — "This deposit is fully applied to invoice X. To refund £Y I'll first release that much back from the invoice, then refund it." One click, explicit. Scope v1 to deposits applied to a SINGLE invoice; anything more complex falls through to a warning and this runbook.
 
 **Sign trap for anything reading these rows.** HireHop dual-publishes each application as two `kind=3` rows sharing one `data.ID` — deposit-side (`credit < 0`, `parent_is="deposit"`) and invoice-side (`credit > 0`, `parent_is="invoice"`). `routes/money.ts` dedups on `data.ID` and takes `Math.abs()`, which is safe there only because `OWNER` supplies the direction. It is **not** safe for a release: a negative application's twins carry the opposite signs, so `abs()` reads a release as *more* money leaving the deposit. Key on the deposit-side twin and keep the sign (`movedOut = −credit`). Also remember a deposit-child row with `OWNER = 0` is a **refund**, which spends the deposit just as an application does — omit it and a fully-refunded deposit reads as still refundable, inviting a double refund.
 

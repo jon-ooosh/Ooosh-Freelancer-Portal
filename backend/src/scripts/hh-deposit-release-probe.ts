@@ -32,8 +32,8 @@
  *       ANSWERED READ-ONLY. No flags needed.
  *
  *   Q2  Does a NEW NEGATIVE application (`OWNER: <invoice>, deposit: <id>,
- *       paid: -<amount>`) release the money? This is append-only, leaves an
- *       audit trail, and needs no edit — strongly preferred if it works.
+ *       paid: -<amount>`) release the money? Append-only, so it was the
+ *       preferred variant.
  *
  *   Q3  Failing that, does EDITING the existing application down
  *       (`id: <appId>, paid: <reduced>`) work over the API as it does in the
@@ -41,6 +41,35 @@
  *
  *   Q4  After a successful release, does the refund (`OWNER: 0`) now succeed
  *       where it previously returned 370?
+ *
+ * ANSWERS (probe run against job 16668, 10 Sep 2026)
+ * -------------------------------------------------
+ *   A1  YES, but NEGATED: `available = -owing`. Deposit 9222 read credit 50,
+ *       applied 40, `owing: -10`. The kind=6 row also carries `paid` (the
+ *       amount spent), so `credit - paid` is a second, independent reading.
+ *       NOTE: a deposit at a ZERO free balance proves nothing about sign —
+ *       0 and -0 are the same number — so only PARTLY-applied deposits count
+ *       as evidence. Ignoring that gave this probe a bogus "inconsistent
+ *       sign" verdict on its first run.
+ *
+ *   A2  NO — and it fails SILENTLY, which is far worse than failing. HireHop
+ *       accepted `paid: -10`, returned `success: true`, created a real
+ *       application row, and CLAMPED THE AMOUNT TO ZERO. The deposit's free
+ *       balance did not move. Any caller trusting the success response would
+ *       march on to refund the client in Stripe and then hit 370 again — the
+ *       original incident, automated. **This is why the release must be
+ *       verified by re-reading the deposit, never by trusting the response.**
+ *
+ *   A3  YES. `id: <appId>, paid: <reduced>` moved deposit 9222 to
+ *       `paid: 40, owing: -10` — exactly the £10 asked for.
+ *
+ *   A4  YES. The refund (`OWNER: 0`) was then accepted where it had 370'd.
+ *       The release -> refund sequence is proven end to end.
+ *
+ *   Xero: every save response carries `hh_task`, `hh_id`, `hh_acc_package_id`
+ *       and `hh_package_type` — HireHop naming its own sync parameters. The
+ *       RELEASE leg needs `accounting/tasks.php` fired just as the refund does;
+ *       without it the amended application never reaches Xero.
  *
  * SAFETY
  * ------
@@ -61,19 +90,15 @@
  *   # Q1 — dump the billing tree and test the `owing` hypothesis. No writes.
  *   npx tsx src/scripts/hh-deposit-release-probe.ts --job=16668
  *
- *   # Q2 — plan a £10 release via a negative application (prints payload only)
- *   npx tsx src/scripts/hh-deposit-release-probe.ts --job=16668 --deposit=<id> --amount=10 --method=negative
- *   # ...then actually send it, and re-read to see what changed:
- *   npx tsx src/scripts/hh-deposit-release-probe.ts --job=16668 --deposit=<id> --amount=10 --method=negative --commit
+ *   # plan a £10 release (prints the payload, sends nothing)
+ *   npx tsx src/scripts/hh-deposit-release-probe.ts --job=16668 --deposit=<id> --amount=10
+ *   # ...send it, re-read, and prove the refund then succeeds:
+ *   npx tsx src/scripts/hh-deposit-release-probe.ts --job=16668 --deposit=<id> --amount=10 --commit --refund --xero
  *
- *   # Q3 — same, editing the existing application down instead
- *   npx tsx src/scripts/hh-deposit-release-probe.ts --job=16668 --deposit=<id> --amount=10 --method=edit --commit
- *
- *   # Q4 — release, then immediately attempt the refund that used to 370
- *   npx tsx src/scripts/hh-deposit-release-probe.ts --job=16668 --deposit=<id> --amount=10 --method=negative --commit --refund
- *
- * Add `--xero` to also fire the post_payment sync on the refund (leave it off
- * on the test job unless you want to tidy Xero afterwards).
+ * `--method` defaults to `edit` (the proven variant). `--method=negative`
+ * reproduces the A2 silent no-op and warns before doing so.
+ * `--xero` fires accounting/tasks.php on BOTH legs; leave it off if you don't
+ * want the test rows landing in Xero.
  */
 import { hhBroker } from '../services/hirehop-broker';
 
@@ -84,7 +109,7 @@ function arg(name: string): string | undefined {
 const jobArg = arg('job');
 const depositArg = arg('deposit');
 const amountArg = arg('amount');
-const method = (arg('method') || 'negative') as 'negative' | 'edit';
+const method = (arg('method') || 'edit') as 'negative' | 'edit';
 const commit = process.argv.includes('--commit');
 const doRefund = process.argv.includes('--refund');
 const doXero = process.argv.includes('--xero');
@@ -116,6 +141,7 @@ interface DepositView {
   description: string;
   credit: number;           // cash received on this deposit
   rawOwing: number | null;  // HH's own `owing` field, verbatim
+  rawPaid: number | null;   // HH's own `paid` field — how much has been spent
   movements: Movement[];
   movedOut: number;         // sum of movements (derived)
   derivedAvailable: number; // credit - movedOut
@@ -180,11 +206,13 @@ function buildDeposits(rows: Row[]): DepositView[] {
     if (!id) continue;
     const credit = parseFloat(row.credit ?? d.credit ?? '0');
     const rawOwing = row.owing ?? d.owing ?? d.OWED ?? d.OWING;
+    const rawPaid = row.paid ?? d.paid ?? d.PAID;
     deposits.set(id, {
       id,
       description: String(d.DESCRIPTION || row.desc || ''),
       credit,
       rawOwing: rawOwing == null || rawOwing === '' ? null : parseFloat(String(rawOwing)),
+      rawPaid: rawPaid == null || rawPaid === '' ? null : parseFloat(String(rawPaid)),
       movements: [],
       movedOut: 0,
       derivedAvailable: credit,
@@ -246,7 +274,7 @@ function printDeposits(label: string, deps: DepositView[]) {
     console.log(`    received        ${money(d.credit)}`);
     console.log(`    moved out       ${money(d.movedOut)}  (${apps.length} application${apps.length === 1 ? '' : 's'}, ${refunds.length} refund${refunds.length === 1 ? '' : 's'})`);
     console.log(`    derived free    ${money(d.derivedAvailable)}   <- credit - movements`);
-    console.log(`    HH raw 'owing'  ${d.rawOwing == null ? '(absent)' : money(d.rawOwing)}`);
+    console.log(`    HH raw 'owing'  ${d.rawOwing == null ? '(absent)' : money(d.rawOwing)}   HH raw 'paid'  ${d.rawPaid == null ? '(absent)' : money(d.rawPaid)}`);
     for (const m of d.movements) {
       const target = m.kind === 'application' ? `invoice ${m.invoiceId}` : 'client (refund)';
       console.log(`      ${m.kind === 'application' ? 'app' : 'ref'} ${m.appId} -> ${target}  ${money(m.movedOut)}  ${m.date}  bank=${m.bank ?? '?'}  side=${m.side}`);
@@ -259,8 +287,14 @@ function printDeposits(label: string, deps: DepositView[]) {
 }
 
 /**
- * Q1: is HH's `owing` on a deposit the same number as credit - applications?
- * Sign is reported rather than assumed — the 15628 UI showed it negative.
+ * Q1: is HH's `owing` on a deposit the refundable balance?
+ *
+ * A deposit whose free balance is ZERO tells us nothing about SIGN — `0` and
+ * `-0` are the same number, so a fully-applied (or fully-unapplied) deposit
+ * "matches" both readings and, counted as evidence, produces a bogus
+ * "inconsistent sign" verdict. Only PARTLY-applied deposits are informative.
+ * (Probe run 10 Sep 2026: deposit 9221 sat at zero and outvoted the one deposit
+ * that actually carried a balance.)
  */
 function reportOwingHypothesis(deps: DepositView[]) {
   console.log(`\n── Q1: is deposit.owing the refundable balance? ${'─'.repeat(16)}`);
@@ -270,8 +304,28 @@ function reportOwingHypothesis(deps: DepositView[]) {
     console.log('  => OP must DERIVE availability from kind=3 applications.');
     return;
   }
-  let sameSign = 0, flipped = 0, mismatch = 0;
+  const informative = withOwing.filter(
+    (d) => Math.abs(d.derivedAvailable) > 0.005 || Math.abs(d.rawOwing as number) > 0.005,
+  );
+  const zeroed = withOwing.length - informative.length;
+
+  // Second, independent reading: HH also publishes `paid` on the deposit row
+  // (how much has been spent), so credit - paid should equal the free balance.
   for (const d of withOwing) {
+    if (d.rawPaid == null) continue;
+    const viaPaid = d.credit - d.rawPaid;
+    const agrees = Math.abs(viaPaid - d.derivedAvailable) < 0.005;
+    console.log(`  deposit ${d.id}: credit - paid = ${money(viaPaid)} ${agrees ? 'AGREES with' : 'DISAGREES with'} derived ${money(d.derivedAvailable)}`);
+  }
+
+  if (informative.length === 0) {
+    console.log(`  INCONCLUSIVE — all ${withOwing.length} deposit(s) sit at a zero free balance,`);
+    console.log('  which matches either sign. Partly apply a deposit and re-run.');
+    return;
+  }
+
+  let sameSign = 0, flipped = 0, mismatch = 0;
+  for (const d of informative) {
     const raw = d.rawOwing as number;
     const derived = d.derivedAvailable;
     const matchesDirect = Math.abs(raw - derived) < 0.005;
@@ -282,17 +336,44 @@ function reportOwingHypothesis(deps: DepositView[]) {
     if (matchesDirect) sameSign++; else if (matchesFlipped) flipped++; else mismatch++;
     console.log(`  deposit ${d.id}: ${verdict}`);
   }
+  if (zeroed > 0) {
+    console.log(`  (${zeroed} zero-balance deposit(s) ignored — they match either sign.)`);
+  }
   if (mismatch > 0) {
     console.log('  => DO NOT trust `owing`. Derive from kind=3 applications instead.');
   } else if (flipped > 0 && sameSign > 0) {
-    console.log('  => INCONSISTENT SIGN across deposits. Derive instead.');
+    console.log('  => INCONSISTENT SIGN across partly-applied deposits. Derive instead.');
   } else if (flipped > 0) {
-    console.log('  => `owing` is the refundable balance, NEGATED. Use Math.abs(owing).');
+    console.log('  => `owing` is the refundable balance, NEGATED. available = -owing.');
   } else {
     console.log('  => `owing` is the refundable balance directly. Safe as the pre-flight check.');
   }
-  console.log('  (Only meaningful once at least one deposit is PARTLY applied — on a');
-  console.log('   job where every deposit is 0%% or 100%% applied both readings agree.)');
+}
+
+/**
+ * Fire HireHop's accounting sync for a saved row. HireHop TELLS us what to send
+ * — every billing_payments_save.php response carries `hh_task`, `hh_id`,
+ * `hh_acc_package_id` and `hh_package_type` — so read them back rather than
+ * assuming the hardcoded 1/3 the rest of the codebase uses.
+ *
+ * The release leg needs this as much as the refund does: without it the
+ * amended application lands in HireHop and never reaches Xero (probe run,
+ * 10 Sep 2026 — the release had to be re-saved by hand in the HireHop UI to
+ * push through).
+ */
+async function syncToXero(label: string, data: Record<string, any> | undefined) {
+  const hhId = data?.hh_id ?? data?.id ?? data?.ID ?? null;
+  if (!hhId) { console.log(`  ${label}: no hh_id in the response — cannot sync.`); return; }
+  const payload = {
+    hh_package_type: data?.hh_package_type ?? 1,
+    hh_acc_package_id: data?.hh_acc_package_id ?? 3,
+    hh_task: data?.hh_task ?? 'post_payment',
+    hh_id: hhId,
+    hh_acc_id: '',
+  };
+  console.log(`  ${label}: accounting/tasks.php ${JSON.stringify(payload)}`);
+  const res = await hhBroker.post('/php_functions/accounting/tasks.php', payload, { priority: 'high' });
+  console.log(`  ${label}: ${res.success ? 'triggered OK' : `FAILED (${res.error})`}`);
 }
 
 async function main() {
@@ -378,7 +459,12 @@ async function main() {
   const payload = method === 'edit' ? editPayload : negativePayload;
 
   console.log(`\n── PLAN: release ${money(amount)} from invoice ${app.invoiceId} back onto deposit ${depositId} ──`);
-  console.log(`  method: ${method === 'edit' ? 'Q3 EDIT existing application (destructive)' : 'Q2 NEW NEGATIVE application (append-only)'}`);
+  console.log(`  method: ${method === 'edit' ? 'Q3 EDIT existing application (destructive — PROVEN to work)' : 'Q2 NEW NEGATIVE application (append-only)'}`);
+  if (method === 'negative') {
+    console.log('  ! WARNING: the negative variant was PROVEN a silent no-op on 10 Sep 2026 —');
+    console.log('    HireHop returned success:true and clamped the amount to £0.00. Kept here');
+    console.log('    only so the finding stays reproducible. Use --method=edit for real work.');
+  }
   console.log(`  billing_payments_save.php payload:`);
   console.log(JSON.stringify(payload, null, 2));
 
@@ -392,6 +478,12 @@ async function main() {
   if (!relRes.success) {
     console.log(`  => ${method} FAILED (${relRes.error}).`);
     console.log(`     ${method === 'negative' ? 'Try --method=edit.' : 'Both variants rejected — the release cannot be automated; keep it manual.'}`);
+  } else if (doXero) {
+    // Must happen for the RELEASE too, not just the refund — an amended
+    // application that never reaches Xero leaves HH and Xero disagreeing.
+    await syncToXero('release Xero sync', relRes.data);
+  } else {
+    console.log('  (Xero sync SKIPPED for the release — pass --xero to fire it.)');
   }
 
   const afterRows = await readBilling(hhJob);
@@ -432,17 +524,10 @@ async function main() {
     console.log('  => refund ACCEPTED. The release + refund sequence is safe to automate.');
   }
 
-  const refundAppId = refRes.success
-    ? ((refRes.data as any)?.hh_id ?? (refRes.data as any)?.id ?? (refRes.data as any)?.ID ?? null)
-    : null;
-
-  if (doXero && refundAppId) {
-    const sync = await hhBroker.post('/php_functions/accounting/tasks.php',
-      { hh_package_type: 1, hh_acc_package_id: 3, hh_task: 'post_payment', hh_id: refundAppId, hh_acc_id: '' },
-      { priority: 'high' });
-    console.log(`  Xero post_payment: ${sync.success ? 'triggered' : `failed (${sync.error})`}`);
-  } else if (refundAppId) {
-    console.log(`  (Xero sync SKIPPED — pass --xero to fire post_payment on application ${refundAppId}.)`);
+  if (refRes.success && doXero) {
+    await syncToXero('refund Xero sync', refRes.data);
+  } else if (refRes.success) {
+    console.log('  (Xero sync SKIPPED for the refund — pass --xero to fire it.)');
   }
 
   const finalRows = await readBilling(hhJob);
