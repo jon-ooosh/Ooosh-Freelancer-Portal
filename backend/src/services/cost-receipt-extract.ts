@@ -70,7 +70,15 @@ Extraction rules:
 - confidence: "high" when every key field reads cleanly; "medium" with some guessing on amounts or supplier; "low" on poor image quality or non-receipt input.
 - Vehicle work: prefer 406 for routine maintenance, 409 for accident/breakage repairs.
 - Fuel always 410. Parking always 411 (or 399 for fines).
-- Crew invoices (named individual sending an invoice for their services) → 320.`;
+- Crew invoices (named individual sending an invoice for their services) → 320.
+
+LINES — splitting one invoice into differently-coded / differently-VAT-rated parts.
+- Return "lines" ONLY when the document ITSELF itemises, and the items would take DIFFERENT category_codes or DIFFERENT VAT treatment. Otherwise return an empty array.
+- NEVER infer a split from narrative text. "Driver services, Chelsea, 3 days — £250" has no lines: there is nothing written down to read. A guess here becomes a wrong number in the accounts. Empty array.
+- BUNDLE printed items that share BOTH a category_code AND a VAT rate into ONE line. An invoice listing a train, a taxi and a flight, all zero-rated, is ONE line coded 325 described "Travel: train, taxi, flight" — not three. Two travel items at DIFFERENT VAT rates stay apart.
+- Each line's amount_gross is INCLUSIVE of that line's VAT, and amount_vat is the VAT inside it (0 where there is none).
+- The lines' amount_gross MUST sum to the document's amount_gross, and their amount_vat to amount_vat. If you cannot make them add up, return an empty array rather than adjusting anything to fit — the totals are what we pay and must never be bent to match a split.
+- 2 to 20 lines. One line is not a split; return an empty array instead.`;
 
 const SCHEMA = {
   type: 'object' as const,
@@ -100,11 +108,27 @@ const SCHEMA = {
       ],
     },
     confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
+    lines: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          description: { type: ['string', 'null'] },
+          amount_gross: { type: 'number' },
+          amount_vat: { type: 'number' },
+          category_code: {
+            anyOf: [{ type: 'string', enum: [...CATEGORY_CODES] }, { type: 'null' }],
+          },
+        },
+        required: ['description', 'amount_gross', 'amount_vat', 'category_code'],
+        additionalProperties: false,
+      },
+    },
   },
   required: [
     'supplier', 'cost_date', 'due_date', 'amount_gross', 'amount_vat', 'amount_net',
     'vat_treatment', 'invoice_number', 'job_number', 'vehicle_reg', 'mileage',
-    'service_type', 'description', 'category_code', 'confidence',
+    'service_type', 'description', 'category_code', 'confidence', 'lines',
   ],
   additionalProperties: false,
 };
@@ -129,8 +153,21 @@ export interface ExtractedReceipt {
   description: string | null;
   category_code: string | null;
   confidence: 'high' | 'medium' | 'low';
+  /**
+   * Proposed split, ONLY where the document itself itemises. Empty for the
+   * overwhelming majority — see reconcileLines() for why we'd rather return
+   * nothing than a plausible guess.
+   */
+  lines: ExtractedLine[];
   /** Set when we canonicalised supplier against an existing Xero contact. */
   supplier_matched?: { from: string; to: string };
+}
+
+export interface ExtractedLine {
+  description: string | null;
+  amount_gross: number;
+  amount_vat: number;
+  category_code: string | null;
 }
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
@@ -301,6 +338,38 @@ async function canonicaliseSupplier(
   return { canonical: extracted, matched: false };
 }
 
+/**
+ * Keep a proposed split only if it is arithmetically honest. Otherwise drop it.
+ *
+ * The totals are what we pay; a split is a convenience. So the rule is one-way:
+ * lines that don't reconcile to the document's own gross and VAT are DISCARDED,
+ * never nudged into agreement, and never allowed to move the totals. A missing
+ * split costs someone thirty seconds of typing; a plausible-but-wrong one goes
+ * to Xero and nobody notices.
+ *
+ * Also drops a "split" of fewer than two lines, which is just the cost again.
+ */
+export function reconcileLines(p: ExtractedReceipt): void {
+  const lines = Array.isArray(p.lines) ? p.lines : [];
+  if (lines.length < 2 || p.amount_gross == null) { p.lines = []; return; }
+
+  const pence = (n: unknown) => Math.round((Number(n) || 0) * 100);
+  const grossSum = lines.reduce((t, l) => t + pence(l.amount_gross), 0);
+  const vatSum = lines.reduce((t, l) => t + pence(l.amount_vat), 0);
+
+  const sane = lines.every((l) => pence(l.amount_gross) > 0
+    && pence(l.amount_vat) >= 0
+    && pence(l.amount_vat) <= pence(l.amount_gross));
+  // 1p of rounding slack, the same tolerance the save path allows.
+  const balances = Math.abs(grossSum - pence(p.amount_gross)) <= 1
+    && Math.abs(vatSum - pence(p.amount_vat ?? 0)) <= 1;
+
+  if (!sane || !balances) {
+    p.lines = [];
+    if (p.confidence === 'high') p.confidence = 'medium';
+  }
+}
+
 export async function extractReceipt(buffer: Buffer, mimeType: string): Promise<ExtractedReceipt> {
   const parsed = await extractDocument<ExtractedReceipt>({
     files: { buffer, mimeType },
@@ -316,6 +385,9 @@ export async function extractReceipt(buffer: Buffer, mimeType: string): Promise<
   normaliseCostDate(parsed);
   normaliseDueDate(parsed);
   normaliseVehicle(parsed);
+  // AFTER normaliseAmounts — the totals may have just been repaired, and the
+  // lines have to reconcile against the repaired figures, not the raw ones.
+  reconcileLines(parsed);
 
   // Xero supplier canonicalisation — non-blocking, best-effort.
   if (parsed.supplier && parsed.supplier.trim()) {

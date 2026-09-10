@@ -1,6 +1,7 @@
 # Cost Lines — Implementation Spec
 
-**Status:** Agreed 9 Sep 2026 (§11 records the answers). PR 1 built; PR 2 not started.
+**Status:** Agreed 9 Sep 2026 (§11 records the answers). PR 1 + PR 2 built. Derived
+allocations (§7) deferred — see §12.
 **Branch:** `claude/receipt-uploader-tweaks-81g0z8`
 **Depends on:** cost capture ✓, `cost_allocations` ✓, Xero push ✓, receipt AI extraction ✓
 **Extends:** `docs/COST-CAPTURE-RECHARGE-SPEC.md` (which mentions `cost_lines` twice as "a separate piece of work" — this is that work)
@@ -354,11 +355,24 @@ after the INSERT — a second round-trip races it onto a one-line bill. One writ
 path also means the guards (reclaim, existing manual split, reconciled lock)
 can't drift between two callers.
 
-**PR 2 — the consumers**, once real invoices have been split by hand:
+**PR 2 — the consumers** (BUILT, except where noted):
 
-5. Derived allocations (§7).
-6. Money-tab buckets from lines, incl. the `crew_fronted` Fronted bucket.
-7. AI `lines` extraction (§9) — deliberately last, once the manual path is proven.
+5. Money-tab buckets from lines, incl. the `crew_fronted` Fronted bucket. `/costs/by-job`
+   returns each whole-cost row's lines (never a split-in row's — its lines describe a
+   total that job doesn't carry). Fronted WINS over the line's own category, because that
+   is what the quote means by the word: money the crew laid out, whatever they spent it on.
+6. AI `lines` extraction (§9), with `reconcileLines()` as the gate: a proposal that doesn't
+   reconcile to the document's own gross AND VAT is discarded outright, never nudged into
+   agreement, and confidence drops so the modal flags it. Lines arrive tagged
+   `✨ from receipt`.
+7. **Derived allocations (§7) — DEFERRED, and it is blocked, not merely unscheduled.**
+   Derivation groups lines by `COALESCE(line.job_id, costs.job_id)` and writes allocations
+   only when they resolve to MORE THAN ONE job. Nothing in the UI can set a line's
+   `job_id`, so every line inherits the cost's, every cost resolves to one job, and the
+   derivation would be dead code on every real cost. It needs a per-line job picker first
+   — a search-autocomplete in a ~500px pane, which is a design problem of its own — and
+   the existing split modal already covers multi-job attribution meanwhile. Build the
+   picker and the derivation together, or not at all.
 
 **Reminder:** the migration runner has a hardcoded file list in
 `backend/src/migrations/run.ts`. Take the next free number at build time.

@@ -764,9 +764,11 @@ router.get('/:id/rollover-chain', async (req: AuthRequest, res: Response) => {
       // landed on. A rolled-over child shows payment_date = the day the rollover
       // was applied, which read as "collected on 2 Sept" for money taken weeks
       // earlier on another hire.
+      // reimbursement_date added Sep 2026 so the Money tab can date the chain's
+      // OUTCOME ("reimbursed 9 Sep") on the origin record, not just name it.
       `SELECT je.id, je.excess_status, je.job_id,
               je.excess_amount_taken, je.claim_amount, je.reimbursement_amount, je.amount_held,
-              je.payment_date, je.payment_method,
+              je.payment_date, je.payment_method, je.reimbursement_date,
               je.created_at, j.hh_job_number, j.job_name
          FROM job_excess je LEFT JOIN jobs j ON j.id = je.job_id
         WHERE je.hh_deposit_id = $1
