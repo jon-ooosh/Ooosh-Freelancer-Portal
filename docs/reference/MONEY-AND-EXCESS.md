@@ -532,7 +532,15 @@ HireHop refuses a manual *payment* here because the invoice is already over-sati
 | **2 — cash** | Stripe refund | Abort. No money moved. Attempt to re-apply the release; if that also fails, flag for manual attention (the invoice will show money owing — visible and recoverable) |
 | **3 — paperwork** | Refund row on the deposit + `post_payment` | Now very unlikely: Phase 1 guaranteed the balance exists |
 
-Phase 1 must be **offered, never silent** — "This deposit is fully applied to invoice X. To refund £Y I'll first release that much back from the invoice, then refund it." One click, explicit. Scope v1 to deposits applied to a SINGLE invoice; anything more complex falls through to a warning and this runbook.
+Phase 1 is **offered, never silent** — the endpoint answers **409 `release_required`** carrying the exact figures (deposit, invoice, application id, current and proposed amounts) and does nothing until the caller retries with `allow_release: true`. Scope is deposits applied to a SINGLE invoice; zero, several, or an application too small to cover the shortfall each 422 with an explanation and point here.
+
+**As shipped (Sep 2026):**
+
+- `services/hh-deposit-release.ts` — `fetchDepositAvailability()` (the min of `-owing` and `credit - paid`, clamped at 0), `releaseFromInvoice()` (edit + Xero sync + **verify by re-read**), `revertRelease()` (two attempts). Deliberately a service, not inline: the excess reimburse path in `routes/excess.ts` hits the identical 370 and should adopt it.
+- `POST /money/:jobId/refund-payment` runs Phase 1 → Stripe → refund row, and reverts the release on **any** abort that leaves nothing refunded, including the record-only (non-Stripe) HireHop failures. If the revert also fails, the error names the application id and amount to restore by hand.
+- `GET /money/:jobId/summary` publishes `available_to_refund` per hire deposit, so the modal warns before anything is submitted rather than only at the confirm step.
+- Both refund modals (payment-history and pending-IOU) share `ReleaseConsentPanel`. **Pass the submit handlers as arrow functions** — `onClick={submitRefund}` hands React's click event in as `allowRelease`, and a truthy event silently authorises the release. Editing the amount, or switching deposit in the IOU picker, retracts a pending plan so a stale shortfall can't be confirmed against different figures.
+
 
 **Sign trap for anything reading these rows.** HireHop dual-publishes each application as two `kind=3` rows sharing one `data.ID` — deposit-side (`credit < 0`, `parent_is="deposit"`) and invoice-side (`credit > 0`, `parent_is="invoice"`). `routes/money.ts` dedups on `data.ID` and takes `Math.abs()`, which is safe there only because `OWNER` supplies the direction. It is **not** safe for a release: a negative application's twins carry the opposite signs, so `abs()` reads a release as *more* money leaving the deposit. Key on the deposit-side twin and keep the sign (`movedOut = −credit`). Also remember a deposit-child row with `OWNER = 0` is a **refund**, which spends the deposit just as an application does — omit it and a fully-refunded deposit reads as still refundable, inviting a double refund.
 

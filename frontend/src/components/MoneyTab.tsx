@@ -74,6 +74,11 @@ interface FinancialData {
       is_deposit?: boolean;
       /** HireHop bank account id — default for the cross-job apply bank field. */
       acc_account_id?: number | null;
+      /** Unallocated money on this deposit — what HireHop will actually let us
+       *  refund out of it. Lower than `amount` once the deposit has been applied
+       *  to an invoice; £0 when fully applied. null when HH published neither
+       *  reading. Drives the Refund modal's release warning. */
+      available_to_refund?: number | null;
       bank_name: string | null; entered_by: string | null;
       /** Original Stripe PaymentIntent (when OP has a matching job_payments row).
        *  Presence enables OP-initiated Stripe refund on the row. */
@@ -248,6 +253,57 @@ function chainOutcomeAmount(tail: RolloverChainEntry): number | null {
   return null;
 }
 
+// ── Release consent ───────────────────────────────────────────────────────
+// HireHop can only refund money still UNALLOCATED on a deposit. Once it has
+// been applied to an invoice there is nothing to take back and the refund is
+// rejected with error 370 — which on job 15628 fired only AFTER the Stripe
+// refund had gone through, leaving real money moved and recorded nowhere.
+//
+// OP can release the amount back off the invoice first, but never on its own
+// initiative: the backend answers 409 with the exact figures and waits. This
+// panel is that question. "Never silently move money" covers allocations too —
+// the cash received doesn't change, but which invoice it is pointed at does,
+// and that is someone's bookkeeping.
+type ReleasePlan = {
+  deposit_id: number; available: number; shortfall: number;
+  invoice_id: number; invoice_number: string | null;
+  application_id: number; application_amount: number; new_application_amount: number;
+};
+
+function ReleaseConsentPanel({ plan, refundAmount, depositAmount, viaStripe }: {
+  plan: ReleasePlan;
+  refundAmount: number;
+  depositAmount: number;
+  viaStripe: boolean;
+}) {
+  const invoice = plan.invoice_number || plan.invoice_id;
+  return (
+    <div className="px-3 py-3 bg-amber-50 border border-amber-300 rounded text-xs text-amber-900 space-y-2">
+      <div className="font-semibold">This deposit has already been spent on an invoice</div>
+      <p>
+        HireHop has £{plan.available.toFixed(2)} unallocated on deposit {plan.deposit_id}, because
+        £{plan.application_amount.toFixed(2)} of it is applied to invoice <strong>{invoice}</strong>.
+        There is nothing to refund out of it yet.
+      </p>
+      <p className="font-medium">If you continue, OP will:</p>
+      <ol className="list-decimal ml-4 space-y-0.5">
+        <li>
+          Reduce that invoice payment from £{plan.application_amount.toFixed(2)} to £{plan.new_application_amount.toFixed(2)},
+          freeing £{plan.shortfall.toFixed(2)} back onto the deposit, and push it to Xero.
+        </li>
+        <li>Refund £{refundAmount.toFixed(2)}{viaStripe ? ' through Stripe' : ''}.</li>
+        <li>Record the refund in HireHop and OP.</li>
+      </ol>
+      <p>
+        The £{depositAmount.toFixed(2)} we received is unchanged — only how much of it is pointed at that invoice.
+        Invoice {invoice} will show £{plan.shortfall.toFixed(2)} owing until the refund lands.
+      </p>
+      <p className="text-[11px]">If step 2 fails, step 1 is put back automatically and nothing is refunded.</p>
+    </div>
+  );
+}
+
+
 export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   const [data, setData] = useState<FinancialData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -305,6 +361,12 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   const [refundLoading, setRefundLoading] = useState(false);
   const [refundError, setRefundError] = useState('');
   const [refundResult, setRefundResult] = useState<{ stripe_refund_id?: string; hh_push_error?: string | null } | null>(null);
+  // Set when the backend answered 409 `release_required`: this deposit is fully
+  // applied to an invoice, so HireHop has nothing to refund from it until some
+  // is released back off that invoice. We never do that silently — the panel
+  // spells out the change and the retry carries allow_release. Shared by both
+  // refund modals (the payment-history one and the pending-IOU one).
+  const [refundRelease, setRefundRelease] = useState<ReleasePlan | null>(null);
 
   // Cross-job "Apply credit to another job" (Phase 2 CROSS-JOB-EXCESS-APPLY-SPEC).
   type ApplyInvoice = { id: number; number: string; description: string; owing: number };
@@ -366,16 +428,20 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
     setRefundNotes('');
     setRefundError('');
     setRefundResult(null);
+    setRefundRelease(null);
   };
 
   const closeRefundModal = () => {
     setRefundingDep(null);
     setRefundError('');
     setRefundResult(null);
+    setRefundRelease(null);
     if (refundResult) loadData();
   };
 
-  const submitRefund = async () => {
+  // `allowRelease` is passed only by the confirm button on the release panel —
+  // never defaulted on, so OP can't rewrite HireHop paperwork nobody agreed to.
+  const submitRefund = async (allowRelease = false) => {
     if (!refundingDep) return;
     const parsed = parseFloat(refundAmount);
     if (isNaN(parsed) || parsed < 0.01) {
@@ -393,14 +459,26 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
           method: refundMethod,
           reference: refundReference.trim() || null,
           notes: refundNotes.trim() || null,
+          ...(allowRelease ? { allow_release: true } : {}),
         }
       );
+      setRefundRelease(null);
       setRefundResult({
         stripe_refund_id: resp.stripe_refund_id,
         hh_push_error: resp.hh_push_error || null,
       });
     } catch (e) {
-      setRefundError(e instanceof Error ? e.message : 'Refund failed');
+      // 409 release_required isn't a failure — it's the backend asking a
+      // question it refuses to answer on our behalf. Show the plan instead of
+      // an error, and let the user decide.
+      const body = (e as { body?: Record<string, unknown> })?.body;
+      if (body?.code === 'release_required' && body.release) {
+        setRefundRelease(body.release as ReleasePlan);
+        setRefundError('');
+      } else {
+        setRefundRelease(null);
+        setRefundError(e instanceof Error ? e.message : 'Refund failed');
+      }
     } finally {
       setRefundLoading(false);
     }
@@ -412,8 +490,10 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   const [pendingRefund, setPendingRefund] = useState<NonNullable<FinancialData['financial']['pending_refunds']>[number] | null>(null);
   const [pendingDepositId, setPendingDepositId] = useState<number | null>(null);
 
-  // Hire deposits available to refund against (non-refund, non-excess rows).
-  const refundableDeposits = (data?.financial.deposits || []).filter(d => !d.is_refund && !d.is_excess);
+  // Hire deposits available to refund against. `is_deposit` matters: the list
+  // also carries kind=3 application LINES (e.g. "Excess applied to hire
+  // invoice"), which are not refundable and have no deposit id to release from.
+  const refundableDeposits = (data?.financial.deposits || []).filter(d => !d.is_refund && !d.is_excess && d.is_deposit);
   const selectedDeposit = refundableDeposits.find(d => d.id === pendingDepositId) || null;
 
   const openPendingRefundModal = (pr: NonNullable<FinancialData['financial']['pending_refunds']>[number]) => {
@@ -426,6 +506,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
     setRefundNotes(pr.notes || '');
     setRefundError('');
     setRefundResult(null);
+    setRefundRelease(null);
   };
 
   const closePendingRefundModal = () => {
@@ -433,8 +514,15 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
     setPendingDepositId(null);
     setRefundError('');
     setRefundResult(null);
+    setRefundRelease(null);
     if (refundResult) loadData();
   };
+
+  // A release plan is only valid for the deposit and amount it was calculated
+  // for. Editing either must retract it — otherwise the confirm button would
+  // still be armed with allow_release and apply a stale shortfall (or worse,
+  // one deposit's plan to a different deposit).
+  const setRefundAmountChecked = (v: string) => { setRefundAmount(v); setRefundRelease(null); };
 
   // Dismiss-pending-refund — clears an OP IOU WITHOUT moving money, for refunds
   // already done out-of-band (HireHop / Stripe / bank direct) or artifacts.
@@ -475,11 +563,12 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   // method to match that deposit (Stripe if it was a Stripe deposit).
   const onPendingDepositChange = (depId: number) => {
     setPendingDepositId(depId);
+    setRefundRelease(null);   // plan belonged to the previous deposit
     const dep = refundableDeposits.find(d => d.id === depId);
     setRefundMethod(dep?.stripe_payment_intent ? 'stripe_gbp' : (dep?.op_payment_method as typeof refundMethod) || 'worldpay');
   };
 
-  const submitPendingRefund = async () => {
+  const submitPendingRefund = async (allowRelease = false) => {
     if (!pendingRefund) return;
     if (!pendingDepositId) {
       setRefundError('Pick which deposit to refund against');
@@ -502,14 +591,26 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
           reference: refundReference.trim() || null,
           notes: refundNotes.trim() || null,
           pending_refund_id: pendingRefund.id,
+          ...(allowRelease ? { allow_release: true } : {}),
         }
       );
+      setRefundRelease(null);
       setRefundResult({
         stripe_refund_id: resp.stripe_refund_id,
         hh_push_error: resp.hh_push_error || null,
       });
     } catch (e) {
-      setRefundError(e instanceof Error ? e.message : 'Refund failed');
+      // Same release-consent branch as the payment-history refund — a
+      // cancellation IOU pointed at a fully-applied deposit hits exactly the
+      // same 370, and a dead-end error here would strand the IOU.
+      const body = (e as { body?: Record<string, unknown> })?.body;
+      if (body?.code === 'release_required' && body.release) {
+        setRefundRelease(body.release as ReleasePlan);
+        setRefundError('');
+      } else {
+        setRefundRelease(null);
+        setRefundError(e instanceof Error ? e.message : 'Refund failed');
+      }
     } finally {
       setRefundLoading(false);
     }
@@ -1979,10 +2080,21 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                     min="0.01"
                     max={refundingDep.amount}
                     value={refundAmount}
-                    onChange={(e) => setRefundAmount(e.target.value)}
+                    onChange={(e) => setRefundAmountChecked(e.target.value)}
                     className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md"
                   />
                   <p className="text-[11px] text-gray-500 mt-1">Max £{Number(refundingDep.amount).toFixed(2)} (partial refunds OK — submit again for the residual).</p>
+                  {/* Heads-up BEFORE submitting. HireHop can only refund money
+                      still unallocated on the deposit; once it's been applied to
+                      an invoice there is nothing to take back (error 370). This
+                      isn't a block — OP can release it back off the invoice —
+                      but saying so up front beats a surprise confirm step. */}
+                  {refundingDep.available_to_refund != null
+                    && refundingDep.available_to_refund + 0.005 < (parseFloat(refundAmount) || 0) && (
+                    <p className="text-[11px] text-amber-700 mt-1">
+                      HireHop shows only £{Number(refundingDep.available_to_refund).toFixed(2)} unallocated on this deposit — the rest has been applied to an invoice. OP will offer to release the difference back first.
+                    </p>
+                  )}
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-gray-700 mb-1">Method</label>
@@ -2027,11 +2139,29 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                 {refundError && (
                   <div className="px-3 py-2 bg-red-50 border border-red-200 rounded text-xs text-red-800">{refundError}</div>
                 )}
+                {refundRelease && (
+                  <ReleaseConsentPanel
+                    plan={refundRelease}
+                    refundAmount={parseFloat(refundAmount) || 0}
+                    depositAmount={Number(refundingDep.amount)}
+                    viaStripe={!!refundingDep.stripe_payment_intent}
+                  />
+                )}
                 <div className="flex gap-2 justify-end pt-1">
                   <button onClick={closeRefundModal} className="px-4 py-2 text-sm font-medium text-gray-700 border border-gray-300 rounded-md hover:bg-gray-50">Cancel</button>
-                  <button onClick={submitRefund} disabled={refundLoading} className="px-4 py-2 text-sm font-medium text-white bg-ooosh-600 hover:bg-ooosh-700 rounded-md disabled:opacity-50">
-                    {refundLoading ? 'Processing...' : 'Confirm Refund'}
-                  </button>
+                  {/* Arrow functions, not bare references: passing the handler
+                      directly would hand React's click event in as
+                      `allowRelease`, and a truthy event would authorise the
+                      release nobody confirmed. */}
+                  {refundRelease ? (
+                    <button onClick={() => submitRefund(true)} disabled={refundLoading} className="px-4 py-2 text-sm font-medium text-white bg-amber-600 hover:bg-amber-700 rounded-md disabled:opacity-50">
+                      {refundLoading ? 'Processing...' : `Release £${Number(refundRelease.shortfall).toFixed(2)} and refund`}
+                    </button>
+                  ) : (
+                    <button onClick={() => submitRefund()} disabled={refundLoading} className="px-4 py-2 text-sm font-medium text-white bg-ooosh-600 hover:bg-ooosh-700 rounded-md disabled:opacity-50">
+                      {refundLoading ? 'Processing...' : 'Confirm Refund'}
+                    </button>
+                  )}
                 </div>
               </div>
             )}
@@ -2150,7 +2280,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                     min="0.01"
                     max={selectedDeposit?.amount}
                     value={refundAmount}
-                    onChange={(e) => setRefundAmount(e.target.value)}
+                    onChange={(e) => setRefundAmountChecked(e.target.value)}
                     className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md"
                   />
                   {selectedDeposit && parseFloat(refundAmount) > selectedDeposit.amount && (
@@ -2201,14 +2331,28 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                 {refundError && (
                   <div className="px-3 py-2 bg-red-50 border border-red-200 rounded text-xs text-red-800">{refundError}</div>
                 )}
+                {refundRelease && selectedDeposit && (
+                  <ReleaseConsentPanel
+                    plan={refundRelease}
+                    refundAmount={parseFloat(refundAmount) || 0}
+                    depositAmount={Number(selectedDeposit.amount)}
+                    viaStripe={!!selectedDeposit.stripe_payment_intent}
+                  />
+                )}
                 <div className="flex gap-2 justify-end pt-1">
                   <button onClick={closePendingRefundModal} className="px-4 py-2 text-sm font-medium text-gray-700 border border-gray-300 rounded-md hover:bg-gray-50">Cancel</button>
+                  {/* Arrow function, not a bare reference — passing the handler
+                      directly hands React's click event in as `allowRelease`,
+                      and a truthy event would authorise a release nobody
+                      confirmed. */}
                   <button
-                    onClick={submitPendingRefund}
+                    onClick={() => submitPendingRefund(!!refundRelease)}
                     disabled={refundLoading || !selectedDeposit || (parseFloat(refundAmount) > (selectedDeposit?.amount ?? 0) + 0.005)}
                     className="px-4 py-2 text-sm font-medium text-white bg-amber-600 hover:bg-amber-700 rounded-md disabled:opacity-50"
                   >
-                    {refundLoading ? 'Processing...' : (selectedDeposit?.stripe_payment_intent ? 'Refund via Stripe & complete' : 'Record refund & complete')}
+                    {refundLoading ? 'Processing...'
+                      : refundRelease ? `Release £${refundRelease.shortfall.toFixed(2)} and refund`
+                      : (selectedDeposit?.stripe_payment_intent ? 'Refund via Stripe & complete' : 'Record refund & complete')}
                   </button>
                 </div>
               </div>
