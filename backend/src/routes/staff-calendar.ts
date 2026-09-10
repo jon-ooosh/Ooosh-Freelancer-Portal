@@ -16,12 +16,12 @@
  */
 import { Router, Response } from 'express';
 import { z } from 'zod';
-import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
+import { authenticate, authorize, AuthRequest, STAFF_ROLES, MANAGER_ROLES } from '../middleware/auth';
 import {
   getStaffCalendar, getTodaySummary, addDaysYmd, DATE_RE,
 } from '../services/staff-day-status';
 import {
-  STAFF_ADMIN_ROLES, upsertEmployment, getEmployeeRecord, listEmployees,
+  STAFF_ADMIN_ROLES, upsertEmployment, getEmployeeRecord, listEmployees, getStaffRoster,
   createPattern, listPatterns, createExceptions, listExceptions,
   addSalaryEntry, listSalaryHistory, upsertReview, listReviews,
 } from '../services/staff-employment';
@@ -91,6 +91,22 @@ router.get('/me', async (req: AuthRequest, res: Response) => {
   } catch (err) {
     console.error('[staff-calendar] me error:', err);
     res.status(500).json({ error: 'Failed to load your calendar' });
+  }
+});
+
+// ── Unified staff roster (manager tier) ─────────────────────────────────────
+
+// GET /api/staff-calendar/roster
+// Everyone with an account OR an employment record. Manager tier, because the
+// account half of this page replaces the Team Members list in Settings, which
+// managers can already reach. Employment, hours and card fields are admin-only
+// and are omitted from the response for anyone else (see getStaffRoster).
+router.get('/roster', authorize(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    res.json({ data: await getStaffRoster(isAdmin(req)) });
+  } catch (err) {
+    console.error('[staff-calendar] roster error:', err);
+    res.status(500).json({ error: 'Failed to load the staff list' });
   }
 });
 
