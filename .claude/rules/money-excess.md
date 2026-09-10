@@ -80,6 +80,8 @@ Full history, incident forensics and design rationale: `docs/reference/MONEY-AND
 - **Send `lines` in the SAME create/update request as the header, never a separate call.** The create route fires `pushCostToXeroBackground` immediately after the INSERT, so a follow-up write races it onto a one-line bill.
 - **Compare money in whole pence, never floats.** `33.33 * 3` is `99.99000000000001`, so `Math.abs(sum - total) > 0.01` rejects an exactly-1p residue — the case the tolerance exists to allow. (Caught by a test, not by review.)
 - **`resolveLineTaxType` takes `{amount_vat, amount_net}`, not a whole cost** — the rate is DERIVED, so a header spanning mixed rates yields a blend that is not a real rate (£250 no-VAT + £60 fuel w/ £10 VAT + £15 zero-rated implies 3%, matches nothing, and falls through to the account default). Only a homogeneous LINE gives a true rate.
+- **AI-proposed cost lines are discarded, never adjusted, when they don't reconcile** (`reconcileLines`). The totals are what we pay; a split is a convenience. Bending one to fit the other puts a plausible wrong number in the accounts.
+- **Bucket a job's actuals per LINE where a cost has them**, and only on whole-cost rows — a split-in row is a share of another job's payable, so its lines describe a total this job doesn't carry. `crew_fronted` beats the line's category (that's what "fronted" means on a quote).
 - **A cost row returned to the UI must go through `withJobLabels()`** (`routes/costs.ts`) — `RETURNING *` omits `hh_job_number`/`job_name`/`vehicle_reg`, so the capture + split modals had nothing to print and fell back to a bracketed "(linked job)" where staff needed the number.
 
 ## Card-machine receipts

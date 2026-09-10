@@ -689,6 +689,7 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
           description: string | null;
           category_code: string | null;
           confidence: 'high' | 'medium' | 'low';
+          lines?: Array<{ description: string | null; amount_gross: number; amount_vat: number; category_code: string | null }>;
           supplier_matched?: { from: string; to: string };
         };
       }>('/costs/extract', fd);
@@ -747,6 +748,23 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
       if (ex.mileage != null) setServiceMileage(String(ex.mileage));
       // Garage is the supplier on a garage invoice — pre-fill if not set.
       if (ex.supplier && !serviceGarage.trim()) setServiceGarage(ex.supplier);
+      // A proposed split, only when the document itself itemised — the server
+      // has already discarded anything that didn't reconcile to the totals, so
+      // whatever arrives here adds up. Marked as AI so it reads as a proposal,
+      // and staff correct or delete rows like any other.
+      if (ex.lines?.length) {
+        setLines(ex.lines.map((l) => ({
+          key: newLineKey(),
+          description: l.description || '',
+          amount_gross: String(l.amount_gross),
+          vatRate: inferLineRate(l.amount_gross, l.amount_vat),
+          amount_vat: String(l.amount_vat),
+          xero_account_code: l.category_code || '',
+          crew_fronted: false,
+          source: 'ai' as const,
+        })));
+        setLinesTouched(true);
+      }
       setAiPrefilled(true);
       setAiConfidence(ex.confidence);
     } catch (err) {
@@ -1219,11 +1237,6 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
           <div className="flex-1 px-6 py-4 space-y-4 md:overflow-y-auto">
             {error && <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-md px-3 py-2">{error}</div>}
 
-            <div className="pt-1 first:pt-0">
-              <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400 border-b border-gray-100 pb-1">The invoice</h3>
-              <p className="text-xs text-gray-400 mt-1">What the paperwork says.</p>
-            </div>
-
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div className="relative">
                 <label className="block text-sm font-medium text-gray-700 mb-1">Supplier</label>
@@ -1406,6 +1419,12 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
                     <div className="flex items-baseline justify-between mb-2 gap-2 flex-wrap">
                       <span className="text-sm font-medium text-gray-700">
                         Lines on this invoice <span className="font-normal text-gray-400">(amounts inc. VAT)</span>
+                        {lines.some((l) => l.source === 'ai') && (
+                          <span className="ml-1.5 px-1.5 py-0.5 text-[10px] font-medium bg-purple-50 text-purple-700 rounded align-middle"
+                            title="Read off the invoice by the AI — check it before saving">
+                            ✨ from receipt
+                          </span>
+                        )}
                       </span>
                       <span className={`text-xs ${linesBalanced ? 'text-gray-500' : 'text-red-600 font-medium'}`}>
                         {gbp(linesGross)} of {gbp(headerGross)}
@@ -1513,7 +1532,6 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
 
             <div className="pt-1 first:pt-0">
               <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400 border-b border-gray-100 pb-1">Where it goes</h3>
-              <p className="text-xs text-gray-400 mt-1">Leave blank for a plain overhead.</p>
             </div>
 
             <div>
