@@ -25,6 +25,11 @@ import {
   createPattern, listPatterns, createExceptions, listExceptions,
   addSalaryEntry, listSalaryHistory, upsertReview, listReviews,
 } from '../services/staff-employment';
+import {
+  getBalance, getTeamBalances, syncEntitlement, postEntry, reverseEntry,
+  computeEntitlement, getPatternPeriods, getContractedWeek, STATUTORY_WEEKS,
+  type LedgerAccount,
+} from '../services/staff-balance';
 
 const router = Router();
 router.use(authenticate, authorize(...STAFF_ROLES));
@@ -107,6 +112,150 @@ router.get('/roster', authorize(...MANAGER_ROLES), async (req: AuthRequest, res:
   } catch (err) {
     console.error('[staff-calendar] roster error:', err);
     res.status(500).json({ error: 'Failed to load the staff list' });
+  }
+});
+
+// ── Balances & the ledger (admin) ───────────────────────────────────────────
+//
+// Every figure here is derived from staff_ledger_entries by
+// services/staff-balance.ts. There is no balance column anywhere and no other
+// caller may SUM that table (spec §4.1).
+
+const ACCOUNTS = ['holiday', 'overtime'] as const;
+
+function resolveYear(req: AuthRequest): number {
+  const y = Number(req.query.year);
+  return Number.isInteger(y) && y >= 2000 && y <= 2200 ? y : new Date().getUTCFullYear();
+}
+
+// GET /api/staff-calendar/balances?year= — the whole team, for the overview
+router.get('/balances', adminOnly, async (req: AuthRequest, res: Response) => {
+  try {
+    const year = resolveYear(req);
+    res.json({ data: await getTeamBalances(year), year });
+  } catch (err) {
+    console.error('[staff-calendar] balances error:', err);
+    res.status(500).json({ error: 'Failed to load balances' });
+  }
+});
+
+// GET /api/staff-calendar/employees/:personId/balance?account=&year=
+// Returns the number AND every entry behind it — the explainable balance is
+// the whole reason a derived figure beats a stored one (spec §0.2).
+router.get('/employees/:personId/balance', async (req: AuthRequest, res: Response) => {
+  const account = String(req.query.account || 'holiday') as LedgerAccount;
+  if (!ACCOUNTS.includes(account)) { res.status(400).json({ error: 'Unknown account' }); return; }
+  try {
+    const personId = req.params.personId as string;
+    // Own balance or admin. Everyone is entitled to see their own working out.
+    if (!isAdmin(req) && (await personIdForUser(req.user!.id)) !== personId) {
+      res.status(403).json({ error: 'Insufficient permissions' }); return;
+    }
+    res.json({ data: await getBalance(personId, account, resolveYear(req)) });
+  } catch (err) {
+    console.error('[staff-calendar] balance error:', err);
+    res.status(500).json({ error: 'Failed to load the balance' });
+  }
+});
+
+// GET /api/staff-calendar/employees/:personId/entitlement-preview?year=
+// What they WOULD be granted, with the segment working, without posting it.
+router.get('/employees/:personId/entitlement-preview', adminOnly, async (req: AuthRequest, res: Response) => {
+  try {
+    const personId = req.params.personId as string;
+    const year = resolveYear(req);
+    const { query: dbQuery } = await import('../config/database');
+    const emp = await dbQuery(
+      `SELECT start_date::text AS start_date, end_date::text AS end_date, entitlement_weeks
+         FROM staff_employment WHERE person_id = $1`, [personId]);
+    if (!emp.rows[0]) { res.status(404).json({ error: 'No employment record' }); return; }
+
+    const patterns = await getPatternPeriods(personId, year);
+    const week = await getContractedWeek(personId, `${year}-12-31`)
+      ?? await getContractedWeek(personId, `${year}-01-01`);
+    const weeks = emp.rows[0].entitlement_weeks != null
+      ? Number(emp.rows[0].entitlement_weeks) : STATUTORY_WEEKS;
+
+    res.json({
+      data: {
+        ...computeEntitlement({
+          year, weeks,
+          employedFrom: emp.rows[0].start_date,
+          employedTo: emp.rows[0].end_date,
+          patterns,
+          nominalDayMinutes: week?.nominalDayMinutes ?? null,
+        }),
+        weeks,
+        nominalDayMinutes: week?.nominalDayMinutes ?? null,
+        weeklyMinutes: week?.weeklyMinutes ?? null,
+      },
+      year,
+    });
+  } catch (err) {
+    console.error('[staff-calendar] entitlement preview error:', err);
+    res.status(500).json({ error: 'Failed to work out the entitlement' });
+  }
+});
+
+// POST /api/staff-calendar/employees/:personId/entitlement — grant or top up.
+// Idempotent: posts only the difference from what is already granted, so
+// re-running after an hours change tops up the delta rather than doubling.
+router.post('/employees/:personId/entitlement', adminOnly, async (req: AuthRequest, res: Response) => {
+  const schema = z.object({ year: z.number().int().min(2000).max(2200) });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: 'A year is required' }); return; }
+  try {
+    const result = await syncEntitlement(req.params.personId as string, parsed.data.year, req.user!.id);
+    res.json({ data: result });
+  } catch (err) {
+    console.error('[staff-calendar] entitlement error:', err);
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to grant the entitlement' });
+  }
+});
+
+// POST /api/staff-calendar/employees/:personId/ledger — a manual adjustment.
+// Deliberately limited to adjustment/correction: bookings and accruals are
+// posted by the flows that own them (Phases B2 and C), never typed in by hand.
+router.post('/employees/:personId/ledger', adminOnly, async (req: AuthRequest, res: Response) => {
+  const schema = z.object({
+    account: z.enum(['holiday', 'overtime']),
+    leaveYear: z.number().int().min(2000).max(2200),
+    entryType: z.enum(['adjustment', 'correction']),
+    minutes: z.number().int(),
+    effectiveDate: dateStr,
+    note: z.string().min(1).max(500),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
+  if (parsed.data.minutes === 0) { res.status(400).json({ error: 'An adjustment of zero does nothing' }); return; }
+  try {
+    // Stamp 'manual' explicitly. syncEntitlement only ever counts source_type
+    // 'system', so a hand-typed adjustment is never swallowed by a
+    // recalculation — but leaving it null made that safety implicit rather
+    // than stated, and unfilterable in reports later.
+    const entry = await postEntry(
+      { personId: req.params.personId as string, ...parsed.data, sourceType: 'manual' },
+      req.user!.id
+    );
+    res.status(201).json({ data: entry });
+  } catch (err) {
+    console.error('[staff-calendar] ledger post error:', err);
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to post the entry' });
+  }
+});
+
+// POST /api/staff-calendar/ledger/:entryId/reverse — undo one entry.
+// The ONLY way to undo anything: the table refuses UPDATE and DELETE outright.
+router.post('/ledger/:entryId/reverse', adminOnly, async (req: AuthRequest, res: Response) => {
+  const schema = z.object({ note: z.string().min(1).max(500) });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: 'A reason is required' }); return; }
+  try {
+    const entry = await reverseEntry(req.params.entryId as string, parsed.data.note, req.user!.id);
+    res.status(201).json({ data: entry });
+  } catch (err) {
+    console.error('[staff-calendar] reverse error:', err);
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to reverse the entry' });
   }
 });
 
