@@ -242,6 +242,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '205_cost_lines.sql',
         '206_staff_calendar_phase_a.sql',
         '207_passport_window_90_days.sql',
+        '208_staff_ledger.sql',
       ];
 
       for (const migration of migrations) {

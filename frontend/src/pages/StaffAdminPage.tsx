@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
+import StaffBalancePanel from '../components/StaffBalancePanel';
 
 /**
  * Staff — the single surface for everyone who works here (Staff Calendar).
@@ -534,6 +535,7 @@ function EmploymentSection({ row, onSaved, onError }: {
   return (
     <div className="space-y-4">
       <EmploymentDetails row={row} onSaved={onSaved} onError={onError} />
+      <StaffBalancePanel personId={row.personId} canManage year={new Date().getFullYear()} />
       {!loaded ? (
         <div className="text-sm text-gray-500">Loading hours…</div>
       ) : (
