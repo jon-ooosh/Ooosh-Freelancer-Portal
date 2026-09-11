@@ -497,6 +497,12 @@ Fix: when HireHop has invoiced the job and its figure agrees with ours **to with
 
 A partly-invoiced job and the 15627 shape both differ from derived by far more than £1, so both keep the accrued basis. **Do not widen the tolerance** to "fix" a larger discrepancy — past a pound it isn't rounding, it's a different scope, and accrued is the honest basis there.
 
+**⚠️ `effectiveHireValueIncVat` is the total that reaches the screen, not `hireValueIncVat`.** The first attempt at this fix changed `hireValueIncVat` and shipped — and job 15628 still showed the red £0.01, because `effectiveHireValueIncVat` is rebuilt from `hireValueExVat + effectiveVatAmount` and it is *that* which is published as `hire_value_inc_vat` and drives `balance_outstanding`. `balanceOutstanding` (the un-prefixed one) is an intermediate that nothing renders. **Anything changing the hire total must follow it through to the `effective*` pair, or it changes a number nobody sees.**
+
+With a **VAT adjustment** the invoiced figure is deliberately NOT preferred: HireHop doesn't know about international VAT relief, so its invoice carries the full VAT and taking it would quietly hand the relief back. The tolerance guard would refuse anyway (the two differ by the whole VAT saved), but the branch is explicit rather than relying on that accident.
+
+`vat_amount` follows the same rule — when the invoiced total is taken, the VAT published is `total − ex-VAT`, so the Money tab header adds up instead of showing three figures where ex + VAT ≠ total.
+
 ##### Refund confirmation emails (Sep 2026)
 
 Hire refunds sent nothing to the client — the one money event OP stayed silent about. Excess reimbursements have emailed unconditionally since Jun 2026, so the hire side was the outlier, not the innovation.
