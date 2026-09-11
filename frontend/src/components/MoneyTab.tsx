@@ -91,7 +91,10 @@ interface FinancialData {
     }>;
     /** OP-only pending refund IOUs (e.g. cancellation refunds) awaiting processing. */
     pending_refunds?: Array<{
-      id: number; amount: number; method: string | null; notes: string | null; date: string;
+      /** job_payments.id — a UUID. Was typed `number` here, which was simply
+       *  wrong; the uuid-validated endpoints only worked because JSON carried
+       *  the real string through regardless. */
+      id: string; amount: number; method: string | null; notes: string | null; date: string;
     }>;
   };
   vat_adjustment: {
@@ -378,6 +381,15 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   // spells out the change and the retry carries allow_release. Shared by both
   // refund modals (the payment-history one and the pending-IOU one).
   const [refundRelease, setRefundRelease] = useState<ReleasePlan | null>(null);
+  // Pending IOUs that were standing on this job when the refund was submitted.
+  // Refunding from Payment History inserts a NEW completed refund row and
+  // leaves any IOU untouched (only the IOU's own "Process refund" passes
+  // pending_refund_id), so the two drift apart silently and Pending Refunds
+  // fills up with money that has already gone back. Snapshotted at submit time
+  // because loadData() replaces `data` once the modal closes.
+  const [refundOrphanIous, setRefundOrphanIous] = useState<NonNullable<FinancialData['financial']['pending_refunds']>>([]);
+  const [clearingIouId, setClearingIouId] = useState<string | null>(null);
+  const [clearIouError, setClearIouError] = useState('');
 
   // Cross-job "Apply credit to another job" (Phase 2 CROSS-JOB-EXCESS-APPLY-SPEC).
   type ApplyInvoice = { id: number; number: string; description: string; owing: number };
@@ -447,7 +459,34 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
     setRefundError('');
     setRefundResult(null);
     setRefundRelease(null);
+    setRefundOrphanIous([]);
+    setClearIouError('');
     if (refundResult) loadData();
+  };
+
+  /**
+   * Close an IOU that the refund just made has satisfied. Dismiss, NOT complete:
+   * the refund already inserted its own completed row, so marking the IOU
+   * complete as well would double-count it in every sum over completed refunds
+   * (which is what makes the Pending Refunds headline untrustworthy in the first
+   * place). `refunded_via_op` rather than `refunded_externally` — the money did
+   * go through OP, just not through this IOU.
+   */
+  const clearOrphanIou = async (iou: NonNullable<FinancialData['financial']['pending_refunds']>[number]) => {
+    setClearingIouId(iou.id);
+    setClearIouError('');
+    try {
+      await api.post(`/money/${jobId}/dismiss-refund`, {
+        refund_id: iou.id,
+        reason: 'refunded_via_op',
+        notes: `Cleared alongside a £${(parseFloat(refundAmount) || 0).toFixed(2)} refund recorded from Payment History on ${new Date().toLocaleDateString('en-GB')}.`,
+      });
+      setRefundOrphanIous((prev) => prev.filter((r) => r.id !== iou.id));
+    } catch (e) {
+      setClearIouError(e instanceof Error ? e.message : 'Could not clear it');
+    } finally {
+      setClearingIouId(null);
+    }
   };
 
   // `allowRelease` is passed only by the confirm button on the release panel —
@@ -474,6 +513,10 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
         }
       );
       setRefundRelease(null);
+      // Any IOU still standing on this job is now probably a duplicate record
+      // of the refund just made. Offered, not assumed — see the success panel.
+      setRefundOrphanIous(data?.financial.pending_refunds || []);
+      setClearIouError('');
       setRefundResult({
         stripe_refund_id: resp.stripe_refund_id,
         hh_push_error: resp.hh_push_error || null,
@@ -2100,6 +2143,74 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                     {refundResult.hh_push_error}
                   </div>
                 )}
+                {/* Close out any IOU this refund has satisfied, here and now.
+                    Refunding from Payment History leaves an IOU untouched, so
+                    Pending Refunds silently accumulates money that has already
+                    gone back — £8,430 across 16 rows by Sep 2026, which is why
+                    nobody trusts that figure. Asking at the one moment someone
+                    actually knows the answer is what stops it rebuilding.
+                    Offered, never automatic: the amounts often differ, and OP
+                    can't tell a part-payment from a duplicate. */}
+                {refundOrphanIous.length > 0 && (
+                  <div className="px-3 py-3 bg-amber-50 border border-amber-300 rounded text-xs text-amber-900 space-y-2">
+                    <div className="font-semibold">
+                      Still showing as a pending refund on this job
+                    </div>
+                    <p>
+                      {canManage ? (
+                        <>
+                          If the £{(parseFloat(refundAmount) || 0).toFixed(2)} you just refunded covers
+                          {refundOrphanIous.length === 1 ? ' this, clear it' : ' these, clear them'} so
+                          {refundOrphanIous.length === 1 ? ' it stops' : ' they stop'} appearing in Pending Refunds.
+                        </>
+                      ) : (
+                        <>
+                          If the £{(parseFloat(refundAmount) || 0).toFixed(2)} you just refunded covers
+                          {refundOrphanIous.length === 1 ? ' this' : ' these'}, ask a manager to clear
+                          {refundOrphanIous.length === 1 ? ' it' : ' them'} from the Money tab.
+                        </>
+                      )}
+                    </p>
+                    {refundOrphanIous.map((iou) => {
+                      const shortOfIou = iou.amount > (parseFloat(refundAmount) || 0) + 0.005;
+                      return (
+                        <div key={iou.id} className="flex items-start justify-between gap-3 border-t border-amber-200 pt-2">
+                          <div>
+                            <span className="font-medium">£{Number(iou.amount).toFixed(2)}</span>
+                            {iou.date && <> · logged {new Date(iou.date).toLocaleDateString('en-GB')}</>}
+                            {iou.notes && <div className="text-amber-800">{iou.notes}</div>}
+                            {/* The one case where clearing is probably wrong. */}
+                            {shortOfIou && (
+                              <div className="text-amber-800 mt-0.5">
+                                More than you just refunded — check the rest has been paid before clearing.
+                              </div>
+                            )}
+                          </div>
+                          {/* Same gate as the Clear link on the Money tab's
+                              own IOU row — dismiss-refund is managers+. Anyone
+                              can still SEE the IOU; only the action is gated,
+                              so a staff refund doesn't end in a 403. */}
+                          {canManage && (
+                            <button
+                              onClick={() => clearOrphanIou(iou)}
+                              disabled={clearingIouId === iou.id}
+                              className="shrink-0 px-2.5 py-1 text-xs font-medium text-amber-900 border border-amber-400 rounded hover:bg-amber-100 disabled:opacity-50"
+                            >
+                              {clearingIouId === iou.id ? 'Clearing…' : 'Clear it'}
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                    {clearIouError && <p className="text-red-700">{clearIouError}</p>}
+                    {canManage && (
+                      <p className="text-[11px]">
+                        Leaving {refundOrphanIous.length === 1 ? 'it' : 'them'} is fine — nothing is lost, and
+                        {refundOrphanIous.length === 1 ? ' it' : ' they'} can be cleared from the Money tab later.
+                      </p>
+                    )}
+                  </div>
+                )}
                 <div className="flex justify-end">
                   <button onClick={closeRefundModal} className="px-4 py-2 text-sm font-medium text-white bg-ooosh-600 hover:bg-ooosh-700 rounded-md">Close</button>
                 </div>
@@ -2228,6 +2339,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                   className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md"
                 >
                   <option value="refunded_externally">Already refunded outside OP (HireHop / Stripe / bank)</option>
+                  <option value="refunded_via_op">Refunded in OP, but not through this IOU</option>
                   <option value="not_required">Not required (artifact / superseded)</option>
                   <option value="duplicate">Duplicate record</option>
                   <option value="other">Other</option>
