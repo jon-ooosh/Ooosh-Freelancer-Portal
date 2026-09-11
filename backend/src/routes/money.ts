@@ -18,7 +18,7 @@ import { reconcileJobExcessTopN } from '../services/excess-topn';
 import { pushDepositToHH, HH_BANK_IDS, getMethodForBankId } from '../services/hh-deposit';
 import { fetchDepositAvailability, releaseFromInvoice, revertRelease, type ReleaseResult } from '../services/hh-deposit-release';
 import { getStripeClient, isStripeConfigured, isStripeError } from '../config/stripe';
-import { sendPaymentEmail, sendExcessEmail, sendLastMinuteAlert, sendPaymentStatementEmail, logResendToTimeline, type StatementPaymentLine } from '../services/money-emails';
+import { sendPaymentEmail, sendExcessEmail, sendLastMinuteAlert, sendPaymentStatementEmail, sendRefundEmail, logResendToTimeline, type StatementPaymentLine } from '../services/money-emails';
 import {
   triggerHireFormEmailOnConfirmation as triggerHireFormEmailOnConfirmationShared,
   triggerCarnetFormOnConfirmation,
@@ -725,6 +725,12 @@ const refundPaymentSchema = z.object({
   // When set, an existing OP `job_payments` pending-refund IOU (e.g. created by
   // a cancellation) is marked completed instead of inserting a new refund row.
   pending_refund_id: z.string().uuid().nullable().optional(),
+  // Email the client confirming the refund. Only meaningful on the record-only
+  // methods: a Stripe refund has genuinely moved the money, so that path always
+  // emails and ignores this. On BACS/cash/Worldpay the money moves by hand, and
+  // the house rule is do-then-record — so the Money tab defaults this ON and
+  // lets whoever is recording it untick when they haven't sent it yet.
+  notify_client: z.boolean().optional(),
   // Staff have seen the "this deposit is fully applied to invoice X — I'll
   // release £Y back from it first" panel and confirmed. Without it a refund
   // needing a release returns 409 `release_required` rather than quietly
@@ -2534,7 +2540,7 @@ router.post('/:jobId/apply-credit', authorize('admin', 'manager'), validate(appl
 router.post('/:jobId/refund-payment', validate(refundPaymentSchema), async (req: AuthRequest, res: Response) => {
   try {
     const jobId = String(req.params.jobId);
-    const { hh_deposit_id, amount, method, reference, notes, pending_refund_id, allow_release } = req.body;
+    const { hh_deposit_id, amount, method, reference, notes, pending_refund_id, allow_release, notify_client } = req.body;
 
     const isUuid = /^[0-9a-f]{8}-/.test(jobId);
     const jobResult = await query(
@@ -2926,12 +2932,39 @@ router.post('/:jobId/refund-payment', validate(refundPaymentSchema), async (req:
       }
     }
 
+    // ── Phase 6: Tell the client ──────────────────────────────────────────
+    // A Stripe refund always emails: OP moved the money itself, so the client's
+    // bank is about to show it and silence is its own kind of bad service. The
+    // record-only methods email only when asked, because there the money moves
+    // by hand and OP has no idea whether it has — telling someone a refund is
+    // on its way before anyone has sent it would be worse than saying nothing.
+    // (Excess reimbursements have emailed unconditionally since Jun 2026; this
+    // is that behaviour plus an escape hatch, not a different policy.)
+    //
+    // AWAITED, unlike the fire-and-forget excess path: the modal reports whether
+    // the client was actually told, and a refund staff believe was confirmed but
+    // wasn't is exactly the sort of quiet gap this whole piece of work exists to
+    // close. Never allowed to fail the refund — the money has already moved.
+    const shouldEmail = stripeRefundPath || notify_client === true;
+    let clientEmail: { sent: boolean; toEmail?: string; isFallback?: boolean; error?: string } | null = null;
+    if (shouldEmail) {
+      try {
+        clientEmail = await sendRefundEmail({ jobId: job.id, amount, paymentMethod: method });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error('[money] Refund confirmation email threw (refund itself is unaffected):', msg);
+        clientEmail = { sent: false, error: msg };
+      }
+      console.log(`[money] Refund confirmation email: ${clientEmail.sent ? `sent to ${clientEmail.toEmail}${clientEmail.isFallback ? ' (info@ fallback)' : ''}` : `NOT sent — ${clientEmail.error || 'unknown'}`}`);
+    }
+
     console.log(`[money] Hire refund recorded: £${amount} on job ${job.id} via ${method}${stripeRefundId ? ` (Stripe ${stripeRefundId})` : ''}${hhPushError ? ' [HH push failed]' : ''}`);
     res.json({
       data: opResult.rows[0],
       ...(stripeRefundId ? { stripe_refund_id: stripeRefundId } : {}),
       ...(hhPaymentAppId ? { hh_payment_application_id: hhPaymentAppId } : {}),
       ...(hhPushError ? { hh_push_error: hhPushError } : {}),
+      ...(clientEmail ? { client_email: clientEmail } : {}),
     });
   } catch (error) {
     console.error('[money] Refund payment error:', error);

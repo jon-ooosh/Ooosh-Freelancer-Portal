@@ -474,6 +474,65 @@ export async function sendPaymentEmail(opts: {
   }
 }
 
+/**
+ * Confirm a HIRE refund to the client (deposit/balance going back).
+ *
+ * NOT for insurance excess — `sendExcessEmail` owns that, and the two must stay
+ * separate in the client's inbox: "your excess is back" and "we've refunded
+ * part of your hire" are different conversations.
+ *
+ * Caller decides WHETHER to send, not this function. A Stripe refund has
+ * genuinely moved the money, so `/refund-payment` fires it automatically; every
+ * other method is record-only and the money moves by hand, so the Money tab
+ * asks. See routes/money.ts.
+ */
+export async function sendRefundEmail(opts: {
+  jobId: string;
+  amount: number;
+  /** OP payment-method key — drives the method-specific timescale sentence. */
+  paymentMethod: string;
+}): Promise<{ sent: boolean; reason?: 'error'; error?: string; isFallback?: boolean; toEmail?: string }> {
+  const { jobId, amount, paymentMethod } = opts;
+  const templateId = 'hire_refund_processed';
+
+  // templateId passed through so the job's per-bucket routing override applies,
+  // same as every other client-facing money email.
+  const target = await resolveClientEmailTarget(jobId, templateId);
+
+  const jobResult = await query(
+    `SELECT job_name, hh_job_number FROM jobs WHERE id = $1`,
+    [jobId]
+  );
+  const job = jobResult.rows[0];
+
+  try {
+    const res = await emailService.send(templateId, {
+      to: target.primaryEmail,
+      cc: target.ccEmails.length > 0 ? target.ccEmails : undefined,
+      prependBanner: target.isFallback
+        ? buildFallbackBanner({
+            jobId,
+            clientName: target.clientName,
+            jobNumber: target.jobNumber,
+            jobName: target.jobName,
+          })
+        : undefined,
+      variables: {
+        firstName: target.primaryFirstName || 'there',
+        amount: `\u00A3${amount.toFixed(2)}`,
+        jobName: job?.job_name || `Job #${job?.hh_job_number || ''}`,
+        jobNumber: String(job?.hh_job_number || ''),
+        refundTimescale: getRefundTimescale(paymentMethod),
+      },
+    });
+    if (!res.success) return { sent: false, reason: 'error', error: res.error, isFallback: target.isFallback, toEmail: target.primaryEmail };
+    if (target.isFallback) await logFallbackToTimeline({ jobId, templateId, amount });
+    return { sent: true, isFallback: target.isFallback, toEmail: target.primaryEmail };
+  } catch (err) {
+    return { sent: false, reason: 'error', error: err instanceof Error ? err.message : String(err), isFallback: target.isFallback, toEmail: target.primaryEmail };
+  }
+}
+
 /** One payment line for the itemised statement (resend confirmation). */
 export interface StatementPaymentLine {
   date: string;        // ISO or display date string
