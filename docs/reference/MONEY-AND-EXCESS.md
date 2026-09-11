@@ -478,6 +478,25 @@ OP is now the staff control surface for the FULL post-collection money loop. Ini
 - [x] **Process pending cancellation refunds (Jun 2026)** — cancellations create a bare `job_payments` IOU (`payment_type='refund'`, `payment_status='pending'`, no HH/Stripe link) that nothing ever actioned. Now: `/summary` returns `financial.pending_refunds`; `/refund-payment` accepts an optional `pending_refund_id` that validates the IOU (belongs to job + still pending, **before** any money moves) then marks it `completed` in place (reusing the Stripe + HH + Xero path) rather than inserting a duplicate. MoneyTab renders pending refunds as an amber "Awaiting refund" row with a "Process refund" button → modal with a deposit picker + an explicit **"When you confirm:"** panel (Stripe auto-refund vs record-only, HH+Xero paperwork, IOU marked complete).
 - [x] **Clear (dismiss) pending refunds without moving money (Jun 2026)** — the "Process refund" path above moves money via Stripe/HH; but some IOUs never need processing through OP (already refunded out-of-band directly in HireHop / Stripe / bank, pre-refund-tracking artifacts, wrong amount / duplicate). The IOU was previously un-clearable — and "Process refund" is disabled when there's no deposit on the job to refund against (e.g. job 15840 showed £93 owing when £150 had already been refunded direct in HH, leaving staff stuck). Sibling of the balance `resolve-balance` + excess `mark-externally-resolved` actions. `POST /api/money/:jobId/dismiss-refund` (`{ refund_id, reason, notes? }`, MANAGER_ROLES) validates the IOU belongs to the job + is still pending, flips `payment_status='cancelled'`, annotates `notes`, logs a job-timeline interaction + audit. **Touches NO money / HireHop / Stripe / Xero.** `POST /api/money/refunds/bulk-dismiss` (`{ reason, notes?, refund_ids[] | logged_before: YYYY-MM-DD }`, admin) for the pre-refund-tracking backlog sweep (mirrors `balances/bulk-resolve`). Dismissed IOUs drop out of the `/overview` Pending Refunds list + per-job MoneyTab (both filter `payment_status='pending'`). UI: "Clear" link beside "Process refund" on the MoneyTab pending-refund row + per-row "Clear" / "Bulk clear old refunds…" on the `/money/overview` Refunds tab. Reasons: `refunded_externally | refunded_via_op | not_required | duplicate | other`.
 
+##### Overpaid invoices on the dashboard, and the £0.01 (Sep 2026)
+
+**`/money/overview` — "Owed to Clients".** The Pending Refunds card became a combined figure: refund IOUs **plus** overpaid invoices. Same conclusion ("we're holding a client's money"), different provenance, and the two are listed as **separate tables under one card** because the actions differ — an IOU can be Processed or Cleared, an overpaid invoice has no row to action and resolves only by actually refunding. One list with one set of buttons would promise a Clear that can't exist.
+
+`client_overpaid` is cached on `job_financials` (migration **211**), written through by the Money tab alongside `balance_outstanding`, because `/overview` reads OP only — no HireHop calls at page load, by design. **Deliberately not backfilled:** there is no way to compute it without asking HireHop per job, and a column defaulting to 0 is honest — it says "no overpayment known", not "no overpayment". Jobs populate as their Money tabs are opened, exactly as the rest of the table did.
+
+**The £0.01.** HireHop gives us the ex-VAT accrued total and OP derives VAT (`hireValueExVat * 0.20`); HireHop rounds VAT **per line**. On a multi-line job the two land a penny or two apart — job 15628: derived £2,209.62 vs invoiced £2,209.61 — and that penny rendered as a **red** "Balance Outstanding: £0.01" beside a "100% paid" bar, with a "Deposit secured" pill instead of "Paid in full". `MONEY_EPSILON` can't absorb it: half a penny, sized for the sub-penny residue of our own arithmetic, where this is a whole penny of genuine disagreement between two real figures.
+
+Fix: when HireHop has invoiced the job and its figure agrees with ours **to within £1**, use HireHop's — it's the number on the document the client received; ours is a derivation of it. The £1 guard is what keeps it surgical, firing only where the two already agree:
+
+| Job | Shape | Before | After |
+|---|---|---|---|
+| 15628 post-refund | invoiced 1p under derived | £0.01 | **£0.00** |
+| 15627 | invoice £24 **above** accrued (billing correction) | £21.60 | £21.60 — tweak doesn't fire |
+| part-invoiced | £1,000 invoice against £3,000 accrued | £2,000 | £2,000 — tweak doesn't fire |
+| uninvoiced | no invoice to prefer | unchanged | unchanged |
+
+A partly-invoiced job and the 15627 shape both differ from derived by far more than £1, so both keep the accrued basis. **Do not widen the tolerance** to "fix" a larger discrepancy — past a pound it isn't rounding, it's a different scope, and accrued is the honest basis there.
+
 ##### Refund confirmation emails (Sep 2026)
 
 Hire refunds sent nothing to the client — the one money event OP stayed silent about. Excess reimbursements have emailed unconditionally since Jun 2026, so the hire side was the outlier, not the innovation.
@@ -497,7 +516,7 @@ Emailing unconditionally on a record-only refund would tell someone money is com
 
 The send is **awaited**, unlike the fire-and-forget excess path, so the modal can report whether the client was actually told — a refund staff believe was confirmed but wasn't is precisely the quiet gap this work exists to close. It can never fail the refund: the money has already moved.
 
-**Deploy note:** while `EMAIL_MODE=test`, add `hire_refund_processed` to `EMAIL_LIVE_TEMPLATES` or it stays test-only. Ignored under `EMAIL_MODE=live`.
+No allowlist entry needed: production runs `EMAIL_MODE=live`, where `EMAIL_LIVE_TEMPLATES` is ignored entirely. The template sends for real the moment it deploys.
 
 ##### Orphaned refund IOUs — why Pending Refunds can't be trusted (Sep 2026)
 
