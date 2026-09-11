@@ -759,8 +759,16 @@ router.get('/:id/rollover-chain', async (req: AuthRequest, res: Response) => {
     if (!depositId) { res.json({ data: { deposit_id: null, current_id: id, chain: [] } }); return; }
 
     const chain = await query(
-      `SELECT je.id, je.excess_status,
+      // job_id/payment_date/payment_method added Sep 2026 so the UI can link
+      // each hop to its job AND name the ORIGIN — the hire the cash actually
+      // landed on. A rolled-over child shows payment_date = the day the rollover
+      // was applied, which read as "collected on 2 Sept" for money taken weeks
+      // earlier on another hire.
+      // reimbursement_date added Sep 2026 so the Money tab can date the chain's
+      // OUTCOME ("reimbursed 9 Sep") on the origin record, not just name it.
+      `SELECT je.id, je.excess_status, je.job_id,
               je.excess_amount_taken, je.claim_amount, je.reimbursement_amount, je.amount_held,
+              je.payment_date, je.payment_method, je.reimbursement_date,
               je.created_at, j.hh_job_number, j.job_name
          FROM job_excess je LEFT JOIN jobs j ON j.id = je.job_id
         WHERE je.hh_deposit_id = $1
@@ -865,7 +873,8 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
         vha.hire_end,
         fv.reg AS vehicle_reg,
         d.full_name AS driver_name,
-        j.job_name
+        j.job_name,
+        (je.notes LIKE '%[Auto-covered by account]%') AS auto_covered
       FROM job_excess je
       LEFT JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
       LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
@@ -1160,6 +1169,23 @@ router.post('/:id/payment', validate(paymentSchema), async (req: AuthRequest, re
     }
 
     // Positive delta — real new payment. Update the record absolutely.
+    //
+    // receipt_required: a Worldpay/Amex excess payment goes through the physical
+    // card terminal and prints a slip we need scanned for audit — exactly as a
+    // hold does. Until Sep 2026 only record-preauth and capture raised this
+    // to-do, so a straight card-machine excess PAYMENT produced no receipt
+    // prompt at all (no QR handoff, no amber banner, nothing under Manage) —
+    // which is why the prompt appeared inconsistently depending on which button
+    // staff had pressed. Stripe has an electronic trail and cash/BACS produce no
+    // card slip, so neither flags one.
+    //
+    // receipt_uploaded_at is cleared alongside it because this is a NEW money
+    // event with its own new slip; the UI gates on `required && !uploaded`, so
+    // leaving an earlier scan's timestamp in place would silently swallow the
+    // to-do. (Per-EVENT receipts remain the known limitation — the record still
+    // carries one receipt_url, which the new scan replaces.)
+    const needsReceipt = method === 'worldpay' || method === 'amex';
+
     const result = await query(
       `UPDATE job_excess SET
         excess_amount_taken = $1,
@@ -1170,10 +1196,12 @@ router.post('/:id/payment', validate(paymentSchema), async (req: AuthRequest, re
         payment_method = $2,
         payment_reference = $3,
         payment_date = NOW(),
+        receipt_required = CASE WHEN $5::boolean THEN TRUE ELSE receipt_required END,
+        receipt_uploaded_at = CASE WHEN $5::boolean THEN NULL ELSE receipt_uploaded_at END,
         updated_at = NOW()
       WHERE id = $4
       RETURNING *`,
-      [newTotal, method, reference || null, id]
+      [newTotal, method, reference || null, id, needsReceipt]
     );
 
     // Rolled-over payments need extra bookkeeping so the cash chain stays linked
@@ -1421,6 +1449,13 @@ router.post('/:id/payment', validate(paymentSchema), async (req: AuthRequest, re
 //
 // Only valid from a "no money yet" state (needed / pending). A record already
 // holding or carrying money is rejected — you don't stack a hold on top.
+//
+// stripe_payment_intent_id is the load-bearing field for a Stripe-channel hold.
+// It is written to BOTH job_excess and the job_payments audit row, because:
+//   - Capture (422s without it) and Release (Stripe cancel) both need the PI.
+//   - services/stripe-preauth-reconciler.ts diffs live Stripe holds against those
+//     two columns, so a hold recorded WITHOUT the PI still reads as "unrecorded"
+//     and re-alerts info@ every morning until the hold expires.
 
 router.post('/:id/record-preauth', validate(recordPreauthSchema), async (req: AuthRequest, res: Response) => {
   try {
@@ -1492,13 +1527,19 @@ router.post('/:id/record-preauth', validate(recordPreauthSchema), async (req: Au
 
     // Audit row in job_payments (payment_status='pre_auth' — not completed). Keeps
     // the hold visible in payment history, consistent with the portal path in money.ts.
+    //
+    // stripe_payment_intent is populated deliberately: the Stripe → OP pre-auth
+    // reconciler (services/stripe-preauth-reconciler.ts) diffs live Stripe holds
+    // against BOTH job_excess.stripe_payment_intent_id and this column. Leaving it
+    // null here meant a hold recorded by hand still read as "not present in OP"
+    // and re-alerted info@ every morning.
     try {
       await query(
         `INSERT INTO job_payments
           (job_id, hirehop_job_id, payment_type, amount, payment_method,
            payment_reference, payment_status, source, excess_id,
-           client_name, recorded_by, notes, payment_date)
-         VALUES ($1, $2, 'excess', $3, $4, $5, 'pre_auth', 'op_excess_modal', $6, $7, $8, $9, NOW())`,
+           client_name, recorded_by, notes, stripe_payment_intent, payment_date)
+         VALUES ($1, $2, 'excess', $3, $4, $5, 'pre_auth', 'op_excess_modal', $6, $7, $8, $9, $10, NOW())`,
         [
           current.job_id,
           current.hh_job_number || null,
@@ -1509,6 +1550,7 @@ router.post('/:id/record-preauth', validate(recordPreauthSchema), async (req: Au
           current.client_name || null,
           req.user?.id || null,
           notes || `Pre-auth hold recorded (expires ${holdDays}d)`,
+          stripe_payment_intent_id || null,
         ]
       );
     } catch (err) {
@@ -1942,6 +1984,13 @@ router.post('/:id/capture', validate(captureSchema), async (req: AuthRequest, re
     // receipt_required: TRUE only for card-machine CARD methods (Worldpay/Amex)
     // when no scan was supplied. Stripe (electronic trail) and cash-held (no card
     // receipt) don't flag one.
+    //
+    // The capture prints its OWN slip on the terminal, distinct from the hold's.
+    // So when we raise the to-do we also clear receipt_uploaded_at (below): the
+    // UI gates on `required && !uploaded`, and a record whose hold receipt was
+    // already scanned would otherwise come back from capture with the flag set
+    // but the to-do invisible — no amber banner, no "Upload Receipt Scan" under
+    // Manage. That inconsistent pair is what hid the prompt on job 16371.
     const needsReceipt = (method === 'worldpay' || method === 'amex') && !receipt_url;
 
     const result = await query(
@@ -1961,9 +2010,13 @@ router.post('/:id/capture', validate(captureSchema), async (req: AuthRequest, re
         claim_date               = CASE WHEN $8 THEN NOW() ELSE claim_date END,
         claim_notes              = $9,
         notes                    = $10,
-        receipt_required         = $11,
+        receipt_required         = $11::boolean,
         receipt_url              = COALESCE($13, receipt_url),
-        receipt_uploaded_at      = CASE WHEN $13 IS NOT NULL THEN NOW() ELSE receipt_uploaded_at END,
+        receipt_uploaded_at      = CASE
+                                     WHEN $13 IS NOT NULL THEN NOW()
+                                     WHEN $11::boolean THEN NULL
+                                     ELSE receipt_uploaded_at
+                                   END,
         updated_at               = NOW()
       WHERE id = $12
       RETURNING *`,
@@ -2110,6 +2163,38 @@ router.post('/:id/release', validate(releaseSchema), async (req: AuthRequest, re
     const errMsg = error instanceof Error ? error.message : String(error);
     console.error('[excess] Release error:', errMsg, error);
     res.status(500).json({ error: 'Failed to release pre-auth', detail: errMsg });
+  }
+});
+
+// ── POST /api/excess/:id/reconcile-preauth — Confirm a held pre-auth's true state ──
+//
+// Asks the truth (Stripe for online holds; the 5-day window for card-machine
+// holds) whether a `pre_auth` hold is still live, and flips it to `released` if
+// it's gone. This is what lets the UI show a BINARY held/not-held state instead
+// of guessing about a past-expiry hold.
+//
+// Powers: the "Check hold status" button in the Manage modal, and the
+// opportunistic self-heal on Money-tab / Overview load. Read-only against Stripe
+// (retrieve, never capture) — the only side effect is flipping OP to `released`
+// when Stripe confirms the hold is canceled. Never pre-empts a live hold.
+//
+// Idempotent: a record already `released` (or never a pre_auth) returns
+// `not_preauth` with the current row and changes nothing.
+router.post('/:id/reconcile-preauth', async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    const { reconcileExcessPreauth } = await import('../services/excess-preauth');
+    const reconcile = await reconcileExcessPreauth(id);
+    const updated = await query(`SELECT * FROM job_excess WHERE id = $1`, [id]);
+    if (updated.rows.length === 0) {
+      res.status(404).json({ error: 'Excess record not found' });
+      return;
+    }
+    res.json({ data: updated.rows[0], reconcile });
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error('[excess] reconcile-preauth error:', errMsg, error);
+    res.status(500).json({ error: 'Failed to reconcile pre-auth', detail: errMsg });
   }
 });
 
@@ -2396,9 +2481,73 @@ router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSch
     // 15781/15235/15358/15503/15996 — Jun 2026).
     const looksLikeStripePi = (v: unknown): v is string =>
       typeof v === 'string' && /^pi_[A-Za-z0-9]+$/.test(v.trim());
-    const resolvedPi: string | null =
+    let resolvedPi: string | null =
       (looksLikeStripePi(current.stripe_payment_intent_id) ? current.stripe_payment_intent_id.trim() : null) ||
       (looksLikeStripePi(current.payment_reference) ? current.payment_reference.trim() : null);
+
+    // Rollover chain-walk: when THIS record has no PI of its own (e.g. it's a
+    // rolled-over child that only inherited hh_deposit_id, not the PI) walk the
+    // deposit chain back to the ORIGINATING record that first took the money and
+    // use its PI. Mirrors resolveDepositBankId's chain-walk for the bank. This is
+    // what lets a rolled-over excess reimburse to the original card one-click,
+    // "from wherever it ended up", instead of loud-failing for want of a PI.
+    if (!resolvedPi && current.hh_deposit_id) {
+      const originPi = await query(
+        `SELECT stripe_payment_intent_id, payment_reference
+         FROM job_excess
+         WHERE hh_deposit_id = $1
+           AND (stripe_payment_intent_id ~ '^pi_' OR payment_reference ~ '^pi_')
+         ORDER BY COALESCE(payment_date, created_at) ASC
+         LIMIT 1`,
+        [current.hh_deposit_id]
+      );
+      const origin = originPi.rows[0];
+      if (origin) {
+        resolvedPi =
+          (looksLikeStripePi(origin.stripe_payment_intent_id) ? origin.stripe_payment_intent_id.trim() : null) ||
+          (looksLikeStripePi(origin.payment_reference) ? origin.payment_reference.trim() : null);
+        if (resolvedPi) {
+          console.log(`[excess] Reimburse PI resolved via rollover chain (deposit ${current.hh_deposit_id}) → ${resolvedPi}`);
+        }
+      }
+    }
+
+    // job_payments fallback: the job_excess rollover chain above only sees PIs
+    // that actually landed on a job_excess row. A record can legitimately hold
+    // the money (hh_deposit_id set, amount_taken populated) with NO PI on ANY
+    // job_excess row in its chain — the classic case is a payment-event that
+    // 500'd on the job_excess UPDATE (e.g. the 42P08 incident, job 16085) but
+    // had already committed the job_payments audit row carrying the PI, then
+    // self-healed the deposit/amount via passive reconciliation (which never
+    // writes the PI). Recover the PI from job_payments: prefer the exact HH
+    // deposit linkage, fall back to the job's excess payments. Read-only —
+    // only recovers a PI that genuinely exists in the audit log, so cash/BACS
+    // records still correctly fall through to the no_stripe_pi loud-fail.
+    if (!resolvedPi && (current.hh_deposit_id || current.hirehop_job_id)) {
+      const jpRes = await query(
+        `SELECT stripe_payment_intent, payment_reference
+         FROM job_payments
+         WHERE (stripe_payment_intent ~ '^pi_' OR payment_reference ~ '^pi_')
+           AND (
+             ($1::bigint IS NOT NULL AND hirehop_deposit_id = $1)
+             OR ($2::bigint IS NOT NULL AND hirehop_job_id = $2 AND payment_type = 'excess')
+           )
+         ORDER BY
+           CASE WHEN $1::bigint IS NOT NULL AND hirehop_deposit_id = $1 THEN 0 ELSE 1 END,
+           created_at ASC
+         LIMIT 1`,
+        [current.hh_deposit_id ?? null, current.hirehop_job_id ?? null]
+      );
+      const jp = jpRes.rows[0];
+      if (jp) {
+        resolvedPi =
+          (looksLikeStripePi(jp.stripe_payment_intent) ? jp.stripe_payment_intent.trim() : null) ||
+          (looksLikeStripePi(jp.payment_reference) ? jp.payment_reference.trim() : null);
+        if (resolvedPi) {
+          console.log(`[excess] Reimburse PI resolved via job_payments fallback (deposit ${current.hh_deposit_id ?? 'n/a'}, hh_job ${current.hirehop_job_id ?? 'n/a'}) → ${resolvedPi}`);
+        }
+      }
+    }
 
     let stripeRefundId: string | null = null;
     const stripeRefundPath = method === 'stripe_gbp' && !!resolvedPi;
@@ -2432,12 +2581,40 @@ router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSch
         });
         stripeRefundId = refund.id;
         console.log(`[excess] Stripe refund created: ${refund.id} (£${amount.toFixed(2)} on PI ${resolvedPi})`);
+
+        // CLAIM THE REFUND LEG NOW — before the HireHop/Xero work below, not
+        // after the response. Stripe fires `charge.refunded` within a few
+        // hundred milliseconds of the refund being created, and that webhook
+        // applies the refund to this record unless it finds a leg carrying the
+        // same refund id. Writing the leg at the END of this handler (which is
+        // what we used to do) left a window of seconds — the whole HH push —
+        // in which the webhook saw an empty ledger and applied the £ a second
+        // time. Job 15187 lost that race by 2 seconds; the records sitting at
+        // reimbursement_amount = 2 × excess_amount_taken lost it too.
+        //
+        // Safe to claim before the money is recorded: once a Stripe refund
+        // exists, every remaining path through this handler reaches the Step 3
+        // UPDATE (the 422/502 aborts below are all gated on `!stripeRefundPath`).
+        await query(
+          `UPDATE job_excess
+           SET refund_legs = COALESCE(refund_legs, '[]'::jsonb) || $1::jsonb
+           WHERE id = $2`,
+          [
+            JSON.stringify([{
+              source: 'manual',
+              ref: `stripe_refund_${refund.id}`,
+              amount,
+              at: new Date().toISOString(),
+            }]),
+            id,
+          ]
+        ).catch(e => console.error('[excess] Refund leg claim failed (non-fatal, webhook may double-apply):', e));
       } catch (err) {
         const msg = isStripeError(err) ? err.message : (err instanceof Error ? err.message : 'Unknown error');
         console.error('[excess] Stripe refund failed:', msg);
         res.status(502).json({
           error: 'Stripe refund failed',
-          detail: msg,
+          detail: `${msg} — if the original charge is past Stripe's refund window (~180 days), the card can no longer be refunded. Contact the hirer and reimburse by another method (e.g. BACS) via this form instead.`,
         });
         return;
       }
@@ -2658,26 +2835,11 @@ router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSch
       );
     }
 
-    // Refund-leg ledger: when OP initiated a Stripe refund, pre-record the
-    // dedup leg so the incoming `charge.refunded` webhook (which always fires
-    // for OP-initiated refunds too) sees an existing entry and no-ops. Source
-    // ref shape MUST match what `stripe-webhook.ts charge.refunded` produces.
-    if (stripeRefundId) {
-      await query(
-        `UPDATE job_excess
-         SET refund_legs = COALESCE(refund_legs, '[]'::jsonb) || $1::jsonb
-         WHERE id = $2`,
-        [
-          JSON.stringify([{
-            source: 'manual',
-            ref: `stripe_refund_${stripeRefundId}`,
-            amount,
-            at: new Date().toISOString(),
-          }]),
-          id,
-        ]
-      ).catch(e => console.error('[excess] Refund leg append failed (non-fatal):', e));
-    } else if (method === 'stripe_gbp') {
+    // Refund-leg ledger: the OP-initiated Stripe refund already claimed its leg
+    // in Step 0 (see the comment there — it has to happen before the HH push,
+    // not here, or the charge.refunded webhook wins the race). Only the
+    // record-only path still needs a leg written at this point.
+    if (!stripeRefundId && method === 'stripe_gbp') {
       // Record-only path: staff acknowledged they refunded in the Stripe dashboard
       // (no PI on record to fire the API). Stamp a leg so the silent-failure
       // detector (scheduler) treats this as resolved, not a swallowed refund.
@@ -2935,15 +3097,28 @@ router.post('/:id/move', authorize(...MANAGER_ROLES), validate(moveExcessSchema)
 // ── POST /api/excess/:id/link-deposit — Manually link an HH deposit to this excess record ──
 // Used when auto-reconciliation can't match (e.g. deposit description doesn't contain excess keywords)
 
+// Link-deposit takes the resulting TOTAL collected, not a delta to add.
+//
+// It used to take `amount` and do `excess_amount_taken += amount`, which
+// silently doubled the collected figure whenever the deposit's money was
+// already on the record — money HireHop reports as an unlinked deposit is very
+// often money OP has already counted (a portal payment that overwrote the
+// deposit pointer leaves the ORIGINAL deposit looking unmatched). Job 15187
+// went to £3,300 collected against a £2,100 excess that way, wiping its
+// `partially_reimbursed` status in the process. Same add-vs-set trap the
+// payment endpoint fixed with `total_collected`; same fix, same name.
+//
+// `amount` is still accepted (delta) for any caller that hasn't moved over.
 const linkDepositSchema = z.object({
   hh_deposit_id: z.number().int().min(1),
-  amount: z.number().min(0.01).optional(), // If provided, also updates excess_amount_taken
+  total_collected: z.number().min(0).optional(), // Absolute set — preferred.
+  amount: z.number().min(0.01).optional(),       // Legacy delta — added to what's there.
 });
 
 router.post('/:id/link-deposit', validate(linkDepositSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
-    const { hh_deposit_id, amount } = req.body;
+    const { hh_deposit_id, total_collected, amount } = req.body;
 
     // Check the excess record exists
     const currentResult = await query(`SELECT * FROM job_excess WHERE id = $1`, [id]);
@@ -2973,12 +3148,24 @@ router.post('/:id/link-deposit', validate(linkDepositSchema), async (req: AuthRe
     ];
     const params: unknown[] = [hh_deposit_id];
 
-    // If amount provided, update the excess amount taken and status
-    if (amount) {
-      const currentTaken = parseFloat(current.excess_amount_taken || 0);
-      const newTaken = currentTaken + amount;
+    // Update the collected figure + status when the caller gave us one.
+    // `total_collected` is the resulting total (absolute); `amount` is the old
+    // delta form. Neither → link only, leave the money alone (that's the
+    // "this record already has the money, just re-point it at the right HH
+    // deposit" case, e.g. after a deposit has been reversed and replaced).
+    const currentTaken = parseFloat(current.excess_amount_taken || 0);
+    const newTaken =
+      total_collected !== undefined ? total_collected
+      : amount ? currentTaken + amount
+      : null;
+
+    if (newTaken !== null) {
       const required = parseFloat(current.excess_amount_required || 0);
-      const newStatus = required > 0 && newTaken >= required ? 'taken' : 'partially_paid';
+      // Don't demote a record that has resolved beyond simple collection —
+      // deriveExcessStatus protects reimbursed/partially_reimbursed/waived and
+      // friends. Linking a deposit is bookkeeping; it must not flip a record
+      // that's been part-refunded back to a plain 'taken' (job 15187).
+      const newStatus = deriveExcessStatus(current.excess_status, required, newTaken);
 
       params.push(newTaken, newStatus);
       updateParts.push(`excess_amount_taken = $${params.length - 1}`);
@@ -3072,7 +3259,8 @@ router.get('/by-person/:personId', async (req: AuthRequest, res: Response) => {
         fv.reg AS vehicle_reg,
         d.full_name AS driver_name,
         j.job_name,
-        COALESCE(h.held_amount, 0) AS held_amount
+        COALESCE(h.held_amount, 0) AS held_amount,
+        (je.notes LIKE '%[Auto-covered by account]%') AS auto_covered
       FROM job_excess je
       LEFT JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
       LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
@@ -3130,7 +3318,8 @@ router.get('/by-org/:orgId', async (req: AuthRequest, res: Response) => {
         fv.reg AS vehicle_reg,
         d.full_name AS driver_name,
         j.job_name,
-        COALESCE(h.held_amount, 0) AS held_amount
+        COALESCE(h.held_amount, 0) AS held_amount,
+        (je.notes LIKE '%[Auto-covered by account]%') AS auto_covered
       FROM job_excess je
       LEFT JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
       LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id

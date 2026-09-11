@@ -85,6 +85,12 @@ async function request<T>(
       status: response.status,
       code: error.error || null,
       details: error.details || null,
+      // The whole parsed body, for callers that need a field the two shortcuts
+      // above don't cover (e.g. the quick-assign gate's `code` +
+      // `can_override`, which decide whether to offer the manager override).
+      // NB `code` above is historically the error MESSAGE, not a machine code —
+      // read `body.code` for that.
+      body: error as Record<string, unknown>,
     });
     throw err;
   }

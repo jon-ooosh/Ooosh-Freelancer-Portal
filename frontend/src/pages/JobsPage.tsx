@@ -9,6 +9,7 @@ import {
   PipelineStatus,
   OperationalStatus,
 } from '../../../shared/types';
+import { jobDisplayOrgNameOr } from '../lib/jobOrgName';
 
 const STATUS_MAP: Record<number, string> = {
   0: 'Enquiry', 1: 'Provisional', 2: 'Booked', 3: 'Prepped',
@@ -68,6 +69,10 @@ interface Job {
   status_name: string | null;
   client_name: string | null;
   company_name: string | null;
+  // Canonical org names from the API (see lib/jobOrgName.ts). Render via
+  // jobDisplayOrgNameOr(job), never the raw client_name/company_name strings.
+  client_org_name?: string | null;
+  lead_org_name?: string | null;
   venue_name: string | null;
   job_date: string | null;
   job_end: string | null;
@@ -530,7 +535,7 @@ export default function JobsPage() {
           </div>
         </td>
         <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-600 truncate max-w-[180px]">
-          {job.client_name || job.company_name || '\u2014'}
+          {jobDisplayOrgNameOr(job)}
         </td>
         <td className="px-4 py-3 whitespace-nowrap">
           <div className="flex flex-col gap-1">
@@ -624,7 +629,7 @@ export default function JobsPage() {
             <span className="font-mono text-xs text-gray-400">—</span>
           )
         }
-        primary={job.job_name || job.client_name || job.company_name || '—'}
+        primary={job.job_name || jobDisplayOrgNameOr(job)}
         primarySuffix={
           job.has_ooh_return ? (
             <span
@@ -649,7 +654,7 @@ export default function JobsPage() {
             </span>
           )
         }
-        secondary={job.client_name || job.company_name || ''}
+        secondary={jobDisplayOrgNameOr(job, '')}
         meta={
           <>
             <span className="text-gray-700 font-medium">{formatDateRange(job.job_date, job.job_end)}</span>

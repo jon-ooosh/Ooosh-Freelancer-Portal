@@ -95,21 +95,21 @@ export default function ExcessGateBanner({ blockers, onOverrideComplete, onNavig
   }
 
   return (
-    <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-4">
+    <div className="mb-4 rounded-lg border border-red-300 bg-red-50 p-4">
       <div className="flex items-start gap-3">
         <div className="flex-shrink-0 mt-0.5">
-          <svg className="h-5 w-5 text-amber-600" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+          <svg className="h-5 w-5 text-red-600" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
           </svg>
         </div>
         <div className="flex-1">
-          <h3 className="text-sm font-semibold text-amber-800">
+          <h3 className="text-sm font-semibold text-red-800">
             Insurance Excess Not Collected
           </h3>
           <div className="mt-2 space-y-2">
             {excessBlockers.map((blocker) => (
               <div key={blocker.assignmentId} className="flex items-center justify-between gap-4">
-                <p className="text-sm text-amber-700">
+                <p className="text-sm text-red-700">
                   <span className="font-medium">{blocker.driverName || 'Unknown driver'}</span>
                   {blocker.vehicleReg && <span> on {blocker.vehicleReg}</span>}
                   {blocker.amountRequired != null && (
@@ -120,7 +120,7 @@ export default function ExcessGateBanner({ blockers, onOverrideComplete, onNavig
                   {canOverride && blocker.excessId && showOverrideForm !== blocker.excessId && (
                     <button
                       onClick={() => setShowOverrideForm(blocker.excessId!)}
-                      className="text-xs font-medium text-amber-700 hover:text-amber-900 underline"
+                      className="text-xs font-medium text-red-700 hover:text-red-900 underline"
                     >
                       Override
                     </button>
@@ -141,7 +141,7 @@ export default function ExcessGateBanner({ blockers, onOverrideComplete, onNavig
           {onNavigateToRequirements && (
             <button
               onClick={onNavigateToRequirements}
-              className="mt-2 text-xs font-medium text-amber-700 hover:text-amber-900 underline"
+              className="mt-2 text-xs font-medium text-red-700 hover:text-red-900 underline"
             >
               Go to Job Requirements
             </button>
@@ -149,7 +149,7 @@ export default function ExcessGateBanner({ blockers, onOverrideComplete, onNavig
 
           {/* Override form */}
           {showOverrideForm && (
-            <div className="mt-3 rounded-md border border-amber-200 bg-white p-3">
+            <div className="mt-3 rounded-md border border-red-200 bg-white p-3">
               <p className="text-xs font-medium text-gray-700 mb-2">Manager Override — Proceed without excess</p>
               <select
                 value={overrideReason}
@@ -176,7 +176,7 @@ export default function ExcessGateBanner({ blockers, onOverrideComplete, onNavig
                 <button
                   onClick={() => handleOverride(showOverrideForm)}
                   disabled={overrideLoading}
-                  className="px-3 py-1 text-xs font-medium text-white bg-amber-600 hover:bg-amber-700 rounded-md disabled:opacity-50"
+                  className="px-3 py-1 text-xs font-medium text-white bg-red-600 hover:bg-red-700 rounded-md disabled:opacity-50"
                 >
                   {overrideLoading ? 'Saving...' : 'Confirm Override'}
                 </button>

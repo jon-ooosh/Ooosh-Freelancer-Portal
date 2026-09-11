@@ -177,6 +177,13 @@ router.post('/register', validate(registerSchema), async (req: Request, res: Res
 
     await query('UPDATE users SET refresh_token = $1 WHERE id = $2', [tokens.refreshToken, user.id]);
 
+    // Materialise any all-staff / role-targeted staff documents for the new user.
+    if (role !== 'freelancer') {
+      import('../services/staff-documents')
+        .then((m) => m.syncAllActiveDocuments())
+        .catch((e) => console.error('Staff-document sync on register failed:', e));
+    }
+
     res.status(201).json({
       user: { id: user.id, email: user.email, role: user.role, first_name, last_name },
       ...tokens,

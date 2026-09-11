@@ -177,10 +177,7 @@ router.post('/form/:token/submit', publicLimiter, async (req: Request, res: Resp
       pdfKey = `carnet-authority/${carnet.id}/letter-of-authorisation-${Date.now()}.pdf`;
       await uploadToR2(pdfKey, pdfBuffer, 'application/pdf');
       await query(`UPDATE job_carnets SET signed_authority_url = $1 WHERE id = $2`, [pdfKey, carnet.id]);
-      const jf = await query(`SELECT files FROM jobs WHERE id = $1`, [carnet.job_id]);
-      const files = Array.isArray(jf.rows[0]?.files) ? jf.rows[0].files : [];
-      files.push({ url: pdfKey, name: 'Letter of Authorisation (carnet).pdf', label: 'Carnet authority', uploaded_at: new Date().toISOString(), uploaded_by: SYSTEM_USER_ID });
-      await query(`UPDATE jobs SET files = $1 WHERE id = $2`, [JSON.stringify(files), carnet.job_id]);
+      await upsertCarnetAuthorityFile(carnet.job_id, carnet.id, pdfKey, SYSTEM_USER_ID);
     } catch (err) {
       console.error('[carnets] authority PDF generation on submit failed:', err);
     }
@@ -341,6 +338,36 @@ async function logCarnetInteraction(jobId: string, content: string, userId?: str
   } catch (err) {
     console.error('[carnets] interaction log failed:', err);
   }
+}
+
+// Attach the freshly-generated Letter of Authorisation to the job's Files tab,
+// REPLACING any prior copy for the same carnet rather than stacking. A carnet
+// has exactly one current authority letter (regenerating just supersedes the
+// old one), and both the staff "Generate" button and the client form-submit
+// land here — without this dedup, every click / submit appended another row
+// (job 15987 ended up with 5). Scoped by the `carnet-authority/<carnetId>/`
+// key prefix so a job with multiple carnets keeps each one's own letter.
+async function upsertCarnetAuthorityFile(
+  jobId: string,
+  carnetId: string,
+  key: string,
+  uploadedBy: string,
+) {
+  const jf = await query(`SELECT files FROM jobs WHERE id = $1`, [jobId]);
+  const existing = Array.isArray(jf.rows[0]?.files) ? jf.rows[0].files : [];
+  const prefix = `carnet-authority/${carnetId}/`;
+  const kept = existing.filter(
+    (f: { url?: string }) => typeof f?.url !== 'string' || !f.url.startsWith(prefix)
+  );
+  kept.push({
+    url: key,
+    name: 'Letter of Authorisation (carnet).pdf',
+    label: 'Carnet authority',
+    type: 'document',
+    uploaded_at: new Date().toISOString(),
+    uploaded_by: uploadedBy,
+  });
+  await query(`UPDATE jobs SET files = $1 WHERE id = $2`, [JSON.stringify(kept), jobId]);
 }
 
 // Map the carnet lifecycle status onto the thin `carnet` job_requirement so the
@@ -746,15 +773,10 @@ router.post('/:id/generate-authority', async (req: AuthRequest, res: Response) =
     const key = `carnet-authority/${carnet.id}/letter-of-authorisation-${Date.now()}.pdf`;
     await uploadToR2(key, Buffer.from(pdfBytes), 'application/pdf');
 
-    // Set on the carnet + surface on the job Files tab.
+    // Set on the carnet + surface on the job Files tab (replacing any prior
+    // copy for this carnet — see upsertCarnetAuthorityFile).
     await query(`UPDATE job_carnets SET signed_authority_url = $1, updated_at = NOW() WHERE id = $2`, [key, carnet.id]);
-    const jobFiles = await query(`SELECT files FROM jobs WHERE id = $1`, [carnet.job_id]);
-    const files = Array.isArray(jobFiles.rows[0]?.files) ? jobFiles.rows[0].files : [];
-    files.push({
-      url: key, name: 'Letter of Authorisation (carnet).pdf', label: 'Carnet authority',
-      uploaded_at: new Date().toISOString(), uploaded_by: req.user?.id || SYSTEM_USER_ID,
-    });
-    await query(`UPDATE jobs SET files = $1 WHERE id = $2`, [JSON.stringify(files), carnet.job_id]);
+    await upsertCarnetAuthorityFile(carnet.job_id, carnet.id, key, req.user?.id || SYSTEM_USER_ID);
 
     await logCarnetInteraction(carnet.job_id, '📄 Carnet Letter of Authorisation generated', req.user?.id);
 

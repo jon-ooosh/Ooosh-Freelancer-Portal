@@ -40,16 +40,31 @@ export interface RossettsStatus {
   isFirstService: boolean
 }
 
-function addMonths(dateStr: string, months: number): string {
+/**
+ * Shift a YYYY-MM-DD date, returning null when the input can't be parsed.
+ *
+ * The null guard is load-bearing: these run inside the fleet table's row map,
+ * so an unparseable date used to throw "Invalid time value" out of
+ * toISOString() and take the whole page down (RX73TBZ, stored with year 0006,
+ * Sep 2026). Any year that isn't exactly 4 digits produces an Invalid Date.
+ * Mirrors the same guard in `vehicle-lifecycle.ts` sellByDate().
+ */
+function shiftDate(dateStr: string, apply: (d: Date) => void): string | null {
   const d = new Date(dateStr + 'T00:00:00')
-  d.setMonth(d.getMonth() + months)
+  if (Number.isNaN(d.getTime())) return null
+  apply(d)
+  // The shift itself can still overflow the Date range (or land on NaN if a
+  // settings value is non-numeric), so re-check before serialising.
+  if (Number.isNaN(d.getTime())) return null
   return d.toISOString().split('T')[0]!
 }
 
-function addYears(dateStr: string, years: number): string {
-  const d = new Date(dateStr + 'T00:00:00')
-  d.setFullYear(d.getFullYear() + years)
-  return d.toISOString().split('T')[0]!
+function addMonths(dateStr: string, months: number): string | null {
+  return shiftDate(dateStr, d => d.setMonth(d.getMonth() + months))
+}
+
+function addYears(dateStr: string, years: number): string | null {
+  return shiftDate(dateStr, d => d.setFullYear(d.getFullYear() + years))
 }
 
 /**

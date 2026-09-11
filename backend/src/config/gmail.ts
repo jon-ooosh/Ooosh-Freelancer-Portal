@@ -184,6 +184,34 @@ export async function createGmailDraft(
 }
 
 /**
+ * Send an existing Gmail DRAFT (compose scope — `gmail.compose` grants send).
+ * Used ONLY by the opt-in auto-SEND path (§10), which is itself gated behind the
+ * `auto_chase_send_enabled` master switch + the suppression checklist. The manual
+ * "Draft chase" button never calls this — staff send those from Gmail themselves.
+ */
+export async function sendGmailDraft(
+  mailbox: string,
+  draftId: string,
+): Promise<{ id: string; threadId: string }> {
+  const client = getGmailComposeClient(mailbox);
+  const token = await client.getAccessToken();
+  if (!token || !token.token) {
+    throw new Error(`Gmail: failed to obtain compose access token for ${mailbox}`);
+  }
+  const url = `${GMAIL_API_BASE}/users/${encodeURIComponent(mailbox)}/drafts/send`;
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token.token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: draftId }),
+  });
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => '');
+    throw new Error(`Gmail draft send ${resp.status}: ${body.slice(0, 300)}`);
+  }
+  return (await resp.json()) as { id: string; threadId: string };
+}
+
+/**
  * Search a mailbox (read-only) with a Gmail query string (`messages.list?q=`).
  * Returns matching message stubs (id + threadId). Used by the thread-latch +
  * cold-start backfill (§13.1 / §8.4) — e.g. q = `"15800"` finds the quote thread.
@@ -198,6 +226,24 @@ export async function gmailSearchMessageIds(
     mailbox,
   );
   return res.messages ?? [];
+}
+
+/**
+ * Download one attachment's bytes (read-only). Gmail returns the payload as
+ * base64url on `messages.attachments.get`; we decode to a Buffer. Used by the
+ * quote-PDF harvest (§7.3) — search a thread, pull the `Quote (NNNNN).pdf` back.
+ */
+export async function gmailGetAttachment(
+  mailbox: string,
+  messageId: string,
+  attachmentId: string,
+): Promise<Buffer> {
+  const res = await gmailApiGet<{ size?: number; data?: string }>(
+    `/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`,
+    mailbox,
+  );
+  if (!res.data) throw new Error(`Gmail: attachment ${attachmentId} returned no data`);
+  return Buffer.from(res.data.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
 }
 
 /**

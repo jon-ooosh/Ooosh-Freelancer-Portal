@@ -32,6 +32,7 @@ const navItems: NavItem[] = [
       { path: '/jobs', label: 'Upcoming & Out' },
       { path: '/jobs/returns', label: 'Returns & Completed' },
       { path: '/jobs/lost-cancelled', label: 'Lost & Cancelled' },
+      { path: '/jobs/leads', label: 'Leads' },
     ],
   },
   {
@@ -43,11 +44,10 @@ const navItems: NavItem[] = [
       { path: '/operations/backline', label: 'Backline' },
       { path: '/operations/backline-matcher', label: 'Backline Matcher' },
       { path: '/storage', label: 'Storage' },
-      { path: '/holding', label: 'Held for Clients' },
-      { path: '/holding/lost-property', label: 'Lost Property' },
+      { path: '/holding', label: 'Holding' },
       { path: '/warehouse/collections', label: 'Warehouse Collections' },
       { path: '/operations/carnets', label: 'Carnets' },
-      { path: '/operations/studio-sitters', label: 'Studio Sitters' },
+      { path: '/operations/rehearsals', label: 'Rehearsals' },
       { path: '/operations/problems', label: 'Problems' },
       { path: '/operations/issues', label: 'Issues' },
     ],
@@ -216,6 +216,26 @@ function UserMenu() {
           </button>
 
           <button
+            onClick={() => { setOpen(false); navigate('/staff/calendar'); }}
+            className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-ooosh-50 hover:text-ooosh-700 transition-colors flex items-center gap-2"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+            </svg>
+            Staff Calendar
+          </button>
+
+          <button
+            onClick={() => { setOpen(false); navigate('/staff/documents'); }}
+            className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-ooosh-50 hover:text-ooosh-700 transition-colors flex items-center gap-2"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
+            My Documents
+          </button>
+
+          <button
             onClick={() => { setOpen(false); navigate('/profile'); }}
             className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-ooosh-50 hover:text-ooosh-700 transition-colors flex items-center gap-2"
           >
@@ -224,6 +244,30 @@ function UserMenu() {
             </svg>
             My Profile
           </button>
+
+          {isAdmin && (
+            <button
+              onClick={() => { setOpen(false); navigate('/staff/admin'); }}
+              className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-ooosh-50 hover:text-ooosh-700 transition-colors flex items-center gap-2"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+              </svg>
+              Staff
+            </button>
+          )}
+
+          {isAdmin && (
+            <button
+              onClick={() => { setOpen(false); navigate('/staff/documents/admin'); }}
+              className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-ooosh-50 hover:text-ooosh-700 transition-colors flex items-center gap-2"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+              </svg>
+              Manage Documents
+            </button>
+          )}
 
           {isAdmin && (
             <button
@@ -373,12 +417,28 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                   Inbox
                 </Link>
                 <Link
+                  to="/staff/documents"
+                  onClick={() => setMobileMenuOpen(false)}
+                  className="block px-3 py-2 rounded text-sm font-medium text-ooosh-100 hover:bg-ooosh-700 hover:text-white transition-colors"
+                >
+                  My Documents
+                </Link>
+                <Link
                   to="/profile"
                   onClick={() => setMobileMenuOpen(false)}
                   className="block px-3 py-2 rounded text-sm font-medium text-ooosh-100 hover:bg-ooosh-700 hover:text-white transition-colors"
                 >
                   My Profile
                 </Link>
+                {hasManagerRole(user?.role) && (
+                  <Link
+                    to="/staff/documents/admin"
+                    onClick={() => setMobileMenuOpen(false)}
+                    className="block px-3 py-2 rounded text-sm font-medium text-ooosh-100 hover:bg-ooosh-700 hover:text-white transition-colors"
+                  >
+                    Manage Documents
+                  </Link>
+                )}
                 {hasManagerRole(user?.role) && (
                   <Link
                     to="/settings"

@@ -54,11 +54,27 @@ const DEFAULT_CACHE_TTLS: Array<{ pattern: RegExp; ttl: number }> = [
   { pattern: /.*/, ttl: 120 },
 ];
 
-/** Rate limiter config */
+/**
+ * Rate limiter config.
+ *
+ * HireHop's 60/min is a PER-TOKEN, ROLLING-minute limit, and it is SHARED with
+ * every other caller on the same API token — the Netlify payment portal hits the
+ * SAME token from a US IP (AWS us-east-2), ~1s offset from OP's Hetzner IP. So OP
+ * must NOT try to consume the whole 60; it takes a smooth ~33/min slice and leaves
+ * the rest for the other callers.
+ *
+ * `minDelayMs` (NOT `maxTokens`) is the real throttle: it is enforced on EVERY
+ * request regardless of available tokens, so a full bucket can never burst. At
+ * 1800ms that is a hard ~33/min with no opening spike. (Pre-Aug-2026 it was 350ms,
+ * which let a full 50-token bucket fire ~170/min for the first ~20s of every 30-min
+ * sync — enough to trip the rolling-minute limit on its own, before the portal even
+ * factored in. Do NOT "restore" 350ms.)
+ */
 const RATE_LIMIT = {
-  maxTokens: 50,          // Max requests per window (HireHop allows 60, we leave 10 headroom)
+  maxTokens: 50,          // Bucket capacity. With minDelayMs=1800 this is NOT the binding constraint.
   windowMs: 60_000,       // 1 minute window
-  minDelayMs: 350,        // Min delay between requests (~3/sec max)
+  minDelayMs: 1800,       // Min delay between requests — the real ceiling (~33/min, no burst)
+  cooldownMs: 30_000,     // After a 327/329, pause the WHOLE queue this long to let HH's rolling window drain
 };
 
 /**
@@ -84,6 +100,8 @@ class TokenBucketRateLimiter {
   private tokens: number;
   private lastRefill: number;
   private lastRequestTime: number = 0;
+  /** When > now, the limiter is in a rate-limit cooldown and acquire() blocks until it passes. */
+  private cooldownUntil: number = 0;
 
   constructor(
     private maxTokens: number,
@@ -92,6 +110,20 @@ class TokenBucketRateLimiter {
   ) {
     this.tokens = maxTokens;
     this.lastRefill = Date.now();
+  }
+
+  /**
+   * Back the whole limiter off after HireHop returns a rate-limit response
+   * (327/329). Extends (never shortens) the current cooldown. This is what breaks
+   * the retry storm: instead of each rejected call hammering back in ~1s — into a
+   * rolling-minute window that is still saturated, all but guaranteeing another 327
+   * — the ENTIRE queue pauses for `cooldownMs` and lets the window drain first.
+   */
+  triggerCooldown(ms: number): void {
+    const until = Date.now() + ms;
+    if (until > this.cooldownUntil) {
+      this.cooldownUntil = until;
+    }
   }
 
   private refill(): void {
@@ -105,6 +137,14 @@ class TokenBucketRateLimiter {
   }
 
   async acquire(): Promise<void> {
+    // Honour a rate-limit cooldown first — blocks EVERY caller (queued requests
+    // AND retries) so a single 327 backs the whole broker off, not just the one
+    // request that hit it. Re-checks each tick in case the cooldown was extended.
+    while (this.cooldownUntil > Date.now()) {
+      const wait = this.cooldownUntil - Date.now();
+      await new Promise(resolve => setTimeout(resolve, Math.min(wait, 1000)));
+    }
+
     this.refill();
 
     // Wait for minimum delay between requests
@@ -186,6 +226,14 @@ class PriorityRequestQueue {
   /** Acquire a rate-limit token outside the queue (used by retry logic). */
   async acquireToken(): Promise<void> {
     await this.rateLimiter.acquire();
+  }
+
+  /**
+   * Signal that HireHop rate-limited us (327/329). Pauses the whole queue for
+   * `cooldownMs` so the rolling-minute window can drain before we send more.
+   */
+  notifyRateLimited(cooldownMs: number): void {
+    this.rateLimiter.triggerCooldown(cooldownMs);
   }
 }
 
@@ -435,6 +483,13 @@ class HireHopBroker {
     return false;
   }
 
+  /** True when a response is HireHop signalling a rate-limit (327/329 or HTTP 429). */
+  private isRateLimitSignal(resp: HireHopResponse<unknown>): boolean {
+    if (resp.success) return false;
+    const err = String(resp.error || '');
+    return TRANSIENT_HH_ERROR_CODES.has(err) || err.includes('Rate limited');
+  }
+
   /**
    * Run an HH operation with exponential backoff on transient failures.
    * Subsequent attempts re-acquire a rate-limit token so retry traffic
@@ -450,10 +505,18 @@ class HireHopBroker {
         const delay = RETRY_CONFIG.delaysMs[attempt - 2] ?? 9_000;
         console.warn(`[HH Broker] ${label} transient failure (${lastResp.error}); retrying in ${delay}ms (attempt ${attempt}/${RETRY_CONFIG.maxAttempts})`);
         await new Promise(r => setTimeout(r, delay));
+        // acquireToken() blocks out any active rate-limit cooldown, so a 327 retry
+        // waits for HH's rolling window to drain rather than firing straight back in.
         await this.queue.acquireToken();
       }
       try {
         const resp = await op();
+        // A HireHop rate-limit response (327/329) backs the whole queue off. This
+        // paces both this request's own retries AND every other queued request —
+        // which is what actually breaks the retry storm.
+        if (this.isRateLimitSignal(resp)) {
+          this.queue.notifyRateLimited(RATE_LIMIT.cooldownMs);
+        }
         if (resp.success || !this.isRetryableError(resp)) {
           if (attempt > 1 && resp.success) {
             console.log(`[HH Broker] ${label} succeeded on attempt ${attempt}`);

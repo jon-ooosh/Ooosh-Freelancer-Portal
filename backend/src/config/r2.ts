@@ -110,6 +110,13 @@ export async function getFromPublicR2(key: string) {
   }));
 }
 
+export async function deleteFromPublicR2(key: string): Promise<void> {
+  await s3.send(new DeleteObjectCommand({
+    Bucket: R2_PUBLIC_BUCKET_NAME,
+    Key: key,
+  }));
+}
+
 export async function listPublicR2Objects(prefix: string) {
   const response = await s3.send(new ListObjectsV2Command({
     Bucket: R2_PUBLIC_BUCKET_NAME,

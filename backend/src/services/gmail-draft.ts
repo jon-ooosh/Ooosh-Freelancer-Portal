@@ -21,7 +21,7 @@
  *   3. No resolvable client email → throw (staff addresses it manually).
  */
 import { query } from '../config/database';
-import { getPrimaryMailbox, createGmailDraft, gmailSearchMessageIds, isGmailConfigured } from '../config/gmail';
+import { getPrimaryMailbox, createGmailDraft, sendGmailDraft, gmailSearchMessageIds, gmailApiGet, isGmailConfigured } from '../config/gmail';
 import { draftChaseEmail } from './chase-draft';
 import { extractEmailAddress } from './email-matcher';
 
@@ -35,6 +35,8 @@ export interface CreatedChaseDraft {
   subject: string;
   threaded: boolean;
   body: string;
+  /** True when the auto-send path actually sent the draft (§10). */
+  sent: boolean;
 }
 
 interface RecipientResolution {
@@ -81,11 +83,37 @@ function buildRawMessage(opts: {
   return toBase64Url(mime);
 }
 
+interface GmailThreadMeta {
+  messages?: Array<{ payload?: { headers?: Array<{ name: string; value: string }> } }>;
+}
+
+/**
+ * RFC822 Message-ID of the NEWEST message in a thread. We reply to that so the
+ * draft appends at the END of the conversation. Latching onto the most recent
+ * *inbound* message (all we ingest) mis-positions the draft when we've since
+ * sent an outbound reply the client hasn't answered — Gmail shows it mid-thread
+ * (the Johan Rydén case). threads.get returns messages oldest→newest.
+ */
+async function latestThreadMessageId(threadId: string, mailbox: string): Promise<string | null> {
+  const thread = await gmailApiGet<GmailThreadMeta>(
+    `/threads/${threadId}?format=metadata&metadataHeaders=Message-ID`,
+    mailbox,
+  );
+  const msgs = thread.messages || [];
+  if (msgs.length === 0) return null;
+  const headers = msgs[msgs.length - 1].payload?.headers || [];
+  return headers.find((h) => h.name.toLowerCase() === 'message-id')?.value ?? null;
+}
+
 /** Resolve who the chase goes to, and whether we can latch onto a thread. */
 async function resolveRecipient(jobId: string): Promise<RecipientResolution | null> {
-  // 1. Latch onto the client's ingested thread, if any.
+  const mailbox = getPrimaryMailbox();
+  let to: string | null = null;
+  let threadId: string | null = null;
+
+  // 1. Latch onto the client's ingested thread, if any (most recent inbound).
   const threadRow = await query(
-    `SELECT gmail_thread_id, gmail_message_id, email_from
+    `SELECT gmail_thread_id, email_from
        FROM interactions
       WHERE job_id = $1 AND type = 'email' AND email_direction = 'inbound'
         AND gmail_thread_id IS NOT NULL
@@ -94,48 +122,54 @@ async function resolveRecipient(jobId: string): Promise<RecipientResolution | nu
     [jobId],
   );
   if (threadRow.rows.length > 0) {
-    const to = extractEmailAddress(threadRow.rows[0].email_from);
-    if (to) {
-      return {
-        to,
-        threadId: threadRow.rows[0].gmail_thread_id as string,
-        inReplyTo: (threadRow.rows[0].gmail_message_id as string | null) ?? null,
-      };
+    to = extractEmailAddress(threadRow.rows[0].email_from);
+    threadId = threadRow.rows[0].gmail_thread_id as string;
+  }
+
+  // 2. Fall back to the job's primary contact email. For the "silent quote" case
+  //    (client never replied, so nothing ingested), still try to latch onto the
+  //    original sent-quote thread by searching the mailbox for the job number —
+  //    so the chase threads into the conversation rather than arriving cold.
+  if (!to) {
+    const contactRow = await query(
+      `SELECT p.email
+         FROM job_contacts jc
+         JOIN people p ON p.id = jc.person_id
+        WHERE jc.job_id = $1
+          AND p.email IS NOT NULL AND p.email <> ''
+          AND COALESCE(p.is_deleted, false) = false
+        ORDER BY jc.is_primary DESC NULLS LAST, jc.created_at ASC
+        LIMIT 1`,
+      [jobId],
+    );
+    if (contactRow.rows.length === 0) return null;
+    to = extractEmailAddress(contactRow.rows[0].email) || String(contactRow.rows[0].email).trim();
+    if (!to) return null;
+  }
+  if (!threadId) {
+    const jobRow = await query(`SELECT hh_job_number FROM jobs WHERE id = $1`, [jobId]);
+    const hh = jobRow.rows[0]?.hh_job_number;
+    if (hh) {
+      try {
+        const found = await gmailSearchMessageIds(mailbox, `"${hh}"`, 10);
+        if (found.length > 0) threadId = found[0].threadId; // Gmail's most-relevant thread
+      } catch {
+        /* non-fatal — fall back to a standalone draft */
+      }
     }
   }
 
-  // 2. Fall back to the job's primary contact email. For the "silent quote"
-  //    case (client never replied, so nothing ingested), still try to latch onto
-  //    the original sent-quote thread by searching the mailbox for the job
-  //    number — so the chase threads into the conversation rather than arriving
-  //    as a cold new email.
-  const contactRow = await query(
-    `SELECT p.email
-       FROM job_contacts jc
-       JOIN people p ON p.id = jc.person_id
-      WHERE jc.job_id = $1
-        AND p.email IS NOT NULL AND p.email <> ''
-        AND COALESCE(p.is_deleted, false) = false
-      ORDER BY jc.is_primary DESC NULLS LAST, jc.created_at ASC
-      LIMIT 1`,
-    [jobId],
-  );
-  if (contactRow.rows.length === 0) return null;
-  const to = extractEmailAddress(contactRow.rows[0].email) || String(contactRow.rows[0].email).trim();
-  if (!to) return null;
-
-  let threadId: string | null = null;
-  const jobRow = await query(`SELECT hh_job_number FROM jobs WHERE id = $1`, [jobId]);
-  const hh = jobRow.rows[0]?.hh_job_number;
-  if (hh) {
+  // Reply to the newest message in the thread (not the latest inbound) so the
+  // draft lands at the end of the conversation.
+  let inReplyTo: string | null = null;
+  if (threadId) {
     try {
-      const found = await gmailSearchMessageIds(getPrimaryMailbox(), `"${hh}"`, 10);
-      if (found.length > 0) threadId = found[0].threadId; // Gmail's most-relevant thread
+      inReplyTo = await latestThreadMessageId(threadId, mailbox);
     } catch {
-      /* non-fatal — fall back to a standalone draft */
+      /* non-fatal — thread still set, draft just won't carry In-Reply-To */
     }
   }
-  return { to, threadId, inReplyTo: null };
+  return { to, threadId, inReplyTo };
 }
 
 /**
@@ -143,13 +177,18 @@ async function resolveRecipient(jobId: string): Promise<RecipientResolution | nu
  * Throws with a clear message when Gmail/Anthropic aren't configured, the job
  * isn't found, or no client email is resolvable (caller maps to 4xx/5xx).
  */
-export async function createChaseDraftForJob(jobId: string): Promise<CreatedChaseDraft> {
+export async function createChaseDraftForJob(
+  jobId: string,
+  signOffName?: string | null,
+  opts: { send?: boolean } = {},
+): Promise<CreatedChaseDraft> {
   if (!isGmailConfigured()) {
     throw new Error('Gmail is not configured — cannot create drafts.');
   }
 
-  // AI draft first (also validates the job exists + is draftable).
-  const { draft } = await draftChaseEmail(jobId);
+  // AI draft first (also validates the job exists + is draftable). Signed off
+  // from the staff member who clicked "Draft chase" (falls back to the team).
+  const { draft } = await draftChaseEmail(jobId, { signOffName });
 
   const recipient = await resolveRecipient(jobId);
   if (!recipient) {
@@ -172,13 +211,25 @@ export async function createChaseDraftForJob(jobId: string): Promise<CreatedChas
     ...(recipient.threadId ? { threadId: recipient.threadId } : {}),
   });
 
+  // Opt-in auto-send (§10). The caller only sets send=true once the master
+  // switch + suppression gate have passed; a send failure is fatal to this call
+  // (the draft still exists in info@ for a human to send manually).
+  let sent = false;
+  let threadId = created.message?.threadId ?? recipient.threadId ?? null;
+  if (opts.send) {
+    const result = await sendGmailDraft(mailbox, created.id);
+    sent = true;
+    threadId = result.threadId ?? threadId;
+  }
+
   return {
     draftId: created.id,
     gmailMessageId: created.message?.id ?? null,
-    threadId: created.message?.threadId ?? recipient.threadId ?? null,
+    threadId,
     to: recipient.to,
     subject: draft.subject,
     threaded: Boolean(recipient.threadId),
     body: draft.body,
+    sent,
   };
 }

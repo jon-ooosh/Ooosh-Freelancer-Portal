@@ -62,6 +62,25 @@ function extractJobNumberCandidates(text: string | null | undefined): number[] {
   return [...out];
 }
 
+// A 4–5 digit number ONLY when it's an explicit job reference — prefixed by
+// `#`, `job`, `ref`, or `quote` (with optional punctuation/parens). A BARE
+// number in a body is NOT enough: eBay order/tracking numbers, prices,
+// postcodes, dates etc. routinely contain 5-digit runs that coincidentally
+// equal a live job number, and attaching on those bulk-polluted job timelines
+// (the eBay-labels incident). Filenames stay on the looser regex above —
+// `Quote (16274).pdf` is already a high-signal, precise key.
+const REFERENCED_JOB_NUMBER_RE = /(?:#|job|ref|reference|quote)\s*[:#]?\s*\(?(\d{4,5})\)?/gi;
+
+export function extractReferencedJobNumbers(text: string | null | undefined): number[] {
+  if (!text) return [];
+  const out = new Set<number>();
+  for (const m of text.matchAll(REFERENCED_JOB_NUMBER_RE)) {
+    const n = parseInt(m[1], 10);
+    if (n >= 1000 && n <= 99999) out.add(n);
+  }
+  return [...out];
+}
+
 /** Extract the first bare email address from a header value like `Name <a@b.com>`. */
 export function extractEmailAddress(headerValue: string | null | undefined): string | null {
   if (!headerValue) return null;
@@ -145,10 +164,11 @@ export async function matchEmailToJob(email: ParsedEmailForMatch): Promise<Email
     return { ...byFilename, method: 'pdf_filename_job_number', confidence: 'high' };
   }
 
-  // Layer 2: job number in subject or body.
+  // Layer 2: an EXPLICIT job reference (#N / job N / ref N / quote N) in the
+  // subject or body — a bare number is deliberately not enough (see the regex).
   const textCandidates = [
-    ...extractJobNumberCandidates(email.subject),
-    ...extractJobNumberCandidates(email.body),
+    ...extractReferencedJobNumbers(email.subject),
+    ...extractReferencedJobNumbers(email.body),
   ];
   const byText = await resolveJobNumber(textCandidates);
   if (byText) {

@@ -14,12 +14,15 @@ import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
+import StudioShiftNotes from '../components/StudioShiftNotes';
+import StudioLockupReport from '../components/StudioLockupReport';
 
 interface RosterJobEntry {
   job_id: string;
   hh_job_number: number | null;
   label: string;
   rooms: string[];
+  speculative?: boolean;
 }
 interface RosterAssignee {
   id: string;
@@ -30,8 +33,12 @@ interface RosterAssignee {
 interface RosterRow {
   date: string;
   needs_sitter: boolean;
+  speculative?: boolean;
   jobs: RosterJobEntry[];
-  shift: { id: string; status: string; manual_override: boolean; override_reason: string | null } | null;
+  shift: {
+    id: string; status: string; manual_override: boolean; override_reason: string | null; note_count?: number;
+    report?: { submitted_at: string; submitted_by_name: string | null; exceptions_count: number } | null;
+  } | null;
   assignee: RosterAssignee | null;
 }
 interface SitterOption {
@@ -43,20 +50,31 @@ interface SitterOption {
 
 type RangeKey = '7' | '14' | 'all';
 type CoverageFilter = 'all' | 'unassigned' | 'assigned';
-interface Prefs { range: RangeKey; filter: CoverageFilter; }
+// from/to are optional custom-range overrides (for looking back through history);
+// when unset the range preset drives a today→+N forward window.
+interface Prefs { range: RangeKey; filter: CoverageFilter; speculative: boolean; from?: string; to?: string; }
 
 const PREFS_KEY = 'ooosh_studio_sitters_prefs';
 const RANGE_DAYS: Record<RangeKey, number> = { '7': 7, '14': 14, all: 730 };
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 function loadPrefs(): Prefs {
   try {
     const raw = localStorage.getItem(PREFS_KEY);
     if (raw) {
       const p = JSON.parse(raw);
-      if (['7', '14', 'all'].includes(p.range) && ['all', 'unassigned', 'assigned'].includes(p.filter)) return p;
+      if (['7', '14', 'all'].includes(p.range) && ['all', 'unassigned', 'assigned'].includes(p.filter)) {
+        return {
+          range: p.range,
+          filter: p.filter,
+          speculative: p.speculative === true,
+          from: DATE_RE.test(p.from) ? p.from : undefined,
+          to: DATE_RE.test(p.to) ? p.to : undefined,
+        };
+      }
     }
   } catch { /* ignore */ }
-  return { range: '14', filter: 'all' };
+  return { range: '14', filter: 'all', speculative: false };
 }
 
 function addDaysIso(iso: string, days: number): string {
@@ -91,6 +109,21 @@ export default function StudioSittersPage() {
   const [picker, setPicker] = useState<{ mode: 'assign'; date: string } | { mode: 'selected' } | null>(null);
   const [pickerSearch, setPickerSearch] = useState('');
 
+  // Handover notes: which shift ids have their notes panel expanded
+  const [openNotes, setOpenNotes] = useState<Set<string>>(new Set());
+  const toggleNotes = (id: string) => setOpenNotes((prev) => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  // Lock-up report read-only panels, keyed by shift date.
+  const [openReports, setOpenReports] = useState<Set<string>>(new Set());
+  const toggleReport = (date: string) => setOpenReports((prev) => {
+    const next = new Set(prev);
+    if (next.has(date)) next.delete(date); else next.add(date);
+    return next;
+  });
+
   // Add-cover (manual override)
   const [showAddCover, setShowAddCover] = useState(false);
   const [coverDate, setCoverDate] = useState(todayIso());
@@ -101,8 +134,10 @@ export default function StudioSittersPage() {
   const [editingFee, setEditingFee] = useState(false);
   const [feeInput, setFeeInput] = useState('');
 
-  const from = todayIso();
-  const to = addDaysIso(from, RANGE_DAYS[prefs.range]);
+  // Custom from/to (history look-back) override the forward preset window.
+  const from = prefs.from || todayIso();
+  const to = prefs.to || addDaysIso(todayIso(), RANGE_DAYS[prefs.range]);
+  const customRange = !!(prefs.from || prefs.to);
 
   useEffect(() => { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); }, [prefs]);
 
@@ -110,14 +145,15 @@ export default function StudioSittersPage() {
     setLoading(true);
     setError(null);
     try {
-      const r = await api.get<{ data: RosterRow[] }>(`/studio-sitters/roster?from=${from}&to=${to}`);
+      const spec = prefs.speculative ? '&speculative=1' : '';
+      const r = await api.get<{ data: RosterRow[] }>(`/studio-sitters/roster?from=${from}&to=${to}${spec}`);
       setRows(r.data ?? []);
     } catch {
       setError('Failed to load the roster.');
     } finally {
       setLoading(false);
     }
-  }, [from, to]);
+  }, [from, to, prefs.speculative]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
@@ -201,22 +237,35 @@ export default function StudioSittersPage() {
       <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Studio Sitters</h1>
-          <p className="text-sm text-gray-500">One sitter per evening covers the whole building.</p>
         </div>
         <div className="flex items-center gap-2">
           <button onClick={() => setShowAddCover((v) => !v)} className="px-3 py-1.5 text-sm rounded-lg border border-gray-300 hover:bg-gray-50">＋ Add cover</button>
         </div>
       </div>
 
-      {/* Controls: range + coverage filter + default fee */}
+      {/* Controls: range + coverage filter + enquiries + default fee */}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2 mb-4">
         <div className="flex items-center gap-1">
           {(['7', '14', 'all'] as RangeKey[]).map((k) => (
-            <button key={k} onClick={() => setPrefs((p) => ({ ...p, range: k }))}
-              className={`px-3 py-1 text-sm rounded-lg border ${prefs.range === k ? 'bg-purple-50 border-purple-300 text-purple-700' : 'border-gray-200 text-gray-600 hover:bg-gray-50'}`}>
+            <button key={k} onClick={() => setPrefs((p) => ({ ...p, range: k, from: undefined, to: undefined }))}
+              className={`px-3 py-1 text-sm rounded-lg border ${!customRange && prefs.range === k ? 'bg-purple-50 border-purple-300 text-purple-700' : 'border-gray-200 text-gray-600 hover:bg-gray-50'}`}>
               {k === 'all' ? 'All' : `${k} days`}
             </button>
           ))}
+        </div>
+        {/* Custom date range — look back through history */}
+        <div className="flex items-center gap-1.5 text-xs text-gray-500">
+          <input type="date" value={prefs.from || todayIso()}
+            onChange={(e) => setPrefs((p) => ({ ...p, from: DATE_RE.test(e.target.value) ? e.target.value : undefined }))}
+            className={`px-2 py-1 border rounded ${customRange ? 'border-purple-300 text-purple-700' : 'border-gray-300 text-gray-600'}`} title="From" />
+          <span>→</span>
+          <input type="date" value={to}
+            onChange={(e) => setPrefs((p) => ({ ...p, to: DATE_RE.test(e.target.value) ? e.target.value : undefined }))}
+            className={`px-2 py-1 border rounded ${customRange ? 'border-purple-300 text-purple-700' : 'border-gray-300 text-gray-600'}`} title="To" />
+          {customRange && (
+            <button onClick={() => setPrefs((p) => ({ ...p, from: undefined, to: undefined }))}
+              className="text-purple-600 hover:text-purple-800" title="Back to upcoming">Reset</button>
+          )}
         </div>
         <div className="flex items-center gap-1">
           {(['all', 'unassigned', 'assigned'] as CoverageFilter[]).map((f) => (
@@ -226,6 +275,11 @@ export default function StudioSittersPage() {
             </button>
           ))}
         </div>
+        <label className="flex items-center gap-1.5 text-sm text-gray-600 cursor-pointer">
+          <input type="checkbox" checked={prefs.speculative}
+            onChange={(e) => setPrefs((p) => ({ ...p, speculative: e.target.checked }))} />
+          Include enquiries
+        </label>
         <div className="text-sm text-gray-600 ml-auto flex items-center gap-2">
           {editingFee ? (
             <span className="flex items-center gap-1">
@@ -298,6 +352,9 @@ export default function StudioSittersPage() {
                     <div className="min-w-0">
                       <div className="font-semibold text-gray-900">
                         {formatDay(row.date)}
+                        {row.speculative && (
+                          <span className="ml-2 text-[11px] font-normal px-1.5 py-0.5 rounded bg-blue-50 text-blue-600 border border-blue-200" title="Pre-confirmation — enquiry/provisional">enquiry</span>
+                        )}
                         {row.shift?.manual_override && (
                           <span className="ml-2 text-[11px] font-normal px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 border border-gray-200">manual cover</span>
                         )}
@@ -340,8 +397,41 @@ export default function StudioSittersPage() {
                       <button onClick={() => removeCover(row.date)} disabled={busy}
                         className="px-2.5 py-1 text-xs rounded-lg border border-red-200 text-red-500 hover:bg-red-50 disabled:opacity-40">Remove</button>
                     )}
+                    {row.shift?.id && (() => {
+                      const noteCount = row.shift.note_count ?? 0;
+                      const active = openNotes.has(row.shift.id);
+                      const hasNotes = noteCount > 0;
+                      return (
+                        <button onClick={() => toggleNotes(row.shift!.id)}
+                          className={`px-2.5 py-1 text-xs rounded-lg border ${active || hasNotes ? 'border-purple-300 bg-purple-50 text-purple-700' : 'border-gray-200 text-gray-500 hover:bg-white'}`}>
+                          💬 Notes{hasNotes ? ` (${noteCount})` : ''}
+                        </button>
+                      );
+                    })()}
+                    {row.shift?.report && (() => {
+                      const ex = row.shift.report.exceptions_count;
+                      return (
+                        <button onClick={() => toggleReport(row.date)}
+                          className={`px-2.5 py-1 text-xs rounded-lg border ${ex > 0 ? 'border-amber-300 bg-amber-50 text-amber-800' : 'border-green-300 bg-green-50 text-green-700'}`}
+                          title={`Lock-up report submitted${row.shift.report.submitted_by_name ? ` by ${row.shift.report.submitted_by_name}` : ''}`}>
+                          🔒 Lock-up{ex > 0 ? ` (⚠ ${ex})` : ' ✓'}
+                        </button>
+                      );
+                    })()}
                   </div>
                 </div>
+
+                {row.shift?.id && openNotes.has(row.shift.id) && (
+                  <div className="mt-3 pt-3 border-t border-gray-200">
+                    <StudioShiftNotes shiftId={row.shift.id} />
+                  </div>
+                )}
+
+                {row.shift?.report && openReports.has(row.date) && (
+                  <div className="mt-3 pt-3 border-t border-gray-200">
+                    <StudioLockupReport date={row.date} />
+                  </div>
+                )}
               </div>
             );
           })}

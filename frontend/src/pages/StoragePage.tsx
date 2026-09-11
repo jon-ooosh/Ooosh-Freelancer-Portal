@@ -31,11 +31,13 @@ interface Tenancy {
   organisation_name: string | null; lead_contact_name: string | null; lead_contact_person_id: string | null; status: string;
   move_in_date: string | null; move_out_date: string | null; weekly_rate: number; billing_mode: string;
   billing_cadence: string; next_bill_date: string | null; next_rate_review_date: string | null;
+  billing_custom_interval_value?: number | null; billing_custom_interval_unit?: string | null;
+  bill_reminder_lead_days?: number | null; bill_overdue_grace_days?: number | null;
   last_rate_change_date: string | null; previous_weekly_rate: number | null; tcs_accepted_at: string | null; tcs_pdf_key?: string | null;
   notes: string | null; access_type?: string | null; access_code?: string | null; key_location?: string | null;
   rate_history?: { id: string; effective_date: string; old_rate: number | null; new_rate: number; notes: string | null }[];
   access_list?: { id: string; person_name: string | null; name: string | null; phone: string | null; relationship: string | null }[];
-  invoices?: { id: string; due_date: string; amount: number | null; sent_at: string }[];
+  invoices?: { id: string; due_date: string; amount: number | null; sent_at: string; invoice_number?: string | null; period_start?: string | null; period_end?: string | null }[];
 }
 interface AccessEvent {
   id: string; type: string; description: string | null; method: string; requested_date: string | null;
@@ -55,6 +57,25 @@ const TAB_LABELS: Record<Tab, string> = { rooms: 'Rooms', tenancies: 'Tenancies'
 
 const money = (n: number | null | undefined) => `£${Number(n || 0).toFixed(2)}`;
 const fmtDate = (d: string | null | undefined) => (d ? new Date(d).toLocaleDateString('en-GB') : '—');
+
+// Add N cadence periods to an ISO date, returning ISO (yyyy-mm-dd). Used to
+// pre-fill the "next invoice due" field in the Mark-invoiced modal from a
+// tenancy's cadence (or its custom every-N-unit interval).
+function addToIso(iso: string, cadence: string, customValue?: number | null, customUnit?: string | null): string {
+  const d = new Date(iso + 'T00:00:00');
+  if (cadence === 'monthly') d.setMonth(d.getMonth() + 1);
+  else if (cadence === 'quarterly') d.setMonth(d.getMonth() + 3);
+  else if (cadence === 'annual') d.setFullYear(d.getFullYear() + 1);
+  else if (cadence === 'custom' && customValue && customUnit) {
+    const n = Number(customValue);
+    if (customUnit === 'day') d.setDate(d.getDate() + n);
+    else if (customUnit === 'week') d.setDate(d.getDate() + n * 7);
+    else if (customUnit === 'month') d.setMonth(d.getMonth() + n);
+    else if (customUnit === 'year') d.setFullYear(d.getFullYear() + n);
+  } else return iso; // custom with no interval → nothing to add
+  return d.toISOString().slice(0, 10);
+}
+const todayIso = () => new Date().toISOString().slice(0, 10);
 const ROOM_STATUS_COLOUR: Record<string, string> = {
   available: 'bg-green-100 text-green-800', occupied: 'bg-blue-100 text-blue-800',
   reserved: 'bg-amber-100 text-amber-800', out_of_use: 'bg-slate-200 text-slate-600',
@@ -504,7 +525,7 @@ function TenanciesTab({ isAdminManager, onChange }: { isAdminManager: boolean; o
 
 function MoveInModal({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
   const [rooms, setRooms] = useState<Room[]>([]);
-  const [f, setF] = useState({ room_id: '', organisation_id: null as string | null, org_name: '', lead_contact_person_id: null as string | null, contact_name: '', weekly_rate: '', access_type: 'door_code', access_code: '', key_location: '', billing_mode: 'manual', billing_cadence: 'monthly', next_bill_date: '', next_rate_review_date: '', move_in_date: new Date().toISOString().slice(0, 10), notes: '' });
+  const [f, setF] = useState({ room_id: '', organisation_id: null as string | null, org_name: '', lead_contact_person_id: null as string | null, contact_name: '', weekly_rate: '', access_type: 'door_code', access_code: '', key_location: '', billing_mode: 'manual', billing_cadence: 'monthly', custom_interval_value: '', custom_interval_unit: 'month', next_bill_date: '', next_rate_review_date: '', move_in_date: new Date().toISOString().slice(0, 10), notes: '' });
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
   useEffect(() => { api.get<{ data: Room[] }>('/storage/rooms?status=available').then((r) => setRooms(r.data)); }, []);
@@ -521,6 +542,8 @@ function MoveInModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =>
         room_id: f.room_id, organisation_id: f.organisation_id, lead_contact_person_id: f.lead_contact_person_id,
         weekly_rate: Number(f.weekly_rate) || 0, access_type: f.access_type, access_code: f.access_code || null, key_location: f.key_location || null,
         billing_mode: f.billing_mode, billing_cadence: f.billing_cadence,
+        billing_custom_interval_value: f.billing_cadence === 'custom' && f.custom_interval_value ? Number(f.custom_interval_value) : null,
+        billing_custom_interval_unit: f.billing_cadence === 'custom' && f.custom_interval_value ? f.custom_interval_unit : null,
         next_bill_date: f.next_bill_date || null, next_rate_review_date: f.next_rate_review_date || null,
         move_in_date: f.move_in_date || null, notes: f.notes || null,
       });
@@ -559,6 +582,17 @@ function MoveInModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =>
               <option value="monthly">Monthly</option><option value="quarterly">Quarterly</option><option value="annual">Annual</option><option value="custom">Custom</option>
             </select></div>}
         </div>
+        {f.billing_mode === 'manual' && f.billing_cadence === 'custom' && (
+          <div><label className="block text-xs text-slate-500 mb-1">Invoice every</label>
+            <div className="flex gap-2">
+              <input className={`${inputCls} w-24`} type="number" min={1} value={f.custom_interval_value} onChange={(e) => setF({ ...f, custom_interval_value: e.target.value })} placeholder="e.g. 6" />
+              <select className={inputCls} value={f.custom_interval_unit} onChange={(e) => setF({ ...f, custom_interval_unit: e.target.value })}>
+                <option value="day">days</option><option value="week">weeks</option><option value="month">months</option><option value="year">years</option>
+              </select>
+            </div>
+            <p className="text-[11px] text-slate-400 mt-1">Used to auto-advance the next invoice due date each time you mark one sent.</p>
+          </div>
+        )}
         {f.billing_mode === 'manual' && <div><label className="block text-xs text-slate-500 mb-1">Next invoice due</label><input className={inputCls} type="date" value={f.next_bill_date} onChange={(e) => setF({ ...f, next_bill_date: e.target.value })} /></div>}
         <div><label className="block text-xs text-slate-500 mb-1">Next rate review</label><input className={inputCls} type="date" value={f.next_rate_review_date} onChange={(e) => setF({ ...f, next_rate_review_date: e.target.value })} /></div>
         <div><label className="block text-xs text-slate-500 mb-1">Notes</label><textarea className={inputCls} rows={2} value={f.notes} onChange={(e) => setF({ ...f, notes: e.target.value })} placeholder="Anything worth recording about this client / tenancy" /></div>
@@ -578,6 +612,10 @@ function EditTenancyForm({ t, onCancel, onSaved }: { t: Tenancy; onCancel: () =>
     lead_contact_person_id: t.lead_contact_person_id, contact_name: t.lead_contact_name || '',
     access_type: t.access_type || 'door_code', access_code: t.access_code || '', key_location: t.key_location || '',
     billing_mode: t.billing_mode, billing_cadence: t.billing_cadence,
+    custom_interval_value: t.billing_custom_interval_value != null ? String(t.billing_custom_interval_value) : '',
+    custom_interval_unit: t.billing_custom_interval_unit || 'month',
+    bill_reminder_lead_days: t.bill_reminder_lead_days != null ? String(t.bill_reminder_lead_days) : '7',
+    bill_overdue_grace_days: t.bill_overdue_grace_days != null ? String(t.bill_overdue_grace_days) : '5',
     next_bill_date: (t.next_bill_date || '').slice(0, 10),
     next_rate_review_date: (t.next_rate_review_date || '').slice(0, 10),
     move_in_date: (t.move_in_date || '').slice(0, 10),
@@ -593,6 +631,10 @@ function EditTenancyForm({ t, onCancel, onSaved }: { t: Tenancy; onCancel: () =>
         status: f.status, move_in_date: f.move_in_date || null,
         access_type: f.access_type, access_code: f.access_code || null, key_location: f.key_location || null,
         billing_mode: f.billing_mode, billing_cadence: f.billing_cadence,
+        billing_custom_interval_value: f.billing_cadence === 'custom' && f.custom_interval_value ? Number(f.custom_interval_value) : null,
+        billing_custom_interval_unit: f.billing_cadence === 'custom' && f.custom_interval_value ? f.custom_interval_unit : null,
+        bill_reminder_lead_days: f.bill_reminder_lead_days !== '' ? Number(f.bill_reminder_lead_days) : undefined,
+        bill_overdue_grace_days: f.bill_overdue_grace_days !== '' ? Number(f.bill_overdue_grace_days) : undefined,
         next_bill_date: f.next_bill_date || null, next_rate_review_date: f.next_rate_review_date || null,
         notes: f.notes || null,
       });
@@ -623,7 +665,28 @@ function EditTenancyForm({ t, onCancel, onSaved }: { t: Tenancy; onCancel: () =>
             <option value="monthly">Monthly</option><option value="quarterly">Quarterly</option><option value="annual">Annual</option><option value="custom">Custom</option>
           </select></div>}
       </div>
+      {f.billing_mode === 'manual' && f.billing_cadence === 'custom' && (
+        <div><label className="block text-xs text-slate-500 mb-1">Invoice every</label>
+          <div className="flex gap-2">
+            <input className={`${inputCls} w-24`} type="number" min={1} value={f.custom_interval_value} onChange={(e) => setF({ ...f, custom_interval_value: e.target.value })} placeholder="e.g. 6" />
+            <select className={inputCls} value={f.custom_interval_unit} onChange={(e) => setF({ ...f, custom_interval_unit: e.target.value })}>
+              <option value="day">days</option><option value="week">weeks</option><option value="month">months</option><option value="year">years</option>
+            </select>
+          </div>
+          <p className="text-[11px] text-slate-400 mt-1">Used to auto-advance the next invoice due date each time you mark one sent.</p>
+        </div>
+      )}
       {f.billing_mode === 'manual' && <div><label className="block text-xs text-slate-500 mb-1">Next invoice due</label><input className={inputCls} type="date" value={f.next_bill_date} onChange={(e) => setF({ ...f, next_bill_date: e.target.value })} /></div>}
+      {f.billing_mode === 'manual' && (
+        <div className="grid grid-cols-2 gap-3">
+          <div><label className="block text-xs text-slate-500 mb-1">Remind me before (days)</label>
+            <input className={inputCls} type="number" min={0} value={f.bill_reminder_lead_days} onChange={(e) => setF({ ...f, bill_reminder_lead_days: e.target.value })} />
+            <p className="text-[11px] text-slate-400 mt-1">"Due soon" nudge this many days before.</p></div>
+          <div><label className="block text-xs text-slate-500 mb-1">Overdue after (days)</label>
+            <input className={inputCls} type="number" min={0} value={f.bill_overdue_grace_days} onChange={(e) => setF({ ...f, bill_overdue_grace_days: e.target.value })} />
+            <p className="text-[11px] text-slate-400 mt-1">Grace period before the "overdue" nudge.</p></div>
+        </div>
+      )}
       <div className="grid grid-cols-2 gap-3">
         <div><label className="block text-xs text-slate-500 mb-1">Next rate review</label><input className={inputCls} type="date" value={f.next_rate_review_date} onChange={(e) => setF({ ...f, next_rate_review_date: e.target.value })} /></div>
         <div><label className="block text-xs text-slate-500 mb-1">Move-in date</label><input className={inputCls} type="date" value={f.move_in_date} onChange={(e) => setF({ ...f, move_in_date: e.target.value })} /></div>
@@ -650,6 +713,7 @@ function TenancyDetailModal({ id, isAdminManager, onClose, onChange, onMovedOut 
   const [busy, setBusy] = useState('');
   const [msg, setMsg] = useState('');
   const [editing, setEditing] = useState(false);
+  const [invoicing, setInvoicing] = useState(false);
   const load = useCallback(async () => { setT((await api.get<{ data: Tenancy }>(`/storage/tenancies/${id}`)).data); }, [id]);
   useEffect(() => { load(); }, [load]);
 
@@ -667,6 +731,12 @@ function TenancyDetailModal({ id, isAdminManager, onClose, onChange, onMovedOut 
     );
   }
 
+  if (invoicing) {
+    return (
+      <MarkInvoicedModal t={t} onCancel={() => setInvoicing(false)} onSaved={() => { setInvoicing(false); load(); onChange(); }} />
+    );
+  }
+
   return (
     <Modal title={`${t.room_name} — ${t.organisation_name || t.lead_contact_name || 'Tenancy'}`} onClose={onClose}>
       <div className="space-y-4 text-sm">
@@ -679,8 +749,22 @@ function TenancyDetailModal({ id, isAdminManager, onClose, onChange, onMovedOut 
             )}
           </div>
           <Field label="Status" value={t.status} />
-          <Field label="Billing" value={t.billing_mode === 'recurring' ? 'Recurring (Xero)' : `We invoice (${t.billing_cadence})`} />
-          {t.billing_mode === 'manual' && <Field label="Next invoice due" value={fmtDate(t.next_bill_date)} />}
+          <Field label="Billing" value={t.billing_mode === 'recurring' ? 'Recurring (Xero)'
+            : `We invoice (${t.billing_cadence}${t.billing_cadence === 'custom' && t.billing_custom_interval_value ? ` · every ${t.billing_custom_interval_value} ${t.billing_custom_interval_unit}${t.billing_custom_interval_value > 1 ? 's' : ''}` : ''})`} />
+          {t.billing_mode === 'manual' && (
+            <div>
+              <p className="text-xs text-slate-400">Next invoice due</p>
+              <p className="text-slate-800">
+                {fmtDate(t.next_bill_date)}
+                {t.next_bill_date && t.next_bill_date.slice(0, 10) <= todayIso() && (
+                  <span className="ml-1.5 px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 text-[11px] align-middle">due now</span>
+                )}
+              </p>
+            </div>
+          )}
+          {t.billing_mode === 'manual' && t.invoices && t.invoices.length > 0 && (
+            <Field label="Last invoice" value={`${t.invoices[0].invoice_number ? `#${t.invoices[0].invoice_number} · ` : ''}${fmtDate(t.invoices[0].sent_at)}`} />
+          )}
           <Field label="Next rate review" value={fmtDate(t.next_rate_review_date)} />
           <Field label="T&Cs" value={t.tcs_accepted_at ? `Accepted ${fmtDate(t.tcs_accepted_at)}` : 'Not accepted'} />
           <Field label="Access" value={
@@ -709,7 +793,7 @@ function TenancyDetailModal({ id, isAdminManager, onClose, onChange, onMovedOut 
 
         <div className="flex flex-wrap gap-2">
           {t.billing_mode === 'manual' && t.status !== 'ended' && (
-            <button disabled={!!busy} onClick={() => action('invoiced', async () => { await api.post(`/storage/tenancies/${id}/mark-invoiced`, {}); })}
+            <button disabled={!!busy} onClick={() => setInvoicing(true)}
               className="px-3 py-1.5 bg-green-600 text-white rounded-lg text-xs">✓ Mark invoice sent</button>
           )}
           {!t.tcs_accepted_at && t.status !== 'ended' && (
@@ -760,7 +844,11 @@ function TenancyDetailModal({ id, isAdminManager, onClose, onChange, onMovedOut 
           <div>
             <h4 className="font-medium text-slate-700 mb-1">Invoices sent</h4>
             {(t.invoices || []).map((iv) => (
-              <p key={iv.id} className="text-xs text-slate-500">{fmtDate(iv.sent_at)} — {money(iv.amount)} (cycle {fmtDate(iv.due_date)})</p>
+              <p key={iv.id} className="text-xs text-slate-500">
+                {fmtDate(iv.sent_at)} — {money(iv.amount)}
+                {iv.invoice_number ? ` · #${iv.invoice_number}` : ''}
+                {iv.period_start ? ` · covers ${fmtDate(iv.period_start)}${iv.period_end ? `–${fmtDate(iv.period_end)}` : ''}` : ` · cycle ${fmtDate(iv.due_date)}`}
+              </p>
             ))}
           </div>
         )}
@@ -771,6 +859,92 @@ function TenancyDetailModal({ id, isAdminManager, onClose, onChange, onMovedOut 
 
 function Field({ label, value }: { label: string; value: string }) {
   return <div><p className="text-xs text-slate-400">{label}</p><p className="text-slate-800 capitalize">{value}</p></div>;
+}
+
+// Records an invoice as sent AND sets when the next one is due — the two are
+// decoupled: "next invoice due" is just the reminder trigger, while the number,
+// amount and (optional) covered period go onto the invoice log. Pre-filled from
+// the tenancy's cadence / custom interval; everything is overridable.
+function MarkInvoicedModal({ t, onCancel, onSaved }: { t: Tenancy; onCancel: () => void; onSaved: () => void }) {
+  // The cycle being invoiced now (what "next invoice due" currently points at).
+  const cycleBase = (t.next_bill_date || '').slice(0, 10) || todayIso();
+  const suggestedAmount = t.billing_cadence === 'monthly' ? Number(t.weekly_rate) * 52 / 12
+    : t.billing_cadence === 'quarterly' ? Number(t.weekly_rate) * 13
+    : t.billing_cadence === 'annual' ? Number(t.weekly_rate) * 52
+    : null; // custom → no reliable per-cycle amount, staff types it
+  const [f, setF] = useState({
+    amount: suggestedAmount != null ? String(Math.round(suggestedAmount * 100) / 100) : '',
+    invoice_number: '',
+    period_start: cycleBase,
+    period_end: '',
+    next_bill_date: addToIso(cycleBase, t.billing_cadence, t.billing_custom_interval_value, t.billing_custom_interval_unit),
+    notes: '',
+  });
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  // Quick-set the next-due date by adding N to the cycle being invoiced.
+  function bump(unit: 'month' | 'year', n: number) {
+    setF((cur) => ({ ...cur, next_bill_date: addToIso(cycleBase, 'custom', n, unit) }));
+  }
+
+  async function save() {
+    setSaving(true); setErr('');
+    try {
+      await api.post(`/storage/tenancies/${t.id}/mark-invoiced`, {
+        amount: f.amount !== '' ? Number(f.amount) : null,
+        invoice_number: f.invoice_number.trim() || null,
+        period_start: f.period_start || null,
+        period_end: f.period_end || null,
+        next_bill_date: f.next_bill_date || null,
+        notes: f.notes.trim() || null,
+      });
+      onSaved();
+    } catch (e) { setErr(e instanceof Error ? e.message : 'Save failed'); } finally { setSaving(false); }
+  }
+
+  return (
+    <Modal title={`Mark invoice sent — ${t.room_name}`} onClose={onCancel}>
+      <div className="space-y-3 text-sm">
+        <div className="grid grid-cols-2 gap-3">
+          <div><label className="block text-xs text-slate-500 mb-1">Amount £</label>
+            <input className={inputCls} type="number" step="0.01" value={f.amount} onChange={(e) => setF({ ...f, amount: e.target.value })} placeholder="e.g. 65.00" /></div>
+          <div><label className="block text-xs text-slate-500 mb-1">Invoice # <span className="text-slate-400">(optional)</span></label>
+            <input className={inputCls} value={f.invoice_number} onChange={(e) => setF({ ...f, invoice_number: e.target.value })} placeholder="e.g. OT-1234" /></div>
+        </div>
+
+        <div>
+          <label className="block text-xs text-slate-500 mb-1">Period covered <span className="text-slate-400">(optional)</span></label>
+          <div className="grid grid-cols-2 gap-3">
+            <input className={inputCls} type="date" value={f.period_start} onChange={(e) => setF({ ...f, period_start: e.target.value })} />
+            <input className={inputCls} type="date" value={f.period_end} onChange={(e) => setF({ ...f, period_end: e.target.value })} />
+          </div>
+          <p className="text-[11px] text-slate-400 mt-1">The invoice itself is the real record — this is just for at-a-glance history.</p>
+        </div>
+
+        <div>
+          <label className="block text-xs text-slate-500 mb-1">Next invoice due</label>
+          <input className={inputCls} type="date" value={f.next_bill_date} onChange={(e) => setF({ ...f, next_bill_date: e.target.value })} />
+          <div className="flex flex-wrap gap-1.5 mt-1.5">
+            {([['+1 month', 'month', 1], ['+3 months', 'month', 3], ['+6 months', 'month', 6], ['+1 year', 'year', 1]] as const).map(([label, unit, n]) => (
+              <button key={label} type="button" onClick={() => bump(unit, n)}
+                className="px-2 py-0.5 rounded border border-slate-300 text-xs text-slate-600 hover:bg-slate-50">{label}</button>
+            ))}
+          </div>
+          <p className="text-[11px] text-slate-400 mt-1">When you'll be reminded to send the next one. Independent of the period above.</p>
+        </div>
+
+        <div><label className="block text-xs text-slate-500 mb-1">Notes <span className="text-slate-400">(optional)</span></label>
+          <textarea className={inputCls} rows={2} value={f.notes} onChange={(e) => setF({ ...f, notes: e.target.value })} /></div>
+
+        {err && <p className="text-red-600 text-sm">{err}</p>}
+        <div className="flex justify-end gap-2">
+          <button onClick={onCancel} className="px-4 py-2 text-sm text-slate-600">Cancel</button>
+          <button onClick={save} disabled={saving} className="px-4 py-2 text-sm bg-green-600 text-white rounded-lg disabled:opacity-50">{saving ? 'Saving…' : '✓ Mark sent'}</button>
+        </div>
+      </div>
+    </Modal>
+  );
 }
 
 // Notes shown on the tenancy detail pop-up, editable inline so staff don't have

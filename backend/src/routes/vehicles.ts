@@ -137,6 +137,89 @@ async function authoriseFreelancerOnQuote(
   return { ok: true, person, jobId, hhJobNumber, venueName };
 }
 
+// ── Multi-van jobs: the freelancer picks which van ──────────────────
+//
+// A job can have several vans out at once, delivered/collected by different
+// freelancers from different places. Both resolvers below used to answer
+// "THE van on this job" with a LIMIT 1, so every freelancer on the job got the
+// same row: HH 15307 (8 Sep) handed Lewis the van Charlie had already
+// collected while Lewis stood in front of a different one, with no way to
+// change it. When more than one van is in play we return the list and let the
+// person looking at the number plate choose.
+
+/** One selectable van — what the freelancer picker renders. */
+interface FreelancerVanCandidate {
+  assignmentId: string;
+  vehicleId: string | null;
+  registration: string | null;
+  makeModel: string;
+  vehicleType: string | null;
+  status: string;
+  customerDriverName: string | null;
+  /**
+   * When this van's leg is already done (soft_checked_in_at on a collection,
+   * booked_out_at on a delivery), ISO or null. Surfaced as a warning badge —
+   * NOT a hard block: warnings, not gates.
+   */
+  alreadyDoneAt: string | null;
+}
+
+/**
+ * Collapse assignment rows to ONE per VEHICLE, keeping the first row seen for
+ * each. Callers must order `rows` best-first.
+ *
+ * A single van routinely has several live rows on one job — HH 15307 carried
+ * three booked_out rows for RX24SZG (one per named driver, plus a bare
+ * allocation). The freelancer picks a registration, not a database row, so
+ * offering the same reg three times would be worse than offering one.
+ */
+function dedupeCandidatesByVehicle<T extends { vehicle_id: string | null }>(rows: T[]): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const row of rows) {
+    if (!row.vehicle_id || seen.has(row.vehicle_id)) continue;
+    seen.add(row.vehicle_id);
+    out.push(row);
+  }
+  return out;
+}
+
+/** Shape an assignment row for the picker. */
+function toVanCandidate(
+  row: {
+    assignment_id: string;
+    vehicle_id: string | null;
+    registration: string | null;
+    make: string | null;
+    model: string | null;
+    vehicle_type: string | null;
+    status: string;
+    customer_driver_name: string | null;
+  },
+  alreadyDoneAt: Date | string | null
+): FreelancerVanCandidate {
+  return {
+    assignmentId: row.assignment_id,
+    vehicleId: row.vehicle_id,
+    registration: row.registration,
+    makeModel: [row.make, row.model].filter(Boolean).join(' '),
+    vehicleType: row.vehicle_type || null,
+    status: row.status,
+    customerDriverName: row.customer_driver_name,
+    alreadyDoneAt: alreadyDoneAt ? new Date(alreadyDoneAt).toISOString() : null,
+  };
+}
+
+/**
+ * The van the freelancer picked in the multi-van picker, if any. Never trusted
+ * on its own — each resolver checks the id is genuinely one of THIS job's
+ * candidates before minting a session against it.
+ */
+function readChosenAssignmentId(req: Request): string | null {
+  const raw = (req.body as Record<string, unknown> | undefined)?.assignmentId;
+  return typeof raw === 'string' && raw.trim() ? raw.trim() : null;
+}
+
 // Best-effort "the freelancer has started the van leg" stamp (§7.3). Never
 // throws — a stamping failure must not block the resolve response.
 async function stampVanLegStarted(quoteId: string): Promise<void> {
@@ -275,15 +358,21 @@ router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) =
     type ResolveOutcome =
       | { kind: 'ok'; row: VhaRow }
       | { kind: 'no_allocation' }
-      | { kind: 'no_hire_form' };
+      | { kind: 'no_hire_form' }
+      // More than one van on the job and the freelancer hasn't said which is
+      // theirs — hand back the list (see the multi-van note above).
+      | { kind: 'needs_selection'; candidates: Array<VhaRow & { booked_out_at: Date | null }> }
+      // A van id came back from the picker that isn't a candidate on this job.
+      | { kind: 'invalid_selection' };
 
-    async function fetchAllocatedVehicleRow(): Promise<ResolveOutcome> {
+    async function fetchAllocatedVehicleRow(chosenAssignmentId: string | null): Promise<ResolveOutcome> {
       // Pull all currently-active rows on the job once and pick from them
       // in JS — we need to inspect the set as a whole to decide whether to
       // merge, and a single result row hides that.
       const result = await query(
         `SELECT vha.id AS assignment_id, vha.vehicle_id, vha.driver_id, vha.status,
                 vha.assignment_type, vha.created_at, vha.van_requirement_index,
+                vha.booked_out_at,
                 fv.reg AS registration, fv.make, fv.model, fv.vehicle_type,
                 d.full_name AS customer_driver_name, d.email AS customer_driver_email
            FROM vehicle_hire_assignments vha
@@ -294,27 +383,70 @@ router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) =
           ORDER BY vha.created_at DESC`,
         [jobId, hhJobNumber]
       );
-      const rows = result.rows as Array<VhaRow & { created_at: string; van_requirement_index: number | null }>;
+      const rows = result.rows as Array<
+        VhaRow & { created_at: string; van_requirement_index: number | null; booked_out_at: Date | null }
+      >;
       if (rows.length === 0) return { kind: 'no_allocation' };
+
+      // Which VANS are in play? One candidate per vehicle, best row first,
+      // following the dedup contract: most-progressed status wins, then a row
+      // that already carries a driver (so the picker can name the hirer),
+      // then most recently created. Rows with no vehicle are the customer
+      // hire-form rows — merge material below, not something to pick from.
+      const STATUS_RANK: Record<string, number> = { active: 0, booked_out: 1, confirmed: 2, soft: 3 };
+      const candidates = dedupeCandidatesByVehicle(
+        [...rows]
+          .filter(r => r.vehicle_id)
+          .sort((a, b) => {
+            const as = STATUS_RANK[a.status] ?? 9;
+            const bs = STATUS_RANK[b.status] ?? 9;
+            if (as !== bs) return as - bs;
+            const ad = a.driver_id ? 0 : 1;
+            const bd = b.driver_id ? 0 : 1;
+            if (ad !== bd) return ad - bd;
+            return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+          })
+      );
+
+      // `scoped` is the row set the merge logic below works from: everything
+      // when there's only one van, or the chosen van's rows plus the
+      // vehicle-less customer rows once a van has been picked.
+      let scoped = rows;
+      if (chosenAssignmentId) {
+        const picked = candidates.find(r => r.assignment_id === chosenAssignmentId);
+        if (!picked) return { kind: 'invalid_selection' };
+        scoped = rows.filter(r => r.vehicle_id === picked.vehicle_id || !r.vehicle_id);
+      } else if (candidates.length > 1) {
+        return { kind: 'needs_selection', candidates };
+      }
 
       // First preference: a row that already has BOTH vehicle and driver —
       // this is the post-merge steady state, or a job that was created the
       // tidy way from the start. Just use it.
-      const merged = rows.find(r => r.vehicle_id && r.driver_id);
+      const merged = scoped.find(r => r.vehicle_id && r.driver_id);
       if (merged) return { kind: 'ok', row: merged };
 
       // Second preference: smart-merge candidate. Find the freelancer's
       // allocation row (vehicle, no driver) and the customer's hire-form
       // row (driver, no vehicle) and combine them.
-      const allocationRow = rows.find(r => r.vehicle_id && !r.driver_id);
-      const customerRow = rows
+      const allocationRow = scoped.find(r => r.vehicle_id && !r.driver_id);
+      const customerRows = scoped
         .filter(r => r.driver_id && !r.vehicle_id)
         .sort((a, b) => {
           const ai = a.van_requirement_index ?? Number.POSITIVE_INFINITY;
           const bi = b.van_requirement_index ?? Number.POSITIVE_INFINITY;
           if (ai !== bi) return ai - bi;
           return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
-        })[0];
+        });
+      // On a multi-van job the customer rows are NOT interchangeable: pair by
+      // van_requirement_index so van #2's allocation doesn't get van #1's
+      // customer (and excess, and hire agreement) stapled to it. Falls back to
+      // the plain lowest-index-first pick when nothing matches, which is
+      // exactly the single-van behaviour.
+      const customerRow =
+        (allocationRow?.van_requirement_index != null
+          ? customerRows.find(r => r.van_requirement_index === allocationRow.van_requirement_index)
+          : undefined) || customerRows[0];
 
       if (allocationRow && customerRow) {
         // Atomic merge: stamp vehicle onto customer row, cancel allocation
@@ -386,13 +518,49 @@ router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) =
       // exists, block with a distinct reason; otherwise it's a plain
       // no-allocation. (Staff book-out doesn't use this endpoint — they go
       // through the normal allocations flow with its own soft guidance.)
-      if (rows.some(r => r.vehicle_id)) {
+      if (scoped.some(r => r.vehicle_id)) {
         return { kind: 'no_hire_form' };
       }
       return { kind: 'no_allocation' };
     }
 
-    const outcome = await fetchAllocatedVehicleRow();
+    const chosenAssignmentId = readChosenAssignmentId(req);
+    const outcome = await fetchAllocatedVehicleRow(chosenAssignmentId);
+    if (outcome.kind === 'needs_selection') {
+      // More than one van allocated — ask which one they're loading rather
+      // than guessing (the HH 15307 failure, delivery side). Stamp the leg as
+      // started so the stalled-leg scanner still notices an abandoned pick.
+      console.log('[freelancer-bookout] Multiple vans allocated — asking the freelancer to pick', {
+        jobId,
+        hhJobNumber,
+        regs: outcome.candidates.map(r => r.registration),
+      });
+      await stampVanLegStarted(quoteId);
+      res.json({
+        success: true,
+        needsVehicleSelection: true,
+        candidates: outcome.candidates.map(r => toVanCandidate(r, r.booked_out_at)),
+        job: { id: jobId, hhJobNumber, venueName },
+        driver: {
+          name: `${person.first_name} ${person.last_name}`.trim(),
+          email: freelancerEmail,
+        },
+      });
+      return;
+    }
+    if (outcome.kind === 'invalid_selection') {
+      console.warn('[freelancer-bookout] Rejected van selection that is not a candidate on this job', {
+        jobId,
+        hhJobNumber,
+        chosenAssignmentId,
+      });
+      res.status(409).json({
+        error: 'That van is no longer allocated to this job',
+        code: 'invalid_selection',
+        hint: 'Head back to the portal and start the delivery again.',
+      });
+      return;
+    }
     if (outcome.kind === 'no_allocation') {
       console.warn('[freelancer-bookout] No allocated vehicle for job', { jobId, hhJobNumber });
       res.status(409).json({
@@ -505,11 +673,16 @@ router.post('/freelancer-checkin/resolve', async (req: Request, res: Response) =
     }
     const { person, jobId, hhJobNumber, venueName } = auth;
 
-    // Resolve the van currently OUT on this job. Most-progressed status first
-    // (active > booked_out), then most-recently booked out. Dual job-match
-    // because staff-allocation rows carry only hirehop_job_id.
+    // Resolve the van(s) currently OUT on this job. Most-progressed status
+    // first (active > booked_out), then a row carrying the customer driver
+    // (their name goes on the interim assessment), then most-recently booked
+    // out. Dual job-match because staff-allocation rows carry only
+    // hirehop_job_id.
+    //
+    // No LIMIT 1 — see the multi-van note above. Several vans can be out on
+    // one job and collected by different freelancers.
     const outResult = await query(
-      `SELECT vha.id AS assignment_id, vha.vehicle_id, vha.status,
+      `SELECT vha.id AS assignment_id, vha.vehicle_id, vha.status, vha.soft_checked_in_at,
               fv.reg AS registration, fv.make, fv.model, fv.vehicle_type,
               d.full_name AS customer_driver_name, d.email AS customer_driver_email
          FROM vehicle_hire_assignments vha
@@ -519,8 +692,8 @@ router.post('/freelancer-checkin/resolve', async (req: Request, res: Response) =
           AND vha.status IN ('booked_out', 'active')
           AND vha.vehicle_id IS NOT NULL
         ORDER BY CASE vha.status WHEN 'active' THEN 0 WHEN 'booked_out' THEN 1 ELSE 2 END,
-                 vha.booked_out_at DESC NULLS LAST
-        LIMIT 1`,
+                 CASE WHEN vha.driver_id IS NOT NULL THEN 0 ELSE 1 END,
+                 vha.booked_out_at DESC NULLS LAST`,
       [jobId, hhJobNumber]
     );
     if (outResult.rows.length === 0) {
@@ -532,11 +705,69 @@ router.post('/freelancer-checkin/resolve', async (req: Request, res: Response) =
       });
       return;
     }
-    const vha = outResult.rows[0];
+
+    type CheckinVhaRow = {
+      assignment_id: string;
+      vehicle_id: string | null;
+      status: string;
+      soft_checked_in_at: Date | null;
+      registration: string | null;
+      make: string | null;
+      model: string | null;
+      vehicle_type: string | null;
+      customer_driver_name: string | null;
+      customer_driver_email: string | null;
+    };
+    const candidateRows = dedupeCandidatesByVehicle(outResult.rows as CheckinVhaRow[]);
+
+    const chosenAssignmentId = readChosenAssignmentId(req);
+    let vha = candidateRows[0];
+    if (chosenAssignmentId) {
+      const picked = candidateRows.find(r => r.assignment_id === chosenAssignmentId);
+      if (!picked) {
+        console.warn('[freelancer-checkin] Rejected van selection that is not a candidate on this job', {
+          jobId,
+          hhJobNumber,
+          chosenAssignmentId,
+        });
+        res.status(409).json({
+          error: 'That van is no longer out on this job',
+          code: 'invalid_selection',
+          hint: 'Head back to the portal and start the collection again.',
+        });
+        return;
+      }
+      vha = picked;
+    } else if (candidateRows.length > 1) {
+      // More than one van out — ask which one they're standing in front of
+      // rather than guessing (the HH 15307 failure). Stamp the leg as started
+      // here too: the freelancer HAS arrived, so the stalled-leg scanner
+      // should notice if they never pick a van.
+      console.log('[freelancer-checkin] Multiple vans out — asking the freelancer to pick', {
+        jobId,
+        hhJobNumber,
+        regs: candidateRows.map(r => r.registration),
+      });
+      await stampVanLegStarted(quoteId);
+      res.json({
+        success: true,
+        needsVehicleSelection: true,
+        candidates: candidateRows.map(r => toVanCandidate(r, r.soft_checked_in_at)),
+        job: { id: jobId, hhJobNumber, venueName },
+        driver: {
+          name: `${person.first_name} ${person.last_name}`.trim(),
+          email: freelancerEmail,
+        },
+      });
+      return;
+    }
+
     console.log('[freelancer-checkin] Vehicle resolved', {
       assignmentId: vha.assignment_id,
       registration: vha.registration,
       status: vha.status,
+      candidateCount: candidateRows.length,
+      chosenByFreelancer: !!chosenAssignmentId,
     });
 
     const sessionToken = mintFreelancerBookoutSession({
@@ -2882,6 +3113,15 @@ router.post('/save-event', async (req: FlexibleVehicleRequest, res: Response) =>
           const userId = req.user?.id || null;
           const mileageIn = event.mileage ? Number(event.mileage) : null;
           const fuelIn = event.fuelLevel || null;
+          // Forward-only: once a hire is flagged as damaged it stays flagged,
+          // so a later corrective event can't quietly clear it. NB the SQL
+          // below is `COALESCE(has_damage, false) OR $4`, NOT the COALESCE
+          // used for mileage/fuel — has_damage is `BOOLEAN DEFAULT false`, so
+          // it is never NULL and `COALESCE(has_damage, $4)` could only ever
+          // return the existing false. Between that and the fact that
+          // `event.hasDamage` was never sent by any caller, has_damage had
+          // never been true on a single row in production (verified Sept
+          // 2026) and the `damage_review` close-out card had never fired.
           const hasDamage = event.hasDamage === true;
           if (matchedRows.length > 0) {
             for (const row of matchedRows) {
@@ -2894,7 +3134,7 @@ router.post('/save-event', async (req: FlexibleVehicleRequest, res: Response) =>
                      checked_in_by = COALESCE(checked_in_by, $1),
                      mileage_in = COALESCE(mileage_in, $2),
                      fuel_level_in = COALESCE(fuel_level_in, $3),
-                     has_damage = COALESCE(has_damage, $4),
+                     has_damage = COALESCE(has_damage, false) OR $4,
                      updated_at = NOW()
                  WHERE id = $5`,
                 [userId, mileageIn, fuelIn, hasDamage, row.id, reg]
@@ -2927,7 +3167,7 @@ router.post('/save-event', async (req: FlexibleVehicleRequest, res: Response) =>
                      checked_in_by = COALESCE(checked_in_by, $1),
                      mileage_in = COALESCE(mileage_in, $2),
                      fuel_level_in = COALESCE(fuel_level_in, $3),
-                     has_damage = COALESCE(has_damage, $4),
+                     has_damage = COALESCE(has_damage, false) OR $4,
                      updated_at = NOW()
                  WHERE id = $5`,
                 [userId, mileageIn, fuelIn, hasDamage, swappedMatch.rows[0].id]
@@ -3746,7 +3986,10 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
   y = addRow('Driver', data.driverName, y);
   if (data.clientEmail) y = addRow('Email', data.clientEmail, y);
   if (data.hireHopJob) y = addRow('HireHop Job', '#' + data.hireHopJob, y);
-  y = addRow('Date/Time', timestamp, y);
+  // For a check-in the Date/Time IS the check-in moment, which reads more
+  // naturally alongside the check-in mileage in the comparison block below —
+  // so it's rendered there instead. Book-out / interim keep it here.
+  if (!isCheckIn) y = addRow('Date/Time', timestamp, y);
 
   // Hire Start / End — render date + time on a single line. Time is
   // optional (some legacy data has dates only). The hire START time is
@@ -3800,6 +4043,7 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
     y = addRow('Book-Out Fuel', boFuelStr, y);
     y += 2; addLine(y); y += 4;
 
+    y = addRow('Check-In Date/Time', timestamp, y);
     const currentMileageStr = data.mileage != null ? data.mileage.toLocaleString() + ' miles' : '-';
     y = addRow('Check-In Mileage', currentMileageStr, y);
     y = addRow('Check-In Fuel', data.fuelLevel || '-', y);
@@ -4627,6 +4871,217 @@ async function resolveJobHireDates(hireHopJob: string | number | null | undefine
 }
 
 /**
+ * Persist a generated condition-report PDF to R2 as the FROZEN record for
+ * an event. Keyed by event so `regenerate-pdf` can serve the exact original
+ * bytes later (an accurate at-the-moment snapshot) instead of reconstructing
+ * from live/mutable sources. Private bucket — the report carries PII (driver
+ * name, damage). Best-effort: a storage failure must never break the
+ * generate/email flow the client is waiting on.
+ */
+function conditionReportPdfKey(reg: string, eventId: string): string {
+  return `condition-reports/${reg.toUpperCase()}/${eventId}.pdf`;
+}
+
+async function storeConditionReportPdf(
+  reg: string | undefined,
+  eventId: string | undefined,
+  pdfBytes: Uint8Array,
+): Promise<void> {
+  if (!reg || !eventId || !isR2Configured()) return;
+  try {
+    await uploadToR2(conditionReportPdfKey(reg, eventId), Buffer.from(pdfBytes), 'application/pdf');
+  } catch (err) {
+    console.warn('[vehicles/pdf] Failed to persist condition report PDF:', err instanceof Error ? err.message : err);
+  }
+}
+
+/** Read a frozen condition-report PDF from R2, or null if none stored. */
+async function readStoredConditionReport(reg: string, eventId: string): Promise<Buffer | null> {
+  if (!isR2Configured()) return null;
+  try {
+    const resp = await getFromR2(conditionReportPdfKey(reg, eventId));
+    const stream = resp.Body as NodeJS.ReadableStream;
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream) chunks.push(Buffer.from(chunk as Uint8Array));
+    const buf = Buffer.concat(chunks);
+    return buf.length > 0 ? buf : null;
+  } catch {
+    return null;  // Not stored (pre-storage event) — reconstruct instead.
+  }
+}
+
+/** Fetch an R2 object as a Buffer, trying the public bucket first (event/
+ *  damage photos live there) then the private bucket. */
+async function r2KeyToBuffer(key: string): Promise<Buffer | null> {
+  const collect = async (resp: { Body?: unknown }): Promise<Buffer | null> => {
+    const stream = resp?.Body as NodeJS.ReadableStream | undefined;
+    if (!stream || typeof (stream as any)[Symbol.asyncIterator] !== 'function') return null;
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream) chunks.push(Buffer.from(chunk as Uint8Array));
+    return Buffer.concat(chunks);
+  };
+  try { const b = await collect(await getFromPublicR2(key)); if (b?.length) return b; } catch { /* try private */ }
+  try { const b = await collect(await getFromR2(key)); if (b?.length) return b; } catch { /* not found */ }
+  return null;
+}
+
+/** Look up a vehicle's descriptor (type/make/model/colour) from fleet_vehicles
+ *  by reg. The event JSON never stored these — a fresh book-out/check-in PDF
+ *  gets them from the selected vehicle client-side, so a REGENERATED PDF was
+ *  showing a blank "Type" (and no make/model/colour). Reconstruct from the
+ *  fleet record instead. */
+async function getVehicleDescriptorByReg(reg: string): Promise<{
+  vehicleType: string | null;
+  make: string | null;
+  model: string | null;
+  colour: string | null;
+}> {
+  try {
+    const r = await query(
+      `SELECT vehicle_type, make, model, colour FROM fleet_vehicles WHERE reg = $1 LIMIT 1`,
+      [reg.toUpperCase()],
+    );
+    const row = r.rows[0];
+    if (!row) return { vehicleType: null, make: null, model: null, colour: null };
+    return {
+      vehicleType: row.vehicle_type ?? null,
+      make: row.make ?? null,
+      model: row.model ?? null,
+      colour: row.colour ?? null,
+    };
+  } catch (err) {
+    console.warn('[vehicles/pdf] getVehicleDescriptorByReg failed:', err instanceof Error ? err.message : err);
+    return { vehicleType: null, make: null, model: null, colour: null };
+  }
+}
+
+/** Map an OP job_issue severity (urgent/normal/low) to the condition-report
+ *  PDF's severity band (Critical/Major/Minor — colour only). */
+function mapIssueSeverityToPdf(sev: string | null | undefined): string {
+  const s = (sev || '').toLowerCase();
+  if (s === 'urgent') return 'Major';
+  return 'Minor';
+}
+
+/**
+ * Reconstruct the book-out comparison state for a check-in event, for events
+ * saved before those fields were persisted (the check-in event JSON only
+ * carries the check-in-side mileage/fuel). Book-out is ONE physical event per
+ * van per hire, so it carries the mileage/fuel/date + driver name regardless
+ * of how many drivers were on the van. Matched by HireHop job (the reliable
+ * disambiguator) and constrained to book-outs at/before the check-in, so a
+ * later hire's book-out can't leak in. Conservative — returns null rather than
+ * guessing when nothing matches.
+ */
+async function findBookOutStateForCheckIn(
+  reg: string,
+  hireHopJob: string | number | null | undefined,
+  checkInCreatedAt: string | undefined,
+): Promise<{ mileage: number | null; fuelLevel: string | null; eventDate: string | null; driverName: string | null } | null> {
+  try {
+    const index = await readR2Json<{ events: any[] }>(`vehicle-events/${reg.toUpperCase()}/_index.json`);
+    if (!index?.events?.length) return null;
+    const hhStr = hireHopJob != null && String(hireHopJob).trim() !== '' ? String(hireHopJob) : null;
+    const cutoff = checkInCreatedAt ? new Date(checkInCreatedAt).getTime() : Infinity;
+    const ts = (e: any): number => {
+      const t = new Date(e.createdAt || e.eventDate || 0).getTime();
+      return isNaN(t) ? 0 : t;
+    };
+    const candidates = index.events
+      .filter((e) => e.eventType === 'Book Out')
+      .filter((e) => !hhStr || String(e.hireHopJob ?? '') === hhStr)
+      // book-out must be at/before the check-in (+1min tolerance) so a
+      // subsequent hire's book-out never becomes "the" book-out.
+      .filter((e) => isFinite(cutoff) ? ts(e) <= cutoff + 60_000 : true)
+      .sort((a, b) => ts(b) - ts(a));
+    const boIndex = candidates[0];
+    if (!boIndex) return null;
+
+    // The index carries mileage/fuel/eventDate; read the full JSON only for
+    // the driver name (not indexed).
+    let driverName: string | null = null;
+    try {
+      const full = await readR2Json<any>(`vehicle-events/${reg.toUpperCase()}/${boIndex.id}.json`);
+      driverName = (full?.driverName as string) || null;
+      if (!driverName && typeof full?.details === 'string') {
+        const m = full.details.match(/^Driver:\s*(.+)$/m);
+        if (m) driverName = m[1].trim();
+      }
+    } catch { /* index values still usable */ }
+
+    return {
+      mileage: boIndex.mileage ?? null,
+      fuelLevel: boIndex.fuelLevel ?? null,
+      eventDate: boIndex.eventDate ?? null,
+      driverName,
+    };
+  } catch (err) {
+    console.warn('[vehicles/pdf] findBookOutStateForCheckIn failed:', err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
+/**
+ * Reconstruct damage records for a check-in event from the Job Issues
+ * register (where check-in damage is auto-created — the event JSON never
+ * stored damage). Scoped strictly to this hire via the OP job + fleet
+ * vehicle so a different hire's damage on the same van can't leak in.
+ * Live/mutable source: reflects the issues' CURRENT state, which is why
+ * storing the PDF at check-in (the frozen record) is the primary path.
+ */
+async function reconstructDamageItemsForEvent(
+  reg: string,
+  hireHopJob: string | number | null | undefined,
+): Promise<Array<{ location: string; severity: string; description: string; photos: Array<{ base64: string }> }>> {
+  if (hireHopJob == null || String(hireHopJob).trim() === '') return [];
+  const hhNum = parseInt(String(hireHopJob), 10);
+  if (!hhNum || isNaN(hhNum)) return [];
+  try {
+    const issuesResult = await query(
+      `SELECT ji.id, ji.summary, ji.description, ji.severity, ji.component_key
+         FROM job_issues ji
+         JOIN jobs j            ON j.id = ji.job_id
+         JOIN fleet_vehicles fv ON fv.id = ji.vehicle_id
+        WHERE j.hh_job_number = $1
+          AND fv.reg = $2
+          AND ji.category = 'damaged'
+          AND ji.status <> 'cancelled'
+        ORDER BY ji.created_at ASC`,
+      [hhNum, reg.toUpperCase()],
+    );
+
+    const items: Array<{ location: string; severity: string; description: string; photos: Array<{ base64: string }> }> = [];
+    for (const row of issuesResult.rows) {
+      const photos: Array<{ base64: string }> = [];
+      try {
+        const fileRows = await query(
+          `SELECT r2_key FROM job_issue_files
+            WHERE issue_id = $1 AND file_type = 'photo'
+            ORDER BY created_at ASC LIMIT 5`,
+          [row.id],
+        );
+        for (const f of fileRows.rows) {
+          if (!f.r2_key) continue;
+          const buf = await r2KeyToBuffer(f.r2_key as string);
+          if (buf) photos.push({ base64: buf.toString('base64') });
+        }
+      } catch { /* photos optional — description still lands */ }
+
+      // summary is stored as "Location: description"; split for the PDF.
+      const summary = String(row.summary || '');
+      const colonIdx = summary.indexOf(':');
+      const location = colonIdx > 0 ? summary.slice(0, colonIdx).trim() : (row.component_key || 'Damage');
+      const description = String(row.description || (colonIdx > 0 ? summary.slice(colonIdx + 1).trim() : summary)).trim();
+      items.push({ location, severity: mapIssueSeverityToPdf(row.severity), description, photos });
+    }
+    return items;
+  } catch (err) {
+    console.warn('[vehicles/pdf] reconstructDamageItemsForEvent failed:', err instanceof Error ? err.message : err);
+    return [];
+  }
+}
+
+/**
  * POST /api/vehicles/generate-pdf
  * Generate a vehicle condition report PDF (book-out / check-in).
  * Returns base64-encoded PDF + filename.
@@ -4669,6 +5124,9 @@ router.post('/generate-pdf', async (req: FlexibleVehicleRequest, res: Response) 
     data.performedByName = await resolveOperatorName(req);
 
     const { pdfBytes, filename } = await buildConditionReportPdf(data);
+    // Freeze this report against its event (offline replay / CollectionPage
+    // path). eventId is optional — pre-deploy tabs won't send it.
+    await storeConditionReportPdf(data.vehicleReg, data.eventId, pdfBytes);
     const base64Pdf = Buffer.from(pdfBytes).toString('base64');
     res.json({
       pdf: base64Pdf,
@@ -4718,15 +5176,29 @@ router.post('/events/:eventId/regenerate-pdf', async (req: AuthRequest, res: Res
 
     // Parse driver name from event.details string (legacy events don't have
     // driverName as a field — it was stuffed into the "details" line-join).
+    // Book-out events use "Driver: X"; check-in events "Returning driver: X".
     // Format: "Driver: Mr Desmond Magee\nHireHop Job: 12345\nPhotos: 14 captured\nBriefing completed\nNotes: ..."
     let driverName = event.driverName || '';
     let notes = event.notes || '';
-    if (!driverName && typeof event.details === 'string') {
-      const driverMatch = event.details.match(/^Driver:\s*(.+)$/m);
-      if (driverMatch) driverName = driverMatch[1].trim();
+    if (typeof event.details === 'string') {
+      if (!driverName) {
+        const driverMatch = event.details.match(/^(?:Returning driver|Driver):\s*(.+)$/m);
+        if (driverMatch) driverName = driverMatch[1].trim();
+      }
       const notesMatch = event.details.match(/^Notes:\s*([\s\S]+)$/m);
       if (notesMatch) notes = notesMatch[1].trim();
     }
+
+    // Manual corrections (from the Regenerate dialog) + force-rebuild flag.
+    const body = req.body || {};
+    const forceRebuild = body.rebuild === true;
+    if (body.driverName && String(body.driverName).trim()) driverName = String(body.driverName).trim();
+
+    // If a frozen PDF was stored at generation time, serve those exact bytes
+    // (the accurate at-the-moment record) unless the caller forces a rebuild.
+    // Only reconstruct (below) when no frozen copy exists — i.e. events from
+    // before PDF storage was added.
+    const storedPdf = forceRebuild ? null : await readStoredConditionReport(reg, String(eventId));
 
     // List photos stored under events/{eventId}/{REG}/*.jpg and base64 them.
     // Load condition photos from the PUBLIC bucket (`ooosh-vehicle-photos`)
@@ -4735,7 +5207,7 @@ router.post('/events/:eventId/regenerate-pdf', async (req: AuthRequest, res: Res
     // hyperlinks resolve to publicly-readable objects in clients' browsers.
     const r2PublicBase = process.env.R2_PUBLIC_URL || '';
     const photoBase64s: Array<{ angle: string; label: string; base64: string; r2Url?: string }> = [];
-    if (isR2Configured()) {
+    if (!storedPdf && isR2Configured()) {
       const photoPrefix = `events/${eventId}/${reg}/`;
       const photoObjects = await listPublicR2Objects(photoPrefix);
       for (const obj of photoObjects) {
@@ -4767,7 +5239,7 @@ router.post('/events/:eventId/regenerate-pdf', async (req: AuthRequest, res: Res
     // instead of failing.
     let signatureBase64: string | undefined;
     const sigKey = event.signatureR2Key || `vehicle-events/${reg}/${eventId}_signature.png`;
-    if (isR2Configured()) {
+    if (!storedPdf && isR2Configured()) {
       try {
         const sigResp = await getFromR2(sigKey);
         const sigStream = sigResp.Body as NodeJS.ReadableStream;
@@ -4781,49 +5253,123 @@ router.post('/events/:eventId/regenerate-pdf', async (req: AuthRequest, res: Res
       }
     }
 
-    // Resolve hire dates from the DB (event JSON doesn't carry them; same
-    // fallback as /generate-pdf). Important for regenerating PDFs from
-    // events that were saved before this column carried hire dates, and
-    // for freelancer book-outs where the hire form data wasn't loaded
-    // client-side at PDF generation time.
-    const resolvedDates = await resolveJobHireDates(event.hireHopJob);
-
-    // Operator name — for regenerated PDFs we want the ORIGINAL operator,
-    // not the staff member clicking the regenerate button. Read from the
-    // assignment's booked_out_by / checked_in_by user reference.
+    // Report type derived from the event — needed by both the stored and
+    // reconstructed branches.
     const normalisedRegenType = String(event.eventType || '').toLowerCase().replace(/[\s_]+/g, '-');
     const isInterimRegen = normalisedRegenType === 'soft-check-in';
     const isCheckInRegen = event.eventType === 'Check In' || event.eventType === 'check-in';
-    const performedByName = await resolveOperatorNameForEvent(
-      reg,
-      event.hireHopJob,
-      isCheckInRegen,
-    );
 
-    // Build the PDF
-    const { pdfBytes, filename } = await buildConditionReportPdf({
-      vehicleReg: reg,
-      vehicleType: event.vehicleType || '',
-      driverName,
-      clientEmail: event.clientEmail || undefined,
-      hireHopJob: event.hireHopJob || undefined,
-      mileage: event.mileage ?? null,
-      fuelLevel: event.fuelLevel || null,
-      eventDate: event.eventDate || new Date().toISOString().slice(0, 10),
-      eventDateTime: event.createdAt || event.eventDate || new Date().toISOString(),
-      hireStartDate: event.hireStartDate || resolvedDates.start || undefined,
-      hireEndDate: event.hireEndDate || resolvedDates.end || undefined,
-      hireStartTime: event.hireStartTime || resolvedDates.startTime || undefined,
-      hireEndTime: event.hireEndTime || resolvedDates.endTime || undefined,
-      performedByName: performedByName || undefined,
-      photos: photoBase64s,
-      briefingItems: Array.isArray(event.briefingItems) ? event.briefingItems : [],
-      bookOutNotes: notes,
-      signatureBase64,
-      signatureMissing: !isInterimRegen && !signatureBase64,
-      isCheckIn: isCheckInRegen,
-      isInterim: isInterimRegen,
-    });
+    let pdfBytes: Uint8Array;
+    let filename: string;
+    let source: 'stored' | 'reconstructed';
+    // Set only for reconstructed check-ins — lets the UI prompt for manual
+    // entry when the book-out mileage couldn't be established.
+    let reconstruction: { bookOutMileageFound: boolean; damageCount: number } | undefined;
+
+    if (storedPdf) {
+      // Frozen original — serve verbatim.
+      pdfBytes = storedPdf;
+      const docType = isInterimRegen ? 'interim' : isCheckInRegen ? 'check-in' : 'book-out';
+      const dateStr = (event.eventDate || new Date().toISOString().slice(0, 10)).replace(/-/g, '');
+      filename = `${reg}-${docType}-${dateStr}.pdf`;
+      source = 'stored';
+    } else {
+      // No frozen copy (pre-storage event) — reconstruct.
+
+      // Resolve hire dates from the DB (event JSON doesn't carry them; same
+      // fallback as /generate-pdf). Important for regenerating PDFs from
+      // events that were saved before this column carried hire dates, and
+      // for freelancer book-outs where the hire form data wasn't loaded
+      // client-side at PDF generation time.
+      const resolvedDates = await resolveJobHireDates(event.hireHopJob);
+
+      // Operator name — for regenerated PDFs we want the ORIGINAL operator,
+      // not the staff member clicking the regenerate button. Read from the
+      // assignment's booked_out_by / checked_in_by user reference.
+      const performedByName = await resolveOperatorNameForEvent(
+        reg,
+        event.hireHopJob,
+        isCheckInRegen,
+      );
+
+      // Reconstruct the book-out comparison + damage that the check-in event
+      // JSON never persisted. Book-out event → mileage/fuel/date + driver;
+      // job_issues → damage. Manual corrections (below) take precedence.
+      let bookOutMileage: number | null = null;
+      let bookOutFuelLevel: string | null = null;
+      let bookOutDate: string | null = null;
+      let damageItems: Array<{ location: string; severity: string; description: string; photos: Array<{ base64: string }> }> = [];
+      if (isCheckInRegen) {
+        const bo = await findBookOutStateForCheckIn(reg, event.hireHopJob, event.createdAt);
+        if (bo) {
+          bookOutMileage = bo.mileage;
+          bookOutFuelLevel = bo.fuelLevel;
+          bookOutDate = bo.eventDate;
+          if (!driverName && bo.driverName) driverName = bo.driverName;
+        }
+        damageItems = await reconstructDamageItemsForEvent(reg, event.hireHopJob);
+      }
+
+      // Vehicle descriptor (type/make/model/colour) — never stored on the
+      // event JSON, so reconstruct from the fleet record (applies to book-out
+      // regen too). Event values win if a legacy event happens to carry them.
+      const descriptor = await getVehicleDescriptorByReg(reg);
+
+      // Manual corrections from the Regenerate dialog (blank → keep auto value).
+      const numOverride = (v: unknown): number | null =>
+        v != null && String(v).trim() !== '' && !isNaN(Number(v)) ? Number(v) : null;
+      const boMileageOverride = numOverride(body.bookOutMileage);
+      if (boMileageOverride != null) bookOutMileage = boMileageOverride;
+      if (body.bookOutFuelLevel && String(body.bookOutFuelLevel).trim()) bookOutFuelLevel = String(body.bookOutFuelLevel).trim();
+      if (body.bookOutDate && String(body.bookOutDate).trim()) bookOutDate = String(body.bookOutDate).trim();
+      const checkInMileageOverride = numOverride(body.mileage);
+      const checkInMileage = checkInMileageOverride != null ? checkInMileageOverride : (event.mileage ?? null);
+
+      if (isCheckInRegen) {
+        reconstruction = { bookOutMileageFound: bookOutMileage != null, damageCount: damageItems.length };
+      }
+
+      const built = await buildConditionReportPdf({
+        vehicleReg: reg,
+        vehicleType: event.vehicleType || descriptor.vehicleType || '',
+        vehicleMake: event.vehicleMake || descriptor.make || undefined,
+        vehicleModel: event.vehicleModel || descriptor.model || undefined,
+        vehicleColour: event.vehicleColour || descriptor.colour || undefined,
+        driverName,
+        clientEmail: event.clientEmail || undefined,
+        hireHopJob: event.hireHopJob || undefined,
+        mileage: checkInMileage,
+        fuelLevel: event.fuelLevel || null,
+        eventDate: event.eventDate || new Date().toISOString().slice(0, 10),
+        eventDateTime: event.createdAt || event.eventDate || new Date().toISOString(),
+        hireStartDate: event.hireStartDate || resolvedDates.start || undefined,
+        hireEndDate: event.hireEndDate || resolvedDates.end || undefined,
+        hireStartTime: event.hireStartTime || resolvedDates.startTime || undefined,
+        hireEndTime: event.hireEndTime || resolvedDates.endTime || undefined,
+        performedByName: performedByName || undefined,
+        photos: photoBase64s,
+        briefingItems: Array.isArray(event.briefingItems) ? event.briefingItems : [],
+        bookOutNotes: notes,
+        signatureBase64,
+        signatureMissing: !isInterimRegen && !signatureBase64,
+        isCheckIn: isCheckInRegen,
+        isInterim: isInterimRegen,
+        // Reconstructed check-in comparison (undefined/[] for book-outs).
+        bookOutMileage,
+        bookOutFuelLevel,
+        bookOutDate,
+        damageItems,
+      });
+      pdfBytes = built.pdfBytes;
+      filename = built.filename;
+      source = 'reconstructed';
+      // Deliberately NOT stored: a reconstruction is a best-effort rebuild
+      // from live/mutable sources (job_issues) and may be incomplete (e.g.
+      // book-out mileage not yet found, awaiting a manual correction).
+      // Freezing it would then serve the stale version and ignore overrides.
+      // Only generation-time PDFs are frozen; historical events stay
+      // reconstructable + correctable.
+    }
 
     const base64Pdf = Buffer.from(pdfBytes).toString('base64');
 
@@ -4869,6 +5415,12 @@ router.post('/events/:eventId/regenerate-pdf', async (req: AuthRequest, res: Res
       signatureFound: !!signatureBase64,
       emailSent,
       emailedTo,
+      // 'stored' = frozen original served verbatim; 'reconstructed' = rebuilt
+      // from live sources (book-out event + job_issues). reconstruction is set
+      // only for reconstructed check-ins so the UI can prompt for a manual
+      // book-out mileage when it couldn't be established.
+      source,
+      reconstruction,
     });
   } catch (error) {
     console.error('[vehicles/regenerate-pdf] Error:', error);
@@ -4958,46 +5510,25 @@ router.post('/send-email', async (req: FlexibleVehicleRequest, res: Response) =>
       contentType: 'application/pdf' as const,
     }] : [];
 
-    // Use the email service's sendRaw for plain emails, or direct nodemailer for attachments
-    if (attachments.length > 0) {
-      const nodemailer = await import('nodemailer');
-      const transporter = nodemailer.createTransport({
-        host: process.env.SMTP_HOST || 'smtp.gmail.com',
-        port: parseInt(process.env.SMTP_PORT || '587', 10),
-        secure: false,
-        auth: {
-          user: process.env.SMTP_USER || '',
-          pass: process.env.SMTP_PASS || '',
-        },
-      });
-
-      const isTestMode = (process.env.EMAIL_MODE || 'test') === 'test';
-      const actualTo = isTestMode && process.env.EMAIL_TEST_REDIRECT
-        ? process.env.EMAIL_TEST_REDIRECT : to;
-
-      const mailResult = await transporter.sendMail({
-        from: process.env.SMTP_FROM || 'Ooosh Tours <notifications@oooshtours.co.uk>',
-        to: actualTo,
-        subject: isTestMode ? `[TEST] ${subject}` : subject,
-        html: (prependBanner || '') + (html || ''),
-        attachments,
-      });
-
-      if (fallbackJobId) {
-        await logFallbackToTimeline({ jobId: fallbackJobId, templateId: 'condition_report' });
-      }
-      res.json({ messageId: mailResult.messageId || 'sent', isFallback: !!fallbackJobId });
-    } else {
-      const result = await emailService.sendRaw({ to, subject, html: (prependBanner || '') + (html || '') });
-      if (!result.success) {
-        res.status(500).json({ error: result.error || 'Email send failed' });
-        return;
-      }
-      if (fallbackJobId) {
-        await logFallbackToTimeline({ jobId: fallbackJobId, templateId: 'condition_report' });
-      }
-      res.json({ messageId: result.messageId || 'sent', isFallback: !!fallbackJobId });
+    // Route EVERYTHING through emailService.sendRaw so it gets the pooled +
+    // retried transport, the outage canary, and audit logging. Attachment
+    // emails (condition reports) carry their own complete HTML, so skip the
+    // base-layout wrap; plain emails keep the wrap.
+    const result = await emailService.sendRaw({
+      to,
+      subject,
+      html: (prependBanner || '') + (html || ''),
+      attachments: attachments.length > 0 ? attachments : undefined,
+      skipLayout: attachments.length > 0,
+    });
+    if (!result.success) {
+      res.status(500).json({ error: result.error || 'Email send failed' });
+      return;
     }
+    if (fallbackJobId) {
+      await logFallbackToTimeline({ jobId: fallbackJobId, templateId: 'condition_report' });
+    }
+    res.json({ messageId: result.messageId || 'sent', isFallback: !!fallbackJobId });
   } catch (error) {
     console.error('[vehicles/email] Send error:', error);
     res.status(500).json({ error: 'Email send failed', details: error instanceof Error ? error.message : 'Unknown error' });
@@ -5066,6 +5597,37 @@ router.post('/send-condition-report', async (req: FlexibleVehicleRequest, res: R
     }
     data.performedByName = await resolveOperatorName(req);
 
+    // Per-driver referral gate (Phase D2b). A driver whose referral is still
+    // pending is HELD BACK — they get neither the hire agreement nor the
+    // condition report. Resolve the held-back drivers on this job (by email +
+    // name) and skip any matching recipient. Book-out itself is per-VAN and
+    // proceeds on the approved drivers; only the paperwork is withheld per
+    // driver. Matches book-out (own-van/cross-van agreement) so the two artefacts
+    // stay consistent. Held-back drivers are authorised later via the referral
+    // resolution flow.
+    const heldBackEmails = new Set<string>();
+    const heldBackNames = new Set<string>();
+    if (data.hireHopJob) {
+      const hbJob = parseInt(String(data.hireHopJob), 10);
+      if (!Number.isNaN(hbJob)) {
+        const heldBack = await query(
+          `SELECT DISTINCT d.email, d.full_name
+             FROM vehicle_hire_assignments vha
+             JOIN drivers d ON d.id = vha.driver_id
+             LEFT JOIN jobs j ON j.id = vha.job_id
+            WHERE (vha.hirehop_job_id = $1 OR j.hh_job_number = $1)
+              AND d.requires_referral = TRUE
+              AND (d.referral_status IS NULL
+                   OR d.referral_status NOT IN ('approved', 'waived'))`,
+          [hbJob]
+        );
+        for (const r of heldBack.rows) {
+          if (r.email) heldBackEmails.add(String(r.email).trim().toLowerCase());
+          if (r.full_name) heldBackNames.add(String(r.full_name).trim().toLowerCase());
+        }
+      }
+    }
+
     // Job-level fallback recipient (resolved once, reused for any recipient
     // with no email on file).
     let fallbackJobId: string | null = null;
@@ -5077,18 +5639,6 @@ router.post('/send-condition-report', async (req: FlexibleVehicleRequest, res: R
       if (jobLookup.rows.length > 0) fallbackJobId = jobLookup.rows[0].id;
     }
 
-    const nodemailer = await import('nodemailer');
-    const transporter = nodemailer.createTransport({
-      host: process.env.SMTP_HOST || 'smtp.gmail.com',
-      port: parseInt(process.env.SMTP_PORT || '587', 10),
-      secure: false,
-      auth: {
-        user: process.env.SMTP_USER || '',
-        pass: process.env.SMTP_PASS || '',
-      },
-    });
-    const isTestMode = (process.env.EMAIL_MODE || 'test') === 'test';
-
     const results: Array<{
       driverName: string;
       success: boolean;
@@ -5099,11 +5649,31 @@ router.post('/send-condition-report', async (req: FlexibleVehicleRequest, res: R
       error?: string;
     }> = [];
 
+    // Freeze the report against its event once (per-van artefact; the
+    // per-driver PDFs differ only by name, so the first is representative).
+    let storedForEvent = false;
+
     // Sequential per driver — PDFs share the photo set, and one in-flight
     // jsPDF build at a time keeps memory predictable.
     for (const recipient of recipients) {
       const driverName = String(recipient?.driverName || '').trim() || 'Driver';
       const explicitEmail = recipient?.email ? String(recipient.email).trim() : '';
+
+      // Referral hold: skip held-back drivers (no condition report, no email).
+      const recipEmailKey = explicitEmail.toLowerCase();
+      const recipNameKey = driverName.toLowerCase();
+      if (
+        (recipEmailKey && heldBackEmails.has(recipEmailKey)) ||
+        heldBackNames.has(recipNameKey)
+      ) {
+        console.log(`[vehicles/send-condition-report] hold ${driverName} — driver referral pending, report withheld`);
+        results.push({
+          driverName,
+          success: false,
+          error: 'Referral pending — not authorised; condition report withheld until resolved',
+        });
+        continue;
+      }
 
       try {
         const { pdfBytes, filename } = await buildConditionReportPdf({
@@ -5111,6 +5681,11 @@ router.post('/send-condition-report', async (req: FlexibleVehicleRequest, res: R
           driverName,
           clientEmail: explicitEmail || undefined,
         });
+
+        if (!storedForEvent) {
+          storedForEvent = true;
+          await storeConditionReportPdf(data.vehicleReg, data.eventId, pdfBytes);
+        }
 
         // Resolve recipient: explicit email, else job-level fallback chain.
         let to = explicitEmail;
@@ -5154,20 +5729,23 @@ router.post('/send-condition-report', async (req: FlexibleVehicleRequest, res: R
         const subject = buildConditionReportSubject(emailParams);
         const html = (prependBanner || '') + buildConditionReportEmailHtml(emailParams);
 
-        const actualTo = isTestMode && process.env.EMAIL_TEST_REDIRECT
-          ? process.env.EMAIL_TEST_REDIRECT : to;
-
-        await transporter.sendMail({
-          from: process.env.SMTP_FROM || 'Ooosh Tours <notifications@oooshtours.co.uk>',
-          to: actualTo,
-          subject: isTestMode ? `[TEST] ${subject}` : subject,
+        // Route through the pooled + retried email service (test-mode redirect,
+        // outage canary and audit logging handled inside). skipLayout: the
+        // condition-report HTML is already a complete, self-contained email.
+        const sendResult = await emailService.sendRaw({
+          to,
+          subject,
           html,
+          skipLayout: true,
           attachments: [{
             filename,
             content: Buffer.from(pdfBytes),
             contentType: 'application/pdf' as const,
           }],
         });
+        if (!sendResult.success) {
+          throw new Error(sendResult.error || 'Email send failed');
+        }
 
         if (usedFallback && fallbackJobId) {
           await logFallbackToTimeline({ jobId: fallbackJobId, templateId: 'condition_report' });
@@ -6557,7 +7135,12 @@ function formatDate(val: unknown): string {
   if (!val) return '';
   // Handle Date objects (returned by pg for DATE/TIMESTAMP columns)
   if (val instanceof Date) {
-    const y = val.getFullYear();
+    if (Number.isNaN(val.getTime())) return '';
+    // The year MUST be zero-padded to 4 digits. Postgres happily stores a
+    // mistyped year like 0006, and `${6}-08-25` is not a parseable date in JS
+    // — `new Date('6-08-25T00:00:00')` is Invalid, which threw out of the
+    // fleet table's Rossetts calc and blanked the page (RX73TBZ, Sep 2026).
+    const y = String(val.getFullYear()).padStart(4, '0');
     const m = String(val.getMonth() + 1).padStart(2, '0');
     const d = String(val.getDate()).padStart(2, '0');
     return `${y}-${m}-${d}`;

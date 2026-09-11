@@ -22,6 +22,31 @@ import { syncExcessRequirementStatus } from './excess-requirement-sync';
 
 export type RefundSource = 'stripe_webhook' | 'payment_event' | 'hh_reconcile' | 'manual';
 
+export interface RefundLeg {
+  source: string;
+  ref: string | null;
+  amount: number;
+  at?: string;
+}
+
+/**
+ * Has this refund already been applied to the record?
+ *
+ * THE dedup rule, matched on `ref` ALONE. One real-world refund reaches OP down
+ * several paths — the reimburse endpoint claims it as `manual`, Stripe's
+ * charge.refunded webhook reports it as `stripe_webhook`, HireHop
+ * reconciliation as `hh_reconcile` — and they all key on the same refund id.
+ * Comparing the source as well meant those never matched each other, so the
+ * SAME refund was applied twice (job 15187 and the records sitting at
+ * reimbursement_amount = 2 × excess_amount_taken, Sep 2026).
+ *
+ * One refund id = one leg, whoever tells us about it first.
+ */
+export function isDuplicateLeg(legs: RefundLeg[] | null | undefined, ref: string | null | undefined): boolean {
+  if (!ref) return false; // No ref → caller owns its own idempotency.
+  return Array.isArray(legs) && legs.some((l) => l.ref === ref);
+}
+
 export interface UnwindRefundInput {
   excessId: string;
   amount: number;             // gross refund amount (positive)
@@ -70,10 +95,9 @@ export async function unwindRefundOnExcess(input: UnwindRefundInput): Promise<Un
   const row = cur.rows[0];
 
   // Idempotency check — refund_legs is a JSONB array of {source, ref, amount, at}.
-  // If this (source, sourceRef) has already been recorded, skip silently.
-  const legs: Array<{ source: string; ref: string | null; amount: number }> =
-    Array.isArray(row.refund_legs) ? row.refund_legs : [];
-  if (sourceRef && legs.some((l) => l.source === source && l.ref === sourceRef)) {
+  // See isDuplicateLeg above for why this matches on ref alone.
+  const legs: RefundLeg[] = Array.isArray(row.refund_legs) ? row.refund_legs : [];
+  if (isDuplicateLeg(legs, sourceRef)) {
     return { updated: false, newStatus: row.excess_status, reason: 'duplicate leg (idempotent skip)' };
   }
 

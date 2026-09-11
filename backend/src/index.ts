@@ -152,6 +152,11 @@ async function start() {
     console.log(`Ooosh Operations API running on port ${PORT}`);
     console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
     startScheduler();
+    // A restart kills the in-process lead pipeline, orphaning any 'running'
+    // lead_runs row. Clear them so the UI doesn't show a phantom stuck search.
+    import('./services/leads/pipeline')
+      .then((m) => m.sweepZombieLeadRuns())
+      .catch((err) => console.warn('[leads] zombie sweep at boot failed:', err));
   });
 }
 

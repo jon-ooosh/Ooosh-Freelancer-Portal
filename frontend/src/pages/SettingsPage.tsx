@@ -2,8 +2,9 @@ import { useState, useEffect } from 'react';
 import { hasManagerRole } from '../lib/roles';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
-import { Navigate } from 'react-router-dom';
+import { Navigate, Link } from 'react-router-dom';
 import XeroBankAccountsSection from '../components/XeroBankAccountsSection';
+import { compressImage } from '../modules/vehicles/lib/image-utils';
 
 interface TeamUser {
   id: string;
@@ -23,53 +24,6 @@ interface BackupEntry {
   created_at: string;
 }
 
-const ROLES = ['admin', 'manager', 'staff', 'general_assistant', 'weekend_manager', 'freelancer'] as const;
-
-const ROLE_LABELS: Record<string, string> = {
-  admin: 'Admin',
-  manager: 'Manager',
-  staff: 'Staff',
-  general_assistant: 'General Assistant',
-  weekend_manager: 'Weekend Manager',
-  freelancer: 'Freelancer',
-};
-
-const roleBadgeColors: Record<string, string> = {
-  admin: 'bg-red-100 text-red-700',
-  manager: 'bg-blue-100 text-blue-700',
-  staff: 'bg-green-100 text-green-700',
-  general_assistant: 'bg-amber-100 text-amber-700',
-  weekend_manager: 'bg-purple-100 text-purple-700',
-  freelancer: 'bg-teal-100 text-teal-700',
-};
-
-function getPasswordStrength(pw: string): { score: number; label: string; color: string; checks: string[] } {
-  const checks: string[] = [];
-  let score = 0;
-
-  if (pw.length >= 8) score++;
-  else checks.push('At least 8 characters');
-
-  if (pw.length >= 12) score++;
-
-  if (/[A-Z]/.test(pw)) score++;
-  else checks.push('An uppercase letter');
-
-  if (/[a-z]/.test(pw)) score++;
-  else checks.push('A lowercase letter');
-
-  if (/\d/.test(pw)) score++;
-  else checks.push('A number');
-
-  if (/[^A-Za-z0-9]/.test(pw)) score++;
-  else checks.push('A special character');
-
-  if (score <= 2) return { score, label: 'Weak', color: 'bg-red-500', checks };
-  if (score <= 3) return { score, label: 'Fair', color: 'bg-amber-500', checks };
-  if (score <= 4) return { score, label: 'Good', color: 'bg-blue-500', checks };
-  return { score, label: 'Strong', color: 'bg-green-500', checks };
-}
-
 export default function SettingsPage() {
   const user = useAuthStore((s) => s.user);
 
@@ -80,152 +34,10 @@ export default function SettingsPage() {
   return <SettingsContent />;
 }
 
+// Team-member management moved to the Staff page (Sep 2026). What remains here
+// is platform configuration only; each section below loads its own data.
 function SettingsContent() {
   const currentUser = useAuthStore((s) => s.user);
-  const [users, setUsers] = useState<TeamUser[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [showForm, setShowForm] = useState(false);
-
-  // New user form
-  const [firstName, setFirstName] = useState('');
-  const [lastName, setLastName] = useState('');
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [showPassword, setShowPassword] = useState(false);
-  const [role, setRole] = useState<string>('staff');
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState('');
-  const [success, setSuccess] = useState('');
-
-  // Edit user
-  const [editingUser, setEditingUser] = useState<TeamUser | null>(null);
-  const [editFirstName, setEditFirstName] = useState('');
-  const [editLastName, setEditLastName] = useState('');
-  const [editEmail, setEditEmail] = useState('');
-  const [editRole, setEditRole] = useState('');
-  const [editHhUserId, setEditHhUserId] = useState('');
-  const [editSubmitting, setEditSubmitting] = useState(false);
-  const [editError, setEditError] = useState('');
-
-  useEffect(() => {
-    loadUsers();
-  }, []);
-
-  async function loadUsers() {
-    try {
-      const data = await api.get<{ data: TeamUser[] }>('/users');
-      setUsers(data.data);
-    } catch (err) {
-      console.error('Failed to load users:', err);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  const strength = getPasswordStrength(password);
-  const isPasswordStrong = password.length >= 8 && strength.score >= 3;
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setError('');
-    setSuccess('');
-
-    if (!isPasswordStrong) {
-      setError('Password is too weak. Please add: ' + strength.checks.join(', '));
-      return;
-    }
-
-    setSubmitting(true);
-
-    try {
-      await api.post('/auth/register', {
-        first_name: firstName.trim(),
-        last_name: lastName.trim(),
-        email: email.trim().toLowerCase(),
-        password,
-        role,
-      });
-
-      setSuccess(`${firstName} ${lastName} has been added as ${ROLE_LABELS[role] || role}.`);
-      setFirstName('');
-      setLastName('');
-      setEmail('');
-      setPassword('');
-      setRole('staff');
-      setShowForm(false);
-      loadUsers();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create user');
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  function startEdit(u: TeamUser) {
-    setEditingUser(u);
-    setEditFirstName(u.first_name || '');
-    setEditLastName(u.last_name || '');
-    setEditEmail(u.email);
-    setEditRole(u.role);
-    setEditHhUserId(u.hh_user_id ? String(u.hh_user_id) : '');
-    setEditError('');
-  }
-
-  function cancelEdit() {
-    setEditingUser(null);
-    setEditError('');
-  }
-
-  async function handleEditSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    if (!editingUser) return;
-    setEditError('');
-    setEditSubmitting(true);
-
-    try {
-      await api.put(`/users/${editingUser.id}`, {
-        first_name: editFirstName.trim(),
-        last_name: editLastName.trim(),
-        email: editEmail.trim().toLowerCase(),
-        role: editRole,
-        hh_user_id: editHhUserId ? parseInt(editHhUserId, 10) : null,
-      });
-
-      setEditingUser(null);
-      loadUsers();
-    } catch (err) {
-      setEditError(err instanceof Error ? err.message : 'Failed to update user');
-    } finally {
-      setEditSubmitting(false);
-    }
-  }
-
-  async function handleDeactivate(userId: string) {
-    if (!confirm('Deactivate this user? They will no longer be able to log in.')) return;
-    try {
-      await api.put(`/users/${userId}`, { is_active: false });
-      loadUsers();
-    } catch (err) {
-      console.error('Failed to deactivate user:', err);
-    }
-  }
-
-  async function handleForcePassword(userId: string, userName: string) {
-    const newPw = prompt(`Set a new temporary password for ${userName}.\nThey will be prompted to change it on next login.\n\nNew password (min 8 characters):`);
-    if (!newPw) return;
-    if (newPw.length < 8) {
-      alert('Password must be at least 8 characters.');
-      return;
-    }
-    try {
-      await api.post(`/users/${userId}/force-password`, { new_password: newPw });
-      setSuccess(`Password reset for ${userName}. They will be prompted to change it on next login.`);
-    } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to reset password');
-    }
-  }
-
-  if (loading) return <div className="text-center py-12 text-gray-500">Loading...</div>;
 
   return (
     <div>
@@ -236,293 +48,16 @@ function SettingsContent() {
         </div>
       </div>
 
-      {/* Team Members section */}
-      <div className="mb-8">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-semibold text-gray-900">Team Members</h2>
-          <button
-            onClick={() => { setShowForm(!showForm); setError(''); setSuccess(''); }}
-            className="bg-ooosh-600 text-white px-4 py-2 rounded text-sm font-medium hover:bg-ooosh-700 transition-colors"
-          >
-            {showForm ? 'Cancel' : 'Add User'}
-          </button>
-        </div>
-
-        {success && (
-          <div className="bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded-lg text-sm mb-4">
-            {success}
-          </div>
-        )}
-
-        {/* Add user form */}
-        {showForm && (
-          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
-            <h3 className="text-base font-semibold text-gray-900 mb-4">Add New User</h3>
-
-            {error && (
-              <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded text-sm mb-4">
-                {error}
-              </div>
-            )}
-
-            <form onSubmit={handleSubmit} className="space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">First Name</label>
-                  <input
-                    type="text"
-                    required
-                    value={firstName}
-                    onChange={(e) => setFirstName(e.target.value)}
-                    className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Last Name</label>
-                  <input
-                    type="text"
-                    required
-                    value={lastName}
-                    onChange={(e) => setLastName(e.target.value)}
-                    className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
-                <input
-                  type="email"
-                  required
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder="name@oooshtours.co.uk"
-                  className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Password</label>
-                <div className="relative">
-                  <input
-                    type={showPassword ? 'text' : 'password'}
-                    required
-                    minLength={8}
-                    autoComplete="new-password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    placeholder="Minimum 8 characters"
-                    className="w-full rounded border border-gray-300 px-3 py-2 pr-10 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowPassword(!showPassword)}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
-                    tabIndex={-1}
-                  >
-                    {showPassword ? (
-                      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3.98 8.223A10.477 10.477 0 001.934 12c1.292 4.338 5.31 7.5 10.066 7.5.993 0 1.953-.138 2.863-.395M6.228 6.228A10.45 10.45 0 0112 4.5c4.756 0 8.773 3.162 10.065 7.498a10.523 10.523 0 01-4.293 5.774M6.228 6.228L3 3m3.228 3.228l3.65 3.65m7.894 7.894L21 21m-3.228-3.228l-3.65-3.65m0 0a3 3 0 10-4.243-4.243m4.242 4.242L9.88 9.88" /></svg>
-                    ) : (
-                      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178zM15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
-                    )}
-                  </button>
-                </div>
-
-                {password.length > 0 && (
-                  <div className="mt-2">
-                    <div className="flex items-center gap-2">
-                      <div className="flex-1 h-1.5 bg-gray-200 rounded-full overflow-hidden">
-                        <div
-                          className={`h-full rounded-full transition-all ${strength.color}`}
-                          style={{ width: `${Math.min((strength.score / 6) * 100, 100)}%` }}
-                        />
-                      </div>
-                      <span className={`text-xs font-medium ${
-                        strength.label === 'Weak' ? 'text-red-600' :
-                        strength.label === 'Fair' ? 'text-amber-600' :
-                        strength.label === 'Good' ? 'text-blue-600' : 'text-green-600'
-                      }`}>
-                        {strength.label}
-                      </span>
-                    </div>
-                    {strength.checks.length > 0 && (
-                      <p className="text-xs text-gray-500 mt-1">
-                        Needs: {strength.checks.join(', ')}
-                      </p>
-                    )}
-                  </div>
-                )}
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Role</label>
-                <select
-                  value={role}
-                  onChange={(e) => setRole(e.target.value)}
-                  className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                >
-                  {ROLES.map((r) => (
-                    <option key={r} value={r}>
-                      {ROLE_LABELS[r]}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="flex justify-end">
-                <button
-                  type="submit"
-                  disabled={submitting || !isPasswordStrong}
-                  className="bg-ooosh-600 text-white px-6 py-2 rounded text-sm font-medium hover:bg-ooosh-700 transition-colors disabled:opacity-50"
-                >
-                  {submitting ? 'Creating...' : 'Create User'}
-                </button>
-              </div>
-            </form>
-          </div>
-        )}
-
-        {/* Users list */}
-        <div className="space-y-3">
-          {users.map((u) => (
-            <div key={u.id} className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
-              {editingUser?.id === u.id ? (
-                /* Edit mode */
-                <form onSubmit={handleEditSubmit}>
-                  {editError && (
-                    <div className="bg-red-50 border border-red-200 text-red-700 px-3 py-2 rounded text-sm mb-3">
-                      {editError}
-                    </div>
-                  )}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-                    <div>
-                      <label className="block text-xs font-medium text-gray-500 mb-1">First Name</label>
-                      <input
-                        type="text"
-                        required
-                        value={editFirstName}
-                        onChange={(e) => setEditFirstName(e.target.value)}
-                        className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-gray-500 mb-1">Last Name</label>
-                      <input
-                        type="text"
-                        required
-                        value={editLastName}
-                        onChange={(e) => setEditLastName(e.target.value)}
-                        className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-gray-500 mb-1">Email</label>
-                      <input
-                        type="email"
-                        required
-                        value={editEmail}
-                        onChange={(e) => setEditEmail(e.target.value)}
-                        className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-gray-500 mb-1">Role</label>
-                      <select
-                        value={editRole}
-                        onChange={(e) => setEditRole(e.target.value)}
-                        className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                      >
-                        {ROLES.map((r) => (
-                          <option key={r} value={r}>{ROLE_LABELS[r]}</option>
-                        ))}
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-gray-500 mb-1">HireHop User ID</label>
-                      <input
-                        type="number"
-                        value={editHhUserId}
-                        onChange={(e) => setEditHhUserId(e.target.value)}
-                        placeholder="e.g. 42"
-                        className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                      />
-                      <p className="text-xs text-gray-400 mt-0.5">Sets manager on HH jobs created by this user</p>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2 mt-3">
-                    <button
-                      type="submit"
-                      disabled={editSubmitting}
-                      className="bg-ooosh-600 text-white px-4 py-1.5 rounded text-sm font-medium hover:bg-ooosh-700 transition-colors disabled:opacity-50"
-                    >
-                      {editSubmitting ? 'Saving...' : 'Save'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={cancelEdit}
-                      className="px-4 py-1.5 rounded text-sm font-medium border border-gray-300 hover:bg-gray-50 transition-colors"
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </form>
-              ) : (
-                /* View mode */
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    {u.avatar_url ? (
-                      <img
-                        src={`/api/auth/avatar/${u.avatar_url.split('/').pop()}`}
-                        alt=""
-                        className="w-9 h-9 rounded-full object-cover flex-shrink-0"
-                      />
-                    ) : (
-                      <div className="w-9 h-9 rounded-full bg-ooosh-100 text-ooosh-700 flex items-center justify-center text-sm font-bold flex-shrink-0">
-                        {(u.first_name || u.email)[0].toUpperCase()}
-                      </div>
-                    )}
-                    <div>
-                      <div className="text-sm font-medium text-gray-900">
-                        {u.first_name && u.last_name ? `${u.first_name} ${u.last_name}` : u.email}
-                      </div>
-                      <div className="text-xs text-gray-500">{u.email}</div>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${roleBadgeColors[u.role] || 'bg-gray-100 text-gray-700'}`}>
-                      {ROLE_LABELS[u.role] || u.role}
-                    </span>
-                    <button
-                      onClick={() => startEdit(u)}
-                      className="text-xs text-gray-400 hover:text-ooosh-600 transition-colors px-2 py-1"
-                    >
-                      Edit
-                    </button>
-                    {u.id !== currentUser?.id && (
-                      <>
-                        <button
-                          onClick={() => handleForcePassword(u.id, `${u.first_name || ''} ${u.last_name || ''}`.trim() || u.email)}
-                          className="text-xs text-gray-400 hover:text-amber-600 transition-colors px-2 py-1"
-                        >
-                          Reset Password
-                        </button>
-                        <button
-                          onClick={() => handleDeactivate(u.id)}
-                          className="text-xs text-gray-400 hover:text-red-600 transition-colors px-2 py-1"
-                        >
-                          Deactivate
-                        </button>
-                      </>
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
-          ))}
-          {users.length === 0 && (
-            <p className="text-center text-sm text-gray-400 py-8">No users found.</p>
-          )}
-        </div>
+      {/* Team members, logins and company cards moved to the Staff page (Sep 2026).
+          They are facts about a person who works here, not platform configuration
+          — see docs/STAFF-CALENDAR-SPEC.md §10. Pointer left so nobody hunts. */}
+      <div className="mb-8 p-4 rounded-lg border border-gray-200 bg-white">
+        <h2 className="text-lg font-semibold text-gray-900 mb-1">Team members</h2>
+        <p className="text-sm text-gray-600">
+          Logins, roles, company cards and working hours now live on the{' '}
+          <Link to="/staff/admin" className="text-ooosh-600 hover:underline font-medium">Staff page</Link>
+          {' '}— everyone who works here in one place, alongside the staff calendar.
+        </p>
       </div>
 
       {/* Calculator Settings — admin & manager */}
@@ -533,6 +68,9 @@ function SettingsContent() {
 
       <CarnetSettingsSection />
 
+      {/* Studio-sitter lock-up report template — admin & manager */}
+      <StudioSitterSettingsSection />
+
       {/* Auto-chase draft voice — admin & manager */}
       <ChaseVoiceSettingsSection />
 
@@ -541,9 +79,6 @@ function SettingsContent() {
 
       {/* Vehicle Issues settings — admin & manager */}
       <VehicleIssueSettingsSection />
-
-      {/* COT card register — admin only */}
-      {currentUser?.role === 'admin' && <CotCardRegisterSection />}
 
       {/* Email Service section — admin only */}
       {currentUser?.role === 'admin' && <EmailSection />}
@@ -1228,6 +763,281 @@ function CarnetSettingsSection() {
   );
 }
 
+// ── Studio-sitter lock-up report template ────────────────────────────────────
+
+interface LockupRef { text?: string; photos: string[]; }
+interface LockupTemplateItem {
+  id: string;
+  label: string;
+  type: 'yesno' | 'text' | 'number';
+  section?: string;
+  expected?: string;
+  end_of_booking_only?: boolean;
+  reference?: LockupRef;
+  note_prompt?: string;
+}
+interface LockupTemplateShape {
+  version: number;
+  intro?: string;
+  items: LockupTemplateItem[];
+  notes_label?: string;
+  lost_property_prompt?: string;
+}
+
+function slugId(label: string): string {
+  const base = label.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40);
+  return base || `item_${Math.random().toString(36).slice(2, 7)}`;
+}
+
+// Reference-photo preview: external URLs render directly, R2 keys via auth blob.
+function RefPhotoPreview({ url }: { url: string }) {
+  const [src, setSrc] = useState<string | null>(url.startsWith('files/') ? null : url);
+  useEffect(() => {
+    let revoke: string | null = null;
+    if (url.startsWith('files/')) {
+      api.blob(`/files/download?key=${encodeURIComponent(url)}`)
+        .then(({ blob }) => { const o = URL.createObjectURL(blob); revoke = o; setSrc(o); })
+        .catch(() => setSrc(null));
+    }
+    return () => { if (revoke) URL.revokeObjectURL(revoke); };
+  }, [url]);
+  if (!src) return <div className="w-full h-16 bg-gray-100 rounded flex items-center justify-center text-[10px] text-gray-400">preview…</div>;
+  return <img src={src} alt="reference" className="w-full h-16 object-cover rounded border border-gray-200" />;
+}
+
+function StudioSitterSettingsSection() {
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [uploadingIdx, setUploadingIdx] = useState<number | null>(null);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+  const [tpl, setTpl] = useState<LockupTemplateShape | null>(null);
+
+  useEffect(() => { load(); }, []);
+
+  async function load() {
+    try {
+      const res = await api.get<{ data: SystemSetting[] }>('/system-settings?category=studio_sitter');
+      const rawTpl = res.data.find(s => s.key === 'studio_sitter_lockup_template')?.value ?? '';
+      let parsed: LockupTemplateShape;
+      try {
+        const p = JSON.parse(rawTpl);
+        parsed = {
+          version: Number(p.version) || 1,
+          intro: p.intro ?? '',
+          items: Array.isArray(p.items) ? p.items : [],
+          notes_label: p.notes_label ?? '',
+          lost_property_prompt: p.lost_property_prompt ?? '',
+        };
+      } catch { parsed = { version: 1, intro: '', items: [], notes_label: '', lost_property_prompt: '' }; }
+      setTpl(parsed);
+    } catch {
+      setError('Could not load studio-sitter settings (has migration 168 run?).');
+    } finally { setLoading(false); }
+  }
+
+  function updateItem(idx: number, patch: Partial<LockupTemplateItem>) {
+    setTpl(t => t ? { ...t, items: t.items.map((it, i) => i === idx ? { ...it, ...patch } : it) } : t);
+  }
+  function moveItem(idx: number, dir: -1 | 1) {
+    setTpl(t => {
+      if (!t) return t;
+      const j = idx + dir;
+      if (j < 0 || j >= t.items.length) return t;
+      const items = [...t.items];
+      [items[idx], items[j]] = [items[j], items[idx]];
+      return { ...t, items };
+    });
+  }
+  function addItem() {
+    setTpl(t => t ? { ...t, items: [...t.items, { id: slugId('new item'), label: '', type: 'yesno', expected: 'yes', section: t.items[t.items.length - 1]?.section }] } : t);
+  }
+  function removeItem(idx: number) {
+    setTpl(t => t ? { ...t, items: t.items.filter((_, i) => i !== idx) } : t);
+  }
+
+  async function uploadItemPhoto(idx: number, file: File) {
+    setUploadingIdx(idx); setError('');
+    try {
+      // Reference photos are only "what it should look like" guides — downscale
+      // before upload so they load fast for sitters on 4G (a phone photo is
+      // ~3MB; this lands ~150-250KB). Falls back to the original on any decode
+      // failure (e.g. a non-image).
+      let upload: Blob = file;
+      let name = file.name;
+      try {
+        upload = await compressImage(file, 1400, 0.8);
+        name = file.name.replace(/\.[^.]+$/, '') + '.jpg';
+      } catch { /* keep original */ }
+      const fd = new FormData();
+      fd.append('file', upload, name);
+      fd.append('attachment_only', 'true');
+      const up = await api.upload<{ r2_key: string }>('/files/upload', fd);
+      setTpl(t => t ? { ...t, items: t.items.map((it, i) => i === idx
+        ? { ...it, reference: { text: it.reference?.text, photos: [...(it.reference?.photos ?? []), up.r2_key] } } : it) } : t);
+    } catch (e) { setError(e instanceof Error ? e.message : 'Upload failed'); }
+    finally { setUploadingIdx(null); }
+  }
+  function removeItemPhoto(idx: number, photoIdx: number) {
+    setTpl(t => t ? { ...t, items: t.items.map((it, i) => i === idx
+      ? { ...it, reference: { text: it.reference?.text, photos: (it.reference?.photos ?? []).filter((_, p) => p !== photoIdx) } } : it) } : t);
+  }
+
+  async function save() {
+    if (!tpl) return;
+    setSaving(true); setError(''); setSuccess('');
+    try {
+      const seen = new Set<string>();
+      const items = tpl.items
+        .filter(it => it.label.trim() !== '')
+        .map(it => {
+          let id = it.id?.trim() || slugId(it.label);
+          while (seen.has(id)) id = `${id}_${Math.random().toString(36).slice(2, 4)}`;
+          seen.add(id);
+          const out: LockupTemplateItem = { id, label: it.label.trim(), type: it.type };
+          if (it.section?.trim()) out.section = it.section.trim();
+          if (it.expected) out.expected = it.expected;
+          if (it.end_of_booking_only) out.end_of_booking_only = true;
+          if (it.note_prompt?.trim()) out.note_prompt = it.note_prompt.trim();
+          const refText = it.reference?.text?.trim();
+          const refPhotos = (it.reference?.photos ?? []).filter(Boolean);
+          if (refText || refPhotos.length > 0) out.reference = { text: refText || undefined, photos: refPhotos };
+          return out;
+        });
+      const payload: LockupTemplateShape = {
+        version: (tpl.version || 1) + 1,
+        intro: tpl.intro?.trim() || undefined,
+        items,
+        notes_label: tpl.notes_label?.trim() || undefined,
+        lost_property_prompt: tpl.lost_property_prompt?.trim() || undefined,
+      };
+      await api.put('/system-settings', { settings: { studio_sitter_lockup_template: JSON.stringify(payload) } });
+      setSuccess('Lock-up template saved.');
+      load();
+    } catch (e) { setError(e instanceof Error ? e.message : 'Save failed'); }
+    finally { setSaving(false); }
+  }
+
+  if (loading || !tpl) return null;
+
+  return (
+    <div className="bg-white rounded-lg shadow p-6 mb-6">
+      <h2 className="text-lg font-semibold text-gray-900 mb-1">Studio Sitter — Lock-up report</h2>
+      <p className="text-sm text-gray-500 mb-4">
+        The end-of-night &ldquo;Finish for the night&rdquo; checklist a sitter fills in. Items with an
+        <em> expected</em> answer flag anything off-expected. End-of-booking items are hidden when the
+        studio is in use again the next day. A <em>section</em> groups items under a header; a
+        <em> reference</em> shows &ldquo;what it should look like&rdquo; photos + text on that item.
+      </p>
+      {error && <div className="mb-3 text-sm text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2">{error}</div>}
+      {success && <div className="mb-3 text-sm text-green-700 bg-green-50 border border-green-200 rounded px-3 py-2">{success}</div>}
+
+      <div className="grid grid-cols-1 gap-3 mb-4">
+        <label className="text-sm">
+          <span className="text-gray-500 text-xs">Intro line</span>
+          <textarea className="mt-1 w-full border rounded px-2 py-1" rows={2} value={tpl.intro || ''} onChange={(e) => setTpl({ ...tpl, intro: e.target.value })} />
+        </label>
+        <label className="text-sm">
+          <span className="text-gray-500 text-xs">Notes prompt</span>
+          <input className="mt-1 w-full border rounded px-2 py-1" value={tpl.notes_label || ''} onChange={(e) => setTpl({ ...tpl, notes_label: e.target.value })} />
+        </label>
+        <label className="text-sm">
+          <span className="text-gray-500 text-xs">Lost-property prompt</span>
+          <input className="mt-1 w-full border rounded px-2 py-1" value={tpl.lost_property_prompt || ''} onChange={(e) => setTpl({ ...tpl, lost_property_prompt: e.target.value })} />
+        </label>
+      </div>
+
+      <div className="border-t pt-4 mb-4">
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-sm font-medium text-gray-700">Checklist items</span>
+          <button onClick={addItem} className="text-sm px-2.5 py-1 bg-gray-100 hover:bg-gray-200 rounded">+ Add item</button>
+        </div>
+        <div className="space-y-2">
+          {tpl.items.map((it, idx) => (
+            <div key={idx} className="border rounded p-2.5 bg-gray-50">
+              <div className="flex gap-2 items-start">
+                <input className="flex-1 border rounded px-2 py-1 text-sm" placeholder="Checklist question" value={it.label} onChange={(e) => updateItem(idx, { label: e.target.value })} />
+                <div className="flex flex-col gap-1">
+                  <button onClick={() => moveItem(idx, -1)} disabled={idx === 0} className="px-1.5 text-gray-400 hover:text-gray-700 disabled:opacity-30" title="Move up">▲</button>
+                  <button onClick={() => moveItem(idx, 1)} disabled={idx === tpl.items.length - 1} className="px-1.5 text-gray-400 hover:text-gray-700 disabled:opacity-30" title="Move down">▼</button>
+                </div>
+                <button onClick={() => removeItem(idx)} className="px-1.5 text-red-400 hover:text-red-600" title="Remove">✕</button>
+              </div>
+              <div className="flex flex-wrap gap-3 mt-2 text-xs items-center">
+                <label className="flex items-center gap-1">
+                  <span className="text-gray-500">Section</span>
+                  <input className="border rounded px-1 py-0.5 w-28" placeholder="e.g. Upstairs" value={it.section ?? ''} onChange={(e) => updateItem(idx, { section: e.target.value })} />
+                </label>
+                <label className="flex items-center gap-1">
+                  <span className="text-gray-500">Type</span>
+                  <select className="border rounded px-1 py-0.5" value={it.type} onChange={(e) => updateItem(idx, { type: e.target.value as LockupTemplateItem['type'] })}>
+                    <option value="yesno">Yes/No</option>
+                    <option value="text">Text</option>
+                    <option value="number">Number</option>
+                  </select>
+                </label>
+                {it.type === 'yesno' && (
+                  <label className="flex items-center gap-1">
+                    <span className="text-gray-500">Expected</span>
+                    <select className="border rounded px-1 py-0.5" value={it.expected ?? ''} onChange={(e) => updateItem(idx, { expected: e.target.value || undefined })}>
+                      <option value="yes">Yes</option>
+                      <option value="no">No</option>
+                      <option value="">(no flag)</option>
+                    </select>
+                  </label>
+                )}
+                <label className="flex items-center gap-1">
+                  <input type="checkbox" checked={!!it.end_of_booking_only} onChange={(e) => updateItem(idx, { end_of_booking_only: e.target.checked })} />
+                  <span className="text-gray-500">End-of-booking only</span>
+                </label>
+              </div>
+
+              {/* Per-item reference: "what it should look like" */}
+              <div className="mt-2 border-t border-gray-200 pt-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] text-gray-500">Reference</span>
+                  <input className="flex-1 border rounded px-1.5 py-0.5 text-xs" placeholder="What it should look like (optional caption)"
+                    value={it.reference?.text ?? ''} onChange={(e) => updateItem(idx, { reference: { text: e.target.value, photos: it.reference?.photos ?? [] } })} />
+                  <label className="text-xs px-2 py-0.5 bg-gray-100 hover:bg-gray-200 rounded cursor-pointer">
+                    {uploadingIdx === idx ? 'Uploading…' : '+ Photo'}
+                    <input type="file" accept="image/png,image/jpeg" className="hidden" disabled={uploadingIdx === idx}
+                      onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadItemPhoto(idx, f); e.target.value = ''; }} />
+                  </label>
+                </div>
+                {(it.reference?.photos?.length ?? 0) > 0 && (
+                  <div className="grid grid-cols-3 sm:grid-cols-4 gap-2 mt-2">
+                    {it.reference!.photos.map((p, pi) => (
+                      <div key={pi} className="relative">
+                        <RefPhotoPreview url={p} />
+                        <button onClick={() => removeItemPhoto(idx, pi)} className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-red-500 text-white text-[10px] leading-none" title="Remove">×</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Always-on note box: prompt shown on the form regardless of answer
+                  (e.g. "how did they pay?"). Empty = no note box for this item. */}
+              <div className="mt-2 border-t border-gray-200 pt-2">
+                <label className="flex items-center gap-2">
+                  <span className="text-[11px] text-gray-500 whitespace-nowrap">Always-ask note</span>
+                  <input className="flex-1 border rounded px-1.5 py-0.5 text-xs" placeholder="e.g. How did they pay? (leave blank for none)"
+                    value={it.note_prompt ?? ''} onChange={(e) => updateItem(idx, { note_prompt: e.target.value })} />
+                </label>
+              </div>
+            </div>
+          ))}
+          {tpl.items.length === 0 && <p className="text-sm text-gray-400">No items yet.</p>}
+        </div>
+      </div>
+
+      <button onClick={save} disabled={saving} className="px-3 py-1.5 bg-purple-600 text-white rounded text-sm disabled:opacity-50">
+        {saving ? 'Saving…' : 'Save lock-up template'}
+      </button>
+    </div>
+  );
+}
+
 // ── Auto-Chase draft voice ───────────────────────────────────────────────────
 
 function ChaseVoiceSettingsSection() {
@@ -1237,8 +1047,55 @@ function ChaseVoiceSettingsSection() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  // Example-driven voice tuning (§9.3): paste real emails → distil into guidance.
+  const [showLearn, setShowLearn] = useState(false);
+  const [examples, setExamples] = useState('');
+  const [learning, setLearning] = useState(false);
+  const [proposed, setProposed] = useState('');
+  const [learnError, setLearnError] = useState('');
+  // Master auto-send switch (§10). Off = jobs set to Auto-send only create drafts.
+  const [sendEnabled, setSendEnabled] = useState(false);
+  const [sendSaving, setSendSaving] = useState(false);
+  // Default sign-off name for AUTOMATED chases (manual drafts use the clicker).
+  const [senderName, setSenderName] = useState('');
+  const [senderOrig, setSenderOrig] = useState('');
+  const [senderSaving, setSenderSaving] = useState(false);
+
+  async function saveSenderName() {
+    setSenderSaving(true);
+    try {
+      await api.put('/system-settings', { settings: { chase_default_sender_name: senderName.trim() === '' ? null : senderName.trim() } });
+      setSenderOrig(senderName.trim());
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not save the sender name');
+    } finally { setSenderSaving(false); }
+  }
 
   useEffect(() => { load(); }, []);
+
+  async function toggleSend() {
+    const next = !sendEnabled;
+    setSendSaving(true);
+    try {
+      await api.put('/system-settings', { settings: { auto_chase_send_enabled: next ? 'true' : 'false' } });
+      setSendEnabled(next);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not update the auto-send switch');
+    } finally { setSendSaving(false); }
+  }
+
+  async function learnFromExamples() {
+    setLearning(true); setLearnError(''); setProposed('');
+    try {
+      const res = await api.post<{ data: { proposed: string } }>(
+        '/auto-chase/voice/learn',
+        { examples, current: val },
+      );
+      setProposed(res.data.proposed);
+    } catch (e) {
+      setLearnError(e instanceof Error ? e.message : 'Could not learn from these examples');
+    } finally { setLearning(false); }
+  }
 
   async function load() {
     try {
@@ -1246,6 +1103,10 @@ function ChaseVoiceSettingsSection() {
       const v = res.data.find(s => s.key === 'chase_voice_instructions')?.value ?? '';
       setOrig(v);
       setVal(v);
+      setSendEnabled(res.data.find(s => s.key === 'auto_chase_send_enabled')?.value === 'true');
+      const sn = res.data.find(s => s.key === 'chase_default_sender_name')?.value ?? '';
+      setSenderName(sn);
+      setSenderOrig(sn);
     } catch {
       setError('Could not load chase settings (has migration 157 run?).');
     } finally { setLoading(false); }
@@ -1274,6 +1135,54 @@ function ChaseVoiceSettingsSection() {
       {error && <div className="mb-3 text-sm text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2">{error}</div>}
       {success && <div className="mb-3 text-sm text-green-700 bg-green-50 border border-green-200 rounded px-3 py-2">{success}</div>}
 
+      {/* Master auto-send switch (§10) — the global backstop on top of per-job
+          Auto-send mode. Off = even Auto-send jobs only create drafts. */}
+      <div className={`mb-5 rounded-lg border p-3 flex items-start justify-between gap-4 ${sendEnabled ? 'border-amber-300 bg-amber-50' : 'border-gray-200 bg-gray-50'}`}>
+        <div>
+          <p className="text-sm font-medium text-gray-900">Auto-send chases {sendEnabled ? '· ON' : '· off (drafts only)'}</p>
+          <p className="text-xs text-gray-500 mt-0.5">
+            Master switch. While off, jobs set to “Auto-send” still only create Gmail drafts — so you can watch what would go out.
+            Turn on to let those jobs actually send automatically (each still passes the suppression check first).
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={toggleSend}
+          disabled={sendSaving}
+          role="switch"
+          aria-checked={sendEnabled}
+          className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 ${sendEnabled ? 'bg-amber-500' : 'bg-gray-300'}`}
+        >
+          <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${sendEnabled ? 'translate-x-6' : 'translate-x-1'}`} />
+        </button>
+      </div>
+
+      {/* Default sign-off for AUTOMATED chases (manual "Draft chase" uses the
+          clicker's name; the runner uses the job's manager, then this). */}
+      <div className="mb-5">
+        <label className="block text-sm font-medium text-gray-700 mb-1">Automated chase sign-off</label>
+        <p className="text-xs text-gray-500 mb-2">
+          Name automated chases sign off with when a job has no assigned manager (blank = “the Ooosh team”).
+          Manual drafts always sign off with whoever clicked.
+        </p>
+        <div className="flex items-center gap-2">
+          <input
+            type="text"
+            value={senderName}
+            onChange={(e) => setSenderName(e.target.value)}
+            placeholder="e.g. Will"
+            className="w-48 border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+          />
+          <button
+            onClick={saveSenderName}
+            disabled={senderSaving || senderName.trim() === senderOrig.trim()}
+            className="px-3 py-1.5 bg-ooosh-600 text-white rounded text-sm disabled:opacity-50"
+          >
+            {senderSaving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </div>
+
       <textarea
         value={val}
         onChange={(e) => { setVal(e.target.value); setSuccess(''); }}
@@ -1286,6 +1195,60 @@ function ChaseVoiceSettingsSection() {
           {saving ? 'Saving…' : 'Save voice'}
         </button>
         {val !== orig && <button onClick={() => setVal(orig)} className="text-sm text-gray-500 hover:text-gray-700">Reset</button>}
+      </div>
+
+      {/* Example-driven voice tuning (§9.3) — teach the voice by showing real
+          emails instead of hand-writing the guidance above. */}
+      <div className="mt-5 border-t border-gray-100 pt-4">
+        <button
+          type="button"
+          onClick={() => setShowLearn((v) => !v)}
+          className="text-sm font-medium text-ooosh-600 hover:text-ooosh-700"
+        >
+          {showLearn ? '▾' : '▸'} Teach the voice from real examples
+        </button>
+        {showLearn && (
+          <div className="mt-3">
+            <p className="text-xs text-gray-500 mb-2">
+              Paste a few real examples — client emails and the actual replies your team sent are ideal.
+              We’ll distil the tone/style into a proposed guidance note, which you can review and drop into
+              the box above before saving. Style only — client names, prices and job details are never baked in.
+            </p>
+            <textarea
+              value={examples}
+              onChange={(e) => setExamples(e.target.value)}
+              rows={7}
+              placeholder={'Paste example emails here, e.g.\n\nCLIENT: Hi, any update on the quote for the two vans?\nOOOSH: Hey! Yep all good to go whenever you are — just give us a shout and we\'ll get it locked in. Cheers, the Ooosh team'}
+              className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 resize-y min-h-[120px]"
+            />
+            {learnError && <div className="mt-2 text-sm text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2">{learnError}</div>}
+            <div className="flex items-center gap-3 mt-2">
+              <button
+                onClick={learnFromExamples}
+                disabled={learning || examples.trim() === ''}
+                className="px-3 py-1.5 bg-purple-600 text-white rounded text-sm disabled:opacity-50"
+              >
+                {learning ? 'Learning…' : '✨ Suggest guidance from these'}
+              </button>
+            </div>
+            {proposed && (
+              <div className="mt-3 rounded-lg border border-purple-200 bg-purple-50/60 p-3">
+                <div className="text-xs font-semibold text-purple-700 mb-1">Proposed voice guidance</div>
+                <p className="text-sm text-gray-700 whitespace-pre-line">{proposed}</p>
+                <div className="flex items-center gap-3 mt-3">
+                  <button
+                    onClick={() => { setVal(proposed); setSuccess(''); setProposed(''); }}
+                    className="px-3 py-1.5 bg-ooosh-600 text-white rounded text-sm"
+                  >
+                    Use this ↑
+                  </button>
+                  <button onClick={() => setProposed('')} className="text-sm text-gray-500 hover:text-gray-700">Discard</button>
+                </div>
+                <p className="mt-2 text-[11px] text-gray-400">“Use this” drops it into the box above — review, tweak, then <strong>Save voice</strong> to apply.</p>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1807,122 +1770,6 @@ function VehicleIssueSettingsSection() {
         >
           {saving ? 'Saving…' : 'Save'}
         </button>
-      </div>
-    </div>
-  );
-}
-
-// ── COT card register (admin only) ──────────────────────────────────────────
-// Admin sets each staff member's company card (last 4 + a friendly label). The
-// cost-capture flow stamps the card holder + last 4 from here server-side, so
-// staff never type card details when logging a company-card purchase.
-
-interface CotCardRow {
-  id: string;
-  email: string;
-  is_active: boolean;
-  first_name: string | null;
-  last_name: string | null;
-  cot_card_last4: string | null;
-  cot_card_label: string | null;
-}
-
-function CotCardRegisterSection() {
-  const [rows, setRows] = useState<CotCardRow[]>([]);
-  const [drafts, setDrafts] = useState<Record<string, { last4: string; label: string }>>({});
-  const [loading, setLoading] = useState(true);
-  const [savingId, setSavingId] = useState<string | null>(null);
-  const [error, setError] = useState('');
-  const [savedId, setSavedId] = useState<string | null>(null);
-
-  useEffect(() => {
-    api.get<{ data: CotCardRow[] }>('/users/cot-cards')
-      .then((res) => {
-        setRows(res.data);
-        const d: Record<string, { last4: string; label: string }> = {};
-        res.data.forEach((r) => { d[r.id] = { last4: r.cot_card_last4 || '', label: r.cot_card_label || '' }; });
-        setDrafts(d);
-      })
-      .catch((err) => { console.error('Failed to load COT cards:', err); setError('Could not load staff.'); })
-      .finally(() => setLoading(false));
-  }, []);
-
-  async function save(id: string) {
-    const draft = drafts[id];
-    if (draft.last4 && !/^\d{4}$/.test(draft.last4)) { setError('Last 4 must be exactly 4 digits.'); return; }
-    setError('');
-    setSavingId(id);
-    try {
-      await api.patch(`/users/${id}/cot-card`, {
-        cot_card_last4: draft.last4 || null,
-        cot_card_label: draft.label.trim() || null,
-      });
-      setRows((prev) => prev.map((r) => r.id === id ? { ...r, cot_card_last4: draft.last4 || null, cot_card_label: draft.label.trim() || null } : r));
-      setSavedId(id);
-      setTimeout(() => setSavedId((s) => s === id ? null : s), 2500);
-    } catch (err) {
-      console.error('Save COT card failed:', err);
-      setError(err instanceof Error ? err.message : 'Save failed.');
-    } finally {
-      setSavingId(null);
-    }
-  }
-
-  const name = (r: CotCardRow) => [r.first_name, r.last_name].filter(Boolean).join(' ') || r.email;
-  const dirty = (r: CotCardRow) => (drafts[r.id]?.last4 || '') !== (r.cot_card_last4 || '') || (drafts[r.id]?.label.trim() || '') !== (r.cot_card_label || '');
-
-  if (loading) {
-    return (
-      <div className="bg-white rounded-xl border border-gray-200 p-6">
-        <h2 className="text-lg font-semibold text-gray-900 mb-2">COT Card Register</h2>
-        <p className="text-sm text-gray-500">Loading…</p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="bg-white rounded-xl border border-gray-200 p-6">
-      <h2 className="text-lg font-semibold text-gray-900 mb-1">COT Card Register</h2>
-      <p className="text-xs text-gray-500 mb-4">
-        Set each staff member's company card. The cost-capture form stamps the card holder + last 4 from here automatically — staff never type card details.
-      </p>
-      {error && <div className="mb-3 bg-red-50 border border-red-200 text-red-700 text-sm rounded-md px-3 py-2">{error}</div>}
-      <div className="overflow-x-auto">
-        <table className="min-w-full text-sm">
-          <thead>
-            <tr className="text-left text-gray-500 border-b border-gray-200">
-              <th className="py-2 pr-3 font-medium">Staff</th>
-              <th className="py-2 px-3 font-medium">Card last 4</th>
-              <th className="py-2 px-3 font-medium">Card label</th>
-              <th className="py-2 pl-3 font-medium text-right">&nbsp;</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r) => (
-              <tr key={r.id} className={`border-b border-gray-100 ${r.is_active ? '' : 'opacity-50'}`}>
-                <td className="py-2 pr-3 text-gray-800">{name(r)}{!r.is_active && <span className="text-xs text-gray-400"> (inactive)</span>}</td>
-                <td className="py-2 px-3">
-                  <input value={drafts[r.id]?.last4 ?? ''} inputMode="numeric" maxLength={4}
-                    onChange={(e) => setDrafts((d) => ({ ...d, [r.id]: { ...d[r.id], last4: e.target.value.replace(/\D/g, '').slice(0, 4) } }))}
-                    placeholder="1234" className="w-20 border border-gray-300 rounded-md px-2 py-1 text-sm" />
-                </td>
-                <td className="py-2 px-3">
-                  <input value={drafts[r.id]?.label ?? ''} maxLength={60}
-                    onChange={(e) => setDrafts((d) => ({ ...d, [r.id]: { ...d[r.id], label: e.target.value } }))}
-                    placeholder="e.g. Amex ·1234" className="w-40 border border-gray-300 rounded-md px-2 py-1 text-sm" />
-                </td>
-                <td className="py-2 pl-3 text-right">
-                  {savedId === r.id ? <span className="text-xs text-green-600">Saved ✓</span> : (
-                    <button onClick={() => save(r.id)} disabled={savingId === r.id || !dirty(r)}
-                      className="px-3 py-1 text-xs text-white bg-purple-600 hover:bg-purple-700 rounded-md disabled:opacity-40">
-                      {savingId === r.id ? '…' : 'Save'}
-                    </button>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
       </div>
     </div>
   );

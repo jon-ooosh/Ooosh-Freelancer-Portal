@@ -8,15 +8,13 @@
  * the moment the last required leg lands (van book-out and/or equipment
  * /complete) — no cross-domain return hop required.
  *
- * OP mode only. In Monday mode there's no leg concept, so we no-op success and
- * let the legacy return-hop flow run unchanged. Best-effort: a failure here
- * MUST NOT block the freelancer starting their book-out / completion — the
- * caller ignores errors and proceeds.
+ * Best-effort: a failure here MUST NOT block the freelancer starting their
+ * book-out / completion — the caller ignores errors and proceeds.
  */
 
 import { NextRequest, NextResponse } from 'next/server'
 import { getSessionUser } from '@/lib/session'
-import { isOpMode, declareLegsOP } from '@/lib/op-api'
+import { declareLegsOP } from '@/lib/op-api'
 
 export async function POST(
   request: NextRequest,
@@ -41,11 +39,6 @@ export async function POST(
       equipment = body.equipment === true
     } catch {
       return NextResponse.json({ success: false, error: 'Invalid body' }, { status: 400 })
-    }
-
-    // Monday mode: no leg concept — succeed silently.
-    if (!isOpMode()) {
-      return NextResponse.json({ success: true, skipped: 'monday-mode' })
     }
 
     const sessionToken = request.cookies.get('session')?.value

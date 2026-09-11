@@ -1,21 +1,16 @@
 /**
  * Forgot Password API Endpoint
- * 
+ *
  * POST /api/auth/forgot-password
- * 
- * Initiates a password reset by:
- * 1. Validating the email exists in Monday.com
- * 2. Generating a secure reset token
- * 3. Sending a reset email with a link
- * 
- * Always returns success to prevent email enumeration attacks.
+ *
+ * Initiates a password reset on the OP backend, which generates the token and
+ * sends the reset email. Always returns success to prevent email enumeration
+ * attacks.
  */
 
 import { NextRequest, NextResponse } from 'next/server'
-import { findFreelancerByEmail } from '@/lib/monday'
-import { sendPasswordResetEmail } from '@/lib/email'
-import { createResetToken, checkResetRateLimit } from '@/lib/password-reset'
-import { isOpMode, forgotPasswordOP, reportFallback, mondayFallbackAllowed, isOpClientError } from '@/lib/op-api'
+import { checkResetRateLimit } from '@/lib/password-reset'
+import { forgotPasswordOP, isOpClientError } from '@/lib/op-api'
 
 export async function POST(request: NextRequest) {
   try {
@@ -40,67 +35,26 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // ── OP Backend mode ──────────────────────────────────────────
-    if (isOpMode()) {
-      try {
-        const result = await forgotPasswordOP(normalizedEmail)
-        return NextResponse.json(result)
-      } catch (opError) {
-        // 4xx is a legit negative response from OP (e.g. rate limit) — don't
-        // alert + don't fall back to Monday. Still return the anti-enumeration
-        // generic response so we don't leak.
-        if (isOpClientError(opError)) {
-          return NextResponse.json({
-            success: true,
-            message: 'If your email is on our approved list, a reset link is on its way.',
-          })
-        }
-        console.error('Forgot-password: OP backend error, falling back:', opError)
-        reportFallback('forgot-password', opError, { email: normalizedEmail })
-        if (!mondayFallbackAllowed()) {
-          // Don't leak which path we tried. Return the generic response so the
-          // attacker can't enumerate emails.
-          return NextResponse.json({
-            success: true,
-            message: 'If your email is on our approved list, a reset link is on its way.',
-          })
-        }
-      }
-    }
-    // ── End OP Backend mode ──────────────────────────────────────
-
-    // Always return success to prevent email enumeration
-    // But only send email if account exists and is verified
     try {
-      const freelancer = await findFreelancerByEmail(normalizedEmail)
-
-      // Only proceed if account exists, is verified, and has a password
-      if (freelancer && freelancer.emailVerified && freelancer.passwordHash) {
-        // Generate reset token
-        const token = createResetToken(normalizedEmail, freelancer.id)
-
-        // Build reset URL
-        const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://ooosh-freelancer-portal.netlify.app'
-        const resetUrl = `${appUrl.replace(/\/$/, '')}/reset-password?token=${token}`
-
-        // Send reset email
-        await sendPasswordResetEmail(normalizedEmail, resetUrl, freelancer.name)
-
-        console.log(`Password reset email sent to ${normalizedEmail}`)
-      } else {
-        console.log(`Password reset requested for non-existent or unverified email: ${normalizedEmail}`)
+      const result = await forgotPasswordOP(normalizedEmail)
+      return NextResponse.json(result)
+    } catch (opError) {
+      // 4xx is a legit negative response from OP (e.g. rate limit) — still
+      // return the anti-enumeration generic response so we don't leak.
+      if (isOpClientError(opError)) {
+        return NextResponse.json({
+          success: true,
+          message: 'If your email is on our approved list, a reset link is on its way.',
+        })
       }
-    } catch (err) {
-      // Log but don't expose errors to prevent enumeration
-      console.error('Error processing password reset:', err)
+      // 5xx / network — don't leak that OP is down. Return the generic
+      // response so the attacker can't enumerate emails.
+      console.error('Forgot-password: OP backend error:', opError)
+      return NextResponse.json({
+        success: true,
+        message: 'If your email is on our approved list, a reset link is on its way.',
+      })
     }
-
-    // Always return success
-    return NextResponse.json({
-      success: true,
-      message: 'If an account exists, a reset email will be sent.',
-    })
-
   } catch (error) {
     console.error('Forgot password error:', error)
     return NextResponse.json(
