@@ -478,6 +478,27 @@ OP is now the staff control surface for the FULL post-collection money loop. Ini
 - [x] **Process pending cancellation refunds (Jun 2026)** — cancellations create a bare `job_payments` IOU (`payment_type='refund'`, `payment_status='pending'`, no HH/Stripe link) that nothing ever actioned. Now: `/summary` returns `financial.pending_refunds`; `/refund-payment` accepts an optional `pending_refund_id` that validates the IOU (belongs to job + still pending, **before** any money moves) then marks it `completed` in place (reusing the Stripe + HH + Xero path) rather than inserting a duplicate. MoneyTab renders pending refunds as an amber "Awaiting refund" row with a "Process refund" button → modal with a deposit picker + an explicit **"When you confirm:"** panel (Stripe auto-refund vs record-only, HH+Xero paperwork, IOU marked complete).
 - [x] **Clear (dismiss) pending refunds without moving money (Jun 2026)** — the "Process refund" path above moves money via Stripe/HH; but some IOUs never need processing through OP (already refunded out-of-band directly in HireHop / Stripe / bank, pre-refund-tracking artifacts, wrong amount / duplicate). The IOU was previously un-clearable — and "Process refund" is disabled when there's no deposit on the job to refund against (e.g. job 15840 showed £93 owing when £150 had already been refunded direct in HH, leaving staff stuck). Sibling of the balance `resolve-balance` + excess `mark-externally-resolved` actions. `POST /api/money/:jobId/dismiss-refund` (`{ refund_id, reason, notes? }`, MANAGER_ROLES) validates the IOU belongs to the job + is still pending, flips `payment_status='cancelled'`, annotates `notes`, logs a job-timeline interaction + audit. **Touches NO money / HireHop / Stripe / Xero.** `POST /api/money/refunds/bulk-dismiss` (`{ reason, notes?, refund_ids[] | logged_before: YYYY-MM-DD }`, admin) for the pre-refund-tracking backlog sweep (mirrors `balances/bulk-resolve`). Dismissed IOUs drop out of the `/overview` Pending Refunds list + per-job MoneyTab (both filter `payment_status='pending'`). UI: "Clear" link beside "Process refund" on the MoneyTab pending-refund row + per-row "Clear" / "Bulk clear old refunds…" on the `/money/overview` Refunds tab. Reasons: `refunded_externally | refunded_via_op | not_required | duplicate | other`.
 
+##### Refund confirmation emails (Sep 2026)
+
+Hire refunds sent nothing to the client — the one money event OP stayed silent about. Excess reimbursements have emailed unconditionally since Jun 2026, so the hire side was the outlier, not the innovation.
+
+`hire_refund_processed` (template + `sendRefundEmail()` in `money-emails.ts`), routed through the **`bookings_payments`** bucket — a hire refund is the same money conversation with the same person as the receipt that preceded it. Excess reimbursements stay in the `excess` bucket with their own templates: *"your excess is back"* and *"we've refunded part of your hire"* are different conversations and conflating them invites "hang on, which money is this?".
+
+**When it fires, and why it isn't unconditional:**
+
+| Path | Behaviour | Reason |
+|---|---|---|
+| `stripe_gbp` | **always emails** | OP moved the money itself; the client's bank is about to show it |
+| every other method | **checkbox, default ON** | record-only — the money moves by hand and OP cannot know whether it has |
+
+Emailing unconditionally on a record-only refund would tell someone money is coming before anyone sent it — worse than silence, and the client-facing twin of the lying-ledger problem the Phase 1/2/3 ordering exists to avoid. The default is ON because the house rule is do-then-record, so by the time a BACS refund is being logged the money has normally gone; the checkbox exists to catch the exception, and its label says that assumption out loud.
+
+**No reason/notes variable in the template, deliberately.** The refund form's Notes field is internal ("cancelled late, kept 25%"), and a busy person ticking "email the client" is not re-reading what they typed there. A bare confirmation that prompts "why?" beats internal shorthand landing in a client's inbox; a refund that genuinely needs explaining deserves a real email from a human.
+
+The send is **awaited**, unlike the fire-and-forget excess path, so the modal can report whether the client was actually told — a refund staff believe was confirmed but wasn't is precisely the quiet gap this work exists to close. It can never fail the refund: the money has already moved.
+
+**Deploy note:** while `EMAIL_MODE=test`, add `hire_refund_processed` to `EMAIL_LIVE_TEMPLATES` or it stays test-only. Ignored under `EMAIL_MODE=live`.
+
 ##### Orphaned refund IOUs — why Pending Refunds can't be trusted (Sep 2026)
 
 `/refund-payment` marks an IOU completed **only when `pending_refund_id` is passed**, which only the IOU's own "Process refund" flow does. Refund the same money from the **Payment History Refund button** and OP inserts a *new* completed refund row and leaves the IOU standing. The money went back; the to-do didn't.

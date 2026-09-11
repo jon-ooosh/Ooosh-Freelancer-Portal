@@ -318,6 +318,51 @@ function ReleaseConsentPanel({ plan, refundAmount, depositAmount, viaStripe }: {
 }
 
 
+/**
+ * "Tell the client" control for a refund.
+ *
+ * A Stripe refund has genuinely moved the money, so OP always emails and there
+ * is nothing to decide — it just says so. Every other method is record-only:
+ * the money moves by hand and OP has no way of knowing whether it has, so
+ * emailing unconditionally risks telling someone a refund is on its way before
+ * anyone has sent it.
+ *
+ * Ticked by default because the house rule is do-then-record — by the time a
+ * BACS refund is being logged the money has normally gone — but it's a checkbox
+ * precisely so the exception can be caught. The label says the assumption out
+ * loud rather than leaving it implicit.
+ */
+function RefundNotifyControl({ viaStripe, checked, onChange }: {
+  viaStripe: boolean;
+  checked: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  if (viaStripe) {
+    return (
+      <p className="text-[11px] text-gray-500">
+        The client will be emailed confirmation of this refund.
+      </p>
+    );
+  }
+  return (
+    <label className="flex items-start gap-2 text-xs text-gray-700 cursor-pointer">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+        className="mt-0.5"
+      />
+      <span>
+        Email the client to confirm this refund
+        <span className="block text-[11px] text-gray-500">
+          Assumes you&rsquo;ve already sent the money — untick if you haven&rsquo;t yet.
+        </span>
+      </span>
+    </label>
+  );
+}
+
+
 export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   const [data, setData] = useState<FinancialData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -374,7 +419,16 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   const [refundNotes, setRefundNotes] = useState('');
   const [refundLoading, setRefundLoading] = useState(false);
   const [refundError, setRefundError] = useState('');
-  const [refundResult, setRefundResult] = useState<{ stripe_refund_id?: string; hh_push_error?: string | null } | null>(null);
+  const [refundResult, setRefundResult] = useState<{
+    stripe_refund_id?: string; hh_push_error?: string | null;
+    client_email?: { sent: boolean; toEmail?: string; isFallback?: boolean; error?: string } | null;
+  } | null>(null);
+  // Record-only refunds (BACS/cash/Worldpay) only email when asked, because the
+  // money moves by hand and OP can't know whether it has. Defaults ON because
+  // the house rule is do-then-record — by the time it's being logged the money
+  // has normally gone — but it's a checkbox precisely so the exception is
+  // catchable. Ignored on the Stripe path, which always emails.
+  const [refundNotifyClient, setRefundNotifyClient] = useState(true);
   // Set when the backend answered 409 `release_required`: this deposit is fully
   // applied to an invoice, so HireHop has nothing to refund from it until some
   // is released back off that invoice. We never do that silently — the panel
@@ -452,6 +506,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
     setRefundError('');
     setRefundResult(null);
     setRefundRelease(null);
+    setRefundNotifyClient(true);
   };
 
   const closeRefundModal = () => {
@@ -501,7 +556,10 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
     setRefundLoading(true);
     setRefundError('');
     try {
-      const resp = await api.post<{ data: unknown; stripe_refund_id?: string; hh_push_error?: string | null }>(
+      const resp = await api.post<{
+        data: unknown; stripe_refund_id?: string; hh_push_error?: string | null;
+        client_email?: { sent: boolean; toEmail?: string; isFallback?: boolean; error?: string } | null;
+      }>(
         `/money/${jobId}/refund-payment`,
         {
           hh_deposit_id: refundingDep.id,
@@ -510,6 +568,9 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
           reference: refundReference.trim() || null,
           notes: refundNotes.trim() || null,
           ...(allowRelease ? { allow_release: true } : {}),
+          // Sent regardless of method; the backend ignores it on the Stripe
+          // path, which always emails.
+          notify_client: refundNotifyClient,
         }
       );
       setRefundRelease(null);
@@ -520,6 +581,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
       setRefundResult({
         stripe_refund_id: resp.stripe_refund_id,
         hh_push_error: resp.hh_push_error || null,
+        client_email: resp.client_email || null,
       });
     } catch (e) {
       // 409 release_required isn't a failure — it's the backend asking a
@@ -561,6 +623,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
     setRefundError('');
     setRefundResult(null);
     setRefundRelease(null);
+    setRefundNotifyClient(true);
   };
 
   const closePendingRefundModal = () => {
@@ -636,7 +699,10 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
     setRefundLoading(true);
     setRefundError('');
     try {
-      const resp = await api.post<{ data: unknown; stripe_refund_id?: string; hh_push_error?: string | null }>(
+      const resp = await api.post<{
+        data: unknown; stripe_refund_id?: string; hh_push_error?: string | null;
+        client_email?: { sent: boolean; toEmail?: string; isFallback?: boolean; error?: string } | null;
+      }>(
         `/money/${jobId}/refund-payment`,
         {
           hh_deposit_id: pendingDepositId,
@@ -646,12 +712,16 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
           notes: refundNotes.trim() || null,
           pending_refund_id: pendingRefund.id,
           ...(allowRelease ? { allow_release: true } : {}),
+          // Sent regardless of method; the backend ignores it on the Stripe
+          // path, which always emails.
+          notify_client: refundNotifyClient,
         }
       );
       setRefundRelease(null);
       setRefundResult({
         stripe_refund_id: resp.stripe_refund_id,
         hh_push_error: resp.hh_push_error || null,
+        client_email: resp.client_email || null,
       });
     } catch (e) {
       // Same release-consent branch as the payment-history refund — a
@@ -2143,6 +2213,19 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                     {refundResult.hh_push_error}
                   </div>
                 )}
+                {refundResult.client_email && (
+                  refundResult.client_email.sent ? (
+                    <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded text-xs text-gray-600">
+                      Confirmation emailed to {refundResult.client_email.toEmail}
+                      {refundResult.client_email.isFallback && ' (no client address on file — sent to info@ to forward)'}
+                    </div>
+                  ) : (
+                    <div className="px-3 py-2 bg-amber-50 border border-amber-300 rounded text-xs text-amber-900">
+                      <div className="font-semibold mb-1">Confirmation email not sent</div>
+                      The refund itself is recorded. {refundResult.client_email.error || 'The email failed to send.'} Let the client know another way.
+                    </div>
+                  )
+                )}
                 {/* Close out any IOU this refund has satisfied, here and now.
                     Refunding from Payment History leaves an IOU untouched, so
                     Pending Refunds silently accumulates money that has already
@@ -2286,6 +2369,11 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                     placeholder="Why is this being refunded?"
                   />
                 </div>
+                <RefundNotifyControl
+                  viaStripe={!!refundingDep.stripe_payment_intent}
+                  checked={refundNotifyClient}
+                  onChange={setRefundNotifyClient}
+                />
                 {refundError && (
                   <div className="px-3 py-2 bg-red-50 border border-red-200 rounded text-xs text-red-800">{refundError}</div>
                 )}
@@ -2397,6 +2485,19 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                     {refundResult.hh_push_error}
                   </div>
                 )}
+                {refundResult.client_email && (
+                  refundResult.client_email.sent ? (
+                    <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded text-xs text-gray-600">
+                      Confirmation emailed to {refundResult.client_email.toEmail}
+                      {refundResult.client_email.isFallback && ' (no client address on file — sent to info@ to forward)'}
+                    </div>
+                  ) : (
+                    <div className="px-3 py-2 bg-amber-50 border border-amber-300 rounded text-xs text-amber-900">
+                      <div className="font-semibold mb-1">Confirmation email not sent</div>
+                      The refund itself is recorded. {refundResult.client_email.error || 'The email failed to send.'} Let the client know another way.
+                    </div>
+                  )
+                )}
                 <div className="flex justify-end">
                   <button onClick={closePendingRefundModal} className="px-4 py-2 text-sm font-medium text-white bg-ooosh-600 hover:bg-ooosh-700 rounded-md">Close</button>
                 </div>
@@ -2482,6 +2583,11 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                   </ol>
                 </div>
 
+                <RefundNotifyControl
+                  viaStripe={!!selectedDeposit?.stripe_payment_intent}
+                  checked={refundNotifyClient}
+                  onChange={setRefundNotifyClient}
+                />
                 {refundError && (
                   <div className="px-3 py-2 bg-red-50 border border-red-200 rounded text-xs text-red-800">{refundError}</div>
                 )}

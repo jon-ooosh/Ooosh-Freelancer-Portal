@@ -91,6 +91,10 @@ export const TEMPLATE_BUCKETS: Readonly<Record<string, EmailBucket>> = {
   // Bookings & payments
   booking_confirmed_deposit: 'bookings_payments',
   payment_received: 'bookings_payments',
+  // A hire refund is the same money conversation with the same person as the
+  // receipt that preceded it, so it belongs in this bucket rather than a new
+  // one. (Excess reimbursements stay in `excess` — different money.)
+  hire_refund_processed: 'bookings_payments',
   last_minute_booking: 'bookings_payments',
   job_cancelled_client: 'bookings_payments',
 

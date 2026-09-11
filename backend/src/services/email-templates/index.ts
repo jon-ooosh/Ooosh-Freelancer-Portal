@@ -1021,6 +1021,48 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  // Hire-side refund, i.e. a deposit/balance going back — NOT an insurance
+  // excess reimbursement, which has its own templates. Keeping them separate
+  // matters to the client: "your excess is back" and "we've refunded part of
+  // your hire" are different conversations and conflating them invites
+  // "hang on, which money is this?".
+  //
+  // {{refundTimescale}} is method-specific (getRefundTimescale) — a Stripe
+  // refund quotes 5-10 working days, cash asks them to contact us. Deliberately
+  // does not promise a VAT invoice or a credit note: whether either follows
+  // depends on how the refund was raised, and guessing wrong in writing is
+  // worse than saying nothing.
+  //
+  // NO reason/notes variable, deliberately. The refund form's Notes field is
+  // internal ("cancelled late, kept 25%", "client was difficult") and a busy
+  // person ticking "email the client" will not be re-reading what they typed
+  // there. A bare confirmation prompting "why?" is a far better outcome than
+  // internal shorthand landing in a client's inbox; a refund that genuinely
+  // needs explaining deserves a real email from a human.
+  hire_refund_processed: {
+    variant: 'client',
+    preheader: 'A refund has been processed for your booking',
+    subject: 'Refund Processed — {{jobName}} (#{{jobNumber}})',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Refund Processed</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        Hi {{firstName}},
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        We have refunded <strong>{{amount}}</strong> to you for <strong>{{jobName}}</strong> (job <strong>#{{jobNumber}}</strong>).
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        {{refundTimescale}}
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Please note that these timescales are approximate and may vary by bank and financial institution.
+      </p>
+      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
+        If you have any questions, just reply to this email or call us on <strong>+44 (0) 1273 911382</strong>.
+      </p>
+    `,
+  },
+
   // ── Remittance advice ─────────────────────────────────────────────────
   // Subject + body are composed in services/remittance.ts (supplier vs
   // reimbursement wording, paid-vs-scheduled tense) and passed via
