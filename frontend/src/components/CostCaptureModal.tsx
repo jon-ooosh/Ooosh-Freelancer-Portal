@@ -232,6 +232,13 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
   // VAT. The header (gross/VAT above) stays authoritative; lines only say how it
   // breaks down, and must add back up to it before we'll save. See
   // docs/COST-LINES-SPEC.md.
+  // A CLOSE but unconfirmed Xero contact for the supplier the AI read. Shown as
+  // "is it this one?" rather than applied — a wrong auto-merge files costs
+  // against the wrong supplier, which is worse than a duplicate contact. Saying
+  // yes is remembered server-side, so the question is asked once per letterhead.
+  const [supplierSuggestion, setSupplierSuggestion] =
+    useState<{ printed: string; name: string; xero_contact_id: string } | null>(null);
+
   const [lines, setLines] = useState<LineDraft[]>([]);
   const [linesTouched, setLinesTouched] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState<CostPaymentMethod>(existing?.payment_method || 'cot_card');
@@ -691,10 +698,17 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
           confidence: 'high' | 'medium' | 'low';
           lines?: Array<{ description: string | null; amount_gross: number; amount_vat: number; category_code: string | null }>;
           supplier_matched?: { from: string; to: string };
+          xero_contact_id?: string | null;
+          supplier_suggestion?: { name: string; xero_contact_id: string };
         };
       }>('/costs/extract', fd);
       const ex = res.data;
       if (ex.supplier) setSupplierName(ex.supplier);
+      // An alias or exact match arrives already applied, with the contact id.
+      if (ex.xero_contact_id) setXeroContactId(ex.xero_contact_id);
+      setSupplierSuggestion(ex.supplier_suggestion && ex.supplier
+        ? { printed: ex.supplier, ...ex.supplier_suggestion }
+        : null);
       if (ex.cost_date) setCostDate(ex.cost_date);
       if (ex.invoice_number) setInvoiceNumber(ex.invoice_number);
       // A printed due date is the document's own answer, so it beats our derived
@@ -868,6 +882,27 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
   function removeLine(key: string) {
     setLinesTouched(true);
     setLines((prev) => prev.filter((l) => l.key !== key));
+  }
+
+  // "Yes, use it" adopts the Xero contact AND teaches the matcher, so this
+  // letterhead resolves on its own from now on. "No" simply drops the prompt —
+  // we never record a negative, because the next receipt from a genuinely
+  // similar-but-different supplier deserves the same question.
+  async function confirmSupplierAlias(yes: boolean) {
+    const sug = supplierSuggestion;
+    setSupplierSuggestion(null);
+    if (!sug || !yes) return;
+    setSupplierName(sug.name);
+    setXeroContactId(sug.xero_contact_id);
+    try {
+      await api.post('/costs/supplier-alias', {
+        printed_name: sug.printed,
+        xero_contact_id: sug.xero_contact_id,
+        xero_name: sug.name,
+      });
+    } catch {
+      // The contact is adopted on this cost either way; only the memory is lost.
+    }
   }
 
   // Closing on an unbalanced split loses the work AND the receipt, so say so
@@ -1241,10 +1276,23 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
               <div className="relative">
                 <label className="block text-sm font-medium text-gray-700 mb-1">Supplier</label>
                 <input className={inputCls} value={supplierName}
-                  onChange={(e) => { setSupplierName(e.target.value); setXeroContactId(null); }}
+                  onChange={(e) => { setSupplierName(e.target.value); setXeroContactId(null); setSupplierSuggestion(null); }}
                   onFocus={() => setSupplierFocused(true)}
                   onBlur={() => setTimeout(() => setSupplierFocused(false), 150)}
                   placeholder="e.g. TTS360, Shell" autoComplete="off" />
+                {supplierSuggestion && supplierSuggestion.name !== supplierName && (
+                  <p className="text-xs text-amber-700 mt-1">
+                    Xero already has <strong>{supplierSuggestion.name}</strong> — is that the same supplier?{' '}
+                    <button type="button" onClick={() => confirmSupplierAlias(true)}
+                      className="underline hover:no-underline font-medium">Yes, use it</button>
+                    {' · '}
+                    <button type="button" onClick={() => confirmSupplierAlias(false)}
+                      className="underline hover:no-underline">No, it's different</button>
+                    <span className="block text-gray-400">
+                      Saying yes is remembered, so “{supplierSuggestion.printed}” maps straight through next time.
+                    </span>
+                  </p>
+                )}
                 {supplierFocused && supplierSuggestions.length > 0 && (
                   <div className="absolute z-10 mt-1 w-full max-h-48 overflow-y-auto bg-white border border-gray-200 rounded-md shadow-lg">
                     {supplierSuggestions.map((s) => (

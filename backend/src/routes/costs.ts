@@ -1028,7 +1028,11 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
     const updated = result.rows[0];
     // Same ordering rule as create: lines land before any push reads them.
     if (editedLines !== undefined) await replaceCostLines(String(req.params.id), editedLines);
-    const alreadyPushed = Boolean(updated.xero_object_id) && ['bill_created', 'attached', 'reconciled'].includes(updated.xero_sync_state);
+    // Already in Xero is decided by the OBJECT ID alone — never by sync state.
+    // State says whether the last operation succeeded; it says nothing about
+    // whether the object is there. Reading 'error' as "not in Xero" here is half
+    // of what created duplicate bills (services/cost-xero-push.ts existsInXero).
+    const alreadyPushed = Boolean(updated.xero_object_id);
 
     if (alreadyPushed) {
       // Already in Xero — we can't silently re-push (it may be reconciled). If a
@@ -1048,8 +1052,9 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
         const s = await query(`UPDATE costs SET xero_stale=TRUE WHERE id=$1 RETURNING xero_stale`, [updated.id]);
         updated.xero_stale = s.rows[0]?.xero_stale ?? true;
       }
-    } else if (!updated.xero_object_id || updated.xero_sync_state === 'error' || updated.xero_sync_state === 'pending') {
-      // Not yet in Xero — background push (the service guards on state).
+    } else {
+      // Genuinely not in Xero (no object id) — background push. The service
+      // guards again on the same rule, so a race can't create a second object.
       const { pushCostToXeroBackground } = await import('../services/cost-xero-push');
       pushCostToXeroBackground(updated.id);
     }
@@ -1073,8 +1078,25 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
 router.post('/:id/sync-xero', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
   try {
     const id = String(req.params.id);
-    const { pushCostToXero } = await import('../services/cost-xero-push');
-    const result = await pushCostToXero(id);
+    // The red "Failed" pill's Retry lands here. A cost that already HAS a Xero
+    // object needs its figures pushed at the existing one, not a fresh create —
+    // and for a bill still awaiting its payment leg, pushCostToXero is exactly
+    // the right call (it skips the create and records the payment). So: object
+    // present + nothing left for the bill flow to do → re-sync in place.
+    const cur = await query(
+      'SELECT xero_object_id, xero_payment_id, payment_method, payment_status FROM costs WHERE id = $1',
+      [id],
+    );
+    if (!cur.rows.length) return res.status(404).json({ error: 'Cost not found' });
+    const c = cur.rows[0];
+    const paymentLegOutstanding = Boolean(c.xero_object_id)
+      && BILL_METHODS.includes(c.payment_method)
+      && c.payment_status === 'paid' && !c.xero_payment_id;
+
+    const svc = await import('../services/cost-xero-push');
+    const result = (c.xero_object_id && !paymentLegOutstanding)
+      ? await svc.resyncCostToXero(id)
+      : await svc.pushCostToXero(id);
     const after = await query('SELECT * FROM costs WHERE id = $1', [id]);
     if (!after.rows.length) return res.status(404).json({ error: 'Cost not found' });
     res.json({ data: after.rows[0], result });
@@ -1437,6 +1459,26 @@ router.put('/:id/allocations', authorize(...STAFF_ROLES), async (req: AuthReques
     res.json({ data: result.rows });
   } catch (err) {
     console.error('[costs] allocations error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Confirm a near-miss supplier match: "yes, that printed name IS this Xero
+// contact". Remembered as an alias so nobody is asked about it again — the
+// human goes the last mile once, not every time.
+router.post('/supplier-alias', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const parse = z.object({
+      printed_name: z.string().trim().min(1).max(200),
+      xero_contact_id: z.string().trim().min(1).max(60),
+      xero_name: z.string().trim().min(1).max(200),
+    }).safeParse(req.body);
+    if (!parse.success) { res.status(400).json({ error: 'Invalid input', issues: parse.error.issues }); return; }
+    const { rememberSupplierAlias } = await import('../services/supplier-match');
+    await rememberSupplierAlias(parse.data.printed_name, parse.data.xero_contact_id, parse.data.xero_name, req.user!.id);
+    res.json({ data: { remembered: true } });
+  } catch (err) {
+    console.error('[costs] supplier-alias error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

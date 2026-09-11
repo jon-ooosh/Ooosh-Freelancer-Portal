@@ -20,7 +20,7 @@
  * alongside `supplier_matched: {from, to}` so the UI can show what changed.
  */
 import { extractDocument } from './document-extract';
-import { xeroBroker } from './xero-broker';
+import { matchSupplier } from './supplier-match';
 
 // Xero account codes the OP capture modal exposes — keep in step with
 // COST_CATEGORIES in frontend/src/components/CostCaptureModal.tsx.
@@ -161,6 +161,14 @@ export interface ExtractedReceipt {
   lines: ExtractedLine[];
   /** Set when we canonicalised supplier against an existing Xero contact. */
   supplier_matched?: { from: string; to: string };
+  /** Resolved Xero contact, when the match was certain enough to apply. */
+  xero_contact_id?: string | null;
+  /**
+   * A CLOSE but not certain Xero contact. Deliberately not applied — the modal
+   * asks "is it this one?" and a yes is remembered as an alias, so the question
+   * is only ever asked once per printed name.
+   */
+  supplier_suggestion?: { name: string; xero_contact_id: string };
 }
 
 export interface ExtractedLine {
@@ -319,24 +327,11 @@ function normaliseVehicle(p: ExtractedReceipt): void {
  * fine for typo-class duplicates without over-matching. Fails silently if
  * Xero is unreachable.
  */
-async function canonicaliseSupplier(
-  extracted: string,
-): Promise<{ canonical: string; matched: boolean }> {
-  try {
-    const contacts = await xeroBroker.searchContacts(extracted, 5);
-    const lower = extracted.toLowerCase();
-    const hit = contacts.find((c) => {
-      const cl = c.Name.toLowerCase();
-      return cl === lower || cl.includes(lower) || lower.includes(cl);
-    });
-    if (hit && hit.Name !== extracted) {
-      return { canonical: hit.Name, matched: true };
-    }
-  } catch {
-    /* Xero down — keep extracted name */
-  }
-  return { canonical: extracted, matched: false };
-}
+// Supplier matching lives in services/supplier-match.ts — learned aliases first,
+// then a normalised comparison, then a near match OFFERED for confirmation. The
+// old version here lowercased and checked substring containment, which sees no
+// relation between "High Class-Cleaning LTD" and "High Class Cleaning" and so
+// offered to create a duplicate contact.
 
 /**
  * Keep a proposed split only if it is arithmetically honest. Otherwise drop it.
@@ -389,12 +384,22 @@ export async function extractReceipt(buffer: Buffer, mimeType: string): Promise<
   // lines have to reconcile against the repaired figures, not the raw ones.
   reconcileLines(parsed);
 
-  // Xero supplier canonicalisation — non-blocking, best-effort.
+  // Xero supplier matching — non-blocking, best-effort.
+  //
+  // An alias or an exact normalised match is APPLIED: someone has either
+  // confirmed it before, or the two names are the same once punctuation and
+  // "Ltd" are set aside. A NEAR match is only OFFERED — silently merging on a
+  // fuzzy match would file costs against the wrong supplier, which is worse
+  // than the duplicate contact it avoids.
   if (parsed.supplier && parsed.supplier.trim()) {
-    const { canonical, matched } = await canonicaliseSupplier(parsed.supplier.trim());
-    if (matched) {
-      parsed.supplier_matched = { from: parsed.supplier, to: canonical };
-      parsed.supplier = canonical;
+    const printed = parsed.supplier.trim();
+    const m = await matchSupplier(printed);
+    if ((m.kind === 'alias' || m.kind === 'exact') && m.xeroName) {
+      if (m.xeroName !== printed) parsed.supplier_matched = { from: printed, to: m.xeroName };
+      parsed.supplier = m.xeroName;
+      parsed.xero_contact_id = m.xeroContactId ?? null;
+    } else if (m.kind === 'near' && m.xeroName && m.xeroContactId) {
+      parsed.supplier_suggestion = { name: m.xeroName, xero_contact_id: m.xeroContactId };
     }
   }
 
