@@ -267,6 +267,7 @@ function ResolveBalanceModal({ target, onClose, onDone }: {
 // Pending-refund dismiss reasons (mirror of money.ts DISMISS_REFUND_REASONS).
 const DISMISS_REASONS = [
   { value: 'refunded_externally', label: 'Already refunded outside OP (HireHop / Stripe / bank)' },
+  { value: 'refunded_via_op', label: 'Refunded in OP, but not through this IOU' },
   { value: 'not_required', label: 'Not required (artifact / superseded)' },
   { value: 'duplicate', label: 'Duplicate record' },
   { value: 'other', label: 'Other' },

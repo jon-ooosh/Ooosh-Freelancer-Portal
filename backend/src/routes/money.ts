@@ -538,12 +538,21 @@ router.post('/balances/bulk-resolve', authorize('admin'), validate(bulkResolveSc
 // HireHop, Stripe, or Xero.
 const DISMISS_REFUND_REASONS = [
   'refunded_externally',  // already refunded directly in HireHop / Stripe / bank
+  // Refunded THROUGH OP, but via the Payment History Refund button rather than
+  // the IOU's own "Process refund" — so a completed refund row was inserted and
+  // the IOU was left behind. Distinct from `refunded_externally`, which says the
+  // money moved outside OP entirely; recording that here would be a small lie in
+  // the audit trail. NOT `completed`: the refund already has its own row, and
+  // marking the IOU complete too would double-count it in every sum over
+  // completed refunds.
+  'refunded_via_op',
   'not_required',         // refund not actually due (artifact / superseded)
   'duplicate',            // duplicate IOU
   'other',
 ] as const;
 const DISMISS_REASON_LABELS: Record<string, string> = {
   refunded_externally: 'Already refunded outside OP',
+  refunded_via_op: 'Refunded in OP, outside this IOU',
   not_required: 'Not required',
   duplicate: 'Duplicate record',
   other: 'Other',
@@ -1855,7 +1864,7 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     // cancellation) awaiting processing. Surfaced so staff can action them from
     // the Money tab via POST /refund-payment with pending_refund_id. No HH/Stripe
     // link yet; the process step picks a deposit to refund against.
-    let pendingRefunds: Array<{ id: number; amount: number; method: string | null; notes: string | null; date: string }> = [];
+    let pendingRefunds: Array<{ id: string; amount: number; method: string | null; notes: string | null; date: string }> = [];
     if (job.id) {
       try {
         const pr = await query(
@@ -1865,7 +1874,7 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
            ORDER BY payment_date DESC`,
           [job.id]
         );
-        pendingRefunds = pr.rows.map((r: { id: number; amount: string; payment_method: string | null; notes: string | null; payment_date: string }) => ({
+        pendingRefunds = pr.rows.map((r: { id: string; amount: string; payment_method: string | null; notes: string | null; payment_date: string }) => ({
           id: r.id,
           amount: parseFloat(r.amount),
           method: r.payment_method || null,
