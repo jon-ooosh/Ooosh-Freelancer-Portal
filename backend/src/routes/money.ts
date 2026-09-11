@@ -201,6 +201,29 @@ router.get('/overview', authorize('admin', 'manager'), async (req: AuthRequest, 
        LIMIT 200`
     );
 
+    // Overpaid invoices — the OTHER kind of "we owe this client money". A
+    // pending refund is a DECISION we made and can be Processed or Cleared; an
+    // overpaid invoice is a STATE OF THE BOOKS with no row to action, usually a
+    // credit note raised after the invoice was paid. Same bucket on the
+    // dashboard because the conclusion is identical, but the rows say which
+    // they are because the actions differ.
+    //
+    // Reads the cached figure written through by the Money tab (migration 211) —
+    // this endpoint deliberately makes no HireHop calls, so a job only appears
+    // once its Money tab has been opened since that shipped. Same caveat as
+    // every other figure here, and the page says so.
+    const clientOverpaid = await query(
+      `SELECT jf.job_id, j.hh_job_number, j.job_name,
+              COALESCE(j.client_name, j.company_name) AS client_name,
+              jf.client_overpaid AS amount, jf.last_synced_at
+       FROM job_financials jf
+       JOIN jobs j ON j.id = jf.job_id
+       WHERE jf.client_overpaid > 0.01
+         AND COALESCE(j.pipeline_status, '') NOT IN ('cancelled', 'lost')
+       ORDER BY jf.client_overpaid DESC
+       LIMIT 200`
+    );
+
     const sum = (rows: Array<Record<string, unknown>>, col: string) =>
       rows.reduce((acc, r) => acc + parseFloat(String(r[col] ?? 0)), 0);
 
@@ -221,6 +244,7 @@ router.get('/overview', authorize('admin', 'manager'), async (req: AuthRequest, 
         deposits_pending: depositsPending.rows,
         excess_held: excessHeld.rows,
         pending_refunds: pendingRefunds.rows,
+        client_overpaid: clientOverpaid.rows,
         totals: {
           balance_outstanding: sum(balances.rows, 'balance_outstanding'),
           balances_count: balances.rows.length,
@@ -235,6 +259,11 @@ router.get('/overview', authorize('admin', 'manager'), async (req: AuthRequest, 
           excess_held_past_count: excessPastCount,
           pending_refunds: sum(pendingRefunds.rows, 'amount'),
           pending_refunds_count: pendingRefunds.rows.length,
+          client_overpaid: sum(clientOverpaid.rows, 'amount'),
+          client_overpaid_count: clientOverpaid.rows.length,
+          // Headline for the card: both kinds of "we owe this client", since
+          // that is the question someone glancing at it is asking.
+          owed_to_clients: sum(pendingRefunds.rows, 'amount') + sum(clientOverpaid.rows, 'amount'),
         },
       },
     });
@@ -1683,7 +1712,7 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
 
     const vatRate = 0.20;
     const vatAmount = hireValueExVat * vatRate;
-    const hireValueIncVat = hireValueExVat + vatAmount;
+    const derivedHireValueIncVat = hireValueExVat + vatAmount;
     const totalDeposits = totalHireDeposits + totalExcessDeposits;
 
     // Credit notes come in two shapes, and only one reduces the balance:
@@ -1700,6 +1729,35 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     // Clamped to the remaining balance so a mis-shaped credit note can't flip
     // the job to phantom-overpaid (the pre-15627 symptom).
     const approvedInvoiceTotal = approvedInvoices.reduce((s, inv) => s + inv.amount, 0);
+
+    // ── Pennies: prefer HireHop's invoiced figure over our derived VAT ──────
+    // HireHop gives us the ex-VAT accrued total and we derive VAT ourselves
+    // (`hireValueExVat * 0.20`), while HireHop rounds VAT per line. On a
+    // multi-line job the two land a penny or two apart — job 15628: we derive
+    // £2,209.62, HireHop invoiced £2,209.61 — and that 1p renders as a RED
+    // "Balance Outstanding: £0.01" beside a "100% paid" bar, with a
+    // "Deposit secured" pill instead of "Paid in full".
+    //
+    // lib/money.ts's MONEY_EPSILON can't absorb it: that is half a penny, sized
+    // for the sub-penny residue of our own VAT arithmetic. This is a whole
+    // penny of genuine disagreement between two real figures.
+    //
+    // So when HireHop has invoiced the job and its figure AGREES with ours to
+    // within £1, take HireHop's — it is the number on the document the client
+    // actually received, and ours is a derivation of it. The £1 guard is what
+    // keeps this surgical: it fires only where the two already agree, so it
+    // cannot touch a partly-invoiced job (invoice far below accrued, where
+    // accrued is the honest basis) or the job-15627 billing-correction shape
+    // (invoice £24 ABOVE accrued, which `invoicedOverage` below is there to
+    // handle). Both fall through to the derived figure exactly as before.
+    const INVOICE_ROUNDING_TOLERANCE = 1.00;
+    const useInvoicedValue = approvedInvoiceTotal > 0
+      && Math.abs(approvedInvoiceTotal - derivedHireValueIncVat) < INVOICE_ROUNDING_TOLERANCE;
+    const hireValueIncVat = useInvoicedValue ? approvedInvoiceTotal : derivedHireValueIncVat;
+    if (useInvoicedValue && Math.abs(approvedInvoiceTotal - derivedHireValueIncVat) > 0.005) {
+      console.log(`[money] Job ${hhJobId}: using HireHop's invoiced £${approvedInvoiceTotal.toFixed(2)} over our derived £${derivedHireValueIncVat.toFixed(2)} (${(approvedInvoiceTotal - derivedHireValueIncVat).toFixed(2)} VAT rounding)`);
+    }
+
     const invoicedOverage = Math.max(approvedInvoiceTotal - hireValueIncVat, 0);
     const creditNoteWriteOff = Math.min(
       Math.max(totalCreditNotesApplied - invoicedOverage, 0),
@@ -1900,15 +1958,16 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     if (job.id) {
       query(
         `INSERT INTO job_financials
-           (job_id, hire_value_inc_vat, total_hire_deposits, balance_outstanding, vat_saved, last_synced_at)
-         VALUES ($1, $2, $3, $4, $5, NOW())
+           (job_id, hire_value_inc_vat, total_hire_deposits, balance_outstanding, vat_saved, client_overpaid, last_synced_at)
+         VALUES ($1, $2, $3, $4, $5, $6, NOW())
          ON CONFLICT (job_id) DO UPDATE SET
            hire_value_inc_vat  = EXCLUDED.hire_value_inc_vat,
            total_hire_deposits = EXCLUDED.total_hire_deposits,
            balance_outstanding = EXCLUDED.balance_outstanding,
            vat_saved           = EXCLUDED.vat_saved,
+           client_overpaid     = EXCLUDED.client_overpaid,
            last_synced_at      = NOW()`,
-        [job.id, effectiveHireValueIncVat, totalHireDeposits, effectiveBalanceOutstanding, vatAdjustment ? vatAdjustment.vatSaved : 0]
+        [job.id, effectiveHireValueIncVat, totalHireDeposits, effectiveBalanceOutstanding, vatAdjustment ? vatAdjustment.vatSaved : 0, clientOverpaid]
       ).catch((e) => console.error('[money] job_financials write-through failed (non-fatal):', e.message));
     }
 

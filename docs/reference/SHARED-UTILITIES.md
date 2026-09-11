@@ -110,6 +110,13 @@ await emailService.send('compliance_reminder', {
 - **Two template categories:**
   - Client-facing: Polished, Ooosh-branded (logo, colours, professional footer)
   - Internal/operational: Simpler but consistent styling
+- **⚠️ PRODUCTION IS `EMAIL_MODE=live` (over Resend) and has been since mid-2026.**
+  Every registered template sends for real, to the real recipient. A new
+  template needs **nothing** adding to any allowlist. The test-mode machinery
+  below is still in the code and still correct — it just isn't what production
+  is doing, and several feature specs still say a template "ships OFF
+  `EMAIL_LIVE_TEMPLATES` so it test-redirects until released", which describes a
+  rollout that predates go-live.
 - **Test mode:** Global `EMAIL_MODE` setting (`test` | `live`)
   - In test mode: emails redirect to `EMAIL_TEST_REDIRECT` address by default
   - Test emails include banner: "TEST MODE — would have been sent to: client@example.com"
@@ -117,9 +124,9 @@ await emailService.send('compliance_reminder', {
 - **Per-template allowlist** (`EMAIL_LIVE_TEMPLATES`): comma-separated template
   IDs that bypass the test-mode redirect even while `EMAIL_MODE=test`. Lets us
   release individual templates to real recipients (no banner, no `[TEST]`
-  prefix, CCs honoured) without flipping the whole system live. Ignored when
-  `EMAIL_MODE=live`. `sendRaw()` is NOT covered (no template ID to match) —
-  raw sends always honour the global mode.
+  prefix, CCs honoured) without flipping the whole system live. **Ignored when
+  `EMAIL_MODE=live` — i.e. dormant in production.** `sendRaw()` is NOT covered
+  (no template ID to match) — raw sends always honour the global mode.
   - `email_log.mode` stores the **per-message effective** routing (`live` if it
     went to the real recipient, `test` if it was redirected), not the env mode.
 - **Audit trail:** Every email logged to `email_log` table (recipient, template, sent_at, status)
@@ -127,11 +134,11 @@ await emailService.send('compliance_reminder', {
 
 **Environment variables:**
 ```
-EMAIL_MODE=test                           # 'test' or 'live'
-EMAIL_TEST_REDIRECT=jon@oooshtours.co.uk  # Where redirected test emails go
-EMAIL_LIVE_TEMPLATES=                     # Comma-separated template IDs to release
-                                          # while in test mode (e.g.
-                                          # booking_confirmed_deposit,payment_received)
+EMAIL_MODE=live                           # PRODUCTION IS 'live'. 'test' is for dev only.
+EMAIL_PROVIDER=resend                     # production transport
+EMAIL_TEST_REDIRECT=jon@oooshtours.co.uk  # Where redirected test emails go (test mode only)
+EMAIL_LIVE_TEMPLATES=                     # Per-template release list — ONLY read while
+                                          # EMAIL_MODE=test. Dormant in production.
 SMTP_HOST=smtp.gmail.com
 SMTP_PORT=587
 SMTP_USER=notifications@oooshtours.co.uk
