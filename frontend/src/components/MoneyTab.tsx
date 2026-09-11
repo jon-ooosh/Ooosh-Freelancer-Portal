@@ -52,6 +52,9 @@ interface FinancialData {
     total_excess_deposits: number;
     /** All non-excess credit notes on the job (informational). */
     total_credit_notes?: number;
+    /** Money the client has OVERPAID and is owed back. 0 when square. Derived
+     *  from HireHop's own invoice `owing`, so it self-clears once refunded. */
+    client_overpaid?: number;
     /** Portion of credit notes treated as a write-off of accrued value —
      *  already subtracted from balance_outstanding by the backend. */
     credit_note_write_off?: number;
@@ -1005,12 +1008,36 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
               )}
             </div>
 
-            {/* Credit-note write-off transparency — the balance above already
-                reflects it; this explains why it's lower than deposits suggest. */}
-            {(financial.credit_note_write_off ?? 0) > 0.009 && (
+            {/* Credit notes, ALWAYS shown when there are any. Previously this
+                line was keyed on `credit_note_write_off`, which clamps to zero
+                on a job whose deposits already cover the invoice — so job
+                15187's £120 goodwill credit note was read, sent to the browser,
+                and then rendered nowhere. A credit note is a thing that
+                happened to this job's money; staff should see it either way. */}
+            {(financial.total_credit_notes ?? 0) > 0.009 && (
               <p className="text-xs text-gray-500 mt-0.5">
-                Includes £{(financial.credit_note_write_off as number).toFixed(2)} written off by credit note in HireHop
+                £{(financial.total_credit_notes as number).toFixed(2)} credited by credit note in HireHop
+                {(financial.credit_note_write_off ?? 0) > 0.009
+                  && ` — £${(financial.credit_note_write_off as number).toFixed(2)} of it written off against this balance`}
               </p>
+            )}
+
+            {/* Client is OWED money. The balance line above can't say this: it
+                clamps at zero, so an overpaid job reads "PAID IN FULL · £0.00"
+                — which is what OP told us on 15628 (£91.12 already refunded in
+                Stripe, invisible) and still tells us on 15187 (£120 goodwill
+                credit, unrefunded). Taken from HireHop's own invoice `owing`,
+                so it disappears by itself once the refund is made. */}
+            {(financial.client_overpaid ?? 0) > 0.009 && (
+              <div className="mt-2 p-3 bg-amber-50 border border-amber-300 rounded-lg">
+                <p className="text-sm font-semibold text-amber-900">
+                  Client is owed £{(financial.client_overpaid as number).toFixed(2)}
+                </p>
+                <p className="text-xs text-amber-800 mt-0.5">
+                  HireHop shows this much overpaid on the invoice — usually a credit note raised after payment.
+                  Refund it from Payment History below; this note clears itself once the refund lands.
+                </p>
+              </div>
             )}
 
             {/* Business-override banner — shown to everyone so staff understand
