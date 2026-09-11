@@ -52,6 +52,9 @@ interface FinancialData {
     total_excess_deposits: number;
     /** All non-excess credit notes on the job (informational). */
     total_credit_notes?: number;
+    /** Money the client has OVERPAID and is owed back. 0 when square. Derived
+     *  from HireHop's own invoice `owing`, so it self-clears once refunded. */
+    client_overpaid?: number;
     /** Portion of credit notes treated as a write-off of accrued value —
      *  already subtracted from balance_outstanding by the backend. */
     credit_note_write_off?: number;
@@ -279,26 +282,34 @@ function ReleaseConsentPanel({ plan, refundAmount, depositAmount, viaStripe }: {
   const invoice = plan.invoice_number || plan.invoice_id;
   return (
     <div className="px-3 py-3 bg-amber-50 border border-amber-300 rounded text-xs text-amber-900 space-y-2">
-      <div className="font-semibold">This deposit has already been spent on an invoice</div>
+      <div className="font-semibold">Nothing to refund on this deposit yet</div>
       <p>
-        HireHop has £{plan.available.toFixed(2)} unallocated on deposit {plan.deposit_id}, because
-        £{plan.application_amount.toFixed(2)} of it is applied to invoice <strong>{invoice}</strong>.
-        There is nothing to refund out of it yet.
+        All £{depositAmount.toFixed(2)} of deposit {plan.deposit_id} is applied to invoice <strong>{invoice}</strong>.
+        OP can free up £{plan.shortfall.toFixed(2)} by reducing that invoice&rsquo;s payment to
+        £{plan.new_application_amount.toFixed(2)}, then refund. Reverts automatically if the refund fails.
       </p>
-      <p className="font-medium">If you continue, OP will:</p>
-      <ol className="list-decimal ml-4 space-y-0.5">
-        <li>
-          Reduce that invoice payment from £{plan.application_amount.toFixed(2)} to £{plan.new_application_amount.toFixed(2)},
-          freeing £{plan.shortfall.toFixed(2)} back onto the deposit, and push it to Xero.
-        </li>
-        <li>Refund £{refundAmount.toFixed(2)}{viaStripe ? ' through Stripe' : ''}.</li>
-        <li>Record the refund in HireHop and OP.</li>
-      </ol>
-      <p>
-        The £{depositAmount.toFixed(2)} we received is unchanged — only how much of it is pointed at that invoice.
-        Invoice {invoice} will show £{plan.shortfall.toFixed(2)} owing until the refund lands.
-      </p>
-      <p className="text-[11px]">If step 2 fails, step 1 is put back automatically and nothing is refunded.</p>
+      {/* The detail matters to whoever wants it and is noise to everyone else.
+          Three lines of decision, the rest a click away — the panel was tall
+          enough to push the confirm button off-screen at 100% zoom. */}
+      <details className="group">
+        <summary className="cursor-pointer select-none font-medium underline decoration-dotted marker:content-['']">
+          <span className="group-open:hidden">▸ What exactly changes?</span>
+          <span className="hidden group-open:inline">▾ What exactly changes?</span>
+        </summary>
+        <ol className="list-decimal ml-4 mt-1.5 space-y-0.5">
+          <li>
+            Invoice {invoice}&rsquo;s payment from this deposit drops from £{plan.application_amount.toFixed(2)} to
+            £{plan.new_application_amount.toFixed(2)}, freeing £{plan.shortfall.toFixed(2)}, and is pushed to Xero.
+          </li>
+          <li>£{refundAmount.toFixed(2)} is refunded{viaStripe ? ' through Stripe' : ''}.</li>
+          <li>The refund is recorded in HireHop and OP.</li>
+        </ol>
+        <p className="mt-1.5">
+          The £{depositAmount.toFixed(2)} we received is unchanged — only how much of it is pointed at that invoice.
+          Invoice {invoice} shows £{plan.shortfall.toFixed(2)} owing until the refund lands. If step 2 fails, step 1
+          is put back and nothing is refunded.
+        </p>
+      </details>
     </div>
   );
 }
@@ -1005,12 +1016,36 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
               )}
             </div>
 
-            {/* Credit-note write-off transparency — the balance above already
-                reflects it; this explains why it's lower than deposits suggest. */}
-            {(financial.credit_note_write_off ?? 0) > 0.009 && (
+            {/* Credit notes, ALWAYS shown when there are any. Previously this
+                line was keyed on `credit_note_write_off`, which clamps to zero
+                on a job whose deposits already cover the invoice — so job
+                15187's £120 goodwill credit note was read, sent to the browser,
+                and then rendered nowhere. A credit note is a thing that
+                happened to this job's money; staff should see it either way. */}
+            {(financial.total_credit_notes ?? 0) > 0.009 && (
               <p className="text-xs text-gray-500 mt-0.5">
-                Includes £{(financial.credit_note_write_off as number).toFixed(2)} written off by credit note in HireHop
+                £{(financial.total_credit_notes as number).toFixed(2)} credited by credit note in HireHop
+                {(financial.credit_note_write_off ?? 0) > 0.009
+                  && ` — £${(financial.credit_note_write_off as number).toFixed(2)} of it written off against this balance`}
               </p>
+            )}
+
+            {/* Client is OWED money. The balance line above can't say this: it
+                clamps at zero, so an overpaid job reads "PAID IN FULL · £0.00"
+                — which is what OP told us on 15628 (£91.12 already refunded in
+                Stripe, invisible) and still tells us on 15187 (£120 goodwill
+                credit, unrefunded). Taken from HireHop's own invoice `owing`,
+                so it disappears by itself once the refund is made. */}
+            {(financial.client_overpaid ?? 0) > 0.009 && (
+              <div className="mt-2 p-3 bg-amber-50 border border-amber-300 rounded-lg">
+                <p className="text-sm font-semibold text-amber-900">
+                  Client is owed £{(financial.client_overpaid as number).toFixed(2)}
+                </p>
+                <p className="text-xs text-amber-800 mt-0.5">
+                  HireHop shows this much overpaid on the invoice — usually a credit note raised after payment.
+                  Refund it from Payment History below; this note clears itself once the refund lands.
+                </p>
+              </div>
             )}
 
             {/* Business-override banner — shown to everyone so staff understand
@@ -2037,8 +2072,12 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
       {/* Hire payment refund modal */}
       {refundingDep && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={closeRefundModal}>
-          <div className="bg-white rounded-lg shadow-xl max-w-md w-full" onClick={(e) => e.stopPropagation()}>
-            <div className="px-5 py-4 border-b border-gray-200 flex items-center justify-between">
+          {/* Height-capped with a scrolling body. Without it the release-consent
+              panel pushed "Confirm Refund" off the bottom of a 100%-zoom
+              screen; any long content (a verbose HireHop error, say) would do
+              the same. Matches the convention used elsewhere in this file. */}
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="px-5 py-4 border-b border-gray-200 flex items-center justify-between shrink-0">
               <div>
                 <h3 className="text-lg font-semibold text-gray-900">Refund Payment</h3>
                 <p className="text-xs text-gray-500 mt-0.5">
@@ -2066,7 +2105,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                 </div>
               </div>
             ) : (
-              <div className="px-5 py-4 space-y-3">
+              <div className="px-5 py-4 space-y-3 overflow-y-auto">
                 {refundingDep.stripe_payment_intent && (
                   <div className="px-3 py-2 bg-purple-50 border border-purple-200 rounded text-xs text-purple-900">
                     <strong>Stripe-paid</strong> — OP will originate the refund directly via the Stripe API. The matching payment-application appears in HireHop alongside.
@@ -2219,8 +2258,11 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
       {/* Process pending refund modal (e.g. cancellation IOU) */}
       {pendingRefund && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={closePendingRefundModal}>
-          <div className="bg-white rounded-lg shadow-xl max-w-md w-full" onClick={(e) => e.stopPropagation()}>
-            <div className="px-5 py-4 border-b border-gray-200 flex items-center justify-between">
+          {/* Height-capped like the refund modal above — this one is TALLER
+              (deposit picker + "when you confirm" panel) and can also carry the
+              release-consent panel, so it overflows sooner. */}
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="px-5 py-4 border-b border-gray-200 flex items-center justify-between shrink-0">
               <div>
                 <h3 className="text-lg font-semibold text-gray-900">Process Refund</h3>
                 <p className="text-xs text-gray-500 mt-0.5">
@@ -2257,7 +2299,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                 </div>
               </div>
             ) : (
-              <div className="px-5 py-4 space-y-3">
+              <div className="px-5 py-4 space-y-3 overflow-y-auto">
                 <div>
                   <label className="block text-xs font-medium text-gray-700 mb-1">Refund against deposit</label>
                   <select

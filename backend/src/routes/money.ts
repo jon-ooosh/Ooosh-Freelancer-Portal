@@ -1526,13 +1526,28 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
           );
           const description = String(data.DESCRIPTION || row.desc || '');
           const isExcess = isExcessPayment(description);
+          // Approved only — a DRAFT credit note is a proposal, not money, and
+          // must not move a balance. Mirrors the kind=1 invoice branch above,
+          // which treats status 0 as proforma. This branch previously had no
+          // status check at all.
+          //
+          // Telemetry, deliberately: every credit note we've observed live has
+          // been Approved (status 2/3), so "draft = 0" is inferred from the
+          // invoice convention rather than from an observed draft. Logging the
+          // status means a mis-inference shows up as a skipped note in the logs
+          // instead of a quietly wrong balance.
+          const creditNoteStatus = parseInt(row.status ?? data.STATUS ?? data.status ?? '0');
+          const isDraftCreditNote = creditNoteStatus === 0;
+          if (creditAmount > 0 && isDraftCreditNote) {
+            console.warn(`[money] Skipping DRAFT credit note (status ${creditNoteStatus}) on job ${hhJobId}: £${creditAmount.toFixed(2)} "${description}"`);
+          }
 
-          if (creditAmount > 0 && !isExcess) {
+          if (creditAmount > 0 && !isExcess && !isDraftCreditNote) {
             totalCreditNotesApplied += creditAmount;
           }
           // Excess credit notes are rare in practice; preserve original behaviour
           // (treat as deposit) for now until we see one in the wild.
-          else if (creditAmount > 0 && isExcess) {
+          else if (creditAmount > 0 && isExcess && !isDraftCreditNote) {
             totalExcessDeposits += creditAmount;
           }
         }
@@ -1557,12 +1572,33 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     // for a direct payment. Verified against job 15627 (May 2026): £24 credit
     // note was inflating totalHireDeposits by £24, producing a phantom £2.40
     // overpayment.
-    const directInvoicePayments = Math.max(
-      totalPaidOnApprovedInvoices - hireDepositAppliedToInvoices - totalCreditNotesApplied,
-      0
-    );
+    const invoiceReconciliationGap = totalPaidOnApprovedInvoices - hireDepositAppliedToInvoices - totalCreditNotesApplied;
+    const directInvoicePayments = Math.max(invoiceReconciliationGap, 0);
     if (directInvoicePayments > 0.01) {
       totalHireDeposits += directInvoicePayments;
+    }
+
+    // The NEGATIVE side of that same gap is money the client has overpaid and
+    // is owed back — and it was being thrown away in three separate places
+    // (this clamp, the creditNoteWriteOff clamp, and `owing: Math.max(..., 0)`
+    // on approvedInvoices). The clamps stay: they exist for the job-15627
+    // billing-correction shape and removing them would flip those jobs to
+    // phantom-overpaid. But binning the figure entirely is what let OP print
+    // "PAID IN FULL · £0.00" on two jobs where we genuinely owed the client
+    // money — 15628 (£91.12, refunded in Stripe, invisible here) and 15187
+    // (£120.00 goodwill credit note, still owed).
+    //
+    // Validated against every documented credit-note job: it fires on the two
+    // genuinely-overpaid ones (15628 -£91.12, 15187 -£120.00) and stays silent
+    // on the two where the credit note is doing something else (15627
+    // billing-correction and 15516 write-off both compute exactly £0.00).
+    //
+    // Self-clearing: once the refund is actually made, the deposit→invoice
+    // application drops by that amount and the gap returns to zero on its own.
+    // No stale banner to dismiss.
+    const clientOverpaid = invoiceReconciliationGap < -0.01 ? Math.abs(invoiceReconciliationGap) : 0;
+    if (clientOverpaid > 0) {
+      console.log(`[money] Job ${hhJobId}: HireHop shows £${clientOverpaid.toFixed(2)} overpaid — client is owed a refund`);
     }
 
     // ── Passive Reconciliation: match HH excess deposits → OP excess records ──
@@ -1914,6 +1950,8 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
           total_excess_deposits: totalExcessDeposits,
           total_credit_notes: totalCreditNotesApplied,
           credit_note_write_off: creditNoteWriteOff,
+          /** Money the client has overpaid and is owed back (0 when square). */
+          client_overpaid: clientOverpaid,
           balance_outstanding: effectiveBalanceOutstanding,
           required_deposit: requiredDeposit,
           deposit_paid: depositPaid,
