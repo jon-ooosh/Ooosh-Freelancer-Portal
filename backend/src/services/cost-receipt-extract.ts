@@ -64,6 +64,7 @@ Extraction rules:
 - service_type: when the document is a vehicle servicing/repair/garage invoice, classify the PRIMARY work into ONE of: "service" (routine/scheduled service, oil/filter change, inspection), "repair" (mechanical, bodywork, glass, accident or breakage fixes), "mot" (MOT test), "tyre" (tyres, wheels, balancing, alignment, tracking, punctures), "insurance" (insurance-related work), "tax" (road tax / VED), "other" (anything else). If the invoice clearly covers ONE kind of work, return that specific type (e.g. an invoice only for replacing tyres → "tyre"). If it's a genuine mix of different work, return "service". Null when the document is NOT a vehicle servicing/repair document (fuel, parking, non-vehicle costs).
 - supplier: the merchant's canonical company name as printed on the receipt header (e.g. "TTS360 Ltd", "Shell U.K. Limited", "Halfords Autocentres") — NOT the tagline, address line, or "thank you" line. Strip trailing punctuation.
 - cost_date: format YYYY-MM-DD. Receipt dates are UK DAY-FIRST (DD/MM/YYYY) — when a date is ambiguous (both parts ≤ 12, e.g. 11/06), read it day-first (11 June, NOT 6 November). The cost date is normally TODAY or in the recent past; it should not be months in the future. Null if not visible.
+- THE YEAR. These are receipts for costs being captured now: they are nearly always from the last few weeks, occasionally a few months. The user message gives you today's date — use it. When the printed year is unclear, abbreviated (2 digits), smudged, or absent, resolve to the MOST RECENT year that puts the date on or before today; never reach back to an older one. A receipt dated more than a year ago is almost always a misread year, not a genuinely ancient receipt. Never invent a year that contradicts what is clearly printed — if the document plainly says 2024, return 2024 and let a human judge it.
 - due_date: the date payment is DUE, format YYYY-MM-DD — only when the document explicitly prints one (labelled "Due Date", "Payment Due", "Pay By", "Date Due"). A due date is normally ON or AFTER the invoice date and in the near future, so it is the one date here that legitimately looks forward. Also return it when the document states plain terms you can resolve against the invoice date (e.g. "Net 30", "Payment terms: 14 days" → invoice date + that many days). Null when the document says nothing about when payment is due — do NOT invent one from a default assumption.
 - job_number: if the document clearly references an Ooosh job/booking number (e.g. "Job 15291", "#15291", "Attention: Ooosh Tours (#15291)", "your ref 15291"), return JUST the digits as a string. Otherwise null. Do NOT guess from invoice numbers, phone numbers, postcodes, dates, or amounts — only a clear job/booking reference.
 - description: 1-2 line summary of what was bought (e.g. "Brake pads and disc rotors", "5 packs of D'Addario strings").
@@ -248,7 +249,7 @@ function normaliseAmounts(p: ExtractedReceipt): void {
  * it (and downgrade confidence so the modal flags it). If it can't be repaired,
  * keep the date but still downgrade so a human double-checks.
  */
-function normaliseCostDate(p: ExtractedReceipt): void {
+export function normaliseCostDate(p: ExtractedReceipt): void {
   if (!p.cost_date) return;
   const m = p.cost_date.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!m) return;
@@ -257,10 +258,24 @@ function normaliseCostDate(p: ExtractedReceipt): void {
   const now = new Date();
   const todayUTC = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
   const TOL_MS = 7 * 86_400_000; // allow a week's grace for the odd genuinely-future invoice
+  // Beyond this, a capture date stops being "recent" and starts being suspicious.
+  // Four months covers a year-end catch-up without nagging; a receipt older than
+  // that is nearly always a misread year. Keep in step with STALE_COST_DAYS in
+  // frontend/src/components/CostCaptureModal.tsx, which draws the warning.
+  const STALE_MS = 120 * 86_400_000;
   const downgrade = () => { if (p.confidence === 'high') p.confidence = 'medium'; };
 
   const t = Date.UTC(Number(ys), month - 1, day);
-  if (t <= todayUTC + TOL_MS) return; // plausible — leave it
+  if (t <= todayUTC + TOL_MS) {
+    // Plausible direction, but is it plausibly RECENT? A receipt being captured
+    // now is days or weeks old, not years. We do NOT rewrite the year: a genuine
+    // historic invoice does get uploaded occasionally, and silently moving its
+    // date would be worse than the misread. Downgrade confidence so the modal's
+    // green "confidence: high" banner stops vouching for it, and let the human
+    // see the "dated over N months ago" warning the capture modal now shows.
+    if (t < todayUTC - STALE_MS) downgrade();
+    return;
+  }
 
   // Implausibly future. If both fields are ≤ 12 the date is ambiguous, so the
   // day/month swap is safe (a ≤12 "day" is valid in any month). Take the swap
@@ -370,7 +385,12 @@ export async function extractReceipt(buffer: Buffer, mimeType: string): Promise<
     files: { buffer, mimeType },
     systemPrompt: SYSTEM_PROMPT,
     schema: SCHEMA,
-    userInstruction: 'Extract the details from this receipt.',
+    // Today's date goes in the USER message, never the system prompt: the system
+    // prompt is byte-identical across calls so one cache_control breakpoint
+    // serves it at ~10% input cost, and a date in there would bust that cache
+    // every single day. Without it the model has no anchor for "recent" and
+    // guesses a year — which is how fuel receipts arrived dated 2024.
+    userInstruction: `Extract the details from this receipt. Today's date is ${new Date().toISOString().slice(0, 10)}.`,
     logTag: 'receipt-extract',
   });
 

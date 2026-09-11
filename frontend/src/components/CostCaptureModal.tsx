@@ -155,6 +155,27 @@ function inferLineRate(gross: number, vat: number): LineVatRate {
 }
 const newLineKey = () => Math.random().toString(36).slice(2);
 const gbp = (n: number) => `£${n.toFixed(2)}`;
+
+// Beyond this a capture date stops being "recent" and starts being suspicious —
+// almost always a misread year rather than a genuinely ancient receipt. Four
+// months covers a year-end catch-up without nagging. Keep in step with STALE_MS
+// in backend/src/services/cost-receipt-extract.ts, which downgrades confidence
+// on the same boundary.
+const STALE_COST_DAYS = 120;
+// Same day and month, in the most recent year that isn't in the future. The
+// one-click repair for a misread year: 23/08/2024 read today becomes 23/08/2026,
+// or 23/08/2025 if August hasn't happened yet this year.
+function mostRecentSameDayMonth(iso: string): string | null {
+  const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return null;
+  const [, , mo, da] = m;
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const todayStr = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  const thisYear = `${now.getFullYear()}-${mo}-${da}`;
+  const candidate = thisYear <= todayStr ? thisYear : `${now.getFullYear() - 1}-${mo}-${da}`;
+  return candidate === iso ? null : candidate;
+}
 // Normalise a UK reg for comparison — strip spaces/punctuation, uppercase.
 const normReg = (s: string) => s.replace(/[^a-z0-9]/gi, '').toUpperCase();
 
@@ -1310,6 +1331,24 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
                 <input type="date" className={inputCls} value={costDate} onChange={(e) => setCostDate(e.target.value)} />
                 {costDate && costDate > new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10) && (
                   <p className="text-xs text-amber-600 mt-1">⚠️ This date is in the future — is that right? Receipt dates are usually today or earlier (UK day/month).</p>
+                )}
+                {/* The mirror image: a date too far in the PAST. Nearly always a
+                    misread year rather than a genuinely old receipt, so offer the
+                    same day and month in the most recent year — but never apply it
+                    on our own. A historic invoice does get captured occasionally,
+                    and silently moving its date would be worse than the misread. */}
+                {costDate && costDate < new Date(Date.now() - STALE_COST_DAYS * 86400000).toISOString().slice(0, 10) && (
+                  <p className="text-xs text-amber-600 mt-1">
+                    ⚠️ That's over {Math.round(STALE_COST_DAYS / 30)} months ago — are we really capturing a receipt from {fmtDate(costDate)}?
+                    {mostRecentSameDayMonth(costDate) && (
+                      <>{' '}
+                        <button type="button" onClick={() => setCostDate(mostRecentSameDayMonth(costDate) as string)}
+                          className="underline hover:no-underline font-medium">
+                          Use {fmtDate(mostRecentSameDayMonth(costDate) as string)} instead
+                        </button>
+                      </>
+                    )}
+                  </p>
                 )}
               </div>
             </div>
