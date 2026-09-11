@@ -169,6 +169,10 @@ export default function CostsPage() {
   const [dueFilter, setDueFilter] = useState<DueFilter>('all');
   const [supplierFilter, setSupplierFilter] = useState('');
   const [periodFilter, setPeriodFilter] = useState<PeriodFilter>('all');
+  // Bulk pay: the garage sends twenty invoices a month and gets one transfer.
+  // Selection lives on the payable view only — there is nothing to pay elsewhere.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [showBatchPay, setShowBatchPay] = useState(false);
 
   const sortedRows = useMemo(() => {
     let base = rows;
@@ -233,6 +237,18 @@ export default function CostsPage() {
       return sortDir === 'asc' ? cmp : -cmp;
     });
   }, [rows, sortKey, sortDir, view, dueFilter, supplierFilter, periodFilter]);
+
+  // A selection the user can no longer see must not stay in the batch — paying
+  // a row you filtered away is exactly the kind of surprise this feature can't
+  // afford. Pruned rather than cleared, so narrowing the filter keeps the rest.
+  useEffect(() => {
+    setSelected((prev) => {
+      if (!prev.size) return prev;
+      const visible = new Set(sortedRows.map((c) => c.id));
+      const next = new Set([...prev].filter((id) => visible.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [sortedRows]);
 
   // The list join already returns hh_job_number per row, so the "filtered to job"
   // chip can name the job without a second fetch.
@@ -318,6 +334,45 @@ export default function CostsPage() {
   // Mark a bill paid: captures the value date (may be future) + the method the
   // money went out from. The backend records the payment against the Xero bill
   // on that method's mapped bank account.
+  // Only ever offer to batch-pay rows that CAN be: an approved, unpaid bill that
+  // reached Xero. The server re-checks and refuses the whole batch anyway, but
+  // greying out the rest beats explaining a refusal after the fact.
+  const batchPayable = (c: CostRow) =>
+    c.payment_status !== 'paid'
+    && (c.payment_method === 'not_yet_paid' || c.payment_method === 'reimburse_me')
+    && c.approval_state === 'approved';
+  const selectableRows = view === 'payable' && isAdmin ? sortedRows.filter(batchPayable) : [];
+  const selectedRows = selectableRows.filter((c) => selected.has(c.id));
+  const selectedTotal = selectedRows.reduce((t, c) => t + (Number(c.amount_gross) || 0), 0);
+  const selectedSuppliers = new Set(selectedRows.map((c) => (c.supplier_name || '').trim().toLowerCase()));
+
+  function toggleRow(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+
+  async function payBatch(paidDate: string, paidMethod: string, reference: string) {
+    setActionBusy('batch-pay');
+    try {
+      const r = await api.post<{ data: { paid: number; total: number; batchPaymentId?: string } }>(
+        '/costs/pay-batch',
+        { cost_ids: [...selected], paid_method: paidMethod, paid_date: paidDate, reference: reference || null },
+      );
+      setShowBatchPay(false);
+      setSelected(new Set());
+      await load(true);
+      alert(`Paid ${r.data.paid} bill${r.data.paid === 1 ? '' : 's'} — £${r.data.total.toFixed(2)} as a single Xero batch payment.`);
+    } catch (err) {
+      // Every refusal names what's wrong and confirms nothing was paid.
+      alert(err instanceof Error ? err.message : 'Batch payment failed');
+    } finally {
+      setActionBusy(null);
+    }
+  }
+
   async function payCost(id: string, paidDate: string, paidMethod: string, remittanceEmail?: string) {
     setActionBusy(id + 'pay');
     try {
@@ -520,6 +575,14 @@ export default function CostsPage() {
           <table className="min-w-full text-sm">
             <thead className="bg-gray-50 text-gray-600">
               <tr>
+                {selectableRows.length > 0 && (
+                  <th className="px-2 py-2 w-8">
+                    <input type="checkbox" aria-label="Select all payable bills"
+                      checked={selectedRows.length > 0 && selectedRows.length === selectableRows.length}
+                      ref={(el) => { if (el) el.indeterminate = selectedRows.length > 0 && selectedRows.length < selectableRows.length; }}
+                      onChange={(e) => setSelected(e.target.checked ? new Set(selectableRows.map((c) => c.id)) : new Set())} />
+                  </th>
+                )}
                 <SortableTh label="Date" k="date" sortKey={sortKey} sortDir={sortDir} onSort={clickSort} />
                 {view === 'payable' && <SortableTh label="Due" k="due" sortKey={sortKey} sortDir={sortDir} onSort={clickSort} />}
                 <SortableTh label="Supplier" k="supplier" sortKey={sortKey} sortDir={sortDir} onSort={clickSort} />
@@ -535,6 +598,16 @@ export default function CostsPage() {
               {sortedRows.map((c) => (
                 <tr key={c.id} id={`cost-row-${c.id}`}
                   className={focusCostId === c.id ? 'bg-purple-50 ring-2 ring-inset ring-purple-300' : 'hover:bg-gray-50'}>
+                  {selectableRows.length > 0 && (
+                    <td className="px-2 py-2">
+                      {batchPayable(c) ? (
+                        <input type="checkbox" checked={selected.has(c.id)} onChange={() => toggleRow(c.id)}
+                          aria-label={`Select ${c.supplier_name || 'cost'} for batch payment`} />
+                      ) : (
+                        <span className="block w-3" title="Only an approved, unpaid bill that has reached Xero can be batch-paid" />
+                      )}
+                    </td>
+                  )}
                   <td className="px-2 py-2 whitespace-nowrap text-gray-700" title={fmtDate(c.cost_date)}>{fmtDayMonth(c.cost_date)}</td>
                   {view === 'payable' && (() => {
                     const due = dueInfo(c);
@@ -685,6 +758,42 @@ export default function CostsPage() {
           onSaved={() => { setAllocating(null); load(true); }}
         />
       )}
+      {/* Batch-pay bar. Sticks to the bottom so the total stays visible while
+          scrolling a long payment run. */}
+      {selectedRows.length > 0 && (
+        <div className="sticky bottom-0 z-20 mt-3 flex flex-wrap items-center justify-between gap-3
+                        border border-purple-200 bg-purple-50 rounded-lg px-4 py-3 shadow-lg">
+          <div className="text-sm text-purple-900">
+            <strong>{selectedRows.length}</strong> bill{selectedRows.length === 1 ? '' : 's'} selected
+            {' · '}<strong>{gbp(selectedTotal)}</strong>
+            {selectedSuppliers.size > 1 && (
+              <span className="block text-xs text-purple-700">
+                Across {selectedSuppliers.size} suppliers — this pays them all as ONE bank line.
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <button onClick={() => setSelected(new Set())}
+              className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-900">Clear</button>
+            <button onClick={() => setShowBatchPay(true)}
+              className="px-4 py-2 text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-md">
+              Mark {selectedRows.length} paid…
+            </button>
+          </div>
+        </div>
+      )}
+
+      {showBatchPay && (
+        <BatchPayModal
+          count={selectedRows.length}
+          total={selectedTotal}
+          supplierCount={selectedSuppliers.size}
+          busy={actionBusy === 'batch-pay'}
+          onClose={() => setShowBatchPay(false)}
+          onSubmit={payBatch}
+        />
+      )}
+
       {payTarget && (
         <PayModal
           cost={payTarget}
@@ -832,6 +941,72 @@ const PAID_NOW_METHODS = [
   { value: 'petty_cash', label: 'Petty cash' },
   { value: 'paypal', label: 'PayPal' },
 ];
+
+// One payment, many bills. Deliberately a SEPARATE component from PayModal:
+// that one carries remittance advice, a person picker and a payee, all of which
+// are per-payee concepts that don't survive a batch spanning suppliers. Bolting
+// a "many" mode onto it would make both harder to read.
+function BatchPayModal({ count, total, supplierCount, busy, onClose, onSubmit }: {
+  count: number;
+  total: number;
+  supplierCount: number;
+  busy: boolean;
+  onClose: () => void;
+  onSubmit: (paidDate: string, paidMethod: string, reference: string) => void;
+}) {
+  const [paidDate, setPaidDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [paidMethod, setPaidMethod] = useState('lloyds_transfer');
+  const [reference, setReference] = useState('');
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div className="bg-white rounded-lg shadow-xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+        <div className="px-5 py-4 border-b border-gray-200">
+          <h3 className="text-lg font-semibold text-gray-900">Pay {count} bill{count === 1 ? '' : 's'}</h3>
+          <p className="text-sm text-gray-500 mt-0.5">
+            One Xero batch payment of <strong className="text-gray-900">{gbp(total)}</strong>
+            {supplierCount > 1 ? ` across ${supplierCount} suppliers` : ''}.
+          </p>
+        </div>
+        <div className="px-5 py-4 space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Payment date</label>
+            <input type="date" value={paidDate} onChange={(e) => setPaidDate(e.target.value)}
+              className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-purple-500" />
+            <p className="text-xs text-gray-400 mt-1">A future date schedules the payment in Xero for that day.</p>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Paid from</label>
+            <select value={paidMethod} onChange={(e) => setPaidMethod(e.target.value)}
+              className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-purple-500">
+              {PAID_NOW_METHODS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Reference <span className="text-gray-400 font-normal">(optional)</span>
+            </label>
+            <input value={reference} onChange={(e) => setReference(e.target.value)}
+              placeholder="e.g. Garage — September"
+              className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-purple-500" />
+            <p className="text-xs text-gray-400 mt-1">Shown on the batch in Xero, to help match it to the bank line.</p>
+          </div>
+          <p className="text-xs text-gray-500 border-t border-gray-100 pt-3">
+            Each bill is paid in full. If any one of them can't be paid, nothing is —
+            you'll be told which and why.
+          </p>
+        </div>
+        <div className="px-5 py-3 border-t border-gray-200 flex justify-end gap-2">
+          <button onClick={onClose} className="px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded-md">Cancel</button>
+          <button disabled={busy} onClick={() => onSubmit(paidDate, paidMethod, reference)}
+            className="px-4 py-2 text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-md disabled:opacity-50">
+            {busy ? 'Paying…' : `Pay ${gbp(total)}`}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function PayModal({ cost, busy, onClose, onSubmit }: {
   cost: CostRow;

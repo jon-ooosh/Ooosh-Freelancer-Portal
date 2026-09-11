@@ -502,6 +502,51 @@ class XeroBroker {
     return r.Payments[0];
   }
 
+  /**
+   * ONE payment covering MANY bills — Xero's BatchPayments.
+   *
+   * The reason this exists rather than a loop over payInvoice(): a single bank
+   * transfer paying twenty garage invoices should reconcile against ONE bank
+   * line. Twenty individual payments are each correct in the ledger, but leave
+   * twenty rows to tick against that one line in the bank feed — which is the
+   * tedium bulk pay was meant to remove, just moved into Xero.
+   *
+   * Xero returns the batch plus its constituent payments; we hand back both so
+   * the caller can stamp the per-invoice PaymentID where it's available and fall
+   * back to the BatchPaymentID where it isn't.
+   */
+  async createBatchPayment(input: {
+    accountId: string;
+    date?: string;        // YYYY-MM-DD
+    reference?: string;
+    payments: Array<{ invoiceId: string; amount: number }>;
+  }): Promise<{ BatchPaymentID?: string; Payments?: Array<{ PaymentID?: string; Invoice?: { InvoiceID?: string } }> }> {
+    const r = await this.request<{ BatchPayments?: Array<{
+      BatchPaymentID?: string;
+      Payments?: Array<{ PaymentID?: string; Invoice?: { InvoiceID?: string } }>;
+    }> }>(
+      'PUT',
+      '/BatchPayments',
+      {
+        body: {
+          BatchPayments: [
+            {
+              Account: { AccountID: input.accountId },
+              Date: input.date,
+              Reference: input.reference,
+              Payments: input.payments.map((p) => ({
+                Invoice: { InvoiceID: p.invoiceId },
+                Amount: p.amount,
+              })),
+            },
+          ],
+        },
+        billsScope: true,
+      }
+    );
+    return r.BatchPayments?.[0] ?? {};
+  }
+
   /** Spend money (petty cash / PayPal / reimbursement not on a bank feed). */
   async createSpendMoney(input: CreateSpendMoneyInput): Promise<{ BankTransactionID: string }> {
     const contactID = input.contactId
