@@ -1844,9 +1844,28 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
       } catch { /* non-fatal */ }
     }
 
-    // If VAT adjustment applies, override the VAT figures
+    // If VAT adjustment applies, override the VAT figures.
+    //
+    // Note which total feeds which. WITHOUT a VAT adjustment this is just
+    // `hireValueIncVat`, so it inherits the "prefer HireHop's invoiced figure
+    // when it agrees to within £1" rule above — which is the whole point, since
+    // THIS is the total that reaches the client as `hire_value_inc_vat` and
+    // drives `balance_outstanding`. Rebuilding it from `hireValueExVat` instead
+    // silently bypassed that rule and left job 15628 showing a red £0.01.
+    //
+    // WITH a VAT adjustment the invoiced figure must NOT be preferred: HireHop
+    // doesn't know about international VAT relief, so its invoice carries the
+    // full VAT and taking it would quietly hand the relief back. (The tolerance
+    // guard would refuse anyway — the two differ by the whole VAT saved, far
+    // more than £1 — but relying on that would be relying on an accident.)
     const effectiveVatAmount = vatAdjustment ? vatAdjustment.adjustedVat : vatAmount;
-    const effectiveHireValueIncVat = hireValueExVat + effectiveVatAmount;
+    const effectiveHireValueIncVat = vatAdjustment
+      ? hireValueExVat + effectiveVatAmount
+      : hireValueIncVat;
+    // Keep the header's arithmetic honest: when we've taken HireHop's invoiced
+    // total, the VAT shown must be that total minus ex-VAT, or the Money tab
+    // displays three figures where ex + VAT doesn't equal the total.
+    const displayVatAmount = vatAdjustment ? effectiveVatAmount : effectiveHireValueIncVat - hireValueExVat;
     const effectiveBalanceOutstanding = effectiveHireValueIncVat - totalHireDeposits - creditNoteWriteOff;
 
     // Calculate deposit requirements using effective (VAT-adjusted) total
@@ -2016,7 +2035,7 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
           balance_override: balanceOverride,
           hire_value_ex_vat: hireValueExVat,
           hire_value_inc_vat: effectiveHireValueIncVat,
-          vat_amount: effectiveVatAmount,
+          vat_amount: displayVatAmount,
           original_vat_amount: vatAdjustment ? vatAmount : undefined,
           original_hire_value_inc_vat: vatAdjustment ? hireValueIncVat : undefined,
           vat_adjusted: !!vatAdjustment,
