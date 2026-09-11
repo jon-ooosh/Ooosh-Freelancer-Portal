@@ -6822,6 +6822,12 @@ function OverviewFinancialStrip({ jobId }: { jobId: string }) {
   const [data, setData] = useState<{
     hire_value_inc_vat: number; total_hire_deposits: number;
     balance_outstanding: number; deposit_percent: number; deposit_paid: boolean;
+    /** Money the client has OVERPAID and is owed back. This strip reads the
+     *  same endpoint as the Money tab but copied only the five fields above,
+     *  so an overpaid job read "Paid in full" here while the Money tab said
+     *  "Client is owed £120" (job 15187). Two surfaces, one source, opposite
+     *  conclusions — and the Overview is the one people glance at. */
+    client_overpaid?: number;
   } | null>(null);
 
   useEffect(() => {
@@ -6836,6 +6842,7 @@ function OverviewFinancialStrip({ jobId }: { jobId: string }) {
             balance_outstanding: f.balance_outstanding,
             deposit_percent: f.deposit_percent,
             deposit_paid: f.deposit_paid,
+            client_overpaid: f.client_overpaid,
           });
         }
       })
@@ -6869,6 +6876,18 @@ function OverviewFinancialStrip({ jobId }: { jobId: string }) {
         {data.balance_outstanding > 0 && (
           <span className="text-xs font-semibold text-red-600 whitespace-nowrap">
             £{data.balance_outstanding.toFixed(2)} outstanding
+          </span>
+        )}
+        {/* The mirror image of "outstanding": money owed the other way. The
+            "Paid in full" label stays true — they paid it all and then some —
+            but on its own it reads as "nothing to do here", which is wrong when
+            we're sitting on a client's money. */}
+        {(data.client_overpaid ?? 0) > 0.009 && (
+          <span
+            className="text-xs font-semibold text-amber-700 whitespace-nowrap"
+            title="HireHop shows this much overpaid on the invoice — see the Money tab to refund it."
+          >
+            £{(data.client_overpaid as number).toFixed(2)} owed to client
           </span>
         )}
       </div>

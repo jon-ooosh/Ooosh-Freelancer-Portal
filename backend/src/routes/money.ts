@@ -1531,11 +1531,13 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
           // which treats status 0 as proforma. This branch previously had no
           // status check at all.
           //
-          // Telemetry, deliberately: every credit note we've observed live has
-          // been Approved (status 2/3), so "draft = 0" is inferred from the
-          // invoice convention rather than from an observed draft. Logging the
-          // status means a mis-inference shows up as a skipped note in the logs
-          // instead of a quietly wrong balance.
+          // Confirmed against HireHop (job 16668, 11 Sep 2026): the SAME credit
+          // note read status 0 / NUMBER "" / credit 0 as a draft and status 2 /
+          // OT-CRE-1219 / credit 30 once approved. HireHop itself only moved the
+          // invoice's `owing` (104 -> 74) on approval, so counting a draft would
+          // put OP at odds with HireHop as well as with reality. The log stays:
+          // it's cheap, and a skipped note that shouldn't have been is far
+          // easier to spot in a log line than in a quietly wrong balance.
           const creditNoteStatus = parseInt(row.status ?? data.STATUS ?? data.status ?? '0');
           const isDraftCreditNote = creditNoteStatus === 0;
           if (creditAmount > 0 && isDraftCreditNote) {
