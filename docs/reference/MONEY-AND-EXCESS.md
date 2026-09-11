@@ -545,8 +545,22 @@ Phase 1 is **offered, never silent** — the endpoint answers **409 `release_req
 
 **Also surfaced on the Money tab:**
 - **Credit notes, whenever there are any** — keyed on `total_credit_notes`, not `credit_note_write_off`. The old line used the write-off, which clamps to zero when deposits already cover the invoice, so job 15187's £120 goodwill credit note was read, sent to the browser and rendered nowhere.
-- **`client_overpaid`** — the NEGATIVE side of the PASS 3 reconciliation gap, which three separate clamps were discarding. Fires on genuinely overpaid jobs (15187 £120.00, 15628 £91.12) and stays silent where a credit note is doing something else (15627 billing-correction, 15516 write-off — both exactly £0.00). Self-clearing: once the refund is made the deposit→invoice application drops and the gap returns to zero.
-- **Credit notes count only when APPROVED.** The `kind=2` branch had no status check while `kind=1` already excluded status 0 as proforma, so a DRAFT credit note moved the balance. "Draft = 0" is inferred from the invoice convention, not an observed draft, so skipped notes are logged.
+- **`client_overpaid`** — the NEGATIVE side of the PASS 3 reconciliation gap, which three separate clamps were discarding. Surfaced on the Money tab AND on the Overview financial strip (`OverviewFinancialStrip` in `JobDetailPage.tsx`, which reads the same endpoint but copies only a handful of fields — it said "Paid in full" on job 15187 while the Money tab said the client was owed £120). **Any new surface reading `/money/:jobId/summary` needs to carry this field**, or it will confidently contradict the others. Fires on genuinely overpaid jobs (15187 £120.00, 15628 £91.12) and stays silent where a credit note is doing something else (15627 billing-correction, 15516 write-off — both exactly £0.00). Self-clearing: once the refund is made the deposit→invoice application drops and the gap returns to zero.
+- **Credit notes count only when APPROVED.** The `kind=2` branch had no status check while `kind=1` already excluded status 0 as proforma, so a DRAFT credit note moved the balance.
+
+  **Confirmed against HireHop, 11 Sep 2026** (job 16668, one credit note captured either side of approval — same `ID: 12756` throughout):
+
+  | | Draft | Approved |
+  |---|---|---|
+  | `status` / `STATUS` | **0** | **2** |
+  | `NUMBER` | `""` | `OT-CRE-1219` |
+  | `credit` | **0** | 30 |
+  | `AUTH_USER` | 0 | 1 |
+  | invoice's `owing` | 104 | **74** |
+
+  Two things that matter beyond the status value. First, a draft publishes `credit: 0`, so the pre-existing `creditAmount > 0` guard was *accidentally* excluding empty drafts already — but only empty ones; a draft with line items would carry a real total and would have counted. Second, **HireHop itself ignores draft credit notes**: the invoice's `owing` only moved (104 → 74) on approval. So counting a draft would have put OP at odds with HireHop, not just with reality.
+
+  Credit notes also sync to Xero under a different task — `hh_task: "post_invoice_credit"`, not `post_payment`.
 
 
 **Sign trap for anything reading these rows.** HireHop dual-publishes each application as two `kind=3` rows sharing one `data.ID` — deposit-side (`credit < 0`, `parent_is="deposit"`) and invoice-side (`credit > 0`, `parent_is="invoice"`). `routes/money.ts` dedups on `data.ID` and takes `Math.abs()`, which is safe there only because `OWNER` supplies the direction. It is **not** safe for a release: a negative application's twins carry the opposite signs, so `abs()` reads a release as *more* money leaving the deposit. Key on the deposit-side twin and keep the sign (`movedOut = −credit`). Also remember a deposit-child row with `OWNER = 0` is a **refund**, which spends the deposit just as an application does — omit it and a fully-refunded deposit reads as still refundable, inviting a double refund.
