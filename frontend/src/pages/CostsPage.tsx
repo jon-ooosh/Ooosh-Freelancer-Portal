@@ -109,7 +109,19 @@ const APPROVAL_COLOURS: Record<string, string> = {
 
 // Client-side column sort. null = server order (newest captured first).
 type SortKey = 'date' | 'due' | 'supplier' | 'description' | 'gross' | 'type' | 'status';
-type DueFilter = 'all' | 'overdue' | 'friday' | 'next_friday' | 'this_week' | 'next_7';
+type DueFilter = 'all' | 'unpaid' | 'overdue' | 'friday' | 'next_friday' | 'this_week' | 'next_7';
+// Period slices the list by COST date, and applies on every tab — a different
+// axis from the due-date pills, which are about when a bill needs paying and
+// only make sense on Bills to Pay. Keeping them separate stops "this month"
+// quietly meaning two things.
+type PeriodFilter = 'all' | 'this_month' | 'last_month' | 'ytd' | 'last_year';
+const PERIOD_LABELS: [PeriodFilter, string][] = [
+  ['all', 'All time'],
+  ['this_month', 'This month'],
+  ['last_month', 'Last month'],
+  ['ytd', 'Year to date'],
+  ['last_year', 'Last year'],
+];
 const SORT_VALUE: Record<SortKey, (c: { cost_date: string | null; due_date?: string | null; supplier_name: string | null; description: string | null; amount_gross: number | null; category: string | null; cost_type: string; approval_state: string | null; payment_status: string }) => string | number> = {
   date: (c) => c.cost_date || '',
   // Undated bills sort last under ascending (the common "what's due soonest" view).
@@ -156,10 +168,31 @@ export default function CostsPage() {
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
   const [dueFilter, setDueFilter] = useState<DueFilter>('all');
   const [supplierFilter, setSupplierFilter] = useState('');
+  const [periodFilter, setPeriodFilter] = useState<PeriodFilter>('all');
 
   const sortedRows = useMemo(() => {
     let base = rows;
     if (supplierFilter) base = base.filter((c) => (c.supplier_name || '') === supplierFilter);
+    // Period — by cost date, on every tab. Bounds are computed in LOCAL time for
+    // the same reason the due filters are: toISOString() is UTC and shifts the
+    // day under BST, which would drop the 1st of a month out of its own month.
+    if (periodFilter !== 'all') {
+      const now = new Date();
+      const fmtD = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      const y = now.getFullYear(); const m = now.getMonth();
+      const range: Record<Exclude<PeriodFilter, 'all'>, [string, string]> = {
+        this_month: [fmtD(new Date(y, m, 1)), fmtD(new Date(y, m + 1, 0))],
+        last_month: [fmtD(new Date(y, m - 1, 1)), fmtD(new Date(y, m, 0))],
+        ytd:        [fmtD(new Date(y, 0, 1)), fmtD(now)],
+        last_year:  [fmtD(new Date(y - 1, 0, 1)), fmtD(new Date(y - 1, 11, 31))],
+      };
+      const [from, to] = range[periodFilter];
+      base = base.filter((c) => {
+        if (!c.cost_date) return false;   // undated can't be in a period
+        const d = c.cost_date.slice(0, 10);
+        return d >= from && d <= to;
+      });
+    }
     // Due-date filters only apply in the Bills to Pay view.
     if (view === 'payable' && dueFilter !== 'all') {
       const today = new Date(); today.setHours(0, 0, 0, 0);
@@ -174,9 +207,15 @@ export default function CostsPage() {
       const nextFriday = new Date(friday); nextFriday.setDate(friday.getDate() + 7);
       const next7 = new Date(today); next7.setDate(today.getDate() + 7);
       base = base.filter((c) => {
-        if (c.payment_status === 'paid' || !c.due_date) return false;
+        if (c.payment_status === 'paid') return false;
+        // Every other pill is a date window, so an undated bill can't be in one.
+        // "Unpaid" isn't a window, and an undated bill is still owed.
+        if (!c.due_date) return dueFilter === 'unpaid';
         const d = c.due_date.slice(0, 10);
         switch (dueFilter) {
+          // Everything still owed, whether or not it's past due — the "what do
+          // we actually owe right now" view, rather than a window.
+          case 'unpaid':      return true;
           case 'overdue':     return d < todayStr;
           case 'friday':      return d === fmt(friday);
           case 'next_friday': return d === fmt(nextFriday);
@@ -193,7 +232,7 @@ export default function CostsPage() {
       const cmp = typeof av === 'number' && typeof bv === 'number' ? av - bv : String(av).localeCompare(String(bv));
       return sortDir === 'asc' ? cmp : -cmp;
     });
-  }, [rows, sortKey, sortDir, view, dueFilter, supplierFilter]);
+  }, [rows, sortKey, sortDir, view, dueFilter, supplierFilter, periodFilter]);
 
   // The list join already returns hh_job_number per row, so the "filtered to job"
   // chip can name the job without a second fetch.
@@ -354,11 +393,13 @@ export default function CostsPage() {
     }
   }
 
-  const tabs: { key: ViewMode; label: string; badge?: number }[] = [
-    { key: 'all', label: 'All costs' },
-    { key: 'payable', label: 'Bills to Pay', badge: stats?.payable },
-    { key: 'recharge', label: 'Recharges', badge: stats?.recharge_pending },
-    { key: 'reconcile', label: 'Reconcile', badge: stats?.reconcile_pending },
+  const tabs: { key: ViewMode; label: string; badge?: number; sub?: string; color: string }[] = [
+    { key: 'payable', label: 'Bills to pay', badge: stats?.payable, sub: gbp(stats?.payable_total), color: 'amber' },
+    { key: 'recharge', label: 'Recharges pending', badge: stats?.recharge_pending, color: 'blue' },
+    { key: 'reconcile', label: 'To reconcile', badge: stats?.reconcile_pending, color: 'purple' },
+    // No badge: "all" has no headline count of its own, so it shows how many
+    // rows the current filters leave — which is what "Shown" used to say.
+    { key: 'all', label: 'All costs', color: 'gray' },
   ];
 
   return (
@@ -371,24 +412,11 @@ export default function CostsPage() {
         </button>
       </div>
 
-      {/* Stat cards */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
-        <StatCard label="Bills to pay" value={String(stats?.payable ?? 0)} sub={gbp(stats?.payable_total)} color="amber" />
-        <StatCard label="Recharges pending" value={String(stats?.recharge_pending ?? 0)} color="blue" />
-        <StatCard label="To reconcile" value={String(stats?.reconcile_pending ?? 0)} color="purple" />
-        <StatCard label="Shown" value={String(rows.length)} color="gray" />
-      </div>
-
-      {/* Tabs */}
-      <div className="flex flex-wrap gap-2 border-b border-gray-200 mb-4">
+      {/* Stat cards — these are the view switcher; there is no separate tab row. */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
         {tabs.map((t) => (
-          <button key={t.key} onClick={() => setView(t.key)}
-            className={`px-3 py-2 text-sm font-medium border-b-2 -mb-px ${
-              view === t.key ? 'border-purple-600 text-purple-700' : 'border-transparent text-gray-500 hover:text-gray-700'
-            }`}>
-            {t.label}
-            {t.badge ? <span className="ml-1.5 px-1.5 py-0.5 text-xs bg-gray-200 text-gray-700 rounded-full">{t.badge}</span> : null}
-          </button>
+          <StatCard key={t.key} label={t.label} value={String(t.badge ?? sortedRows.length)}
+            sub={t.sub} color={t.color} active={view === t.key} onClick={() => setView(t.key)} />
         ))}
       </div>
 
@@ -415,6 +443,11 @@ export default function CostsPage() {
       <div className="flex flex-wrap gap-2 mb-4">
         <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search supplier / description"
           className="border border-gray-300 rounded-md px-3 py-1.5 text-sm flex-1 min-w-[200px]" />
+        {/* Period slices by COST date and applies on every tab — see PeriodFilter. */}
+        <select value={periodFilter} onChange={(e) => setPeriodFilter(e.target.value as PeriodFilter)}
+          className="border border-gray-300 rounded-md px-3 py-1.5 text-sm">
+          {PERIOD_LABELS.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+        </select>
         <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}
           className="border border-gray-300 rounded-md px-3 py-1.5 text-sm">
           <option value="">All types</option>
@@ -438,6 +471,7 @@ export default function CostsPage() {
           <span className="text-xs text-gray-400 mr-1">Due:</span>
           {([
             ['all', 'All'],
+            ['unpaid', 'Outstanding'],
             ['overdue', 'Overdue'],
             ['friday', 'This Friday'],
             ['next_friday', 'Next Friday'],
@@ -1116,19 +1150,27 @@ function XeroCell({ cost, busy, onRetry, resyncBusy, onResync }: { cost: Cost; b
   );
 }
 
-function StatCard({ label, value, sub, color }: { label: string; value: string; sub?: string; color: string }) {
+// The stat cards ARE the tabs. They used to sit above a row of tabs saying the
+// same four things with the same four counts — bigger targets, the money total,
+// and a whole row of vertical space back.
+function StatCard({ label, value, sub, color, active, onClick }: {
+  label: string; value: string; sub?: string; color: string; active: boolean; onClick: () => void;
+}) {
   const colours: Record<string, string> = {
-    amber: 'border-amber-200 bg-amber-50',
-    blue: 'border-blue-200 bg-blue-50',
-    purple: 'border-purple-200 bg-purple-50',
-    gray: 'border-gray-200 bg-gray-50',
+    amber: 'border-amber-200 bg-amber-50 hover:bg-amber-100',
+    blue: 'border-blue-200 bg-blue-50 hover:bg-blue-100',
+    purple: 'border-purple-200 bg-purple-50 hover:bg-purple-100',
+    gray: 'border-gray-200 bg-gray-50 hover:bg-gray-100',
   };
   return (
-    <div className={`border rounded-lg p-3 ${colours[color] || colours.gray}`}>
+    <button type="button" onClick={onClick} aria-pressed={active}
+      className={`text-left border rounded-lg p-3 transition ${colours[color] || colours.gray} ${
+        active ? 'ring-2 ring-purple-500 ring-offset-1' : ''}`}>
       <div className="text-xs text-gray-500">{label}</div>
       <div className="text-xl font-bold text-gray-900">{value}</div>
-      {sub && <div className="text-xs text-gray-500">{sub}</div>}
-    </div>
+      {sub ? <div className="text-xs text-gray-500">{sub}</div>
+           : <div className="text-xs text-gray-400">{active ? 'showing' : 'show'}</div>}
+    </button>
   );
 }
 
