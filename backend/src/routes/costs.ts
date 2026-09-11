@@ -1373,6 +1373,39 @@ router.post('/:id/pay', authorize(...ADMIN_ONLY), async (req: AuthRequest, res: 
   }
 });
 
+// Pay MANY bills with ONE Xero batch payment — the monthly garage run. Refuses
+// the whole selection if any one bill can't be paid, and creates the batch in
+// Xero BEFORE marking anything paid here. See services/cost-batch-pay.ts.
+// ADMIN_ONLY, same as /:id/pay: this is money out the door, times twenty.
+router.post('/pay-batch', authorize(...ADMIN_ONLY), async (req: AuthRequest, res: Response) => {
+  try {
+    const parse = z.object({
+      cost_ids: z.array(z.string().uuid()).min(1).max(200),
+      paid_method: z.string().trim().min(1).max(40),
+      paid_date: z.string().trim().max(20).optional().nullable(),
+      reference: z.string().trim().max(255).optional().nullable(),
+    }).safeParse(req.body ?? {});
+    if (!parse.success) { res.status(400).json({ error: 'Invalid input', issues: parse.error.issues }); return; }
+
+    const { payCostsAsBatch } = await import('../services/cost-batch-pay');
+    const result = await payCostsAsBatch({
+      costIds: parse.data.cost_ids,
+      paidMethod: parse.data.paid_method,
+      paidDate: parse.data.paid_date ?? null,
+      reference: parse.data.reference ?? null,
+      userId: req.user!.id,
+    });
+    // A refusal is a 400 with the reason, not a 500 — the caller can act on it.
+    if (result.error) { res.status(400).json({ error: result.error }); return; }
+    res.json({ data: result });
+  } catch (err) {
+    console.error('[costs] pay-batch error:', err);
+    // The thrown case is the one where Xero HAS the money and we failed to
+    // record it. Surface the message verbatim; it names the batch id.
+    res.status(500).json({ error: err instanceof Error ? err.message : 'Internal server error' });
+  }
+});
+
 // ── Remittance advice ───────────────────────────────────────────────────────
 // Optional courtesy email confirming a bill/reimbursement has been (or will be)
 // paid. Decoupled from /pay — a bad email must never block/unwind a payment.
