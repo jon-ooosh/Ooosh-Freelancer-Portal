@@ -216,15 +216,75 @@ export function resolveScheduledDay(
   };
 }
 
+/** One live leave day, as the merge layer needs it. */
+export interface LeaveDayOverlay {
+  date: string;
+  portion: DayPortion;
+  leaveType: string;
+  status: 'pending' | 'approved';
+}
+
 /**
- * Overlay leave and absence onto the contracted days.
+ * Overlay leave (and, from Phase D, absence) onto the contracted days.
  *
- * Phase A has neither table, so this is the identity function — but it is the
- * single attachment point for Phase B (leave) and Phase D (absence), so when
- * they land no caller and no other function changes.
+ * The single attachment point promised in Phase A — leave landed here without
+ * any caller changing, which was the point of putting it behind one function.
+ *
+ * A day only becomes 'leave' if it was contracted in the first place: leave on
+ * a day someone does not work is meaningless, and letting it render would make
+ * the calendar disagree with the ledger (which charged nothing for it).
+ *
+ * PENDING leave shows as 'partial' rather than 'leave'. It is not time off
+ * yet, but everyone — the approver especially — needs to see it is coming,
+ * and showing it as confirmed would be a lie the approver then acts on.
  */
-export function mergeAbsenceLayer(days: StaffDay[]): StaffDay[] {
-  return days;
+export function mergeAbsenceLayer(days: StaffDay[], leave: LeaveDayOverlay[] = []): StaffDay[] {
+  if (leave.length === 0) return days;
+  const byDate = new Map(leave.map(l => [l.date, l]));
+
+  return days.map(d => {
+    const l = byDate.get(d.date);
+    if (!l || d.status !== 'working') return d;
+
+    const approved = l.status === 'approved';
+    const halfDay = l.portion === 'am' || l.portion === 'pm';
+
+    return {
+      ...d,
+      status: approved ? (halfDay ? 'partial' : 'leave') : 'partial',
+      portion: l.portion,
+      detail: { leaveType: approved ? l.leaveType : `${l.leaveType} (requested)` },
+    };
+  });
+}
+
+/** Live leave days for a set of people over a range, for the merge above. */
+export async function getLeaveOverlay(
+  personIds: string[], from: string, to: string
+): Promise<Map<string, LeaveDayOverlay[]>> {
+  if (personIds.length === 0) return new Map();
+  const r = await query(
+    `SELECT r.person_id, d.leave_date::text AS leave_date, d.portion,
+            r.leave_type, r.status
+       FROM staff_leave_request_days d
+       JOIN staff_leave_requests r ON r.id = d.request_id
+      WHERE d.is_live
+        AND d.person_id = ANY($1::uuid[])
+        AND d.leave_date BETWEEN $2::date AND $3::date`,
+    [personIds, from, to]
+  );
+  const out = new Map<string, LeaveDayOverlay[]>();
+  for (const row of r.rows) {
+    const list = out.get(row.person_id) ?? [];
+    list.push({
+      date: row.leave_date,
+      portion: row.portion as DayPortion,
+      leaveType: row.leave_type as string,
+      status: row.status as 'pending' | 'approved',
+    });
+    out.set(row.person_id, list);
+  }
+  return out;
 }
 
 /**
@@ -269,7 +329,19 @@ export async function listStaffPeople(): Promise<
 export async function getStaffCalendar(
   from: string,
   to: string,
-  opts: { isAdmin: boolean; personId?: string }
+  opts: {
+    isAdmin: boolean;
+    personId?: string;
+    /**
+     * Overlay live leave onto the contracted days. Default true.
+     *
+     * Pass false to get the RAW contract — what someone is scheduled to work,
+     * ignoring any leave. buildDays() in staff-leave.ts needs that: pricing a
+     * new request against a leave-overlaid calendar would silently skip days
+     * already booked instead of surfacing the clash.
+     */
+    includeLeave?: boolean;
+  }
 ): Promise<StaffCalendarPerson[]> {
   if (!DATE_RE.test(from) || !DATE_RE.test(to)) throw new Error('Dates must be YYYY-MM-DD');
   if (to < from) throw new Error('`to` must be on or after `from`');
@@ -326,6 +398,9 @@ export async function getStaffCalendar(
     exceptions.set(`${row.person_id}:${row.exception_date}`, row);
   }
 
+  const leaveByPerson = opts.includeLeave === false
+    ? new Map<string, LeaveDayOverlay[]>()
+    : await getLeaveOverlay(ids, from, to);
   const dates = dateRange(from, to);
 
   return people.map(p => {
@@ -339,7 +414,10 @@ export async function getStaffCalendar(
       preferredName: p.preferred_name,
       jobTitle: p.job_title,
       department: p.department,
-      days: maskForViewer(mergeAbsenceLayer(days), opts.isAdmin),
+      days: maskForViewer(
+        mergeAbsenceLayer(days, leaveByPerson.get(p.person_id) ?? []),
+        opts.isAdmin
+      ),
     };
   });
 }
