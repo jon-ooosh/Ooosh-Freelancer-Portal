@@ -39,10 +39,17 @@ interface LeaveRequest {
   cancellationReason: string | null;
   days: { date: string; minutes: number; portion: 'full' | 'am' | 'pm' }[];
 }
+interface AccountBreakdown {
+  inMinutes: number;
+  outMinutes: number;
+  availableMinutes: number;
+  nominalDayMinutes: number | null;
+  byType: Record<string, number>;
+}
 interface MyBalances {
   year: number;
-  holiday: { balanceMinutes: number; nominalDayMinutes: number | null };
-  overtime: { balanceMinutes: number; nominalDayMinutes: number | null };
+  holiday: AccountBreakdown;
+  overtime: AccountBreakdown;
 }
 interface OvertimeEntry {
   id: string;
@@ -315,7 +322,25 @@ function BookTimeOff({ balances, onClose, onBooked, onError }: {
 
   const dayPartsKey = useMemo(() => JSON.stringify(dayParts), [dayParts]);
 
+  // A native time input reports "23" as 23:00 while you are still typing the
+  // minutes, so every keystroke fired a request and a transient out-of-range
+  // value blanked the panel. Validate locally first and say so, without asking
+  // the server about something we already know is wrong.
+  const localTimeError = useMemo(() => {
+    if (spanMode !== 'part') return null;
+    const p = Object.values(dayParts)[0];
+    if (!p || p.portion !== 'hours') return null;
+    if (!p.startTime || !p.endTime) return 'Set a start and an end time.';
+    const toMin = (t: string) => {
+      const [h, m] = t.split(':').map(Number);
+      return (h || 0) * 60 + (m || 0);
+    };
+    if (toMin(p.endTime) <= toMin(p.startTime)) return 'The end time needs to be after the start.';
+    return null;
+  }, [spanMode, dayParts]);
+
   useEffect(() => {
+    if (localTimeError) { setChecking(false); return; }
     let cancelled = false;
     setChecking(true);
     const t = setTimeout(async () => {
@@ -338,7 +363,7 @@ function BookTimeOff({ balances, onClose, onBooked, onError }: {
       }
     }, 300);
     return () => { cancelled = true; clearTimeout(t); };
-  }, [startDate, endDate, leaveType, dayPartsKey]);
+  }, [startDate, endDate, leaveType, dayPartsKey, localTimeError]);
 
   async function submit() {
     setSaving(true);
@@ -356,7 +381,9 @@ function BookTimeOff({ balances, onClose, onBooked, onError }: {
   }
 
 
-  const blocked = (impact?.ownClashes.length ?? 0) > 0 || (impact?.workingDays ?? 0) === 0;
+  const blocked = localTimeError !== null
+    || (impact?.ownClashes.length ?? 0) > 0
+    || (impact?.workingDays ?? 0) === 0;
 
   return (
     <div className="p-4 rounded-lg border border-gray-200 bg-white">
@@ -399,10 +426,10 @@ function BookTimeOff({ balances, onClose, onBooked, onError }: {
             {/* The balance is in the label so the choice between holiday and
                 TOIL is made with both figures visible, not from memory. */}
             <option value="holiday">
-              Holiday{balances ? ` — ${fmtH(balances.holiday.balanceMinutes)} left` : ''}
+              Holiday{balances ? ` — ${fmtH(balances.holiday.availableMinutes)} left` : ''}
             </option>
             <option value="toil">
-              TOIL{balances ? ` — ${fmtH(balances.overtime.balanceMinutes)} banked` : ''}
+              TOIL{balances ? ` — ${fmtH(balances.overtime.availableMinutes)} available` : ''}
             </option>
             <option value="unpaid">Unpaid leave</option>
           </select>
@@ -506,15 +533,13 @@ function BookTimeOff({ balances, onClose, onBooked, onError }: {
           className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm" />
       </label>
 
-      <ImpactPanel impact={impact} checking={checking} leaveType={leaveType} />
+      <ImpactPanel impact={impact} checking={checking} leaveType={leaveType}
+        error={localTimeError ?? impactError} />
 
       <button onClick={() => void submit()} disabled={saving || checking || blocked}
         className="mt-3 px-3 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
         {saving ? 'Submitting…' : 'Submit request'}
       </button>
-      {impactError && (
-        <p className="mt-1.5 text-xs text-red-600">{impactError}</p>
-      )}
       {blocked && impact && (
         <p className="mt-1.5 text-xs text-red-600">
           {impact.ownClashes.length > 0
@@ -526,11 +551,27 @@ function BookTimeOff({ balances, onClose, onBooked, onError }: {
   );
 }
 
-export function ImpactPanel({ impact, checking, leaveType }: {
-  impact: Impact | null; checking: boolean; leaveType: LeaveType;
+export function ImpactPanel({ impact, checking, leaveType, error }: {
+  impact: Impact | null; checking: boolean; leaveType: LeaveType; error?: string | null;
 }) {
-  if (checking && !impact) return <div className="text-sm text-gray-500">Checking…</div>;
-  if (!impact) return null;
+  // Keep the panel in place whatever happens. It used to return null the
+  // moment the impact call failed — so typing a time outside someone's working
+  // day made the whole summary disappear mid-keystroke, with the reason
+  // tucked away below the button. The box stays; the message goes inside it.
+  if (error) {
+    return (
+      <div className="p-3 rounded border border-amber-200 bg-amber-50 text-sm text-amber-900">
+        {error}
+      </div>
+    );
+  }
+  if (!impact) {
+    return (
+      <div className="p-3 rounded border border-gray-200 bg-gray-50/70 text-sm text-gray-500">
+        {checking ? 'Checking…' : 'Pick your dates and times to see what this costs.'}
+      </div>
+    );
+  }
 
   const days = impact.nominalDayMinutes
     ? (impact.totalMinutes / impact.nominalDayMinutes).toFixed(1) : null;
@@ -592,26 +633,76 @@ export function ImpactPanel({ impact, checking, leaveType }: {
  */
 function BalanceCards({ balances }: { balances: MyBalances | null }) {
   if (!balances) return null;
+
+  const days = (mins: number, nominal: number | null) =>
+    nominal && nominal > 0 ? `${(mins / nominal).toFixed(1)} days` : null;
+
+  // A single net figure answers "can I book this?" but not "where did it go?".
+  // For the overtime bank especially, earned / taken as time off / paid out are
+  // three separate facts that one number silently merges.
+  //
+  // The parts are derived so they ALWAYS reconcile to the available figure,
+  // rather than read off raw credits and debits. A cancelled holiday posts a
+  // credit, so raw "in" would have read 217h on a 196h allowance — true to the
+  // ledger, wrong on a line labelled Allowance. Netting the cancellation
+  // against the booking it reverses gives the number a person expects, and
+  // allowance is then derived from what is left.
+  const t = (b: AccountBreakdown, k: string) => b.byType[k] ?? 0;
+
+  const holidayTaken = -(t(balances.holiday, 'booking') + t(balances.holiday, 'cancellation'));
+  const holidayAllowance = balances.holiday.availableMinutes + holidayTaken;
+
+  const toilTaken = -(t(balances.overtime, 'spend_toil') + t(balances.overtime, 'cancellation'));
+  const toilPaid = -(t(balances.overtime, 'spend_paid') + t(balances.overtime, 'year_end_cashout'));
+  const toilBanked = balances.overtime.availableMinutes + toilTaken + toilPaid;
+
   const cards = [
-    { label: 'Holiday left', ...balances.holiday, hint: `${balances.year} allowance` },
-    { label: 'Overtime banked', ...balances.overtime, hint: 'Take as time off or ask for it in pay' },
+    {
+      key: 'holiday',
+      label: 'Holiday',
+      b: balances.holiday,
+      parts: [
+        { label: 'Allowance', mins: holidayAllowance, always: true },
+        { label: 'Booked off', mins: holidayTaken, always: true },
+      ],
+      hint: `${balances.year} allowance`,
+    },
+    {
+      key: 'overtime',
+      label: 'Overtime',
+      b: balances.overtime,
+      parts: [
+        { label: 'Banked', mins: toilBanked, always: true },
+        { label: 'Taken as time off', mins: toilTaken, always: false },
+        { label: 'Paid out', mins: toilPaid, always: false },
+      ],
+      hint: 'Take as time off or ask for it in pay',
+    },
   ];
+
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
       {cards.map(c => {
-        const days = c.nominalDayMinutes
-          ? (c.balanceMinutes / c.nominalDayMinutes).toFixed(1) : null;
+        const avail = c.b.availableMinutes;
+        const asDays = days(avail, c.b.nominalDayMinutes);
         return (
-          <div key={c.label} className="p-3 rounded-lg border border-gray-200 bg-white">
-            <div className="text-xs text-gray-500">{c.label}</div>
+          <div key={c.key} className="p-3 rounded-lg border border-gray-200 bg-white">
+            <div className="text-xs text-gray-500">{c.label} available</div>
             <div className="flex items-baseline gap-2">
               <span className={`text-xl font-semibold tabular-nums ${
-                c.balanceMinutes < 0 ? 'text-red-700' : 'text-gray-900'}`}>
-                {fmtH(c.balanceMinutes)}
-              </span>
-              {days && <span className="text-sm text-gray-600">{days} days</span>}
+                avail < 0 ? 'text-red-700' : 'text-gray-900'}`}>{fmtH(avail)}</span>
+              {asDays && <span className="text-sm text-gray-600">{asDays}</span>}
             </div>
-            <div className="text-[11px] text-gray-400 mt-0.5">{c.hint}</div>
+
+            <dl className="mt-2 pt-2 border-t border-gray-100 space-y-0.5">
+              {c.parts.filter(p => p.always || p.mins !== 0).map(p => (
+                <div key={p.label} className="flex justify-between text-xs">
+                  <dt className="text-gray-500">{p.label}</dt>
+                  <dd className="text-gray-700 tabular-nums">{fmtH(p.mins)}</dd>
+                </div>
+              ))}
+            </dl>
+            <div className="text-[11px] text-gray-400 mt-1.5">{c.hint}</div>
           </div>
         );
       })}

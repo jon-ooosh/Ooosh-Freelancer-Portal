@@ -9,13 +9,13 @@
  *      already in the nav, deeplinked via action_url. Free, instant, and it
  *      costs nothing to send one per event.
  *
- *   2. ONE DIGEST EMAIL A DAY, and only when something is actually waiting.
- *      Never an empty email.
+ *   2. AN EMAIL PER REQUEST, because the bell alone gets missed (jon, Sep 2026
+ *      — the original digest-only design was mine and it was wrong for how he
+ *      actually works: a bell you have to be looking at is not an alert).
  *
- * Per-request email was considered and rejected: overtime CLUSTERS — seven
- * people logging after a busy week means a burst of mail on exactly the day
- * you least want it. The digest respects that, while the in-app alert means
- * nothing waits a day when the approver is at their desk.
+ *   3. A DAILY DIGEST as the backstop, and only when something is STILL
+ *      waiting. That means it now lists things that were already emailed and
+ *      not acted on — which is exactly the useful signal, not a duplicate.
  *
  * Every send is best-effort and swallowed. A notification failing must never
  * roll back the request it was announcing.
@@ -92,7 +92,7 @@ async function notify(
 export async function notifyLeaveRequested(requestId: string) {
   try {
     const r = await query(
-      `SELECT r.id, r.leave_type, r.total_minutes,
+      `SELECT r.id, r.leave_type, r.total_minutes, r.request_note,
               r.start_date::text AS start_date, r.end_date::text AS end_date,
               (p.first_name || ' ' || p.last_name) AS name
          FROM staff_leave_requests r JOIN people p ON p.id = r.person_id
@@ -101,12 +101,21 @@ export async function notifyLeaveRequested(requestId: string) {
     if (!q) return;
     const range = q.start_date === q.end_date
       ? fmtDate(q.start_date) : `${fmtDate(q.start_date)} – ${fmtDate(q.end_date)}`;
+    const what = q.leave_type === 'holiday' ? 'holiday' : q.leave_type === 'toil' ? 'TOIL' : 'unpaid leave';
     for (const u of await approverUserIds()) {
       await notify(u.id, 'follow_up',
-        `${q.name} has requested ${q.leave_type === 'holiday' ? 'holiday' : q.leave_type}`,
+        `${q.name} has requested ${what}`,
         `${range} · ${fmtH(Number(q.total_minutes))}`,
         'staff_leave_request', q.id, STAFF_URL);
     }
+    await emailApprovers(
+      `${q.name} has requested ${what}`,
+      `${esc(q.name)} has requested ${esc(what)}`,
+      [
+        `<strong>${esc(range)}</strong> — ${fmtH(Number(q.total_minutes))}`,
+        ...(q.request_note ? [`<span style="color:#64748b;">“${esc(q.request_note)}”</span>`] : []),
+      ],
+      STAFF_URL);
   } catch (e) { console.error('[staff-notifications] leave requested:', e); }
 }
 
@@ -125,7 +134,45 @@ export async function notifyOvertimeLogged(entryId: string) {
         `${fmtDate(q.work_date)} — ${q.reason}`,
         'staff_overtime_entry', q.id, STAFF_URL);
     }
+    await emailApprovers(
+      `${q.name} logged ${fmtH(Number(q.minutes))} overtime`,
+      `${esc(q.name)} logged ${fmtH(Number(q.minutes))} overtime`,
+      [
+        `<strong>${esc(fmtDate(q.work_date))}</strong> — ${fmtH(Number(q.minutes))}`,
+        `<span style="color:#64748b;">${esc(q.reason)}</span>`,
+      ],
+      STAFF_URL);
   } catch (e) { console.error('[staff-notifications] overtime logged:', e); }
+}
+
+/**
+ * Email the approver about one new request.
+ *
+ * Deliberately separate from the digest: this fires immediately, the digest
+ * catches what is still outstanding the next morning.
+ *
+ * NOTE ON DELIVERY: with EMAIL_MODE=test (the default), a template only
+ * reaches real recipients if its id is in EMAIL_LIVE_TEMPLATES. Both
+ * staff_time_request and staff_time_digest need adding there, or these land
+ * redirected/[TEST]-prefixed and look like nothing was sent.
+ */
+async function emailApprovers(subject: string, heading: string, lines: string[], linkPath: string) {
+  const approvers = await approverUserIds();
+  if (approvers.length === 0) return;
+
+  const base = process.env.APP_BASE_URL || 'https://staff.oooshtours.co.uk';
+  const body =
+    `<h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">${esc(heading)}</h2>` +
+    lines.map(l => `<p style="margin:0 0 8px;font-size:15px;color:#334155;line-height:1.6;">${l}</p>`).join('') +
+    `<p style="margin:24px 0 0;"><a href="${base}${linkPath}" ` +
+    `style="display:inline-block;padding:10px 18px;background:#7B5EA7;color:#fff;` +
+    `border-radius:6px;text-decoration:none;font-size:15px;">Review and approve</a></p>`;
+
+  for (const a of approvers) {
+    await emailService.send('staff_time_request', {
+      to: a.email, subjectOverride: subject, bodyHtmlOverride: body,
+    }).catch(e => console.error('[staff-notifications] request email failed:', e));
+  }
 }
 
 // ── The requester hears back ────────────────────────────────────────────────

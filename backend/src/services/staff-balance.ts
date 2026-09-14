@@ -471,3 +471,57 @@ export async function getTeamBalances(leaveYear: number) {
     };
   }));
 }
+
+
+// ── Breakdown ───────────────────────────────────────────────────────────────
+
+export interface AccountBreakdown {
+  account: LedgerAccount;
+  leaveYear: number;
+  /** Everything credited in: entitlement and grants, or overtime banked. */
+  inMinutes: number;
+  /** Everything spent, as a positive number. */
+  outMinutes: number;
+  availableMinutes: number;
+  nominalDayMinutes: number | null;
+  /** Per entry_type, signed, for the caller to label how it likes. */
+  byType: Record<string, number>;
+}
+
+/**
+ * The same balance, broken into what came in and what went out.
+ *
+ * A single net figure answers "can I book this?" but not "where did it go?" —
+ * and for the overtime bank especially, banked / taken as time off / paid out
+ * are three different facts that a net number silently merges. Still derived
+ * from the ledger; this adds no second source of truth, only a grouping.
+ */
+export async function getBreakdown(
+  personId: string, account: LedgerAccount, leaveYear: number
+): Promise<AccountBreakdown> {
+  const [rows, week] = await Promise.all([
+    query(
+      `SELECT entry_type, SUM(minutes)::int AS total
+         FROM staff_ledger_entries
+        WHERE person_id = $1 AND account = $2 AND leave_year = $3
+        GROUP BY entry_type`,
+      [personId, account, leaveYear]
+    ),
+    getContractedWeek(personId, `${leaveYear}-12-31`),
+  ]);
+
+  const byType: Record<string, number> = {};
+  let inMinutes = 0, outMinutes = 0;
+  for (const r of rows.rows) {
+    const v = Number(r.total);
+    byType[r.entry_type as string] = v;
+    if (v > 0) inMinutes += v; else outMinutes += -v;
+  }
+
+  return {
+    account, leaveYear, inMinutes, outMinutes,
+    availableMinutes: inMinutes - outMinutes,
+    nominalDayMinutes: week?.nominalDayMinutes ?? null,
+    byType,
+  };
+}
