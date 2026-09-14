@@ -4,6 +4,7 @@ import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
 import StaffBalancePanel from '../components/StaffBalancePanel';
+import LeaveApprovals from '../components/LeaveApprovals';
 
 /**
  * Staff — the single surface for everyone who works here (Staff Calendar).
@@ -100,6 +101,11 @@ function fmtDate(iso: string): string {
     day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC',
   });
 }
+/** Trim float noise: 28 stays 28, 22.4 stays 22.4, 22.400000000000002 does not. */
+function fmtDays(n: number): string {
+  return String(Math.round(n * 100) / 100);
+}
+
 function blankDays(cycleWeeks: number): DraftDay[] {
   const out: DraftDay[] = [];
   for (let w = 1; w <= cycleWeeks; w++) {
@@ -204,6 +210,8 @@ export default function StaffAdminPage() {
           Show people who have left
         </label>
       </div>
+
+      {isAdmin && <LeaveApprovals />}
 
       {loading ? (
         <div className="text-sm text-gray-500 py-6">Loading…</div>
@@ -531,10 +539,15 @@ function EmploymentSection({ row, onSaved, onError }: {
   useEffect(() => { void load(); }, [load]);
 
   const current = patterns.find(p => p.effective_to === null) ?? patterns[0];
+  // Days-per-week for the allowance converter below. Null when no pattern
+  // exists, because "28 days" is meaningless until we know what a week is.
+  const workingDaysPerWeek = current
+    ? current.days.filter(d => d.is_working).length / (current.cycle_weeks || 1)
+    : null;
 
   return (
     <div className="space-y-4">
-      <EmploymentDetails row={row} onSaved={onSaved} onError={onError} />
+      <EmploymentDetails row={row} workingDaysPerWeek={workingDaysPerWeek} onSaved={onSaved} onError={onError} />
       <StaffBalancePanel personId={row.personId} canManage year={new Date().getFullYear()} />
       {!loaded ? (
         <div className="text-sm text-gray-500">Loading hours…</div>
@@ -549,8 +562,9 @@ function EmploymentSection({ row, onSaved, onError }: {
   );
 }
 
-function EmploymentDetails({ row, onSaved, onError }: {
-  row: RosterRow; onSaved: (msg: string) => Promise<void>; onError: (msg: string) => void;
+function EmploymentDetails({ row, workingDaysPerWeek, onSaved, onError }: {
+  row: RosterRow; workingDaysPerWeek: number | null;
+  onSaved: (msg: string) => Promise<void>; onError: (msg: string) => void;
 }) {
   const emp = row.employment!;
   const [editing, setEditing] = useState(false);
@@ -561,6 +575,11 @@ function EmploymentDetails({ row, onSaved, onError }: {
   const [department, setDepartment] = useState(emp.department ?? '');
   const [bankHolidays, setBankHolidays] = useState<string>(emp.bankHolidayPolicy ?? '');
   const [entitlement, setEntitlement] = useState(emp.entitlementWeeks ?? '');
+  const [entitlementDays, setEntitlementDays] = useState(
+    emp.entitlementWeeks != null && workingDaysPerWeek
+      ? fmtDays(Number(emp.entitlementWeeks) * workingDaysPerWeek)
+      : ''
+  );
   const [saving, setSaving] = useState(false);
 
   async function save() {
@@ -597,7 +616,14 @@ function EmploymentDetails({ row, onSaved, onError }: {
           <div><dt className="text-xs text-gray-500">Department</dt><dd className="text-gray-900">{emp.department || '—'}</dd></div>
           <div>
             <dt className="text-xs text-gray-500">Holiday allowance</dt>
-            <dd className="text-gray-900">{emp.entitlementWeeks != null ? `${emp.entitlementWeeks} weeks` : '5.6 weeks (statutory)'}</dd>
+            <dd className="text-gray-900">
+              {emp.entitlementWeeks != null ? `${emp.entitlementWeeks} weeks` : '5.6 weeks (statutory)'}
+              {workingDaysPerWeek ? (
+                <span className="text-gray-500">
+                  {' '}= {fmtDays(Number(emp.entitlementWeeks ?? 5.6) * workingDaysPerWeek)} days
+                </span>
+              ) : null}
+            </dd>
           </div>
           <div className="col-span-2 sm:col-span-4">
             <dt className="text-xs text-gray-500">Bank holidays</dt>
@@ -640,16 +666,58 @@ function EmploymentDetails({ row, onSaved, onError }: {
             policy change follows them automatically.
           </span>
         </label>
-        <label className="text-sm">
-          <span className="block text-xs text-gray-600 mb-1">Holiday allowance (weeks)</span>
-          <input type="number" min={0} max={52} step={0.1} value={entitlement}
-            onChange={e => setEntitlement(e.target.value)} placeholder="5.6 (statutory)"
-            className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white" />
+        <div className="text-sm">
+          <span className="block text-xs text-gray-600 mb-1">Holiday allowance</span>
+          <div className="flex items-center gap-2">
+            <div className="flex-1">
+              <input type="number" min={0} max={365} step={0.5}
+                value={entitlementDays}
+                disabled={!workingDaysPerWeek}
+                onChange={e => {
+                  const v = e.target.value;
+                  setEntitlementDays(v);
+                  // Days are per-person: 5.6 weeks is 28 days on a five-day week
+                  // and 22.4 on a four-day one. Convert against THIS person's
+                  // week, and store weeks — see the note below.
+                  setEntitlement(v === '' || !workingDaysPerWeek
+                    ? '' : String(Math.round((Number(v) / workingDaysPerWeek) * 1000) / 1000));
+                }}
+                placeholder={workingDaysPerWeek ? fmtDays(5.6 * workingDaysPerWeek) : '—'}
+                className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white disabled:bg-gray-100" />
+              <span className="block text-[11px] text-gray-500 mt-0.5">days</span>
+            </div>
+            <span className="text-gray-400 pb-4">=</span>
+            <div className="flex-1">
+              <input type="number" min={0} max={52} step={0.1}
+                value={entitlement}
+                onChange={e => {
+                  const v = e.target.value;
+                  setEntitlement(v);
+                  setEntitlementDays(v === '' || !workingDaysPerWeek
+                    ? '' : fmtDays(Number(v) * workingDaysPerWeek));
+                }}
+                placeholder="5.6 (statutory)"
+                className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white" />
+              <span className="block text-[11px] text-gray-500 mt-0.5">weeks</span>
+            </div>
+          </div>
           <span className="block text-xs text-gray-500 mt-1">
-            Blank uses the statutory 5.6 weeks, applied to their own contracted hours — so
-            part-timers pro-rata without anyone calculating anything.
+            {workingDaysPerWeek ? (
+              <>
+                Type whichever is easier — they convert against this person&apos;s{' '}
+                {fmtDays(workingDaysPerWeek)}-day week. Blank uses the statutory 5.6 weeks
+                ({fmtDays(5.6 * workingDaysPerWeek)} days for them).
+              </>
+            ) : (
+              <>Set their working hours first — &ldquo;days&rdquo; has no meaning until we know what a week is for them.</>
+            )}
           </span>
-        </label>
+          <span className="block text-xs text-gray-500 mt-1">
+            Stored in <strong>weeks</strong>, deliberately: if they later change to a different
+            number of days a week, 5.6 weeks stays right while a fixed day count would quietly
+            become wrong.
+          </span>
+        </div>
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
         <label className="text-sm">

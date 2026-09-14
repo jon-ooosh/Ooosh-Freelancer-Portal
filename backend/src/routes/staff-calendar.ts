@@ -30,6 +30,11 @@ import {
   computeEntitlement, getPatternPeriods, getContractedWeek, STATUTORY_WEEKS,
   type LedgerAccount,
 } from '../services/staff-balance';
+import {
+  createRequest, approveRequest, declineRequest, withdrawRequest, cancelRequest,
+  getRequest, listRequests, getImpact, countPending,
+  type LeaveType, type LeaveStatus, type DayPortion,
+} from '../services/staff-leave';
 
 const router = Router();
 router.use(authenticate, authorize(...STAFF_ROLES));
@@ -112,6 +117,176 @@ router.get('/roster', authorize(...MANAGER_ROLES), async (req: AuthRequest, res:
   } catch (err) {
     console.error('[staff-calendar] roster error:', err);
     res.status(500).json({ error: 'Failed to load the staff list' });
+  }
+});
+
+// ── Leave requests (Phase B2) ───────────────────────────────────────────────
+//
+// Staff request their own; admin can request on someone's behalf and is the
+// only one who decides. Every check is a WARNING except double-booking and
+// requesting days someone is not contracted to work, which corrupt data
+// rather than merely inconveniencing anyone.
+
+const halfDaysSchema = z.record(z.string().regex(DATE_RE), z.enum(['full', 'am', 'pm'])).optional();
+
+/** Resolve the person a leave action is about, and whether the caller may act. */
+async function resolveLeaveTarget(req: AuthRequest, bodyPersonId?: string) {
+  const own = await personIdForUser(req.user!.id);
+  const personId = bodyPersonId ?? own;
+  if (!personId) return { error: 'No staff record is linked to your login' as const };
+  if (personId !== own && !isAdmin(req)) {
+    return { error: 'You can only request leave for yourself' as const };
+  }
+  return { personId, own };
+}
+
+// GET /api/staff-calendar/leave/impact?personId=&from=&to=&type=
+// Shown to the REQUESTER before submitting as well as to the approver — the
+// best clash is the one that never gets requested (spec §5.2).
+router.get('/leave/impact', async (req: AuthRequest, res: Response) => {
+  const from = String(req.query.from || '');
+  const to = String(req.query.to || from);
+  const type = String(req.query.type || 'holiday') as LeaveType;
+  if (!DATE_RE.test(from) || !DATE_RE.test(to)) { res.status(400).json({ error: 'from and to must be YYYY-MM-DD' }); return; }
+  if (!['holiday', 'toil', 'unpaid'].includes(type)) { res.status(400).json({ error: 'Unknown leave type' }); return; }
+
+  const target = await resolveLeaveTarget(req, req.query.personId ? String(req.query.personId) : undefined);
+  if ('error' in target) { res.status(403).json({ error: target.error }); return; }
+  try {
+    const halfDays = req.query.halfDays ? JSON.parse(String(req.query.halfDays)) : {};
+    res.json({ data: await getImpact(target.personId, from, to, type, halfDays,
+      req.query.excludeRequestId ? String(req.query.excludeRequestId) : undefined) });
+  } catch (err) {
+    console.error('[staff-calendar] impact error:', err);
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to work out the impact' });
+  }
+});
+
+// GET /api/staff-calendar/leave?status=&personId=&from=&to=
+// Non-admins see only their own, whatever they ask for.
+router.get('/leave', async (req: AuthRequest, res: Response) => {
+  try {
+    const own = await personIdForUser(req.user!.id);
+    const requested = req.query.personId ? String(req.query.personId) : undefined;
+    const personId = isAdmin(req) ? requested : (own ?? '__none__');
+    const status = req.query.status ? String(req.query.status) as LeaveStatus : undefined;
+    res.json({
+      data: await listRequests({
+        personId, status,
+        from: DATE_RE.test(String(req.query.from)) ? String(req.query.from) : undefined,
+        to: DATE_RE.test(String(req.query.to)) ? String(req.query.to) : undefined,
+      }),
+      pendingCount: isAdmin(req) ? await countPending() : undefined,
+    });
+  } catch (err) {
+    console.error('[staff-calendar] list leave error:', err);
+    res.status(500).json({ error: 'Failed to load leave requests' });
+  }
+});
+
+// POST /api/staff-calendar/leave
+router.post('/leave', async (req: AuthRequest, res: Response) => {
+  const schema = z.object({
+    personId: z.string().uuid().optional(),
+    leaveType: z.enum(['holiday', 'toil', 'unpaid']),
+    startDate: dateStr,
+    endDate: dateStr,
+    halfDays: halfDaysSchema,
+    note: z.string().max(1000).nullish(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
+
+  const target = await resolveLeaveTarget(req, parsed.data.personId);
+  if ('error' in target) { res.status(403).json({ error: target.error }); return; }
+  try {
+    const id = await createRequest({
+      personId: target.personId,
+      leaveType: parsed.data.leaveType,
+      startDate: parsed.data.startDate,
+      endDate: parsed.data.endDate,
+      halfDays: parsed.data.halfDays as Record<string, DayPortion> | undefined,
+      note: parsed.data.note ?? null,
+    }, req.user!.id);
+    res.status(201).json({ data: await getRequest(id) });
+  } catch (err) {
+    console.error('[staff-calendar] create leave error:', err);
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to submit the request' });
+  }
+});
+
+// GET /api/staff-calendar/leave/:id — the approval surface (spec §11).
+// Carries the impact alongside the request, so approving is never a guess.
+router.get('/leave/:id', async (req: AuthRequest, res: Response) => {
+  try {
+    const request = await getRequest(req.params.id as string);
+    if (!request) { res.status(404).json({ error: 'Request not found' }); return; }
+    const own = await personIdForUser(req.user!.id);
+    if (!isAdmin(req) && request.personId !== own) {
+      res.status(403).json({ error: 'Insufficient permissions' }); return;
+    }
+    const halfDays = Object.fromEntries(
+      request.days.filter(d => d.portion !== 'full').map(d => [d.date, d.portion]));
+    const impact = await getImpact(
+      request.personId, request.startDate, request.endDate, request.leaveType,
+      halfDays, request.id
+    );
+    res.json({ data: { request, impact } });
+  } catch (err) {
+    console.error('[staff-calendar] leave detail error:', err);
+    res.status(500).json({ error: 'Failed to load the request' });
+  }
+});
+
+// POST /api/staff-calendar/leave/:id/approve
+router.post('/leave/:id/approve', adminOnly, async (req: AuthRequest, res: Response) => {
+  try {
+    await approveRequest(req.params.id as string, req.body?.note ?? null, req.user!.id);
+    res.json({ data: await getRequest(req.params.id as string) });
+  } catch (err) {
+    console.error('[staff-calendar] approve error:', err);
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to approve' });
+  }
+});
+
+// POST /api/staff-calendar/leave/:id/decline
+router.post('/leave/:id/decline', adminOnly, async (req: AuthRequest, res: Response) => {
+  const schema = z.object({ note: z.string().min(1).max(1000) });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: 'A reason is required when declining' }); return; }
+  try {
+    await declineRequest(req.params.id as string, parsed.data.note, req.user!.id);
+    res.json({ data: await getRequest(req.params.id as string) });
+  } catch (err) {
+    console.error('[staff-calendar] decline error:', err);
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to decline' });
+  }
+});
+
+// POST /api/staff-calendar/leave/:id/withdraw — the requester pulls their own.
+router.post('/leave/:id/withdraw', async (req: AuthRequest, res: Response) => {
+  try {
+    const own = await personIdForUser(req.user!.id);
+    if (!own) { res.status(403).json({ error: 'No staff record is linked to your login' }); return; }
+    await withdrawRequest(req.params.id as string, own);
+    res.json({ data: await getRequest(req.params.id as string) });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to withdraw' });
+  }
+});
+
+// POST /api/staff-calendar/leave/:id/cancel — admin cancels an APPROVED request
+// and the time goes back, as a visible cancellation entry rather than a hole.
+router.post('/leave/:id/cancel', adminOnly, async (req: AuthRequest, res: Response) => {
+  const schema = z.object({ reason: z.string().min(1).max(1000) });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: 'A reason is required when cancelling' }); return; }
+  try {
+    await cancelRequest(req.params.id as string, parsed.data.reason, req.user!.id);
+    res.json({ data: await getRequest(req.params.id as string) });
+  } catch (err) {
+    console.error('[staff-calendar] cancel error:', err);
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to cancel' });
   }
 });
 
