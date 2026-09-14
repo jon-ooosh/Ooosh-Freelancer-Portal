@@ -103,6 +103,7 @@ export default function MyTimePage() {
   const [requests, setRequests] = useState<LeaveRequest[]>([]);
   const [overtime, setOvertime] = useState<OvertimeEntry[]>([]);
   const [balances, setBalances] = useState<MyBalances | null>(null);
+  const [openForm, setOpenForm] = useState<'leave' | 'overtime' | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -154,11 +155,29 @@ export default function MyTimePage() {
 
       <BalanceCards balances={balances} />
 
-      <div className="flex flex-wrap gap-2">
-        <BookTimeOff balances={balances}
-          onBooked={async (msg) => { setNotice(msg); setError(null); await load(); }} onError={setError} />
-        <LogOvertime onLogged={async (msg) => { setNotice(msg); setError(null); await load(); }} onError={setError} />
-      </div>
+      {/* One form at a time. These were previously siblings in a flex row, so
+          opening either expanded it to full width while the other button
+          stretched to match — a stray panel beside the open form. */}
+      {openForm === null ? (
+        <div className="flex flex-wrap gap-2">
+          <button onClick={() => setOpenForm('leave')}
+            className="px-3 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700">
+            Book time off
+          </button>
+          <button onClick={() => setOpenForm('overtime')}
+            className="px-3 py-2 text-sm rounded border border-ooosh-300 text-ooosh-700 hover:bg-ooosh-50">
+            Log overtime
+          </button>
+        </div>
+      ) : openForm === 'leave' ? (
+        <BookTimeOff balances={balances} onClose={() => setOpenForm(null)}
+          onBooked={async (msg) => { setNotice(msg); setError(null); setOpenForm(null); await load(); }}
+          onError={setError} />
+      ) : (
+        <LogOvertime onClose={() => setOpenForm(null)}
+          onLogged={async (msg) => { setNotice(msg); setError(null); setOpenForm(null); await load(); }}
+          onError={setError} />
+      )}
 
       <section className="mt-6">
         <h2 className="text-sm font-semibold text-gray-900 uppercase tracking-wide mb-2">Upcoming</h2>
@@ -246,12 +265,12 @@ function RequestCard({ r, onWithdraw }: { r: LeaveRequest; onWithdraw?: (id: str
   );
 }
 
-function BookTimeOff({ balances, onBooked, onError }: {
-  balances: MyBalances | null;
+function BookTimeOff({ balances, onClose, onBooked, onError }: {
+  balances: MyBalances | null; onClose: () => void;
   onBooked: (msg: string) => Promise<void>; onError: (msg: string) => void;
 }) {
-  const [open, setOpen] = useState(false);
   const [leaveType, setLeaveType] = useState<LeaveType>('holiday');
+  const [spanMode, setSpanMode] = useState<'days' | 'part'>('days');
   const [startDate, setStartDate] = useState(TODAY);
   const [endDate, setEndDate] = useState(TODAY);
   // A day can be whole, a half, or an actual period ("leaving at 15:00").
@@ -264,10 +283,21 @@ function BookTimeOff({ balances, onBooked, onError }: {
   // Keep the end date sane rather than letting an invalid range reach the API.
   useEffect(() => { if (endDate < startDate) setEndDate(startDate); }, [startDate, endDate]);
 
+  // Part-of-a-day is always one date, and the times must follow it if the date
+  // moves — otherwise dayParts still points at yesterday and the request costs
+  // a whole day without saying why.
+  useEffect(() => {
+    if (spanMode !== 'part') return;
+    setEndDate(startDate);
+    setDayParts(prev => {
+      const existing = Object.values(prev)[0];
+      return { [startDate]: existing ?? { portion: 'hours', startTime: '15:00', endTime: '17:00' } };
+    });
+  }, [spanMode, startDate]);
+
   const dayPartsKey = useMemo(() => JSON.stringify(dayParts), [dayParts]);
 
   useEffect(() => {
-    if (!open) return;
     let cancelled = false;
     setChecking(true);
     const t = setTimeout(async () => {
@@ -284,7 +314,7 @@ function BookTimeOff({ balances, onBooked, onError }: {
       }
     }, 300);
     return () => { cancelled = true; clearTimeout(t); };
-  }, [open, startDate, endDate, leaveType, dayPartsKey]);
+  }, [startDate, endDate, leaveType, dayPartsKey]);
 
   async function submit() {
     setSaving(true);
@@ -294,21 +324,13 @@ function BookTimeOff({ balances, onBooked, onError }: {
         halfDays: Object.keys(dayParts).length ? dayParts : undefined,
         note: note || null,
       });
-      setOpen(false); setNote(''); setDayParts({}); setImpact(null);
+      setNote(''); setDayParts({}); setImpact(null);
       await onBooked('Request submitted — you’ll hear when it’s been looked at.');
     } catch (err) {
       onError(err instanceof Error ? err.message : 'Failed to submit the request');
     } finally { setSaving(false); }
   }
 
-  if (!open) {
-    return (
-      <button onClick={() => setOpen(true)}
-        className="px-3 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700">
-        Book time off
-      </button>
-    );
-  }
 
   const blocked = (impact?.ownClashes.length ?? 0) > 0 || (impact?.workingDays ?? 0) === 0;
 
@@ -316,7 +338,33 @@ function BookTimeOff({ balances, onBooked, onError }: {
     <div className="p-4 rounded-lg border border-gray-200 bg-white">
       <div className="flex items-center justify-between mb-3">
         <h2 className="font-medium text-gray-900">Book time off</h2>
-        <button onClick={() => setOpen(false)} className="text-sm text-gray-500 hover:text-gray-700">Cancel</button>
+        <button onClick={onClose} className="text-sm text-gray-500 hover:text-gray-700">Cancel</button>
+      </div>
+
+      <div className="mb-3">
+        <span className="block text-xs text-gray-600 mb-1">How much time?</span>
+        <div className="flex rounded border border-gray-300 overflow-hidden text-xs w-fit">
+          {([['days', 'Whole days'], ['part', 'Part of a day']] as const).map(([m, label]) => (
+            <button key={m}
+              onClick={() => {
+                setSpanMode(m);
+                if (m === 'part') {
+                  setEndDate(startDate);
+                  setDayParts({ [startDate]: { portion: 'hours', startTime: '15:00', endTime: '17:00' } });
+                } else {
+                  setDayParts({});
+                }
+              }}
+              className={`px-3 py-1.5 ${spanMode === m ? 'bg-ooosh-600 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'}`}>
+              {label}
+            </button>
+          ))}
+        </div>
+        {spanMode === 'part' && (
+          <p className="mt-1 text-xs text-gray-500">
+            For an hour or two — an early finish, a late start, or an appointment.
+          </p>
+        )}
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3">
@@ -340,14 +388,42 @@ function BookTimeOff({ balances, onBooked, onError }: {
           <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)}
             className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm" />
         </label>
-        <label className="text-sm">
-          <span className="block text-xs text-gray-600 mb-1">To</span>
-          <input type="date" value={endDate} min={startDate} onChange={e => setEndDate(e.target.value)}
-            className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm" />
-        </label>
+        {spanMode === 'days' && (
+          <label className="text-sm">
+            <span className="block text-xs text-gray-600 mb-1">To</span>
+            <input type="date" value={endDate} min={startDate} onChange={e => setEndDate(e.target.value)}
+              className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm" />
+          </label>
+        )}
       </div>
 
-      {impact && impact.days.length > 0 && impact.days.length <= 14 && (
+      {spanMode === 'part' && (
+        <div className="mb-3 flex flex-wrap items-end gap-2">
+          <label className="text-sm">
+            <span className="block text-xs text-gray-600 mb-1">From</span>
+            <input type="time"
+              value={Object.values(dayParts)[0]?.startTime ?? '15:00'}
+              onChange={e => setDayParts({ [startDate]: {
+                ...(Object.values(dayParts)[0] ?? { portion: 'hours' as const }),
+                portion: 'hours', startTime: e.target.value } })}
+              className="px-2 py-1.5 border border-gray-300 rounded text-sm" />
+          </label>
+          <label className="text-sm">
+            <span className="block text-xs text-gray-600 mb-1">To</span>
+            <input type="time"
+              value={Object.values(dayParts)[0]?.endTime ?? '17:00'}
+              onChange={e => setDayParts({ [startDate]: {
+                ...(Object.values(dayParts)[0] ?? { portion: 'hours' as const }),
+                portion: 'hours', endTime: e.target.value } })}
+              className="px-2 py-1.5 border border-gray-300 rounded text-sm" />
+          </label>
+          {impact && impact.totalMinutes > 0 && (
+            <span className="pb-2 text-sm text-gray-700">= {fmtH(impact.totalMinutes)}</span>
+          )}
+        </div>
+      )}
+
+      {spanMode === 'days' && impact && impact.days.length > 0 && impact.days.length <= 14 && (
         <div className="mb-3">
           <span className="block text-xs text-gray-600 mb-1">
             Days — click to switch between a whole day, a half, or set times
@@ -561,10 +637,10 @@ function OvertimeCard({ e, onCancel }: {
  * the clock" — and it is what actually gets stored either way, rounded to the
  * five-minute step the module works in.
  */
-function LogOvertime({ onLogged, onError }: {
+function LogOvertime({ onClose, onLogged, onError }: {
+  onClose: () => void;
   onLogged: (msg: string) => Promise<void>; onError: (msg: string) => void;
 }) {
-  const [open, setOpen] = useState(false);
   const [workDate, setWorkDate] = useState(TODAY);
   const [mode, setMode] = useState<'times' | 'minutes'>('times');
   const [startTime, setStartTime] = useState('08:00');
@@ -582,7 +658,12 @@ function LogOvertime({ onLogged, onError }: {
     return toMin(endTime) - toMin(startTime);
   }, [mode, minutes, startTime, endTime]);
 
-  const invalid = computed <= 0 || computed % 5 !== 0 || computed > 960 || !reason.trim();
+  // Snap UP to the 5-minute step rather than refusing. Telling someone their
+  // 12 minutes "will need rounding" and then blocking them is friction for no
+  // benefit — round it, say so plainly, and let them get on.
+  const snapped = computed > 0 ? Math.ceil(computed / 5) * 5 : 0;
+  const wasSnapped = snapped !== computed;
+  const invalid = snapped <= 0 || snapped > 960 || !reason.trim();
 
   async function save() {
     setSaving(true);
@@ -591,30 +672,22 @@ function LogOvertime({ onLogged, onError }: {
         workDate,
         startTime: mode === 'times' ? startTime : null,
         endTime: mode === 'times' ? endTime : null,
-        minutes: computed,
+        minutes: snapped,
         reason: reason.trim(),
       });
-      setOpen(false); setReason('');
+      setReason('');
       await onLogged('Overtime logged — it’ll be added to your bank once approved.');
     } catch (err) {
       onError(err instanceof Error ? err.message : 'Failed to log the overtime');
     } finally { setSaving(false); }
   }
 
-  if (!open) {
-    return (
-      <button onClick={() => setOpen(true)}
-        className="px-3 py-2 text-sm rounded border border-ooosh-300 text-ooosh-700 hover:bg-ooosh-50">
-        Log overtime
-      </button>
-    );
-  }
 
   return (
     <div className="w-full p-4 rounded-lg border border-gray-200 bg-white">
       <div className="flex items-center justify-between mb-1">
         <h2 className="font-medium text-gray-900">Log overtime</h2>
-        <button onClick={() => setOpen(false)} className="text-sm text-gray-500 hover:text-gray-700">Cancel</button>
+        <button onClick={onClose} className="text-sm text-gray-500 hover:text-gray-700">Cancel</button>
       </div>
       <p className="text-xs text-gray-500 mb-3">
         Goes into your bank once approved. You decide later whether to take it as time off or ask for it in pay.
@@ -675,15 +748,15 @@ function LogOvertime({ onLogged, onError }: {
           className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm" />
       </label>
 
-      {computed > 0 && computed % 5 !== 0 && (
-        <p className="mb-2 text-xs text-amber-700">
-          Overtime is logged in 5-minute steps — {computed} minutes will need rounding.
+      {wasSnapped && (
+        <p className="mb-2 text-xs text-gray-600">
+          Rounded up to {fmtH(snapped)} — overtime is banked in 5-minute steps.
         </p>
       )}
 
       <button onClick={() => void save()} disabled={saving || invalid}
         className="px-3 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
-        {saving ? 'Logging…' : `Log ${computed > 0 ? fmtH(computed) : ''}`}
+        {saving ? 'Logging…' : `Log ${snapped > 0 ? fmtH(snapped) : ''}`}
       </button>
     </div>
   );

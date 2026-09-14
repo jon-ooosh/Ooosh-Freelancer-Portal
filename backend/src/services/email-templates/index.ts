@@ -17,6 +17,17 @@ export interface EmailTemplate {
 
 const templates: Record<string, EmailTemplate> = {
 
+  // Staff Calendar: one digest a day listing leave requests and overtime
+  // waiting for a decision. Only sent when something is actually pending —
+  // never an empty email. Body is built by services/staff-notifications.ts and
+  // passed as bodyHtmlOverride, so the template is just the shell.
+  staff_time_digest: {
+    variant: 'internal',
+    preheader: 'Staff time requests waiting for a decision',
+    subject: 'Staff time requests waiting',
+    body: '<p>Requests are waiting for a decision in the Ooosh Operations Platform.</p>',
+  },
+
   // ── Client-facing templates ────────────────────────────────────────────
 
   // Driver hire-form email verification code (OTP). Sent by the hire form app
