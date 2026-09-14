@@ -937,6 +937,26 @@ export function startScheduler() {
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: Staff Documents reminders scheduled daily at 09:35 Europe/London');
 
+  // ── Staff time digest — one email a day, only if something is waiting ──────
+  // The in-app notification already fired when each request was made; this is
+  // the backstop for days the approver is not at their desk. Deliberately
+  // silent when nothing is pending — an empty daily email trains people to
+  // ignore it (docs/STAFF-CALENDAR-SPEC.md §11).
+  cron.schedule('45 8 * * *', async () => {
+    try {
+      const { runStaffTimeDigest } = await import('../services/staff-notifications');
+      const r = await runStaffTimeDigest();
+      if (r.emailed) {
+        console.log(`Scheduler: Staff time digest sent — ${r.pendingLeave} leave, ${r.pendingOvertime} overtime`);
+      } else {
+        console.log(`Scheduler: Staff time digest not sent (${r.skippedReason})`);
+      }
+    } catch (err) {
+      console.error('Scheduler: Staff time digest failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: Staff time digest scheduled daily at 08:45 Europe/London');
+
   // ── Studio-sitter lock-up chase (morning after) ──────────────────────────
   // Daily at 08:45 Europe/London. For any shift that closed without a lock-up
   // report, reminds the rostered sitter + alerts the office. Once per shift

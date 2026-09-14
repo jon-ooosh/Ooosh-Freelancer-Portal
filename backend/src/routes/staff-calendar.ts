@@ -42,6 +42,9 @@ import {
   cashOut, yearEndCashOut, getPayrollReport, payrollCsv, recordBatch,
   minutesBetween, MIN_INCREMENT, type OvertimeStatus,
 } from '../services/staff-overtime';
+import {
+  notifyLeaveRequested, notifyOvertimeLogged, notifyDecision,
+} from '../services/staff-notifications';
 
 const router = Router();
 router.use(authenticate, authorize(...STAFF_ROLES));
@@ -226,6 +229,7 @@ router.post('/leave', async (req: AuthRequest, res: Response) => {
       halfDays: parsed.data.halfDays as Record<string, DayPortion | DaySpec> | undefined,
       note: parsed.data.note ?? null,
     }, req.user!.id);
+    void notifyLeaveRequested(id);
     res.status(201).json({ data: await getRequest(id) });
   } catch (err) {
     console.error('[staff-calendar] create leave error:', err);
@@ -263,7 +267,11 @@ router.get('/leave/:id', async (req: AuthRequest, res: Response) => {
 router.post('/leave/:id/approve', adminOnly, async (req: AuthRequest, res: Response) => {
   try {
     await approveRequest(req.params.id as string, req.body?.note ?? null, req.user!.id);
-    res.json({ data: await getRequest(req.params.id as string) });
+    const r = await getRequest(req.params.id as string);
+    if (r) void notifyDecision({ personId: r.personId, kind: 'leave', outcome: 'approved',
+      summary: `${r.startDate}${r.endDate !== r.startDate ? ` – ${r.endDate}` : ''}`,
+      note: r.decisionNote, entityId: r.id });
+    res.json({ data: r });
   } catch (err) {
     console.error('[staff-calendar] approve error:', err);
     res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to approve' });
@@ -277,7 +285,11 @@ router.post('/leave/:id/decline', adminOnly, async (req: AuthRequest, res: Respo
   if (!parsed.success) { res.status(400).json({ error: 'A reason is required when declining' }); return; }
   try {
     await declineRequest(req.params.id as string, parsed.data.note, req.user!.id);
-    res.json({ data: await getRequest(req.params.id as string) });
+    const r = await getRequest(req.params.id as string);
+    if (r) void notifyDecision({ personId: r.personId, kind: 'leave', outcome: 'declined',
+      summary: `${r.startDate}${r.endDate !== r.startDate ? ` – ${r.endDate}` : ''}`,
+      note: r.decisionNote, entityId: r.id });
+    res.json({ data: r });
   } catch (err) {
     console.error('[staff-calendar] decline error:', err);
     res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to decline' });
@@ -365,9 +377,10 @@ router.post('/overtime', async (req: AuthRequest, res: Response) => {
   if (!minutes || minutes <= 0) {
     res.status(400).json({ error: 'Give either a start and end time, or a number of minutes' }); return;
   }
-  if (minutes % MIN_INCREMENT !== 0) {
-    res.status(400).json({ error: `Overtime is logged in ${MIN_INCREMENT}-minute steps` }); return;
-  }
+  // Snap UP to the step rather than refusing. Bouncing someone back to fix 12
+  // minutes into 15 is friction for no benefit — round it, and let the UI say
+  // plainly that it did.
+  const snapped = Math.ceil(minutes / MIN_INCREMENT) * MIN_INCREMENT;
 
   try {
     const id = await createOvertime({
@@ -375,9 +388,10 @@ router.post('/overtime', async (req: AuthRequest, res: Response) => {
       workDate: parsed.data.workDate,
       startTime: parsed.data.startTime ?? null,
       endTime: parsed.data.endTime ?? null,
-      minutes,
+      minutes: snapped,
       reason: parsed.data.reason,
     }, req.user!.id);
+    void notifyOvertimeLogged(id);
     res.status(201).json({ data: await getOvertime(id) });
   } catch (err) {
     console.error('[staff-calendar] create overtime error:', err);
@@ -388,7 +402,11 @@ router.post('/overtime', async (req: AuthRequest, res: Response) => {
 router.post('/overtime/:id/approve', adminOnly, async (req: AuthRequest, res: Response) => {
   try {
     await approveOvertime(req.params.id as string, req.body?.note ?? null, req.user!.id);
-    res.json({ data: await getOvertime(req.params.id as string) });
+    const e = await getOvertime(req.params.id as string);
+    if (e) void notifyDecision({ personId: e.personId, kind: 'overtime', outcome: 'approved',
+      summary: `${e.minutes} min on ${e.workDate} — now in your bank`,
+      note: e.decisionNote, entityId: e.id });
+    res.json({ data: e });
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to approve' });
   }
@@ -399,7 +417,10 @@ router.post('/overtime/:id/decline', adminOnly, async (req: AuthRequest, res: Re
   if (!parsed.success) { res.status(400).json({ error: 'A reason is required when declining' }); return; }
   try {
     await declineOvertime(req.params.id as string, parsed.data.note, req.user!.id);
-    res.json({ data: await getOvertime(req.params.id as string) });
+    const e = await getOvertime(req.params.id as string);
+    if (e) void notifyDecision({ personId: e.personId, kind: 'overtime', outcome: 'declined',
+      summary: `${e.minutes} min on ${e.workDate}`, note: e.decisionNote, entityId: e.id });
+    res.json({ data: e });
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to decline' });
   }
