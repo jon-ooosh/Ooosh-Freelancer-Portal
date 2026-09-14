@@ -222,6 +222,9 @@ export interface LeaveDayOverlay {
   portion: DayPortion;
   leaveType: string;
   status: 'pending' | 'approved';
+  /** Set when portion = 'hours' — shown to peers as the window, without a reason. */
+  startTime?: string | null;
+  endTime?: string | null;
 }
 
 /**
@@ -247,12 +250,16 @@ export function mergeAbsenceLayer(days: StaffDay[], leave: LeaveDayOverlay[] = [
     if (!l || d.status !== 'working') return d;
 
     const approved = l.status === 'approved';
-    const halfDay = l.portion === 'am' || l.portion === 'pm';
+    // Anything short of a whole day is 'partial': they are in for some of it,
+    // and the coverage warnings must not count them absent all day. That
+    // includes a timed period ('hours') as well as a half day.
+    const wholeDay = l.portion === 'full';
 
     return {
       ...d,
-      status: approved ? (halfDay ? 'partial' : 'leave') : 'partial',
+      status: approved ? (wholeDay ? 'leave' : 'partial') : 'partial',
       portion: l.portion,
+      ...(l.startTime && l.endTime ? { window: { start: l.startTime.slice(0, 5), end: l.endTime.slice(0, 5) } } : {}),
       detail: { leaveType: approved ? l.leaveType : `${l.leaveType} (requested)` },
     };
   });
@@ -265,6 +272,7 @@ export async function getLeaveOverlay(
   if (personIds.length === 0) return new Map();
   const r = await query(
     `SELECT r.person_id, d.leave_date::text AS leave_date, d.portion,
+            d.start_time::text AS start_time, d.end_time::text AS end_time,
             r.leave_type, r.status
        FROM staff_leave_request_days d
        JOIN staff_leave_requests r ON r.id = d.request_id
@@ -281,6 +289,8 @@ export async function getLeaveOverlay(
       portion: row.portion as DayPortion,
       leaveType: row.leave_type as string,
       status: row.status as 'pending' | 'approved',
+      startTime: (row.start_time as string) ?? null,
+      endTime: (row.end_time as string) ?? null,
     });
     out.set(row.person_id, list);
   }

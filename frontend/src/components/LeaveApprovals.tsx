@@ -62,16 +62,27 @@ function fmtH(min: number): string {
   return m === 0 ? `${sign}${h}h` : `${sign}${h}h ${m}m`;
 }
 
+interface OvertimeEntry {
+  id: string; personName: string; workDate: string;
+  startTime: string | null; endTime: string | null;
+  minutes: number; reason: string; status: string;
+}
+
 export default function LeaveApprovals({ onChanged }: { onChanged?: () => void }) {
   const [pending, setPending] = useState<LeaveRequest[]>([]);
+  const [overtime, setOvertime] = useState<OvertimeEntry[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [openId, setOpenId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const res = await api.get<{ data: LeaveRequest[] }>('/staff-calendar/leave?status=pending');
-      setPending(res.data);
+      const [leave, ot] = await Promise.all([
+        api.get<{ data: LeaveRequest[] }>('/staff-calendar/leave?status=pending'),
+        api.get<{ data: OvertimeEntry[] }>('/staff-calendar/overtime?status=pending'),
+      ]);
+      setPending(leave.data);
+      setOvertime(ot.data);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load requests');
     } finally { setLoaded(true); }
@@ -84,7 +95,7 @@ export default function LeaveApprovals({ onChanged }: { onChanged?: () => void }
   return (
     <section className="mb-6">
       <div className="flex items-baseline gap-2 mb-2">
-        <h2 className="text-sm font-semibold text-gray-900 uppercase tracking-wide">Leave requests</h2>
+        <h2 className="text-sm font-semibold text-gray-900 uppercase tracking-wide">Waiting for you</h2>
         {pending.length > 0 && (
           <span className="text-xs px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 font-medium">
             {pending.length} waiting
@@ -104,12 +115,82 @@ export default function LeaveApprovals({ onChanged }: { onChanged?: () => void }
             <ApprovalCard key={r.id} request={r}
               open={openId === r.id}
               onToggle={() => setOpenId(openId === r.id ? null : r.id)}
-              onDecided={async (msg) => { setError(null); await load(); onChanged?.(); if (msg) setError(null); }}
+              onDecided={async () => { setError(null); await load(); onChanged?.(); }}
               onError={setError} />
           ))}
         </div>
       )}
+
+      {overtime.length > 0 && (
+        <div className="mt-4">
+          <div className="flex items-baseline gap-2 mb-2">
+            <h3 className="text-sm font-semibold text-gray-900 uppercase tracking-wide">Overtime</h3>
+            <span className="text-xs px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 font-medium">
+              {overtime.length} waiting
+            </span>
+          </div>
+          <p className="text-xs text-gray-500 mb-2">
+            Approving adds it to their bank. Whether it becomes time off or pay is decided later,
+            by them.
+          </p>
+          <div className="space-y-2">
+            {overtime.map(e => (
+              <OvertimeApprovalRow key={e.id} entry={e}
+                onDecided={async () => { setError(null); await load(); onChanged?.(); }}
+                onError={setError} />
+            ))}
+          </div>
+        </div>
+      )}
     </section>
+  );
+}
+
+function OvertimeApprovalRow({ entry, onDecided, onError }: {
+  entry: OvertimeEntry; onDecided: () => Promise<void>; onError: (msg: string) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+
+  async function decide(action: 'approve' | 'decline') {
+    let body: Record<string, string> = {};
+    if (action === 'decline') {
+      const note = prompt(`Why are you declining ${entry.personName}'s overtime?`);
+      if (!note) return;
+      body = { note };
+    }
+    setBusy(true);
+    try {
+      await api.post(`/staff-calendar/overtime/${entry.id}/${action}`, body);
+      await onDecided();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : `Failed to ${action}`);
+    } finally { setBusy(false); }
+  }
+
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-lg border border-gray-200 bg-white">
+      <div className="min-w-0">
+        <div className="font-medium text-gray-900">
+          {entry.personName}
+          <span className="ml-2 text-sm font-normal text-gray-600">{fmtDate(entry.workDate)}</span>
+          <span className="ml-2 text-sm text-gray-900">{fmtH(entry.minutes)}</span>
+        </div>
+        <div className="text-xs text-gray-500">
+          {entry.startTime && entry.endTime && `${entry.startTime.slice(0, 5)}–${entry.endTime.slice(0, 5)} · `}
+          {entry.reason}
+        </div>
+      </div>
+      <div className="flex gap-2 shrink-0">
+        <button onClick={() => void decide('approve')} disabled={busy}
+          className="px-2.5 py-1.5 text-sm rounded bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50">
+          Approve
+        </button>
+        <button onClick={() => void decide('decline')} disabled={busy}
+          className="px-2.5 py-1.5 text-sm rounded border border-red-300 text-red-700 hover:bg-red-50 disabled:opacity-50">
+          Decline
+        </button>
+      </div>
+    </div>
   );
 }
 

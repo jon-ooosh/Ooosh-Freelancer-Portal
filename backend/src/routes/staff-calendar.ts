@@ -33,8 +33,15 @@ import {
 import {
   createRequest, approveRequest, declineRequest, withdrawRequest, cancelRequest,
   getRequest, listRequests, getImpact, countPending,
-  type LeaveType, type LeaveStatus, type DayPortion,
+  type LeaveType, type LeaveStatus, type DayPortion, type DaySpec,
 } from '../services/staff-leave';
+import {
+  createEntry as createOvertime, approveEntry as approveOvertime,
+  declineEntry as declineOvertime, cancelEntry as cancelOvertime,
+  listEntries as listOvertime, getEntry as getOvertime, countPendingOvertime,
+  cashOut, yearEndCashOut, getPayrollReport, payrollCsv, recordBatch,
+  minutesBetween, MIN_INCREMENT, type OvertimeStatus,
+} from '../services/staff-overtime';
 
 const router = Router();
 router.use(authenticate, authorize(...STAFF_ROLES));
@@ -127,7 +134,18 @@ router.get('/roster', authorize(...MANAGER_ROLES), async (req: AuthRequest, res:
 // requesting days someone is not contracted to work, which corrupt data
 // rather than merely inconveniencing anyone.
 
-const halfDaysSchema = z.record(z.string().regex(DATE_RE), z.enum(['full', 'am', 'pm'])).optional();
+// A day can be a whole day, a half, or an actual period ("leaving at 15:00").
+// The string form is kept so an older client sending {"2027-07-09":"am"} still
+// works; the object form carries the times.
+const daySpecSchema = z.union([
+  z.enum(['full', 'am', 'pm']),
+  z.object({
+    portion: z.enum(['full', 'am', 'pm', 'hours']),
+    startTime: timeStr.nullish(),
+    endTime: timeStr.nullish(),
+  }),
+]);
+const halfDaysSchema = z.record(z.string().regex(DATE_RE), daySpecSchema).optional();
 
 /** Resolve the person a leave action is about, and whether the caller may act. */
 async function resolveLeaveTarget(req: AuthRequest, bodyPersonId?: string) {
@@ -205,7 +223,7 @@ router.post('/leave', async (req: AuthRequest, res: Response) => {
       leaveType: parsed.data.leaveType,
       startDate: parsed.data.startDate,
       endDate: parsed.data.endDate,
-      halfDays: parsed.data.halfDays as Record<string, DayPortion> | undefined,
+      halfDays: parsed.data.halfDays as Record<string, DayPortion | DaySpec> | undefined,
       note: parsed.data.note ?? null,
     }, req.user!.id);
     res.status(201).json({ data: await getRequest(id) });
@@ -225,8 +243,11 @@ router.get('/leave/:id', async (req: AuthRequest, res: Response) => {
     if (!isAdmin(req) && request.personId !== own) {
       res.status(403).json({ error: 'Insufficient permissions' }); return;
     }
+    // Rebuild the FULL day spec, not just the portion — a timed period needs
+    // its times back or the impact would re-price it as a half day.
     const halfDays = Object.fromEntries(
-      request.days.filter(d => d.portion !== 'full').map(d => [d.date, d.portion]));
+      request.days.filter(d => d.portion !== 'full').map(d =>
+        [d.date, { portion: d.portion, startTime: d.startTime, endTime: d.endTime }]));
     const impact = await getImpact(
       request.personId, request.startDate, request.endDate, request.leaveType,
       halfDays, request.id
@@ -287,6 +308,191 @@ router.post('/leave/:id/cancel', adminOnly, async (req: AuthRequest, res: Respon
   } catch (err) {
     console.error('[staff-calendar] cancel error:', err);
     res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to cancel' });
+  }
+});
+
+// ── Overtime (Phase C) ──────────────────────────────────────────────────────
+//
+// Logged by staff in 5-minute steps, approved by admin, and credited to the
+// BANK. Nothing is decided at approval about whether it becomes time off or
+// pay — that choice is made later, by taking TOIL leave or by a cash-out
+// (spec §6.2).
+
+// GET /api/staff-calendar/overtime?status=&personId=&from=&to=
+router.get('/overtime', async (req: AuthRequest, res: Response) => {
+  try {
+    const own = await personIdForUser(req.user!.id);
+    const personId = isAdmin(req)
+      ? (req.query.personId ? String(req.query.personId) : undefined)
+      : (own ?? '__none__');
+    res.json({
+      data: await listOvertime({
+        personId,
+        status: req.query.status ? String(req.query.status) as OvertimeStatus : undefined,
+        from: DATE_RE.test(String(req.query.from)) ? String(req.query.from) : undefined,
+        to: DATE_RE.test(String(req.query.to)) ? String(req.query.to) : undefined,
+      }),
+      pendingCount: isAdmin(req) ? await countPendingOvertime() : undefined,
+    });
+  } catch (err) {
+    console.error('[staff-calendar] list overtime error:', err);
+    res.status(500).json({ error: 'Failed to load overtime' });
+  }
+});
+
+// POST /api/staff-calendar/overtime — log some. Either give times, or minutes.
+router.post('/overtime', async (req: AuthRequest, res: Response) => {
+  const schema = z.object({
+    personId: z.string().uuid().optional(),
+    workDate: dateStr,
+    startTime: timeStr.nullish(),
+    endTime: timeStr.nullish(),
+    minutes: z.number().int().positive().optional(),
+    reason: z.string().min(1).max(500),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
+
+  const target = await resolveLeaveTarget(req, parsed.data.personId);
+  if ('error' in target) { res.status(403).json({ error: target.error }); return; }
+
+  // Times are the friendlier way in; minutes are the fallback for "I did about
+  // 40 minutes" where nobody remembers the clock.
+  let minutes = parsed.data.minutes ?? 0;
+  if (!minutes && parsed.data.startTime && parsed.data.endTime) {
+    minutes = minutesBetween(parsed.data.startTime, parsed.data.endTime);
+  }
+  if (!minutes || minutes <= 0) {
+    res.status(400).json({ error: 'Give either a start and end time, or a number of minutes' }); return;
+  }
+  if (minutes % MIN_INCREMENT !== 0) {
+    res.status(400).json({ error: `Overtime is logged in ${MIN_INCREMENT}-minute steps` }); return;
+  }
+
+  try {
+    const id = await createOvertime({
+      personId: target.personId,
+      workDate: parsed.data.workDate,
+      startTime: parsed.data.startTime ?? null,
+      endTime: parsed.data.endTime ?? null,
+      minutes,
+      reason: parsed.data.reason,
+    }, req.user!.id);
+    res.status(201).json({ data: await getOvertime(id) });
+  } catch (err) {
+    console.error('[staff-calendar] create overtime error:', err);
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to log the overtime' });
+  }
+});
+
+router.post('/overtime/:id/approve', adminOnly, async (req: AuthRequest, res: Response) => {
+  try {
+    await approveOvertime(req.params.id as string, req.body?.note ?? null, req.user!.id);
+    res.json({ data: await getOvertime(req.params.id as string) });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to approve' });
+  }
+});
+
+router.post('/overtime/:id/decline', adminOnly, async (req: AuthRequest, res: Response) => {
+  const parsed = z.object({ note: z.string().min(1).max(500) }).safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: 'A reason is required when declining' }); return; }
+  try {
+    await declineOvertime(req.params.id as string, parsed.data.note, req.user!.id);
+    res.json({ data: await getOvertime(req.params.id as string) });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to decline' });
+  }
+});
+
+router.post('/overtime/:id/cancel', async (req: AuthRequest, res: Response) => {
+  try {
+    const own = await personIdForUser(req.user!.id);
+    if (!own) { res.status(403).json({ error: 'No staff record is linked to your login' }); return; }
+    await cancelOvertime(req.params.id as string, own);
+    res.json({ data: await getOvertime(req.params.id as string) });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to cancel' });
+  }
+});
+
+// POST /api/staff-calendar/employees/:personId/cash-out — pay banked overtime.
+// The one hard limit in the module: you cannot pay out more than is banked,
+// because the consequence is paying for hours nobody worked.
+router.post('/employees/:personId/cash-out', adminOnly, async (req: AuthRequest, res: Response) => {
+  const schema = z.object({
+    minutes: z.number().int().positive(),
+    effectiveDate: dateStr,
+    note: z.string().max(500).nullish(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
+  try {
+    const entry = await cashOut(req.params.personId as string, parsed.data.minutes,
+      parsed.data.effectiveDate, parsed.data.note ?? null, req.user!.id);
+    res.status(201).json({ data: entry });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to pay out' });
+  }
+});
+
+// POST /api/staff-calendar/year-end-cashout — the 31 Dec sweep, run by hand
+// until the scheduler picks it up. Idempotent: a second run finds nothing.
+router.post('/year-end-cashout', adminOnly, async (req: AuthRequest, res: Response) => {
+  const parsed = z.object({ year: z.number().int().min(2000).max(2200) }).safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: 'A year is required' }); return; }
+  try {
+    res.json({ data: await yearEndCashOut(parsed.data.year, req.user!.id) });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to run the sweep' });
+  }
+});
+
+// ── Payroll report (spec §12.1) ─────────────────────────────────────────────
+
+router.get('/payroll', adminOnly, async (req: AuthRequest, res: Response) => {
+  const from = String(req.query.from || '');
+  const to = String(req.query.to || '');
+  if (!DATE_RE.test(from) || !DATE_RE.test(to)) { res.status(400).json({ error: 'from and to must be YYYY-MM-DD' }); return; }
+  try {
+    const rows = await getPayrollReport(from, to);
+    if (req.query.format === 'csv') {
+      await recordBatch(from, to, req.user!.id);
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="ooosh-payroll-${from}-to-${to}.csv"`);
+      res.send(payrollCsv(rows, from, to));
+      return;
+    }
+    res.json({ data: rows, period: { from, to } });
+  } catch (err) {
+    console.error('[staff-calendar] payroll error:', err);
+    res.status(500).json({ error: 'Failed to build the payroll report' });
+  }
+});
+
+// ── My balances ─────────────────────────────────────────────────────────────
+// Both accounts for the logged-in user in one call, so the booking form can
+// show what is available BEFORE dates are picked — the thing that lets someone
+// choose between holiday and TOIL rather than guess.
+router.get('/me/balances', async (req: AuthRequest, res: Response) => {
+  try {
+    const personId = await personIdForUser(req.user!.id);
+    if (!personId) { res.json({ data: null }); return; }
+    const year = resolveYear(req);
+    const [holiday, overtime] = await Promise.all([
+      getBalance(personId, 'holiday', year),
+      getBalance(personId, 'overtime', year),
+    ]);
+    res.json({
+      data: {
+        personId, year,
+        holiday: { balanceMinutes: holiday.balanceMinutes, nominalDayMinutes: holiday.nominalDayMinutes },
+        overtime: { balanceMinutes: overtime.balanceMinutes, nominalDayMinutes: overtime.nominalDayMinutes },
+      },
+    });
+  } catch (err) {
+    console.error('[staff-calendar] my balances error:', err);
+    res.status(500).json({ error: 'Failed to load your balances' });
   }
 });
 
