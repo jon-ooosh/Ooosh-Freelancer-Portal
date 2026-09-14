@@ -31,6 +31,12 @@ and the per-module reference docs.
 
   **Key on the id ONLY** — never the pathname or `location.key`, or every `?tab=` click remounts the page and closes open modals under the user.
 
+  **Applied to all eight entity detail pages** — jobs, people, organisations, venues, drivers, PCNs (`/vehicles/pcns/:id`), problems (`/operations/problems/:id`) and carnets. A new `*DetailPage` gets the same wrapper.
+
+  **Not for a list page that takes an id.** `IssuesPage` serves `/operations/issues/:id`, where the param only deep-links a detail modal open — keying it would re-fetch the whole filtered list and lose scroll on every modal open. The test is whether the param identifies *the thing the page is about*, not something the page merely points at. Same reasoning skips the public `:token` routes (you never navigate between two of them) and, for now, the vehicles module's `fleet/:id` (no vehicle→vehicle link in the page, and vehicles aren't in global search, so the bug is barely reachable — it's the same pattern if it ever needs doing).
+
+  **The tab effect still has a job to do.** `OrganisationDetailPage` keys its tab effect on `[id, tabParam]` because a same-page link there changes only the query string, which an id-keyed remount cannot see. Keep those effects; don't let the wrapper tempt you into deleting them.
+
   **Do not "fix" this by adding setters to a manual reset effect.** That was the previous convention and it lost: it is whack-a-mole across ~100 state slots, it drifts the moment someone adds state, and it cannot fix the late-reply race at all. The existing reset block and tab-reset effect in `JobDetailPage` are kept as belt-and-braces only.
 
   Not in conflict with the `ErrorBoundary` decision above: that deliberately avoids re-keying *children on a crash reset*, which is a different level and a different purpose.

@@ -135,7 +135,21 @@ const RESOLUTION_LABELS: Record<ResolutionPath, string> = {
 
 interface User { id: string; first_name: string; last_name: string }
 
+// Keyed by the route id so /operations/problems/A → …/B is a genuine
+// unmount/remount. React Router otherwise reuses ONE instance and only swaps
+// the param, leaving the previous issue's state on the new page and letting a
+// slow reply for the old id resolve into it (no fetch here is cancellable).
+// See `.claude/rules/frontend.md` → Detail pages; JobDetailPage has the long
+// version.
+//
+// Key on `id` ONLY — never the pathname or a query param, or a same-page link
+// that changes only the query string would remount the page.
 export default function IssueDetailPage() {
+  const { id } = useParams<{ id: string }>();
+  return <IssueDetailContent key={id} />;
+}
+
+function IssueDetailContent() {
   const { id } = useParams<{ id: string }>();
   const [issue, setIssue] = useState<Issue | null>(null);
   const [showAddCost, setShowAddCost] = useState(false);
