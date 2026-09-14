@@ -120,7 +120,22 @@ const VALID_ORG_TABS = [
 ] as const;
 type OrgTab = (typeof VALID_ORG_TABS)[number];
 
+// Keyed by the route id so /organisations/A → /organisations/B is a genuine
+// unmount/remount. React Router otherwise reuses ONE instance and only swaps
+// the param, leaving the previous organisation's state on the new page and
+// letting a slow reply for the old id resolve into it (nothing is cancellable).
+// See `.claude/rules/frontend.md` → Detail pages; JobDetailPage has the long
+// version.
+//
+// Key on `id` ONLY — never the pathname or a ?tab= param, or every tab click
+// would remount the page. The hand-written tab/cache resets below are kept as
+// belt-and-braces, and the tab effect still handles same-page ?tab= changes.
 export default function OrganisationDetailPage() {
+  const { id } = useParams<{ id: string }>();
+  return <OrganisationDetailContent key={id} />;
+}
+
+function OrganisationDetailContent() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const user = useAuthStore((s) => s.user);
