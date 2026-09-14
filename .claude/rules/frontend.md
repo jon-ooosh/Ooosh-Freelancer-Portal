@@ -18,7 +18,22 @@ and the per-module reference docs.
 
 ## Detail pages
 
-- **Reset tab state on `id` change.** React Router reuses the component instance across `/jobs/A` → `/jobs/B`, so `useState(initialTab)` initialises once and the active tab drags across. Every `*DetailPage` with tabs needs `useEffect(() => setActiveTab(default), [id])` — and the same effect should clear any per-tab cached data.
+- **Key a detail page by its route id — don't hand-reset state.** React Router reuses ONE component instance across `/jobs/A` → `/jobs/B`; only the param changes. So every `*DetailPage` needs a thin keyed wrapper as its default export:
+
+  ```tsx
+  export default function JobDetailPage() {
+    const { id } = useParams<{ id: string }>();
+    return <JobDetailContent key={id} />;   // the real page, unexported
+  }
+  ```
+
+  That fixes three things at once: state can't carry across (`JobDetailPage` had ~86 of ~100 state slots surviving a job change — HireHop derivation flags, client history, open inline-edit drafts that would then save onto the *new* job), a slow reply for the old id can't overwrite the new page (the setter belongs to a dead instance, so React discards it — there is no `AbortController` anywhere in this frontend), and the one-frame flash of the old entity disappears, because the remount happens during the render pass the route change triggers rather than in a post-paint effect.
+
+  **Key on the id ONLY** — never the pathname or `location.key`, or every `?tab=` click remounts the page and closes open modals under the user.
+
+  **Do not "fix" this by adding setters to a manual reset effect.** That was the previous convention and it lost: it is whack-a-mole across ~100 state slots, it drifts the moment someone adds state, and it cannot fix the late-reply race at all. The existing reset block and tab-reset effect in `JobDetailPage` are kept as belt-and-braces only.
+
+  Not in conflict with the `ErrorBoundary` decision above: that deliberately avoids re-keying *children on a crash reset*, which is a different level and a different purpose.
 - **No top-of-page "Back to …" breadcrumb on entity detail pages.** They were usually wrong: a hardcoded destination ignores where you came from, and the "smart" variant only worked from the two pages that passed `state.from`. A wrong back button is worse than none. **Don't re-add them.** Deliberately KEPT: contextual deep-links reflecting a real parent (issue → its job, carnet → its job), "not found" recovery buttons inside error states, and vehicle-module kiosk workflow exits (in freelancer mode those are the *only* navigation available).
 - A conditional/`hideWhenEmpty` component inside a margined wrapper needs `empty:hidden` on the wrapper, or an empty render leaves a phantom gap.
 
