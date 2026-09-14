@@ -1546,7 +1546,27 @@ function JobAlertBanner({
   );
 }
 
+// React Router reuses ONE component instance across /jobs/A → /jobs/B — only the
+// `id` param changes. That left the previous job's state sitting on the new job's
+// page (HireHop derivation flags, client history, open inline-edit drafts: ~86 of
+// this page's ~100 state slots were never cleared), and let a slow reply for job A
+// resolve into job B's page — the auto HireHop sync ends by calling loadJob(),
+// which would setJob(A) seconds after B had already rendered.
+//
+// Keying the page by `id` makes a job→job navigation a genuine unmount/remount:
+// every state slot starts empty, and a late reply for the old job lands on a dead
+// instance (React discards the update) instead of overwriting the new one. It also
+// removes the one-frame flash of the old job, because the remount happens during
+// the render pass the route change triggers — the first paint is the new instance.
+//
+// Key on `id` ONLY. Keying on the pathname or location.key would remount on every
+// ?tab= click and close any open modal under the user.
 export default function JobDetailPage() {
+  const { id } = useParams<{ id: string }>();
+  return <JobDetailContent key={id} />;
+}
+
+function JobDetailContent() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const location = useLocation();
@@ -1578,6 +1598,9 @@ export default function JobDetailPage() {
   // this the active tab "drags across" — e.g. you were on Money on job A,
   // click through to job B and you're still on Money. Re-reads the URL
   // tab param so deep-links still land where they should.
+  // NOTE: the `key={id}` wrapper above now remounts the page on a job change, so
+  // this runs once per mount and the tab can no longer drag across on its own.
+  // Kept as belt-and-braces (and it still handles a tab param that changes).
   useEffect(() => {
     const urlTab = searchParams.get('tab');
     setActiveTab((validTabs as readonly string[]).includes(urlTab || '') ? (urlTab as TabType) : 'overview');
@@ -2321,6 +2344,9 @@ export default function JobDetailPage() {
       // resolve and overwrite B's state. Worse: loadVehicleAssignments reads
       // job.hh_job_number from state to build its second query, so without
       // this reset it would query A's HH number while displaying B's page.
+      // NOTE: the `key={id}` wrapper means this now runs once on a fresh mount,
+      // where the state is already empty. Kept as belt-and-braces — it is the
+      // only reset path if the keyed wrapper is ever removed.
       setJob(null);
       setInteractions([]);
       setQuotes([]);
