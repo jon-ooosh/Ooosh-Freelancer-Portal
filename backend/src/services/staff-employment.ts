@@ -597,3 +597,65 @@ export async function getStaffRoster(isAdmin: boolean): Promise<RosterRow[]> {
       : null,
   }));
 }
+
+
+// ── Linking a login to a staff record ───────────────────────────────────────
+
+/**
+ * Active logins whose person has NO employment record.
+ *
+ * These are the candidates for linking to an employee created against a
+ * different `people` row — the situation that arises when someone is added as
+ * an employee by picking the wrong duplicate out of the address book. Their
+ * login then points at one person while their hours and balances sit on
+ * another, so My Time shows nothing and every request is refused.
+ */
+export async function listUnlinkedLogins() {
+  const r = await query(
+    `SELECT u.id AS user_id, u.email, u.role, u.last_login,
+            (p.first_name || ' ' || p.last_name) AS name
+       FROM users u
+       JOIN people p ON p.id = u.person_id
+      WHERE u.is_active = true
+        AND u.role <> 'freelancer'
+        -- The seeded System Service account (migration 001 gives it the
+        -- all-zeros person id, deterministically). Offering it here would let
+        -- someone point the service account at a staff record by mistake,
+        -- which leaves the real person no better off and the automation worse.
+        AND u.person_id <> '00000000-0000-0000-0000-000000000000'::uuid
+        AND NOT EXISTS (SELECT 1 FROM staff_employment se WHERE se.person_id = u.person_id)
+      -- People who actually sign in first; dormant logins are rarely the answer.
+      ORDER BY u.last_login DESC NULLS LAST, p.first_name, p.last_name`
+  );
+  return r.rows;
+}
+
+/**
+ * Point an existing login at a staff record.
+ *
+ * Moves `users.person_id`, which is the ONE column that defines whose staff
+ * record a login sees. The alternative — moving the employment, patterns and
+ * ledger onto the login's person — is not possible: staff_ledger_entries is
+ * append-only and refuses UPDATE, by design.
+ *
+ * The previously-linked person row is left alone in the address book. It keeps
+ * its interactions and job history, which belong to that record; only the
+ * login moves.
+ */
+export async function linkLoginToPerson(personId: string, userId: string) {
+  const emp = await query(`SELECT 1 FROM staff_employment WHERE person_id = $1`, [personId]);
+  if (emp.rows.length === 0) throw new Error('That person has no employment record');
+
+  const taken = await query(
+    `SELECT u.email FROM users u WHERE u.person_id = $1 AND u.id <> $2`, [personId, userId]);
+  if (taken.rows.length > 0) {
+    throw new Error(`${taken.rows[0].email} is already linked to this staff record`);
+  }
+
+  const r = await query(
+    `UPDATE users SET person_id = $1, updated_at = NOW() WHERE id = $2 RETURNING email`,
+    [personId, userId]
+  );
+  if (r.rows.length === 0) throw new Error('Login not found');
+  return r.rows[0];
+}
