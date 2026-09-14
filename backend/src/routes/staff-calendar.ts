@@ -22,6 +22,7 @@ import {
 } from '../services/staff-day-status';
 import {
   STAFF_ADMIN_ROLES, upsertEmployment, getEmployeeRecord, listEmployees, getStaffRoster,
+  listUnlinkedLogins, linkLoginToPerson,
   createPattern, listPatterns, createExceptions, listExceptions,
   addSalaryEntry, listSalaryHistory, upsertReview, listReviews,
 } from '../services/staff-employment';
@@ -111,6 +112,30 @@ router.get('/me', async (req: AuthRequest, res: Response) => {
   } catch (err) {
     console.error('[staff-calendar] me error:', err);
     res.status(500).json({ error: 'Failed to load your calendar' });
+  }
+});
+
+// GET /api/staff-calendar/unlinked-logins — logins with no staff record.
+// Candidates for linking to an employee that was created against a different
+// `people` row (see linkLoginToPerson).
+router.get('/unlinked-logins', adminOnly, async (_req: AuthRequest, res: Response) => {
+  try {
+    res.json({ data: await listUnlinkedLogins() });
+  } catch (err) {
+    console.error('[staff-calendar] unlinked logins error:', err);
+    res.status(500).json({ error: 'Failed to load logins' });
+  }
+});
+
+// POST /api/staff-calendar/employees/:personId/link-login
+router.post('/employees/:personId/link-login', adminOnly, async (req: AuthRequest, res: Response) => {
+  const parsed = z.object({ userId: z.string().uuid() }).safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: 'A login is required' }); return; }
+  try {
+    const r = await linkLoginToPerson(req.params.personId as string, parsed.data.userId);
+    res.json({ data: r });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to link the login' });
   }
 });
 
@@ -498,7 +523,17 @@ router.get('/payroll', adminOnly, async (req: AuthRequest, res: Response) => {
 router.get('/me/balances', async (req: AuthRequest, res: Response) => {
   try {
     const personId = await personIdForUser(req.user!.id);
-    if (!personId) { res.json({ data: null }); return; }
+    if (!personId) { res.json({ data: null, hasStaffRecord: false }); return; }
+
+    // A zero balance and "you are not set up as staff" look identical if both
+    // report 0, and the second is the one that needs acting on. Distinguish
+    // them explicitly so My Time can say which it is.
+    const { query: dbQuery } = await import('../config/database');
+    const emp = await dbQuery(
+      `SELECT 1 FROM staff_employment WHERE person_id = $1 AND employment_status = 'employed'`,
+      [personId]);
+    if (emp.rows.length === 0) { res.json({ data: null, hasStaffRecord: false }); return; }
+
     const year = resolveYear(req);
     const [holiday, overtime] = await Promise.all([
       getBalance(personId, 'holiday', year),
@@ -510,6 +545,7 @@ router.get('/me/balances', async (req: AuthRequest, res: Response) => {
         holiday: { balanceMinutes: holiday.balanceMinutes, nominalDayMinutes: holiday.nominalDayMinutes },
         overtime: { balanceMinutes: overtime.balanceMinutes, nominalDayMinutes: overtime.nominalDayMinutes },
       },
+      hasStaffRecord: true,
     });
   } catch (err) {
     console.error('[staff-calendar] my balances error:', err);

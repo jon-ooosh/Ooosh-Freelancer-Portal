@@ -346,11 +346,7 @@ function AccountSection({ row, isAdmin, onSaved, onError }: {
   const [saving, setSaving] = useState(false);
 
   if (!row.account) {
-    return (
-      <div className="p-3 rounded border border-dashed border-gray-300 text-sm text-gray-500">
-        No login. They appear on the calendar and in reports, but cannot sign in to OP.
-      </div>
-    );
+    return <NoLogin row={row} isAdmin={isAdmin} onSaved={onSaved} onError={onError} />;
   }
   const userId = row.userId!;
 
@@ -1168,6 +1164,104 @@ function AddUser({ onAdded, onError }: {
         className="px-3 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
         {saving ? 'Creating…' : 'Create login'}
       </button>
+    </div>
+  );
+}
+
+
+/**
+ * An employee with no login — and the fix for it.
+ *
+ * This is worth surfacing loudly because it breaks My Time completely and
+ * silently: hours, holiday and overtime all hang off the staff record, so if
+ * someone's login points at a DIFFERENT `people` row (easily done by picking
+ * the wrong duplicate when adding them), their balances read zero and every
+ * request is refused with no explanation.
+ *
+ * Linking moves `users.person_id`, which is the one column that decides whose
+ * staff record a login sees. The reverse — moving employment, patterns and
+ * ledger onto the login's person — is impossible: the ledger is append-only
+ * and refuses UPDATE by design.
+ */
+function NoLogin({ row, isAdmin, onSaved, onError }: {
+  row: RosterRow; isAdmin: boolean;
+  onSaved: (msg: string) => Promise<void>; onError: (msg: string) => void;
+}) {
+  const [linking, setLinking] = useState(false);
+  const [candidates, setCandidates] = useState<
+    { user_id: string; email: string; role: string; name: string }[]>([]);
+  const [chosen, setChosen] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!linking || candidates.length > 0) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await api.get<{ data: typeof candidates }>('/staff-calendar/unlinked-logins');
+        if (!cancelled) setCandidates(res.data);
+      } catch (err) {
+        onError(err instanceof Error ? err.message : 'Failed to load logins');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [linking, candidates.length, onError]);
+
+  async function link() {
+    if (!chosen) return;
+    setSaving(true);
+    try {
+      await api.post(`/staff-calendar/employees/${row.personId}/link-login`, { userId: chosen });
+      setLinking(false);
+      await onSaved(`Login linked to ${row.name}. Their My Time page will work now.`);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Failed to link the login');
+    } finally { setSaving(false); }
+  }
+
+  return (
+    <div className="p-3 rounded border border-amber-200 bg-amber-50">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="text-sm text-amber-900">
+          <strong className="block">No login linked to this staff record.</strong>
+          They show on the calendar and in reports, but cannot see their own balances
+          or book anything — My Time will read zero for them.
+        </div>
+        {isAdmin && !linking && (
+          <button onClick={() => setLinking(true)}
+            className="text-xs text-ooosh-700 underline shrink-0">Link a login</button>
+        )}
+      </div>
+
+      {linking && (
+        <div className="mt-3 flex flex-wrap items-end gap-2">
+          <label className="text-sm">
+            <span className="block text-xs text-gray-600 mb-1">Login to point at this record</span>
+            <select value={chosen} onChange={e => setChosen(e.target.value)}
+              className="px-2 py-1.5 border border-gray-300 rounded text-sm bg-white min-w-[16rem]">
+              <option value="">Choose a login…</option>
+              {candidates.map(c => (
+                <option key={c.user_id} value={c.user_id}>{c.name} — {c.email}</option>
+              ))}
+            </select>
+          </label>
+          <button onClick={() => void link()} disabled={saving || !chosen}
+            className="px-3 py-1.5 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-40">
+            {saving ? 'Linking…' : 'Link'}
+          </button>
+          <button onClick={() => setLinking(false)}
+            className="px-2 py-1.5 text-sm text-gray-500 hover:text-gray-700">Cancel</button>
+          {candidates.length === 0 && (
+            <span className="text-xs text-gray-500 pb-2">
+              No unlinked logins — every active login already has a staff record.
+            </span>
+          )}
+          <p className="w-full text-xs text-gray-600 mt-1">
+            Only shows logins that have no staff record of their own. The person record that
+            login used to point at stays in the address book with its history.
+          </p>
+        </div>
+      )}
     </div>
   );
 }

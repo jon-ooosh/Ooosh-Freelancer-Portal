@@ -103,6 +103,7 @@ export default function MyTimePage() {
   const [requests, setRequests] = useState<LeaveRequest[]>([]);
   const [overtime, setOvertime] = useState<OvertimeEntry[]>([]);
   const [balances, setBalances] = useState<MyBalances | null>(null);
+  const [hasStaffRecord, setHasStaffRecord] = useState(true);
   const [openForm, setOpenForm] = useState<'leave' | 'overtime' | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -113,11 +114,12 @@ export default function MyTimePage() {
       const [leave, ot, bal] = await Promise.all([
         api.get<{ data: LeaveRequest[] }>('/staff-calendar/leave'),
         api.get<{ data: OvertimeEntry[] }>('/staff-calendar/overtime'),
-        api.get<{ data: MyBalances | null }>('/staff-calendar/me/balances'),
+        api.get<{ data: MyBalances | null; hasStaffRecord?: boolean }>('/staff-calendar/me/balances'),
       ]);
       setRequests(leave.data);
       setOvertime(ot.data);
       setBalances(bal.data);
+      setHasStaffRecord(bal.hasStaffRecord !== false);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load your time');
     } finally { setLoading(false); }
@@ -152,6 +154,21 @@ export default function MyTimePage() {
 
       {error && <div className="mb-4 p-3 rounded bg-red-50 border border-red-200 text-sm text-red-700">{error}</div>}
       {notice && <div className="mb-4 p-3 rounded bg-emerald-50 border border-emerald-200 text-sm text-emerald-800">{notice}</div>}
+
+      {!hasStaffRecord && (
+        <div className="mb-4 p-3 rounded border border-amber-200 bg-amber-50 text-sm text-amber-900">
+          <strong className="block">Your login isn&apos;t linked to a staff record.</strong>
+          Your hours, holiday and overtime all hang off a staff record, and this login
+          isn&apos;t pointed at one — so there is nothing to show and nothing can be booked.
+          {hasManagerRole(role) ? (
+            <> Fix it on the <Link to="/staff/admin" className="underline font-medium">Staff page</Link>:
+            find the employee, then use <em>Link a login</em>. If they show
+            &ldquo;No login&rdquo;, that is this exact problem.</>
+          ) : (
+            <> Ask an admin to link it on the Staff page.</>
+          )}
+        </div>
+      )}
 
       <BalanceCards balances={balances} />
 
@@ -277,6 +294,7 @@ function BookTimeOff({ balances, onClose, onBooked, onError }: {
   const [dayParts, setDayParts] = useState<Record<string, DaySpec>>({});
   const [note, setNote] = useState('');
   const [impact, setImpact] = useState<Impact | null>(null);
+  const [impactError, setImpactError] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
   const [saving, setSaving] = useState(false);
 
@@ -306,9 +324,15 @@ function BookTimeOff({ balances, onClose, onBooked, onError }: {
           from: startDate, to: endDate, type: leaveType, halfDays: dayPartsKey,
         });
         const res = await api.get<{ data: Impact }>(`/staff-calendar/leave/impact?${qs}`);
-        if (!cancelled) setImpact(res.data);
-      } catch {
-        if (!cancelled) setImpact(null);
+        if (!cancelled) { setImpact(res.data); setImpactError(null); }
+      } catch (err) {
+        // The impact call failing is the usual reason Submit stays disabled.
+        // Silently nulling it left the button greyed with nothing explaining
+        // why — show what the server said instead.
+        if (!cancelled) {
+          setImpact(null);
+          setImpactError(err instanceof Error ? err.message : 'Could not work out the impact');
+        }
       } finally {
         if (!cancelled) setChecking(false);
       }
@@ -401,7 +425,7 @@ function BookTimeOff({ balances, onClose, onBooked, onError }: {
         <div className="mb-3 flex flex-wrap items-end gap-2">
           <label className="text-sm">
             <span className="block text-xs text-gray-600 mb-1">From</span>
-            <input type="time"
+            <input type="time" step={300}
               value={Object.values(dayParts)[0]?.startTime ?? '15:00'}
               onChange={e => setDayParts({ [startDate]: {
                 ...(Object.values(dayParts)[0] ?? { portion: 'hours' as const }),
@@ -410,7 +434,7 @@ function BookTimeOff({ balances, onClose, onBooked, onError }: {
           </label>
           <label className="text-sm">
             <span className="block text-xs text-gray-600 mb-1">To</span>
-            <input type="time"
+            <input type="time" step={300}
               value={Object.values(dayParts)[0]?.endTime ?? '17:00'}
               onChange={e => setDayParts({ [startDate]: {
                 ...(Object.values(dayParts)[0] ?? { portion: 'hours' as const }),
@@ -457,11 +481,11 @@ function BookTimeOff({ balances, onClose, onBooked, onError }: {
 
                   {spec.portion === 'hours' && (
                     <span className="flex items-center gap-1 text-xs">
-                      <input type="time" value={spec.startTime ?? '15:00'}
+                      <input type="time" step={300} value={spec.startTime ?? '15:00'}
                         onChange={e => setDayParts(p => ({ ...p, [d.date]: { ...spec, startTime: e.target.value } }))}
                         className="px-1.5 py-1 border border-gray-300 rounded text-xs" />
                       <span className="text-gray-400">to</span>
-                      <input type="time" value={spec.endTime ?? '17:00'}
+                      <input type="time" step={300} value={spec.endTime ?? '17:00'}
                         onChange={e => setDayParts(p => ({ ...p, [d.date]: { ...spec, endTime: e.target.value } }))}
                         className="px-1.5 py-1 border border-gray-300 rounded text-xs" />
                     </span>
@@ -488,6 +512,9 @@ function BookTimeOff({ balances, onClose, onBooked, onError }: {
         className="mt-3 px-3 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
         {saving ? 'Submitting…' : 'Submit request'}
       </button>
+      {impactError && (
+        <p className="mt-1.5 text-xs text-red-600">{impactError}</p>
+      )}
       {blocked && impact && (
         <p className="mt-1.5 text-xs text-red-600">
           {impact.ownClashes.length > 0
@@ -717,12 +744,12 @@ function LogOvertime({ onClose, onLogged, onError }: {
         <div className="flex flex-wrap items-end gap-2 mb-3">
           <label className="text-sm">
             <span className="block text-xs text-gray-600 mb-1">From</span>
-            <input type="time" value={startTime} onChange={e => setStartTime(e.target.value)}
+            <input type="time" step={300} value={startTime} onChange={e => setStartTime(e.target.value)}
               className="px-2 py-1.5 border border-gray-300 rounded text-sm" />
           </label>
           <label className="text-sm">
             <span className="block text-xs text-gray-600 mb-1">To</span>
-            <input type="time" value={endTime} onChange={e => setEndTime(e.target.value)}
+            <input type="time" step={300} value={endTime} onChange={e => setEndTime(e.target.value)}
               className="px-2 py-1.5 border border-gray-300 rounded text-sm" />
           </label>
           <span className={`pb-2 text-sm ${computed > 0 ? 'text-gray-700' : 'text-red-600'}`}>
