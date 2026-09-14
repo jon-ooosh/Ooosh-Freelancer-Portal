@@ -247,6 +247,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '209_cost_xero_object_type.sql',
         '210_supplier_aliases.sql',
         '211_job_financials_client_overpaid.sql',
+        '212_staff_overtime.sql',
       ];
 
       for (const migration of migrations) {

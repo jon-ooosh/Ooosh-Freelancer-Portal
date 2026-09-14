@@ -26,7 +26,7 @@ import { getBalance, postEntry, type LedgerAccount } from './staff-balance';
 
 export type LeaveType = 'holiday' | 'toil' | 'unpaid';
 export type LeaveStatus = 'pending' | 'approved' | 'declined' | 'cancelled' | 'withdrawn';
-export type DayPortion = 'full' | 'am' | 'pm';
+export type DayPortion = 'full' | 'am' | 'pm' | 'hours';
 
 /** Which ledger account a leave type debits. `unpaid` debits nothing. */
 export function accountFor(type: LeaveType): LedgerAccount | null {
@@ -39,6 +39,16 @@ export interface DraftDay {
   date: string;
   minutes: number;
   portion: DayPortion;
+  /** Set when portion = 'hours' — an actual period, e.g. leaving at 15:00. */
+  startTime?: string | null;
+  endTime?: string | null;
+}
+
+/** What the caller asks for on a given date: a whole day, a half, or a period. */
+export interface DaySpec {
+  portion: DayPortion;
+  startTime?: string | null;
+  endTime?: string | null;
 }
 
 export interface LeaveRequest {
@@ -56,7 +66,7 @@ export interface LeaveRequest {
   decidedByName: string | null;
   decisionNote: string | null;
   cancellationReason: string | null;
-  days: { date: string; minutes: number; portion: DayPortion }[];
+  days: { date: string; minutes: number; portion: DayPortion; startTime: string | null; endTime: string | null }[];
 }
 
 // ── Building the days ───────────────────────────────────────────────────────
@@ -73,7 +83,7 @@ export async function buildDays(
   personId: string,
   startDate: string,
   endDate: string,
-  halfDays: Record<string, DayPortion> = {}
+  dayOverrides: Record<string, DaySpec | DayPortion> = {}
 ): Promise<DraftDay[]> {
   if (!DATE_RE.test(startDate) || !DATE_RE.test(endDate)) throw new Error('Dates must be YYYY-MM-DD');
   if (endDate < startDate) throw new Error('The end date must be on or after the start date');
@@ -89,12 +99,47 @@ export async function buildDays(
   const out: DraftDay[] = [];
   for (const day of person.days) {
     if (day.status !== 'working' || day.scheduledMinutes <= 0) continue;
-    const portion = halfDays[day.date] ?? 'full';
-    const minutes = portion === 'full' ? day.scheduledMinutes : Math.round(day.scheduledMinutes / 2);
+
+    const raw = dayOverrides[day.date];
+    const spec: DaySpec = typeof raw === 'string' ? { portion: raw } : (raw ?? { portion: 'full' });
+
+    if (spec.portion === 'hours') {
+      // A timed period: the duration IS the charge. Costing it any other way
+      // would make an early finish either free or a full day, and neither is
+      // what happened.
+      if (!spec.startTime || !spec.endTime) {
+        throw new Error(`A timed period on ${day.date} needs both a start and an end time`);
+      }
+      const minutes = minutesBetweenTimes(spec.startTime, spec.endTime);
+      if (minutes <= 0) throw new Error(`The end time on ${day.date} must be after the start`);
+      if (minutes > day.scheduledMinutes) {
+        throw new Error(
+          `${day.date}: that period is longer than the ${Math.round(day.scheduledMinutes / 60 * 10) / 10}h they are contracted to work that day`
+        );
+      }
+      out.push({
+        date: day.date, minutes, portion: 'hours',
+        startTime: spec.startTime, endTime: spec.endTime,
+      });
+      continue;
+    }
+
+    const minutes = spec.portion === 'full'
+      ? day.scheduledMinutes
+      : Math.round(day.scheduledMinutes / 2);
     if (minutes <= 0) continue;
-    out.push({ date: day.date, minutes, portion });
+    out.push({ date: day.date, minutes, portion: spec.portion });
   }
   return out;
+}
+
+/** Minutes between two HH:MM(:SS) clock times. */
+export function minutesBetweenTimes(start: string, end: string): number {
+  const toMin = (t: string) => {
+    const [h, m] = t.split(':').map(Number);
+    return h * 60 + m;
+  };
+  return toMin(end) - toMin(start);
 }
 
 // ── The impact preview (spec §5.2) ──────────────────────────────────────────
@@ -126,9 +171,9 @@ export interface LeaveImpact {
  */
 export async function getImpact(
   personId: string, startDate: string, endDate: string, leaveType: LeaveType,
-  halfDays: Record<string, DayPortion> = {}, excludeRequestId?: string
+  dayOverrides: Record<string, DaySpec | DayPortion> = {}, excludeRequestId?: string
 ): Promise<LeaveImpact> {
-  const days = await buildDays(personId, startDate, endDate, halfDays);
+  const days = await buildDays(personId, startDate, endDate, dayOverrides);
   const totalMinutes = days.reduce((s, d) => s + d.minutes, 0);
   const account = accountFor(leaveType);
   const year = Number(startDate.slice(0, 4));
@@ -249,7 +294,7 @@ export async function createRequest(input: {
   leaveType: LeaveType;
   startDate: string;
   endDate: string;
-  halfDays?: Record<string, DayPortion>;
+  halfDays?: Record<string, DaySpec | DayPortion>;
   note?: string | null;
 }, userId: string): Promise<string> {
   const days = await buildDays(input.personId, input.startDate, input.endDate, input.halfDays ?? {});
@@ -273,9 +318,10 @@ export async function createRequest(input: {
 
     for (const d of days) {
       await client.query(
-        `INSERT INTO staff_leave_request_days (request_id, person_id, leave_date, minutes, portion, is_live)
-         VALUES ($1,$2,$3::date,$4,$5,true)`,
-        [id, input.personId, d.date, d.minutes, d.portion]
+        `INSERT INTO staff_leave_request_days
+           (request_id, person_id, leave_date, minutes, portion, start_time, end_time, is_live)
+         VALUES ($1,$2,$3::date,$4,$5,$6::time,$7::time,true)`,
+        [id, input.personId, d.date, d.minutes, d.portion, d.startTime ?? null, d.endTime ?? null]
       );
     }
     await client.query('COMMIT');
@@ -316,6 +362,11 @@ export async function approveRequest(requestId: string, note: string | null, use
     );
 
     if (account) {
+      // The debit type is PER ACCOUNT: spending the overtime bank on a day off
+      // is 'spend_toil', not 'booking' (which is holiday-only). Migration 208's
+      // per-account constraint refuses the wrong one outright — which is how
+      // this was caught, having shipped broken in B2.
+      const debitType = account === 'overtime' ? 'spend_toil' : 'booking';
       // One debit per day, so the ledger reads as the days actually taken and
       // a later single-day reclaim (sickness during holiday) has something to
       // reverse. effective_date is the day off, not the day approved.
@@ -324,9 +375,10 @@ export async function approveRequest(requestId: string, note: string | null, use
           `INSERT INTO staff_ledger_entries
              (person_id, account, leave_year, entry_type, minutes, effective_date,
               source_type, source_id, note, created_by)
-           VALUES ($1,$2,$3,'booking',$4,$5::date,'leave_request',$6,$7,$8)`,
+           VALUES ($1,$2,$3,$9,$4,$5::date,'leave_request',$6,$7,$8)`,
           [req.personId, account, Number(d.date.slice(0, 4)), -d.minutes, d.date,
-           requestId, `${req.leaveType} — ${d.portion === 'full' ? 'full day' : d.portion}`, userId]
+           requestId, `${req.leaveType} — ${d.portion === 'full' ? 'full day' : d.portion}`,
+           userId, debitType]
         );
       }
     }
@@ -422,7 +474,8 @@ export async function getRequest(requestId: string): Promise<LeaveRequest | null
   );
   if (r.rows.length === 0) return null;
   const days = await query(
-    `SELECT leave_date::text AS leave_date, minutes, portion
+    `SELECT leave_date::text AS leave_date, minutes, portion,
+            start_time::text AS start_time, end_time::text AS end_time
        FROM staff_leave_request_days WHERE request_id = $1 ORDER BY leave_date`,
     [requestId]
   );
@@ -456,7 +509,8 @@ export async function listRequests(opts: {
   if (r.rows.length === 0) return [];
 
   const days = await query(
-    `SELECT request_id, leave_date::text AS leave_date, minutes, portion
+    `SELECT request_id, leave_date::text AS leave_date, minutes, portion,
+            start_time::text AS start_time, end_time::text AS end_time
        FROM staff_leave_request_days
       WHERE request_id = ANY($1::uuid[])
       ORDER BY leave_date`,
@@ -486,6 +540,8 @@ function mapRequest(row: Record<string, unknown>, days: Record<string, unknown>[
       date: d.leave_date as string,
       minutes: Number(d.minutes),
       portion: d.portion as DayPortion,
+      startTime: (d.start_time as string) ?? null,
+      endTime: (d.end_time as string) ?? null,
     })),
   };
 }
