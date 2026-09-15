@@ -103,15 +103,23 @@ Two settings that do NOT do what their name suggests:
   setting without a migration leaves the database refusing what the form
   offers.
 
-## Bank holidays are DATES, not days off
+## Bank holidays are COMPUTED, and are DATES rather than days off
+
+`services/bank-holidays.ts` derives England & Wales dates for any year,
+substitutes included. **Do not go back to a seeded list** — 216 did, and it
+lasted two days before the "who adds 2029?" question arrived.
+`staff.bank_holidays.<year>` is an OVERRIDE: empty means compute.
 
 Policy is `use_allowance`: a bank holiday is an ordinary working day here and
-someone who wants it off books holiday like any other day. They are stored as a
-comma-separated date list per year and **marked** on the calendar.
+someone who wants it off books holiday like any other day. They are **marked**
+on the calendar, nothing more.
 
 **Never seed them as `staff_pattern_exceptions`.** That is the obvious
 implementation and it would make them non-working — silently handing everyone
 eight free days a year that no ledger entry ever paid for.
+
+A one-off royal bank holiday is not a date correction. It is "the company is
+shut that day", which is a company day (spec §20) and is not built yet.
 
 ## The entitlement grant runs daily; the cash-out only reminds
 
@@ -120,12 +128,22 @@ annual job has a one-year retry interval, and 1 Jan 2027 is a Friday bank
 holiday. It is idempotent, so it grants once and no-ops after — and picks up a
 mid-year hours change for free.
 
+It syncs the current leave year **and the next one**, so booking January from
+December has a balance to draw on rather than reporting the whole of next
+year's allowance as a shortfall.
+
 `runCashOutReminder` **emails the figures and posts nothing.** Paying out
 banked overtime is money out the door, and the platform rule is to surface a
 recomputed figure for a human. The sweep stays a button. Its deadline is
 DECEMBER payroll (§17.2), not 31 December, which is why the reminder defaults
 to the 8th. It stamps `staff.overtime_cashout_reminded_year` so it cannot nag
 every morning — same lesson as `rtw_chased_at`.
+
+It also runs in **January, for the year just ended**, because the sweep does
+not close a year, it empties it at a moment in time: overtime worked between
+the cash-out and New Year accrues to the swept year and nothing would ever look
+at it again. The stamp carries year *and* phase (`2027:dec`, `2027:jan`) so the
+December send does not silence the January follow-up.
 
 ## An absence is a whole day, a morning or an afternoon — never timed
 
@@ -185,6 +203,26 @@ Production runs `EMAIL_MODE=live` over Resend and has since mid-2026.
 `EMAIL_LIVE_TEMPLATES` is the **test-mode** allowlist and is ignored when live —
 a new template needs nothing added to it. Do not tell anyone to edit it. (See
 `.claude/rules/email-and-notifications.md`, which says the same thing.)
+
+## Anything that prices leave must be PER LEAVE YEAR
+
+`approveRequest` has always debited one entry per day into that day's own
+`leave_year`, so a request straddling 31 December hits two accounts. Anything
+that previews, validates or reports on that request has to split the same way —
+`getImpact` did not, and a 28 Dec–4 Jan request was checked entirely against
+December's balance and then quietly put January into deficit. `LeaveImpact.perYear`
+is the split; the top-level figures are the first year's, kept for the common case.
+
+## Display names come from `lib/displayName.ts`
+
+`people.preferred_name` is what somebody is CALLED. The avatar, the @mention
+list, the dashboard greeting and "Posting as …" all read it through
+`displayFirstName` / `displayFullName` / `displayInitials`, so the answer cannot
+drift between surfaces. It is served by `/auth/login`, `/auth/me` and `/users`.
+
+**Not for anything legal or financial** — payroll, the hire agreement,
+right-to-work records and carnets want the passport name and build it
+themselves.
 
 ## API response shapes only ever GAIN fields
 

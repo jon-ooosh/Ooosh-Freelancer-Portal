@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { hasManagerRole, roleAllowed } from '../lib/roles';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../hooks/useAuthStore';
+import { displayFirstName, displayFullName, displayInitials } from '../lib/displayName';
 import { api } from '../services/api';
 import GlobalSearch from './GlobalSearch';
 import NotificationBell from './NotificationBell';
@@ -128,13 +129,13 @@ function NavDropdown({ item, isActive, userRole }: { item: NavItem; isActive: bo
 function UserAvatar({ size = 'sm' }: { size?: 'sm' | 'md' | 'lg' }) {
   const user = useAuthStore((s) => s.user);
   const sizeClasses = { sm: 'w-7 h-7 text-xs', md: 'w-9 h-9 text-sm', lg: 'w-16 h-16 text-xl' };
-  const initials = `${user?.first_name?.[0] || ''}${user?.last_name?.[0] || ''}`.toUpperCase();
+  const initials = displayInitials(user);
 
   if (user?.avatar_url) {
     return (
       <img
         src={`/api/auth/avatar/${user.avatar_url.split('/').pop()}`}
-        alt={`${user.first_name} ${user.last_name}`}
+        alt={displayFullName(user)}
         className={`${sizeClasses[size]} rounded-full object-cover ring-2 ring-ooosh-400`}
       />
     );
@@ -185,7 +186,7 @@ function UserMenu() {
       >
         <UserAvatar size="sm" />
         <span className="hidden sm:inline text-sm text-ooosh-100 max-w-[120px] truncate">
-          {user?.first_name}
+          {displayFirstName(user, '')}
         </span>
         <svg className={`hidden sm:block w-3 h-3 text-ooosh-300 transition-transform ${open ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
@@ -195,7 +196,7 @@ function UserMenu() {
         <div className="absolute right-0 top-full mt-1 w-56 bg-white rounded-lg shadow-lg border border-gray-200 py-1 z-50">
           {/* User info header */}
           <div className="px-4 py-3 border-b border-gray-100">
-            <p className="text-sm font-medium text-gray-900">{user?.first_name} {user?.last_name}</p>
+            <p className="text-sm font-medium text-gray-900">{displayFullName(user)}</p>
             <p className="text-xs text-gray-500 truncate">{user?.email}</p>
           </div>
 
@@ -460,7 +461,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                 )}
                 <div className="flex items-center justify-between px-3 py-2">
                   <span className="text-sm text-ooosh-200">
-                    {user?.first_name} {user?.last_name}
+                    {displayFullName(user)}
                   </span>
                   <button
                     onClick={() => { logout(); setMobileMenuOpen(false); }}

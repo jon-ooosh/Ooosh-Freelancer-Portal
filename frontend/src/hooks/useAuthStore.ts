@@ -6,6 +6,8 @@ interface User {
   role: string;
   first_name: string;
   last_name: string;
+  /** What they go by. Display code reads this first — see lib/displayName.ts. */
+  preferred_name?: string | null;
   avatar_url?: string | null;
   force_password_change?: boolean;
   cot_card_last4?: string | null;

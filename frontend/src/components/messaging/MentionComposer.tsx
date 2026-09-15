@@ -38,6 +38,7 @@
  */
 
 import { useState, useEffect, useRef } from 'react';
+import { displayFirstName, displayFullName, nameSearchText } from '../../lib/displayName';
 import type { ReactNode } from 'react';
 import { api } from '../../services/api';
 import { PendingAttachmentStrip, type useAttachments } from './Attachments';
@@ -47,6 +48,8 @@ export interface MentionUser {
   email: string;
   first_name: string | null;
   last_name: string | null;
+  /** What they go by. Everything user-facing here reads this first. */
+  preferred_name?: string | null;
 }
 
 interface MentionComposerProps {
@@ -99,10 +102,12 @@ export function MentionComposer({
       .catch(() => {});
   }, [usersProp]);
 
+  // Searchable by EITHER name: someone typing "@will" should find him whether
+  // the record says William or Will, and someone who only knows the legal name
+  // should still find him after he sets a preferred one.
   const filteredUsers = users.filter((u) => {
-    const name = `${u.first_name || ''} ${u.last_name || ''}`.toLowerCase();
     const f = mentionFilter.toLowerCase();
-    return name.includes(f) || u.email.toLowerCase().includes(f);
+    return nameSearchText(u).includes(f);
   });
 
   function handleContentChange(e: React.ChangeEvent<HTMLTextAreaElement>) {
@@ -126,7 +131,7 @@ export function MentionComposer({
     const cursorPos = ta.selectionStart;
     const upToCursor = value.slice(0, cursorPos);
     const atPos = upToCursor.lastIndexOf('@');
-    const displayName = `${u.first_name || ''} ${u.last_name || ''}`.trim() || u.email;
+    const displayName = displayFullName(u, u.email);
     const newContent = value.slice(0, atPos) + `@${displayName} ` + value.slice(cursorPos);
     onChange(newContent);
     setShowMentions(false);
@@ -192,13 +197,17 @@ export function MentionComposer({
                 }`}
               >
                 <span className="w-6 h-6 rounded-full bg-ooosh-100 text-ooosh-700 flex items-center justify-center text-xs font-bold flex-shrink-0">
-                  {(u.first_name || u.email)[0]!.toUpperCase()}
+                  {(displayFirstName(u, u.email)[0] ?? '?').toUpperCase()}
                 </span>
                 <span>
-                  <span className="font-medium">
-                    {u.first_name && u.last_name ? `${u.first_name} ${u.last_name}` : u.email}
-                  </span>
-                  {u.first_name && (
+                  <span className="font-medium">{displayFullName(u, u.email)}</span>
+                  {/* The legal name, when it differs — so an admin picking from
+                      a list of seven can still tell who is who. */}
+                  {u.preferred_name && u.first_name
+                    && u.preferred_name.trim() !== u.first_name.trim() && (
+                    <span className="text-gray-400 text-xs ml-1.5">({u.first_name})</span>
+                  )}
+                  {(u.first_name || u.preferred_name) && (
                     <span className="text-gray-400 text-xs ml-1.5">{u.email}</span>
                   )}
                 </span>
@@ -215,7 +224,7 @@ export function MentionComposer({
             if (!u) return null;
             return (
               <span key={uid} className="inline-flex items-center gap-1 bg-pink-50 text-pink-700 text-xs px-2 py-0.5 rounded-full">
-                @{u.first_name || u.email}
+                @{displayFirstName(u, u.email)}
                 <button
                   type="button"
                   onClick={() => onMentionedIdsChange(mentionedIds.filter((id) => id !== uid))}

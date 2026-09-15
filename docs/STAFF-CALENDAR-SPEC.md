@@ -1068,6 +1068,7 @@ is a settings change and not a deploy — that is why they are settings.
 | **D** | Absence and sickness, two-tier visibility, return-to-work + its one chase, holiday reclaim, absence reporting by spell, sickness on the payroll report | 214 |
 | — | Timed absence markers removed — built in D, taken out on review (§7.5, decision 10) | 215 |
 | **D0** | The §13 settings created and read, bank holidays seeded and marked, entitlement and the cash-out reminder on the scheduler, My Time by leave year | 216 |
+| **D0.1** | Bank holidays computed rather than seeded; next year's entitlement granted in advance; cross-year request pricing; the post-sweep overtime residual; preferred name used site-wide | 218 |
 
 ### Decisions taken during the build that CHANGE this spec
 
@@ -1164,6 +1165,28 @@ contradict an earlier section, this list wins.
    exceptions would have been the obvious implementation and would have handed
    everyone eight free days a year that no ledger entry ever paid for.
 
+16. **Bank holidays are COMPUTED, not stored.** 216 seeded 2026–2028, which
+   immediately raised "who adds 2029?" — nobody, and the calendar quietly stops
+   marking them. Seven of the eight are arithmetic and the eighth is Easter, so
+   `services/bank-holidays.ts` derives any year and the setting became an
+   override for the year the arithmetic is ever wrong. One-off royal bank
+   holidays are deliberately not this file's problem: a coronation is "the
+   company is shut", which is §20.
+
+17. **Next year's entitlement is granted in ADVANCE.** Booking January from
+   December showed the requester the whole of next year's allowance as a
+   shortfall, because next year had no credit yet. It never blocked the
+   request, but a blood-red warning over an ordinary two weeks reads as a
+   refusal. Entitlement is deterministic from the patterns and the sync is
+   idempotent, so granting it early costs nothing and corrects itself.
+
+18. **The cash-out reminder chases a CLOSED year too.** jon's catch: take half
+   the bank as TOIL, cash the rest out on the 20th, then work a long night on
+   New Year's Eve — those minutes accrue to a leave year that has already been
+   swept and that nothing ever looks at again. The reminder now runs in
+   December for the current year and in January for the previous one, stamping
+   year *and* phase so December's send does not silence January's follow-up.
+
 ### Bugs found during the build, and what they teach
 
 Kept because each one is a trap the next person could fall into.
@@ -1198,6 +1221,21 @@ Kept because each one is a trap the next person could fall into.
   10th") never generated the extra days. They then appeared on the next read,
   by which point they had missed their debit and were covered but free. The
   end date is now written first, so the catch-up sees the real range.
+- **A leave request straddling 31 December was mispriced** (D0.1, found while
+  investigating a report that January could not be booked at all). `getImpact`
+  checked the WHOLE request against the start year's balance, while
+  `approveRequest` had always debited per day into each day's own leave year.
+  So a 28 Dec–4 Jan request was previewed entirely against December and then
+  quietly put January into deficit on approval. *The preview and the ledger are
+  two places deriving the same fact, which is this codebase's signature failure
+  — and the reported symptom (a scary shortfall on a January booking) was a
+  different, milder problem sitting on top of it.*
+- **An override that could never be created.** `setSystemSetting` deliberately
+  refuses an unknown key so a typo cannot invent one, which meant the new
+  per-year bank holiday override was impossible for any year not already
+  seeded — precisely the years it exists for. Fixed with an explicit
+  `upsertSystemSetting` for the handful of genuinely open-ended keys. *A guard
+  that is right for one caller can be exactly wrong for the next one.*
 - **A notification passed a YEAR where a uuid was expected** (D0). The
   year-end reminder set `entity_id` to `'2027'` on a `uuid` column. Because
   `notify()` wraps its insert in `.catch()` so a bell failure can never take
@@ -1253,7 +1291,7 @@ in this module now has a date attached to it.
 
 Every phase was verified against a **real Postgres 16** with all migrations
 applied from scratch and realistic fixtures, not only unit tests. Six of the
-thirteen bugs above were invisible to unit tests and surfaced the moment real SQL
+fifteen bugs above were invisible to unit tests and surfaced the moment real SQL
 ran — including Phase D's, which no amount of type checking would have found.
 Unit tests cover the pure date, entitlement and merge logic
 (`staff-day-status.test.ts`, `staff-balance.test.ts` — 60 tests); everything
@@ -1272,6 +1310,13 @@ createdb ooosh_scratch
 DATABASE_URL=postgresql://…/ooosh_scratch npx tsx src/migrations/run.ts up
 DATABASE_URL=postgresql://…/ooosh_scratch npx tsx src/scripts/__verify-phase-d.ts
 ```
+
+There are three: `__verify-phase-d.ts` (66), `__verify-d0.ts` (40) and
+`__verify-d0b.ts` (29). **Give each its own database.** Several of the things
+they check are team-wide — the cash-out reminder sums everyone, coverage
+warnings count everyone — so one script's fixtures change another's answers.
+Running all three against one database produced two failures that were purely
+that, and it took a solo re-run to tell them from real ones.
 
 ---
 
@@ -1353,6 +1398,14 @@ physically-here — and they will disagree. Options:
 switched to count office presence — that setting exists precisely to say "we
 want two bodies here on a Monday", and bodies is what it means.
 
+**Agreed with jon**, plus two refinements from him:
+
+- **Collapse to one number when they agree.** "Working 5 · In the office 5"
+  is noise; on a day nobody is remote it should just read "5". The two-number
+  form should be the exception that draws the eye, not the permanent state.
+- **The calendar needs a location FILTER**, so "show me who is on site" is a
+  view rather than a sum done in someone's head.
+
 Until that is decided the rest is not worth building, because the whole value
 is in the number.
 
@@ -1363,3 +1416,77 @@ balance, blocks no cutover, and wants a season of real data to calibrate
 against. It should NOT go in before the Oct–Dec parallel run — that run exists
 to shake out leave and patterns, and moving what "In" means mid-run would
 muddy the comparison it is there to make.
+
+---
+
+## 20. Proposed — company days ("bonus" days off)
+
+**Not agreed, not built.** Raised by jon: he grants a couple of extra days off
+a year that should not come out of anyone's allowance — Christmas Day being the
+standing example, since under `use_allowance` it is otherwise an ordinary
+working day.
+
+### 20.1 Why not just use what exists
+
+Two mechanisms look like they would do it and both are wrong:
+
+- **A pattern exception per person.** `staff_pattern_exceptions` already makes
+  a date non-working, and the calendar already reads it. But it stores a
+  *person* fact, and a company day is a *company* fact: seven rows to grant one
+  day, nothing to edit when it changes, and a new starter silently does not get
+  it. Recurring ("every Christmas Day") cannot be expressed at all.
+- **Leave with a type that does not deduct.** This is the timed-marker mistake
+  again — a leave request nobody requested and nobody approved.
+
+### 20.2 Shape
+
+```sql
+staff_company_days
+  id, day_date DATE, label TEXT NOT NULL,        -- "Christmas Day", "Office closed"
+  recurs BOOLEAN NOT NULL DEFAULT false,         -- same month + day, every year
+  status VARCHAR(20) DEFAULT 'active' CHECK IN ('active','cancelled'),
+  created_by, created_at
+  UNIQUE (day_date) WHERE status = 'active'
+```
+
+One row grants it to everybody, resolved at read time, so a new starter gets it
+without anyone remembering. It merges in `staff-day-status.ts` — the same
+single attachment point — **before** leave and absence, because it changes
+whether the day is contracted at all, exactly as a pattern exception does. A
+company day makes the day `not_scheduled` with a reason.
+
+It also subsumes the `granted` bank-holiday policy (§5.1): if that setting ever
+flips, the computed bank holidays become company days through the same path
+rather than a second mechanism.
+
+### 20.3 The part that needs care
+
+**Somebody will already have booked holiday on it.** Grant Christmas Day in
+November and anyone who had already booked it off has paid for a day the
+company has now given them. Silently leaving that is the mirror image of
+"never silently move money" — it silently fails to give it back.
+
+The mechanism already exists: §7.4's reclaim, which posts a `correction` credit
+per day and stamps the leave day. Adding a company day should therefore do what
+opening an absence does — **show which approved leave days it collides with and
+offer to reclaim them**, per day, defaulting to all. Not automatic: giving
+allowance back is a decision, and the platform rule is that a recomputed figure
+gets surfaced for a human.
+
+### 20.4 Open questions for jon
+
+1. **Does a company day apply to everyone, always?** The design above says yes.
+   A part-timer who does not work Fridays gains nothing from a Friday closure,
+   which is inherent rather than a bug, but it is worth saying out loud.
+2. **Recurring — same date, or the same *substituted* weekday?** "Christmas Day
+   every year" is a fixed date. If the intent is closer to "the working day
+   around Christmas", that is a different and much fuzzier rule; a fixed date
+   plus the odd one-off is almost certainly enough.
+3. **Should a company day count toward `min_headcount_by_weekday`?** No —
+   nobody is contracted, so the floor should not fire. Easy to get wrong.
+
+### 20.5 Sizing
+
+Migration + service + a day-status layer + admin UI + the reclaim prompt. About
+the size of a small phase, and it is the natural companion to §19 rather than
+something to bolt onto an unrelated PR.
