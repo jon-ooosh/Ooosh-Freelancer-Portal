@@ -20,9 +20,6 @@ const templates: Record<string, EmailTemplate> = {
   // Staff Calendar: one email per new leave request or overtime entry, sent
   // immediately. The bell alone gets missed (jon, Sep 2026). Body is built by
   // services/staff-notifications.ts and passed as bodyHtmlOverride.
-  //
-  // NOTE: with EMAIL_MODE=test this only reaches a real inbox if
-  // 'staff_time_request' is listed in EMAIL_LIVE_TEMPLATES.
   staff_time_request: {
     variant: 'internal',
     preheader: 'A staff time request needs a decision',

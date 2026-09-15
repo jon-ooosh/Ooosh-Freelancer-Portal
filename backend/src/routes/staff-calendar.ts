@@ -542,8 +542,17 @@ router.get('/me/balances', async (req: AuthRequest, res: Response) => {
       getBreakdown(personId, 'holiday', year),
       getBreakdown(personId, 'overtime', year),
     ]);
+    // balanceMinutes is kept ALONGSIDE the breakdown, deliberately. Dropping it
+    // when the breakdown landed was a breaking change: any browser still
+    // holding the previous JS bundle read balanceMinutes, got undefined, and
+    // rendered "NaNh NaNm". A cached bundle is the normal state of affairs
+    // right after a deploy, so response shapes here only ever gain fields.
     res.json({
-      data: { personId, year, holiday, overtime },
+      data: {
+        personId, year,
+        holiday: { ...holiday, balanceMinutes: holiday.availableMinutes },
+        overtime: { ...overtime, balanceMinutes: overtime.availableMinutes },
+      },
       hasStaffRecord: true,
     });
   } catch (err) {
@@ -728,7 +737,11 @@ const employmentSchema = z.object({
   department: z.string().max(50).nullish(),
   bankHolidayPolicy: z.enum(['use_allowance', 'granted']).nullish(),
   entitlementWeeks: z.number().min(0).max(52).nullish(),
+  probationEndDate: dateStr.nullish(),
+  noticePeriodDays: z.number().int().min(0).max(365).nullish(),
   notes: z.string().nullish(),
+  preferredName: z.string().max(100).nullish(),
+  pronouns: z.string().max(40).nullish(),
 });
 
 // PUT /api/staff-calendar/employees/:personId
