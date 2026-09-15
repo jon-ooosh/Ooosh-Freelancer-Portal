@@ -99,6 +99,7 @@ through Y" rules for that area.
 | `email-and-notifications.md` | email service, templates, notifications, comms, auto-chase |
 | `jobs-pipeline-dashboard.md` | pipeline, requirements, dashboard, jobs, returns |
 | `frontend.md` | any frontend file |
+| `staff-calendar.md` | staff calendar, holiday, TOIL, overtime, absence, My Time |
 
 **`docs/reference/*.md` is the full record** — design rationale, incident forensics,
 shipped-work history. Read one when you need the "why" behind a rule, or when working
