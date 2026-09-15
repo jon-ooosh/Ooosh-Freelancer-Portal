@@ -130,7 +130,11 @@ export interface StaffDay {
    * dropping a field breaks every browser still holding the previous bundle.
    */
   window?: { start: string; end: string };
-  /** Every timed window on this day — "in late AND away early" is two. */
+  /**
+   * Timed windows on this day. Only ever one now — it arrived when a day could
+   * carry several timed absence markers, and migration 215 removed those.
+   * Kept rather than removed because fields are only ever added.
+   */
   windows?: { start: string; end: string }[];
   /** True when a pattern exception (incl. a swap leg) applies to this date. */
   isException: boolean;
@@ -235,13 +239,17 @@ export interface LeaveDayOverlay {
   endTime?: string | null;
 }
 
-/** One live absence day, as the merge layer needs it. */
+/**
+ * One live absence day, as the merge layer needs it.
+ *
+ * No times: migration 215 removed timed absence, so an absence is a whole day,
+ * a morning or an afternoon. Timed LEAVE still exists and still carries a
+ * window — see LeaveDayOverlay above.
+ */
 export interface AbsenceDayOverlay {
   date: string;
-  portion: DayPortion;
+  portion: 'full' | 'am' | 'pm';
   absenceType: string;
-  startTime: string | null;
-  endTime: string | null;
 }
 
 /**
@@ -273,19 +281,16 @@ export function mergeAbsenceLayer(
 ): StaffDay[] {
   if (leave.length === 0 && absence.length === 0) return days;
 
+  // One row each per date: the unique index on leave days has always said so,
+  // and since migration 215 the one on absence days says it without exception.
   const leaveByDate = new Map(leave.map(l => [l.date, l]));
-  const absenceByDate = new Map<string, AbsenceDayOverlay[]>();
-  for (const a of absence) {
-    const list = absenceByDate.get(a.date) ?? [];
-    list.push(a);
-    absenceByDate.set(a.date, list);
-  }
+  const absenceByDate = new Map(absence.map(a => [a.date, a]));
 
   return days.map(d => {
     if (d.status !== 'working') return d;
     const l = leaveByDate.get(d.date);
-    const abs = absenceByDate.get(d.date) ?? [];
-    if (!l && abs.length === 0) return d;
+    const a = absenceByDate.get(d.date);
+    if (!l && !a) return d;
 
     // Leave detail is carried through even when absence takes the status, so
     // an admin can see that the sickness landed on a booked holiday.
@@ -293,28 +298,19 @@ export function mergeAbsenceLayer(
       ? { leaveType: l.status === 'approved' ? l.leaveType : `${l.leaveType} (requested)` }
       : {};
 
-    if (abs.length > 0) {
-      // A whole day off beats any marker — the unique index means at most one
-      // whole/half-day row exists, so this cannot be ambiguous.
-      const whole = abs.find(a => a.portion === 'full');
-      const windows = abs
-        .filter(a => a.startTime && a.endTime)
-        .map(a => ({ start: a.startTime!.slice(0, 5), end: a.endTime!.slice(0, 5) }));
-      const lead = whole ?? abs[0];
-
+    if (a) {
       return {
         ...d,
-        status: whole ? 'absent' : 'partial',
-        portion: lead.portion,
-        ...(windows.length > 0 ? { window: windows[0], windows } : {}),
-        detail: { ...leaveDetail, absenceType: lead.absenceType },
+        status: a.portion === 'full' ? 'absent' : 'partial',
+        portion: a.portion,
+        detail: { ...leaveDetail, absenceType: a.absenceType },
       };
     }
 
-    const approved = l!.status === 'approved';
     // Anything short of a whole day is 'partial': they are in for some of it,
     // and the coverage warnings must not count them absent all day. That
     // includes a timed period ('hours') as well as a half day.
+    const approved = l!.status === 'approved';
     const wholeDay = l!.portion === 'full';
     const win = l!.startTime && l!.endTime
       ? { start: l!.startTime.slice(0, 5), end: l!.endTime.slice(0, 5) }
@@ -383,7 +379,6 @@ export async function getAbsenceOverlay(
 
   const r = await query(
     `SELECT d.person_id, d.absence_date::text AS absence_date, d.portion,
-            d.start_time::text AS start_time, d.end_time::text AS end_time,
             a.absence_type
        FROM staff_absence_days d
        JOIN staff_absences a ON a.id = d.absence_id
@@ -391,7 +386,7 @@ export async function getAbsenceOverlay(
         AND a.status = 'active'
         AND d.person_id = ANY($1::uuid[])
         AND d.absence_date BETWEEN $2::date AND $3::date
-      ORDER BY d.absence_date, d.start_time NULLS FIRST`,
+      ORDER BY d.absence_date`,
     [personIds, from, to]
   );
 
@@ -400,10 +395,8 @@ export async function getAbsenceOverlay(
     const list = out.get(row.person_id) ?? [];
     list.push({
       date: row.absence_date,
-      portion: row.portion as DayPortion,
+      portion: row.portion as 'full' | 'am' | 'pm',
       absenceType: row.absence_type as string,
-      startTime: (row.start_time as string) ?? null,
-      endTime: (row.end_time as string) ?? null,
     });
     out.set(row.person_id, list);
   }
@@ -414,7 +407,7 @@ export async function getAbsenceOverlay(
  * Strip special-category detail for anyone who isn't admin (spec §0.5).
  *
  * Peers keep the SHAPE — they can see someone is absent, and for a timed
- * appointment they keep the window, because "out 14:00–15:00" is the
+ * leave period they keep the window, because "out from 15:00" is the
  * operational fact the team needs. They never learn the type or the reason.
  */
 export function maskForViewer(days: StaffDay[], isAdmin: boolean): StaffDay[] {

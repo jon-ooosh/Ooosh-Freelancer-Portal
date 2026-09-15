@@ -77,12 +77,27 @@ inconvenience anyone:
 2. requesting days someone is not contracted to work
 3. paying out more overtime than is banked
 4. a timed leave period longer than that day's contracted hours
-5. two whole-or-half-day absences over the same date (unique index on
-   `staff_absence_days(person_id, absence_date) WHERE is_active AND portion <> 'hours'`)
-6. two timed markers on one day whose windows **overlap** (a trigger, not an
-   `EXCLUDE` constraint — that needs `btree_gist` and a superuser). Two
-   non-overlapping markers in a day are fine and expected: in late *and* away
-   early is two entries.
+5. two absences over the same date (unique index on
+   `staff_absence_days(person_id, absence_date) WHERE is_active`)
+
+## An absence is a whole day, a morning or an afternoon — never timed
+
+Migration 215 removed timed absence and the self-recorded "out 14:00–15:00"
+marker that came with it. **Do not put it back without asking.** It deducted
+nothing, was approved by nobody and belonged to no account — a presence tracker
+wearing an absence row's clothes, and every future rule in this module would
+have had to say "…except markers". The database refuses it now:
+`staff_absence_days.portion IN ('full','am','pm')` and
+`start_time IS NULL AND end_time IS NULL`.
+
+**Timed LEAVE is a different thing and still exists.** "Leaving at 15:00 on
+Thursday" (`staff_leave_request_days.portion = 'hours'`, migration 212) deducts
+and is approved, which is exactly what a marker did not do. Someone who goes
+home ill after lunch is a `pm` absence.
+
+`StaffDay.windows` is therefore always length 0 or 1. It is an array because a
+day could once carry several markers; it is kept because API shapes only ever
+gain fields.
 
 ## Absence wins the calendar, and both rows survive
 
@@ -112,12 +127,10 @@ Sickness and parental data is masked inside `staff-day-status.ts`
 `Absent` or a time window — never a type or reason. Do not "fix" a calendar by
 returning full records and hiding them in React.
 
-Every `/absences` route is `adminOnly` (`STAFF_ADMIN_ROLES = ['admin']`), with
-two deliberate exceptions: `POST /absences/marker` and
-`DELETE /absences/marker/:id`, where someone records their own "out 14:00–15:00"
-— that carries no health information beyond the window. `GET /me/absences`
-serves a person their OWN record as dates only; reason, notes, fit-note status
-and the return-to-work write-up are the employer's record and are not in it.
+**Every `/absences` route is `adminOnly`** (`STAFF_ADMIN_ROLES = ['admin']`),
+with no exceptions. Staff have exactly two things to do in this module: log
+overtime, and request time off as holiday or TOIL. Absence is recorded for
+them, not by them.
 
 ## Email is LIVE
 

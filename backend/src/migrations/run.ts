@@ -250,6 +250,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '212_staff_overtime.sql',
         '213_staff_personal_fields.sql',
         '214_staff_absence.sql',
+        '215_drop_timed_absence.sql',
       ];
 
       for (const migration of migrations) {

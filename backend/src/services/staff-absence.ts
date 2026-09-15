@@ -49,25 +49,29 @@ export const ABSENCE_TYPES: AbsenceType[] = [
   'medical_appointment', 'other',
 ];
 
-/**
- * The only types staff may record for themselves (spec §7.5).
- *
- * Everything else is admin-entered, because it is either special-category or
- * it costs allowance. These two are neither: a timed marker is a presence
- * flag, and its whole point is that the person out at 2 can record it without
- * going through anyone.
- */
-export const SELF_SERVICE_TYPES: AbsenceType[] = ['medical_appointment', 'other'];
-
 export type FitToReturn = 'yes' | 'yes_with_adjustments' | 'no';
 
+/**
+ * `startTime` / `endTime` are always null since migration 215 dropped timed
+ * absence. They are still returned because API shapes only ever GAIN fields —
+ * a browser still holding the previous bundle reads them.
+ */
 export interface AbsenceDay {
   date: string;
   minutes: number;
-  portion: DayPortion;
-  startTime: string | null;
-  endTime: string | null;
+  portion: AbsencePortion;
+  startTime: null;
+  endTime: null;
 }
+
+/**
+ * An absence is a whole day, a morning or an afternoon.
+ *
+ * NOT `DayPortion`, which still includes 'hours' for timed LEAVE — "leaving at
+ * 15:00" is time off, it deducts, and it is approved. A timed ABSENCE did none
+ * of those things, which is why migration 215 removed it.
+ */
+export type AbsencePortion = 'full' | 'am' | 'pm';
 
 export interface Absence {
   id: string;
@@ -120,9 +124,7 @@ export async function buildAbsenceDays(
   personId: string,
   startDate: string,
   endDate: string,
-  portion: DayPortion = 'full',
-  startTime?: string,
-  endTime?: string
+  portion: AbsencePortion = 'full'
 ): Promise<AbsenceDay[]> {
   if (!DATE_RE.test(startDate) || !DATE_RE.test(endDate)) throw new Error('Dates must be YYYY-MM-DD');
   if (endDate < startDate) throw new Error('The end date must be on or after the start date');
@@ -138,20 +140,6 @@ export async function buildAbsenceDays(
   const out: AbsenceDay[] = [];
   for (const day of person.days) {
     if (day.status !== 'working' || day.scheduledMinutes <= 0) continue;
-
-    if (portion === 'hours') {
-      if (!startTime || !endTime) throw new Error('A timed absence needs both a start and an end time');
-      const minutes = minutesBetweenTimes(startTime, endTime);
-      if (minutes <= 0) throw new Error('The end time must be after the start time');
-      if (minutes > day.scheduledMinutes) {
-        throw new Error(
-          `That period is longer than the ${Math.round(day.scheduledMinutes / 60 * 10) / 10}h they are contracted to work on ${day.date}`
-        );
-      }
-      out.push({ date: day.date, minutes, portion, startTime, endTime });
-      continue;
-    }
-
     const minutes = portion === 'full' ? day.scheduledMinutes : Math.round(day.scheduledMinutes / 2);
     out.push({ date: day.date, minutes, portion, startTime: null, endTime: null });
   }
@@ -172,9 +160,7 @@ export async function materialiseDays(absenceId: string, upTo: string = TODAY())
   const r = await query(
     `SELECT person_id, start_date::text AS start_date, end_date::text AS end_date,
             status,
-            (SELECT portion    FROM staff_absence_days WHERE absence_id = a.id LIMIT 1) AS portion,
-            (SELECT start_time::text FROM staff_absence_days WHERE absence_id = a.id LIMIT 1) AS start_time,
-            (SELECT end_time::text   FROM staff_absence_days WHERE absence_id = a.id LIMIT 1) AS end_time
+            (SELECT portion FROM staff_absence_days WHERE absence_id = a.id LIMIT 1) AS portion
        FROM staff_absences a WHERE a.id = $1`,
     [absenceId]
   );
@@ -187,23 +173,19 @@ export async function materialiseDays(absenceId: string, upTo: string = TODAY())
   const end: string = a.end_date ?? upTo;
   if (end < a.start_date) return 0;
 
-  const portion = (a.portion as DayPortion) ?? 'full';
-  const days = await buildAbsenceDays(
-    a.person_id, a.start_date, end, portion,
-    a.start_time ? String(a.start_time).slice(0, 5) : undefined,
-    a.end_time ? String(a.end_time).slice(0, 5) : undefined
-  );
+  const portion = (a.portion as AbsencePortion) ?? 'full';
+  const days = await buildAbsenceDays(a.person_id, a.start_date, end, portion);
   if (days.length === 0) return 0;
 
   let added = 0;
   for (const d of days) {
     const ins = await query(
       `INSERT INTO staff_absence_days
-         (absence_id, person_id, absence_date, minutes, portion, start_time, end_time)
-       VALUES ($1,$2,$3::date,$4,$5,$6::time,$7::time)
+         (absence_id, person_id, absence_date, minutes, portion)
+       VALUES ($1,$2,$3::date,$4,$5)
        ON CONFLICT (absence_id, absence_date) DO NOTHING
        RETURNING id`,
-      [absenceId, a.person_id, d.date, d.minutes, d.portion, d.startTime, d.endTime]
+      [absenceId, a.person_id, d.date, d.minutes, d.portion]
     );
     added += ins.rows.length;
   }
@@ -240,9 +222,7 @@ export interface CreateAbsenceInput {
   startDate: string;
   /** Omit for an absence that is still running. */
   endDate?: string | null;
-  portion?: DayPortion;
-  startTime?: string;
-  endTime?: string;
+  portion?: AbsencePortion;
   deductsAllowance?: boolean;
   reasonCategory?: string | null;
   notes?: string | null;
@@ -261,25 +241,17 @@ export interface CreateAbsenceInput {
  * nothing tells you it happened.
  */
 export async function createAbsence(input: CreateAbsenceInput, userId: string | null): Promise<Absence> {
-  const portion: DayPortion = input.portion ?? 'full';
-  if (portion === 'hours') {
-    if (!input.startTime || !input.endTime) throw new Error('A timed absence needs both a start and an end time');
-    // A marker is a single day by definition: "out 14:00–15:00" across a week
-    // is not one absence, it is five.
-    if (input.endDate && input.endDate !== input.startDate) {
-      throw new Error('A timed absence covers a single day');
-    }
-  }
+  const portion: AbsencePortion = input.portion ?? 'full';
 
   // An OPEN absence has no day rows to read a portion back from, so the
   // catch-up assumes whole days. Rather than let that silently re-price an
   // ongoing half-day, refuse it: "off every afternoon, indefinitely" is not a
   // real arrangement, and a pattern change is the right tool if it becomes one.
-  if ((input.endDate ?? null) === null && portion !== 'full' && portion !== 'hours') {
+  if ((input.endDate ?? null) === null && portion !== 'full') {
     throw new Error('An ongoing absence has to be whole days — give it an end date to record half days');
   }
 
-  const end = portion === 'hours' ? input.startDate : (input.endDate ?? null);
+  const end = input.endDate ?? null;
 
   // An OPEN absence only ever materialises as far as today — writing future
   // rows would mark someone sick for days that have not happened. One that
@@ -288,8 +260,7 @@ export async function createAbsence(input: CreateAbsenceInput, userId: string | 
   const buildTo = end ?? TODAY();
   const days = buildTo < input.startDate
     ? []
-    : await buildAbsenceDays(
-        input.personId, input.startDate, buildTo, portion, input.startTime, input.endTime);
+    : await buildAbsenceDays(input.personId, input.startDate, buildTo, portion);
 
   // Refusing this is kinder than storing a spell that shows up nowhere. It
   // only applies to an absence with known dates: an open one legitimately has
@@ -327,9 +298,9 @@ export async function createAbsence(input: CreateAbsenceInput, userId: string | 
     for (const d of days) {
       await client.query(
         `INSERT INTO staff_absence_days
-           (absence_id, person_id, absence_date, minutes, portion, start_time, end_time)
-         VALUES ($1,$2,$3::date,$4,$5,$6::time,$7::time)`,
-        [id, input.personId, d.date, d.minutes, d.portion, d.startTime, d.endTime]
+           (absence_id, person_id, absence_date, minutes, portion)
+         VALUES ($1,$2,$3::date,$4,$5)`,
+        [id, input.personId, d.date, d.minutes, d.portion]
       );
     }
 
@@ -471,19 +442,9 @@ export async function closeAbsence(absenceId: string, endDate: string, userId: s
   let totalMinutes = 0;
   for (const d of dayRows.rows) {
     totalMinutes += Number(d.minutes);
-    workingDays += d.portion === 'full' ? 1 : d.portion === 'am' || d.portion === 'pm' ? 0.5 : 0;
+    workingDays += d.portion === 'full' ? 1 : 0.5;
   }
-  // Timed periods contribute their real fraction of that day's contract.
-  const timed = dayRows.rows.filter(d => d.portion === 'hours');
-  if (timed.length > 0) {
-    const [person] = await getStaffCalendar(
-      timed[0].absence_date, timed[timed.length - 1].absence_date,
-      { isAdmin: true, personId: a.person_id, includeLeave: false, includeAbsence: false });
-    for (const t of timed) {
-      const sched = person?.days.find(x => x.date === t.absence_date)?.scheduledMinutes ?? 0;
-      if (sched > 0) workingDays += Number(t.minutes) / sched;
-    }
-  }
+
   await query(
     `UPDATE staff_absences
         SET total_minutes = $2, working_days = $3, updated_at = NOW()
@@ -618,6 +579,7 @@ export interface ReclaimCandidate {
   requestId: string;
   date: string;
   minutes: number;
+  /** The LEAVE day's portion, so this one keeps the full DayPortion. */
   portion: DayPortion;
   leaveType: string;
 }
@@ -752,8 +714,9 @@ function mapAbsence(row: Record<string, any>, days: Record<string, any>[]): Abse
       date: d.absence_date,
       minutes: Number(d.minutes),
       portion: d.portion,
-      startTime: d.start_time ? String(d.start_time).slice(0, 5) : null,
-      endTime: d.end_time ? String(d.end_time).slice(0, 5) : null,
+      // Always null since migration 215. Kept so a cached bundle still reads.
+      startTime: null,
+      endTime: null,
     })),
   };
 }
@@ -763,9 +726,8 @@ export async function getAbsence(absenceId: string): Promise<Absence | null> {
   const r = await query(`${ABSENCE_SELECT} WHERE a.id = $1`, [absenceId]);
   if (r.rows.length === 0) return null;
   const d = await query(
-    `SELECT absence_date::text AS absence_date, minutes, portion,
-            start_time::text AS start_time, end_time::text AS end_time
-       FROM staff_absence_days WHERE absence_id = $1 AND is_active ORDER BY absence_date, start_time`,
+    `SELECT absence_date::text AS absence_date, minutes, portion
+       FROM staff_absence_days WHERE absence_id = $1 AND is_active ORDER BY absence_date`,
     [absenceId]
   );
   return mapAbsence(r.rows[0], d.rows);
@@ -801,10 +763,9 @@ export async function listAbsences(opts: {
 
   const ids = r.rows.map(x => x.id);
   const d = await query(
-    `SELECT absence_id, absence_date::text AS absence_date, minutes, portion,
-            start_time::text AS start_time, end_time::text AS end_time
+    `SELECT absence_id, absence_date::text AS absence_date, minutes, portion
        FROM staff_absence_days WHERE absence_id = ANY($1::uuid[]) AND is_active
-      ORDER BY absence_date, start_time`,
+      ORDER BY absence_date`,
     [ids]
   );
   const byAbsence = new Map<string, Record<string, any>[]>();

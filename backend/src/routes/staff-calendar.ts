@@ -9,9 +9,8 @@
  *   * Calendar reads — STAFF_ROLES. The whole team needs to see who is in.
  *   * Employment / pattern / salary / review writes — admin only, via the
  *     STAFF_ADMIN_ROLES chokepoint in services/staff-employment.ts.
- *   * Absence — admin only, because it is special-category data (§0.5). The
- *     single exception is a staff member's own timed marker, which carries no
- *     health information beyond "out between these times".
+ *   * Absence — admin only, with no exceptions, because it is special-category
+ *     data (§0.5).
  *
  * MASKING (spec §0.5): every calendar response passes through
  * getStaffCalendar(), which strips special-category detail for non-admin
@@ -505,11 +504,14 @@ router.post('/year-end-cashout', adminOnly, async (req: AuthRequest, res: Respon
 
 // ── Absence (Phase D) ───────────────────────────────────────────────────────
 //
-// ADMIN ONLY, with one exception: staff record their own timed markers
-// ("out 14:00–15:00 Tuesday") via POST /absences/marker. Everything else is
-// special-category data under UK GDPR (spec §0.5) and the tier is deliberate —
-// the module has one admin today, and widening it is an RBAC change, not a
-// code change.
+// ADMIN ONLY, every route. Absence is special-category data under UK GDPR
+// (spec §0.5) and the tier is deliberate — the module has one admin today, and
+// widening it is an RBAC change, not a code change.
+//
+// Migration 215 removed the one exception there used to be, the self-recorded
+// timed marker. It answered neither question this module exists to answer —
+// it deducted nothing and was approved by nobody — so staff now have exactly
+// two things to do here: log overtime, and request time off.
 //
 // Note that absence detail NEVER travels on the calendar endpoints for a
 // non-admin: maskForViewer() strips it inside staff-day-status.ts. These
@@ -531,153 +533,6 @@ router.get('/absences', adminOnly, async (req: AuthRequest, res: Response) => {
   } catch (err) {
     console.error('[staff-calendar] list absences error:', err);
     res.status(500).json({ error: 'Failed to load absences' });
-  }
-});
-
-// GET /api/staff-calendar/me/absences — your own, dates only.
-//
-// Deliberately NOT the admin shape: someone can see their own sickness record
-// (they have every right to), but the reason category, notes, fit-note status
-// and RTW write-up are the employer's record of a conversation and are not
-// served here.
-router.get('/me/absences', async (req: AuthRequest, res: Response) => {
-  try {
-    const own = await personIdForUser(req.user!.id);
-    if (!own) { res.json({ data: [] }); return; }
-    const rows = await listAbsences({ personId: own, limit: 100 });
-    res.json({
-      data: rows.map(a => ({
-        id: a.id,
-        absenceType: a.absenceType,
-        startDate: a.startDate,
-        endDate: a.endDate,
-        isOpen: a.isOpen,
-        deductsAllowance: a.deductsAllowance,
-        totalMinutes: a.totalMinutes,
-        workingDays: a.workingDays,
-        rtwRequired: a.rtwRequired,
-        rtwCompletedAt: a.rtwCompletedAt,
-        days: a.days,
-      })),
-    });
-  } catch (err) {
-    console.error('[staff-calendar] my absences error:', err);
-    res.status(500).json({ error: 'Failed to load your absences' });
-  }
-});
-
-// GET /api/staff-calendar/absences/:id
-router.get('/absences/:id', adminOnly, async (req: AuthRequest, res: Response) => {
-  try {
-    const a = await getAbsence(req.params.id as string);
-    if (!a) { res.status(404).json({ error: 'Absence not found' }); return; }
-    res.json({ data: a, reclaimCandidates: await getReclaimCandidates(a.id) });
-  } catch (err) {
-    console.error('[staff-calendar] get absence error:', err);
-    res.status(500).json({ error: 'Failed to load the absence' });
-  }
-});
-
-// POST /api/staff-calendar/absences — open one. No end date = still running.
-router.post('/absences', adminOnly, async (req: AuthRequest, res: Response) => {
-  const schema = z.object({
-    personId: z.string().uuid(),
-    absenceType: z.enum(ABSENCE_TYPES as [string, ...string[]]),
-    startDate: dateStr,
-    endDate: dateStr.nullish(),
-    portion: z.enum(['full', 'am', 'pm', 'hours']).optional(),
-    startTime: timeStr.optional(),
-    endTime: timeStr.optional(),
-    deductsAllowance: z.boolean().optional(),
-    reasonCategory: z.string().max(50).nullish(),
-    notes: z.string().max(2000).nullish(),
-    selfCertified: z.boolean().optional(),
-    fitNoteReceived: z.boolean().optional(),
-    fitNoteExpiry: dateStr.nullish(),
-    sspQualifying: z.boolean().nullish(),
-    rtwRequired: z.boolean().optional(),
-  });
-  const parsed = schema.safeParse(req.body);
-  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
-
-  try {
-    const a = await createAbsence(
-      { ...parsed.data, absenceType: parsed.data.absenceType as AbsenceType } as CreateAbsenceInput,
-      req.user!.id
-    );
-    // The reclaim prompt (§7.4) is offered, never applied automatically —
-    // giving holiday back is a decision, and the platform rule is that money
-    // and allowance never move without a human saying so.
-    res.status(201).json({ data: a, reclaimCandidates: await getReclaimCandidates(a.id) });
-  } catch (err) {
-    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to record the absence' });
-  }
-});
-
-// POST /api/staff-calendar/absences/marker — a timed marker (spec §7.5).
-//
-// The one thing staff record for themselves. It deducts nothing, needs no
-// approval, and exists so the team knows the office is short at 2pm rather
-// than discovering it at 2pm. Admin can file one on someone else's behalf.
-router.post('/absences/marker', async (req: AuthRequest, res: Response) => {
-  const schema = z.object({
-    personId: z.string().uuid().optional(),
-    date: dateStr,
-    startTime: timeStr,
-    endTime: timeStr,
-    absenceType: z.enum(['medical_appointment', 'other']).optional(),
-    notes: z.string().max(500).nullish(),
-  });
-  const parsed = schema.safeParse(req.body);
-  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
-
-  const target = await resolveLeaveTarget(req, parsed.data.personId);
-  if ('error' in target) { res.status(403).json({ error: target.error }); return; }
-
-  try {
-    const a = await createAbsence({
-      personId: target.personId,
-      absenceType: (parsed.data.absenceType ?? 'medical_appointment') as AbsenceType,
-      startDate: parsed.data.date,
-      endDate: parsed.data.date,
-      portion: 'hours',
-      startTime: parsed.data.startTime,
-      endTime: parsed.data.endTime,
-      deductsAllowance: false,
-      rtwRequired: false,
-      // Kept, but note it is admin-visible only like every other absence note.
-      notes: parsed.data.notes ?? null,
-    }, req.user!.id);
-    res.status(201).json({ data: { id: a.id, startDate: a.startDate, days: a.days } });
-  } catch (err) {
-    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to save that' });
-  }
-});
-
-// DELETE /api/staff-calendar/absences/marker/:id — drop your own future marker.
-//
-// Soft-cancel like everything else. Past markers stay: they are a record of
-// where someone was, and the calendar for a day that has happened should not
-// change after the fact.
-router.delete('/absences/marker/:id', async (req: AuthRequest, res: Response) => {
-  try {
-    const a = await getAbsence(req.params.id as string);
-    if (!a) { res.status(404).json({ error: 'Not found' }); return; }
-
-    const own = await personIdForUser(req.user!.id);
-    if (!isAdmin(req) && a.personId !== own) { res.status(403).json({ error: 'That is not yours to cancel' }); return; }
-    // `.some(…)` on an empty array is false, which would have let a
-    // day-less absence through this guard as if it were a marker.
-    if (a.days.length === 0 || !a.days.every(d => d.portion === 'hours')) {
-      res.status(400).json({ error: 'That is a full absence — cancel it from the Absence page' }); return;
-    }
-    if (!isAdmin(req) && a.startDate < new Date().toISOString().slice(0, 10)) {
-      res.status(400).json({ error: 'That day has already happened' }); return;
-    }
-    await cancelAbsence(a.id, 'Withdrawn by the person', req.user!.id);
-    res.json({ data: { id: a.id, cancelled: true } });
-  } catch (err) {
-    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to cancel' });
   }
 });
 
