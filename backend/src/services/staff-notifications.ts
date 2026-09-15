@@ -25,6 +25,7 @@ import { query } from '../config/database';
 import { emailService } from './email-service';
 
 const STAFF_URL = '/staff/admin';
+const ABSENCE_URL = '/staff/absence';
 
 function fmtH(min: number): string {
   const a = Math.abs(min), h = Math.floor(a / 60), m = a % 60;
@@ -205,6 +206,75 @@ export async function notifyDecision(opts: {
       opts.entityId, '/staff/me',
       opts.outcome === 'declined' ? 'high' : 'normal');
   } catch (e) { console.error('[staff-notifications] decision:', e); }
+}
+
+// ── Return to work (spec §7.3) ──────────────────────────────────────────────
+
+/**
+ * A sickness absence just closed and needs the return-to-work write-up.
+ *
+ * In-app AND email, like every other alert in this module — a bell you have to
+ * be looking at is not an alert.
+ */
+export async function notifyRtwDue(absenceId: string) {
+  try {
+    const r = await query(
+      `SELECT a.id, a.end_date::text AS end_date,
+              (p.first_name || ' ' || p.last_name) AS name
+         FROM staff_absences a JOIN people p ON p.id = a.person_id
+        WHERE a.id = $1`, [absenceId]);
+    const q = r.rows[0];
+    if (!q) return;
+
+    for (const u of await approverUserIds()) {
+      await notify(u.id, 'follow_up',
+        `Return-to-work due for ${q.name}`,
+        `Back on ${fmtDate(q.end_date)} — record the conversation`,
+        'staff_absence', q.id, ABSENCE_URL);
+    }
+    await emailApprovers(
+      `Return-to-work due for ${q.name}`,
+      `${esc(q.name)} is back from sickness`,
+      [
+        `Returned <strong>${esc(fmtDate(q.end_date))}</strong>.`,
+        'Record the return-to-work conversation: date, fit to return, any adjustments.',
+      ],
+      ABSENCE_URL);
+  } catch (e) { console.error('[staff-notifications] rtw due:', e); }
+}
+
+export interface RtwChaseResult {
+  outstanding: number;
+  chased: number;
+}
+
+/**
+ * Chase outstanding return-to-work records ONCE, after `chaseDays` (spec §7.3).
+ *
+ * Once, not daily: rtw_chased_at records that it fired. A nag that repeats
+ * every morning gets filtered, and then the one that mattered is filtered too.
+ */
+export async function runRtwChase(chaseDays = 7): Promise<RtwChaseResult> {
+  const { listRtwOutstanding, markRtwChased } = await import('./staff-absence');
+  const outstanding = await listRtwOutstanding();
+  const due = outstanding.filter(a => a.daysWaiting >= chaseDays && !a.chasedAt);
+
+  for (const a of due) {
+    for (const u of await approverUserIds()) {
+      await notify(u.id, 'follow_up',
+        `Return-to-work still outstanding for ${a.personName}`,
+        `Back on ${fmtDate(a.endDate)} — ${a.daysWaiting} days ago`,
+        'staff_absence', a.id, ABSENCE_URL, 'high');
+    }
+    await emailApprovers(
+      `Return-to-work still outstanding for ${a.personName}`,
+      `${esc(a.personName)} returned ${esc(fmtDate(a.endDate))} and the conversation is not recorded`,
+      [`That is <strong>${a.daysWaiting} days</strong> ago. This is the only reminder.`],
+      ABSENCE_URL);
+    await markRtwChased(a.id);
+  }
+
+  return { outstanding: outstanding.length, chased: due.length };
 }
 
 // ── The daily digest ────────────────────────────────────────────────────────

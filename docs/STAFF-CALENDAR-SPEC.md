@@ -455,6 +455,8 @@ staff_absences
   total_minutes     INT                 -- computed on close
   working_days      NUMERIC(5,2)        -- computed on close, for reporting
   -- ADMIN ONLY from here down:
+  status            VARCHAR(20) NOT NULL DEFAULT 'active'
+                      CHECK (status IN ('active','cancelled'))
   reason_category   VARCHAR(50)
   notes             TEXT
   self_certified    BOOLEAN NOT NULL DEFAULT false
@@ -462,24 +464,44 @@ staff_absences
   fit_note_expiry   DATE
   ssp_qualifying    BOOLEAN             -- flag for the accountants; we do not compute SSP
   rtw_required      BOOLEAN NOT NULL DEFAULT true
-  rtw_completed_at  TIMESTAMPTZ
+  rtw_date          DATE                -- when the conversation happened…
+  rtw_completed_at  TIMESTAMPTZ         -- …as against when it was recorded
   rtw_by            UUID REFERENCES users(id)
-  rtw_fit_to_return BOOLEAN
+  rtw_fit_to_return VARCHAR(20) CHECK (IN 'yes','yes_with_adjustments','no')
   rtw_adjustments   TEXT
   rtw_notes         TEXT
+  rtw_chased_at     TIMESTAMPTZ         -- so the 7-day chase fires ONCE
+  cancelled_by, cancelled_at, cancellation_reason
   created_by, created_at, updated_at
 
 staff_absence_days
-  id, absence_id, absence_date DATE, minutes INT,
+  id, absence_id, person_id, absence_date DATE, minutes INT,
   portion VARCHAR(10) NOT NULL DEFAULT 'full'
     CHECK (portion IN ('full','am','pm','hours')),
   start_time TIME,          -- set when portion = 'hours' (§7.5)
   end_time   TIME,
+  is_active  BOOLEAN NOT NULL DEFAULT true,   -- kept in step with the parent status
   UNIQUE (absence_id, absence_date)
 ```
 
 `deducts_allowance` defaults false — goodwill, bereavement and sickness do not come out
 of holiday. It exists so an odd case can be handled without a new type.
+
+Four things differ from the first draft of this table, all settled while building:
+
+- **`rtw_fit_to_return` is a VARCHAR, not a BOOLEAN.** §7.3 asks "yes / yes with
+  adjustments / no" and a boolean cannot hold the middle one — which is the answer that
+  actually carries an obligation.
+- **`rtw_chased_at`** exists because §7.3's "chases once" needs somewhere to record that
+  it fired. Without it the chase either never runs or runs every morning forever.
+- **`status`** — an absence entered against the wrong person has to be retractable, and
+  per CLAUDE.md we soft-cancel rather than delete. `is_active` on the day rows is kept in
+  step by a trigger, exactly as `is_live` is on `staff_leave_request_days`.
+- **`person_id` and `is_active` on the day rows** are denormalised for the same reason
+  leave's are: a unique index cannot reach through a join.
+
+`is_open` is derivable from `end_date` and a CHECK constraint ties them together, so the
+two cannot drift into disagreeing about whether the absence has finished.
 
 ### 3.8 Freelancer day bookings
 
@@ -714,9 +736,12 @@ simple:
 | **Taking time off** | Leave request | Yes — **minimum half a day**, always |
 | **Flagging an absence from the building** | Timed absence marker | No, by default |
 
-**Leave stays in half-day chunks.** `staff_leave_request_days.portion` remains
-`full / am / pm` and the request UI offers nothing finer. Nobody books 40 minutes of
-holiday.
+**Leave can be a timed period.** This paragraph originally said leave stayed in half-day
+chunks and that nobody books 40 minutes of holiday. That turned out to be wrong: staff
+wanted to book "leaving at 15:00", and with minutes as the unit of account it costs
+nothing to support. `portion` is `full / am / pm / hours` (decision 3 in §18, shipped in
+migration 212). The distinction in the table above still holds and is the point of this
+section — a timed *leave period* deducts, a timed *marker* does not.
 
 **Appointments are a presence marker, not leave.** An hour at the dentist creates a
 `staff_absences` row of type `medical_appointment` with `deducts_allowance = false` and a
@@ -725,9 +750,16 @@ exists purely so the calendar and the coverage warnings know the person is out �
 the whole point: not discovering at 14:00 on Tuesday that the office is empty.
 
 **Staff can create these themselves.** This is the one absence type staff may self-record
-(everything else is admin-entered). Auto-approved, editable by the person while it is in
-the future, and admin sees them in the approvals feed as information rather than as a
-decision.
+(everything else is admin-entered). Auto-approved, removable by the person while it is in
+the future, and admin sees them on the Absence page as information rather than as a
+decision. The endpoint is `POST /absences/marker` and it accepts only
+`medical_appointment` or `other` — a school run is not a medical appointment, and
+mislabelling it as one puts health-adjacent data where none belongs.
+
+**Two markers in one day are fine, as long as they do not overlap.** In late *and* away
+early is two genuinely separate periods, so each is its own absence row. Overlapping ones
+are refused by a trigger; a marker inside a whole day off is refused too, since they are
+already out.
 
 **Masking (§0.5) still applies, and matters here.** Peers see the *time window* and
 nothing else:
@@ -955,7 +987,7 @@ Plan:
 | **A** | `staff_employment`, patterns + exceptions, `staff-day-status.ts`, read-only global calendar, dashboard strip, avatar menu | 2 wks | Yes — "who's in today" |
 | **B** | Ledger + trigger + `staff-balance.ts`, entitlement, leave requests, impact preview, approval with context, explainable balance | 3 wks | The core |
 | **C** | Overtime entries, the bank, TOIL drawdown, cash-out, payroll report | 2 wks | Yes |
-| **D** | Absence, sickness, RTW process, holiday reclaim, absence reports, employee directory + reviews | 2 wks | Yes |
+| **D** | Absence, sickness, RTW process, holiday reclaim, absence reports, employee directory + reviews | 2 wks | Yes — **shipped**, see §18 |
 | — | Parallel run, BrightHR import, fixes | 3 wks | → **live 1 Jan 2027** |
 | **E** | Freelancer day bookings + portal + expected invoice totals | 2 wks | **Independent of A–D** |
 | **F** | Coverage intelligence (staffing vs prep/job volume), personal iCal | later | Post-go-live |
@@ -1024,7 +1056,7 @@ is a settings change and not a deploy — that is why they are settings.
 
 ## 18. Build log — what is done, what changed, what is left
 
-*Written 15 Sep 2026, at the point of handing over to a fresh session.*
+*Written 15 Sep 2026; Phase D appended the same day.*
 
 ### Shipped
 
@@ -1035,6 +1067,7 @@ is a settings change and not a deploy — that is why they are settings.
 | **B2** | Leave requests, impact preview, approval with operational context, cancel / decline / withdraw, My Time | 209 |
 | **C** | Overtime in 5-minute steps, the bank, TOIL drawdown, cash-out, year-end sweep, payroll CSV, timed leave | 212 |
 | — | Consolidation: Team Members + COT card register moved onto the Staff page; login linking; notifications and the daily digest | 213 |
+| **D** | Absence and sickness, two-tier visibility, return-to-work + its one chase, holiday reclaim, self-recorded timed markers, absence reporting by spell, sickness on the payroll report | 214 |
 
 ### Decisions taken during the build that CHANGE this spec
 
@@ -1072,6 +1105,37 @@ contradict an earlier section, this list wins.
    employment record, two-tier gated: account section at manager level (matching
    the access the old Settings list gave), everything else admin.
 
+8. **Absence WINS over leave on the same date** (§7.4). Both rows legitimately
+   exist — the reclaim deliberately leaves the approved holiday intact — so the
+   merge had to choose, and what actually happened to the person that day is
+   the absence. Admin sees both in `detail`; peers see neither, because the
+   masking strips `detail` entirely. jon's steer: the staff-facing calendar
+   shows whether someone is in, never why.
+
+9. **Open absences materialise their day rows LAZILY, on the read** (§7.1). The
+   spec implied a nightly job. A scheduled task that stops silently is noticed
+   in March, so instead `materialiseDays()` is idempotent and every read calls
+   it — the read repairs the data and it cannot drift. No new moving part.
+
+10. **Two timed markers in one day are allowed; overlapping ones are not.**
+   jon: "someone could need to come in late and leave early — two different
+   time periods on the same day". So the one-per-day unique index excludes
+   `portion = 'hours'`, and a trigger refuses overlaps instead. A trigger
+   rather than an `EXCLUDE` constraint because that needs `btree_gist`, and
+   installing an extension needs a superuser on the box — migration 175
+   already carries that scar.
+
+11. **A deducting absence posts `booking` with `source_type = 'absence'`**, not
+   a new entry type. The source is what distinguishes it from a leave request;
+   inventing an entry type nobody would remember the rules for is how the one
+   ledger bug in this module happened.
+
+12. **Absence stays admin-only for now.** Raised as a single-point-of-failure
+   risk — with one admin, nobody can record a sick day while jon is away. His
+   call was to keep §0.5 strict and revisit the RBAC if it bites. The one
+   exception is a person's own timed marker, which carries no health
+   information beyond the window.
+
 ### Bugs found during the build, and what they teach
 
 Kept because each one is a trap the next person could fall into.
@@ -1095,41 +1159,89 @@ Kept because each one is a trap the next person could fall into.
   `NaNh NaNm`.
 - **A timed leave period rendered as a whole-day `leave`**, so a two-hour early
   finish counted as absent all day in the coverage warnings.
+- **`cancelAbsence` swept up its own credits.** It reversed every un-reversed
+  ledger entry the absence had posted — which includes the CREDITS it and
+  `closeAbsence` post. It tried to write a negative `cancellation`, and the
+  sign constraint from migration 208 refused it. *The constraint was right and
+  the code was wrong; that is the second time that table has caught a bug the
+  type checker could not. Filter by `entry_type`, not just by source.*
+- **`closeAbsence` materialised days before it wrote the end date**, so
+  re-closing an absence LATER (a correction, "actually he was off until the
+  10th") never generated the extra days. They then appeared on the next read,
+  by which point they had missed their debit and were covered but free. The
+  end date is now written first, so the catch-up sees the real range.
+- **A day whose debit had been reversed could never be charged again.** The
+  "have I already debited this date?" check matched any entry on the day,
+  reversal included. Shorten an absence and lengthen it back and those days
+  came back free.
+
+- **A future-dated OPEN absence could not be opened at all** (Phase D, caught by
+  the scratch-database run, invisible to the type checker and to every unit
+  test). `createAbsence` handed `buildAbsenceDays` today's date as the range
+  end for an absence with no end date; for maternity starting next month that
+  end is *before* the start, so it threw "the end date must be on or after the
+  start date". The catch-up had the mirror of the same mistake, clamping *up*
+  to the start date and so materialising a day that had not happened yet. Both
+  now: an open absence runs start → today, and a spell that has not begun has
+  no day rows at all. *The lesson is the old one — the fixture has to include
+  the case where today is not inside the range.*
 
 ### Still to build
 
-**Phase D — absence** (the next piece, and the last before the parallel run):
-- `staff_absences` + `staff_absence_days` (§3.7). Sickness, maternity /
-  paternity / shared parental, bereavement, goodwill, jury service.
-- Two-tier visibility (§0.5) — peers see `Absent`, never a type. The masking
-  hook already exists in `staff-day-status.ts`.
-- Return-to-work process (§7.3) with the structured form and the 7-day chase.
-- **Sickness during booked holiday** (§7.4) — the reclaim prompt. The
-  `reclaimed_absence_id` column is already on `staff_leave_request_days`
-  waiting for it.
-- Timed non-deducting appointment markers (§7.5) — the "dentist at 2" case.
-- Absence reporting: spells rather than days, the repeat-absence flag.
-
-**Phase E — freelancer day bookings** (§9). Independent of D; can be pulled
+**Phase E — freelancer day bookings** (§9). Independent of A–D; can be pulled
 forward. Tables and portal endpoints all still to build.
 
 **Phase F — coverage intelligence and iCal** (§10, §16). Post-go-live.
 
-**Carried over, smaller:**
+**D0 — the three carry-overs, and the only work with a date on it.**
+Deliberately deferred out of Phase D to keep that diff reviewable, but two of
+these bite BEFORE 1 Jan 2027, not on it:
+
+- The `system_settings` keys in §13 are specified but **still not created** —
+  the bank-holiday policy default is a frontend constant
+  (`COMPANY_BANK_HOLIDAY_DEFAULT`), and Phase D's two report thresholds
+  (`staff.absence_flag_spells` / `_months`, defaulting to 3 and 3) and
+  `staff.rtw_chase_days` (7) are likewise hardcoded defaults in the service
+  signatures. All read fine; none is staff-editable yet.
+- **Bank holiday dates are not seeded for any year.** This has an OCTOBER
+  deadline, not a January one: the parallel run covers Christmas and New Year,
+  so 25/26/28 Dec and 1 Jan fall inside the window where staff are supposed to
+  be booking in both systems and comparing them.
+- **The year-end cash-out and the 1 Jan entitlement grant are manual buttons.**
+  The cash-out's real deadline is MID-DECEMBER, because §17.2 has banked
+  overtime paid in December's payroll — if it does not run before payroll
+  closes, balances roll into a year that is meant to start at zero and the "no
+  opening balances to migrate" property that makes the 1 Jan cutover cheap
+  stops being true. The entitlement grant is 1 Jan, which is a Friday bank
+  holiday, so in practice nobody presses it until the 4th and staff open the
+  new system on day one to a zero balance.
+
+**Carried over from Phase D itself:**
+- Absence retention. §17.9 asks how long sickness records are kept; nothing
+  expires them yet, and it feeds the open GDPR retention item in `ROADMAP.md`.
 - Port My Time into Quick Actions (in `BACKLOG.md`, deliberately deferred until
-  D–F land so the surface is not moved twice).
-- The `system_settings` keys in §13 are specified but **not yet created** —
-  the bank-holiday policy default is currently a frontend constant
-  (`COMPANY_BANK_HOLIDAY_DEFAULT`) with a comment pointing here.
-- Bank holiday dates are not seeded for any year.
-- The year-end cash-out and the 1 Jan entitlement grant are **manual buttons**;
-  neither is on the scheduler yet. Both must be before 1 Jan 2027.
+  E–F land so the surface is not moved twice).
 
 ### Verification approach — please keep doing this
 
 Every phase was verified against a **real Postgres 16** with all migrations
 applied from scratch and realistic fixtures, not only unit tests. Six of the
-eight bugs above were invisible to unit tests and surfaced the moment real SQL
-ran. Unit tests cover the pure date and entitlement arithmetic
-(`staff-day-status.test.ts`, `staff-balance.test.ts` — 52 tests); everything
+twelve bugs above were invisible to unit tests and surfaced the moment real SQL
+ran — including Phase D's, which no amount of type checking would have found.
+Unit tests cover the pure date, entitlement and merge logic
+(`staff-day-status.test.ts`, `staff-balance.test.ts` — 60 tests); everything
 touching the database gets a scratch-database run.
+
+Phase D's run is **kept in the repo** as
+`backend/src/scripts/__verify-phase-d.ts` — 67 assertions over a fixture using
+the unequal four-day week, covering the hard refusals, the masking, the lazy
+catch-up, the reclaim, and the shorten/re-lengthen/cancel unwind that found
+three of the four Phase D bugs. It refuses to run against a
+`DATABASE_URL` that does not name a scratch database, because it writes
+fixtures and momentarily relaxes two NOT NULL constraints to seed them:
+
+```bash
+createdb ooosh_scratch
+DATABASE_URL=postgresql://…/ooosh_scratch npx tsx src/migrations/run.ts up
+DATABASE_URL=postgresql://…/ooosh_scratch npx tsx src/scripts/__verify-phase-d.ts
+```

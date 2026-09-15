@@ -36,6 +36,7 @@ import StaffDocumentsPage from './pages/StaffDocumentsPage';
 import StaffCalendarPage from './pages/StaffCalendarPage';
 import StaffAdminPage from './pages/StaffAdminPage';
 import MyTimePage from './pages/MyTimePage';
+import StaffAbsencePage from './pages/StaffAbsencePage';
 import StaffDocumentsAdminPage from './pages/StaffDocumentsAdminPage';
 import StaffReceiptsPage from './pages/StaffReceiptsPage';
 import LostCancelledPage from './pages/LostCancelledPage';
@@ -252,6 +253,7 @@ export default function App() {
                 <Route path="/staff/calendar" element={<StaffCalendarPage />} />
                 <Route path="/staff/admin" element={<StaffAdminPage />} />
                 <Route path="/staff/me" element={<MyTimePage />} />
+                <Route path="/staff/absence" element={<StaffAbsencePage />} />
                 <Route path="/staff/documents" element={<StaffDocumentsPage />} />
                 <Route path="/staff/documents/admin" element={<StaffDocumentsAdminPage />} />
                 <Route path="/my-receipts" element={<StaffReceiptsPage />} />

@@ -188,7 +188,14 @@ export default function StaffAdminPage() {
     <div className="p-4 sm:p-6 max-w-6xl">
       <div className="flex flex-wrap items-center justify-between gap-3 mb-1">
         <h1 className="text-2xl font-semibold text-gray-900">Staff</h1>
-        <Link to="/staff/calendar" className="text-sm text-ooosh-600 hover:underline">View calendar →</Link>
+        <div className="flex items-center gap-4">
+          {/* Absence lives on its own page: it is admin-only special-category
+              data (§0.5), and this page is manager-tier for the account section. */}
+          {isAdmin && (
+            <Link to="/staff/absence" className="text-sm text-ooosh-600 hover:underline">Absence →</Link>
+          )}
+          <Link to="/staff/calendar" className="text-sm text-ooosh-600 hover:underline">View calendar →</Link>
+        </div>
       </div>
       <p className="text-sm text-gray-500 mb-5">
         Logins, roles, company cards and working hours — everyone who works here in one place.
