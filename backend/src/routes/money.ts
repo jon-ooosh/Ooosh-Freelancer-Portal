@@ -17,6 +17,7 @@ import { hhBroker } from '../services/hirehop-broker';
 import { reconcileJobExcessTopN } from '../services/excess-topn';
 import { pushDepositToHH, HH_BANK_IDS, getMethodForBankId } from '../services/hh-deposit';
 import { fetchDepositAvailability, releaseFromInvoice, revertRelease, type ReleaseResult } from '../services/hh-deposit-release';
+import { syncSavedRowToXero, sendXeroSyncFailedAlert, type XeroSyncResult } from '../services/hh-xero-sync';
 import { getStripeClient, isStripeConfigured, isStripeError } from '../config/stripe';
 import { sendPaymentEmail, sendExcessEmail, sendLastMinuteAlert, sendPaymentStatementEmail, sendRefundEmail, logResendToTimeline, type StatementPaymentLine } from '../services/money-emails';
 import {
@@ -2574,12 +2575,16 @@ router.post('/:jobId/apply-credit', authorize('admin', 'manager'), validate(appl
     const hhAppId = (hhResult.data as any).hh_id || (hhResult.data as any).id || (hhResult.data as any).ID || null;
 
     if (hhAppId) {
-      try {
-        await hhBroker.post('/php_functions/accounting/tasks.php',
-          { hh_package_type: 1, hh_acc_package_id: 3, hh_task: 'post_payment', hh_id: hhAppId, hh_acc_id: '' },
-          { priority: 'high' });
-      } catch (e) {
-        console.error('[money] Xero sync for cross-job credit failed (non-fatal):', e);
+      const sync = await syncSavedRowToXero(
+        `cross-job credit ${job.hh_job_number} → job ${target_hh_job} invoice ${invoice_id}`,
+        hhResult.data as Record<string, unknown>,
+      );
+      if (!sync.ok) {
+        void sendXeroSyncFailedAlert({
+          jobId: job.id, hhJobNumber: job.hh_job_number, what: 'cross-job credit application',
+          amount, clientName: job.client_name, hhRowId: hhAppId, hhDepositId: hh_deposit_id,
+          error: sync.error || 'Unknown error',
+        });
       }
     }
 
@@ -2878,6 +2883,10 @@ router.post('/:jobId/refund-payment', validate(refundPaymentSchema), async (req:
     // hh_push_error surfacing below rather than a silent success.
     let hhPushError: string | null = null;
     let hhPaymentAppId: number | null = null;
+    // The WHOLE save response, kept for Phase 5: HireHop names its own Xero
+    // sync parameters in it (`hh_task`, `hh_acc_package_id`, `hh_package_type`),
+    // so the sync reads them back rather than assuming the hardcoded values.
+    let hhSavedData: Record<string, unknown> | null = null;
     if (job.hh_job_number) {
       try {
         const currentDate = new Date().toISOString().split('T')[0];
@@ -2907,6 +2916,7 @@ router.post('/:jobId/refund-payment', validate(refundPaymentSchema), async (req:
             return;
           }
         } else {
+          hhSavedData = hhResult.data as Record<string, unknown>;
           hhPaymentAppId = (hhResult.data as { hh_id?: number; id?: number; ID?: number }).hh_id
             ?? (hhResult.data as { hh_id?: number; id?: number; ID?: number }).id
             ?? (hhResult.data as { hh_id?: number; id?: number; ID?: number }).ID
@@ -2992,21 +3002,51 @@ router.post('/:jobId/refund-payment', validate(refundPaymentSchema), async (req:
       );
     }
 
-    // ── Phase 5: Trigger Xero sync (best-effort — HH push already succeeded, so
-    // OP and HH are in sync. Without this the refund lands in HH billing but
-    // never posts through to Xero. Mirrors the excess reimburse path. ────────
+    // ── Phase 5: Push the refund through to Xero, and say so if it won't go ──
+    //
+    // Deliberately AFTER the OP record: if this hangs or the process dies
+    // mid-call, a refund that really moved money is already written down.
+    //
+    // This used to fire and discard the result. `hhBroker.post` RESOLVES
+    // `{ success: false }` rather than throwing, so the try/catch never fired
+    // and the log said "triggered" whatever happened — which is how job 15187's
+    // £120 reached Stripe and HireHop, was refused by Xero with a perfectly
+    // clear message, and told nobody. Some refusals are not fixable from OP
+    // (see hh-xero-sync.ts), so the job is to record and report the gap, not
+    // to fail the refund — the money has already gone.
+    let xeroSync: XeroSyncResult | null = null;
     if (hhPaymentAppId) {
-      try {
-        await hhBroker.post('/php_functions/accounting/tasks.php', {
-          hh_package_type: 1,
-          hh_acc_package_id: 3,
-          hh_task: 'post_payment',
-          hh_id: hhPaymentAppId,
-          hh_acc_id: '',
-        }, { priority: 'high' });
-        console.log('[money] Xero sync triggered for hire refund payment application');
-      } catch (e) {
-        console.error('[money] Xero sync for hire refund failed (non-fatal — payment posted, sync may catch up later):', e);
+      xeroSync = await syncSavedRowToXero(`hire refund on job ${job.hh_job_number}`, hhSavedData);
+
+      if (!xeroSync.ok) {
+        const gapNote = `⚠️ Xero sync REFUSED: ${xeroSync.error} — HireHop is correct, Xero needs a manual correction.`;
+
+        // Durable, in three places, because a warning rendered once in a modal
+        // is a warning nobody can find at year end (the 15628 lesson: "the gap
+        // isn't recorded anywhere"). Each is non-fatal on its own.
+        await query(
+          `UPDATE job_payments SET notes = COALESCE(notes || ' — ', '') || $2 WHERE id = $1`,
+          [opResult.rows[0].id, gapNote]
+        ).catch((e) => console.error('[money] refund Xero-gap note update failed (non-fatal):', e));
+
+        await query(
+          `INSERT INTO interactions (type, content, job_id, created_by, source)
+           VALUES ('note', $1, $2, $3, 'system')`,
+          [`Refund of £${amount.toFixed(2)} reached Stripe and HireHop but was REFUSED by Xero — ${xeroSync.error}. HireHop is correct; Xero needs a manual correction. Admin has been emailed.`,
+           job.id, req.user!.id]
+        ).catch((e) => console.error('[money] refund Xero-gap timeline note failed (non-fatal):', e));
+
+        void sendXeroSyncFailedAlert({
+          jobId: job.id,
+          hhJobNumber: job.hh_job_number,
+          what: 'hire refund',
+          amount,
+          clientName: job.client_name,
+          hhRowId: hhPaymentAppId,
+          hhDepositId: hh_deposit_id,
+          moneyMoved: Boolean(stripeRefundId),
+          error: xeroSync.error || 'Unknown error',
+        });
       }
     }
 
@@ -3036,12 +3076,13 @@ router.post('/:jobId/refund-payment', validate(refundPaymentSchema), async (req:
       console.log(`[money] Refund confirmation email: ${clientEmail.sent ? `sent to ${clientEmail.toEmail}${clientEmail.isFallback ? ' (info@ fallback)' : ''}` : `NOT sent — ${clientEmail.error || 'unknown'}`}`);
     }
 
-    console.log(`[money] Hire refund recorded: £${amount} on job ${job.id} via ${method}${stripeRefundId ? ` (Stripe ${stripeRefundId})` : ''}${hhPushError ? ' [HH push failed]' : ''}`);
+    console.log(`[money] Hire refund recorded: £${amount} on job ${job.id} via ${method}${stripeRefundId ? ` (Stripe ${stripeRefundId})` : ''}${hhPushError ? ' [HH push failed]' : ''}${xeroSync && !xeroSync.ok ? ' [Xero sync refused]' : ''}`);
     res.json({
       data: opResult.rows[0],
       ...(stripeRefundId ? { stripe_refund_id: stripeRefundId } : {}),
       ...(hhPaymentAppId ? { hh_payment_application_id: hhPaymentAppId } : {}),
       ...(hhPushError ? { hh_push_error: hhPushError } : {}),
+      ...(xeroSync && !xeroSync.ok ? { xero_sync: xeroSync } : {}),
       ...(clientEmail ? { client_email: clientEmail } : {}),
     });
   } catch (error) {
