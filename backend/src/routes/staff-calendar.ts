@@ -28,7 +28,7 @@ import {
 } from '../services/staff-employment';
 import {
   getBalance, getTeamBalances, syncEntitlement, postEntry, reverseEntry,
-  computeEntitlement, getPatternPeriods, getContractedWeek, STATUTORY_WEEKS,
+  computeEntitlement, getPatternPeriods, getContractedWeek, getBreakdown, STATUTORY_WEEKS,
   type LedgerAccount,
 } from '../services/staff-balance';
 import {
@@ -535,16 +535,15 @@ router.get('/me/balances', async (req: AuthRequest, res: Response) => {
     if (emp.rows.length === 0) { res.json({ data: null, hasStaffRecord: false }); return; }
 
     const year = resolveYear(req);
+    // Breakdowns, not just net figures. "1h banked" merges three different
+    // facts for the overtime account — what was earned, what was taken as time
+    // off, and what was paid out — and the merged number is the confusing one.
     const [holiday, overtime] = await Promise.all([
-      getBalance(personId, 'holiday', year),
-      getBalance(personId, 'overtime', year),
+      getBreakdown(personId, 'holiday', year),
+      getBreakdown(personId, 'overtime', year),
     ]);
     res.json({
-      data: {
-        personId, year,
-        holiday: { balanceMinutes: holiday.balanceMinutes, nominalDayMinutes: holiday.nominalDayMinutes },
-        overtime: { balanceMinutes: overtime.balanceMinutes, nominalDayMinutes: overtime.nominalDayMinutes },
-      },
+      data: { personId, year, holiday, overtime },
       hasStaffRecord: true,
     });
   } catch (err) {
