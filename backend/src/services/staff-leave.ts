@@ -21,7 +21,7 @@
  */
 
 import { query, getClient } from '../config/database';
-import { DATE_RE, dateRange, getStaffCalendar } from './staff-day-status';
+import { DATE_RE, dateRange, getStaffCalendar, weekdayIndex } from './staff-day-status';
 import { getBalance, postEntry, type LedgerAccount } from './staff-balance';
 
 export type LeaveType = 'holiday' | 'toil' | 'unpaid';
@@ -263,16 +263,34 @@ export async function getImpact(
         leaveType === 'toil' ? ' in the overtime bank' : ''}.`
     );
   }
-  if (noticeDays < 14 && days.length > 0) {
+  const { getNoticeDaysWarning } = await import('./staff-settings');
+  const noticeThreshold = await getNoticeDaysWarning();
+  if (noticeDays < noticeThreshold && days.length > 0) {
     warnings.push(`Only ${noticeDays} day${noticeDays === 1 ? '' : 's'}' notice.`);
   }
-  const thin = coverage.filter(c => c.ifApproved <= 1);
-  for (const c of thin) {
-    warnings.push(
-      c.ifApproved === 0
-        ? `Nobody would be in on ${c.date}.`
-        : `Only one person would be in on ${c.date}.`
-    );
+  // Coverage floor, per weekday (spec §13 `staff.min_headcount_by_weekday`).
+  // With nothing configured this keeps the behaviour it has always had —
+  // shout when a day would drop to one person or nobody — so an empty setting
+  // is not a silent loss of the warning.
+  const { getMinHeadcountByWeekday } = await import('./staff-settings');
+  const floors = await getMinHeadcountByWeekday();
+  for (const c of coverage) {
+    const floor = floors[String(weekdayIndex(c.date))];
+    if (floor !== undefined) {
+      if (c.ifApproved < floor) {
+        warnings.push(
+          `${c.date} would have ${c.ifApproved} in, and you want at least ${floor}.`
+        );
+      }
+      continue;
+    }
+    if (c.ifApproved <= 1) {
+      warnings.push(
+        c.ifApproved === 0
+          ? `Nobody would be in on ${c.date}.`
+          : `Only one person would be in on ${c.date}.`
+      );
+    }
   }
 
   return {

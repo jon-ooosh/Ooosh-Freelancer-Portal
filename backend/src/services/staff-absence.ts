@@ -806,8 +806,11 @@ export async function getAbsenceReport(opts: {
   flagMonths?: number;
   types?: AbsenceType[];
 }): Promise<AbsenceReportRow[]> {
-  const flagSpells = opts.flagSpells ?? 3;
-  const flagMonths = opts.flagMonths ?? 3;
+  // Defaults from settings (spec §13), not from literals here.
+  const { getAbsenceFlag } = await import('./staff-settings');
+  const flagDefaults = await getAbsenceFlag();
+  const flagSpells = opts.flagSpells ?? flagDefaults.spells;
+  const flagMonths = opts.flagMonths ?? flagDefaults.months;
   const types = opts.types ?? ['sickness'];
   const flagFrom = addDaysYmd(new Date().toISOString().slice(0, 10), -Math.round(flagMonths * 30.44));
 

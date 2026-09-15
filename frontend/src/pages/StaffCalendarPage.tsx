@@ -83,6 +83,8 @@ export default function StaffCalendarPage() {
   const [weeks, setWeeks] = useState(2);
   const [from, setFrom] = useState(() => mondayOf(TODAY));
   const [people, setPeople] = useState<CalendarPerson[]>([]);
+  const [bankHolidays, setBankHolidays] = useState<string[]>([]);
+  const [bhPolicy, setBhPolicy] = useState<'use_allowance' | 'granted'>('use_allowance');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -92,10 +94,14 @@ export default function StaffCalendarPage() {
     setLoading(true);
     setError(null);
     try {
-      const res = await api.get<{ data: CalendarPerson[] }>(
-        `/staff-calendar/calendar?from=${from}&to=${to}`
-      );
+      const res = await api.get<{
+        data: CalendarPerson[];
+        bankHolidays?: string[];
+        bankHolidayPolicy?: 'use_allowance' | 'granted';
+      }>(`/staff-calendar/calendar?from=${from}&to=${to}`);
       setPeople(res.data);
+      setBankHolidays(res.bankHolidays ?? []);
+      setBhPolicy(res.bankHolidayPolicy ?? 'use_allowance');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load the calendar');
     } finally {
@@ -110,6 +116,9 @@ export default function StaffCalendarPage() {
     for (let d = from; d <= to; d = addDays(d, 1)) out.push(d);
     return out;
   }, [from, to]);
+
+  const isBankHoliday = useCallback(
+    (date: string) => bankHolidays.includes(date), [bankHolidays]);
 
   // Headcount per day — the coverage signal, informational only.
   const headcount = useMemo(
@@ -173,11 +182,22 @@ export default function StaffCalendarPage() {
                 </th>
                 {dates.map(d => (
                   <th key={d}
+                    title={isBankHoliday(d)
+                      ? (bhPolicy === 'granted'
+                          ? 'Bank holiday — granted, nobody is contracted'
+                          : 'Bank holiday — a normal working day here. Book it off if you want it')
+                      : undefined}
                     className={`px-1 py-2 border-b border-gray-200 font-medium text-center min-w-[3rem] ${
                       d === TODAY ? 'bg-ooosh-50 text-ooosh-700' : 'text-gray-600'
                     } ${weekdayIndex(d) >= 5 ? 'bg-gray-100' : ''}`}>
                     <div className="text-[10px] uppercase tracking-wide">{shortDay(d)}</div>
                     <div className="text-xs">{dayNum(d)}</div>
+                    {/* A dot, not a colour fill: under `use_allowance` a bank
+                        holiday IS a working day, and shading it like leave
+                        would say the opposite of what the ledger did. */}
+                    <div className="h-1.5 leading-none">
+                      {isBankHoliday(d) && <span className="text-[9px] text-violet-500">●</span>}
+                    </div>
                   </th>
                 ))}
               </tr>
@@ -241,6 +261,12 @@ export default function StaffCalendarPage() {
           <span className="inline-block w-3 h-3 rounded ring-1 ring-inset ring-ooosh-400" />
           One-off change / swap
         </span>
+        {bankHolidays.length > 0 && (
+          <span className="inline-flex items-center gap-1.5">
+            <span className="text-violet-500">●</span>
+            Bank holiday{bhPolicy === 'use_allowance' && ' — a normal working day here'}
+          </span>
+        )}
       </div>
     </div>
   );

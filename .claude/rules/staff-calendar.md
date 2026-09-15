@@ -1,6 +1,6 @@
 ---
 paths:
-  - "backend/src/services/staff-{day-status,employment,balance,leave,overtime,absence,notifications}.ts"
+  - "backend/src/services/staff-{day-status,employment,balance,leave,overtime,absence,notifications,settings}.ts"
   - "backend/src/routes/staff-calendar.ts"
   - "backend/src/migrations/{206,208,209,212,213,214}_*.sql"
   - "frontend/src/pages/{StaffCalendarPage,StaffAdminPage,MyTimePage,StaffAbsencePage}.tsx"
@@ -35,6 +35,7 @@ neither can be shown to be wrong.
 | How much holiday / TOIL has someone got? | `services/staff-balance.ts` |
 | Is this person in on this date? | `services/staff-day-status.ts` |
 | Is this person off sick, and for how long? | `services/staff-absence.ts` |
+| What is the threshold / policy / bank holiday? | `services/staff-settings.ts` |
 
 ## The ledger is append-only and the database enforces it
 
@@ -79,6 +80,52 @@ inconvenience anyone:
 4. a timed leave period longer than that day's contracted hours
 5. two absences over the same date (unique index on
    `staff_absence_days(person_id, absence_date) WHERE is_active`)
+
+## Thresholds come from `staff-settings.ts`, never from a literal
+
+Every configurable number in spec §13 — statutory weeks, the notice warning,
+the coverage floor, the absence flag, the RTW chase, the pro-rata rounding, the
+bank holiday policy and dates — is seeded by migration 216 and read through
+`services/staff-settings.ts`. **Do not reintroduce a hardcoded `14` or `3`.**
+§17 lists nine statutory specifics that want checking with the accountants
+before go-live; the whole point of them being settings is that a correction is
+a settings change, not a deploy.
+
+Every getter falls back to a documented default, so a missing or malformed row
+degrades and logs rather than breaking. The seeded values and the defaults in
+`DEFAULTS` are deliberately identical — change one, change the other.
+
+Two settings that do NOT do what their name suggests:
+- `staff.leave_year_start_month` is seeded for completeness; **the code assumes
+  January** throughout.
+- `staff.overtime_min_increment_minutes` drives the UI and the service check,
+  but `staff_overtime_entries` has a `minutes % 5 = 0` CHECK. Lowering the
+  setting without a migration leaves the database refusing what the form
+  offers.
+
+## Bank holidays are DATES, not days off
+
+Policy is `use_allowance`: a bank holiday is an ordinary working day here and
+someone who wants it off books holiday like any other day. They are stored as a
+comma-separated date list per year and **marked** on the calendar.
+
+**Never seed them as `staff_pattern_exceptions`.** That is the obvious
+implementation and it would make them non-working — silently handing everyone
+eight free days a year that no ledger entry ever paid for.
+
+## The entitlement grant runs daily; the cash-out only reminds
+
+`runEntitlementSync` is on a DAILY cron, not an annual one on 1 January. An
+annual job has a one-year retry interval, and 1 Jan 2027 is a Friday bank
+holiday. It is idempotent, so it grants once and no-ops after — and picks up a
+mid-year hours change for free.
+
+`runCashOutReminder` **emails the figures and posts nothing.** Paying out
+banked overtime is money out the door, and the platform rule is to surface a
+recomputed figure for a human. The sweep stays a button. Its deadline is
+DECEMBER payroll (§17.2), not 31 December, which is why the reminder defaults
+to the 8th. It stamps `staff.overtime_cashout_reminded_year` so it cannot nag
+every morning — same lesson as `rtw_chased_at`.
 
 ## An absence is a whole day, a morning or an afternoon — never timed
 
