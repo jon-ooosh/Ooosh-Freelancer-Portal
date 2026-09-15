@@ -1,5 +1,6 @@
 import { useState, useRef } from 'react';
 import { useAuthStore } from '../hooks/useAuthStore';
+import { displayInitials } from '../lib/displayName';
 import { api } from '../services/api';
 
 function PasswordStrength({ password }: { password: string }) {
@@ -63,7 +64,7 @@ export default function ProfilePage() {
   const [avatarMsg, setAvatarMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const initials = `${user?.first_name?.[0] || ''}${user?.last_name?.[0] || ''}`.toUpperCase();
+  const initials = displayInitials(user);
 
   async function handleProfileSave(e: React.FormEvent) {
     e.preventDefault();

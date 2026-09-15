@@ -19,6 +19,7 @@
 
 import { getSystemSetting } from '../routes/system-settings';
 import { DATE_RE } from './staff-day-status';
+import { computeBankHolidayDates } from './bank-holidays';
 
 // ── Defaults (identical to what migration 216 seeds) ────────────────────────
 
@@ -80,9 +81,16 @@ export function getProRataRounding(): Promise<'up_half_day' | 'none'> {
 /**
  * Bank holiday dates for one year, England & Wales.
  *
- * Stored as a comma-separated list of YYYY-MM-DD under
- * `staff.bank_holidays.<year>`, one row per year, so adding 2029 is a settings
- * edit rather than a deploy.
+ * COMPUTED by default (`services/bank-holidays.ts`), because the alternative is
+ * a seeded list that silently runs out. Migration 216 seeded 2026–2028, which
+ * immediately raised "and who adds 2029?" — the answer is nobody, and the
+ * calendar quietly stops marking them.
+ *
+ * `staff.bank_holidays.<year>` is now an OVERRIDE: leave it empty and the year
+ * is computed; put a comma-separated list in it and that list wins outright,
+ * for the rare year the arithmetic is wrong. One-off royal bank holidays are
+ * NOT handled here — a coronation is "the company is shut", which is a company
+ * day (spec §20), not a change to the bank holiday calendar.
  *
  * They are INFORMATIONAL under the current policy: `use_allowance` means a bank
  * holiday is an ordinary working day and someone wanting it off books it like
@@ -91,11 +99,18 @@ export function getProRataRounding(): Promise<'up_half_day' | 'none'> {
  */
 export async function getBankHolidays(year: number): Promise<string[]> {
   const raw = await getSystemSetting(`staff.bank_holidays.${year}`);
-  if (!raw) return [];
+  if (!raw || raw.trim() === '') return computeBankHolidayDates(year);
+
   const dates = raw.split(',').map(s => s.trim()).filter(Boolean);
   const good = dates.filter(d => DATE_RE.test(d) && d.slice(0, 4) === String(year));
   if (good.length !== dates.length) {
     console.warn(`[staff-settings] staff.bank_holidays.${year} has entries that are not ${year} YYYY-MM-DD dates — ignoring those`);
+  }
+  // An override that turns out to be entirely junk falls back to the computed
+  // list rather than leaving the year blank.
+  if (good.length === 0) {
+    console.warn(`[staff-settings] staff.bank_holidays.${year} had nothing usable — computing instead`);
+    return computeBankHolidayDates(year);
   }
   return good.sort();
 }

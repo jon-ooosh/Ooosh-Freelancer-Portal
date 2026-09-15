@@ -967,9 +967,12 @@ export function startScheduler() {
   // for free, which previously needed an admin to remember the button.
   cron.schedule('5 6 * * *', async () => {
     try {
-      const { runEntitlementSync } = await import('../services/staff-balance');
-      const r = await runEntitlementSync();
-      if (r.changed.length > 0 || r.failed.length > 0) {
+      const { runEntitlementSyncForOpenYears } = await import('../services/staff-balance');
+      // This year AND next: booking January from December has to have
+      // something to draw on, or the requester sees the whole of next year's
+      // allowance reported as a shortfall.
+      for (const r of await runEntitlementSyncForOpenYears()) {
+        if (r.changed.length === 0 && r.failed.length === 0) continue;
         console.log(
           `Scheduler: Holiday entitlement ${r.year} — ${r.changed.length} updated, ` +
           `${r.failed.length} failed, ${r.checked} checked`
@@ -984,7 +987,7 @@ export function startScheduler() {
   console.log('Scheduler: Holiday entitlement sync scheduled daily at 06:05 Europe/London');
 
   // ── Year-end overtime cash-out REMINDER (spec §6.3, §17.2) ────────────────
-  // Daily at 09:55 Europe/London; no-ops outside December and sends once.
+  // Daily at 09:55 Europe/London; no-ops outside December and January.
   //
   // It REMINDS, it does not sweep. Paying out seven people's banked overtime
   // is money out the door, and the platform rule is that a recomputed figure
@@ -996,14 +999,14 @@ export function startScheduler() {
       const r = await runCashOutReminder();
       if (r.sent) {
         console.log(`Scheduler: Year-end cash-out reminder sent — ${r.people.length} people, ${r.totalMinutes} min banked`);
-      } else if (r.skippedReason !== 'not December') {
+      } else if (r.skippedReason !== 'not December or January') {
         console.log(`Scheduler: Year-end cash-out reminder not sent (${r.skippedReason})`);
       }
     } catch (err) {
       console.error('Scheduler: Year-end cash-out reminder failed:', err);
     }
   }, { timezone: 'Europe/London' });
-  console.log('Scheduler: Year-end cash-out reminder scheduled daily at 09:55 Europe/London (December only)');
+  console.log('Scheduler: Year-end cash-out reminder scheduled daily at 09:55 Europe/London (December + January)');
 
   // ── Return-to-work chase (spec §7.3) ──────────────────────────────────────
   // Daily at 08:50 Europe/London, right after the time digest. Chases a closed

@@ -11,6 +11,12 @@
  *
  * Refuses to run outside a scratch database — it writes fixtures and briefly
  * relaxes two NOT NULL constraints to seed them.
+ *
+ * WANTS ITS OWN DATABASE. Several of the things under test are team-wide — the
+ * cash-out reminder sums everyone, the coverage warnings count everyone — so
+ * fixtures left by another verification script change the answers. Assertions
+ * are scoped to this script's own person where that is possible; a clean
+ * database is the guarantee for the rest.
  */
 import { query } from '../config/database';
 import { addDaysYmd } from '../services/staff-day-status';
@@ -188,21 +194,25 @@ async function main() {
   await approveOvertime(ot, null, userId);
 
   const notDec = await runCashOutReminder(new Date(Date.UTC(2027, 9, 20)));
-  check('it does nothing in October', !notDec.sent && notDec.skippedReason === 'not December', notDec);
+  check('it does nothing in October',
+    !notDec.sent && notDec.skippedReason === 'not December or January', notDec);
   const tooEarly = await runCashOutReminder(new Date(Date.UTC(2027, 11, 2)));
   check('…nor on 2 December, before the configured day',
     !tooEarly.sent && tooEarly.skippedReason === 'before 8 December', tooEarly);
 
   const sent = await runCashOutReminder(new Date(Date.UTC(2027, 11, 8)));
   check('it sends on the configured day', sent.sent === true, sent.skippedReason);
-  check('and reports the banked figure', sent.totalMinutes === 120, sent.totalMinutes);
+  check('and reports THIS person\'s banked figure',
+    sent.people.find(x => x.personId === personId)?.minutes === 120, sent.people);
   check('naming who it is for', sent.people.some(x => x.personId === personId), sent.people);
 
   const again = await runCashOutReminder(new Date(Date.UTC(2027, 11, 9)));
   check('it does NOT nag the next morning',
-    !again.sent && again.skippedReason === 'already sent this year', again);
-  check('the stamp records the year',
-    (await getSystemSetting('staff.overtime_cashout_reminded_year')) === '2027');
+    !again.sent && again.skippedReason === 'already sent for this year and phase', again);
+  // The stamp carries the PHASE as well as the year, so December's send does
+  // not silence January's follow-up on the same leave year — see __verify-d0b.
+  check('the stamp records the year and phase',
+    (await getSystemSetting('staff.overtime_cashout_reminded_year')) === '2027:dec');
 
   // Crucially: it must not have MOVED anything.
   const bank = await getBalance(personId, 'overtime', 2027);

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback, type ReactNode } from 'react';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
+import { displayFullName } from '../lib/displayName';
 import {
   AttachmentList,
   PendingAttachmentStrip,
@@ -1006,7 +1007,7 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
 
         <div className="flex justify-between items-center mt-2 gap-2">
           <div className="flex items-center gap-3 text-xs text-gray-400">
-            <span>Posting as {user?.first_name} {user?.last_name}</span>
+            <span>Posting as {displayFullName(user)}</span>
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}

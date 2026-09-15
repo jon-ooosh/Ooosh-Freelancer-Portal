@@ -536,6 +536,29 @@ export async function getBreakdown(
 
 // ── The 1 January grant, as a daily safety net ──────────────────────────────
 
+/**
+ * Sync the current leave year AND the next one.
+ *
+ * WHY NEXT YEAR IS GRANTED IN ADVANCE. Booking January from December used to
+ * show the requester "this is 140h more than you have left" — the whole of
+ * next year's allowance as a shortfall — because next year's entitlement did
+ * not exist until 1 January. It never actually blocked the request, but a
+ * blood-red warning covering a perfectly ordinary two weeks in January reads
+ * as a refusal, and people do not submit through it.
+ *
+ * Entitlement is deterministic from the working patterns, so next year's
+ * figure is knowable now, and syncEntitlement is idempotent — if hours change
+ * before the year starts, the next nightly run corrects it. The year picker on
+ * My Time already offers next year, so it should have a balance behind it.
+ */
+export async function runEntitlementSyncForOpenYears(): Promise<EntitlementSyncResult[]> {
+  const thisYear = new Date().getUTCFullYear();
+  return [
+    await runEntitlementSync(thisYear),
+    await runEntitlementSync(thisYear + 1),
+  ];
+}
+
 export interface EntitlementSyncResult {
   year: number;
   checked: number;

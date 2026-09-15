@@ -432,15 +432,42 @@ export async function runCashOutReminder(today = new Date()): Promise<CashOutRem
   const { getCashOutReminderDay, getOvertimeYearEnd } = await import('./staff-settings');
   const { getSystemSetting, setSystemSetting } = await import('../routes/system-settings');
 
-  if (today.getUTCMonth() !== 11) {
-    return { ...empty, skippedReason: 'not December' };
+  // WHICH year is being chased. In December it is this one. In January it is
+  // LAST one — because the sweep does not close a year, it just empties it at
+  // a moment in time. Somebody who takes half their bank as TOIL, cashes the
+  // rest out on the 20th and then works a long night on New Year's Eve has
+  // banked minutes against a leave year that has already been swept, and
+  // nothing would ever look at them again: the year is gone from My Time's
+  // default view and the December reminder has stamped itself as done.
+  //
+  // So a closed year with a positive balance keeps being chased until it is
+  // actually zero. That also covers the ordinary case of the sweep simply not
+  // getting run before the 31st, which jon is relaxed about — people use the
+  // bank up over a quiet Christmas either way.
+  const month = today.getUTCMonth();
+  const target = month === 11 ? year : year - 1;
+  const stampKey = 'staff.overtime_cashout_reminded_year';
+
+  if (month === 11) {
+    const fromDay = await getCashOutReminderDay();
+    if (today.getUTCDate() < fromDay) {
+      return { ...empty, year: target, skippedReason: `before ${fromDay} December` };
+    }
+  } else if (month === 0) {
+    // A few days' grace in January before nagging about a year just ended.
+    if (today.getUTCDate() < 5) {
+      return { ...empty, year: target, skippedReason: 'early January grace period' };
+    }
+  } else {
+    return { ...empty, year: target, skippedReason: 'not December or January' };
   }
-  const fromDay = await getCashOutReminderDay();
-  if (today.getUTCDate() < fromDay) {
-    return { ...empty, skippedReason: `before ${fromDay} December` };
-  }
-  if ((await getSystemSetting('staff.overtime_cashout_reminded_year')) === String(year)) {
-    return { ...empty, skippedReason: 'already sent this year' };
+
+  // The stamp records year AND phase, so December's send does not silence
+  // January's follow-up on the same leave year.
+  const phase = month === 11 ? 'dec' : 'jan';
+  const stamp = `${target}:${phase}`;
+  if ((await getSystemSetting(stampKey)) === stamp) {
+    return { ...empty, year: target, skippedReason: 'already sent for this year and phase' };
   }
 
   // 'expire' is available and not advised (§6.3). If anyone ever sets it,
@@ -461,7 +488,7 @@ export async function runCashOutReminder(today = new Date()): Promise<CashOutRem
 
   const people: { personId: string; name: string; minutes: number }[] = [];
   for (const row of staff.rows) {
-    const bal = await getBalance(row.person_id, 'overtime', year);
+    const bal = await getBalance(row.person_id, 'overtime', target);
     if (bal.balanceMinutes > 0) {
       people.push({ personId: row.person_id, name: row.name, minutes: bal.balanceMinutes });
     }
@@ -469,34 +496,36 @@ export async function runCashOutReminder(today = new Date()): Promise<CashOutRem
 
   if (people.length === 0) {
     // Nothing banked is a result, not a failure — and it still counts as
-    // handled for the year, so this does not re-check every morning.
-    await setSystemSetting('staff.overtime_cashout_reminded_year', String(year));
-    return { ...empty, skippedReason: 'nobody has anything banked' };
+    // handled, so this does not re-check every morning.
+    await setSystemSetting(stampKey, stamp);
+    return { ...empty, year: target, skippedReason: 'nobody has anything banked' };
   }
 
   const totalMinutes = people.reduce((s, p) => s + p.minutes, 0);
 
+  const title = phase === 'dec'
+    ? `Banked overtime to pay out before ${target} closes`
+    : `${target} still has banked overtime left over`;
+
   for (const u of await approverUserIds()) {
-    await notify(u.id, 'follow_up',
-      `Banked overtime needs paying out before ${year} closes`,
+    await notify(u.id, 'follow_up', title,
       `${people.length} ${people.length === 1 ? 'person has' : 'people have'} ${fmtH(totalMinutes)} between them`,
       'staff_overtime_entry', null, STAFF_URL, 'high');
   }
 
-  await emailApprovers(
-    `Banked overtime to pay out before ${year} closes`,
-    `Banked overtime at the end of ${year}`,
+  await emailApprovers(title, title,
     [
-      `Hours already worked cannot be forfeited, so the bank is <strong>paid out</strong> rather than expired.`,
-      `This wants to land in <strong>December's payroll</strong>, so it needs doing before that closes.`,
+      phase === 'dec'
+        ? `Hours already worked cannot be forfeited, so the bank is <strong>paid out</strong> rather than expired. This wants to land in <strong>December's payroll</strong>, so it needs doing before that closes — though anyone who would rather take the time off over a quiet Christmas still can.`
+        : `This is what is left in the ${target} bank after the sweep — most likely overtime worked between the cash-out and New Year, which accrues to ${target} and would otherwise sit there unseen. Run the sweep again for ${target}; it is idempotent and picks up exactly this.`,
       ...people.map(p => `<strong>${esc(p.name)}</strong> — ${fmtH(p.minutes)}`),
       `<strong>Total: ${fmtH(totalMinutes)}</strong>`,
       `Nothing has been posted. Run the year-end cash-out on the Staff page when you are happy with the figures.`,
     ],
     STAFF_URL);
 
-  await setSystemSetting('staff.overtime_cashout_reminded_year', String(year));
-  return { sent: true, year, people, totalMinutes };
+  await setSystemSetting(stampKey, stamp);
+  return { sent: true, year: target, people, totalMinutes };
 }
 
 /**
