@@ -37,7 +37,11 @@ export interface ParsedEmailForMatch {
 export type EmailMatchMethod =
   | 'pdf_filename_job_number'
   | 'subject_body_job_number'
-  | 'sender_person_single_open_job';
+  | 'sender_person_single_open_job'
+  // Not produced by matchEmailToJob() itself — the ingestion layer stamps this
+  // when a reply inherits its thread's anchor job (see gmail-ingestion thread
+  // anchoring, spec §5.3a) rather than the matcher's own weaker guess.
+  | 'thread_anchor';
 
 export interface EmailMatchResult {
   jobId: string;

@@ -24,7 +24,7 @@
  */
 import { query } from '../config/database';
 import { getGmailProfile, gmailApiGet, getPrimaryMailbox, isGmailConfigured } from '../config/gmail';
-import { matchEmailToJob, extractEmailAddress } from './email-matcher';
+import { matchEmailToJob, extractEmailAddress, extractReferencedJobNumbers } from './email-matcher';
 
 const SYSTEM_USER_ID = '00000000-0000-0000-0000-000000000000';
 
@@ -295,6 +295,29 @@ async function recordError(mailbox: string, message: string): Promise<void> {
 export type IngestOutcome = 'logged' | 'skipped' | 'duplicate' | 'unmatched';
 
 /**
+ * The job a Gmail thread is already anchored to, if any: the earliest ingested
+ * email in the thread that's still attached to a (non-deleted) job. Detached
+ * emails (job_id NULL) don't anchor; hidden emails still do (they still belong
+ * to the job, they're just off the all-staff view). Drives thread-anchoring so a
+ * conversation that drifts to mention other jobs doesn't scatter across timelines.
+ */
+async function getThreadAnchorJob(threadId: string | null | undefined): Promise<string | null> {
+  if (!threadId) return null;
+  const r = await query(
+    `SELECT i.job_id
+       FROM interactions i
+       JOIN jobs j ON j.id = i.job_id AND j.is_deleted = false
+      WHERE i.type = 'email'
+        AND i.gmail_thread_id = $1
+        AND i.job_id IS NOT NULL
+      ORDER BY i.created_at ASC
+      LIMIT 1`,
+    [threadId],
+  );
+  return r.rows[0]?.job_id ?? null;
+}
+
+/**
  * Ingest a single Gmail message: internal/automated skip → RFC822 dedup →
  * attach to a job (matcher, or a forced known job for the backfill) or park in
  * the unmatched queue. Idempotent (dedup on the RFC822 Message-ID).
@@ -350,11 +373,50 @@ export async function ingestGmailMessage(
   const direction = (msg.labelIds || []).includes('SENT') ? 'outbound' : 'inbound';
   const snippet = (msg.snippet || body).slice(0, 500);
 
-  // Resolve the job: forced (backfill) or via the deterministic matcher (live).
+  // Resolve the job: forced (backfill) or via the deterministic matcher (live),
+  // with thread-anchoring on the live path. `matchMethod` / `matchConfidence` are
+  // persisted so the timeline can show WHY an email is on a job and a human can
+  // spot a bad attach (spec §5.3a).
   let jobId: string | null = opts.forceJobId ?? null;
-  if (!jobId) {
+  let matchMethod: string | null = opts.forceJobId ? 'backfill_forced' : null;
+  let matchConfidence: string | null = opts.forceJobId ? 'high' : null;
+
+  if (!opts.forceJobId) {
     const match = await matchEmailToJob({ from, to, subject, body, attachmentFilenames });
-    jobId = match?.jobId ?? null;
+
+    // Thread-anchoring: once a thread's first message strong-matched a job, later
+    // messages inherit that job UNLESS they carry their OWN strong evidence for a
+    // DIFFERENT job — a `Quote (N)` PDF attachment or an explicit job number in
+    // the SUBJECT line. A job number in the BODY does NOT override the anchor:
+    // bodies routinely reference other/past hires in passing ("like on #15804"),
+    // and letting those move attribution is exactly the drift jon flagged. A weak
+    // (sender) or absent match in an anchored thread also inherits the anchor —
+    // so a bare client reply lands on the right job instead of the unmatched queue.
+    const anchorJobId = await getThreadAnchorJob(msg.threadId);
+    if (anchorJobId) {
+      const subjectJobNumbers = extractReferencedJobNumbers(subject);
+      const strongOwnDifferentJob =
+        match != null &&
+        match.jobId !== anchorJobId &&
+        (match.method === 'pdf_filename_job_number' ||
+          (match.method === 'subject_body_job_number' &&
+            match.hhJobNumber != null &&
+            subjectJobNumbers.includes(match.hhJobNumber)));
+
+      if (strongOwnDifferentJob) {
+        jobId = match!.jobId;
+        matchMethod = match!.method;
+        matchConfidence = match!.confidence;
+      } else {
+        jobId = anchorJobId;
+        matchMethod = 'thread_anchor';
+        matchConfidence = 'high';
+      }
+    } else if (match) {
+      jobId = match.jobId;
+      matchMethod = match.method;
+      matchConfidence = match.confidence;
+    }
   }
 
   if (jobId) {
@@ -362,10 +424,10 @@ export async function ingestGmailMessage(
       `INSERT INTO interactions
          (type, content, job_id, created_by,
           gmail_message_id, gmail_thread_id, email_from, email_to, email_subject,
-          email_snippet, email_direction, has_attachments)
-       VALUES ('email', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+          email_snippet, email_direction, has_attachments, match_method, match_confidence)
+       VALUES ('email', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
       [body || snippet || '(no body)', jobId, SYSTEM_USER_ID, rfcMessageId, msg.threadId,
-       from, to, subject, snippet, direction, hasAttachments],
+       from, to, subject, snippet, direction, hasAttachments, matchMethod, matchConfidence],
     );
 
     // Chase auto-unenrol: a LIVE inbound client reply is engagement — push the
