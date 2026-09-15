@@ -48,6 +48,7 @@ interface RosterRow {
   userId: string | null;
   name: string;
   preferredName: string | null;
+  pronouns: string | null;
   email: string | null;
   avatarUrl: string | null;
   account: { role: string; isActive: boolean; hhUserId: number | null } | null;
@@ -56,6 +57,8 @@ interface RosterRow {
     jobTitle: string | null; department: string | null;
     bankHolidayPolicy: 'use_allowance' | 'granted' | null;
     entitlementWeeks: string | null;
+    probationEndDate: string | null;
+    noticePeriodDays: number | null;
   } | null;
   weeklyMinutes: number | null;
   hasPattern: boolean;
@@ -185,7 +188,14 @@ export default function StaffAdminPage() {
     <div className="p-4 sm:p-6 max-w-6xl">
       <div className="flex flex-wrap items-center justify-between gap-3 mb-1">
         <h1 className="text-2xl font-semibold text-gray-900">Staff</h1>
-        <Link to="/staff/calendar" className="text-sm text-ooosh-600 hover:underline">View calendar →</Link>
+        <div className="flex items-center gap-4">
+          {/* Absence lives on its own page: it is admin-only special-category
+              data (§0.5), and this page is manager-tier for the account section. */}
+          {isAdmin && (
+            <Link to="/staff/absence" className="text-sm text-ooosh-600 hover:underline">Absence →</Link>
+          )}
+          <Link to="/staff/calendar" className="text-sm text-ooosh-600 hover:underline">View calendar →</Link>
+        </div>
       </div>
       <p className="text-sm text-gray-500 mb-5">
         Logins, roles, company cards and working hours — everyone who works here in one place.
@@ -279,6 +289,7 @@ function PersonCard({ row, isAdmin, open, onToggle, onSaved, onError }: {
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <span className="font-medium text-gray-900">{row.preferredName || row.name}</span>
+            {row.pronouns && <span className="text-xs text-gray-500">({row.pronouns})</span>}
             {row.account ? (
               <span className={`text-[11px] px-1.5 py-0.5 rounded ${ROLE_COLOURS[row.account.role] || 'bg-gray-100 text-gray-700'}`}>
                 {ROLE_LABELS[row.account.role] || row.account.role}
@@ -570,6 +581,11 @@ function EmploymentDetails({ row, workingDaysPerWeek, onSaved, onError }: {
   const [jobTitle, setJobTitle] = useState(emp.jobTitle ?? '');
   const [department, setDepartment] = useState(emp.department ?? '');
   const [bankHolidays, setBankHolidays] = useState<string>(emp.bankHolidayPolicy ?? '');
+  const [preferredName, setPreferredName] = useState(row.preferredName ?? '');
+  const [pronouns, setPronouns] = useState(row.pronouns ?? '');
+  const [probationEnd, setProbationEnd] = useState(emp.probationEndDate ?? '');
+  const [noticeDays, setNoticeDays] = useState(
+    emp.noticePeriodDays != null ? String(emp.noticePeriodDays) : '');
   const [entitlement, setEntitlement] = useState(emp.entitlementWeeks ?? '');
   const [entitlementDays, setEntitlementDays] = useState(
     emp.entitlementWeeks != null && workingDaysPerWeek
@@ -589,6 +605,10 @@ function EmploymentDetails({ row, workingDaysPerWeek, onSaved, onError }: {
         department: department || null,
         bankHolidayPolicy: bankHolidays === '' ? null : bankHolidays,
         entitlementWeeks: entitlement === '' ? null : Number(entitlement),
+        probationEndDate: probationEnd || null,
+        noticePeriodDays: noticeDays === '' ? null : Number(noticeDays),
+        preferredName,
+        pronouns,
       });
       setEditing(false);
       await onSaved('Employment details saved.');
@@ -607,6 +627,13 @@ function EmploymentDetails({ row, workingDaysPerWeek, onSaved, onError }: {
           <button onClick={() => setEditing(true)} className="text-xs text-ooosh-600 hover:underline">Edit</button>
         </div>
         <dl className="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-2 text-sm">
+          <div>
+            <dt className="text-xs text-gray-500">Known as</dt>
+            <dd className="text-gray-900">
+              {row.preferredName || <span className="text-gray-400">{row.name.split(' ')[0]}</span>}
+              {row.pronouns && <span className="text-gray-500 text-xs"> ({row.pronouns})</span>}
+            </dd>
+          </div>
           <div><dt className="text-xs text-gray-500">Started</dt><dd className="text-gray-900">{fmtDate(emp.startDate)}</dd></div>
           <div><dt className="text-xs text-gray-500">Job title</dt><dd className="text-gray-900">{emp.jobTitle || '—'}</dd></div>
           <div><dt className="text-xs text-gray-500">Department</dt><dd className="text-gray-900">{emp.department || '—'}</dd></div>
@@ -621,6 +648,28 @@ function EmploymentDetails({ row, workingDaysPerWeek, onSaved, onError }: {
               ) : null}
             </dd>
           </div>
+          {emp.probationEndDate && (
+            <div>
+              <dt className="text-xs text-gray-500">Probation ends</dt>
+              <dd className="text-gray-900">
+                {fmtDate(emp.probationEndDate)}
+                {(() => {
+                  const days = Math.ceil(
+                    (Date.parse(emp.probationEndDate + 'T00:00:00Z') - Date.now()) / 86400000);
+                  if (days < 0) return <span className="text-gray-500 text-xs"> (passed)</span>;
+                  return <span className={`text-xs ${days <= 30 ? 'text-amber-700 font-medium' : 'text-gray-500'}`}>
+                    {' '}({days} days)
+                  </span>;
+                })()}
+              </dd>
+            </div>
+          )}
+          {emp.noticePeriodDays != null && (
+            <div>
+              <dt className="text-xs text-gray-500">Notice period</dt>
+              <dd className="text-gray-900">{emp.noticePeriodDays} days</dd>
+            </div>
+          )}
           <div className="col-span-2 sm:col-span-4">
             <dt className="text-xs text-gray-500">Bank holidays</dt>
             <dd className="text-gray-900">
@@ -640,6 +689,21 @@ function EmploymentDetails({ row, workingDaysPerWeek, onSaved, onError }: {
         <button onClick={() => setEditing(false)} className="text-sm text-gray-500 hover:text-gray-700">Cancel</button>
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3">
+        <label className="text-sm">
+          <span className="block text-xs text-gray-600 mb-1">Likes to be known as</span>
+          <input value={preferredName} onChange={e => setPreferredName(e.target.value)}
+            placeholder={row.name.split(' ')[0]}
+            className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white" />
+          <span className="block text-xs text-gray-500 mt-1">
+            Used everywhere their name appears. Blank falls back to their first name.
+          </span>
+        </label>
+        <label className="text-sm">
+          <span className="block text-xs text-gray-600 mb-1">Pronouns</span>
+          <input value={pronouns} onChange={e => setPronouns(e.target.value)}
+            placeholder="e.g. he/him"
+            className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white" />
+        </label>
         <label className="text-sm">
           <span className="block text-xs text-gray-600 mb-1">Start date</span>
           <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)}
@@ -715,6 +779,20 @@ function EmploymentDetails({ row, workingDaysPerWeek, onSaved, onError }: {
           </span>
         </div>
       </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+        <label className="text-sm">
+          <span className="block text-xs text-gray-600 mb-1">Probation ends (optional)</span>
+          <input type="date" value={probationEnd} onChange={e => setProbationEnd(e.target.value)}
+            className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white" />
+        </label>
+        <label className="text-sm">
+          <span className="block text-xs text-gray-600 mb-1">Notice period (days)</span>
+          <input type="number" min={0} max={365} value={noticeDays}
+            onChange={e => setNoticeDays(e.target.value)} placeholder="e.g. 28"
+            className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white" />
+        </label>
+      </div>
+
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
         <label className="text-sm">
           <span className="block text-xs text-gray-600 mb-1">Status</span>

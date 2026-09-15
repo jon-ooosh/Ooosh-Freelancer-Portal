@@ -957,6 +957,27 @@ export function startScheduler() {
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: Staff time digest scheduled daily at 08:45 Europe/London');
 
+  // ── Return-to-work chase (spec §7.3) ──────────────────────────────────────
+  // Daily at 08:50 Europe/London, right after the time digest. Chases a closed
+  // sickness absence whose return-to-work conversation is still unrecorded
+  // after 7 days — ONCE, not every morning: rtw_chased_at records that it
+  // fired, because a reminder that repeats daily gets filtered and then the
+  // one that mattered is filtered with it.
+  cron.schedule('50 8 * * *', async () => {
+    try {
+      const { runRtwChase } = await import('../services/staff-notifications');
+      const r = await runRtwChase();
+      if (r.chased > 0) {
+        console.log(`Scheduler: Return-to-work chase — ${r.chased} chased, ${r.outstanding} outstanding`);
+      } else {
+        console.log(`Scheduler: Return-to-work chase — nothing to chase (${r.outstanding} outstanding)`);
+      }
+    } catch (err) {
+      console.error('Scheduler: Return-to-work chase failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: Return-to-work chase scheduled daily at 08:50 Europe/London');
+
   // ── Studio-sitter lock-up chase (morning after) ──────────────────────────
   // Daily at 08:45 Europe/London. For any shift that closed without a lock-up
   // report, reminds the rostered sitter + alerts the office. Once per shift

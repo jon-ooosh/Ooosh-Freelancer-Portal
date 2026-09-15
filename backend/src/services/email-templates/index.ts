@@ -17,6 +17,16 @@ export interface EmailTemplate {
 
 const templates: Record<string, EmailTemplate> = {
 
+  // Staff Calendar: one email per new leave request or overtime entry, sent
+  // immediately. The bell alone gets missed (jon, Sep 2026). Body is built by
+  // services/staff-notifications.ts and passed as bodyHtmlOverride.
+  staff_time_request: {
+    variant: 'internal',
+    preheader: 'A staff time request needs a decision',
+    subject: 'Staff time request',
+    body: '<p>A request is waiting for a decision in the Ooosh Operations Platform.</p>',
+  },
+
   // Staff Calendar: one digest a day listing leave requests and overtime
   // waiting for a decision. Only sent when something is actually pending —
   // never an empty email. Body is built by services/staff-notifications.ts and
@@ -2037,29 +2047,25 @@ const templates: Record<string, EmailTemplate> = {
 
   under_dispatched_warning: {
     variant: 'internal',
-    subject: 'Sanity check: {{jobName}} (#{{jobNumber}}) marked On Hire but HH not fully dispatched',
+    subject: 'Check HireHop: {{jobName}} (#{{jobNumber}}) not dispatched',
     body: `
-      <h2 style="margin:0 0 12px;font-size:18px;color:#92400e;">⚠️ Under-dispatched warning</h2>
+      <h2 style="margin:0 0 12px;font-size:18px;color:#92400e;">⚠️ OP and HireHop don't match</h2>
       <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.6;">
-        Job <strong>{{jobName}}</strong> (job <strong>#{{jobNumber}}</strong>) has just been marked
-        <strong>On Hire</strong> in OP via <strong>{{source}}</strong> by
-        <strong>{{actorLabel}}</strong>, but HireHop status is still
-        <strong>{{hhStatusLabel}}</strong> — not all items appear to be
-        dispatched in HH.
+        <strong>{{jobName}}</strong> (#{{jobNumber}}) is marked <strong>On Hire</strong>
+        in OP, but <strong>{{mismatchLine}}</strong>.
       </p>
       <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.6;">
-        OP has gone ahead and pushed the HH status to Dispatched. Please
-        confirm the items are correct, or flip back in HireHop if needed.
+        Please open the job in HireHop and see what's left to be done.
       </p>
       <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
         <tr>
           <td style="padding:12px 16px;background-color:#fffbeb;border-radius:8px;border:1px solid #fde68a;">
-            <p style="margin:0 0 8px;font-size:13px;color:#92400e;">
-              <a href="{{opJobUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Open job in OP →</a>
-            </p>
-            {{#if hhJobUrl}}<p style="margin:0;font-size:13px;color:#92400e;">
+            {{#if hhJobUrl}}<p style="margin:0 0 8px;font-size:13px;color:#92400e;">
               <a href="{{hhJobUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Open job in HireHop →</a>
             </p>{{/if}}
+            <p style="margin:0;font-size:13px;color:#92400e;">
+              <a href="{{opJobUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Open job in OP →</a>
+            </p>
           </td>
         </tr>
       </table>

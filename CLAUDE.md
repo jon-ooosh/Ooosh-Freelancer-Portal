@@ -99,6 +99,7 @@ through Y" rules for that area.
 | `email-and-notifications.md` | email service, templates, notifications, comms, auto-chase |
 | `jobs-pipeline-dashboard.md` | pipeline, requirements, dashboard, jobs, returns |
 | `frontend.md` | any frontend file |
+| `staff-calendar.md` | staff calendar, holiday, TOIL, overtime, absence, My Time |
 
 **`docs/reference/*.md` is the full record** — design rationale, incident forensics,
 shipped-work history. Read one when you need the "why" behind a rule, or when working
@@ -241,7 +242,7 @@ HH codes: 0 Enquiry · 1 Provisional · 2 Booked · 3 Prepped · 4 Part Dispatch
 
 Backups 02:00 · job financials 03:00 · Xero reconcile 07:45 · compliance 08:00 ·
 chase alerts 08:10 · auto-chase runner 08:10 · lock-up chaser 08:45 · staff time digest
-08:45 · stale-enquiry
+08:45 · return-to-work chase 08:50 · stale-enquiry
 auto-lose 09:00 · carnet forms 09:15 · referral safety-net 09:18 · storage reminders
 09:20 · holding reminders 09:25 · close-out chase 09:30 · staff documents 09:35 ·
 pre-auth expiry 09:40 · Stripe pre-auth discovery 09:50 · OOH reminders 10:00 ·

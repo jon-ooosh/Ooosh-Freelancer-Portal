@@ -21,6 +21,8 @@ interface StaffDay {
   startTime: string | null;
   endTime: string | null;
   window?: { start: string; end: string };
+  /** Every timed window on the day — someone can be in late AND away early. */
+  windows?: { start: string; end: string }[];
   isException: boolean;
   detail?: { leaveType?: string; absenceType?: string };
 }
@@ -189,10 +191,13 @@ export default function StaffCalendarPage() {
                   </td>
                   {p.days.map(day => {
                     const cell = CELL[day.status];
+                    // A day can carry several windows now; fall back to the
+                    // single `window` so a cached bundle keeps working.
+                    const wins = day.windows ?? (day.window ? [day.window] : []);
                     const title = day.status === 'working' && day.startTime
                       ? `${day.startTime.slice(0, 5)}–${day.endTime?.slice(0, 5)} · ${fmtMinutes(day.scheduledMinutes)}`
-                      : day.window
-                        ? `Out ${day.window.start}–${day.window.end}`
+                      : wins.length > 0
+                        ? `Out ${wins.map(w => `${w.start}–${w.end}`).join(', ')}`
                         : cell.label || 'Not scheduled';
                     return (
                       <td key={day.date}

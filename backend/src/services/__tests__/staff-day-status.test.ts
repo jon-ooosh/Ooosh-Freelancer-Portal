@@ -1,8 +1,8 @@
 import {
   daysBetween, addDaysYmd, weekdayIndex, mondayOf, cycleWeekFor,
   dateRange, shiftMinutes, formatMinutes,
-  resolveScheduledDay, maskForViewer,
-  type StaffDay,
+  resolveScheduledDay, maskForViewer, mergeAbsenceLayer,
+  type StaffDay, type DayPortion,
 } from '../staff-day-status';
 
 // ── Date maths ──────────────────────────────────────────────────────────────
@@ -253,5 +253,94 @@ describe('maskForViewer', () => {
     const masked = maskForViewer(appt, false);
     expect(masked[0].window).toEqual({ start: '14:00', end: '15:00' });
     expect(masked[0].detail).toBeUndefined();
+  });
+});
+
+// ── The merge layer (Phase D) ───────────────────────────────────────────────
+
+describe('mergeAbsenceLayer — absence', () => {
+  const working = (date: string): StaffDay => ({
+    date, scheduledMinutes: 450, status: 'working',
+    startTime: '09:00', endTime: '17:30', isException: false,
+  });
+  const absence = (date: string, portion: DayPortion, start?: string, end?: string) => ({
+    date, portion, absenceType: 'sickness',
+    startTime: start ?? null, endTime: end ?? null,
+  });
+
+  it('turns a whole-day absence into `absent`', () => {
+    const [d] = mergeAbsenceLayer([working('2026-10-07')], [], [absence('2026-10-07', 'full')]);
+    expect(d.status).toBe('absent');
+    expect(d.detail).toEqual({ absenceType: 'sickness' });
+  });
+
+  it('turns a half day into `partial`, not `absent`', () => {
+    // The coverage warnings must not count someone absent all day when they
+    // are in for half of it — this is bug eight from the build log, in the
+    // absence layer rather than the leave one.
+    const [d] = mergeAbsenceLayer([working('2026-10-07')], [], [absence('2026-10-07', 'am')]);
+    expect(d.status).toBe('partial');
+  });
+
+  it('carries every timed window, not just the first', () => {
+    const [d] = mergeAbsenceLayer([working('2026-10-13')], [], [
+      absence('2026-10-13', 'hours', '09:00:00', '11:00:00'),
+      absence('2026-10-13', 'hours', '16:00:00', '17:30:00'),
+    ]);
+    expect(d.status).toBe('partial');
+    expect(d.windows).toEqual([
+      { start: '09:00', end: '11:00' },
+      { start: '16:00', end: '17:30' },
+    ]);
+    // The pre-existing single-window field keeps working for cached bundles.
+    expect(d.window).toEqual({ start: '09:00', end: '11:00' });
+  });
+
+  it('never overlays a day the person does not work', () => {
+    const off: StaffDay = {
+      date: '2026-10-09', scheduledMinutes: 0, status: 'not_scheduled',
+      startTime: null, endTime: null, isException: false,
+    };
+    expect(mergeAbsenceLayer([off], [], [absence('2026-10-09', 'full')])[0].status)
+      .toBe('not_scheduled');
+  });
+
+  it('lets absence win over booked leave, keeping both for admin', () => {
+    // Sickness during a booked holiday (§7.4): the leave request is left
+    // intact on purpose, so both rows exist and the merge has to choose.
+    const [d] = mergeAbsenceLayer(
+      [working('2026-11-03')],
+      [{ date: '2026-11-03', portion: 'full', leaveType: 'holiday', status: 'approved' }],
+      [absence('2026-11-03', 'full')]
+    );
+    expect(d.status).toBe('absent');
+    expect(d.detail).toEqual({ leaveType: 'holiday', absenceType: 'sickness' });
+  });
+
+  it('leaves leave alone on days the absence does not cover', () => {
+    const days = [working('2026-11-02'), working('2026-11-03')];
+    const merged = mergeAbsenceLayer(
+      days,
+      [
+        { date: '2026-11-02', portion: 'full', leaveType: 'holiday', status: 'approved' },
+        { date: '2026-11-03', portion: 'full', leaveType: 'holiday', status: 'approved' },
+      ],
+      [absence('2026-11-03', 'full')]
+    );
+    expect(merged[0].status).toBe('leave');
+    expect(merged[1].status).toBe('absent');
+  });
+
+  it('a whole day beats a marker on the same date', () => {
+    const [d] = mergeAbsenceLayer([working('2026-10-07')], [], [
+      absence('2026-10-07', 'hours', '14:00:00', '15:00:00'),
+      absence('2026-10-07', 'full'),
+    ]);
+    expect(d.status).toBe('absent');
+  });
+
+  it('is a no-op with nothing to overlay', () => {
+    const days = [working('2026-10-07')];
+    expect(mergeAbsenceLayer(days, [], [])).toBe(days);
   });
 });

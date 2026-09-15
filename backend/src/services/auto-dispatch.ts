@@ -134,7 +134,8 @@ export async function autoDispatchJob(opts: AutoDispatchOptions): Promise<AutoDi
 const SYSTEM_USER_ID = '00000000-0000-0000-0000-000000000000';
 
 /** Public HH-status integer → human label map. Used by the dispatch sanity
- *  scanner when composing the warning email. */
+ *  scanner for its failure logs (the warning email itself is deliberately
+ *  free of HH status codes — they mean nothing to staff). */
 export const HH_STATUS_LABELS: Record<number, string> = {
   0: '0 — Enquiry',
   1: '1 — Provisional',

@@ -268,6 +268,8 @@ export interface PayrollRow {
   paidOvertimeMinutes: number;
   unpaidLeaveMinutes: number;
   unpaidLeaveDays: number;
+  sicknessMinutes: number;
+  sicknessDays: number;
   nominalDayMinutes: number | null;
 }
 
@@ -278,8 +280,11 @@ export interface PayrollRow {
  * the same numbers — the batch table records what was generated and when it
  * went, and never stamps the append-only ledger.
  *
- * Sickness and other absence join this in Phase D; the shape is deliberately
- * additive so the accountants see the same columns in the same order.
+ * Sickness joined this in Phase D, appended rather than inserted, so the
+ * accountants see the same columns in the same order they already had.
+ *
+ * SSP is NOT computed (spec §16). We report the days; they work out the pay.
+ * Owning SSP's correctness for seven people is not a trade worth making.
  */
 export async function getPayrollReport(from: string, to: string): Promise<PayrollRow[]> {
   const r = await query(
@@ -308,16 +313,24 @@ export async function getPayrollReport(from: string, to: string): Promise<Payrol
   );
 
   const { getContractedWeek } = await import('./staff-balance');
+  // THE definition of sickness minutes — staff-absence.ts, not a second SUM here.
+  const { getSicknessMinutes } = await import('./staff-absence');
+  const sickness = await getSicknessMinutes(from, to);
+
   return Promise.all(r.rows.map(async (row: Record<string, unknown>) => {
     const week = await getContractedWeek(row.person_id as string, to);
     const unpaid = Number(row.unpaid_leave_minutes);
+    const sick = sickness.get(row.person_id as string) ?? 0;
+    const asDays = (min: number) => week?.nominalDayMinutes
+      ? Math.round((min / week.nominalDayMinutes) * 100) / 100 : 0;
     return {
       personId: row.person_id as string,
       name: row.name as string,
       paidOvertimeMinutes: Number(row.paid_overtime_minutes),
       unpaidLeaveMinutes: unpaid,
-      unpaidLeaveDays: week?.nominalDayMinutes
-        ? Math.round((unpaid / week.nominalDayMinutes) * 100) / 100 : 0,
+      unpaidLeaveDays: asDays(unpaid),
+      sicknessMinutes: sick,
+      sicknessDays: asDays(sick),
       nominalDayMinutes: week?.nominalDayMinutes ?? null,
     };
   }));
@@ -331,13 +344,15 @@ export function payrollCsv(rows: PayrollRow[], from: string, to: string): string
   const lines = [
     `Ooosh Tours payroll changes,${from} to ${to}`,
     '',
-    'Name,Paid overtime (hours),Paid overtime (h:mm),Unpaid leave (days),Unpaid leave (hours)',
+    'Name,Paid overtime (hours),Paid overtime (h:mm),Unpaid leave (days),Unpaid leave (hours),Sickness (days),Sickness (hours)',
     ...rows.map(r => [
       esc(r.name),
       (r.paidOvertimeMinutes / 60).toFixed(2),
       `${Math.floor(r.paidOvertimeMinutes / 60)}:${String(r.paidOvertimeMinutes % 60).padStart(2, '0')}`,
       r.unpaidLeaveDays.toFixed(2),
       (r.unpaidLeaveMinutes / 60).toFixed(2),
+      r.sicknessDays.toFixed(2),
+      (r.sicknessMinutes / 60).toFixed(2),
     ].join(',')),
   ];
   return lines.join('\n');

@@ -10,9 +10,11 @@
  * the approval context panel — calls it. Nothing else queries the underlying
  * tables to answer this question.
  *
- * Phase A implements the pattern + exception layer. Leave (Phase B) and
- * absence (Phase D) merge in at mergeAbsenceLayer() below, which is the single
- * place they attach; no caller changes when they land.
+ * Phase A implemented the pattern + exception layer; leave (Phase B) and
+ * absence (Phase D) merged in at mergeAbsenceLayer() below, which is the single
+ * place they attach. No caller changed when either landed, which is what that
+ * function exists for. Anything that answers "in or out" in future goes there
+ * too, not into a caller.
  *
  * MASKING (spec §0.5): sickness and parental data is special-category under UK
  * GDPR. Peers see 'Absent' with no type and no reason. maskForViewer() applies
@@ -122,8 +124,14 @@ export interface StaffDay {
   startTime: string | null;
   endTime: string | null;
   portion?: DayPortion;
-  /** Set when portion = 'hours' — a timed appointment window (spec §7.5). */
+  /**
+   * Set when portion = 'hours' — a timed window (spec §7.5). Kept as the FIRST
+   * window rather than removed now that a day can carry several, because
+   * dropping a field breaks every browser still holding the previous bundle.
+   */
   window?: { start: string; end: string };
+  /** Every timed window on this day — "in late AND away early" is two. */
+  windows?: { start: string; end: string }[];
   /** True when a pattern exception (incl. a swap leg) applies to this date. */
   isException: boolean;
   /** ADMIN ONLY. Stripped by maskForViewer() for everyone else. */
@@ -227,40 +235,97 @@ export interface LeaveDayOverlay {
   endTime?: string | null;
 }
 
+/** One live absence day, as the merge layer needs it. */
+export interface AbsenceDayOverlay {
+  date: string;
+  portion: DayPortion;
+  absenceType: string;
+  startTime: string | null;
+  endTime: string | null;
+}
+
 /**
- * Overlay leave (and, from Phase D, absence) onto the contracted days.
+ * Overlay leave and absence onto the contracted days.
  *
- * The single attachment point promised in Phase A — leave landed here without
- * any caller changing, which was the point of putting it behind one function.
+ * The single attachment point promised in Phase A — leave landed here in B2
+ * and absence in D, and no caller changed either time. That was the point of
+ * putting it behind one function.
  *
- * A day only becomes 'leave' if it was contracted in the first place: leave on
- * a day someone does not work is meaningless, and letting it render would make
- * the calendar disagree with the ledger (which charged nothing for it).
+ * A day only becomes 'leave' or 'absent' if it was contracted in the first
+ * place: time off on a day someone does not work is meaningless, and letting
+ * it render would make the calendar disagree with the ledger (which charged
+ * nothing for it).
  *
  * PENDING leave shows as 'partial' rather than 'leave'. It is not time off
  * yet, but everyone — the approver especially — needs to see it is coming,
  * and showing it as confirmed would be a lie the approver then acts on.
+ *
+ * ABSENCE WINS over leave on the same date. That is the sickness-during-
+ * holiday case (§7.4): both rows legitimately exist, because the reclaim
+ * deliberately leaves the holiday request intact, and what actually happened
+ * to the person that day is the absence. Admin sees both in `detail`; peers
+ * see neither, because maskForViewer strips detail entirely.
  */
-export function mergeAbsenceLayer(days: StaffDay[], leave: LeaveDayOverlay[] = []): StaffDay[] {
-  if (leave.length === 0) return days;
-  const byDate = new Map(leave.map(l => [l.date, l]));
+export function mergeAbsenceLayer(
+  days: StaffDay[],
+  leave: LeaveDayOverlay[] = [],
+  absence: AbsenceDayOverlay[] = []
+): StaffDay[] {
+  if (leave.length === 0 && absence.length === 0) return days;
+
+  const leaveByDate = new Map(leave.map(l => [l.date, l]));
+  const absenceByDate = new Map<string, AbsenceDayOverlay[]>();
+  for (const a of absence) {
+    const list = absenceByDate.get(a.date) ?? [];
+    list.push(a);
+    absenceByDate.set(a.date, list);
+  }
 
   return days.map(d => {
-    const l = byDate.get(d.date);
-    if (!l || d.status !== 'working') return d;
+    if (d.status !== 'working') return d;
+    const l = leaveByDate.get(d.date);
+    const abs = absenceByDate.get(d.date) ?? [];
+    if (!l && abs.length === 0) return d;
 
-    const approved = l.status === 'approved';
+    // Leave detail is carried through even when absence takes the status, so
+    // an admin can see that the sickness landed on a booked holiday.
+    const leaveDetail = l
+      ? { leaveType: l.status === 'approved' ? l.leaveType : `${l.leaveType} (requested)` }
+      : {};
+
+    if (abs.length > 0) {
+      // A whole day off beats any marker — the unique index means at most one
+      // whole/half-day row exists, so this cannot be ambiguous.
+      const whole = abs.find(a => a.portion === 'full');
+      const windows = abs
+        .filter(a => a.startTime && a.endTime)
+        .map(a => ({ start: a.startTime!.slice(0, 5), end: a.endTime!.slice(0, 5) }));
+      const lead = whole ?? abs[0];
+
+      return {
+        ...d,
+        status: whole ? 'absent' : 'partial',
+        portion: lead.portion,
+        ...(windows.length > 0 ? { window: windows[0], windows } : {}),
+        detail: { ...leaveDetail, absenceType: lead.absenceType },
+      };
+    }
+
+    const approved = l!.status === 'approved';
     // Anything short of a whole day is 'partial': they are in for some of it,
     // and the coverage warnings must not count them absent all day. That
     // includes a timed period ('hours') as well as a half day.
-    const wholeDay = l.portion === 'full';
+    const wholeDay = l!.portion === 'full';
+    const win = l!.startTime && l!.endTime
+      ? { start: l!.startTime.slice(0, 5), end: l!.endTime.slice(0, 5) }
+      : null;
 
     return {
       ...d,
       status: approved ? (wholeDay ? 'leave' : 'partial') : 'partial',
-      portion: l.portion,
-      ...(l.startTime && l.endTime ? { window: { start: l.startTime.slice(0, 5), end: l.endTime.slice(0, 5) } } : {}),
-      detail: { leaveType: approved ? l.leaveType : `${l.leaveType} (requested)` },
+      portion: l!.portion,
+      ...(win ? { window: win, windows: [win] } : {}),
+      detail: leaveDetail,
     };
   });
 }
@@ -289,6 +354,54 @@ export async function getLeaveOverlay(
       portion: row.portion as DayPortion,
       leaveType: row.leave_type as string,
       status: row.status as 'pending' | 'approved',
+      startTime: (row.start_time as string) ?? null,
+      endTime: (row.end_time as string) ?? null,
+    });
+    out.set(row.person_id, list);
+  }
+  return out;
+}
+
+/**
+ * Live absence days for a set of people over a range, for the merge above.
+ *
+ * Catches open absences up to today first: a sickness with no end date cannot
+ * have all its day rows written when it starts, so they are filled in lazily
+ * (spec §7.1). Doing it on the READ means the read repairs the data and it
+ * cannot silently drift — which a nightly job can, and would not tell anyone.
+ *
+ * The import is dynamic on purpose: staff-absence.ts reads the calendar
+ * through this module, so a static import both ways would be a cycle.
+ */
+export async function getAbsenceOverlay(
+  personIds: string[], from: string, to: string
+): Promise<Map<string, AbsenceDayOverlay[]>> {
+  if (personIds.length === 0) return new Map();
+
+  const { materialiseOpenAbsences } = await import('./staff-absence');
+  await materialiseOpenAbsences(personIds);
+
+  const r = await query(
+    `SELECT d.person_id, d.absence_date::text AS absence_date, d.portion,
+            d.start_time::text AS start_time, d.end_time::text AS end_time,
+            a.absence_type
+       FROM staff_absence_days d
+       JOIN staff_absences a ON a.id = d.absence_id
+      WHERE d.is_active
+        AND a.status = 'active'
+        AND d.person_id = ANY($1::uuid[])
+        AND d.absence_date BETWEEN $2::date AND $3::date
+      ORDER BY d.absence_date, d.start_time NULLS FIRST`,
+    [personIds, from, to]
+  );
+
+  const out = new Map<string, AbsenceDayOverlay[]>();
+  for (const row of r.rows) {
+    const list = out.get(row.person_id) ?? [];
+    list.push({
+      date: row.absence_date,
+      portion: row.portion as DayPortion,
+      absenceType: row.absence_type as string,
       startTime: (row.start_time as string) ?? null,
       endTime: (row.end_time as string) ?? null,
     });
@@ -351,6 +464,15 @@ export async function getStaffCalendar(
      * already booked instead of surfacing the clash.
      */
     includeLeave?: boolean;
+    /**
+     * Overlay live absence onto the contracted days. Default true.
+     *
+     * Same reasoning as includeLeave, and buildAbsenceDays() in
+     * staff-absence.ts passes false for the same reason: a second absence over
+     * the same dates must surface as the clash the database will refuse, not
+     * quietly price to nothing.
+     */
+    includeAbsence?: boolean;
   }
 ): Promise<StaffCalendarPerson[]> {
   if (!DATE_RE.test(from) || !DATE_RE.test(to)) throw new Error('Dates must be YYYY-MM-DD');
@@ -411,6 +533,9 @@ export async function getStaffCalendar(
   const leaveByPerson = opts.includeLeave === false
     ? new Map<string, LeaveDayOverlay[]>()
     : await getLeaveOverlay(ids, from, to);
+  const absenceByPerson = opts.includeAbsence === false
+    ? new Map<string, AbsenceDayOverlay[]>()
+    : await getAbsenceOverlay(ids, from, to);
   const dates = dateRange(from, to);
 
   return people.map(p => {
@@ -425,7 +550,11 @@ export async function getStaffCalendar(
       jobTitle: p.job_title,
       department: p.department,
       days: maskForViewer(
-        mergeAbsenceLayer(days, leaveByPerson.get(p.person_id) ?? []),
+        mergeAbsenceLayer(
+          days,
+          leaveByPerson.get(p.person_id) ?? [],
+          absenceByPerson.get(p.person_id) ?? []
+        ),
         opts.isAdmin
       ),
     };
