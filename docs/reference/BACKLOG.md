@@ -217,3 +217,18 @@ Future enhancements. Nothing here is committed work; treat as a menu, not a queu
 ### Phase 3–5
 
 See docs/SPEC.md for full phased plan.
+
+## Staff Calendar & Time
+
+- **Working location per day** ("boots on the ground") — WFH / on site / office,
+  so the calendar can answer *who is in the building* and not just *who is not
+  off*. Full design and the one decision it hangs on (what "In" should count)
+  in `docs/STAFF-CALENDAR-SPEC.md` §19. **Phase F, post-go-live.** Deliberately
+  NOT the timed marker that §7.5 removed — see §19 for why the distinction is
+  structural rather than a rationalisation.
+
+- **My Time month grouping** — a year filter shipped in D0. Month filtering was
+  considered and rejected: with seven staff and ~25 days of leave a year, a
+  month control is one more thing to set and unset for a list that is already
+  short. If the year list ever gets long enough to scroll, group it under month
+  headings rather than adding a second filter.

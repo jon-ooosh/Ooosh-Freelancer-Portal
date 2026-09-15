@@ -380,17 +380,25 @@ export async function syncEntitlement(
   const e = emp.rows[0];
   if (!e) throw new Error('No employment record for this person');
 
-  const weeks = e.entitlement_weeks != null ? Number(e.entitlement_weeks) : STATUTORY_WEEKS;
+  // A per-person contract beats the company default, which is now a setting
+  // (spec §13) rather than the STATUTORY_WEEKS constant. The constant stays as
+  // the fallback inside staff-settings.ts and as the value the tests pin.
+  const { getStatutoryWeeks, getProRataRounding } = await import('./staff-settings');
+  const weeks = e.entitlement_weeks != null ? Number(e.entitlement_weeks) : await getStatutoryWeeks();
   const patterns = await getPatternPeriods(personId, year);
   const week = await getContractedWeek(personId, `${year}-12-31`)
     ?? await getContractedWeek(personId, `${year}-01-01`);
 
+  // `none` turns the part-year round-up off, which §17.1 wants checkable
+  // without a deploy. Passing a null nominal day is what computeEntitlement
+  // already treats as "do not round".
+  const rounding = await getProRataRounding();
   const { totalMinutes, segments } = computeEntitlement({
     year, weeks,
     employedFrom: e.start_date,
     employedTo: e.end_date,
     patterns,
-    nominalDayMinutes: week?.nominalDayMinutes ?? null,
+    nominalDayMinutes: rounding === 'up_half_day' ? (week?.nominalDayMinutes ?? null) : null,
   });
 
   // Everything THIS function has ever posted, identified by source_type
@@ -524,4 +532,67 @@ export async function getBreakdown(
     nominalDayMinutes: week?.nominalDayMinutes ?? null,
     byType,
   };
+}
+
+// ── The 1 January grant, as a daily safety net ──────────────────────────────
+
+export interface EntitlementSyncResult {
+  year: number;
+  checked: number;
+  changed: { personId: string; name: string; postedMinutes: number; reason: string }[];
+  failed: { personId: string; name: string; error: string }[];
+}
+
+/**
+ * Bring every employed person's entitlement up to date for the current year.
+ *
+ * WHY THIS RUNS DAILY RATHER THAN ONCE ON 1 JANUARY.
+ *
+ * The spec describes "a scheduled task on 1 Jan posts the new entitlement
+ * credit" (§5.1), and an annual cron is the obvious way to write it. It is
+ * also a single point of failure with a one-year retry interval: if the server
+ * is down, mid-deploy, or the clock is off on that one morning, nobody has any
+ * holiday and the next attempt is in twelve months. 1 Jan 2027 is a Friday
+ * bank holiday, so nobody would notice until the 4th at the earliest.
+ *
+ * syncEntitlement is idempotent — it compares what it has already granted
+ * against what the patterns now say and posts only the difference — so running
+ * it every day costs one query per person and self-heals. The first run of the
+ * year grants; every run after that is a no-op.
+ *
+ * It also picks up a mid-year hours change for free, which is a real bonus:
+ * entitlement is pro-rated per pattern period, so someone moving from four
+ * days to five in March should have their allowance topped up, and previously
+ * that only happened if an admin remembered to press the button.
+ *
+ * One person failing must not stop the rest, so each is caught individually.
+ */
+export async function runEntitlementSync(year?: number): Promise<EntitlementSyncResult> {
+  const leaveYear = year ?? new Date().getUTCFullYear();
+  const people = await query(
+    `SELECT se.person_id, (p.first_name || ' ' || p.last_name) AS name
+       FROM staff_employment se
+       JOIN people p ON p.id = se.person_id
+      WHERE se.employment_status = 'employed' AND p.is_deleted = false
+      ORDER BY p.first_name, p.last_name`
+  );
+
+  const out: EntitlementSyncResult = { year: leaveYear, checked: people.rows.length, changed: [], failed: [] };
+  for (const row of people.rows) {
+    try {
+      const r = await syncEntitlement(row.person_id, leaveYear, null);
+      if (r.postedMinutes !== 0) {
+        out.changed.push({
+          personId: row.person_id, name: row.name,
+          postedMinutes: r.postedMinutes, reason: r.reason,
+        });
+      }
+    } catch (e) {
+      out.failed.push({
+        personId: row.person_id, name: row.name,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+  return out;
 }

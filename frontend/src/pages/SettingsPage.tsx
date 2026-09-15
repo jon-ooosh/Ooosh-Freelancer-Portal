@@ -80,6 +80,9 @@ function SettingsContent() {
       {/* Vehicle Issues settings — admin & manager */}
       <VehicleIssueSettingsSection />
 
+      {/* Staff time thresholds & bank holidays — admin & manager */}
+      <StaffTimeSettingsSection />
+
       {/* Email Service section — admin only */}
       {currentUser?.role === 'admin' && <EmailSection />}
 
@@ -1770,6 +1773,137 @@ function VehicleIssueSettingsSection() {
         >
           {saving ? 'Saving…' : 'Save'}
         </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Staff Calendar & Time (spec §13) ────────────────────────────────────────
+
+/**
+ * The thresholds the staff time module runs on.
+ *
+ * These exist as settings rather than constants for one reason: spec §17 lists
+ * statutory specifics that want a sanity check from the accountants before
+ * go-live — the pro-rata rounding rule, whether bank holidays are granted, how
+ * banked overtime is handled at year end. A correction should be a settings
+ * change, not a deploy, and that only holds if there is somewhere to change it.
+ *
+ * Everything is stored as text and read through backend
+ * services/staff-settings.ts, which falls back to a documented default if a
+ * value is empty or malformed — so a typo here degrades rather than breaks.
+ */
+function StaffTimeSettingsSection() {
+  const [settings, setSettings] = useState<SystemSetting[]>([]);
+  const [vals, setVals] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+
+  useEffect(() => { void load(); }, []);
+
+  async function load() {
+    try {
+      const res = await api.get<{ data: SystemSetting[] }>('/system-settings?category=staff_time');
+      setSettings(res.data);
+      const v: Record<string, string> = {};
+      for (const row of res.data) v[row.key] = row.value ?? '';
+      setVals(v);
+    } catch {
+      setError('Could not load staff time settings (has migration 216 run?).');
+    } finally { setLoading(false); }
+  }
+
+  async function save() {
+    setSaving(true); setError(''); setSuccess('');
+    try {
+      const changed: Record<string, string | null> = {};
+      for (const row of settings) {
+        const orig = row.value ?? '';
+        if (orig !== (vals[row.key] ?? '')) changed[row.key] = vals[row.key];
+      }
+      if (Object.keys(changed).length === 0) { setSuccess('Nothing changed.'); return; }
+      await api.put('/system-settings', { settings: changed });
+      setSuccess(`Saved ${Object.keys(changed).length} setting${Object.keys(changed).length === 1 ? '' : 's'}.`);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to save');
+    } finally { setSaving(false); }
+  }
+
+  if (loading) return null;
+
+  // The internal "last reminded" stamp is machinery, not config — shown last
+  // and set apart, because clearing it is a deliberate act (it makes the
+  // year-end cash-out reminder fire again).
+  const INTERNAL = 'staff.overtime_cashout_reminded_year';
+  const editable = settings.filter(row => row.key !== INTERNAL);
+  const bankHolidayRows = editable.filter(row => row.key.startsWith('staff.bank_holidays.'));
+  const thresholdRows = editable.filter(row => !row.key.startsWith('staff.bank_holidays.'));
+  const internal = settings.find(row => row.key === INTERNAL);
+
+  return (
+    <div className="bg-white rounded-lg border border-gray-200 p-4 sm:p-6 mb-6">
+      <h2 className="text-lg font-semibold text-gray-900 mb-1">Staff time</h2>
+      <p className="text-sm text-gray-600 mb-4">
+        Holiday, overtime and absence thresholds, plus the bank holiday calendar.
+        Changing one takes effect within a minute — no deploy needed.
+      </p>
+
+      {error && <div className="mb-3 p-2 rounded bg-red-50 border border-red-200 text-sm text-red-700">{error}</div>}
+      {success && <div className="mb-3 p-2 rounded bg-emerald-50 border border-emerald-200 text-sm text-emerald-800">{success}</div>}
+
+      <div className="space-y-3">
+        {thresholdRows.map(row => (
+          <div key={row.key} className="grid sm:grid-cols-[minmax(0,1fr)_10rem] gap-2 sm:items-center">
+            <label htmlFor={row.key} className="text-sm text-gray-700">
+              {row.label ?? row.key}
+              <span className="block text-xs text-gray-400 font-mono">{row.key}</span>
+            </label>
+            <input id={row.key} value={vals[row.key] ?? ''}
+              onChange={e => setVals(v => ({ ...v, [row.key]: e.target.value }))}
+              className="px-2 py-1.5 rounded border border-gray-300 text-sm" />
+          </div>
+        ))}
+      </div>
+
+      {bankHolidayRows.length > 0 && (
+        <div className="mt-5 pt-4 border-t border-gray-100">
+          <h3 className="text-sm font-semibold text-gray-900 mb-1">Bank holidays</h3>
+          <p className="text-xs text-gray-500 mb-3">
+            England &amp; Wales, comma-separated <code>YYYY-MM-DD</code>, with weekend
+            substitutes already applied. Under the <code>use_allowance</code> policy these
+            are marked on the calendar but are <strong>ordinary working days</strong> —
+            staff who want one off book it like any other day. Add a year by asking for a
+            new row; editing one here is enough to correct a date.
+          </p>
+          <div className="space-y-3">
+            {bankHolidayRows.map(row => (
+              <div key={row.key}>
+                <label htmlFor={row.key} className="block text-sm text-gray-700 mb-1">
+                  {row.label ?? row.key}
+                </label>
+                <textarea id={row.key} rows={2} value={vals[row.key] ?? ''}
+                  onChange={e => setVals(v => ({ ...v, [row.key]: e.target.value }))}
+                  className="w-full px-2 py-1.5 rounded border border-gray-300 text-sm font-mono" />
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="mt-4 flex items-center gap-3">
+        <button onClick={() => void save()} disabled={saving}
+          className="px-4 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+        {internal && (
+          <span className="text-xs text-gray-400">
+            Year-end cash-out reminder last sent for:{' '}
+            <strong>{internal.value || 'never'}</strong>
+          </span>
+        )}
       </div>
     </div>
   );

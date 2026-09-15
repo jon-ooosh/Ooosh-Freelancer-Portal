@@ -104,6 +104,15 @@ function fmtRange(a: string, b: string): string {
   return a === b ? fmtDate(a) : `${fmtDate(a)} – ${fmtDate(b)}`;
 }
 const TODAY = new Date().toISOString().slice(0, 10);
+const CURRENT_YEAR = Number(TODAY.slice(0, 4));
+
+/** Whole weeks left in a leave year, for the "use it or lose it" nudge. */
+function weeksLeftInYear(year: number): number {
+  if (year !== CURRENT_YEAR) return 0;
+  const end = Date.UTC(year, 11, 31);
+  const now = Date.UTC(CURRENT_YEAR, Number(TODAY.slice(5, 7)) - 1, Number(TODAY.slice(8, 10)));
+  return Math.max(0, Math.floor((end - now) / (7 * 86400000)));
+}
 
 export default function MyTimePage() {
   const role = useAuthStore(s => s.user?.role);
@@ -111,6 +120,13 @@ export default function MyTimePage() {
   const [overtime, setOvertime] = useState<OvertimeEntry[]>([]);
   const [balances, setBalances] = useState<MyBalances | null>(null);
   const [hasStaffRecord, setHasStaffRecord] = useState(true);
+  // The leave year being looked at. Everything on this page is per leave year
+  // because the ledger is — balances, entitlement and the year-end sweep all
+  // key on it — so a page that mixes years is showing a number that belongs to
+  // no account.
+  const [year, setYear] = useState(CURRENT_YEAR);
+  const [bankHolidays, setBankHolidays] = useState<string[]>([]);
+  const [bhPolicy, setBhPolicy] = useState<'use_allowance' | 'granted'>('use_allowance');
   const [openForm, setOpenForm] = useState<'leave' | 'overtime' | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -118,19 +134,26 @@ export default function MyTimePage() {
 
   const load = useCallback(async () => {
     try {
-      const [leave, ot, bal] = await Promise.all([
-        api.get<{ data: LeaveRequest[] }>('/staff-calendar/leave'),
-        api.get<{ data: OvertimeEntry[] }>('/staff-calendar/overtime'),
-        api.get<{ data: MyBalances | null; hasStaffRecord?: boolean }>('/staff-calendar/me/balances'),
+      const from = `${year}-01-01`;
+      const to = `${year}-12-31`;
+      const [leave, ot, bal, bh] = await Promise.all([
+        api.get<{ data: LeaveRequest[] }>(`/staff-calendar/leave?from=${from}&to=${to}`),
+        api.get<{ data: OvertimeEntry[] }>(`/staff-calendar/overtime?from=${from}&to=${to}`),
+        api.get<{ data: MyBalances | null; hasStaffRecord?: boolean }>(
+          `/staff-calendar/me/balances?year=${year}`),
+        api.get<{ data: string[]; policy?: 'use_allowance' | 'granted' }>(
+          `/staff-calendar/bank-holidays?year=${year}`),
       ]);
       setRequests(leave.data);
       setOvertime(ot.data);
       setBalances(bal.data);
+      setBankHolidays(bh.data ?? []);
+      setBhPolicy(bh.policy ?? 'use_allowance');
       setHasStaffRecord(bal.hasStaffRecord !== false);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load your time');
     } finally { setLoading(false); }
-  }, []);
+  }, [year]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -147,17 +170,32 @@ export default function MyTimePage() {
 
   const upcoming = requests.filter(r => r.endDate >= TODAY);
   const past = requests.filter(r => r.endDate < TODAY);
+  const isCurrentYear = year === CURRENT_YEAR;
 
   return (
     <div className="p-4 sm:p-6 max-w-4xl">
       <div className="flex flex-wrap items-center justify-between gap-3 mb-1">
         <h1 className="text-2xl font-semibold text-gray-900">My time</h1>
         <div className="flex items-center gap-3 text-sm">
+          {/* Leave years, newest first. Two back is enough: nothing carries
+              over, so an older year is history rather than something to act
+              on, and the list should not grow forever. */}
+          <select value={year} onChange={e => setYear(Number(e.target.value))}
+            aria-label="Leave year"
+            className="px-2 py-1 rounded border border-gray-300 text-sm">
+            {[CURRENT_YEAR + 1, CURRENT_YEAR, CURRENT_YEAR - 1, CURRENT_YEAR - 2].map(y => (
+              <option key={y} value={y}>{y}{y === CURRENT_YEAR ? ' (this year)' : ''}</option>
+            ))}
+          </select>
           <Link to="/staff/calendar" className="text-ooosh-600 hover:underline">Team calendar →</Link>
           {hasManagerRole(role) && <Link to="/staff/admin" className="text-ooosh-600 hover:underline">Staff →</Link>}
         </div>
       </div>
-      <p className="text-sm text-gray-500 mb-5">Book time off and track your requests.</p>
+      <p className="text-sm text-gray-500 mb-5">
+        {isCurrentYear
+          ? 'Book time off and track your requests.'
+          : `Your ${year} leave year. Read-only — book against this year from the picker above.`}
+      </p>
 
       {error && <div className="mb-4 p-3 rounded bg-red-50 border border-red-200 text-sm text-red-700">{error}</div>}
       {notice && <div className="mb-4 p-3 rounded bg-emerald-50 border border-emerald-200 text-sm text-emerald-800">{notice}</div>}
@@ -178,11 +216,12 @@ export default function MyTimePage() {
       )}
 
       <BalanceCards balances={balances} />
+      <YearNudge balances={balances} year={year} bankHolidays={bankHolidays} bhPolicy={bhPolicy} />
 
       {/* One form at a time. These were previously siblings in a flex row, so
           opening either expanded it to full width while the other button
           stretched to match — a stray panel beside the open form. */}
-      {openForm === null ? (
+      {!isCurrentYear ? null : openForm === null ? (
         <div className="flex flex-wrap gap-2">
           <button onClick={() => setOpenForm('leave')}
             className="px-3 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700">
@@ -204,12 +243,14 @@ export default function MyTimePage() {
       )}
 
       <section className="mt-6">
-        <h2 className="text-sm font-semibold text-gray-900 uppercase tracking-wide mb-2">Upcoming</h2>
+        <h2 className="text-sm font-semibold text-gray-900 uppercase tracking-wide mb-2">
+          {isCurrentYear ? 'Upcoming' : `Booked in ${year}`}
+        </h2>
         {loading ? (
           <div className="text-sm text-gray-500">Loading…</div>
         ) : upcoming.length === 0 ? (
           <div className="p-4 rounded border border-dashed border-gray-300 text-sm text-gray-500">
-            Nothing booked.
+            Nothing booked{isCurrentYear ? '' : ` in ${year}`}.
           </div>
         ) : (
           <div className="space-y-2">
@@ -219,7 +260,9 @@ export default function MyTimePage() {
       </section>
 
       <section className="mt-6">
-        <h2 className="text-sm font-semibold text-gray-900 uppercase tracking-wide mb-2">Overtime</h2>
+        <h2 className="text-sm font-semibold text-gray-900 uppercase tracking-wide mb-2">
+          Overtime{isCurrentYear ? '' : ` in ${year}`}
+        </h2>
         {overtime.length === 0 ? (
           <div className="p-4 rounded border border-dashed border-gray-300 text-sm text-gray-500">
             Nothing logged yet.
@@ -241,10 +284,12 @@ export default function MyTimePage() {
       </section>
 
       <section className="mt-6">
-        <h2 className="text-sm font-semibold text-gray-900 uppercase tracking-wide mb-2">Past leave</h2>
+        <h2 className="text-sm font-semibold text-gray-900 uppercase tracking-wide mb-2">
+          {isCurrentYear ? 'Already taken this year' : `Taken in ${year}`}
+        </h2>
         {past.length === 0 ? (
           <div className="p-4 rounded border border-dashed border-gray-300 text-sm text-gray-500">
-            Nothing yet — past holidays and time off will build up here.
+            Nothing yet — time off you have already taken will build up here.
           </div>
         ) : (
           <div className="space-y-2">{past.slice(0, 30).map(r => <RequestCard key={r.id} r={r} />)}</div>
@@ -876,6 +921,75 @@ function LogOvertime({ onClose, onLogged, onError }: {
         className="px-3 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
         {saving ? 'Logging…' : `Log ${snapped > 0 ? fmtH(snapped) : ''}`}
       </button>
+    </div>
+  );
+}
+
+// ── The nudge that makes a leave year mean something ────────────────────────
+
+/**
+ * "You have this much left and this long to use it."
+ *
+ * The single most useful thing this page can say, and the one a list of past
+ * requests cannot: NOTHING CARRIES OVER (spec §5.1), so holiday not booked by
+ * 31 December is simply gone. A balance on its own does not convey that; a
+ * balance next to the weeks remaining does.
+ *
+ * It also carries the bank-holiday fact, which surprises people: under the
+ * `use_allowance` policy Christmas Day is an ordinary working day here, so
+ * anyone who assumed otherwise has fewer days than they think.
+ */
+function YearNudge({ balances, year, bankHolidays, bhPolicy }: {
+  balances: MyBalances | null;
+  year: number;
+  bankHolidays: string[];
+  bhPolicy: 'use_allowance' | 'granted';
+}) {
+  if (!balances) return null;
+
+  const left = balances.holiday.availableMinutes;
+  const nominal = balances.holiday.nominalDayMinutes;
+  const leftDays = nominal && nominal > 0 ? left / nominal : null;
+  const weeks = weeksLeftInYear(year);
+  const isCurrentYear = year === CURRENT_YEAR;
+
+  // Bank holidays still ahead, so the count is actionable rather than trivia.
+  const upcomingBh = bankHolidays.filter(d => d >= TODAY);
+
+  // Nothing worth saying about a year that is over, or one with no allowance.
+  if (!isCurrentYear && left <= 0) return null;
+
+  const urgent = isCurrentYear && left > 0 && weeks <= 8;
+
+  return (
+    <div className={`mb-4 p-3 rounded-lg border text-sm ${
+      urgent ? 'border-amber-200 bg-amber-50 text-amber-900'
+             : 'border-gray-200 bg-white text-gray-700'}`}>
+      {left > 0 ? (
+        <>
+          <strong>
+            {leftDays !== null ? `${leftDays.toFixed(1)} days` : fmtH(left)} of holiday left
+          </strong>
+          {isCurrentYear ? (
+            weeks > 0
+              ? <> — and {weeks} week{weeks === 1 ? '' : 's'} of {year} to use {leftDays !== null && leftDays === 1 ? 'it' : 'them'} in. Nothing carries over.</>
+              : <> — {year} is nearly over, and nothing carries over.</>
+          ) : <> unused at the end of {year}.</>}
+        </>
+      ) : left < 0 ? (
+        <><strong>You are {fmtH(-left)} over</strong> your {year} allowance. Worth a word with a manager.</>
+      ) : (
+        <>All of your {year} holiday is booked or taken.</>
+      )}
+
+      {isCurrentYear && bhPolicy === 'use_allowance' && upcomingBh.length > 0 && (
+        <div className="mt-1 text-xs opacity-80">
+          {upcomingBh.length} bank holiday{upcomingBh.length === 1 ? '' : 's'} left this year
+          {' '}({upcomingBh.slice(0, 3).map(fmtDate).join(', ')}
+          {upcomingBh.length > 3 ? '…' : ''}) — they are normal working days here,
+          so book them off if you want them.
+        </div>
+      )}
     </div>
   );
 }

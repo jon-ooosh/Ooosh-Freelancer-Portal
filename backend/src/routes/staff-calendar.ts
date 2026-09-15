@@ -54,6 +54,9 @@ import {
 import {
   notifyLeaveRequested, notifyOvertimeLogged, notifyDecision, notifyRtwDue,
 } from '../services/staff-notifications';
+import {
+  getBankHolidaysInRange, getBankHolidays, getBankHolidayPolicy,
+} from '../services/staff-settings';
 
 const router = Router();
 router.use(authenticate, authorize(...STAFF_ROLES));
@@ -86,8 +89,16 @@ router.get('/calendar', async (req: AuthRequest, res: Response) => {
   const range = resolveRange(req);
   if ('error' in range) { res.status(400).json({ error: range.error }); return; }
   try {
-    const data = await getStaffCalendar(range.from, range.to, { isAdmin: isAdmin(req) });
-    res.json({ data, range });
+    // Bank holidays ride along as an ADDITIVE field. Under the current
+    // `use_allowance` policy they are ordinary working days, so they are a
+    // marker on the grid and nothing more — the calendar must not draw them
+    // as time off, because no ledger entry ever paid for them.
+    const [data, bankHolidays, bankHolidayPolicy] = await Promise.all([
+      getStaffCalendar(range.from, range.to, { isAdmin: isAdmin(req) }),
+      getBankHolidaysInRange(range.from, range.to),
+      getBankHolidayPolicy(),
+    ]);
+    res.json({ data, range, bankHolidays, bankHolidayPolicy });
   } catch (err) {
     console.error('[staff-calendar] calendar error:', err);
     res.status(500).json({ error: 'Failed to load staff calendar' });
@@ -639,6 +650,21 @@ router.get('/payroll', adminOnly, async (req: AuthRequest, res: Response) => {
 // Both accounts for the logged-in user in one call, so the booking form can
 // show what is available BEFORE dates are picked — the thing that lets someone
 // choose between holiday and TOIL rather than guess.
+// GET /api/staff-calendar/bank-holidays?year= — the marked days for a year.
+router.get('/bank-holidays', async (req: AuthRequest, res: Response) => {
+  try {
+    const year = resolveYear(req);
+    res.json({
+      data: await getBankHolidays(year),
+      year,
+      policy: await getBankHolidayPolicy(),
+    });
+  } catch (err) {
+    console.error('[staff-calendar] bank holidays error:', err);
+    res.status(500).json({ error: 'Failed to load bank holidays' });
+  }
+});
+
 router.get('/me/balances', async (req: AuthRequest, res: Response) => {
   try {
     const personId = await personIdForUser(req.user!.id);

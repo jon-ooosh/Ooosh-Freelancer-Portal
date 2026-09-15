@@ -1067,6 +1067,7 @@ is a settings change and not a deploy — that is why they are settings.
 | — | Consolidation: Team Members + COT card register moved onto the Staff page; login linking; notifications and the daily digest | 213 |
 | **D** | Absence and sickness, two-tier visibility, return-to-work + its one chase, holiday reclaim, absence reporting by spell, sickness on the payroll report | 214 |
 | — | Timed absence markers removed — built in D, taken out on review (§7.5, decision 10) | 215 |
+| **D0** | The §13 settings created and read, bank holidays seeded and marked, entitlement and the cash-out reminder on the scheduler, My Time by leave year | 216 |
 
 ### Decisions taken during the build that CHANGE this spec
 
@@ -1141,6 +1142,28 @@ contradict an earlier section, this list wins.
    10 removed it, so the rule is now simply "absence is recorded for staff, not
    by them".
 
+13. **The 1 January entitlement grant runs DAILY, not annually.** §5.1 says
+   "a scheduled task on 1 Jan", and an annual cron is a single point of failure
+   with a one-year retry interval — a server down that morning means nobody has
+   any holiday until somebody notices, and 1 Jan 2027 is a Friday bank holiday.
+   `syncEntitlement` is idempotent, so a daily run grants once and no-ops
+   thereafter, and picks up a mid-year hours change for free.
+
+14. **The year-end cash-out REMINDS; it does not sweep.** Paying out banked
+   overtime is money out the door, and the platform rule is that a recomputed
+   figure gets surfaced for a human to decide on (CLAUDE.md). A cron that
+   debited seven banks unattended is the thing that rule exists to prevent, and
+   the ledger being append-only means an unwanted sweep is corrected with
+   reversing entries rather than undone. The scheduler removes the "I forgot"
+   failure, which is the one that actually bites: it emails every figure on
+   `staff.overtime_cashout_reminder_day` (default 8 December, because §17.2 has
+   this landing in DECEMBER's payroll), and the sweep stays a button.
+
+15. **Bank holidays are seeded as DATES, never as pattern exceptions.** Under
+   `use_allowance` they are ordinary working days. Seeding them as non-working
+   exceptions would have been the obvious implementation and would have handed
+   everyone eight free days a year that no ledger entry ever paid for.
+
 ### Bugs found during the build, and what they teach
 
 Kept because each one is a trap the next person could fall into.
@@ -1175,6 +1198,14 @@ Kept because each one is a trap the next person could fall into.
   10th") never generated the extra days. They then appeared on the next read,
   by which point they had missed their debit and were covered but free. The
   end date is now written first, so the catch-up sees the real range.
+- **A notification passed a YEAR where a uuid was expected** (D0). The
+  year-end reminder set `entity_id` to `'2027'` on a `uuid` column. Because
+  `notify()` wraps its insert in `.catch()` so a bell failure can never take
+  down an email, this failed *silently*: the email went out, the in-app
+  notification simply never appeared. Fixed by typing the parameter
+  `string | null` and passing null for anything that is about no single row.
+  *A deliberately non-fatal catch still needs to say what it swallowed — the
+  log line now names the notification type.*
 - **A day whose debit had been reversed could never be charged again.** The
   "have I already debited this date?" check matched any entry on the day,
   reversal included. Shorten an absence and lengthen it back and those days
@@ -1198,40 +1229,31 @@ forward. Tables and portal endpoints all still to build.
 
 **Phase F — coverage intelligence and iCal** (§10, §16). Post-go-live.
 
-**D0 — the three carry-overs, and the only work with a date on it.**
-Deliberately deferred out of Phase D to keep that diff reviewable, but two of
-these bite BEFORE 1 Jan 2027, not on it:
+**D0 — DONE** (migration 216). The §13 settings exist, are read through
+`services/staff-settings.ts` and are editable on the Settings page; bank
+holidays are seeded for 2026–2028 and marked on the calendar and My Time; the
+entitlement grant and the cash-out reminder are both on the scheduler. Nothing
+in this module now has a date attached to it.
 
-- The `system_settings` keys in §13 are specified but **still not created** —
-  the bank-holiday policy default is a frontend constant
-  (`COMPANY_BANK_HOLIDAY_DEFAULT`), and Phase D's two report thresholds
-  (`staff.absence_flag_spells` / `_months`, defaulting to 3 and 3) and
-  `staff.rtw_chase_days` (7) are likewise hardcoded defaults in the service
-  signatures. All read fine; none is staff-editable yet.
-- **Bank holiday dates are not seeded for any year.** This has an OCTOBER
-  deadline, not a January one: the parallel run covers Christmas and New Year,
-  so 25/26/28 Dec and 1 Jan fall inside the window where staff are supposed to
-  be booking in both systems and comparing them.
-- **The year-end cash-out and the 1 Jan entitlement grant are manual buttons.**
-  The cash-out's real deadline is MID-DECEMBER, because §17.2 has banked
-  overtime paid in December's payroll — if it does not run before payroll
-  closes, balances roll into a year that is meant to start at zero and the "no
-  opening balances to migrate" property that makes the 1 Jan cutover cheap
-  stops being true. The entitlement grant is 1 Jan, which is a Friday bank
-  holiday, so in practice nobody presses it until the 4th and staff open the
-  new system on day one to a zero balance.
-
-**Carried over from Phase D itself:**
+**Carried over:**
 - Absence retention. §17.9 asks how long sickness records are kept; nothing
   expires them yet, and it feeds the open GDPR retention item in `ROADMAP.md`.
 - Port My Time into Quick Actions (in `BACKLOG.md`, deliberately deferred until
   E–F land so the surface is not moved twice).
+- **Working location** (§19) — proposed, not agreed. Phase F.
+- `staff.leave_year_start_month` is seeded but **the code assumes January**.
+  The setting is there so §13 is complete; a non-calendar leave year would need
+  real work in `staff-balance.ts` and is not on anyone's list.
+- `staff.overtime_min_increment_minutes` drives the UI step and the service
+  check, but `staff_overtime_entries` carries a `minutes % 5 = 0` CHECK from
+  migration 212. LOWERING the setting without a migration would leave the
+  database refusing what the form offers. Raising it is safe.
 
 ### Verification approach — please keep doing this
 
 Every phase was verified against a **real Postgres 16** with all migrations
 applied from scratch and realistic fixtures, not only unit tests. Six of the
-twelve bugs above were invisible to unit tests and surfaced the moment real SQL
+thirteen bugs above were invisible to unit tests and surfaced the moment real SQL
 ran — including Phase D's, which no amount of type checking would have found.
 Unit tests cover the pure date, entitlement and merge logic
 (`staff-day-status.test.ts`, `staff-balance.test.ts` — 60 tests); everything
@@ -1250,3 +1272,94 @@ createdb ooosh_scratch
 DATABASE_URL=postgresql://…/ooosh_scratch npx tsx src/migrations/run.ts up
 DATABASE_URL=postgresql://…/ooosh_scratch npx tsx src/scripts/__verify-phase-d.ts
 ```
+
+---
+
+## 19. Proposed — working location ("boots on the ground")
+
+**Not agreed, not built.** Raised by jon after the timed markers came out (§7.5),
+as a better answer to the need that feature was reaching for.
+
+### Is this the marker again?
+
+It is the first question to ask, and the answer is no — but only because of one
+structural difference, and it is worth being precise about it or this gets
+rejected for the wrong reason.
+
+The marker was an **absence row that was not an absence**. It deducted nothing,
+was approved by nobody, belonged to no account, and yet lived in
+`staff_absences` and had to be special-cased out of every rule that table has.
+
+A working location is an **attribute of a working day**. The person IS working,
+IS contracted, IS counted, IS paid. Nothing about leave, absence or the ledger
+is involved, so nothing has to say "…except locations". It sits orthogonally to
+the whole in/out question rather than pretending to be part of it.
+
+The honest counter-argument is that both are "a thing staff type in that costs
+nothing", and the marker proved that is a weak reason to build something. The
+difference that rescues this one is that **it changes a number somebody uses**:
+headcount. That is a testable claim, and §19.3 is where it gets tested.
+
+### 19.1 The need
+
+"Who is in" currently answers *who is contracted and not off*. It does not
+answer *who is in the building*, and for a warehouse those are different
+questions: someone working from home cannot take a delivery, prep a van, or let
+a client in. Coverage warnings that count a WFH day as cover are quietly wrong.
+
+### 19.2 Shape
+
+```sql
+staff_work_locations
+  id, person_id, location_date DATE, person_id + date UNIQUE,
+  location VARCHAR(20) CHECK IN ('office','home','on_site','travelling'),
+  note TEXT,                      -- "at Brighton Dome all day"
+  created_by, created_at
+```
+
+Plus a **default per pattern day**, so "Tom is home on Fridays" is stated once
+rather than typed every week — `staff_working_pattern_days.default_location`,
+following the same effective-dated rule as everything else on that table
+(§0.3). A row in `staff_work_locations` overrides the pattern default for that
+date, exactly as a pattern exception overrides the pattern.
+
+Merging happens in `mergeAbsenceLayer()`'s sibling in `staff-day-status.ts` —
+**the one attachment point**, per the rule that has now held through two phases.
+A `location` field is added to `StaffDay`; it is set only when `status` is
+`working` or `partial`, because a location on a day off is meaningless.
+
+**Staff record their own**, and this time that is right: where you are working
+is not special-category data, it costs nothing, and the person who knows is the
+person typing.
+
+### 19.3 The bit that needs deciding first
+
+**What does "In" mean on the calendar footer and the dashboard strip?**
+
+Today it is one number. With locations it is two — contracted-and-working, and
+physically-here — and they will disagree. Options:
+
+1. **"In" stays as-is, location is a chip on the cell.** Smallest change;
+   coverage warnings keep counting a WFH day as cover, so the warnings stay
+   subtly wrong and the feature is decoration.
+2. **"In" becomes "in the office"**, with WFH shown separately. Answers the
+   real question; changes the meaning of a number people have been reading
+   since Phase A, and changes what §5.2's coverage warnings and
+   `staff.min_headcount_by_weekday` count.
+3. **Two numbers: "Working 5 · In the office 3".** Honest, no silent
+   redefinition, slightly busier.
+
+**Option 3 is the recommendation**, with `staff.min_headcount_by_weekday`
+switched to count office presence — that setting exists precisely to say "we
+want two bodies here on a Monday", and bodies is what it means.
+
+Until that is decided the rest is not worth building, because the whole value
+is in the number.
+
+### 19.4 Why it is not urgent
+
+It is Phase F work (§15): coverage intelligence, post-go-live. It changes no
+balance, blocks no cutover, and wants a season of real data to calibrate
+against. It should NOT go in before the Oct–Dec parallel run — that run exists
+to shake out leave and patterns, and moving what "In" means mid-run would
+muddy the comparison it is there to make.

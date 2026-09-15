@@ -78,14 +78,22 @@ async function approverUserIds(): Promise<{ id: string; email: string }[]> {
 
 async function notify(
   userId: string, type: string, title: string, content: string,
-  entityType: string, entityId: string, actionUrl: string,
+  entityType: string,
+  /**
+   * The row this is ABOUT, or null when it is about no single row — a year-end
+   * summary, say. It is a uuid column, so anything else is rejected, and the
+   * insert below is deliberately non-fatal: passing a year here once meant the
+   * email went out and the bell entry silently never appeared.
+   */
+  entityId: string | null,
+  actionUrl: string,
   priority: 'low' | 'normal' | 'high' = 'normal'
 ) {
   await query(
     `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
     [userId, type, title, content, entityType, entityId, actionUrl, priority]
-  ).catch(e => console.error('[staff-notifications] notify failed:', e));
+  ).catch(e => console.error(`[staff-notifications] notify failed (${type}, ${entityType}):`, e));
 }
 
 // ── Something needs the approver ────────────────────────────────────────────
@@ -254,10 +262,12 @@ export interface RtwChaseResult {
  * Once, not daily: rtw_chased_at records that it fired. A nag that repeats
  * every morning gets filtered, and then the one that mattered is filtered too.
  */
-export async function runRtwChase(chaseDays = 7): Promise<RtwChaseResult> {
+export async function runRtwChase(chaseDays?: number): Promise<RtwChaseResult> {
   const { listRtwOutstanding, markRtwChased } = await import('./staff-absence');
+  const { getRtwChaseDays } = await import('./staff-settings');
+  const days = chaseDays ?? await getRtwChaseDays();
   const outstanding = await listRtwOutstanding();
-  const due = outstanding.filter(a => a.daysWaiting >= chaseDays && !a.chasedAt);
+  const due = outstanding.filter(a => a.daysWaiting >= days && !a.chasedAt);
 
   for (const a of due) {
     for (const u of await approverUserIds()) {
@@ -378,4 +388,151 @@ export async function runStaffTimeDigest(): Promise<DigestResult> {
   result.emailed = sent > 0;
   if (sent === 0) result.skippedReason = 'every send failed — see the email log';
   return result;
+}
+
+// ── Year-end overtime cash-out (spec §6.3, §17.2) ───────────────────────────
+
+export interface CashOutReminderResult {
+  sent: boolean;
+  year: number;
+  people: { personId: string; name: string; minutes: number }[];
+  totalMinutes: number;
+  skippedReason?: string;
+}
+
+/**
+ * Remind whoever runs payroll that banked overtime needs paying out — and
+ * DO NOT pay it out.
+ *
+ * The sweep itself stays a button. This is deliberate and it is the platform's
+ * own rule: "never silently move money — surface a recomputed figure and let a
+ * human decide" (CLAUDE.md). A cron that debits seven people's banks and
+ * creates a payroll obligation while nobody is looking is exactly the thing
+ * that rule exists to prevent, and the failure mode is expensive: the ledger
+ * is append-only, so an unwanted sweep is corrected with reversing entries
+ * rather than undone.
+ *
+ * What the scheduler removes is the "I forgot" failure, which is the one that
+ * actually bites. §17.2 has banked overtime paid in DECEMBER's payroll, so the
+ * real deadline is whenever that payroll closes — earlier than 31 December and
+ * much earlier than 1 January. The reminder goes out on
+ * `staff.overtime_cashout_reminder_day` with every figure already computed, so
+ * running the sweep is one click on a number someone has read.
+ *
+ * WHY IT CHECKS DAILY THROUGH DECEMBER rather than using an annual cron: same
+ * reasoning as runEntitlementSync. A server down on the 8th would otherwise
+ * skip the year entirely. `staff.overtime_cashout_reminded_year` is stamped
+ * once it sends, which is what stops it going out every morning until New Year
+ * — the same lesson as rtw_chased_at.
+ */
+export async function runCashOutReminder(today = new Date()): Promise<CashOutReminderResult> {
+  const year = today.getUTCFullYear();
+  const empty: CashOutReminderResult = { sent: false, year, people: [], totalMinutes: 0 };
+
+  const { getCashOutReminderDay, getOvertimeYearEnd } = await import('./staff-settings');
+  const { getSystemSetting, setSystemSetting } = await import('../routes/system-settings');
+
+  if (today.getUTCMonth() !== 11) {
+    return { ...empty, skippedReason: 'not December' };
+  }
+  const fromDay = await getCashOutReminderDay();
+  if (today.getUTCDate() < fromDay) {
+    return { ...empty, skippedReason: `before ${fromDay} December` };
+  }
+  if ((await getSystemSetting('staff.overtime_cashout_reminded_year')) === String(year)) {
+    return { ...empty, skippedReason: 'already sent this year' };
+  }
+
+  // 'expire' is available and not advised (§6.3). If anyone ever sets it,
+  // reminding them to pay out would be wrong.
+  if ((await getOvertimeYearEnd()) !== 'cash_out') {
+    return { ...empty, skippedReason: 'policy is not cash_out' };
+  }
+
+  // Read through staff-balance, never a SUM of the ledger here.
+  const { getBalance } = await import('./staff-balance');
+  const staff = await query(
+    `SELECT se.person_id, (p.first_name || ' ' || p.last_name) AS name
+       FROM staff_employment se
+       JOIN people p ON p.id = se.person_id
+      WHERE se.employment_status = 'employed' AND p.is_deleted = false
+      ORDER BY p.first_name, p.last_name`
+  );
+
+  const people: { personId: string; name: string; minutes: number }[] = [];
+  for (const row of staff.rows) {
+    const bal = await getBalance(row.person_id, 'overtime', year);
+    if (bal.balanceMinutes > 0) {
+      people.push({ personId: row.person_id, name: row.name, minutes: bal.balanceMinutes });
+    }
+  }
+
+  if (people.length === 0) {
+    // Nothing banked is a result, not a failure — and it still counts as
+    // handled for the year, so this does not re-check every morning.
+    await setSystemSetting('staff.overtime_cashout_reminded_year', String(year));
+    return { ...empty, skippedReason: 'nobody has anything banked' };
+  }
+
+  const totalMinutes = people.reduce((s, p) => s + p.minutes, 0);
+
+  for (const u of await approverUserIds()) {
+    await notify(u.id, 'follow_up',
+      `Banked overtime needs paying out before ${year} closes`,
+      `${people.length} ${people.length === 1 ? 'person has' : 'people have'} ${fmtH(totalMinutes)} between them`,
+      'staff_overtime_entry', null, STAFF_URL, 'high');
+  }
+
+  await emailApprovers(
+    `Banked overtime to pay out before ${year} closes`,
+    `Banked overtime at the end of ${year}`,
+    [
+      `Hours already worked cannot be forfeited, so the bank is <strong>paid out</strong> rather than expired.`,
+      `This wants to land in <strong>December's payroll</strong>, so it needs doing before that closes.`,
+      ...people.map(p => `<strong>${esc(p.name)}</strong> — ${fmtH(p.minutes)}`),
+      `<strong>Total: ${fmtH(totalMinutes)}</strong>`,
+      `Nothing has been posted. Run the year-end cash-out on the Staff page when you are happy with the figures.`,
+    ],
+    STAFF_URL);
+
+  await setSystemSetting('staff.overtime_cashout_reminded_year', String(year));
+  return { sent: true, year, people, totalMinutes };
+}
+
+/**
+ * Say what the nightly entitlement sync actually did.
+ *
+ * Only called when something changed, so it is never a "nothing happened"
+ * email. It matters most on the first run of a new leave year, where it is the
+ * confirmation that everybody's allowance landed — and on a mid-year hours
+ * change, where someone's balance moved without them asking for it and the
+ * ledger line should not be the only trace.
+ */
+export async function notifyEntitlementPosted(result: {
+  year: number;
+  changed: { personId: string; name: string; postedMinutes: number; reason: string }[];
+  failed: { personId: string; name: string; error: string }[];
+}) {
+  try {
+    if (result.changed.length === 0 && result.failed.length === 0) return;
+
+    const lines = [
+      ...result.changed.map(c =>
+        `<strong>${esc(c.name)}</strong> — ${c.postedMinutes > 0 ? '+' : ''}${fmtH(c.postedMinutes)} (${esc(c.reason.toLowerCase())})`),
+      ...result.failed.map(f =>
+        `<span style="color:#b91c1c;"><strong>${esc(f.name)}</strong> — could not be calculated: ${esc(f.error)}</span>`),
+    ];
+    const headline = result.failed.length > 0
+      ? `Holiday entitlement for ${result.year} — ${result.failed.length} could not be calculated`
+      : `Holiday entitlement posted for ${result.year}`;
+
+    for (const u of await approverUserIds()) {
+      await notify(u.id, result.failed.length > 0 ? 'follow_up' : 'system',
+        headline,
+        `${result.changed.length} updated${result.failed.length > 0 ? `, ${result.failed.length} failed` : ''}`,
+        'staff_employment', null, STAFF_URL,
+        result.failed.length > 0 ? 'high' : 'normal');
+    }
+    await emailApprovers(headline, headline, lines, STAFF_URL);
+  } catch (e) { console.error('[staff-notifications] entitlement posted:', e); }
 }

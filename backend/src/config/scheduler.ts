@@ -957,6 +957,54 @@ export function startScheduler() {
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: Staff time digest scheduled daily at 08:45 Europe/London');
 
+  // ── Holiday entitlement — the 1 January grant, run daily ──────────────────
+  // Daily at 06:05 Europe/London, NOT an annual cron on 1 January. An annual
+  // job is a single point of failure with a one-year retry: a server down that
+  // one morning means nobody has any holiday until somebody notices, and
+  // 1 Jan 2027 is a Friday bank holiday so that would be the 4th at best.
+  // syncEntitlement is idempotent, so the first run of the year grants and
+  // every run after is a no-op — and a mid-year hours change gets picked up
+  // for free, which previously needed an admin to remember the button.
+  cron.schedule('5 6 * * *', async () => {
+    try {
+      const { runEntitlementSync } = await import('../services/staff-balance');
+      const r = await runEntitlementSync();
+      if (r.changed.length > 0 || r.failed.length > 0) {
+        console.log(
+          `Scheduler: Holiday entitlement ${r.year} — ${r.changed.length} updated, ` +
+          `${r.failed.length} failed, ${r.checked} checked`
+        );
+        const { notifyEntitlementPosted } = await import('../services/staff-notifications');
+        await notifyEntitlementPosted(r);
+      }
+    } catch (err) {
+      console.error('Scheduler: Holiday entitlement sync failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: Holiday entitlement sync scheduled daily at 06:05 Europe/London');
+
+  // ── Year-end overtime cash-out REMINDER (spec §6.3, §17.2) ────────────────
+  // Daily at 09:55 Europe/London; no-ops outside December and sends once.
+  //
+  // It REMINDS, it does not sweep. Paying out seven people's banked overtime
+  // is money out the door, and the platform rule is that a recomputed figure
+  // gets surfaced for a human to decide on. The deadline it protects is
+  // DECEMBER payroll, not 31 December — see the service for the full reasoning.
+  cron.schedule('55 9 * * *', async () => {
+    try {
+      const { runCashOutReminder } = await import('../services/staff-notifications');
+      const r = await runCashOutReminder();
+      if (r.sent) {
+        console.log(`Scheduler: Year-end cash-out reminder sent — ${r.people.length} people, ${r.totalMinutes} min banked`);
+      } else if (r.skippedReason !== 'not December') {
+        console.log(`Scheduler: Year-end cash-out reminder not sent (${r.skippedReason})`);
+      }
+    } catch (err) {
+      console.error('Scheduler: Year-end cash-out reminder failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: Year-end cash-out reminder scheduled daily at 09:55 Europe/London (December only)');
+
   // ── Return-to-work chase (spec §7.3) ──────────────────────────────────────
   // Daily at 08:50 Europe/London, right after the time digest. Chases a closed
   // sickness absence whose return-to-work conversation is still unrecorded
