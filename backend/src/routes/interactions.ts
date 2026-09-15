@@ -107,6 +107,12 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       if (req.query.include_issues !== 'true') {
         sql += ` AND i.issue_id IS NULL`;
       }
+      // Confidentiality backstop: an email hidden from the timeline drops off
+      // the all-staff view but STAYS visible to admin (the record is preserved,
+      // just not surfaced to everyone). Auto-Chase filtering foundation.
+      if (req.user?.role !== 'admin') {
+        sql += ` AND i.hidden_at IS NULL`;
+      }
     }
     if (venue_id) {
       sql += ` AND i.venue_id = $${paramIndex} AND i.issue_id IS NULL AND i.held_item_id IS NULL AND i.shift_id IS NULL`;

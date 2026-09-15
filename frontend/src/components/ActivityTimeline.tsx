@@ -31,6 +31,13 @@ interface Interaction {
   source?: 'user' | 'system' | null;
   // Note editing (migration 160)
   edited_at?: string | null;
+  // Ingested-email attribution + confidentiality controls (migration 213).
+  job_id?: string | null;
+  gmail_message_id?: string | null;
+  email_direction?: 'inbound' | 'outbound' | null;
+  match_method?: string | null;
+  match_confidence?: string | null;
+  hidden_at?: string | null;
 }
 
 const JOB_STATUS_MAP: Record<number, string> = {
@@ -260,6 +267,20 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
         setMoveLoading(false);
       }
     }, 300);
+  }
+
+  // Ingested-email backstops (Auto-Chase filtering foundation): detach a
+  // mis-attached email, or hide/unhide a sensitive one from the all-staff view.
+  // Both re-fetch the timeline afterwards so the row reflects the new state.
+  const isAdmin = user?.role === 'admin';
+  async function emailAction(interactionId: string, action: 'hide' | 'unhide' | 'detach') {
+    if (action === 'detach' && !window.confirm('Remove this email from this job? It will drop off the timeline.')) return;
+    try {
+      await api.post(`/auto-chase/emails/${interactionId}/${action}`, {});
+      onInteractionAdded();
+    } catch (err) {
+      console.error(`Email ${action} failed:`, err);
+    }
   }
 
   async function confirmMove(interactionId: string, target: SearchResult) {
@@ -646,6 +667,8 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
           onSearchEntities={searchEntities}
           onConfirmMove={(target) => confirmMove(interaction.id, target)}
           renderContent={renderContent}
+          isAdmin={isAdmin}
+          onEmailAction={emailAction}
         />
 
         {replyCount > 0 && (
@@ -671,6 +694,8 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
                 onSearchEntities={() => {}}
                 onConfirmMove={() => {}}
                 renderContent={renderContent}
+                isAdmin={isAdmin}
+                onEmailAction={emailAction}
               />
             ))}
             {expanded && replyCount > COLLAPSE_THRESHOLD && (
@@ -1132,6 +1157,8 @@ interface InteractionRowProps {
   onSearchEntities: (q: string) => void;
   onConfirmMove: (target: SearchResult) => void;
   renderContent: (text: string) => React.ReactNode;
+  isAdmin: boolean;
+  onEmailAction: (id: string, action: 'hide' | 'unhide' | 'detach') => void;
 }
 
 // Quoted-reply boundary in an email body: the first inline "On … wrote:"
@@ -1226,9 +1253,71 @@ function InteractionBody({
   return <p className="mt-1 text-sm text-gray-800 whitespace-pre-wrap break-words">{renderContent(full)}</p>;
 }
 
+// Provenance + manual backstops for an ingested email row (Auto-Chase filtering
+// foundation). Shows WHY it's on this job for the weaker match methods, a
+// "hidden from staff" marker (admin view only — staff never see hidden rows at
+// all), and the two human controls: "Not this job" (detach, any staff) + Hide
+// (admin). High-confidence attaches (own PDF / explicit #ref) get no caveat chip.
+function EmailProvenanceBar({
+  interaction, isAdmin, onEmailAction,
+}: {
+  interaction: Interaction;
+  isAdmin: boolean;
+  onEmailAction: (id: string, action: 'hide' | 'unhide' | 'detach') => void;
+}) {
+  if (!interaction.gmail_message_id) return null;
+  const method = interaction.match_method;
+  const hidden = !!interaction.hidden_at;
+
+  let chip: { label: string; cls: string } | null = null;
+  if (method === 'sender_person_single_open_job') {
+    chip = { label: 'auto-attached · sender match', cls: 'bg-amber-50 text-amber-700 border border-amber-200' };
+  } else if (method === 'thread_anchor') {
+    chip = { label: 'linked via thread', cls: 'bg-gray-100 text-gray-500' };
+  } else if (method === 'backfill_forced') {
+    chip = { label: 'backfilled', cls: 'bg-gray-100 text-gray-500' };
+  }
+
+  return (
+    <div className="mt-1.5 flex items-center flex-wrap gap-x-3 gap-y-1 text-xs">
+      {chip && <span className={`px-1.5 py-0.5 rounded ${chip.cls}`}>{chip.label}</span>}
+      {hidden && (
+        <span className="px-1.5 py-0.5 rounded bg-purple-50 text-purple-700 border border-purple-200">
+          🔒 Hidden from staff
+        </span>
+      )}
+      <button
+        type="button"
+        onClick={() => onEmailAction(interaction.id, 'detach')}
+        className="text-gray-400 hover:text-red-600"
+        title="Remove this email from this job (wrong job / discussed in passing)"
+      >
+        Not this job
+      </button>
+      {isAdmin && (
+        hidden ? (
+          <button type="button" onClick={() => onEmailAction(interaction.id, 'unhide')} className="text-gray-400 hover:text-gray-700">
+            Unhide
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={() => onEmailAction(interaction.id, 'hide')}
+            className="text-gray-400 hover:text-purple-700"
+            title="Hide from the all-staff timeline (you'll still see it as admin)"
+          >
+            Hide
+          </button>
+        )
+      )}
+    </div>
+  );
+}
+
 function InteractionRow({
   interaction, isReply, currentUserId, onEdited, movingId, onStartMove, onCancelMove,
   moveSearch, moveResults, moveLoading, onSearchEntities, onConfirmMove, renderContent,
+  isAdmin, onEmailAction,
 }: InteractionRowProps) {
   // Creator-only editing of human notes. Automated (source='system') entries
   // are immutable; the backend enforces both rules regardless of the UI.
@@ -1339,6 +1428,7 @@ function InteractionRow({
             />
           )}
           <AttachmentList files={interaction.files} />
+          {!editing && <EmailProvenanceBar interaction={interaction} isAdmin={isAdmin} onEmailAction={onEmailAction} />}
           <Reactions interactionId={interaction.id} reactions={interaction.reactions} />
         </div>
       </div>

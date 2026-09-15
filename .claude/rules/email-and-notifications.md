@@ -77,6 +77,8 @@ Adding a scanner: copy the shape, add a marker column, wire the clear into every
 - **Keep genuine staff→client outbound, skip internal↔internal and our own system sender.** Skipping all own-domain mail also dropped our quotes and replies, leaving the summary and chase draft blind to "we sent five quotes".
 - **Ground chase drafts in the INSIDE hire dates** — a hire to the 15th shows `job_end` as the 16th at 09:00; the 16th is the RETURN, not a hire day.
 - Any `extractDocument` caller whose output can be long (list extraction) needs an explicit `maxTokens` — the 1024 default truncates JSON mid-array and surfaces as a parse error.
+- **Thread-anchoring: a reply inherits its thread's anchor job.** In `gmail-ingestion.ts`, once a thread's first message strong-matches a job, later messages inherit it UNLESS they carry their OWN strong evidence for a *different* job — a `Quote (N)` PDF or an explicit job number in the **SUBJECT**. A job number in the **BODY does NOT override the anchor** (bodies reference other/past hires in passing — that's the drift). Persist `match_method`/`match_confidence` on every ingested email (the matcher computes them; don't discard them).
+- **Hidden ingested emails must be excluded from EVERY AI read and the all-staff timeline.** `hidden_at IS NOT NULL` → dropped from `comms-summary` + `comms-query` **always** (never feed private content to the summary/dispute AI, even for admin) and from the job timeline for non-admins (admin still sees it — hide preserves the record, it doesn't delete). Hide is **admin-only**; detach/move is STAFF_ROLES. Route all four through `/api/auto-chase/emails/:id/*`; don't add a parallel hide/detach path.
 
 ## Background work
 

@@ -102,6 +102,105 @@ router.get('/unmatched', authorize('admin', 'manager'), async (req: AuthRequest,
   }
 });
 
+// ── Manual attribution backstops on ingested emails ────────────────────────
+// Two human controls over what the deterministic matcher attached (spec §5.3a):
+//   * detach / move  — accuracy backstop ("this isn't job A" / "→ actually B").
+//     STAFF_ROLES: a mis-attach is low-harm + recoverable, and correcting it is
+//     day-to-day work.
+//   * hide / unhide  — confidentiality backstop. Drops an email off the all-staff
+//     timeline + the AI reads (summary / dispute helper) but keeps it visible to
+//     ADMIN, audit preserved. Admin-only: hiding conceals, so it must not be a
+//     lever a staff member can pull on (e.g.) a client complaint about themselves.
+// All scoped to ingested emails (type='email' AND gmail_message_id IS NOT NULL)
+// so this route can't touch staff notes / money-audit rows.
+async function loadIngestedEmail(id: string): Promise<{ id: string; job_id: string | null } | null> {
+  const r = await query(
+    `SELECT id, job_id FROM interactions
+      WHERE id = $1 AND type = 'email' AND gmail_message_id IS NOT NULL`,
+    [id],
+  );
+  return r.rows[0] ?? null;
+}
+
+// POST /api/auto-chase/emails/:id/hide — hide an ingested email from the
+// all-staff timeline (admin still sees it). Admin only.
+router.post('/emails/:id/hide', authorize('admin'), async (req: AuthRequest, res: Response) => {
+  try {
+    const row = await loadIngestedEmail(String(req.params.id));
+    if (!row) return res.status(404).json({ error: 'Ingested email not found' });
+    await query(
+      `UPDATE interactions SET hidden_at = NOW(), hidden_by = $2 WHERE id = $1`,
+      [row.id, req.user?.id ?? null],
+    );
+    res.json({ data: { id: row.id, hidden: true } });
+  } catch (error) {
+    console.error('[auto-chase] hide email error:', error);
+    res.status(500).json({ error: 'Failed to hide email' });
+  }
+});
+
+// POST /api/auto-chase/emails/:id/unhide — restore a hidden email. Admin only.
+router.post('/emails/:id/unhide', authorize('admin'), async (req: AuthRequest, res: Response) => {
+  try {
+    const row = await loadIngestedEmail(String(req.params.id));
+    if (!row) return res.status(404).json({ error: 'Ingested email not found' });
+    await query(`UPDATE interactions SET hidden_at = NULL, hidden_by = NULL WHERE id = $1`, [row.id]);
+    res.json({ data: { id: row.id, hidden: false } });
+  } catch (error) {
+    console.error('[auto-chase] unhide email error:', error);
+    res.status(500).json({ error: 'Failed to unhide email' });
+  }
+});
+
+// POST /api/auto-chase/emails/:id/detach — "this isn't this job". Nulls job_id
+// (email drops off the timeline; the RFC822 dedup keeps re-ingestion from
+// re-creating it). Records where it was for audit. STAFF_ROLES.
+router.post('/emails/:id/detach', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const row = await loadIngestedEmail(String(req.params.id));
+    if (!row) return res.status(404).json({ error: 'Ingested email not found' });
+    await query(
+      `UPDATE interactions
+          SET job_id = NULL,
+              reattached_from_job_id = $2,
+              reattached_at = NOW(),
+              reattached_by = $3
+        WHERE id = $1`,
+      [row.id, row.job_id, req.user?.id ?? null],
+    );
+    res.json({ data: { id: row.id, job_id: null } });
+  } catch (error) {
+    console.error('[auto-chase] detach email error:', error);
+    res.status(500).json({ error: 'Failed to detach email' });
+  }
+});
+
+// POST /api/auto-chase/emails/:id/move — re-attach to a different job. Body:
+// { job_id }. STAFF_ROLES.
+router.post('/emails/:id/move', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const targetJobId = String(req.body?.job_id || '').trim();
+    if (!targetJobId) return res.status(400).json({ error: 'job_id is required' });
+    const row = await loadIngestedEmail(String(req.params.id));
+    if (!row) return res.status(404).json({ error: 'Ingested email not found' });
+    const target = await query(`SELECT id FROM jobs WHERE id = $1 AND is_deleted = false`, [targetJobId]);
+    if (target.rows.length === 0) return res.status(404).json({ error: 'Target job not found' });
+    await query(
+      `UPDATE interactions
+          SET job_id = $2,
+              reattached_from_job_id = $3,
+              reattached_at = NOW(),
+              reattached_by = $4
+        WHERE id = $1`,
+      [row.id, targetJobId, row.job_id, req.user?.id ?? null],
+    );
+    res.json({ data: { id: row.id, job_id: targetJobId } });
+  } catch (error) {
+    console.error('[auto-chase] move email error:', error);
+    res.status(500).json({ error: 'Failed to move email' });
+  }
+});
+
 // POST /api/auto-chase/preview-draft/:jobId — generate an AI chase draft for a
 // job and return it as JSON WITHOUT creating a Gmail draft. Lets us judge draft
 // quality on real jobs before the Gmail `compose` scope + draft-creation slice
