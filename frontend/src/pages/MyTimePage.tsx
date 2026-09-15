@@ -62,6 +62,24 @@ interface OvertimeEntry {
   decidedByName: string | null;
   decisionNote: string | null;
 }
+/**
+ * Your own absence record, dates only.
+ *
+ * Deliberately thinner than the admin shape: the reason, notes, fit-note
+ * status and return-to-work write-up are the employer's record and the API
+ * does not serve them here (spec §0.5).
+ */
+interface MyAbsence {
+  id: string;
+  absenceType: string;
+  startDate: string;
+  endDate: string | null;
+  isOpen: boolean;
+  deductsAllowance: boolean;
+  totalMinutes: number | null;
+  days: { date: string; minutes: number; portion: string; startTime: string | null; endTime: string | null }[];
+}
+
 interface Impact {
   days: { date: string; minutes: number; portion: string }[];
   totalMinutes: number;
@@ -111,21 +129,24 @@ export default function MyTimePage() {
   const [overtime, setOvertime] = useState<OvertimeEntry[]>([]);
   const [balances, setBalances] = useState<MyBalances | null>(null);
   const [hasStaffRecord, setHasStaffRecord] = useState(true);
-  const [openForm, setOpenForm] = useState<'leave' | 'overtime' | null>(null);
+  const [markers, setMarkers] = useState<MyAbsence[]>([]);
+  const [openForm, setOpenForm] = useState<'leave' | 'overtime' | 'marker' | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const [leave, ot, bal] = await Promise.all([
+      const [leave, ot, bal, abs] = await Promise.all([
         api.get<{ data: LeaveRequest[] }>('/staff-calendar/leave'),
         api.get<{ data: OvertimeEntry[] }>('/staff-calendar/overtime'),
         api.get<{ data: MyBalances | null; hasStaffRecord?: boolean }>('/staff-calendar/me/balances'),
+        api.get<{ data: MyAbsence[] }>('/staff-calendar/me/absences'),
       ]);
       setRequests(leave.data);
       setOvertime(ot.data);
       setBalances(bal.data);
+      setMarkers(abs.data);
       setHasStaffRecord(bal.hasStaffRecord !== false);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load your time');
@@ -192,7 +213,15 @@ export default function MyTimePage() {
             className="px-3 py-2 text-sm rounded border border-ooosh-300 text-ooosh-700 hover:bg-ooosh-50">
             Log overtime
           </button>
+          <button onClick={() => setOpenForm('marker')}
+            className="px-3 py-2 text-sm rounded border border-gray-300 text-gray-700 hover:bg-gray-50">
+            I&apos;m out for a bit
+          </button>
         </div>
+      ) : openForm === 'marker' ? (
+        <OutForABit onClose={() => setOpenForm(null)}
+          onSaved={async (msg) => { setNotice(msg); setError(null); setOpenForm(null); await load(); }}
+          onError={setError} />
       ) : openForm === 'leave' ? (
         <BookTimeOff balances={balances} onClose={() => setOpenForm(null)}
           onBooked={async (msg) => { setNotice(msg); setError(null); setOpenForm(null); await load(); }}
@@ -234,6 +263,31 @@ export default function MyTimePage() {
                     await api.post(`/staff-calendar/overtime/${id}/cancel`, {});
                     setNotice('Entry withdrawn.'); await load();
                   } catch (err) { setError(err instanceof Error ? err.message : 'Failed to withdraw'); }
+                }} />
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="mt-6">
+        <h2 className="text-sm font-semibold text-gray-900 uppercase tracking-wide mb-2">
+          Time out of the building
+        </h2>
+        {markers.length === 0 ? (
+          <div className="p-4 rounded border border-dashed border-gray-300 text-sm text-gray-500">
+            Nothing recorded. Use <em>I&apos;m out for a bit</em> for an appointment or a late
+            start — it costs no holiday, it just means nobody wonders where you are.
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {markers.slice(0, 30).map(a => (
+              <MarkerCard key={a.id} a={a}
+                onCancel={async (id) => {
+                  if (!confirm('Remove this?')) return;
+                  try {
+                    await api.delete(`/staff-calendar/absences/marker/${id}`);
+                    setNotice('Removed.'); await load();
+                  } catch (err) { setError(err instanceof Error ? err.message : 'Failed to remove'); }
                 }} />
             ))}
           </div>
@@ -876,6 +930,121 @@ function LogOvertime({ onClose, onLogged, onError }: {
         className="px-3 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
         {saving ? 'Logging…' : `Log ${snapped > 0 ? fmtH(snapped) : ''}`}
       </button>
+    </div>
+  );
+}
+
+// ── Out of the building for a bit (spec §7.5) ───────────────────────────────
+//
+// A presence marker, NOT leave. It deducts nothing and needs no approval — it
+// exists so the calendar and the coverage warnings know the person is out,
+// which is the whole point: not discovering at 14:00 on Tuesday that the
+// office is empty.
+//
+// Colleagues see the time window and nothing else. The type is admin-only,
+// stripped by the API, because "medical appointment" is health-adjacent.
+
+function MarkerCard({ a, onCancel }: { a: MyAbsence; onCancel: (id: string) => void }) {
+  const day = a.days[0];
+  const isTimed = day?.portion === 'hours';
+  const future = a.startDate >= TODAY;
+
+  return (
+    <div className="p-3 rounded border border-gray-200 bg-white flex flex-wrap items-center gap-x-3 gap-y-1">
+      <span className="font-medium text-gray-900">{fmtDate(a.startDate)}</span>
+      {isTimed ? (
+        <span className="text-sm text-gray-600">{day.startTime} – {day.endTime}</span>
+      ) : (
+        <span className="text-sm text-gray-600">
+          {a.endDate && a.endDate !== a.startDate ? `to ${fmtDate(a.endDate)}` : 'all day'}
+          {a.isOpen && ' · ongoing'}
+        </span>
+      )}
+      {a.deductsAllowance && (
+        <span className="text-xs px-2 py-0.5 rounded bg-sky-100 text-sky-800">Deducts allowance</span>
+      )}
+      {isTimed && future && (
+        <button onClick={() => onCancel(a.id)}
+          className="ml-auto text-xs px-2 py-1 rounded border border-gray-300 text-gray-600 hover:bg-gray-50">
+          Remove
+        </button>
+      )}
+    </div>
+  );
+}
+
+function OutForABit({ onClose, onSaved, onError }: {
+  onClose: () => void;
+  onSaved: (msg: string) => void | Promise<void>;
+  onError: (msg: string) => void;
+}) {
+  const [date, setDate] = useState(TODAY);
+  const [startTime, setStartTime] = useState('14:00');
+  const [endTime, setEndTime] = useState('15:00');
+  const [absenceType, setType] = useState<'medical_appointment' | 'other'>('medical_appointment');
+  const [busy, setBusy] = useState(false);
+
+  async function save() {
+    if (endTime <= startTime) { onError('The end time needs to be after the start'); return; }
+    setBusy(true);
+    try {
+      await api.post('/staff-calendar/absences/marker', { date, startTime, endTime, absenceType });
+      await onSaved(`Noted — out ${startTime}–${endTime} on ${fmtDate(date)}.`);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Failed to save that');
+    } finally { setBusy(false); }
+  }
+
+  return (
+    <div className="p-4 rounded-lg border border-gray-200 bg-white space-y-3">
+      <div>
+        <h2 className="text-sm font-semibold text-gray-900">Out for a bit</h2>
+        <p className="text-xs text-gray-500 mt-0.5">
+          An appointment, a late start, an early finish. This costs no holiday and needs no
+          approval — the team just sees you&apos;re out between those times, and nothing else.
+        </p>
+      </div>
+
+      <div className="grid sm:grid-cols-4 gap-3">
+        <label className="text-sm">
+          <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">Day</span>
+          <input type="date" value={date} onChange={e => setDate(e.target.value)}
+            className="w-full px-2 py-1.5 rounded border border-gray-300" />
+        </label>
+        <label className="text-sm">
+          <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">From</span>
+          <input type="time" step={300} value={startTime} onChange={e => setStartTime(e.target.value)}
+            className="w-full px-2 py-1.5 rounded border border-gray-300" />
+        </label>
+        <label className="text-sm">
+          <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">To</span>
+          <input type="time" step={300} value={endTime} onChange={e => setEndTime(e.target.value)}
+            className="w-full px-2 py-1.5 rounded border border-gray-300" />
+        </label>
+        <label className="text-sm">
+          <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">What sort</span>
+          <select value={absenceType} onChange={e => setType(e.target.value as 'medical_appointment' | 'other')}
+            className="w-full px-2 py-1.5 rounded border border-gray-300">
+            <option value="medical_appointment">Appointment</option>
+            <option value="other">Something else</option>
+          </select>
+        </label>
+      </div>
+
+      <p className="text-xs text-gray-500">
+        Two periods in one day are fine — in late and away early is two entries — as long
+        as they don&apos;t overlap. If you want the time off as holiday, use
+        <em> Book time off</em> instead.
+      </p>
+
+      <div className="flex gap-2">
+        <button disabled={busy} onClick={() => void save()}
+          className="px-3 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
+          Save
+        </button>
+        <button onClick={onClose}
+          className="px-3 py-2 text-sm rounded border border-gray-300 hover:bg-gray-50">Cancel</button>
+      </div>
     </div>
   );
 }

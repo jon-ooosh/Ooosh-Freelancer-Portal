@@ -1,14 +1,17 @@
 /**
  * Staff Calendar & Time — routes (Phase A).
  *
- * See docs/STAFF-CALENDAR-SPEC.md. Phase A serves the read-only "who's in"
- * calendar plus the admin screens that set up employment records and working
- * patterns. Leave, overtime and absence arrive in Phases B–D.
+ * See docs/STAFF-CALENDAR-SPEC.md. One router serves the whole module: the
+ * "who's in" calendar (A), leave requests (B), overtime and the bank (C) and
+ * absence, return-to-work and the holiday reclaim (D).
  *
  * RBAC:
  *   * Calendar reads — STAFF_ROLES. The whole team needs to see who is in.
  *   * Employment / pattern / salary / review writes — admin only, via the
  *     STAFF_ADMIN_ROLES chokepoint in services/staff-employment.ts.
+ *   * Absence — admin only, because it is special-category data (§0.5). The
+ *     single exception is a staff member's own timed marker, which carries no
+ *     health information beyond "out between these times".
  *
  * MASKING (spec §0.5): every calendar response passes through
  * getStaffCalendar(), which strips special-category detail for non-admin
@@ -44,7 +47,13 @@ import {
   minutesBetween, MIN_INCREMENT, type OvertimeStatus,
 } from '../services/staff-overtime';
 import {
-  notifyLeaveRequested, notifyOvertimeLogged, notifyDecision,
+  createAbsence, closeAbsence, cancelAbsence, recordRtw, reclaimLeaveDays,
+  getReclaimCandidates, getAbsence, listAbsences, listRtwOutstanding,
+  getAbsenceReport, ABSENCE_TYPES,
+  type AbsenceType, type CreateAbsenceInput,
+} from '../services/staff-absence';
+import {
+  notifyLeaveRequested, notifyOvertimeLogged, notifyDecision, notifyRtwDue,
 } from '../services/staff-notifications';
 
 const router = Router();
@@ -491,6 +500,261 @@ router.post('/year-end-cashout', adminOnly, async (req: AuthRequest, res: Respon
     res.json({ data: await yearEndCashOut(parsed.data.year, req.user!.id) });
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to run the sweep' });
+  }
+});
+
+// ── Absence (Phase D) ───────────────────────────────────────────────────────
+//
+// ADMIN ONLY, with one exception: staff record their own timed markers
+// ("out 14:00–15:00 Tuesday") via POST /absences/marker. Everything else is
+// special-category data under UK GDPR (spec §0.5) and the tier is deliberate —
+// the module has one admin today, and widening it is an RBAC change, not a
+// code change.
+//
+// Note that absence detail NEVER travels on the calendar endpoints for a
+// non-admin: maskForViewer() strips it inside staff-day-status.ts. These
+// routes are the only way the type or reason reaches a browser at all.
+
+// GET /api/staff-calendar/absences?personId=&from=&to=&openOnly=&includeCancelled=
+router.get('/absences', adminOnly, async (req: AuthRequest, res: Response) => {
+  try {
+    res.json({
+      data: await listAbsences({
+        personId: req.query.personId ? String(req.query.personId) : undefined,
+        from: DATE_RE.test(String(req.query.from)) ? String(req.query.from) : undefined,
+        to: DATE_RE.test(String(req.query.to)) ? String(req.query.to) : undefined,
+        openOnly: req.query.openOnly === 'true',
+        includeCancelled: req.query.includeCancelled === 'true',
+      }),
+      rtwOutstanding: await listRtwOutstanding(),
+    });
+  } catch (err) {
+    console.error('[staff-calendar] list absences error:', err);
+    res.status(500).json({ error: 'Failed to load absences' });
+  }
+});
+
+// GET /api/staff-calendar/me/absences — your own, dates only.
+//
+// Deliberately NOT the admin shape: someone can see their own sickness record
+// (they have every right to), but the reason category, notes, fit-note status
+// and RTW write-up are the employer's record of a conversation and are not
+// served here.
+router.get('/me/absences', async (req: AuthRequest, res: Response) => {
+  try {
+    const own = await personIdForUser(req.user!.id);
+    if (!own) { res.json({ data: [] }); return; }
+    const rows = await listAbsences({ personId: own, limit: 100 });
+    res.json({
+      data: rows.map(a => ({
+        id: a.id,
+        absenceType: a.absenceType,
+        startDate: a.startDate,
+        endDate: a.endDate,
+        isOpen: a.isOpen,
+        deductsAllowance: a.deductsAllowance,
+        totalMinutes: a.totalMinutes,
+        workingDays: a.workingDays,
+        rtwRequired: a.rtwRequired,
+        rtwCompletedAt: a.rtwCompletedAt,
+        days: a.days,
+      })),
+    });
+  } catch (err) {
+    console.error('[staff-calendar] my absences error:', err);
+    res.status(500).json({ error: 'Failed to load your absences' });
+  }
+});
+
+// GET /api/staff-calendar/absences/:id
+router.get('/absences/:id', adminOnly, async (req: AuthRequest, res: Response) => {
+  try {
+    const a = await getAbsence(req.params.id as string);
+    if (!a) { res.status(404).json({ error: 'Absence not found' }); return; }
+    res.json({ data: a, reclaimCandidates: await getReclaimCandidates(a.id) });
+  } catch (err) {
+    console.error('[staff-calendar] get absence error:', err);
+    res.status(500).json({ error: 'Failed to load the absence' });
+  }
+});
+
+// POST /api/staff-calendar/absences — open one. No end date = still running.
+router.post('/absences', adminOnly, async (req: AuthRequest, res: Response) => {
+  const schema = z.object({
+    personId: z.string().uuid(),
+    absenceType: z.enum(ABSENCE_TYPES as [string, ...string[]]),
+    startDate: dateStr,
+    endDate: dateStr.nullish(),
+    portion: z.enum(['full', 'am', 'pm', 'hours']).optional(),
+    startTime: timeStr.optional(),
+    endTime: timeStr.optional(),
+    deductsAllowance: z.boolean().optional(),
+    reasonCategory: z.string().max(50).nullish(),
+    notes: z.string().max(2000).nullish(),
+    selfCertified: z.boolean().optional(),
+    fitNoteReceived: z.boolean().optional(),
+    fitNoteExpiry: dateStr.nullish(),
+    sspQualifying: z.boolean().nullish(),
+    rtwRequired: z.boolean().optional(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
+
+  try {
+    const a = await createAbsence(
+      { ...parsed.data, absenceType: parsed.data.absenceType as AbsenceType } as CreateAbsenceInput,
+      req.user!.id
+    );
+    // The reclaim prompt (§7.4) is offered, never applied automatically —
+    // giving holiday back is a decision, and the platform rule is that money
+    // and allowance never move without a human saying so.
+    res.status(201).json({ data: a, reclaimCandidates: await getReclaimCandidates(a.id) });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to record the absence' });
+  }
+});
+
+// POST /api/staff-calendar/absences/marker — a timed marker (spec §7.5).
+//
+// The one thing staff record for themselves. It deducts nothing, needs no
+// approval, and exists so the team knows the office is short at 2pm rather
+// than discovering it at 2pm. Admin can file one on someone else's behalf.
+router.post('/absences/marker', async (req: AuthRequest, res: Response) => {
+  const schema = z.object({
+    personId: z.string().uuid().optional(),
+    date: dateStr,
+    startTime: timeStr,
+    endTime: timeStr,
+    absenceType: z.enum(['medical_appointment', 'other']).optional(),
+    notes: z.string().max(500).nullish(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
+
+  const target = await resolveLeaveTarget(req, parsed.data.personId);
+  if ('error' in target) { res.status(403).json({ error: target.error }); return; }
+
+  try {
+    const a = await createAbsence({
+      personId: target.personId,
+      absenceType: (parsed.data.absenceType ?? 'medical_appointment') as AbsenceType,
+      startDate: parsed.data.date,
+      endDate: parsed.data.date,
+      portion: 'hours',
+      startTime: parsed.data.startTime,
+      endTime: parsed.data.endTime,
+      deductsAllowance: false,
+      rtwRequired: false,
+      // Kept, but note it is admin-visible only like every other absence note.
+      notes: parsed.data.notes ?? null,
+    }, req.user!.id);
+    res.status(201).json({ data: { id: a.id, startDate: a.startDate, days: a.days } });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to save that' });
+  }
+});
+
+// DELETE /api/staff-calendar/absences/marker/:id — drop your own future marker.
+//
+// Soft-cancel like everything else. Past markers stay: they are a record of
+// where someone was, and the calendar for a day that has happened should not
+// change after the fact.
+router.delete('/absences/marker/:id', async (req: AuthRequest, res: Response) => {
+  try {
+    const a = await getAbsence(req.params.id as string);
+    if (!a) { res.status(404).json({ error: 'Not found' }); return; }
+
+    const own = await personIdForUser(req.user!.id);
+    if (!isAdmin(req) && a.personId !== own) { res.status(403).json({ error: 'That is not yours to cancel' }); return; }
+    // `.some(…)` on an empty array is false, which would have let a
+    // day-less absence through this guard as if it were a marker.
+    if (a.days.length === 0 || !a.days.every(d => d.portion === 'hours')) {
+      res.status(400).json({ error: 'That is a full absence — cancel it from the Absence page' }); return;
+    }
+    if (!isAdmin(req) && a.startDate < new Date().toISOString().slice(0, 10)) {
+      res.status(400).json({ error: 'That day has already happened' }); return;
+    }
+    await cancelAbsence(a.id, 'Withdrawn by the person', req.user!.id);
+    res.json({ data: { id: a.id, cancelled: true } });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to cancel' });
+  }
+});
+
+// POST /api/staff-calendar/absences/:id/close — set the end date and price it.
+router.post('/absences/:id/close', adminOnly, async (req: AuthRequest, res: Response) => {
+  const parsed = z.object({ endDate: dateStr }).safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: 'An end date is required' }); return; }
+  try {
+    const a = await closeAbsence(req.params.id as string, parsed.data.endDate, req.user!.id);
+    if (a.rtwRequired && !a.rtwCompletedAt) void notifyRtwDue(a.id);
+    res.json({ data: a, reclaimCandidates: await getReclaimCandidates(a.id) });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to close the absence' });
+  }
+});
+
+// POST /api/staff-calendar/absences/:id/rtw — the return-to-work write-up.
+router.post('/absences/:id/rtw', adminOnly, async (req: AuthRequest, res: Response) => {
+  const schema = z.object({
+    rtwDate: dateStr,
+    fitToReturn: z.enum(['yes', 'yes_with_adjustments', 'no']),
+    adjustments: z.string().max(2000).nullish(),
+    notes: z.string().max(2000).nullish(),
+    fitNoteReceived: z.boolean().optional(),
+    fitNoteExpiry: dateStr.nullish(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
+  try {
+    res.json({ data: await recordRtw(req.params.id as string, parsed.data, req.user!.id) });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to save the return to work' });
+  }
+});
+
+// POST /api/staff-calendar/absences/:id/reclaim — give back overtaken holiday.
+router.post('/absences/:id/reclaim', adminOnly, async (req: AuthRequest, res: Response) => {
+  const parsed = z.object({ dayIds: z.array(z.string().uuid()).min(1) }).safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: 'Pick at least one day to reclaim' }); return; }
+  try {
+    const r = await reclaimLeaveDays(req.params.id as string, parsed.data.dayIds, req.user!.id);
+    res.json({ data: { ...r, absence: await getAbsence(req.params.id as string) } });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to reclaim those days' });
+  }
+});
+
+// POST /api/staff-calendar/absences/:id/cancel — soft-cancel, reversing any debit.
+router.post('/absences/:id/cancel', adminOnly, async (req: AuthRequest, res: Response) => {
+  const parsed = z.object({ reason: z.string().min(1).max(500) }).safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: 'A reason is required' }); return; }
+  try {
+    await cancelAbsence(req.params.id as string, parsed.data.reason, req.user!.id);
+    res.json({ data: await getAbsence(req.params.id as string) });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to cancel the absence' });
+  }
+});
+
+// GET /api/staff-calendar/absence-report?from=&to=&flagSpells=&flagMonths=
+//
+// By SPELL. Five one-day absences and one five-day absence are the same number
+// of days and completely different signals (spec §7.6).
+router.get('/absence-report', adminOnly, async (req: AuthRequest, res: Response) => {
+  const range = resolveRange(req);
+  if ('error' in range) { res.status(400).json({ error: range.error }); return; }
+  try {
+    const flagSpells = Number(req.query.flagSpells) || 3;
+    const flagMonths = Number(req.query.flagMonths) || 3;
+    res.json({
+      data: await getAbsenceReport({ from: range.from, to: range.to, flagSpells, flagMonths }),
+      rtwOutstanding: await listRtwOutstanding(),
+      flagSpells, flagMonths,
+    });
+  } catch (err) {
+    console.error('[staff-calendar] absence report error:', err);
+    res.status(500).json({ error: 'Failed to build the absence report' });
   }
 });
 
