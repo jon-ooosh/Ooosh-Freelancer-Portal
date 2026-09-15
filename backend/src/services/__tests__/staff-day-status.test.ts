@@ -2,7 +2,7 @@ import {
   daysBetween, addDaysYmd, weekdayIndex, mondayOf, cycleWeekFor,
   dateRange, shiftMinutes, formatMinutes,
   resolveScheduledDay, maskForViewer, mergeAbsenceLayer,
-  type StaffDay, type DayPortion,
+  type StaffDay,
 } from '../staff-day-status';
 
 // ── Date maths ──────────────────────────────────────────────────────────────
@@ -243,12 +243,12 @@ describe('maskForViewer', () => {
     maskForViewer(days, false);
     expect(days[0].detail).toEqual({ absenceType: 'sickness' });
   });
-  it('keeps a timed appointment window for peers — the time is operational, the reason is not', () => {
+  it('keeps a timed leave window for peers — the time is operational, the reason is not', () => {
     const appt: StaffDay[] = [{
       date: '2026-09-08', scheduledMinutes: 450, status: 'partial',
       startTime: '09:00', endTime: '17:00', portion: 'hours',
       window: { start: '14:00', end: '15:00' },
-      isException: false, detail: { absenceType: 'medical_appointment' },
+      isException: false, detail: { leaveType: 'holiday' },
     }];
     const masked = maskForViewer(appt, false);
     expect(masked[0].window).toEqual({ start: '14:00', end: '15:00' });
@@ -263,9 +263,9 @@ describe('mergeAbsenceLayer — absence', () => {
     date, scheduledMinutes: 450, status: 'working',
     startTime: '09:00', endTime: '17:30', isException: false,
   });
-  const absence = (date: string, portion: DayPortion, start?: string, end?: string) => ({
+  // Whole, morning or afternoon — migration 215 removed timed absence.
+  const absence = (date: string, portion: 'full' | 'am' | 'pm') => ({
     date, portion, absenceType: 'sickness',
-    startTime: start ?? null, endTime: end ?? null,
   });
 
   it('turns a whole-day absence into `absent`', () => {
@@ -282,18 +282,16 @@ describe('mergeAbsenceLayer — absence', () => {
     expect(d.status).toBe('partial');
   });
 
-  it('carries every timed window, not just the first', () => {
-    const [d] = mergeAbsenceLayer([working('2026-10-13')], [], [
-      absence('2026-10-13', 'hours', '09:00:00', '11:00:00'),
-      absence('2026-10-13', 'hours', '16:00:00', '17:30:00'),
-    ]);
+  it('leaves the window alone for timed LEAVE, which still exists', () => {
+    // Migration 215 removed timed ABSENCE. Timed leave — "leaving at 15:00" —
+    // deducts and is approved, so it stayed, and it still renders a window.
+    const [d] = mergeAbsenceLayer([working('2026-10-13')], [{
+      date: '2026-10-13', portion: 'hours', leaveType: 'holiday',
+      status: 'approved', startTime: '15:00:00', endTime: '17:30:00',
+    }], []);
     expect(d.status).toBe('partial');
-    expect(d.windows).toEqual([
-      { start: '09:00', end: '11:00' },
-      { start: '16:00', end: '17:30' },
-    ]);
-    // The pre-existing single-window field keeps working for cached bundles.
-    expect(d.window).toEqual({ start: '09:00', end: '11:00' });
+    expect(d.window).toEqual({ start: '15:00', end: '17:30' });
+    expect(d.windows).toEqual([{ start: '15:00', end: '17:30' }]);
   });
 
   it('never overlays a day the person does not work', () => {
@@ -329,14 +327,6 @@ describe('mergeAbsenceLayer — absence', () => {
     );
     expect(merged[0].status).toBe('leave');
     expect(merged[1].status).toBe('absent');
-  });
-
-  it('a whole day beats a marker on the same date', () => {
-    const [d] = mergeAbsenceLayer([working('2026-10-07')], [], [
-      absence('2026-10-07', 'hours', '14:00:00', '15:00:00'),
-      absence('2026-10-07', 'full'),
-    ]);
-    expect(d.status).toBe('absent');
   });
 
   it('is a no-op with nothing to overlay', () => {

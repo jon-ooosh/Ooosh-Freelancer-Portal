@@ -20,12 +20,12 @@ type AbsenceType =
   | 'bereavement' | 'compassionate' | 'goodwill' | 'jury_service'
   | 'medical_appointment' | 'other';
 
-type Portion = 'full' | 'am' | 'pm' | 'hours';
+// Whole, morning or afternoon — migration 215 removed timed absence.
+type Portion = 'full' | 'am' | 'pm';
 type FitToReturn = 'yes' | 'yes_with_adjustments' | 'no';
 
 interface AbsenceDay {
   date: string; minutes: number; portion: Portion;
-  startTime: string | null; endTime: string | null;
 }
 interface Absence {
   id: string;
@@ -397,9 +397,7 @@ function AbsenceDetail({ a }: { a: Absence }) {
           <span key={d.date} className="inline-block mr-2">
             {fmtDate(d.date)}
             {d.portion !== 'full' && (
-              <span className="text-gray-500">
-                {' '}({d.portion === 'hours' ? `${d.startTime}–${d.endTime}` : d.portion.toUpperCase()})
-              </span>
+              <span className="text-gray-500"> ({d.portion.toUpperCase()})</span>
             )}
           </span>
         ))}
@@ -660,8 +658,6 @@ function AddAbsence({ roster, onClose, onSaved, onError }: {
   const [ongoing, setOngoing] = useState(true);
   const [endDate, setEnd] = useState(TODAY);
   const [portion, setPortion] = useState<Portion>('full');
-  const [startTime, setStartTime] = useState('14:00');
-  const [endTime, setEndTime] = useState('15:00');
   const [deductsAllowance, setDeducts] = useState(false);
   const [reasonCategory, setReason] = useState('');
   const [notes, setNotes] = useState('');
@@ -669,17 +665,14 @@ function AddAbsence({ roster, onClose, onSaved, onError }: {
   const [sspQualifying, setSsp] = useState(false);
   const [busy, setBusy] = useState(false);
 
-  const timed = portion === 'hours';
-
   async function save() {
     if (!personId) { onError('Pick who this is for'); return; }
     setBusy(true);
     try {
       await api.post('/staff-calendar/absences', {
         personId, absenceType, startDate,
-        endDate: timed ? startDate : (ongoing && portion === 'full' ? null : endDate),
+        endDate: ongoing && portion === 'full' ? null : endDate,
         portion,
-        ...(timed ? { startTime, endTime } : {}),
         deductsAllowance,
         reasonCategory: reasonCategory || null,
         notes: notes || null,
@@ -723,53 +716,33 @@ function AddAbsence({ roster, onClose, onSaved, onError }: {
             <option value="full">Whole days</option>
             <option value="am">Morning</option>
             <option value="pm">Afternoon</option>
-            <option value="hours">A set period</option>
           </select>
         </label>
       </div>
 
       <div className="grid sm:grid-cols-3 gap-3">
         <label className="text-sm">
-          <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">
-            {timed ? 'Date' : 'First day off'}
-          </span>
+          <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">First day off</span>
           <input type="date" value={startDate} onChange={e => setStart(e.target.value)}
             className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white" />
         </label>
-        {timed ? (
-          <>
-            <label className="text-sm">
-              <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">From</span>
-              <input type="time" step={300} value={startTime} onChange={e => setStartTime(e.target.value)}
-                className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white" />
-            </label>
-            <label className="text-sm">
-              <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">To</span>
-              <input type="time" step={300} value={endTime} onChange={e => setEndTime(e.target.value)}
-                className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white" />
-            </label>
-          </>
-        ) : (
-          <>
-            <label className="text-sm">
-              <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">Last day off</span>
-              <input type="date" value={endDate} disabled={ongoing}
-                onChange={e => setEnd(e.target.value)}
-                className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white disabled:bg-gray-100" />
-            </label>
-            {/* Only whole days can be open-ended: an absence with no end date
-                has no day rows to read a portion back from, so the catch-up
-                assumes whole days and the API refuses the rest. */}
-            <label className="flex items-end gap-2 text-sm text-gray-700 pb-1.5">
-              <input type="checkbox" checked={ongoing && portion === 'full'}
-                disabled={portion !== 'full'}
-                onChange={e => setOngoing(e.target.checked)} />
-              <span className={portion !== 'full' ? 'text-gray-400' : ''}>
-                Still off — no end date yet
-              </span>
-            </label>
-          </>
-        )}
+        <label className="text-sm">
+          <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">Last day off</span>
+          <input type="date" value={endDate} disabled={ongoing && portion === 'full'}
+            onChange={e => setEnd(e.target.value)}
+            className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white disabled:bg-gray-100" />
+        </label>
+        {/* Only whole days can be open-ended: an absence with no end date has
+            no day rows to read a portion back from, so the catch-up assumes
+            whole days and the API refuses the rest. */}
+        <label className="flex items-end gap-2 text-sm text-gray-700 pb-1.5">
+          <input type="checkbox" checked={ongoing && portion === 'full'}
+            disabled={portion !== 'full'}
+            onChange={e => setOngoing(e.target.checked)} />
+          <span className={portion !== 'full' ? 'text-gray-400' : ''}>
+            Still off — no end date yet
+          </span>
+        </label>
       </div>
 
       <div className="grid sm:grid-cols-2 gap-3">

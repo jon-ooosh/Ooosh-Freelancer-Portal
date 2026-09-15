@@ -151,8 +151,6 @@ shape. Full records are never sent to the browser and hidden in React.
 - Overtime logged in 5-minute increments into a **bank**, drawn down as either TOIL
   time off or payroll cash-out, at whatever moment the person decides.
 - Unpaid leave.
-- Timed appointment markers ("out 14:00–15:00") that flag absence from the building
-  without deducting anything (§7.5).
 - Sickness, parental, bereavement, goodwill and other absence, with return-to-work.
 - Global "who's in" calendar + dashboard strip + personal calendar.
 - Approval flow with operational context attached.
@@ -477,8 +475,8 @@ staff_absences
 staff_absence_days
   id, absence_id, person_id, absence_date DATE, minutes INT,
   portion VARCHAR(10) NOT NULL DEFAULT 'full'
-    CHECK (portion IN ('full','am','pm','hours')),
-  start_time TIME,          -- set when portion = 'hours' (§7.5)
+    CHECK (portion IN ('full','am','pm')),        -- 'hours' removed, mig 215 (§7.5)
+  start_time TIME,          -- always NULL since mig 215; kept, constrained
   end_time   TIME,
   is_active  BOOLEAN NOT NULL DEFAULT true,   -- kept in step with the parent status
   UNIQUE (absence_id, absence_date)
@@ -578,7 +576,7 @@ getDayStatus(personId, date): {
   scheduledMinutes: number,
   status: 'working' | 'not_scheduled' | 'leave' | 'absent' | 'partial',
   portion?: 'full' | 'am' | 'pm' | 'hours',
-  window?: { start: string, end: string },  // set when portion = 'hours' (§7.5)
+  window?: { start: string, end: string },  // set when portion = 'hours' — timed LEAVE
   detail?: { leaveType?, absenceType? }     // ADMIN ONLY — stripped for peers
 }
 getTeamDayStatus(date, viewerRole): TeamDayStatus[]   // masking applied here
@@ -726,52 +724,52 @@ Accepting posts a `correction` credit for those days' minutes and stamps
 and still shows in history — the reclaim is visible as its own ledger line, which is
 exactly what you want if it is ever questioned.
 
-### 7.5 Timed appointments — "I'm at the dentist 2–3 on Tuesday"
+### 7.5 Timed appointments — REMOVED, and why
 
-Two different needs get conflated here, and separating them is what keeps the rules
-simple:
+**This section described a feature that was built and then taken out four days
+later (migration 215). It is kept as a record of the reasoning, not as a
+design. Do not build it again without asking.**
+
+The original idea separated two needs:
 
 | Need | Mechanism | Deducts? |
 |---|---|---|
-| **Taking time off** | Leave request | Yes — **minimum half a day**, always |
-| **Flagging an absence from the building** | Timed absence marker | No, by default |
+| **Taking time off** | Leave request | Yes |
+| **Flagging an absence from the building** | Timed absence marker | No |
 
-**Leave can be a timed period.** This paragraph originally said leave stayed in half-day
-chunks and that nobody books 40 minutes of holiday. That turned out to be wrong: staff
-wanted to book "leaving at 15:00", and with minutes as the unit of account it costs
-nothing to support. `portion` is `full / am / pm / hours` (decision 3 in §18, shipped in
-migration 212). The distinction in the table above still holds and is the point of this
-section — a timed *leave period* deducts, a timed *marker* does not.
+The second one was the mistake. An hour at the dentist created a
+`staff_absences` row of type `medical_appointment` with
+`deducts_allowance = false` and a day row of `portion = 'hours'`, 14:00–15:00.
+Staff could record it themselves, it needed no approval, and it cost nothing.
+The argument for it was operational: so the calendar and the coverage warnings
+knew the office was short at 2pm, rather than discovering it at 2pm.
 
-**Appointments are a presence marker, not leave.** An hour at the dentist creates a
-`staff_absences` row of type `medical_appointment` with `deducts_allowance = false` and a
-day row of `portion = 'hours'`, 14:00–15:00. It costs nothing, needs no approval, and
-exists purely so the calendar and the coverage warnings know the person is out — which is
-the whole point: not discovering at 14:00 on Tuesday that the office is empty.
+**Why it came out.** This module answers two questions — how much time has
+someone worked, and how much time are they taking off. A marker answers
+neither. It deducted nothing, was approved by nobody and belonged to no
+account, which made it a presence tracker wearing an absence row's clothes.
+Carrying it would have meant every future rule in this module having to say
+"…except markers", and it had already started: a partial unique index with a
+`portion <> 'hours'` carve-out, an overlap trigger that existed only for it,
+and a `windows` array on `StaffDay` that only it could populate. jon's call,
+and the right one — the operational need is real but it is a thing you say out
+loud in an office of seven, not a row in an HR system.
 
-**Staff can create these themselves.** This is the one absence type staff may self-record
-(everything else is admin-entered). Auto-approved, removable by the person while it is in
-the future, and admin sees them on the Absence page as information rather than as a
-decision. The endpoint is `POST /absences/marker` and it accepts only
-`medical_appointment` or `other` — a school run is not a medical appointment, and
-mislabelling it as one puts health-adjacent data where none belongs.
+**What covers the ground instead:**
 
-**Two markers in one day are fine, as long as they do not overlap.** In late *and* away
-early is two genuinely separate periods, so each is its own absence row. Overlapping ones
-are refused by a trigger; a marker inside a whole day off is refused too, since they are
-already out.
+- **Timed leave** (`portion = 'hours'`, migration 212, decision 3 in §18).
+  "Leaving at 15:00 on Thursday" is time off: it deducts and it is approved.
+  That is the thing people actually asked for, and it stays.
+- **Half-day absence** (`am` / `pm`). Someone who goes home ill after lunch is
+  a `pm` absence. That is what the portion column is for.
 
-**Masking (§0.5) still applies, and matters here.** Peers see the *time window* and
-nothing else:
+**The database enforces the removal**, so a stray insert cannot put the
+calendar back into a state the merge layer no longer understands:
+`portion IN ('full','am','pm')` and `start_time IS NULL AND end_time IS NULL`.
+If it is ever genuinely wanted, relaxing those two constraints is the whole of
+the change — the columns are still there, nullable and empty.
 
-> `Will — out 14:00–15:00`
-
-Never the type. The time is operational information the team needs; "medical appointment"
-is health-adjacent and stays admin-only. `staff-day-status.ts` returns `status: 'partial'`
-with the window, and strips `detail.absenceType` for non-admin viewers.
-
-If policy ever wants an appointment to be deducted, flipping `deducts_allowance` on that
-absence posts the ledger debit — no new mechanism.
+---
 
 ### 7.6 Reporting
 
@@ -927,7 +925,7 @@ is ready.
 ### 12.2 Other reports
 
 - Balances and remaining liability across the team (holiday and banked overtime).
-- Absence spells / Bradford-style flags (§7.5).
+- Absence spells / repeat-absence flags (§7.6).
 - Full audit trail per person: every ledger entry, request, decision, correction.
 
 ---
@@ -1056,7 +1054,7 @@ is a settings change and not a deploy — that is why they are settings.
 
 ## 18. Build log — what is done, what changed, what is left
 
-*Written 15 Sep 2026; Phase D appended the same day.*
+*Written 15 Sep 2026; Phase D appended the same day, and trimmed on review.*
 
 ### Shipped
 
@@ -1067,7 +1065,8 @@ is a settings change and not a deploy — that is why they are settings.
 | **B2** | Leave requests, impact preview, approval with operational context, cancel / decline / withdraw, My Time | 209 |
 | **C** | Overtime in 5-minute steps, the bank, TOIL drawdown, cash-out, year-end sweep, payroll CSV, timed leave | 212 |
 | — | Consolidation: Team Members + COT card register moved onto the Staff page; login linking; notifications and the daily digest | 213 |
-| **D** | Absence and sickness, two-tier visibility, return-to-work + its one chase, holiday reclaim, self-recorded timed markers, absence reporting by spell, sickness on the payroll report | 214 |
+| **D** | Absence and sickness, two-tier visibility, return-to-work + its one chase, holiday reclaim, absence reporting by spell, sickness on the payroll report | 214 |
+| — | Timed absence markers removed — built in D, taken out on review (§7.5, decision 10) | 215 |
 
 ### Decisions taken during the build that CHANGE this spec
 
@@ -1088,7 +1087,8 @@ contradict an earlier section, this list wins.
    separate non-deducting concept (§7.5). Staff also wanted to book "leaving at
    15:00", which with minutes as the unit costs nothing to support. `portion`
    is now `full | am | pm | hours`. The non-deducting appointment marker of
-   §7.5 is still **unbuilt** and still wanted.
+   §7.5 was built in Phase D and then removed — see decision 10, which
+   supersedes this sentence.
 
 4. **Rounding applies only to PRO-RATED entitlement.** Rounding a full year up
    to the half day inflated it — 5.6 weeks of an unequal four-day week is 22.4
@@ -1117,24 +1117,29 @@ contradict an earlier section, this list wins.
    in March, so instead `materialiseDays()` is idempotent and every read calls
    it — the read repairs the data and it cannot drift. No new moving part.
 
-10. **Two timed markers in one day are allowed; overlapping ones are not.**
-   jon: "someone could need to come in late and leave early — two different
-   time periods on the same day". So the one-per-day unique index excludes
-   `portion = 'hours'`, and a trigger refuses overlaps instead. A trigger
-   rather than an `EXCLUDE` constraint because that needs `btree_gist`, and
-   installing an extension needs a superuser on the box — migration 175
-   already carries that scar.
+10. **Timed absence markers were built, then REMOVED four days later**
+   (migration 215, §7.5). They shipped as "two timed markers in one day are
+   allowed, overlapping ones are not", which needed a `portion <> 'hours'`
+   carve-out in the unique index and a trigger that existed for nothing else.
+   jon then read it back and said it was blurring what the module is for, and
+   he was right: it deducted nothing, was approved by nobody and belonged to
+   no account. **Staff have exactly two things to do here — log overtime, and
+   request time off as holiday or TOIL.** An absence is now whole, morning or
+   afternoon, enforced by a CHECK. *The lesson is that a spec section can be
+   internally coherent and still be the wrong feature; §7.5 argued its case
+   well and had never been put in front of the person who would use it.*
 
 11. **A deducting absence posts `booking` with `source_type = 'absence'`**, not
    a new entry type. The source is what distinguishes it from a leave request;
    inventing an entry type nobody would remember the rules for is how the one
    ledger bug in this module happened.
 
-12. **Absence stays admin-only for now.** Raised as a single-point-of-failure
-   risk — with one admin, nobody can record a sick day while jon is away. His
-   call was to keep §0.5 strict and revisit the RBAC if it bites. The one
-   exception is a person's own timed marker, which carries no health
-   information beyond the window.
+12. **Absence is admin-only, with no exceptions.** Raised as a
+   single-point-of-failure risk — with one admin, nobody can record a sick day
+   while jon is away. His call was to keep §0.5 strict and revisit the RBAC if
+   it bites. The one exception used to be a person's own timed marker; decision
+   10 removed it, so the rule is now simply "absence is recorded for staff, not
+   by them".
 
 ### Bugs found during the build, and what they teach
 

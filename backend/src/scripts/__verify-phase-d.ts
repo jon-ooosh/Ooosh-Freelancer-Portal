@@ -110,45 +110,67 @@ async function main() {
   await refuses('dates the person is not contracted to work',
     () => createAbsence({ personId, absenceType: 'other', startDate: '2026-10-09', endDate: '2026-10-10' }, userId),
     /contracted to work/i);
-  await refuses('a timed period longer than that day is contracted',
-    () => createAbsence({ personId, absenceType: 'medical_appointment', startDate: '2026-10-13',
-      portion: 'hours', startTime: '09:00', endTime: '19:00' }, userId),
+  await refuses('a timed leave period longer than that day is contracted',
+    () => createRequest({ personId, leaveType: 'holiday',
+      startDate: '2026-10-14', endDate: '2026-10-14',
+      halfDays: { '2026-10-14': { portion: 'hours', startTime: '09:00', endTime: '20:00' } } }, userId),
     /longer than/i);
 
-  // ── 3. Two markers in one day, so long as they do not overlap ────────────
-  console.log('\n3. Timed markers (jon: "in late AND away early")');
-  const late = await createAbsence({ personId, absenceType: 'other', startDate: '2026-10-13',
-    portion: 'hours', startTime: '09:00', endTime: '11:00' }, userId);
-  const early = await createAbsence({ personId, absenceType: 'medical_appointment', startDate: '2026-10-13',
-    portion: 'hours', startTime: '16:00', endTime: '17:30' }, userId);
-  check('two non-overlapping markers on one day both stick', !!late.id && !!early.id);
-  await refuses('an overlapping marker',
-    () => createAbsence({ personId, absenceType: 'other', startDate: '2026-10-13',
-      portion: 'hours', startTime: '10:30', endTime: '12:00' }, userId),
-    /overlaps an existing/i);
-  await refuses('a marker inside a whole day off',
-    () => createAbsence({ personId, absenceType: 'other', startDate: '2026-10-08',
-      portion: 'hours', startTime: '10:00', endTime: '11:00' }, userId),
-    /absent for the whole/i);
+  // ── 3. Timed absence is gone (migration 215) ─────────────────────────────
+  console.log('\n3. Timed absence stays gone');
+  await refuses('a timed absence through the service',
+    () => createAbsence({ personId, absenceType: 'medical_appointment',
+      startDate: '2026-10-13', endDate: '2026-10-13',
+      portion: 'hours' as unknown as 'full' }, userId),
+    /portion|check|constraint|contracted/i);
+
+  // The DATABASE has to refuse it too, not just the TypeScript union — the
+  // constraint is what stops a stray insert from putting the calendar back
+  // into a state the merge layer no longer understands.
+  await refuses('a timed absence day row inserted directly',
+    () => query(
+      `INSERT INTO staff_absence_days (absence_id, person_id, absence_date, minutes, portion, start_time, end_time)
+       VALUES ($1,$2,'2026-10-13'::date,60,'hours','14:00'::time,'15:00'::time)`,
+      [flu.id, personId]),
+    /staff_absence_days_portion_check|staff_absence_day_times/i);
+
+  await refuses('start/end times on an ordinary absence day',
+    () => query(
+      `INSERT INTO staff_absence_days (absence_id, person_id, absence_date, minutes, portion, start_time, end_time)
+       VALUES ($1,$2,'2026-10-20'::date,450,'am','14:00'::time,'15:00'::time)`,
+      [flu.id, personId]),
+    /staff_absence_day_times/i);
+
+  // And the one-per-day index no longer has an exception carved out of it.
+  await refuses('a second absence of ANY portion on a date already taken',
+    () => createAbsence({ personId, absenceType: 'other',
+      startDate: '2026-10-08', endDate: '2026-10-08', portion: 'am' }, userId),
+    /duplicate key|idx_staff_absence_one_per_day/i);
 
   // ── 4. The calendar merge ─────────────────────────────────────────────────
   console.log('\n4. The calendar');
   const admin = (await getStaffCalendar('2026-10-05', '2026-10-13', { isAdmin: true, personId }))[0];
   const d07 = admin.days.find(d => d.date === '2026-10-07')!;
-  const d13 = admin.days.find(d => d.date === '2026-10-13')!;
   check('a whole sick day reads absent', d07.status === 'absent', d07.status);
   check('admin sees the absence type', d07.detail?.absenceType === 'sickness', d07.detail);
-  check('a day of markers reads partial, not absent', d13.status === 'partial', d13.status);
-  check('both windows survive to the calendar',
-    JSON.stringify(d13.windows) === '[{"start":"09:00","end":"11:00"},{"start":"16:00","end":"17:30"}]', d13.windows);
-  check('the legacy single `window` field still populates', d13.window?.start === '09:00', d13.window);
+
+  // Timed LEAVE survived migration 215 and still renders its window.
+  const timedLeaveId = await createRequest({ personId, leaveType: 'holiday',
+    startDate: '2026-10-13', endDate: '2026-10-13',
+    halfDays: { '2026-10-13': { portion: 'hours', startTime: '15:00', endTime: '17:00' } } }, userId);
+  await approveRequest(timedLeaveId, null, userId);
+  const withLeave = (await getStaffCalendar('2026-10-13', '2026-10-13', { isAdmin: true, personId }))[0];
+  check('an early finish still reads partial, with its window',
+    withLeave.days[0].status === 'partial' &&
+    withLeave.days[0].window?.start === '15:00', withLeave.days[0]);
 
   const peer = (await getStaffCalendar('2026-10-05', '2026-10-13', { isAdmin: false, personId }))[0];
   const p07 = peer.days.find(d => d.date === '2026-10-07')!;
-  const p13 = peer.days.find(d => d.date === '2026-10-13')!;
   check('a PEER sees absent and nothing else', p07.status === 'absent' && p07.detail === undefined, p07);
-  check('a peer keeps the time window (operational) but no type',
-    p13.windows?.length === 2 && p13.detail === undefined, p13);
+  const peerLeave = (await getStaffCalendar('2026-10-13', '2026-10-13', { isAdmin: false, personId }))[0];
+  check('a peer keeps the leave window (operational) but no type',
+    peerLeave.days[0].window?.start === '15:00' && peerLeave.days[0].detail === undefined,
+    peerLeave.days[0]);
   const today = await getTodaySummary('2026-10-07', false);
   check("who's-in masks detail too", today.people.every(r => r.detail === undefined));
 
@@ -324,7 +346,7 @@ async function main() {
   const mine = report.find(r => r.personId === personId)!;
   check('sickness spells are counted, not just days', mine.spells === 3, mine);
   check('the repeat-absence flag trips at the threshold', mine.flagged === true, mine);
-  check('markers are excluded from the sickness report', mine.days === 7, mine.days);
+  check('only sickness counts toward the sickness report', mine.days === 7, mine.days);
 
   const sickMin = await getSicknessMinutes('2026-01-01', '2026-12-31');
   check('sickness minutes are summed for payroll', sickMin.get(personId)! > 0, sickMin.get(personId));
