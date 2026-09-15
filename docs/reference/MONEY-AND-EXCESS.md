@@ -626,6 +626,53 @@ Phase 1 is **offered, never silent** — the endpoint answers **409 `release_req
   Credit notes also sync to Xero under a different task — `hh_task: "post_invoice_credit"`, not `post_payment`.
 
 
+##### The Xero leg failed silently for three months (Sep 2026, job 15187)
+
+**Symptom.** A £120 goodwill refund went through the Money tab. Stripe: done. HireHop: the refund row is there against deposit 8953. Xero: nothing — no cloud icon on the HireHop row — and **OP said "Refund recorded successfully" with no warning of any kind.**
+
+**The trap.** Every money-out path fires `accounting/tasks.php` after its `billing_*_save.php` write. Five of the six copies looked like this:
+
+```js
+try {
+  await hhBroker.post('/php_functions/accounting/tasks.php', {...});
+  console.log('Xero sync triggered');     // ← printed either way
+} catch (e) { /* non-fatal */ }
+```
+
+**`hhBroker.post` RESOLVES `{ success: false, error }` — it never throws.** So the `catch` never fired, the return value was discarded, and the log line was true by construction and informative never. HireHop had handed us Xero's own refusal, verbatim, in the response body:
+
+```json
+{ "error": "<b>Can't create payment for invoice </b><br>Xero error: Payments can only be made against Authorised documents<br>[2263]" }
+```
+
+The broker classifies that correctly (top-level `error` ⇒ `success: false`, and `isRetryableError` says permanent, so no retry storm) — but as a permanent non-success it isn't logged either, so **the failure appeared in no log at all**. The only trace was `ACC_ID: ""` on the HireHop row.
+
+**Why Xero refused, and why it is not fixable from OP.** HireHop and Xero disagree about which document is unfunded, in exact mirror image:
+
+```
+HireHop   invoice OT-INV-12144 £3,708.48 = deposit 7937 £3,450.00
+                                         + deposit 8953   £138.48
+                                         + credit note   £120.00  ← consumed
+          deposit 8953  £258.48 − £138.48 applied − £120.00 refunded = £0.00 ✓
+
+Xero      overpayment "15187 - balance" £258.48 — allocated in full 2 Sept → PAID
+          credit note OT-CRE-1217 £120.00 — raised 4 Sept → still AWAITING PAYMENT
+```
+
+The credit note was approved **two days after** the overpayment had been allocated. In HireHop the credit note is therefore spent and the deposit is the free money (so refunding out of the deposit is right, and worked). In Xero the overpayment is spent and the *credit note* is the document left unfunded — and an overpayment flips AUTHORISED → PAID once fully allocated, so Xero refuses any further payment against it. That is error 2263.
+
+**Do NOT "fix" this by posting the refund against the credit note in HireHop.** It was considered and rejected: the credit note is already consumed there, so HireHop would show it both reducing the invoice *and* being paid out — £120 wrong — and deposit 8953 would still read as refundable, inviting a second real refund. It would fix the Xero sync by corrupting HireHop, which is where operational truth lives. Writing the refund straight into Xero via `xero-broker` was rejected for the same reason the 15628 runbook rejects it: a correction only Xero can see is invisible to OP and to everyone using it.
+
+**The manual fix.** In Xero, record a cash refund against the credit note (it is sitting at *Awaiting payment* for exactly the refund amount) from the bank account the money actually left, dated to match. Nothing to change in HireHop — it is already correct; the row simply never gets its cloud.
+
+**As shipped:** `services/hh-xero-sync.ts` is now THE way OP asks HireHop to push a row to Xero, used by all six paths (hire refund, cross-job credit, excess reimburse / claim / capture-apply, deposit push + reattribution) plus the release leg it was extracted from. It checks `success`, flattens HireHop's display HTML to one line (`cleanHhError`), and returns `{ ok, error }`. A refusal is recorded in **three** places, because the 15628 lesson was that a warning rendered once in a modal is a warning nobody can find later: the `job_payments` / `job_excess` notes, a job timeline note, and an **admin-only** email (`sendXeroSyncFailedAlert`, hardcoded to jon@ — the remedy is always "fix it in Xero", which only the account owner can do, so info@ would just be noise). The 2263 shape is detected and the email names the credit-note remedy directly. The refund modals and the excess reimburse modal show an amber panel carrying HireHop's own words. Warning, never a gate — the money has already moved.
+
+**`ACC_ID` is the "has it reached Xero" field** — the cloud icon in data form. On `billing_list.php` rows: populated with the Xero object id once a row has landed (deposit 8953 carries `ACC_ID: "b3a1fc0a-…"`, `exported: 1`, and `ACC_DATA.OverpaymentID` — the Xero Overpayment GUID), empty until then. **Deliberately NOT used to verify a push.** `tasks.php` reports its own failures honestly in the response body, so a re-read would spend an extra HireHop call per refund to rediscover what the response already said. The "never trust the save response" rule from the release probe is about `billing_payments_save.php` silently clamping a write — it does not generalise to the accounting task.
+
+**`ACC_DATA.OverpaymentID` makes a read-only Xero pre-flight cheap** if this shape proves common (two so far: 15628 £91.12, 15187 £120.00): one `GET Overpayments/<guid>` before the Stripe refund, check `RemainingCredit`, and warn *before* money moves rather than after. Not built — the after-the-fact warning catches every failure mode, this would catch only one.
+
+**⚠️ The 15628 note's "no Xero counterpart" assumption does not hold universally.** That runbook justifies editing a deposit→invoice application partly on "HireHop posts deposits into Xero as unallocated Overpayments… Xero's copy still reads Paid 0.00". On 15187 the overpayments carry paid dates and the invoice reads Paid, so the allocation IS live in Xero. Editing an application on a job like this one would put HireHop and Xero out of step. Worth re-checking properly before leaning on that assumption again.
+
 **Sign trap for anything reading these rows.** HireHop dual-publishes each application as two `kind=3` rows sharing one `data.ID` — deposit-side (`credit < 0`, `parent_is="deposit"`) and invoice-side (`credit > 0`, `parent_is="invoice"`). `routes/money.ts` dedups on `data.ID` and takes `Math.abs()`, which is safe there only because `OWNER` supplies the direction. It is **not** safe for a release: a negative application's twins carry the opposite signs, so `abs()` reads a release as *more* money leaving the deposit. Key on the deposit-side twin and keep the sign (`movedOut = −credit`). Also remember a deposit-child row with `OWNER = 0` is a **refund**, which spends the deposit just as an application does — omit it and a fully-refunded deposit reads as still refundable, inviting a double refund.
 
 

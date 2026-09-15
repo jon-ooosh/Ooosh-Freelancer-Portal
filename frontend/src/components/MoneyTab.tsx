@@ -421,6 +421,10 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   const [refundError, setRefundError] = useState('');
   const [refundResult, setRefundResult] = useState<{
     stripe_refund_id?: string; hh_push_error?: string | null;
+    // Present only when HireHop REFUSED to push the refund on to Xero. The
+    // refund itself is fine — money moved, HireHop is right — but Xero is short
+    // and needs a hand-correction. See hh-xero-sync.ts (job 15187).
+    xero_sync?: { ok: boolean; error: string | null } | null;
     client_email?: { sent: boolean; toEmail?: string; isFallback?: boolean; error?: string } | null;
   } | null>(null);
   // Record-only refunds (BACS/cash/Worldpay) only email when asked, because the
@@ -558,6 +562,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
     try {
       const resp = await api.post<{
         data: unknown; stripe_refund_id?: string; hh_push_error?: string | null;
+        xero_sync?: { ok: boolean; error: string | null } | null;
         client_email?: { sent: boolean; toEmail?: string; isFallback?: boolean; error?: string } | null;
       }>(
         `/money/${jobId}/refund-payment`,
@@ -581,6 +586,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
       setRefundResult({
         stripe_refund_id: resp.stripe_refund_id,
         hh_push_error: resp.hh_push_error || null,
+        xero_sync: resp.xero_sync || null,
         client_email: resp.client_email || null,
       });
     } catch (e) {
@@ -701,6 +707,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
     try {
       const resp = await api.post<{
         data: unknown; stripe_refund_id?: string; hh_push_error?: string | null;
+        xero_sync?: { ok: boolean; error: string | null } | null;
         client_email?: { sent: boolean; toEmail?: string; isFallback?: boolean; error?: string } | null;
       }>(
         `/money/${jobId}/refund-payment`,
@@ -721,6 +728,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
       setRefundResult({
         stripe_refund_id: resp.stripe_refund_id,
         hh_push_error: resp.hh_push_error || null,
+        xero_sync: resp.xero_sync || null,
         client_email: resp.client_email || null,
       });
     } catch (e) {
@@ -2213,6 +2221,15 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                     {refundResult.hh_push_error}
                   </div>
                 )}
+                {refundResult.xero_sync && !refundResult.xero_sync.ok && (
+                  <div className="px-3 py-2 bg-amber-50 border border-amber-300 rounded text-xs text-amber-900">
+                    <div className="font-semibold mb-1">Recorded in HireHop, but Xero refused it</div>
+                    <div className="font-mono text-[11px] mb-1.5 text-amber-800">{refundResult.xero_sync.error}</div>
+                    The refund itself is done and HireHop is correct — only Xero is short, so it needs a
+                    manual correction. It's noted on the payment and the job timeline, and admin has been
+                    emailed. Nothing to re-refund.
+                  </div>
+                )}
                 {refundResult.client_email && (
                   refundResult.client_email.sent ? (
                     <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded text-xs text-gray-600">
@@ -2483,6 +2500,15 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                   <div className="px-3 py-2 bg-amber-50 border border-amber-300 rounded text-xs text-amber-900">
                     <div className="font-semibold mb-1">HireHop paperwork push failed</div>
                     {refundResult.hh_push_error}
+                  </div>
+                )}
+                {refundResult.xero_sync && !refundResult.xero_sync.ok && (
+                  <div className="px-3 py-2 bg-amber-50 border border-amber-300 rounded text-xs text-amber-900">
+                    <div className="font-semibold mb-1">Recorded in HireHop, but Xero refused it</div>
+                    <div className="font-mono text-[11px] mb-1.5 text-amber-800">{refundResult.xero_sync.error}</div>
+                    The refund itself is done and HireHop is correct — only Xero is short, so it needs a
+                    manual correction. It's noted on the payment and the job timeline, and admin has been
+                    emailed. Nothing to re-refund.
                   </div>
                 )}
                 {refundResult.client_email && (

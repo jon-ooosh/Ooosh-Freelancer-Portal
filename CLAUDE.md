@@ -155,6 +155,7 @@ existing definition:
 | Talking to HireHop | `services/hirehop-broker.ts` |
 | Sending any email | `services/email-service.ts` |
 | Pushing a deposit to HireHop | `services/hh-deposit.ts` |
+| Pushing anything from HireHop to Xero | `services/hh-xero-sync.ts` |
 | Encrypting PII | `services/encryption.ts` |
 | Verifying an API key | `middleware/api-key.ts` |
 

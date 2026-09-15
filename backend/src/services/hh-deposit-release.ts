@@ -35,9 +35,15 @@
  *     its own sync parameters (`hh_task`, `hh_id`, `hh_acc_package_id`,
  *     `hh_package_type`), so read them back rather than assuming.
  *
+ * That last point is now `services/hh-xero-sync.ts`, shared with every other
+ * money-out path — this file was the only one checking whether the Xero push
+ * actually succeeded, which is how job 15187's refund reached HireHop, missed
+ * Xero, and told nobody.
+ *
  * See docs/reference/MONEY-AND-EXCESS.md for the full incident + runbook.
  */
 import { hhBroker } from './hirehop-broker';
+import { syncSavedRowToXero } from './hh-xero-sync';
 
 /** One movement of money OFF a deposit — an invoice application or a refund. */
 export interface DepositApplication {
@@ -145,29 +151,6 @@ export async function fetchDepositAvailability(
   depositId: number,
 ): Promise<DepositAvailability | null> {
   return readDepositAvailability(await readBillingRows(hhJobNumber), depositId);
-}
-
-/** Fire HireHop's accounting sync, using the parameters HireHop itself returned. */
-async function syncSavedRowToXero(label: string, data: Record<string, any> | undefined): Promise<boolean> {
-  const hhId = data?.hh_id ?? data?.id ?? data?.ID ?? null;
-  if (!hhId) {
-    console.error(`[hh-release] ${label}: no hh_id in the save response — cannot sync to Xero.`);
-    return false;
-  }
-  try {
-    const res = await hhBroker.post('/php_functions/accounting/tasks.php', {
-      hh_package_type: data?.hh_package_type ?? 1,
-      hh_acc_package_id: data?.hh_acc_package_id ?? 3,
-      hh_task: data?.hh_task ?? 'post_payment',
-      hh_id: hhId,
-      hh_acc_id: '',
-    }, { priority: 'high' });
-    if (!res.success) console.error(`[hh-release] ${label}: Xero sync failed — ${res.error}`);
-    return res.success;
-  } catch (e) {
-    console.error(`[hh-release] ${label}: Xero sync threw —`, e instanceof Error ? e.message : e);
-    return false;
-  }
 }
 
 /**

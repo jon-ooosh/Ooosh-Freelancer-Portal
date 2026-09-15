@@ -720,9 +720,9 @@ export default function ExcessPaymentModal({ excess: excessProp, onClose, onUpda
                 : { iban: bankIban.trim(), swiftBic: bankSwift.trim() || undefined, bankCountry: bankCountry.trim() || undefined }),
             };
           }
-          let resp: { data: any; warning?: string };
+          let resp: { data: any; warning?: string; xero_sync?: { ok: boolean; error: string | null } | null };
           try {
-            resp = await api.post<{ data: any; warning?: string }>(
+            resp = await api.post<{ data: any; warning?: string; xero_sync?: { ok: boolean; error: string | null } | null }>(
               `/excess/${excess.id}/reimburse`,
               {
                 amount: parseFloat(reimburseAmount),
@@ -745,8 +745,17 @@ export default function ExcessPaymentModal({ excess: excessProp, onClose, onUpda
             }
             throw err;
           }
-          if (resp.warning) {
-            setError(resp.warning);
+          // HireHop took the reimbursement but refused to push it on to Xero.
+          // The money has moved and HireHop is right — Xero alone needs a manual
+          // correction — so this is said out loud, not failed. It's also on the
+          // record's notes, the job timeline and an admin email; this is just
+          // the bit the person who pressed the button sees. (Job 15187.)
+          const xeroWarning = resp.xero_sync && !resp.xero_sync.ok
+            ? `Reimbursement recorded in HireHop, but Xero refused it: ${resp.xero_sync.error}. `
+              + `HireHop is correct — only Xero needs a manual correction. Admin has been emailed. Nothing to re-refund.`
+            : null;
+          if (resp.warning || xeroWarning) {
+            setError([resp.warning, xeroWarning].filter(Boolean).join(' '));
             setMadeChange(true); // refresh on close, not mid-flow (see handleClose)
             setLoading(false);
             return;
