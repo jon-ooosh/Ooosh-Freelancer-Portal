@@ -26,16 +26,23 @@ import { useSearchParams } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { BookOutPage } from '../modules/vehicles/pages/BookOutPage'
 import { FreelancerLinkError } from '../modules/vehicles/components/FreelancerLinkError'
+import { FreelancerVanPicker } from '../modules/vehicles/components/FreelancerVanPicker'
 import {
   clearFreelancerSession,
   getFreelancerSession,
   resolveFreelancerToken,
   setFreelancerSession,
 } from '../modules/vehicles/adapters/freelancer-session'
+import type { FreelancerVanCandidate } from '../modules/vehicles/adapters/freelancer-session'
 
 type ShellState =
   | { kind: 'loading' }
   | { kind: 'ready' }
+  // More than one van allocated to this job — the freelancer picks the reg in
+  // front of them before we mint a session (the HH 15307 failure, delivery
+  // side). The HMAC token stays in the URL until they pick, so a refresh
+  // re-shows the picker rather than dying.
+  | { kind: 'select'; candidates: FreelancerVanCandidate[]; hmacToken: string; returnUrl: string | null }
   | { kind: 'expired'; returnUrl: string | null }
   | { kind: 'error'; message: string; returnUrl: string | null }
 
@@ -50,6 +57,43 @@ const queryClient = new QueryClient({
 export default function FreelancerBookoutShell() {
   const [searchParams, setSearchParams] = useSearchParams()
   const [state, setState] = useState<ShellState>({ kind: 'loading' })
+  const [pickBusyId, setPickBusyId] = useState<string | null>(null)
+  const [pickError, setPickError] = useState<string | null>(null)
+
+  // Strip the one-shot token from the URL once a session exists (see below).
+  const stripTokenParams = () => {
+    const next = new URLSearchParams(searchParams)
+    next.delete('freelancerToken')
+    next.delete('returnUrl')
+    setSearchParams(next, { replace: true })
+  }
+
+  // Claim one van from the picker. Same endpoint, now with the chosen
+  // assignment — the server re-checks it's genuinely a van on this job.
+  const handleSelect = async (candidate: FreelancerVanCandidate) => {
+    if (state.kind !== 'select') return
+    setPickBusyId(candidate.assignmentId)
+    setPickError(null)
+    const result = await resolveFreelancerToken(
+      OP_API_BASE,
+      state.hmacToken,
+      state.returnUrl,
+      'freelancer-bookout/resolve',
+      candidate.assignmentId,
+    )
+    if (result.kind === 'ok') {
+      setFreelancerSession(result.token, result.context)
+      stripTokenParams()
+      setState({ kind: 'ready' })
+      return
+    }
+    setPickBusyId(null)
+    setPickError(
+      result.kind === 'error'
+        ? result.error
+        : 'That van could not be claimed — please try another or call the office.',
+    )
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -63,8 +107,19 @@ export default function FreelancerBookoutShell() {
         const result = await resolveFreelancerToken(OP_API_BASE, hmacToken, returnUrl)
         if (cancelled) return
 
-        if (!result.ok) {
+        if (result.kind === 'error') {
           setState({ kind: 'error', message: result.error, returnUrl })
+          return
+        }
+
+        if (result.kind === 'select') {
+          // Bin any session left over from an earlier van on this device —
+          // otherwise abandoning the picker and coming back without a token
+          // would resume the OLD van, which is the bug we're fixing.
+          clearFreelancerSession()
+          // Leave the token in the URL — no session yet, and a refresh should
+          // land back on the picker.
+          setState({ kind: 'select', candidates: result.candidates, hmacToken, returnUrl })
           return
         }
 
@@ -72,10 +127,7 @@ export default function FreelancerBookoutShell() {
 
         // Strip the token/returnUrl from the URL so a refresh/back-button
         // doesn't try to re-exchange a one-shot HMAC and fail.
-        const next = new URLSearchParams(searchParams)
-        next.delete('freelancerToken')
-        next.delete('returnUrl')
-        setSearchParams(next, { replace: true })
+        stripTokenParams()
 
         setState({ kind: 'ready' })
         return
@@ -104,6 +156,18 @@ export default function FreelancerBookoutShell() {
 
   if (state.kind === 'error') {
     return <FreelancerLinkError message={state.message} returnUrl={state.returnUrl} action="book-out" />
+  }
+
+  if (state.kind === 'select') {
+    return (
+      <FreelancerVanPicker
+        candidates={state.candidates}
+        action="book-out"
+        busyAssignmentId={pickBusyId}
+        error={pickError}
+        onSelect={handleSelect}
+      />
+    )
   }
 
   if (state.kind === 'expired') {

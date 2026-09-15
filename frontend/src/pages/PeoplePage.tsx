@@ -3,6 +3,7 @@ import { useNavigate, Link } from 'react-router-dom';
 import { api } from '../services/api';
 import SlidePanel from '../components/SlidePanel';
 import PersonForm from '../components/PersonForm';
+import InviteFreelancerModal from '../components/InviteFreelancerModal';
 
 interface Person {
   id: string;
@@ -14,6 +15,7 @@ interface Person {
   last_interaction_at: string | null;
   // Freelancer-specific (always returned by SELECT p.*, may be null/false)
   is_freelancer: boolean;
+  freelancer_status: string | null;
   is_approved: boolean;
   is_insured_on_vehicles: boolean;
   has_tshirt: boolean;
@@ -77,6 +79,7 @@ export default function PeoplePage() {
   const [loading, setLoading] = useState(true);
   const [pagination, setPagination] = useState({ page: 1, total: 0, totalPages: 0 });
   const [showForm, setShowForm] = useState(false);
+  const [showInviteFreelancer, setShowInviteFreelancer] = useState(false);
   const [filterFreelancer, setFilterFreelancer] = useState(false);
   const [filterApproved, setFilterApproved] = useState(false);
   const [filterMissingEmail, setFilterMissingEmail] = useState(false);
@@ -193,6 +196,12 @@ export default function PeoplePage() {
           >
             Duplicates
           </Link>
+          <button
+            onClick={() => setShowInviteFreelancer(true)}
+            className="px-4 py-2 text-sm border border-purple-300 text-purple-700 rounded hover:bg-purple-50 transition-colors font-medium"
+          >
+            + New Freelancer
+          </button>
           <button
             onClick={() => setShowForm(true)}
             className="bg-ooosh-600 text-white px-4 py-2 rounded text-sm font-medium hover:bg-ooosh-700 transition-colors"
@@ -421,6 +430,13 @@ export default function PeoplePage() {
           onCancel={() => setShowForm(false)}
         />
       </SlidePanel>
+
+      {showInviteFreelancer && (
+        <InviteFreelancerModal
+          onClose={() => setShowInviteFreelancer(false)}
+          onInvited={(personId) => { setShowInviteFreelancer(false); navigate(`/people/${personId}`); }}
+        />
+      )}
     </div>
   );
 }
@@ -479,6 +495,22 @@ function PeopleTable({
                   )}
                   {freelancerMode && person.is_approved && (
                     <span title="Approved" className="text-[10px] px-1 rounded bg-green-100 text-green-700">✓</span>
+                  )}
+                  {freelancerMode && !person.is_approved && person.freelancer_status && person.freelancer_status !== 'approved' && (
+                    <span
+                      title={`Freelancer status: ${person.freelancer_status.replace('_', ' ')}`}
+                      className={`text-[10px] px-1 rounded ${
+                        person.freelancer_status === 'applied' ? 'bg-amber-100 text-amber-700'
+                        : person.freelancer_status === 'more_info' ? 'bg-amber-100 text-amber-700'
+                        : person.freelancer_status === 'declined' ? 'bg-red-100 text-red-700'
+                        : 'bg-slate-100 text-slate-600'
+                      }`}
+                    >
+                      {person.freelancer_status === 'applied' ? 'applied'
+                        : person.freelancer_status === 'more_info' ? 'info req'
+                        : person.freelancer_status === 'declined' ? 'declined'
+                        : 'invited'}
+                    </span>
                   )}
                   {freelancerMode && person.is_insured_on_vehicles && (
                     <span title="Insured on vehicles" className="text-[10px]">🛡</span>

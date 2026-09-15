@@ -130,3 +130,25 @@ export async function getSystemSettings(keys: string[]): Promise<Record<string, 
 export function invalidateSystemSettingsCache(): void {
   cache.clear();
 }
+
+/**
+ * Write a single setting from backend code.
+ *
+ * For values the SYSTEM owns rather than a person — a "last run" stamp, say.
+ * Staff-editable config still goes through the PUT above so it is audited to a
+ * user. Only updates an existing row, matching that route: every key is seeded
+ * by a migration, so a typo here fails loudly as a no-op rather than quietly
+ * creating a key nothing reads.
+ */
+export async function setSystemSetting(key: string, value: string | null): Promise<boolean> {
+  const r = await query(
+    `UPDATE system_settings SET value = $1, updated_at = NOW() WHERE key = $2 RETURNING key`,
+    [value, key]
+  );
+  if (r.rows.length === 0) {
+    console.warn(`[system-settings] setSystemSetting: no row for "${key}" — seed it in a migration first`);
+    return false;
+  }
+  cache.delete(key);
+  return true;
+}

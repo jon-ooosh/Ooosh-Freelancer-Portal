@@ -640,6 +640,7 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
       `SELECT q.id, q.calculation_mode, q.is_local, q.job_date, q.arrival_time,
               q.venue_name, q.venue_id, q.status,
               q.job_type, q.num_days, q.is_multi_day, q.crew_count,
+              q.client_charge_rounded, q.freelancer_fee_rounded,
               j.job_name as linked_job_name, j.hh_job_number as linked_hh_job_number
        FROM quotes q
        LEFT JOIN jobs j ON j.id = q.job_id
@@ -703,18 +704,34 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
       recalcNeeded = true;
     }
 
-    // Fee overrides (available for all quote types). When recalc is happening,
-    // the calculator output wins — ignore submitted overrides because they're
-    // stale snapshots from the form that doesn't know the new totals yet.
+    // Fee overrides (available for all quote types). A posted fee only counts
+    // as an override when it DIFFERS from the stored value — the edit form
+    // echoes the loaded figures back on every save, and an unchanged echo must
+    // not pin a fee against a recalc. Genuine overrides survive the recalc
+    // (re-applied after it below): editing the fee and editing the expenses
+    // are independent intents. Pre-Jul-2026 this was gated on `!recalcNeeded`,
+    // which silently DROPPED fee edits whenever `expenses` was posted alongside
+    // (the modal always sent it) — the "fee reverts on save" bug.
+    const clientFeeOverride =
+      fields.client_charge_rounded !== undefined && fields.client_charge_rounded !== null &&
+      Number(fields.client_charge_rounded) !== Number(oldQuote.client_charge_rounded ?? 0)
+        ? Number(fields.client_charge_rounded)
+        : null;
+    const freelancerFeeOverride =
+      fields.freelancer_fee_rounded !== undefined && fields.freelancer_fee_rounded !== null &&
+      Number(fields.freelancer_fee_rounded) !== Number(oldQuote.freelancer_fee_rounded ?? 0)
+        ? Number(fields.freelancer_fee_rounded)
+        : null;
+
     if (!recalcNeeded) {
-      if (fields.client_charge_rounded !== undefined) {
+      if (clientFeeOverride !== null) {
         updates.push(`client_charge_rounded = $${idx}, client_charge_total = $${idx}`);
-        params.push(fields.client_charge_rounded);
+        params.push(clientFeeOverride);
         idx++;
       }
-      if (fields.freelancer_fee_rounded !== undefined) {
+      if (freelancerFeeOverride !== null) {
         updates.push(`freelancer_fee_rounded = $${idx}, freelancer_fee = $${idx}`);
-        params.push(fields.freelancer_fee_rounded);
+        params.push(freelancerFeeOverride);
         idx++;
       }
     }
@@ -796,6 +813,33 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
         ]
       );
       updatedQuote = recalcUpdate.rows[0] || updatedQuote;
+
+      // Re-apply explicit fee overrides ON TOP of the recalc output. The
+      // recalc owns every derived figure EXCEPT a fee the user actually typed
+      // — without this, a fee edit saved together with expenses gets clobbered
+      // by the calculator reproducing the original figure.
+      if (clientFeeOverride !== null || freelancerFeeOverride !== null) {
+        const ovUpdates: string[] = [];
+        const ovParams: unknown[] = [];
+        let ovIdx = 1;
+        if (clientFeeOverride !== null) {
+          ovUpdates.push(`client_charge_rounded = $${ovIdx}, client_charge_total = $${ovIdx}`);
+          ovParams.push(clientFeeOverride);
+          ovIdx++;
+        }
+        if (freelancerFeeOverride !== null) {
+          ovUpdates.push(`freelancer_fee_rounded = $${ovIdx}, freelancer_fee = $${ovIdx}`);
+          ovParams.push(freelancerFeeOverride);
+          ovIdx++;
+        }
+        ovParams.push(req.params.id);
+        const ovResult = await query(
+          `UPDATE quotes SET ${ovUpdates.join(', ')}, updated_at = NOW()
+           WHERE id = $${ovIdx} AND is_deleted = false RETURNING *`,
+          ovParams
+        );
+        updatedQuote = ovResult.rows[0] || updatedQuote;
+      }
     }
 
     // Check if key fields changed and notify assigned crew
@@ -1486,12 +1530,13 @@ const localQuoteSchema = z.object({
   fee: z.number().min(0).optional().nullable(),
   clientCharge: z.number().min(0).optional().nullable(),
   notes: z.string().optional().nullable(),
+  freelancerNotes: z.string().optional().nullable(),
   whatIsIt: z.enum(['vehicle', 'equipment', 'people']).optional().nullable(),
 });
 
 router.post('/local', validate(localQuoteSchema), async (req: AuthRequest, res: Response) => {
   try {
-    const { jobId, jobType, jobDate, arrivalTime, venueId, venueName, fee, clientCharge, notes, whatIsIt } = req.body;
+    const { jobId, jobType, jobDate, arrivalTime, venueId, venueName, fee, clientCharge, notes, freelancerNotes, whatIsIt } = req.body;
     const feeVal = fee || 0;
     const chargeVal = clientCharge || feeVal;
 
@@ -1501,16 +1546,16 @@ router.post('/local', validate(localQuoteSchema), async (req: AuthRequest, res: 
         venue_id, venue_name, job_date, arrival_time,
         freelancer_fee, freelancer_fee_rounded,
         client_charge_total, client_charge_rounded,
-        what_is_it, internal_notes,
+        what_is_it, internal_notes, freelancer_notes,
         distance_miles, drive_time_mins,
         created_by
-      ) VALUES ($1, $2, true, 'fixed', $3, $4, $5, $6, $7, $7, $8, $8, $9, $10, 0, 0, $11)
+      ) VALUES ($1, $2, true, 'fixed', $3, $4, $5, $6, $7, $7, $8, $8, $9, $10, $11, 0, 0, $12)
       RETURNING id`,
       [
         jobId, jobType, venueId || null, venueName || null,
         jobDate || null, arrivalTime || null,
         feeVal, chargeVal,
-        whatIsIt || null, notes || null,
+        whatIsIt || null, notes || null, freelancerNotes || null,
         req.user!.id,
       ]
     );

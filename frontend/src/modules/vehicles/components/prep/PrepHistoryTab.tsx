@@ -5,13 +5,20 @@
  * Used in VehicleDetailPage as a tab or section.
  */
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { apiFetch } from '../../config/api-config'
 import type { PrepHistorySession } from '../../lib/prep-history'
 
 interface PrepHistoryTabProps {
   vehicleReg: string
+  /**
+   * Event id of a prep to open straight into its detail modal — the deep-link
+   * target of the "View prep →" button on a "Prep Completed" row in the Events
+   * tab. Prep sessions are stored under the SAME id as their event, so this
+   * matches `session.eventId` directly.
+   */
+  focusEventId?: string | null
 }
 
 async function fetchPrepHistory(vehicleReg: string, limit: number): Promise<{
@@ -108,14 +115,46 @@ function getProblems(session: PrepHistorySession): string[] {
   return problems
 }
 
-export function PrepHistoryTab({ vehicleReg }: PrepHistoryTabProps) {
+export function PrepHistoryTab({ vehicleReg, focusEventId }: PrepHistoryTabProps) {
   const [limit, setLimit] = useState(10)
   const [selectedSession, setSelectedSession] = useState<PrepHistorySession | null>(null)
+  const [focusMissing, setFocusMissing] = useState(false)
+  // Which focus id we've already acted on, so closing the modal doesn't get
+  // undone by the next render (or a background refetch) re-opening it.
+  const handledFocusRef = useRef<string | null>(null)
   const { data, isLoading, isError } = useQuery({
     queryKey: ['prep-history', vehicleReg, limit],
     queryFn: () => fetchPrepHistory(vehicleReg, limit),
     staleTime: 5 * 60 * 1000,
   })
+
+  // Deep-link from the Events tab: open the matching prep. Only the newest 10
+  // are loaded by default, so if the target is older, widen the page once
+  // (the backend caps at 100) and look again rather than silently doing
+  // nothing. A prep that still isn't there predates prep-session storage.
+  useEffect(() => {
+    if (!focusEventId) return
+    if (handledFocusRef.current === focusEventId) return
+    if (!data) return
+
+    const match = (data.sessions || []).find(
+      s => (s as unknown as Record<string, unknown>).eventId === focusEventId,
+    )
+    if (match) {
+      handledFocusRef.current = focusEventId
+      setFocusMissing(false)
+      setSelectedSession(match)
+      return
+    }
+
+    if (data.sessions.length < data.total && limit < 100) {
+      setLimit(Math.min(data.total, 100))
+      return
+    }
+
+    handledFocusRef.current = focusEventId
+    setFocusMissing(true)
+  }, [focusEventId, data, limit])
 
   if (isLoading) {
     return (
@@ -148,6 +187,12 @@ export function PrepHistoryTab({ vehicleReg }: PrepHistoryTabProps) {
 
   return (
     <div className="space-y-3">
+      {focusMissing && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+          Couldn&apos;t find the full record for that prep event — it may predate prep-session storage.
+        </div>
+      )}
+
       {/* Mileage trend summary */}
       {sessions.length >= 2 && (() => {
         const mileages = sessions

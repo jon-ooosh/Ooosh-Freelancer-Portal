@@ -12,6 +12,7 @@ import fontkit from '@pdf-lib/fontkit';
 import { readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { getFromR2 } from '../config/r2';
+import { resolveDocumentKey, type DocumentKey } from './driver-documents';
 
 // ── Types ──
 
@@ -257,25 +258,28 @@ export async function generateDriverSnapshot(data: DriverSnapshotData): Promise<
 }
 
 /**
+ * Which of the resolvable documents this PDF actually renders.
+ *
+ * The token lists moved to services/driver-documents.ts, which the staff
+ * cockpit reads too — one set of spellings for both. That module resolves the
+ * iDenfy `selfie` as well; the snapshot has never had a selfie page, so it is
+ * skipped here EXPLICITLY rather than by omission, and skipped before the R2
+ * fetch so nothing is downloaded to be thrown away.
+ */
+const SNAPSHOT_DOC_KEYS = new Set<DocumentKey>([
+  'licenceFront', 'licenceBack', 'dvlaCheck', 'poa1', 'poa2', 'passport', 'signature',
+]);
+
+/**
  * Load document buffers from R2 for a driver's uploaded files.
  */
-export async function loadDriverDocuments(files: Array<{ label?: string; url: string }>): Promise<Record<string, Buffer | null>> {
+export async function loadDriverDocuments(files: Array<{ label?: string; tag?: string; url: string }>): Promise<Record<string, Buffer | null>> {
   const docs: Record<string, Buffer | null> = {};
-  const labelMap: Record<string, string> = {
-    'licence front': 'licenceFront',
-    'licence back': 'licenceBack',
-    'passport': 'passport',
-    'poa 1': 'poa1',
-    'proof of address 1': 'poa1',
-    'poa 2': 'poa2',
-    'proof of address 2': 'poa2',
-    'dvla check': 'dvlaCheck',
-    'signature': 'signature',
-  };
 
   for (const file of files) {
-    const key = labelMap[(file.label || '').toLowerCase()];
-    if (!key || docs[key]) continue;  // Skip unknown labels or already loaded
+    const key = resolveDocumentKey(file);
+    // Skip unknown labels, documents this PDF has no page for, and repeats.
+    if (!key || !SNAPSHOT_DOC_KEYS.has(key) || docs[key]) continue;
 
     try {
       const r2Result = await getFromR2(file.url);

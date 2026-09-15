@@ -12,6 +12,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
 import Countdown from '../components/CarnetCountdown';
+import { jobDisplayOrgNameOr } from '../lib/jobOrgName';
 
 interface CarnetRow {
   id: string;
@@ -49,7 +50,10 @@ const STATUS_COLOUR: Record<string, string> = {
   cancelled: 'bg-red-100 text-red-700',
 };
 
-interface JobHit { id: string; hh_job_number: number | null; job_name: string | null; client_name: string | null }
+// Fed by /hirehop/jobs, so it carries the canonical org names too — render
+// via jobDisplayOrgNameOr so this picker agrees with the job lists.
+interface JobHit { id: string; hh_job_number: number | null; job_name: string | null; client_name: string | null;
+  client_org_name?: string | null; lead_org_name?: string | null }
 
 // Manual create for the "client arranges their own carnet — just log it" case.
 function NewClientCarnetModal({ onClose, onCreated }: { onClose: () => void; onCreated: (id: string) => void }) {
@@ -94,7 +98,7 @@ function NewClientCarnetModal({ onClose, onCreated }: { onClose: () => void; onC
           {!searching && hits.map((j) => (
             <button key={j.id} disabled={busy} onClick={() => create(j)} className="w-full text-left py-2 hover:bg-purple-50 px-2 rounded text-sm disabled:opacity-50">
               <span className="font-medium">{j.hh_job_number ? `#${j.hh_job_number}` : '—'}</span> · {j.job_name || '—'}
-              <span className="text-gray-400"> · {j.client_name || ''}</span>
+              <span className="text-gray-400"> · {jobDisplayOrgNameOr(j, '')}</span>
             </button>
           ))}
           {!searching && q.trim().length >= 2 && hits.length === 0 && <p className="text-sm text-gray-400 py-2">No matching jobs.</p>}

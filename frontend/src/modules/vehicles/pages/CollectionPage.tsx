@@ -151,6 +151,40 @@ export function CollectionPage() {
     [vehicleIssues],
   )
 
+  // Freelancer auto-fill from context (mirrors BookOutPage). The checkin
+  // resolve endpoint already identified the van that's out on this job and
+  // put it in the session — but the allocations hook that normally drives
+  // auto-select below is staff-only (gated off for freelancers), so without
+  // this effect a freelancer sits on "Waiting for vehicle allocation"
+  // forever even though the van is right there in freelancerContext.
+  // Waits for the vehicles query so vehicleType/simpleType come through.
+  const freelancerAutoSelectedRef = useRef(false)
+
+  useEffect(() => {
+    if (!isFreelancer) return
+    if (!freelancerContext?.vehicleId || !freelancerContext?.vehicleReg) return
+    if (freelancerAutoSelectedRef.current) return
+    const ctxVehicle = vehicles.find(v => v.id === freelancerContext.vehicleId)
+    if (!ctxVehicle) return // wait for vehicles list
+    freelancerAutoSelectedRef.current = true
+    // On a collection the "driver" on the interim assessment is the CUSTOMER
+    // who had the van (from the hire form, via the resolve payload); the
+    // freelancer is just the collection agent. Fall back to the freelancer's
+    // own name if no customer hire form is linked — field stays editable.
+    const customerName = freelancerContext.customerDriverName || ''
+    const customerEmail = freelancerContext.customerDriverEmail || ''
+    setForm(f => ({
+      ...f,
+      vehicleId: ctxVehicle.id,
+      vehicleReg: ctxVehicle.reg,
+      vehicleType: ctxVehicle.vehicleType,
+      vehicleSimpleType: ctxVehicle.simpleType,
+      hireHopJob: freelancerContext.jobId || f.hireHopJob,
+      driverName: customerName || freelancerContext.driverName || f.driverName,
+      clientEmail: customerEmail || f.clientEmail,
+    }))
+  }, [isFreelancer, freelancerContext, vehicles])
+
   // Auto-select vehicle from allocation
   const autoSelectedRef = useRef(false)
 
@@ -446,6 +480,7 @@ export function CollectionPage() {
         () =>
           sendConditionReport(
             {
+              eventId,
               vehicleReg: form.vehicleReg,
               vehicleType: form.vehicleType,
               vehicleMake: selectedVehicle?.make,

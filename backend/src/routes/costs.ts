@@ -14,6 +14,8 @@ import { z } from 'zod';
 import multer from 'multer';
 import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
+import { resolveRemittanceContact, getCostForRemittance, sendRemittance } from '../services/remittance';
+import { fetchCostLines, validateCostLines, replaceCostLines, headerVatFromLines, type CostLineInput } from '../services/cost-lines';
 
 const router = Router();
 router.use(authenticate);
@@ -69,6 +71,22 @@ const RUNNING_COST_CODES = new Set(['410', '411', '325']);
 
 const money = z.number().nonnegative().finite();
 
+// Xero allows 10 attachments per object and the main receipt takes one of them,
+// so a cost may carry at most 9 supporting documents.
+const MAX_SUPPORTING_DOCUMENTS = 9;
+
+// One cost line. Shared by the create/update payload and PUT /:id/lines so the
+// two can't drift.
+const costLineInputSchema = z.object({
+  description: z.string().trim().max(2000).optional().nullable(),
+  amount_gross: money,
+  amount_vat: money.optional().nullable(),
+  xero_account_code: z.string().trim().max(20).optional().nullable(),
+  job_id: z.string().uuid().optional().nullable(),
+  crew_fronted: z.boolean().optional(),
+  source: z.enum(['manual', 'ai']).optional(),
+});
+
 const createSchema = z.object({
   supplier_name: z.string().trim().max(200).optional().nullable(),
   cost_date: z.string().trim().max(20).optional().nullable(),
@@ -77,6 +95,9 @@ const createSchema = z.object({
   amount_net: money.optional().nullable(),
   vat_treatment: z.enum(['standard', 'reclaim_split']).optional(),
   invoice_number: z.string().trim().max(100).optional().nullable(),
+  // Staff override for the bill due date. NULL/'' = follow the derived rule
+  // (supplier terms, or the freelancer Friday rule). See resolveDueDate().
+  due_date_override: z.string().trim().max(20).optional().nullable(),
   // Xero contact id captured when staff pick a real Xero supplier in the
   // autocomplete — lets terms resolve by stable id + seed from Xero.
   xero_contact_id: z.string().trim().max(60).optional().nullable(),
@@ -100,11 +121,28 @@ const createSchema = z.object({
   cost_intent: z.enum(['quote_actual', 'extra']).optional().nullable(),
   receipt_r2_key: z.string().trim().max(500).optional().nullable(),
   receipt_filename: z.string().trim().max(200).optional().nullable(),
+  // Supporting evidence filed alongside the main receipt. Sent whole (idempotent
+  // replace) — the modal always posts the full list, so a removal is just a
+  // shorter array. Capped at MAX_SUPPORTING_DOCUMENTS so one cost can't blow the
+  // Xero per-object attachment limit.
+  supporting_documents: z.array(z.object({
+    r2_key: z.string().trim().min(1).max(500),
+    filename: z.string().trim().min(1).max(200),
+    content_type: z.string().trim().max(200).optional().nullable(),
+    size_bytes: z.number().int().nonnegative().optional().nullable(),
+    uploaded_at: z.string().trim().max(40).optional().nullable(),
+    uploaded_by: z.string().uuid().optional().nullable(),
+  })).max(MAX_SUPPORTING_DOCUMENTS).optional(),
   status: z.enum(['draft', 'confirmed', 'resolved']).optional(),
   notes: z.string().trim().max(10000).optional().nullable(),
   // Control flag (not a column): one-click "Approve & save" on a payable.
   // Honoured only for admin/manager + a payable; ignored otherwise.
   approve: z.boolean().optional(),
+
+  // Cost lines. Written in the same request as the header so the background
+  // Xero push (fired immediately below) sees them — a separate PUT would race
+  // it and push a one-line bill. See services/cost-lines.ts.
+  lines: z.array(costLineInputSchema).max(50).optional(),
 });
 
 // Update accepts the same fields, all optional.
@@ -130,12 +168,23 @@ const allocationSchema = z.object({
 // workflow timestamps + Xero state are server-controlled).
 const WRITABLE = [
   'supplier_name', 'cost_date', 'amount_gross', 'amount_vat', 'amount_net', 'vat_treatment',
-  'invoice_number', 'xero_contact_id', 'currency',
+  'invoice_number', 'due_date_override', 'xero_contact_id', 'currency',
   'description', 'category', 'xero_account_code', 'cost_type', 'payment_method',
   'cot_card_holder', 'cot_card_last4', 'payment_status', 'job_id', 'vehicle_id',
   'quote_assignment_id', 'platform_issue_id', 'vehicle_service_log_id', 'vehicle_fuel_log_id',
-  'recharge_mode', 'recharge_amount', 'recharge_status', 'cost_intent', 'receipt_r2_key', 'receipt_filename', 'status', 'notes',
+  'recharge_mode', 'recharge_amount', 'recharge_status', 'cost_intent', 'receipt_r2_key', 'receipt_filename',
+  'supporting_documents', 'status', 'notes',
 ] as const;
+
+// ⚠️ node-postgres sends a JS array as a Postgres ARRAY literal ({"..."}), which
+// JSONB rejects — and an EMPTY array survives, so the bug only shows once
+// someone actually attaches something. Stringify before the generic column loop
+// writes it. Same lesson as JSONB_FIELDS in driver-verification.
+function serialiseJsonbForWrite(data: Record<string, unknown>) {
+  if (data.supporting_documents !== undefined) {
+    data.supporting_documents = JSON.stringify(data.supporting_documents ?? []);
+  }
+}
 
 // A quote_actual cost is already billed via its quote — it can never carry a
 // recharge. Coerce recharge off server-side (defence-in-depth; the modal also
@@ -160,6 +209,29 @@ function deriveRechargeStatusForWrite(data: Record<string, unknown>, current?: s
   } else if (!current || !TERMINAL_RECHARGE.has(current)) {
     // Flagging (or re-flagging) for recharge and not already resolved → pending.
     data.recharge_status = 'pending';
+  }
+}
+
+// `RETURNING *` gives the raw costs row — no hh_job_number / job_name / vehicle_reg,
+// because those live on the joined tables. Callers hand that row straight to the
+// UI (the capture modal's job chip, and the split modal it can open next), which
+// then had nothing to print and fell back to "(linked job)" / "(captured job)".
+// Enrich the row with the display fields the list query already exposes so the
+// real job number is shown wherever a saved cost is rendered.
+async function withJobLabels<T extends { id?: string; job_id?: string | null; vehicle_id?: string | null }>(row: T): Promise<T> {
+  if (!row || (!row.job_id && !row.vehicle_id)) return row;
+  try {
+    const r = await query(
+      `SELECT j.hh_job_number, j.job_name, fv.reg AS vehicle_reg
+         FROM costs c
+         LEFT JOIN jobs j ON j.id = c.job_id
+         LEFT JOIN fleet_vehicles fv ON fv.id = c.vehicle_id
+        WHERE c.id = $1`,
+      [row.id],
+    );
+    return r.rows.length ? { ...row, ...r.rows[0] } : row;
+  } catch {
+    return row; // display sugar only — never fail a save over it
   }
 }
 
@@ -245,7 +317,14 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         CONCAT(up.first_name, ' ', up.last_name) AS uploaded_by_name,
         j.hh_job_number, j.job_name,
         fv.reg AS vehicle_reg,
-        (SELECT COUNT(*)::int FROM cost_allocations a WHERE a.cost_id = c.id) AS allocation_count
+        (SELECT COUNT(*)::int FROM cost_allocations a WHERE a.cost_id = c.id) AS allocation_count,
+        (SELECT COALESCE(json_agg(json_build_object(
+                  'job_id', a.job_id, 'hh_job_number', aj.hh_job_number,
+                  'job_name', aj.job_name, 'amount', a.amount
+                ) ORDER BY a.created_at), '[]'::json)
+           FROM cost_allocations a
+           LEFT JOIN jobs aj ON aj.id = a.job_id
+          WHERE a.cost_id = c.id) AS allocation_jobs
       FROM costs c
       LEFT JOIN users u   ON u.id = c.uploaded_by
       LEFT JOIN people up ON up.id = u.person_id
@@ -261,20 +340,19 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     // due date (+ the terms that produced it) to each row. Single source of
     // truth for the bill due date — the list, mark-paid modal and Xero push all
     // read these. See docs/COSTS-PAYMENT-AUTOMATION-SPEC.md.
-    const { buildTermsResolver, computeDueDate, freelancerDueDate } = await import('../services/supplier-terms');
+    const { buildTermsResolver, resolveDueDate } = await import('../services/supplier-terms');
     const resolve = await buildTermsResolver(
       result.rows.map((r) => ({ xeroContactId: r.xero_contact_id, supplierName: r.supplier_name })),
     );
     const rows = result.rows.map((r) => {
-      // Freelancer invoices follow Ooosh terms (first Friday +1wk after approval),
-      // not supplier/Xero terms. The Friday date only exists once approved — until
-      // then we fall back to the standard terms display.
-      if (r.cost_type === 'freelancer_invoice' && r.approved_at) {
-        const terms = { basis: 'invoice_date' as const, days: 0, source: 'freelancer' as const };
-        return { ...r, terms, due_date: freelancerDueDate(r.approved_at) };
-      }
-      const terms = resolve({ xeroContactId: r.xero_contact_id, supplierName: r.supplier_name });
-      return { ...r, terms, due_date: computeDueDate(r.cost_date, terms) };
+      // resolveDueDate picks the rule (staff override → freelancer Friday terms →
+      // supplier terms) — don't branch on cost_type out here, or this list drifts
+      // from the Xero push again.
+      const { dueDate, derivedDueDate, terms, isOverride } = resolveDueDate(
+        r,
+        resolve({ xeroContactId: r.xero_contact_id, supplierName: r.supplier_name }),
+      );
+      return { ...r, terms, due_date: dueDate, due_date_derived: derivedDueDate, due_date_is_override: isOverride };
     });
 
     // Headline counts for the hub tabs.
@@ -317,13 +395,100 @@ async function listBy(column: string, value: string, res: Response, extra?: Reco
   res.json({ data: result.rows, outstanding, ...(extra || {}) });
 }
 
+// A job's cost figure is ALLOCATION-AWARE (the single read that honours the
+// cost_allocations attribution layer — see docs/COST-CAPTURE-RECHARGE-SPEC.md).
+//   (A) costs captured on this job with NO allocations → full amount_gross
+//   (B) allocations TO this job (cost captured anywhere) → the allocation amount
+// A cost that HAS allocations is attributed purely by its allocations, so it
+// only surfaces here via (B) — never both. This prevents the double-count that
+// let a split £150 invoice still read as £150 on its capture job while nothing
+// landed on the other job (the bug this fixes). The remainder of an
+// under-allocated cost (allocations summing to less than gross) is unattributed
+// "our cost" and correctly surfaces on no job.
+//
+// Each row's `amount_gross` is REPLACED with this job's effective share so every
+// downstream consumer (MoneyTab JobCostsPanel, capture-modal jobSummary) works
+// unchanged. `full_amount_gross` keeps the true cost total; `is_allocation`
+// flags a split-in row (rendered distinctly + no recharge affordance — recharge
+// stays on the cost's capture job).
 router.get('/by-job/:jobId', async (req: AuthRequest, res: Response) => {
   try {
     const jobId = String(req.params.jobId);
-    // Surface the job's recharge-running-costs flag so the capture modal can
-    // default new running-cost costs to recharge + show the hint.
     const jf = await query('SELECT recharge_running_costs FROM jobs WHERE id = $1', [jobId]);
-    await listBy('job_id', jobId, res, { recharge_running_costs: jf.rows[0]?.recharge_running_costs ?? false });
+
+    const result = await query(
+      `SELECT c.*, CONCAT(up.first_name, ' ', up.last_name) AS uploaded_by_name,
+              capj.hh_job_number AS capture_hh_job_number,
+              NULL::numeric AS alloc_amount, NULL::boolean AS alloc_recharge,
+              NULL::text AS alloc_notes, NULL::uuid AS allocation_id, false AS is_allocation
+         FROM costs c
+         LEFT JOIN users u ON u.id = c.uploaded_by
+         LEFT JOIN people up ON up.id = u.person_id
+         LEFT JOIN jobs capj ON capj.id = c.job_id
+        WHERE c.job_id = $1
+          AND NOT EXISTS (SELECT 1 FROM cost_allocations a WHERE a.cost_id = c.id)
+       UNION ALL
+       SELECT c.*, CONCAT(up.first_name, ' ', up.last_name) AS uploaded_by_name,
+              capj.hh_job_number AS capture_hh_job_number,
+              a.amount AS alloc_amount, a.recharge AS alloc_recharge,
+              a.notes AS alloc_notes, a.id AS allocation_id, true AS is_allocation
+         FROM cost_allocations a
+         JOIN costs c ON c.id = a.cost_id
+         LEFT JOIN users u ON u.id = c.uploaded_by
+         LEFT JOIN people up ON up.id = u.person_id
+         LEFT JOIN jobs capj ON capj.id = c.job_id
+        WHERE a.job_id = $1
+       ORDER BY created_at DESC`,
+      [jobId],
+    );
+
+    // Lines, so the Money tab can bucket a bundled invoice by what each part
+    // actually was rather than dumping the whole thing under the header's
+    // category. One query for the lot — a cost with no lines simply gets none,
+    // which is the overwhelmingly common case.
+    const costIds = [...new Set(result.rows.map((r) => r.id))];
+    const linesByCost = new Map<string, unknown[]>();
+    if (costIds.length) {
+      const lr = await query(
+        `SELECT cost_id, line_no, description, amount_gross, amount_vat,
+                xero_account_code, job_id, crew_fronted
+           FROM cost_lines WHERE cost_id = ANY($1::uuid[]) ORDER BY line_no ASC`,
+        [costIds],
+      );
+      for (const l of lr.rows) {
+        if (!linesByCost.has(l.cost_id)) linesByCost.set(l.cost_id, []);
+        linesByCost.get(l.cost_id)!.push(l);
+      }
+    }
+
+    const rows = result.rows.map((r) => {
+      const fullGross = r.amount_gross;
+      const effective = r.is_allocation ? r.alloc_amount : r.amount_gross;
+      return {
+        ...r,
+        amount_gross: effective,        // this job's share (drives all sums)
+        full_amount_gross: fullGross,   // the cost's true total
+        allocation_recharge: r.alloc_recharge,
+        allocation_notes: r.alloc_notes,
+        // Only on a whole-cost row. A split-in row is a SHARE of someone else's
+        // payable, so its lines describe a total this job doesn't carry —
+        // bucketing by them here would overstate the job.
+        lines: r.is_allocation ? [] : (linesByCost.get(r.id) ?? []),
+      };
+    });
+
+    // Outstanding (close-out flag) is computed over costs genuinely captured
+    // against this job — allocation-in rows are another job's payable, tracked
+    // there. Preserves pre-allocation behaviour for the common (unsplit) case.
+    const outstanding = rows.filter(
+      (r) => !r.is_allocation && (
+        r.status !== 'resolved'
+        || (r.recharge_mode !== 'none' && (r.recharge_status ?? 'pending') === 'pending')
+        || r.payment_status !== 'paid'
+      ),
+    ).length;
+
+    res.json({ data: rows, outstanding, recharge_running_costs: jf.rows[0]?.recharge_running_costs ?? false });
   }
   catch (err) { console.error('[costs] by-job error:', err); res.status(500).json({ error: 'Internal server error' }); }
 });
@@ -360,6 +525,26 @@ router.get('/check-invoice', async (req: AuthRequest, res: Response) => {
     res.json({ data: { duplicate: r.rows.length > 0, match: r.rows[0] || null } });
   } catch (err) {
     console.error('[costs] check-invoice error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Due-date preview for the capture modal — what the rules WOULD give for a
+// cost that doesn't exist yet, so staff see the derived date at upload time and
+// can correct it. Same engine as the list / get-one / Xero push, so the number
+// shown here is the number that lands. Multi-segment so it doesn't hit /:id.
+router.get('/due-date-preview', async (req: AuthRequest, res: Response) => {
+  try {
+    const { resolveDueDateForCost } = await import('../services/supplier-terms');
+    const { dueDate, terms } = await resolveDueDateForCost({
+      cost_type: req.query.cost_type ? String(req.query.cost_type) : null,
+      cost_date: req.query.cost_date ? String(req.query.cost_date) : null,
+      supplier_name: req.query.supplier_name ? String(req.query.supplier_name) : null,
+      xero_contact_id: req.query.xero_contact_id ? String(req.query.xero_contact_id) : null,
+    });
+    res.json({ data: { due_date: dueDate, terms } });
+  } catch (err) {
+    console.error('[costs] due-date-preview error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -648,9 +833,19 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
       [req.params.id],
     );
     const cost = result.rows[0];
-    const { resolveTermsForSupplier, computeDueDate } = await import('../services/supplier-terms');
-    const terms = await resolveTermsForSupplier(cost.xero_contact_id, cost.supplier_name);
-    res.json({ data: { ...cost, terms, due_date: computeDueDate(cost.cost_date, terms), allocations: allocations.rows } });
+    const { resolveDueDateForCost } = await import('../services/supplier-terms');
+    const { dueDate, derivedDueDate, terms, isOverride } = await resolveDueDateForCost(cost);
+    res.json({
+      data: {
+        ...cost,
+        terms,
+        due_date: dueDate,
+        due_date_derived: derivedDueDate,
+        due_date_is_override: isOverride,
+        allocations: allocations.rows,
+        lines: await fetchCostLines(String(req.params.id)),
+      },
+    });
   } catch (err) {
     console.error('[costs] get error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -680,6 +875,21 @@ router.post('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respon
 
     coerceRechargeForIntent(data);
     deriveRechargeStatusForWrite(data);
+    serialiseJsonbForWrite(data);
+
+    // Lines are validated BEFORE the insert so a set that doesn't add up can't
+    // leave a half-saved cost behind. `lines` is not in WRITABLE, so it never
+    // reaches the column loop below.
+    const newLines = (data.lines as CostLineInput[] | undefined);
+    if (newLines?.length) {
+      const problem = validateCostLines(data as never, newLines);
+      if (problem) { res.status(400).json({ error: problem }); return; }
+      // VAT is an analysis of the total, not part of it, so a cost with lines
+      // takes its VAT (and hence net) FROM them. The gross — what we actually
+      // owe — is untouched. Derived here rather than trusted from the client so
+      // the header can't disagree with its own lines whatever the caller sends.
+      Object.assign(data, headerVatFromLines(newLines, data.amount_gross));
+    }
 
     // A payable (anything not already paid) enters the approval workflow. If the
     // booker is uploading it, they vouch for it inline → 'verified'. An approver
@@ -722,6 +932,10 @@ router.post('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respon
       vals,
     );
 
+    // Lines BEFORE the push, not after: the push reads them to build the Xero
+    // line items, and a separate round-trip would race it onto a one-line bill.
+    if (newLines?.length) await replaceCostLines(result.rows[0].id, newLines);
+
     // Background push to Xero for paid costs — non-blocking; the cost row's
     // xero_sync_state + xero_error carry success/failure for the UI.
     const { pushCostToXeroBackground } = await import('../services/cost-xero-push');
@@ -736,7 +950,7 @@ router.post('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respon
         .catch(() => { /* non-fatal — staff can set terms manually */ });
     }
 
-    res.status(201).json({ data: created });
+    res.status(201).json({ data: await withJobLabels(created) });
   } catch (err) {
     console.error('[costs] create error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -751,12 +965,50 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
     if (!parse.success) { res.status(400).json({ error: 'Invalid input', issues: parse.error.issues }); return; }
     const data = parse.data as Record<string, unknown>;
     coerceRechargeForIntent(data);
+    serialiseJsonbForWrite(data);
 
     // Keep recharge_status in step if recharge_mode is being changed — but never
     // clobber a terminal resolution (already pushed/absorbed) back to pending.
     if (data.recharge_mode !== undefined) {
       const cur = await query('SELECT recharge_status FROM costs WHERE id = $1', [req.params.id]);
       deriveRechargeStatusForWrite(data, cur.rows[0]?.recharge_status ?? null);
+    }
+
+    // Lines are checked against the row as it WILL be — the same PATCH may be
+    // changing the total they have to add up to. Validating first means an
+    // unbalanced set is refused with nothing written, header included.
+    const editedLines = (data.lines as CostLineInput[] | undefined);
+    if (editedLines !== undefined) {
+      const before = await query(
+        'SELECT amount_gross, amount_vat, vat_treatment, xero_sync_state FROM costs WHERE id = $1',
+        [req.params.id],
+      );
+      if (!before.rows.length) { res.status(404).json({ error: 'Cost not found' }); return; }
+      if (before.rows[0].xero_sync_state === 'reconciled') {
+        res.status(409).json({ error: 'This cost is reconciled in Xero and can no longer be changed.' });
+        return;
+      }
+      // Lines and a hand-made job split are two answers to the same question,
+      // and lines are the better one (they carry the category too). Rather than
+      // guess which wins, refuse and let staff clear the split.
+      // NB when derived allocations land (COST-LINES-SPEC §7) this narrows to
+      // allocations that were NOT derived from lines.
+      if (editedLines.length) {
+        const split = await query('SELECT COUNT(*)::int AS n FROM cost_allocations WHERE cost_id = $1', [req.params.id]);
+        if (split.rows[0]?.n > 0) {
+          res.status(400).json({
+            error: 'This cost already has a manual job split. Clear the split first — lines carry the job themselves.',
+          });
+          return;
+        }
+      }
+
+      const merged = { ...before.rows[0], ...data };
+      const problem = validateCostLines(merged as never, editedLines);
+      if (problem) { res.status(400).json({ error: problem }); return; }
+      // Lines own the VAT split (see create). Clearing the lines leaves the
+      // header's own figures alone — whatever the modal sent with them.
+      if (editedLines.length) Object.assign(data, headerVatFromLines(editedLines, merged.amount_gross));
     }
 
     const sets: string[] = [];
@@ -774,20 +1026,35 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
     if (!result.rows.length) { res.status(404).json({ error: 'Cost not found' }); return; }
 
     const updated = result.rows[0];
-    const alreadyPushed = Boolean(updated.xero_object_id) && ['bill_created', 'attached', 'reconciled'].includes(updated.xero_sync_state);
+    // Same ordering rule as create: lines land before any push reads them.
+    if (editedLines !== undefined) await replaceCostLines(String(req.params.id), editedLines);
+    // Already in Xero is decided by the OBJECT ID alone — never by sync state.
+    // State says whether the last operation succeeded; it says nothing about
+    // whether the object is there. Reading 'error' as "not in Xero" here is half
+    // of what created duplicate bills (services/cost-xero-push.ts existsInXero).
+    const alreadyPushed = Boolean(updated.xero_object_id);
 
     if (alreadyPushed) {
       // Already in Xero — we can't silently re-push (it may be reconciled). If a
       // Xero-affecting field changed, flag it stale so the UI warns + offers a
       // manual "Re-sync to Xero". Non-Xero edits (notes, payment_status) leave it alone.
       const XERO_AFFECTING = ['amount_net', 'amount_vat', 'amount_gross', 'xero_account_code',
-        'supplier_name', 'description', 'vat_treatment', 'cost_date', 'payment_method', 'invoice_number'];
+        'supplier_name', 'description', 'vat_treatment', 'cost_date', 'payment_method', 'invoice_number',
+        // The bill's Xero DueDate comes from resolveDueDate(), so an override edit
+        // has to be re-syncable or OP and Xero disagree about when it's due.
+        'due_date_override',
+        // Adding/removing supporting evidence after the push only reaches Xero
+        // via a re-sync — without this the doc sits in OP and never lands.
+        'supporting_documents',
+        // Lines ARE the Xero line items. Changing them changes the bill.
+        'lines'];
       if (XERO_AFFECTING.some((f) => data[f] !== undefined) && !updated.xero_stale) {
         const s = await query(`UPDATE costs SET xero_stale=TRUE WHERE id=$1 RETURNING xero_stale`, [updated.id]);
         updated.xero_stale = s.rows[0]?.xero_stale ?? true;
       }
-    } else if (!updated.xero_object_id || updated.xero_sync_state === 'error' || updated.xero_sync_state === 'pending') {
-      // Not yet in Xero — background push (the service guards on state).
+    } else {
+      // Genuinely not in Xero (no object id) — background push. The service
+      // guards again on the same rule, so a race can't create a second object.
       const { pushCostToXeroBackground } = await import('../services/cost-xero-push');
       pushCostToXeroBackground(updated.id);
     }
@@ -799,7 +1066,7 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
         .catch(() => { /* non-fatal — staff can set terms manually */ });
     }
 
-    res.json({ data: updated });
+    res.json({ data: await withJobLabels(updated) });
   } catch (err) {
     console.error('[costs] update error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -811,8 +1078,25 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
 router.post('/:id/sync-xero', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
   try {
     const id = String(req.params.id);
-    const { pushCostToXero } = await import('../services/cost-xero-push');
-    const result = await pushCostToXero(id);
+    // The red "Failed" pill's Retry lands here. A cost that already HAS a Xero
+    // object needs its figures pushed at the existing one, not a fresh create —
+    // and for a bill still awaiting its payment leg, pushCostToXero is exactly
+    // the right call (it skips the create and records the payment). So: object
+    // present + nothing left for the bill flow to do → re-sync in place.
+    const cur = await query(
+      'SELECT xero_object_id, xero_payment_id, payment_method, payment_status FROM costs WHERE id = $1',
+      [id],
+    );
+    if (!cur.rows.length) return res.status(404).json({ error: 'Cost not found' });
+    const c = cur.rows[0];
+    const paymentLegOutstanding = Boolean(c.xero_object_id)
+      && BILL_METHODS.includes(c.payment_method)
+      && c.payment_status === 'paid' && !c.xero_payment_id;
+
+    const svc = await import('../services/cost-xero-push');
+    const result = (c.xero_object_id && !paymentLegOutstanding)
+      ? await svc.resyncCostToXero(id)
+      : await svc.pushCostToXero(id);
     const after = await query('SELECT * FROM costs WHERE id = $1', [id]);
     if (!after.rows.length) return res.status(404).json({ error: 'Cost not found' });
     res.json({ data: after.rows[0], result });
@@ -1089,6 +1373,72 @@ router.post('/:id/pay', authorize(...ADMIN_ONLY), async (req: AuthRequest, res: 
   }
 });
 
+// Pay MANY bills with ONE Xero batch payment — the monthly garage run. Refuses
+// the whole selection if any one bill can't be paid, and creates the batch in
+// Xero BEFORE marking anything paid here. See services/cost-batch-pay.ts.
+// ADMIN_ONLY, same as /:id/pay: this is money out the door, times twenty.
+router.post('/pay-batch', authorize(...ADMIN_ONLY), async (req: AuthRequest, res: Response) => {
+  try {
+    const parse = z.object({
+      cost_ids: z.array(z.string().uuid()).min(1).max(200),
+      paid_method: z.string().trim().min(1).max(40),
+      paid_date: z.string().trim().max(20).optional().nullable(),
+      reference: z.string().trim().max(255).optional().nullable(),
+    }).safeParse(req.body ?? {});
+    if (!parse.success) { res.status(400).json({ error: 'Invalid input', issues: parse.error.issues }); return; }
+
+    const { payCostsAsBatch } = await import('../services/cost-batch-pay');
+    const result = await payCostsAsBatch({
+      costIds: parse.data.cost_ids,
+      paidMethod: parse.data.paid_method,
+      paidDate: parse.data.paid_date ?? null,
+      reference: parse.data.reference ?? null,
+      userId: req.user!.id,
+    });
+    // A refusal is a 400 with the reason, not a 500 — the caller can act on it.
+    if (result.error) { res.status(400).json({ error: result.error }); return; }
+    res.json({ data: result });
+  } catch (err) {
+    console.error('[costs] pay-batch error:', err);
+    // The thrown case is the one where Xero HAS the money and we failed to
+    // record it. Surface the message verbatim; it names the batch id.
+    res.status(500).json({ error: err instanceof Error ? err.message : 'Internal server error' });
+  }
+});
+
+// ── Remittance advice ───────────────────────────────────────────────────────
+// Optional courtesy email confirming a bill/reimbursement has been (or will be)
+// paid. Decoupled from /pay — a bad email must never block/unwind a payment.
+
+// Resolve the payee + address for pre-filling the mark-paid modal's tickbox.
+router.get('/:id/remittance-contact', authorize(...ADMIN_ONLY), async (req: AuthRequest, res: Response) => {
+  try {
+    const cost = await getCostForRemittance(req.params.id as string);
+    if (!cost) { res.status(404).json({ error: 'Cost not found' }); return; }
+    const contact = await resolveRemittanceContact(cost);
+    res.json({ data: contact });
+  } catch (err) {
+    console.error('[costs] remittance-contact error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+const remittanceSchema = z.object({ email: z.string().trim().email().max(200) });
+
+router.post('/:id/send-remittance', authorize(...ADMIN_ONLY), async (req: AuthRequest, res: Response) => {
+  try {
+    const parse = remittanceSchema.safeParse(req.body ?? {});
+    if (!parse.success) { res.status(400).json({ error: 'A valid recipient email is required' }); return; }
+    const result = await sendRemittance(req.params.id as string, parse.data.email);
+    if (!result.ok) { res.status(502).json({ error: result.error || 'Send failed' }); return; }
+    await audit(req.user!.id, req.params.id as string, 'remittance_sent', null, { email: parse.data.email });
+    res.json({ data: { sent: true, email: parse.data.email } });
+  } catch (err) {
+    console.error('[costs] send-remittance error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // ── Allocations (bundled invoice split) ─────────────────────────────────────
 // Replaces all allocations for a cost in one transaction.
 
@@ -1098,8 +1448,24 @@ router.put('/:id/allocations', authorize(...STAFF_ROLES), async (req: AuthReques
     if (!parse.success) { res.status(400).json({ error: 'Invalid input', issues: parse.error.issues }); return; }
     const { allocations } = parse.data;
 
-    const exists = await query('SELECT id FROM costs WHERE id = $1', [req.params.id]);
+    const exists = await query('SELECT id, amount_gross FROM costs WHERE id = $1', [req.params.id]);
     if (!exists.rows.length) { res.status(404).json({ error: 'Cost not found' }); return; }
+
+    // Attribution is OP-only and OPTIONAL — it may leave a remainder unallocated
+    // ("our cost"), so allocations summing to LESS than the cost total is fine.
+    // Only OVER-allocation is rejected: you can't attribute more than the cost.
+    const gross = Number(exists.rows[0].amount_gross ?? 0);
+    const allocated = allocations.reduce((s, a) => s + Number(a.amount || 0), 0);
+    if (allocated > gross + 0.01) {
+      res.status(400).json({
+        error: `Allocated £${allocated.toFixed(2)} exceeds the cost total £${gross.toFixed(2)}. Reduce the split — you can't attribute more than the cost.`,
+      });
+      return;
+    }
+    if (allocations.some((a) => !(Number(a.amount) > 0))) {
+      res.status(400).json({ error: 'Every line needs an amount greater than zero.' });
+      return;
+    }
 
     await query('BEGIN');
     try {
@@ -1126,6 +1492,26 @@ router.put('/:id/allocations', authorize(...STAFF_ROLES), async (req: AuthReques
     res.json({ data: result.rows });
   } catch (err) {
     console.error('[costs] allocations error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Confirm a near-miss supplier match: "yes, that printed name IS this Xero
+// contact". Remembered as an alias so nobody is asked about it again — the
+// human goes the last mile once, not every time.
+router.post('/supplier-alias', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const parse = z.object({
+      printed_name: z.string().trim().min(1).max(200),
+      xero_contact_id: z.string().trim().min(1).max(60),
+      xero_name: z.string().trim().min(1).max(200),
+    }).safeParse(req.body);
+    if (!parse.success) { res.status(400).json({ error: 'Invalid input', issues: parse.error.issues }); return; }
+    const { rememberSupplierAlias } = await import('../services/supplier-match');
+    await rememberSupplierAlias(parse.data.printed_name, parse.data.xero_contact_id, parse.data.xero_name, req.user!.id);
+    res.json({ data: { remembered: true } });
+  } catch (err) {
+    console.error('[costs] supplier-alias error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

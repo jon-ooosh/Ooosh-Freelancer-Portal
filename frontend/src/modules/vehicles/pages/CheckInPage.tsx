@@ -477,6 +477,13 @@ export function CheckInPage() {
           hireHopJob: form.bookOutHireHopJob || null,
           clientEmail: form.bookOutClientEmail || null,
           hireStatus: 'Prep Needed',
+          // Drives vehicle_hire_assignments.has_damage server-side, which is
+          // what gates the post-hire `damage_review` close-out card. Never
+          // sent before Sept 2026, so the card had never once appeared.
+          hasDamage: form.damageItems.length > 0,
+          // Persist the returning driver as a first-class field so a later
+          // PDF regeneration doesn't have to parse it out of `details`.
+          driverName: form.bookOutDriverName || null,
         }),
       'R2 event creation',
     )
@@ -599,12 +606,20 @@ export function CheckInPage() {
       let issuesReflagged = 0
       const createdIssueIds: string[] = []
       for (const damage of form.damageItems) {
-        if (!damage.description.trim()) continue
         try {
           const componentKey = `bodywork_${damage.location.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 50) || 'general'}`
+          // A damage item with no typed description is still a real damage
+          // report — location, severity and photos say plenty, and the
+          // Description box is optional with no validation behind it. This
+          // used to `continue` past any blank description, dropping the
+          // whole issue SILENTLY: the dent reached the condition-report PDF
+          // (which needs no description) but never the Problems register
+          // (job 15428 / RX24SZD, Sept 2026). Fall back, never skip.
+          const damageDesc = damage.description.trim()
+            || `${damage.severity} damage flagged at check-in — see photos`
           const locationNote = issueLocation
-            ? `${damage.description} [GPS: ${issueLocation.lat.toFixed(5)}, ${issueLocation.lng.toFixed(5)}]`
-            : damage.description
+            ? `${damageDesc} [GPS: ${issueLocation.lat.toFixed(5)}, ${issueLocation.lng.toFixed(5)}]`
+            : damageDesc
           const damagePhotoKeys = damageKeysByItemId[damage.id] || []
           const resp = await apiFetch('/api/problems/auto-create', {
             method: 'POST',
@@ -615,7 +630,7 @@ export function CheckInPage() {
               category: 'damaged',
               source_module: 'vehicle',
               severity: mapSeverityToOpSeverity(damage.severity),
-              summary: `${damage.location}: ${damage.description}`.slice(0, 250),
+              summary: `${damage.location}: ${damageDesc}`.slice(0, 250),
               description: locationNote,
               // Link the issue to the job — resolved to the OP UUID
               // server-side. Without this, check-in damage issues were
@@ -648,17 +663,23 @@ export function CheckInPage() {
         }
       }
 
-      if (issuesCreated > 0 || issuesReflagged > 0 || issuesFailed > 0) {
-        const parts: string[] = []
-        if (issuesCreated) parts.push(`${issuesCreated} new`)
-        if (issuesReflagged) parts.push(`${issuesReflagged} re-flagged`)
-        if (issuesFailed) parts.push(`${issuesFailed} failed`)
-        results.push({
-          label: 'Damage issues logged',
-          success: issuesFailed === 0,
-          detail: parts.join(' · '),
-        })
-      }
+      // ALWAYS render this row once damage has been flagged. The old guard
+      // (`created || reflagged || failed`) meant a damage set that produced
+      // no issues at all rendered NO row — so staff saw a clean success
+      // screen with no hint the damage hadn't been logged anywhere. Silence
+      // was what made the 15428 skip invisible for a day; the fallback above
+      // fixes the cause, this makes any future gap impossible to miss.
+      const parts: string[] = []
+      if (issuesCreated) parts.push(`${issuesCreated} new`)
+      if (issuesReflagged) parts.push(`${issuesReflagged} re-flagged`)
+      if (issuesFailed) parts.push(`${issuesFailed} failed`)
+      results.push({
+        label: 'Damage issues logged',
+        success: issuesFailed === 0 && (issuesCreated + issuesReflagged) > 0,
+        detail: parts.length > 0
+          ? parts.join(' · ')
+          : `0 logged from ${form.damageItems.length} damage item(s) — log manually on the job`,
+      })
 
       // ── Step 3b: TTS360 repair quote (optional) ──
       // Fires AFTER the auto-create loop so we have all the issue IDs.
@@ -796,6 +817,7 @@ export function CheckInPage() {
       () =>
         sendConditionReport(
           {
+            eventId,
             vehicleReg: form.vehicleReg,
             vehicleType: form.vehicleType,
             vehicleMake: selectedVehicle?.make,
@@ -1814,7 +1836,7 @@ function StepDamageReport({
 
           {/* Description */}
           <div>
-            <label className="mb-1 block text-xs font-medium text-gray-600">Description</label>
+            <label className="mb-1 block text-xs font-medium text-gray-600">Description (optional)</label>
             <textarea
               value={item.description}
               onChange={e => updateItem(item.id, { description: e.target.value })}

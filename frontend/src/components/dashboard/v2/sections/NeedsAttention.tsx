@@ -297,6 +297,16 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
     items: [],
     viewAllHref: '/money/costs?missing_receipt=1',
   };
+  // Staff with outstanding documents to read/sign (managers only — the backend
+  // returns 0 for non-managers so this hides). Deep-links to the admin library.
+  const staffDocs: NABucket = {
+    key: 'staff_documents',
+    title: 'Staff Documents',
+    accent: 'amber',
+    count: na.staff_documents_outstanding_count || 0,
+    items: [],
+    viewAllHref: '/staff/documents/admin',
+  };
   // Client recharges flagged but not yet resolved (pushed to HH / billed
   // externally / absorbed) on active or finished hires. Amber — money we could
   // be billing back that's sitting unactioned. Deep-links to the Recharges tab.
@@ -307,6 +317,18 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
     count: na.recharges_to_resolve_count || 0,
     items: [],
     viewAllHref: '/money/costs?view=recharge',
+  };
+  // High-priority backline gaps with no acquisition plan — kit we've flagged
+  // high priority that we don't stock and haven't decided to get. Blue —
+  // informational purchasing prompt, not time-critical. Deep-links to the
+  // Backline Matcher filtered to high-priority.
+  const backlineToBuy: NABucket = {
+    key: 'backline_to_buy',
+    title: 'Backline to Buy',
+    accent: 'blue',
+    count: na.backline_to_buy_count || 0,
+    items: [],
+    viewAllHref: '/operations/backline-matcher?priority=high',
   };
 
   // Transport arrangements to action — quotes in next 7 days on a
@@ -455,12 +477,35 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
     viewAllHref: '/operations/studio-sitters',
   };
 
+  // Holding — items nobody has identified. Self-hiding (like the PCN buckets):
+  // the secondary row already renders 13 cards unconditionally, greying the
+  // empty ones, and a surface meant to say "a human is needed here" shouldn't
+  // grow another permanent grey tile. Filtered out below when zero.
+  const holdingUnlinked: NABucket = {
+    key: 'holding-unlinked',
+    title: 'Unidentified items',
+    accent: 'amber',
+    count: na.holding_unlinked_count || 0,
+    items: (na.holding_unlinked || []).map((h) => ({
+      id: h.id,
+      label: h.description || 'Held item',
+      // action_due here is the found/logged date, so it reads as an age.
+      age: h.action_due
+        ? `${Math.max(0, Math.floor((Date.now() - new Date(h.action_due).getTime()) / 86400000))}d old`
+        : undefined,
+      tag: h.found_vehicle_reg || undefined,
+      href: `/holding?item=${h.id}`,
+    })),
+    viewAllHref: '/holding?action=link_owner',
+  };
+
   const allClear = overdueTotal === 0;
   const overdueBuckets = [departures, completions, backline, transport];
   // expiringHolds leads the secondary row — red accent, time-critical (hold
   // auto-voids at day 5). Sits ahead of the amber/blue/purple buckets so it
   // catches the eye when present.
-  const secondaryBuckets = [expiringHolds, receiptsOutstanding, cotReceipts, rechargesToResolve, ...pcnBuckets, carnets, referrals, excess, sitterGaps, transportArrangements, fleetBucket, problemsBucket];
+  const selfHiding = [holdingUnlinked].filter((b) => b.count > 0);
+  const secondaryBuckets = [expiringHolds, receiptsOutstanding, cotReceipts, staffDocs, rechargesToResolve, ...pcnBuckets, ...selfHiding, carnets, referrals, excess, sitterGaps, backlineToBuy, transportArrangements, fleetBucket, problemsBucket];
   const secondaryAny = secondaryBuckets.some(b => b.count > 0);
 
   return (

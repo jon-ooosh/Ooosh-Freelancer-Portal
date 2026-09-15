@@ -24,7 +24,7 @@
  */
 import { query } from '../config/database';
 import { getGmailProfile, gmailApiGet, getPrimaryMailbox, isGmailConfigured } from '../config/gmail';
-import { matchEmailToJob, extractEmailAddress } from './email-matcher';
+import { matchEmailToJob, extractEmailAddress, extractReferencedJobNumbers } from './email-matcher';
 
 const SYSTEM_USER_ID = '00000000-0000-0000-0000-000000000000';
 
@@ -80,6 +80,47 @@ function isInternalSender(from: string | null): boolean {
   const domain = senderDomain(from);
   if (!domain) return false;
   return INTERNAL_SENDER_DOMAINS.some((d) => domain === d || domain.endsWith(`.${d}`));
+}
+
+// Our SYSTEM/template sender — every branded transactional email (booking
+// confirmations, payment receipts, hire-form requests, delivery notes, referral
+// alerts, digests, the client-no-email fallback) goes out from here via the
+// email service. These are NOT staff conversation, so we never ingest them —
+// even when addressed to an external client — or they'd clutter the per-job
+// conversation summary + chase context with template noise. Genuine staff mail
+// goes from info@ or a personal @oooshtours address, which we DO keep (see the
+// outbound rule in ingestGmailMessage). Lowercase, full address.
+const SYSTEM_SENDER_ADDRESSES = ['notifications@oooshtours.co.uk'];
+
+function isSystemSender(from: string | null): boolean {
+  const addr = extractEmailAddress(from);
+  return addr != null && SYSTEM_SENDER_ADDRESSES.includes(addr);
+}
+
+/** Every bare email address in a header value (To/Cc can carry several). */
+function extractAllEmailAddresses(headerValue: string | null | undefined): string[] {
+  if (!headerValue) return [];
+  const out: string[] = [];
+  const re = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi;
+  for (const m of headerValue.matchAll(re)) out.push(m[0].toLowerCase());
+  return out;
+}
+
+/**
+ * Does this email involve an EXTERNAL party (a real client)? True when any
+ * To/Cc recipient is off our own domain. Used to tell a genuine staff→client
+ * email (keep, as outbound) from internal↔internal notification/CC traffic (skip).
+ */
+function hasExternalRecipient(toCc: Array<string | null>): boolean {
+  for (const raw of toCc) {
+    for (const addr of extractAllEmailAddresses(raw)) {
+      const at = addr.lastIndexOf('@');
+      const domain = at === -1 ? '' : addr.slice(at + 1);
+      const internal = INTERNAL_SENDER_DOMAINS.some((d) => domain === d || domain.endsWith(`.${d}`));
+      if (!internal) return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -187,6 +228,33 @@ function extractBodyAndAttachments(payload: GmailPart | undefined): {
   return { body, attachmentFilenames, hasAttachments: attachmentFilenames.length > 0 };
 }
 
+/**
+ * Parse the fields the matcher / backfill-validator need out of a full Gmail
+ * message. Exported so the backfill can validate a thread genuinely belongs to a
+ * job before force-attaching it (spec §7.3 backfill tightening).
+ */
+export function parseGmailMessageParts(msg: GmailMessage): {
+  from: string | null;
+  to: string | null;
+  cc: string | null;
+  subject: string | null;
+  body: string;
+  attachmentFilenames: string[];
+} {
+  const headers = msg.payload?.headers;
+  const { body, attachmentFilenames } = extractBodyAndAttachments(msg.payload);
+  return {
+    from: headerValue(headers, 'From'),
+    to: headerValue(headers, 'To'),
+    cc: headerValue(headers, 'Cc'),
+    subject: headerValue(headers, 'Subject'),
+    body,
+    attachmentFilenames,
+  };
+}
+
+export { extractAllEmailAddresses };
+
 // ── Cursor state ────────────────────────────────────────────────────────────
 async function getSyncState(mailbox: string): Promise<{ history_id: string | null } | null> {
   const r = await query(`SELECT history_id FROM gmail_sync_state WHERE mailbox = $1`, [mailbox]);
@@ -227,6 +295,29 @@ async function recordError(mailbox: string, message: string): Promise<void> {
 export type IngestOutcome = 'logged' | 'skipped' | 'duplicate' | 'unmatched';
 
 /**
+ * The job a Gmail thread is already anchored to, if any: the earliest ingested
+ * email in the thread that's still attached to a (non-deleted) job. Detached
+ * emails (job_id NULL) don't anchor; hidden emails still do (they still belong
+ * to the job, they're just off the all-staff view). Drives thread-anchoring so a
+ * conversation that drifts to mention other jobs doesn't scatter across timelines.
+ */
+async function getThreadAnchorJob(threadId: string | null | undefined): Promise<string | null> {
+  if (!threadId) return null;
+  const r = await query(
+    `SELECT i.job_id
+       FROM interactions i
+       JOIN jobs j ON j.id = i.job_id AND j.is_deleted = false
+      WHERE i.type = 'email'
+        AND i.gmail_thread_id = $1
+        AND i.job_id IS NOT NULL
+      ORDER BY i.created_at ASC
+      LIMIT 1`,
+    [threadId],
+  );
+  return r.rows[0]?.job_id ?? null;
+}
+
+/**
  * Ingest a single Gmail message: internal/automated skip → RFC822 dedup →
  * attach to a job (matcher, or a forced known job for the backfill) or park in
  * the unmatched queue. Idempotent (dedup on the RFC822 Message-ID).
@@ -248,13 +339,23 @@ export async function ingestGmailMessage(
   const rfcMessageId = headerValue(headers, 'Message-ID') || `gmail:${msg.id}`;
   const from = headerValue(headers, 'From');
   const to = headerValue(headers, 'To');
+  const cc = headerValue(headers, 'Cc');
   const subject = headerValue(headers, 'Subject');
 
-  // Internal / automated guard — an email from our own domain is a
-  // notification/alert/our-own-sent-copy, not a client reply; external
-  // auto-generated mail (bounces / OOO / bulk) is noise. Skip entirely.
-  if (!isEnquirySource(from) && (isInternalSender(from) || looksAutomated(headers))) {
-    return 'skipped';
+  // What to ingest: genuine staff↔client conversation, BOTH directions. What to
+  // skip: our own transactional templates, internal↔internal notification
+  // traffic, and external automated noise (bounces / OOO / bulk).
+  //   - automated (Auto-Submitted / bulk)                        → skip
+  //   - our system/template sender (notifications@)              → skip
+  //   - from us with NO external recipient (internal↔internal)   → skip
+  //   - from us WITH an external client recipient (our outbound) → KEEP (outbound)
+  //   - from an external address (client mail)                   → KEEP (inbound)
+  // Keeping our outbound is what makes the conversation summary two-sided and
+  // lets the chase draft see what we've already sent (spec §5.4a, revised).
+  if (!isEnquirySource(from)) {
+    if (looksAutomated(headers)) return 'skipped';
+    if (isSystemSender(from)) return 'skipped';
+    if (isInternalSender(from) && !hasExternalRecipient([to, cc])) return 'skipped';
   }
 
   // Authoritative dedup on the RFC822 Message-ID (unique across mailboxes).
@@ -272,25 +373,85 @@ export async function ingestGmailMessage(
   const direction = (msg.labelIds || []).includes('SENT') ? 'outbound' : 'inbound';
   const snippet = (msg.snippet || body).slice(0, 500);
 
-  // Resolve the job: forced (backfill) or via the deterministic matcher (live).
+  // Resolve the job: forced (backfill) or via the deterministic matcher (live),
+  // with thread-anchoring on the live path. `matchMethod` / `matchConfidence` are
+  // persisted so the timeline can show WHY an email is on a job and a human can
+  // spot a bad attach (spec §5.3a).
   let jobId: string | null = opts.forceJobId ?? null;
-  if (!jobId) {
+  let matchMethod: string | null = opts.forceJobId ? 'backfill_forced' : null;
+  let matchConfidence: string | null = opts.forceJobId ? 'high' : null;
+
+  if (!opts.forceJobId) {
     const match = await matchEmailToJob({ from, to, subject, body, attachmentFilenames });
-    jobId = match?.jobId ?? null;
+
+    // Thread-anchoring: once a thread's first message strong-matched a job, later
+    // messages inherit that job UNLESS they carry their OWN strong evidence for a
+    // DIFFERENT job — a `Quote (N)` PDF attachment or an explicit job number in
+    // the SUBJECT line. A job number in the BODY does NOT override the anchor:
+    // bodies routinely reference other/past hires in passing ("like on #15804"),
+    // and letting those move attribution is exactly the drift jon flagged. A weak
+    // (sender) or absent match in an anchored thread also inherits the anchor —
+    // so a bare client reply lands on the right job instead of the unmatched queue.
+    const anchorJobId = await getThreadAnchorJob(msg.threadId);
+    if (anchorJobId) {
+      const subjectJobNumbers = extractReferencedJobNumbers(subject);
+      const strongOwnDifferentJob =
+        match != null &&
+        match.jobId !== anchorJobId &&
+        (match.method === 'pdf_filename_job_number' ||
+          (match.method === 'subject_body_job_number' &&
+            match.hhJobNumber != null &&
+            subjectJobNumbers.includes(match.hhJobNumber)));
+
+      if (strongOwnDifferentJob) {
+        jobId = match!.jobId;
+        matchMethod = match!.method;
+        matchConfidence = match!.confidence;
+      } else {
+        jobId = anchorJobId;
+        matchMethod = 'thread_anchor';
+        matchConfidence = 'high';
+      }
+    } else if (match) {
+      jobId = match.jobId;
+      matchMethod = match.method;
+      matchConfidence = match.confidence;
+    }
   }
 
   if (jobId) {
-    // Note: the chase-model auto-bump lives in the interactions ROUTE, not this
-    // raw INSERT — Phase 2's chase logic owns the bump; this just records.
     await query(
       `INSERT INTO interactions
          (type, content, job_id, created_by,
           gmail_message_id, gmail_thread_id, email_from, email_to, email_subject,
-          email_snippet, email_direction, has_attachments)
-       VALUES ('email', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+          email_snippet, email_direction, has_attachments, match_method, match_confidence)
+       VALUES ('email', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
       [body || snippet || '(no body)', jobId, SYSTEM_USER_ID, rfcMessageId, msg.threadId,
-       from, to, subject, snippet, direction, hasAttachments],
+       from, to, subject, snippet, direction, hasAttachments, matchMethod, matchConfidence],
     );
+
+    // Chase auto-unenrol: a LIVE inbound client reply is engagement — push the
+    // next chase forward (sacred-future: only when null/today/past, never shorten
+    // a deliberately future-dated chase) and reset the silent-chase counter so a
+    // job that was heading for cold-dead-end escalation gets a clean slate. Only
+    // for live ingestion — the backfill (opts.forceJobId) replays historical mail
+    // and must not move today's chase dates. Scoped to enquiry stages (chase
+    // dates on confirmed/lost/cancelled are stale anyway). Spec §3, §5.5, §10.
+    if (direction === 'inbound' && !opts.forceJobId) {
+      await query(
+        `UPDATE jobs SET
+           next_chase_date = CASE
+             WHEN next_chase_date IS NULL OR next_chase_date <= CURRENT_DATE
+               THEN (CURRENT_DATE + (COALESCE(chase_interval_days, 5) || ' days')::interval)::date
+             ELSE next_chase_date
+           END,
+           auto_chase_count = 0,
+           updated_at = NOW()
+         WHERE id = $1
+           AND pipeline_status IN ('new_enquiry','quoting','paused','provisional')`,
+        [jobId],
+      );
+    }
     return 'logged';
   }
 

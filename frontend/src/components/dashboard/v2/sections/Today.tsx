@@ -7,6 +7,41 @@ import {
   EMPTY_STRIP, JobProgressStrip, STRIP_LABELS, StripPhase, stripPercent,
 } from '../progress-strip';
 import { api } from '../../../../services/api';
+import { vehiclePrepPill } from '../../../../lib/vehiclePrep';
+
+/** Compact allocated-van indicator for a Today row.
+ *  Going out: reg + prep pill (Prep needed / Ready) for the first van, "+N"
+ *  for any others, or a faint "van unassigned" when the job needs a van and
+ *  none is allocated. Returning: reg(s) only — prep status isn't relevant to
+ *  something coming back. Renders nothing for non-van jobs. */
+function VehicleTag({ job, phase }: { job: ScheduleJob; phase: StripPhase }) {
+  const vehicles = job.vehicles ?? [];
+  if (vehicles.length === 0) {
+    if (phase === 'pre_hire' && job.van_unassigned) {
+      return (
+        <span className="inline-flex items-center gap-1 text-[11px] text-amber-600">
+          <span aria-hidden>🚐</span> van unassigned
+        </span>
+      );
+    }
+    return null;
+  }
+  const first = vehicles[0];
+  const extra = vehicles.length - 1;
+  const prep = phase === 'pre_hire' ? vehiclePrepPill(first.hire_status) : null;
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span className="inline-flex items-center gap-1 op-num text-xs font-medium text-gray-700">
+        <span aria-hidden>🚐</span>
+        {first.reg}
+        {extra > 0 && <span className="text-gray-400">+{extra}</span>}
+      </span>
+      {prep && (
+        <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${prep.cls}`}>{prep.label}</span>
+      )}
+    </span>
+  );
+}
 
 function formatTime(t: string | null | undefined): string {
   if (!t) return '—';
@@ -46,6 +81,11 @@ function JobRow({
         {job.venue_name && (
           <div className="text-xs text-gray-500 mt-0.5">{job.venue_name}</div>
         )}
+        {(job.vehicles?.length || (phase === 'pre_hire' && job.van_unassigned)) ? (
+          <div className="mt-1">
+            <VehicleTag job={job} phase={phase} />
+          </div>
+        ) : null}
         <div className="mt-2">
           <ProgressStrip strip={strip} labels={labels} />
         </div>

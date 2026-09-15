@@ -21,6 +21,8 @@ import { emailService } from '../services/email-service';
 import { resolveClientEmailTarget, buildFallbackBanner, logFallbackToTimeline } from '../services/money-emails';
 import { uploadToR2, isR2Configured, getPresignedDownloadUrl } from '../config/r2';
 import { generateDeliveryNotePdf, DeliveryNoteItem } from '../services/delivery-note-pdf';
+import { getSitterShifts, getSitterShiftDetail, isSitterAssignedTo } from '../services/studio-sitter';
+import { getLockupContext, submitLockupReport, logShiftLostProperty, LockupAlreadySubmittedError } from '../services/studio-sitter-lockup';
 
 // Stable UUID seeded by migration 031 — used as created_by for portal-driven
 // auto-actions (the freelancer is a `people` row, not a `users` row, so we
@@ -188,7 +190,9 @@ router.post('/auth/login', async (req: Request, res: Response) => {
       `SELECT p.id, p.first_name, p.last_name, p.email, p.portal_password_hash,
               p.is_freelancer, p.is_approved, p.portal_email_verified
        FROM people p
-       WHERE LOWER(p.email) = $1 AND p.is_freelancer = true`,
+       WHERE LOWER(p.email) = $1 AND p.is_freelancer = true AND p.is_deleted = false
+       ORDER BY p.is_approved DESC, p.portal_last_login DESC NULLS LAST
+       LIMIT 1`,
       [normalizedEmail]
     );
 
@@ -293,7 +297,9 @@ router.post('/auth/register/start', async (req: Request, res: Response) => {
     const result = await query(
       `SELECT id, first_name, last_name, email, portal_password_hash, is_approved
        FROM people
-       WHERE LOWER(email) = $1 AND is_freelancer = true`,
+       WHERE LOWER(email) = $1 AND is_freelancer = true AND is_deleted = false
+       ORDER BY is_approved DESC, portal_last_login DESC NULLS LAST
+       LIMIT 1`,
       [email]
     );
 
@@ -500,7 +506,9 @@ router.post('/auth/forgot-password', async (req: Request, res: Response) => {
 
     const result = await query(
       `SELECT id, first_name, email FROM people
-       WHERE LOWER(email) = $1 AND is_freelancer = true AND is_approved = true`,
+       WHERE LOWER(email) = $1 AND is_freelancer = true AND is_approved = true AND is_deleted = false
+       ORDER BY portal_last_login DESC NULLS LAST
+       LIMIT 1`,
       [email]
     );
 
@@ -563,7 +571,8 @@ router.get('/auth/verify-reset-token', async (req: Request, res: Response) => {
          AND t.used_at IS NULL
          AND t.expires_at > NOW()
          AND p.is_freelancer = true
-         AND p.is_approved = true`,
+         AND p.is_approved = true
+         AND p.is_deleted = false`,
       [tokenHash]
     );
     res.json({ valid: result.rows.length > 0 });
@@ -595,7 +604,8 @@ router.post('/auth/reset-password', async (req: Request, res: Response) => {
        JOIN people p ON p.id = t.person_id
        WHERE t.token_hash = $1
          AND t.used_at IS NULL
-         AND t.expires_at > NOW()`,
+         AND t.expires_at > NOW()
+         AND p.is_deleted = false`,
       [tokenHash]
     );
 
@@ -849,6 +859,574 @@ router.get('/me', async (req: PortalRequest, res: Response) => {
   } catch (error) {
     console.error('Portal me error:', error);
     res.status(500).json({ error: 'Failed to load user' });
+  }
+});
+
+// ── Studio Sitter shifts (Rehearsals — Phase D portal surface) ───────
+//
+// A sitter (freelancer) sees the evenings they've been rostered to, and per
+// evening: who's in each room that night (derived) + the job's shared specs.
+// One sitter per night covers the whole building. Read-only in this slice;
+// handover thread + end-of-day report land in later slices.
+
+const SITTER_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+function addDaysIsoP(iso: string, days: number): string {
+  const [y, m, d] = iso.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + days);
+  return dt.toISOString().slice(0, 10);
+}
+
+// GET /api/portal/studio-sitter/shifts — the sitter's upcoming/recent shifts
+router.get('/studio-sitter/shifts', async (req: PortalRequest, res: Response) => {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    // A short look-back so a sitter can still open a recent past shift, and a
+    // full year forward so far-out assignments (e.g. a September date rota'd in
+    // July) always surface — the query is bounded by the sitter's own
+    // assignments, so a wide window stays cheap.
+    const from = addDaysIsoP(today, -14);
+    const to = addDaysIsoP(today, 365);
+    const shifts = await getSitterShifts(req.portalUser!.id, from, to);
+    res.json({ success: true, shifts });
+  } catch (error) {
+    console.error('Portal sitter shifts error:', error);
+    res.status(500).json({ error: 'Failed to load shifts' });
+  }
+});
+
+// GET /api/portal/studio-sitter/shifts/:date — one evening's detail
+router.get('/studio-sitter/shifts/:date', async (req: PortalRequest, res: Response) => {
+  try {
+    const date = String(req.params.date);
+    if (!SITTER_DATE_RE.test(date)) { res.status(400).json({ error: 'Invalid date' }); return; }
+    // Access: the sitter must be rostered to this night (shared staff account
+    // may view any).
+    const allowed = req.portalUser!.isStaffShared || await isSitterAssignedTo(req.portalUser!.id, date);
+    if (!allowed) { res.status(403).json({ error: 'Not rostered to this evening' }); return; }
+    const detail = await getSitterShiftDetail(date, req.portalUser!.id);
+    res.json({ success: true, ...detail });
+  } catch (error) {
+    console.error('Portal sitter shift detail error:', error);
+    res.status(500).json({ error: 'Failed to load shift' });
+  }
+});
+
+// ── Studio Sitter handover thread (Rehearsals — Phase D slice 3) ─────
+//
+// The sitter ⇄ staff handover notes for one evening. Flat chronological log
+// anchored to the shift via interactions.shift_id (scoped OUT of the person /
+// job / org / venue timelines by the shift_id IS NULL guard). Freelancer-
+// authored messages carry created_by = NULL + author_name (sitters are people,
+// not OP users). Access is gated the same way as the shift detail.
+
+async function resolveOpenShiftId(date: string): Promise<string | null> {
+  const r = await query(
+    `SELECT id FROM studio_sitter_shifts WHERE shift_date = $1 AND status <> 'cancelled' LIMIT 1`,
+    [date]
+  );
+  return r.rows[0]?.id ?? null;
+}
+
+// Handover-note attachments (images / PDFs). Stored in interactions.files under
+// the same shape as staff interaction attachments so both surfaces render them.
+const sitterNoteUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 8 * 1024 * 1024, files: 6 }, // 8MB per file, 6 files
+  fileFilter: (_req, file, cb) => {
+    if (file.mimetype.startsWith('image/') || file.mimetype === 'application/pdf') {
+      cb(null, true);
+    } else {
+      cb(new Error('Only images and PDFs can be attached'));
+    }
+  },
+}).array('files', 6);
+
+function sitterNoteUploadMw(req: PortalRequest, res: Response, next: NextFunction) {
+  sitterNoteUpload(req, res, (err: unknown) => {
+    if (err) {
+      const msg = err instanceof multer.MulterError ? err.message : (err instanceof Error ? err.message : 'Upload failed');
+      res.status(400).json({ error: msg });
+      return;
+    }
+    next();
+  });
+}
+
+// Map a stored interaction-file blob to the portal display shape, presigning
+// R2 keys. Handles BOTH the staff interaction-attachment shape
+// ({ r2_key, filename, content_type }) and the legacy shared-file shape
+// ({ url, name, type }), so staff- and sitter-posted attachments render alike.
+async function mapThreadFile(x: Record<string, any>): Promise<{ name: string; url: string; fileType: string | null }> {
+  const key: string = x.r2_key || x.url || '';
+  let url = key;
+  if (key && typeof key === 'string' && key.startsWith('files/')) {
+    try { url = await getPresignedDownloadUrl(key); } catch { /* keep raw */ }
+  }
+  return {
+    name: x.filename || x.name || 'File',
+    url,
+    fileType: x.content_type || x.type || x.fileType || null,
+  };
+}
+
+// GET /api/portal/studio-sitter/shifts/:date/thread — read the handover log
+router.get('/studio-sitter/shifts/:date/thread', async (req: PortalRequest, res: Response) => {
+  try {
+    const date = String(req.params.date);
+    if (!SITTER_DATE_RE.test(date)) { res.status(400).json({ error: 'Invalid date' }); return; }
+    const allowed = req.portalUser!.isStaffShared || await isSitterAssignedTo(req.portalUser!.id, date);
+    if (!allowed) { res.status(403).json({ error: 'Not rostered to this evening' }); return; }
+
+    const shiftId = await resolveOpenShiftId(date);
+    if (!shiftId) { res.json({ success: true, messages: [] }); return; }
+
+    const result = await query(
+      `SELECT i.id, i.content, i.created_at, i.files, i.created_by, i.author_name,
+              CONCAT(p.first_name, ' ', p.last_name) AS staff_name
+       FROM interactions i
+       LEFT JOIN users u ON u.id = i.created_by
+       LEFT JOIN people p ON p.id = u.person_id
+       WHERE i.shift_id = $1
+       ORDER BY i.created_at ASC`,
+      [shiftId]
+    );
+
+    const myName = req.portalUser!.name;
+    const messages = await Promise.all(result.rows.map(async (row: any) => {
+      const fromStaff = !!row.created_by;
+      const author = fromStaff
+        ? (String(row.staff_name || '').trim() || 'Ooosh')
+        : (row.author_name || 'Studio sitter');
+      const raw: any[] = Array.isArray(row.files) ? row.files : [];
+      const files = await Promise.all(raw.map(mapThreadFile));
+      return {
+        id: row.id,
+        content: row.content,
+        created_at: row.created_at,
+        author,
+        from_staff: fromStaff,
+        mine: !fromStaff && (row.author_name || '') === myName,
+        files,
+      };
+    }));
+
+    res.json({ success: true, messages });
+  } catch (error) {
+    console.error('Portal sitter thread read error:', error);
+    res.status(500).json({ error: 'Failed to load handover notes' });
+  }
+});
+
+// GET /api/portal/studio-sitter/shifts/:date/recent-handover — the last few
+// nights' handover notes (read-only), so a sitter arriving fresh sees the prior
+// context the per-night thread anchor doesn't carry across. Premises-wide (there
+// is one studio), most-recent-first, capped at MAX_NIGHTS within a lookback.
+router.get('/studio-sitter/shifts/:date/recent-handover', async (req: PortalRequest, res: Response) => {
+  try {
+    const date = String(req.params.date);
+    if (!SITTER_DATE_RE.test(date)) { res.status(400).json({ error: 'Invalid date' }); return; }
+    const allowed = req.portalUser!.isStaffShared || await isSitterAssignedTo(req.portalUser!.id, date);
+    if (!allowed) { res.status(403).json({ error: 'Not rostered to this evening' }); return; }
+
+    const result = await query(
+      `SELECT i.id, i.content, i.created_at, i.files, i.created_by, i.author_name,
+              s.shift_date::text AS shift_date,
+              CONCAT(p.first_name, ' ', p.last_name) AS staff_name
+       FROM interactions i
+       JOIN studio_sitter_shifts s ON s.id = i.shift_id AND s.status <> 'cancelled'
+       LEFT JOIN users u ON u.id = i.created_by
+       LEFT JOIN people p ON p.id = u.person_id
+       WHERE s.shift_date < $1
+         AND s.shift_date >= ($1::date - INTERVAL '21 days')
+       ORDER BY s.shift_date DESC, i.created_at ASC
+       LIMIT 120`,
+      [date]
+    );
+
+    // Group by night, keeping the most recent MAX_NIGHTS that carry notes.
+    const MAX_NIGHTS = 4;
+    const byDate = new Map<string, any[]>();
+    for (const row of result.rows) {
+      const d = String(row.shift_date).slice(0, 10);
+      if (!byDate.has(d)) { if (byDate.size >= MAX_NIGHTS) continue; byDate.set(d, []); }
+      byDate.get(d)!.push(row);
+    }
+    const nights = await Promise.all([...byDate.entries()].map(async ([d, rows]) => ({
+      date: d,
+      entries: await Promise.all(rows.map(async (row: any) => {
+        const fromStaff = !!row.created_by;
+        return {
+          id: row.id,
+          content: row.content,
+          created_at: row.created_at,
+          author: fromStaff ? (String(row.staff_name || '').trim() || 'Ooosh') : (row.author_name || 'Studio sitter'),
+          from_staff: fromStaff,
+          mine: false,
+          files: await Promise.all((Array.isArray(row.files) ? row.files : []).map(mapThreadFile)),
+        };
+      })),
+    })));
+
+    res.json({ success: true, nights });
+  } catch (error) {
+    console.error('Portal sitter recent-handover error:', error);
+    res.status(500).json({ error: 'Failed to load recent handover notes' });
+  }
+});
+
+// POST /api/portal/studio-sitter/shifts/:date/thread — add a handover note
+// Accepts JSON ({ content }) or multipart/form-data (content + files[] of
+// images/PDFs). Attachments upload to R2 and store on interactions.files.
+router.post('/studio-sitter/shifts/:date/thread', sitterNoteUploadMw, async (req: PortalRequest, res: Response) => {
+  try {
+    const date = String(req.params.date);
+    if (!SITTER_DATE_RE.test(date)) { res.status(400).json({ error: 'Invalid date' }); return; }
+    const allowed = req.portalUser!.isStaffShared || await isSitterAssignedTo(req.portalUser!.id, date);
+    if (!allowed) { res.status(403).json({ error: 'Not rostered to this evening' }); return; }
+
+    const content = String(req.body?.content ?? '').trim().slice(0, 4000);
+    const uploaded = (req.files as Express.Multer.File[] | undefined) || [];
+    if (!content && uploaded.length === 0) {
+      res.status(400).json({ error: 'A message or attachment is required' });
+      return;
+    }
+
+    const shiftId = await resolveOpenShiftId(date);
+    if (!shiftId) { res.status(404).json({ error: 'No shift for this evening' }); return; }
+
+    // Upload attachments to R2 (same shape/prefix as staff interaction
+    // attachments so both surfaces render them identically).
+    const fileBlobs: Array<Record<string, any>> = [];
+    if (uploaded.length > 0 && isR2Configured()) {
+      for (const f of uploaded) {
+        const ext = (f.originalname.match(/\.[a-z0-9]+$/i) || [''])[0].toLowerCase();
+        const key = `files/attachments/portal-${req.portalUser!.id}/${crypto.randomUUID()}${ext}`;
+        await uploadToR2(key, f.buffer, f.mimetype);
+        fileBlobs.push({
+          r2_key: key,
+          filename: f.originalname,
+          content_type: f.mimetype,
+          size_bytes: f.size,
+          uploaded_at: new Date().toISOString(),
+        });
+      }
+    }
+
+    // Content is NOT NULL on interactions; use a placeholder for attachment-only.
+    const storedContent = content || '(attachment)';
+
+    // Freelancer-authored: created_by NULL + author_name (they aren't OP users).
+    const inserted = await query(
+      `INSERT INTO interactions (type, content, shift_id, created_by, author_name, files)
+       VALUES ('note', $1, $2, NULL, $3, $4::jsonb)
+       RETURNING id, created_at`,
+      [storedContent, shiftId, req.portalUser!.name, JSON.stringify(fileBlobs)]
+    );
+
+    // Let prior staff participants know a sitter replied — low-priority bell
+    // only (no email), matching the thread re-notify model. Best-effort:
+    // a notification failure must not fail the post.
+    try {
+      const priorStaff = await query(
+        `SELECT DISTINCT created_by FROM interactions
+         WHERE shift_id = $1 AND created_by IS NOT NULL`,
+        [shiftId]
+      );
+      for (const row of priorStaff.rows) {
+        await query(
+          `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority)
+           VALUES ($1, 'system', $2, $3, 'studio_sitter_shifts', $4, '/studio-sitters', 'low')`,
+          [
+            row.created_by,
+            `${req.portalUser!.name} added a handover note`,
+            storedContent.length > 200 ? storedContent.slice(0, 200) + '...' : storedContent,
+            shiftId,
+          ]
+        );
+      }
+    } catch (notifyErr) {
+      console.error('Portal sitter thread notify error (non-fatal):', notifyErr);
+    }
+
+    const files = await Promise.all(fileBlobs.map(mapThreadFile));
+    res.json({
+      success: true,
+      message: {
+        id: inserted.rows[0].id,
+        content: storedContent,
+        created_at: inserted.rows[0].created_at,
+        author: req.portalUser!.name,
+        from_staff: false,
+        mine: true,
+        files,
+      },
+    });
+  } catch (error) {
+    console.error('Portal sitter thread post error:', error);
+    res.status(500).json({ error: 'Failed to post handover note' });
+  }
+});
+
+// ── Studio Sitter end-of-day lock-up report (Rehearsals — Phase E) ───
+//
+// GET  /api/portal/studio-sitter/shifts/:date/lockup → template + reference
+//        photos + DERIVED "continuing tomorrow?" + any prior submission
+// POST /api/portal/studio-sitter/shifts/:date/lockup → submit the report
+//        (closes the shift, posts the note into the handover thread, alerts
+//        staff). Access-gated the same way as the shift detail / thread.
+
+router.get('/studio-sitter/shifts/:date/lockup', async (req: PortalRequest, res: Response) => {
+  try {
+    const date = String(req.params.date);
+    if (!SITTER_DATE_RE.test(date)) { res.status(400).json({ error: 'Invalid date' }); return; }
+    const allowed = req.portalUser!.isStaffShared || await isSitterAssignedTo(req.portalUser!.id, date);
+    if (!allowed) { res.status(403).json({ error: 'Not rostered to this evening' }); return; }
+    const context = await getLockupContext(date);
+    res.json({ success: true, ...context });
+  } catch (error) {
+    console.error('Portal sitter lock-up context error:', error);
+    res.status(500).json({ error: 'Failed to load lock-up report' });
+  }
+});
+
+// Multipart: `payload` (JSON) + optional photos. Photo field names route the
+// file: `why_<itemId>` → that exception's "why?" photos; `item_<itemId>` → a
+// note_prompt item's always-on note photos; `notes_photo` → the final-notes
+// photos. Reuses the same 8MB image/PDF limits as the thread upload.
+const lockupUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 8 * 1024 * 1024, files: 20 },
+  fileFilter: (_req, file, cb) => {
+    if (file.mimetype.startsWith('image/') || file.mimetype === 'application/pdf') cb(null, true);
+    else cb(new Error('Only images and PDFs can be attached'));
+  },
+}).any();
+function lockupUploadMw(req: PortalRequest, res: Response, next: NextFunction) {
+  lockupUpload(req, res, (err: unknown) => {
+    if (err) {
+      const msg = err instanceof multer.MulterError ? err.message : (err instanceof Error ? err.message : 'Upload failed');
+      res.status(400).json({ error: msg }); return;
+    }
+    next();
+  });
+}
+
+/** Upload a multer file to R2 → the interaction-attachment blob shape. */
+async function uploadLockupPhoto(personId: string, f: Express.Multer.File) {
+  const ext = (f.originalname.match(/\.[a-z0-9]+$/i) || [''])[0].toLowerCase();
+  const key = `files/attachments/portal-${personId}/${crypto.randomUUID()}${ext}`;
+  await uploadToR2(key, f.buffer, f.mimetype);
+  return { r2_key: key, filename: f.originalname, content_type: f.mimetype, size_bytes: f.size };
+}
+
+router.post('/studio-sitter/shifts/:date/lockup', lockupUploadMw, async (req: PortalRequest, res: Response) => {
+  try {
+    const date = String(req.params.date);
+    if (!SITTER_DATE_RE.test(date)) { res.status(400).json({ error: 'Invalid date' }); return; }
+    const allowed = req.portalUser!.isStaffShared || await isSitterAssignedTo(req.portalUser!.id, date);
+    if (!allowed) { res.status(403).json({ error: 'Not rostered to this evening' }); return; }
+
+    let parsed: any = {};
+    try { parsed = req.body?.payload ? JSON.parse(String(req.body.payload)) : {}; }
+    catch { res.status(400).json({ error: 'Invalid payload' }); return; }
+
+    const answers: Record<string, string> = {};
+    if (parsed.answers && typeof parsed.answers === 'object') {
+      for (const [k, v] of Object.entries(parsed.answers)) answers[k] = String(v ?? '');
+    }
+    const exceptionNoteText: Record<string, string> = {};
+    if (parsed.exception_notes && typeof parsed.exception_notes === 'object') {
+      for (const [k, v] of Object.entries(parsed.exception_notes)) exceptionNoteText[k] = String(v ?? '');
+    }
+    const itemNoteText: Record<string, string> = {};
+    if (parsed.item_notes && typeof parsed.item_notes === 'object') {
+      for (const [k, v] of Object.entries(parsed.item_notes)) itemNoteText[k] = String(v ?? '');
+    }
+    const notesText = typeof parsed.notes === 'string' ? parsed.notes : '';
+
+    // Upload photos, routed by field name: `why_<id>` → exception photos,
+    // `item_<id>` → note_prompt item photos, `notes_photo` → final-notes photos.
+    const exceptionPhotos: Record<string, any[]> = {};
+    const itemPhotos: Record<string, any[]> = {};
+    const notesPhotos: any[] = [];
+    const files = (req.files as Express.Multer.File[] | undefined) || [];
+    if (files.length && isR2Configured()) {
+      for (const f of files) {
+        const blob = await uploadLockupPhoto(req.portalUser!.id, f);
+        if (f.fieldname === 'notes_photo') notesPhotos.push(blob);
+        else if (f.fieldname.startsWith('why_')) {
+          const id = f.fieldname.slice(4);
+          (exceptionPhotos[id] ||= []).push(blob);
+        } else if (f.fieldname.startsWith('item_')) {
+          const id = f.fieldname.slice(5);
+          (itemPhotos[id] ||= []).push(blob);
+        }
+      }
+    }
+
+    const exception_notes: Record<string, { text: string; photos: any[] }> = {};
+    const exIds = new Set([...Object.keys(exceptionNoteText), ...Object.keys(exceptionPhotos)]);
+    for (const id of exIds) exception_notes[id] = { text: exceptionNoteText[id] ?? '', photos: exceptionPhotos[id] ?? [] };
+
+    const item_notes: Record<string, { text: string; photos: any[] }> = {};
+    const itIds = new Set([...Object.keys(itemNoteText), ...Object.keys(itemPhotos)]);
+    for (const id of itIds) item_notes[id] = { text: itemNoteText[id] ?? '', photos: itemPhotos[id] ?? [] };
+
+    const result = await submitLockupReport(date, req.portalUser!.id, req.portalUser!.name, {
+      answers,
+      exception_notes,
+      item_notes,
+      notes: { text: notesText, photos: notesPhotos },
+      continuing_tomorrow: parsed.continuing_tomorrow === true || parsed.continuing_tomorrow === 'true',
+      allow_resubmit: parsed.allow_resubmit === true || parsed.allow_resubmit === 'true',
+    });
+    res.json({ success: true, ...result });
+  } catch (error) {
+    if (error instanceof LockupAlreadySubmittedError) {
+      res.status(409).json({ error: 'This shift has already been submitted.', already_submitted: true, submitted_at: error.submittedAt });
+      return;
+    }
+    const msg = error instanceof Error ? error.message : 'Failed to submit lock-up report';
+    if (msg === 'No shift for this evening') { res.status(404).json({ error: msg }); return; }
+    console.error('Portal sitter lock-up submit error:', error);
+    res.status(500).json({ error: 'Failed to submit lock-up report' });
+  }
+});
+
+// POST /api/portal/studio-sitter/shifts/:date/lost-property — log a found item
+// straight into the Holding module (multipart: description/found_location + photos).
+router.post('/studio-sitter/shifts/:date/lost-property', lockupUploadMw, async (req: PortalRequest, res: Response) => {
+  try {
+    const date = String(req.params.date);
+    if (!SITTER_DATE_RE.test(date)) { res.status(400).json({ error: 'Invalid date' }); return; }
+    const allowed = req.portalUser!.isStaffShared || await isSitterAssignedTo(req.portalUser!.id, date);
+    if (!allowed) { res.status(403).json({ error: 'Not rostered to this evening' }); return; }
+
+    const description = String(req.body?.description ?? '').trim();
+    if (!description) { res.status(400).json({ error: 'Please describe the item' }); return; }
+    const found_location = req.body?.found_location ? String(req.body.found_location).trim() : undefined;
+
+    const photos: any[] = [];
+    const files = (req.files as Express.Multer.File[] | undefined) || [];
+    if (files.length && isR2Configured()) {
+      for (const f of files) photos.push(await uploadLockupPhoto(req.portalUser!.id, f));
+    }
+
+    const id = await logShiftLostProperty(date, req.portalUser!.name, { description, found_location, photos });
+    res.json({ success: true, id });
+  } catch (error) {
+    console.error('Portal sitter lost-property error:', error);
+    res.status(500).json({ error: 'Failed to log lost property' });
+  }
+});
+
+// ── Resources (Staff Documents shared with freelancers) ──────────────
+//
+// GET /api/portal/resources      → approved, shareable staff documents
+// GET /api/portal/resources/:id  → markdown body for the in-portal reader
+//
+// Replaces the old Monday "Staff Training" board read. A staff document
+// surfaces here only when it is active + approved + flagged
+// shareable_with_freelancers (the flag is only settable for policy / training /
+// other categories — enforced on the OP staff side). File-backed docs carry a
+// short-lived presigned R2 url; markdown docs are read in-portal via the
+// detail endpoint.
+
+function fileTypeFromName(name: string | null): string | null {
+  if (!name) return null;
+  const ext = name.split('.').pop()?.toLowerCase();
+  return ext ? ext.toUpperCase() : null;
+}
+
+router.get('/resources', async (_req: PortalRequest, res: Response) => {
+  try {
+    const result = await query(
+      `SELECT d.id, d.title, d.category,
+              v.file_r2_key, v.file_name
+         FROM staff_documents d
+         JOIN staff_document_versions v
+           ON v.document_id = d.id AND v.is_current = true
+        WHERE d.is_active = true
+          AND d.approval_status = 'approved'
+          AND d.shareable_with_freelancers = true
+        ORDER BY d.category, d.title`,
+    );
+
+    const resources = await Promise.all(
+      result.rows.map(async (r: Record<string, any>) => {
+        const isFile = !!r.file_r2_key;
+        let url: string | null = null;
+        if (isFile) {
+          try {
+            url = await getPresignedDownloadUrl(r.file_r2_key, 3600);
+          } catch (err) {
+            console.error('[portal] resource presign failed', r.id, err);
+          }
+        }
+        return {
+          id: r.id,
+          title: r.title,
+          category: r.category,
+          kind: isFile ? 'file' : 'markdown',
+          fileName: r.file_name || null,
+          fileType: isFile ? fileTypeFromName(r.file_name) : null,
+          url,
+        };
+      }),
+    );
+
+    res.json({ resources });
+  } catch (error) {
+    console.error('Portal resources error:', error);
+    res.status(500).json({ error: 'Failed to load resources' });
+  }
+});
+
+router.get('/resources/:id', async (req: PortalRequest, res: Response) => {
+  try {
+    if (!isUuidLike(req.params.id)) { res.status(404).json({ error: 'Not found' }); return; }
+    const result = await query(
+      `SELECT d.id, d.title, d.category,
+              v.body, v.file_r2_key, v.file_name
+         FROM staff_documents d
+         JOIN staff_document_versions v
+           ON v.document_id = d.id AND v.is_current = true
+        WHERE d.id = $1
+          AND d.is_active = true
+          AND d.approval_status = 'approved'
+          AND d.shareable_with_freelancers = true`,
+      [req.params.id],
+    );
+    const doc = result.rows[0];
+    if (!doc) { res.status(404).json({ error: 'Not found' }); return; }
+
+    if (doc.file_r2_key) {
+      // File-backed: hand back a fresh presigned url, not a body.
+      let url: string | null = null;
+      try {
+        url = await getPresignedDownloadUrl(doc.file_r2_key, 3600);
+      } catch (err) {
+        console.error('[portal] resource presign failed', doc.id, err);
+      }
+      res.json({
+        resource: {
+          id: doc.id, title: doc.title, category: doc.category, kind: 'file',
+          fileName: doc.file_name || null, fileType: fileTypeFromName(doc.file_name), url,
+        },
+      });
+      return;
+    }
+
+    res.json({
+      resource: {
+        id: doc.id, title: doc.title, category: doc.category, kind: 'markdown',
+        body: doc.body || '',
+      },
+    });
+  } catch (error) {
+    console.error('Portal resource detail error:', error);
+    res.status(500).json({ error: 'Failed to load resource' });
   }
 });
 

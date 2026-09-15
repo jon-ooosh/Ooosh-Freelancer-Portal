@@ -104,7 +104,19 @@ export async function runCompletionChase(): Promise<{ scanned: number; sent: num
        AND q.job_date IS NOT NULL
        AND q.job_date >= NOW() - INTERVAL '3 days'
        AND q.job_date <= NOW()
-       AND COALESCE(q.completion_reminder_level, 0) < 3`
+       AND COALESCE(q.completion_reminder_level, 0) < 3
+       -- Operational-only gate (mirrors arranging-chaser): never chase
+       -- "please complete" for an enquiry / provisional / paused / lost /
+       -- cancelled job. A quote's own job_date can be stale (e.g. the hire
+       -- got pushed to next year but the quote row kept its old date), so the
+       -- underlying job's pipeline_status is the source of truth for whether
+       -- this hire is actually happening. Local D&C quotes (no linked job)
+       -- always pass through. NULL pipeline_status falls back to HH numeric.
+       AND (
+         j.id IS NULL
+         OR j.pipeline_status IN ('confirmed','prepping','prepped','dispatched','returned_incomplete','returned','completed')
+         OR (j.pipeline_status IS NULL AND j.status IN (2,3,4,5,6,7,8,11))
+       )`
   );
   const rows = candidates.rows as OverdueQuote[];
 

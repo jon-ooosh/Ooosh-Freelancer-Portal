@@ -11,6 +11,7 @@
  */
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { hasManagerRole } from '../lib/roles';
+import { ReceiptThumb, ReceiptPreview } from '../components/costs/CostReceipt';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
@@ -27,6 +28,7 @@ interface CostRow extends Cost {
   job_name?: string | null;
   vehicle_reg?: string | null;
   allocation_count?: number;
+  allocation_jobs?: Array<{ job_id: string | null; hh_job_number: number | null; job_name: string | null; amount: number }>;
   due_date?: string | null;
 }
 
@@ -107,7 +109,19 @@ const APPROVAL_COLOURS: Record<string, string> = {
 
 // Client-side column sort. null = server order (newest captured first).
 type SortKey = 'date' | 'due' | 'supplier' | 'description' | 'gross' | 'type' | 'status';
-type DueFilter = 'all' | 'overdue' | 'friday' | 'next_friday' | 'this_week' | 'next_7';
+type DueFilter = 'all' | 'unpaid' | 'overdue' | 'friday' | 'next_friday' | 'this_week' | 'next_7';
+// Period slices the list by COST date, and applies on every tab — a different
+// axis from the due-date pills, which are about when a bill needs paying and
+// only make sense on Bills to Pay. Keeping them separate stops "this month"
+// quietly meaning two things.
+type PeriodFilter = 'all' | 'this_month' | 'last_month' | 'ytd' | 'last_year';
+const PERIOD_LABELS: [PeriodFilter, string][] = [
+  ['all', 'All time'],
+  ['this_month', 'This month'],
+  ['last_month', 'Last month'],
+  ['ytd', 'Year to date'],
+  ['last_year', 'Last year'],
+];
 const SORT_VALUE: Record<SortKey, (c: { cost_date: string | null; due_date?: string | null; supplier_name: string | null; description: string | null; amount_gross: number | null; category: string | null; cost_type: string; approval_state: string | null; payment_status: string }) => string | number> = {
   date: (c) => c.cost_date || '',
   // Undated bills sort last under ascending (the common "what's due soonest" view).
@@ -129,6 +143,11 @@ export default function CostsPage() {
   const [view, setView] = useState<ViewMode>((searchParams.get('view') as ViewMode) || 'all');
   const missingReceipt = searchParams.get('missing_receipt') === '1';
   const mineOnly = searchParams.get('mine') === '1';
+  // Deep-link from a job's Money tab: `job` narrows the list to that job's costs
+  // (so the linked cost is guaranteed to be in the 200-row page), `cost` scrolls
+  // to and highlights the specific row.
+  const jobFilter = searchParams.get('job') || '';
+  const focusCostId = searchParams.get('cost') || '';
   const [rows, setRows] = useState<CostRow[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [loading, setLoading] = useState(true);
@@ -149,10 +168,35 @@ export default function CostsPage() {
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
   const [dueFilter, setDueFilter] = useState<DueFilter>('all');
   const [supplierFilter, setSupplierFilter] = useState('');
+  const [periodFilter, setPeriodFilter] = useState<PeriodFilter>('all');
+  // Bulk pay: the garage sends twenty invoices a month and gets one transfer.
+  // Selection lives on the payable view only — there is nothing to pay elsewhere.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [showBatchPay, setShowBatchPay] = useState(false);
 
   const sortedRows = useMemo(() => {
     let base = rows;
     if (supplierFilter) base = base.filter((c) => (c.supplier_name || '') === supplierFilter);
+    // Period — by cost date, on every tab. Bounds are computed in LOCAL time for
+    // the same reason the due filters are: toISOString() is UTC and shifts the
+    // day under BST, which would drop the 1st of a month out of its own month.
+    if (periodFilter !== 'all') {
+      const now = new Date();
+      const fmtD = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      const y = now.getFullYear(); const m = now.getMonth();
+      const range: Record<Exclude<PeriodFilter, 'all'>, [string, string]> = {
+        this_month: [fmtD(new Date(y, m, 1)), fmtD(new Date(y, m + 1, 0))],
+        last_month: [fmtD(new Date(y, m - 1, 1)), fmtD(new Date(y, m, 0))],
+        ytd:        [fmtD(new Date(y, 0, 1)), fmtD(now)],
+        last_year:  [fmtD(new Date(y - 1, 0, 1)), fmtD(new Date(y - 1, 11, 31))],
+      };
+      const [from, to] = range[periodFilter];
+      base = base.filter((c) => {
+        if (!c.cost_date) return false;   // undated can't be in a period
+        const d = c.cost_date.slice(0, 10);
+        return d >= from && d <= to;
+      });
+    }
     // Due-date filters only apply in the Bills to Pay view.
     if (view === 'payable' && dueFilter !== 'all') {
       const today = new Date(); today.setHours(0, 0, 0, 0);
@@ -167,9 +211,15 @@ export default function CostsPage() {
       const nextFriday = new Date(friday); nextFriday.setDate(friday.getDate() + 7);
       const next7 = new Date(today); next7.setDate(today.getDate() + 7);
       base = base.filter((c) => {
-        if (c.payment_status === 'paid' || !c.due_date) return false;
+        if (c.payment_status === 'paid') return false;
+        // Every other pill is a date window, so an undated bill can't be in one.
+        // "Unpaid" isn't a window, and an undated bill is still owed.
+        if (!c.due_date) return dueFilter === 'unpaid';
         const d = c.due_date.slice(0, 10);
         switch (dueFilter) {
+          // Everything still owed, whether or not it's past due — the "what do
+          // we actually owe right now" view, rather than a window.
+          case 'unpaid':      return true;
           case 'overdue':     return d < todayStr;
           case 'friday':      return d === fmt(friday);
           case 'next_friday': return d === fmt(nextFriday);
@@ -186,7 +236,26 @@ export default function CostsPage() {
       const cmp = typeof av === 'number' && typeof bv === 'number' ? av - bv : String(av).localeCompare(String(bv));
       return sortDir === 'asc' ? cmp : -cmp;
     });
-  }, [rows, sortKey, sortDir, view, dueFilter, supplierFilter]);
+  }, [rows, sortKey, sortDir, view, dueFilter, supplierFilter, periodFilter]);
+
+  // A selection the user can no longer see must not stay in the batch — paying
+  // a row you filtered away is exactly the kind of surprise this feature can't
+  // afford. Pruned rather than cleared, so narrowing the filter keeps the rest.
+  useEffect(() => {
+    setSelected((prev) => {
+      if (!prev.size) return prev;
+      const visible = new Set(sortedRows.map((c) => c.id));
+      const next = new Set([...prev].filter((id) => visible.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [sortedRows]);
+
+  // The list join already returns hh_job_number per row, so the "filtered to job"
+  // chip can name the job without a second fetch.
+  const jobHhNumber = useMemo(
+    () => (jobFilter ? rows.find((r) => r.job_id === jobFilter)?.hh_job_number ?? null : null),
+    [rows, jobFilter],
+  );
 
   const supplierOptions = useMemo(
     () => Array.from(new Set(rows.map((r) => r.supplier_name).filter((s): s is string => !!s))).sort((a, b) => a.localeCompare(b)),
@@ -214,6 +283,7 @@ export default function CostsPage() {
       if (searchDebounced) params.set('search', searchDebounced);
       if (missingReceipt) params.set('missing_receipt', '1');
       if (mineOnly) params.set('mine', '1');
+      if (jobFilter) params.set('job_id', jobFilter);
       if (view === 'recharge' && rechargeStatusFilter) params.set('recharge_status', rechargeStatusFilter);
       const res = await api.get<{ data: CostRow[]; stats: Stats }>(`/costs?${params.toString()}`);
       setRows(res.data);
@@ -223,9 +293,17 @@ export default function CostsPage() {
     } finally {
       if (!quiet) setLoading(false);
     }
-  }, [view, typeFilter, searchDebounced, missingReceipt, mineOnly, rechargeStatusFilter]);
+  }, [view, typeFilter, searchDebounced, missingReceipt, mineOnly, rechargeStatusFilter, jobFilter]);
 
   useEffect(() => { load(); }, [load]);
+
+  // Scroll the deep-linked cost into view and pulse it, once the row exists.
+  useEffect(() => {
+    if (!focusCostId || loading) return;
+    const el = document.getElementById(`cost-row-${focusCostId}`);
+    if (!el) return;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, [focusCostId, loading, rows]);
 
   // Deep-link from /quick "Upload receipt" → open the capture modal directly.
   useEffect(() => {
@@ -256,10 +334,57 @@ export default function CostsPage() {
   // Mark a bill paid: captures the value date (may be future) + the method the
   // money went out from. The backend records the payment against the Xero bill
   // on that method's mapped bank account.
-  async function payCost(id: string, paidDate: string, paidMethod: string) {
+  // Only ever offer to batch-pay rows that CAN be: an approved, unpaid bill that
+  // reached Xero. The server re-checks and refuses the whole batch anyway, but
+  // greying out the rest beats explaining a refusal after the fact.
+  const batchPayable = (c: CostRow) =>
+    c.payment_status !== 'paid'
+    && (c.payment_method === 'not_yet_paid' || c.payment_method === 'reimburse_me')
+    && c.approval_state === 'approved';
+  const selectableRows = view === 'payable' && isAdmin ? sortedRows.filter(batchPayable) : [];
+  const selectedRows = selectableRows.filter((c) => selected.has(c.id));
+  const selectedTotal = selectedRows.reduce((t, c) => t + (Number(c.amount_gross) || 0), 0);
+  const selectedSuppliers = new Set(selectedRows.map((c) => (c.supplier_name || '').trim().toLowerCase()));
+
+  function toggleRow(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+
+  async function payBatch(paidDate: string, paidMethod: string, reference: string) {
+    setActionBusy('batch-pay');
+    try {
+      const r = await api.post<{ data: { paid: number; total: number; batchPaymentId?: string } }>(
+        '/costs/pay-batch',
+        { cost_ids: [...selected], paid_method: paidMethod, paid_date: paidDate, reference: reference || null },
+      );
+      setShowBatchPay(false);
+      setSelected(new Set());
+      await load(true);
+      alert(`Paid ${r.data.paid} bill${r.data.paid === 1 ? '' : 's'} — £${r.data.total.toFixed(2)} as a single Xero batch payment.`);
+    } catch (err) {
+      // Every refusal names what's wrong and confirms nothing was paid.
+      alert(err instanceof Error ? err.message : 'Batch payment failed');
+    } finally {
+      setActionBusy(null);
+    }
+  }
+
+  async function payCost(id: string, paidDate: string, paidMethod: string, remittanceEmail?: string) {
     setActionBusy(id + 'pay');
     try {
       await api.post(`/costs/${id}/pay`, { paid_date: paidDate, paid_method: paidMethod });
+      // Remittance is decoupled — a failed email never unwinds the payment.
+      if (remittanceEmail) {
+        try {
+          await api.post(`/costs/${id}/send-remittance`, { email: remittanceEmail });
+        } catch (remErr) {
+          alert(`Marked paid — but the remittance email to ${remittanceEmail} failed to send: ${remErr instanceof Error ? remErr.message : 'unknown error'}. You can resend it later.`);
+        }
+      }
       setPayTarget(null);
       await load(true);
     } catch (err) {
@@ -323,11 +448,13 @@ export default function CostsPage() {
     }
   }
 
-  const tabs: { key: ViewMode; label: string; badge?: number }[] = [
-    { key: 'all', label: 'All costs' },
-    { key: 'payable', label: 'Bills to Pay', badge: stats?.payable },
-    { key: 'recharge', label: 'Recharges', badge: stats?.recharge_pending },
-    { key: 'reconcile', label: 'Reconcile', badge: stats?.reconcile_pending },
+  const tabs: { key: ViewMode; label: string; badge?: number; sub?: string; color: string }[] = [
+    { key: 'payable', label: 'Bills to pay', badge: stats?.payable, sub: gbp(stats?.payable_total), color: 'amber' },
+    { key: 'recharge', label: 'Recharges pending', badge: stats?.recharge_pending, color: 'blue' },
+    { key: 'reconcile', label: 'To reconcile', badge: stats?.reconcile_pending, color: 'purple' },
+    // No badge: "all" has no headline count of its own, so it shows how many
+    // rows the current filters leave — which is what "Shown" used to say.
+    { key: 'all', label: 'All costs', color: 'gray' },
   ];
 
   return (
@@ -340,28 +467,27 @@ export default function CostsPage() {
         </button>
       </div>
 
-      {/* Stat cards */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
-        <StatCard label="Bills to pay" value={String(stats?.payable ?? 0)} sub={gbp(stats?.payable_total)} color="amber" />
-        <StatCard label="Recharges pending" value={String(stats?.recharge_pending ?? 0)} color="blue" />
-        <StatCard label="To reconcile" value={String(stats?.reconcile_pending ?? 0)} color="purple" />
-        <StatCard label="Shown" value={String(rows.length)} color="gray" />
-      </div>
-
-      {/* Tabs */}
-      <div className="flex flex-wrap gap-2 border-b border-gray-200 mb-4">
+      {/* Stat cards — these are the view switcher; there is no separate tab row. */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
         {tabs.map((t) => (
-          <button key={t.key} onClick={() => setView(t.key)}
-            className={`px-3 py-2 text-sm font-medium border-b-2 -mb-px ${
-              view === t.key ? 'border-purple-600 text-purple-700' : 'border-transparent text-gray-500 hover:text-gray-700'
-            }`}>
-            {t.label}
-            {t.badge ? <span className="ml-1.5 px-1.5 py-0.5 text-xs bg-gray-200 text-gray-700 rounded-full">{t.badge}</span> : null}
-          </button>
+          <StatCard key={t.key} label={t.label} value={String(t.badge ?? sortedRows.length)}
+            sub={t.sub} color={t.color} active={view === t.key} onClick={() => setView(t.key)} />
         ))}
       </div>
 
       {/* Filters */}
+      {jobFilter && (
+        <div className="flex items-center justify-between gap-2 mb-4 bg-purple-50 border border-purple-200 text-purple-800 rounded-md px-3 py-2 text-sm">
+          <span>
+            Showing costs captured against one job
+            {jobHhNumber ? <> (<Link to={`/jobs/${jobFilter}`} className="underline">#{jobHhNumber}</Link>)</> : null}
+            .
+          </span>
+          <button
+            onClick={() => { searchParams.delete('job'); searchParams.delete('cost'); setSearchParams(searchParams, { replace: true }); }}
+            className="text-purple-700 hover:underline whitespace-nowrap">Show all costs</button>
+        </div>
+      )}
       {missingReceipt && (
         <div className="flex items-center justify-between gap-2 mb-4 bg-amber-50 border border-amber-200 text-amber-800 rounded-md px-3 py-2 text-sm">
           <span>Showing company-card costs with no receipt attached{mineOnly ? ' (yours)' : ''}. Open each one to attach its receipt.</span>
@@ -372,6 +498,11 @@ export default function CostsPage() {
       <div className="flex flex-wrap gap-2 mb-4">
         <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search supplier / description"
           className="border border-gray-300 rounded-md px-3 py-1.5 text-sm flex-1 min-w-[200px]" />
+        {/* Period slices by COST date and applies on every tab — see PeriodFilter. */}
+        <select value={periodFilter} onChange={(e) => setPeriodFilter(e.target.value as PeriodFilter)}
+          className="border border-gray-300 rounded-md px-3 py-1.5 text-sm">
+          {PERIOD_LABELS.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+        </select>
         <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}
           className="border border-gray-300 rounded-md px-3 py-1.5 text-sm">
           <option value="">All types</option>
@@ -395,6 +526,7 @@ export default function CostsPage() {
           <span className="text-xs text-gray-400 mr-1">Due:</span>
           {([
             ['all', 'All'],
+            ['unpaid', 'Outstanding'],
             ['overdue', 'Overdue'],
             ['friday', 'This Friday'],
             ['next_friday', 'Next Friday'],
@@ -443,27 +575,44 @@ export default function CostsPage() {
           <table className="min-w-full text-sm">
             <thead className="bg-gray-50 text-gray-600">
               <tr>
+                {selectableRows.length > 0 && (
+                  <th className="px-2 py-2 w-8">
+                    <input type="checkbox" aria-label="Select all payable bills"
+                      checked={selectedRows.length > 0 && selectedRows.length === selectableRows.length}
+                      ref={(el) => { if (el) el.indeterminate = selectedRows.length > 0 && selectedRows.length < selectableRows.length; }}
+                      onChange={(e) => setSelected(e.target.checked ? new Set(selectableRows.map((c) => c.id)) : new Set())} />
+                  </th>
+                )}
                 <SortableTh label="Date" k="date" sortKey={sortKey} sortDir={sortDir} onSort={clickSort} />
                 {view === 'payable' && <SortableTh label="Due" k="due" sortKey={sortKey} sortDir={sortDir} onSort={clickSort} />}
                 <SortableTh label="Supplier" k="supplier" sortKey={sortKey} sortDir={sortDir} onSort={clickSort} />
                 <SortableTh label="Description" k="description" sortKey={sortKey} sortDir={sortDir} onSort={clickSort} />
                 <SortableTh label="Gross" k="gross" sortKey={sortKey} sortDir={sortDir} onSort={clickSort} align="right" />
                 <SortableTh label="Type" k="type" sortKey={sortKey} sortDir={sortDir} onSort={clickSort} />
-                <th className="px-2.5 py-2 text-left font-medium">Linked</th>
-                {view === 'all' && <th className="px-2.5 py-2 text-left font-medium">Uploaded by</th>}
+                <th className="px-2 py-2 text-left font-medium">Linked</th>
                 <SortableTh label="Status" k="status" sortKey={sortKey} sortDir={sortDir} onSort={clickSort} />
-                <th className="px-2.5 py-2 text-left font-medium">Xero</th>
-                <th className="px-2.5 py-2 text-right font-medium">Actions</th>
+                <th className="px-2 py-2 text-right font-medium">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {sortedRows.map((c) => (
-                <tr key={c.id} className="hover:bg-gray-50">
-                  <td className="px-2.5 py-2 whitespace-nowrap text-gray-700" title={fmtDate(c.cost_date)}>{fmtDayMonth(c.cost_date)}</td>
+                <tr key={c.id} id={`cost-row-${c.id}`}
+                  className={focusCostId === c.id ? 'bg-purple-50 ring-2 ring-inset ring-purple-300' : 'hover:bg-gray-50'}>
+                  {selectableRows.length > 0 && (
+                    <td className="px-2 py-2">
+                      {batchPayable(c) ? (
+                        <input type="checkbox" checked={selected.has(c.id)} onChange={() => toggleRow(c.id)}
+                          aria-label={`Select ${c.supplier_name || 'cost'} for batch payment`} />
+                      ) : (
+                        <span className="block w-3" title="Only an approved, unpaid bill that has reached Xero can be batch-paid" />
+                      )}
+                    </td>
+                  )}
+                  <td className="px-2 py-2 whitespace-nowrap text-gray-700" title={fmtDate(c.cost_date)}>{fmtDayMonth(c.cost_date)}</td>
                   {view === 'payable' && (() => {
                     const due = dueInfo(c);
                     return (
-                      <td className="px-2.5 py-2 whitespace-nowrap">
+                      <td className="px-2 py-2 whitespace-nowrap">
                         <button onClick={() => setTermsTarget(c)}
                           title={due ? `Due ${due.fullLabel} · terms: ${termsLabel(c.terms)} · click to set this supplier's terms` : 'Set this supplier’s payment terms'}
                           className="flex items-center gap-1.5 text-gray-700 hover:text-purple-700">
@@ -477,30 +626,62 @@ export default function CostsPage() {
                       </td>
                     );
                   })()}
-                  <td className="px-2.5 py-2 text-gray-900">
+                  <td className="px-2 py-2 text-gray-900">
                     <div className="flex items-center gap-2">
                       {c.receipt_r2_key && <ReceiptThumb cost={c} onOpen={() => setPreview(c)} />}
                       <div className="min-w-0">
-                        <div className="truncate max-w-[160px]">{c.supplier_name || '—'}</div>
-                        {c.invoice_number && <div className="text-xs text-gray-400 truncate max-w-[160px]">#{c.invoice_number}</div>}
+                        <div className="truncate max-w-[150px]">{c.supplier_name || '—'}</div>
+                        {c.invoice_number && <div className="text-xs text-gray-400 truncate max-w-[150px]">#{c.invoice_number}</div>}
+                        {/* "Uploaded by" used to be its own column on the All costs tab,
+                            which pushed the row actions off-screen. It rides here instead;
+                            the other tabs keep it as the Type tooltip, as before. */}
+                        {view === 'all' && c.uploaded_by_name && (
+                          <div className="text-xs text-gray-400 truncate max-w-[150px]" title={`Uploaded by ${c.uploaded_by_name}`}>
+                            {c.uploaded_by_name}
+                          </div>
+                        )}
                       </div>
                     </div>
                   </td>
-                  <td className="px-2.5 py-2 text-gray-600 max-w-[180px] truncate" title={c.description || undefined}>{c.description || '—'}</td>
-                  <td className="px-2.5 py-2 text-right font-medium text-gray-900">{gbp(c.amount_gross)}</td>
-                  <td className="px-2.5 py-2 text-gray-600 max-w-[110px] truncate whitespace-nowrap" title={`${c.category || c.cost_type.replace('_', ' ')}${view !== 'all' && c.uploaded_by_name ? ` · uploaded by ${c.uploaded_by_name}` : ''}`}>
+                  <td className="px-2 py-2 text-gray-600 max-w-[180px] truncate" title={c.description || undefined}>{c.description || '—'}</td>
+                  <td className="px-2 py-2 text-right font-medium text-gray-900">{gbp(c.amount_gross)}</td>
+                  <td className="px-2 py-2 text-gray-600 max-w-[110px] truncate whitespace-nowrap" title={`${c.category || c.cost_type.replace('_', ' ')}${view !== 'all' && c.uploaded_by_name ? ` · uploaded by ${c.uploaded_by_name}` : ''}`}>
                     {c.category || c.cost_type.replace('_', ' ')}
                   </td>
-                  <td className="px-2.5 py-2 text-gray-600 whitespace-nowrap">
+                  <td className="px-2 py-2 text-gray-600 whitespace-nowrap">
                     {c.hh_job_number && c.job_id ? (
                       <Link to={`/jobs/${c.job_id}`} title={c.job_name || undefined} className="text-purple-700 hover:underline">#{c.hh_job_number}</Link>
                     ) : c.hh_job_number ? <span className="text-purple-700">#{c.hh_job_number}</span>
                       : c.vehicle_reg && c.vehicle_id ? (
                         <Link to={`/vehicles/fleet/${c.vehicle_id}`} className="text-purple-700 hover:underline">{c.vehicle_reg}</Link>
                       ) : c.vehicle_reg ? <span className="text-purple-700">{c.vehicle_reg}</span> : '—'}
+                    {c.allocation_jobs && c.allocation_jobs.length > 0 && (
+                      /* One job per line, not a single inline run. Inline, a three-way
+                         split was ~250px wide and set the whole column's width, which is
+                         what pushed the row actions off the right edge. Stacked, the
+                         column is only ever as wide as one entry. Capped at three so a
+                         many-way split can't make the row absurdly tall; the tooltip
+                         always lists the lot. */
+                      <div className="text-[11px] text-gray-500 mt-0.5"
+                        title={`Split across ${c.allocation_jobs.length} job(s), OP cost tracking only: ${c.allocation_jobs
+                          .map((a) => `${a.hh_job_number ? '#' + a.hh_job_number : a.job_name || 'job'} £${Number(a.amount).toFixed(2)}`)
+                          .join(', ')}`}>
+                        {c.allocation_jobs.slice(0, 3).map((a, i) => (
+                          <div key={a.job_id || i} className={i === 0 ? '' : 'pl-3'}>
+                            {i === 0 ? '⑂ ' : ''}
+                            {a.job_id && a.hh_job_number
+                              ? <Link to={`/jobs/${a.job_id}`} className="text-purple-600 hover:underline">#{a.hh_job_number}</Link>
+                              : a.hh_job_number ? <span className="text-purple-600">#{a.hh_job_number}</span> : '(job)'}
+                            <span className="text-gray-400"> £{Number(a.amount).toFixed(0)}</span>
+                          </div>
+                        ))}
+                        {c.allocation_jobs.length > 3 && (
+                          <div className="pl-3 text-gray-400">+{c.allocation_jobs.length - 3} more</div>
+                        )}
+                      </div>
+                    )}
                   </td>
-                  {view === 'all' && <td className="px-2.5 py-2 text-gray-600 whitespace-nowrap">{c.uploaded_by_name || '—'}</td>}
-                  <td className="px-2.5 py-2">
+                  <td className="px-2 py-2">
                     {c.approval_state ? (
                       <span className={`px-2 py-0.5 text-xs rounded-full ${APPROVAL_COLOURS[c.approval_state] || 'bg-gray-100 text-gray-700'}`}>
                         {c.approval_state}
@@ -511,12 +692,18 @@ export default function CostsPage() {
                     {c.recharge_mode !== 'none' && (
                       <span className="ml-1"><RechargeStatusPill status={c.recharge_status} mode={c.recharge_mode} /></span>
                     )}
+                    {c.remittance_sent_at && (
+                      <span className="ml-1 text-xs text-gray-400" title={`Remittance advice sent${c.remittance_email ? ` to ${c.remittance_email}` : ''}`}>✉︎</span>
+                    )}
+                    {/* Xero state rides in the same cell as the OP status — both answer
+                        "where has this cost got to", and a separate column pushed the
+                        row actions off-screen. */}
+                    <span className="ml-1 inline-block align-middle">
+                      <XeroCell cost={c} busy={actionBusy === c.id + 'sync'} onRetry={() => retrySync(c)}
+                        resyncBusy={actionBusy === c.id + 'resync'} onResync={() => resyncStale(c)} />
+                    </span>
                   </td>
-                  <td className="px-2.5 py-2 whitespace-nowrap">
-                    <XeroCell cost={c} busy={actionBusy === c.id + 'sync'} onRetry={() => retrySync(c)}
-                      resyncBusy={actionBusy === c.id + 'resync'} onResync={() => resyncStale(c)} />
-                  </td>
-                  <td className="px-2.5 py-2 text-right whitespace-nowrap">
+                  <td className="px-2 py-2 text-right whitespace-nowrap">
                     <div className="flex items-center justify-end gap-2">
                       {view === 'payable' && (
                         <PayableActions cost={c} isManager={isManager} isAdmin={isAdmin} busy={actionBusy} onAction={runAction} onPay={() => setPayTarget(c)} />
@@ -571,12 +758,48 @@ export default function CostsPage() {
           onSaved={() => { setAllocating(null); load(true); }}
         />
       )}
+      {/* Batch-pay bar. Sticks to the bottom so the total stays visible while
+          scrolling a long payment run. */}
+      {selectedRows.length > 0 && (
+        <div className="sticky bottom-0 z-20 mt-3 flex flex-wrap items-center justify-between gap-3
+                        border border-purple-200 bg-purple-50 rounded-lg px-4 py-3 shadow-lg">
+          <div className="text-sm text-purple-900">
+            <strong>{selectedRows.length}</strong> bill{selectedRows.length === 1 ? '' : 's'} selected
+            {' · '}<strong>{gbp(selectedTotal)}</strong>
+            {selectedSuppliers.size > 1 && (
+              <span className="block text-xs text-purple-700">
+                Across {selectedSuppliers.size} suppliers — this pays them all as ONE bank line.
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <button onClick={() => setSelected(new Set())}
+              className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-900">Clear</button>
+            <button onClick={() => setShowBatchPay(true)}
+              className="px-4 py-2 text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-md">
+              Mark {selectedRows.length} paid…
+            </button>
+          </div>
+        </div>
+      )}
+
+      {showBatchPay && (
+        <BatchPayModal
+          count={selectedRows.length}
+          total={selectedTotal}
+          supplierCount={selectedSuppliers.size}
+          busy={actionBusy === 'batch-pay'}
+          onClose={() => setShowBatchPay(false)}
+          onSubmit={payBatch}
+        />
+      )}
+
       {payTarget && (
         <PayModal
           cost={payTarget}
           busy={actionBusy === payTarget.id + 'pay'}
           onClose={() => setPayTarget(null)}
-          onSubmit={(date, method) => payCost(payTarget.id, date, method)}
+          onSubmit={(date, method, remittanceEmail) => payCost(payTarget.id, date, method, remittanceEmail)}
         />
       )}
       {resolving && (
@@ -706,80 +929,6 @@ function SupplierTermsModal({ cost, onClose, onSaved }: {
   );
 }
 
-// Small receipt thumbnail in the Supplier cell — authenticated blob fetch (the
-// JWT isn't sent on a plain <img src> to /files/download). Image → thumbnail,
-// PDF/other → 📎 icon. Click opens the lightbox.
-function ReceiptThumb({ cost, onOpen }: { cost: CostRow; onOpen: () => void }) {
-  const [url, setUrl] = useState<string | null>(null);
-  const [isImage, setIsImage] = useState(false);
-  useEffect(() => {
-    if (!cost.receipt_r2_key) return;
-    let objUrl = ''; let cancelled = false;
-    api.blob(`/files/download?key=${encodeURIComponent(cost.receipt_r2_key)}`)
-      .then(({ blob, contentType }) => {
-        if (cancelled) return;
-        if (contentType.startsWith('image/')) {
-          setIsImage(true);
-          objUrl = URL.createObjectURL(blob);
-          setUrl(objUrl);
-        }
-      })
-      .catch(() => {});
-    return () => { cancelled = true; if (objUrl) URL.revokeObjectURL(objUrl); };
-  }, [cost.receipt_r2_key]);
-  return (
-    <button onClick={onOpen} title="View receipt"
-      className="shrink-0 w-8 h-8 rounded border border-gray-200 overflow-hidden bg-gray-50 flex items-center justify-center hover:border-purple-400">
-      {isImage && url ? <img src={url} alt="receipt" className="w-full h-full object-cover" /> : <span className="text-sm">📎</span>}
-    </button>
-  );
-}
-
-// Lightbox — fetches the receipt blob and shows it large (image inline, PDF in
-// an iframe). Backdrop / ✕ / Escape to close.
-function ReceiptPreview({ cost, onClose }: { cost: CostRow; onClose: () => void }) {
-  const [url, setUrl] = useState<string | null>(null);
-  const [type, setType] = useState('');
-  const [err, setErr] = useState('');
-  useEffect(() => {
-    if (!cost.receipt_r2_key) { setErr('No receipt on file'); return; }
-    let objUrl = ''; let cancelled = false;
-    api.blob(`/files/download?key=${encodeURIComponent(cost.receipt_r2_key)}`)
-      .then(({ blob, contentType }) => {
-        if (cancelled) return;
-        setType(contentType);
-        objUrl = URL.createObjectURL(blob);
-        setUrl(objUrl);
-      })
-      .catch(() => { if (!cancelled) setErr('Failed to load receipt'); });
-    return () => { cancelled = true; if (objUrl) URL.revokeObjectURL(objUrl); };
-  }, [cost.receipt_r2_key]);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
-  return (
-    <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4" onClick={onClose}>
-      <div className="bg-white rounded-lg shadow-xl max-w-3xl w-full max-h-[90vh] overflow-hidden flex flex-col" onClick={(e) => e.stopPropagation()}>
-        <div className="px-4 py-2.5 border-b border-gray-200 flex items-center justify-between">
-          <span className="text-sm font-medium text-gray-700 truncate">{cost.receipt_filename || cost.supplier_name || 'Receipt'}</span>
-          <div className="flex items-center gap-3">
-            {url && <a href={url} target="_blank" rel="noreferrer" className="text-xs text-purple-600 hover:underline">Open full</a>}
-            <button onClick={onClose} className="text-gray-400 hover:text-gray-700">✕</button>
-          </div>
-        </div>
-        <div className="flex-1 overflow-auto bg-gray-100 flex items-center justify-center min-h-[300px]">
-          {err ? <p className="text-sm text-gray-500 p-6">{err}</p>
-            : !url ? <p className="text-sm text-gray-400 p-6">Loading…</p>
-            : type.includes('pdf') ? <iframe src={url} title="receipt" className="w-full h-[75vh]" />
-            : <img src={url} alt="receipt" className="max-w-full max-h-[80vh] object-contain" />}
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // Bank/card instruments money can go out from — drives which Xero bank account
 // a bill payment posts to. Keep in step with the paid-now methods in
 // CostCaptureModal + backend SPEND_MONEY_METHODS.
@@ -793,15 +942,132 @@ const PAID_NOW_METHODS = [
   { value: 'paypal', label: 'PayPal' },
 ];
 
+// One payment, many bills. Deliberately a SEPARATE component from PayModal:
+// that one carries remittance advice, a person picker and a payee, all of which
+// are per-payee concepts that don't survive a batch spanning suppliers. Bolting
+// a "many" mode onto it would make both harder to read.
+function BatchPayModal({ count, total, supplierCount, busy, onClose, onSubmit }: {
+  count: number;
+  total: number;
+  supplierCount: number;
+  busy: boolean;
+  onClose: () => void;
+  onSubmit: (paidDate: string, paidMethod: string, reference: string) => void;
+}) {
+  const [paidDate, setPaidDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [paidMethod, setPaidMethod] = useState('lloyds_transfer');
+  const [reference, setReference] = useState('');
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div className="bg-white rounded-lg shadow-xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+        <div className="px-5 py-4 border-b border-gray-200">
+          <h3 className="text-lg font-semibold text-gray-900">Pay {count} bill{count === 1 ? '' : 's'}</h3>
+          <p className="text-sm text-gray-500 mt-0.5">
+            One Xero batch payment of <strong className="text-gray-900">{gbp(total)}</strong>
+            {supplierCount > 1 ? ` across ${supplierCount} suppliers` : ''}.
+          </p>
+        </div>
+        <div className="px-5 py-4 space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Payment date</label>
+            <input type="date" value={paidDate} onChange={(e) => setPaidDate(e.target.value)}
+              className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-purple-500" />
+            <p className="text-xs text-gray-400 mt-1">A future date schedules the payment in Xero for that day.</p>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Paid from</label>
+            <select value={paidMethod} onChange={(e) => setPaidMethod(e.target.value)}
+              className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-purple-500">
+              {PAID_NOW_METHODS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Reference <span className="text-gray-400 font-normal">(optional)</span>
+            </label>
+            <input value={reference} onChange={(e) => setReference(e.target.value)}
+              placeholder="e.g. Garage — September"
+              className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-purple-500" />
+            <p className="text-xs text-gray-400 mt-1">Shown on the batch in Xero, to help match it to the bank line.</p>
+          </div>
+          <p className="text-xs text-gray-500 border-t border-gray-100 pt-3">
+            Each bill is paid in full. If any one of them can't be paid, nothing is —
+            you'll be told which and why.
+          </p>
+        </div>
+        <div className="px-5 py-3 border-t border-gray-200 flex justify-end gap-2">
+          <button onClick={onClose} className="px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded-md">Cancel</button>
+          <button disabled={busy} onClick={() => onSubmit(paidDate, paidMethod, reference)}
+            className="px-4 py-2 text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-md disabled:opacity-50">
+            {busy ? 'Paying…' : `Pay ${gbp(total)}`}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function PayModal({ cost, busy, onClose, onSubmit }: {
   cost: CostRow;
   busy: boolean;
   onClose: () => void;
-  onSubmit: (paidDate: string, paidMethod: string) => void;
+  onSubmit: (paidDate: string, paidMethod: string, remittanceEmail?: string) => void;
 }) {
   const [paidDate, setPaidDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [paidMethod, setPaidMethod] = useState('lloyds_transfer');
   const isReimburse = cost.payment_method === 'reimburse_me';
+  const payeeName = isReimburse ? (cost.uploaded_by_name || 'staff') : (cost.supplier_name || 'supplier');
+
+  // Remittance advice — optional courtesy email to the payee. Pre-fill the
+  // address from the resolved contact; staff confirm before it goes (never
+  // send blind). Default unticked — sending external mail is a deliberate act.
+  const [sendRemittance, setSendRemittance] = useState(false);
+  const [remittanceEmail, setRemittanceEmail] = useState('');
+  const [contactLoaded, setContactLoaded] = useState(false);
+  const [contactSource, setContactSource] = useState<string | null>(null);
+  // Person picker — search OP for the payee (freelancers are always in here).
+  const [pickerQuery, setPickerQuery] = useState('');
+  const [pickerResults, setPickerResults] = useState<Array<{ id: string; first_name: string; last_name: string; email: string | null }>>([]);
+  const [pickerOpen, setPickerOpen] = useState(false);
+
+  useEffect(() => {
+    const q = pickerQuery.trim();
+    if (q.length < 2) { setPickerResults([]); return; }
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      try {
+        const res = await api.get<{ data: Array<{ id: string; first_name: string; last_name: string; email: string | null }> }>(
+          `/people?search=${encodeURIComponent(q)}&limit=8`,
+        );
+        if (!cancelled) setPickerResults(res.data || []);
+      } catch {
+        if (!cancelled) setPickerResults([]);
+      }
+    }, 300);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [pickerQuery]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await api.get<{ data: { email: string | null; source: string } }>(`/costs/${cost.id}/remittance-contact`);
+        if (cancelled) return;
+        const c = res.data;
+        if (c?.email) setRemittanceEmail(c.email);
+        setContactSource(c?.source ?? null);
+      } catch {
+        /* pre-fill is best-effort — staff can still type an address */
+      } finally {
+        if (!cancelled) setContactLoaded(true);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [cost.id]);
+
+  const isFutureDate = paidDate > new Date().toISOString().slice(0, 10);
+  const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(remittanceEmail.trim());
   // Due date from the supplier's resolved terms (server-computed), falling back
   // to flat invoice + 30 for an older API response.
   const dueDate = (() => {
@@ -845,12 +1111,87 @@ function PayModal({ cost, busy, onClose, onSubmit }: {
             </select>
             <p className="text-xs text-gray-400 mt-1">Records the payment against the bill on this account's Xero feed.</p>
           </div>
+
+          {/* Optional remittance advice to the payee. */}
+          <div className="border-t border-gray-100 pt-3">
+            <label className="flex items-start gap-2 cursor-pointer">
+              <input type="checkbox" checked={sendRemittance} onChange={(e) => setSendRemittance(e.target.checked)}
+                className="mt-0.5 rounded border-gray-300 text-purple-600 focus:ring-purple-500" />
+              <span className="text-sm text-gray-700">
+                Also send <strong>{payeeName}</strong> remittance advice
+                <span className="block text-xs text-gray-400">
+                  {isFutureDate
+                    ? 'A short email: their invoice is scheduled to be paid on this date.'
+                    : 'A short email confirming their invoice has been paid.'}
+                </span>
+              </span>
+            </label>
+            {sendRemittance && (
+              <div className="mt-2 pl-6">
+                <input type="email" value={remittanceEmail}
+                  onChange={(e) => { setRemittanceEmail(e.target.value); setContactSource('manual'); }}
+                  placeholder={contactLoaded ? 'name@example.com' : 'Looking up contact…'}
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-purple-500" />
+                {contactLoaded && !remittanceEmail && (
+                  <p className="text-xs text-amber-600 mt-1">No email found for this payee — search OP below or type one.</p>
+                )}
+                {remittanceEmail && !emailValid && (
+                  <p className="text-xs text-amber-600 mt-1">That doesn't look like a valid email address.</p>
+                )}
+                {remittanceEmail && emailValid && contactSource === 'reimbursement_staff' && (
+                  <p className="text-xs text-gray-400 mt-1">From their staff profile.</p>
+                )}
+                {remittanceEmail && emailValid && (contactSource === 'freelancer_assignment' || contactSource === 'person_match') && (
+                  <p className="text-xs text-gray-400 mt-1">From their OP contact record.</p>
+                )}
+                {remittanceEmail && emailValid && contactSource === 'remembered' && (
+                  <p className="text-xs text-gray-400 mt-1">Remembered from a previous remittance.</p>
+                )}
+                {remittanceEmail && emailValid && contactSource === 'supplier_org' && (
+                  <p className="text-xs text-gray-400 mt-1">From the supplier's record.</p>
+                )}
+
+                {/* Person picker — search OP for the payee (freelancers are always here). */}
+                <div className="relative mt-2">
+                  <input type="text" value={pickerQuery}
+                    onChange={(e) => { setPickerQuery(e.target.value); setPickerOpen(true); }}
+                    onFocus={() => setPickerOpen(true)}
+                    placeholder="🔍 Search OP for the payee (name or email)"
+                    className="w-full border border-gray-200 rounded-md px-3 py-1.5 text-sm focus:ring-2 focus:ring-purple-500" />
+                  {pickerOpen && pickerResults.length > 0 && (
+                    <div className="absolute z-10 mt-1 w-full bg-white border border-gray-200 rounded-md shadow-lg max-h-48 overflow-auto">
+                      {pickerResults.map((p) => {
+                        const name = `${p.first_name} ${p.last_name}`.trim();
+                        return (
+                          <button key={p.id} type="button" disabled={!p.email}
+                            onClick={() => {
+                              if (!p.email) return;
+                              setRemittanceEmail(p.email);
+                              setContactSource('person_match');
+                              setPickerQuery('');
+                              setPickerResults([]);
+                              setPickerOpen(false);
+                            }}
+                            className="w-full text-left px-3 py-1.5 text-sm hover:bg-purple-50 disabled:opacity-50 disabled:cursor-not-allowed">
+                            <span className="text-gray-800">{name}</span>
+                            <span className="block text-xs text-gray-400">{p.email || 'no email on file'}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
         <div className="flex justify-end gap-2 px-6 py-4 border-t border-gray-200">
           <button onClick={onClose} className="px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded-md">Cancel</button>
-          <button onClick={() => onSubmit(paidDate, paidMethod)} disabled={busy}
+          <button
+            onClick={() => onSubmit(paidDate, paidMethod, sendRemittance && emailValid ? remittanceEmail.trim() : undefined)}
+            disabled={busy || (sendRemittance && !emailValid)}
             className="px-4 py-2 text-sm text-white bg-purple-600 hover:bg-purple-700 rounded-md disabled:opacity-50">
-            {busy ? 'Saving…' : 'Mark paid'}
+            {busy ? 'Saving…' : sendRemittance && emailValid ? 'Mark paid & send' : 'Mark paid'}
           </button>
         </div>
       </div>
@@ -886,7 +1227,7 @@ function SortableTh({ label, k, sortKey, sortDir, onSort, align }: {
 }) {
   return (
     <th onClick={() => onSort(k)}
-      className={`px-2.5 py-2 font-medium cursor-pointer select-none hover:text-gray-900 whitespace-nowrap ${align === 'right' ? 'text-right' : 'text-left'}`}>
+      className={`px-2 py-2 font-medium cursor-pointer select-none hover:text-gray-900 whitespace-nowrap ${align === 'right' ? 'text-right' : 'text-left'}`}>
       {label}
       {sortKey === k && <span className="ml-1">{sortDir === 'asc' ? '▲' : '▼'}</span>}
     </th>
@@ -927,19 +1268,33 @@ function XeroCell({ cost, busy, onRetry, resyncBusy, onResync }: { cost: Cost; b
     && cost.xero_sync_state !== 'error') {
     return <span className="text-xs text-gray-400 whitespace-nowrap" title="The Xero bill is created automatically when this cost is approved">Syncs on approval</span>;
   }
+  // Xero LOCKS these — a reconciled spend-money and a paid bill can't be mutated,
+  // so no re-sync affordance (staff fix those directly in Xero).
   if (cost.xero_sync_state === 'reconciled') {
     return <span className="px-2 py-0.5 text-xs rounded-full bg-emerald-100 text-emerald-800">Reconciled</span>;
   }
+  if (cost.xero_sync_state === 'attached' && isBill && cost.xero_payment_id) {
+    return <span className="px-2 py-0.5 text-xs rounded-full bg-green-100 text-green-800" title="Bill paid in Xero">Bill paid</span>;
+  }
+  // Synced but still editable in Xero (unpaid bill / unreconciled spend-money).
+  // Make the pill click-to-re-sync so staff can push a corrected invoice number
+  // etc. into Xero WITHOUT waiting for the xero_stale flag (which only fires on
+  // an OP-side edit). Re-syncing an already-correct cost is a harmless no-op.
+  const syncedPill = (colour: string, label: string, title: string) =>
+    onResync ? (
+      <button disabled={resyncBusy} onClick={onResync}
+        title={`${title} — click to re-sync to Xero (safe no-op if already up to date).`}
+        className={`px-2 py-0.5 text-xs rounded-full ${colour} hover:opacity-80 disabled:opacity-50 whitespace-nowrap`}>
+        {resyncBusy ? '…' : label}
+      </button>
+    ) : <span className={`px-2 py-0.5 text-xs rounded-full ${colour}`} title={title}>{label}</span>;
   if (cost.xero_sync_state === 'attached') {
-    if (isBill) {
-      return cost.xero_payment_id
-        ? <span className="px-2 py-0.5 text-xs rounded-full bg-green-100 text-green-800" title="Bill paid in Xero">Bill paid</span>
-        : <span className="px-2 py-0.5 text-xs rounded-full bg-blue-100 text-blue-800" title="Bill in Xero, awaiting payment">In Xero</span>;
-    }
-    return <span className="px-2 py-0.5 text-xs rounded-full bg-green-100 text-green-800">Synced</span>;
+    return isBill
+      ? syncedPill('bg-blue-100 text-blue-800', 'In Xero', 'Bill in Xero, awaiting payment')
+      : syncedPill('bg-green-100 text-green-800', 'Synced', 'Synced to Xero');
   }
   if (cost.xero_sync_state === 'bill_created') {
-    return <span className="px-2 py-0.5 text-xs rounded-full bg-blue-100 text-blue-800" title="In Xero; receipt attach pending">{isBill ? 'Bill created' : 'Sent'}</span>;
+    return syncedPill('bg-blue-100 text-blue-800', isBill ? 'Bill created' : 'Sent', 'In Xero; receipt attach pending');
   }
   // Actionable states collapse the status + sync button into ONE clickable pill
   // (the button used to widen the column and push the row actions off-screen).
@@ -970,19 +1325,27 @@ function XeroCell({ cost, busy, onRetry, resyncBusy, onResync }: { cost: Cost; b
   );
 }
 
-function StatCard({ label, value, sub, color }: { label: string; value: string; sub?: string; color: string }) {
+// The stat cards ARE the tabs. They used to sit above a row of tabs saying the
+// same four things with the same four counts — bigger targets, the money total,
+// and a whole row of vertical space back.
+function StatCard({ label, value, sub, color, active, onClick }: {
+  label: string; value: string; sub?: string; color: string; active: boolean; onClick: () => void;
+}) {
   const colours: Record<string, string> = {
-    amber: 'border-amber-200 bg-amber-50',
-    blue: 'border-blue-200 bg-blue-50',
-    purple: 'border-purple-200 bg-purple-50',
-    gray: 'border-gray-200 bg-gray-50',
+    amber: 'border-amber-200 bg-amber-50 hover:bg-amber-100',
+    blue: 'border-blue-200 bg-blue-50 hover:bg-blue-100',
+    purple: 'border-purple-200 bg-purple-50 hover:bg-purple-100',
+    gray: 'border-gray-200 bg-gray-50 hover:bg-gray-100',
   };
   return (
-    <div className={`border rounded-lg p-3 ${colours[color] || colours.gray}`}>
+    <button type="button" onClick={onClick} aria-pressed={active}
+      className={`text-left border rounded-lg p-3 transition ${colours[color] || colours.gray} ${
+        active ? 'ring-2 ring-purple-500 ring-offset-1' : ''}`}>
       <div className="text-xs text-gray-500">{label}</div>
       <div className="text-xl font-bold text-gray-900">{value}</div>
-      {sub && <div className="text-xs text-gray-500">{sub}</div>}
-    </div>
+      {sub ? <div className="text-xs text-gray-500">{sub}</div>
+           : <div className="text-xs text-gray-400">{active ? 'showing' : 'show'}</div>}
+    </button>
   );
 }
 

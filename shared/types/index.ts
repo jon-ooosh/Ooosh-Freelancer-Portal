@@ -17,6 +17,11 @@ export interface FileAttachment {
   uploaded_at: string;
   uploaded_by: string;
   share_with_freelancer?: boolean;
+  // Org files only. Whether this file reads through onto the jobs that org is
+  // on (docs/CROSS-ENTITY-FILES-SPEC.md). ABSENT MEANS TRUE — the default is to
+  // surface, so a rider is reusable the moment it's uploaded; set false to keep
+  // something internal (a contract) on the org alone.
+  show_on_jobs?: boolean;
 }
 
 export interface Person {
@@ -310,6 +315,7 @@ export const LOST_REASON_OPTIONS = [
   'Timing',
   'No Decision',
   'Cancelled Event',
+  'Confirmed Alternative Quote (from us)',
   'Other',
 ] as const;
 
@@ -333,9 +339,22 @@ export interface Job {
   colour: string | null;
   // Client
   client_id: string | null;
+  // client_name / company_name are HireHop's raw CLIENT / COMPANY strings.
+  // company_name is never written by OP and client_name only survives a
+  // deliberate client change because the sync guards it on client_locked_at,
+  // so neither is the canonical name. Prefer jobDisplayOrgName() (frontend
+  // lib/jobOrgName.ts), which reads the joined org name instead.
   client_name: string | null;
   company_name: string | null;
   client_ref: string | null;
+  // Canonical client org name, joined from organisations via client_id.
+  // Present on the single-job, job-list, pipeline and cancellations responses;
+  // absent elsewhere (hence optional).
+  client_org_name?: string | null;
+  // Name of the org explicitly flagged to headline this job on lists
+  // (job_organisations.is_primary). NULL = no explicit lead, fall back to the
+  // client. Display only — client_id stays authoritative for accounting.
+  lead_org_name?: string | null;
   // Venue
   venue_id: string | null;
   venue_name: string | null;
@@ -659,9 +678,19 @@ export interface Driver {
   licence_points: number;
   licence_endorsements: LicenceEndorsement[];
   licence_restrictions: string | null;
+  /** Entitlement categories as iDenfy reports them, e.g. "B,BE,C1". */
+  licence_categories: string | null;
   licence_next_check_due: string | null;
   date_passed_test: string | null;
-  // Document expiry dates (the validity backbone)
+  // Document FROM dates — the validity backbone. Staff and the hire form set
+  // ONLY these; every *_valid_until below is derived from them on write by
+  // backend/src/services/driver-validity.ts. Never write an expiry directly.
+  poa1_doc_date: string | null;
+  poa2_doc_date: string | null;
+  passport_check_date: string | null;
+  passport_expiry: string | null;
+  // Derived expiry windows (read-only for consumers).
+  licence_check_valid_until: string | null;
   poa1_valid_until: string | null;
   poa2_valid_until: string | null;
   dvla_valid_until: string | null;
@@ -840,6 +869,11 @@ export interface JobExcess {
   held_on_account?: boolean;
   person_id: string | null;
   notes: string | null;
+  // Computed (not a stored column): true when this record was auto-covered from
+  // the client's standing held-on-account balance (waived + [Auto-covered by
+  // account] marker). Drives the distinct "Covered by account" pill. Set by the
+  // per-job excess selects (money summary, /excess by-org/by-person).
+  auto_covered?: boolean;
   // HH deposit reconciliation (migration 039)
   hh_deposit_id: number | null;
   hh_reconciled_at: string | null;
@@ -1027,6 +1061,20 @@ export interface SupplierPaymentTerms {
   source: 'manual' | 'xero' | 'default' | 'freelancer';
 }
 
+/**
+ * One supporting document filed against a cost. `r2_key` is a private-bucket
+ * key — fetch it through the authenticated /files/download helper, never as a
+ * plain <img src>.
+ */
+export interface CostDocument {
+  r2_key: string;
+  filename: string;
+  content_type?: string | null;
+  size_bytes?: number | null;
+  uploaded_at?: string | null;
+  uploaded_by?: string | null;
+}
+
 export interface Cost {
   id: string;
   uploaded_by: string | null;
@@ -1040,8 +1088,15 @@ export interface Cost {
   vat_treatment?: 'standard' | 'reclaim_split';
   invoice_number?: string | null;
   xero_contact_id?: string | null;
-  // Computed server-side from the supplier's payment terms (list + get-one).
+  // THE due date (list + get-one), resolved server-side by resolveDueDate():
+  // staff override → the freelancer Friday rule → the supplier's payment terms.
   due_date?: string | null;
+  // What the rules alone would give — lets the UI offer "reset to default".
+  due_date_derived?: string | null;
+  due_date_is_override?: boolean;
+  // Staff override. NULL = follow the derived rule. Never read this raw for
+  // display; `due_date` above already accounts for it.
+  due_date_override?: string | null;
   terms?: SupplierPaymentTerms;
   currency: string;
   description: string | null;
@@ -1080,8 +1135,17 @@ export interface Cost {
   paid_at: string | null;
   paid_value_date: string | null;
   paid_method: string | null;
+  /** Remittance advice sent to the payee for this cost (audit + "sent" pip). */
+  remittance_sent_at?: string | null;
+  remittance_email?: string | null;
   receipt_r2_key: string | null;
   receipt_filename: string | null;
+  /**
+   * Extra evidence filed with this payable alongside the main receipt — a
+   * freelancer's fuel receipt behind their invoice, a delivery note, a warranty
+   * card. One payable, one Xero bill; these ride along as extra attachments.
+   */
+  supporting_documents?: CostDocument[];
   xero_sync_state: CostXeroSyncState;
   xero_object_id: string | null;
   xero_payment_id: string | null;
@@ -1109,7 +1173,26 @@ export interface CostAllocation {
 
 // Holding module — "Held for Clients" / "Lost Property" / temp storage
 // One engine; `kind` drives behaviour + display home. See docs/HOLDING-MODULE-SPEC.md.
+// `temp_storage` is DEPRECATED (Aug 2026) — folded into `incoming`. The value
+// stays in the union (and the DB CHECK constraint) so historical rows and any
+// in-flight API caller keep working; the UI no longer offers it. Two kinds
+// remain, split by a question staff can always answer — does the client know
+// we've got it? incoming = they sent/left it (ends in a handover);
+// lost_property = we found it (ends in collection/disposal, chase ladder).
 export type HeldItemKind = 'incoming' | 'lost_property' | 'temp_storage';
+
+/**
+ * What this item needs from a human next — derived server-side in
+ * routes/holding.ts so the list, the action strip, the filters and any future
+ * dashboard bucket all read one definition. Ordered by precedence, not by kind.
+ */
+export type HeldItemNextAction =
+  | 'link_owner'   // owner unknown — can't chase or hand over until identified
+  | 'receive'      // declared, not arrived
+  | 'chase_owner'  // lost property, owner known
+  | 'hand_over'    // here, owner known
+  | 'decide'       // hold_until / dispose_after has passed
+  | 'none';        // terminal
 
 export type HeldItemStatus =
   | 'expected'
@@ -1219,6 +1302,9 @@ export interface HeldItem {
   // list, detail card and review queue all agree. null for non-lost-property.
   next_chase_due?: string | null;
   chase_state?: 'none' | 'paused' | 'due' | 'scheduled' | null;
+  // Derived server-side (routes/holding.ts) — see HeldItemNextAction.
+  next_action?: HeldItemNextAction;
+  action_due?: string | null;
 }
 
 // API response wrappers

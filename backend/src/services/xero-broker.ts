@@ -67,6 +67,14 @@ export interface CreateBillInput {
   /** When known, used directly (skips the name-based get-or-create lookup). */
   contactId?: string;
   reference?: string;
+  /**
+   * Supplier's invoice number → Xero `InvoiceNumber`. On an ACCPAY bill this IS
+   * the field the Xero UI labels "Reference" (the visible box); the API
+   * `Reference` field above is stored but hidden on bills. So the supplier
+   * invoice number must go here to actually show up on the bill. (Spend-money
+   * has no InvoiceNumber — there the API `Reference` is the visible field.)
+   */
+  invoiceNumber?: string;
   date?: string;          // YYYY-MM-DD
   dueDate?: string;       // YYYY-MM-DD
   lineItems: XeroLineItem[];
@@ -365,6 +373,18 @@ class XeroBroker {
     return r.BankTransactions || [];
   }
 
+  /** Read a single ACCPAY/ACCREC invoice by ID (diagnostics / read-back). billsScope for ACCPAY. */
+  async getInvoice(invoiceId: string): Promise<Record<string, unknown> | null> {
+    const r = await this.request<{ Invoices?: Array<Record<string, unknown>> }>('GET', `/Invoices/${invoiceId}`, { billsScope: true });
+    return r.Invoices?.[0] ?? null;
+  }
+
+  /** Read a single spend-money bank transaction by ID (diagnostics / read-back). */
+  async getBankTransaction(bankTransactionId: string): Promise<Record<string, unknown> | null> {
+    const r = await this.request<{ BankTransactions?: Array<Record<string, unknown>> }>('GET', `/BankTransactions/${bankTransactionId}`);
+    return r.BankTransactions?.[0] ?? null;
+  }
+
   // ── Writes ───────────────────────────────────────────────────────────────
 
   /** Find a contact by exact name or create it (for ACCPAY supplier linkage). */
@@ -431,6 +451,8 @@ class XeroBroker {
             {
               Type: 'ACCPAY',
               Contact: { ContactID: contactID },
+              // InvoiceNumber = the "Reference" box shown on a bill in the Xero UI.
+              ...(input.invoiceNumber ? { InvoiceNumber: input.invoiceNumber } : {}),
               Reference: input.reference,
               Date: input.date,
               DueDate: input.dueDate,
@@ -480,6 +502,51 @@ class XeroBroker {
     return r.Payments[0];
   }
 
+  /**
+   * ONE payment covering MANY bills — Xero's BatchPayments.
+   *
+   * The reason this exists rather than a loop over payInvoice(): a single bank
+   * transfer paying twenty garage invoices should reconcile against ONE bank
+   * line. Twenty individual payments are each correct in the ledger, but leave
+   * twenty rows to tick against that one line in the bank feed — which is the
+   * tedium bulk pay was meant to remove, just moved into Xero.
+   *
+   * Xero returns the batch plus its constituent payments; we hand back both so
+   * the caller can stamp the per-invoice PaymentID where it's available and fall
+   * back to the BatchPaymentID where it isn't.
+   */
+  async createBatchPayment(input: {
+    accountId: string;
+    date?: string;        // YYYY-MM-DD
+    reference?: string;
+    payments: Array<{ invoiceId: string; amount: number }>;
+  }): Promise<{ BatchPaymentID?: string; Payments?: Array<{ PaymentID?: string; Invoice?: { InvoiceID?: string } }> }> {
+    const r = await this.request<{ BatchPayments?: Array<{
+      BatchPaymentID?: string;
+      Payments?: Array<{ PaymentID?: string; Invoice?: { InvoiceID?: string } }>;
+    }> }>(
+      'PUT',
+      '/BatchPayments',
+      {
+        body: {
+          BatchPayments: [
+            {
+              Account: { AccountID: input.accountId },
+              Date: input.date,
+              Reference: input.reference,
+              Payments: input.payments.map((p) => ({
+                Invoice: { InvoiceID: p.invoiceId },
+                Amount: p.amount,
+              })),
+            },
+          ],
+        },
+        billsScope: true,
+      }
+    );
+    return r.BatchPayments?.[0] ?? {};
+  }
+
   /** Spend money (petty cash / PayPal / reimbursement not on a bank feed). */
   async createSpendMoney(input: CreateSpendMoneyInput): Promise<{ BankTransactionID: string }> {
     const contactID = input.contactId
@@ -527,6 +594,8 @@ class XeroBroker {
               InvoiceID: invoiceId,
               Type: 'ACCPAY',
               Contact: { ContactID: contact.ContactID },
+              // InvoiceNumber = the "Reference" box shown on a bill in the Xero UI.
+              ...(input.invoiceNumber ? { InvoiceNumber: input.invoiceNumber } : {}),
               Reference: input.reference,
               Date: input.date,
               DueDate: input.dueDate,

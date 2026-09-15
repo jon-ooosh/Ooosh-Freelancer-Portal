@@ -41,7 +41,22 @@ interface Interaction {
   mentioned_user_ids: string[];
 }
 
+// Keyed by the route id so /venues/A → /venues/B is a genuine
+// unmount/remount. React Router otherwise reuses ONE instance and only swaps
+// the param, leaving the previous venue's state on the new page and letting a
+// slow reply for the old id resolve into it (no fetch here is cancellable).
+// See `.claude/rules/frontend.md` → Detail pages; JobDetailPage has the long
+// version.
+//
+// Key on `id` ONLY — never the pathname or a ?tab= param, or every tab click
+// would remount the page. The hand-written tab/cache resets below are kept as
+// belt-and-braces, and the tab effect still handles same-page ?tab= changes.
 export default function VenueDetailPage() {
+  const { id } = useParams<{ id: string }>();
+  return <VenueDetailContent key={id} />;
+}
+
+function VenueDetailContent() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
 
@@ -113,10 +128,6 @@ export default function VenueDetailPage() {
 
   return (
     <div>
-      <Link to="/venues" className="text-sm text-ooosh-600 hover:text-ooosh-700 mb-4 inline-block">
-        &larr; Back to Venues
-      </Link>
-
       {/* Header */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
         <div className="flex items-start justify-between">

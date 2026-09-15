@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, type ReactNode } from 'react';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import {
@@ -8,6 +8,8 @@ import {
   type InteractionAttachment,
 } from './messaging/Attachments';
 import Reactions, { type ReactionsMap } from './messaging/Reactions';
+import ConversationSummary from './ConversationSummary';
+import QuoteVersions from './QuoteVersions';
 
 interface Interaction {
   id: string;
@@ -29,6 +31,13 @@ interface Interaction {
   source?: 'user' | 'system' | null;
   // Note editing (migration 160)
   edited_at?: string | null;
+  // Ingested-email attribution + confidentiality controls (migration 213).
+  job_id?: string | null;
+  gmail_message_id?: string | null;
+  email_direction?: 'inbound' | 'outbound' | null;
+  match_method?: string | null;
+  match_confidence?: string | null;
+  hidden_at?: string | null;
 }
 
 const JOB_STATUS_MAP: Record<number, string> = {
@@ -258,6 +267,20 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
         setMoveLoading(false);
       }
     }, 300);
+  }
+
+  // Ingested-email backstops (Auto-Chase filtering foundation): detach a
+  // mis-attached email, or hide/unhide a sensitive one from the all-staff view.
+  // Both re-fetch the timeline afterwards so the row reflects the new state.
+  const isAdmin = user?.role === 'admin';
+  async function emailAction(interactionId: string, action: 'hide' | 'unhide' | 'detach') {
+    if (action === 'detach' && !window.confirm('Remove this email from this job? It will drop off the timeline.')) return;
+    try {
+      await api.post(`/auto-chase/emails/${interactionId}/${action}`, {});
+      onInteractionAdded();
+    } catch (err) {
+      console.error(`Email ${action} failed:`, err);
+    }
   }
 
   async function confirmMove(interactionId: string, target: SearchResult) {
@@ -644,6 +667,8 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
           onSearchEntities={searchEntities}
           onConfirmMove={(target) => confirmMove(interaction.id, target)}
           renderContent={renderContent}
+          isAdmin={isAdmin}
+          onEmailAction={emailAction}
         />
 
         {replyCount > 0 && (
@@ -669,6 +694,8 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
                 onSearchEntities={() => {}}
                 onConfirmMove={() => {}}
                 renderContent={renderContent}
+                isAdmin={isAdmin}
+                onEmailAction={emailAction}
               />
             ))}
             {expanded && replyCount > COLLAPSE_THRESHOLD && (
@@ -764,6 +791,24 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
 
   return (
     <div>
+      {/* AI digest of the ingested email conversation (jobs only). Renders
+          nothing when there are no ingested emails / Anthropic is off. */}
+      {entityType === 'job_id' && (
+        <ConversationSummary
+          jobId={entityId}
+          emailSignal={interactions.filter((i) => i.type === 'email').length}
+        />
+      )}
+
+      {/* Quote-PDF version diff (jobs only). Renders nothing until the job has
+          harvested quote PDFs. Spec §7.3. */}
+      {entityType === 'job_id' && (
+        <QuoteVersions
+          jobId={entityId}
+          emailSignal={interactions.filter((i) => i.type === 'email').length}
+        />
+      )}
+
       {/* Add interaction form */}
       <form
         onSubmit={handleSubmit}
@@ -1112,11 +1157,167 @@ interface InteractionRowProps {
   onSearchEntities: (q: string) => void;
   onConfirmMove: (target: SearchResult) => void;
   renderContent: (text: string) => React.ReactNode;
+  isAdmin: boolean;
+  onEmailAction: (id: string, action: 'hide' | 'unhide' | 'detach') => void;
+}
+
+// Quoted-reply boundary in an email body: the first inline "On … wrote:"
+// attribution, an Outlook From/Sent header, an "Original Message" divider, or a
+// '>' quoted line. Everything from there down is quoted history (redundant —
+// earlier messages are their own ingested interactions), so we collapse it.
+//
+// CHARACTER-based (not line-based) on purpose: ingested HTML emails have their
+// newlines flattened to spaces at storage time, so the whole thread arrives as
+// one giant line and line-anchored patterns (wrote:$) never match. We scan the
+// raw text for the earliest inline marker instead. Returns a char index, or -1.
+const QUOTE_MARKERS: RegExp[] = [
+  // "On Tue, 14 Jul 2026 at 13:07, Ooosh! Tours Ltd <info@…> wrote:" — inline,
+  // non-greedy, bounded so it can't run away across a whole email.
+  /\bOn\s[\s\S]{5,200}?\bwrote:/i,
+  /-{2,}\s*Original Message\s*-{2,}/i,
+  // Outlook header block "From: … Sent: …"
+  /\bFrom:\s[\s\S]{0,160}?\bSent:\s/i,
+  // A run of '>' quoting.
+  /(^|\n)\s*>/,
+];
+function findQuoteBoundaryChar(text: string): number {
+  let idx = -1;
+  for (const p of QUOTE_MARKERS) {
+    const m = p.exec(text);
+    if (m && m.index >= 0 && (idx === -1 || m.index < idx)) idx = m.index;
+  }
+  return idx;
+}
+
+// Renders interaction content, collapsing (a) an email's quoted reply history,
+// or (b) any very long body, behind a toggle so the timeline stays scannable.
+function InteractionBody({
+  text, isEmail, renderContent,
+}: {
+  text: string;
+  isEmail: boolean;
+  renderContent: (t: string) => ReactNode;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const full = text || '';
+  const boundary = isEmail ? findQuoteBoundaryChar(full) : -1;
+
+  // (a) Email with a quoted tail — show the new message, collapse the quote.
+  // Require a bit of real new content before the boundary (guards against an
+  // email that's ALL quote from char 0).
+  if (boundary > 20) {
+    const visible = full.slice(0, boundary).replace(/\s+$/, '');
+    const quoted = full.slice(boundary).trim();
+    return (
+      <div className="mt-1 text-sm text-gray-800 whitespace-pre-wrap break-words">
+        {renderContent(visible || full)}
+        {quoted && (expanded ? (
+          <>
+            <div className="mt-2 pl-2.5 border-l-2 border-gray-200 text-gray-500 text-[13px] whitespace-pre-wrap break-words">
+              {renderContent(quoted)}
+            </div>
+            <button type="button" onClick={() => setExpanded(false)} className="mt-1 text-xs text-ooosh-600 hover:text-ooosh-800">
+              Hide quoted text
+            </button>
+          </>
+        ) : (
+          <button type="button" onClick={() => setExpanded(true)}
+            className="mt-1 inline-flex items-center text-xs text-gray-400 hover:text-gray-600 border border-gray-200 rounded px-1.5 py-0.5"
+            title="Show quoted / earlier thread">
+            ··· show quoted text
+          </button>
+        ))}
+      </div>
+    );
+  }
+
+  // (b) Long body with no quote boundary — clamp by characters (works even when
+  // the whole thing is one flattened line) or by lines, whichever hits first.
+  const CHAR_LIMIT = 600;
+  const lines = full.split('\n');
+  if (full.length > CHAR_LIMIT || lines.length > 16) {
+    const head = lines.length > 16
+      ? lines.slice(0, 12).join('\n').trimEnd()
+      : full.slice(0, CHAR_LIMIT).trimEnd();
+    return (
+      <div className="mt-1 text-sm text-gray-800 whitespace-pre-wrap break-words">
+        {renderContent(expanded ? full : `${head}…`)}
+        <button type="button" onClick={() => setExpanded(!expanded)} className="mt-1 block text-xs text-ooosh-600 hover:text-ooosh-800">
+          {expanded ? 'Show less' : 'Show more'}
+        </button>
+      </div>
+    );
+  }
+
+  // (c) Short — as-is.
+  return <p className="mt-1 text-sm text-gray-800 whitespace-pre-wrap break-words">{renderContent(full)}</p>;
+}
+
+// Provenance + manual backstops for an ingested email row (Auto-Chase filtering
+// foundation). Shows WHY it's on this job for the weaker match methods, a
+// "hidden from staff" marker (admin view only — staff never see hidden rows at
+// all), and the two human controls: "Not this job" (detach, any staff) + Hide
+// (admin). High-confidence attaches (own PDF / explicit #ref) get no caveat chip.
+function EmailProvenanceBar({
+  interaction, isAdmin, onEmailAction,
+}: {
+  interaction: Interaction;
+  isAdmin: boolean;
+  onEmailAction: (id: string, action: 'hide' | 'unhide' | 'detach') => void;
+}) {
+  if (!interaction.gmail_message_id) return null;
+  const method = interaction.match_method;
+  const hidden = !!interaction.hidden_at;
+
+  let chip: { label: string; cls: string } | null = null;
+  if (method === 'sender_person_single_open_job') {
+    chip = { label: 'auto-attached · sender match', cls: 'bg-amber-50 text-amber-700 border border-amber-200' };
+  } else if (method === 'thread_anchor') {
+    chip = { label: 'linked via thread', cls: 'bg-gray-100 text-gray-500' };
+  } else if (method === 'backfill_forced') {
+    chip = { label: 'backfilled', cls: 'bg-gray-100 text-gray-500' };
+  }
+
+  return (
+    <div className="mt-1.5 flex items-center flex-wrap gap-x-3 gap-y-1 text-xs">
+      {chip && <span className={`px-1.5 py-0.5 rounded ${chip.cls}`}>{chip.label}</span>}
+      {hidden && (
+        <span className="px-1.5 py-0.5 rounded bg-purple-50 text-purple-700 border border-purple-200">
+          🔒 Hidden from staff
+        </span>
+      )}
+      <button
+        type="button"
+        onClick={() => onEmailAction(interaction.id, 'detach')}
+        className="text-gray-400 hover:text-red-600"
+        title="Remove this email from this job (wrong job / discussed in passing)"
+      >
+        Not this job
+      </button>
+      {isAdmin && (
+        hidden ? (
+          <button type="button" onClick={() => onEmailAction(interaction.id, 'unhide')} className="text-gray-400 hover:text-gray-700">
+            Unhide
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={() => onEmailAction(interaction.id, 'hide')}
+            className="text-gray-400 hover:text-purple-700"
+            title="Hide from the all-staff timeline (you'll still see it as admin)"
+          >
+            Hide
+          </button>
+        )
+      )}
+    </div>
+  );
 }
 
 function InteractionRow({
   interaction, isReply, currentUserId, onEdited, movingId, onStartMove, onCancelMove,
   moveSearch, moveResults, moveLoading, onSearchEntities, onConfirmMove, renderContent,
+  isAdmin, onEmailAction,
 }: InteractionRowProps) {
   // Creator-only editing of human notes. Automated (source='system') entries
   // are immutable; the backend enforces both rules regardless of the UI.
@@ -1220,9 +1421,14 @@ function InteractionRow({
               </div>
             </div>
           ) : (
-            <p className="mt-1 text-sm text-gray-800 whitespace-pre-wrap">{renderContent(interaction.content)}</p>
+            <InteractionBody
+              text={interaction.content}
+              isEmail={interaction.type === 'email'}
+              renderContent={renderContent}
+            />
           )}
           <AttachmentList files={interaction.files} />
+          {!editing && <EmailProvenanceBar interaction={interaction} isAdmin={isAdmin} onEmailAction={onEmailAction} />}
           <Reactions interactionId={interaction.id} reactions={interaction.reactions} />
         </div>
       </div>

@@ -127,8 +127,8 @@ export default function ExcessHistorySection({ entityType, entityId }: ExcessHis
                   )}
                 </td>
                 <td className="px-4 py-2.5 text-center">
-                  <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${statusColor(record.excess_status)}`}>
-                    {statusLabel(record.excess_status)}
+                  <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${statusColor(record.excess_status, record.auto_covered)}`}>
+                    {statusLabel(record.excess_status, record.auto_covered)}
                   </span>
                 </td>
                 <td className="px-4 py-2.5 text-center">
