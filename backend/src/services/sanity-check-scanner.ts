@@ -175,6 +175,13 @@ export async function runDispatchSanityScan(): Promise<{ checked: number; warned
     try {
       const hhStatus: number = job.status;
       const hhStatusLabel = HH_STATUS_LABELS[hhStatus] || `Status ${hhStatus}`;
+      // Staff-facing wording only — HH status integers/labels are internal
+      // plumbing and mean nothing to the reader, so the email never shows them.
+      // Part Dispatched (4) means some items were scanned out; anything lower
+      // means the checkout never happened in HH at all.
+      const mismatchLine = hhStatus === 4
+        ? "HireHop still has items that haven't been dispatched"
+        : "the job hasn't been dispatched in HireHop at all";
       const jobRef = job.hh_job_number
         ? `J-${job.hh_job_number}`
         : (job.job_name || 'Unknown job');
@@ -200,10 +207,7 @@ export async function runDispatchSanityScan(): Promise<{ checked: number; warned
           jobRef,
           jobName: job.job_name || '',
           jobNumber: job.hh_job_number ? String(job.hh_job_number) : '',
-          source: 'Sanity scanner (30-min post-dispatch check)',
-          actorLabel: 'scheduler',
-          hhStatusLabel,
-          hhStatusCode: String(hhStatus),
+          mismatchLine,
           opJobUrl,
           hhJobUrl,
         },
@@ -212,7 +216,7 @@ export async function runDispatchSanityScan(): Promise<{ checked: number; warned
       if (result.success) {
         warned++;
       } else {
-        console.warn(`[sanity-scanner] dispatch warning send failed for ${jobRef}:`, result);
+        console.warn(`[sanity-scanner] dispatch warning send failed for ${jobRef} (HH ${hhStatusLabel}):`, result);
       }
     } catch (err) {
       console.error(`[sanity-scanner] dispatch scan error for job ${job.id}:`, err);
