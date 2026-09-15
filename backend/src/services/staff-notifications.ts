@@ -151,10 +151,11 @@ export async function notifyOvertimeLogged(entryId: string) {
  * Deliberately separate from the digest: this fires immediately, the digest
  * catches what is still outstanding the next morning.
  *
- * NOTE ON DELIVERY: with EMAIL_MODE=test (the default), a template only
- * reaches real recipients if its id is in EMAIL_LIVE_TEMPLATES. Both
- * staff_time_request and staff_time_digest need adding there, or these land
- * redirected/[TEST]-prefixed and look like nothing was sent.
+ * DELIVERY: production runs EMAIL_MODE=live over Resend and has done since
+ * mid-2026, so every registered template sends for real to the real recipient.
+ * EMAIL_LIVE_TEMPLATES is the TEST-mode allowlist and is ignored entirely when
+ * the mode is live — a new template needs nothing added to it. See
+ * .claude/rules/email-and-notifications.md, which says so explicitly.
  */
 async function emailApprovers(subject: string, heading: string, lines: string[], linkPath: string) {
   const approvers = await approverUserIds();

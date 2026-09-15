@@ -44,7 +44,12 @@ export interface EmploymentInput {
   department?: string | null;
   bankHolidayPolicy?: 'use_allowance' | 'granted' | null;
   entitlementWeeks?: number | null;
+  probationEndDate?: string | null;
+  noticePeriodDays?: number | null;
   notes?: string | null;
+  /** Personal fields that live on `people`, written in the same call. */
+  preferredName?: string | null;
+  pronouns?: string | null;
 }
 
 // ── Employment ──────────────────────────────────────────────────────────────
@@ -57,8 +62,10 @@ export async function upsertEmployment(personId: string, input: EmploymentInput,
   const r = await query(
     `INSERT INTO staff_employment
        (person_id, employment_status, start_date, end_date, job_title, department,
-        bank_holiday_policy, entitlement_weeks, notes, created_by)
-     VALUES ($1, COALESCE($2,'employed'), $3::date, $4::date, $5, $6, $7, $8, $9, $10)
+        bank_holiday_policy, entitlement_weeks, notes, created_by,
+        probation_end_date, notice_period_days)
+     VALUES ($1, COALESCE($2,'employed'), $3::date, $4::date, $5, $6, $7, $8, $9, $10,
+             $11::date, $12)
      ON CONFLICT (person_id) DO UPDATE SET
        employment_status   = COALESCE(EXCLUDED.employment_status, staff_employment.employment_status),
        start_date          = EXCLUDED.start_date,
@@ -68,14 +75,41 @@ export async function upsertEmployment(personId: string, input: EmploymentInput,
        bank_holiday_policy = EXCLUDED.bank_holiday_policy,
        entitlement_weeks   = EXCLUDED.entitlement_weeks,
        notes               = EXCLUDED.notes,
+       probation_end_date  = EXCLUDED.probation_end_date,
+       notice_period_days  = EXCLUDED.notice_period_days,
        updated_at          = NOW()
      RETURNING *`,
     [
       personId, input.employmentStatus ?? null, input.startDate, input.endDate ?? null,
       input.jobTitle ?? null, input.department ?? null, input.bankHolidayPolicy ?? null,
       input.entitlementWeeks ?? null, input.notes ?? null, userId,
+      input.probationEndDate ?? null, input.noticePeriodDays ?? null,
     ]
   );
+
+  // preferred_name and pronouns live on `people`, not staff_employment —
+  // they describe the person, not the employment, and the freelancer flows
+  // already read preferred_name from there. Written here only when supplied,
+  // so an employment-only save never blanks them.
+  // Built from the keys actually supplied, NOT with COALESCE: coalescing would
+  // make an empty value fall back to the old one, so clearing a preferred name
+  // would silently do nothing. Absent key = leave alone; empty string = clear.
+  const personSets: string[] = [];
+  const personParams: unknown[] = [personId];
+  if (input.preferredName !== undefined) {
+    personParams.push(input.preferredName === '' ? null : input.preferredName);
+    personSets.push(`preferred_name = $${personParams.length}`);
+  }
+  if (input.pronouns !== undefined) {
+    personParams.push(input.pronouns === '' ? null : input.pronouns);
+    personSets.push(`pronouns = $${personParams.length}`);
+  }
+  if (personSets.length > 0) {
+    await query(
+      `UPDATE people SET ${personSets.join(', ')}, updated_at = NOW() WHERE id = $1`,
+      personParams
+    );
+  }
   return r.rows[0];
 }
 
@@ -458,6 +492,7 @@ export interface RosterRow {
   userId: string | null;
   name: string;
   preferredName: string | null;
+  pronouns: string | null;
   email: string | null;
   avatarUrl: string | null;
   account: { role: string; isActive: boolean; hhUserId: number | null } | null;
@@ -469,6 +504,8 @@ export interface RosterRow {
     department: string | null;
     bankHolidayPolicy: 'use_allowance' | 'granted' | null;
     entitlementWeeks: string | null;
+    probationEndDate: string | null;
+    noticePeriodDays: number | null;
   } | null;
   weeklyMinutes: number | null;
   hasPattern: boolean;
@@ -516,6 +553,9 @@ export async function getStaffRoster(isAdmin: boolean): Promise<RosterRow[]> {
             se.department,
             se.bank_holiday_policy,
             se.entitlement_weeks,
+            se.probation_end_date::text AS probation_end_date,
+            se.notice_period_days,
+            p.pronouns,
             pat.weekly_minutes,
             agr.status       AS agreement_status,
             agr.completed_at AS agreement_completed_at
@@ -565,6 +605,7 @@ export async function getStaffRoster(isAdmin: boolean): Promise<RosterRow[]> {
     userId: (row.user_id as string) ?? null,
     name: row.name as string,
     preferredName: (row.preferred_name as string) ?? null,
+    pronouns: (row.pronouns as string) ?? null,
     email: (row.email as string) ?? null,
     avatarUrl: (row.avatar_url as string) ?? null,
     account: row.user_id
@@ -579,6 +620,8 @@ export async function getStaffRoster(isAdmin: boolean): Promise<RosterRow[]> {
           department: (row.department as string) ?? null,
           bankHolidayPolicy: (row.bank_holiday_policy as 'use_allowance' | 'granted') ?? null,
           entitlementWeeks: row.entitlement_weeks != null ? String(row.entitlement_weeks) : null,
+          probationEndDate: (row.probation_end_date as string) ?? null,
+          noticePeriodDays: row.notice_period_days != null ? Number(row.notice_period_days) : null,
         }
       : null,
     // A non-admin must not learn someone's hours, so this is null rather than 0

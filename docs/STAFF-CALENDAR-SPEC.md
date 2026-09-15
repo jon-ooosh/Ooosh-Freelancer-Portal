@@ -1,17 +1,24 @@
 # Staff Calendar & Time Module — Spec
 
-**Status:** Draft for build (Sep 2026). Fleshes out `docs/SPEC.md` §3.9 "Staff & HR
-Management", which was written in Phase 1, scheduled into Phase 3, and then dropped out
-of `ROADMAP.md` entirely. Nothing has been built.
+**Status (15 Sep 2026): Phases A, B1, B2 and C are BUILT, deployed and in use.**
+Phases D, E and F remain. See §18 for exactly what is done, what changed during
+the build, and what is left.
 
-**One-line:** Replace BrightHR with a module that (a) knows everyone's working pattern,
-(b) holds one immutable ledger of holiday and overtime, (c) lets staff request time off
-and log overtime for admin approval *with the operational context visible at the moment
-of approval*, (d) records sickness and other absence with a proper return-to-work
-process, and (e) books freelancers onto days without treating them as staff.
+Fleshes out `docs/SPEC.md` §3.9 "Staff & HR Management", which was written in
+Phase 1, scheduled into Phase 3, and then dropped out of `ROADMAP.md` entirely.
 
-**Hard deadline: live 1 January 2027.** The BrightHR subscription expires around Dec
-2026 and the leave year is calendar Jan–Dec. See §14.
+**One-line:** Replace BrightHR with a module that (a) knows everyone's working
+pattern, (b) holds one immutable ledger of holiday and overtime, (c) lets staff
+request time off and log overtime for admin approval *with the operational
+context visible at the moment of approval*, (d) records sickness and other
+absence with a proper return-to-work process, and (e) books freelancers onto
+days without treating them as staff.
+
+**Hard deadline: live 1 January 2027.** The BrightHR subscription expires around
+Dec 2026 and the leave year is calendar Jan–Dec. See §14.
+
+**Load-bearing rules for anyone picking this up:**
+`.claude/rules/staff-calendar.md` (loads automatically on the module's files).
 
 ---
 
@@ -1011,3 +1018,118 @@ is a settings change and not a deploy — that is why they are settings.
    GDPR retention policy item in `ROADMAP.md`.
 10. **Payroll report format** — show the accountants a sample CSV before Phase C ships and
    shape the columns to what they actually want.
+
+
+---
+
+## 18. Build log — what is done, what changed, what is left
+
+*Written 15 Sep 2026, at the point of handing over to a fresh session.*
+
+### Shipped
+
+| Phase | What | Migrations |
+|---|---|---|
+| **A** | Employment records, effective-dated working patterns, pattern exceptions / swaps, salary history, reviews, the who's-in calendar, the dashboard strip | 206 |
+| **B1** | The append-only ledger, derived balances, entitlement (per pattern-period, pro-rated), the explainable balance UI | 208 |
+| **B2** | Leave requests, impact preview, approval with operational context, cancel / decline / withdraw, My Time | 209 |
+| **C** | Overtime in 5-minute steps, the bank, TOIL drawdown, cash-out, year-end sweep, payroll CSV, timed leave | 212 |
+| — | Consolidation: Team Members + COT card register moved onto the Staff page; login linking; notifications and the daily digest | 213 |
+
+### Decisions taken during the build that CHANGE this spec
+
+These were settled in conversation with jon and are now the design. Where they
+contradict an earlier section, this list wins.
+
+1. **Overtime is BANKED, not dispositioned at approval** (§6.2, as written).
+   The original draft had the approver choose TOIL-or-pay at approval; jon
+   pushed back — during a busy run nobody knows yet. Approval credits the bank;
+   the choice is a later, separate debit. This was the right call and the ledger
+   design absorbed it without change.
+
+2. **Year end CASHES OUT, it does not expire** (§6.3). Hours already worked
+   cannot be forfeited. The sweep is idempotent.
+
+3. **Leave can be a timed PERIOD, not just a whole or half day.** The spec
+   originally held leave to a half-day minimum with timed *appointments* as a
+   separate non-deducting concept (§7.5). Staff also wanted to book "leaving at
+   15:00", which with minutes as the unit costs nothing to support. `portion`
+   is now `full | am | pm | hours`. The non-deducting appointment marker of
+   §7.5 is still **unbuilt** and still wanted.
+
+4. **Rounding applies only to PRO-RATED entitlement.** Rounding a full year up
+   to the half day inflated it — 5.6 weeks of an unequal four-day week is 22.4
+   of that person's days, not a whole number of halves.
+
+5. **Alerts are in-app AND email per request, plus a daily digest.** The
+   original design was digest-only; jon correctly said a bell you have to be
+   looking at is not an alert.
+
+6. **Holiday allowance is entered in days OR weeks** and stored in **weeks** —
+   a fixed day count goes wrong the moment someone changes their days per week.
+
+7. **The Staff page is a UNION** of people with a login and people with an
+   employment record, two-tier gated: account section at manager level (matching
+   the access the old Settings list gave), everything else admin.
+
+### Bugs found during the build, and what they teach
+
+Kept because each one is a trap the next person could fall into.
+
+- **`booking` posted against the overtime account.** Entry types are per
+  account; spending the bank is `spend_toil`. Shipped in B2 and caught by the
+  B1 constraint when a TOIL request was first approved. *Unit tests approved
+  holiday and never TOIL — test the other branch.*
+- **`syncEntitlement` was not idempotent for claw-backs**, so the 1 Jan
+  scheduler would have drained a balance a little further every year. Fixed by
+  counting what it had granted via `source_type = 'system'` rather than
+  `entry_type`.
+- **`createPattern` deleted every LATER pattern**, not just the one being
+  replaced.
+- **Coverage double-counted people already off** — right with two people,
+  wrong with four.
+- **`buildDays` priced against the leave-overlaid calendar**, so already-booked
+  days silently vanished from a request instead of surfacing as a clash.
+- **A `42P08`** from reusing one pg parameter in two type contexts.
+- **`/me/balances` dropped a field** and every cached browser bundle rendered
+  `NaNh NaNm`.
+- **A timed leave period rendered as a whole-day `leave`**, so a two-hour early
+  finish counted as absent all day in the coverage warnings.
+
+### Still to build
+
+**Phase D — absence** (the next piece, and the last before the parallel run):
+- `staff_absences` + `staff_absence_days` (§3.7). Sickness, maternity /
+  paternity / shared parental, bereavement, goodwill, jury service.
+- Two-tier visibility (§0.5) — peers see `Absent`, never a type. The masking
+  hook already exists in `staff-day-status.ts`.
+- Return-to-work process (§7.3) with the structured form and the 7-day chase.
+- **Sickness during booked holiday** (§7.4) — the reclaim prompt. The
+  `reclaimed_absence_id` column is already on `staff_leave_request_days`
+  waiting for it.
+- Timed non-deducting appointment markers (§7.5) — the "dentist at 2" case.
+- Absence reporting: spells rather than days, the repeat-absence flag.
+
+**Phase E — freelancer day bookings** (§9). Independent of D; can be pulled
+forward. Tables and portal endpoints all still to build.
+
+**Phase F — coverage intelligence and iCal** (§10, §16). Post-go-live.
+
+**Carried over, smaller:**
+- Port My Time into Quick Actions (in `BACKLOG.md`, deliberately deferred until
+  D–F land so the surface is not moved twice).
+- The `system_settings` keys in §13 are specified but **not yet created** —
+  the bank-holiday policy default is currently a frontend constant
+  (`COMPANY_BANK_HOLIDAY_DEFAULT`) with a comment pointing here.
+- Bank holiday dates are not seeded for any year.
+- The year-end cash-out and the 1 Jan entitlement grant are **manual buttons**;
+  neither is on the scheduler yet. Both must be before 1 Jan 2027.
+
+### Verification approach — please keep doing this
+
+Every phase was verified against a **real Postgres 16** with all migrations
+applied from scratch and realistic fixtures, not only unit tests. Six of the
+eight bugs above were invisible to unit tests and surfaced the moment real SQL
+ran. Unit tests cover the pure date and entitlement arithmetic
+(`staff-day-status.test.ts`, `staff-balance.test.ts` — 52 tests); everything
+touching the database gets a scratch-database run.
