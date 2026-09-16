@@ -139,8 +139,11 @@ async function uploadRequest<T>(
   return response.json();
 }
 
-// Fetch a file as a blob with auth headers (for inline viewing)
-async function blobRequest(path: string): Promise<{ blob: Blob; contentType: string }> {
+// Fetch a file as a blob with auth headers (for inline viewing).
+// Pass an AbortSignal when the caller may lose interest mid-download (a
+// thumbnail scrolled back out of view) — receipts run to several MB and
+// finishing one nobody will look at just starves the next request.
+async function blobRequest(path: string, signal?: AbortSignal): Promise<{ blob: Blob; contentType: string }> {
   const { accessToken, refreshToken } = useAuthStore.getState();
 
   const headers: Record<string, string> = {};
@@ -148,13 +151,13 @@ async function blobRequest(path: string): Promise<{ blob: Blob; contentType: str
     headers['Authorization'] = `Bearer ${accessToken}`;
   }
 
-  let response = await fetch(`${API_BASE}${path}`, { headers });
+  let response = await fetch(`${API_BASE}${path}`, { headers, signal });
 
   if (response.status === 401 && refreshToken) {
     try {
       const tokens = await refreshAccessToken();
       headers['Authorization'] = `Bearer ${tokens.accessToken}`;
-      response = await fetch(`${API_BASE}${path}`, { headers });
+      response = await fetch(`${API_BASE}${path}`, { headers, signal });
     } catch {
       throw new Error('Session expired');
     }
@@ -190,5 +193,5 @@ export const api = {
   deleteWithBody: <T>(path: string, body: unknown) =>
     request<T>(path, { method: 'DELETE', body: JSON.stringify(body) }),
   upload: <T>(path: string, formData: FormData) => uploadRequest<T>(path, formData),
-  blob: (path: string) => blobRequest(path),
+  blob: (path: string, signal?: AbortSignal) => blobRequest(path, signal),
 };
