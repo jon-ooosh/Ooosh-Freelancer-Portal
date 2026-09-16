@@ -16,6 +16,7 @@ import {
   sendConfirmationSilentSkipAlert,
 } from '../services/confirmation-hooks';
 import { reactivateAutoCancelledRequirements } from '../services/requirement-cleanup';
+import { cascadeJobClose, reactivateAutoCancelledQuotes } from '../services/job-close-cascade';
 import { pushDepositToHH, reverseDepositOnHH, getMethodForBankId } from '../services/hh-deposit';
 import { getJobBillingFacts, getNetHireDepositTotal, HireDeposit } from '../services/hh-billing-deposits';
 import { createPipelineEnquiry, EnquiryValidationError } from '../services/pipeline-enquiry';
@@ -608,6 +609,19 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
       } catch (reactivateErr) {
         console.warn('[Pipeline] Failed to reactivate auto-cancelled requirements:', reactivateErr);
       }
+      // Same for the transport/crew quotes the close cascade cancelled. They
+      // come back as draft/todo and WITHOUT their crew — see
+      // reactivateAutoCancelledQuotes for why re-offering stays manual.
+      try {
+        const revived = await reactivateAutoCancelledQuotes(jobId);
+        if (revived.reactivatedCount > 0) {
+          console.log(
+            `[Pipeline] Reactivated ${revived.reactivatedCount} auto-cancelled quote(s) on resurrection (${fromStatus} → ${pipeline_status}) for job ${jobId}`
+          );
+        }
+      } catch (reactivateErr) {
+        console.warn('[Pipeline] Failed to reactivate auto-cancelled quotes:', reactivateErr);
+      }
     }
 
     // Log the transition as an interaction
@@ -825,110 +839,12 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
       })();
     }
 
-    // Lost cascade — mirror the cancellation flow. Without this the
-    // transport/crew quotes + assignments keep showing as active work on
-    // Transport Ops even though the parent job is dead. We skip the
-    // freelancer email for past-dated jobs (backfill / historical data
-    // import) so cleaning up old records doesn't spam anyone.
+    // Lost cascade — transport/crew/vehicle cleanup. Shared with the
+    // cancellation flow, the stale-enquiry auto-loser and the HH webhook via
+    // services/job-close-cascade.ts, so all four doors out of a live job do
+    // the same thing. Never throws; logs its own counts.
     if (pipeline_status === 'lost' && fromStatus !== 'lost') {
-      try {
-        // Pull crew before we cancel assignments so we still have the data
-        const crewResult = await query(
-          `SELECT qa.role, p.first_name, p.last_name, p.email
-             FROM quote_assignments qa
-             JOIN people p ON p.id = qa.person_id
-             WHERE qa.quote_id IN (SELECT id FROM quotes WHERE job_id = $1 AND is_deleted = false)
-               AND qa.status NOT IN ('cancelled', 'declined')
-               AND qa.is_ooosh_crew = false
-               AND p.is_deleted = false
-               AND p.email IS NOT NULL`,
-          [jobId]
-        );
-
-        await query(
-          `UPDATE quotes
-             SET status = 'cancelled',
-                 ops_status = 'cancelled',
-                 status_changed_at = NOW(),
-                 status_changed_by = $2,
-                 cancelled_reason = COALESCE(cancelled_reason, 'Parent job marked lost'),
-                 updated_at = NOW()
-           WHERE job_id = $1
-             AND is_deleted = false
-             AND status NOT IN ('cancelled', 'completed')`,
-          [jobId, req.user!.id]
-        );
-
-        await query(
-          `UPDATE quote_assignments SET status = 'cancelled', updated_at = NOW()
-           WHERE quote_id IN (SELECT id FROM quotes WHERE job_id = $1 AND is_deleted = false)
-             AND status NOT IN ('cancelled', 'declined')`,
-          [jobId]
-        );
-
-        // Vehicle hire assignment sweep. Without this, speculative/orphan
-        // rows (derivation-engine pre-allocations, quick-assign, even stray
-        // booked_out rows on test jobs) get left behind on a lost job and
-        // keep blocking syncFleetHireStatus from transitioning the van to
-        // 'Prep Needed'. Mirrors the cancellations.ts /process flow.
-        // Dual job match catches V&D-style rows (job_id IS NULL).
-        const hhJobNumber = currentJob.hh_job_number ?? null;
-        const sweptVha = await query(
-          `UPDATE vehicle_hire_assignments
-             SET status = 'cancelled',
-                 status_changed_at = NOW(),
-                 notes = COALESCE(notes, '') ||
-                         E'\n[Auto-cancelled: job marked lost]',
-                 updated_at = NOW()
-           WHERE (job_id = $1
-                  OR (job_id IS NULL AND hirehop_job_id = $2::integer))
-             AND status NOT IN ('cancelled', 'returned', 'swapped')
-           RETURNING id, vehicle_id`,
-          [jobId, hhJobNumber]
-        );
-        if (sweptVha.rows.length > 0) {
-          console.log(`[Pipeline lost cascade] Cancelled ${sweptVha.rows.length} open vehicle_hire_assignment(s) for job ${jobId}`);
-          // Recompute fleet hire_status for each affected vehicle so the
-          // cached projection catches up immediately.
-          const { syncFleetHireStatus } = await import('../services/fleet-hire-status-sync');
-          const seen = new Set<string>();
-          for (const r of sweptVha.rows) {
-            if (r.vehicle_id && !seen.has(r.vehicle_id)) {
-              seen.add(r.vehicle_id);
-              try { await syncFleetHireStatus(r.vehicle_id); }
-              catch (e) { console.warn('[Pipeline lost cascade] syncFleetHireStatus failed:', e); }
-            }
-          }
-        }
-
-        // Email only for future-dated jobs. currentJob.job_date is a Date
-        // or ISO string; compare on calendar-day to be friendly to TZ.
-        const rawJobDate = currentJob.job_date ? new Date(currentJob.job_date as string | Date) : null;
-        const today = new Date(); today.setHours(0, 0, 0, 0);
-        const isFuture = !!rawJobDate && !Number.isNaN(rawJobDate.getTime()) && rawJobDate >= today;
-
-        if (isFuture && crewResult.rows.length > 0) {
-          const jobNumber = currentJob.hh_job_number ? `J-${currentJob.hh_job_number}` : 'NEW';
-          const jobName = currentJob.job_name || 'Untitled';
-          const jobDates = [currentJob.job_date, currentJob.job_end].filter(Boolean).map(
-            (d: string | Date) => new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
-          ).join(' — ');
-          for (const crew of crewResult.rows) {
-            emailService.send('job_cancelled_crew', {
-              to: crew.email,
-              variables: {
-                crewName: `${crew.first_name || ''} ${crew.last_name || ''}`.trim() || 'there',
-                jobName,
-                jobNumber,
-                jobDates,
-                crewRole: crew.role || 'Crew',
-              },
-            }).catch(err => console.error(`[Pipeline lost cascade] Email failed for ${crew.email}:`, err));
-          }
-        }
-      } catch (cascadeErr) {
-        console.error('[Pipeline] Lost cascade failed:', cascadeErr);
-      }
+      await cascadeJobClose({ jobId, reason: 'lost', actorUserId: req.user!.id });
     }
 
     // Write back to HireHop (async, non-blocking — don't fail the response if HH is down)

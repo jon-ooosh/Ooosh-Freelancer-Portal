@@ -232,3 +232,19 @@ See docs/SPEC.md for full phased plan.
   month control is one more thing to set and unset for a list that is already
   short. If the year list ever gets long enough to scroll, group it under month
   headings rather than adding a second filter.
+
+## Transport & Crew
+
+- **Push OP delivery/collection details into HireHop's delivery box** — HH jobs
+  have delivery / collection address fields that OP neither reads nor writes
+  (confirmed Sep 2026: zero references anywhere in the codebase). Local D&C
+  already pushes a *charge line* to HH (`LOCAL_DC_ITEMS` / `getLocalItemId` in
+  `routes/quotes.ts`), so HH knows commercially that a delivery exists — it
+  just doesn't carry the address.
+
+  If this gets built, make it **one-way (OP → HH) only**. The OP quote is the
+  richer record — linked venue with address, parking/access notes, times, fee,
+  assigned driver, run grouping, freelancer-portal exposure — and nobody works
+  from HH's box, so reading back would create a divergence surface for no
+  operational gain. Nice-to-have for HH-side visibility; not a gap that costs
+  anyone anything today.

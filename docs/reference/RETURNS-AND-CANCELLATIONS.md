@@ -262,5 +262,68 @@ Merge two **same-client pre-hire** bookings into one — the "client wants their
 
 **Phase in `action_url`:** Notification action URLs include `&phase=pre_hire` or `&phase=post_hire` so clicking through from the inbox lands on the correct toggle. Without this, pre-hire reminders are invisible on dispatched+ jobs (which default to post-hire view) and vice versa. JobDetailPage reads `?phase=` from the URL to seed the toggle state.
 
+#### Job close cascade — the transport side (Sep 2026)
+
+The requirement sweep above is only half of what has to happen when a job dies.
+The other half — **transport/crew quotes, `quote_assignments`, stray
+`vehicle_hire_assignments`, and the freelancer "your job is off" email** — now
+lives in **`services/job-close-cascade.ts`**. Use it; do not write a third copy.
+
+**Why it was extracted.** The cascade was written inline in `pipeline.ts` (7 Sep
+2026) and, separately and slightly differently, in `cancellations.ts`. Two of
+the four doors out of a live job had no cascade at all:
+
+- **`config/scheduler.ts` — the 09:00 stale-enquiry auto-loser.** Unattended,
+  runs daily, set `pipeline_status = 'lost'` and nothing else. **Job 16505** is
+  the worked example: auto-lost 31 Aug 2026 with `lost_reason = 'No Decision'`,
+  both its transport quotes still `confirmed` afterwards, still showing as live
+  work on Transport Ops. (The giveaway that the cascade never ran: those quotes'
+  `cancelled_reason` was blank when they were eventually cancelled by hand — the
+  cascade always stamps a reason.)
+- **`routes/webhooks.ts` — both the HH webhook and the external transition
+  endpoint.** Staff marking a job Cancelled / Not Interested *in HireHop* flipped
+  `pipeline_status` and left the transport live. Note the auto-loser **writes
+  back to HH status 10**, so these two gaps sat directly downstream of each other.
+
+**The contract:**
+
+- `cascadeJobClose({ jobId, reason, actorUserId })` — `reason` is `'lost'` or
+  `'cancelled'`; `actorUserId` is `null` on the unattended paths (cron, webhook).
+  Idempotent, never throws, logs its own counts.
+- **`completed` quotes are never cancelled.** The work physically happened and
+  the freelancer is owed for it whatever the parent job's fate.
+- **Crew emails fire for future-dated jobs only.** Every job the auto-loser
+  touches is past-dated by definition, so cleaning up historic dead enquiries
+  can never spam anyone. Sends are per-recipient guarded — one bad address does
+  not stop the rest of the crew being told.
+- **`is_ooosh_crew = false`** on the crew lookup drops the "Ooosh Staff"
+  placeholder person that local D&C quotes auto-assign. (This tightened the
+  cancellation flow, which previously had neither this filter nor the
+  future-dated rule.)
+- **Markers on `quotes.cancelled_reason`:** `[Auto-cancelled: job marked lost]`
+  / `[Auto-cancelled: job cancelled]`, same convention as the requirement notes
+  and the VHA notes sweep. An existing human-typed reason is preserved and the
+  marker appended.
+
+**Resurrection** is `reactivateAutoCancelledQuotes(jobId)`, called alongside
+`reactivateAutoCancelledRequirements` everywhere a job moves back OUT of
+lost/cancelled (pipeline route + both webhook sites). Marker-gated, so a quote a
+human cancelled stays cancelled. Two deliberate limits:
+
+- Quotes come back as **`draft` / `todo`**, not at whatever status they held —
+  the prior status isn't recorded anywhere, and the crew is gone (below), so
+  restoring straight to `confirmed` would claim crew the quote no longer has.
+- **Crew assignments and vehicle hire assignments are NOT reinstated.** Those
+  freelancers were emailed "this job is off"; silently putting them back on it
+  would imply a commitment nobody made to them. Re-offering is a human decision,
+  and an unallocated van is the safe direction.
+
+**Still open:** the `job_requirements` sweep is deliberately NOT in the service —
+it depends on the staff-supplied keep-list and must run AFTER the event-trigger
+pass. That means the cron and webhook paths close a job without sweeping its
+requirements. Low impact (background scanners already gate on
+`pipeline_status NOT IN ('lost','cancelled')`), but the cards stay visibly open
+on the job. Fixing it needs the event-trigger ordering solved first.
+
 #### Step 5: Payment Portal Repointing
 *Merged into Step 3 Phase E (Money System).* See above for full repointing plan with `DATA_BACKEND` env var toggle.

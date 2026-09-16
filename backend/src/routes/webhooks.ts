@@ -20,6 +20,7 @@ import {
   sendConfirmationSilentSkipAlert,
 } from '../services/confirmation-hooks';
 import { reactivateAutoCancelledRequirements } from '../services/requirement-cleanup';
+import { cascadeJobClose, reactivateAutoCancelledQuotes } from '../services/job-close-cascade';
 
 const router = Router();
 
@@ -266,6 +267,21 @@ async function handleJobStatusChange(
       [newPipelineStatus, job.id],
     );
 
+    // Close cascade: a job marked Cancelled / Not Interested IN HIREHOP used
+    // to flip pipeline_status here and nothing else, leaving live transport
+    // quotes + crew assignments behind. Same cleanup the OP-side transitions
+    // do — unattended, so no actor user.
+    if (
+      (newPipelineStatus === 'lost' && job.pipeline_status !== 'lost') ||
+      (newPipelineStatus === 'cancelled' && job.pipeline_status !== 'cancelled')
+    ) {
+      await cascadeJobClose({
+        jobId: job.id,
+        reason: newPipelineStatus as 'lost' | 'cancelled',
+        actorUserId: null,
+      });
+    }
+
     // Resurrection: reverse the Lost / Cancelled requirement sweep when HH
     // moves the job back out of lost/cancelled. Marker-gated so staff-cancelled
     // rows stay cancelled. See CLAUDE.md → "Lost / Cancelled cleanup pattern".
@@ -282,6 +298,19 @@ async function handleJobStatusChange(
         }
       } catch (reactivateErr) {
         console.warn('[Webhook] Failed to reactivate auto-cancelled requirements:', reactivateErr);
+      }
+      // Quotes the close cascade cancelled come back too — draft/todo, and
+      // WITHOUT their crew (re-offering a freelancer who was told the job was
+      // off stays a human decision).
+      try {
+        const revived = await reactivateAutoCancelledQuotes(job.id);
+        if (revived.reactivatedCount > 0) {
+          console.log(
+            `[Webhook] Reactivated ${revived.reactivatedCount} auto-cancelled quote(s) on resurrection (${job.pipeline_status} → ${newPipelineStatus}) for job ${job.id}`,
+          );
+        }
+      } catch (reactivateErr) {
+        console.warn('[Webhook] Failed to reactivate auto-cancelled quotes:', reactivateErr);
       }
     }
 
@@ -545,6 +574,18 @@ router.post('/external/status-transition', async (req: Request, res: Response) =
       [newPipelineStatus, new_status, getHHStatusName(new_status), job.id],
     );
 
+    // Close cascade — same as the HH webhook path above.
+    if (
+      (newPipelineStatus === 'lost' && job.pipeline_status !== 'lost') ||
+      (newPipelineStatus === 'cancelled' && job.pipeline_status !== 'cancelled')
+    ) {
+      await cascadeJobClose({
+        jobId: job.id,
+        reason: newPipelineStatus as 'lost' | 'cancelled',
+        actorUserId: null,
+      });
+    }
+
     // Resurrection: reverse the Lost / Cancelled requirement sweep when an
     // external caller moves the job back out of lost/cancelled. Marker-gated
     // so staff-cancelled rows stay cancelled.
@@ -561,6 +602,16 @@ router.post('/external/status-transition', async (req: Request, res: Response) =
         }
       } catch (reactivateErr) {
         console.warn('[Webhook/external] Failed to reactivate auto-cancelled requirements:', reactivateErr);
+      }
+      try {
+        const revived = await reactivateAutoCancelledQuotes(job.id);
+        if (revived.reactivatedCount > 0) {
+          console.log(
+            `[Webhook/external] Reactivated ${revived.reactivatedCount} auto-cancelled quote(s) on resurrection (${job.pipeline_status} → ${newPipelineStatus}) for job ${job.id}`,
+          );
+        }
+      } catch (reactivateErr) {
+        console.warn('[Webhook/external] Failed to reactivate auto-cancelled quotes:', reactivateErr);
       }
     }
 
