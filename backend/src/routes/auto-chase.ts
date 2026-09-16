@@ -10,7 +10,7 @@
 import { Router, Response } from 'express';
 import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
-import { getGmailIngestionStatus, runIngestionForPrimaryMailbox } from '../services/gmail-ingestion';
+import { getGmailIngestionStatus, runIngestionForAllMailboxes, getAllGmailIngestionStatus } from '../services/gmail-ingestion';
 import { runEmailRetentionSweep } from '../services/email-retention';
 import { draftChaseEmail, learnChaseVoice } from '../services/chase-draft';
 import { createChaseDraftForJob } from '../services/gmail-draft';
@@ -20,7 +20,7 @@ import { backfillOpenPipelineThreads, type BackfillScope, type BackfillSummary }
 import { getJobQuoteVersions, sweepQuoteVersions, type QuoteSweepSummary } from '../services/quote-versions';
 import { runDueAutoChases } from '../services/auto-chase-runner';
 import { isAnthropicConfigured } from '../config/anthropic';
-import { isGmailConfigured } from '../config/gmail';
+import { isGmailConfigured, getPrimaryMailbox } from '../config/gmail';
 
 const router = Router();
 router.use(authenticate);
@@ -59,12 +59,13 @@ router.get('/status', authorize('admin', 'manager'), async (_req: AuthRequest, r
   }
 });
 
-// POST /api/auto-chase/ingest — manual ingestion run (admin only). Handy for
-// establishing the baseline + a first live test before the cron cadence.
+// POST /api/auto-chase/ingest — manual ingestion run across ALL mailboxes (admin
+// only): info@ (full) + every configured manager mailbox (matched-only). Handy for
+// establishing a new mailbox's baseline + a first live test before the cron cadence.
 router.post('/ingest', authorize('admin'), async (_req: AuthRequest, res: Response) => {
   try {
-    const summary = await runIngestionForPrimaryMailbox();
-    res.json({ data: summary });
+    const summaries = await runIngestionForAllMailboxes();
+    res.json({ data: summaries });
   } catch (error) {
     console.error('[auto-chase] manual ingest error:', error);
     res.status(500).json({ error: 'Ingestion run failed' });
@@ -210,6 +211,62 @@ router.post('/emails/:id/move', authorize(...STAFF_ROLES), async (req: AuthReque
   } catch (error) {
     console.error('[auto-chase] move email error:', error);
     res.status(500).json({ error: 'Failed to move email' });
+  }
+});
+
+// GET /api/auto-chase/mailboxes — per-mailbox ingestion status: info@ (full) +
+// each manager mailbox (matched-only), each probed live so a delegation gap
+// surfaces inline. Admin only (managing which mailboxes we read is sensitive).
+router.get('/mailboxes', authorize('admin'), async (_req: AuthRequest, res: Response) => {
+  try {
+    const status = await getAllGmailIngestionStatus();
+    res.json({ data: status });
+  } catch (error) {
+    console.error('[auto-chase] mailboxes status error:', error);
+    res.status(500).json({ error: 'Failed to read mailbox status' });
+  }
+});
+
+// PUT /api/auto-chase/mailboxes — set the manager-mailbox list. Body:
+// { mailboxes: string[] }. Each must be an @oooshtours.co.uk address and not the
+// primary info@. Stored in system_settings.gmail_manager_mailboxes (JSON). Admin
+// only. Returns the fresh per-mailbox status so the UI reflects connectivity.
+router.put('/mailboxes', authorize('admin'), async (req: AuthRequest, res: Response) => {
+  try {
+    const input = Array.isArray(req.body?.mailboxes) ? req.body.mailboxes : null;
+    if (!input) return res.status(400).json({ error: 'mailboxes must be an array' });
+
+    const primary = getPrimaryMailbox().toLowerCase();
+    const seen = new Set<string>();
+    const clean: string[] = [];
+    const rejected: string[] = [];
+    for (const item of input) {
+      const addr = String(item || '').trim().toLowerCase();
+      if (!addr) continue;
+      const valid = /^[^@\s]+@oooshtours\.co\.uk$/.test(addr);
+      if (!valid || addr === primary) { rejected.push(addr); continue; }
+      if (seen.has(addr)) continue;
+      seen.add(addr);
+      clean.push(addr);
+    }
+    if (rejected.length > 0) {
+      return res.status(400).json({
+        error: `Only @oooshtours.co.uk mailboxes (other than ${primary}) can be added. Rejected: ${rejected.join(', ')}`,
+      });
+    }
+
+    await query(
+      `INSERT INTO system_settings (key, value, category, value_type, updated_at, updated_by)
+       VALUES ('gmail_manager_mailboxes', $1, 'chase', 'text', NOW(), $2)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW(), updated_by = EXCLUDED.updated_by`,
+      [JSON.stringify(clean), req.user?.id ?? null],
+    );
+
+    const status = await getAllGmailIngestionStatus();
+    res.json({ data: status });
+  } catch (error) {
+    console.error('[auto-chase] set mailboxes error:', error);
+    res.status(500).json({ error: 'Failed to save mailbox list' });
   }
 });
 

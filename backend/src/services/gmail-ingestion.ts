@@ -25,8 +25,44 @@
 import { query } from '../config/database';
 import { getGmailProfile, gmailApiGet, getPrimaryMailbox, isGmailConfigured } from '../config/gmail';
 import { matchEmailToJob, extractEmailAddress, extractReferencedJobNumbers } from './email-matcher';
+import { getSystemSetting } from '../routes/system-settings';
 
 const SYSTEM_USER_ID = '00000000-0000-0000-0000-000000000000';
+
+/**
+ * Manager mailboxes to ingest alongside info@ (spec §6, Phase 1.5), from the
+ * admin-editable system_settings.gmail_manager_mailboxes (JSON array). Lowercased,
+ * limited to our own domain, deduped, never including the primary. These run
+ * MATCHED-ONLY (see runIngestionForAllMailboxes) — no unmatched-queue residue, so
+ * a manager's non-job mail never surfaces. The existing domain-wide-delegation
+ * grant already covers every mailbox in the domain, so adding one is pure config.
+ */
+export async function getManagerMailboxes(): Promise<string[]> {
+  const raw = await getSystemSetting('gmail_manager_mailboxes');
+  if (!raw || !raw.trim()) return [];
+  let list: string[];
+  try {
+    const parsed = JSON.parse(raw);
+    list = Array.isArray(parsed) ? parsed.map((x) => String(x)) : [];
+  } catch {
+    list = raw.split(','); // tolerate a plain comma-separated value
+  }
+  const primary = getPrimaryMailbox().toLowerCase();
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of list) {
+    const addr = item.trim().toLowerCase();
+    if (!addr || addr === primary || seen.has(addr)) continue;
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(addr)) continue;
+    const domain = addr.slice(addr.lastIndexOf('@') + 1);
+    const ownDomain = INTERNAL_SENDER_DOMAINS.some((d) => domain === d || domain.endsWith(`.${d}`));
+    if (!ownDomain) continue;
+    seen.add(addr);
+    out.push(addr);
+  }
+  return out;
+}
+
 
 // ── Internal / automated sender filtering ───────────────────────────────────
 // info@ is a firehose of our OWN mail: every internal notification / alert /
@@ -165,13 +201,15 @@ interface GmailHistoryList {
 
 export interface IngestionSummary {
   mailbox: string;
+  /** 'full' = info@ (matched + unmatched queue); 'matched_only' = a manager mailbox. */
+  mode?: 'full' | 'matched_only';
   configured: boolean;
   baselineEstablished: boolean;
   fetched: number;
   logged: number;
   unmatched: number;
   duplicates: number;
-  /** Internal (own-domain) or automated (bounce/OOO/bulk) mail skipped entirely. */
+  /** Internal/automated mail skipped — plus, in matched-only mode, unmatched mail not queued. */
   skipped: number;
   error?: string;
 }
@@ -331,7 +369,7 @@ async function getThreadAnchorJob(threadId: string | null | undefined): Promise<
 export async function ingestGmailMessage(
   mailbox: string,
   messageId: string,
-  opts: { forceJobId?: string; prefetched?: GmailMessage } = {},
+  opts: { forceJobId?: string; prefetched?: GmailMessage; queueUnmatched?: boolean } = {},
 ): Promise<IngestOutcome> {
   const msg =
     opts.prefetched ?? (await gmailApiGet<GmailMessage>(`/messages/${messageId}?format=full`, mailbox));
@@ -455,6 +493,12 @@ export async function ingestGmailMessage(
     return 'logged';
   }
 
+  // No confident job match. Full mode (info@) parks it in the review queue for a
+  // human to hand-link; matched-only mode (manager mailboxes) drops it entirely so
+  // a manager's non-job mail never surfaces (spec §6). queueUnmatched defaults true.
+  if (opts.queueUnmatched === false) {
+    return 'skipped';
+  }
   await query(
     `INSERT INTO gmail_unmatched_inbound
        (mailbox, gmail_message_id, gmail_thread_id, email_from, email_to,
@@ -470,8 +514,9 @@ async function processMessage(
   mailbox: string,
   messageId: string,
   counters: { logged: number; unmatched: number; duplicates: number; skipped: number },
+  queueUnmatched: boolean,
 ): Promise<void> {
-  const outcome = await ingestGmailMessage(mailbox, messageId);
+  const outcome = await ingestGmailMessage(mailbox, messageId, { queueUnmatched });
   if (outcome === 'logged') counters.logged++;
   else if (outcome === 'unmatched') counters.unmatched++;
   else if (outcome === 'duplicate') counters.duplicates++;
@@ -510,13 +555,18 @@ async function fetchAddedMessageIds(mailbox: string, startHistoryId: string): Pr
 }
 
 /**
- * Ingest new mail for the primary (info@) mailbox. Safe to call on a schedule.
- * No-ops cleanly when Gmail isn't configured.
+ * Ingest new mail for one delegated mailbox. `queueUnmatched` = park no-match mail
+ * in the review queue (true for info@) vs drop it (false for manager mailboxes,
+ * matched-only). Safe to call on a schedule; no-ops cleanly when Gmail isn't
+ * configured.
  */
-export async function runIngestionForPrimaryMailbox(): Promise<IngestionSummary> {
-  const mailbox = getPrimaryMailbox();
+export async function runIngestionForMailbox(
+  mailbox: string,
+  opts: { queueUnmatched: boolean },
+): Promise<IngestionSummary> {
   const summary: IngestionSummary = {
     mailbox,
+    mode: opts.queueUnmatched ? 'full' : 'matched_only',
     configured: isGmailConfigured(),
     baselineEstablished: false,
     fetched: 0,
@@ -544,10 +594,10 @@ export async function runIngestionForPrimaryMailbox(): Promise<IngestionSummary>
     const counters = { logged: 0, unmatched: 0, duplicates: 0, skipped: 0 };
     for (const id of ids) {
       try {
-        await processMessage(mailbox, id, counters);
+        await processMessage(mailbox, id, counters, opts.queueUnmatched);
       } catch (err) {
         // One bad message shouldn't stall the batch; log + continue.
-        console.error(`[gmail-ingestion] message ${id} failed:`, err);
+        console.error(`[gmail-ingestion] message ${id} (${mailbox}) failed:`, err);
       }
     }
     summary.logged = counters.logged;
@@ -563,6 +613,42 @@ export async function runIngestionForPrimaryMailbox(): Promise<IngestionSummary>
     await recordError(mailbox, message).catch(() => undefined);
     return summary;
   }
+}
+
+/**
+ * Ingest the primary info@ mailbox (matched + unmatched queue). Kept as a thin
+ * wrapper — other callers (tests, manual triggers) use it directly.
+ */
+export async function runIngestionForPrimaryMailbox(): Promise<IngestionSummary> {
+  return runIngestionForMailbox(getPrimaryMailbox(), { queueUnmatched: true });
+}
+
+/**
+ * Ingest info@ (full) + every configured manager mailbox (matched-only), in turn.
+ * This is what the scheduler runs (spec §6). Returns a per-mailbox summary array.
+ * A failure on one mailbox is captured in its summary and never blocks the others.
+ */
+export async function runIngestionForAllMailboxes(): Promise<IngestionSummary[]> {
+  const primary = getPrimaryMailbox();
+  if (!isGmailConfigured()) {
+    return [{
+      mailbox: primary, mode: 'full', configured: false, baselineEstablished: false,
+      fetched: 0, logged: 0, unmatched: 0, duplicates: 0, skipped: 0,
+    }];
+  }
+  const results: IngestionSummary[] = [];
+  results.push(await runIngestionForMailbox(primary, { queueUnmatched: true }));
+
+  let managers: string[] = [];
+  try {
+    managers = await getManagerMailboxes();
+  } catch (err) {
+    console.error('[gmail-ingestion] manager mailbox list read failed:', err);
+  }
+  for (const mailbox of managers) {
+    results.push(await runIngestionForMailbox(mailbox, { queueUnmatched: false }));
+  }
+  return results;
 }
 
 /**
@@ -589,4 +675,44 @@ export async function getGmailIngestionStatus(): Promise<{
   } catch (err) {
     return { configured: true, mailbox, error: err instanceof Error ? err.message : String(err) };
   }
+}
+
+export interface MailboxStatus {
+  mailbox: string;
+  mode: 'full' | 'matched_only';
+  profile?: { emailAddress: string; historyId: string; messagesTotal: number };
+  syncState?: { history_id: string | null; last_synced_at: string | null; last_error: string | null; messages_seen: number };
+  error?: string;
+}
+
+/**
+ * Per-mailbox status for the admin Settings surface: info@ (full) + every manager
+ * mailbox (matched-only). Each entry probes the mailbox via getGmailProfile, so a
+ * manager mailbox the delegation can't impersonate surfaces its error inline
+ * rather than failing silently at ingest time.
+ */
+export async function getAllGmailIngestionStatus(): Promise<{ configured: boolean; mailboxes: MailboxStatus[] }> {
+  if (!isGmailConfigured()) return { configured: false, mailboxes: [] };
+  const primary = getPrimaryMailbox().toLowerCase();
+  const managers = await getManagerMailboxes().catch(() => []);
+  const targets: Array<{ mailbox: string; mode: 'full' | 'matched_only' }> = [
+    { mailbox: primary, mode: 'full' },
+    ...managers.map((m) => ({ mailbox: m, mode: 'matched_only' as const })),
+  ];
+
+  const mailboxes: MailboxStatus[] = [];
+  for (const { mailbox, mode } of targets) {
+    try {
+      const profile = await getGmailProfile(mailbox);
+      const r = await query(
+        `SELECT history_id, last_synced_at, last_error, messages_seen
+           FROM gmail_sync_state WHERE mailbox = $1`,
+        [mailbox],
+      );
+      mailboxes.push({ mailbox, mode, profile, syncState: r.rows[0] });
+    } catch (err) {
+      mailboxes.push({ mailbox, mode, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  return { configured: true, mailboxes };
 }

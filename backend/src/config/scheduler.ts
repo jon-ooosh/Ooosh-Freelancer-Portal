@@ -1290,16 +1290,18 @@ export function startScheduler() {
     } else {
       cron.schedule('*/10 * * * *', async () => {
         try {
-          const { runIngestionForPrimaryMailbox } = await import('../services/gmail-ingestion');
-          const r = await runIngestionForPrimaryMailbox();
-          if (r.baselineEstablished) {
-            console.log(`Scheduler: Gmail ingestion — baseline established for ${r.mailbox}`);
-          } else if (r.error) {
-            console.error(`Scheduler: Gmail ingestion error (${r.mailbox}): ${r.error}`);
-          } else if (r.logged > 0 || r.unmatched > 0) {
-            console.log(
-              `Scheduler: Gmail ingestion — ${r.logged} logged, ${r.unmatched} unmatched, ${r.duplicates} dupes (fetched ${r.fetched})`,
-            );
+          const { runIngestionForAllMailboxes } = await import('../services/gmail-ingestion');
+          const summaries = await runIngestionForAllMailboxes();
+          for (const r of summaries) {
+            if (r.baselineEstablished) {
+              console.log(`Scheduler: Gmail ingestion — baseline established for ${r.mailbox} (${r.mode})`);
+            } else if (r.error) {
+              console.error(`Scheduler: Gmail ingestion error (${r.mailbox}): ${r.error}`);
+            } else if (r.logged > 0 || r.unmatched > 0) {
+              console.log(
+                `Scheduler: Gmail ingestion (${r.mailbox}, ${r.mode}) — ${r.logged} logged, ${r.unmatched} unmatched, ${r.duplicates} dupes (fetched ${r.fetched})`,
+              );
+            }
           }
         } catch (err) {
           console.error('Scheduler: Gmail ingestion failed:', err);
