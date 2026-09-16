@@ -1069,6 +1069,7 @@ is a settings change and not a deploy — that is why they are settings.
 | — | Timed absence markers removed — built in D, taken out on review (§7.5, decision 10) | 215 |
 | **D0** | The §13 settings created and read, bank holidays seeded and marked, entitlement and the cash-out reminder on the scheduler, My Time by leave year | 216 |
 | **D0.1** | Bank holidays computed rather than seeded; next year's entitlement granted in advance; cross-year request pricing; the post-sweep overtime residual; preferred name used site-wide | 218 |
+| **§20** | Company days — granted to everyone, recurring or one-off, with the reclaim prompt and an annual November ask | 219 |
 
 ### Decisions taken during the build that CHANGE this spec
 
@@ -1186,6 +1187,23 @@ contradict an earlier section, this list wins.
    swept and that nothing ever looks at again. The reminder now runs in
    December for the current year and in January for the previous one, stamping
    year *and* phase so December's send does not silence January's follow-up.
+
+19. **A company day is a layer ABOVE leave and absence, not beside them.** It
+   changes whether the day is contracted at all, which is the level a pattern
+   exception works at. Putting it there meant three things needed no rules of
+   their own: leave cannot be booked on it, it does not count toward coverage,
+   and the min-headcount floor cannot fire on it. Every one of those would have
+   been a separate special case had it been modelled as a kind of leave.
+
+20. **Next year became bookable, which is why it had been read-only.** My Time
+   gated a future year read-only with "book against this year from the picker
+   above", which jon rightly called confusing. The real cause was duller than
+   the message suggested: the booking form seeded its dates from TODAY, so
+   picking 2027 and opening the form gave you a 2026 date. Seeding the form
+   from the year being viewed fixed it, and with next year's entitlement now
+   granted in advance there was no reason left to gate it at all. *A gate put
+   up to hide an awkward default outlives the awkwardness and then reads as a
+   rule.*
 
 ### Bugs found during the build, and what they teach
 
@@ -1419,12 +1437,11 @@ muddy the comparison it is there to make.
 
 ---
 
-## 20. Proposed — company days ("bonus" days off)
+## 20. Company days ("bonus" days off) — SHIPPED (migration 219)
 
-**Not agreed, not built.** Raised by jon: he grants a couple of extra days off
-a year that should not come out of anyone's allowance — Christmas Day being the
-standing example, since under `use_allowance` it is otherwise an ordinary
-working day.
+Raised by jon: he grants a couple of extra days off a year that should not come
+out of anyone's allowance — Christmas Day being the standing example, since
+under `use_allowance` it is otherwise an ordinary working day.
 
 ### 20.1 Why not just use what exists
 
@@ -1473,20 +1490,31 @@ offer to reclaim them**, per day, defaulting to all. Not automatic: giving
 allowance back is a decision, and the platform rule is that a recomputed figure
 gets surfaced for a human.
 
-### 20.4 Open questions for jon
+### 20.4 The three questions, answered
 
-1. **Does a company day apply to everyone, always?** The design above says yes.
-   A part-timer who does not work Fridays gains nothing from a Friday closure,
-   which is inherent rather than a bug, but it is worth saying out loud.
-2. **Recurring — same date, or the same *substituted* weekday?** "Christmas Day
-   every year" is a fixed date. If the intent is closer to "the working day
-   around Christmas", that is a different and much fuzzier rule; a fixed date
-   plus the odd one-off is almost certainly enough.
-3. **Should a company day count toward `min_headcount_by_weekday`?** No —
-   nobody is contracted, so the floor should not fire. Easy to get wrong.
+1. **Applies to everyone, always** — jon's answer. A part-timer who does not
+   work Fridays gains nothing from a Friday closure; that is inherent, and the
+   merge leaves such a day unlabelled rather than writing "Closed" over a day
+   they already had off.
+2. **Recurring on a fixed date, PLUS an annual prompt.** jon: "25th Dec will
+   always be Christmas Day, but it won't always be a working day for everyone
+   — perhaps an annual review to input the company days for the coming year?"
+   Both, therefore: `recurs` handles the fixed ones and a scheduled prompt each
+   November asks for the year's one-offs, which are the ones nobody remembers.
+3. **Does not count toward `min_headcount_by_weekday`** — agreed. It falls out
+   rather than needing a rule: the day resolves to `not_scheduled`, so it never
+   reaches the coverage list at all.
 
-### 20.5 Sizing
+### 20.5 Where it is controlled
 
-Migration + service + a day-status layer + admin UI + the reclaim prompt. About
-the size of a small phase, and it is the natural companion to §19 rather than
-something to bolt onto an unrelated PR.
+**Settings → Staff time & company calendar**, alongside bank holidays, because
+from a staff member's point of view they are the same kind of thing: days that
+are not normal working days. The staff calendar carries an admin link to it,
+since noticing you need one and configuring it are different moments and only
+the second wants a form.
+
+### 20.6 What 29 February does
+
+A recurring day on 29 February is **skipped** in a common year rather than slid
+to the 28th. Sliding would invent a day off nobody agreed to; skipping is
+visible on the calendar and a one-off covers it if that was the intent.

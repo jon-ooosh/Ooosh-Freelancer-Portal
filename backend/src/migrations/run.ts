@@ -254,6 +254,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '216_staff_time_settings.sql',
         '217_email_attribution_controls.sql',
         '218_bank_holidays_computed.sql',
+        '219_company_days.sql',
       ];
 
       for (const migration of migrations) {

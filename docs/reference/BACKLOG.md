@@ -220,12 +220,6 @@ See docs/SPEC.md for full phased plan.
 
 ## Staff Calendar & Time
 
-- **Company days / bonus days off** — ad-hoc or recurring days the company
-  grants that do not come out of anyone's allowance (Christmas Day being the
-  standing one). Design in `docs/STAFF-CALENDAR-SPEC.md` §20, including the
-  part that needs care: anyone who had already booked holiday on that date
-  needs it giving back, which reuses §7.4's reclaim.
-
 - **Working location per day** ("boots on the ground") — WFH / on site / office,
   so the calendar can answer *who is in the building* and not just *who is not
   off*. Full design and the one decision it hangs on (what "In" should count)

@@ -1847,10 +1847,11 @@ function StaffTimeSettingsSection() {
 
   return (
     <div className="bg-white rounded-lg border border-gray-200 p-4 sm:p-6 mb-6">
-      <h2 className="text-lg font-semibold text-gray-900 mb-1">Staff time</h2>
+      <h2 className="text-lg font-semibold text-gray-900 mb-1">Staff time &amp; company calendar</h2>
       <p className="text-sm text-gray-600 mb-4">
-        Holiday, overtime and absence thresholds, plus the bank holiday calendar.
-        Changing one takes effect within a minute — no deploy needed.
+        Holiday, overtime and absence thresholds, the bank holiday calendar, and the
+        days the company closes. Changing one takes effect within a minute — no deploy
+        needed.
       </p>
 
       {error && <div className="mb-3 p-2 rounded bg-red-50 border border-red-200 text-sm text-red-700">{error}</div>}
@@ -1871,6 +1872,8 @@ function StaffTimeSettingsSection() {
       </div>
 
       <BankHolidayOverrides onError={setError} onSuccess={setSuccess} />
+
+      <CompanyDaysSection onError={setError} onSuccess={setSuccess} />
 
       <div className="mt-4 flex items-center gap-3">
         <button onClick={() => void save()} disabled={saving}
@@ -1994,6 +1997,234 @@ function BankHolidayOverrides({ onError, onSuccess }: {
             Correct {year}&apos;s dates
           </button>
         </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Company days — the days the company grants to everyone (spec §20).
+ *
+ * Lives next to bank holidays because they are the same kind of thing from a
+ * staff member's point of view: days that are not normal working days. The
+ * difference is that bank holidays are computed and are NOT days off under the
+ * current policy, whereas these are granted and cost nobody any allowance.
+ *
+ * The staff calendar links here, because noticing you need one and configuring
+ * it are different moments and only the second wants a form.
+ */
+function CompanyDaysSection({ onError, onSuccess }: {
+  onError: (m: string) => void;
+  onSuccess: (m: string) => void;
+}) {
+  interface CompanyDay {
+    id: string; dayDate: string; label: string; recurs: boolean;
+    status: 'active' | 'cancelled'; notes: string | null;
+  }
+  interface Occurrence { date: string; label: string; companyDayId: string }
+  interface ReclaimCandidate {
+    dayId: string; personId: string; personName: string;
+    date: string; minutes: number; leaveType: string;
+  }
+
+  const thisYear = new Date().getUTCFullYear();
+  const [days, setDays] = useState<CompanyDay[]>([]);
+  const [occurrences, setOccurrences] = useState<Occurrence[]>([]);
+  const [year, setYear] = useState(thisYear);
+  const [loading, setLoading] = useState(true);
+  const [adding, setAdding] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [reclaim, setReclaim] = useState<{ dayLabel: string; id: string; candidates: ReclaimCandidate[] } | null>(null);
+
+  const [dayDate, setDayDate] = useState(`${thisYear}-12-25`);
+  const [label, setLabel] = useState('');
+  const [recurs, setRecurs] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await api.get<{ data: CompanyDay[]; occurrences: Occurrence[] }>(
+        `/staff-calendar/company-days?year=${year}`);
+      setDays(res.data);
+      setOccurrences(res.occurrences ?? []);
+    } catch {
+      onError('Could not load company days (has migration 219 run?).');
+    } finally { setLoading(false); }
+  }, [year, onError]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  async function add() {
+    if (!label.trim()) { onError('Give the day a name — it shows on everyone\'s calendar.'); return; }
+    setSaving(true);
+    try {
+      const res = await api.post<{ data: CompanyDay; reclaimCandidates: ReclaimCandidate[] }>(
+        '/staff-calendar/company-days', { dayDate, label, recurs });
+      onSuccess(`${res.data.label} added.`);
+      setAdding(false); setLabel(''); setRecurs(false);
+      // Anyone who had already booked it off has paid for a day they are now
+      // being given. Surfaced immediately, applied only if asked.
+      if (res.reclaimCandidates?.length > 0) {
+        setReclaim({ dayLabel: res.data.label, id: res.data.id, candidates: res.reclaimCandidates });
+      }
+      await load();
+    } catch (e) {
+      onError(e instanceof Error ? e.message : 'Failed to add that day');
+    } finally { setSaving(false); }
+  }
+
+  async function giveBack(ids: string[]) {
+    if (!reclaim) return;
+    setSaving(true);
+    try {
+      await api.post(`/staff-calendar/company-days/${reclaim.id}/reclaim`, { leaveDayIds: ids });
+      onSuccess(`${ids.length} booked day${ids.length === 1 ? '' : 's'} given back.`);
+      setReclaim(null);
+    } catch (e) {
+      onError(e instanceof Error ? e.message : 'Failed to give those days back');
+    } finally { setSaving(false); }
+  }
+
+  async function cancel(d: CompanyDay) {
+    const reason = window.prompt(`Why is "${d.label}" being withdrawn? (kept on the record)`);
+    if (!reason) return;
+    try {
+      await api.post(`/staff-calendar/company-days/${d.id}/cancel`, { reason });
+      onSuccess(`${d.label} withdrawn.`);
+      await load();
+    } catch (e) {
+      onError(e instanceof Error ? e.message : 'Failed to withdraw that day');
+    }
+  }
+
+  const fmt = (iso: string) => {
+    const [y, m, d] = iso.split('-').map(Number);
+    const dt = new Date(Date.UTC(y, m - 1, d));
+    return Number.isNaN(dt.getTime()) ? iso
+      : dt.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' });
+  };
+
+  return (
+    <div className="mt-5 pt-4 border-t border-gray-100">
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+        <h3 className="text-sm font-semibold text-gray-900">Company days</h3>
+        <div className="flex items-center gap-2">
+          <select value={year} onChange={e => setYear(Number(e.target.value))}
+            aria-label="Company day year"
+            className="px-2 py-1 rounded border border-gray-300 text-sm">
+            {Array.from({ length: 4 }, (_, i) => thisYear - 1 + i).map(y => (
+              <option key={y} value={y}>{y}</option>
+            ))}
+          </select>
+          <button onClick={() => setAdding(a => !a)}
+            className="px-3 py-1 text-sm rounded border border-ooosh-300 text-ooosh-700 hover:bg-ooosh-50">
+            {adding ? 'Cancel' : 'Add a day'}
+          </button>
+        </div>
+      </div>
+      <p className="text-xs text-gray-500 mb-3">
+        Days the company gives everyone — a Christmas closure, a day around a bank
+        holiday. They <strong>cost nobody any allowance</strong>, nobody can book leave
+        on them, and they do not count toward cover. Anyone who had already booked one
+        off gets it handed back.
+      </p>
+
+      {adding && (
+        <div className="mb-3 p-3 rounded border border-ooosh-200 bg-ooosh-50/40 space-y-2">
+          <div className="grid sm:grid-cols-3 gap-2">
+            <label className="text-sm">
+              <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">Date</span>
+              <input type="date" value={dayDate} onChange={e => setDayDate(e.target.value)}
+                className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white" />
+            </label>
+            <label className="text-sm sm:col-span-2">
+              <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">What is it</span>
+              <input value={label} onChange={e => setLabel(e.target.value)}
+                placeholder="Christmas Day · Office closed"
+                className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white" />
+            </label>
+          </div>
+          <label className="flex items-center gap-2 text-sm text-gray-700">
+            <input type="checkbox" checked={recurs} onChange={e => setRecurs(e.target.checked)} />
+            Every year on this date
+          </label>
+          <p className="text-xs text-gray-500">
+            Tick it for something fixed like Christmas Day and it looks after itself.
+            Leave it for a one-off — you get a reminder each November to set the next
+            year&apos;s.
+          </p>
+          <button disabled={saving} onClick={() => void add()}
+            className="px-3 py-1.5 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
+            Add it
+          </button>
+        </div>
+      )}
+
+      {reclaim && (
+        <div className="mb-3 p-3 rounded border border-sky-200 bg-sky-50">
+          <p className="text-sm text-sky-900 mb-2">
+            <strong>{reclaim.candidates.length}</strong> booked day
+            {reclaim.candidates.length === 1 ? ' has' : 's have'} been overtaken by{' '}
+            {reclaim.dayLabel}. Give the allowance back?
+          </p>
+          <ul className="text-sm text-sky-900 mb-2 space-y-0.5">
+            {reclaim.candidates.map(c => (
+              <li key={c.dayId}>
+                {c.personName} — {fmt(c.date)} ({c.leaveType === 'toil' ? 'TOIL' : 'holiday'})
+              </li>
+            ))}
+          </ul>
+          <div className="flex gap-2">
+            <button disabled={saving}
+              onClick={() => void giveBack(reclaim.candidates.map(c => c.dayId))}
+              className="px-3 py-1.5 text-sm rounded bg-sky-600 text-white hover:bg-sky-700 disabled:opacity-50">
+              Give all {reclaim.candidates.length} back
+            </button>
+            <button onClick={() => setReclaim(null)}
+              className="px-3 py-1.5 text-sm rounded border border-sky-300 bg-white hover:bg-sky-100">
+              Leave them as they are
+            </button>
+          </div>
+        </div>
+      )}
+
+      {loading ? (
+        <div className="text-sm text-gray-400">Loading…</div>
+      ) : (
+        <>
+          {days.length === 0 ? (
+            <div className="text-sm text-gray-400 mb-2">None set up.</div>
+          ) : (
+            <ul className="divide-y divide-gray-100 border border-gray-200 rounded mb-2">
+              {days.map(d => (
+                <li key={d.id} className="flex flex-wrap items-center gap-2 px-3 py-2 text-sm">
+                  <span className="font-medium text-gray-900">{d.label}</span>
+                  <span className="text-gray-500">
+                    {d.recurs
+                      ? `every ${fmt(d.dayDate).replace(/^\w{3} /, '')}`
+                      : fmt(d.dayDate) + ' ' + d.dayDate.slice(0, 4)}
+                  </span>
+                  {d.recurs && (
+                    <span className="text-xs px-2 py-0.5 rounded bg-emerald-100 text-emerald-800">
+                      Recurring
+                    </span>
+                  )}
+                  <button onClick={() => void cancel(d)}
+                    className="ml-auto text-xs text-red-600 hover:underline">
+                    Withdraw
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <div className="text-xs text-gray-500">
+            <span className="font-medium">{year}:</span>{' '}
+            {occurrences.length === 0
+              ? 'no company days'
+              : occurrences.map(o => `${fmt(o.date)} (${o.label})`).join(' · ')}
+          </div>
+        </>
       )}
     </div>
   );
