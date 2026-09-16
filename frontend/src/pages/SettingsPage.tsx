@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { hasManagerRole } from '../lib/roles';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
@@ -1839,7 +1839,9 @@ function StaffTimeSettingsSection() {
   // year-end cash-out reminder fire again).
   const INTERNAL = 'staff.overtime_cashout_reminded_year';
   const editable = settings.filter(row => row.key !== INTERNAL);
-  const bankHolidayRows = editable.filter(row => row.key.startsWith('staff.bank_holidays.'));
+  // The per-year override rows are handled by BankHolidayOverrides below,
+  // which can reach years nobody seeded. They are filtered out here so they do
+  // not also appear as raw text boxes.
   const thresholdRows = editable.filter(row => !row.key.startsWith('staff.bank_holidays.'));
   const internal = settings.find(row => row.key === INTERNAL);
 
@@ -1868,30 +1870,7 @@ function StaffTimeSettingsSection() {
         ))}
       </div>
 
-      {bankHolidayRows.length > 0 && (
-        <div className="mt-5 pt-4 border-t border-gray-100">
-          <h3 className="text-sm font-semibold text-gray-900 mb-1">Bank holidays</h3>
-          <p className="text-xs text-gray-500 mb-3">
-            England &amp; Wales, comma-separated <code>YYYY-MM-DD</code>, with weekend
-            substitutes already applied. Under the <code>use_allowance</code> policy these
-            are marked on the calendar but are <strong>ordinary working days</strong> —
-            staff who want one off book it like any other day. Add a year by asking for a
-            new row; editing one here is enough to correct a date.
-          </p>
-          <div className="space-y-3">
-            {bankHolidayRows.map(row => (
-              <div key={row.key}>
-                <label htmlFor={row.key} className="block text-sm text-gray-700 mb-1">
-                  {row.label ?? row.key}
-                </label>
-                <textarea id={row.key} rows={2} value={vals[row.key] ?? ''}
-                  onChange={e => setVals(v => ({ ...v, [row.key]: e.target.value }))}
-                  className="w-full px-2 py-1.5 rounded border border-gray-300 text-sm font-mono" />
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
+      <BankHolidayOverrides onError={setError} onSuccess={setSuccess} />
 
       <div className="mt-4 flex items-center gap-3">
         <button onClick={() => void save()} disabled={saving}
@@ -1905,6 +1884,117 @@ function StaffTimeSettingsSection() {
           </span>
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * Bank holidays — computed for any year, overridable for the odd one.
+ *
+ * The dates are worked out from the rules (`services/bank-holidays.ts`) rather
+ * than stored, so there is no year to "add" and nothing to keep topped up. This
+ * shows what any year resolves to and lets an admin pin a corrected list if the
+ * arithmetic is ever wrong — which needs its own endpoint, because the generic
+ * settings PUT only updates rows that already exist.
+ */
+function BankHolidayOverrides({ onError, onSuccess }: {
+  onError: (m: string) => void;
+  onSuccess: (m: string) => void;
+}) {
+  const thisYear = new Date().getUTCFullYear();
+  const [year, setYear] = useState(thisYear);
+  const [dates, setDates] = useState<string[]>([]);
+  const [draft, setDraft] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [editing, setEditing] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await api.get<{ data: string[] }>(`/staff-calendar/bank-holidays?year=${year}`);
+      setDates(res.data);
+      setDraft(res.data.join(', '));
+    } catch {
+      onError('Could not load bank holidays.');
+    } finally { setLoading(false); }
+  }, [year, onError]);
+
+  useEffect(() => { void load(); setEditing(false); }, [load]);
+
+  async function saveOverride(list: string[]) {
+    setSaving(true);
+    try {
+      await api.put(`/staff-calendar/bank-holidays/${year}`, { dates: list });
+      onSuccess(list.length > 0
+        ? `${year} pinned to ${list.length} date${list.length === 1 ? '' : 's'}.`
+        : `${year} handed back to the automatic dates.`);
+      setEditing(false);
+      await load();
+    } catch (e) {
+      onError(e instanceof Error ? e.message : 'Failed to save those dates');
+    } finally { setSaving(false); }
+  }
+
+  return (
+    <div className="mt-5 pt-4 border-t border-gray-100">
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+        <h3 className="text-sm font-semibold text-gray-900">Bank holidays</h3>
+        <select value={year} onChange={e => setYear(Number(e.target.value))}
+          aria-label="Bank holiday year"
+          className="px-2 py-1 rounded border border-gray-300 text-sm">
+          {Array.from({ length: 8 }, (_, i) => thisYear - 1 + i).map(y => (
+            <option key={y} value={y}>{y}</option>
+          ))}
+        </select>
+      </div>
+      <p className="text-xs text-gray-500 mb-3">
+        England &amp; Wales, <strong>worked out automatically</strong> for any year —
+        weekend substitutes included — so there is nothing to keep topped up. Under the{' '}
+        <code>use_allowance</code> policy these are marked on the calendar but are
+        ordinary working days. A one-off royal bank holiday is not a date change, it is
+        the company being shut — that is a company day, not this.
+      </p>
+
+      {loading ? (
+        <div className="text-sm text-gray-400">Loading…</div>
+      ) : editing ? (
+        <div className="space-y-2">
+          <textarea rows={3} value={draft} onChange={e => setDraft(e.target.value)}
+            className="w-full px-2 py-1.5 rounded border border-gray-300 text-sm font-mono"
+            placeholder="2029-01-01, 2029-03-30, …" />
+          <div className="flex flex-wrap gap-2">
+            <button disabled={saving}
+              onClick={() => void saveOverride(
+                draft.split(',').map(d => d.trim()).filter(Boolean))}
+              className="px-3 py-1.5 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
+              Pin these dates
+            </button>
+            <button disabled={saving} onClick={() => void saveOverride([])}
+              className="px-3 py-1.5 text-sm rounded border border-gray-300 hover:bg-gray-50">
+              Use the automatic dates
+            </button>
+            <button onClick={() => { setEditing(false); setDraft(dates.join(', ')); }}
+              className="px-3 py-1.5 text-sm rounded border border-gray-300 hover:bg-gray-50">
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div>
+          <div className="flex flex-wrap gap-1.5 mb-2">
+            {dates.map(d => (
+              <span key={d} className="text-xs px-2 py-1 rounded bg-violet-50 text-violet-800 font-mono">
+                {d}
+              </span>
+            ))}
+          </div>
+          <button onClick={() => setEditing(true)}
+            className="text-sm text-ooosh-600 hover:underline">
+            Correct {year}&apos;s dates
+          </button>
+        </div>
+      )}
     </div>
   );
 }

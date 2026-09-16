@@ -15,7 +15,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     const whereClause = includeInactive ? '' : 'WHERE u.is_active = true';
     const result = await query(
       `SELECT u.id, u.email, u.role, u.is_active, u.last_login, u.avatar_url, u.hh_user_id,
-        p.first_name, p.last_name
+        p.first_name, p.last_name, p.preferred_name
        FROM users u
        LEFT JOIN people p ON p.id = u.person_id
        ${whereClause}
@@ -112,7 +112,7 @@ router.put('/:id', authorize('admin', 'manager'), validate(updateUserSchema), as
     // Return updated user
     const result = await query(
       `SELECT u.id, u.email, u.role, u.is_active, u.avatar_url, u.hh_user_id,
-        p.first_name, p.last_name
+        p.first_name, p.last_name, p.preferred_name
        FROM users u
        LEFT JOIN people p ON p.id = u.person_id
        WHERE u.id = $1`,

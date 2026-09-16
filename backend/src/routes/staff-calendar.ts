@@ -650,6 +650,43 @@ router.get('/payroll', adminOnly, async (req: AuthRequest, res: Response) => {
 // Both accounts for the logged-in user in one call, so the booking form can
 // show what is available BEFORE dates are picked — the thing that lets someone
 // choose between holiday and TOIL rather than guess.
+// PUT /api/staff-calendar/bank-holidays/:year — override a year's dates.
+//
+// Its own route rather than the generic settings PUT, which only ever UPDATEs
+// an existing row: dates are computed for any year, so an override has to be
+// creatable for a year nobody seeded. Sending an empty list clears the
+// override and hands the year back to the arithmetic.
+router.put('/bank-holidays/:year', adminOnly, async (req: AuthRequest, res: Response) => {
+  const year = Number(req.params.year);
+  if (!Number.isInteger(year) || year < 2000 || year > 2200) {
+    res.status(400).json({ error: 'That is not a year' }); return;
+  }
+  const parsed = z.object({ dates: z.array(dateStr) }).safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: 'Dates must be YYYY-MM-DD' }); return; }
+
+  const wrong = parsed.data.dates.filter(d => d.slice(0, 4) !== String(year));
+  if (wrong.length > 0) {
+    res.status(400).json({ error: `Not in ${year}: ${wrong.join(', ')}` }); return;
+  }
+
+  try {
+    const { upsertSystemSetting } = await import('./system-settings');
+    await upsertSystemSetting(
+      `staff.bank_holidays.${year}`,
+      [...new Set(parsed.data.dates)].sort().join(','),
+      {
+        label: `Bank holidays ${year} — OVERRIDE only. Leave empty and they are worked out automatically`,
+        category: 'staff_time',
+        sortOrder: 200 + (year - 2026),
+      }
+    );
+    res.json({ data: await getBankHolidays(year), year, overridden: parsed.data.dates.length > 0 });
+  } catch (err) {
+    console.error('[staff-calendar] bank holiday override error:', err);
+    res.status(500).json({ error: 'Failed to save those dates' });
+  }
+});
+
 // GET /api/staff-calendar/bank-holidays?year= — the marked days for a year.
 router.get('/bank-holidays', async (req: AuthRequest, res: Response) => {
   try {

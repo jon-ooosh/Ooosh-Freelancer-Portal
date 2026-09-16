@@ -153,6 +153,14 @@ export interface LeaveImpact {
   balanceAfter: number | null;
   nominalDayMinutes: number | null;
   shortfallMinutes: number;
+  /**
+   * The cost split by leave year. Almost always one entry; two when a request
+   * straddles 31 December, which is the case that used to be mispriced.
+   */
+  perYear: {
+    year: number; minutes: number;
+    balanceBefore: number; balanceAfter: number; shortfallMinutes: number;
+  }[];
   noticeDays: number;
   /** Dates the requester has ALREADY booked off — a blocker, not a warning. */
   ownClashes: string[];
@@ -176,17 +184,49 @@ export async function getImpact(
   const days = await buildDays(personId, startDate, endDate, dayOverrides);
   const totalMinutes = days.reduce((s, d) => s + d.minutes, 0);
   const account = accountFor(leaveType);
-  const year = Number(startDate.slice(0, 4));
 
+  // PER LEAVE YEAR, because a request can straddle 31 December and the ledger
+  // already does: approveRequest posts one debit per day into that day's own
+  // leave year. Pricing the whole request against the START year — which this
+  // did — meant a 28 Dec–4 Jan request was checked entirely against December's
+  // balance and then quietly put January's into deficit on approval. The
+  // preview and the ledger disagreed, which is the failure mode this codebase
+  // is most prone to.
+  const minutesByYear = new Map<number, number>();
+  for (const d of days) {
+    const y = Number(d.date.slice(0, 4));
+    minutesByYear.set(y, (minutesByYear.get(y) ?? 0) + d.minutes);
+  }
+  // A request with no chargeable days still needs a year to report against.
+  if (minutesByYear.size === 0) minutesByYear.set(Number(startDate.slice(0, 4)), 0);
+
+  const perYear: LeaveImpact['perYear'] = [];
   let balanceBefore: number | null = null;
   let nominalDayMinutes: number | null = null;
+  let shortfallMinutes = 0;
+
   if (account) {
-    const bal = await getBalance(personId, account, year);
-    balanceBefore = bal.balanceMinutes;
-    nominalDayMinutes = bal.nominalDayMinutes;
+    for (const [y, mins] of [...minutesByYear.entries()].sort((a, b) => a[0] - b[0])) {
+      const bal = await getBalance(personId, account, y);
+      const after = bal.balanceMinutes - mins;
+      perYear.push({
+        year: y, minutes: mins,
+        balanceBefore: bal.balanceMinutes, balanceAfter: after,
+        shortfallMinutes: after < 0 ? -after : 0,
+      });
+      if (after < 0) shortfallMinutes += -after;
+      // The headline figures stay the FIRST year's, so the existing shape keeps
+      // meaning what it always did for the overwhelmingly common single-year
+      // request. perYear is the additive field that tells the whole story.
+      if (balanceBefore === null) {
+        balanceBefore = bal.balanceMinutes;
+        nominalDayMinutes = bal.nominalDayMinutes;
+      }
+    }
   }
-  const balanceAfter = balanceBefore === null ? null : balanceBefore - totalMinutes;
-  const shortfallMinutes = balanceAfter !== null && balanceAfter < 0 ? -balanceAfter : 0;
+  const balanceAfter = balanceBefore === null
+    ? null
+    : balanceBefore - (minutesByYear.get(perYear[0]?.year ?? 0) ?? 0);
 
   const today = new Date().toISOString().slice(0, 10);
   const noticeDays = Math.max(0, dateRange(today, startDate).length - 1);
@@ -258,10 +298,18 @@ export async function getImpact(
     warnings.push('None of those dates are days this person is contracted to work.');
   }
   if (shortfallMinutes > 0) {
-    warnings.push(
-      `This is ${fmtMins(shortfallMinutes)} more than they have left${
-        leaveType === 'toil' ? ' in the overtime bank' : ''}.`
-    );
+    const bank = leaveType === 'toil' ? ' in the overtime bank' : '';
+    if (perYear.length > 1) {
+      // Naming the year matters here: "you are 14h over" is baffling when half
+      // the request is in a year you have barely touched.
+      for (const y of perYear.filter(x => x.shortfallMinutes > 0)) {
+        warnings.push(
+          `This is ${fmtMins(y.shortfallMinutes)} more than they have left${bank} in ${y.year}.`
+        );
+      }
+    } else {
+      warnings.push(`This is ${fmtMins(shortfallMinutes)} more than they have left${bank}.`);
+    }
   }
   const { getNoticeDaysWarning } = await import('./staff-settings');
   const noticeThreshold = await getNoticeDaysWarning();
@@ -295,7 +343,7 @@ export async function getImpact(
 
   return {
     days, totalMinutes, workingDays: days.length, account,
-    balanceBefore, balanceAfter, nominalDayMinutes, shortfallMinutes,
+    balanceBefore, balanceAfter, nominalDayMinutes, shortfallMinutes, perYear,
     noticeDays, ownClashes, clashes, coverage, warnings,
   };
 }
