@@ -24,7 +24,7 @@ interface Job {
   id: string
   name: string
   type: 'delivery' | 'collection'
-  whatIsIt?: 'equipment' | 'vehicle'  // Equipment or A vehicle
+  whatIsIt?: 'equipment' | 'vehicle' | 'people'  // Raw quotes.what_is_it
   date?: string
   time?: string
   venueName?: string
@@ -181,7 +181,7 @@ function translateStatus(status: string): { label: string; style: string; icon: 
 /**
  * Get the filter mode for HireHop items based on job's whatIsIt value
  */
-function getFilterMode(whatIsIt?: 'equipment' | 'vehicle'): 'equipment' | 'vehicles' | 'all' {
+function getFilterMode(whatIsIt?: 'equipment' | 'vehicle' | 'people'): 'equipment' | 'vehicles' | 'all' {
   switch (whatIsIt) {
     case 'equipment':
       return 'equipment'  // Exclude vehicles and services
@@ -229,7 +229,7 @@ function getDisplayWorkType(workType?: string, workDescription?: string): string
 
 interface EquipmentListProps {
   hhRef: string
-  whatIsIt?: 'equipment' | 'vehicle'
+  whatIsIt?: 'equipment' | 'vehicle' | 'people'
   isReference?: boolean             // If true, label as "Equipment Reference" instead of "Equipment List"
 }
 

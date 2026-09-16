@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
+import { dayMarker } from '../lib/companyCalendar';
 import { useAuthStore } from '../hooks/useAuthStore';
 
 /**
@@ -28,6 +29,37 @@ interface StaffDay {
   companyDay?: string;
   detail?: { leaveType?: string; absenceType?: string };
 }
+/**
+ * A freelancer booked in to work at the yard (spec §9).
+ *
+ * Deliberately NOT a CalendarPerson: they have no working pattern, no leave and
+ * no absence, and the day is a booking rather than a contracted shift. Offered
+ * → accepted / declined, never "rostered".
+ */
+interface DayBooking {
+  id: string;
+  personId: string;
+  personName: string;
+  bookingDate: string;
+  startTime: string | null;
+  endTime: string | null;
+  durationType: 'full_day' | 'half_day' | 'hours';
+  rateType: 'day' | 'half_day' | 'hourly' | 'fixed';
+  agreedRate: number | null;
+  expectedTotal: number | null;
+  status: 'offered' | 'accepted' | 'declined' | 'cancelled' | 'completed';
+  notes: string | null;
+  invoiceReceived: boolean;
+  invoiceAmount: number | null;
+  invoiceQueried: boolean;
+}
+
+interface SpendSummary {
+  bookedDays: number; completedDays: number;
+  expectedTotal: number; invoicedTotal: number;
+  awaitingInvoice: number; queried: number;
+}
+
 interface CalendarPerson {
   personId: string;
   name: string;
@@ -70,6 +102,21 @@ function monthLabel(date: string): string {
 
 const TODAY = new Date().toISOString().slice(0, 10);
 
+/**
+ * How a booking reads on the grid. Offered is deliberately paler than
+ * accepted: an offer is not a commitment from either side, and the calendar
+ * should not imply the person is definitely coming.
+ */
+const BOOKING_STATUS: Record<
+  DayBooking['status'], { cell: string; short: string; label: string }
+> = {
+  offered:   { cell: 'bg-amber-50 text-amber-800 ring-1 ring-inset ring-amber-200 ring-dashed', short: 'Offered', label: 'Offered — no reply yet' },
+  accepted:  { cell: 'bg-amber-100 text-amber-900', short: 'In',      label: 'Accepted' },
+  completed: { cell: 'bg-amber-200 text-amber-900', short: 'Done',    label: 'Done' },
+  declined:  { cell: 'bg-gray-100 text-gray-500',   short: '—',       label: 'Declined' },
+  cancelled: { cell: 'bg-gray-100 text-gray-500',   short: '—',       label: 'Cancelled' },
+};
+
 const CELL: Record<DayStatus, { bg: string; label: string }> = {
   working:       { bg: 'bg-emerald-100 text-emerald-900', label: 'In' },
   partial:       { bg: 'bg-amber-100 text-amber-900',     label: 'Part' },
@@ -87,6 +134,10 @@ export default function StaffCalendarPage() {
   const [people, setPeople] = useState<CalendarPerson[]>([]);
   const [bankHolidays, setBankHolidays] = useState<string[]>([]);
   const [companyDays, setCompanyDays] = useState<{ date: string; label: string }[]>([]);
+  const [freelancerDays, setFreelancerDays] = useState<DayBooking[]>([]);
+  const [spend, setSpend] = useState<SpendSummary | null>(null);
+  const [addingBooking, setAddingBooking] = useState(false);
+  const [openBooking, setOpenBooking] = useState<DayBooking | null>(null);
   const [bhPolicy, setBhPolicy] = useState<'use_allowance' | 'granted'>('use_allowance');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -106,6 +157,19 @@ export default function StaffCalendarPage() {
       setPeople(res.data);
       setBankHolidays(res.bankHolidays ?? []);
       setCompanyDays(res.companyDays ?? []);
+
+      // A separate call rather than more fields on the calendar response:
+      // freelancer days are a different concept with a different access tier,
+      // and one of the two must keep working if the other fails.
+      try {
+        const fd = await api.get<{ data: DayBooking[]; spend?: SpendSummary }>(
+          `/staff-calendar/freelancer-days?from=${from}&to=${to}`);
+        setFreelancerDays(fd.data ?? []);
+        setSpend(fd.spend ?? null);
+      } catch {
+        setFreelancerDays([]);
+        setSpend(null);
+      }
       setBhPolicy(res.bankHolidayPolicy ?? 'use_allowance');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load the calendar');
@@ -122,19 +186,43 @@ export default function StaffCalendarPage() {
     return out;
   }, [from, to]);
 
-  const isBankHoliday = useCallback(
-    (date: string) => bankHolidays.includes(date), [bankHolidays]);
-  const companyDayLabel = useCallback(
-    (date: string) => companyDays.find(c => c.date === date)?.label, [companyDays]);
+  // A company day beats a bank holiday on the same date — the rule lives in
+  // lib/companyCalendar.ts so this page and My Time cannot drift apart on it.
+  const marker = useCallback(
+    (date: string) => dayMarker(date, bankHolidays, companyDays),
+    [bankHolidays, companyDays]);
 
   // Headcount per day — the coverage signal, informational only.
+  //
+  // Staff and freelancers are counted SEPARATELY and shown as "4 +2", collapsing
+  // to a single number on a day with no freelancers. The calendar is used to
+  // answer "have we got enough people in", so the freelancers have to be in the
+  // total — but they are not interchangeable with staff, and a merged number
+  // would quietly claim they were.
   const headcount = useMemo(
-    () => dates.map(d => people.filter(p => {
-      const day = p.days.find(x => x.date === d);
-      return day?.status === 'working' || day?.status === 'partial';
-    }).length),
-    [dates, people]
+    () => dates.map(d => ({
+      staff: people.filter(p => {
+        const day = p.days.find(x => x.date === d);
+        return day?.status === 'working' || day?.status === 'partial';
+      }).length,
+      freelancers: freelancerDays.filter(
+        b => b.bookingDate === d && b.status !== 'declined' && b.status !== 'cancelled').length,
+    })),
+    [dates, people, freelancerDays]
   );
+
+  // One lane per freelancer who appears anywhere in the window.
+  const freelancerLanes = useMemo(() => {
+    const byPerson = new Map<string, { personId: string; name: string; byDate: Map<string, DayBooking> }>();
+    for (const b of freelancerDays) {
+      if (b.status === 'declined' || b.status === 'cancelled') continue;
+      const lane = byPerson.get(b.personId)
+        ?? { personId: b.personId, name: b.personName, byDate: new Map() };
+      lane.byDate.set(b.bookingDate, b);
+      byPerson.set(b.personId, lane);
+    }
+    return [...byPerson.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }, [freelancerDays]);
 
   return (
     <div className="p-4 sm:p-6 max-w-full">
@@ -146,6 +234,12 @@ export default function StaffCalendarPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {isAdmin && (
+            <button onClick={() => setAddingBooking(true)}
+              className="px-3 py-1.5 text-sm rounded border border-amber-300 text-amber-800 hover:bg-amber-50">
+              Book a freelancer
+            </button>
+          )}
           {isAdmin && (
             <Link to="/staff/admin"
               className="px-3 py-1.5 text-sm rounded border border-ooosh-300 text-ooosh-700 hover:bg-ooosh-50">
@@ -171,6 +265,38 @@ export default function StaffCalendarPage() {
         <div className="mb-4 p-3 rounded bg-red-50 border border-red-200 text-sm text-red-700">{error}</div>
       )}
 
+      {addingBooking && (
+        <BookFreelancer defaultDate={from}
+          onClose={() => setAddingBooking(false)}
+          onBooked={async () => { setAddingBooking(false); await load(); }}
+          onError={setError} />
+      )}
+
+      {openBooking && (
+        <BookingActions booking={openBooking}
+          onClose={() => setOpenBooking(null)}
+          onChanged={async () => { setOpenBooking(null); await load(); }}
+          onError={setError} />
+      )}
+
+      {isAdmin && spend && spend.bookedDays + spend.completedDays > 0 && (
+        <div className="mb-4 p-3 rounded border border-amber-200 bg-amber-50/60 text-sm text-amber-900">
+          <strong>{spend.bookedDays + spend.completedDays} freelance day
+            {spend.bookedDays + spend.completedDays === 1 ? '' : 's'}</strong> in view
+          {spend.expectedTotal > 0 && <> — £{spend.expectedTotal.toFixed(2)} expected</>}
+          {spend.awaitingInvoice > 0 && (
+            <span className="ml-2 text-xs px-2 py-0.5 rounded bg-amber-200">
+              {spend.awaitingInvoice} awaiting an invoice
+            </span>
+          )}
+          {spend.queried > 0 && (
+            <span className="ml-2 text-xs px-2 py-0.5 rounded bg-rose-100 text-rose-800">
+              {spend.queried} queried
+            </span>
+          )}
+        </div>
+      )}
+
       {loading ? (
         <div className="text-sm text-gray-500 py-8">Loading…</div>
       ) : people.length === 0 ? (
@@ -189,26 +315,29 @@ export default function StaffCalendarPage() {
                 </th>
                 {dates.map(d => (
                   <th key={d}
-                    title={companyDayLabel(d)
-                      ? `${companyDayLabel(d)} — company day, nobody is contracted`
-                      : isBankHoliday(d)
-                        ? (bhPolicy === 'granted'
-                            ? 'Bank holiday — granted, nobody is contracted'
-                            : 'Bank holiday — a normal working day here. Book it off if you want it')
-                        : undefined}
+                    title={(() => {
+                      const m = marker(d);
+                      if (m?.kind === 'company') return `${m.label} — company day, nobody is contracted`;
+                      if (m?.kind === 'bank') {
+                        return bhPolicy === 'granted'
+                          ? 'Bank holiday — granted, nobody is contracted'
+                          : 'Bank holiday — a normal working day here. Book it off if you want it';
+                      }
+                      return undefined;
+                    })()}
                     className={`px-1 py-2 border-b border-gray-200 font-medium text-center min-w-[3rem] ${
                       d === TODAY ? 'bg-ooosh-50 text-ooosh-700' : 'text-gray-600'
                     } ${weekdayIndex(d) >= 5 ? 'bg-gray-100' : ''} ${
-                      companyDayLabel(d) ? 'bg-emerald-50 text-emerald-800' : ''}`}>
+                      marker(d)?.kind === 'company' ? 'bg-emerald-50 text-emerald-800' : ''}`}>
                     <div className="text-[10px] uppercase tracking-wide">{shortDay(d)}</div>
                     <div className="text-xs">{dayNum(d)}</div>
                     {/* A dot, not a colour fill: under `use_allowance` a bank
                         holiday IS a working day, and shading it like leave
                         would say the opposite of what the ledger did. */}
                     <div className="h-1.5 leading-none">
-                      {companyDayLabel(d)
+                      {marker(d)?.kind === 'company'
                         ? <span className="text-[9px] text-emerald-600">★</span>
-                        : isBankHoliday(d) && <span className="text-[9px] text-violet-500">●</span>}
+                        : marker(d)?.kind === 'bank' && <span className="text-[9px] text-violet-500">●</span>}
                     </div>
                   </th>
                 ))}
@@ -251,12 +380,70 @@ export default function StaffCalendarPage() {
                   })}
                 </tr>
               ))}
+              {/* A separate, visually distinct lane below the staff rows
+                  (spec §9.1). They are here because the calendar answers
+                  "have we got enough people in" and a freelancer in the yard
+                  counts — but they have no pattern, no leave and no absence,
+                  and the amber lane says so at a glance. */}
+              {freelancerLanes.length > 0 && (
+                <tr>
+                  <td colSpan={dates.length + 1}
+                    className="sticky left-0 bg-amber-50/70 px-3 py-1 text-[10px] uppercase tracking-wide text-amber-800 border-t border-amber-200">
+                    Freelance — booked in
+                  </td>
+                </tr>
+              )}
+              {freelancerLanes.map(lane => (
+                <tr key={lane.personId} className="hover:bg-amber-50/40">
+                  <td className="sticky left-0 z-10 bg-white px-3 py-2 border-b border-gray-100 whitespace-nowrap">
+                    <div className="font-medium text-gray-900">{lane.name}</div>
+                    <div className="text-xs text-amber-700">Freelance</div>
+                  </td>
+                  {dates.map(d => {
+                    const b = lane.byDate.get(d);
+                    return (
+                      <td key={d}
+                        className={`px-1 py-1.5 border-b border-gray-100 text-center align-middle ${
+                          weekdayIndex(d) >= 5 ? 'bg-gray-50/60' : ''}`}>
+                        {b && (
+                          <button
+                            onClick={() => isAdmin && setOpenBooking(b)}
+                            disabled={!isAdmin}
+                            title={[
+                              b.personName,
+                              b.durationType === 'hours' ? `${b.startTime}–${b.endTime}`
+                                : b.durationType === 'half_day' ? 'Half day' : 'Full day',
+                              BOOKING_STATUS[b.status].label,
+                              b.expectedTotal !== null ? `£${b.expectedTotal.toFixed(2)}` : null,
+                              b.notes,
+                            ].filter(Boolean).join(' · ')}
+                            className={`w-full rounded px-1 py-1 text-[10px] leading-tight ${
+                              BOOKING_STATUS[b.status].cell} ${isAdmin ? 'hover:ring-1 hover:ring-amber-400' : ''}`}>
+                            {b.durationType === 'hours' ? b.startTime
+                              : b.durationType === 'half_day' ? '½'
+                                : BOOKING_STATUS[b.status].short}
+                          </button>
+                        )}
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+
               <tr className="bg-gray-50 font-medium">
                 <td className="sticky left-0 z-10 bg-gray-50 px-3 py-2 text-gray-600 text-xs uppercase tracking-wide">
                   In
                 </td>
                 {headcount.map((n, i) => (
-                  <td key={dates[i]} className="px-1 py-2 text-center text-gray-700">{n}</td>
+                  <td key={dates[i]} className="px-1 py-2 text-center text-gray-700"
+                    title={n.freelancers > 0
+                      ? `${n.staff} staff, ${n.freelancers} freelance`
+                      : `${n.staff} staff`}>
+                    {n.staff}
+                    {n.freelancers > 0 && (
+                      <span className="text-amber-700"> +{n.freelancers}</span>
+                    )}
+                  </td>
                 ))}
               </tr>
             </tbody>
@@ -275,16 +462,22 @@ export default function StaffCalendarPage() {
           <span className="inline-block w-3 h-3 rounded ring-1 ring-inset ring-ooosh-400" />
           One-off change / swap
         </span>
-        {bankHolidays.length > 0 && (
+        {dates.some(d => marker(d)?.kind === 'bank') && (
           <span className="inline-flex items-center gap-1.5">
             <span className="text-violet-500">●</span>
             Bank holiday{bhPolicy === 'use_allowance' && ' — a normal working day here'}
           </span>
         )}
-        {companyDays.length > 0 && (
+        {dates.some(d => marker(d)?.kind === 'company') && (
           <span className="inline-flex items-center gap-1.5">
             <span className="text-emerald-600">★</span>
             Company day — granted, costs nobody any allowance
+          </span>
+        )}
+        {freelancerLanes.length > 0 && (
+          <span className="inline-flex items-center gap-1.5">
+            <span className="inline-block w-3 h-3 rounded bg-amber-100" />
+            Freelance — booked in, counts toward the total as &ldquo;+n&rdquo;
           </span>
         )}
         {isAdmin && (
@@ -293,6 +486,304 @@ export default function StaffCalendarPage() {
           </Link>
         )}
       </div>
+    </div>
+  );
+}
+
+// ── Booking a freelancer in (spec §9.2) ─────────────────────────────────────
+
+interface Bookable {
+  personId: string; name: string; email: string | null;
+  defaultDayRate: number | null; defaultHalfDayRate: number | null;
+}
+
+/**
+ * Book someone in for a day at the yard.
+ *
+ * Lives on the calendar rather than behind its own page, because the moment
+ * you decide you need an extra pair of hands is the moment you are looking at
+ * the week and seeing a thin day.
+ *
+ * The rate PRE-FILLS from the person and is then theirs to change: what gets
+ * stored is what was agreed for this booking, not a lookup that could restate
+ * it later.
+ */
+function BookFreelancer({ defaultDate, onClose, onBooked, onError }: {
+  defaultDate: string;
+  onClose: () => void;
+  onBooked: () => void | Promise<void>;
+  onError: (m: string) => void;
+}) {
+  const [people, setPeople] = useState<Bookable[]>([]);
+  const [personId, setPersonId] = useState('');
+  const [bookingDate, setBookingDate] = useState(defaultDate);
+  const [durationType, setDurationType] = useState<DayBooking['durationType']>('full_day');
+  const [startTime, setStartTime] = useState('09:00');
+  const [endTime, setEndTime] = useState('17:00');
+  const [rateType, setRateType] = useState<DayBooking['rateType']>('day');
+  const [agreedRate, setAgreedRate] = useState<string>('');
+  const [notes, setNotes] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    api.get<{ data: Bookable[] }>('/staff-calendar/freelancer-days/bookable')
+      .then(r => setPeople(r.data))
+      .catch(() => onError('Could not load the freelancer list.'));
+  }, [onError]);
+
+  // Pre-fill from the person and the duration, but never overwrite a figure
+  // that has been typed — the agreed rate is the point of the field.
+  const chosen = people.find(p => p.personId === personId);
+  useEffect(() => {
+    if (!chosen || agreedRate !== '') return;
+    const suggested = durationType === 'half_day' ? chosen.defaultHalfDayRate : chosen.defaultDayRate;
+    if (suggested !== null && suggested !== undefined) setAgreedRate(String(suggested));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [personId, durationType]);
+
+  useEffect(() => {
+    if (durationType === 'half_day' && rateType === 'day') setRateType('half_day');
+    if (durationType === 'full_day' && rateType === 'half_day') setRateType('day');
+    if (durationType !== 'hours' && rateType === 'hourly') setRateType('day');
+  }, [durationType, rateType]);
+
+  const timed = durationType === 'hours';
+  const rate = agreedRate === '' ? null : Number(agreedRate);
+  const expected = rate === null ? null
+    : rateType === 'hourly'
+      ? Math.round(rate * Math.max(0, (Number(endTime.slice(0, 2)) * 60 + Number(endTime.slice(3, 5))
+          - Number(startTime.slice(0, 2)) * 60 - Number(startTime.slice(3, 5))) / 60) * 100) / 100
+      : rate;
+
+  async function save() {
+    if (!personId) { onError('Pick who you are booking.'); return; }
+    if (timed && endTime <= startTime) { onError('The end time needs to be after the start.'); return; }
+    setSaving(true);
+    try {
+      await api.post('/staff-calendar/freelancer-days', {
+        personId, bookingDate, durationType, rateType,
+        ...(timed ? { startTime, endTime } : {}),
+        agreedRate: rate,
+        notes: notes || null,
+      });
+      await onBooked();
+    } catch (e) {
+      onError(e instanceof Error ? e.message : 'Failed to book that day');
+    } finally { setSaving(false); }
+  }
+
+  return (
+    <div className="mb-4 p-4 rounded-lg border border-amber-200 bg-amber-50/50 space-y-3">
+      <div>
+        <h2 className="text-sm font-semibold text-gray-900">Book a freelancer in</h2>
+        <p className="text-xs text-gray-600 mt-0.5">
+          A day at the yard — prep, warehouse, an extra pair of hands. It is an{' '}
+          <strong>offer</strong> until they reply, and it has nothing to do with holiday,
+          overtime or working patterns.
+        </p>
+      </div>
+
+      <div className="grid sm:grid-cols-3 gap-3">
+        <label className="text-sm">
+          <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">Who</span>
+          <select value={personId} onChange={e => setPersonId(e.target.value)}
+            className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white">
+            <option value="">Pick someone…</option>
+            {people.map(p => <option key={p.personId} value={p.personId}>{p.name}</option>)}
+          </select>
+        </label>
+        <label className="text-sm">
+          <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">Day</span>
+          <input type="date" value={bookingDate} onChange={e => setBookingDate(e.target.value)}
+            className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white" />
+        </label>
+        <label className="text-sm">
+          <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">How long</span>
+          <select value={durationType}
+            onChange={e => setDurationType(e.target.value as DayBooking['durationType'])}
+            className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white">
+            <option value="full_day">Full day</option>
+            <option value="half_day">Half day</option>
+            <option value="hours">Set hours</option>
+          </select>
+        </label>
+      </div>
+
+      {timed && (
+        <div className="grid sm:grid-cols-3 gap-3">
+          <label className="text-sm">
+            <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">From</span>
+            <input type="time" step={300} value={startTime} onChange={e => setStartTime(e.target.value)}
+              className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white" />
+          </label>
+          <label className="text-sm">
+            <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">To</span>
+            <input type="time" step={300} value={endTime} onChange={e => setEndTime(e.target.value)}
+              className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white" />
+          </label>
+        </div>
+      )}
+
+      <div className="grid sm:grid-cols-3 gap-3">
+        <label className="text-sm">
+          <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">Rate basis</span>
+          <select value={rateType} onChange={e => setRateType(e.target.value as DayBooking['rateType'])}
+            className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white">
+            <option value="day">Day rate</option>
+            <option value="half_day">Half-day rate</option>
+            {timed && <option value="hourly">Hourly</option>}
+            <option value="fixed">Fixed for the job</option>
+          </select>
+        </label>
+        <label className="text-sm">
+          <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">
+            Agreed rate (£)
+          </span>
+          <input type="number" min={0} step="0.01" value={agreedRate}
+            onChange={e => setAgreedRate(e.target.value)}
+            placeholder={chosen?.defaultDayRate ? String(chosen.defaultDayRate) : '—'}
+            className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white" />
+        </label>
+        <div className="text-sm flex items-end pb-1.5">
+          {expected !== null && (
+            <span className="text-gray-600">
+              Expected: <strong className="text-gray-900">£{expected.toFixed(2)}</strong>
+            </span>
+          )}
+        </div>
+      </div>
+
+      <label className="block text-sm">
+        <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">
+          What are they doing
+        </span>
+        <input value={notes} onChange={e => setNotes(e.target.value)}
+          placeholder="Van prep for the Thursday get-out"
+          className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white" />
+      </label>
+
+      <div className="flex gap-2">
+        <button disabled={saving} onClick={() => void save()}
+          className="px-3 py-1.5 text-sm rounded bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50">
+          Offer the day
+        </button>
+        <button onClick={onClose}
+          className="px-3 py-1.5 text-sm rounded border border-gray-300 bg-white hover:bg-gray-50">
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * What can be done with an existing booking.
+ *
+ * Accepted / declined is recorded here by admin for now — the freelancer-facing
+ * version is spec §9.3 and is not built. A decline is recorded and nothing else
+ * happens to them; that is the whole point of the wording.
+ */
+function BookingActions({ booking, onClose, onChanged, onError }: {
+  booking: DayBooking;
+  onClose: () => void;
+  onChanged: () => void | Promise<void>;
+  onError: (m: string) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [invoiceAmount, setInvoiceAmount] = useState(
+    booking.invoiceAmount !== null ? String(booking.invoiceAmount)
+      : booking.expectedTotal !== null ? String(booking.expectedTotal) : '');
+
+  async function act(fn: () => Promise<unknown>) {
+    setBusy(true);
+    try { await fn(); await onChanged(); }
+    catch (e) { onError(e instanceof Error ? e.message : 'That did not work'); }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <div className="mb-4 p-4 rounded-lg border border-amber-200 bg-white space-y-3">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <span className="font-medium text-gray-900">{booking.personName}</span>
+        <span className="text-sm text-gray-600">{booking.bookingDate}</span>
+        <span className="text-sm text-gray-500">
+          {booking.durationType === 'hours' ? `${booking.startTime}–${booking.endTime}`
+            : booking.durationType === 'half_day' ? 'Half day' : 'Full day'}
+        </span>
+        <span className="text-xs px-2 py-0.5 rounded bg-amber-100 text-amber-900">
+          {BOOKING_STATUS[booking.status].label}
+        </span>
+        {booking.expectedTotal !== null && (
+          <span className="text-sm text-gray-600">£{booking.expectedTotal.toFixed(2)} expected</span>
+        )}
+        <button onClick={onClose} className="ml-auto text-sm text-gray-500 hover:underline">Close</button>
+      </div>
+      {booking.notes && <p className="text-sm text-gray-600">{booking.notes}</p>}
+
+      <div className="flex flex-wrap gap-2">
+        {booking.status === 'offered' && (
+          <>
+            <button disabled={busy}
+              onClick={() => act(() => api.post(`/staff-calendar/freelancer-days/${booking.id}/respond`,
+                { response: 'accepted' }))}
+              className="px-3 py-1.5 text-sm rounded bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50">
+              They accepted
+            </button>
+            <button disabled={busy}
+              onClick={() => act(() => api.post(`/staff-calendar/freelancer-days/${booking.id}/respond`,
+                { response: 'declined' }))}
+              className="px-3 py-1.5 text-sm rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-50">
+              They declined
+            </button>
+          </>
+        )}
+        {booking.status === 'accepted' && (
+          <button disabled={busy}
+            onClick={() => act(() => api.post(`/staff-calendar/freelancer-days/${booking.id}/complete`, {}))}
+            className="px-3 py-1.5 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
+            Mark the day done
+          </button>
+        )}
+        {booking.status !== 'cancelled' && (
+          <button disabled={busy}
+            onClick={() => {
+              const reason = window.prompt('Why is this being cancelled? (kept on the record)');
+              if (!reason) return;
+              void act(() => api.post(`/staff-calendar/freelancer-days/${booking.id}/cancel`, { reason }));
+            }}
+            className="px-3 py-1.5 text-sm rounded border border-red-200 text-red-700 hover:bg-red-50 disabled:opacity-50">
+            Cancel the booking
+          </button>
+        )}
+      </div>
+
+      {booking.status === 'completed' && (
+        <div className="pt-3 border-t border-gray-100 flex flex-wrap items-end gap-2">
+          <label className="text-sm">
+            <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">
+              Invoice received (£)
+            </span>
+            <input type="number" min={0} step="0.01" value={invoiceAmount}
+              onChange={e => setInvoiceAmount(e.target.value)}
+              className="px-2 py-1.5 rounded border border-gray-300 w-32" />
+          </label>
+          <button disabled={busy}
+            onClick={() => act(() => api.post(`/staff-calendar/freelancer-days/${booking.id}/invoice`, {
+              received: true,
+              amount: invoiceAmount === '' ? null : Number(invoiceAmount),
+              queried: invoiceAmount !== '' && booking.expectedTotal !== null
+                && Number(invoiceAmount) !== booking.expectedTotal,
+            }))}
+            className="px-3 py-1.5 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
+            Record it
+          </button>
+          {booking.invoiceReceived && (
+            <span className="text-xs text-emerald-700">
+              Recorded{booking.invoiceQueried ? ' — flagged, it differs from the expected figure' : ''}
+            </span>
+          )}
+        </div>
+      )}
     </div>
   );
 }

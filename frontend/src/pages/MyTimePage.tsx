@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
+import { splitBankHolidays } from '../lib/companyCalendar';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
 
@@ -127,6 +128,7 @@ export default function MyTimePage() {
   const [year, setYear] = useState(CURRENT_YEAR);
   const [bankHolidays, setBankHolidays] = useState<string[]>([]);
   const [bhPolicy, setBhPolicy] = useState<'use_allowance' | 'granted'>('use_allowance');
+  const [companyDays, setCompanyDays] = useState<{ date: string; label: string }[]>([]);
   const [openForm, setOpenForm] = useState<'leave' | 'overtime' | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -136,19 +138,22 @@ export default function MyTimePage() {
     try {
       const from = `${year}-01-01`;
       const to = `${year}-12-31`;
-      const [leave, ot, bal, bh] = await Promise.all([
+      const [leave, ot, bal, bh, cd] = await Promise.all([
         api.get<{ data: LeaveRequest[] }>(`/staff-calendar/leave?from=${from}&to=${to}`),
         api.get<{ data: OvertimeEntry[] }>(`/staff-calendar/overtime?from=${from}&to=${to}`),
         api.get<{ data: MyBalances | null; hasStaffRecord?: boolean }>(
           `/staff-calendar/me/balances?year=${year}`),
         api.get<{ data: string[]; policy?: 'use_allowance' | 'granted' }>(
           `/staff-calendar/bank-holidays?year=${year}`),
+        api.get<{ occurrences: { date: string; label: string }[] }>(
+          `/staff-calendar/company-days?year=${year}`),
       ]);
       setRequests(leave.data);
       setOvertime(ot.data);
       setBalances(bal.data);
       setBankHolidays(bh.data ?? []);
       setBhPolicy(bh.policy ?? 'use_allowance');
+      setCompanyDays(cd.occurrences ?? []);
       setHasStaffRecord(bal.hasStaffRecord !== false);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load your time');
@@ -175,6 +180,9 @@ export default function MyTimePage() {
   // Only a year that has finished is read-only, and then because the dates
   // have been and gone rather than because of anything about the balance.
   const isPastYear = year < CURRENT_YEAR;
+  const upcomingCompanyDays = companyDays
+    .filter(c => c.date >= TODAY)
+    .sort((a, b) => a.date.localeCompare(b.date));
   // Open a form on the year being looked at, not on today. This was the real
   // reason next year was gated read-only: picking 2027 and hitting "Book time
   // off" opened a form dated 2026, which is worse than not offering it.
@@ -231,7 +239,8 @@ export default function MyTimePage() {
       )}
 
       <BalanceCards balances={balances} />
-      <YearNudge balances={balances} year={year} bankHolidays={bankHolidays} bhPolicy={bhPolicy} />
+      <YearNudge balances={balances} year={year} bankHolidays={bankHolidays}
+        bhPolicy={bhPolicy} companyDays={companyDays} />
 
       {/* One form at a time. These were previously siblings in a flex row, so
           opening either expanded it to full width while the other button
@@ -259,16 +268,29 @@ export default function MyTimePage() {
 
       <section className="mt-6">
         <h2 className="text-sm font-semibold text-gray-900 uppercase tracking-wide mb-2">
-          {isCurrentYear ? 'Upcoming' : `Booked in ${year}`}
+          {isCurrentYear ? 'Upcoming time off' : `Booked in ${year}`}
         </h2>
         {loading ? (
           <div className="text-sm text-gray-500">Loading…</div>
-        ) : upcoming.length === 0 ? (
+        ) : upcoming.length === 0 && upcomingCompanyDays.length === 0 ? (
           <div className="p-4 rounded border border-dashed border-gray-300 text-sm text-gray-500">
             Nothing booked{isCurrentYear ? '' : ` in ${year}`}.
           </div>
         ) : (
           <div className="space-y-2">
+            {/* Company days sit alongside your own bookings: from where you are
+                standing, the office being shut IS time off — you just did not
+                have to ask for it and it cost you nothing. */}
+            {upcomingCompanyDays.map(c => (
+              <div key={c.date}
+                className="p-3 rounded border border-emerald-200 bg-emerald-50 flex flex-wrap items-center gap-x-3 gap-y-1">
+                <span className="font-medium text-emerald-900">{fmtDate(c.date)}</span>
+                <span className="text-sm text-emerald-800">{c.label}</span>
+                <span className="ml-auto text-xs px-2 py-0.5 rounded bg-emerald-100 text-emerald-800">
+                  Company day — costs you nothing
+                </span>
+              </div>
+            ))}
             {upcoming.map(r => <RequestCard key={r.id} r={r} onWithdraw={withdraw} />)}
           </div>
         )}
@@ -276,7 +298,7 @@ export default function MyTimePage() {
 
       <section className="mt-6">
         <h2 className="text-sm font-semibold text-gray-900 uppercase tracking-wide mb-2">
-          Overtime{isCurrentYear ? '' : ` in ${year}`}
+          Accrued overtime{isCurrentYear ? '' : ` in ${year}`}
         </h2>
         {overtime.length === 0 ? (
           <div className="p-4 rounded border border-dashed border-gray-300 text-sm text-gray-500">
@@ -957,23 +979,34 @@ function LogOvertime({ onClose, onLogged, onError }: {
  * `use_allowance` policy Christmas Day is an ordinary working day here, so
  * anyone who assumed otherwise has fewer days than they think.
  */
-function YearNudge({ balances, year, bankHolidays, bhPolicy }: {
+function YearNudge({ balances, year, bankHolidays, bhPolicy, companyDays }: {
   balances: MyBalances | null;
   year: number;
   bankHolidays: string[];
   bhPolicy: 'use_allowance' | 'granted';
+  companyDays: { date: string; label: string }[];
 }) {
   if (!balances) return null;
 
   const left = balances.holiday.availableMinutes;
+  // Granted, not remaining: "nothing left" and "nothing granted" look the same
+  // in `left` and mean entirely different things to the person reading it.
+  const t = (k: string) => balances.holiday.byType[k] ?? 0;
+  const allowance = t('entitlement') + t('adjustment') + t('carry_over');
   const nominal = balances.holiday.nominalDayMinutes;
   const leftDays = nominal && nominal > 0 ? left / nominal : null;
   const weeks = weeksLeftInYear(year);
   const isCurrentYear = year === CURRENT_YEAR;
   const isFutureYear = year > CURRENT_YEAR;
 
-  // Bank holidays still ahead, so the count is actionable rather than trivia.
-  const upcomingBh = bankHolidays.filter(d => d >= TODAY);
+  // Bank holidays still ahead, MINUS any the company has already granted.
+  //
+  // The two overlap and said opposite things: adding Christmas Day as a company
+  // day left this line still telling everyone that 25 December was a normal
+  // working day they would have to book off. A company day wins — it is the
+  // more specific fact, and it is the one Ooosh decided rather than inherited.
+  const { working: upcomingBh, granted: grantedBh } =
+    splitBankHolidays(bankHolidays, companyDays, TODAY);
 
   // Nothing worth saying about a year that is over, or one with no allowance.
   if (!isCurrentYear && !isFutureYear && left <= 0) return null;
@@ -999,6 +1032,16 @@ function YearNudge({ balances, year, bankHolidays, bhPolicy }: {
         </>
       ) : left < 0 ? (
         <><strong>You are {fmtH(-left)} over</strong> your {year} allowance. Worth a word with a manager.</>
+      ) : allowance === 0 ? (
+        // Zero LEFT and zero ALLOWANCE are different facts and the old copy
+        // read them the same, telling anyone looking at a future year that all
+        // of it was "booked or taken" when none of it had been granted.
+        <>
+          No {year} allowance has been worked out yet.
+          {isFutureYear
+            ? ' It is set automatically — if this is still empty tomorrow, tell an admin.'
+            : ' If that looks wrong, tell an admin — it hangs off your working pattern.'}
+        </>
       ) : (
         <>All of your {year} holiday is booked or taken.</>
       )}
@@ -1009,6 +1052,13 @@ function YearNudge({ balances, year, bankHolidays, bhPolicy }: {
           {' '}({upcomingBh.slice(0, 3).map(fmtDate).join(', ')}
           {upcomingBh.length > 3 ? '…' : ''}) — they are normal working days here,
           so book them off if you want them.
+        </div>
+      )}
+      {isCurrentYear && grantedBh.length > 0 && (
+        <div className="mt-1 text-xs opacity-80">
+          {grantedBh.length === 1 ? 'One is' : `${grantedBh.length} are`} already given to you
+          {' '}({grantedBh.slice(0, 3).map(fmtDate).join(', ')}
+          {grantedBh.length > 3 ? '…' : ''}) — nothing to book.
         </div>
       )}
     </div>

@@ -619,3 +619,55 @@ export async function runEntitlementSync(year?: number): Promise<EntitlementSync
   }
   return out;
 }
+
+/**
+ * Make sure a year's entitlement has been granted before anyone reads it.
+ *
+ * WHY A READ HAS TO DO THIS. runEntitlementSyncForOpenYears runs at 06:05, so
+ * next year's allowance only exists once that cron has fired since the code
+ * landed. Deploy at lunchtime and My Time shows next year as 0m for the rest
+ * of the day — which is exactly what happened, and worse than showing nothing,
+ * because the page says "next year's allowance is already set" beside it.
+ *
+ * Same shape as the absence catch-up: the READ REPAIRS THE DATA, so it cannot
+ * drift and it covers every cause rather than just deploys — a restarted
+ * server, a disabled cron, an employee added an hour ago.
+ *
+ * IT NEVER TOUCHES A PAST YEAR. Granting 2025 retroactively would invent an
+ * allowance for a year this system did not exist in and that nobody can now
+ * take. Whatever is in the ledger for a finished year IS what happened.
+ *
+ * Cheap when there is nothing to do: one COUNT, then out.
+ */
+export async function ensureEntitlement(personId: string, year: number): Promise<void> {
+  if (year < new Date().getUTCFullYear()) return;
+
+  const granted = await query(
+    `SELECT 1 FROM staff_ledger_entries
+      WHERE person_id = $1 AND account = 'holiday'
+        AND leave_year = $2 AND source_type = 'system'
+      LIMIT 1`,
+    [personId, year]
+  );
+  if (granted.rows.length > 0) return;
+
+  // Only people who are actually employed — syncEntitlement throws otherwise,
+  // and a login with no staff record reads this route legitimately.
+  const emp = await query(
+    `SELECT 1 FROM staff_employment
+      WHERE person_id = $1 AND employment_status = 'employed'`,
+    [personId]
+  );
+  if (emp.rows.length === 0) return;
+
+  await syncEntitlement(personId, year, null).catch(e =>
+    console.error(`[staff-balance] lazy entitlement for ${personId} ${year} failed:`, e));
+}
+
+/** The same, for everyone employed — the admin team overview. */
+export async function ensureEntitlementForAll(year: number): Promise<void> {
+  if (year < new Date().getUTCFullYear()) return;
+  const people = await query(
+    `SELECT person_id FROM staff_employment WHERE employment_status = 'employed'`);
+  for (const row of people.rows) await ensureEntitlement(row.person_id, year);
+}
