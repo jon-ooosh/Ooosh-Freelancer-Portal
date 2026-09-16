@@ -57,6 +57,10 @@ import {
 import {
   getBankHolidaysInRange, getBankHolidays, getBankHolidayPolicy,
 } from '../services/staff-settings';
+import {
+  listCompanyDays, listOccurrences, createCompanyDay, getCompanyDay,
+  cancelCompanyDay, getCompanyReclaimCandidates, reclaimForCompanyDay,
+} from '../services/staff-company-days';
 
 const router = Router();
 router.use(authenticate, authorize(...STAFF_ROLES));
@@ -93,12 +97,17 @@ router.get('/calendar', async (req: AuthRequest, res: Response) => {
     // `use_allowance` policy they are ordinary working days, so they are a
     // marker on the grid and nothing more — the calendar must not draw them
     // as time off, because no ledger entry ever paid for them.
-    const [data, bankHolidays, bankHolidayPolicy] = await Promise.all([
+    const { getCompanyDayOverlay } = await import('../services/staff-company-days');
+    const [data, bankHolidays, bankHolidayPolicy, companyDays] = await Promise.all([
       getStaffCalendar(range.from, range.to, { isAdmin: isAdmin(req) }),
       getBankHolidaysInRange(range.from, range.to),
       getBankHolidayPolicy(),
+      getCompanyDayOverlay(range.from, range.to),
     ]);
-    res.json({ data, range, bankHolidays, bankHolidayPolicy });
+    res.json({
+      data, range, bankHolidays, bankHolidayPolicy,
+      companyDays: [...companyDays.values()].map(c => ({ date: c.date, label: c.label })),
+    });
   } catch (err) {
     console.error('[staff-calendar] calendar error:', err);
     res.status(500).json({ error: 'Failed to load staff calendar' });
@@ -621,6 +630,85 @@ router.get('/absence-report', adminOnly, async (req: AuthRequest, res: Response)
   } catch (err) {
     console.error('[staff-calendar] absence report error:', err);
     res.status(500).json({ error: 'Failed to build the absence report' });
+  }
+});
+
+// ── Company days (spec §20) ─────────────────────────────────────────────────
+//
+// Days the company grants to EVERYONE that cost nobody any allowance. Reads
+// are open to all staff — "is the office shut on the 27th" is a question the
+// whole team has — writes are admin.
+
+// GET /api/staff-calendar/company-days?year=
+router.get('/company-days', async (req: AuthRequest, res: Response) => {
+  try {
+    const year = resolveYear(req);
+    res.json({
+      data: await listCompanyDays({ includeCancelled: req.query.includeCancelled === 'true' }),
+      occurrences: await listOccurrences(year),
+      year,
+    });
+  } catch (err) {
+    console.error('[staff-calendar] company days error:', err);
+    res.status(500).json({ error: 'Failed to load company days' });
+  }
+});
+
+// POST /api/staff-calendar/company-days
+router.post('/company-days', adminOnly, async (req: AuthRequest, res: Response) => {
+  const schema = z.object({
+    dayDate: dateStr,
+    label: z.string().min(1).max(120),
+    recurs: z.boolean().optional(),
+    notes: z.string().max(500).nullish(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
+
+  try {
+    const day = await createCompanyDay(parsed.data, req.user!.id);
+    // Offered, never applied: anyone who had already booked the day off has
+    // paid for something the company has now given them, and handing it back
+    // is a decision a human makes (§20.3).
+    res.status(201).json({ data: day, reclaimCandidates: await getCompanyReclaimCandidates(day.id) });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to add that day' });
+  }
+});
+
+// GET /api/staff-calendar/company-days/:id — with what it has landed on.
+router.get('/company-days/:id', adminOnly, async (req: AuthRequest, res: Response) => {
+  try {
+    const day = await getCompanyDay(req.params.id as string);
+    if (!day) { res.status(404).json({ error: 'Company day not found' }); return; }
+    res.json({ data: day, reclaimCandidates: await getCompanyReclaimCandidates(day.id) });
+  } catch (err) {
+    console.error('[staff-calendar] company day error:', err);
+    res.status(500).json({ error: 'Failed to load that day' });
+  }
+});
+
+// POST /api/staff-calendar/company-days/:id/reclaim
+router.post('/company-days/:id/reclaim', adminOnly, async (req: AuthRequest, res: Response) => {
+  const parsed = z.object({ leaveDayIds: z.array(z.string().uuid()).min(1) }).safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: 'Pick at least one day to give back' }); return; }
+  try {
+    const r = await reclaimForCompanyDay(req.params.id as string, parsed.data.leaveDayIds, req.user!.id);
+    res.json({ data: { ...r, reclaimCandidates: await getCompanyReclaimCandidates(req.params.id as string) } });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to give those days back' });
+  }
+});
+
+// POST /api/staff-calendar/company-days/:id/cancel
+router.post('/company-days/:id/cancel', adminOnly, async (req: AuthRequest, res: Response) => {
+  const parsed = z.object({ reason: z.string().min(1).max(500) }).safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: 'A reason is required' }); return; }
+  try {
+    await cancelCompanyDay(req.params.id as string, parsed.data.reason, req.user!.id);
+    res.json({ data: await getCompanyDay(req.params.id as string) });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to cancel that day' });
   }
 });
 

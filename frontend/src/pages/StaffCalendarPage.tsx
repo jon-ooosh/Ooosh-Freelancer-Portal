@@ -24,6 +24,8 @@ interface StaffDay {
   /** Every timed window on the day — someone can be in late AND away early. */
   windows?: { start: string; end: string }[];
   isException: boolean;
+  /** The company has granted this day to everyone — "Christmas Day". */
+  companyDay?: string;
   detail?: { leaveType?: string; absenceType?: string };
 }
 interface CalendarPerson {
@@ -84,6 +86,7 @@ export default function StaffCalendarPage() {
   const [from, setFrom] = useState(() => mondayOf(TODAY));
   const [people, setPeople] = useState<CalendarPerson[]>([]);
   const [bankHolidays, setBankHolidays] = useState<string[]>([]);
+  const [companyDays, setCompanyDays] = useState<{ date: string; label: string }[]>([]);
   const [bhPolicy, setBhPolicy] = useState<'use_allowance' | 'granted'>('use_allowance');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -98,9 +101,11 @@ export default function StaffCalendarPage() {
         data: CalendarPerson[];
         bankHolidays?: string[];
         bankHolidayPolicy?: 'use_allowance' | 'granted';
+        companyDays?: { date: string; label: string }[];
       }>(`/staff-calendar/calendar?from=${from}&to=${to}`);
       setPeople(res.data);
       setBankHolidays(res.bankHolidays ?? []);
+      setCompanyDays(res.companyDays ?? []);
       setBhPolicy(res.bankHolidayPolicy ?? 'use_allowance');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load the calendar');
@@ -119,6 +124,8 @@ export default function StaffCalendarPage() {
 
   const isBankHoliday = useCallback(
     (date: string) => bankHolidays.includes(date), [bankHolidays]);
+  const companyDayLabel = useCallback(
+    (date: string) => companyDays.find(c => c.date === date)?.label, [companyDays]);
 
   // Headcount per day — the coverage signal, informational only.
   const headcount = useMemo(
@@ -182,21 +189,26 @@ export default function StaffCalendarPage() {
                 </th>
                 {dates.map(d => (
                   <th key={d}
-                    title={isBankHoliday(d)
-                      ? (bhPolicy === 'granted'
-                          ? 'Bank holiday — granted, nobody is contracted'
-                          : 'Bank holiday — a normal working day here. Book it off if you want it')
-                      : undefined}
+                    title={companyDayLabel(d)
+                      ? `${companyDayLabel(d)} — company day, nobody is contracted`
+                      : isBankHoliday(d)
+                        ? (bhPolicy === 'granted'
+                            ? 'Bank holiday — granted, nobody is contracted'
+                            : 'Bank holiday — a normal working day here. Book it off if you want it')
+                        : undefined}
                     className={`px-1 py-2 border-b border-gray-200 font-medium text-center min-w-[3rem] ${
                       d === TODAY ? 'bg-ooosh-50 text-ooosh-700' : 'text-gray-600'
-                    } ${weekdayIndex(d) >= 5 ? 'bg-gray-100' : ''}`}>
+                    } ${weekdayIndex(d) >= 5 ? 'bg-gray-100' : ''} ${
+                      companyDayLabel(d) ? 'bg-emerald-50 text-emerald-800' : ''}`}>
                     <div className="text-[10px] uppercase tracking-wide">{shortDay(d)}</div>
                     <div className="text-xs">{dayNum(d)}</div>
                     {/* A dot, not a colour fill: under `use_allowance` a bank
                         holiday IS a working day, and shading it like leave
                         would say the opposite of what the ledger did. */}
                     <div className="h-1.5 leading-none">
-                      {isBankHoliday(d) && <span className="text-[9px] text-violet-500">●</span>}
+                      {companyDayLabel(d)
+                        ? <span className="text-[9px] text-emerald-600">★</span>
+                        : isBankHoliday(d) && <span className="text-[9px] text-violet-500">●</span>}
                     </div>
                   </th>
                 ))}
@@ -230,7 +242,9 @@ export default function StaffCalendarPage() {
                           }`}>
                           {day.status === 'working' && day.startTime
                             ? day.startTime.slice(0, 5)
-                            : cell.label || '·'}
+                            : day.companyDay
+                              ? 'Closed'
+                              : cell.label || '·'}
                         </div>
                       </td>
                     );
@@ -266,6 +280,17 @@ export default function StaffCalendarPage() {
             <span className="text-violet-500">●</span>
             Bank holiday{bhPolicy === 'use_allowance' && ' — a normal working day here'}
           </span>
+        )}
+        {companyDays.length > 0 && (
+          <span className="inline-flex items-center gap-1.5">
+            <span className="text-emerald-600">★</span>
+            Company day — granted, costs nobody any allowance
+          </span>
+        )}
+        {isAdmin && (
+          <Link to="/settings" className="text-ooosh-600 hover:underline">
+            Company days &amp; bank holidays →
+          </Link>
         )}
       </div>
     </div>

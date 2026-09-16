@@ -138,6 +138,15 @@ export interface StaffDay {
   windows?: { start: string; end: string }[];
   /** True when a pattern exception (incl. a swap leg) applies to this date. */
   isException: boolean;
+  /**
+   * Set when the company has granted this day to everyone (spec §20).
+   *
+   * The day reads as `not_scheduled` — nobody is contracted — so leave cannot
+   * be booked on it and it does not count toward coverage. The label is what
+   * lets the calendar draw it as "Closed — Christmas Day" rather than as a
+   * blank the same shape as a weekend.
+   */
+  companyDay?: string;
   /** ADMIN ONLY. Stripped by maskForViewer() for everyone else. */
   detail?: DayDetail;
 }
@@ -226,6 +235,39 @@ export function resolveScheduledDay(
     endTime: day.end_time,
     isException: false,
   };
+}
+
+/**
+ * Overlay company days, turning a contracted day into a granted one.
+ *
+ * Runs BEFORE the leave and absence merge, because it changes whether the day
+ * is contracted at all — the same level a pattern exception works at, not the
+ * level "are they off today" works at. Everything downstream then behaves
+ * correctly without knowing company days exist: buildDays will not price the
+ * date, coverage will not count it, and the min-headcount floor cannot fire on
+ * it (§20.4 Q3).
+ *
+ * A day someone was not working anyway is left alone rather than labelled — a
+ * part-timer gains nothing from a Friday closure, which is inherent rather
+ * than a bug, and saying "Closed" on their existing day off would be noise.
+ */
+export function mergeCompanyDays(
+  days: StaffDay[],
+  companyDays: Map<string, { label: string }>
+): StaffDay[] {
+  if (companyDays.size === 0) return days;
+  return days.map(d => {
+    const c = companyDays.get(d.date);
+    if (!c || d.status !== 'working') return d;
+    return {
+      ...d,
+      status: 'not_scheduled',
+      scheduledMinutes: 0,
+      startTime: null,
+      endTime: null,
+      companyDay: c.label,
+    };
+  });
 }
 
 /** One live leave day, as the merge layer needs it. */
@@ -466,6 +508,15 @@ export async function getStaffCalendar(
      * quietly price to nothing.
      */
     includeAbsence?: boolean;
+    /**
+     * Apply company days. Default true.
+     *
+     * There is no caller that wants them off — unlike leave and absence, a
+     * company day is not a clash to surface, it is simply not a working day.
+     * The flag exists so the option shape stays uniform and a future importer
+     * reconstructing a historical calendar has the door.
+     */
+    includeCompanyDays?: boolean;
   }
 ): Promise<StaffCalendarPerson[]> {
   if (!DATE_RE.test(from) || !DATE_RE.test(to)) throw new Error('Dates must be YYYY-MM-DD');
@@ -529,12 +580,18 @@ export async function getStaffCalendar(
   const absenceByPerson = opts.includeAbsence === false
     ? new Map<string, AbsenceDayOverlay[]>()
     : await getAbsenceOverlay(ids, from, to);
+  const companyDays = opts.includeCompanyDays === false
+    ? new Map<string, { label: string }>()
+    : await (await import('./staff-company-days')).getCompanyDayOverlay(from, to);
   const dates = dateRange(from, to);
 
   return people.map(p => {
     const mine = patterns.filter(pt => pt.person_id === p.person_id);
-    const days = dates.map(d =>
-      resolveScheduledDay(d, mine, patternDays, exceptions.get(`${p.person_id}:${d}`))
+    const days = mergeCompanyDays(
+      dates.map(d =>
+        resolveScheduledDay(d, mine, patternDays, exceptions.get(`${p.person_id}:${d}`))
+      ),
+      companyDays
     );
     return {
       personId: p.person_id,

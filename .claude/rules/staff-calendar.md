@@ -1,6 +1,6 @@
 ---
 paths:
-  - "backend/src/services/staff-{day-status,employment,balance,leave,overtime,absence,notifications,settings}.ts"
+  - "backend/src/services/staff-{day-status,employment,balance,leave,overtime,absence,notifications,settings,company-days}.ts"
   - "backend/src/routes/staff-calendar.ts"
   - "backend/src/migrations/{206,208,209,212,213,214}_*.sql"
   - "frontend/src/pages/{StaffCalendarPage,StaffAdminPage,MyTimePage,StaffAbsencePage}.tsx"
@@ -36,6 +36,7 @@ neither can be shown to be wrong.
 | Is this person in on this date? | `services/staff-day-status.ts` |
 | Is this person off sick, and for how long? | `services/staff-absence.ts` |
 | What is the threshold / policy / bank holiday? | `services/staff-settings.ts` |
+| Is the company shut on this date? | `services/staff-company-days.ts` |
 
 ## The ledger is append-only and the database enforces it
 
@@ -103,6 +104,15 @@ Two settings that do NOT do what their name suggests:
   setting without a migration leaves the database refusing what the form
   offers.
 
+## Bank holidays and company days are different things
+
+A **bank holiday** is computed, and under `use_allowance` is an ordinary
+working day that merely gets marked. A **company day** is granted by Ooosh and
+is genuinely not a working day. Both are managed in the same place (Settings →
+Staff time & company calendar) because staff see them as the same kind of
+thing, but they must never be conflated in code: a one-off royal bank holiday
+is a company day, not a bank-holiday date correction.
+
 ## Bank holidays are COMPUTED, and are DATES rather than days off
 
 `services/bank-holidays.ts` derives England & Wales dates for any year,
@@ -163,6 +173,28 @@ home ill after lunch is a `pm` absence.
 `StaffDay.windows` is therefore always length 0 or 1. It is an array because a
 day could once carry several markers; it is kept because API shapes only ever
 gain fields.
+
+## A company day is a layer ABOVE leave and absence
+
+`mergeCompanyDays()` runs BEFORE the leave/absence merge in
+`staff-day-status.ts`, because a company day changes whether the date is
+contracted at all — the level a pattern exception works at, not the level "are
+they off today" works at. One row grants it to EVERYONE, resolved at read time.
+
+Put it there and three things need no rules of their own: leave cannot be
+priced on it, coverage does not count it, and `min_headcount_by_weekday` cannot
+fire on it. **Do not remodel it as a kind of leave or absence** — every one of
+those becomes a special case, which is exactly how the timed marker went wrong.
+
+A day someone was not working anyway is left **unlabelled** rather than marked
+"Closed": a part-timer gains nothing from a Friday closure, and saying so on
+their existing day off is noise.
+
+Granting a day that people have already booked off means they have paid for
+something they are now being given. The create response carries
+`reclaimCandidates` and the UI offers to hand it back — per §7.4's mechanism, a
+`correction` credit and a stamp. **Offered, never automatic.** Withdrawing a
+company day deliberately does NOT re-debit what was handed back.
 
 ## Absence wins the calendar, and both rows survive
 

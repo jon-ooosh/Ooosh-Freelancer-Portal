@@ -171,6 +171,14 @@ export default function MyTimePage() {
   const upcoming = requests.filter(r => r.endDate >= TODAY);
   const past = requests.filter(r => r.endDate < TODAY);
   const isCurrentYear = year === CURRENT_YEAR;
+  // Next year is bookable now that its entitlement is granted in advance.
+  // Only a year that has finished is read-only, and then because the dates
+  // have been and gone rather than because of anything about the balance.
+  const isPastYear = year < CURRENT_YEAR;
+  // Open a form on the year being looked at, not on today. This was the real
+  // reason next year was gated read-only: picking 2027 and hitting "Book time
+  // off" opened a form dated 2026, which is worse than not offering it.
+  const formSeedDate = isCurrentYear ? TODAY : `${year}-01-01`;
 
   return (
     <div className="p-4 sm:p-6 max-w-4xl">
@@ -180,21 +188,28 @@ export default function MyTimePage() {
           {/* Leave years, newest first. Two back is enough: nothing carries
               over, so an older year is history rather than something to act
               on, and the list should not grow forever. */}
-          <select value={year} onChange={e => setYear(Number(e.target.value))}
-            aria-label="Leave year"
-            className="px-2 py-1 rounded border border-gray-300 text-sm">
+          {/* Labelled, because an unlabelled select sitting next to two links
+              reads as part of the nav rather than as a control. */}
+          <label className="flex items-center gap-1.5 text-gray-500">
+            Year
+            <select value={year} onChange={e => setYear(Number(e.target.value))}
+              aria-label="Leave year"
+              className="px-2 py-1 rounded border border-gray-300 text-sm text-gray-900">
             {[CURRENT_YEAR + 1, CURRENT_YEAR, CURRENT_YEAR - 1, CURRENT_YEAR - 2].map(y => (
-              <option key={y} value={y}>{y}{y === CURRENT_YEAR ? ' (this year)' : ''}</option>
-            ))}
-          </select>
+                <option key={y} value={y}>{y}{y === CURRENT_YEAR ? ' (this year)' : ''}</option>
+              ))}
+            </select>
+          </label>
           <Link to="/staff/calendar" className="text-ooosh-600 hover:underline">Team calendar →</Link>
           {hasManagerRole(role) && <Link to="/staff/admin" className="text-ooosh-600 hover:underline">Staff →</Link>}
         </div>
       </div>
       <p className="text-sm text-gray-500 mb-5">
-        {isCurrentYear
-          ? 'Book time off and track your requests.'
-          : `Your ${year} leave year. Read-only — book against this year from the picker above.`}
+        {isPastYear
+          ? `Your ${year} leave year. Finished, so this is a record rather than something to book against.`
+          : isCurrentYear
+            ? 'Book time off and track your requests.'
+            : `Your ${year} leave year. You can book against it now — next year's allowance is already set.`}
       </p>
 
       {error && <div className="mb-4 p-3 rounded bg-red-50 border border-red-200 text-sm text-red-700">{error}</div>}
@@ -221,7 +236,7 @@ export default function MyTimePage() {
       {/* One form at a time. These were previously siblings in a flex row, so
           opening either expanded it to full width while the other button
           stretched to match — a stray panel beside the open form. */}
-      {!isCurrentYear ? null : openForm === null ? (
+      {isPastYear ? null : openForm === null ? (
         <div className="flex flex-wrap gap-2">
           <button onClick={() => setOpenForm('leave')}
             className="px-3 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700">
@@ -233,7 +248,7 @@ export default function MyTimePage() {
           </button>
         </div>
       ) : openForm === 'leave' ? (
-        <BookTimeOff balances={balances} onClose={() => setOpenForm(null)}
+        <BookTimeOff balances={balances} seedDate={formSeedDate} onClose={() => setOpenForm(null)}
           onBooked={async (msg) => { setNotice(msg); setError(null); setOpenForm(null); await load(); }}
           onError={setError} />
       ) : (
@@ -334,14 +349,17 @@ function RequestCard({ r, onWithdraw }: { r: LeaveRequest; onWithdraw?: (id: str
   );
 }
 
-function BookTimeOff({ balances, onClose, onBooked, onError }: {
-  balances: MyBalances | null; onClose: () => void;
+function BookTimeOff({ balances, seedDate, onClose, onBooked, onError }: {
+  balances: MyBalances | null;
+  /** The date the form opens on — today, or 1 January of the year being viewed. */
+  seedDate: string;
+  onClose: () => void;
   onBooked: (msg: string) => Promise<void>; onError: (msg: string) => void;
 }) {
   const [leaveType, setLeaveType] = useState<LeaveType>('holiday');
   const [spanMode, setSpanMode] = useState<'days' | 'part'>('days');
-  const [startDate, setStartDate] = useState(TODAY);
-  const [endDate, setEndDate] = useState(TODAY);
+  const [startDate, setStartDate] = useState(seedDate);
+  const [endDate, setEndDate] = useState(seedDate);
   // A day can be whole, a half, or an actual period ("leaving at 15:00").
   const [dayParts, setDayParts] = useState<Record<string, DaySpec>>({});
   const [note, setNote] = useState('');
@@ -952,12 +970,13 @@ function YearNudge({ balances, year, bankHolidays, bhPolicy }: {
   const leftDays = nominal && nominal > 0 ? left / nominal : null;
   const weeks = weeksLeftInYear(year);
   const isCurrentYear = year === CURRENT_YEAR;
+  const isFutureYear = year > CURRENT_YEAR;
 
   // Bank holidays still ahead, so the count is actionable rather than trivia.
   const upcomingBh = bankHolidays.filter(d => d >= TODAY);
 
   // Nothing worth saying about a year that is over, or one with no allowance.
-  if (!isCurrentYear && left <= 0) return null;
+  if (!isCurrentYear && !isFutureYear && left <= 0) return null;
 
   const urgent = isCurrentYear && left > 0 && weeks <= 8;
 
@@ -974,7 +993,9 @@ function YearNudge({ balances, year, bankHolidays, bhPolicy }: {
             weeks > 0
               ? <> — and {weeks} week{weeks === 1 ? '' : 's'} of {year} to use {leftDays !== null && leftDays === 1 ? 'it' : 'them'} in. Nothing carries over.</>
               : <> — {year} is nearly over, and nothing carries over.</>
-          ) : <> unused at the end of {year}.</>}
+          ) : isFutureYear
+            ? <> for {year}, already set aside. You can book against it now.</>
+            : <> unused at the end of {year}.</>}
         </>
       ) : left < 0 ? (
         <><strong>You are {fmtH(-left)} over</strong> your {year} allowance. Worth a word with a manager.</>

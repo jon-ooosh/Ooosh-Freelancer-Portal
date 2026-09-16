@@ -26,6 +26,7 @@ import { emailService } from './email-service';
 
 const STAFF_URL = '/staff/admin';
 const ABSENCE_URL = '/staff/absence';
+const SETTINGS_URL = '/settings';
 
 function fmtH(min: number): string {
   const a = Math.abs(min), h = Math.floor(a / 60), m = a % 60;
@@ -564,4 +565,77 @@ export async function notifyEntitlementPosted(result: {
     }
     await emailApprovers(headline, headline, lines, STAFF_URL);
   } catch (e) { console.error('[staff-notifications] entitlement posted:', e); }
+}
+
+// ── The annual company-days prompt (spec §20.4 Q2) ──────────────────────────
+
+export interface CompanyDaysReviewResult {
+  sent: boolean;
+  year: number;
+  recurring: string[];
+  oneOffs: number;
+  skippedReason?: string;
+}
+
+/**
+ * Once a year, ask what next year's company days are.
+ *
+ * jon's answer to §20.4 Q2: Christmas Day recurs and looks after itself, but
+ * the ad-hoc ones — "we're shutting the Friday before the bank holiday" — are
+ * exactly what nobody remembers until someone turns up to an empty building.
+ * So the recurring rows need no action and this prompt exists for the rest.
+ *
+ * Runs through the configured month (November by default) rather than on one
+ * date, and stamps the year once sent — same reasoning as the cash-out
+ * reminder: an annual cron that falls on a day the server is down simply never
+ * happens, and a reminder with nowhere to record itself nags every morning.
+ */
+export async function runCompanyDaysReview(today = new Date()): Promise<CompanyDaysReviewResult> {
+  const nextYear = today.getUTCFullYear() + 1;
+  const empty: CompanyDaysReviewResult = { sent: false, year: nextYear, recurring: [], oneOffs: 0 };
+
+  const { getSystemSetting, setSystemSetting } = await import('../routes/system-settings');
+  const reviewMonth = Number(await getSystemSetting('staff.company_days_review_month')) || 11;
+
+  if (today.getUTCMonth() + 1 !== reviewMonth) {
+    return { ...empty, skippedReason: 'not the review month' };
+  }
+  if ((await getSystemSetting('staff.company_days_reviewed_year')) === String(nextYear)) {
+    return { ...empty, skippedReason: 'already asked for this year' };
+  }
+
+  const { listCompanyDays, listOccurrences } = await import('./staff-company-days');
+  const all = await listCompanyDays();
+  const recurring = all.filter(d => d.recurs);
+  const nextYearOccurrences = await listOccurrences(nextYear);
+  const oneOffs = nextYearOccurrences.filter(
+    o => !recurring.some(r => r.id === o.companyDayId)).length;
+
+  const fmt = (d: string) => fmtDate(d);
+  for (const u of await approverUserIds()) {
+    await notify(u.id, 'follow_up',
+      `Company days for ${nextYear}`,
+      recurring.length > 0
+        ? `${recurring.length} recurring day${recurring.length === 1 ? '' : 's'} carry over automatically — add any one-offs`
+        : 'Nothing is set up yet for next year',
+      'staff_employment', null, SETTINGS_URL);
+  }
+
+  await emailApprovers(
+    `Company days for ${nextYear}`,
+    `Company days for ${nextYear}`,
+    [
+      'A yearly check, so nobody turns up to a building that is shut.',
+      recurring.length > 0
+        ? `These recur and need <strong>no action</strong>: ${recurring.map(r => `${esc(r.label)} (${esc(fmt(r.dayDate).replace(/ \\d{4}$/, ''))})`).join(', ')}.`
+        : 'No recurring company days are set up.',
+      oneOffs > 0
+        ? `${oneOffs} one-off day${oneOffs === 1 ? ' is' : 's are'} already set for ${nextYear}.`
+        : `No one-off days are set for ${nextYear} yet.`,
+      'Add any extras — a Christmas closure, a day around a bank holiday — on the Settings page. They cost nobody any allowance, and anyone who has already booked one off gets it handed back.',
+    ],
+    SETTINGS_URL);
+
+  await setSystemSetting('staff.company_days_reviewed_year', String(nextYear));
+  return { sent: true, year: nextYear, recurring: recurring.map(r => r.label), oneOffs };
 }

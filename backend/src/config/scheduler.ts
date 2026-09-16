@@ -1008,6 +1008,26 @@ export function startScheduler() {
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: Year-end cash-out reminder scheduled daily at 09:55 Europe/London (December + January)');
 
+  // ── Company days for next year (spec §20.4) ───────────────────────────────
+  // Daily at 09:58 Europe/London; no-ops outside the configured review month
+  // (November) and asks once. Recurring days carry themselves over — this is
+  // for the one-offs, which are the ones nobody remembers until somebody turns
+  // up to a shut building.
+  cron.schedule('58 9 * * *', async () => {
+    try {
+      const { runCompanyDaysReview } = await import('../services/staff-notifications');
+      const r = await runCompanyDaysReview();
+      if (r.sent) {
+        console.log(`Scheduler: Company days prompt sent for ${r.year} — ${r.recurring.length} recurring, ${r.oneOffs} one-offs already set`);
+      } else if (r.skippedReason !== 'not the review month') {
+        console.log(`Scheduler: Company days prompt not sent (${r.skippedReason})`);
+      }
+    } catch (err) {
+      console.error('Scheduler: Company days prompt failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: Company days prompt scheduled daily at 09:58 Europe/London (November only)');
+
   // ── Return-to-work chase (spec §7.3) ──────────────────────────────────────
   // Daily at 08:50 Europe/London, right after the time digest. Chases a closed
   // sickness absence whose return-to-work conversation is still unrecorded

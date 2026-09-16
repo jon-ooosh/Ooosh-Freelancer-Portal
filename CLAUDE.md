@@ -248,7 +248,7 @@ chase alerts 08:10 · auto-chase runner 08:10 · lock-up chaser 08:45 · staff t
 auto-lose 09:00 · carnet forms 09:15 · referral safety-net 09:18 · storage reminders
 09:20 · holding reminders 09:25 · close-out chase 09:30 · staff documents 09:35 ·
 pre-auth expiry 09:40 · Stripe pre-auth discovery 09:50 · year-end cash-out reminder
-09:55 (December + January) · OOH reminders 10:00 ·
+09:55 (December + January) · company-days prompt 09:58 (November) · OOH reminders 10:00 ·
 HireHop sync every 30 min · sanity scanners every 15 min · notification escalation
 every 15 min · Gmail ingestion every 10 min.
 
