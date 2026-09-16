@@ -43,8 +43,8 @@ type ShellState =
   // side). The HMAC token stays in the URL until they pick, so a refresh
   // re-shows the picker rather than dying.
   | { kind: 'select'; candidates: FreelancerVanCandidate[]; hmacToken: string; returnUrl: string | null }
-  | { kind: 'expired'; returnUrl: string | null }
-  | { kind: 'error'; message: string; returnUrl: string | null }
+  | { kind: 'expired'; returnUrl: string | null; startUrl: string | null }
+  | { kind: 'error'; message: string; returnUrl: string | null; startUrl: string | null; code?: string }
 
 const OP_API_BASE = '/api/vehicles'
 
@@ -65,6 +65,7 @@ export default function FreelancerBookoutShell() {
     const next = new URLSearchParams(searchParams)
     next.delete('freelancerToken')
     next.delete('returnUrl')
+    next.delete('startUrl')
     setSearchParams(next, { replace: true })
   }
 
@@ -101,6 +102,8 @@ export default function FreelancerBookoutShell() {
     async function init() {
       const hmacToken = searchParams.get('freelancerToken')
       const returnUrl = searchParams.get('returnUrl')
+      // Where to send them if the van leg can't run — see FreelancerLinkError.
+      const startUrl = searchParams.get('startUrl')
 
       // Fresh arrival from portal — exchange the token.
       if (hmacToken) {
@@ -108,7 +111,7 @@ export default function FreelancerBookoutShell() {
         if (cancelled) return
 
         if (result.kind === 'error') {
-          setState({ kind: 'error', message: result.error, returnUrl })
+          setState({ kind: 'error', message: result.error, returnUrl, startUrl, code: result.code })
           return
         }
 
@@ -141,7 +144,7 @@ export default function FreelancerBookoutShell() {
       }
 
       // No token, no session → expired or arrived directly.
-      setState({ kind: 'expired', returnUrl })
+      setState({ kind: 'expired', returnUrl, startUrl })
     }
 
     init()
@@ -155,7 +158,15 @@ export default function FreelancerBookoutShell() {
   }
 
   if (state.kind === 'error') {
-    return <FreelancerLinkError message={state.message} returnUrl={state.returnUrl} action="book-out" />
+    return (
+      <FreelancerLinkError
+        message={state.message}
+        returnUrl={state.returnUrl}
+        startUrl={state.startUrl}
+        code={state.code}
+        action="book-out"
+      />
+    )
   }
 
   if (state.kind === 'select') {
@@ -176,6 +187,7 @@ export default function FreelancerBookoutShell() {
       <FreelancerLinkError
         message="Your book-out session has ended (sessions last 4 hours). Head back to the freelancer portal and click “Start delivery” again to resume."
         returnUrl={state.returnUrl}
+        startUrl={state.startUrl}
         action="book-out"
       />
     )

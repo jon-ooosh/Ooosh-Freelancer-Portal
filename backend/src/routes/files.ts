@@ -205,7 +205,21 @@ router.get('/download', async (req: AuthRequest, res: Response) => {
     }
 
     // Stream the response
-    const stream = object.Body as NodeJS.ReadableStream;
+    const stream = object.Body as NodeJS.ReadableStream & { destroy?: (err?: Error) => void };
+
+    // If the caller walks away mid-download — a receipt thumbnail scrolled back
+    // out of view, a page navigated — the R2 body is left unconsumed, and an
+    // unconsumed body keeps its connection checked out of the S3 client's pool.
+    // Tear it down explicitly. `close` also fires on a clean finish, hence the
+    // writableEnded guard.
+    res.on('close', () => {
+      if (!res.writableEnded) stream.destroy?.();
+    });
+    stream.on('error', (err: Error) => {
+      console.error('File download stream error:', err);
+      res.destroy();
+    });
+
     stream.pipe(res);
   } catch (error) {
     console.error('File download error:', error);

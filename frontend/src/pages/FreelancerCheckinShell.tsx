@@ -34,8 +34,8 @@ type ShellState =
   // of them before we mint a session (HH 15307). The HMAC token stays in the
   // URL until they pick, so a refresh re-shows the picker rather than dying.
   | { kind: 'select'; candidates: FreelancerVanCandidate[]; hmacToken: string; returnUrl: string | null }
-  | { kind: 'expired'; returnUrl: string | null }
-  | { kind: 'error'; message: string; returnUrl: string | null }
+  | { kind: 'expired'; returnUrl: string | null; startUrl: string | null }
+  | { kind: 'error'; message: string; returnUrl: string | null; startUrl: string | null; code?: string }
 
 const OP_API_BASE = '/api/vehicles'
 
@@ -57,6 +57,7 @@ export default function FreelancerCheckinShell() {
     const next = new URLSearchParams(searchParams)
     next.delete('freelancerToken')
     next.delete('returnUrl')
+    next.delete('startUrl')
     setSearchParams(next, { replace: true })
   }
 
@@ -92,13 +93,15 @@ export default function FreelancerCheckinShell() {
     async function init() {
       const hmacToken = searchParams.get('freelancerToken')
       const returnUrl = searchParams.get('returnUrl')
+      // Where to send them if the van leg can't run — see FreelancerLinkError.
+      const startUrl = searchParams.get('startUrl')
 
       if (hmacToken) {
         const result = await resolveFreelancerCheckinToken(OP_API_BASE, hmacToken, returnUrl)
         if (cancelled) return
 
         if (result.kind === 'error') {
-          setState({ kind: 'error', message: result.error, returnUrl })
+          setState({ kind: 'error', message: result.error, returnUrl, startUrl, code: result.code })
           return
         }
 
@@ -126,7 +129,7 @@ export default function FreelancerCheckinShell() {
         return
       }
 
-      setState({ kind: 'expired', returnUrl })
+      setState({ kind: 'expired', returnUrl, startUrl })
     }
 
     init()
@@ -147,7 +150,15 @@ export default function FreelancerCheckinShell() {
   }
 
   if (state.kind === 'error') {
-    return <FreelancerLinkError message={state.message} returnUrl={state.returnUrl} action="check-in" />
+    return (
+      <FreelancerLinkError
+        message={state.message}
+        returnUrl={state.returnUrl}
+        startUrl={state.startUrl}
+        code={state.code}
+        action="check-in"
+      />
+    )
   }
 
   if (state.kind === 'select') {
@@ -168,6 +179,7 @@ export default function FreelancerCheckinShell() {
       <FreelancerLinkError
         message="Your session has ended (sessions last 4 hours). Head back to the freelancer portal and start the collection again."
         returnUrl={state.returnUrl}
+        startUrl={state.startUrl}
         action="check-in"
       />
     )
