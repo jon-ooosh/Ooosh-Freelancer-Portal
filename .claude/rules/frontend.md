@@ -51,6 +51,7 @@ and the per-module reference docs.
 
 - `api.ts` errors carry the parsed response `body`, so callers can branch on a machine-readable field. **NB the long-standing `code` property on those errors is the error MESSAGE, not a code — read `body.code`.**
 - Private-bucket files (receipts, driver docs, condition photos) must be fetched through the authenticated `api.blob()` helper. A plain `<img src="/api/files/download…">` won't carry the JWT and 401s.
+- **To SHOW one, use `hooks/useAuthedFileUrl.ts` rather than calling `api.blob()` in an effect.** Every thumbnail needs the same three things and the hand-rolled copies kept missing them: wait until the element is near the viewport, abort if the caller loses interest, revoke the object URL on unmount. Rolled by hand per component it cost a 25-second Costs page — ~90 requests and ~100MB of full-size originals to draw a column of 32px icons. Attach the returned `ref` to the PLACEHOLDER as well as the loaded element; the ref is how the hook learns the thumbnail is on screen, so a ref only on the success branch never loads at all. Pass `enabled: false` when the caller already knows no image is coming (a PDF rendering as an icon) and nothing is requested. Fetching on a click — a lightbox, a download — is fine as a plain `api.blob()` call; the hook is for things that render on mount.
 
 ## File inputs
 
