@@ -566,7 +566,7 @@ router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) =
       res.status(409).json({
         error: 'No vehicle allocated for this job yet',
         code: 'no_allocation',
-        hint: 'Staff needs to allocate a van on the OP Allocations page before you can book out.',
+        hint: 'If you are only delivering backline, go back and choose “Backline only”. Otherwise the office needs to allocate a van before you can book out.',
       });
       return;
     }
@@ -697,11 +697,39 @@ router.post('/freelancer-checkin/resolve', async (req: Request, res: Response) =
       [jobId, hhJobNumber]
     );
     if (outResult.rows.length === 0) {
-      console.warn('[freelancer-checkin] No van currently out for job', { jobId, hhJobNumber });
+      // Nothing out — but WHY matters to the person standing in the car park.
+      // Two very different situations (HH 16448, 12 Sep): a van is reserved on
+      // the job but was never booked out (staff need to sort it), or there is
+      // no van on this job at all, which almost always means they picked the
+      // van leg on a backline-only collection by mistake. The old message
+      // assumed the first and sent both to the phone.
+      const reserved = await query(
+        `SELECT fv.reg AS registration
+           FROM vehicle_hire_assignments vha
+           LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+          WHERE (vha.job_id = $1 OR vha.hirehop_job_id = $2)
+            AND vha.status IN ('soft', 'confirmed')
+          ORDER BY vha.status_changed_at DESC NULLS LAST
+          LIMIT 1`,
+        [jobId, hhJobNumber]
+      );
+      // Key off the ROW, not the reg — a reserved assignment with no readable
+      // plate must still read as "reserved", never as "no van on this job".
+      const hasReserved = reserved.rows.length > 0;
+      const reservedReg = reserved.rows[0]?.registration || null;
+      console.warn('[freelancer-checkin] No van currently out for job', {
+        jobId,
+        hhJobNumber,
+        reservedButNotBookedOut: hasReserved,
+      });
       res.status(409).json({
-        error: 'No van is currently out for this job',
+        error: hasReserved
+          ? `${reservedReg || 'The van'} is reserved for this job but was never booked out`
+          : 'There is no van on this job to check in',
         code: 'no_out_vehicle',
-        hint: 'This collection can only be done once the van has been booked out. Please contact the Ooosh office.',
+        hint: hasReserved
+          ? 'A van can only be checked in after it has been booked out. Give the office a call and we will sort it.'
+          : 'If you are only collecting backline, go back and choose “Backline only” — you do not need the van steps.',
       });
       return;
     }

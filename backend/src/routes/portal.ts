@@ -2603,7 +2603,12 @@ function formatJobForPortal(row: Record<string, unknown>) {
   return {
     ...base,
     isGrouped: false,
-    whatIsIt: row.what_is_it === 'vehicle' ? 'A vehicle' : 'Equipment',
+    // Emit the RAW enum ('vehicle' | 'equipment' | 'people' | null), not a
+    // display label. Every portal consumer compares lowercase — the old
+    // 'A vehicle'/'Equipment' labels matched none of them, so the equipment
+    // checklist never filtered vehicles out and the job badge always read
+    // "Equipment" regardless of the actual value.
+    whatIsIt: (row.what_is_it as string | null) || null,
     clientEmail: null as string | null,
   };
 }
