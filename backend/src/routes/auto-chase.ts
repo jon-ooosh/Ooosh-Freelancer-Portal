@@ -152,31 +152,41 @@ router.post('/emails/:id/unhide', authorize('admin'), async (req: AuthRequest, r
   }
 });
 
-// POST /api/auto-chase/emails/:id/detach — "this isn't this job". Nulls job_id
-// (email drops off the timeline; the RFC822 dedup keeps re-ingestion from
-// re-creating it). Records where it was for audit. STAFF_ROLES.
+// POST /api/auto-chase/emails/:id/detach — "this isn't this job". Tombstone:
+// keeps job_id so the email stays on the timeline as a greyed "removed from this
+// job · Re-attach" line (recoverable if the detach was wrong), but flags it
+// detached so it drops out of the AI reads (summary / dispute helper). STAFF_ROLES.
 router.post('/emails/:id/detach', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
   try {
     const row = await loadIngestedEmail(String(req.params.id));
     if (!row) return res.status(404).json({ error: 'Ingested email not found' });
     await query(
-      `UPDATE interactions
-          SET job_id = NULL,
-              reattached_from_job_id = $2,
-              reattached_at = NOW(),
-              reattached_by = $3
-        WHERE id = $1`,
-      [row.id, row.job_id, req.user?.id ?? null],
+      `UPDATE interactions SET detached_at = NOW(), detached_by = $2 WHERE id = $1`,
+      [row.id, req.user?.id ?? null],
     );
-    res.json({ data: { id: row.id, job_id: null } });
+    res.json({ data: { id: row.id, detached: true } });
   } catch (error) {
     console.error('[auto-chase] detach email error:', error);
     res.status(500).json({ error: 'Failed to detach email' });
   }
 });
 
-// POST /api/auto-chase/emails/:id/move — re-attach to a different job. Body:
-// { job_id }. STAFF_ROLES.
+// POST /api/auto-chase/emails/:id/reattach — undo a detach (clears the tombstone).
+router.post('/emails/:id/reattach', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const row = await loadIngestedEmail(String(req.params.id));
+    if (!row) return res.status(404).json({ error: 'Ingested email not found' });
+    await query(`UPDATE interactions SET detached_at = NULL, detached_by = NULL WHERE id = $1`, [row.id]);
+    res.json({ data: { id: row.id, detached: false } });
+  } catch (error) {
+    console.error('[auto-chase] reattach email error:', error);
+    res.status(500).json({ error: 'Failed to reattach email' });
+  }
+});
+
+// POST /api/auto-chase/emails/:id/move — re-home to a different job. Body:
+// { job_id }. Clears any detach tombstone (the email now belongs to the target).
+// STAFF_ROLES.
 router.post('/emails/:id/move', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
   try {
     const targetJobId = String(req.body?.job_id || '').trim();
@@ -190,7 +200,9 @@ router.post('/emails/:id/move', authorize(...STAFF_ROLES), async (req: AuthReque
           SET job_id = $2,
               reattached_from_job_id = $3,
               reattached_at = NOW(),
-              reattached_by = $4
+              reattached_by = $4,
+              detached_at = NULL,
+              detached_by = NULL
         WHERE id = $1`,
       [row.id, targetJobId, row.job_id, req.user?.id ?? null],
     );

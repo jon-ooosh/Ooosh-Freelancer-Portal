@@ -36,9 +36,12 @@ interface Interaction {
   job_id?: string | null;
   gmail_message_id?: string | null;
   email_direction?: 'inbound' | 'outbound' | null;
+  email_subject?: string | null;
+  email_snippet?: string | null;
   match_method?: string | null;
   match_confidence?: string | null;
   hidden_at?: string | null;
+  detached_at?: string | null;
 }
 
 const JOB_STATUS_MAP: Record<number, string> = {
@@ -75,6 +78,12 @@ interface SearchResult {
   label: string;
   type: 'person_id' | 'organisation_id' | 'venue_id';
   entityLabel: string;
+}
+
+// Job picker result for the ingested-email "Move to job" control.
+interface JobSearchResult {
+  id: string;
+  label: string;
 }
 
 interface ActivityTimelineProps {
@@ -270,17 +279,27 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
     }, 300);
   }
 
-  // Ingested-email backstops (Auto-Chase filtering foundation): detach a
-  // mis-attached email, or hide/unhide a sensitive one from the all-staff view.
-  // Both re-fetch the timeline afterwards so the row reflects the new state.
+  // Ingested-email backstops (Auto-Chase filtering foundation): detach (tombstone,
+  // re-attachable) or move a mis-attached email to the right job, and hide/unhide a
+  // sensitive one. All re-fetch the timeline afterwards so the row reflects the new
+  // state.
   const isAdmin = user?.role === 'admin';
-  async function emailAction(interactionId: string, action: 'hide' | 'unhide' | 'detach') {
-    if (action === 'detach' && !window.confirm('Remove this email from this job? It will drop off the timeline.')) return;
+  async function emailAction(interactionId: string, action: 'hide' | 'unhide' | 'detach' | 'reattach') {
+    if (action === 'detach' && !window.confirm('Remove this email from this job? It stays as a greyed line you can re-attach later.')) return;
     try {
       await api.post(`/auto-chase/emails/${interactionId}/${action}`, {});
       onInteractionAdded();
     } catch (err) {
       console.error(`Email ${action} failed:`, err);
+    }
+  }
+
+  async function emailMoveToJob(interactionId: string, jobId: string) {
+    try {
+      await api.post(`/auto-chase/emails/${interactionId}/move`, { job_id: jobId });
+      onInteractionAdded();
+    } catch (err) {
+      console.error('Email move-to-job failed:', err);
     }
   }
 
@@ -670,6 +689,7 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
           renderContent={renderContent}
           isAdmin={isAdmin}
           onEmailAction={emailAction}
+          onMoveToJob={emailMoveToJob}
         />
 
         {replyCount > 0 && (
@@ -697,6 +717,7 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
                 renderContent={renderContent}
                 isAdmin={isAdmin}
                 onEmailAction={emailAction}
+                onMoveToJob={emailMoveToJob}
               />
             ))}
             {expanded && replyCount > COLLAPSE_THRESHOLD && (
@@ -1159,7 +1180,8 @@ interface InteractionRowProps {
   onConfirmMove: (target: SearchResult) => void;
   renderContent: (text: string) => React.ReactNode;
   isAdmin: boolean;
-  onEmailAction: (id: string, action: 'hide' | 'unhide' | 'detach') => void;
+  onEmailAction: (id: string, action: 'hide' | 'unhide' | 'detach' | 'reattach') => void;
+  onMoveToJob: (id: string, jobId: string) => void;
 }
 
 // Quoted-reply boundary in an email body: the first inline "On … wrote:"
@@ -1255,17 +1277,48 @@ function InteractionBody({
 }
 
 // Provenance + manual backstops for an ingested email row (Auto-Chase filtering
-// foundation). Shows WHY it's on this job for the weaker match methods, a
-// "hidden from staff" marker (admin view only — staff never see hidden rows at
-// all), and the two human controls: "Not this job" (detach, any staff) + Hide
-// (admin). High-confidence attaches (own PDF / explicit #ref) get no caveat chip.
+// foundation). One line under the email: WHY it's on this job (for weaker match
+// methods), a "hidden from staff" marker (admin view only), and the related
+// controls together — Move to job (search by number or name), Not this job
+// (detach → tombstone), and Hide (admin). High-confidence attaches (own PDF /
+// explicit #ref) get no caveat chip. Detached emails render as a tombstone in
+// InteractionRow instead of this bar.
 function EmailProvenanceBar({
-  interaction, isAdmin, onEmailAction,
+  interaction, isAdmin, onEmailAction, onMoveToJob,
 }: {
   interaction: Interaction;
   isAdmin: boolean;
-  onEmailAction: (id: string, action: 'hide' | 'unhide' | 'detach') => void;
+  onEmailAction: (id: string, action: 'hide' | 'unhide' | 'detach' | 'reattach') => void;
+  onMoveToJob: (id: string, jobId: string) => void;
 }) {
+  const [moving, setMoving] = useState(false);
+  const [jobQuery, setJobQuery] = useState('');
+  const [jobResults, setJobResults] = useState<JobSearchResult[]>([]);
+  const [jobLoading, setJobLoading] = useState(false);
+  const jobSearchRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function searchJobs(q: string) {
+    setJobQuery(q);
+    if (jobSearchRef.current) clearTimeout(jobSearchRef.current);
+    if (q.trim().length < 2) { setJobResults([]); return; }
+    jobSearchRef.current = setTimeout(async () => {
+      setJobLoading(true);
+      try {
+        const res = await api.get<{ data: Array<{ id: string; hh_job_number: number | null; job_name: string | null; client_name: string | null }> }>(
+          `/hirehop/jobs?search=${encodeURIComponent(q)}&limit=8`,
+        );
+        setJobResults((res.data || []).map((j) => ({
+          id: j.id,
+          label: `${j.hh_job_number ? `#${j.hh_job_number} · ` : ''}${j.job_name || j.client_name || 'Job'}`,
+        })));
+      } catch {
+        setJobResults([]);
+      } finally {
+        setJobLoading(false);
+      }
+    }, 300);
+  }
+
   if (!interaction.gmail_message_id) return null;
   const method = interaction.match_method;
   const hidden = !!interaction.hidden_at;
@@ -1280,36 +1333,77 @@ function EmailProvenanceBar({
   }
 
   return (
-    <div className="mt-1.5 flex items-center flex-wrap gap-x-3 gap-y-1 text-xs">
-      {chip && <span className={`px-1.5 py-0.5 rounded ${chip.cls}`}>{chip.label}</span>}
-      {hidden && (
-        <span className="px-1.5 py-0.5 rounded bg-purple-50 text-purple-700 border border-purple-200">
-          🔒 Hidden from staff
-        </span>
-      )}
-      <button
-        type="button"
-        onClick={() => onEmailAction(interaction.id, 'detach')}
-        className="text-gray-400 hover:text-red-600"
-        title="Remove this email from this job (wrong job / discussed in passing)"
-      >
-        Not this job
-      </button>
-      {isAdmin && (
-        hidden ? (
-          <button type="button" onClick={() => onEmailAction(interaction.id, 'unhide')} className="text-gray-400 hover:text-gray-700">
-            Unhide
-          </button>
-        ) : (
-          <button
-            type="button"
-            onClick={() => onEmailAction(interaction.id, 'hide')}
-            className="text-gray-400 hover:text-purple-700"
-            title="Hide from the all-staff timeline (you'll still see it as admin)"
-          >
-            Hide
-          </button>
-        )
+    <div className="mt-1.5 text-xs">
+      <div className="flex items-center flex-wrap gap-x-3 gap-y-1">
+        {chip && <span className={`px-1.5 py-0.5 rounded ${chip.cls}`}>{chip.label}</span>}
+        {hidden && (
+          <span className="px-1.5 py-0.5 rounded bg-purple-50 text-purple-700 border border-purple-200">
+            🔒 Hidden from staff
+          </span>
+        )}
+        <button
+          type="button"
+          onClick={() => { setMoving((m) => !m); setJobQuery(''); setJobResults([]); }}
+          className={moving ? 'text-ooosh-700' : 'text-gray-400 hover:text-gray-700'}
+          title="Move this email to another job (search by job number or name)"
+        >
+          Move to job
+        </button>
+        <button
+          type="button"
+          onClick={() => onEmailAction(interaction.id, 'detach')}
+          className="text-gray-400 hover:text-red-600"
+          title="Remove this email from this job (wrong job / discussed in passing)"
+        >
+          Not this job
+        </button>
+        {isAdmin && (
+          hidden ? (
+            <button type="button" onClick={() => onEmailAction(interaction.id, 'unhide')} className="text-gray-400 hover:text-gray-700">
+              Unhide
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => onEmailAction(interaction.id, 'hide')}
+              className="text-gray-400 hover:text-purple-700"
+              title="Hide from the all-staff timeline (you'll still see it as admin)"
+            >
+              Hide
+            </button>
+          )
+        )}
+      </div>
+
+      {moving && (
+        <div className="mt-2 p-2 bg-gray-50 rounded-lg border border-gray-200">
+          <input
+            type="text"
+            value={jobQuery}
+            onChange={(e) => searchJobs(e.target.value)}
+            placeholder="Job number or name…"
+            autoFocus
+            className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+          />
+          {jobLoading && <p className="text-gray-400 mt-1.5">Searching…</p>}
+          {jobResults.length > 0 && (
+            <div className="mt-1.5 space-y-1 max-h-44 overflow-y-auto">
+              {jobResults.map((r) => (
+                <button
+                  key={r.id}
+                  type="button"
+                  onClick={() => { setMoving(false); onMoveToJob(interaction.id, r.id); }}
+                  className="w-full text-left px-2.5 py-1.5 rounded hover:bg-ooosh-50 text-gray-800"
+                >
+                  {r.label}
+                </button>
+              ))}
+            </div>
+          )}
+          {jobQuery.trim().length >= 2 && !jobLoading && jobResults.length === 0 && (
+            <p className="text-gray-400 mt-1.5">No jobs found</p>
+          )}
+        </div>
       )}
     </div>
   );
@@ -1318,8 +1412,28 @@ function EmailProvenanceBar({
 function InteractionRow({
   interaction, isReply, currentUserId, onEdited, movingId, onStartMove, onCancelMove,
   moveSearch, moveResults, moveLoading, onSearchEntities, onConfirmMove, renderContent,
-  isAdmin, onEmailAction,
+  isAdmin, onEmailAction, onMoveToJob,
 }: InteractionRowProps) {
+  // Detached ingested email → greyed one-line tombstone (like a system row), so a
+  // mistaken "Not this job" is recoverable. Excluded from the AI reads backend-side.
+  if (interaction.gmail_message_id && interaction.detached_at) {
+    const label = interaction.email_subject || interaction.email_snippet || interaction.content || '(email)';
+    return (
+      <div className="flex items-center gap-2 text-xs text-gray-400 italic py-0.5">
+        <span aria-hidden>🔗</span>
+        <span className="truncate">Removed from this job — {label}</span>
+        <span className="text-gray-300 shrink-0">· {formatCompact(interaction.created_at)}</span>
+        <button
+          type="button"
+          onClick={() => onEmailAction(interaction.id, 'reattach')}
+          className="not-italic text-ooosh-600 hover:text-ooosh-800 shrink-0"
+        >
+          Re-attach
+        </button>
+      </div>
+    );
+  }
+
   // Creator-only editing of human notes. Automated (source='system') entries
   // are immutable; the backend enforces both rules regardless of the UI.
   const [editing, setEditing] = useState(false);
@@ -1377,7 +1491,7 @@ function InteractionRow({
                   Edit
                 </button>
               )}
-              {!isReply && (
+              {!isReply && !interaction.gmail_message_id && (
                 <button
                   type="button"
                   onClick={onStartMove}
@@ -1429,7 +1543,7 @@ function InteractionRow({
             />
           )}
           <AttachmentList files={interaction.files} />
-          {!editing && <EmailProvenanceBar interaction={interaction} isAdmin={isAdmin} onEmailAction={onEmailAction} />}
+          {!editing && <EmailProvenanceBar interaction={interaction} isAdmin={isAdmin} onEmailAction={onEmailAction} onMoveToJob={onMoveToJob} />}
           <Reactions interactionId={interaction.id} reactions={interaction.reactions} />
         </div>
       </div>

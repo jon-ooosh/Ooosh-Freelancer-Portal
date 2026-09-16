@@ -62,7 +62,7 @@ async function buildChainContext(jobId: string): Promise<string | null> {
   const threadRes = await query(
     `SELECT email_direction, email_from, email_subject, content, email_snippet, created_at
        FROM interactions
-      WHERE job_id = $1 AND type = 'email' AND hidden_at IS NULL
+      WHERE job_id = $1 AND type = 'email' AND hidden_at IS NULL AND detached_at IS NULL
       ORDER BY created_at ASC
       LIMIT 60`,
     [jobId],
