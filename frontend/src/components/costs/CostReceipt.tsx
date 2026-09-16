@@ -9,7 +9,7 @@
 // components fetch the blob through the authenticated api.blob() helper and hand
 // the browser an object URL instead.
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { api } from '../../services/api';
 
 export interface ReceiptLike {
@@ -20,10 +20,26 @@ export interface ReceiptLike {
   supporting_documents?: { r2_key: string; filename: string }[] | null;
 }
 
+// Receipts are stored as `files/attachments/<uploader>/<uuid><ext>`, with the
+// extension carried over from the original upload (see routes/files.ts), so the
+// key alone tells us whether a thumbnail is even possible. That matters: a PDF
+// can't be drawn in a 32px box, and downloading it to work that out is what made
+// the Costs list pull ~100MB over ~90 requests before it settled.
+const IMAGE_EXT = /\.(jpe?g|png|gif|webp|avif|bmp|heic|heif)$/i;
+function looksLikeImage(cost: ReceiptLike): boolean {
+  return IMAGE_EXT.test(cost.receipt_r2_key || '') || IMAGE_EXT.test(cost.receipt_filename || '');
+}
+
 /**
  * Small receipt thumbnail. Image → thumbnail, PDF/other → 📎 icon.
  * Click opens the lightbox. Renders nothing when there's no receipt on file —
  * callers that want a "no receipt" affordance should render their own.
+ *
+ * Only image receipts are fetched, and only once the row is actually on screen:
+ * the Costs list renders up to 200 rows and every fetch here pulls the FULL
+ * original (a 3MB phone photo) through the API. Until real thumbnails exist
+ * (files.ts `thumbnail_key`, still a Phase B stub) that restraint is the only
+ * thing keeping the page quick.
  */
 export function ReceiptThumb({ cost, onOpen, size = 'md' }: {
   cost: ReceiptLike;
@@ -31,33 +47,51 @@ export function ReceiptThumb({ cost, onOpen, size = 'md' }: {
   size?: 'sm' | 'md';
 }) {
   const [url, setUrl] = useState<string | null>(null);
-  const [isImage, setIsImage] = useState(false);
+  const [visible, setVisible] = useState(false);
+  const boxRef = useRef<HTMLSpanElement | null>(null);
   const key = cost.receipt_r2_key;
+  const isImage = looksLikeImage(cost);
+
+  // Hold the fetch until the row scrolls into range. The 200px margin means the
+  // next few rows are already loading by the time they're read.
   useEffect(() => {
-    if (!key) return;
+    if (!key || !isImage) return;
+    const el = boxRef.current;
+    if (!el) return;
+    if (typeof IntersectionObserver === 'undefined') { setVisible(true); return; }
+    const obs = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) { setVisible(true); obs.disconnect(); }
+    }, { rootMargin: '200px' });
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [key, isImage]);
+
+  useEffect(() => {
+    if (!key || !isImage || !visible) return;
     let objUrl = ''; let cancelled = false;
-    api.blob(`/files/download?key=${encodeURIComponent(key)}`)
+    const ac = new AbortController();
+    api.blob(`/files/download?key=${encodeURIComponent(key)}`, ac.signal)
       .then(({ blob, contentType }) => {
-        if (cancelled) return;
-        if (contentType.startsWith('image/')) {
-          setIsImage(true);
-          objUrl = URL.createObjectURL(blob);
-          setUrl(objUrl);
-        }
+        // The extension got us here; the content type is the one that decides.
+        // A mislabelled upload falls back to the 📎 icon rather than a broken img.
+        if (cancelled || !contentType.startsWith('image/')) return;
+        objUrl = URL.createObjectURL(blob);
+        setUrl(objUrl);
       })
       .catch(() => {});
-    return () => { cancelled = true; if (objUrl) URL.revokeObjectURL(objUrl); };
-  }, [key]);
+    return () => { cancelled = true; ac.abort(); if (objUrl) URL.revokeObjectURL(objUrl); };
+  }, [key, isImage, visible]);
+
   if (!key) return null;
   const box = size === 'sm' ? 'w-6 h-6' : 'w-8 h-8';
   // Supporting docs are extra evidence on the same payable. A count pip is
   // enough here — the documents themselves are managed in the capture modal.
   const extra = cost.supporting_documents?.length ?? 0;
   return (
-    <span className="relative inline-flex shrink-0">
+    <span ref={boxRef} className="relative inline-flex shrink-0">
       <button onClick={onOpen} title={extra ? `View receipt (+${extra} supporting)` : 'View receipt'}
         className={`shrink-0 ${box} rounded border border-gray-200 overflow-hidden bg-gray-50 flex items-center justify-center hover:border-purple-400`}>
-        {isImage && url ? <img src={url} alt="receipt" className="w-full h-full object-cover" /> : <span className="text-sm">📎</span>}
+        {url ? <img src={url} alt="receipt" className="w-full h-full object-cover" /> : <span className="text-sm">📎</span>}
       </button>
       {extra > 0 && (
         <span className="absolute -top-1 -right-1 px-1 min-w-[14px] text-[9px] leading-[14px] text-center font-semibold
