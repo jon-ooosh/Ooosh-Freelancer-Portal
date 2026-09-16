@@ -1,6 +1,6 @@
 ---
 paths:
-  - "backend/src/services/staff-{day-status,employment,balance,leave,overtime,absence,notifications,settings,company-days}.ts"
+  - "backend/src/services/{staff-day-status,staff-employment,staff-balance,staff-leave,staff-overtime,staff-absence,staff-notifications,staff-settings,staff-company-days,freelancer-days}.ts"
   - "backend/src/routes/staff-calendar.ts"
   - "backend/src/migrations/{206,208,209,212,213,214}_*.sql"
   - "frontend/src/pages/{StaffCalendarPage,StaffAdminPage,MyTimePage,StaffAbsencePage}.tsx"
@@ -104,11 +104,39 @@ Two settings that do NOT do what their name suggests:
   setting without a migration leaves the database refusing what the form
   offers.
 
+## Freelancer days are NOT staff time
+
+`services/freelancer-days.ts` has no ledger account, no working pattern, no
+entitlement, no holiday, no overtime and no absence — and must keep none of
+them (spec §9.1). **If a change here needs staff-balance.ts, something has gone
+wrong.** Showing a booked freelancer on a calendar is ordinary operational
+information; giving them a contracted pattern or accrued leave is what creates
+employment-status risk.
+
+**The wording is load-bearing**: offered → accepted / declined. Never
+"rostered", "assigned" or "shift". A decline is a recorded response, not a
+penalty, and the rate is agreed per booking. Do not tidy this into something
+more familiar.
+
+Only YARD days — people physically in the building. A freelancer booked to
+drive a delivery lives in `quote_assignments` and does not belong here, because
+the only question this answers is "have we got enough people in".
+
+Staff and freelancers are counted **separately** on the calendar ("4 +2"),
+collapsing to one number when there are no freelancers. Merging them would
+claim they are interchangeable.
+
 ## Bank holidays and company days are different things
 
 A **bank holiday** is computed, and under `use_allowance` is an ordinary
 working day that merely gets marked. A **company day** is granted by Ooosh and
-is genuinely not a working day. Both are managed in the same place (Settings →
+is genuinely not a working day.
+
+**Where they land on the same date, the company day WINS** — it is the more
+specific fact and the one Ooosh decided. That precedence lives in
+`frontend/src/lib/companyCalendar.ts` (`splitBankHolidays`, `dayMarker`) and
+nowhere else: both the staff calendar and My Time need it, and two places
+deciding it is how they came to contradict each other on screen. Both are managed in the same place (Settings →
 Staff time & company calendar) because staff see them as the same kind of
 thing, but they must never be conflated in code: a one-off royal bank holiday
 is a company day, not a bank-holiday date correction.
