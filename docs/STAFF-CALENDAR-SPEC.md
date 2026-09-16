@@ -834,7 +834,29 @@ On the calendar they appear in a **separate, visually distinct lane** labelled
   reference a `job_id` or a vehicle.
 - Invoice tracking mirrors `quote_assignments`: expected vs received vs queried.
 
-### 9.3 Portal
+### 9.2b What shipped (migration 222)
+
+Booking and displaying, which is what was asked for. On the **staff calendar**,
+not a page of its own: the moment you decide you need an extra pair of hands is
+the moment you are looking at the week and seeing a thin day.
+
+- A distinct amber lane below the staff rows, one row per freelancer booked in
+  the window.
+- The headcount row reads **"4 +2"** — staff and freelancers counted separately,
+  collapsing to a single number on a day with nobody freelance. Merging them
+  would claim they are interchangeable.
+- Offered → accepted / declined recorded by admin; the freelancer-facing
+  version below is NOT built.
+- Expected spend for the window, and a count of completed days still waiting on
+  an invoice.
+- **One live booking per person per day** (unique index). Two stints in a day
+  is one booking with the wider window and a note — the same call the leave
+  design made, and for the same reason.
+- `freelancer_day_booking_tasks` (§3.8) is **not built**. Per-booking task
+  breakdown does not help answer "are there enough people in", which is what
+  this is for; the booking's note covers "what are they doing" for now.
+
+### 9.3 Portal — NOT BUILT
 
 New endpoints on `routes/portal.ts` mirroring the studio-sitter shape:
 
@@ -1070,6 +1092,7 @@ is a settings change and not a deploy — that is why they are settings.
 | **D0** | The §13 settings created and read, bank holidays seeded and marked, entitlement and the cash-out reminder on the scheduler, My Time by leave year | 216 |
 | **D0.1** | Bank holidays computed rather than seeded; next year's entitlement granted in advance; cross-year request pricing; the post-sweep overtime residual; preferred name used site-wide | 218 |
 | **§20** | Company days — granted to everyone, recurring or one-off, with the reclaim prompt and an annual November ask | 219 |
+| **E** | Freelancer day bookings ("yard days") — booked and displayed on the staff calendar, agreed rate snapshot, expected spend, invoice tracking | 222 |
 
 ### Decisions taken during the build that CHANGE this spec
 
@@ -1205,6 +1228,25 @@ contradict an earlier section, this list wins.
    up to hide an awkward default outlives the awkwardness and then reads as a
    rule.*
 
+21. **Freelancer days are "yard days" only.** jon: "I don't want to see where
+   we've booked freelancers in for deliveries, just this new class of yard
+   work." The distinction is whether they are physically in the building,
+   because the calendar answers one question — have we got enough people in —
+   and a freelancer on the road does not help with it. Delivery and driving
+   assignments stay in `quote_assignments` and are untouched.
+
+22. **Staff and freelancers are counted SEPARATELY and shown as "4 +2".**
+   Following the §19 agreement: collapse to one number when there are no
+   freelancers, show both when there are. Merging them into a single headcount
+   would quietly claim they are interchangeable, and the whole reason the lane
+   is visually distinct is that they are not.
+
+23. **The portal side of §9.3 is deliberately NOT built.** jon asked for "a
+   surface and mechanism for booking and displaying non-staff people", so
+   accepted/declined is recorded by admin for now. The wording is already
+   offered → accepted / declined throughout, so the freelancer-facing version
+   is an additional route rather than a remodelling.
+
 ### Bugs found during the build, and what they teach
 
 Kept because each one is a trap the next person could fall into.
@@ -1239,6 +1281,13 @@ Kept because each one is a trap the next person could fall into.
   10th") never generated the extra days. They then appeared on the next read,
   by which point they had missed their debit and were covered but free. The
   end date is now written first, so the catch-up sees the real range.
+- **Bank holidays and company days contradicted each other on screen.** Adding
+  Christmas Day as a company day left My Time still announcing that 25 December
+  was a normal working day everyone would have to book off. Two overlapping
+  facts with no stated precedence, surfaced in two places. A company day now
+  wins — it is the more specific fact and the one Ooosh decided — and the rule
+  lives in `lib/companyCalendar.ts` rather than in either page. *Whenever two
+  features can describe the same date, one of them has to be told it loses.*
 - **Next year's allowance read 0m for a day after the deploy.** The advance
   grant lived only on the 06:05 cron, so deploying it at lunchtime meant next
   year stayed empty until the following morning — with My Time saying "next
@@ -1322,7 +1371,7 @@ in this module now has a date attached to it.
 
 Every phase was verified against a **real Postgres 16** with all migrations
 applied from scratch and realistic fixtures, not only unit tests. Six of the
-seventeen bugs above were invisible to unit tests and surfaced the moment real SQL
+eighteen bugs above were invisible to unit tests and surfaced the moment real SQL
 ran — including Phase D's, which no amount of type checking would have found.
 Unit tests cover the pure date, entitlement and merge logic
 (`staff-day-status.test.ts`, `staff-balance.test.ts` — 60 tests); everything
@@ -1342,9 +1391,10 @@ DATABASE_URL=postgresql://…/ooosh_scratch npx tsx src/migrations/run.ts up
 DATABASE_URL=postgresql://…/ooosh_scratch npx tsx src/scripts/__verify-phase-d.ts
 ```
 
-There are five: `__verify-phase-d.ts` (66), `__verify-d0.ts` (40),
-`__verify-d0b.ts` (30), `__verify-company-days.ts` (38) and
-`__verify-lazy-entitlement.ts` (10). **Give each its own database.** Several of the things
+There are six: `__verify-phase-d.ts` (66), `__verify-d0.ts` (40),
+`__verify-d0b.ts` (30), `__verify-company-days.ts` (38),
+`__verify-lazy-entitlement.ts` (10) and `__verify-freelancer-days.ts` (36).
+**Give each its own database.** Several of the things
 they check are team-wide — the cash-out reminder sums everyone, coverage
 warnings count everyone — so one script's fixtures change another's answers.
 Running all three against one database produced two failures that were purely

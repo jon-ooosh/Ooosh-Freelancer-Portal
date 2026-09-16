@@ -62,6 +62,10 @@ import {
   listCompanyDays, listOccurrences, createCompanyDay, getCompanyDay,
   cancelCompanyDay, getCompanyReclaimCandidates, reclaimForCompanyDay,
 } from '../services/staff-company-days';
+import {
+  listForRange, listBookableFreelancers, createBooking, recordResponse,
+  markCompleted, cancelBooking, recordInvoice, getSpendSummary,
+} from '../services/freelancer-days';
 
 const router = Router();
 router.use(authenticate, authorize(...STAFF_ROLES));
@@ -710,6 +714,113 @@ router.post('/company-days/:id/cancel', adminOnly, async (req: AuthRequest, res:
     res.json({ data: await getCompanyDay(req.params.id as string) });
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to cancel that day' });
+  }
+});
+
+// ── Freelancer day bookings — "yard days" (Phase E, spec §9) ────────────────
+//
+// On THIS router rather than one of their own, because they exist to answer a
+// staff-calendar question: have we got enough people in. Reads are open to the
+// team for the same reason; writes are admin.
+//
+// Structurally separate from everything above — no ledger, no pattern, no
+// entitlement (§9.1). The language is offered → accepted / declined, never
+// "rostered": a decline is a response, not a penalty.
+
+// GET /api/staff-calendar/freelancer-days?from=&to=
+router.get('/freelancer-days', async (req: AuthRequest, res: Response) => {
+  const range = resolveRange(req);
+  if ('error' in range) { res.status(400).json({ error: range.error }); return; }
+  try {
+    res.json({
+      data: await listForRange(range.from, range.to),
+      range,
+      spend: isAdmin(req) ? await getSpendSummary(range.from, range.to) : undefined,
+    });
+  } catch (err) {
+    console.error('[staff-calendar] freelancer days error:', err);
+    res.status(500).json({ error: 'Failed to load freelancer days' });
+  }
+});
+
+// GET /api/staff-calendar/freelancer-days/bookable — who can be booked, + rates
+router.get('/freelancer-days/bookable', adminOnly, async (_req: AuthRequest, res: Response) => {
+  try {
+    res.json({ data: await listBookableFreelancers() });
+  } catch (err) {
+    console.error('[staff-calendar] bookable freelancers error:', err);
+    res.status(500).json({ error: 'Failed to load freelancers' });
+  }
+});
+
+// POST /api/staff-calendar/freelancer-days
+router.post('/freelancer-days', adminOnly, async (req: AuthRequest, res: Response) => {
+  const schema = z.object({
+    personId: z.string().uuid(),
+    bookingDate: dateStr,
+    durationType: z.enum(['full_day', 'half_day', 'hours']).optional(),
+    startTime: timeStr.nullish(),
+    endTime: timeStr.nullish(),
+    rateType: z.enum(['day', 'half_day', 'hourly', 'fixed']).optional(),
+    agreedRate: z.number().nonnegative().nullish(),
+    notes: z.string().max(1000).nullish(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
+  try {
+    res.status(201).json({ data: await createBooking(parsed.data, req.user!.id) });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to book that day' });
+  }
+});
+
+// POST /api/staff-calendar/freelancer-days/:id/respond — accepted or declined
+router.post('/freelancer-days/:id/respond', adminOnly, async (req: AuthRequest, res: Response) => {
+  const parsed = z.object({
+    response: z.enum(['accepted', 'declined']),
+    note: z.string().max(500).nullish(),
+  }).safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: 'A response of accepted or declined is required' }); return; }
+  try {
+    res.json({ data: await recordResponse(req.params.id as string, parsed.data.response, parsed.data.note ?? null) });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to record that' });
+  }
+});
+
+// POST /api/staff-calendar/freelancer-days/:id/complete
+router.post('/freelancer-days/:id/complete', adminOnly, async (req: AuthRequest, res: Response) => {
+  try {
+    res.json({ data: await markCompleted(req.params.id as string) });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to mark that done' });
+  }
+});
+
+// POST /api/staff-calendar/freelancer-days/:id/cancel
+router.post('/freelancer-days/:id/cancel', adminOnly, async (req: AuthRequest, res: Response) => {
+  const parsed = z.object({ reason: z.string().min(1).max(500) }).safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: 'A reason is required' }); return; }
+  try {
+    res.json({ data: await cancelBooking(req.params.id as string, parsed.data.reason, req.user!.id) });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to cancel' });
+  }
+});
+
+// POST /api/staff-calendar/freelancer-days/:id/invoice
+router.post('/freelancer-days/:id/invoice', adminOnly, async (req: AuthRequest, res: Response) => {
+  const parsed = z.object({
+    received: z.boolean(),
+    amount: z.number().nonnegative().nullish(),
+    queried: z.boolean().optional(),
+    queryNotes: z.string().max(500).nullish(),
+  }).safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
+  try {
+    res.json({ data: await recordInvoice(req.params.id as string, parsed.data) });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to record the invoice' });
   }
 });
 
