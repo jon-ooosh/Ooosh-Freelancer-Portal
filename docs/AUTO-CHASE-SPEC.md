@@ -137,11 +137,15 @@ Live-feedback round after several months of use. Jon's two findings once ingesti
 - **Mechanism:** a low-frequency scheduled task (weekly is ample) `UPDATE interactions SET content = NULL, body_stripped_at = NOW() WHERE type='email' AND created_at < NOW() - INTERVAL '24 months' AND body_stripped_at IS NULL`. Cheap, idempotent, and reversible in policy (extend the window later without a migration). Attachments harvested to `jobs.files` (§8) follow the file-retention policy separately — they're operational documents, not conversational PII, so they are NOT auto-stripped by this task.
 - The window is a `system_settings` value (`email_retention_months`, default 24) so it's tunable without a deploy if legal/ops want it shorter or longer.
 
-## 6. Phase 1.5 — Manager mailboxes (feasible; deferred until `info@` proven)
+## 6. Phase 1.5 — Manager mailboxes (BUILT — Sep 2026)
 
-- **Feasibility: yes.** Domain-wide delegation (§5.1) scales trivially to the 5 managers' `@oooshtours.co.uk` accounts — admin consents once, no per-manager OAuth.
+- **Feasibility: yes.** Domain-wide delegation (§5.1) scales trivially to the managers' `@oooshtours.co.uk` accounts — admin consents once, no per-manager OAuth.
 - **The real work is dedup, not access** — §5.4 already handles it via `Message-ID`. Adding mailboxes = adding delegated users to the poll loop; each message still logs once.
 - **Prove on `info@` first**, then roll out. GDPR is a staff-comfort question, not a legal blocker (company property, legitimate interest).
+
+**As built (spec §13.5):** the mailbox list is `system_settings.gmail_manager_mailboxes` (JSON array, migration 221), edited from the **admin-only** "Manager mailboxes" Settings section — pure config, no deploy. `getManagerMailboxes()` (gmail-ingestion.ts) reads/normalises it (own-domain only, deduped, never the primary). `runIngestionForAllMailboxes()` runs info@ (`queueUnmatched: true`) then each manager mailbox (`queueUnmatched: false`); the scheduler calls it on the 10-min cycle. **Matched-only mode:** a manager-mailbox email with no confident job match returns `skipped` instead of being parked in `gmail_unmatched_inbound` — so a manager's / director's non-job mail never surfaces anywhere (the confidentiality trade jon accepted). Thread-anchoring (§5.3a) still applies within a mailbox, so a bare client reply in an already-anchored manager-mailbox thread still lands on the job. `GET/PUT /api/auto-chase/mailboxes` (admin) manage the list + return live per-mailbox status (each probed via `getGmailProfile`, so a delegation gap shows as "Not connected" in Settings rather than failing silently). `getAllGmailIngestionStatus()` powers that surface. **Confidentiality controls (hide/detach, §5.3a) are the backstop** for anything sensitive that does match a job.
+
+**Rollout:** add one mailbox first (jon's own — recent quoting happened there), watch it, then the rest. The confidentiality backstop (§5.3a, shipped) had to land first — which it did.
 
 ### 6.1 The staleness cost of `info@`-only (jon, Jun 2026)
 
@@ -355,6 +359,12 @@ Fixes off jon's first real use. Three coupled problems, all "the AI is only as g
 The safety layer that makes multi-mailbox ingestion (incl. the director's own inbox) safe — see §5.3a for the full design. Persist match method/confidence; thread-anchoring on the live ingest path; manual detach/move (staff) + hide/unhide (admin) on any ingested email; read-filters so the AI (summary + dispute helper) and the all-staff timeline never see hidden emails. Migration 217. **Sequencing (agreed with jon):** this deterministic-protections + manual-backstops layer lands FIRST and improves the existing info@-only ingestion too; THEN the multi-mailbox plumbing (mailbox list in admin-only Settings, poll loop over mailboxes, "matched-only, no unmatched-queue" mode for manager mailboxes); THEN enable jon's mailbox, watch, and only then add the AI screening (§10a). Backfill for a newly-added mailbox stays optional and capped (~2 months) and must run only AFTER thread-anchoring (the backfill is the biggest over-attach risk).
 
 **Still to build (later PRs):** multi-mailbox plumbing + admin Settings mailbox list + matched-only mode (Phase 1.5 proper); AI relevance/sensitivity screen surfaced IN the timeline as a yellow box + bell notification, NOT a new review surface (§10a); "move to another job" timeline UI (the `/move` endpoint is built, detach ships in the UI first).
+
+### 13.5 Manager mailboxes / multi-mailbox plumbing (BUILT — Sep 2026)
+
+Phase 1.5 proper — see §6 "As built" for the full shape. Migration 221 seeds `gmail_manager_mailboxes`. Backend: `getManagerMailboxes()`, `runIngestionForMailbox(mailbox, {queueUnmatched})` (extracted from the old primary-only runner), `runIngestionForAllMailboxes()` (scheduler entry), `getAllGmailIngestionStatus()`, `ingestGmailMessage` gained `queueUnmatched` (matched-only drops no-match mail instead of queuing). Routes `GET/PUT /api/auto-chase/mailboxes` (admin). Frontend: admin-only `ManagerMailboxesSection` on Settings (add/remove + live per-mailbox connectivity). Detach round 2 (§5.3a) shipped detach/hide/move first; this is the plumbing on top.
+
+**Next:** enable jon's mailbox from Settings, watch it (esp. false-attach on the noisier personal mail — the matcher/thread-anchor tightening already landed), then roll the rest. Then the AI relevance/sensitivity screen (§10a) — surfaced in-timeline (yellow box + bell), not a new surface. Website-enquiry direct webhook (Phase 4, §11) is separate.
 
 ## 14. Open decisions (carried into build)
 

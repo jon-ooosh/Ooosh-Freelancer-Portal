@@ -256,6 +256,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '218_bank_holidays_computed.sql',
         '219_company_days.sql',
         '220_email_detach_tombstone.sql',
+        '221_gmail_manager_mailboxes.sql',
       ];
 
       for (const migration of migrations) {

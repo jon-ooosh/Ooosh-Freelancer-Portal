@@ -74,6 +74,9 @@ function SettingsContent() {
       {/* Auto-chase draft voice — admin & manager */}
       <ChaseVoiceSettingsSection />
 
+      {/* Auto-chase manager mailboxes — admin only (which inboxes we ingest) */}
+      {currentUser?.role === 'admin' && <ManagerMailboxesSection />}
+
       {/* Xero bank account mapping — admin & manager */}
       <XeroBankAccountsSection />
 
@@ -1042,6 +1045,128 @@ function StudioSitterSettingsSection() {
 }
 
 // ── Auto-Chase draft voice ───────────────────────────────────────────────────
+
+interface MailboxStatusRow {
+  mailbox: string;
+  mode: 'full' | 'matched_only';
+  profile?: { emailAddress: string };
+  syncState?: { last_synced_at: string | null; last_error: string | null } | null;
+  error?: string;
+}
+
+// Admin-only: which mailboxes auto-chase ingests. info@ (full) is fixed; manager
+// mailboxes (matched-only) are add/remove here — no deploy. Each row is probed
+// live, so a delegation gap on a manager mailbox shows as "Not connected".
+function ManagerMailboxesSection() {
+  const [rows, setRows] = useState<MailboxStatusRow[]>([]);
+  const [configured, setConfigured] = useState(true);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [newAddr, setNewAddr] = useState('');
+  const [error, setError] = useState('');
+
+  useEffect(() => { load(); }, []);
+
+  async function load() {
+    setLoading(true); setError('');
+    try {
+      const res = await api.get<{ data: { configured: boolean; mailboxes: MailboxStatusRow[] } }>('/auto-chase/mailboxes');
+      setConfigured(res.data.configured);
+      setRows(res.data.mailboxes || []);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not load mailbox status');
+    } finally { setLoading(false); }
+  }
+
+  const managerList = () => rows.filter((r) => r.mode === 'matched_only').map((r) => r.mailbox);
+
+  async function saveList(list: string[]) {
+    setSaving(true); setError('');
+    try {
+      const res = await api.put<{ data: { configured: boolean; mailboxes: MailboxStatusRow[] } }>(
+        '/auto-chase/mailboxes', { mailboxes: list },
+      );
+      setConfigured(res.data.configured);
+      setRows(res.data.mailboxes || []);
+      setNewAddr('');
+    } catch (e) {
+      const err = e as { body?: { error?: string }; message?: string };
+      setError(err.body?.error || err.message || 'Save failed');
+    } finally { setSaving(false); }
+  }
+
+  function addMailbox() {
+    const addr = newAddr.trim().toLowerCase();
+    if (!addr) return;
+    saveList([...managerList(), addr]);
+  }
+
+  function removeMailbox(mb: string) {
+    if (!window.confirm(`Stop ingesting ${mb}? Emails already logged onto jobs stay; no new mail from this mailbox will be read.`)) return;
+    saveList(managerList().filter((m) => m !== mb));
+  }
+
+  if (loading) return null;
+
+  return (
+    <div className="bg-white rounded-lg shadow p-6 mb-6">
+      <h2 className="text-lg font-semibold text-gray-900 mb-1">Auto-Chase — manager mailboxes</h2>
+      <p className="text-sm text-gray-500 mb-4">
+        Mailboxes ingested alongside <strong>info@</strong>. Manager mailboxes run <strong>matched-only</strong> — an
+        email is logged only when it confidently matches a job; anything else is dropped (never queued), so
+        non-job mail from a personal mailbox never surfaces to staff. info@ stays full (matched + review queue).
+      </p>
+      {!configured && (
+        <div className="mb-3 text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-2">
+          Gmail ingestion isn’t configured on the server yet — mailboxes can’t be read.
+        </div>
+      )}
+      {error && <div className="mb-3 text-sm text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2">{error}</div>}
+
+      <div className="space-y-2 mb-4">
+        {rows.map((r) => (
+          <div key={r.mailbox} className="flex items-center justify-between gap-3 rounded border border-gray-200 px-3 py-2">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <span className="font-medium text-gray-900 truncate">{r.mailbox}</span>
+                <span className={`text-xs px-1.5 py-0.5 rounded ${r.mode === 'full' ? 'bg-blue-50 text-blue-700 border border-blue-200' : 'bg-gray-100 text-gray-600'}`}>
+                  {r.mode === 'full' ? 'primary · full' : 'matched-only'}
+                </span>
+              </div>
+              <div className="text-xs mt-0.5">
+                {r.error
+                  ? <span className="text-red-600">⚠ Not connected — {r.error}</span>
+                  : <span className="text-green-700">✓ Connected{r.syncState?.last_synced_at ? ` · last synced ${new Date(r.syncState.last_synced_at).toLocaleString('en-GB')}` : ' · awaiting first sync'}</span>}
+                {r.syncState?.last_error && !r.error && <span className="text-amber-600"> · last error: {r.syncState.last_error}</span>}
+              </div>
+            </div>
+            {r.mode === 'matched_only' && (
+              <button type="button" onClick={() => removeMailbox(r.mailbox)} disabled={saving}
+                className="text-xs text-gray-400 hover:text-red-600 shrink-0">Remove</button>
+            )}
+          </div>
+        ))}
+      </div>
+
+      <div className="flex items-center gap-2">
+        <input
+          type="email" value={newAddr} onChange={(e) => setNewAddr(e.target.value)}
+          placeholder="name@oooshtours.co.uk"
+          onKeyDown={(e) => { if (e.key === 'Enter') addMailbox(); }}
+          className="flex-1 rounded border border-gray-300 px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+        />
+        <button type="button" onClick={addMailbox} disabled={saving || !newAddr.trim()}
+          className="bg-ooosh-600 text-white px-3 py-1.5 rounded text-sm font-medium hover:bg-ooosh-700 disabled:opacity-50">
+          {saving ? 'Saving…' : 'Add mailbox'}
+        </button>
+      </div>
+      <p className="text-xs text-gray-400 mt-2">
+        A newly added mailbox ingests from now on — it establishes a baseline first, then reads new mail on the
+        10-minute cycle. Only @oooshtours.co.uk addresses can be added.
+      </p>
+    </div>
+  );
+}
 
 function ChaseVoiceSettingsSection() {
   const [orig, setOrig] = useState('');
