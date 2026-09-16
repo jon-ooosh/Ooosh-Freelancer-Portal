@@ -63,7 +63,14 @@ export async function POST(
     const appUrl = (process.env.NEXT_PUBLIC_APP_URL || 'https://ooosh-freelancer-portal.netlify.app').replace(/\/$/, '')
     const returnUrl = `${appUrl}/job/${jobId}/complete${vanOnly ? '?vanOnly=true' : ''}`
 
-    const checkinUrl = `${opUrl}/vehicles/check-in?freelancerToken=${encodeURIComponent(token)}&returnUrl=${encodeURIComponent(returnUrl)}`
+    // Escape hatch for a van leg that can't run — see bookout-token. HH 16448
+    // (12 Sep): a backline collection was started as "Both", the check-in
+    // resolver correctly found no van out, and the only way back led to
+    // /complete — so requires_van_leg stayed true and the quote could never
+    // auto-close. It sat open for three days until staff closed it by hand.
+    const startUrl = `${appUrl}/job/${jobId}/start`
+
+    const checkinUrl = `${opUrl}/vehicles/check-in?freelancerToken=${encodeURIComponent(token)}&returnUrl=${encodeURIComponent(returnUrl)}&startUrl=${encodeURIComponent(startUrl)}`
 
     return NextResponse.json({ success: true, checkinUrl })
   } catch (error) {

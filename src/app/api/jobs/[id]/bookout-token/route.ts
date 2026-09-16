@@ -87,7 +87,13 @@ export async function POST(
     const appUrl = (process.env.NEXT_PUBLIC_APP_URL || 'https://ooosh-freelancer-portal.netlify.app').replace(/\/$/, '')
     const returnUrl = `${appUrl}/job/${jobId}/complete${vanOnly ? '?vanOnly=true' : ''}`
 
-    const bookoutUrl = `${opUrl}/vehicles/book-out?freelancerToken=${encodeURIComponent(token)}&returnUrl=${encodeURIComponent(returnUrl)}`
+    // Where to send them when the van leg CAN'T run (no van allocated, wrong
+    // leg picked). returnUrl points at /complete, which skips the wizard and
+    // leaves the bad leg declaration in place — /start lets them pick again,
+    // which rewrites requires_van_leg so the quote can still close.
+    const startUrl = `${appUrl}/job/${jobId}/start`
+
+    const bookoutUrl = `${opUrl}/vehicles/book-out?freelancerToken=${encodeURIComponent(token)}&returnUrl=${encodeURIComponent(returnUrl)}&startUrl=${encodeURIComponent(startUrl)}`
 
     return NextResponse.json({
       success: true,
