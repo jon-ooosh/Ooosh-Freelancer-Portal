@@ -966,6 +966,10 @@ function YearNudge({ balances, year, bankHolidays, bhPolicy }: {
   if (!balances) return null;
 
   const left = balances.holiday.availableMinutes;
+  // Granted, not remaining: "nothing left" and "nothing granted" look the same
+  // in `left` and mean entirely different things to the person reading it.
+  const t = (k: string) => balances.holiday.byType[k] ?? 0;
+  const allowance = t('entitlement') + t('adjustment') + t('carry_over');
   const nominal = balances.holiday.nominalDayMinutes;
   const leftDays = nominal && nominal > 0 ? left / nominal : null;
   const weeks = weeksLeftInYear(year);
@@ -999,6 +1003,16 @@ function YearNudge({ balances, year, bankHolidays, bhPolicy }: {
         </>
       ) : left < 0 ? (
         <><strong>You are {fmtH(-left)} over</strong> your {year} allowance. Worth a word with a manager.</>
+      ) : allowance === 0 ? (
+        // Zero LEFT and zero ALLOWANCE are different facts and the old copy
+        // read them the same, telling anyone looking at a future year that all
+        // of it was "booked or taken" when none of it had been granted.
+        <>
+          No {year} allowance has been worked out yet.
+          {isFutureYear
+            ? ' It is set automatically — if this is still empty tomorrow, tell an admin.'
+            : ' If that looks wrong, tell an admin — it hangs off your working pattern.'}
+        </>
       ) : (
         <>All of your {year} holiday is booked or taken.</>
       )}

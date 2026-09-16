@@ -22,7 +22,7 @@
 
 import { query, getClient } from '../config/database';
 import { DATE_RE, dateRange, getStaffCalendar, weekdayIndex } from './staff-day-status';
-import { getBalance, postEntry, type LedgerAccount } from './staff-balance';
+import { getBalance, postEntry, ensureEntitlement, type LedgerAccount } from './staff-balance';
 
 export type LeaveType = 'holiday' | 'toil' | 'unpaid';
 export type LeaveStatus = 'pending' | 'approved' | 'declined' | 'cancelled' | 'withdrawn';
@@ -207,6 +207,10 @@ export async function getImpact(
 
   if (account) {
     for (const [y, mins] of [...minutesByYear.entries()].sort((a, b) => a[0] - b[0])) {
+      // Booking into a year whose entitlement the nightly sync has not granted
+      // yet would report the whole request as a shortfall. Holiday only — the
+      // overtime bank is earned, never granted.
+      if (account === 'holiday') await ensureEntitlement(personId, y);
       const bal = await getBalance(personId, account, y);
       const after = bal.balanceMinutes - mins;
       perYear.push({

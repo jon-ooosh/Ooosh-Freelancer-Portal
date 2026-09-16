@@ -95,15 +95,23 @@ async function main() {
   // ── 3. Next year is granted in advance ───────────────────────────────────
   console.log('\n3. Booking into next year');
   await syncEntitlement(personId, thisYear, userId);
+  check(`${nextYear} has nothing granted yet`,
+    (await getBalance(personId, 'holiday', nextYear)).balanceMinutes === 0);
+
+  // This used to report the WHOLE request as a shortfall, because next year
+  // had no entitlement until the 06:05 cron ran. The preview now grants it on
+  // the way through (ensureEntitlement), so the gap between a deploy and the
+  // first cron run is no longer visible to anyone.
   const beforeAdvance = await getImpact(personId, `${nextYear}-01-04`, `${nextYear}-01-15`, 'holiday');
-  check('without next year granted, the whole request reads as a shortfall',
-    beforeAdvance.shortfallMinutes > 0, beforeAdvance.shortfallMinutes);
-  check('…though it was never actually blocked — the days exist',
+  check('the preview grants next year rather than reporting a phantom shortfall',
+    beforeAdvance.shortfallMinutes === 0, beforeAdvance.shortfallMinutes);
+  check('and the days are priced normally',
     beforeAdvance.workingDays > 0, beforeAdvance.workingDays);
 
   await runEntitlementSyncForOpenYears();
   const granted = await getBalance(personId, 'holiday', nextYear);
-  check('the nightly sync now grants next year too', granted.balanceMinutes > 0, granted.balanceMinutes);
+  check('the nightly sync grants next year too, and agrees with the lazy grant',
+    granted.balanceMinutes > 0, granted.balanceMinutes);
   const afterAdvance = await getImpact(personId, `${nextYear}-01-04`, `${nextYear}-01-15`, 'holiday');
   check('and the same request no longer shows a shortfall',
     afterAdvance.shortfallMinutes === 0, afterAdvance.shortfallMinutes);
