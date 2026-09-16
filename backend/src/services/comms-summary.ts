@@ -76,7 +76,7 @@ async function getEmailStats(jobId: string): Promise<{ count: number; lastAt: st
   const r = await query(
     `SELECT COUNT(*)::int AS n, MAX(created_at) AS last_at
        FROM interactions
-      WHERE job_id = $1 AND type = 'email' AND hidden_at IS NULL`,
+      WHERE job_id = $1 AND type = 'email' AND hidden_at IS NULL AND detached_at IS NULL`,
     [jobId],
   );
   const row = r.rows[0] || {};
@@ -159,7 +159,7 @@ async function buildUserPrompt(jobId: string): Promise<{ prompt: string; emailCo
   const threadRes = await query(
     `SELECT email_direction, email_from, email_subject, content, email_snippet, created_at
        FROM interactions
-      WHERE job_id = $1 AND type = 'email' AND hidden_at IS NULL
+      WHERE job_id = $1 AND type = 'email' AND hidden_at IS NULL AND detached_at IS NULL
       ORDER BY created_at ASC
       LIMIT 40`,
     [jobId],
