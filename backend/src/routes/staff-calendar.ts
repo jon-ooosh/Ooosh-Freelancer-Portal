@@ -30,6 +30,7 @@ import {
 } from '../services/staff-employment';
 import {
   getBalance, getTeamBalances, syncEntitlement, postEntry, reverseEntry,
+  ensureEntitlement, ensureEntitlementForAll,
   computeEntitlement, getPatternPeriods, getContractedWeek, getBreakdown, STATUTORY_WEEKS,
   type LedgerAccount,
 } from '../services/staff-balance';
@@ -805,6 +806,10 @@ router.get('/me/balances', async (req: AuthRequest, res: Response) => {
     if (emp.rows.length === 0) { res.json({ data: null, hasStaffRecord: false }); return; }
 
     const year = resolveYear(req);
+    // Grant this year (or a future one) if the nightly sync has not run since
+    // the code landed — otherwise next year reads 0m beside a line saying the
+    // allowance is already set.
+    await ensureEntitlement(personId, year);
     // Breakdowns, not just net figures. "1h banked" merges three different
     // facts for the overtime account — what was earned, what was taken as time
     // off, and what was paid out — and the merged number is the confusing one.
@@ -848,6 +853,7 @@ function resolveYear(req: AuthRequest): number {
 router.get('/balances', adminOnly, async (req: AuthRequest, res: Response) => {
   try {
     const year = resolveYear(req);
+    await ensureEntitlementForAll(year);
     res.json({ data: await getTeamBalances(year), year });
   } catch (err) {
     console.error('[staff-calendar] balances error:', err);

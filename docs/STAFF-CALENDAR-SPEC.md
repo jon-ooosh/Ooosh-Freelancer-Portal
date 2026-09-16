@@ -1239,6 +1239,19 @@ Kept because each one is a trap the next person could fall into.
   10th") never generated the extra days. They then appeared on the next read,
   by which point they had missed their debit and were covered but free. The
   end date is now written first, so the catch-up sees the real range.
+- **Next year's allowance read 0m for a day after the deploy.** The advance
+  grant lived only on the 06:05 cron, so deploying it at lunchtime meant next
+  year stayed empty until the following morning — with My Time saying "next
+  year's allowance is already set" directly beside the zero. Fixed by granting
+  lazily on read as well, bounded so a finished year is never granted
+  retroactively. *A scheduled job is not a guarantee about state, it is a
+  guarantee about eventual state, and the UI was asserting the former. Where a
+  read can repair the data cheaply, it should — the same conclusion the absence
+  catch-up reached.*
+- **"Nothing left" and "nothing granted" rendered identically.** The My Time
+  nudge showed "All of your 2027 holiday is booked or taken" for a year with no
+  entitlement at all, because both come out as a zero balance. They are
+  different facts and now read differently.
 - **A leave request straddling 31 December was mispriced** (D0.1, found while
   investigating a report that January could not be booked at all). `getImpact`
   checked the WHOLE request against the start year's balance, while
@@ -1309,7 +1322,7 @@ in this module now has a date attached to it.
 
 Every phase was verified against a **real Postgres 16** with all migrations
 applied from scratch and realistic fixtures, not only unit tests. Six of the
-fifteen bugs above were invisible to unit tests and surfaced the moment real SQL
+seventeen bugs above were invisible to unit tests and surfaced the moment real SQL
 ran — including Phase D's, which no amount of type checking would have found.
 Unit tests cover the pure date, entitlement and merge logic
 (`staff-day-status.test.ts`, `staff-balance.test.ts` — 60 tests); everything
@@ -1329,8 +1342,9 @@ DATABASE_URL=postgresql://…/ooosh_scratch npx tsx src/migrations/run.ts up
 DATABASE_URL=postgresql://…/ooosh_scratch npx tsx src/scripts/__verify-phase-d.ts
 ```
 
-There are three: `__verify-phase-d.ts` (66), `__verify-d0.ts` (40) and
-`__verify-d0b.ts` (29). **Give each its own database.** Several of the things
+There are five: `__verify-phase-d.ts` (66), `__verify-d0.ts` (40),
+`__verify-d0b.ts` (30), `__verify-company-days.ts` (38) and
+`__verify-lazy-entitlement.ts` (10). **Give each its own database.** Several of the things
 they check are team-wide — the cash-out reminder sums everyone, coverage
 warnings count everyone — so one script's fixtures change another's answers.
 Running all three against one database produced two failures that were purely

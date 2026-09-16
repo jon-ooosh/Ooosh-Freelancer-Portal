@@ -142,6 +142,14 @@ It syncs the current leave year **and the next one**, so booking January from
 December has a balance to draw on rather than reporting the whole of next
 year's allowance as a shortfall.
 
+**Do not rely on the cron alone.** `ensureEntitlement(personId, year)` grants
+lazily on read — from `/me/balances`, the admin team overview and the impact
+preview — because the cron only fires at 06:05 and a deploy at lunchtime left
+next year reading 0m for the rest of the day, beside a line saying the
+allowance was already set. Same rule as the absence catch-up: the read repairs
+the data. It **never touches a past year** — granting a finished year would
+invent an allowance nobody can take.
+
 `runCashOutReminder` **emails the figures and posts nothing.** Paying out
 banked overtime is money out the door, and the platform rule is to surface a
 recomputed figure for a human. The sweep stays a button. Its deadline is
