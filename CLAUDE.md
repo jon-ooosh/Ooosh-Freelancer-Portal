@@ -149,6 +149,7 @@ existing definition:
 | Who receives a PCN email? | `services/pcn-recipient.ts` |
 | What's this van's hire status? | `services/fleet-hire-status-sync.ts` |
 | Is this job genuinely returning? | `services/hire-lifecycle.ts` |
+| What happens to transport when a job dies? | `services/job-close-cascade.ts` |
 | When is this bill due? | `services/supplier-terms.ts` `resolveDueDate()` |
 | What are this job's costs? | `GET /costs/by-job/:jobId` |
 | What does this held item need next? | `services/held-item-query.ts` |

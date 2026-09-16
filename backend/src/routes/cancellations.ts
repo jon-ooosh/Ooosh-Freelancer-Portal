@@ -11,6 +11,7 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
+import { cascadeJobClose } from '../services/job-close-cascade';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
@@ -331,95 +332,23 @@ router.post(
         [jobId]
       );
 
-      // 4. Cancel vehicle assignments.
-      //    Dual job match catches V&D-style rows (`job_id IS NULL`,
-      //    only `hirehop_job_id` set). Exclude already-terminal states
-      //    (returned / swapped) to avoid re-marking historic rows.
-      //    Recompute fleet hire_status for each affected vehicle so the
-      //    cached projection catches up immediately.
-      const sweptVha = await query(
-        `UPDATE vehicle_hire_assignments
-           SET status = 'cancelled',
-               status_changed_at = NOW(),
-               notes = COALESCE(notes, '') || E'\n[Auto-cancelled: job cancelled]',
-               updated_at = NOW()
-         WHERE (job_id = $1
-                OR (job_id IS NULL AND hirehop_job_id = $2::integer))
-           AND status NOT IN ('cancelled', 'returned', 'swapped')
-         RETURNING id, vehicle_id`,
-        [jobId, job.hh_job_number ?? null]
-      );
-      if (sweptVha.rows.length > 0) {
-        const { syncFleetHireStatus } = await import('../services/fleet-hire-status-sync');
-        const seen = new Set<string>();
-        for (const r of sweptVha.rows) {
-          if (r.vehicle_id && !seen.has(r.vehicle_id)) {
-            seen.add(r.vehicle_id);
-            try { await syncFleetHireStatus(r.vehicle_id); }
-            catch (e) { console.warn('[Cancellation] syncFleetHireStatus failed:', e); }
-          }
-        }
-      }
+      // 4/5. Cancel the transport/crew side — quotes, crew assignments,
+      //      vehicle hire assignments, plus the freelancer cancellation
+      //      emails. Shared with the lost transition, the stale-enquiry
+      //      auto-loser and the HH webhook via services/job-close-cascade.ts.
+      //      Without the quote cancellation the Transport Ops page keeps
+      //      showing them in their pre-existing ops bucket, because
+      //      effective_ops_status only reads q.status/q.ops_status — not the
+      //      parent job's state.
+      await cascadeJobClose({ jobId, reason: 'cancelled', actorUserId: userId });
 
-      // 5a. Cancel the transport/crew quotes themselves. Without this the
-      // Transport Ops page keeps showing them in their pre-existing ops
-      // bucket (Arranging/Arranged/…) because effective_ops_status only
-      // reads q.status/q.ops_status — not the parent job's state.
-      await query(
-        `UPDATE quotes
-           SET status = 'cancelled',
-               ops_status = 'cancelled',
-               status_changed_at = NOW(),
-               status_changed_by = $2,
-               cancelled_reason = COALESCE(cancelled_reason, 'Parent job cancelled'),
-               updated_at = NOW()
-         WHERE job_id = $1
-           AND is_deleted = false
-           AND status NOT IN ('cancelled', 'completed')`,
-        [jobId, userId]
-      );
-
-      // 5b. Cancel crew assignments + send emails
-      const crewResult = await query(
-        `SELECT qa.id, qa.role, qa.status, p.first_name, p.last_name, p.email
-         FROM quote_assignments qa
-         JOIN people p ON p.id = qa.person_id
-         WHERE qa.quote_id IN (SELECT id FROM quotes WHERE job_id = $1 AND is_deleted = false)
-           AND qa.status NOT IN ('cancelled', 'declined')`,
-        [jobId]
-      );
-
-      // Cancel all crew assignments
-      if (crewResult.rows.length > 0) {
-        await query(
-          `UPDATE quote_assignments SET status = 'cancelled'
-           WHERE quote_id IN (SELECT id FROM quotes WHERE job_id = $1 AND is_deleted = false)
-             AND status NOT IN ('cancelled', 'declined')`,
-          [jobId]
-        );
-      }
-
-      // Email crew members
+      // Job display fields — still needed below by the internal + client
+      // cancellation emails (the crew email now lives in the cascade).
       const jobNumber = job.hh_job_number ? `J-${job.hh_job_number}` : 'NEW';
       const jobName = job.job_name || 'Untitled';
       const jobDates = [job.job_date, job.job_end].filter(Boolean).map(
         (d: string) => new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
       ).join(' — ');
-
-      for (const crew of crewResult.rows) {
-        if (crew.email) {
-          emailService.send('job_cancelled_crew', {
-            to: crew.email,
-            variables: {
-              crewName: `${crew.first_name} ${crew.last_name}`.trim(),
-              jobName,
-              jobNumber,
-              jobDates,
-              crewRole: crew.role || 'Crew',
-            },
-          }).catch(err => console.error(`[Cancellation] Failed to email crew ${crew.email}:`, err));
-        }
-      }
 
       // 6. Flag excess records for refund — add cancellation note, don't change status
       // (staff processes actual refund via Money tab / excess ledger)

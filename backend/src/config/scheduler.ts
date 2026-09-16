@@ -11,6 +11,7 @@ import emailService from '../services/email-service';
 import { getFrontendUrl } from './app-urls';
 import { sendOohReminderEmails } from '../services/ooh-return';
 import { runOohApproachScan } from '../services/ooh-sms-approach';
+import { cascadeJobClose } from '../services/job-close-cascade';
 
 /**
  * Starts the backup and sync schedulers.
@@ -330,6 +331,15 @@ export function startScheduler() {
                 job.id,
               ]
             );
+            // Cancel the transport/crew side. Without this the auto-loser
+            // left live quotes + crew assignments on every auto-lost enquiry
+            // that had transport on it — they kept showing as active work on
+            // Transport Ops with no parent job to belong to (job 16505,
+            // Aug 2026). Unattended path, so no actor user; every job the
+            // auto-loser touches is past-dated, so the cascade's future-only
+            // rule means no freelancer is emailed about a dead enquiry.
+            await cascadeJobClose({ jobId: job.id as string, reason: 'lost', actorUserId: null });
+
             // Push to HireHop (status 10 = Not Interested)
             await writeBackStatusToHireHop(job.id as string, 'lost', 'scheduler:auto_expire');
           } catch (wbErr) {
