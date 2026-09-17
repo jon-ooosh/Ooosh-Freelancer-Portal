@@ -1135,6 +1135,13 @@ export interface Cost {
   paid_at: string | null;
   paid_value_date: string | null;
   paid_method: string | null;
+  /**
+   * Cleared from the OP ledger without OP paying it — already settled in Xero
+   * or elsewhere. Suppresses the Xero payment leg on every push path, so a
+   * later edit can't pay the supplier a second time (migration 224).
+   */
+  settled_externally?: boolean;
+  settled_externally_note?: string | null;
   /** Remittance advice sent to the payee for this cost (audit + "sent" pip). */
   remittance_sent_at?: string | null;
   remittance_email?: string | null;
