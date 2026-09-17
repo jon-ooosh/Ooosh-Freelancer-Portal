@@ -72,6 +72,52 @@ ENCRYPTION_KEY=<64-char-hex-key>  # In .env, generated via: openssl rand -hex 32
 
 **The "critical" npm sometimes reports is dev-only.** It's `handlebars`, pulled in transitively by `ts-jest` (a devDependency / test tooling) — **not shipped to production**, requires compiling attacker-controlled templates, zero runtime exposure. Don't panic over the severity label; npm doesn't know it's dev-only.
 
+## Reference-route RBAC — `authenticate` is not a staff gate (Sep 2026)
+
+**`router.use(authenticate)` on its own lets EVERY active user through, including
+a `freelancer`.** A freelancer is an ordinary `users` row (`role = 'freelancer'`,
+allowed by the CHECK constraint in migration 001 and by the register schema), and
+`POST /api/auth/login` has **no role gate** — it checks `is_active` and nothing
+else. So a freelancer account holds a full OP JWT, not just a portal session.
+
+`STAFF_ROLES`' own comment says freelancers "authenticate via the portal route,
+not these", which is true of the *intended* flow but not enforced at login. Don't
+rely on it.
+
+**Gated (Sep 2026):** `venues.ts`, `people.ts`, `organisations.ts`,
+`interactions.ts` and `search.ts` now each carry
+`router.use(authorize(...STAFF_ROLES))`. Before that a freelancer JWT could
+create and edit venues, people, organisations and interactions, and read all of
+them through global search.
+
+**`search.ts` is load-bearing for the other four.** It reads across `people`,
+`organisations`, `venues` and `jobs`, so gating those routers while leaving
+search open blocks WRITES and leaves READS wide open. Gate them together or not
+at all.
+
+Verified safe for all five: the Next.js portal is hard-prefixed to
+`/api/portal` in `src/lib/op-api.ts` (it cannot construct a path to these
+routers at all), the vehicles book-out kiosk's scoped token never calls them,
+and every frontend consumer is a staff page. None of the five has a public or
+API-key path mounted ahead of `authenticate`.
+
+**Still open, and NOT safe to sweep blind:** ~18 other routers are
+`authenticate`-only with per-endpoint gates instead (`costs.ts`, `drivers.ts`,
+`leads.ts`, `quotes.ts`, `assignments.ts`, `hire-forms.ts`, `email.ts`,
+`files.ts`, `issues.ts`, `staff-documents.ts`, `system-settings.ts`, `users.ts`,
+`auto-chase.ts`, `cancellations.ts`, `data-cleanup.ts`, `ve103b.ts`, `wise.ts`,
+plus `dashboard.ts`, `duplicates.ts`, `fill-gap.ts` and `notifications.ts` with
+no `authorize()` at all). Some are **deliberately** mixed-audience —
+`vehicles.ts` serves the freelancer kiosk through `FlexibleVehicleRequest` and
+must never get a blanket staff gate; `hire-forms.ts` has public token paths;
+`notifications.ts` serves whoever is logged in. Each needs its own audit. A
+blanket sweep breaks book-out.
+
+**When adding a reference route:** `router.use(authorize(...STAFF_ROLES))` goes on
+immediately after `authenticate`, as in `backline.ts`, `carnets.ts`, `excess.ts`,
+`hirehop.ts`, `holding.ts`, `pcns.ts`, `pipeline.ts`. Per-endpoint
+`authorize('admin', 'manager')` stacks on top for the destructive ones.
+
 ## Crew & Transport System
 
 This is the quoting/costing system for delivery, collection, and crewed jobs. It lives in the **"Crew & Transport" tab** on the Job Detail page.
@@ -95,6 +141,121 @@ This is the quoting/costing system for delivery, collection, and crewed jobs. It
 4. **Quotes** are saved to the `quotes` table, linked to a job and optionally a venue
 5. **Crew assignments** via `quote_assignments` junction table — links people to quotes with role, agreed rate, and status
 6. **Quote status lifecycle:** draft → confirmed → completed/cancelled (with `cancelled_reason`)
+
+### Venue linkage on a quote (Sep 2026)
+
+**`quotes.venue_id` is what carries the address to the freelancer.** The portal
+reads it via `LEFT JOIN venues v ON v.id = q.venue_id` (`routes/portal.ts`), and
+`venue_address` / `venue_city` come from nowhere else. A quote with `venue_name`
+set and `venue_id` NULL is an orphan: the driver gets a **name with no address,
+no postcode, and none of the venue's parking / load-in / access notes**.
+
+97 of 675 quotes were in that state when this was found. The three entry points
+had drifted:
+
+| Entry point | Before | Now |
+|---|---|---|
+| `TransportCalculator.tsx` (full quote) | search + **create-a-venue** + green "selected from database" hint | unchanged, plus the amber unlinked warning |
+| `VenuePicker.tsx` (Edit Quote modal, Job Detail + Transport Ops) | search + free text only — **no create** | search + create-on-no-match + amber warning |
+| Local D&C modal (`JobDetailPage.tsx`) | its own hand-rolled copy of the search input — no create | uses the shared `VenuePicker` |
+
+**Free text is still allowed, deliberately.** Plenty of these genuinely aren't
+venues ("client's house", "our warehouse", "TBC", a bare postcode). Auto-creating
+a venue from whatever was typed was considered and rejected: a record minted from
+a typo or a part-name ("Brixton") pollutes the table permanently and degrades
+every later search, and a venue created from a name alone has no address, which
+is the only thing that made linking worth doing. So linking is made the path of
+least resistance — one click when there's no match — and an unlinked value warns
+about the actual consequence.
+
+**Use `VenuePicker` for any new venue field.** `TransportCalculator` keeps its own
+because it does more (venue distance/drive-time defaults, and write-back of
+changed mileage to the venue record); that's a real difference, not drift. Don't
+add a fourth.
+
+### Contacts on a transport leg (Sep 2026)
+
+**`quote_contacts` (migration 223) answers "who does the driver call?"** Before
+it, a quote had no contact field at all — `client_introduction` is a *status*
+(`not_needed` / `todo` / `working_on_it` / `done`), not a person — so the site
+contact was re-typed into `freelancer_notes` every time, surfaced to the portal
+as `keyNotes`, despite the job already knowing every person at every org on it.
+
+`GET /api/quotes/:id/contacts` returns `{ ticked, candidates }`;
+`PUT /api/quotes/:id/contacts` is an idempotent whole-list replace. Staff UI is
+`QuoteContactsPicker.tsx`, embedded in `QuoteEditModal` so both Job Detail and
+Transport Ops get it. The portal renders them as a "Who to contact" card with
+`tel:` links, above the Key Notes card.
+
+**Three contact tables, one candidate pool. Don't conflate them:**
+
+| Table / helper | Answers | Reaches |
+|---|---|---|
+| `job_contacts` (086) | who is on this HIRE | CLIENT emails — hire forms, confirmations, receipts |
+| `quote_contacts` (223) | who to CALL on this leg | the freelancer, via the portal |
+| `services/hire-form-contacts.ts` | who to EMAIL a hire form | as above, plus org-level email columns and a `jobs.client_name` name match |
+
+`services/job-contact-candidates.ts` `resolveJobContactCandidates()` is **THE
+candidate pool** all three draw from — client org plus anything on
+`job_organisations`, deduped per person. Extracted from the pipeline route when
+the transport picker needed it; two copies would have drifted the moment a
+source was added, which is exactly what happened to the hire-form resolver
+before it was centralised. Unlike that resolver it does **not** filter on having
+an email: a transport contact is someone the driver *phones*, and filtering
+would hide the site contacts this exists to surface.
+
+**Ticking a contact onto a leg must never write to `job_contacts`.** That drives
+the client email chain, so promoting a venue's duty manager there would start
+sending them hire-form requests. Nothing in the quote-contacts path touches it.
+
+**No snapshot columns, deliberately.** `person_id` is a live reference; name,
+phone and email are resolved by join on every read. Snapshotting protects an
+immutable record, but a site contact is operational data read for a few days
+around the job — if the number changes you *want* the driver to get the new one.
+Copying it would reinstate the hand-maintained duplicates the table exists to
+remove.
+
+**The phone gap is the load-bearing part.** Only ~540 of 3,095 `people` rows
+carry any number. A picker full of contacts with an email and no mobile is
+useless to a driver at a loading bay and staff would go straight back to typing
+into the notes — so a candidate with no number gets an inline "add one" that
+writes `mobile` to the **person record** (`PUT /api/people/:id`), not to the leg.
+Captured once, true everywhere after. The portal query also drops any contact
+with neither a number nor an email, because a name alone tells a driver nothing.
+
+**The picker saves on its own**, not via `QuoteEditModal`'s Save: the contact
+list is a relationship rather than a field of the quote, and a number you just
+corrected should stay corrected even if you then cancel out of the quote edit.
+
+**Nothing backfills older quotes** — their contacts are still prose in
+`freelancer_notes`, which is why the portal keeps rendering the Key Notes card
+alongside.
+
+### Defaulting the venue on a second leg
+
+`deriveSiblingVenue()` in `JobDetailPage.tsx` pre-fills the Local D&C form from
+this job's existing legs **of the opposite type** — a collection is nearly always
+from the place we delivered to, and the delivery quote's venue is the one a human
+actually chose. `jobs.venue_name` is only the fallback: HireHop's `VENUE` field is
+often empty, and sync only links a `venue_id` on an exact case-insensitive name
+match (`hirehop-job-sync.ts`), so the job frequently has no venue at all.
+
+Rules, in order: exactly one distinct opposite-type venue → pre-fill it (a leg
+with a real `venue_id` wins over a free-text one); **more than one → pre-fill
+nothing**, because on a multi-drop job "the venue we're delivering to" is a guess
+and confidently picking the wrong one of three is worse than blank — the
+candidates render as click-to-fill chips under the field instead; no opposite-type
+legs → the job's own venue. Cancelled legs are never candidates.
+
+Re-derives when the Delivery/Collection toggle flips, but **only while the field
+still holds the last suggestion** — a venue the user chose is never overwritten.
+
+**The submit handler sends exactly what the picker holds.** It used to fall back
+per-field (`venueId || job.venue_id`, `venueName || job.venue_name`), which meant
+typing a free-text venue after clearing the link saved the TYPED NAME against the
+JOB'S `venue_id` — a quote linked to one venue while displaying another. It also
+silently re-filled a field the user had deliberately emptied, which now matters
+because blank is how a multi-drop job says "don't guess".
 
 ### Key Types (shared/types/index.ts)
 

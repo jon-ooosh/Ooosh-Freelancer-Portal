@@ -1,5 +1,5 @@
 -- ============================================================================
--- 223: Costs settled outside OP ("already paid in Xero, just clear the ledger")
+-- 224: Costs settled outside OP ("already paid in Xero, just clear the ledger")
 -- ============================================================================
 -- A bill can be paid without OP ever being told: the bookkeeper pays it in Xero
 -- directly, or it is settled by some route OP has no record of. Until now the

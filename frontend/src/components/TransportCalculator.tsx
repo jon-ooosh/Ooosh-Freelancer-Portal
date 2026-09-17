@@ -934,6 +934,18 @@ export default function TransportCalculator({
                           )}
                         </div>
                       )}
+                      {/* Unlinked free text. This path already offers "Create
+                          … as new venue" above, so the warning is about the
+                          consequence of declining it rather than a missing
+                          affordance: the freelancer portal reads the address
+                          off `venues v ON v.id = q.venue_id`, so no link means
+                          the driver gets a name and no address. Matches the
+                          hint in VenuePicker. */}
+                      {!formData.selectedVenueId && !showVenueForm && formData.destination.trim().length > 0 && (
+                        <p className="text-xs text-amber-600 mt-1">
+                          ⚠ Not linked to a venue record — the freelancer won't see an address
+                        </p>
+                      )}
 
                       {showVenueForm && (
                         <div className="mt-3 border border-ooosh-200 bg-ooosh-50/50 rounded-lg p-4 space-y-3">

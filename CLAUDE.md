@@ -147,9 +147,11 @@ existing definition:
 | Is this driver signed for THIS hire? | `services/driver-hire-progress.ts` |
 | Who receives this client email? | `services/money-emails.ts` `resolveClientEmailTarget()` |
 | Who receives a PCN email? | `services/pcn-recipient.ts` |
+| Who could we contact on this job? | `services/job-contact-candidates.ts` |
 | What's this van's hire status? | `services/fleet-hire-status-sync.ts` |
 | Is this job genuinely returning? | `services/hire-lifecycle.ts` |
 | What happens to transport when a job dies? | `services/job-close-cascade.ts` |
+| What happens to requirements when a job dies? | `services/requirement-close-sweep.ts` |
 | When is this bill due? | `services/supplier-terms.ts` `resolveDueDate()` |
 | What are this job's costs? | `GET /costs/by-job/:jobId` |
 | What does this held item need next? | `services/held-item-query.ts` |
@@ -159,6 +161,8 @@ existing definition:
 | Pushing anything from HireHop to Xero | `services/hh-xero-sync.ts` |
 | Encrypting PII | `services/encryption.ts` |
 | What is this person called? | `frontend/src/lib/displayName.ts` |
+| Picking or creating a venue | `frontend/src/components/VenuePicker.tsx` |
+| Showing a private-bucket file in the DOM | `frontend/src/hooks/useAuthedFileUrl.ts` |
 | Bank holiday or company day? | `frontend/src/lib/companyCalendar.ts` |
 | Verifying an API key | `middleware/api-key.ts` |
 
@@ -261,7 +265,7 @@ Adding one? Gate it on the lost/cancelled + `keep_after_close` rule and the
 
 `people` · `organisations` · `person_organisation_roles` · `venues` · `interactions` ·
 `users` · `jobs` · `job_contacts` · `job_organisations` · `job_requirements` ·
-`quotes` · `quote_assignments` · `drivers` · `vehicle_hire_assignments` · `job_excess` ·
+`quotes` · `quote_assignments` · `quote_contacts` · `drivers` · `vehicle_hire_assignments` · `job_excess` ·
 `fleet_vehicles` · `costs` · `job_issues` · `held_items` · `storage_tenancies` ·
 `notifications` · `audit_log` · `system_settings` · `external_id_map`
 

@@ -506,7 +506,7 @@ async function pushBill(cost: CostRow): Promise<PushResult> {
   // ── Step 2: if paid, record the payment against the bill ─────────────────
   // `settled_externally` is what stops this paying a supplier twice: the bill
   // was cleared in OP precisely BECAUSE the money already moved elsewhere, so
-  // there is no payment for us to record. See migration 223.
+  // there is no payment for us to record. See migration 224.
   if (cost.payment_status === 'paid' && !cost.settled_externally && !cost.xero_payment_id && cost.xero_object_id) {
     const payResult = await recordBillPayment(cost);
     if (payResult.error) return { pushed: true, invoiceID: cost.xero_object_id, error: payResult.error };

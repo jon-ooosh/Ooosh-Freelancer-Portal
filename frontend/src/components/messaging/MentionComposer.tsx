@@ -10,10 +10,17 @@
  * copy) so the caller handles them via `footer` (rendered below the
  * textarea inside the same wrapper).
  *
- * Three previously-duplicated mention pickers (ThreadView reply,
- * ActivityTimeline top-level, ActivityTimeline reply) now route
- * through this primitive, plus a fourth: the issue-comment composer
- * on IssueDetailPage which gained mention support via this extraction.
+ * Used by the ThreadView reply composer and by the issue-comment
+ * composer on IssueDetailPage, which gained mention support via this
+ * extraction.
+ *
+ * ActivityTimeline's two composers (top-level and reply) do NOT route
+ * through here yet — an earlier version of this note claimed they did,
+ * which cost a later session an hour: both were still building names
+ * from `first_name` and so ignored preferred names long after the rest
+ * of the app honoured them. They now use the same lib/displayName
+ * helpers this primitive does, so the two agree; folding them in
+ * properly is still worth doing and still outstanding.
  *
  * Usage:
  *   const attach = useAttachments();

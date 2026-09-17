@@ -1098,7 +1098,7 @@ router.post('/:id/sync-xero', authorize(...STAFF_ROLES), async (req: AuthRequest
     const c = cur.rows[0];
     // A bill settled outside OP has NO payment leg — the money moved somewhere
     // we didn't do, so there is nothing to record and recording one would pay
-    // the supplier twice. See migration 223.
+    // the supplier twice. See migration 224.
     const paymentLegOutstanding = Boolean(c.xero_object_id)
       && BILL_METHODS.includes(c.payment_method)
       && c.payment_status === 'paid' && !c.xero_payment_id && !c.settled_externally;

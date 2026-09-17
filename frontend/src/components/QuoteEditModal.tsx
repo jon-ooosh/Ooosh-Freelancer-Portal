@@ -3,6 +3,7 @@ import { api } from '../services/api';
 import DatePicker from './DatePicker';
 import { TimeInput } from './TimeInput';
 import { VenuePicker } from './VenuePicker';
+import { QuoteContactsPicker } from './QuoteContactsPicker';
 
 // Minimal shape — union of editable fields used by JobDetailPage and TransportOpsPage.
 // Reference-only fields (out_date, return_date, hh_pushed_at) drive amber warnings
@@ -452,6 +453,17 @@ export function QuoteEditModal({
               </div>
             </div>
           )}
+
+          {/* Contacts for this leg — picked from the people already on the job's
+              organisations, rather than re-typed into Freelancer Notes. Saves
+              on its own (see QuoteContactsPicker), so it is deliberately NOT
+              part of this modal's Save. */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Who does the driver call?
+            </label>
+            <QuoteContactsPicker quoteId={quote.id} />
+          </div>
 
           {/* Notes */}
           <div>

@@ -12,6 +12,7 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
 import { cascadeJobClose } from '../services/job-close-cascade';
+import { closeJobRequirements } from '../services/requirement-close-sweep';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
@@ -240,97 +241,18 @@ router.post(
         [timelineContent, jobId, userId]
       );
 
-      // 2a. Flag the requirements the user explicitly chose to KEEP alive.
-      // The blanket cancel pass below skips items with keep_after_close=true,
-      // so flagging happens first. Background scanners (reminder scanner,
-      // hire-form auto-emailer, etc.) check this flag and keep firing kept
-      // items even though the parent job is now in a terminal status.
-      if (Array.isArray(keep_requirement_ids) && keep_requirement_ids.length > 0) {
-        try {
-          await query(
-            `UPDATE job_requirements
-             SET keep_after_close = true,
-                 notes = COALESCE(notes, '') ||
-                         E'\n[Kept alive after job cancelled]',
-                 updated_at = NOW()
-             WHERE id = ANY($1::uuid[])
-               AND job_id = $2
-               AND status NOT IN ('done', 'cancelled')`,
-            [keep_requirement_ids, jobId]
-          );
-        } catch (cancelErr) {
-          console.warn('[Cancellation] Failed to flag kept requirements:', cancelErr);
-        }
-      }
-
-      // 2b. Fire event-triggered reminders (before blanket mark-as-done)
-      try {
-        const triggered = await query(
-          `SELECT jr.id, jr.custom_label, jr.assigned_to, jr.notes, jr.delivery_method, jr.job_id
-           FROM job_requirements jr
-           WHERE jr.job_id = $1
-             AND jr.requirement_type = 'reminder'
-             AND jr.event_trigger = 'cancelled'
-             AND jr.status NOT IN ('done', 'cancelled')`,
-          [jobId]
-        );
-
-        const jobName = job.job_name || job.client_name || `Job ${job.hh_job_number || ''}`;
-        for (const rem of triggered.rows) {
-          const targetUserId = rem.assigned_to || userId;
-          const title = `Reminder triggered: ${rem.custom_label || 'Reminder'}`;
-          const content = `Job cancelled — ${rem.custom_label || 'Reminder'} (${jobName})`;
-          const deliveryMethod = rem.delivery_method || 'both';
-          const priority = deliveryMethod === 'notification' ? 'low' : 'high';
-
-          await query(
-            `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, source_user_id)
-             VALUES ($1, 'follow_up', $2, $3, 'jobs', $4, $5, $6, $7)`,
-            [targetUserId, title, content, rem.job_id, `/jobs/${rem.job_id}?tab=overview`, priority, userId]
-          );
-
-          if (deliveryMethod === 'email' || deliveryMethod === 'both') {
-            try {
-              const userResult = await query('SELECT u.email, p.first_name FROM users u LEFT JOIN people p ON p.id = u.person_id WHERE u.id = $1', [targetUserId]);
-              if (userResult.rows.length > 0 && userResult.rows[0].email) {
-                await emailService.sendRaw({
-                  to: userResult.rows[0].email,
-                  subject: title,
-                  html: `<p>Hi ${userResult.rows[0].first_name || ''},</p>
-                         <p>Your reminder "<strong>${rem.custom_label || 'Reminder'}</strong>" has been triggered because the job <strong>${jobName}</strong> has been <strong>cancelled</strong>.</p>
-                         ${rem.notes ? `<p>Notes: ${rem.notes}</p>` : ''}
-                         <p><a href="${getFrontendUrl()}/jobs/${rem.job_id}?tab=overview">View Job</a></p>`,
-                });
-              }
-            } catch (emailErr) {
-              console.warn('[Cancellation] Event trigger email failed:', emailErr);
-            }
-          }
-
-          // Mark the reminder as done
-          await query(`UPDATE job_requirements SET status = 'done', updated_at = NOW() WHERE id = $1`, [rem.id]);
-        }
-
-        if (triggered.rows.length > 0) {
-          console.log(`[Cancellation] Fired ${triggered.rows.length} event-triggered reminder(s) for job ${jobId}`);
-        }
-      } catch (triggerErr) {
-        console.warn('[Cancellation] Event trigger check failed:', triggerErr);
-      }
-
-      // 3. Cancel all remaining open requirements EXCEPT those the user
-      // explicitly chose to keep (flagged keep_after_close=true in step 2a).
-      // See CLAUDE.md → "Lost / Cancelled cleanup pattern".
-      await query(
-        `UPDATE job_requirements
-         SET status = 'cancelled',
-             notes = COALESCE(notes, '') || ' [Cancelled]',
-             updated_at = NOW()
-         WHERE job_id = $1
-           AND status NOT IN ('done', 'cancelled')
-           AND keep_after_close = false`,
-        [jobId]
-      );
+      // 2/3. Requirement cleanup — flag the keeps, fire any reminder whose
+      //      event_trigger is 'cancelled', then sweep the rest. That order is
+      //      load-bearing: swept first, a reminder set to fire on cancellation
+      //      never fires. Shared with the lost transition, the stale-enquiry
+      //      auto-loser and the HH webhook via
+      //      services/requirement-close-sweep.ts.
+      await closeJobRequirements({
+        jobId,
+        reason: 'cancelled',
+        keepRequirementIds: keep_requirement_ids,
+        actorUserId: userId,
+      });
 
       // 4/5. Cancel the transport/crew side — quotes, crew assignments,
       //      vehicle hire assignments, plus the freelancer cancellation

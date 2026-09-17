@@ -12,6 +12,7 @@ import {
 import { emailService } from '../services/email-service';
 import { hhBroker } from '../services/hirehop-broker';
 import { shouldSuppressInformational } from '../services/portal-notification-prefs';
+import { resolveJobContactCandidates } from '../services/job-contact-candidates';
 
 const router = Router();
 router.use(authenticate);
@@ -1580,6 +1581,125 @@ router.post('/local', validate(localQuoteSchema), async (req: AuthRequest, res: 
   } catch (error) {
     console.error('Create local quote error:', error);
     res.status(500).json({ error: 'Failed to create local delivery/collection' });
+  }
+});
+
+// ── Quote contacts — who to call on this transport leg ──────────────
+//
+// `quote_contacts` (migration 223). Before this there was no contact field on
+// a quote at all, so the site contact was typed by hand into
+// `freelancer_notes` every time — despite the job already knowing every
+// person at every org on it.
+//
+// Reads are a live join: name / phone / email come from `people` on every
+// request, never copied into the junction. If a number changes, the driver
+// gets the new one. See the migration for why there are no snapshot columns.
+//
+// Deliberately NOT written to `job_contacts` — that drives client email
+// routing (hire forms, confirmations, receipts), and ticking a venue's duty
+// manager onto a delivery must never start emailing them hire forms.
+
+// GET /api/quotes/:id/contacts
+// Returns { data: { ticked: [...], candidates: [...] } } — `ticked` is what's
+// on this leg, `candidates` is everyone reachable through the job's orgs.
+// A candidate already ticked still appears in `candidates` so the picker can
+// render one list with checkboxes rather than two that need reconciling.
+router.get('/:id/contacts', async (req: AuthRequest, res: Response) => {
+  try {
+    const quoteResult = await query(
+      `SELECT id, job_id FROM quotes WHERE id = $1 AND is_deleted = false`,
+      [req.params.id]
+    );
+    if (quoteResult.rows.length === 0) {
+      res.status(404).json({ error: 'Quote not found' });
+      return;
+    }
+    const { job_id: jobId } = quoteResult.rows[0];
+
+    const tickedResult = await query(
+      `SELECT qc.person_id, qc.label,
+              p.first_name, p.last_name, p.email, p.phone, p.mobile
+       FROM quote_contacts qc
+       JOIN people p ON p.id = qc.person_id AND p.is_deleted = false
+       WHERE qc.quote_id = $1
+       ORDER BY p.first_name ASC`,
+      [req.params.id]
+    );
+
+    const ticked = tickedResult.rows.map((r: Record<string, unknown>) => ({
+      person_id: r.person_id as string,
+      name: `${r.first_name || ''} ${r.last_name || ''}`.trim(),
+      email: (r.email as string) || null,
+      phone: (r.phone as string) || null,
+      mobile: (r.mobile as string) || null,
+      label: (r.label as string) || null,
+    }));
+
+    // A quote can exist without a job (standalone calculator run) — no job
+    // means no org chain, so no candidates. Still return the ticked list.
+    const candidates = jobId ? await resolveJobContactCandidates(jobId) : [];
+
+    res.json({ data: { ticked, candidates } });
+  } catch (error) {
+    console.error('Get quote contacts error:', error);
+    res.status(500).json({ error: 'Failed to load contacts' });
+  }
+});
+
+// PUT /api/quotes/:id/contacts — idempotent replace
+// Mirrors the shape of PUT /api/pipeline/:jobId/contacts. The whole list is
+// sent each time; anything absent is removed.
+const quoteContactsSchema = z.object({
+  contacts: z.array(z.object({
+    person_id: z.string().uuid(),
+    label: z.string().max(100).optional().nullable(),
+  })).max(20),
+});
+
+router.put('/:id/contacts', validate(quoteContactsSchema), async (req: AuthRequest, res: Response) => {
+  const client = await (await import('../config/database')).getClient();
+  try {
+    const quoteCheck = await client.query(
+      `SELECT id FROM quotes WHERE id = $1 AND is_deleted = false`,
+      [req.params.id]
+    );
+    if (quoteCheck.rows.length === 0) {
+      res.status(404).json({ error: 'Quote not found' });
+      return;
+    }
+
+    const { contacts } = req.body as z.infer<typeof quoteContactsSchema>;
+    // Guard the unique constraint: the same person sent twice (two rows in the
+    // picker payload) would abort the whole transaction on the second INSERT.
+    const seen = new Set<string>();
+    const unique = contacts.filter((c) => {
+      if (seen.has(c.person_id)) return false;
+      seen.add(c.person_id);
+      return true;
+    });
+
+    await client.query('BEGIN');
+    // Replace rather than diff. The set is small (≤20) and a diff would have
+    // to reason about label-only changes; a delete + insert is one behaviour
+    // with no edge cases. `created_at` resetting is acceptable — nothing reads
+    // it, and the audit trail people care about is the quote's own timeline.
+    await client.query('DELETE FROM quote_contacts WHERE quote_id = $1', [req.params.id]);
+    for (const c of unique) {
+      await client.query(
+        `INSERT INTO quote_contacts (quote_id, person_id, label, created_by)
+         VALUES ($1, $2, $3, $4)`,
+        [req.params.id, c.person_id, c.label || null, req.user!.id]
+      );
+    }
+    await client.query('COMMIT');
+
+    res.json({ data: { count: unique.length } });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('Update quote contacts error:', error);
+    res.status(500).json({ error: 'Failed to save contacts' });
+  } finally {
+    client.release();
   }
 });
 

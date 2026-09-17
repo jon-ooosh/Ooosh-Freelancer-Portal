@@ -1138,7 +1138,7 @@ export interface Cost {
   /**
    * Cleared from the OP ledger without OP paying it — already settled in Xero
    * or elsewhere. Suppresses the Xero payment leg on every push path, so a
-   * later edit can't pay the supplier a second time (migration 223).
+   * later edit can't pay the supplier a second time (migration 224).
    */
   settled_externally?: boolean;
   settled_externally_note?: string | null;

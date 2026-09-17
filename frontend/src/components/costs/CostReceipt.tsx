@@ -9,8 +9,9 @@
 // components fetch the blob through the authenticated api.blob() helper and hand
 // the browser an object URL instead.
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import { api } from '../../services/api';
+import { useAuthedFileUrl } from '../../hooks/useAuthedFileUrl';
 
 export interface ReceiptLike {
   receipt_r2_key?: string | null;
@@ -46,41 +47,14 @@ export function ReceiptThumb({ cost, onOpen, size = 'md' }: {
   onOpen: () => void;
   size?: 'sm' | 'md';
 }) {
-  const [url, setUrl] = useState<string | null>(null);
-  const [visible, setVisible] = useState(false);
-  const boxRef = useRef<HTMLSpanElement | null>(null);
   const key = cost.receipt_r2_key;
-  const isImage = looksLikeImage(cost);
-
-  // Hold the fetch until the row scrolls into range. The 200px margin means the
-  // next few rows are already loading by the time they're read.
-  useEffect(() => {
-    if (!key || !isImage) return;
-    const el = boxRef.current;
-    if (!el) return;
-    if (typeof IntersectionObserver === 'undefined') { setVisible(true); return; }
-    const obs = new IntersectionObserver((entries) => {
-      if (entries.some((e) => e.isIntersecting)) { setVisible(true); obs.disconnect(); }
-    }, { rootMargin: '200px' });
-    obs.observe(el);
-    return () => obs.disconnect();
-  }, [key, isImage]);
-
-  useEffect(() => {
-    if (!key || !isImage || !visible) return;
-    let objUrl = ''; let cancelled = false;
-    const ac = new AbortController();
-    api.blob(`/files/download?key=${encodeURIComponent(key)}`, ac.signal)
-      .then(({ blob, contentType }) => {
-        // The extension got us here; the content type is the one that decides.
-        // A mislabelled upload falls back to the 📎 icon rather than a broken img.
-        if (cancelled || !contentType.startsWith('image/')) return;
-        objUrl = URL.createObjectURL(blob);
-        setUrl(objUrl);
-      })
-      .catch(() => {});
-    return () => { cancelled = true; ac.abort(); if (objUrl) URL.revokeObjectURL(objUrl); };
-  }, [key, isImage, visible]);
+  // `enabled` is the cheap half: a PDF receipt never makes a thumbnail, so it
+  // is never fetched. The rest — waiting for the row to scroll into range,
+  // aborting if it scrolls away again — is the hook's job.
+  const { ref, url, contentType } = useAuthedFileUrl(key, { enabled: looksLikeImage(cost) });
+  // The extension got us this far; the content type is what decides. A
+  // mislabelled upload falls back to the 📎 rather than a broken <img>.
+  const thumb = url && contentType.startsWith('image/') ? url : null;
 
   if (!key) return null;
   const box = size === 'sm' ? 'w-6 h-6' : 'w-8 h-8';
@@ -88,10 +62,10 @@ export function ReceiptThumb({ cost, onOpen, size = 'md' }: {
   // enough here — the documents themselves are managed in the capture modal.
   const extra = cost.supporting_documents?.length ?? 0;
   return (
-    <span ref={boxRef} className="relative inline-flex shrink-0">
+    <span ref={ref} className="relative inline-flex shrink-0">
       <button onClick={onOpen} title={extra ? `View receipt (+${extra} supporting)` : 'View receipt'}
         className={`shrink-0 ${box} rounded border border-gray-200 overflow-hidden bg-gray-50 flex items-center justify-center hover:border-purple-400`}>
-        {url ? <img src={url} alt="receipt" className="w-full h-full object-cover" /> : <span className="text-sm">📎</span>}
+        {thumb ? <img src={thumb} alt="receipt" className="w-full h-full object-cover" /> : <span className="text-sm">📎</span>}
       </button>
       {extra > 0 && (
         <span className="absolute -top-1 -right-1 px-1 min-w-[14px] text-[9px] leading-[14px] text-center font-semibold

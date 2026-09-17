@@ -233,10 +233,20 @@ Merge two **same-client pre-hire** bookings into one — the "client wants their
 
 3. **Frontend submits `keep_requirement_ids: string[]`** (the ticked-to-keep ones). Empty/absent = cancel everything still open.
 
-4. **Backend cleanup is handled in two places** (mirroring the two transition paths):
-   - `PATCH /api/pipeline/:id/status` for `lost` transitions (`backend/src/routes/pipeline.ts`)
-   - `POST /api/cancellations/:jobId/process` for `cancelled` transitions (`backend/src/routes/cancellations.ts`)
-   Each path: (a) flags kept items with `keep_after_close = true`, (b) lets the event-trigger pass run (fires + self-marks done any reminders triggered on this status), (c) sweeps everything else still open with `status = 'cancelled'` and `notes` annotated `[Auto-cancelled: job marked lost]` / `[Cancelled]`. The order matters — flag first, fire triggers second, sweep last — so triggered requirements fire before cleanup deletes them.
+4. **Backend cleanup is ONE service — `services/requirement-close-sweep.ts`** (Sep 2026), called from every path that closes a job:
+   - `PATCH /api/pipeline/:id/status` (`lost` and `cancelled`)
+   - `POST /api/cancellations/:jobId/process`
+   - `config/scheduler.ts` — the 09:00 stale-enquiry auto-loser
+   - `routes/webhooks.ts` — the HH webhook + the external transition endpoint
+
+   `closeJobRequirements({ jobId, reason, keepRequirementIds, actorUserId })`: (a) flags kept items with `keep_after_close = true`, (b) fires + self-marks done any reminder whose `event_trigger` matches this status, (c) sweeps everything else still open with `status = 'cancelled'` and `notes` annotated `[Auto-cancelled: job marked lost]` / `[Cancelled]`. **The order matters** — flag first, fire triggers second, sweep last — so triggered requirements fire before cleanup cancels them.
+
+   It was inline in the first two routes until Sep 2026, and the two unattended paths did **none** of it: an auto-lost enquiry kept every requirement card open AND any reminder set to fire on `lost` was never fired at all — it just sat there until someone noticed. Both were silent.
+
+   Three things to preserve if you touch it:
+   - **The marker separator is exact.** The lost marker is written with a NEWLINE, the cancelled one with a LEADING SPACE, because `requirement-cleanup.ts` strips them by literal string match. Swap them and every resurrection leaves residue in `notes`.
+   - **An unassigned reminder on an unattended path goes to every active admin/manager**, matching the close-out chase scanner. The inline copies did `assigned_to || req.user.id`, which on a cron tick would have inserted a NULL `user_id` and fired the reminder into nobody's inbox.
+   - **`fireEventTriggeredReminders` is exported separately** because `confirmed` transitions fire triggers with NO sweep — a confirmed job's requirements are the work, not litter.
 
 5. **Background scanners check the flag.** Any scheduler task that finds work to do via `job_requirements` MUST gate on `pipeline_status NOT IN ('lost', 'cancelled') OR keep_after_close = true`. Currently applied to:
    - Reminder scanner (`config/scheduler.ts` — hourly)
@@ -318,12 +328,10 @@ human cancelled stays cancelled. Two deliberate limits:
   would imply a commitment nobody made to them. Re-offering is a human decision,
   and an unallocated van is the safe direction.
 
-**Still open:** the `job_requirements` sweep is deliberately NOT in the service —
-it depends on the staff-supplied keep-list and must run AFTER the event-trigger
-pass. That means the cron and webhook paths close a job without sweeping its
-requirements. Low impact (background scanners already gate on
-`pipeline_status NOT IN ('lost','cancelled')`), but the cards stay visibly open
-on the job. Fixing it needs the event-trigger ordering solved first.
+**The requirements half** is `services/requirement-close-sweep.ts` (see the
+Lost / Cancelled cleanup pattern above) — deliberately a separate service,
+because its flag → fire → sweep ordering constraint has no equivalent on the
+quote side. Both are now called from all four paths.
 
 #### Step 5: Payment Portal Repointing
 *Merged into Step 3 Phase E (Money System).* See above for full repointing plan with `DATA_BACKEND` env var toggle.

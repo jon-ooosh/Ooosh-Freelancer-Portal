@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, ReactNode } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
+import { useAuthedFileUrl } from '../hooks/useAuthedFileUrl';
 import { EntitySearch } from '../components/holding/EntitySearch';
 import { NotifyClientModal } from '../components/holding/NotifyClientModal';
 import { HeldItemForm } from '../components/holding/HeldItemForm';
@@ -128,17 +129,13 @@ function compareSortVals(a: string | number, b: string | number): number {
   return a - b;
 }
 function PhotoThumb({ photoKey, onOpen }: { photoKey: string; onOpen: () => void }) {
-  const [src, setSrc] = useState('');
-  useEffect(() => {
-    let url = '';
-    api.blob(`/files/download?key=${encodeURIComponent(photoKey)}`)
-      .then(({ blob }) => { url = URL.createObjectURL(blob); setSrc(url); })
-      .catch(() => {});
-    return () => { if (url) URL.revokeObjectURL(url); };
-  }, [photoKey]);
+  // Held-item photos are full-size phone shots. Closing the modal before one
+  // landed used to leave the fetch running and then leak its object URL — the
+  // revoke ran while the local was still empty.
+  const { ref, url: src } = useAuthedFileUrl(photoKey);
   return src
-    ? <img src={src} onClick={onOpen} className="w-20 h-20 object-cover rounded-lg border border-slate-200 cursor-pointer hover:opacity-90" alt="" />
-    : <div className="w-20 h-20 rounded-lg bg-slate-100 animate-pulse" />;
+    ? <img ref={ref} src={src} onClick={onOpen} className="w-20 h-20 object-cover rounded-lg border border-slate-200 cursor-pointer hover:opacity-90" alt="" />
+    : <div ref={ref} className="w-20 h-20 rounded-lg bg-slate-100 animate-pulse" />;
 }
 const FOUND_IN_LABEL: Record<string, string> = {
   van: 'Van', rehearsal: 'Rehearsal room', backline: 'Backline', elsewhere: 'Somewhere else',

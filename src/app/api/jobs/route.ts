@@ -37,6 +37,7 @@ interface OrganisedJob {
   runNotes?: string | null
   hhRef?: string
   keyNotes?: string
+  contacts?: Array<{ name: string; label?: string | null; phone?: string | null; email?: string | null }>
   completedAtDate?: string
   // Crew job specific fields
   workType?: string             // e.g. "BACKLINE TECH", or work description if "Other"

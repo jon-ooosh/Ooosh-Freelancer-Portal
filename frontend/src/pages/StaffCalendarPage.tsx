@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { dayMarker } from '../lib/companyCalendar';
+import { QuarterHourSelect } from '../components/QuarterHourSelect';
 import { useAuthStore } from '../hooks/useAuthStore';
 
 /**
@@ -95,6 +96,12 @@ function shortDay(date: string): string {
 function dayNum(date: string): string {
   return String(Number(date.slice(8, 10)));
 }
+function fmtLongDate(date: string): string {
+  const [y, m, d] = date.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return Number.isNaN(dt.getTime()) ? date
+    : dt.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
+}
 function monthLabel(date: string): string {
   const [y, m] = date.split('-').map(Number);
   return new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
@@ -108,13 +115,16 @@ const TODAY = new Date().toISOString().slice(0, 10);
  * should not imply the person is definitely coming.
  */
 const BOOKING_STATUS: Record<
-  DayBooking['status'], { cell: string; short: string; label: string }
+  DayBooking['status'], { cell: string; short: string; label: string; counts: boolean }
 > = {
-  offered:   { cell: 'bg-amber-50 text-amber-800 ring-1 ring-inset ring-amber-200 ring-dashed', short: 'Offered', label: 'Offered — no reply yet' },
-  accepted:  { cell: 'bg-amber-100 text-amber-900', short: 'In',      label: 'Accepted' },
-  completed: { cell: 'bg-amber-200 text-amber-900', short: 'Done',    label: 'Done' },
-  declined:  { cell: 'bg-gray-100 text-gray-500',   short: '—',       label: 'Declined' },
-  cancelled: { cell: 'bg-gray-100 text-gray-500',   short: '—',       label: 'Cancelled' },
+  // `counts` is whether this person can be relied on to be there. An offer
+  // cannot: nobody has said yes. It still SHOWS, because the approver needs to
+  // see it coming — the same call pending leave makes, for the same reason.
+  offered:   { cell: 'bg-white text-amber-700 border border-dashed border-amber-400', short: 'Pending', label: 'Offered — waiting on their reply', counts: false },
+  accepted:  { cell: 'bg-amber-100 text-amber-900', short: 'In',   label: 'Accepted',  counts: true },
+  completed: { cell: 'bg-amber-200 text-amber-900', short: 'Done', label: 'Done',      counts: true },
+  declined:  { cell: 'bg-gray-100 text-gray-500',   short: '—',    label: 'Declined',  counts: false },
+  cancelled: { cell: 'bg-gray-100 text-gray-500',   short: '—',    label: 'Cancelled', counts: false },
 };
 
 const CELL: Record<DayStatus, { bg: string; label: string }> = {
@@ -205,8 +215,13 @@ export default function StaffCalendarPage() {
         const day = p.days.find(x => x.date === d);
         return day?.status === 'working' || day?.status === 'partial';
       }).length,
+      // CONFIRMED only. Counting an unanswered offer would tell you that you
+      // have cover you have not actually got, which is the one thing this
+      // number exists to get right.
       freelancers: freelancerDays.filter(
-        b => b.bookingDate === d && b.status !== 'declined' && b.status !== 'cancelled').length,
+        b => b.bookingDate === d && BOOKING_STATUS[b.status].counts).length,
+      pending: freelancerDays.filter(
+        b => b.bookingDate === d && b.status === 'offered').length,
     })),
     [dates, people, freelancerDays]
   );
@@ -389,7 +404,7 @@ export default function StaffCalendarPage() {
                 <tr>
                   <td colSpan={dates.length + 1}
                     className="sticky left-0 bg-amber-50/70 px-3 py-1 text-[10px] uppercase tracking-wide text-amber-800 border-t border-amber-200">
-                    Freelance — booked in
+                    Freelance — offered and confirmed
                   </td>
                 </tr>
               )}
@@ -436,12 +451,17 @@ export default function StaffCalendarPage() {
                 </td>
                 {headcount.map((n, i) => (
                   <td key={dates[i]} className="px-1 py-2 text-center text-gray-700"
-                    title={n.freelancers > 0
-                      ? `${n.staff} staff, ${n.freelancers} freelance`
-                      : `${n.staff} staff`}>
+                    title={[
+                      `${n.staff} staff`,
+                      n.freelancers > 0 ? `${n.freelancers} freelance confirmed` : null,
+                      n.pending > 0 ? `${n.pending} offered, no reply yet` : null,
+                    ].filter(Boolean).join(' · ')}>
                     {n.staff}
                     {n.freelancers > 0 && (
                       <span className="text-amber-700"> +{n.freelancers}</span>
+                    )}
+                    {n.pending > 0 && (
+                      <span className="text-amber-500 font-normal"> +{n.pending}?</span>
                     )}
                   </td>
                 ))}
@@ -477,7 +497,13 @@ export default function StaffCalendarPage() {
         {freelancerLanes.length > 0 && (
           <span className="inline-flex items-center gap-1.5">
             <span className="inline-block w-3 h-3 rounded bg-amber-100" />
-            Freelance — booked in, counts toward the total as &ldquo;+n&rdquo;
+            Freelance confirmed — counts toward the total as &ldquo;+n&rdquo;
+          </span>
+        )}
+        {freelancerDays.some(b => b.status === 'offered') && (
+          <span className="inline-flex items-center gap-1.5">
+            <span className="inline-block w-3 h-3 rounded border border-dashed border-amber-400" />
+            Offered, no reply yet — shown as &ldquo;+n?&rdquo; and NOT counted as cover
           </span>
         )}
         {isAdmin && (
@@ -523,6 +549,7 @@ function BookFreelancer({ defaultDate, onClose, onBooked, onError }: {
   const [rateType, setRateType] = useState<DayBooking['rateType']>('day');
   const [agreedRate, setAgreedRate] = useState<string>('');
   const [notes, setNotes] = useState('');
+  const [backdateOk, setBackdateOk] = useState(false);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -541,6 +568,8 @@ function BookFreelancer({ defaultDate, onClose, onBooked, onError }: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [personId, durationType]);
 
+  useEffect(() => { setBackdateOk(false); }, [bookingDate]);
+
   useEffect(() => {
     if (durationType === 'half_day' && rateType === 'day') setRateType('half_day');
     if (durationType === 'full_day' && rateType === 'half_day') setRateType('day');
@@ -548,6 +577,11 @@ function BookFreelancer({ defaultDate, onClose, onBooked, onError }: {
   }, [durationType, rateType]);
 
   const timed = durationType === 'hours';
+  // Backfilling after the fact is legitimate — things come together at the last
+  // minute and get recorded afterwards — so this is a deliberate pause rather
+  // than a refusal, per the platform's warnings-not-gates rule. What it stops
+  // is the silent slip: a mistyped year quietly booking someone into 2025.
+  const isBackdated = bookingDate < TODAY;
   const rate = agreedRate === '' ? null : Number(agreedRate);
   const expected = rate === null ? null
     : rateType === 'hourly'
@@ -558,6 +592,7 @@ function BookFreelancer({ defaultDate, onClose, onBooked, onError }: {
   async function save() {
     if (!personId) { onError('Pick who you are booking.'); return; }
     if (timed && endTime <= startTime) { onError('The end time needs to be after the start.'); return; }
+    if (isBackdated && !backdateOk) { onError('Tick the box to confirm the date is in the past.'); return; }
     setSaving(true);
     try {
       await api.post('/staff-calendar/freelancer-days', {
@@ -613,12 +648,17 @@ function BookFreelancer({ defaultDate, onClose, onBooked, onError }: {
         <div className="grid sm:grid-cols-3 gap-3">
           <label className="text-sm">
             <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">From</span>
-            <input type="time" step={300} value={startTime} onChange={e => setStartTime(e.target.value)}
+            {/* Quarter hours, and a <select> rather than a time input because
+                Chrome's time picker ignores `step` and offered all sixty
+                minutes. Overtime deliberately stays on 5-minute steps —
+                staff_overtime_entries has a `minutes % 5 = 0` CHECK and the two
+                are answering different questions. */}
+            <QuarterHourSelect value={startTime} onChange={setStartTime} aria-label="Start time"
               className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white" />
           </label>
           <label className="text-sm">
             <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">To</span>
-            <input type="time" step={300} value={endTime} onChange={e => setEndTime(e.target.value)}
+            <QuarterHourSelect value={endTime} onChange={setEndTime} aria-label="End time"
               className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white" />
           </label>
         </div>
@@ -662,10 +702,21 @@ function BookFreelancer({ defaultDate, onClose, onBooked, onError }: {
           className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white" />
       </label>
 
+      {isBackdated && (
+        <label className="flex items-start gap-2 p-2 rounded border border-amber-300 bg-amber-100/60 text-sm text-amber-900">
+          <input type="checkbox" checked={backdateOk} className="mt-0.5"
+            onChange={e => setBackdateOk(e.target.checked)} />
+          <span>
+            <strong>{fmtLongDate(bookingDate)} is in the past.</strong> That is fine if you
+            are recording something that already happened — tick to confirm you meant it.
+          </span>
+        </label>
+      )}
+
       <div className="flex gap-2">
-        <button disabled={saving} onClick={() => void save()}
+        <button disabled={saving || (isBackdated && !backdateOk)} onClick={() => void save()}
           className="px-3 py-1.5 text-sm rounded bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50">
-          Offer the day
+          {isBackdated ? 'Record the day' : 'Offer the day'}
         </button>
         <button onClick={onClose}
           className="px-3 py-1.5 text-sm rounded border border-gray-300 bg-white hover:bg-gray-50">

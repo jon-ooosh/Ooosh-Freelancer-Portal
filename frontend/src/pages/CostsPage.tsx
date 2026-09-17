@@ -408,7 +408,7 @@ export default function CostsPage() {
 
   // "Already paid — just clear it." Deliberately a DIFFERENT endpoint from
   // /pay: that one records a real payment in Xero, this one records that we
-  // aren't going to. See migration 223.
+  // aren't going to. See migration 224.
   async function settleExternally(id: string, settledDate: string, note: string) {
     setActionBusy(id + 'pay');
     try {

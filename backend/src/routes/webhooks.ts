@@ -21,6 +21,7 @@ import {
 } from '../services/confirmation-hooks';
 import { reactivateAutoCancelledRequirements } from '../services/requirement-cleanup';
 import { cascadeJobClose, reactivateAutoCancelledQuotes } from '../services/job-close-cascade';
+import { closeJobRequirements } from '../services/requirement-close-sweep';
 
 const router = Router();
 
@@ -276,6 +277,14 @@ async function handleJobStatusChange(
       (newPipelineStatus === 'cancelled' && job.pipeline_status !== 'cancelled')
     ) {
       await cascadeJobClose({
+        jobId: job.id,
+        reason: newPipelineStatus as 'lost' | 'cancelled',
+        actorUserId: null,
+      });
+      // Requirement cleanup — fires any reminder whose event_trigger matches
+      // this status, then sweeps the rest. No keep-list on an unattended
+      // path; rows already flagged keep_after_close survive.
+      await closeJobRequirements({
         jobId: job.id,
         reason: newPipelineStatus as 'lost' | 'cancelled',
         actorUserId: null,
@@ -580,6 +589,14 @@ router.post('/external/status-transition', async (req: Request, res: Response) =
       (newPipelineStatus === 'cancelled' && job.pipeline_status !== 'cancelled')
     ) {
       await cascadeJobClose({
+        jobId: job.id,
+        reason: newPipelineStatus as 'lost' | 'cancelled',
+        actorUserId: null,
+      });
+      // Requirement cleanup — fires any reminder whose event_trigger matches
+      // this status, then sweeps the rest. No keep-list on an unattended
+      // path; rows already flagged keep_after_close survive.
+      await closeJobRequirements({
         jobId: job.id,
         reason: newPipelineStatus as 'lost' | 'cancelled',
         actorUserId: null,

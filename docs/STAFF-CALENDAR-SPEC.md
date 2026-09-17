@@ -856,7 +856,96 @@ the moment you are looking at the week and seeing a thin day.
   breakdown does not help answer "are there enough people in", which is what
   this is for; the booking's note covers "what are they doing" for now.
 
+### 9.4 The offer email — DESIGNED, NOT BUILT
+
+**SIGNED OFF (17 Sep 2026), not yet built.** jon agreed all four decisions
+below as written. It sends mail to people outside the company, which is why it
+waited; it no longer waits. Everything below is ready to build.
+
+Today "Offer the day" writes a row and tells nobody. The freelancer finds out
+when somebody rings them, which makes the status field a fiction — it says
+`offered` when nothing has been offered.
+
+**Shape**
+
+- `response_token` on the booking: long random, indexed, mirroring
+  `vehicle_hire_assignments.ooh_parking_token` (mig 072) rather than inventing
+  a scheme. Cleared on response and dead after the booking date.
+- A public route `/api/freelancer-days/respond/:token` — no login, GET renders
+  the day and POST records accept or decline. Same posture as the OOH parking
+  form and the storage T&Cs: a link in an email is a bearer credential, and the
+  worst a stolen one does here is mis-set one day's availability, which the
+  person turning up or not immediately contradicts.
+- The email goes through `services/email-service.ts` like everything else, with
+  two buttons and the day, times, what they are doing and the agreed rate.
+
+**The chase, which is the bit that earns its keep**
+
+| When | What | Who |
+|---|---|---|
+| On offer | The offer, with both buttons | The freelancer |
+| +1 day, no reply | One chase, same links | The freelancer |
+| Day before, still no reply | "Nobody has confirmed for tomorrow" | Admin, not the freelancer |
+
+Stamped like every other chase in this module (`rtw_chased_at`,
+`staff.overtime_cashout_reminded_year`) so each fires once. Intervals as
+`system_settings`, defaulting to 1 day.
+
+**Decisions taken, worth challenging**
+
+1. **An unanswered offer is never auto-declined.** The date passing with no
+   reply leaves it `offered` and surfaces to admin. Auto-declining would
+   silently remove somebody who may well be planning to turn up.
+2. **The last chase goes to ADMIN, not the freelancer.** Two emails is a
+   reminder; three is nagging somebody who does not work for us. By then the
+   problem is Ooosh's to solve, not theirs to answer.
+3. **Declining is one click and needs no reason.** A reason box invites
+   justification, and a decline is a response rather than something to excuse.
+   There is an optional note for anyone who wants to add one.
+4. **Cancelling a booking emails them too.** Somebody who has accepted a day
+   and rearranged around it must not find out by looking at a calendar they
+   cannot see.
+
+**Three things that must land WITH the email, not after it**
+
+Raised by jon on sign-off. Each is cheap now and awkward to retrofit once mail
+is going out.
+
+5. **A passed, unanswered offer needs a way to be closed.** Decision 1 says
+   never auto-decline, which is right — but it leaves an `offered` day with no
+   terminal state at all, so it sits in the admin list forever. Six months in
+   the list is long enough that nobody reads it, which defeats the point of not
+   auto-declining. One click on a passed offer: *they came anyway* (→
+   `completed`) or *it did not happen* (→ a closed state). The safety net has
+   to be clearable or it rots.
+
+6. **There is no way to AMEND a booking — there is no update endpoint at all.**
+   Today, changing a time, a rate or a date means cancel-and-rebook, which
+   throws away the acceptance and re-offers the day. That is merely annoying
+   now; once an email fires on every offer it means emailing somebody twice to
+   move a start time by an hour. Needs `PATCH /freelancer-days/:id` with an
+   explicit rule about which fields re-open the offer and which do not —
+   proposed: **date and times re-offer** (they have to agree to the new day),
+   **rate and notes do not** (tell them, do not re-ask). Amending a `cancelled`
+   or `completed` booking stays refused.
+
+7. **"Pulled out after accepting" is not the same fact as "declined".**
+   `recordResponse` currently allows `accepted → declined`, so a freelancer
+   dropping out the day before is recorded identically to one who never wanted
+   the day. Those are different facts operationally — one left a hole at short
+   notice — and under decision 4 they should send different mail. Wants its own
+   status (`withdrew`) rather than overloading `declined`. Note `LIVE_STATUSES`
+   and `BOOKING_STATUS[...].counts` both need it, and it is not cover either
+   way.
+
 ### 9.3 Portal — NOT BUILT
+
+**One decision needed before building, and only one:** is the portal
+read-only-plus-respond, or can a freelancer also PROPOSE a change — "I can do
+it, but not until 11"? That single answer changes the shape of the page. A
+counter-offer is a third response alongside accept and decline, and it needs
+somewhere to land, which is item 6 above; without it, "not until 11" has to go
+through a phone call anyway. Do not start the page until this is answered.
 
 New endpoints on `routes/portal.ts` mirroring the studio-sitter shape:
 
@@ -1076,7 +1165,17 @@ is a settings change and not a deploy — that is why they are settings.
 
 ## 18. Build log — what is done, what changed, what is left
 
-*Written 15 Sep 2026; Phase D appended the same day, and trimmed on review.*
+*Written 15 Sep 2026. Phases D, D0, D0.1, §20 and E appended over the following
+two days, each after jon used the previous one in production and fed back.*
+
+**HANDING OVER — read this first.** Every phase A–E has SHIPPED and is running
+on `staff.oooshtours.co.uk`. The module is in use by jon alone, testing ahead of
+the Oct–Dec parallel run, so live data is his test data and there is no staff
+rollout yet. What is left is listed under **Still to build** below; the next
+thing to build is the freelancer OFFER EMAIL (§9.4), which jon signed off on
+17 Sep 2026 along with three items that must ship WITH it — a way to close out a
+passed unanswered offer, an amend endpoint (there is none at all today), and
+separating "pulled out after accepting" from "declined". §9.4 items 5–7.
 
 ### Shipped
 
@@ -1340,32 +1439,70 @@ Kept because each one is a trap the next person could fall into.
   no day rows at all. *The lesson is the old one — the fixture has to include
   the case where today is not inside the range.*
 
+- **`<input type="time" step={900}>` did nothing.** The freelancer booking form
+  was moved to quarter hours and still offered every minute, because `step`
+  governs validation and the spinner arrows but Chrome's dropdown picker — the
+  control people actually click — ignores it. The field was therefore happily
+  accepting 09:07 from the only route into it anybody uses. Replaced with a
+  `<select>` of the 96 quarter hours (`components/QuarterHourSelect.tsx`), so the
+  granularity is ours rather than the browser's. *A constraint expressed only as
+  an attribute hint is not a constraint. If the rule matters, own the options.*
+  It also survived a review because the diff looked obviously correct — the bug
+  was in a browser, not in the code.
+
+- **A docstring claimed a refactor that had not happened.**
+  `MentionComposer.tsx` said ActivityTimeline's two composers routed through it.
+  They did not, so when preferred names were adopted site-wide in D0.1, the
+  busiest mention surface in the app — Job, Person, Organisation and Venue — kept
+  building names from `first_name` and quietly ignored them, as did every
+  display name in `routes/interactions.ts`. Someone called Will was "Will" on
+  the Inbox and "William Parish" on the job he was actually being mentioned on.
+  *Comments describing structure go stale silently and are believed, because
+  nothing type-checks them. When a note says work is finished, check the call
+  sites before trusting it — and prefer wording that says what IS true over what
+  was intended.*
+
 ### Still to build
 
-**Phase E — freelancer day bookings** (§9). Independent of A–D; can be pulled
-forward. Tables and portal endpoints all still to build.
+**Phase E, the freelancer-facing half.** Booking and displaying shipped
+(migration 222). What is missing is the part where the freelancer hears about
+it at all:
 
-**Phase F — coverage intelligence and iCal** (§10, §16). Post-go-live.
+- **The offer email with accept / decline links (§9.4)** — designed, costed and
+  SIGNED OFF 17 Sep 2026. This is the next thing to do. It brings three
+  companions with it (§9.4 items 5–7): closing out a passed unanswered offer,
+  `PATCH /freelancer-days/:id` so a booking can be amended without
+  cancel-and-rebook, and a `withdrew` status distinct from `declined`.
+- **The portal page (§9.3)**, deliberately after the email — the email is the
+  thing that actually reaches somebody. One question to answer first: whether a
+  freelancer can counter-offer, or only accept and decline (§9.3).
+- `freelancer_day_booking_tasks` (§3.8) — skipped on purpose; a per-booking task
+  breakdown does not help answer "are there enough people in".
 
-**D0 — DONE** (migration 216). The §13 settings exist, are read through
-`services/staff-settings.ts` and are editable on the Settings page; bank
-holidays are seeded for 2026–2028 and marked on the calendar and My Time; the
-entitlement grant and the cash-out reminder are both on the scheduler. Nothing
-in this module now has a date attached to it.
+**Phase F — coverage intelligence and personal iCal** (§10, §16). Post-go-live,
+and it wants a season of real data to calibrate against.
+
+**Working location** (§19) — agreed in principle with jon, including that the
+headcount shows two numbers and collapses to one when they match, and that the
+calendar needs a location filter. Phase F; must NOT land before the parallel
+run, because moving what "In" means mid-run muddies the comparison.
 
 **Carried over:**
 - Absence retention. §17.9 asks how long sickness records are kept; nothing
   expires them yet, and it feeds the open GDPR retention item in `ROADMAP.md`.
-- Port My Time into Quick Actions (in `BACKLOG.md`, deliberately deferred until
-  E–F land so the surface is not moved twice).
-- **Working location** (§19) — proposed, not agreed. Phase F.
+- Port My Time into Quick Actions (in `BACKLOG.md`, deferred until E–F land so
+  the surface is not moved twice).
+- A single home for freelancer RATES (`BACKLOG.md`) — today a rate lives in
+  three unconnected places. Wanted, but it spans quoting and driver assignment
+  as well, so it is its own piece.
 - `staff.leave_year_start_month` is seeded but **the code assumes January**.
-  The setting is there so §13 is complete; a non-calendar leave year would need
-  real work in `staff-balance.ts` and is not on anyone's list.
-- `staff.overtime_min_increment_minutes` drives the UI step and the service
-  check, but `staff_overtime_entries` carries a `minutes % 5 = 0` CHECK from
-  migration 212. LOWERING the setting without a migration would leave the
-  database refusing what the form offers. Raising it is safe.
+- `staff.overtime_min_increment_minutes` drives the UI and the service check,
+  but `staff_overtime_entries` has a `minutes % 5 = 0` CHECK. Lowering the
+  setting without a migration leaves the database refusing what the form offers.
+
+**Not code — jon's to do before go-live:** the ten items in §17, which want a
+sanity check from the accountants or an HR advisor, and the §14 cutover plan
+(Oct–Dec parallel run, then the BrightHR import as read-only history).
 
 ### Verification approach — please keep doing this
 

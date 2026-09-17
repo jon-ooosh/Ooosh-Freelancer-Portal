@@ -12,6 +12,7 @@ import { getFrontendUrl } from './app-urls';
 import { sendOohReminderEmails } from '../services/ooh-return';
 import { runOohApproachScan } from '../services/ooh-sms-approach';
 import { cascadeJobClose } from '../services/job-close-cascade';
+import { closeJobRequirements } from '../services/requirement-close-sweep';
 
 /**
  * Starts the backup and sync schedulers.
@@ -339,6 +340,17 @@ export function startScheduler() {
             // auto-loser touches is past-dated, so the cascade's future-only
             // rule means no freelancer is emailed about a dead enquiry.
             await cascadeJobClose({ jobId: job.id as string, reason: 'lost', actorUserId: null });
+
+            // Requirement cleanup — same gap, other half. An auto-lost
+            // enquiry kept its requirement cards open AND any reminder set to
+            // trigger on 'lost' never fired at all. No keep-list here: there
+            // is nobody to ask, so anything already flagged keep_after_close
+            // survives and the rest is swept.
+            await closeJobRequirements({
+              jobId: job.id as string,
+              reason: 'lost',
+              actorUserId: null,
+            });
 
             // Push to HireHop (status 10 = Not Interested)
             await writeBackStatusToHireHop(job.id as string, 'lost', 'scheduler:auto_expire');
