@@ -32,6 +32,7 @@
  */
 import { query } from '../config/database';
 import emailService from './email-service';
+import { fullDisplayName } from './display-name';
 
 export type JobCloseReason = 'lost' | 'cancelled';
 
@@ -99,7 +100,7 @@ export async function cascadeJobClose(
     // email. `is_ooosh_crew = false` drops the "Ooosh Staff" placeholder that
     // local D&C quotes auto-assign — it isn't a real person to notify.
     const crewResult = await query(
-      `SELECT DISTINCT qa.role, p.first_name, p.last_name, p.email
+      `SELECT DISTINCT qa.role, p.first_name, p.last_name, p.preferred_name, p.email
          FROM quote_assignments qa
          JOIN people p ON p.id = qa.person_id
          WHERE qa.quote_id IN (SELECT id FROM quotes WHERE job_id = $1 AND is_deleted = false)
@@ -211,7 +212,7 @@ export async function cascadeJobClose(
           await emailService.send('job_cancelled_crew', {
             to: crew.email,
             variables: {
-              crewName: `${crew.first_name || ''} ${crew.last_name || ''}`.trim() || 'there',
+              crewName: fullDisplayName(crew) || 'there',
               jobName,
               jobNumber,
               jobDates,

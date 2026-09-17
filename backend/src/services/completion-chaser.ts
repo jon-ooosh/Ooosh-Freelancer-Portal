@@ -18,6 +18,7 @@
  */
 import { query } from '../config/database';
 import { emailService } from './email-service';
+import { greetingName, fullDisplayName } from './display-name';
 
 const BUSINESS_START_HOUR = 7;
 const BUSINESS_END_HOUR = 22;
@@ -45,6 +46,7 @@ interface OverdueQuote {
   freelancer_id: string;
   freelancer_email: string | null;
   freelancer_first_name: string | null;
+  freelancer_preferred_name: string | null;
   freelancer_last_name: string | null;
   agreed_rate: string | null;
 }
@@ -91,6 +93,7 @@ export async function runCompletionChase(): Promise<{ scanned: number; sent: num
             qa.agreed_rate,
             p.id AS freelancer_id, p.email AS freelancer_email,
             p.first_name AS freelancer_first_name, p.last_name AS freelancer_last_name,
+            p.preferred_name AS freelancer_preferred_name,
             j.job_name
      FROM quotes q
      JOIN quote_assignments qa ON qa.quote_id = q.id
@@ -149,7 +152,10 @@ export async function runCompletionChase(): Promise<{ scanned: number; sent: num
       continue;
     }
 
-    const freelancerName = (row.freelancer_first_name || '').trim() || 'there';
+    const freelancerName = greetingName({
+      first_name: row.freelancer_first_name,
+      preferred_name: row.freelancer_preferred_name,
+    });
     const jobName = row.job_name || row.venue_name || 'your job';
     const venueName = row.venue_name || 'the venue';
     const portalUrl =
@@ -197,8 +203,13 @@ export async function runCompletionChase(): Promise<{ scanned: number; sent: num
     const isInfoMailbox = (row.freelancer_email || '').toLowerCase() === 'info@oooshtours.co.uk';
     if (level === 3 && !isInfoMailbox) {
       try {
-        const fullName = `${row.freelancer_first_name || ''} ${row.freelancer_last_name || ''}`.trim()
-          || row.freelancer_email;
+        // An internal escalation subject line — still the name the office
+        // knows them by, not the passport one.
+        const fullName = fullDisplayName({
+          first_name: row.freelancer_first_name,
+          last_name: row.freelancer_last_name,
+          preferred_name: row.freelancer_preferred_name,
+        }) || row.freelancer_email;
         await emailService.sendRaw({
           to: 'info@oooshtours.co.uk',
           subject: `[Escalation] ${fullName} hasn't completed ${jobName}`,

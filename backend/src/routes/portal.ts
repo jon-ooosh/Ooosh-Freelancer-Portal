@@ -23,6 +23,7 @@ import { uploadToR2, isR2Configured, getPresignedDownloadUrl } from '../config/r
 import { generateDeliveryNotePdf, DeliveryNoteItem } from '../services/delivery-note-pdf';
 import { getSitterShifts, getSitterShiftDetail, isSitterAssignedTo } from '../services/studio-sitter';
 import { getLockupContext, submitLockupReport, logShiftLostProperty, LockupAlreadySubmittedError } from '../services/studio-sitter-lockup';
+import { greetingName, fullDisplayName } from '../services/display-name';
 
 // Stable UUID seeded by migration 031 — used as created_by for portal-driven
 // auto-actions (the freelancer is a `people` row, not a `users` row, so we
@@ -187,7 +188,7 @@ router.post('/auth/login', async (req: Request, res: Response) => {
 
     // Find freelancer in people table
     const result = await query(
-      `SELECT p.id, p.first_name, p.last_name, p.email, p.portal_password_hash,
+      `SELECT p.id, p.first_name, p.last_name, p.preferred_name, p.email, p.portal_password_hash,
               p.is_freelancer, p.is_approved, p.portal_email_verified
        FROM people p
        WHERE LOWER(p.email) = $1 AND p.is_freelancer = true AND p.is_deleted = false
@@ -231,7 +232,9 @@ router.post('/auth/login', async (req: Request, res: Response) => {
       }
     }
 
-    const name = `${freelancer.first_name} ${freelancer.last_name}`.trim();
+    // Display only — the portal dashboard greets from this claim and settings
+    // prints it. The id, not the name, is what identifies the session.
+    const name = fullDisplayName(freelancer);
 
     // Create session token (compatible with portal's jose-based verification)
     const sessionToken = jwt.sign(
@@ -295,7 +298,7 @@ router.post('/auth/register/start', async (req: Request, res: Response) => {
 
     // Two-tick gate: must be an approved freelancer in the people table
     const result = await query(
-      `SELECT id, first_name, last_name, email, portal_password_hash, is_approved
+      `SELECT id, first_name, last_name, preferred_name, email, portal_password_hash, is_approved
        FROM people
        WHERE LOWER(email) = $1 AND is_freelancer = true AND is_deleted = false
        ORDER BY is_approved DESC, portal_last_login DESC NULLS LAST
@@ -333,7 +336,7 @@ router.post('/auth/register/start', async (req: Request, res: Response) => {
       [email, code, expiresAt]
     );
 
-    const freelancerName = person.first_name || 'there';
+    const freelancerName = greetingName(person);
     await emailService.send('portal_verification_code', {
       to: email,
       variables: { freelancerName, code },
@@ -435,7 +438,7 @@ router.post('/auth/register/complete', async (req: Request, res: Response) => {
 
     // Gate again — still must be an approved freelancer
     const personResult = await query(
-      `SELECT id, first_name, last_name, email FROM people
+      `SELECT id, first_name, last_name, preferred_name, email FROM people
        WHERE LOWER(email) = $1 AND is_freelancer = true AND is_approved = true AND is_deleted = false`,
       [email]
     );
@@ -456,7 +459,7 @@ router.post('/auth/register/complete', async (req: Request, res: Response) => {
     );
 
     // Issue session token (same shape as login)
-    const name = `${person.first_name || ''} ${person.last_name || ''}`.trim();
+    const name = fullDisplayName(person);
     const sessionToken = jwt.sign(
       { id: person.id, email: person.email || email, name },
       PORTAL_SECRET,
@@ -505,7 +508,7 @@ router.post('/auth/forgot-password', async (req: Request, res: Response) => {
     const email = parsed.data.email.toLowerCase().trim();
 
     const result = await query(
-      `SELECT id, first_name, email FROM people
+      `SELECT id, first_name, preferred_name, email FROM people
        WHERE LOWER(email) = $1 AND is_freelancer = true AND is_approved = true AND is_deleted = false
        ORDER BY portal_last_login DESC NULLS LAST
        LIMIT 1`,
@@ -535,7 +538,7 @@ router.post('/auth/forgot-password', async (req: Request, res: Response) => {
     );
 
     const resetUrl = `${PORTAL_FRONTEND_URL}/reset-password?token=${rawToken}`;
-    const freelancerName = person.first_name || 'there';
+    const freelancerName = greetingName(person);
 
     await emailService.send('portal_password_reset', {
       to: person.email || email,
@@ -598,7 +601,7 @@ router.post('/auth/reset-password', async (req: Request, res: Response) => {
     const tokenHash = hashToken(token);
 
     const result = await query(
-      `SELECT t.id, t.person_id, p.first_name, p.last_name, p.email,
+      `SELECT t.id, t.person_id, p.first_name, p.last_name, p.preferred_name, p.email,
               p.is_freelancer, p.is_approved
        FROM portal_password_reset_tokens t
        JOIN people p ON p.id = t.person_id
@@ -651,7 +654,7 @@ router.post('/auth/reset-password', async (req: Request, res: Response) => {
     }
 
     // Issue session token so they go straight into the portal
-    const name = `${row.first_name || ''} ${row.last_name || ''}`.trim();
+    const name = fullDisplayName(row);
     const sessionToken = jwt.sign(
       { id: row.person_id, email: row.email, name },
       PORTAL_SECRET,

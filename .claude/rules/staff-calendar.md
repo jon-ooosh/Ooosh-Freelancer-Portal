@@ -311,8 +311,11 @@ list, the dashboard greeting and "Posting as …" all read it through
 `displayFirstName` / `displayFullName` / `displayInitials`, so the answer cannot
 drift between surfaces. It is served by `/auth/login`, `/auth/me` and `/users`.
 
-`routes/interactions.ts` has the SQL twin, `DISPLAY_NAME_SQL`, for the same
-reason — use it there rather than a fresh `CONCAT(p.first_name, …)`.
+`services/display-name.ts` is the backend twin — `greetingName` for an email
+greeting, `fullDisplayName` for a full name, `DISPLAY_NAME_SQL` for a name built
+in the query. Use those rather than a fresh `CONCAT(p.first_name, …)` or a bare
+`|| 'there'`, and remember to SELECT `preferred_name` or they quietly return the
+legal name.
 
 **Check the call sites before believing a comment that says this is done.**
 `MentionComposer.tsx` claimed ActivityTimeline routed through it; it did not,

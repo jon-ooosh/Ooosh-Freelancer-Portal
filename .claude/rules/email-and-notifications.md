@@ -27,6 +27,22 @@ Full template registry, incident history and messaging spec pointers:
 - **`{{#if}}` is single-level only — NEVER nest.** The substituter's non-greedy regex matches to the FIRST `{{/if}}`, leaving literal `{{/if}}` / `{{#if}}` artifacts in the sent email. Render an image and its caption as two separate top-level blocks.
 - **Every job-scoped template carries the HH job number in BOTH subject and body.** It's the thread that ties an email back to the job without clicking through. Callers pass `jobNumber: String(job.hh_job_number || '')` — an empty string degrades gracefully; omitting it renders the literal placeholder. Doesn't apply to auth flows, vehicle-scoped or non-job system alerts.
 
+## How to greet somebody — `services/display-name.ts`
+
+`greetingName(row)` for "Hi Will", `fullDisplayName(row)` for "Will Parish".
+Never `row.first_name || 'there'`: `people.preferred_name` is what they asked to
+be called, and it has been on the freelancer application form since migration
+184 — we ask the question, so use the answer.
+
+**SELECT `preferred_name` in the query.** A row that never fetched it falls
+straight through to the legal name and nothing errors, which is exactly how
+this stayed broken: the helper cannot tell "not set" from "not fetched".
+
+**Not for anything legal or financial** — payroll, the hire agreement,
+right-to-work records and carnets want the passport name and build it
+themselves. Client greetings are a different question again and belong to
+`resolveClientEmailTarget`.
+
 ## Who receives a client email
 
 Resolution order, and it is the single source of truth:

@@ -12,6 +12,7 @@ import {
 import { emailService } from '../services/email-service';
 import { hhBroker } from '../services/hirehop-broker';
 import { shouldSuppressInformational } from '../services/portal-notification-prefs';
+import { greetingName } from '../services/display-name';
 import { resolveJobContactCandidates } from '../services/job-contact-candidates';
 
 const router = Router();
@@ -861,7 +862,7 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
       (async () => {
         try {
           const assignees = await query(
-            `SELECT qa.person_id, p.first_name, p.last_name, p.email
+            `SELECT qa.person_id, p.first_name, p.last_name, p.preferred_name, p.email
              FROM quote_assignments qa
              JOIN people p ON p.id = qa.person_id
              WHERE qa.quote_id = $1 AND qa.status NOT IN ('declined', 'cancelled')
@@ -885,7 +886,7 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
               await emailService.send('job_change_notification', {
                 to: crew.email,
                 variables: {
-                  freelancerName: crew.first_name || 'there',
+                  freelancerName: greetingName(crew),
                   jobName,
                   jobNumber: String(oldQuote.linked_hh_job_number || ''),
                   jobDate: formattedDate,
@@ -964,7 +965,7 @@ router.patch('/:id/status', validate(statusSchema), async (req: AuthRequest, res
         try {
           const assignees = await query(
             `SELECT qa.id AS assignment_id, qa.role, qa.agreed_rate, qa.rate_type,
-                    p.id AS person_id, p.first_name, p.email, p.is_freelancer,
+                    p.id AS person_id, p.first_name, p.preferred_name, p.email, p.is_freelancer,
                     q.job_date, q.venue_name, j.job_name, j.hh_job_number
              FROM quote_assignments qa
              JOIN people p ON p.id = qa.person_id
@@ -990,7 +991,7 @@ router.patch('/:id/status', validate(statusSchema), async (req: AuthRequest, res
               );
               continue;
             }
-            const freelancerName = (a.first_name || '').trim() || 'there';
+            const freelancerName = greetingName(a);
             const jobName = a.job_name || a.venue_name || 'a job';
             const jobDate = a.job_date
               ? new Date(a.job_date).toLocaleDateString('en-GB', {
@@ -1166,7 +1167,7 @@ router.post('/:id/assignments', validate(assignSchema), async (req: AuthRequest,
       (async () => {
         try {
           const ctx = await query(
-            `SELECT p.first_name, p.last_name, p.email, p.is_freelancer,
+            `SELECT p.first_name, p.last_name, p.preferred_name, p.email, p.is_freelancer,
                     q.status AS quote_status, q.job_date, q.arrival_time,
                     q.venue_name, q.job_type,
                     j.job_name, j.hh_job_number
@@ -1185,7 +1186,7 @@ router.post('/:id/assignments', validate(assignSchema), async (req: AuthRequest,
           const { suppress } = await shouldSuppressInformational(personId, String(req.params.id));
           if (suppress) return;
 
-          const freelancerName = (row.first_name || '').trim() || 'there';
+          const freelancerName = greetingName(row);
           const jobName = row.job_name || row.venue_name || 'a job';
           const jobDate = row.job_date
             ? new Date(row.job_date).toLocaleDateString('en-GB', {
@@ -1405,7 +1406,7 @@ router.post(
       const result = await query(
         `SELECT q.id AS quote_id, q.job_type, q.venue_name, q.job_date, q.arrival_time,
                 p.id AS person_id, p.email AS person_email,
-                p.first_name, p.last_name,
+                p.first_name, p.last_name, p.preferred_name,
                 j.job_name
          FROM quote_assignments qa
          JOIN quotes q ON q.id = qa.quote_id
@@ -1427,7 +1428,7 @@ router.post(
         return;
       }
 
-      const firstName = (row.first_name || '').trim() || 'there';
+      const firstName = greetingName(row);
       const venueName = row.venue_name || 'the venue';
       const jobName = row.job_name || row.venue_name || 'your job';
       const portalBase = (process.env.FRONTEND_PORTAL_URL || 'https://freelancer.oooshtours.co.uk').replace(/\/$/, '');
