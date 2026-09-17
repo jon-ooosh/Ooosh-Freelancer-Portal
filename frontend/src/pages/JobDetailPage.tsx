@@ -26,6 +26,7 @@ import OohReturnModal from '../components/OohReturnModal';
 import JobOohReturns from '../components/JobOohReturns';
 import AddToHireModal, { type AddToHireCandidate } from '../components/AddToHireModal';
 import JobContactsCard from '../components/JobContactsCard';
+import { VenuePicker } from '../components/VenuePicker';
 import type { JobExcess } from '../../../shared/types';
 import CancellationModal from '../components/CancellationModal';
 import CombineBookingsModal from '../components/CombineBookingsModal';
@@ -1658,9 +1659,6 @@ function JobDetailContent() {
     pushToHirehop: true,
   });
   const [localSubmitting, setLocalSubmitting] = useState(false);
-  const [venueSearch, setVenueSearch] = useState('');
-  const [venueOptions, setVenueOptions] = useState<{ id: string; name: string; city: string | null }[]>([]);
-  const [showVenueDropdown, setShowVenueDropdown] = useState(false);
 
   // Job organisations (band, promoter, etc.)
   const [jobOrgs, setJobOrgs] = useState<Array<{
@@ -2529,15 +2527,52 @@ function JobDetailContent() {
     }
   }
 
-  async function searchVenues(search: string) {
-    try {
-      const data = await api.get<{ data: { id: string; name: string; city: string | null }[] }>(
-        `/venues?search=${encodeURIComponent(search)}&limit=10`
-      );
-      setVenueOptions(data.data);
-    } catch {
-      console.error('Failed to search venues');
+  // Distinct venues already carried by this job's OTHER transport legs — the
+  // ones of the opposite type to what's being added. A collection is nearly
+  // always from the place we delivered to, and the DELIVERY QUOTE's venue is
+  // the one a human actually chose; `jobs.venue_name` is whatever HireHop
+  // happened to carry and is often blank or unlinked.
+  //
+  // Cancelled legs are excluded — a venue we decided not to go to is not a
+  // sensible default. Deduped on venue_id, falling back to the trimmed name so
+  // two free-text legs to the same place collapse to one entry.
+  function otherJobVenues(
+    forType: 'delivery' | 'collection'
+  ): Array<{ venueId: string | null; venueName: string }> {
+    const oppositeType = forType === 'delivery' ? 'collection' : 'delivery';
+    const seen = new Set<string>();
+    const out: Array<{ venueId: string | null; venueName: string }> = [];
+    for (const q of quotes) {
+      if (q.job_type !== oppositeType) continue;
+      if (q.status === 'cancelled') continue;
+      const name = (q.venue_name || '').trim();
+      if (!name) continue;
+      const key = q.venue_id || name.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ venueId: q.venue_id || null, venueName: name });
     }
+    // A leg linked to a real venue record is the more useful default (it's the
+    // one that carries an address through to the freelancer portal).
+    return out.sort((a, b) => Number(!!b.venueId) - Number(!!a.venueId));
+  }
+
+  // The venue to pre-fill when adding a leg of `forType`.
+  //
+  // Exactly one distinct opposite-type venue → use it. MORE than one → return
+  // nothing: on a multi-drop job "the venue we're delivering to" is ambiguous,
+  // and confidently pre-filling the wrong one of three is worse than leaving it
+  // blank. Those candidates surface as click-to-fill chips under the field
+  // instead. No opposite-type legs at all → fall back to the job's own venue.
+  function deriveSiblingVenue(
+    forType: 'delivery' | 'collection'
+  ): { venueId: string; venueName: string } {
+    const candidates = otherJobVenues(forType);
+    if (candidates.length === 1) {
+      return { venueId: candidates[0].venueId || '', venueName: candidates[0].venueName };
+    }
+    if (candidates.length > 1) return { venueId: '', venueName: '' };
+    return { venueId: job?.venue_id || '', venueName: job?.venue_name || '' };
   }
 
   function getDefaultDate(jobType: 'delivery' | 'collection'): string {
@@ -2553,19 +2588,17 @@ function JobDetailContent() {
   function openLocalForm() {
     if (!job) return;
     const defaultDate = getDefaultDate('delivery');
+    const venue = deriveSiblingVenue('delivery');
     setLocalFormData({
       jobType: 'delivery',
-      venueId: job.venue_id || '',
-      venueName: job.venue_name || '',
+      venueId: venue.venueId,
+      venueName: venue.venueName,
       jobDate: defaultDate,
       arrivalTime: '',
       freelancerNotes: '',
       notes: '',
       pushToHirehop: true,
     });
-    setVenueSearch(job.venue_name || '');
-    setVenueOptions([]);
-    setShowVenueDropdown(false);
     setShowLocalForm(true);
   }
 
@@ -6164,7 +6197,20 @@ function JobDetailContent() {
                         key={t}
                         onClick={() => {
                           const newDefault = getDefaultDate(t);
-                          setLocalFormData({ ...localFormData, jobType: t, jobDate: newDefault });
+                          // Re-derive the venue for the new type, but only while
+                          // the field still holds whatever we last suggested —
+                          // never overwrite a venue the user chose themselves.
+                          const suggested = deriveSiblingVenue(localFormData.jobType);
+                          const untouched =
+                            localFormData.venueName === suggested.venueName &&
+                            localFormData.venueId === suggested.venueId;
+                          const next = untouched ? deriveSiblingVenue(t) : null;
+                          setLocalFormData({
+                            ...localFormData,
+                            jobType: t,
+                            jobDate: newDefault,
+                            ...(next ? { venueId: next.venueId, venueName: next.venueName } : {}),
+                          });
                         }}
                         className={`flex-1 px-3 py-2 rounded-lg border text-sm font-medium ${
                           localFormData.jobType === t
@@ -6178,50 +6224,45 @@ function JobDetailContent() {
                   </div>
                 </div>
 
-                {/* Venue search */}
-                <div className="relative">
+                {/* Venue — shared picker, so search / link / create-on-no-match
+                    and the "not linked, freelancer sees no address" warning all
+                    behave identically here and in the Edit Quote modal. */}
+                <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Venue</label>
-                  <input
-                    type="text"
-                    value={venueSearch}
-                    onChange={(e) => {
-                      setVenueSearch(e.target.value);
-                      if (e.target.value.length >= 2) {
-                        searchVenues(e.target.value);
-                        setShowVenueDropdown(true);
-                      } else {
-                        setVenueOptions([]);
-                        setShowVenueDropdown(false);
-                      }
-                      // Clear venue selection if text changed
-                      if (e.target.value !== localFormData.venueName) {
-                        setLocalFormData({ ...localFormData, venueId: '', venueName: e.target.value });
-                      }
-                    }}
-                    onFocus={() => {
-                      if (venueOptions.length > 0) setShowVenueDropdown(true);
-                    }}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-                    placeholder="Search venues..."
+                  <VenuePicker
+                    value={{ venueId: localFormData.venueId || null, venueName: localFormData.venueName }}
+                    onChange={({ venueId, venueName }) =>
+                      setLocalFormData({ ...localFormData, venueId: venueId || '', venueName })
+                    }
                   />
-                  {showVenueDropdown && venueOptions.length > 0 && (
-                    <div className="absolute z-10 mt-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg max-h-40 overflow-y-auto">
-                      {venueOptions.map((v) => (
-                        <button
-                          key={v.id}
-                          onClick={() => {
-                            setLocalFormData({ ...localFormData, venueId: v.id, venueName: v.name });
-                            setVenueSearch(v.name);
-                            setShowVenueDropdown(false);
-                          }}
-                          className="w-full text-left px-3 py-2 text-sm hover:bg-ooosh-50 flex justify-between"
-                        >
-                          <span className="font-medium text-gray-900">{v.name}</span>
-                          {v.city && <span className="text-xs text-gray-400">{v.city}</span>}
-                        </button>
-                      ))}
-                    </div>
-                  )}
+                  {/* Other venues already on this job — one click to reuse. Shown
+                      when the field is empty or points somewhere else, which is
+                      exactly the multi-drop case where auto-defaulting would be
+                      a guess (see deriveSiblingVenue). */}
+                  {(() => {
+                    const others = otherJobVenues(localFormData.jobType)
+                      .filter((v) => v.venueId !== (localFormData.venueId || null));
+                    if (others.length === 0) return null;
+                    return (
+                      <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                        <span className="text-xs text-gray-500">Also on this job:</span>
+                        {others.map((v) => (
+                          <button
+                            key={v.venueId ?? v.venueName}
+                            type="button"
+                            onClick={() => setLocalFormData({
+                              ...localFormData,
+                              venueId: v.venueId || '',
+                              venueName: v.venueName,
+                            })}
+                            className="px-2 py-0.5 rounded-full border border-gray-300 text-xs text-gray-600 hover:bg-ooosh-50 hover:border-ooosh-300"
+                          >
+                            {v.venueName}
+                          </button>
+                        ))}
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 {/* Date & Time */}
@@ -6349,8 +6390,20 @@ function JobDetailContent() {
                       const localResult = await api.post<{ id: string }>('/quotes/local', {
                         jobId: job.id,
                         jobType: localFormData.jobType,
-                        venueId: localFormData.venueId || job.venue_id || undefined,
-                        venueName: localFormData.venueName || job.venue_name || undefined,
+                        // Send exactly what the picker holds — no job-level
+                        // fallback. The two used to fall back independently
+                        // (`venueId || job.venue_id`, `venueName ||
+                        // job.venue_name`), so typing a free-text venue after
+                        // clearing the link saved the TYPED NAME against the
+                        // JOB'S venue_id — a quote linked to one venue while
+                        // displaying another. It also silently re-filled a
+                        // field the user had deliberately emptied, which now
+                        // matters because a blank field is how a multi-drop
+                        // job says "don't guess" (see deriveSiblingVenue).
+                        // The picker is already pre-filled with the job venue
+                        // when there's nothing better, so nothing is lost.
+                        venueId: localFormData.venueId || undefined,
+                        venueName: localFormData.venueName || undefined,
                         jobDate: dateStr,
                         arrivalTime: localFormData.arrivalTime || undefined,
                         notes: localFormData.notes || undefined,

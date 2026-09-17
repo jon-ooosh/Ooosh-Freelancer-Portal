@@ -96,6 +96,63 @@ This is the quoting/costing system for delivery, collection, and crewed jobs. It
 5. **Crew assignments** via `quote_assignments` junction table — links people to quotes with role, agreed rate, and status
 6. **Quote status lifecycle:** draft → confirmed → completed/cancelled (with `cancelled_reason`)
 
+### Venue linkage on a quote (Sep 2026)
+
+**`quotes.venue_id` is what carries the address to the freelancer.** The portal
+reads it via `LEFT JOIN venues v ON v.id = q.venue_id` (`routes/portal.ts`), and
+`venue_address` / `venue_city` come from nowhere else. A quote with `venue_name`
+set and `venue_id` NULL is an orphan: the driver gets a **name with no address,
+no postcode, and none of the venue's parking / load-in / access notes**.
+
+97 of 675 quotes were in that state when this was found. The three entry points
+had drifted:
+
+| Entry point | Before | Now |
+|---|---|---|
+| `TransportCalculator.tsx` (full quote) | search + **create-a-venue** + green "selected from database" hint | unchanged, plus the amber unlinked warning |
+| `VenuePicker.tsx` (Edit Quote modal, Job Detail + Transport Ops) | search + free text only — **no create** | search + create-on-no-match + amber warning |
+| Local D&C modal (`JobDetailPage.tsx`) | its own hand-rolled copy of the search input — no create | uses the shared `VenuePicker` |
+
+**Free text is still allowed, deliberately.** Plenty of these genuinely aren't
+venues ("client's house", "our warehouse", "TBC", a bare postcode). Auto-creating
+a venue from whatever was typed was considered and rejected: a record minted from
+a typo or a part-name ("Brixton") pollutes the table permanently and degrades
+every later search, and a venue created from a name alone has no address, which
+is the only thing that made linking worth doing. So linking is made the path of
+least resistance — one click when there's no match — and an unlinked value warns
+about the actual consequence.
+
+**Use `VenuePicker` for any new venue field.** `TransportCalculator` keeps its own
+because it does more (venue distance/drive-time defaults, and write-back of
+changed mileage to the venue record); that's a real difference, not drift. Don't
+add a fourth.
+
+### Defaulting the venue on a second leg
+
+`deriveSiblingVenue()` in `JobDetailPage.tsx` pre-fills the Local D&C form from
+this job's existing legs **of the opposite type** — a collection is nearly always
+from the place we delivered to, and the delivery quote's venue is the one a human
+actually chose. `jobs.venue_name` is only the fallback: HireHop's `VENUE` field is
+often empty, and sync only links a `venue_id` on an exact case-insensitive name
+match (`hirehop-job-sync.ts`), so the job frequently has no venue at all.
+
+Rules, in order: exactly one distinct opposite-type venue → pre-fill it (a leg
+with a real `venue_id` wins over a free-text one); **more than one → pre-fill
+nothing**, because on a multi-drop job "the venue we're delivering to" is a guess
+and confidently picking the wrong one of three is worse than blank — the
+candidates render as click-to-fill chips under the field instead; no opposite-type
+legs → the job's own venue. Cancelled legs are never candidates.
+
+Re-derives when the Delivery/Collection toggle flips, but **only while the field
+still holds the last suggestion** — a venue the user chose is never overwritten.
+
+**The submit handler sends exactly what the picker holds.** It used to fall back
+per-field (`venueId || job.venue_id`, `venueName || job.venue_name`), which meant
+typing a free-text venue after clearing the link saved the TYPED NAME against the
+JOB'S `venue_id` — a quote linked to one venue while displaying another. It also
+silently re-filled a field the user had deliberately emptied, which now matters
+because blank is how a multi-drop job says "don't guess".
+
 ### Key Types (shared/types/index.ts)
 
 - `QuoteJobType`: 'delivery' | 'collection' | 'crewed'
