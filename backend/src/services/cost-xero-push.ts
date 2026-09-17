@@ -44,7 +44,8 @@ import { fetchCostLines, grossesWithResidue } from './cost-lines';
 // (Exported for the reconcile sync — cost-xero-reconcile-sync.ts.)
 export const SPEND_MONEY_METHODS = ['cot_card', 'amex', 'lloyds_cc', 'petty_cash', 'paypal', 'wise', 'lloyds_transfer'] as const;
 // Pay-later methods → authorised ACCPAY bill on approval, payment recorded when paid.
-const BILL_METHODS = ['not_yet_paid', 'reimburse_me'] as const;
+// (Exported for the payment pull-back sync — cost-xero-payment-sync.ts.)
+export const BILL_METHODS = ['not_yet_paid', 'reimburse_me'] as const;
 
 const PUSHED_STATES = ['bill_created', 'attached', 'reconciled'];
 
@@ -158,6 +159,7 @@ interface CostRow {
   paid_method: string | null;
   paid_value_date: string | null;
   paid_at: string | null;
+  settled_externally: boolean | null;
   receipt_r2_key: string | null;
   receipt_filename: string | null;
   supporting_documents: CostDocumentRow[] | null;
@@ -502,7 +504,10 @@ async function pushBill(cost: CostRow): Promise<PushResult> {
   }
 
   // ── Step 2: if paid, record the payment against the bill ─────────────────
-  if (cost.payment_status === 'paid' && !cost.xero_payment_id && cost.xero_object_id) {
+  // `settled_externally` is what stops this paying a supplier twice: the bill
+  // was cleared in OP precisely BECAUSE the money already moved elsewhere, so
+  // there is no payment for us to record. See migration 224.
+  if (cost.payment_status === 'paid' && !cost.settled_externally && !cost.xero_payment_id && cost.xero_object_id) {
     const payResult = await recordBillPayment(cost);
     if (payResult.error) return { pushed: true, invoiceID: cost.xero_object_id, error: payResult.error };
     if (payResult.skipped) return { pushed: true, invoiceID: cost.xero_object_id, skipped: payResult.skipped };
@@ -517,6 +522,10 @@ async function pushBill(cost: CostRow): Promise<PushResult> {
 async function recordBillPayment(cost: CostRow): Promise<{ paymentID?: string; skipped?: string; error?: string }> {
   if (!cost.xero_object_id) return { skipped: 'Bill not in Xero yet' };
   if (cost.xero_payment_id) return { skipped: 'Payment already recorded' };
+  // Belt and braces alongside the caller's guard — this function is the only
+  // place OP creates a supplier payment, so the "don't pay it" flag is checked
+  // here too rather than trusting every future call site to remember.
+  if (cost.settled_externally) return { skipped: 'Settled outside OP' };
 
   const payMethod = cost.paid_method;
   if (!payMethod) {
@@ -552,32 +561,42 @@ async function recordBillPayment(cost: CostRow): Promise<{ paymentID?: string; s
 }
 
 /**
+ * Run `fn` holding THE per-cost advisory lock.
+ *
+ * Serialize all Xero work for ONE cost. The push is triggered from five places
+ * (create / update / approve / pay / Push-Now), most fire-and-forget, so two can
+ * overlap — e.g. approve's background push racing the Push-Now button. Each
+ * reads xero_object_id as null, passes the billExists guard, and creates its own
+ * Xero bill → DUPLICATE BILLS (seen live on T.Reeve repair invoices). The lock
+ * makes the second wait for the first to commit xero_object_id, after which
+ * loadCost + the billExists / PUSHED_STATES guard short-circuit it. Different
+ * costs hash to different keys so unrelated costs never contend.
+ *
+ * Exported so the payment pull-back sync (cost-xero-payment-sync.ts) can mark a
+ * cost paid under the same lock — otherwise it could land between a push's
+ * "is there a payment yet?" read and its write.
+ */
+export async function withCostPushLock<T>(costId: string, fn: () => Promise<T>): Promise<T> {
+  const client = await getClient();
+  const key = `cost-push:${costId}`;
+  try {
+    await client.query('SELECT pg_advisory_lock(hashtext($1)::bigint)', [key]);
+    return await fn();
+  } finally {
+    try { await client.query('SELECT pg_advisory_unlock(hashtext($1)::bigint)', [key]); }
+    catch (err) { console.error('[cost-xero-push] advisory unlock failed:', costId, err); }
+    client.release();
+  }
+}
+
+/**
  * Push a single cost to Xero. Idempotent and resumable: a fully-pushed cost is a
  * no-op; a part-done one continues from where it stopped.
  */
 export async function pushCostToXero(costId: string): Promise<PushResult> {
   if (!isXeroConfigured()) return { pushed: false, skipped: 'Xero not configured' };
 
-  // Serialize all pushes for THIS cost behind a Postgres advisory lock. The push
-  // is triggered from five places (create / update / approve / pay / Push-Now),
-  // most fire-and-forget, so two can overlap — e.g. approve's background push
-  // racing the Push-Now button. Each reads xero_object_id as null, passes the
-  // billExists guard, and creates its own Xero bill → DUPLICATE BILLS (seen live
-  // on T.Reeve repair invoices). The lock makes the second push wait for the
-  // first to commit xero_object_id, after which loadCost + the billExists /
-  // PUSHED_STATES guard short-circuit it. Different costs hash to different keys
-  // so unrelated pushes never contend.
-  const client = await getClient();
-  const lockSql = 'pg_advisory_lock(hashtext($1)::bigint)';
-  const key = `cost-push:${costId}`;
-  try {
-    await client.query(`SELECT ${lockSql}`, [key]);
-    return await pushCostToXeroLocked(costId);
-  } finally {
-    try { await client.query('SELECT pg_advisory_unlock(hashtext($1)::bigint)', [key]); }
-    catch (err) { console.error('[cost-xero-push] advisory unlock failed:', costId, err); }
-    client.release();
-  }
+  return withCostPushLock(costId, () => pushCostToXeroLocked(costId));
 }
 
 async function pushCostToXeroLocked(costId: string): Promise<PushResult> {
@@ -618,16 +637,7 @@ export function pushCostToXeroBackground(costId: string): void {
  */
 export async function resyncCostToXero(costId: string): Promise<PushResult & { locked?: boolean }> {
   if (!isXeroConfigured()) return { pushed: false, skipped: 'Xero not configured' };
-  const client = await getClient();
-  const key = `cost-push:${costId}`;
-  try {
-    await client.query('SELECT pg_advisory_lock(hashtext($1)::bigint)', [key]);
-    return await resyncCostToXeroLocked(costId);
-  } finally {
-    try { await client.query('SELECT pg_advisory_unlock(hashtext($1)::bigint)', [key]); }
-    catch (err) { console.error('[cost-xero-push] advisory unlock failed:', costId, err); }
-    client.release();
-  }
+  return withCostPushLock(costId, () => resyncCostToXeroLocked(costId));
 }
 
 async function resyncCostToXeroLocked(costId: string): Promise<PushResult & { locked?: boolean }> {
@@ -656,6 +666,13 @@ async function resyncCostToXeroLocked(costId: string): Promise<PushResult & { lo
 
   try {
     if (isBill) {
+      // Settled outside OP: whatever state our bill is in over there, OP is no
+      // longer the thing that changes it. Refused with its OWN message — the
+      // "paid in Xero" one below would be a guess, and often a wrong one (the
+      // money may have been recorded against a different bill entirely).
+      if (cost.settled_externally) {
+        return { pushed: false, locked: true, error: 'This bill was settled outside OP — change or void it in Xero directly.' };
+      }
       // A bill with a recorded payment / marked paid has locked amounts in Xero.
       if (cost.xero_payment_id || cost.payment_status === 'paid') {
         return { pushed: false, locked: true, error: 'This bill is paid in Xero — its amounts are locked. Edit it directly in Xero.' };

@@ -150,6 +150,9 @@ export default function CostsPage() {
   const focusCostId = searchParams.get('cost') || '';
   const [rows, setRows] = useState<CostRow[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
+  // How many costs match the SERVER-side filters, which can exceed the rows we
+  // were sent (the list is capped). Drives the honesty note on the filtered total.
+  const [totalMatching, setTotalMatching] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [searchDebounced, setSearchDebounced] = useState('');
@@ -285,9 +288,10 @@ export default function CostsPage() {
       if (mineOnly) params.set('mine', '1');
       if (jobFilter) params.set('job_id', jobFilter);
       if (view === 'recharge' && rechargeStatusFilter) params.set('recharge_status', rechargeStatusFilter);
-      const res = await api.get<{ data: CostRow[]; stats: Stats }>(`/costs?${params.toString()}`);
+      const res = await api.get<{ data: CostRow[]; stats: Stats; total_matching?: number }>(`/costs?${params.toString()}`);
       setRows(res.data);
       setStats(res.stats);
+      setTotalMatching(typeof res.total_matching === 'number' ? res.total_matching : null);
     } catch (err) {
       console.error('Failed to load costs:', err);
     } finally {
@@ -344,6 +348,14 @@ export default function CostsPage() {
   const selectableRows = view === 'payable' && isAdmin ? sortedRows.filter(batchPayable) : [];
   const selectedRows = selectableRows.filter((c) => selected.has(c.id));
   const selectedTotal = selectedRows.reduce((t, c) => t + (Number(c.amount_gross) || 0), 0);
+  // What the table in front of you actually adds up to. Deliberately SEPARATE
+  // from the stat card's figure, which is the global "what do we owe" number:
+  // a card that quietly changes meaning when a filter is on is how someone
+  // quotes a filtered total as the total.
+  const shownTotal = sortedRows.reduce((t, c) => t + (Number(c.amount_gross) || 0), 0);
+  // The server caps the list. Where it did, the filtered total covers what was
+  // sent, not everything that matches — say so rather than under-reporting money.
+  const truncated = totalMatching !== null && rows.length < totalMatching;
   const selectedSuppliers = new Set(selectedRows.map((c) => (c.supplier_name || '').trim().toLowerCase()));
 
   function toggleRow(id: string) {
@@ -389,6 +401,40 @@ export default function CostsPage() {
       await load(true);
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to mark paid');
+    } finally {
+      setActionBusy(null);
+    }
+  }
+
+  // "Already paid — just clear it." Deliberately a DIFFERENT endpoint from
+  // /pay: that one records a real payment in Xero, this one records that we
+  // aren't going to. See migration 224.
+  async function settleExternally(id: string, settledDate: string, note: string) {
+    setActionBusy(id + 'pay');
+    try {
+      await api.post(`/costs/${id}/settle-external`, { paid_date: settledDate, note });
+      setPayTarget(null);
+      await load(true);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to clear the bill');
+    } finally {
+      setActionBusy(null);
+    }
+  }
+
+  // Ask Xero whether any outstanding bill has already been paid there. The same
+  // sweep the scheduler runs each morning, on the button.
+  async function checkXeroPayments() {
+    setActionBusy('xero-payment-sync');
+    try {
+      const res = await api.post<{ data: { checked: number; marked: number } }>('/costs/sync-xero-payments', {});
+      const { checked, marked } = res.data;
+      alert(marked > 0
+        ? `${marked} of ${checked} outstanding bill${checked === 1 ? '' : 's'} had already been paid in Xero — marked paid here.`
+        : `Checked ${checked} outstanding bill${checked === 1 ? '' : 's'} — none of them are paid in Xero yet.`);
+      await load(true);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to check Xero');
     } finally {
       setActionBusy(null);
     }
@@ -564,6 +610,30 @@ export default function CostsPage() {
       )}
 
       {view === 'reconcile' && isManager && <XeroCotProbe />}
+
+      {/* What's on screen, in money. The stat cards above stay global. */}
+      {!loading && rows.length > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-2 text-sm text-gray-600">
+          <span>
+            Showing <strong className="text-gray-900">{sortedRows.length}</strong>
+            {sortedRows.length === 1 ? ' cost' : ' costs'} ·{' '}
+            <strong className="text-gray-900">{gbp(shownTotal)}</strong>
+            {truncated && (
+              <span className="text-amber-700">
+                {' '}— only the first {rows.length} of {totalMatching} matching costs are loaded,
+                so this total covers what's on screen, not the whole filter.
+              </span>
+            )}
+          </span>
+          {view === 'payable' && isAdmin && (
+            <button onClick={checkXeroPayments} disabled={actionBusy === 'xero-payment-sync'}
+              title="Ask Xero whether any of these have already been paid there, and clear the ones that have"
+              className="px-2.5 py-1 text-xs rounded-md border border-gray-300 text-gray-600 hover:bg-gray-50 disabled:opacity-50 whitespace-nowrap">
+              {actionBusy === 'xero-payment-sync' ? 'Checking Xero…' : 'Check Xero for payments'}
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Table */}
       {loading ? (
@@ -800,6 +870,7 @@ export default function CostsPage() {
           busy={actionBusy === payTarget.id + 'pay'}
           onClose={() => setPayTarget(null)}
           onSubmit={(date, method, remittanceEmail) => payCost(payTarget.id, date, method, remittanceEmail)}
+          onSettleExternal={(date, note) => settleExternally(payTarget.id, date, note)}
         />
       )}
       {resolving && (
@@ -1008,14 +1079,21 @@ function BatchPayModal({ count, total, supplierCount, busy, onClose, onSubmit }:
   );
 }
 
-function PayModal({ cost, busy, onClose, onSubmit }: {
+function PayModal({ cost, busy, onClose, onSubmit, onSettleExternal }: {
   cost: CostRow;
   busy: boolean;
   onClose: () => void;
   onSubmit: (paidDate: string, paidMethod: string, remittanceEmail?: string) => void;
+  onSettleExternal: (settledDate: string, note: string) => void;
 }) {
   const [paidDate, setPaidDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [paidMethod, setPaidMethod] = useState('lloyds_transfer');
+  // "It's already been paid — I'm recording that, not asking you to pay it."
+  // The two jobs live in one modal because they start from the same thought;
+  // everything below the tickbox changes because they are NOT the same action.
+  const [settleExternal, setSettleExternal] = useState(false);
+  const [settleNote, setSettleNote] = useState('');
+  const noteValid = settleNote.trim().length >= 3;
   const isReimburse = cost.payment_method === 'reimburse_me';
   const payeeName = isReimburse ? (cost.uploaded_by_name || 'staff') : (cost.supplier_name || 'supplier');
 
@@ -1098,22 +1176,62 @@ function PayModal({ cost, busy, onClose, onSubmit }: {
             {dueDate ? <>, due <strong>{dueDate}</strong></> : null}.
           </p>
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Payment date</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              {settleExternal ? 'Date it was settled' : 'Payment date'}
+            </label>
             <input type="date" value={paidDate} onChange={(e) => setPaidDate(e.target.value)}
               className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-purple-500" />
-            <p className="text-xs text-gray-400 mt-1">A future date schedules the payment in Xero for that day.</p>
+            <p className="text-xs text-gray-400 mt-1">
+              {settleExternal
+                ? 'When the money actually moved, as far as you know. Recorded in OP only.'
+                : 'A future date schedules the payment in Xero for that day.'}
+            </p>
           </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Paid from</label>
-            <select value={paidMethod} onChange={(e) => setPaidMethod(e.target.value)}
-              className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-purple-500">
-              {PAID_NOW_METHODS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
-            </select>
-            <p className="text-xs text-gray-400 mt-1">Records the payment against the bill on this account's Xero feed.</p>
+          {!settleExternal && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Paid from</label>
+              <select value={paidMethod} onChange={(e) => setPaidMethod(e.target.value)}
+                className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-purple-500">
+                {PAID_NOW_METHODS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+              </select>
+              <p className="text-xs text-gray-400 mt-1">Records the payment against the bill on this account's Xero feed.</p>
+            </div>
+          )}
+
+          {/* The escape hatch. Everything OP normally does here sends money. */}
+          <div className="border-t border-gray-100 pt-3">
+            <label className="flex items-start gap-2 cursor-pointer">
+              <input type="checkbox" checked={settleExternal} onChange={(e) => setSettleExternal(e.target.checked)}
+                className="mt-0.5 rounded border-gray-300 text-purple-600 focus:ring-purple-500" />
+              <span className="text-sm text-gray-700">
+                This has already been paid — just clear it here
+                <span className="block text-xs text-gray-400">
+                  Nothing is sent to Xero. Use this when the money has already moved somewhere OP didn't do it.
+                </span>
+              </span>
+            </label>
+            {settleExternal && (
+              <div className="mt-2 pl-6 space-y-2">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">How was it settled?</label>
+                  <input type="text" value={settleNote} onChange={(e) => setSettleNote(e.target.value)}
+                    placeholder="e.g. paid in Xero against bill INV-1042"
+                    className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-purple-500" />
+                  <p className="text-xs text-gray-400 mt-1">Required — a cleared ledger nobody can explain is worse than an untidy one.</p>
+                </div>
+                {cost.xero_object_id && (
+                  <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-2 py-1.5">
+                    This bill exists in Xero{cost.invoice_number ? ` (${cost.invoice_number})` : ''}. If the payment there
+                    was recorded against a DIFFERENT bill, ours stays sitting unpaid in Xero — void it there, or the
+                    ledger is only tidy on this side.
+                  </p>
+                )}
+              </div>
+            )}
           </div>
 
-          {/* Optional remittance advice to the payee. */}
-          <div className="border-t border-gray-100 pt-3">
+          {/* Optional remittance advice to the payee — only when OP is paying. */}
+          <div className={`border-t border-gray-100 pt-3 ${settleExternal ? 'hidden' : ''}`}>
             <label className="flex items-start gap-2 cursor-pointer">
               <input type="checkbox" checked={sendRemittance} onChange={(e) => setSendRemittance(e.target.checked)}
                 className="mt-0.5 rounded border-gray-300 text-purple-600 focus:ring-purple-500" />
@@ -1188,10 +1306,14 @@ function PayModal({ cost, busy, onClose, onSubmit }: {
         <div className="flex justify-end gap-2 px-6 py-4 border-t border-gray-200">
           <button onClick={onClose} className="px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded-md">Cancel</button>
           <button
-            onClick={() => onSubmit(paidDate, paidMethod, sendRemittance && emailValid ? remittanceEmail.trim() : undefined)}
-            disabled={busy || (sendRemittance && !emailValid)}
+            onClick={() => (settleExternal
+              ? onSettleExternal(paidDate, settleNote.trim())
+              : onSubmit(paidDate, paidMethod, sendRemittance && emailValid ? remittanceEmail.trim() : undefined))}
+            disabled={busy || (settleExternal ? !noteValid : (sendRemittance && !emailValid))}
             className="px-4 py-2 text-sm text-white bg-purple-600 hover:bg-purple-700 rounded-md disabled:opacity-50">
-            {busy ? 'Saving…' : sendRemittance && emailValid ? 'Mark paid & send' : 'Mark paid'}
+            {busy ? 'Saving…'
+              : settleExternal ? 'Clear from ledger'
+              : sendRemittance && emailValid ? 'Mark paid & send' : 'Mark paid'}
           </button>
         </div>
       </div>
@@ -1245,6 +1367,17 @@ function ActionBtn({ busy, onClick, label }: { busy: boolean; onClick: () => voi
 
 function XeroCell({ cost, busy, onRetry, resyncBusy, onResync }: { cost: Cost; busy: boolean; onRetry: () => void; resyncBusy?: boolean; onResync?: () => void }) {
   const isBill = cost.payment_method === 'not_yet_paid' || cost.payment_method === 'reimburse_me';
+  // Cleared in OP because the money moved elsewhere. Said plainly so nobody
+  // reads the missing payment as a sync that failed — and checked FIRST,
+  // because OP will never push a payment for this bill again.
+  if (cost.settled_externally) {
+    return (
+      <span className="px-2 py-0.5 text-xs rounded-full bg-slate-100 text-slate-700 whitespace-nowrap"
+        title={cost.settled_externally_note || 'Settled outside OP — no payment was recorded in Xero from here'}>
+        Settled elsewhere
+      </span>
+    );
+  }
   // Edited after it was pushed → Xero is out of date. Takes precedence over the
   // synced pills; offer a manual re-sync.
   if (cost.xero_stale && cost.xero_object_id) {

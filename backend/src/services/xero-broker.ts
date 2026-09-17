@@ -379,6 +379,22 @@ class XeroBroker {
     return r.Invoices?.[0] ?? null;
   }
 
+  /**
+   * Read MANY invoices in one call (filtered), for the payment pull-back sync.
+   *
+   * Xero's Invoices list omits the Payments array on a bulk read UNLESS the
+   * summaryOnly default is overridden, which is why this passes the ids as a
+   * `where` and nothing else — a filtered list returns full objects, including
+   * `Payments`, `AmountDue` and `Status`. billsScope for ACCPAY.
+   */
+  async getInvoices(where: string): Promise<Array<Record<string, unknown>>> {
+    const r = await this.request<{ Invoices?: Array<Record<string, unknown>> }>('GET', '/Invoices', {
+      query: { where },
+      billsScope: true,
+    });
+    return r.Invoices || [];
+  }
+
   /** Read a single spend-money bank transaction by ID (diagnostics / read-back). */
   async getBankTransaction(bankTransactionId: string): Promise<Record<string, unknown> | null> {
     const r = await this.request<{ BankTransactions?: Array<Record<string, unknown>> }>('GET', `/BankTransactions/${bankTransactionId}`);
