@@ -110,6 +110,33 @@ function monthLabel(date: string): string {
 const TODAY = new Date().toISOString().slice(0, 10);
 
 /**
+ * Hours between two HH:MM times. Mirrors `hoursBetween` in
+ * services/freelancer-days.ts, which is what actually gets stored — this is
+ * the preview, and the two must agree or the figure shown before saving is not
+ * the figure saved.
+ *
+ * Negative when the pair is backwards; the caller decides what that means.
+ * Returns null if either time is missing or unparseable.
+ */
+function hoursBetween(start: string, end: string): number | null {
+  const toMin = (t: string) => {
+    const [h, m] = t.split(':').map(Number);
+    return Number.isFinite(h) && Number.isFinite(m) ? h * 60 + m : null;
+  };
+  const a = toMin(start);
+  const b = toMin(end);
+  if (a === null || b === null) return null;
+  return Math.round(((b - a) / 60) * 100) / 100;
+}
+
+/** "5 hours", "8.5 hours", "1 hour", "45 minutes" — quarter hours read badly as decimals below one. */
+function formatDuration(hours: number): string {
+  if (hours < 1) return `${Math.round(hours * 60)} minutes`;
+  const trimmed = Number(hours.toFixed(2));
+  return `${trimmed} ${trimmed === 1 ? 'hour' : 'hours'}`;
+}
+
+/**
  * How a booking reads on the grid. Offered is deliberately paler than
  * accepted: an offer is not a commitment from either side, and the calendar
  * should not imply the person is definitely coming.
@@ -592,10 +619,12 @@ function BookFreelancer({ defaultDate, onClose, onBooked, onError }: {
   // is the silent slip: a mistyped year quietly booking someone into 2025.
   const isBackdated = bookingDate < TODAY;
   const rate = agreedRate === '' ? null : Number(agreedRate);
+  // The same number the duration is shown from, so what is displayed and what
+  // is charged cannot disagree.
+  const hours = timed ? hoursBetween(startTime, endTime) : null;
   const expected = rate === null ? null
     : rateType === 'hourly'
-      ? Math.round(rate * Math.max(0, (Number(endTime.slice(0, 2)) * 60 + Number(endTime.slice(3, 5))
-          - Number(startTime.slice(0, 2)) * 60 - Number(startTime.slice(3, 5))) / 60) * 100) / 100
+      ? Math.round(rate * Math.max(0, hours ?? 0) * 100) / 100
       : rate;
 
   async function save() {
@@ -671,6 +700,17 @@ function BookFreelancer({ defaultDate, onClose, onBooked, onError }: {
               className={`w-full px-2 py-1.5 rounded border bg-white ${
                 timesBackwards ? 'border-red-400' : 'border-gray-300'}`} />
           </label>
+          {/* The third column of the row the two pickers sit in. Reading the
+              hours back is how you catch picking 17:00 when you meant 07:00 —
+              the pair is valid, so nothing else would flag it. */}
+          <div className="text-sm flex items-end pb-1.5">
+            {hours !== null && hours > 0 && (
+              <span className="text-gray-600">
+                That is <strong className="text-gray-900">{formatDuration(hours)}</strong>
+                {rateType === 'hourly' && ' at the hourly rate'}
+              </span>
+            )}
+          </div>
           {timesBackwards && (
             <p className="text-xs text-red-700 sm:col-span-3 -mt-1" role="alert">
               {endTime === startTime
