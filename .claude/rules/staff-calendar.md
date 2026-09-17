@@ -118,6 +118,17 @@ employment-status risk.
 penalty, and the rate is agreed per booking. Do not tidy this into something
 more familiar.
 
+**An OFFER is not cover.** `offered` shows on the calendar as a dashed
+"Pending" cell and is counted separately (`+n?`), never inside the confirmed
+`+n`. Same call pending leave makes: everyone needs to see it coming, and
+showing it as confirmed would be a lie the person planning the week then acts
+on. `BOOKING_STATUS[...].counts` in `StaffCalendarPage.tsx` is the one place
+that decides which statuses are real cover.
+
+**Nothing emails the freelancer yet** (spec §9.4, designed and not built), so
+`offered` currently means "we intend to ask", not "we asked". Do not lean on it
+meaning more than that until the email ships.
+
 Only YARD days — people physically in the building. A freelancer booked to
 drive a delivery lives in `quote_assignments` and does not belong here, because
 the only question this answers is "have we got enough people in".

@@ -224,6 +224,21 @@ See docs/SPEC.md for full phased plan.
 
 ## Staff Calendar & Time
 
+- **A single place for freelancer rates** — jon, Sep 2026: "could we align our
+  freelancer rates somewhere? Note this would actually be across all freelancer
+  offerings." Today a rate lives in three unconnected places: `people.day_rate_note`
+  (free text, mig 184), `people.default_day_rate` / `default_half_day_rate`
+  (numeric, mig 222, pre-fills a yard day), and `calculator_settings.driver_day_rate`
+  (the company-wide driver figure). Quote assignments carry their own agreed
+  figures again.
+
+  Worth doing as its own piece rather than bolted onto the calendar, because the
+  consumers are spread across quoting, driver assignment and yard days, and the
+  question "what do we pay this person for this kind of work" is a rate CARD
+  (per person × per work type, effective-dated) rather than one number. Whatever
+  it becomes, the snapshot-on-the-booking rule must survive: a booking keeps the
+  rate that was agreed, and a rate card only ever pre-fills.
+
 - **Working location per day** ("boots on the ground") — WFH / on site / office,
   so the calendar can answer *who is in the building* and not just *who is not
   off*. Full design and the one decision it hangs on (what "In" should count)
