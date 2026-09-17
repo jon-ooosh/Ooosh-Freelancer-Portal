@@ -254,10 +254,6 @@ export function QuoteContactsPicker({ quoteId }: { quoteId: string }) {
       {!error && !saving && savedAt !== null && (
         <p className="text-xs text-green-600">✓ Contacts saved</p>
       )}
-      <p className="text-xs text-gray-500">
-        Ticked contacts show on the freelancer's job in the portal, with whatever number is on
-        their record at the time — so a number corrected later reaches them automatically.
-      </p>
     </div>
   );
 }
