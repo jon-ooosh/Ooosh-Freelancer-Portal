@@ -32,6 +32,7 @@ interface Job {
   status: string
   hhRef?: string
   keyNotes?: string
+  contacts?: Array<{ name: string; label?: string | null; phone?: string | null; email?: string | null }>
   runGroup?: string
   driverPay?: number
   completedAtDate?: string
@@ -833,6 +834,51 @@ function CrewJobDetail({ job, venue }: { job: Job; venue: Venue | null }) {
           </h2>
           <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
             <p className="text-gray-700 whitespace-pre-wrap">{venue.accessNotes}</p>
+          </div>
+        </div>
+      )}
+
+      {/* On-site contacts — staff-picked from the people already on the job's
+          organisations (quote_contacts, OP migration 223). These used to be
+          typed by hand into Key Notes below, which is why that card still
+          renders: nothing backfills older jobs.
+
+          Numbers are tel: links — this page is read on a phone at a loading
+          bay, and making someone copy a number out by hand is the reason
+          drivers ring the office instead. */}
+      {job.contacts && job.contacts.length > 0 && (
+        <div className="bg-white rounded-xl shadow-sm p-6">
+          <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+            <span>📞</span> Who to contact
+          </h2>
+          <div className="space-y-2">
+            {job.contacts.map((c, i) => (
+              <div
+                key={i}
+                className="border border-gray-200 rounded-lg p-3 flex items-start justify-between gap-3"
+              >
+                <div className="min-w-0">
+                  <p className="font-medium text-gray-900">{c.name}</p>
+                  {c.label && <p className="text-sm text-gray-500">{c.label}</p>}
+                  {c.email && (
+                    <a
+                      href={`mailto:${c.email}`}
+                      className="text-sm text-blue-600 break-all hover:underline"
+                    >
+                      {c.email}
+                    </a>
+                  )}
+                </div>
+                {c.phone && (
+                  <a
+                    href={`tel:${c.phone.replace(/\s+/g, '')}`}
+                    className="shrink-0 px-3 py-2 rounded-lg bg-green-600 text-white text-sm font-medium"
+                  >
+                    Call {c.phone}
+                  </a>
+                )}
+              </div>
+            ))}
           </div>
         </div>
       )}

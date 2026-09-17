@@ -127,6 +127,64 @@ because it does more (venue distance/drive-time defaults, and write-back of
 changed mileage to the venue record); that's a real difference, not drift. Don't
 add a fourth.
 
+### Contacts on a transport leg (Sep 2026)
+
+**`quote_contacts` (migration 223) answers "who does the driver call?"** Before
+it, a quote had no contact field at all — `client_introduction` is a *status*
+(`not_needed` / `todo` / `working_on_it` / `done`), not a person — so the site
+contact was re-typed into `freelancer_notes` every time, surfaced to the portal
+as `keyNotes`, despite the job already knowing every person at every org on it.
+
+`GET /api/quotes/:id/contacts` returns `{ ticked, candidates }`;
+`PUT /api/quotes/:id/contacts` is an idempotent whole-list replace. Staff UI is
+`QuoteContactsPicker.tsx`, embedded in `QuoteEditModal` so both Job Detail and
+Transport Ops get it. The portal renders them as a "Who to contact" card with
+`tel:` links, above the Key Notes card.
+
+**Three contact tables, one candidate pool. Don't conflate them:**
+
+| Table / helper | Answers | Reaches |
+|---|---|---|
+| `job_contacts` (086) | who is on this HIRE | CLIENT emails — hire forms, confirmations, receipts |
+| `quote_contacts` (223) | who to CALL on this leg | the freelancer, via the portal |
+| `services/hire-form-contacts.ts` | who to EMAIL a hire form | as above, plus org-level email columns and a `jobs.client_name` name match |
+
+`services/job-contact-candidates.ts` `resolveJobContactCandidates()` is **THE
+candidate pool** all three draw from — client org plus anything on
+`job_organisations`, deduped per person. Extracted from the pipeline route when
+the transport picker needed it; two copies would have drifted the moment a
+source was added, which is exactly what happened to the hire-form resolver
+before it was centralised. Unlike that resolver it does **not** filter on having
+an email: a transport contact is someone the driver *phones*, and filtering
+would hide the site contacts this exists to surface.
+
+**Ticking a contact onto a leg must never write to `job_contacts`.** That drives
+the client email chain, so promoting a venue's duty manager there would start
+sending them hire-form requests. Nothing in the quote-contacts path touches it.
+
+**No snapshot columns, deliberately.** `person_id` is a live reference; name,
+phone and email are resolved by join on every read. Snapshotting protects an
+immutable record, but a site contact is operational data read for a few days
+around the job — if the number changes you *want* the driver to get the new one.
+Copying it would reinstate the hand-maintained duplicates the table exists to
+remove.
+
+**The phone gap is the load-bearing part.** Only ~540 of 3,095 `people` rows
+carry any number. A picker full of contacts with an email and no mobile is
+useless to a driver at a loading bay and staff would go straight back to typing
+into the notes — so a candidate with no number gets an inline "add one" that
+writes `mobile` to the **person record** (`PUT /api/people/:id`), not to the leg.
+Captured once, true everywhere after. The portal query also drops any contact
+with neither a number nor an email, because a name alone tells a driver nothing.
+
+**The picker saves on its own**, not via `QuoteEditModal`'s Save: the contact
+list is a relationship rather than a field of the quote, and a number you just
+corrected should stay corrected even if you then cancel out of the quote edit.
+
+**Nothing backfills older quotes** — their contacts are still prose in
+`freelancer_notes`, which is why the portal keeps rendering the Key Notes card
+alongside.
+
 ### Defaulting the venue on a second leg
 
 `deriveSiblingVenue()` in `JobDetailPage.tsx` pre-fills the Local D&C form from

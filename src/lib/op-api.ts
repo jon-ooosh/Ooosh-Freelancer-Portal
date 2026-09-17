@@ -46,6 +46,9 @@ export interface PortalJob {
   status: string
   opsStatus: string
   keyNotes: string | null
+  // Who to call on this leg (quote_contacts). Resolved live from the person
+  // record on every read, so a corrected number arrives without a re-save.
+  contacts?: Array<{ name: string; label: string | null; phone: string | null; email: string | null }>
   completedAtDate: string | null
   completionNotes: string | null
   isLocal: boolean
