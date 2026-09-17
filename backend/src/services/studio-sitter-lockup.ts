@@ -24,6 +24,7 @@ import { query, getClient } from '../config/database';
 import { getSystemSetting } from '../routes/system-settings';
 import { emailService } from './email-service';
 import { getPresignedDownloadUrl } from '../config/r2';
+import { greetingName, fullDisplayName } from './display-name';
 
 // ── Template types ──────────────────────────────────────────────────────────
 
@@ -543,7 +544,7 @@ async function notifyStaffOfLockup(
 export async function runLockupChase(): Promise<number> {
   const due = await query(
     `SELECT s.id AS shift_id, s.shift_date::text AS shift_date,
-            p.first_name, p.last_name, p.email
+            p.first_name, p.last_name, p.preferred_name, p.email
      FROM studio_sitter_shifts s
      JOIN studio_sitter_shift_assignments a ON a.shift_id = s.id AND a.status IN ('assigned','confirmed')
      JOIN people p ON p.id = a.person_id
@@ -557,7 +558,7 @@ export async function runLockupChase(): Promise<number> {
   let sent = 0;
   for (const row of due.rows) {
     const dateIso = String(row.shift_date).slice(0, 10);
-    const sitterName = `${row.first_name || ''} ${row.last_name || ''}`.trim() || 'Studio sitter';
+    const sitterName = fullDisplayName(row) || 'Studio sitter';
     // Stamp first (dedup): a send failure must not re-fire on the next pass.
     await query(`UPDATE studio_sitter_shifts SET lockup_chase_sent_at = NOW() WHERE id = $1`, [row.shift_id]);
 
@@ -592,7 +593,7 @@ export async function runLockupChase(): Promise<number> {
         await emailService.send('studio_lockup_reminder', {
           to: row.email,
           variables: {
-            sitterFirstName: row.first_name || 'there',
+            sitterFirstName: greetingName(row),
             date: formatLongDate(dateIso),
             lockupUrl: `https://hireforms.oooshtours.co.uk/shift/${dateIso}/lockup`,
           },
@@ -616,7 +617,7 @@ export async function notifySitterOfStaffReply(
   shiftId: string, replyText: string, staffUserId: string,
 ): Promise<void> {
   const r = await query(
-    `SELECT s.shift_date::text AS shift_date, p.first_name, p.email
+    `SELECT s.shift_date::text AS shift_date, p.first_name, p.preferred_name, p.email
      FROM studio_sitter_shifts s
      JOIN studio_sitter_shift_assignments a ON a.shift_id = s.id AND a.status IN ('assigned','confirmed')
      JOIN people p ON p.id = a.person_id
@@ -637,7 +638,7 @@ export async function notifySitterOfStaffReply(
   await emailService.send('studio_shift_reply', {
     to: row.email,
     variables: {
-      sitterFirstName: row.first_name || 'there',
+      sitterFirstName: greetingName(row),
       staffName,
       date: formatLongDate(dateIso),
       replyText: replyText.length > 1200 ? replyText.slice(0, 1200) + '…' : replyText,

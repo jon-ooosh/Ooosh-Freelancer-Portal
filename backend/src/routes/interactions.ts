@@ -6,20 +6,7 @@ import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
 import emailService from '../services/email-service';
 import { frontendLink } from '../config/app-urls';
-
-/**
- * What somebody is CALLED, in SQL — the twin of frontend/src/lib/displayName.ts.
- *
- * Preferred name first, legal first name as the fallback, surname always real.
- * Every display name in this file goes through it: the timeline byline, the
- * thread byline, the participant list, the edit response and the "X mentioned
- * you" notification all answered this question separately before, and a person
- * called Will was "William Parish" on the post and "Will" on the pill.
- *
- * Expects `people` joined as `p`. NOT for anything legal or financial — payroll
- * and the hire agreement build the passport name themselves.
- */
-const DISPLAY_NAME_SQL = `CONCAT(COALESCE(NULLIF(p.preferred_name, ''), p.first_name), ' ', p.last_name)`;
+import { DISPLAY_NAME_SQL } from '../services/display-name';
 
 const router = Router();
 router.use(authenticate);
