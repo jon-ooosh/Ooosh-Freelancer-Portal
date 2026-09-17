@@ -858,8 +858,9 @@ the moment you are looking at the week and seeing a thin day.
 
 ### 9.4 The offer email — DESIGNED, NOT BUILT
 
-**Awaiting jon's sign-off.** It sends mail to people outside the company, which
-is not something to ship on an assumption. Everything below is ready to build.
+**SIGNED OFF (17 Sep 2026), not yet built.** jon agreed all four decisions
+below as written. It sends mail to people outside the company, which is why it
+waited; it no longer waits. Everything below is ready to build.
 
 Today "Offer the day" writes a row and tells nobody. The freelancer finds out
 when somebody rings them, which makes the status field a fiction — it says
@@ -905,7 +906,46 @@ Stamped like every other chase in this module (`rtw_chased_at`,
    and rearranged around it must not find out by looking at a calendar they
    cannot see.
 
+**Three things that must land WITH the email, not after it**
+
+Raised by jon on sign-off. Each is cheap now and awkward to retrofit once mail
+is going out.
+
+5. **A passed, unanswered offer needs a way to be closed.** Decision 1 says
+   never auto-decline, which is right — but it leaves an `offered` day with no
+   terminal state at all, so it sits in the admin list forever. Six months in
+   the list is long enough that nobody reads it, which defeats the point of not
+   auto-declining. One click on a passed offer: *they came anyway* (→
+   `completed`) or *it did not happen* (→ a closed state). The safety net has
+   to be clearable or it rots.
+
+6. **There is no way to AMEND a booking — there is no update endpoint at all.**
+   Today, changing a time, a rate or a date means cancel-and-rebook, which
+   throws away the acceptance and re-offers the day. That is merely annoying
+   now; once an email fires on every offer it means emailing somebody twice to
+   move a start time by an hour. Needs `PATCH /freelancer-days/:id` with an
+   explicit rule about which fields re-open the offer and which do not —
+   proposed: **date and times re-offer** (they have to agree to the new day),
+   **rate and notes do not** (tell them, do not re-ask). Amending a `cancelled`
+   or `completed` booking stays refused.
+
+7. **"Pulled out after accepting" is not the same fact as "declined".**
+   `recordResponse` currently allows `accepted → declined`, so a freelancer
+   dropping out the day before is recorded identically to one who never wanted
+   the day. Those are different facts operationally — one left a hole at short
+   notice — and under decision 4 they should send different mail. Wants its own
+   status (`withdrew`) rather than overloading `declined`. Note `LIVE_STATUSES`
+   and `BOOKING_STATUS[...].counts` both need it, and it is not cover either
+   way.
+
 ### 9.3 Portal — NOT BUILT
+
+**One decision needed before building, and only one:** is the portal
+read-only-plus-respond, or can a freelancer also PROPOSE a change — "I can do
+it, but not until 11"? That single answer changes the shape of the page. A
+counter-offer is a third response alongside accept and decline, and it needs
+somewhere to land, which is item 6 above; without it, "not until 11" has to go
+through a phone call anyway. Do not start the page until this is answered.
 
 New endpoints on `routes/portal.ts` mirroring the studio-sitter shape:
 
@@ -1131,10 +1171,11 @@ two days, each after jon used the previous one in production and fed back.*
 **HANDING OVER — read this first.** Every phase A–E has SHIPPED and is running
 on `staff.oooshtours.co.uk`. The module is in use by jon alone, testing ahead of
 the Oct–Dec parallel run, so live data is his test data and there is no staff
-rollout yet. What is left is listed under **Still to build** below; the single
-most important thing waiting on a decision is the freelancer OFFER EMAIL (§9.4),
-which is designed but deliberately unbuilt because it sends mail to third
-parties and wanted jon's sign-off first.
+rollout yet. What is left is listed under **Still to build** below; the next
+thing to build is the freelancer OFFER EMAIL (§9.4), which jon signed off on
+17 Sep 2026 along with three items that must ship WITH it — a way to close out a
+passed unanswered offer, an amend endpoint (there is none at all today), and
+separating "pulled out after accepting" from "declined". §9.4 items 5–7.
 
 ### Shipped
 
@@ -1398,6 +1439,29 @@ Kept because each one is a trap the next person could fall into.
   no day rows at all. *The lesson is the old one — the fixture has to include
   the case where today is not inside the range.*
 
+- **`<input type="time" step={900}>` did nothing.** The freelancer booking form
+  was moved to quarter hours and still offered every minute, because `step`
+  governs validation and the spinner arrows but Chrome's dropdown picker — the
+  control people actually click — ignores it. The field was therefore happily
+  accepting 09:07 from the only route into it anybody uses. Replaced with a
+  `<select>` of the 96 quarter hours (`components/QuarterHourSelect.tsx`), so the
+  granularity is ours rather than the browser's. *A constraint expressed only as
+  an attribute hint is not a constraint. If the rule matters, own the options.*
+  It also survived a review because the diff looked obviously correct — the bug
+  was in a browser, not in the code.
+
+- **A docstring claimed a refactor that had not happened.**
+  `MentionComposer.tsx` said ActivityTimeline's two composers routed through it.
+  They did not, so when preferred names were adopted site-wide in D0.1, the
+  busiest mention surface in the app — Job, Person, Organisation and Venue — kept
+  building names from `first_name` and quietly ignored them, as did every
+  display name in `routes/interactions.ts`. Someone called Will was "Will" on
+  the Inbox and "William Parish" on the job he was actually being mentioned on.
+  *Comments describing structure go stale silently and are believed, because
+  nothing type-checks them. When a note says work is finished, check the call
+  sites before trusting it — and prefer wording that says what IS true over what
+  was intended.*
+
 ### Still to build
 
 **Phase E, the freelancer-facing half.** Booking and displaying shipped
@@ -1405,10 +1469,13 @@ Kept because each one is a trap the next person could fall into.
 it at all:
 
 - **The offer email with accept / decline links (§9.4)** — designed, costed and
-  NOT built, because it sends mail to people outside the company and jon should
-  see the shape first. This is the next thing to do.
+  SIGNED OFF 17 Sep 2026. This is the next thing to do. It brings three
+  companions with it (§9.4 items 5–7): closing out a passed unanswered offer,
+  `PATCH /freelancer-days/:id` so a booking can be amended without
+  cancel-and-rebook, and a `withdrew` status distinct from `declined`.
 - **The portal page (§9.3)**, deliberately after the email — the email is the
-  thing that actually reaches somebody.
+  thing that actually reaches somebody. One question to answer first: whether a
+  freelancer can counter-offer, or only accept and decline (§9.3).
 - `freelancer_day_booking_tasks` (§3.8) — skipped on purpose; a per-booking task
   breakdown does not help answer "are there enough people in".
 

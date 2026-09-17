@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, type ReactNode } from 'react';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
-import { displayFullName } from '../lib/displayName';
+import { displayFirstName, displayFullName, nameSearchText } from '../lib/displayName';
 import {
   AttachmentList,
   PendingAttachmentStrip,
@@ -71,6 +71,8 @@ interface UserOption {
   email: string;
   first_name: string | null;
   last_name: string | null;
+  /** What they go by. Everything user-facing here reads this first. */
+  preferred_name?: string | null;
 }
 
 interface SearchResult {
@@ -331,8 +333,11 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
       .catch(() => {});
   }, []);
 
+  // Searchable by EITHER name: "@will" should find him whether the record says
+  // William or Will, and someone who only knows the legal name should still
+  // find him after he sets a preferred one.
   const filteredUsers = users.filter((u) => {
-    const name = `${u.first_name || ''} ${u.last_name || ''}`.toLowerCase();
+    const name = nameSearchText(u);
     return name.includes(mentionFilter.toLowerCase()) || u.email.toLowerCase().includes(mentionFilter.toLowerCase());
   });
 
@@ -361,7 +366,7 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
     const cursorPos = textarea.selectionStart;
     const textUpToCursor = content.slice(0, cursorPos);
     const atPos = textUpToCursor.lastIndexOf('@');
-    const displayName = `${u.first_name || ''} ${u.last_name || ''}`.trim() || u.email;
+    const displayName = displayFullName(u, u.email);
 
     const newContent = content.slice(0, atPos) + `@${displayName} ` + content.slice(cursorPos);
     setContent(newContent);
@@ -401,7 +406,7 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
   // composers can be open simultaneously: top-level for a new note, reply
   // open on an old thread.
   const replyFilteredUsers = users.filter((u) => {
-    const name = `${u.first_name || ''} ${u.last_name || ''}`.toLowerCase();
+    const name = nameSearchText(u);
     return name.includes(replyMentionFilter.toLowerCase()) || u.email.toLowerCase().includes(replyMentionFilter.toLowerCase());
   });
 
@@ -426,7 +431,7 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
     const cursorPos = ta.selectionStart;
     const upToCursor = replyContent.slice(0, cursorPos);
     const atPos = upToCursor.lastIndexOf('@');
-    const displayName = `${u.first_name || ''} ${u.last_name || ''}`.trim() || u.email;
+    const displayName = displayFullName(u, u.email);
     const newContent = replyContent.slice(0, atPos) + `@${displayName} ` + replyContent.slice(cursorPos);
     setReplyContent(newContent);
     setReplyShowMentions(false);
@@ -757,11 +762,15 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
                       className={`w-full text-left px-3 py-2 text-sm flex items-center gap-2 ${i === replyMentionIndex ? 'bg-ooosh-50 text-ooosh-700' : 'hover:bg-gray-50'}`}
                     >
                       <span className="w-6 h-6 rounded-full bg-ooosh-100 text-ooosh-700 flex items-center justify-center text-xs font-bold flex-shrink-0">
-                        {(u.first_name || u.email)[0].toUpperCase()}
+                        {(displayFirstName(u, u.email)[0] ?? '?').toUpperCase()}
                       </span>
                       <span>
-                        <span className="font-medium">{u.first_name && u.last_name ? `${u.first_name} ${u.last_name}` : u.email}</span>
-                        {u.first_name && (<span className="text-gray-400 text-xs ml-1.5">{u.email}</span>)}
+                        <span className="font-medium">{displayFullName(u, u.email)}</span>
+                        {u.preferred_name && u.first_name
+                          && u.preferred_name.trim() !== u.first_name.trim() && (
+                          <span className="text-gray-400 text-xs ml-1.5">({u.first_name})</span>
+                        )}
+                        {(u.first_name || u.preferred_name) && (<span className="text-gray-400 text-xs ml-1.5">{u.email}</span>)}
                       </span>
                     </button>
                   ))}
@@ -775,7 +784,7 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
                   if (!u) return null;
                   return (
                     <span key={uid} className="inline-flex items-center gap-1 bg-pink-50 text-pink-700 text-xs px-2 py-0.5 rounded-full">
-                      @{u.first_name || u.email}
+                      @{displayFirstName(u, u.email)}
                       <button type="button" onClick={() => setReplyMentionedIds(replyMentionedIds.filter((id) => id !== uid))} className="hover:text-pink-900">&times;</button>
                     </span>
                   );
@@ -922,7 +931,7 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
                 <option value="">No alert</option>
                 {users.map((u) => (
                   <option key={u.id} value={u.id}>
-                    {u.first_name && u.last_name ? `${u.first_name} ${u.last_name}` : u.email}
+                    {displayFullName(u, u.email)}
                   </option>
                 ))}
               </select>
@@ -955,13 +964,19 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
                   }`}
                 >
                   <span className="w-6 h-6 rounded-full bg-ooosh-100 text-ooosh-700 flex items-center justify-center text-xs font-bold flex-shrink-0">
-                    {(u.first_name || u.email)[0].toUpperCase()}
+                    {(displayFirstName(u, u.email)[0] ?? '?').toUpperCase()}
                   </span>
                   <span>
                     <span className="font-medium">
-                      {u.first_name && u.last_name ? `${u.first_name} ${u.last_name}` : u.email}
+                      {displayFullName(u, u.email)}
                     </span>
-                    {u.first_name && (
+                    {/* The legal name, when it differs — so an admin picking from
+                        a list of seven can still tell who is who. */}
+                    {u.preferred_name && u.first_name
+                      && u.preferred_name.trim() !== u.first_name.trim() && (
+                      <span className="text-gray-400 text-xs ml-1.5">({u.first_name})</span>
+                    )}
+                    {(u.first_name || u.preferred_name) && (
                       <span className="text-gray-400 text-xs ml-1.5">{u.email}</span>
                     )}
                   </span>
@@ -979,7 +994,7 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
               if (!u) return null;
               return (
                 <span key={uid} className="inline-flex items-center gap-1 bg-pink-50 text-pink-700 text-xs px-2 py-0.5 rounded-full">
-                  @{u.first_name || u.email}
+                  @{displayFirstName(u, u.email)}
                   <button
                     type="button"
                     onClick={() => setMentionedIds(mentionedIds.filter((id) => id !== uid))}
