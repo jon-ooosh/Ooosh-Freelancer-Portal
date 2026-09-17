@@ -281,7 +281,12 @@ export default function StaffCalendarPage() {
       )}
 
       {addingBooking && (
-        <BookFreelancer defaultDate={from}
+        /* Today if today is on screen, otherwise the first day in view. The
+           panel used to open on `from` — the MONDAY of the current fortnight —
+           so booking something for today meant correcting the date every time.
+           Paging forward to November and booking still gives you November: the
+           dates you are looking at are the ones you mean. */
+        <BookFreelancer defaultDate={TODAY >= from && TODAY <= to ? TODAY : from}
           onClose={() => setAddingBooking(false)}
           onBooked={async () => { setAddingBooking(false); await load(); }}
           onError={setError} />
@@ -577,6 +582,10 @@ function BookFreelancer({ defaultDate, onClose, onBooked, onError }: {
   }, [durationType, rateType]);
 
   const timed = durationType === 'hours';
+  // Shown the moment the pair stops making sense, rather than on save. `save()`
+  // still refuses it — this is the same rule said earlier and in the right
+  // place, not a second one that could drift.
+  const timesBackwards = timed && endTime <= startTime;
   // Backfilling after the fact is legitimate — things come together at the last
   // minute and get recorded afterwards — so this is a deliberate pause rather
   // than a refusal, per the platform's warnings-not-gates rule. What it stops
@@ -659,8 +668,16 @@ function BookFreelancer({ defaultDate, onClose, onBooked, onError }: {
           <label className="text-sm">
             <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">To</span>
             <QuarterHourSelect value={endTime} onChange={setEndTime} aria-label="End time"
-              className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white" />
+              className={`w-full px-2 py-1.5 rounded border bg-white ${
+                timesBackwards ? 'border-red-400' : 'border-gray-300'}`} />
           </label>
+          {timesBackwards && (
+            <p className="text-xs text-red-700 sm:col-span-3 -mt-1" role="alert">
+              {endTime === startTime
+                ? 'The start and end are the same — that is a day with no hours in it.'
+                : `Finishing at ${endTime} is before starting at ${startTime}. Overnight days are not supported yet — book the two halves as separate days.`}
+            </p>
+          )}
         </div>
       )}
 
@@ -714,7 +731,7 @@ function BookFreelancer({ defaultDate, onClose, onBooked, onError }: {
       )}
 
       <div className="flex gap-2">
-        <button disabled={saving || (isBackdated && !backdateOk)} onClick={() => void save()}
+        <button disabled={saving || timesBackwards || (isBackdated && !backdateOk)} onClick={() => void save()}
           className="px-3 py-1.5 text-sm rounded bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50">
           {isBackdated ? 'Record the day' : 'Offer the day'}
         </button>

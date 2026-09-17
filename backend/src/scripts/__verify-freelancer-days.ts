@@ -118,6 +118,16 @@ async function main() {
     () => createBooking({ personId: bobId, bookingDate: '2026-10-08',
       durationType: 'full_day', rateType: 'hourly', agreedRate: 20 }, userId),
     /hourly rate needs the hours/i);
+  // The `freelancer_day_times` CHECK refuses these anyway; what is being tested
+  // is that the caller gets a sentence rather than a constraint violation.
+  await refuses('an end time before the start',
+    () => createBooking({ personId: bobId, bookingDate: '2026-10-08',
+      durationType: 'hours', startTime: '15:00', endTime: '14:00' }, userId),
+    /end time needs to be after the start/i);
+  await refuses('a start and end that are the same',
+    () => createBooking({ personId: bobId, bookingDate: '2026-10-08',
+      durationType: 'hours', startTime: '09:00', endTime: '09:00' }, userId),
+    /end time needs to be after the start/i);
 
   const b2 = await createBooking({
     personId: bobId, bookingDate: '2026-10-08', durationType: 'hours',
