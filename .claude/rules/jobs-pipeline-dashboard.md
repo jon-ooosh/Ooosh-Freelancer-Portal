@@ -63,3 +63,5 @@ Full detail: `docs/reference/PIPELINE-AND-ORGS.md`, `docs/reference/OPERATIONS-M
 ## Lost / cancelled cleanup
 
 - When a job goes `lost` or `cancelled`, **every open requirement is auto-cancelled unless explicitly kept** (`keep_after_close`). Order matters: flag kept items → fire event-triggers → sweep the rest. Any new requirement type inherits this; default is cancel.
+- **Go through `services/requirement-close-sweep.ts` `closeJobRequirements()`** — never re-implement the pass. It is called from all four paths that close a job (pipeline status change, cancellation flow, the 09:00 stale-enquiry auto-loser, the HH webhook); two of those had no cleanup at all until Sep 2026, so an auto-lost enquiry kept its cards open and its `lost`-triggered reminders never fired. The transport half is `services/job-close-cascade.ts`.
+- **A sweep marker's separator is part of the marker** — lost uses a newline, cancelled a leading space, because `requirement-cleanup.ts` strips them by literal match on resurrection.
