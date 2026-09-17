@@ -137,6 +137,18 @@ Staff and freelancers are counted **separately** on the calendar ("4 +2"),
 collapsing to one number when there are no freelancers. Merging them would
 claim they are interchangeable.
 
+## Freelancer day times are quarter hours, from a `<select>`
+
+`components/QuarterHourSelect.tsx` owns the option list. **Do not go back to
+`<input type="time" step={900}>`** — it was that, and the step did nothing:
+`step` drives validation and the spinner arrows, but Chrome's dropdown picker
+ignores it and offers all sixty minutes, so the field took 09:07 from the one
+route anybody uses.
+
+**Overtime is the exception and stays a time input on 5-minute steps.**
+`staff_overtime_entries` has a `minutes % 5 = 0` CHECK; the two are answering
+different questions.
+
 ## Bank holidays and company days are different things
 
 A **bank holiday** is computed, and under `use_allowance` is an ordinary
@@ -298,6 +310,14 @@ is the split; the top-level figures are the first year's, kept for the common ca
 list, the dashboard greeting and "Posting as …" all read it through
 `displayFirstName` / `displayFullName` / `displayInitials`, so the answer cannot
 drift between surfaces. It is served by `/auth/login`, `/auth/me` and `/users`.
+
+`routes/interactions.ts` has the SQL twin, `DISPLAY_NAME_SQL`, for the same
+reason — use it there rather than a fresh `CONCAT(p.first_name, …)`.
+
+**Check the call sites before believing a comment that says this is done.**
+`MentionComposer.tsx` claimed ActivityTimeline routed through it; it did not,
+and the busiest @mention surface in the app ignored preferred names for weeks
+after D0.1 shipped them "site-wide". Nothing type-checks a docstring.
 
 **Not for anything legal or financial** — payroll, the hire agreement,
 right-to-work records and carnets want the passport name and build it

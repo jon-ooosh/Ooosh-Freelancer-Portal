@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { dayMarker } from '../lib/companyCalendar';
+import { QuarterHourSelect } from '../components/QuarterHourSelect';
 import { useAuthStore } from '../hooks/useAuthStore';
 
 /**
@@ -647,15 +648,17 @@ function BookFreelancer({ defaultDate, onClose, onBooked, onError }: {
         <div className="grid sm:grid-cols-3 gap-3">
           <label className="text-sm">
             <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">From</span>
-            {/* Quarter hours. Overtime deliberately stays on 5-minute steps —
+            {/* Quarter hours, and a <select> rather than a time input because
+                Chrome's time picker ignores `step` and offered all sixty
+                minutes. Overtime deliberately stays on 5-minute steps —
                 staff_overtime_entries has a `minutes % 5 = 0` CHECK and the two
                 are answering different questions. */}
-            <input type="time" step={900} value={startTime} onChange={e => setStartTime(e.target.value)}
+            <QuarterHourSelect value={startTime} onChange={setStartTime} aria-label="Start time"
               className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white" />
           </label>
           <label className="text-sm">
             <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">To</span>
-            <input type="time" step={900} value={endTime} onChange={e => setEndTime(e.target.value)}
+            <QuarterHourSelect value={endTime} onChange={setEndTime} aria-label="End time"
               className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white" />
           </label>
         </div>

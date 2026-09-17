@@ -7,6 +7,20 @@ import { logAudit } from '../middleware/audit';
 import emailService from '../services/email-service';
 import { frontendLink } from '../config/app-urls';
 
+/**
+ * What somebody is CALLED, in SQL — the twin of frontend/src/lib/displayName.ts.
+ *
+ * Preferred name first, legal first name as the fallback, surname always real.
+ * Every display name in this file goes through it: the timeline byline, the
+ * thread byline, the participant list, the edit response and the "X mentioned
+ * you" notification all answered this question separately before, and a person
+ * called Will was "William Parish" on the post and "Will" on the pill.
+ *
+ * Expects `people` joined as `p`. NOT for anything legal or financial — payroll
+ * and the hire agreement build the passport name themselves.
+ */
+const DISPLAY_NAME_SQL = `CONCAT(COALESCE(NULLIF(p.preferred_name, ''), p.first_name), ' ', p.last_name)`;
+
 const router = Router();
 router.use(authenticate);
 // Staff only. `authenticate` alone admits EVERY active user: a `freelancer`
@@ -83,7 +97,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     let sql = `
       SELECT i.*,
         u.email as created_by_email,
-        CONCAT(p.first_name, ' ', p.last_name) as created_by_name
+        ${DISPLAY_NAME_SQL} as created_by_name
       FROM interactions i
       LEFT JOIN users u ON u.id = i.created_by
       LEFT JOIN people p ON p.id = u.person_id
@@ -193,7 +207,7 @@ router.get('/:id/thread', async (req: AuthRequest, res: Response) => {
     const threadResult = await query(
       `SELECT i.*,
         u.email AS created_by_email,
-        CONCAT(p.first_name, ' ', p.last_name) AS created_by_name
+        ${DISPLAY_NAME_SQL} AS created_by_name
        FROM interactions i
        LEFT JOIN users u ON u.id = i.created_by
        LEFT JOIN people p ON p.id = u.person_id
@@ -218,7 +232,7 @@ router.get('/:id/thread', async (req: AuthRequest, res: Response) => {
       const partResult = await query(
         `SELECT u.id,
           u.email,
-          COALESCE(NULLIF(CONCAT(p.first_name, ' ', p.last_name), ' '), u.email) AS name
+          COALESCE(NULLIF(${DISPLAY_NAME_SQL}, ' '), u.email) AS name
          FROM users u
          LEFT JOIN people p ON p.id = u.person_id
          WHERE u.id = ANY($1::uuid[])`,
@@ -473,7 +487,7 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
 
     // Author display name — used by both mention and thread-reply notifications.
     const creatorResult = await query(
-      `SELECT CONCAT(p.first_name, ' ', p.last_name) as name
+      `SELECT ${DISPLAY_NAME_SQL} as name
        FROM users u JOIN people p ON p.id = u.person_id WHERE u.id = $1`,
       [req.user!.id]
     );
@@ -538,7 +552,7 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
     if (mentioned_user_ids && mentioned_user_ids.length > 0) {
       // Bulk-load recipients + delivery preferences in one round-trip.
       const recipientResult = await query(
-        `SELECT u.id, u.email, p.first_name,
+        `SELECT u.id, u.email, p.first_name, p.preferred_name,
           COALESCE(
             (SELECT delivery_method FROM user_notification_preferences
               WHERE user_id = u.id AND notification_type = 'mention'),
@@ -591,7 +605,8 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
         // email_sent_at), so we log loudly. Acceptable trade-off — alarming
         // every flake would create more noise than it saves.
         if (wantsEmail) {
-          const recipientName = recipient.first_name || 'there';
+          // What they go by, not what the passport says — this is a greeting.
+          const recipientName = recipient.preferred_name?.trim() || recipient.first_name || 'there';
           const recipientEmail = recipient.email;
           const priorityLabel = priority === 'urgent' ? 'URGENT: ' : priority === 'high' ? 'Important: ' : '';
           const subject = `${priorityLabel}${creatorName} mentioned you`;
@@ -744,7 +759,7 @@ router.patch('/:id', validate(editInteractionSchema), async (req: AuthRequest, r
          SET content = $1, edited_at = NOW(), edited_by = $2
        WHERE id = $3
        RETURNING *,
-         (SELECT CONCAT(p.first_name, ' ', p.last_name)
+         (SELECT ${DISPLAY_NAME_SQL}
             FROM users u LEFT JOIN people p ON p.id = u.person_id
            WHERE u.id = interactions.created_by) AS created_by_name`,
       [content.trim(), req.user!.id, req.params.id]
