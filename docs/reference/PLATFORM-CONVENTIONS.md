@@ -84,18 +84,34 @@ else. So a freelancer account holds a full OP JWT, not just a portal session.
 not these", which is true of the *intended* flow but not enforced at login. Don't
 rely on it.
 
-`routes/venues.ts` now carries `router.use(authorize(...STAFF_ROLES))` —
-previously a freelancer could create, edit (and, with the pre-existing
-admin/manager gate, not delete) venue records. Safe to gate the whole router:
-the freelancer portal talks to `/api/portal/*`, and the vehicles book-out kiosk's
-scoped token never calls `/api/venues`.
+**Gated (Sep 2026):** `venues.ts`, `people.ts`, `organisations.ts`,
+`interactions.ts` and `search.ts` now each carry
+`router.use(authorize(...STAFF_ROLES))`. Before that a freelancer JWT could
+create and edit venues, people, organisations and interactions, and read all of
+them through global search.
 
-**Still open, same shape:** `routes/people.ts`, `routes/organisations.ts` and
-`routes/interactions.ts` are all `authenticate`-only, so a freelancer JWT can
-still write there — `people` being the one that matters, since it holds PII.
-Each needs the same one-line gate, but each needs checking against the
-freelancer-facing surfaces first (the vehicles kiosk does read some person data),
-which is why they weren't swept in blind alongside venues.
+**`search.ts` is load-bearing for the other four.** It reads across `people`,
+`organisations`, `venues` and `jobs`, so gating those routers while leaving
+search open blocks WRITES and leaves READS wide open. Gate them together or not
+at all.
+
+Verified safe for all five: the Next.js portal is hard-prefixed to
+`/api/portal` in `src/lib/op-api.ts` (it cannot construct a path to these
+routers at all), the vehicles book-out kiosk's scoped token never calls them,
+and every frontend consumer is a staff page. None of the five has a public or
+API-key path mounted ahead of `authenticate`.
+
+**Still open, and NOT safe to sweep blind:** ~18 other routers are
+`authenticate`-only with per-endpoint gates instead (`costs.ts`, `drivers.ts`,
+`leads.ts`, `quotes.ts`, `assignments.ts`, `hire-forms.ts`, `email.ts`,
+`files.ts`, `issues.ts`, `staff-documents.ts`, `system-settings.ts`, `users.ts`,
+`auto-chase.ts`, `cancellations.ts`, `data-cleanup.ts`, `ve103b.ts`, `wise.ts`,
+plus `dashboard.ts`, `duplicates.ts`, `fill-gap.ts` and `notifications.ts` with
+no `authorize()` at all). Some are **deliberately** mixed-audience —
+`vehicles.ts` serves the freelancer kiosk through `FlexibleVehicleRequest` and
+must never get a blanket staff gate; `hire-forms.ts` has public token paths;
+`notifications.ts` serves whoever is logged in. Each needs its own audit. A
+blanket sweep breaks book-out.
 
 **When adding a reference route:** `router.use(authorize(...STAFF_ROLES))` goes on
 immediately after `authenticate`, as in `backline.ts`, `carnets.ts`, `excess.ts`,
