@@ -72,6 +72,36 @@ ENCRYPTION_KEY=<64-char-hex-key>  # In .env, generated via: openssl rand -hex 32
 
 **The "critical" npm sometimes reports is dev-only.** It's `handlebars`, pulled in transitively by `ts-jest` (a devDependency / test tooling) — **not shipped to production**, requires compiling attacker-controlled templates, zero runtime exposure. Don't panic over the severity label; npm doesn't know it's dev-only.
 
+## Reference-route RBAC — `authenticate` is not a staff gate (Sep 2026)
+
+**`router.use(authenticate)` on its own lets EVERY active user through, including
+a `freelancer`.** A freelancer is an ordinary `users` row (`role = 'freelancer'`,
+allowed by the CHECK constraint in migration 001 and by the register schema), and
+`POST /api/auth/login` has **no role gate** — it checks `is_active` and nothing
+else. So a freelancer account holds a full OP JWT, not just a portal session.
+
+`STAFF_ROLES`' own comment says freelancers "authenticate via the portal route,
+not these", which is true of the *intended* flow but not enforced at login. Don't
+rely on it.
+
+`routes/venues.ts` now carries `router.use(authorize(...STAFF_ROLES))` —
+previously a freelancer could create, edit (and, with the pre-existing
+admin/manager gate, not delete) venue records. Safe to gate the whole router:
+the freelancer portal talks to `/api/portal/*`, and the vehicles book-out kiosk's
+scoped token never calls `/api/venues`.
+
+**Still open, same shape:** `routes/people.ts`, `routes/organisations.ts` and
+`routes/interactions.ts` are all `authenticate`-only, so a freelancer JWT can
+still write there — `people` being the one that matters, since it holds PII.
+Each needs the same one-line gate, but each needs checking against the
+freelancer-facing surfaces first (the vehicles kiosk does read some person data),
+which is why they weren't swept in blind alongside venues.
+
+**When adding a reference route:** `router.use(authorize(...STAFF_ROLES))` goes on
+immediately after `authenticate`, as in `backline.ts`, `carnets.ts`, `excess.ts`,
+`hirehop.ts`, `holding.ts`, `pcns.ts`, `pipeline.ts`. Per-endpoint
+`authorize('admin', 'manager')` stacks on top for the destructive ones.
+
 ## Crew & Transport System
 
 This is the quoting/costing system for delivery, collection, and crewed jobs. It lives in the **"Crew & Transport" tab** on the Job Detail page.
