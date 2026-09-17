@@ -16,6 +16,7 @@ import {
   sendConfirmationSilentSkipAlert,
 } from '../services/confirmation-hooks';
 import { reactivateAutoCancelledRequirements } from '../services/requirement-cleanup';
+import { resolveJobContactCandidates } from '../services/job-contact-candidates';
 import { cascadeJobClose, reactivateAutoCancelledQuotes } from '../services/job-close-cascade';
 import { pushDepositToHH, reverseDepositOnHH, getMethodForBankId } from '../services/hh-deposit';
 import { getJobBillingFacts, getNetHireDepositTotal, HireDeposit } from '../services/hh-billing-deposits';
@@ -1272,28 +1273,10 @@ router.get('/:jobId/contacts', async (req: AuthRequest, res: Response) => {
       [jobId]
     );
 
-    // All candidate people from client org + any linked org. DISTINCT ON
-    // person_id keeps the first source per person (sorted so client wins
-    // over linked orgs, primary contacts surface ahead of generals).
-    const candidatesResult = await query(
-      `SELECT DISTINCT ON (p.id)
-              p.id AS person_id,
-              p.first_name, p.last_name, p.email, p.phone,
-              por.role, por.is_primary AS is_org_primary,
-              o.id AS source_org_id, o.name AS source_org_name,
-              CASE WHEN o.id = j.client_id THEN 0 ELSE 1 END AS source_priority
-       FROM jobs j
-       JOIN person_organisation_roles por ON por.status = 'active'
-       JOIN organisations o ON o.id = por.organisation_id AND o.is_deleted = false
-       JOIN people p ON p.id = por.person_id AND p.is_deleted = false
-       WHERE j.id = $1
-         AND (
-           o.id = j.client_id
-           OR o.id IN (SELECT organisation_id FROM job_organisations WHERE job_id = j.id)
-         )
-       ORDER BY p.id, source_priority, por.is_primary DESC`,
-      [jobId]
-    );
+    // All candidate people from client org + any linked org. Shared with the
+    // transport-leg contact picker via services/job-contact-candidates.ts, so
+    // the two can't drift as sources are added.
+    const candidates = await resolveJobContactCandidates(jobId);
 
     const ticked = tickedResult.rows.map((r: any) => ({
       person_id: r.person_id,
@@ -1304,16 +1287,6 @@ router.get('/:jobId/contacts', async (req: AuthRequest, res: Response) => {
       role_override: r.role_override,
     }));
 
-    const candidates = candidatesResult.rows.map((r: any) => ({
-      person_id: r.person_id,
-      name: `${r.first_name || ''} ${r.last_name || ''}`.trim(),
-      email: r.email,
-      phone: r.phone,
-      role: r.role,
-      is_org_primary: r.is_org_primary,
-      source_org_id: r.source_org_id,
-      source_org_name: r.source_org_name,
-    }));
 
     res.json({ ticked, candidates });
   } catch (error) {

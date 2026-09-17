@@ -1622,12 +1622,33 @@ router.get('/jobs', async (req: PortalRequest, res: Response) => {
         qa.expected_expenses as assignment_expected_expenses,
         j.job_name, j.hh_job_number AS hirehop_id, j.client_name as job_client_name,
         j.out_date, j.return_date, j.files as job_files,
-        v.name as linked_venue_name, v.address as venue_address, v.city as venue_city
+        v.name as linked_venue_name, v.address as venue_address, v.city as venue_city,
+        qcx.contacts as leg_contacts
        FROM quote_assignments qa
        JOIN quotes q ON q.id = qa.quote_id
        LEFT JOIN jobs j ON j.id = q.job_id
        LEFT JOIN venues v ON v.id = q.venue_id
        LEFT JOIN run_groups rg ON rg.id = q.run_group
+       -- Contacts for this leg (quote_contacts, migration 223). Resolved LIVE
+       -- from the people table on every read: nothing is snapshotted into the
+       -- junction, so a number corrected on the person record reaches the
+       -- driver immediately. Only rows with something dialable or emailable
+       -- are sent: a name alone tells a driver at a loading bay nothing.
+       LEFT JOIN LATERAL (
+         SELECT json_agg(
+                  json_build_object(
+                    'name', TRIM(CONCAT(p2.first_name, ' ', p2.last_name)),
+                    'label', qc.label,
+                    'phone', COALESCE(NULLIF(p2.mobile, ''), NULLIF(p2.phone, '')),
+                    'email', NULLIF(p2.email, '')
+                  ) ORDER BY p2.first_name
+                ) AS contacts
+         FROM quote_contacts qc
+         JOIN people p2 ON p2.id = qc.person_id AND p2.is_deleted = false
+         WHERE qc.quote_id = q.id
+           AND (COALESCE(NULLIF(p2.mobile, ''), NULLIF(p2.phone, '')) IS NOT NULL
+                OR NULLIF(p2.email, '') IS NOT NULL)
+       ) qcx ON true
        WHERE ${assignmentFilter}
          AND q.is_deleted = false
          AND q.status IN ('confirmed', 'completed')
@@ -1725,12 +1746,33 @@ router.get('/jobs/:quoteId', async (req: PortalRequest, res: Response) => {
         v.name as linked_venue_name, v.address as venue_address,
         v.city as venue_city, v.w3w_address as venue_w3w,
         v.files as venue_files,
-        COALESCE(v.approach_notes, v.general_notes) as venue_access_notes
+        COALESCE(v.approach_notes, v.general_notes) as venue_access_notes,
+        qcx.contacts as leg_contacts
        FROM quote_assignments qa
        JOIN quotes q ON q.id = qa.quote_id
        LEFT JOIN jobs j ON j.id = q.job_id
        LEFT JOIN venues v ON v.id = q.venue_id
        LEFT JOIN run_groups rg ON rg.id = q.run_group
+       -- Contacts for this leg (quote_contacts, migration 223). Resolved LIVE
+       -- from the people table on every read: nothing is snapshotted into the
+       -- junction, so a number corrected on the person record reaches the
+       -- driver immediately. Only rows with something dialable or emailable
+       -- are sent: a name alone tells a driver at a loading bay nothing.
+       LEFT JOIN LATERAL (
+         SELECT json_agg(
+                  json_build_object(
+                    'name', TRIM(CONCAT(p2.first_name, ' ', p2.last_name)),
+                    'label', qc.label,
+                    'phone', COALESCE(NULLIF(p2.mobile, ''), NULLIF(p2.phone, '')),
+                    'email', NULLIF(p2.email, '')
+                  ) ORDER BY p2.first_name
+                ) AS contacts
+         FROM quote_contacts qc
+         JOIN people p2 ON p2.id = qc.person_id AND p2.is_deleted = false
+         WHERE qc.quote_id = q.id
+           AND (COALESCE(NULLIF(p2.mobile, ''), NULLIF(p2.phone, '')) IS NOT NULL
+                OR NULLIF(p2.email, '') IS NOT NULL)
+       ) qcx ON true
        WHERE qa.quote_id = $1 AND (qa.person_id = $2 OR (qa.is_ooosh_crew = true AND $3 = true))
          AND q.is_deleted = false`,
       [quoteId, personId, isStaffShared]
@@ -2542,6 +2584,19 @@ function formatJobForPortal(row: Record<string, unknown>) {
     driverPay: Number(row.agreed_rate || row.freelancer_fee_rounded || row.freelancer_fee || 0),
     // Freelancer notes
     freelancerNotes: row.freelancer_notes as string | null,
+    // Who to call on this leg. Staff-picked from the people already on the
+    // job's organisations (quote_contacts, migration 223) — this replaces
+    // re-typing a name and number into the notes every time. `keyNotes` keeps
+    // rendering alongside: existing quotes have their contacts in there and
+    // nothing backfills them.
+    contacts: Array.isArray(row.leg_contacts)
+      ? (row.leg_contacts as Array<Record<string, unknown>>).map((c) => ({
+          name: (c.name as string) || '',
+          label: (c.label as string) || null,
+          phone: (c.phone as string) || null,
+          email: (c.email as string) || null,
+        }))
+      : [],
     // Arrangement details (so freelancer knows what's booked for them)
     tollsStatus: row.tolls_status as string | null,
     accommodationStatus: row.accommodation_status as string | null,
