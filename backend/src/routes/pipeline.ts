@@ -18,6 +18,7 @@ import {
 import { reactivateAutoCancelledRequirements } from '../services/requirement-cleanup';
 import { resolveJobContactCandidates } from '../services/job-contact-candidates';
 import { cascadeJobClose, reactivateAutoCancelledQuotes } from '../services/job-close-cascade';
+import { closeJobRequirements, fireEventTriggeredReminders } from '../services/requirement-close-sweep';
 import { pushDepositToHH, reverseDepositOnHH, getMethodForBankId } from '../services/hh-deposit';
 import { getJobBillingFacts, getNetHireDepositTotal, HireDeposit } from '../services/hh-billing-deposits';
 import { createPipelineEnquiry, EnquiryValidationError } from '../services/pipeline-enquiry';
@@ -693,117 +694,23 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
     // van), and stamps `returned_bookedout_warned_at` so at most one
     // email fires per transition.
 
-    // Lost cleanup — flag the items the user opted to keep alive past close-out.
-    // The actual auto-cancellation pass runs AFTER the event-trigger pass below
-    // so triggered reminders get to fire & self-mark-done first.
-    // (Cancelled transitions go through cancellations.ts, which has its own
-    // equivalent pass — see CLAUDE.md → "Lost / Cancelled cleanup pattern".)
-    if (pipeline_status === 'lost' && fromStatus !== 'lost') {
-      const keepIds = Array.isArray(keep_requirement_ids) ? keep_requirement_ids : [];
-      if (keepIds.length > 0) {
-        try {
-          await query(
-            `UPDATE job_requirements
-             SET keep_after_close = true,
-                 notes = COALESCE(notes, '') ||
-                         E'\n[Kept alive after job marked lost]',
-                 updated_at = NOW()
-             WHERE id = ANY($1::uuid[])
-               AND job_id = $2
-               AND status NOT IN ('done', 'cancelled')`,
-            [keepIds, jobId]
-          );
-        } catch (cancelErr) {
-          console.warn('[Pipeline] Failed to flag kept requirements on lost:', cancelErr);
-        }
-      }
-    }
-
-    // Fire event-triggered reminders (reminder requirements with matching event_trigger)
-    if (['confirmed', 'cancelled', 'lost'].includes(pipeline_status)) {
-      try {
-        const triggered = await query(
-          `SELECT jr.id, jr.custom_label, jr.assigned_to, jr.notes, jr.delivery_method, jr.job_id
-           FROM job_requirements jr
-           WHERE jr.job_id = $1
-             AND jr.requirement_type = 'reminder'
-             AND jr.event_trigger = $2
-             AND jr.status NOT IN ('done', 'cancelled')`,
-          [jobId, pipeline_status]
-        );
-
-        const jobName = currentJob.job_name || currentJob.client_name || `Job ${currentJob.hh_job_number || ''}`;
-        for (const rem of triggered.rows) {
-          const targetUserId = rem.assigned_to || req.user!.id;
-          const title = `Reminder triggered: ${rem.custom_label || 'Reminder'}`;
-          const content = `Job ${pipeline_status} — ${rem.custom_label || 'Reminder'} (${jobName})`;
-          const deliveryMethod = rem.delivery_method || 'both';
-
-          // Respect delivery_method: 'notification' → low priority (no email escalation),
-          // 'email' → send email immediately + mark as emailed, 'both' → normal escalation
-          const priority = deliveryMethod === 'notification' ? 'low' : 'high';
-          const emailSentClause = deliveryMethod === 'email' ? `, email_sent_at = NOW()` : '';
-
-          await query(
-            `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, source_user_id)
-             VALUES ($1, 'follow_up', $2, $3, 'jobs', $4, $5, $6, $7)`,
-            [targetUserId, title, content, rem.job_id, `/jobs/${rem.job_id}?tab=overview`, priority, req.user!.id]
-          );
-
-          // If email-only or both, send email immediately for event triggers (they're time-sensitive)
-          if (deliveryMethod === 'email' || deliveryMethod === 'both') {
-            try {
-              const userResult = await query('SELECT u.email, p.first_name FROM users u LEFT JOIN people p ON p.id = u.person_id WHERE u.id = $1', [targetUserId]);
-              if (userResult.rows.length > 0 && userResult.rows[0].email) {
-                await emailService.sendRaw({
-                  to: userResult.rows[0].email,
-                  subject: title,
-                  html: `<p>Hi ${userResult.rows[0].first_name || ''},</p>
-                         <p>Your reminder "<strong>${rem.custom_label || 'Reminder'}</strong>" has been triggered because the job <strong>${jobName}</strong> is now <strong>${pipeline_status}</strong>.</p>
-                         ${rem.notes ? `<p>Notes: ${rem.notes}</p>` : ''}
-                         <p><a href="${getFrontendUrl()}/jobs/${rem.job_id}?tab=overview">View Job</a></p>`,
-                });
-              }
-            } catch (emailErr) {
-              console.warn('[Pipeline] Event trigger email failed:', emailErr);
-            }
-          }
-
-          // Mark the reminder as done
-          await query(`UPDATE job_requirements SET status = 'done', updated_at = NOW() WHERE id = $1`, [rem.id]);
-        }
-
-        if (triggered.rows.length > 0) {
-          console.log(`[Pipeline] Fired ${triggered.rows.length} event-triggered reminder(s) for job ${jobId} → ${pipeline_status}`);
-        }
-      } catch (triggerErr) {
-        console.warn('[Pipeline] Event trigger check failed:', triggerErr);
-      }
-    }
-
-    // Lost cleanup — second half. After the event-trigger pass has fired (and
-    // self-marked-done) any reminders set to trigger on 'lost', sweep up
-    // everything else still open and not explicitly kept.
-    if (pipeline_status === 'lost' && fromStatus !== 'lost') {
-      try {
-        const swept = await query(
-          `UPDATE job_requirements
-           SET status = 'cancelled',
-               notes = COALESCE(notes, '') ||
-                       E'\n[Auto-cancelled: job marked lost]',
-               updated_at = NOW()
-           WHERE job_id = $1
-             AND status NOT IN ('done', 'cancelled')
-             AND keep_after_close = false
-           RETURNING id`,
-          [jobId]
-        );
-        if (swept.rows.length > 0) {
-          console.log(`[Pipeline] Auto-cancelled ${swept.rows.length} open requirement(s) on lost transition for job ${jobId}`);
-        }
-      } catch (cancelErr) {
-        console.warn('[Pipeline] Failed to sweep open requirements on lost:', cancelErr);
-      }
+    // Requirement cleanup. Flag the keeps, fire any reminder whose
+    // event_trigger matches this status, then sweep the rest — in that order,
+    // or a reminder set to fire on `lost` is cancelled before it fires.
+    // Shared with the cancellation flow, the stale-enquiry auto-loser and the
+    // HH webhook via services/requirement-close-sweep.ts.
+    if ((pipeline_status === 'lost' && fromStatus !== 'lost')
+        || (pipeline_status === 'cancelled' && fromStatus !== 'cancelled')) {
+      await closeJobRequirements({
+        jobId,
+        reason: pipeline_status as 'lost' | 'cancelled',
+        keepRequirementIds: keep_requirement_ids,
+        actorUserId: req.user!.id,
+      });
+    } else if (pipeline_status === 'confirmed' && fromStatus !== 'confirmed') {
+      // Confirmation fires triggers but NEVER sweeps — a confirmed job's
+      // requirements are the work, not litter.
+      await fireEventTriggeredReminders(jobId, 'confirmed', req.user!.id);
     }
 
     // Last-minute booking alert (any route to confirmed, job starts within 3 days)
@@ -844,8 +751,13 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
     // cancellation flow, the stale-enquiry auto-loser and the HH webhook via
     // services/job-close-cascade.ts, so all four doors out of a live job do
     // the same thing. Never throws; logs its own counts.
-    if (pipeline_status === 'lost' && fromStatus !== 'lost') {
-      await cascadeJobClose({ jobId, reason: 'lost', actorUserId: req.user!.id });
+    if ((pipeline_status === 'lost' && fromStatus !== 'lost')
+        || (pipeline_status === 'cancelled' && fromStatus !== 'cancelled')) {
+      await cascadeJobClose({
+        jobId,
+        reason: pipeline_status as 'lost' | 'cancelled',
+        actorUserId: req.user!.id,
+      });
     }
 
     // Write back to HireHop (async, non-blocking — don't fail the response if HH is down)
