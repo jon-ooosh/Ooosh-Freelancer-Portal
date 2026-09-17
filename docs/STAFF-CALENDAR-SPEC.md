@@ -929,6 +929,16 @@ is going out.
    **rate and notes do not** (tell them, do not re-ask). Amending a `cancelled`
    or `completed` booking stays refused.
 
+   *Reuse the plumbing, not the pattern.* `routes/quotes.ts` already emails an
+   assigned freelancer on quote confirmation — the `freelancer_assignment`
+   template, `emailService.send`, `shouldSuppressInformational` for the mute,
+   and a `confirmed_at` stamp so a re-confirm does not re-send. Take all of
+   that. But note what it is: a one-way NOTIFICATION with a portal link, deduped
+   on "we told them". A yard day is an OFFER awaiting a reply, so the token, the
+   accept / decline write-back and the chase in §9.4 have no equivalent there and
+   have to be built. Treating an offer as informational would also let a
+   freelancer mute the thing they are being asked to answer.
+
 7. **"Pulled out after accepting" is not the same fact as "declined".**
    `recordResponse` currently allows `accepted → declined`, so a freelancer
    dropping out the day before is recorded identically to one who never wanted
@@ -940,12 +950,22 @@ is going out.
 
 ### 9.3 Portal — NOT BUILT
 
-**One decision needed before building, and only one:** is the portal
-read-only-plus-respond, or can a freelancer also PROPOSE a change — "I can do
-it, but not until 11"? That single answer changes the shape of the page. A
-counter-offer is a third response alongside accept and decline, and it needs
-somewhere to land, which is item 6 above; without it, "not until 11" has to go
-through a phone call anyway. Do not start the page until this is answered.
+**ANSWERED (17 Sep 2026): read-only plus accept / decline. No counter-offer.**
+jon's reasoning, and it is worth keeping because it is about how the business
+actually runs rather than about the software: the negotiation already happens in
+the freelance WhatsApp group. "X can do it but has to finish at 4" gets settled
+there, and OP then sends the *revised* offer. OP is the record and the
+confirmation, not the first port of call.
+
+That makes the portal small — see the day, accept or decline — and it makes the
+amend endpoint (§9.4 item 6) the thing that carries the revision, which is the
+right place for it.
+
+**Flagged as a future revision point.** If the group chat stops being where this
+gets worked out — more freelancers, or people who are not in it — a counter-offer
+becomes a third response alongside accept and decline and needs somewhere to
+land. Do not build it now; do not design the response table so tightly that it
+cannot be added.
 
 New endpoints on `routes/portal.ts` mirroring the studio-sitter shape:
 
@@ -1461,6 +1481,23 @@ Kept because each one is a trap the next person could fall into.
   nothing type-checks them. When a note says work is finished, check the call
   sites before trusting it — and prefer wording that says what IS true over what
   was intended.*
+
+- **The booking panel opened on the Monday, not on today.** `defaultDate={from}`
+  handed it the first day of the visible fortnight, so from Tuesday onwards
+  every booking for today needed the date correcting first — and a mistyped
+  correction is exactly what the backdate guard was built to catch. Now today
+  when today is in view, and the first day in view otherwise, so paging forward
+  to November still books in November. *A default that is right once a week is
+  worse than no default: it is right often enough that you stop reading it.*
+
+- **"End before start" was enforced by the DATABASE and nothing else.** The
+  `freelancer_day_times` CHECK (mig 222) meant nothing backwards could ever be
+  stored, so this was never a data bug — but `createBooking` had no check of its
+  own, so anything reaching it through the API got a raw constraint violation
+  as its error message, and the form only complained on save. Both fixed: the
+  service says it in English, and the form says it as you type. *A constraint
+  the database holds and the service does not still needs a sentence, or the
+  caller gets Postgres's.*
 
 ### Still to build
 

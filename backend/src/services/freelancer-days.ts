@@ -201,6 +201,18 @@ export async function createBooking(input: CreateBookingInput, userId: string): 
   if (durationType !== 'hours' && (input.startTime || input.endTime)) {
     throw new Error('Only a timed booking carries times — pick "set hours" or leave them blank');
   }
+  // The `freelancer_day_times` CHECK (mig 222) already refuses this, so nothing
+  // backwards can be stored — but a caller that reaches it gets the raw
+  // constraint violation as its error message. Say it in English first. An
+  // overnight day is genuinely unsupported, not an oversight: the row holds two
+  // times and no dates, so 22:00 → 02:00 has nowhere to record which day the
+  // 02:00 belongs to. Two bookings is the honest way to record one.
+  // Zero-padded HH:MM compares correctly as a string; `timeStr` guarantees the
+  // padding, so this does not need parsing into minutes.
+  if (durationType === 'hours' && input.startTime && input.endTime
+      && input.endTime <= input.startTime) {
+    throw new Error('The end time needs to be after the start — a day that runs past midnight is two bookings');
+  }
   if (rateType === 'hourly' && durationType !== 'hours') {
     throw new Error('An hourly rate needs the hours — pick "set hours" for the duration');
   }

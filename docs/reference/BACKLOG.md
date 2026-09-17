@@ -239,6 +239,17 @@ See docs/SPEC.md for full phased plan.
   it becomes, the snapshot-on-the-booking rule must survive: a booking keeps the
   rate that was agreed, and a rate card only ever pre-fills.
 
+  **NOTHING WRITES `default_day_rate` OR `default_half_day_rate` (found Sep 2026).**
+  Migration 222 added the columns, `listBookableFreelancers` reads them and the
+  booking form pre-fills the agreed rate from them — but there is no input,
+  anywhere, that sets them. No endpoint, no field on the person record. So the
+  pre-fill has never fired for anybody and the placeholder on "Agreed rate"
+  always reads "—". Two ways out, and they should be chosen deliberately rather
+  than by whoever gets there first: a field on the person record now (ten
+  minutes, but it entrenches a fourth place a rate lives), or wait and let the
+  rate card above be the thing that fills it. Until then the columns are dead
+  weight and the pre-fill is decoration.
+
 - **Working location per day** ("boots on the ground") — WFH / on site / office,
   so the calendar can answer *who is in the building* and not just *who is not
   off*. Full design and the one decision it hangs on (what "In" should count)
