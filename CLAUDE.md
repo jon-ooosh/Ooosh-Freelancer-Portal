@@ -159,6 +159,7 @@ existing definition:
 | Pushing anything from HireHop to Xero | `services/hh-xero-sync.ts` |
 | Encrypting PII | `services/encryption.ts` |
 | What is this person called? | `frontend/src/lib/displayName.ts` |
+| Picking or creating a venue | `frontend/src/components/VenuePicker.tsx` |
 | Showing a private-bucket file in the DOM | `frontend/src/hooks/useAuthedFileUrl.ts` |
 | Bank holiday or company day? | `frontend/src/lib/companyCalendar.ts` |
 | Verifying an API key | `middleware/api-key.ts` |
