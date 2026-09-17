@@ -244,7 +244,7 @@ HH codes: 0 Enquiry · 1 Provisional · 2 Booked · 3 Prepped · 4 Part Dispatch
 ## Scheduled tasks (`config/scheduler.ts`)
 
 Backups 02:00 · job financials 03:00 · holiday entitlement 06:05 · Xero reconcile 07:45 ·
-compliance 08:00 ·
+bill payment pull-back 07:50 · compliance 08:00 ·
 chase alerts 08:10 · auto-chase runner 08:10 · lock-up chaser 08:45 · staff time digest
 08:45 · return-to-work chase 08:50 · stale-enquiry
 auto-lose 09:00 · carnet forms 09:15 · referral safety-net 09:18 · storage reminders

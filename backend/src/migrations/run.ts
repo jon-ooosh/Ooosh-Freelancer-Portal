@@ -258,6 +258,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '220_email_detach_tombstone.sql',
         '221_gmail_manager_mailboxes.sql',
         '222_freelancer_day_bookings.sql',
+        '223_cost_settled_externally.sql',
       ];
 
       for (const migration of migrations) {

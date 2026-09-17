@@ -1287,6 +1287,25 @@ export function startScheduler() {
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: Cost Xero reconcile sync scheduled daily at 07:45 Europe/London');
 
+  // ── Bill payment pull-back sync — daily 07:50 Europe/London ─────────────
+  // The return leg of the bills loop: when a bill OP pushed is paid IN XERO
+  // (the bookkeeper pays it there, or reconciles a bank line against it), mark
+  // it paid here using Xero's own payment id and date. Without it those bills
+  // sit on Bills to Pay forever and the only button on them — Mark paid —
+  // would record a SECOND payment in Xero. Silent housekeeping; no emails.
+  cron.schedule('50 7 * * *', async () => {
+    try {
+      const { runCostXeroPaymentSync } = await import('../services/cost-xero-payment-sync');
+      const r = await runCostXeroPaymentSync();
+      if (r.marked > 0) {
+        console.log(`Scheduler: Bill payment pull-back — ${r.marked} of ${r.checked} bill(s) already paid in Xero, marked paid in OP`);
+      }
+    } catch (err) {
+      console.error('Scheduler: Bill payment pull-back sync failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: Bill payment pull-back sync scheduled daily at 07:50 Europe/London');
+
   // ── Gmail ingestion (Auto-Chase Phase 1) ────────────────────────────
   // Every 10 minutes — poll the info@ mailbox, log new client emails onto job
   // timelines as interactions, drop the residue into the review queue. Inert

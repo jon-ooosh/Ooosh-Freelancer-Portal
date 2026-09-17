@@ -310,6 +310,11 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     }
 
     const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    // How many rows MATCH, before the limit trims them. The page sums what it
+    // has been sent to show a filtered total, and that sum is only honest if it
+    // knows whether it is holding the whole set — a money figure that quietly
+    // omits row 201 is worse than no figure at all.
+    const filterParams = [...params];
     params.push(Math.min(parseInt(limit as string, 10) || 200, 500));
 
     const sql = `
@@ -365,7 +370,9 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       FROM costs
     `);
 
-    res.json({ data: rows, stats: stats.rows[0] });
+    const matching = await query(`SELECT COUNT(*)::int AS n FROM costs c ${whereClause}`, filterParams);
+
+    res.json({ data: rows, stats: stats.rows[0], total_matching: matching.rows[0].n });
   } catch (err) {
     console.error('[costs] list error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -1084,14 +1091,17 @@ router.post('/:id/sync-xero', authorize(...STAFF_ROLES), async (req: AuthRequest
     // the right call (it skips the create and records the payment). So: object
     // present + nothing left for the bill flow to do → re-sync in place.
     const cur = await query(
-      'SELECT xero_object_id, xero_payment_id, payment_method, payment_status FROM costs WHERE id = $1',
+      'SELECT xero_object_id, xero_payment_id, payment_method, payment_status, settled_externally FROM costs WHERE id = $1',
       [id],
     );
     if (!cur.rows.length) return res.status(404).json({ error: 'Cost not found' });
     const c = cur.rows[0];
+    // A bill settled outside OP has NO payment leg — the money moved somewhere
+    // we didn't do, so there is nothing to record and recording one would pay
+    // the supplier twice. See migration 223.
     const paymentLegOutstanding = Boolean(c.xero_object_id)
       && BILL_METHODS.includes(c.payment_method)
-      && c.payment_status === 'paid' && !c.xero_payment_id;
+      && c.payment_status === 'paid' && !c.xero_payment_id && !c.settled_externally;
 
     const svc = await import('../services/cost-xero-push');
     const result = (c.xero_object_id && !paymentLegOutstanding)
@@ -1370,6 +1380,75 @@ router.post('/:id/pay', authorize(...ADMIN_ONLY), async (req: AuthRequest, res: 
   } catch (err) {
     console.error('[costs] pay error:', err);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Settle without paying ───────────────────────────────────────────────────
+// "It's already been paid — I'm recording that, not asking you to pay it."
+//
+// Clears a bill off the OP ledger WITHOUT touching Xero. The everyday case (our
+// own bill was paid in Xero) is handled automatically by the daily pull-back
+// sync; this is the escape hatch for the rest — no bill in Xero, paid by some
+// route OP never saw, or the money landed on a different bill someone keyed by
+// hand.
+//
+// `settled_externally` is persisted rather than being a one-off "skip the push":
+// paid + no xero_payment_id is the exact shape three other code paths read as
+// "this bill still needs its payment recording in Xero", so without the flag the
+// next edit to the row would pay the supplier again. ADMIN_ONLY like /pay — it
+// doesn't move money, but it closes the book on money that moved.
+const settleExternalSchema = z.object({
+  // Required: a clean ledger nobody can explain is worse than a dirty one.
+  note: z.string().trim().min(3).max(500),
+  // When it was actually settled, if known. Defaults to today.
+  paid_date: z.string().trim().max(20).optional().nullable(),
+});
+
+router.post('/:id/settle-external', authorize(...ADMIN_ONLY), async (req: AuthRequest, res: Response) => {
+  try {
+    const parse = settleExternalSchema.safeParse(req.body ?? {});
+    if (!parse.success) { res.status(400).json({ error: 'A short note saying how it was settled is required', issues: parse.error.issues }); return; }
+    const { note, paid_date } = parse.data;
+
+    const before = await query('SELECT payment_status, approval_state FROM costs WHERE id = $1', [req.params.id]);
+    if (!before.rows.length) { res.status(404).json({ error: 'Cost not found' }); return; }
+    if (before.rows[0].payment_status === 'paid') {
+      res.status(400).json({ error: 'This cost is already marked paid.' });
+      return;
+    }
+
+    // paid_method stays NULL on purpose — no money left an account we know
+    // about, so naming one would invent a bank line that doesn't exist.
+    const result = await query(
+      `UPDATE costs
+       SET approval_state = 'paid', payment_status = 'paid',
+           settled_externally = TRUE, settled_externally_note = $1,
+           paid_by = $2, paid_at = NOW(),
+           paid_value_date = COALESCE($3::date, paid_value_date, CURRENT_DATE)
+       WHERE id = $4 RETURNING *`,
+      [note, req.user!.id, paid_date || null, req.params.id],
+    );
+    await audit(req.user!.id, req.params.id as string, 'cost_settled_externally',
+      before.rows[0], { payment_status: 'paid', settled_externally: true, note, paid_date: paid_date || null });
+
+    res.json({ data: await withJobLabels(result.rows[0]) });
+  } catch (err) {
+    console.error('[costs] settle-external error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Ask Xero, now, whether any outstanding bill has already been paid there.
+// The same sweep the scheduler runs at 07:50 — on the button, for the day you
+// don't want to wait until tomorrow to see the ledger clear.
+router.post('/sync-xero-payments', authorize(...ADMIN_ONLY), async (_req: AuthRequest, res: Response) => {
+  try {
+    const { runCostXeroPaymentSync } = await import('../services/cost-xero-payment-sync');
+    const result = await runCostXeroPaymentSync();
+    res.json({ data: result });
+  } catch (err) {
+    console.error('[costs] sync-xero-payments error:', err);
+    res.status(500).json({ error: err instanceof Error ? err.message : 'Internal server error' });
   }
 });
 
