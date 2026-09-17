@@ -1,9 +1,16 @@
 import { Router, Response } from 'express';
 import { query } from '../config/database';
-import { authenticate, AuthRequest } from '../middleware/auth';
+import { authenticate, STAFF_ROLES, authorize, AuthRequest } from '../middleware/auth';
 
 const router = Router();
 router.use(authenticate);
+// Staff only — and this one is load-bearing for the gates on people.ts,
+// organisations.ts and venues.ts. Global search reads across `people`,
+// `organisations`, `venues` and `jobs`, so leaving it open would block a
+// freelancer JWT from WRITING that data while still letting it READ the lot.
+// No freelancer surface uses it: the kiosk and the Next.js portal never call
+// /api/search, and every consumer is a staff page.
+router.use(authorize(...STAFF_ROLES));
 
 // GET /api/search?q=searchterm&limit=20
 router.get('/', async (req: AuthRequest, res: Response) => {

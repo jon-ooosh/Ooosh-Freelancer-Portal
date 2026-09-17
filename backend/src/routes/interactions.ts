@@ -1,7 +1,7 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
-import { authenticate, AuthRequest } from '../middleware/auth';
+import { authenticate, authorize, STAFF_ROLES, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
 import emailService from '../services/email-service';
@@ -23,6 +23,14 @@ const DISPLAY_NAME_SQL = `CONCAT(COALESCE(NULLIF(p.preferred_name, ''), p.first_
 
 const router = Router();
 router.use(authenticate);
+// Staff only. `authenticate` alone admits EVERY active user: a `freelancer`
+// is an ordinary `users` row and POST /api/auth/login has no role gate, so
+// such an account holds a full OP JWT. Verified safe to gate the whole
+// router — the Next.js portal is hard-prefixed to `/api/portal` in
+// `src/lib/op-api.ts`, the vehicles book-out kiosk's scoped token never calls
+// this router, and every frontend consumer is a staff page. See
+// docs/reference/PLATFORM-CONVENTIONS.md → "Reference-route RBAC".
+router.use(authorize(...STAFF_ROLES));
 
 // Attachment shape — mirrors the metadata returned by
 // POST /api/files/upload?attachment_only=true. Stored on interactions.files
