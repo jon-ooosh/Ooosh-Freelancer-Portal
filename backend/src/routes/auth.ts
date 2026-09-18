@@ -101,7 +101,7 @@ router.post('/login', loginLimiter, validate(loginSchema), async (req: Request, 
     const { email, password } = req.body;
 
     const result = await query(
-      `SELECT u.*, p.first_name, p.last_name
+      `SELECT u.*, p.first_name, p.last_name, p.preferred_name
        FROM users u JOIN people p ON u.person_id = p.id
        WHERE u.email = $1 AND u.is_active = true`,
       [email.toLowerCase()]
@@ -135,6 +135,9 @@ router.post('/login', loginLimiter, validate(loginSchema), async (req: Request, 
         role: user.role,
         first_name: user.first_name,
         last_name: user.last_name,
+        // What they are actually called. Display code uses this in preference
+        // to first_name — see frontend lib/displayName.ts.
+        preferred_name: user.preferred_name || null,
         avatar_url: user.avatar_url || null,
         force_password_change: user.force_password_change || false,
       },
@@ -177,6 +180,13 @@ router.post('/register', validate(registerSchema), async (req: Request, res: Res
 
     await query('UPDATE users SET refresh_token = $1 WHERE id = $2', [tokens.refreshToken, user.id]);
 
+    // Materialise any all-staff / role-targeted staff documents for the new user.
+    if (role !== 'freelancer') {
+      import('../services/staff-documents')
+        .then((m) => m.syncAllActiveDocuments())
+        .catch((e) => console.error('Staff-document sync on register failed:', e));
+    }
+
     res.status(201).json({
       user: { id: user.id, email: user.email, role: user.role, first_name, last_name },
       ...tokens,
@@ -205,7 +215,7 @@ router.post('/refresh', refreshLimiter, async (req: Request, res: Response) => {
     }
 
     const result = await query(
-      `SELECT u.*, p.first_name, p.last_name
+      `SELECT u.*, p.first_name, p.last_name, p.preferred_name
        FROM users u JOIN people p ON u.person_id = p.id
        WHERE u.id = $1 AND u.refresh_token = $2 AND u.is_active = true`,
       [decoded.id, refreshToken]
@@ -250,7 +260,7 @@ router.get('/me', authenticate, async (req: AuthRequest, res: Response) => {
     const result = await query(
       `SELECT u.id, u.email, u.role, u.avatar_url, u.force_password_change,
               u.cot_card_last4,
-              p.first_name, p.last_name
+              p.first_name, p.last_name, p.preferred_name
        FROM users u JOIN people p ON u.person_id = p.id
        WHERE u.id = $1`,
       [req.user!.id]
@@ -316,7 +326,7 @@ router.put('/profile', authenticate, validate(updateProfileSchema), async (req: 
     const result = await query(
       `SELECT u.id, u.email, u.role, u.avatar_url, u.force_password_change,
               u.cot_card_last4,
-              p.first_name, p.last_name
+              p.first_name, p.last_name, p.preferred_name
        FROM users u JOIN people p ON u.person_id = p.id
        WHERE u.id = $1`,
       [userId]

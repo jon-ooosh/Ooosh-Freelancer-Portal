@@ -9,7 +9,7 @@ import { getDateUrgency } from '../types/vehicle'
 import { vmPath } from '../config/route-paths'
 import { createVehicle, uploadVehicleFile, fetchComplianceSettings, DEFAULT_COMPLIANCE } from '../lib/fleet-api'
 import { buildDefaultChecklist } from '../lib/setup-checklist'
-import { lifespanCountdown, sellByDate, formatGbp } from '../lib/vehicle-lifecycle'
+import { lifespanCountdown, sellByDate, formatGbp, annualMileage, formatAnnualMileage } from '../lib/vehicle-lifecycle'
 import { FinanceProviderSelect } from '../components/FinanceLifecycleSection'
 import type { SetupChecklistItem } from '../types/vehicle'
 import { getServiceMileageStatus, getRossettsStatus, URGENCY_TEXT } from '../lib/service-status'
@@ -121,6 +121,16 @@ function VehicleCard({ vehicle, isAllocated }: { vehicle: Vehicle; isAllocated: 
           )}
         </div>
 
+        {/* Mileage — the age-vs-miles read, same as the table + finance views */}
+        {vehicle.currentMileage != null && (
+          <p className="mt-2 text-xs text-gray-500 tabular-nums">
+            {vehicle.currentMileage.toLocaleString()} miles
+            {formatAnnualMileage(annualMileage(vehicle.currentMileage, vehicle.dateFirstReg))
+              ? ` · ${formatAnnualMileage(annualMileage(vehicle.currentMileage, vehicle.dateFirstReg))}`
+              : ''}
+          </p>
+        )}
+
         {/* Key dates that need attention */}
         <div className="mt-2 flex flex-wrap gap-x-4 gap-y-0.5">
           <DateBadge label="MOT" date={vehicle.motDue} />
@@ -198,6 +208,24 @@ function SortTh({ label, col, sort, onSort, className = '', align = 'left' }: {
     >
       {label}<span className="text-gray-400">{active ? (sort!.dir === 'asc' ? ' ▲' : ' ▼') : ''}</span>
     </th>
+  )
+}
+
+/**
+ * Mileage cell: the odometer reading with its miles-per-year underneath.
+ *
+ * The pair is the point. Deciding whether to move a van on is an age-vs-miles
+ * judgement, and neither number answers it alone — 140k on a two-year-old van
+ * and 140k on a six-year-old one are different vans. Shared by the fleet table
+ * and the finance board so both read the same way.
+ */
+function MileageCell({ vehicle, className = '' }: { vehicle: Vehicle; className?: string }) {
+  const perYear = formatAnnualMileage(annualMileage(vehicle.currentMileage, vehicle.dateFirstReg))
+  return (
+    <td className={`whitespace-nowrap px-2 py-2 text-right text-xs tabular-nums text-gray-600 ${className}`}>
+      {vehicle.currentMileage != null ? vehicle.currentMileage.toLocaleString() : '—'}
+      {perYear && <div className="text-[10px] text-gray-400">{perYear}</div>}
+    </td>
   )
 }
 
@@ -329,9 +357,7 @@ function FleetTable({
                     </span>
                   )}
                 </td>
-                <td className="whitespace-nowrap px-2 py-2 text-right text-xs tabular-nums text-gray-600">
-                  {vehicle.currentMileage != null ? vehicle.currentMileage.toLocaleString() : '—'}
-                </td>
+                <MileageCell vehicle={vehicle} />
                 <td className={`whitespace-nowrap px-2 py-2 text-xs tabular-nums ${URGENCY_TEXT[svc.urgency]}`}>
                   {svc.milesRemaining == null
                     ? '—'
@@ -389,6 +415,7 @@ function FleetFinanceTable({ vehicles }: { vehicles: Vehicle[] }) {
       case 'deposit': return v.depositPaid
       case 'financed': return v.amountFinanced
       case 'total': return v.totalPayable
+      case 'mileage': return v.currentMileage
       case 'sellby': { const d = sellByDate(v.dateFirstReg); return d ? d.getTime() : null }
       case 'countdown': return lifespanCountdown(v.dateFirstReg)?.months ?? null
       default: return null
@@ -410,6 +437,7 @@ function FleetFinanceTable({ vehicles }: { vehicles: Vehicle[] }) {
             <SortTh label="Deposit" col="deposit" sort={sort} onSort={onSort} className="px-2 py-2" align="right" />
             <SortTh label="Financed" col="financed" sort={sort} onSort={onSort} className="px-2 py-2" align="right" />
             <SortTh label="Total payable" col="total" sort={sort} onSort={onSort} className="px-2 py-2" align="right" />
+            <SortTh label="Mileage" col="mileage" sort={sort} onSort={onSort} className="px-2 py-2" align="right" />
             <SortTh label="5-yr sell-by" col="sellby" sort={sort} onSort={onSort} className="px-2 py-2" />
             <SortTh label="Countdown" col="countdown" sort={sort} onSort={onSort} className="px-2 py-2" />
             <th className="px-2 py-2 text-center">Docs</th>
@@ -445,6 +473,7 @@ function FleetFinanceTable({ vehicles }: { vehicles: Vehicle[] }) {
                 <td className="whitespace-nowrap px-2 py-2 text-right text-xs tabular-nums font-medium text-gray-800">
                   {vehicle.totalPayable != null ? formatGbp(vehicle.totalPayable) : '—'}
                 </td>
+                <MileageCell vehicle={vehicle} />
                 <td className="whitespace-nowrap px-2 py-2 text-xs tabular-nums text-gray-600">
                   {sellBy ? compactDate(sellBy.toISOString().slice(0, 10)) : '—'}
                 </td>

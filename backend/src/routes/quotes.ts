@@ -12,6 +12,8 @@ import {
 import { emailService } from '../services/email-service';
 import { hhBroker } from '../services/hirehop-broker';
 import { shouldSuppressInformational } from '../services/portal-notification-prefs';
+import { greetingName } from '../services/display-name';
+import { resolveJobContactCandidates } from '../services/job-contact-candidates';
 
 const router = Router();
 router.use(authenticate);
@@ -640,6 +642,7 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
       `SELECT q.id, q.calculation_mode, q.is_local, q.job_date, q.arrival_time,
               q.venue_name, q.venue_id, q.status,
               q.job_type, q.num_days, q.is_multi_day, q.crew_count,
+              q.client_charge_rounded, q.freelancer_fee_rounded,
               j.job_name as linked_job_name, j.hh_job_number as linked_hh_job_number
        FROM quotes q
        LEFT JOIN jobs j ON j.id = q.job_id
@@ -703,18 +706,34 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
       recalcNeeded = true;
     }
 
-    // Fee overrides (available for all quote types). When recalc is happening,
-    // the calculator output wins — ignore submitted overrides because they're
-    // stale snapshots from the form that doesn't know the new totals yet.
+    // Fee overrides (available for all quote types). A posted fee only counts
+    // as an override when it DIFFERS from the stored value — the edit form
+    // echoes the loaded figures back on every save, and an unchanged echo must
+    // not pin a fee against a recalc. Genuine overrides survive the recalc
+    // (re-applied after it below): editing the fee and editing the expenses
+    // are independent intents. Pre-Jul-2026 this was gated on `!recalcNeeded`,
+    // which silently DROPPED fee edits whenever `expenses` was posted alongside
+    // (the modal always sent it) — the "fee reverts on save" bug.
+    const clientFeeOverride =
+      fields.client_charge_rounded !== undefined && fields.client_charge_rounded !== null &&
+      Number(fields.client_charge_rounded) !== Number(oldQuote.client_charge_rounded ?? 0)
+        ? Number(fields.client_charge_rounded)
+        : null;
+    const freelancerFeeOverride =
+      fields.freelancer_fee_rounded !== undefined && fields.freelancer_fee_rounded !== null &&
+      Number(fields.freelancer_fee_rounded) !== Number(oldQuote.freelancer_fee_rounded ?? 0)
+        ? Number(fields.freelancer_fee_rounded)
+        : null;
+
     if (!recalcNeeded) {
-      if (fields.client_charge_rounded !== undefined) {
+      if (clientFeeOverride !== null) {
         updates.push(`client_charge_rounded = $${idx}, client_charge_total = $${idx}`);
-        params.push(fields.client_charge_rounded);
+        params.push(clientFeeOverride);
         idx++;
       }
-      if (fields.freelancer_fee_rounded !== undefined) {
+      if (freelancerFeeOverride !== null) {
         updates.push(`freelancer_fee_rounded = $${idx}, freelancer_fee = $${idx}`);
-        params.push(fields.freelancer_fee_rounded);
+        params.push(freelancerFeeOverride);
         idx++;
       }
     }
@@ -796,6 +815,33 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
         ]
       );
       updatedQuote = recalcUpdate.rows[0] || updatedQuote;
+
+      // Re-apply explicit fee overrides ON TOP of the recalc output. The
+      // recalc owns every derived figure EXCEPT a fee the user actually typed
+      // — without this, a fee edit saved together with expenses gets clobbered
+      // by the calculator reproducing the original figure.
+      if (clientFeeOverride !== null || freelancerFeeOverride !== null) {
+        const ovUpdates: string[] = [];
+        const ovParams: unknown[] = [];
+        let ovIdx = 1;
+        if (clientFeeOverride !== null) {
+          ovUpdates.push(`client_charge_rounded = $${ovIdx}, client_charge_total = $${ovIdx}`);
+          ovParams.push(clientFeeOverride);
+          ovIdx++;
+        }
+        if (freelancerFeeOverride !== null) {
+          ovUpdates.push(`freelancer_fee_rounded = $${ovIdx}, freelancer_fee = $${ovIdx}`);
+          ovParams.push(freelancerFeeOverride);
+          ovIdx++;
+        }
+        ovParams.push(req.params.id);
+        const ovResult = await query(
+          `UPDATE quotes SET ${ovUpdates.join(', ')}, updated_at = NOW()
+           WHERE id = $${ovIdx} AND is_deleted = false RETURNING *`,
+          ovParams
+        );
+        updatedQuote = ovResult.rows[0] || updatedQuote;
+      }
     }
 
     // Check if key fields changed and notify assigned crew
@@ -816,7 +862,7 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
       (async () => {
         try {
           const assignees = await query(
-            `SELECT qa.person_id, p.first_name, p.last_name, p.email
+            `SELECT qa.person_id, p.first_name, p.last_name, p.preferred_name, p.email
              FROM quote_assignments qa
              JOIN people p ON p.id = qa.person_id
              WHERE qa.quote_id = $1 AND qa.status NOT IN ('declined', 'cancelled')
@@ -840,7 +886,7 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
               await emailService.send('job_change_notification', {
                 to: crew.email,
                 variables: {
-                  freelancerName: crew.first_name || 'there',
+                  freelancerName: greetingName(crew),
                   jobName,
                   jobNumber: String(oldQuote.linked_hh_job_number || ''),
                   jobDate: formattedDate,
@@ -919,7 +965,7 @@ router.patch('/:id/status', validate(statusSchema), async (req: AuthRequest, res
         try {
           const assignees = await query(
             `SELECT qa.id AS assignment_id, qa.role, qa.agreed_rate, qa.rate_type,
-                    p.id AS person_id, p.first_name, p.email, p.is_freelancer,
+                    p.id AS person_id, p.first_name, p.preferred_name, p.email, p.is_freelancer,
                     q.job_date, q.venue_name, j.job_name, j.hh_job_number
              FROM quote_assignments qa
              JOIN people p ON p.id = qa.person_id
@@ -945,7 +991,7 @@ router.patch('/:id/status', validate(statusSchema), async (req: AuthRequest, res
               );
               continue;
             }
-            const freelancerName = (a.first_name || '').trim() || 'there';
+            const freelancerName = greetingName(a);
             const jobName = a.job_name || a.venue_name || 'a job';
             const jobDate = a.job_date
               ? new Date(a.job_date).toLocaleDateString('en-GB', {
@@ -1121,7 +1167,7 @@ router.post('/:id/assignments', validate(assignSchema), async (req: AuthRequest,
       (async () => {
         try {
           const ctx = await query(
-            `SELECT p.first_name, p.last_name, p.email, p.is_freelancer,
+            `SELECT p.first_name, p.last_name, p.preferred_name, p.email, p.is_freelancer,
                     q.status AS quote_status, q.job_date, q.arrival_time,
                     q.venue_name, q.job_type,
                     j.job_name, j.hh_job_number
@@ -1140,7 +1186,7 @@ router.post('/:id/assignments', validate(assignSchema), async (req: AuthRequest,
           const { suppress } = await shouldSuppressInformational(personId, String(req.params.id));
           if (suppress) return;
 
-          const freelancerName = (row.first_name || '').trim() || 'there';
+          const freelancerName = greetingName(row);
           const jobName = row.job_name || row.venue_name || 'a job';
           const jobDate = row.job_date
             ? new Date(row.job_date).toLocaleDateString('en-GB', {
@@ -1360,7 +1406,7 @@ router.post(
       const result = await query(
         `SELECT q.id AS quote_id, q.job_type, q.venue_name, q.job_date, q.arrival_time,
                 p.id AS person_id, p.email AS person_email,
-                p.first_name, p.last_name,
+                p.first_name, p.last_name, p.preferred_name,
                 j.job_name
          FROM quote_assignments qa
          JOIN quotes q ON q.id = qa.quote_id
@@ -1382,7 +1428,7 @@ router.post(
         return;
       }
 
-      const firstName = (row.first_name || '').trim() || 'there';
+      const firstName = greetingName(row);
       const venueName = row.venue_name || 'the venue';
       const jobName = row.job_name || row.venue_name || 'your job';
       const portalBase = (process.env.FRONTEND_PORTAL_URL || 'https://freelancer.oooshtours.co.uk').replace(/\/$/, '');
@@ -1486,12 +1532,13 @@ const localQuoteSchema = z.object({
   fee: z.number().min(0).optional().nullable(),
   clientCharge: z.number().min(0).optional().nullable(),
   notes: z.string().optional().nullable(),
+  freelancerNotes: z.string().optional().nullable(),
   whatIsIt: z.enum(['vehicle', 'equipment', 'people']).optional().nullable(),
 });
 
 router.post('/local', validate(localQuoteSchema), async (req: AuthRequest, res: Response) => {
   try {
-    const { jobId, jobType, jobDate, arrivalTime, venueId, venueName, fee, clientCharge, notes, whatIsIt } = req.body;
+    const { jobId, jobType, jobDate, arrivalTime, venueId, venueName, fee, clientCharge, notes, freelancerNotes, whatIsIt } = req.body;
     const feeVal = fee || 0;
     const chargeVal = clientCharge || feeVal;
 
@@ -1501,16 +1548,16 @@ router.post('/local', validate(localQuoteSchema), async (req: AuthRequest, res: 
         venue_id, venue_name, job_date, arrival_time,
         freelancer_fee, freelancer_fee_rounded,
         client_charge_total, client_charge_rounded,
-        what_is_it, internal_notes,
+        what_is_it, internal_notes, freelancer_notes,
         distance_miles, drive_time_mins,
         created_by
-      ) VALUES ($1, $2, true, 'fixed', $3, $4, $5, $6, $7, $7, $8, $8, $9, $10, 0, 0, $11)
+      ) VALUES ($1, $2, true, 'fixed', $3, $4, $5, $6, $7, $7, $8, $8, $9, $10, $11, 0, 0, $12)
       RETURNING id`,
       [
         jobId, jobType, venueId || null, venueName || null,
         jobDate || null, arrivalTime || null,
         feeVal, chargeVal,
-        whatIsIt || null, notes || null,
+        whatIsIt || null, notes || null, freelancerNotes || null,
         req.user!.id,
       ]
     );
@@ -1535,6 +1582,125 @@ router.post('/local', validate(localQuoteSchema), async (req: AuthRequest, res: 
   } catch (error) {
     console.error('Create local quote error:', error);
     res.status(500).json({ error: 'Failed to create local delivery/collection' });
+  }
+});
+
+// ── Quote contacts — who to call on this transport leg ──────────────
+//
+// `quote_contacts` (migration 223). Before this there was no contact field on
+// a quote at all, so the site contact was typed by hand into
+// `freelancer_notes` every time — despite the job already knowing every
+// person at every org on it.
+//
+// Reads are a live join: name / phone / email come from `people` on every
+// request, never copied into the junction. If a number changes, the driver
+// gets the new one. See the migration for why there are no snapshot columns.
+//
+// Deliberately NOT written to `job_contacts` — that drives client email
+// routing (hire forms, confirmations, receipts), and ticking a venue's duty
+// manager onto a delivery must never start emailing them hire forms.
+
+// GET /api/quotes/:id/contacts
+// Returns { data: { ticked: [...], candidates: [...] } } — `ticked` is what's
+// on this leg, `candidates` is everyone reachable through the job's orgs.
+// A candidate already ticked still appears in `candidates` so the picker can
+// render one list with checkboxes rather than two that need reconciling.
+router.get('/:id/contacts', async (req: AuthRequest, res: Response) => {
+  try {
+    const quoteResult = await query(
+      `SELECT id, job_id FROM quotes WHERE id = $1 AND is_deleted = false`,
+      [req.params.id]
+    );
+    if (quoteResult.rows.length === 0) {
+      res.status(404).json({ error: 'Quote not found' });
+      return;
+    }
+    const { job_id: jobId } = quoteResult.rows[0];
+
+    const tickedResult = await query(
+      `SELECT qc.person_id, qc.label,
+              p.first_name, p.last_name, p.email, p.phone, p.mobile
+       FROM quote_contacts qc
+       JOIN people p ON p.id = qc.person_id AND p.is_deleted = false
+       WHERE qc.quote_id = $1
+       ORDER BY p.first_name ASC`,
+      [req.params.id]
+    );
+
+    const ticked = tickedResult.rows.map((r: Record<string, unknown>) => ({
+      person_id: r.person_id as string,
+      name: `${r.first_name || ''} ${r.last_name || ''}`.trim(),
+      email: (r.email as string) || null,
+      phone: (r.phone as string) || null,
+      mobile: (r.mobile as string) || null,
+      label: (r.label as string) || null,
+    }));
+
+    // A quote can exist without a job (standalone calculator run) — no job
+    // means no org chain, so no candidates. Still return the ticked list.
+    const candidates = jobId ? await resolveJobContactCandidates(jobId) : [];
+
+    res.json({ data: { ticked, candidates } });
+  } catch (error) {
+    console.error('Get quote contacts error:', error);
+    res.status(500).json({ error: 'Failed to load contacts' });
+  }
+});
+
+// PUT /api/quotes/:id/contacts — idempotent replace
+// Mirrors the shape of PUT /api/pipeline/:jobId/contacts. The whole list is
+// sent each time; anything absent is removed.
+const quoteContactsSchema = z.object({
+  contacts: z.array(z.object({
+    person_id: z.string().uuid(),
+    label: z.string().max(100).optional().nullable(),
+  })).max(20),
+});
+
+router.put('/:id/contacts', validate(quoteContactsSchema), async (req: AuthRequest, res: Response) => {
+  const client = await (await import('../config/database')).getClient();
+  try {
+    const quoteCheck = await client.query(
+      `SELECT id FROM quotes WHERE id = $1 AND is_deleted = false`,
+      [req.params.id]
+    );
+    if (quoteCheck.rows.length === 0) {
+      res.status(404).json({ error: 'Quote not found' });
+      return;
+    }
+
+    const { contacts } = req.body as z.infer<typeof quoteContactsSchema>;
+    // Guard the unique constraint: the same person sent twice (two rows in the
+    // picker payload) would abort the whole transaction on the second INSERT.
+    const seen = new Set<string>();
+    const unique = contacts.filter((c) => {
+      if (seen.has(c.person_id)) return false;
+      seen.add(c.person_id);
+      return true;
+    });
+
+    await client.query('BEGIN');
+    // Replace rather than diff. The set is small (≤20) and a diff would have
+    // to reason about label-only changes; a delete + insert is one behaviour
+    // with no edge cases. `created_at` resetting is acceptable — nothing reads
+    // it, and the audit trail people care about is the quote's own timeline.
+    await client.query('DELETE FROM quote_contacts WHERE quote_id = $1', [req.params.id]);
+    for (const c of unique) {
+      await client.query(
+        `INSERT INTO quote_contacts (quote_id, person_id, label, created_by)
+         VALUES ($1, $2, $3, $4)`,
+        [req.params.id, c.person_id, c.label || null, req.user!.id]
+      );
+    }
+    await client.query('COMMIT');
+
+    res.json({ data: { count: unique.length } });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('Update quote contacts error:', error);
+    res.status(500).json({ error: 'Failed to save contacts' });
+  } finally {
+    client.release();
   }
 });
 

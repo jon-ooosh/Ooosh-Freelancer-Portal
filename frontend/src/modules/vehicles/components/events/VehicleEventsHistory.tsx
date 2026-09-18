@@ -17,6 +17,14 @@ interface Props {
   /** Vehicle UUID — used to deep-link a book-out/check-in into its full
    *  "life of a hire" comparison page (/vehicles/fleet/:id/hire/:hhJob). */
   vehicleId?: string
+  /**
+   * Deep-link a "Prep Completed" event into its full prep record. The prep
+   * session document in R2 is keyed by the SAME id as the event row
+   * (`prep-sessions/{REG}/{eventId}.json` — see PrepPage's save-prep call),
+   * so the event id is all the Preps tab needs to find the session.
+   * Omitted when the parent has no Preps tab to switch to.
+   */
+  onOpenPrep?: (eventId: string) => void
 }
 
 const EVENT_TYPE_BADGE: Record<string, string> = {
@@ -39,7 +47,7 @@ function formatEventDate(iso: string): string {
   }
 }
 
-export function VehicleEventsHistory({ vehicleReg, vehicleId }: Props) {
+export function VehicleEventsHistory({ vehicleReg, vehicleId, onOpenPrep }: Props) {
   const { data, isLoading, error } = useQuery<EventIndexEntry[]>({
     queryKey: ['vehicle-events', vehicleReg],
     queryFn: () => fetchVehicleEvents(vehicleReg),
@@ -71,7 +79,7 @@ export function VehicleEventsHistory({ vehicleReg, vehicleId }: Props) {
       {events.length > 0 && (
         <ul className="divide-y divide-gray-100">
           {events.map(ev => (
-            <EventRow key={ev.id} event={ev} vehicleReg={vehicleReg} vehicleId={vehicleId} />
+            <EventRow key={ev.id} event={ev} vehicleReg={vehicleReg} vehicleId={vehicleId} onOpenPrep={onOpenPrep} />
           ))}
         </ul>
       )}
@@ -79,13 +87,17 @@ export function VehicleEventsHistory({ vehicleReg, vehicleId }: Props) {
   )
 }
 
-function EventRow({ event, vehicleReg, vehicleId }: { event: EventIndexEntry; vehicleReg: string; vehicleId?: string }) {
+function EventRow({ event, vehicleReg, vehicleId, onOpenPrep }: { event: EventIndexEntry; vehicleReg: string; vehicleId?: string; onOpenPrep?: (eventId: string) => void }) {
   const [regenOpen, setRegenOpen] = useState(false)
   const badgeClass = EVENT_TYPE_BADGE[event.eventType] || 'bg-gray-100 text-gray-700'
   const isHireEvent = event.eventType === 'Book Out' || event.eventType === 'Check In'
   const canRegen = isHireEvent
   // Entry point to the full "life of a hire" comparison page (out vs back-in).
   const canViewHire = isHireEvent && !!vehicleId && !!event.hireHopJob
+  // Only "Prep Completed" has a stored prep session — "Prep Started" is a
+  // bare marker event written when the prep is opened, before any checklist
+  // data exists, so there is nothing to link it to.
+  const canViewPrep = event.eventType === 'Prep Completed' && !!onOpenPrep
 
   return (
     <li className="py-3">
@@ -136,13 +148,22 @@ function EventRow({ event, vehicleReg, vehicleId }: { event: EventIndexEntry; ve
               View hire →
             </Link>
           )}
+          {canViewPrep && (
+            <button
+              type="button"
+              onClick={() => onOpenPrep!(event.id)}
+              className="rounded border border-amber-500 bg-white px-3 py-1 text-xs font-medium text-amber-700 hover:bg-amber-50"
+            >
+              View prep →
+            </button>
+          )}
           {canRegen && (
             <button
               type="button"
               onClick={() => setRegenOpen(true)}
               className="rounded border border-gray-300 bg-white px-3 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50"
             >
-              Regenerate PDF
+              Regenerate {event.eventType} PDF
             </button>
           )}
         </div>
@@ -168,23 +189,47 @@ function RegenerateDialog({
   vehicleReg: string
   onClose: () => void
 }) {
+  const isCheckIn = event.eventType === 'Check In'
   const [email, setEmail] = useState('')
   const [busy, setBusy] = useState(false)
+  const [showCorrections, setShowCorrections] = useState(false)
+  const [corrections, setCorrections] = useState({
+    driverName: '',
+    bookOutMileage: '',
+    bookOutFuelLevel: '',
+    bookOutDate: '',
+    mileage: '',
+  })
   const [result, setResult] = useState<{
     success: boolean
     message: string
     downloadUrl?: string
     downloadName?: string
+    needsBookOutMileage?: boolean
   } | null>(null)
+
+  function setCorrection(field: keyof typeof corrections, value: string) {
+    setCorrections(prev => ({ ...prev, [field]: value }))
+  }
 
   async function run(mode: 'send' | 'download') {
     setBusy(true)
     setResult(null)
+
+    // Only send non-empty corrections. Any correction implies a rebuild so it
+    // takes effect even if a frozen PDF exists for this event.
+    const overrides = Object.fromEntries(
+      Object.entries(corrections).filter(([, v]) => v.trim() !== ''),
+    ) as Record<string, string>
+    const hasCorrections = Object.keys(overrides).length > 0
+
     const res = await regenerateEventPdf({
       eventId: event.id,
       vehicleReg,
       email: mode === 'send' ? (email.trim() || undefined) : undefined,
       skipEmail: mode === 'download',
+      rebuild: hasCorrections || undefined,
+      overrides: hasCorrections ? overrides : undefined,
     })
     setBusy(false)
 
@@ -194,11 +239,26 @@ function RegenerateDialog({
     }
 
     const parts: string[] = []
-    parts.push(`${res.photoCount ?? 0} photo${res.photoCount === 1 ? '' : 's'} included`)
-    if (!res.signatureFound) parts.push('no signature on file')
+    if (res.source === 'stored') {
+      parts.push('Served stored original report')
+    } else {
+      parts.push(`${res.photoCount ?? 0} photo${res.photoCount === 1 ? '' : 's'} included`)
+      if (res.reconstruction) {
+        parts.push(`${res.reconstruction.damageCount} damage item${res.reconstruction.damageCount === 1 ? '' : 's'}`)
+      }
+      if (!res.signatureFound) parts.push('no signature on file')
+    }
     if (mode === 'send') {
       parts.push(res.emailSent ? `emailed to ${res.emailedTo}` : 'email failed')
     }
+
+    // Reconstructed check-in where the book-out mileage couldn't be found —
+    // prompt staff to enter it manually and regenerate.
+    const needsBookOutMileage =
+      res.source === 'reconstructed' &&
+      !!res.reconstruction &&
+      !res.reconstruction.bookOutMileageFound &&
+      !corrections.bookOutMileage.trim()
 
     // Build a download URL from the base64 so the staff can grab the PDF
     // directly regardless of send/download mode.
@@ -215,11 +275,14 @@ function RegenerateDialog({
       }
     }
 
+    if (needsBookOutMileage) setShowCorrections(true)
+
     setResult({
       success: true,
       message: parts.join(' · '),
       downloadUrl,
       downloadName: res.filename,
+      needsBookOutMileage,
     })
   }
 
@@ -246,6 +309,40 @@ function RegenerateDialog({
           className="w-full rounded border border-gray-300 px-2 py-1.5 text-sm focus:border-blue-400 focus:outline-none"
           disabled={busy}
         />
+
+        <button
+          type="button"
+          onClick={() => setShowCorrections(v => !v)}
+          className="mt-3 text-xs font-medium text-blue-700 hover:underline"
+        >
+          {showCorrections ? '− Hide manual corrections' : '+ Manual corrections (optional)'}
+        </button>
+
+        {showCorrections && (
+          <div className="mt-2 space-y-2 rounded border border-gray-200 bg-gray-50 p-3">
+            <p className="text-[11px] text-gray-500">
+              For older records where some details weren&apos;t saved. Fill only what&apos;s
+              missing — anything left blank keeps the auto-detected value. Saving a correction
+              rebuilds the PDF.
+            </p>
+            <CorrectionField label="Driver name" value={corrections.driverName} onChange={v => setCorrection('driverName', v)} disabled={busy} />
+            {isCheckIn && (
+              <>
+                <CorrectionField label="Book-out mileage" type="number" value={corrections.bookOutMileage} onChange={v => setCorrection('bookOutMileage', v)} disabled={busy} />
+                <CorrectionField label="Book-out fuel (e.g. 7/8)" value={corrections.bookOutFuelLevel} onChange={v => setCorrection('bookOutFuelLevel', v)} disabled={busy} />
+                <CorrectionField label="Book-out date" type="date" value={corrections.bookOutDate} onChange={v => setCorrection('bookOutDate', v)} disabled={busy} />
+                <CorrectionField label="Check-in mileage" type="number" value={corrections.mileage} onChange={v => setCorrection('mileage', v)} disabled={busy} />
+              </>
+            )}
+          </div>
+        )}
+
+        {result?.needsBookOutMileage && (
+          <div className="mt-3 rounded bg-amber-50 p-2 text-xs text-amber-800">
+            Book-out mileage couldn&apos;t be established automatically. Enter it under
+            &ldquo;Manual corrections&rdquo; above and regenerate.
+          </div>
+        )}
 
         {result && (
           <div
@@ -295,5 +392,32 @@ function RegenerateDialog({
         </div>
       </div>
     </div>
+  )
+}
+
+function CorrectionField({
+  label,
+  value,
+  onChange,
+  type = 'text',
+  disabled,
+}: {
+  label: string
+  value: string
+  onChange: (v: string) => void
+  type?: 'text' | 'number' | 'date'
+  disabled?: boolean
+}) {
+  return (
+    <label className="block">
+      <span className="mb-0.5 block text-[11px] font-medium text-gray-600">{label}</span>
+      <input
+        type={type}
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        disabled={disabled}
+        className="w-full rounded border border-gray-300 px-2 py-1 text-sm focus:border-blue-400 focus:outline-none"
+      />
+    </label>
   )
 }

@@ -39,7 +39,6 @@ interface IssueRow {
   job_id: string | null;
   vehicle_id: string | null;
   vehicle_reg: string | null;
-  vehicle_name: string | null;
   hh_job_number: number | null;
   status: string;
   category: string;
@@ -148,7 +147,6 @@ export async function sendDamageRepairQuote(opts: {
     `SELECT ji.id, ji.job_id, ji.vehicle_id, ji.status, ji.category,
             ji.summary, ji.description, ji.created_at,
             fv.reg          AS vehicle_reg,
-            fv.vehicle_name AS vehicle_name,
             j.hh_job_number AS hh_job_number
        FROM job_issues ji
        LEFT JOIN fleet_vehicles fv ON fv.id = ji.vehicle_id

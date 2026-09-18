@@ -11,6 +11,8 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
+import { cascadeJobClose } from '../services/job-close-cascade';
+import { closeJobRequirements } from '../services/requirement-close-sweep';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
@@ -99,7 +101,7 @@ router.get('/:jobId/transport-crew', async (req: AuthRequest, res: Response) => 
     try {
       vehicles = await query(
         `SELECT vha.id, vha.status, vha.hire_start, vha.hire_end,
-                fv.reg, fv.name AS vehicle_name
+                fv.reg
          FROM vehicle_hire_assignments vha
          LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
          WHERE vha.job_id = $1 AND vha.status NOT IN ('cancelled')`,
@@ -239,187 +241,36 @@ router.post(
         [timelineContent, jobId, userId]
       );
 
-      // 2a. Flag the requirements the user explicitly chose to KEEP alive.
-      // The blanket cancel pass below skips items with keep_after_close=true,
-      // so flagging happens first. Background scanners (reminder scanner,
-      // hire-form auto-emailer, etc.) check this flag and keep firing kept
-      // items even though the parent job is now in a terminal status.
-      if (Array.isArray(keep_requirement_ids) && keep_requirement_ids.length > 0) {
-        try {
-          await query(
-            `UPDATE job_requirements
-             SET keep_after_close = true,
-                 notes = COALESCE(notes, '') ||
-                         E'\n[Kept alive after job cancelled]',
-                 updated_at = NOW()
-             WHERE id = ANY($1::uuid[])
-               AND job_id = $2
-               AND status NOT IN ('done', 'cancelled')`,
-            [keep_requirement_ids, jobId]
-          );
-        } catch (cancelErr) {
-          console.warn('[Cancellation] Failed to flag kept requirements:', cancelErr);
-        }
-      }
+      // 2/3. Requirement cleanup — flag the keeps, fire any reminder whose
+      //      event_trigger is 'cancelled', then sweep the rest. That order is
+      //      load-bearing: swept first, a reminder set to fire on cancellation
+      //      never fires. Shared with the lost transition, the stale-enquiry
+      //      auto-loser and the HH webhook via
+      //      services/requirement-close-sweep.ts.
+      await closeJobRequirements({
+        jobId,
+        reason: 'cancelled',
+        keepRequirementIds: keep_requirement_ids,
+        actorUserId: userId,
+      });
 
-      // 2b. Fire event-triggered reminders (before blanket mark-as-done)
-      try {
-        const triggered = await query(
-          `SELECT jr.id, jr.custom_label, jr.assigned_to, jr.notes, jr.delivery_method, jr.job_id
-           FROM job_requirements jr
-           WHERE jr.job_id = $1
-             AND jr.requirement_type = 'reminder'
-             AND jr.event_trigger = 'cancelled'
-             AND jr.status NOT IN ('done', 'cancelled')`,
-          [jobId]
-        );
+      // 4/5. Cancel the transport/crew side — quotes, crew assignments,
+      //      vehicle hire assignments, plus the freelancer cancellation
+      //      emails. Shared with the lost transition, the stale-enquiry
+      //      auto-loser and the HH webhook via services/job-close-cascade.ts.
+      //      Without the quote cancellation the Transport Ops page keeps
+      //      showing them in their pre-existing ops bucket, because
+      //      effective_ops_status only reads q.status/q.ops_status — not the
+      //      parent job's state.
+      await cascadeJobClose({ jobId, reason: 'cancelled', actorUserId: userId });
 
-        const jobName = job.job_name || job.client_name || `Job ${job.hh_job_number || ''}`;
-        for (const rem of triggered.rows) {
-          const targetUserId = rem.assigned_to || userId;
-          const title = `Reminder triggered: ${rem.custom_label || 'Reminder'}`;
-          const content = `Job cancelled — ${rem.custom_label || 'Reminder'} (${jobName})`;
-          const deliveryMethod = rem.delivery_method || 'both';
-          const priority = deliveryMethod === 'notification' ? 'low' : 'high';
-
-          await query(
-            `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, source_user_id)
-             VALUES ($1, 'follow_up', $2, $3, 'jobs', $4, $5, $6, $7)`,
-            [targetUserId, title, content, rem.job_id, `/jobs/${rem.job_id}?tab=overview`, priority, userId]
-          );
-
-          if (deliveryMethod === 'email' || deliveryMethod === 'both') {
-            try {
-              const userResult = await query('SELECT u.email, p.first_name FROM users u LEFT JOIN people p ON p.id = u.person_id WHERE u.id = $1', [targetUserId]);
-              if (userResult.rows.length > 0 && userResult.rows[0].email) {
-                await emailService.sendRaw({
-                  to: userResult.rows[0].email,
-                  subject: title,
-                  html: `<p>Hi ${userResult.rows[0].first_name || ''},</p>
-                         <p>Your reminder "<strong>${rem.custom_label || 'Reminder'}</strong>" has been triggered because the job <strong>${jobName}</strong> has been <strong>cancelled</strong>.</p>
-                         ${rem.notes ? `<p>Notes: ${rem.notes}</p>` : ''}
-                         <p><a href="${getFrontendUrl()}/jobs/${rem.job_id}?tab=overview">View Job</a></p>`,
-                });
-              }
-            } catch (emailErr) {
-              console.warn('[Cancellation] Event trigger email failed:', emailErr);
-            }
-          }
-
-          // Mark the reminder as done
-          await query(`UPDATE job_requirements SET status = 'done', updated_at = NOW() WHERE id = $1`, [rem.id]);
-        }
-
-        if (triggered.rows.length > 0) {
-          console.log(`[Cancellation] Fired ${triggered.rows.length} event-triggered reminder(s) for job ${jobId}`);
-        }
-      } catch (triggerErr) {
-        console.warn('[Cancellation] Event trigger check failed:', triggerErr);
-      }
-
-      // 3. Cancel all remaining open requirements EXCEPT those the user
-      // explicitly chose to keep (flagged keep_after_close=true in step 2a).
-      // See CLAUDE.md → "Lost / Cancelled cleanup pattern".
-      await query(
-        `UPDATE job_requirements
-         SET status = 'cancelled',
-             notes = COALESCE(notes, '') || ' [Cancelled]',
-             updated_at = NOW()
-         WHERE job_id = $1
-           AND status NOT IN ('done', 'cancelled')
-           AND keep_after_close = false`,
-        [jobId]
-      );
-
-      // 4. Cancel vehicle assignments.
-      //    Dual job match catches V&D-style rows (`job_id IS NULL`,
-      //    only `hirehop_job_id` set). Exclude already-terminal states
-      //    (returned / swapped) to avoid re-marking historic rows.
-      //    Recompute fleet hire_status for each affected vehicle so the
-      //    cached projection catches up immediately.
-      const sweptVha = await query(
-        `UPDATE vehicle_hire_assignments
-           SET status = 'cancelled',
-               status_changed_at = NOW(),
-               notes = COALESCE(notes, '') || E'\n[Auto-cancelled: job cancelled]',
-               updated_at = NOW()
-         WHERE (job_id = $1
-                OR (job_id IS NULL AND hirehop_job_id = $2::integer))
-           AND status NOT IN ('cancelled', 'returned', 'swapped')
-         RETURNING id, vehicle_id`,
-        [jobId, job.hh_job_number ?? null]
-      );
-      if (sweptVha.rows.length > 0) {
-        const { syncFleetHireStatus } = await import('../services/fleet-hire-status-sync');
-        const seen = new Set<string>();
-        for (const r of sweptVha.rows) {
-          if (r.vehicle_id && !seen.has(r.vehicle_id)) {
-            seen.add(r.vehicle_id);
-            try { await syncFleetHireStatus(r.vehicle_id); }
-            catch (e) { console.warn('[Cancellation] syncFleetHireStatus failed:', e); }
-          }
-        }
-      }
-
-      // 5a. Cancel the transport/crew quotes themselves. Without this the
-      // Transport Ops page keeps showing them in their pre-existing ops
-      // bucket (Arranging/Arranged/…) because effective_ops_status only
-      // reads q.status/q.ops_status — not the parent job's state.
-      await query(
-        `UPDATE quotes
-           SET status = 'cancelled',
-               ops_status = 'cancelled',
-               status_changed_at = NOW(),
-               status_changed_by = $2,
-               cancelled_reason = COALESCE(cancelled_reason, 'Parent job cancelled'),
-               updated_at = NOW()
-         WHERE job_id = $1
-           AND is_deleted = false
-           AND status NOT IN ('cancelled', 'completed')`,
-        [jobId, userId]
-      );
-
-      // 5b. Cancel crew assignments + send emails
-      const crewResult = await query(
-        `SELECT qa.id, qa.role, qa.status, p.first_name, p.last_name, p.email
-         FROM quote_assignments qa
-         JOIN people p ON p.id = qa.person_id
-         WHERE qa.quote_id IN (SELECT id FROM quotes WHERE job_id = $1 AND is_deleted = false)
-           AND qa.status NOT IN ('cancelled', 'declined')`,
-        [jobId]
-      );
-
-      // Cancel all crew assignments
-      if (crewResult.rows.length > 0) {
-        await query(
-          `UPDATE quote_assignments SET status = 'cancelled'
-           WHERE quote_id IN (SELECT id FROM quotes WHERE job_id = $1 AND is_deleted = false)
-             AND status NOT IN ('cancelled', 'declined')`,
-          [jobId]
-        );
-      }
-
-      // Email crew members
+      // Job display fields — still needed below by the internal + client
+      // cancellation emails (the crew email now lives in the cascade).
       const jobNumber = job.hh_job_number ? `J-${job.hh_job_number}` : 'NEW';
       const jobName = job.job_name || 'Untitled';
       const jobDates = [job.job_date, job.job_end].filter(Boolean).map(
         (d: string) => new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
       ).join(' — ');
-
-      for (const crew of crewResult.rows) {
-        if (crew.email) {
-          emailService.send('job_cancelled_crew', {
-            to: crew.email,
-            variables: {
-              crewName: `${crew.first_name} ${crew.last_name}`.trim(),
-              jobName,
-              jobNumber,
-              jobDates,
-              crewRole: crew.role || 'Crew',
-            },
-          }).catch(err => console.error(`[Cancellation] Failed to email crew ${crew.email}:`, err));
-        }
-      }
 
       // 6. Flag excess records for refund — add cancellation note, don't change status
       // (staff processes actual refund via Money tab / excess ledger)
@@ -720,9 +571,18 @@ router.get('/list', async (req: AuthRequest, res: Response) => {
               j.cancelled_at, j.cancellation_reason, j.cancellation_fee,
               j.cancellation_refund, j.cancellation_tier, j.cancellation_notice_days,
               j.cancellation_notes, j.reopened_to_job_id,
-              m1p.first_name as manager1_first_name, m1p.last_name as manager1_last_name
+              m1p.first_name as manager1_first_name, m1p.last_name as manager1_last_name,
+              -- Canonical client name + the org ★'d to headline this job. The
+              -- list previously showed HireHop's raw company_name/client_name,
+              -- so a job whose client had been changed in OP kept showing the
+              -- old name here while Job Detail showed the new one.
+              o.name AS client_org_name,
+              (SELECT lo.name FROM job_organisations jo
+                 JOIN organisations lo ON lo.id = jo.organisation_id
+                WHERE jo.job_id = j.id AND jo.is_primary = true LIMIT 1) AS lead_org_name
        FROM jobs j
        LEFT JOIN people m1p ON m1p.id = j.manager1_person_id
+       LEFT JOIN organisations o ON o.id = j.client_id AND o.is_deleted = false
        WHERE ${whereClause}
        ORDER BY ${orderBy}
        LIMIT $${pIdx} OFFSET $${pIdx + 1}`,

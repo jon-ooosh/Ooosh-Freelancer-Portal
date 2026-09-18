@@ -17,6 +17,10 @@ interface SearchResult {
   // post-confirmation (OperationalStatus) values — typed as string here.
   pipeline_status?: string | null;
   hh_status?: number | null;
+  // A dismissed ("dud-ed") enquiry keeps its pre-confirmation pipeline_status
+  // (new_enquiry/quoting/paused) — dismissal is an overlay flag, not a status
+  // value — so the badge must key off this rather than pipeline_status.
+  is_dismissed?: boolean;
 }
 
 const typeLabels: Record<string, string> = {
@@ -44,6 +48,12 @@ const HH_TO_OPERATIONAL: Record<number, OperationalStatus> = {
 };
 
 function jobBadge(result: SearchResult): { label: string; colour: string } {
+  // A dismissed ("dud-ed") enquiry is no longer an enquiry — short-circuit
+  // before the pipeline_status derivation, which would otherwise render the
+  // blue "Enquiries" badge (dismissal leaves pipeline_status untouched).
+  if (result.is_dismissed) {
+    return { label: 'Dismissed', colour: '#6B7280' };
+  }
   // OP's pipeline_status is the source of truth — it holds both pipeline
   // (pre-confirmation) and operational (post-confirmation) values. HH status
   // is only consulted as a fallback when pipeline_status is missing, since

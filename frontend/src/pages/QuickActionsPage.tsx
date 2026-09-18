@@ -12,10 +12,9 @@ import { useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { HeldItemForm } from '../components/holding/HeldItemForm';
-import { locationLabel } from '../components/holding/format';
-import type { HeldItem, HeldItemLocation } from '../../../shared/types';
+import { HeldItemPicker, HandoverFlow } from '../components/holding/HeldItemPicker';
+import type { HeldItemLocation } from '../../../shared/types';
 
-const inputCls = 'w-full border border-slate-300 rounded-xl px-4 py-3 text-base';
 
 type Action = 'package' | 'lost' | 'handover';
 
@@ -95,29 +94,15 @@ function Sheet({ title, onClose, children }: { title: string; onClose: () => voi
 
 // ── Package arrived — search FIRST (receive an expected/known one), then create ──
 // Collapses "is it already on the list?" and "log a new one" into one screen so
-// staff don't flick between pages.
+// staff don't flick between pages. The picker itself is shared with the desktop
+// /holding page (components/holding/HeldItemPicker).
 function PackageArrivedSheet({ locations, onClose, onSaved }: { locations: HeldItemLocation[]; onClose: () => void; onSaved: () => void }) {
   const navigate = useNavigate();
   const [mode, setMode] = useState<'search' | 'create'>('search');
-  const [q, setQ] = useState('');
-  const [items, setItems] = useState<HeldItem[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    const t = setTimeout(async () => {
-      setLoading(true);
-      try {
-        const qs = new URLSearchParams();
-        if (q.trim()) qs.set('search', q.trim());
-        const r = await api.get<{ data: HeldItem[] }>(`/holding?${qs.toString()}`);
-        setItems(r.data.filter((i) => i.kind === 'incoming' || i.kind === 'temp_storage'));
-      } finally { setLoading(false); }
-    }, 250);
-    return () => clearTimeout(t);
-  }, [q]);
 
   if (mode === 'create') {
     // Reuse the create form; its Cancel returns to search rather than closing.
+    // arrivedDefault: you're standing there holding the box.
     return <QuickLogSheet kind="incoming" locations={locations} onClose={() => setMode('search')} onSaved={onSaved} />;
   }
 
@@ -125,22 +110,9 @@ function PackageArrivedSheet({ locations, onClose, onSaved }: { locations: HeldI
     <Sheet title="📦 Package arrived" onClose={onClose}>
       <div className="max-w-md mx-auto">
         <p className="text-sm text-slate-500 mb-2">Is it already expected? Search by job #, client or description — tap to receive it. If it's not listed, log it as new.</p>
-        <input autoFocus className={inputCls} value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search expected deliveries…" />
-        <div className="mt-3 space-y-2">
-          {loading && <p className="text-slate-400 text-sm text-center py-3">Loading…</p>}
-          {!loading && items.length === 0 && <p className="text-slate-400 text-sm text-center py-3">Nothing matching — log it as new below.</p>}
-          {items.map((h) => (
-            <button key={h.id} onClick={() => navigate(`/holding/receipt/${h.id}`)}
-              className="w-full text-left border border-slate-200 rounded-xl px-4 py-3 active:bg-slate-50">
-              <p className="font-medium text-slate-800">{h.description || 'Delivery'}
-                <span className={`ml-2 text-[10px] px-1.5 py-0.5 rounded capitalize ${h.status === 'expected' ? 'bg-amber-100 text-amber-800' : 'bg-blue-100 text-blue-700'}`}>{h.status.replace(/_/g, ' ')}</span></p>
-              <p className="text-xs text-slate-500">
-                {h.owner_person_name || h.owner_organisation_name || h.client_name_text || (h.owner_unknown ? '❓ Unknown' : '—')}
-                {h.hh_job_number ? ` · #${h.hh_job_number}` : ''}{h.box_count ? ` · ${h.box_count} box(es)` : ''}
-              </p>
-            </button>
-          ))}
-        </div>
+        <HeldItemPicker kinds={['incoming', 'temp_storage']} placeholder="Search expected deliveries…"
+          emptyHint="Nothing matching — log it as new below."
+          onPick={(h) => navigate(`/holding/receipt/${h.id}`)} />
         <button onClick={() => setMode('create')}
           className="w-full mt-4 border-2 border-dashed border-slate-300 rounded-xl py-3 text-slate-600 font-medium">
           + Not listed — log a new package
@@ -163,71 +135,12 @@ function QuickLogSheet({ kind, locations, onClose, onSaved }: { kind: 'incoming'
 }
 
 // ── Handover / collected ────────────────────────────────────────────────────
+// Picker + confirm are shared with the desktop /holding page.
 function HandoverSheet({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
-  const [q, setQ] = useState('');
-  const [items, setItems] = useState<HeldItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [picked, setPicked] = useState<HeldItem | null>(null);
-  const [who, setWho] = useState('');
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    const t = setTimeout(async () => {
-      setLoading(true);
-      try {
-        const qs = new URLSearchParams();
-        if (q.trim()) qs.set('search', q.trim());
-        const r = await api.get<{ data: HeldItem[] }>(`/holding?${qs.toString()}`);
-        setItems(r.data);
-      } finally { setLoading(false); }
-    }, 250);
-    return () => clearTimeout(t);
-  }, [q]);
-
-  async function confirm() {
-    if (!picked) return;
-    setSaving(true);
-    try { await api.post(`/holding/${picked.id}/collected`, { collected_by: who || null }); onSaved(); }
-    finally { setSaving(false); }
-  }
-
-  if (picked) {
-    return (
-      <Sheet title="✅ Confirm handover" onClose={() => setPicked(null)}>
-        <div className="space-y-4 max-w-md mx-auto">
-          <div className="bg-slate-50 rounded-xl p-4">
-            <p className="font-semibold text-slate-800">{picked.description || 'Item'}</p>
-            <p className="text-sm text-slate-500">{picked.owner_person_name || picked.owner_organisation_name || picked.client_name_text || 'Unknown owner'}
-              {locationLabel(picked) ? ` · ${locationLabel(picked)}` : ''}</p>
-          </div>
-          <div><label className="block text-sm text-slate-500 mb-1">Collected / received by (optional)</label>
-            <input autoFocus className={inputCls} value={who} onChange={(e) => setWho(e.target.value)} placeholder="Name" /></div>
-          <button onClick={confirm} disabled={saving} className="w-full bg-green-600 text-white rounded-xl py-4 text-lg font-semibold disabled:opacity-50">
-            {saving ? 'Saving…' : picked.kind === 'incoming' ? 'Given to client' : 'Mark collected'}</button>
-        </div>
-      </Sheet>
-    );
-  }
-
   return (
     <Sheet title="✅ Handover / collected" onClose={onClose}>
       <div className="max-w-md mx-auto">
-        <input autoFocus className={inputCls} value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search by description / client…" />
-        <div className="mt-3 space-y-2">
-          {loading && <p className="text-slate-400 text-sm text-center py-4">Loading…</p>}
-          {!loading && items.length === 0 && <p className="text-slate-400 text-sm text-center py-4">Nothing open to hand over.</p>}
-          {items.map((h) => (
-            <button key={h.id} onClick={() => setPicked(h)}
-              className="w-full text-left border border-slate-200 rounded-xl px-4 py-3 active:bg-slate-50">
-              <p className="font-medium text-slate-800">{h.description || 'Item'}</p>
-              <p className="text-xs text-slate-500">
-                {h.owner_person_name || h.owner_organisation_name || h.client_name_text || (h.owner_unknown ? '❓ Unknown' : '—')}
-                {locationLabel(h) ? ` · ${locationLabel(h)}` : ''}
-                {h.hh_job_number ? ` · #${h.hh_job_number}` : ''}
-              </p>
-            </button>
-          ))}
-        </div>
+        <HandoverFlow onDone={onSaved} />
       </div>
     </Sheet>
   );

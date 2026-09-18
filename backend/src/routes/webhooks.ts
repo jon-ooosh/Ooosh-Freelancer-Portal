@@ -20,6 +20,9 @@ import {
   sendConfirmationSilentSkipAlert,
 } from '../services/confirmation-hooks';
 import { reactivateAutoCancelledRequirements } from '../services/requirement-cleanup';
+import { cascadeJobClose, reactivateAutoCancelledQuotes } from '../services/job-close-cascade';
+import { closeJobRequirements } from '../services/requirement-close-sweep';
+import { sendLastMinuteAlert } from '../services/money-emails';
 
 const router = Router();
 
@@ -256,15 +259,44 @@ async function handleJobStatusChange(
       job.pipeline_status === 'dispatched' && newPipelineStatus !== 'dispatched';
     const clearReturnedMarker =
       job.pipeline_status === 'returned' && newPipelineStatus !== 'returned';
+    // Same idea for the one-shot last-minute alert (migration 226): a job HH
+    // marks Cancelled / Not Interested drops its marker, so if it comes back
+    // to life at short notice the alert is allowed to fire again.
+    const clearLastMinuteMarker =
+      newPipelineStatus === 'lost' || newPipelineStatus === 'cancelled';
 
     await query(
       `UPDATE jobs SET pipeline_status = $1, pipeline_status_changed_at = NOW(), updated_at = NOW()
          ${clearChase ? ', next_chase_date = NULL' : ''}
          ${clearDispatchMarker ? ', under_dispatch_warned_at = NULL' : ''}
          ${clearReturnedMarker ? ', returned_bookedout_warned_at = NULL' : ''}
+         ${clearLastMinuteMarker ? ', last_minute_alerted_at = NULL' : ''}
        WHERE id = $2`,
       [newPipelineStatus, job.id],
     );
+
+    // Close cascade: a job marked Cancelled / Not Interested IN HIREHOP used
+    // to flip pipeline_status here and nothing else, leaving live transport
+    // quotes + crew assignments behind. Same cleanup the OP-side transitions
+    // do — unattended, so no actor user.
+    if (
+      (newPipelineStatus === 'lost' && job.pipeline_status !== 'lost') ||
+      (newPipelineStatus === 'cancelled' && job.pipeline_status !== 'cancelled')
+    ) {
+      await cascadeJobClose({
+        jobId: job.id,
+        reason: newPipelineStatus as 'lost' | 'cancelled',
+        actorUserId: null,
+      });
+      // Requirement cleanup — fires any reminder whose event_trigger matches
+      // this status, then sweeps the rest. No keep-list on an unattended
+      // path; rows already flagged keep_after_close survive.
+      await closeJobRequirements({
+        jobId: job.id,
+        reason: newPipelineStatus as 'lost' | 'cancelled',
+        actorUserId: null,
+      });
+    }
 
     // Resurrection: reverse the Lost / Cancelled requirement sweep when HH
     // moves the job back out of lost/cancelled. Marker-gated so staff-cancelled
@@ -282,6 +314,19 @@ async function handleJobStatusChange(
         }
       } catch (reactivateErr) {
         console.warn('[Webhook] Failed to reactivate auto-cancelled requirements:', reactivateErr);
+      }
+      // Quotes the close cascade cancelled come back too — draft/todo, and
+      // WITHOUT their crew (re-offering a freelancer who was told the job was
+      // off stays a human decision).
+      try {
+        const revived = await reactivateAutoCancelledQuotes(job.id);
+        if (revived.reactivatedCount > 0) {
+          console.log(
+            `[Webhook] Reactivated ${revived.reactivatedCount} auto-cancelled quote(s) on resurrection (${job.pipeline_status} → ${newPipelineStatus}) for job ${job.id}`,
+          );
+        }
+      } catch (reactivateErr) {
+        console.warn('[Webhook] Failed to reactivate auto-cancelled quotes:', reactivateErr);
       }
     }
 
@@ -310,6 +355,14 @@ async function handleJobStatusChange(
     // on-confirmation send AND was at the mercy of the daily 09:00 scheduler
     // hitting the exact 10-day mark.
     if (newPipelineStatus === 'confirmed' && job.pipeline_status !== 'confirmed') {
+      // Last-minute alert. Until now this only fired on OP-side confirmations,
+      // so a job booked at short notice and confirmed by staff IN HIREHOP went
+      // unannounced. Same guards as everywhere else — sendLastMinuteAlert()
+      // decides from `job.pipeline_status` (the status we came from) whether
+      // this was the booking being won, and can only fire once per job.
+      sendLastMinuteAlert(job.id, job.pipeline_status).catch(e =>
+        console.error('[HH webhook] Last-minute alert failed:', e),
+      );
       void (async () => {
         try {
           const hfResult = await triggerHireFormEmailOnConfirmation(job.id);
@@ -395,7 +448,10 @@ async function handleJobUpdate(
     RETURN_DATE: 'return_date',
     MANAGER: 'manager1_name',
     MANAGER2: 'manager2_name',
-    MONEY: 'job_value',
+    // MONEY deliberately NOT mapped to job_value — HH's MONEY field is
+    // empty/0 for most jobs and used to clobber the cached display value
+    // back to £0. job_value is owned by the billing-accrued path (Money
+    // tab side-effect + services/job-value-sync gap-filler).
   };
 
   // HH search_list / webhook payloads decorate JOB_NAME for sub-jobs as
@@ -542,6 +598,26 @@ router.post('/external/status-transition', async (req: Request, res: Response) =
       [newPipelineStatus, new_status, getHHStatusName(new_status), job.id],
     );
 
+    // Close cascade — same as the HH webhook path above.
+    if (
+      (newPipelineStatus === 'lost' && job.pipeline_status !== 'lost') ||
+      (newPipelineStatus === 'cancelled' && job.pipeline_status !== 'cancelled')
+    ) {
+      await cascadeJobClose({
+        jobId: job.id,
+        reason: newPipelineStatus as 'lost' | 'cancelled',
+        actorUserId: null,
+      });
+      // Requirement cleanup — fires any reminder whose event_trigger matches
+      // this status, then sweeps the rest. No keep-list on an unattended
+      // path; rows already flagged keep_after_close survive.
+      await closeJobRequirements({
+        jobId: job.id,
+        reason: newPipelineStatus as 'lost' | 'cancelled',
+        actorUserId: null,
+      });
+    }
+
     // Resurrection: reverse the Lost / Cancelled requirement sweep when an
     // external caller moves the job back out of lost/cancelled. Marker-gated
     // so staff-cancelled rows stay cancelled.
@@ -558,6 +634,16 @@ router.post('/external/status-transition', async (req: Request, res: Response) =
         }
       } catch (reactivateErr) {
         console.warn('[Webhook/external] Failed to reactivate auto-cancelled requirements:', reactivateErr);
+      }
+      try {
+        const revived = await reactivateAutoCancelledQuotes(job.id);
+        if (revived.reactivatedCount > 0) {
+          console.log(
+            `[Webhook/external] Reactivated ${revived.reactivatedCount} auto-cancelled quote(s) on resurrection (${job.pipeline_status} → ${newPipelineStatus}) for job ${job.id}`,
+          );
+        }
+      } catch (reactivateErr) {
+        console.warn('[Webhook/external] Failed to reactivate auto-cancelled quotes:', reactivateErr);
       }
     }
 

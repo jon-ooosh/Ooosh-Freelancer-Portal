@@ -362,6 +362,11 @@ const updateRequirementSchema = z.object({
   due_date: z.string().nullable().optional(),
   custom_label: z.string().nullable().optional(),
   sort_order: z.number().optional(),
+  // Reminder-editable fields (see JobDetailPage "Edit Reminder" flow). These
+  // are settable at create time but were previously locked out of PATCH, so a
+  // reminder could only be deleted-and-recreated to change its trigger/delivery.
+  event_trigger: z.string().nullable().optional(),
+  delivery_method: z.string().nullable().optional(),
 });
 
 router.patch('/:id', validate(updateRequirementSchema), async (req: AuthRequest, res: Response) => {

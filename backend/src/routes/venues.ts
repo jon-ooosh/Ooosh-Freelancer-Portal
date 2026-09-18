@@ -1,12 +1,21 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
-import { authenticate, authorize, AuthRequest } from '../middleware/auth';
+import { authenticate, authorize, STAFF_ROLES, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
 
 const router = Router();
 router.use(authenticate);
+// Staff only. `authenticate` alone let ANY active user through, and a
+// `freelancer` account is an ordinary `users` row that logs in through
+// POST /api/auth/login with no role gate — so a freelancer held a valid OP
+// JWT and could create, edit or delete venue records. Nothing in the
+// freelancer-facing surfaces reads this router (the portal uses
+// /api/portal/*, and the vehicles book-out kiosk's scoped token never calls
+// /api/venues), so gating the whole router costs nothing and matches how
+// every other reference route is protected.
+router.use(authorize(...STAFF_ROLES));
 
 const fileSchema = z.object({
   name: z.string(),
