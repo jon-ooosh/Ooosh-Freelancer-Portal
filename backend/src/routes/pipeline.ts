@@ -517,7 +517,12 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
       updates.push(`confirmed_method = $${pIdx}`);
       updateParams.push(confirmed_method || null);
       pIdx++;
-      updates.push(`confirmed_at = NOW()`);
+      // COALESCE, not NOW(): this route is also how a job gets moved BACK to
+      // confirmed from prepped/dispatched when someone corrects a status, and
+      // a bare NOW() rewrote the original confirmation date every time. Job
+      // 15912 was confirmed in early June and its confirmed_at read 20 August
+      // because of a prepped → confirmed correction that morning.
+      updates.push(`confirmed_at = COALESCE(confirmed_at, NOW())`);
       // Clear chase date — once confirmed, chasing belongs to the reminders
       // system, not the enquiry chase pipeline.
       updates.push(`next_chase_date = NULL`);
@@ -531,12 +536,17 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
       updates.push(`lost_at = NOW()`);
       // Clear chase date — lost jobs don't need chasing
       updates.push(`next_chase_date = NULL`);
+      // Drop the one-shot last-minute marker (migration 226) — if this job ever
+      // comes back to life at short notice, that IS a last-minute booking.
+      updates.push(`last_minute_alerted_at = NULL`);
     } else if (pipeline_status === 'cancelled') {
       // Cancellation fields are populated by the cancellations route (POST /api/cancellations/:id/process)
       // The pipeline status change here just sets the status; the cancellation route handles the full workflow.
       // Clear chase date — cancelled jobs don't need chasing
       updates.push(`next_chase_date = NULL`);
       updates.push(`cancelled_at = NOW()`);
+      // Same as the lost branch — see migration 226.
+      updates.push(`last_minute_alerted_at = NULL`);
     } else if (pipeline_status === 'provisional') {
       // Auto-bump chase: moving INTO provisional from a pre-confirmed enquiry
       // stage signals "we have movement, expect a deposit/decision soon".
@@ -713,9 +723,14 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
       await fireEventTriggeredReminders(jobId, 'confirmed', req.user!.id);
     }
 
-    // Last-minute booking alert (any route to confirmed, job starts within 3 days)
+    // Last-minute booking alert + hire form email. `fromStatus` is what decides
+    // whether this was the booking being WON — sendLastMinuteAlert() owns that
+    // judgement (BOOKING_WON_FROM_STATUSES) so every caller applies it the same
+    // way. Firing on "pipeline_status === 'confirmed'" alone is what alerted
+    // info@ about jobs booked weeks earlier: a `prepped → confirmed` status
+    // correction the morning the van went out looked identical to a new booking.
     if (pipeline_status === 'confirmed') {
-      sendLastMinuteAlert(jobId).catch(e => console.error('[Pipeline] Last-minute alert failed:', e));
+      sendLastMinuteAlert(jobId, fromStatus).catch(e => console.error('[Pipeline] Last-minute alert failed:', e));
 
       // Hire form email: runs HH-derivation inline (covers HH-synced jobs whose
       // requirements hadn't yet been derived) and fires the hire form request

@@ -2255,6 +2255,9 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
     // last-minute alert, hire-form auto-send). Use `statusChanged`, never
     // "is currently confirmed", to gate those side effects.
     let statusChanged = false;
+    // The status the job was on when this payment confirmed it — sendLastMinuteAlert()
+    // needs it to tell a won booking from a status correction (see migration 226).
+    let confirmedFromStatus: string | null = null;
     if ((payment_type === 'deposit' || payment_type === 'balance') && amount > 0) {
       try {
         const statusResult = await query(
@@ -2271,6 +2274,7 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
             [job.id]
           );
           statusChanged = true;
+          confirmedFromStatus = currentStatus;
           console.log(`[money] Job ${job.id} moved to confirmed (deposit received)`);
 
           // Push status to HireHop (status 2 = Booked).
@@ -2428,7 +2432,7 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
         // Last-minute alert: only fires when this payment actually confirmed
         // the booking. Receipts on already-confirmed jobs must not re-alert.
         if (statusChanged) {
-          sendLastMinuteAlert(job.id).catch(e => console.error('[money] Last-minute alert failed:', e));
+          sendLastMinuteAlert(job.id, confirmedFromStatus).catch(e => console.error('[money] Last-minute alert failed:', e));
         }
       }
     } catch (emailErr) {
@@ -3447,6 +3451,9 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
     // ── Status transition: deposit/balance payment on pre-confirmed job → Confirmed ──
     // Portal already creates the HH deposit, so we only update OP status + push HH status.
     let statusChanged = false;
+    // The status the job was on when this payment confirmed it — sendLastMinuteAlert()
+    // needs it to tell a won booking from a status correction (see migration 226).
+    let confirmedFromStatus: string | null = null;
     if ((payment_type === 'deposit' || payment_type === 'balance') && amount > 0) {
       try {
         const statusResult = await query(
@@ -3463,6 +3470,7 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
             [job.id]
           );
           statusChanged = true;
+          confirmedFromStatus = currentStatus;
           console.log(`[money] Job ${job.id} moved to confirmed (payment portal deposit received)`);
 
           // Push status to HireHop (status 2 = Booked).
@@ -3560,7 +3568,7 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
 
         // Last-minute alert if job starts within 3 days and we just confirmed
         if (statusChanged) {
-          sendLastMinuteAlert(job.id).catch(e => console.error('[money] Last-minute alert failed (payment-event):', e));
+          sendLastMinuteAlert(job.id, confirmedFromStatus).catch(e => console.error('[money] Last-minute alert failed (payment-event):', e));
         }
       }
     } catch (emailErr) {

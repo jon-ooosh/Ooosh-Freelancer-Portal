@@ -22,6 +22,7 @@ import {
 import { reactivateAutoCancelledRequirements } from '../services/requirement-cleanup';
 import { cascadeJobClose, reactivateAutoCancelledQuotes } from '../services/job-close-cascade';
 import { closeJobRequirements } from '../services/requirement-close-sweep';
+import { sendLastMinuteAlert } from '../services/money-emails';
 
 const router = Router();
 
@@ -258,12 +259,18 @@ async function handleJobStatusChange(
       job.pipeline_status === 'dispatched' && newPipelineStatus !== 'dispatched';
     const clearReturnedMarker =
       job.pipeline_status === 'returned' && newPipelineStatus !== 'returned';
+    // Same idea for the one-shot last-minute alert (migration 226): a job HH
+    // marks Cancelled / Not Interested drops its marker, so if it comes back
+    // to life at short notice the alert is allowed to fire again.
+    const clearLastMinuteMarker =
+      newPipelineStatus === 'lost' || newPipelineStatus === 'cancelled';
 
     await query(
       `UPDATE jobs SET pipeline_status = $1, pipeline_status_changed_at = NOW(), updated_at = NOW()
          ${clearChase ? ', next_chase_date = NULL' : ''}
          ${clearDispatchMarker ? ', under_dispatch_warned_at = NULL' : ''}
          ${clearReturnedMarker ? ', returned_bookedout_warned_at = NULL' : ''}
+         ${clearLastMinuteMarker ? ', last_minute_alerted_at = NULL' : ''}
        WHERE id = $2`,
       [newPipelineStatus, job.id],
     );
@@ -348,6 +355,14 @@ async function handleJobStatusChange(
     // on-confirmation send AND was at the mercy of the daily 09:00 scheduler
     // hitting the exact 10-day mark.
     if (newPipelineStatus === 'confirmed' && job.pipeline_status !== 'confirmed') {
+      // Last-minute alert. Until now this only fired on OP-side confirmations,
+      // so a job booked at short notice and confirmed by staff IN HIREHOP went
+      // unannounced. Same guards as everywhere else — sendLastMinuteAlert()
+      // decides from `job.pipeline_status` (the status we came from) whether
+      // this was the booking being won, and can only fire once per job.
+      sendLastMinuteAlert(job.id, job.pipeline_status).catch(e =>
+        console.error('[HH webhook] Last-minute alert failed:', e),
+      );
       void (async () => {
         try {
           const hfResult = await triggerHireFormEmailOnConfirmation(job.id);
