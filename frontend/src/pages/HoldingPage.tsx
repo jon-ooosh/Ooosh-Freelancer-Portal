@@ -13,6 +13,7 @@ import ThreadView from '../components/messaging/ThreadView';
 import { MentionComposer } from '../components/messaging/MentionComposer';
 import { useAttachments } from '../components/messaging/Attachments';
 import type { HeldItem, HeldItemKind, HeldItemLocation, HeldItemNextAction } from '../../../shared/types';
+import { openR2Key } from '../lib/openAuthedFile';
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 const fmtDate = (d: string | null | undefined) => (d ? new Date(d).toLocaleDateString('en-GB') : '—');
@@ -501,8 +502,7 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
 
   async function viewPhoto(key: string) {
     try {
-      const { blob } = await api.blob(`/files/download?key=${encodeURIComponent(key)}`);
-      window.open(URL.createObjectURL(blob), '_blank');
+      await openR2Key(key);
     } catch { setMsg('Could not open photo.'); }
   }
 

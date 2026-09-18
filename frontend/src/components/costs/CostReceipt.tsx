@@ -52,9 +52,18 @@ export function ReceiptThumb({ cost, onOpen, size = 'md' }: {
   // is never fetched. The rest — waiting for the row to scroll into range,
   // aborting if it scrolls away again — is the hook's job.
   const { ref, url, contentType } = useAuthedFileUrl(key, { enabled: looksLikeImage(cost) });
+  // Neither the extension nor the content type proves the BROWSER can draw it.
+  // A .heic straight off an iPhone is a genuine image/heic and every browser
+  // but Safari refuses it, which rendered an empty box where the 📎 belonged.
+  // Same story for a truncated upload. Only the decode is the last word, so
+  // mirror DocumentThumb and keep a local flag for it. (Same-shape state as
+  // the hook's own `failed`, which only covers the fetch.)
+  const [imgFailed, setImgFailed] = useState(false);
+  // A new file in the same slot deserves a fresh attempt.
+  useEffect(() => { setImgFailed(false); }, [url]);
   // The extension got us this far; the content type is what decides. A
   // mislabelled upload falls back to the 📎 rather than a broken <img>.
-  const thumb = url && contentType.startsWith('image/') ? url : null;
+  const thumb = url && !imgFailed && contentType.startsWith('image/') ? url : null;
 
   if (!key) return null;
   const box = size === 'sm' ? 'w-6 h-6' : 'w-8 h-8';
@@ -65,7 +74,9 @@ export function ReceiptThumb({ cost, onOpen, size = 'md' }: {
     <span ref={ref} className="relative inline-flex shrink-0">
       <button onClick={onOpen} title={extra ? `View receipt (+${extra} supporting)` : 'View receipt'}
         className={`shrink-0 ${box} rounded border border-gray-200 overflow-hidden bg-gray-50 flex items-center justify-center hover:border-purple-400`}>
-        {thumb ? <img src={thumb} alt="receipt" className="w-full h-full object-cover" /> : <span className="text-sm">📎</span>}
+        {thumb
+          ? <img src={thumb} alt="receipt" className="w-full h-full object-cover" onError={() => setImgFailed(true)} />
+          : <span className="text-sm">📎</span>}
       </button>
       {extra > 0 && (
         <span className="absolute -top-1 -right-1 px-1 min-w-[14px] text-[9px] leading-[14px] text-center font-semibold

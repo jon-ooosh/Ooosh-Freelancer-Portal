@@ -19,6 +19,7 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../services/api';
+import { openR2Key } from '../lib/openAuthedFile';
 
 interface Gmr {
   id: string;
@@ -627,10 +628,8 @@ function DocsManager({ carnet, reload }: { carnet: Carnet; reload: () => Promise
 function DownloadLink({ k, label }: { k: string; label: string }) {
   const open = async () => {
     try {
-      const { blob } = await api.blob(`/files/download?key=${encodeURIComponent(k)}`);
-      const url = URL.createObjectURL(blob);
-      window.open(url, '_blank');
-      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      // No filename passed — `label` is UI copy ("Signed carnet"), not a filename.
+      await openR2Key(k);
     } catch { /* ignore */ }
   };
   return <button onClick={open} className="text-purple-600 hover:text-purple-800 hover:underline text-left">{label}</button>;

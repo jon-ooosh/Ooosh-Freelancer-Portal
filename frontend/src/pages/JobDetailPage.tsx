@@ -47,6 +47,7 @@ import type { FileAttachment, PipelineStatus, HoldReason, ConfirmedMethod } from
 import { PIPELINE_STATUS_CONFIG, LOST_REASON_OPTIONS, PAUSED_REASON_OPTIONS } from '@shared/index';
 import { defaultRevisitDate, REVISIT_LEAD_DAYS_UNDER_MINIMUM } from '../lib/revisitDate';
 import { jobClientName, jobClientNameOr } from '../lib/jobOrgName';
+import { openAuthedFile } from '../lib/openAuthedFile';
 
 
 // Stable reference — HeldItemsSection takes `kinds` as an effect dependency, so
@@ -920,11 +921,7 @@ function HireFormActions({ assignmentId, pdfKey, pdfGeneratedAt, vehicleId }: {
     setGenerating(true);
     setMessage(null);
     try {
-      const { blob } = await api.blob(`/hire-forms/${assignmentId}/download`);
-      const url = URL.createObjectURL(blob);
-      window.open(url, '_blank', 'noopener,noreferrer');
-      // Revoke after a delay so the new tab has time to load the PDF.
-      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      await openAuthedFile(`/hire-forms/${assignmentId}/download`, 'hire-agreement.pdf');
     } catch (err) {
       setMessage(`Error: ${err instanceof Error ? err.message : 'Failed to open PDF'}`);
     } finally {

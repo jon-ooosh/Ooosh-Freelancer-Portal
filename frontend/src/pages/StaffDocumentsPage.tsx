@@ -5,6 +5,7 @@ import { SignatureCapture, SignatureCaptureHandle } from '../modules/vehicles/co
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
 import { DocFormModal, VersionModal, ViewModal, DocRow, UserRow, ApprovalStatus } from './StaffDocumentsAdminPage';
+import { openR2Key, openAuthedFile } from '../lib/openAuthedFile';
 
 type Mode = 'read_only' | 'tick' | 'sign';
 
@@ -47,14 +48,12 @@ function fmt(d: string | null): string {
 }
 
 async function openR2File(key: string) {
-  const { blob } = await api.blob(`/files/download?key=${encodeURIComponent(key)}`);
-  window.open(URL.createObjectURL(blob), '_blank');
+  await openR2Key(key);
 }
 
 // Signed copy via the ownership-checked endpoint (never a raw key).
 async function openCompletionPdf(completionId: string) {
-  const { blob } = await api.blob(`/staff-documents/completions/${completionId}/pdf`);
-  window.open(URL.createObjectURL(blob), '_blank');
+  await openAuthedFile(`/staff-documents/completions/${completionId}/pdf`, 'completion.pdf');
 }
 
 export default function StaffDocumentsPage() {

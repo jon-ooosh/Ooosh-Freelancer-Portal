@@ -15,6 +15,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { hasManagerRole } from '../lib/roles';
 import { api } from '../services/api';
+import { openR2Key } from '../lib/openAuthedFile';
 import { useAuthStore } from '../hooks/useAuthStore';
 import type { Cost, CostDocument, CostType, CostPaymentMethod, CostPaymentStatus, CostRechargeMode, CostIntent } from '../../../shared/types';
 
@@ -818,15 +819,13 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
   const viewExistingReceipt = useCallback(async () => {
     if (!existing?.receipt_r2_key) return;
     try {
-      const { blob } = await api.blob(`/files/download?key=${encodeURIComponent(existing.receipt_r2_key)}`);
-      window.open(URL.createObjectURL(blob), '_blank');
+      await openR2Key(existing.receipt_r2_key, existing.receipt_filename || undefined);
     } catch { setError('Could not open the saved receipt.'); }
   }, [existing]);
 
   const viewSupportingDoc = useCallback(async (doc: CostDocument) => {
     try {
-      const { blob } = await api.blob(`/files/download?key=${encodeURIComponent(doc.r2_key)}`);
-      window.open(URL.createObjectURL(blob), '_blank');
+      await openR2Key(doc.r2_key, doc.filename);
     } catch { setError(`Could not open ${doc.filename}.`); }
   }, []);
 

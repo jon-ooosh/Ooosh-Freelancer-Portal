@@ -3,6 +3,7 @@ import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
 import FreelancerHistorySection from './FreelancerHistorySection';
+import { openR2Key } from '../lib/openAuthedFile';
 
 // ---------------------------------------------------------------------------
 // FreelancerPanel — the single home for everything freelancer on a Person.
@@ -696,10 +697,7 @@ function FreelancerDocuments({ personId, files, onFilesChanged, onActivityCreate
 
   async function handleDownload(file: FileAttachment) {
     try {
-      const { blob, contentType } = await api.blob(`/files/download?key=${encodeURIComponent(file.url)}`);
-      const blobUrl = URL.createObjectURL(new Blob([blob], { type: contentType }));
-      window.open(blobUrl, '_blank');
-      setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+      await openR2Key(file.url, file.name);
     } catch {
       setError('Download failed');
     }

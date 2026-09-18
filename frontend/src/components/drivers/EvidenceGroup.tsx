@@ -1,6 +1,7 @@
 import React, { useRef, useState } from 'react';
 import { api } from '../../services/api';
 import { DocumentThumb } from './DocumentThumb';
+import { openR2Key } from '../../lib/openAuthedFile';
 
 /**
  * One block of evidence: the image(s), the date staff set, the expiry OP
@@ -185,10 +186,7 @@ export function EvidenceGroup({
 
   async function handleOpen(file: EvidenceFile) {
     try {
-      const { blob, contentType } = await api.blob(`/files/download?key=${encodeURIComponent(file.url)}`);
-      const url = URL.createObjectURL(new Blob([blob], { type: contentType }));
-      window.open(url, '_blank');
-      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      await openR2Key(file.url, file.name);
     } catch {
       setError('Could not open that file');
     }

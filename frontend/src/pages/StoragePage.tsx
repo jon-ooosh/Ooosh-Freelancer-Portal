@@ -4,6 +4,7 @@ import { useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { HeldItemsSection } from '../components/HeldItemsSection';
+import { openR2Key } from '../lib/openAuthedFile';
 
 // ── Types ───────────────────────────────────────────────────────────────
 type SizeCat = 'small' | 'medium' | 'large' | 'xl';
@@ -779,8 +780,7 @@ function TenancyDetailModal({ id, isAdminManager, onClose, onChange, onMovedOut 
           <button
             onClick={async () => {
               try {
-                const { blob } = await api.blob(`/files/download?key=${encodeURIComponent(t.tcs_pdf_key as string)}`);
-                window.open(URL.createObjectURL(blob), '_blank');
+                await openR2Key(t.tcs_pdf_key as string);
               } catch { setMsg('Could not open the signed T&Cs PDF.'); }
             }}
             className="text-xs text-[#7B5EA7] underline"

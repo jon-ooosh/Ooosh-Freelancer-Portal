@@ -11,6 +11,7 @@ import PcnHistorySection from '../components/PcnHistorySection';
 import ExcessPaymentModal from '../components/ExcessPaymentModal';
 import CalculatedExcessEditModal from '../components/CalculatedExcessEditModal';
 import type { JobExcess } from '../../../shared/types';
+import { openR2Key } from '../lib/openAuthedFile';
 
 interface FileAttachment {
   name: string;
@@ -1729,10 +1730,7 @@ function DetailsTab({
                   <button
                     onClick={async () => {
                       try {
-                        const { blob, contentType } = await api.blob(`/files/download?key=${encodeURIComponent(file.url)}`);
-                        const blobUrl = URL.createObjectURL(new Blob([blob], { type: contentType }));
-                        window.open(blobUrl, '_blank');
-                        setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+                        await openR2Key(file.url, file.name || undefined);
                       } catch { /* ignore */ }
                     }}
                     className="text-ooosh-600 hover:text-ooosh-700 truncate max-w-[60vw] sm:max-w-none"
