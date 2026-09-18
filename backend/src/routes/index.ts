@@ -34,6 +34,7 @@ import issuesRouter from './issues';
 import problemsRouter from './problems';
 import warehouseRouter from './warehouse';
 import systemSettingsRouter from './system-settings';
+import freelancerDaysPublicRouter from './freelancer-days';
 import oohReturnRouter from './ooh-return';
 import mobileUploadRouter from './mobile-upload';
 import preHireBriefingRouter from './pre-hire-briefing';
@@ -107,6 +108,7 @@ router.use('/requirements', requirementsRouter);
 router.use('/portal', portalRouter);  // Freelancer portal — own JWT auth (not OP staff JWT)
 router.use('/warehouse', warehouseRouter);  // Warehouse kiosk — PIN-or-staff-JWT (in-person customer collections)
 router.use('/system-settings', systemSettingsRouter);
+router.use('/freelancer-days', freelancerDaysPublicRouter);  // PUBLIC accept/decline for a yard-day offer (token auth, no JWT)
 router.use('/ooh-return', oohReturnRouter);  // Public parking-form (token auth) + staff endpoints
 router.use('/mobile-upload', mobileUploadRouter);  // Public token-auth file capture (phone QR handoff)
 router.use('/data-cleanup', dataCleanupRouter);

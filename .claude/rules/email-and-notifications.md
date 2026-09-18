@@ -17,6 +17,7 @@ Full template registry, incident history and messaging spec pointers:
 
 - **ALL outbound email goes through `emailService`. Never `nodemailer.createTransport` outside `email-service.ts`.** There is exactly one transport (a pool, `maxConnections: 1`); a direct call silently misses pooling, retry, the audit log and the outage canary. Attachment sends use `sendRaw({ ..., attachments, skipLayout: true })`.
 - **Pooling is the fix, retry is the mop-up.** A non-pooled transport opens a fresh authenticated connection per send, so a burst becomes a concurrent-AUTH storm and Gmail randomly `535`s the surplus — with valid credentials. Retry treats `535` as transient on the deliberate assumption the app password is good.
+- **`emailService.send()` RESOLVES `{ success: false }` on a delivery failure — it does not throw.** A caller that only wraps it in try/catch will sail past a dead SMTP server and stamp whatever "we told them" column it owns, so the record says somebody was asked when nobody was. Always branch on `result.success`. (Caught in §9.4 before it shipped; `offer_email_sent_at` would have lied.)
 - **The outage canary must NOT travel over the failing channel.** When a send fails after all retries it writes an **admin bell** (`email_sent_at` pre-stamped so the escalator never tries to email it), deduped hourly.
 - **When a bell and a direct email fire for the same event, set `email_sent_at = NOW()` on the bell** — the escalation scheduler skips notifications that already have it, so the recipient doesn't get the same content twice.
 
@@ -24,6 +25,11 @@ Full template registry, incident history and messaging spec pointers:
 
 - **Production is `EMAIL_MODE=live` (via Resend) and has been since mid-2026.** Every registered template sends for real to the real recipient — `EMAIL_LIVE_TEMPLATES` is the test-mode allowlist and is **ignored entirely** when the mode is live, so a new template needs nothing added to it. Don't tell anyone to add one, and don't hedge a new email behind "it'll test-redirect until released" — it won't. Feature specs saying a template "ships OFF `EMAIL_LIVE_TEMPLATES`" describe a rollout that predates go-live.
 - Variables are **HTML-escaped** — a `{{var}}` can't inject markup.
+- **There is NO `{{else}}`.** Only `{{#if var}}…{{/if}}`. An `{{else}}` is not
+  parsed — the whole block including the literal word renders when the variable
+  is truthy, and vanishes when it is not. A two-way conditional is two FLAT
+  blocks with complementary flags (`isChase` / `isFirstOffer`), and the caller
+  derives the second so they cannot contradict each other.
 - **`{{#if}}` is single-level only — NEVER nest.** The substituter's non-greedy regex matches to the FIRST `{{/if}}`, leaving literal `{{/if}}` / `{{#if}}` artifacts in the sent email. Render an image and its caption as two separate top-level blocks.
 - **Every job-scoped template carries the HH job number in BOTH subject and body.** It's the thread that ties an email back to the job without clicking through. Callers pass `jobNumber: String(job.hh_job_number || '')` — an empty string degrades gracefully; omitting it renders the literal placeholder. Doesn't apply to auth flows, vehicle-scoped or non-job system alerts.
 
