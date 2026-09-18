@@ -26,9 +26,18 @@ const fileSchema = z.object({
   uploaded_by: z.string(),
 });
 
+/** '' and '   ' mean "not set", not "set to nothing". */
+function blankToNull(v: unknown): string | null {
+  return typeof v === 'string' && v.trim() !== '' ? v.trim() : null;
+}
+
 const createPersonSchema = z.object({
   first_name: z.string().min(1).max(255),
   last_name: z.string().min(1).max(255),
+  // What they like to be known as. OPTIONAL — blank falls back to first_name
+  // via services/display-name.ts, so nothing ever renders an empty greeting.
+  // Same column the staff Employment card writes, so the two cannot diverge.
+  preferred_name: z.string().max(255).optional().nullable(),
   email: z.string().email().optional().nullable(),
   phone: z.string().max(50).optional().nullable(),
   mobile: z.string().max(50).optional().nullable(),
@@ -350,7 +359,7 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
 router.post('/', validate(createPersonSchema), async (req: AuthRequest, res: Response) => {
   try {
     const {
-      first_name, last_name, email, phone, mobile, international_phone,
+      first_name, last_name, preferred_name, email, phone, mobile, international_phone,
       notes, tags, files, preferred_contact_method, home_address, date_of_birth,
       is_freelancer, freelancer_joined_date, freelancer_next_review_date,
       skills, is_insured_on_vehicles, is_approved, has_tshirt,
@@ -363,17 +372,17 @@ router.post('/', validate(createPersonSchema), async (req: AuthRequest, res: Res
 
     const result = await query(
       `INSERT INTO people (
-        first_name, last_name, email, phone, mobile, international_phone,
+        first_name, last_name, preferred_name, email, phone, mobile, international_phone,
         notes, tags, files, preferred_contact_method, home_address, date_of_birth,
         is_freelancer, freelancer_joined_date, freelancer_next_review_date,
         skills, is_insured_on_vehicles, is_approved, has_tshirt,
         emergency_contact_name, emergency_contact_phone, licence_details, freelancer_references,
         working_terms_type, working_terms_credit_days, working_terms_notes,
         created_by
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
        RETURNING *`,
       [
-        first_name, last_name, email?.toLowerCase(), phone, mobile, international_phone,
+        first_name, last_name, blankToNull(preferred_name), email?.toLowerCase(), phone, mobile, international_phone,
         notes, tags, JSON.stringify(files), preferred_contact_method, home_address, date_of_birth,
         is_freelancer, freelancer_joined_date || null, freelancer_next_review_date || null,
         skills, is_insured_on_vehicles, is_approved, has_tshirt,
@@ -400,6 +409,14 @@ router.put('/:id', validate(updatePersonSchema), async (req: AuthRequest, res: R
     if (current.rows.length === 0) {
       res.status(404).json({ error: 'Person not found' });
       return;
+    }
+
+    // A cleared "likes to be known as" must store NULL, not ''. Same rule the
+    // staff Employment card follows (services/staff-employment.ts): absent key
+    // = leave alone, empty = clear. Without this the column fills with empty
+    // strings that every reader then has to NULLIF away.
+    if (req.body.preferred_name !== undefined) {
+      req.body.preferred_name = blankToNull(req.body.preferred_name);
     }
 
     // Optimistic locking: if client sends version, check it matches

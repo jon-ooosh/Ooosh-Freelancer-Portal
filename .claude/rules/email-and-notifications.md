@@ -34,6 +34,11 @@ Never `row.first_name || 'there'`: `people.preferred_name` is what they asked to
 be called, and it has been on the freelancer application form since migration
 184 — we ask the question, so use the answer.
 
+Set from **two** places, both writing the same `people.preferred_name`: the
+person record ("Likes to be known as", `PersonForm`) and the staff Employment
+card. One column, so they cannot disagree; each follows the same rule — absent
+key leaves it alone, empty clears it to NULL.
+
 **SELECT `preferred_name` in the query.** A row that never fetched it falls
 straight through to the legal name and nothing errors, which is exactly how
 this stayed broken: the helper cannot tell "not set" from "not fetched".
