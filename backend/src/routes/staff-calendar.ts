@@ -64,8 +64,9 @@ import {
 } from '../services/staff-company-days';
 import {
   listForRange, listBookableFreelancers, createBooking, recordResponse,
-  markCompleted, cancelBooking, recordInvoice, getSpendSummary,
+  markCompleted, cancelBooking, recordInvoice, getSpendSummary, getBooking,
 } from '../services/freelancer-days';
+import { sendOfferEmail, sendCancellationEmail } from '../services/freelancer-day-offer';
 
 const router = Router();
 router.use(authenticate, authorize(...STAFF_ROLES));
@@ -768,9 +769,26 @@ router.post('/freelancer-days', adminOnly, async (req: AuthRequest, res: Respons
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
   try {
-    res.status(201).json({ data: await createBooking(parsed.data, req.user!.id) });
+    const booking = await createBooking(parsed.data, req.user!.id);
+    // The row is the record; the email is a courtesy on top of it. A mail
+    // failure must never lose the booking, so this is awaited for its RESULT
+    // (so the UI can say nobody was told) but never throws.
+    const offer = await sendOfferEmail(booking.id);
+    res.status(201).json({ data: booking, offer });
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to book that day' });
+  }
+});
+
+// POST /api/staff-calendar/freelancer-days/:id/resend-offer
+// Without this, a bounced or mistyped address is a dead end: the booking sits
+// `offered`, nobody has been asked, and there is no way to ask again short of
+// cancelling and re-booking.
+router.post('/freelancer-days/:id/resend-offer', adminOnly, async (req: AuthRequest, res: Response) => {
+  try {
+    res.json({ data: await sendOfferEmail(req.params.id as string, { resend: true }) });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to send that' });
   }
 });
 
@@ -802,7 +820,15 @@ router.post('/freelancer-days/:id/cancel', adminOnly, async (req: AuthRequest, r
   const parsed = z.object({ reason: z.string().min(1).max(500) }).safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: 'A reason is required' }); return; }
   try {
-    res.json({ data: await cancelBooking(req.params.id as string, parsed.data.reason, req.user!.id) });
+    // Read the status BEFORE cancelling: afterwards the row says `cancelled`
+    // and can no longer tell us whether they had agreed to come, which is the
+    // difference between a note and an apology.
+    const before = await getBooking(req.params.id as string);
+    const data = await cancelBooking(req.params.id as string, parsed.data.reason, req.user!.id);
+    const notified = before
+      ? await sendCancellationEmail(data.id, parsed.data.reason, before.status)
+      : { sent: false as const, why: 'gone' as const };
+    res.json({ data, notified });
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to cancel' });
   }

@@ -69,6 +69,7 @@ import { CheckInPage as StaffCheckInPage } from './modules/vehicles/pages/CheckI
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { sharedRefreshToken } from './services/api';
 import { getFreelancerSession, isFreelancerSessionActive } from './modules/vehicles/adapters/freelancer-session';
+import FreelancerDayRespondPage from './pages/FreelancerDayRespondPage';
 
 const staffBookOutQueryClient = new QueryClient({
   defaultOptions: { queries: { staleTime: 1000 * 60 * 2, retry: 1 } },
@@ -179,6 +180,8 @@ export default function App() {
       <Route path="/return-parking/:token" element={<OohReturnParkingPage />} />
       {/* Public mobile receipt capture (QR handoff) — token-authenticated, no Layout wrapper */}
       <Route path="/m/receipt/:token" element={<MobileReceiptUploadPage />} />
+      {/* Public freelancer yard-day accept/decline — token-authenticated, no Layout wrapper */}
+      <Route path="/freelancer-day/:token" element={<FreelancerDayRespondPage />} />
       {/* Public storage T&Cs acceptance — token-authenticated, no Layout wrapper */}
       <Route path="/storage-tcs/:token" element={<StorageTcsAcceptPage />} />
       <Route path="/carnet-form/:token" element={<CarnetFormPage />} />

@@ -856,11 +856,22 @@ the moment you are looking at the week and seeing a thin day.
   breakdown does not help answer "are there enough people in", which is what
   this is for; the booking's note covers "what are they doing" for now.
 
-### 9.4 The offer email — DESIGNED, NOT BUILT
+### 9.4 The offer email — SHIPPED (migration 225)
 
-**SIGNED OFF (17 Sep 2026), not yet built.** jon agreed all four decisions
-below as written. It sends mail to people outside the company, which is why it
-waited; it no longer waits. Everything below is ready to build.
+**The offer, the token and the reply are LIVE.** Offering a day now emails the
+person, with two buttons; they answer from their phone and the calendar updates.
+The CHASE below is the one part still to build.
+
+Two things departed from the sketch, both on purpose:
+
+- **The token is NOT cleared on response.** Clicking the button in an email
+  twice is ordinary — accept on Monday, reopen on Thursday to check what time
+  you said — and a cleared token answers that with "we do not recognise that
+  link", which reads like the booking has gone wrong. It stays live, cannot
+  double-record (resolve refuses anything not still `offered`), and dies when
+  the date passes.
+- **A backdated booking is never emailed.** The form already calls it "Record
+  the day"; asking somebody whether they are free last Tuesday is nonsense.
 
 Today "Offer the day" writes a row and tells nobody. The freelancer finds out
 when somebody rings them, which makes the status field a fiction — it says
@@ -879,7 +890,7 @@ when somebody rings them, which makes the status field a fiction — it says
 - The email goes through `services/email-service.ts` like everything else, with
   two buttons and the day, times, what they are doing and the agreed rate.
 
-**The chase, which is the bit that earns its keep**
+**The chase, which is the bit that earns its keep — NOT YET BUILT**
 
 | When | What | Who |
 |---|---|---|
@@ -1212,6 +1223,7 @@ separating "pulled out after accepting" from "declined". §9.4 items 5–7.
 | **D0.1** | Bank holidays computed rather than seeded; next year's entitlement granted in advance; cross-year request pricing; the post-sweep overtime residual; preferred name used site-wide | 218 |
 | **§20** | Company days — granted to everyone, recurring or one-off, with the reclaim prompt and an annual November ask | 219 |
 | **E** | Freelancer day bookings ("yard days") — booked and displayed on the staff calendar, agreed rate snapshot, expected spend, invoice tracking | 222 |
+| **E.1** | The yard-day OFFER (§9.4) — the email with accept / decline, the bearer token, the public reply page, resend, and the cancellation note | 225 |
 
 ### Decisions taken during the build that CHANGE this spec
 
@@ -1498,6 +1510,36 @@ Kept because each one is a trap the next person could fall into.
   service says it in English, and the form says it as you type. *A constraint
   the database holds and the service does not still needs a sentence, or the
   caller gets Postgres's.*
+
+- **`{{else}}` is not a thing in our template engine, and fails LOUDLY in the
+  recipient's inbox.** The offer email was written with
+  `{{#if isChase}}…{{else}}…{{/if}}`. The substituter only understands
+  `{{#if}}…{{/if}}`, so the truthy branch would have rendered the else-marker
+  and BOTH paragraphs, and the falsy branch would have dropped the lot. Caught
+  before sending because the engine was read rather than assumed. Two flat
+  blocks with complementary flags now, derived in the caller so they cannot
+  contradict. *The file already warned that `{{#if}}` cannot nest; the same
+  regex is why there is no `{{else}}`. Read the substituter before writing a
+  conditional.*
+
+- **`emailService.send()` resolves `{ success: false }` — it does not throw.**
+  `sendOfferEmail` originally only caught exceptions, so with SMTP down it would
+  have stamped `offer_email_sent_at` and recorded that a freelancer had been
+  asked when nobody had been. That is the worst possible failure for this
+  feature: the admin list would show the offer as sent and the chase would never
+  fire. Now it branches on `result.success`, and the verification suite asserts
+  the stamp stays NULL after a failed send — which is easy to test precisely
+  BECAUSE the scratch environment has no SMTP. *A function returning a result
+  object is not the same as one that throws, and a try/catch around it proves
+  nothing.*
+
+- **A spent link said "we do not recognise that link".** Found by driving the
+  real HTTP endpoints rather than the service functions. The token was cleared
+  on response, per the original §9.4 sketch — but reopening the offer email to
+  check your start time is completely normal, and being told your link is
+  unrecognised reads like your booking has evaporated. The token now survives
+  the answer. *Testing the service layer would never have surfaced this; it only
+  appeared when the flow was walked the way a person walks it.*
 
 ### Still to build
 

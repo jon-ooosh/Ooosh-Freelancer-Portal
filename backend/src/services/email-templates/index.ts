@@ -780,6 +780,119 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  /**
+   * The yard-day OFFER (spec Â§9.4). A QUESTION, not a notification â the two
+   * buttons are the whole point, and every other element is there to let
+   * somebody answer it from a phone without ringing anybody.
+   *
+   * Both buttons land on the same page carrying an intent; neither records
+   * anything on its own. Mail scanners follow links before a human sees them,
+   * so a one-click accept would accept on their behalf.
+   */
+  freelancer_day_offer: {
+    variant: 'internal',
+    preheader: 'Can you do a day at the yard on {{bookingDate}}?',
+    subject: 'Are you free on {{bookingDate}}?',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">A day at the yard</h2>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.5;">
+        Hi {{freelancerName}},
+      </p>
+      {{#if isChase}}
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
+        Just a nudge on this one — we have not heard back yet, and it would help to
+        know either way.
+      </p>
+      {{/if}}
+      {{#if isFirstOffer}}
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
+        We are hoping to get you in for a day at the yard. No pressure either way —
+        just let us know.
+      </p>
+      {{/if}}
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;">
+        <tr>
+          <td style="padding:16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Day</p>
+            <p style="margin:0 0 12px;font-size:15px;color:#1e293b;font-weight:600;">{{bookingDate}}</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Hours</p>
+            <p style="margin:0 0 12px;font-size:15px;color:#1e293b;font-weight:600;">{{duration}}</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Rate</p>
+            <p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">{{rate}}</p>
+          </td>
+        </tr>
+      </table>
+      {{#if notes}}
+      <p style="margin:0 0 20px;font-size:14px;color:#334155;line-height:1.5;">
+        <strong>What we need a hand with:</strong> {{notes}}
+      </p>
+      {{/if}}
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;">
+        <tr>
+          <td style="background-color:#15803d;border-radius:6px;">
+            <a href="{{acceptUrl}}" style="display:inline-block;padding:12px 24px;font-size:15px;color:#ffffff;text-decoration:none;font-weight:600;">Yes, I can do it</a>
+          </td>
+          <td style="width:12px;">&nbsp;</td>
+          <td style="background-color:#ffffff;border:1px solid #cbd5e1;border-radius:6px;">
+            <a href="{{declineUrl}}" style="display:inline-block;padding:12px 24px;font-size:15px;color:#475569;text-decoration:none;font-weight:600;">Sorry, I cannot</a>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0;font-size:13px;color:#64748b;line-height:1.5;">
+        Saying no is genuinely fine and costs you nothing with us. If the day
+        half works — you could come but not until 11, say — give us a ring or drop
+        us a message and we will sort it out.
+      </p>
+    `,
+  },
+  /**
+   * The day is off (spec Â§9.4, decision 4).
+   *
+   * Sent only when they were actually told about it in the first place.
+   * Somebody who accepted and rearranged around it must not find out by
+   * checking a calendar they cannot see.
+   */
+  freelancer_day_cancelled: {
+    variant: 'internal',
+    preheader: 'The yard day on {{bookingDate}} is no longer going ahead',
+    subject: '{{bookingDate}} — that day is off, sorry',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">That day is off</h2>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.5;">
+        Hi {{freelancerName}},
+      </p>
+      {{#if hadAccepted}}
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
+        Apologies — we have had to cancel the day you had agreed to, and we know
+        you will have planned around it.
+      </p>
+      {{/if}}
+      {{#if hadNotAccepted}}
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
+        We have had to cancel the day we asked you about, so you can ignore that
+        earlier email — no reply needed.
+      </p>
+      {{/if}}
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Day</p>
+            <p style="margin:0 0 12px;font-size:15px;color:#1e293b;font-weight:600;">{{bookingDate}}</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Hours</p>
+            <p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">{{duration}}</p>
+          </td>
+        </tr>
+      </table>
+      {{#if reason}}
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
+        <strong>Why:</strong> {{reason}}
+      </p>
+      {{/if}}
+      <p style="margin:0;font-size:14px;color:#334155;line-height:1.5;">
+        Nothing else is needed from you. We will be in touch about other days.
+      </p>
+    `,
+  },
   freelancer_assignment: {
     variant: 'internal',
     subject: 'Job Assignment — {{jobName}} (#{{jobNumber}}) ({{jobDate}})',

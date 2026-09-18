@@ -149,6 +149,30 @@ route anybody uses.
 `staff_overtime_entries` has a `minutes % 5 = 0` CHECK; the two are answering
 different questions.
 
+## The freelancer offer link is a bearer credential, and the GET never writes
+
+`services/freelancer-day-offer.ts` owns the token; `routes/freelancer-days.ts`
+is the public, unauthenticated half. Rules that are not negotiable:
+
+- **A GET must never record a response.** Mail scanners (Outlook Safe Links,
+  corporate filters) follow every URL in a message before a human sees it, so a
+  one-click accept URL accepts on the freelancer's behalf. The email carries the
+  intent (`?r=accept`); only an explicit POST writes.
+- **A backdated booking is NEVER emailed.** The form calls it "Record the day"
+  for a reason — asking somebody whether they are free last Tuesday is nonsense.
+- **A dead link must say WHY.** `resolveResponseToken` returns a reason —
+  passed / answered / cancelled / completed / unknown — and the page has a
+  sentence for each, ending with the office number. Somebody is in a corridor
+  with their phone working out whether they are expected tomorrow; a 404 does
+  not answer that.
+- **The token stays live after they answer** (a departure from §9.4's original
+  "cleared on response"). Reopening the email to check your start time is
+  ordinary, and a cleared token answers it with "we do not recognise that link".
+  It cannot double-record — resolve refuses anything that is not still
+  `offered` — and it dies when the date passes.
+- `offer_email_sent_at` means **we actually told them**. Never stamp it without
+  checking `result.success`; see the email rules.
+
 ## Bank holidays and company days are different things
 
 A **bank holiday** is computed, and under `use_allowance` is an ordinary
