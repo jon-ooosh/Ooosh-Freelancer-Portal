@@ -951,7 +951,16 @@ is going out.
    `completed`) or *it did not happen* (→ a closed state). The safety net has
    to be clearable or it rots.
 
-6. **There is no way to AMEND a booking — there is no update endpoint at all.**
+6. **Amending a booking** — **SHIPPED (228).** `PATCH /freelancer-days/:id`.
+   The day and the hours re-open the question (status back to `offered`, the
+   acceptance cleared, the chase stamps reset so the NEW question gets its own
+   nudge, offer email re-sent); the rate and the notes do not — they send
+   `freelancer_day_updated`, which has no buttons because nothing needs
+   answering. An amendment that changes nothing is a no-op rather than a
+   spurious email. Switching a timed day to a whole one clears the times, or the
+   `freelancer_day_times` CHECK rejects the update.
+
+   *Original note:* **There is no way to AMEND a booking — there is no update endpoint at all.**
    Today, changing a time, a rate or a date means cancel-and-rebook, which
    throws away the acceptance and re-offers the day. That is merely annoying
    now; once an email fires on every offer it means emailing somebody twice to
@@ -971,7 +980,13 @@ is going out.
    have to be built. Treating an offer as informational would also let a
    freelancer mute the thing they are being asked to answer.
 
-7. **"Pulled out after accepting" is not the same fact as "declined".**
+7. **"Pulled out after accepting"** — **SHIPPED (228).** `withdrew` is its own
+   status; `recordResponse` now REFUSES `accepted → declined` and points at
+   `withdrawBooking` instead, so the two facts cannot be collapsed by accident.
+   Not a live status, so it frees the slot. `BOOKING_STATUS.withdrew.counts` is
+   false — it was never cover.
+
+   *Original note:* **"Pulled out after accepting" is not the same fact as "declined".**
    `recordResponse` currently allows `accepted → declined`, so a freelancer
    dropping out the day before is recorded identically to one who never wanted
    the day. Those are different facts operationally — one left a hole at short
@@ -1246,6 +1261,7 @@ separating "pulled out after accepting" from "declined". §9.4 items 5–7.
 | **E** | Freelancer day bookings ("yard days") — booked and displayed on the staff calendar, agreed rate snapshot, expected spend, invoice tracking | 222 |
 | **E.1** | The yard-day OFFER (§9.4) — the email with accept / decline, the bearer token, the public reply page, resend, and the cancellation note | 225 |
 | **E.2** | The offer CHASE (§9.4) — one nudge to them, the day-before alert to admin, and `lapsed` so a passed unanswered offer can be closed out | 227 |
+| **E.3** | AMEND without cancel-and-rebook, and `withdrew` as distinct from `declined` (§9.4 items 6–7) | 228 |
 
 ### Decisions taken during the build that CHANGE this spec
 
@@ -1583,20 +1599,20 @@ Kept because each one is a trap the next person could fall into.
 
 ### Still to build
 
-**Phase E, the freelancer-facing half.** Booking and displaying shipped
-(migration 222). What is missing is the part where the freelancer hears about
-it at all:
+**Phase E is now complete except the portal.** Booking and displaying shipped
+with 222; the offer email, the reply page, the chase, close-out, amend and
+`withdrew` followed in 225, 227 and 228. What is left of E:
 
-- **The offer email with accept / decline links (§9.4)** — designed, costed and
-  SIGNED OFF 17 Sep 2026. This is the next thing to do. It brings three
-  companions with it (§9.4 items 5–7): closing out a passed unanswered offer,
-  `PATCH /freelancer-days/:id` so a booking can be amended without
-  cancel-and-rebook, and a `withdrew` status distinct from `declined`.
-- **The portal page (§9.3)**, deliberately after the email — the email is the
-  thing that actually reaches somebody. One question to answer first: whether a
-  freelancer can counter-offer, or only accept and decline (§9.3).
+- **The portal page (§9.3)** — read-only plus accept / decline, no counter-offer
+  (answered 18 Sep 2026: the negotiation happens in the freelance WhatsApp group
+  and OP sends the revised offer). Now genuinely the last piece of E, and
+  smaller than it was: the amend endpoint carries revisions, so the page only
+  has to show the day and take an answer.
 - `freelancer_day_booking_tasks` (§3.8) — skipped on purpose; a per-booking task
   breakdown does not help answer "are there enough people in".
+- A freelancer cannot withdraw through the link — `resolveResponseToken` refuses
+  anything already answered, so pulling out is a phone call and staff record it.
+  Deliberate for now; revisit with the portal, where they will be logged in.
 
 **Phase F — coverage intelligence and personal iCal** (§10, §16). Post-go-live,
 and it wants a season of real data to calibrate against.
