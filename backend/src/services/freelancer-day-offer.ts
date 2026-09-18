@@ -241,11 +241,11 @@ export async function sendOfferEmail(
         acceptUrl: responseUrl(token, 'accept'),
         declineUrl: responseUrl(token, 'decline'),
         viewUrl: responseUrl(token),
-        // The engine has NO {{else}} and cannot nest {{#if}}, so a conditional
-        // is two flat blocks and each needs its own flag. Deriving the second
-        // here rather than in the template is what stops them contradicting.
+        // The engine has NO {{else}} and cannot nest {{#if}}, so every branch is
+        // its own flat block with its own flag. A chase adds a line; a first
+        // send simply has none, which is why there is no complementary flag
+        // here any more.
         isChase: opts.resend ? 'yes' : '',
-        isFirstOffer: opts.resend ? '' : 'yes',
       },
     });
   } catch (err) {
