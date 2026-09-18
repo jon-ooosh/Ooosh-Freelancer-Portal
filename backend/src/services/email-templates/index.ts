@@ -835,6 +835,49 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
   /**
+   * Details changed, no reply needed (spec §9.4 item 6).
+   *
+   * The counterpart to re-offering: moving the DAY or the HOURS re-opens the
+   * question and sends the offer again, because that is a different commitment.
+   * Changing the rate or what the job is does not — they are told, not re-asked.
+   * Deliberately has NO buttons, so nothing invites an answer nobody needs.
+   */
+  freelancer_day_updated: {
+    variant: 'internal',
+    preheader: 'A change to your day with us on {{bookingDate}}',
+    subject: '{{bookingDate}} — a small change',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">A change to that day</h2>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.5;">
+        Hi {{freelancerName}},
+      </p>
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
+        Nothing has changed about the day itself and you do not need to reply —
+        this is just so you have the current details.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Day</p>
+            <p style="margin:0 0 12px;font-size:15px;color:#1e293b;font-weight:600;">{{bookingDate}}</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Hours</p>
+            <p style="margin:0 0 12px;font-size:15px;color:#1e293b;font-weight:600;">{{duration}}</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Rate</p>
+            <p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">{{rate}}</p>
+          </td>
+        </tr>
+      </table>
+      {{#if notes}}
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
+        <strong>What we need a hand with:</strong> {{notes}}
+      </p>
+      {{/if}}
+      <p style="margin:0;font-size:14px;color:#334155;line-height:1.5;">
+        If any of that does not work for you, get in touch.
+      </p>
+    `,
+  },
+  /**
    * The day is off (spec Â§9.4, decision 4).
    *
    * Sent only when they were actually told about it in the first place.

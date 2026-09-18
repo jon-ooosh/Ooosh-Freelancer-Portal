@@ -265,6 +265,47 @@ export async function sendOfferEmail(
 }
 
 /**
+ * Tell somebody their day's details moved, without re-asking (§9.4 item 6).
+ *
+ * Only to somebody who was actually told about the day in the first place. An
+ * "update" to a booking whose offer never went is the first they would hear of
+ * it, and it would read as a change to something they never knew existed.
+ */
+export async function sendUpdatedEmail(bookingId: string): Promise<OfferSendResult> {
+  const booking = await getBooking(bookingId);
+  if (!booking) return { sent: false, why: 'gone' };
+
+  const stamped = await query(
+    `SELECT offer_email_sent_at FROM freelancer_day_bookings WHERE id = $1`, [bookingId]);
+  if (!stamped.rows[0]?.offer_email_sent_at) return { sent: false, why: 'not_offered' };
+
+  const person = await loadRecipient(booking.personId);
+  if (!person?.email) return { sent: false, why: 'no_email' };
+
+  let result;
+  try {
+    result = await emailService.send('freelancer_day_updated', {
+      to: person.email,
+      variables: {
+        freelancerName: greetingName(person),
+        bookingDate: formatBookingDate(booking.bookingDate),
+        duration: describeDuration(booking),
+        rate: describeRate(booking),
+        notes: booking.notes || '',
+      },
+    });
+  } catch (err) {
+    console.error(`[freelancer-day-offer] update email threw for ${bookingId}:`, err);
+    return { sent: false, why: 'failed', detail: err instanceof Error ? err.message : String(err) };
+  }
+  if (!result.success) {
+    console.error(`[freelancer-day-offer] update email failed for ${bookingId}: ${result.error}`);
+    return { sent: false, why: 'failed', detail: result.error };
+  }
+  return { sent: true };
+}
+
+/**
  * Tell somebody a day they had is off (§9.4, decision 4).
  *
  * Only for a day they had actually been told about. Cancelling a booking that

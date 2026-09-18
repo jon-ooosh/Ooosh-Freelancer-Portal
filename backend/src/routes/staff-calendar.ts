@@ -65,9 +65,9 @@ import {
 import {
   listForRange, listBookableFreelancers, createBooking, recordResponse,
   markCompleted, cancelBooking, recordInvoice, getSpendSummary, getBooking,
-  listNeedsClosing, closeOutBooking,
+  listNeedsClosing, closeOutBooking, withdrawBooking, amendBooking,
 } from '../services/freelancer-days';
-import { sendOfferEmail, sendCancellationEmail } from '../services/freelancer-day-offer';
+import { sendOfferEmail, sendCancellationEmail, sendUpdatedEmail } from '../services/freelancer-day-offer';
 
 const router = Router();
 router.use(authenticate, authorize(...STAFF_ROLES));
@@ -778,6 +778,51 @@ router.post('/freelancer-days', adminOnly, async (req: AuthRequest, res: Respons
     res.status(201).json({ data: booking, offer });
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to book that day' });
+  }
+});
+
+// PATCH /api/staff-calendar/freelancer-days/:id — amend without cancel-and-rebook
+//
+// The rule lives in amendBooking: the DAY and the HOURS re-open the question;
+// the rate and the notes do not. This route just decides which email follows
+// from that, and never lets an email failure lose the amendment — the booking
+// is the record, the mail is a courtesy on top of it.
+router.patch('/freelancer-days/:id', adminOnly, async (req: AuthRequest, res: Response) => {
+  const schema = z.object({
+    bookingDate: dateStr.optional(),
+    durationType: z.enum(['full_day', 'half_day', 'hours']).optional(),
+    startTime: timeStr.nullish(),
+    endTime: timeStr.nullish(),
+    rateType: z.enum(['day', 'half_day', 'hourly', 'fixed']).optional(),
+    agreedRate: z.number().nonnegative().nullish(),
+    notes: z.string().max(1000).nullish(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' });
+    return;
+  }
+  try {
+    const result = await amendBooking(req.params.id as string, parsed.data, req.user!.id);
+    const notified = result.reoffered
+      ? await sendOfferEmail(result.booking.id)
+      : result.changedDetailsOnly
+        ? await sendUpdatedEmail(result.booking.id)
+        : { sent: false as const, why: 'not_offered' as const };
+    res.json({ data: result.booking, reoffered: result.reoffered, notified });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to amend that booking' });
+  }
+});
+
+// POST /api/staff-calendar/freelancer-days/:id/withdraw — they pulled out
+router.post('/freelancer-days/:id/withdraw', adminOnly, async (req: AuthRequest, res: Response) => {
+  const parsed = z.object({ note: z.string().max(500).nullish() }).safeParse(req.body ?? {});
+  if (!parsed.success) { res.status(400).json({ error: 'Invalid input' }); return; }
+  try {
+    res.json({ data: await withdrawBooking(req.params.id as string, parsed.data.note ?? null) });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to record that' });
   }
 });
 
