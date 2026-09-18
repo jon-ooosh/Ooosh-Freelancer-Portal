@@ -7,6 +7,7 @@ import { logAudit } from '../middleware/audit';
 import { writeBackStatusToHireHop, writeBackJobNameToHireHop } from '../services/hirehop-writeback';
 import { hhBroker } from '../services/hirehop-broker';
 import { sendLastMinuteAlert } from '../services/money-emails';
+import { isBookingWonTransition, isUnwonTransition } from '../services/pipeline-stage';
 import emailService from '../services/email-service';
 import { getFrontendUrl } from '../config/app-urls';
 import {
@@ -514,14 +515,21 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
         updates.push(`next_chase_date = NULL`);
       }
     } else if (pipeline_status === 'confirmed') {
-      updates.push(`confirmed_method = $${pIdx}`);
-      updateParams.push(confirmed_method || null);
-      pIdx++;
+      // Only write the method when one was actually supplied. A wind-back to
+      // confirmed (prepped → confirmed) opens the same modal, and an
+      // unconditional write nulled out how the booking was originally won.
+      if (confirmed_method) {
+        updates.push(`confirmed_method = $${pIdx}`);
+        updateParams.push(confirmed_method);
+        pIdx++;
+      }
       // COALESCE, not NOW(): this route is also how a job gets moved BACK to
       // confirmed from prepped/dispatched when someone corrects a status, and
       // a bare NOW() rewrote the original confirmation date every time. Job
       // 15912 was confirmed in early June and its confirmed_at read 20 August
       // because of a prepped → confirmed correction that morning.
+      // The stamp is cleared when a job is wound back BELOW confirmed (below),
+      // so a later genuine re-confirmation still records its own date.
       updates.push(`confirmed_at = COALESCE(confirmed_at, NOW())`);
       // Clear chase date — once confirmed, chasing belongs to the reminders
       // system, not the enquiry chase pipeline.
@@ -577,6 +585,17 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
     }
     if (fromStatus === 'returned' && pipeline_status !== 'returned') {
       updates.push(`returned_bookedout_warned_at = NULL`);
+    }
+
+    // Un-winning: a job wound back to a pre-confirmed stage has, as far as the
+    // record goes, not been won. Drop the confirmation stamp so the COALESCE
+    // above can't make a later genuine re-confirmation inherit the first date,
+    // and drop the one-shot last-minute marker (migration 226) so a genuine
+    // re-confirmation at short notice is still allowed to alert.
+    if (isUnwonTransition(fromStatus, pipeline_status)) {
+      updates.push(`confirmed_at = NULL`);
+      updates.push(`confirmed_method = NULL`);
+      updates.push(`last_minute_alerted_at = NULL`);
     }
 
     // Clear lost fields when moving out of lost (re-opening)
@@ -717,9 +736,14 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
         keepRequirementIds: keep_requirement_ids,
         actorUserId: req.user!.id,
       });
-    } else if (pipeline_status === 'confirmed' && fromStatus !== 'confirmed') {
+    } else if (pipeline_status === 'confirmed' && isBookingWonTransition(fromStatus)) {
       // Confirmation fires triggers but NEVER sweeps — a confirmed job's
       // requirements are the work, not litter.
+      //
+      // Gated on the booking actually being WON, not merely on arriving at
+      // 'confirmed'. A `prepped → confirmed` correction re-fired every
+      // confirmation reminder that wasn't yet done, days after the real
+      // confirmation.
       await fireEventTriggeredReminders(jobId, 'confirmed', req.user!.id);
     }
 

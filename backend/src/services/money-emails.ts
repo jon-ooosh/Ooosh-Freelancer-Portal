@@ -6,6 +6,7 @@ import { query } from '../config/database';
 import { emailService } from './email-service';
 import { getFrontendUrl } from '../config/app-urls';
 import { resolveRoutingOverride } from './email-routing';
+import { isBookingWonTransition } from './pipeline-stage';
 
 /** Refund timescale based on payment method */
 export function getRefundTimescale(paymentMethod: string): string {
@@ -830,27 +831,6 @@ export async function sendExcessEmail(opts: {
 }
 
 /**
- * Pipeline statuses a job must be coming FROM for a move to 'confirmed' to
- * count as winning the booking.
- *
- * This is THE definition of "the booking was just won" for alerting purposes —
- * every caller of sendLastMinuteAlert() goes through it, so none of them can
- * get the judgement wrong on its own.
- *
- * Pre-confirmed stages are the obvious members. `lost` and `cancelled` are in
- * deliberately: a dead job that comes back to life days before it runs IS a
- * genuine last-minute booking and should shout.
- *
- * Everything else is excluded, and `prepped` is the one that matters in
- * practice. A `prepped → confirmed` move is somebody correcting a status on a
- * job confirmed weeks ago, not a new booking — it was the cause of every
- * false-fire we could trace (jobs 15912, 16453, 16491, Aug–Sep 2026).
- */
-const BOOKING_WON_FROM_STATUSES = [
-  'new_enquiry', 'quoting', 'chasing', 'paused', 'provisional', 'lost', 'cancelled',
-];
-
-/**
  * Send the last-minute booking alert to info@.
  *
  * Fires at most ONCE per job (see jobs.last_minute_alerted_at, migration 226),
@@ -860,8 +840,10 @@ const BOOKING_WON_FROM_STATUSES = [
  */
 export async function sendLastMinuteAlert(jobId: string, fromStatus: string | null) {
   // Not a booking being won — a re-save, or a correction from further down the
-  // operational chain. Say nothing.
-  if (!fromStatus || !BOOKING_WON_FROM_STATUSES.includes(fromStatus)) return;
+  // operational chain. Say nothing. `isBookingWonTransition` is THE definition
+  // (services/pipeline-stage.ts); keeping it there rather than here means the
+  // confirmation reminders in routes/pipeline.ts apply the identical test.
+  if (!isBookingWonTransition(fromStatus)) return;
 
   const jobResult = await query(
     `SELECT job_name, hh_job_number, client_name, company_name, job_date, out_date,
