@@ -19,11 +19,22 @@ import {
   sendOfferEmail, sendCancellationEmail, responseUrl,
   formatBookingDate, describeDuration, describeRate,
 } from '../services/freelancer-day-offer';
+import { listNeedsClosing, closeOutBooking } from '../services/freelancer-days';
+import { runFreelancerOfferChase } from '../services/staff-notifications';
 
 let pass = 0, fail = 0;
 function check(name: string, cond: boolean, detail?: unknown) {
   if (cond) { pass++; console.log(`  ok   ${name}`); }
   else { fail++; console.log(`  FAIL ${name}`, detail !== undefined ? JSON.stringify(detail) : ''); }
+}
+
+async function refusesTo(name: string, fn: () => Promise<unknown>, match?: RegExp) {
+  try { await fn(); fail++; console.log(`  FAIL ${name} — it was ALLOWED`); }
+  catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (match && !match.test(msg)) { fail++; console.log(`  FAIL ${name} — wrong error: ${msg}`); }
+    else { pass++; console.log(`  ok   ${name} (${msg.slice(0, 58)})`); }
+  }
 }
 
 const iso = (offsetDays: number) =>
@@ -192,6 +203,87 @@ async function main() {
   const attempted = await sendCancellationEmail(told.id, 'job pulled', toldBefore!.status);
   check('somebody who WAS told gets the cancellation (it reaches the send, which fails with no SMTP)',
     attempted.sent === false && attempted.why === 'failed', attempted);
+
+  // ── 7. The chase (§9.4) ──────────────────────────────────────────────────
+  console.log('\n7. Chasing an unanswered offer');
+  // Told 3 days ago, day still in the future, never chased → due.
+  const chaseMe = await createBooking({ personId: willId, bookingDate: iso(10), agreedRate: 180 }, userId);
+  await query(
+    `UPDATE freelancer_day_bookings SET offer_email_sent_at = NOW() - INTERVAL '3 days' WHERE id = $1`,
+    [chaseMe.id]);
+  // Never told (send failed / backdated record) → must NOT be chased.
+  const neverSent = await createBooking({ personId: nomailId, bookingDate: iso(10), agreedRate: 100 }, userId);
+
+  const run1 = await runFreelancerOfferChase(1);
+  const chasedRow = await query(
+    `SELECT offer_chased_at FROM freelancer_day_bookings WHERE id = $1`, [chaseMe.id]);
+  // No SMTP here, so the nudge cannot go — and the stamp must reflect that.
+  check('a failed nudge does NOT burn the single chase this booking gets',
+    chasedRow.rows[0].offer_chased_at === null, chasedRow.rows[0].offer_chased_at);
+  check('and it reports nothing was chased rather than claiming success',
+    run1.chased === 0, run1);
+  const untold = await query(
+    `SELECT offer_chased_at FROM freelancer_day_bookings WHERE id = $1`, [neverSent.id]);
+  check('somebody never emailed in the first place is never chased about it',
+    untold.rows[0].offer_chased_at === null);
+
+  // Pretend the nudge got through, and prove it cannot fire twice.
+  await query(`UPDATE freelancer_day_bookings SET offer_chased_at = NOW() WHERE id = $1`, [chaseMe.id]);
+  const before2 = await query(`SELECT offer_chased_at FROM freelancer_day_bookings WHERE id = $1`, [chaseMe.id]);
+  await runFreelancerOfferChase(1);
+  const after2 = await query(`SELECT offer_chased_at FROM freelancer_day_bookings WHERE id = $1`, [chaseMe.id]);
+  check('an already-chased booking is left alone on the next run',
+    String(before2.rows[0].offer_chased_at) === String(after2.rows[0].offer_chased_at));
+
+  // Leg 2 — the day before, the alert goes to admin and fires once.
+  const tomorrowBooking = await createBooking({ personId: willId, bookingDate: iso(1), agreedRate: 180 }, userId);
+  await query(
+    `UPDATE freelancer_day_bookings SET offer_email_sent_at = NOW() - INTERVAL '5 days' WHERE id = $1`,
+    [tomorrowBooking.id]);
+  const run3 = await runFreelancerOfferChase(1);
+  const alertRow = await query(
+    `SELECT admin_alerted_at, status FROM freelancer_day_bookings WHERE id = $1`, [tomorrowBooking.id]);
+  check('the day-before alert fires for tomorrow', alertRow.rows[0].admin_alerted_at !== null, run3);
+  check('and it does NOT auto-decline — they may still turn up (§9.4 decision 1)',
+    alertRow.rows[0].status === 'offered', alertRow.rows[0].status);
+  const firstAlert = String(alertRow.rows[0].admin_alerted_at);
+  await runFreelancerOfferChase(1);
+  const alertAgain = await query(
+    `SELECT admin_alerted_at FROM freelancer_day_bookings WHERE id = $1`, [tomorrowBooking.id]);
+  check('and it fires exactly once', String(alertAgain.rows[0].admin_alerted_at) === firstAlert);
+
+  // ── 8. Closing out a passed, unanswered offer (§9.4 item 5) ──────────────
+  console.log('\n8. Closing out what was never answered');
+  const stale = await createBooking({ personId: willId, bookingDate: iso(-20), agreedRate: 180 }, userId);
+  const needs = await listNeedsClosing();
+  check('a passed unanswered offer surfaces for closing',
+    needs.some(b => b.id === stale.id), needs.length);
+  check('a FUTURE offer does not — it is pending, not stale',
+    !needs.some(b => b.bookingDate >= iso(0)));
+
+  const lapsed = await closeOutBooking(stale.id, 'lapsed', userId);
+  check('writing it off records `lapsed`, not declined or cancelled',
+    lapsed.status === 'lapsed', lapsed.status);
+  const closedRow = await query(`SELECT closed_by, closed_at FROM freelancer_day_bookings WHERE id=$1`, [stale.id]);
+  check('and records WHO wrote it off, and when',
+    closedRow.rows[0].closed_by === userId && closedRow.rows[0].closed_at !== null);
+  check('it leaves the list once closed',
+    !(await listNeedsClosing()).some(b => b.id === stale.id));
+
+  const cameAnyway = await createBooking({ personId: willId, bookingDate: iso(-21), agreedRate: 180 }, userId);
+  check('"they came anyway" records a worked day',
+    (await closeOutBooking(cameAnyway.id, 'completed', userId)).status === 'completed');
+
+  await refusesTo('closing out a day that has not happened yet',
+    () => closeOutBooking(chaseMe.id, 'lapsed', userId), /has not happened yet/i);
+  await refusesTo('closing out something already answered',
+    () => closeOutBooking(stale.id, 'lapsed', userId), /already|only an unanswered/i);
+
+  // A lapsed day frees the slot: the live-booking index covers offered and
+  // accepted only, so the same person can be offered that date again.
+  const rebooked = await createBooking({ personId: willId, bookingDate: iso(-20), agreedRate: 180 }, userId);
+  check('a written-off day can be booked again — lapsed is not live',
+    rebooked.status === 'offered');
 
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail === 0 ? 0 : 1);

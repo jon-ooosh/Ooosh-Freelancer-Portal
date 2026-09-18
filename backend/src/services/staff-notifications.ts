@@ -167,7 +167,13 @@ export async function notifyOvertimeLogged(entryId: string) {
  * the mode is live — a new template needs nothing added to it. See
  * .claude/rules/email-and-notifications.md, which says so explicitly.
  */
-async function emailApprovers(subject: string, heading: string, lines: string[], linkPath: string) {
+async function emailApprovers(
+  subject: string, heading: string, lines: string[], linkPath: string,
+  // "Review and approve" is right for a leave request and wrong for "nobody has
+  // confirmed for tomorrow", which is not a decision anybody is being asked to
+  // make. Defaulted, so every existing caller is untouched.
+  linkLabel = 'Review and approve',
+) {
   const approvers = await approverUserIds();
   if (approvers.length === 0) return;
 
@@ -177,7 +183,7 @@ async function emailApprovers(subject: string, heading: string, lines: string[],
     lines.map(l => `<p style="margin:0 0 8px;font-size:15px;color:#334155;line-height:1.6;">${l}</p>`).join('') +
     `<p style="margin:24px 0 0;"><a href="${base}${linkPath}" ` +
     `style="display:inline-block;padding:10px 18px;background:#7B5EA7;color:#fff;` +
-    `border-radius:6px;text-decoration:none;font-size:15px;">Review and approve</a></p>`;
+    `border-radius:6px;text-decoration:none;font-size:15px;">${esc(linkLabel)}</a></p>`;
 
   for (const a of approvers) {
     await emailService.send('staff_time_request', {
@@ -286,6 +292,111 @@ export async function runRtwChase(chaseDays?: number): Promise<RtwChaseResult> {
   }
 
   return { outstanding: outstanding.length, chased: due.length };
+}
+
+// ── Chasing an unanswered yard-day offer (spec §9.4) ───────────────────────
+
+export interface OfferChaseResult {
+  /** Offers still unanswered for a day that has not happened yet. */
+  outstanding: number;
+  /** Freelancers nudged once, today. */
+  chased: number;
+  /** Day-before alerts raised to admin, today. */
+  alerted: number;
+  /** Passed and still unanswered — the list waiting to be closed out. */
+  needsClosing: number;
+}
+
+const CALENDAR_URL = '/staff/calendar';
+
+/**
+ * Two legs, one runner, each firing at most once per booking.
+ *
+ * LEG 1 — a nudge to the freelancer, `chaseDays` after we asked. Same email,
+ * same link, one extra line. `offer_chased_at` stamps it so it cannot repeat:
+ * a reminder that arrives every morning gets filtered, and then the one that
+ * mattered is filtered with it — the same lesson as `rtw_chased_at`.
+ *
+ * LEG 2 — the day before, still nothing: the alert goes to ADMIN, not to them
+ * (§9.4 decision 2). Two emails is a reminder; three is nagging somebody who
+ * does not work for us, and by then it is our problem to solve rather than
+ * their question to answer.
+ *
+ * NEITHER LEG EVER CHANGES A STATUS. An unanswered offer is never auto-declined
+ * (§9.4 decision 1) — somebody who has not replied may still be planning to
+ * turn up, and quietly removing them is the worse error.
+ */
+export async function runFreelancerOfferChase(chaseDays?: number): Promise<OfferChaseResult> {
+  const { sendOfferEmail } = await import('./freelancer-day-offer');
+  const { getOfferChaseDays } = await import('./staff-settings');
+  const days = chaseDays ?? await getOfferChaseDays();
+
+  // ── Leg 1: nudge them, once ──
+  // Only bookings somebody was actually told about. `offer_email_sent_at IS
+  // NULL` means the send failed, or it was a backdated record that is never
+  // emailed at all — chasing a person about an email they never received reads
+  // as gibberish. Those are the resend button's job, not this runner's.
+  const due = await query(
+    `SELECT id FROM freelancer_day_bookings
+      WHERE status = 'offered'
+        AND offer_email_sent_at IS NOT NULL
+        AND offer_chased_at IS NULL
+        AND booking_date >= CURRENT_DATE
+        AND offer_email_sent_at < NOW() - ($1 || ' days')::interval`,
+    [String(days)]
+  );
+  let chased = 0;
+  for (const row of due.rows) {
+    const result = await sendOfferEmail(row.id as string, { resend: true });
+    // Stamp ONLY when it actually went. Stamping a failed send would burn the
+    // single chase this booking gets, and nobody would ever know it had.
+    if (result.sent) {
+      await query(`UPDATE freelancer_day_bookings SET offer_chased_at = NOW() WHERE id = $1`, [row.id]);
+      chased++;
+    }
+  }
+
+  // ── Leg 2: tell US, the day before ──
+  const tomorrow = await query(
+    `SELECT b.id, b.booking_date::text AS booking_date,
+            TRIM(COALESCE(NULLIF(p.preferred_name, ''), p.first_name, '') || ' '
+                 || COALESCE(p.last_name, '')) AS person_name
+       FROM freelancer_day_bookings b
+       JOIN people p ON p.id = b.person_id
+      WHERE b.status = 'offered'
+        AND b.admin_alerted_at IS NULL
+        AND b.booking_date = CURRENT_DATE + 1`);
+  let alerted = 0;
+  for (const row of tomorrow.rows) {
+    const who = String(row.person_name || '').trim() || 'A freelancer';
+    for (const u of await approverUserIds()) {
+      await notify(u.id, 'follow_up',
+        `${who} has not confirmed for tomorrow`,
+        `Offered a yard day on ${fmtDate(row.booking_date)} and has not replied`,
+        'freelancer_day_booking', row.id as string, CALENDAR_URL, 'high');
+    }
+    await emailApprovers(
+      `${who} has not confirmed for tomorrow`,
+      `Nobody has confirmed for ${fmtDate(row.booking_date)}`,
+      [`<strong>${esc(who)}</strong> was offered the day and has not answered. We have already nudged them once.`,
+       'They have not declined, so they may still turn up — nothing has been changed either way. This is the last automatic reminder, and it comes to you rather than to them.'],
+      CALENDAR_URL, 'Open the calendar');
+    await query(`UPDATE freelancer_day_bookings SET admin_alerted_at = NOW() WHERE id = $1`, [row.id]);
+    alerted++;
+  }
+
+  const counts = await query(
+    `SELECT
+       COUNT(*) FILTER (WHERE status = 'offered' AND booking_date >= CURRENT_DATE) AS outstanding,
+       COUNT(*) FILTER (WHERE status = 'offered' AND booking_date <  CURRENT_DATE) AS needs_closing
+     FROM freelancer_day_bookings`);
+
+  return {
+    outstanding: Number(counts.rows[0].outstanding),
+    needsClosing: Number(counts.rows[0].needs_closing),
+    chased,
+    alerted,
+  };
 }
 
 // ── The daily digest ────────────────────────────────────────────────────────

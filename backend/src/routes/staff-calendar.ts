@@ -65,6 +65,7 @@ import {
 import {
   listForRange, listBookableFreelancers, createBooking, recordResponse,
   markCompleted, cancelBooking, recordInvoice, getSpendSummary, getBooking,
+  listNeedsClosing, closeOutBooking,
 } from '../services/freelancer-days';
 import { sendOfferEmail, sendCancellationEmail } from '../services/freelancer-day-offer';
 
@@ -777,6 +778,33 @@ router.post('/freelancer-days', adminOnly, async (req: AuthRequest, res: Respons
     res.status(201).json({ data: booking, offer });
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to book that day' });
+  }
+});
+
+// GET /api/staff-calendar/freelancer-days/needs-closing
+// Passed and still unanswered — the list §9.4 decision 1 creates by refusing to
+// auto-decline, and item 5 exists to clear. Unbounded by date on purpose: an
+// offer from last March is exactly the one that should still be shouting.
+router.get('/freelancer-days/needs-closing', adminOnly, async (_req: AuthRequest, res: Response) => {
+  try {
+    res.json({ data: await listNeedsClosing() });
+  } catch (err) {
+    console.error('[staff-calendar] needs-closing failed:', err);
+    res.status(500).json({ error: 'Failed to load unanswered offers' });
+  }
+});
+
+// POST /api/staff-calendar/freelancer-days/:id/close
+router.post('/freelancer-days/:id/close', adminOnly, async (req: AuthRequest, res: Response) => {
+  const parsed = z.object({ outcome: z.enum(['completed', 'lapsed']) }).safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Say whether they came anyway or it did not happen' });
+    return;
+  }
+  try {
+    res.json({ data: await closeOutBooking(req.params.id as string, parsed.data.outcome, req.user!.id) });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to close that out' });
   }
 });
 

@@ -1071,6 +1071,30 @@ export function startScheduler() {
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: Return-to-work chase scheduled daily at 08:50 Europe/London');
 
+  // ── Freelancer yard-day offer chase (spec §9.4) ───────────────────────────
+  // Daily at 09:05 Europe/London — after the 09:00 cluster, before the carnet
+  // forms at 09:15. Two legs, each firing at most once per booking:
+  //   1. a nudge to the freelancer a day after we asked (offer_chased_at)
+  //   2. the day before, still nothing — the alert comes to ADMIN, not to them
+  //      (admin_alerted_at), because a third email to somebody who does not
+  //      work for us is nagging rather than reminding.
+  // NEITHER leg changes a status: an unanswered offer is never auto-declined
+  // (§9.4 decision 1), because somebody who has not replied may still turn up.
+  cron.schedule('5 9 * * *', async () => {
+    try {
+      const { runFreelancerOfferChase } = await import('../services/staff-notifications');
+      const r = await runFreelancerOfferChase();
+      if (r.chased > 0 || r.alerted > 0) {
+        console.log(`Scheduler: Freelancer offer chase — ${r.chased} nudged, ${r.alerted} admin alerts, ${r.outstanding} outstanding, ${r.needsClosing} awaiting close-out`);
+      } else {
+        console.log(`Scheduler: Freelancer offer chase — nothing due (${r.outstanding} outstanding, ${r.needsClosing} awaiting close-out)`);
+      }
+    } catch (err) {
+      console.error('Scheduler: Freelancer offer chase failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: Freelancer offer chase scheduled daily at 09:05 Europe/London');
+
   // ── Studio-sitter lock-up chase (morning after) ──────────────────────────
   // Daily at 08:45 Europe/London. For any shift that closed without a lock-up
   // report, reminds the rostered sitter + alerts the office. Once per shift

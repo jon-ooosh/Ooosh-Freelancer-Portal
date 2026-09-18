@@ -48,7 +48,7 @@ interface DayBooking {
   rateType: 'day' | 'half_day' | 'hourly' | 'fixed';
   agreedRate: number | null;
   expectedTotal: number | null;
-  status: 'offered' | 'accepted' | 'declined' | 'cancelled' | 'completed';
+  status: 'offered' | 'accepted' | 'declined' | 'cancelled' | 'completed' | 'lapsed';
   notes: string | null;
   invoiceReceived: boolean;
   invoiceAmount: number | null;
@@ -152,6 +152,9 @@ const BOOKING_STATUS: Record<
   completed: { cell: 'bg-amber-200 text-amber-900', short: 'Done', label: 'Done',      counts: true },
   declined:  { cell: 'bg-gray-100 text-gray-500',   short: '—',    label: 'Declined',  counts: false },
   cancelled: { cell: 'bg-gray-100 text-gray-500',   short: '—',    label: 'Cancelled', counts: false },
+  // Offered, never answered, day gone, written off. Not a decline — nobody
+  // declined — and not a cancellation, which is us calling the day off.
+  lapsed:    { cell: 'bg-gray-100 text-gray-500',   short: '—',    label: 'No reply — written off', counts: false },
 };
 
 const CELL: Record<DayStatus, { bg: string; label: string }> = {
@@ -306,6 +309,8 @@ export default function StaffCalendarPage() {
       {error && (
         <div className="mb-4 p-3 rounded bg-red-50 border border-red-200 text-sm text-red-700">{error}</div>
       )}
+
+      {isAdmin && <UnansweredOffers onError={setError} />}
 
       {addingBooking && (
         /* Today if today is on screen, otherwise the first day in view. The
@@ -780,6 +785,81 @@ function BookFreelancer({ defaultDate, onClose, onBooked, onError }: {
           Cancel
         </button>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Passed, still unanswered — the list §9.4 decision 1 creates and item 5 clears.
+ *
+ * Decision 1 (never auto-decline an unanswered offer) is right: somebody who
+ * has not replied may well be planning to turn up, and silently removing them
+ * is the worse error. But it leaves those days with no terminal state, so
+ * without this panel the list grows forever and, six months in, is long enough
+ * that nobody reads it — which defeats the point of having kept them.
+ *
+ * Two buttons because those are the two things that actually happened. Shown
+ * only when there is something in it: an empty panel every morning is training
+ * to ignore the panel.
+ */
+function UnansweredOffers({ onError }: { onError: (m: string) => void }) {
+  const [rows, setRows] = useState<DayBooking[]>([]);
+  const [busy, setBusy] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const r = await api.get<{ data: DayBooking[] }>('/staff-calendar/freelancer-days/needs-closing');
+      setRows(r.data ?? []);
+    } catch {
+      // Silent: this is a housekeeping panel, and failing to load it must not
+      // put an error banner over the calendar somebody actually came for.
+      setRows([]);
+    }
+  }, []);
+  useEffect(() => { void load(); }, [load]);
+
+  async function close(id: string, outcome: 'completed' | 'lapsed') {
+    setBusy(id);
+    try {
+      await api.post(`/staff-calendar/freelancer-days/${id}/close`, { outcome });
+      await load();
+    } catch (e) {
+      onError(e instanceof Error ? e.message : 'Could not close that out');
+    } finally { setBusy(null); }
+  }
+
+  if (rows.length === 0) return null;
+
+  return (
+    <div className="mb-4 p-4 rounded-lg border border-gray-300 bg-gray-50 space-y-3">
+      <div>
+        <h2 className="text-sm font-semibold text-gray-900">
+          {rows.length === 1 ? 'One offer was never answered' : `${rows.length} offers were never answered`}
+        </h2>
+        <p className="text-xs text-gray-600 mt-0.5">
+          The day has passed and nobody replied. Nothing was assumed either way —
+          say what happened so it stops sitting here.
+        </p>
+      </div>
+      <ul className="space-y-2">
+        {rows.map(b => (
+          <li key={b.id} className="flex flex-wrap items-center gap-2 text-sm">
+            <span className="text-gray-900 font-medium">{b.personName}</span>
+            <span className="text-gray-500">{fmtLongDate(b.bookingDate)}</span>
+            {b.notes && <span className="text-gray-400 text-xs truncate max-w-[16rem]">{b.notes}</span>}
+            <span className="ml-auto flex gap-2">
+              <button disabled={busy === b.id} onClick={() => void close(b.id, 'completed')}
+                className="px-2 py-1 text-xs rounded border border-amber-300 bg-white hover:bg-amber-50 disabled:opacity-40">
+                They came anyway
+              </button>
+              <button disabled={busy === b.id} onClick={() => void close(b.id, 'lapsed')}
+                className="px-2 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-gray-100 disabled:opacity-40">
+                It did not happen
+              </button>
+            </span>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

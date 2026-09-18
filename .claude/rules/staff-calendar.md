@@ -173,6 +173,23 @@ is the public, unauthenticated half. Rules that are not negotiable:
 - `offer_email_sent_at` means **we actually told them**. Never stamp it without
   checking `result.success`; see the email rules.
 
+## An unanswered offer is never auto-declined — but it must be closeable
+
+`runFreelancerOfferChase` (daily 09:05) nudges the freelancer ONCE
+(`offer_chased_at`), then alerts ADMIN the day before (`admin_alerted_at`).
+Neither leg touches `status`: somebody who has not replied may still turn up,
+and removing them silently is the worse error (§9.4 decision 1).
+
+- **Stamp a chase only when the send actually succeeded.** A stamp on a failed
+  send burns the single chase that booking gets and nobody ever finds out.
+- **Never chase a booking with `offer_email_sent_at IS NULL`** — the send failed
+  or it is a backdated record that is never emailed. Chasing somebody about an
+  email they never got reads as gibberish. That is the resend button's job.
+- **`lapsed` is not `cancelled` and not `declined`.** Cancelled is Ooosh calling
+  the day off; declined is them saying no; lapsed is nobody ever answering.
+  Conflating them loses the only signal that says "we asked and heard nothing".
+  It is not a live status, so a written-off day frees the slot for a rebooking.
+
 ## Bank holidays and company days are different things
 
 A **bank holiday** is computed, and under `use_allowance` is an ordinary
