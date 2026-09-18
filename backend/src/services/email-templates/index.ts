@@ -791,10 +791,10 @@ const templates: Record<string, EmailTemplate> = {
    */
   freelancer_day_offer: {
     variant: 'internal',
-    preheader: 'Can you do a day at the yard on {{bookingDate}}?',
+    preheader: 'Can you work for us on {{bookingDate}}?',
     subject: 'Are you free on {{bookingDate}}?',
     body: `
-      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">A day at the yard</h2>
+      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Ooosh work</h2>
       <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.5;">
         Hi {{freelancerName}},
       </p>
@@ -804,10 +804,9 @@ const templates: Record<string, EmailTemplate> = {
         know either way.
       </p>
       {{/if}}
-      {{#if isFirstOffer}}
+      {{#if notes}}
       <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
-        We are hoping to get you in for a day at the yard. No pressure either way —
-        just let us know.
+        <strong>What we need a hand with:</strong> {{notes}}
       </p>
       {{/if}}
       <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;">
@@ -822,11 +821,6 @@ const templates: Record<string, EmailTemplate> = {
           </td>
         </tr>
       </table>
-      {{#if notes}}
-      <p style="margin:0 0 20px;font-size:14px;color:#334155;line-height:1.5;">
-        <strong>What we need a hand with:</strong> {{notes}}
-      </p>
-      {{/if}}
       <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;">
         <tr>
           <td style="background-color:#15803d;border-radius:6px;">
@@ -838,11 +832,6 @@ const templates: Record<string, EmailTemplate> = {
           </td>
         </tr>
       </table>
-      <p style="margin:0;font-size:13px;color:#64748b;line-height:1.5;">
-        Saying no is genuinely fine and costs you nothing with us. If the day
-        half works — you could come but not until 11, say — give us a ring or drop
-        us a message and we will sort it out.
-      </p>
     `,
   },
   /**

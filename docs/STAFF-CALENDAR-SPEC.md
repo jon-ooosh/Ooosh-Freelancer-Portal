@@ -889,6 +889,15 @@ when somebody rings them, which makes the status field a fiction — it says
   person turning up or not immediately contradicts.
 - The email goes through `services/email-service.ts` like everything else, with
   two buttons and the day, times, what they are doing and the agreed rate.
+  **Kept deliberately short** (reviewed with jon on the first live send): heading
+  "Ooosh work", the greeting, what we need a hand with, the details box, the two
+  buttons. The reassuring filler around it — "no pressure either way", "saying no
+  is genuinely fine" — was cut. It padded a short question, and the tone is
+  already carried by the fact that declining is one click.
+- **No phone number anywhere in this flow.** The reply page says "get in touch".
+  A number was invented during the build and caught on the first test send;
+  there is no single source for the real one yet (see `BACKLOG.md`), and a wrong
+  number is far worse than none.
 
 **The chase, which is the bit that earns its keep — NOT YET BUILT**
 

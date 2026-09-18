@@ -33,8 +33,6 @@ interface OfferView {
   } | null;
 }
 
-const OFFICE = '020 3468 6104';
-
 /** What a dead link says. Each one answers "so am I expected or not?". */
 function deadLinkMessage(reason: Reason | null, status?: string): { title: string; body: string } {
   switch (reason) {
@@ -42,13 +40,13 @@ function deadLinkMessage(reason: Reason | null, status?: string): { title: strin
       return {
         title: status === 'accepted' ? 'You already said yes to this one' : 'You already replied to this one',
         body: status === 'accepted'
-          ? 'We have you down for it, so there is nothing else to do. If something has changed and you can no longer make it, please ring us rather than leaving it.'
-          : 'Your answer is recorded and no one is expecting you. If you have changed your mind and could do it after all, give us a ring — it may still be going.',
+          ? 'We have you down for it, so there is nothing else to do. If something has changed and you can no longer make it — or you tapped the wrong button — please get in touch rather than leaving it.'
+          : 'Your answer is recorded and no one is expecting you. If you have changed your mind and could do it after all, or you tapped the wrong button, get in touch — it may still be going.',
       };
     case 'passed':
       return {
         title: 'That day has been and gone',
-        body: 'This link was for a day that has already passed, so there is nothing left to answer. If you think that is wrong, or you did work that day and it is not showing, please ring us.',
+        body: 'This link was for a day that has already passed, so there is nothing left to answer. If you think that is wrong, or you did work that day and it is not showing, please get in touch.',
       };
     case 'cancelled':
       return {
@@ -58,12 +56,12 @@ function deadLinkMessage(reason: Reason | null, status?: string): { title: strin
     case 'completed':
       return {
         title: 'That day is already done',
-        body: 'This one is marked as worked and closed off. If your invoice is outstanding, or something does not look right, please ring us.',
+        body: 'This one is marked as worked and closed off. If your invoice is outstanding, or something does not look right, please get in touch.',
       };
     default:
       return {
         title: 'We do not recognise that link',
-        body: 'It may have been mistyped, or cut in half by an email app. Try opening it again from the original message — and if it still will not work, ring us and we will sort it out.',
+        body: 'It may have been mistyped, or cut in half by an email app. Try opening it again from the original message — and if it still will not work, get in touch and we will sort it out.',
       };
   }
 }
@@ -71,16 +69,19 @@ function deadLinkMessage(reason: Reason | null, status?: string): { title: strin
 export default function FreelancerDayRespondPage() {
   const { token } = useParams<{ token: string }>();
   const [params] = useSearchParams();
-  // Pre-selects the button they pressed in the email. Never acts on its own —
-  // it only decides which choice is highlighted when the page opens.
+  // Which button they pressed in the email. It ONLY highlights the matching
+  // button here — it never answers on its own, because mail scanners follow
+  // every link in a message before a human sees it. Highlighting is what makes
+  // the tap on this page read as confirming rather than being asked twice.
   const intent = params.get('r') === 'accept' ? 'accepted'
     : params.get('r') === 'decline' ? 'declined' : null;
 
   const [view, setView] = useState<OfferView | null>(null);
   const [loading, setLoading] = useState(true);
-  const [choice, setChoice] = useState<'accepted' | 'declined' | null>(intent);
   const [note, setNote] = useState('');
-  const [saving, setSaving] = useState(false);
+  // WHICH button is in flight, so only that one reads "Sending…" and a
+  // double-tap cannot fire the request twice.
+  const [saving, setSaving] = useState<'accepted' | 'declined' | null>(null);
   const [error, setError] = useState('');
   const [done, setDone] = useState<'accepted' | 'declined' | null>(null);
 
@@ -100,9 +101,9 @@ export default function FreelancerDayRespondPage() {
     return () => { live = false; };
   }, [token]);
 
-  async function submit() {
-    if (!choice) return;
-    setSaving(true);
+  async function submit(choice: 'accepted' | 'declined') {
+    if (saving) return;
+    setSaving(choice);
     setError('');
     try {
       const res = await fetch(`/api/freelancer-days/respond/${token}`, {
@@ -126,7 +127,7 @@ export default function FreelancerDayRespondPage() {
     } catch {
       setError('That did not save — you may have lost signal. Try again, or ring us.');
     } finally {
-      setSaving(false);
+      setSaving(null);
     }
   }
 
@@ -142,7 +143,7 @@ export default function FreelancerDayRespondPage() {
         </h1>
         <p className="text-sm text-gray-600 leading-relaxed">
           {done === 'accepted'
-            ? `We have you down for ${view?.booking?.bookingDateLabel ?? 'that day'}. If anything changes, ring us on ${OFFICE} rather than leaving it — we would always rather know early.`
+            ? `We have you down for ${view?.booking?.bookingDateLabel ?? 'that day'}. If anything changes, let us know rather than leaving it — we would always rather hear early.`
             : 'No problem at all, and thanks for answering rather than leaving us guessing. We will keep you in mind for other days.'}
         </p>
       </Shell>
@@ -155,9 +156,7 @@ export default function FreelancerDayRespondPage() {
       <Shell>
         <h1 className="text-xl font-semibold text-gray-900 mb-2">{msg.title}</h1>
         <p className="text-sm text-gray-600 leading-relaxed mb-4">{msg.body}</p>
-        <p className="text-sm text-gray-500">
-          Ooosh Tours · <a href={`tel:${OFFICE.replace(/\s/g, '')}`} className="text-ooosh-700 font-medium">{OFFICE}</a>
-        </p>
+        <p className="text-sm text-gray-500">Ooosh Tours</p>
       </Shell>
     );
   }
@@ -177,32 +176,10 @@ export default function FreelancerDayRespondPage() {
         {b.notes && <Row label="What we need a hand with" value={b.notes} />}
       </dl>
 
-      <div className="grid grid-cols-2 gap-3 mb-4">
-        <button
-          type="button"
-          onClick={() => setChoice('accepted')}
-          className={`px-4 py-3 rounded-lg text-sm font-semibold border-2 transition ${
-            choice === 'accepted'
-              ? 'bg-green-700 border-green-700 text-white'
-              : 'bg-white border-gray-300 text-gray-700 hover:border-green-600'}`}
-        >
-          Yes, I can do it
-        </button>
-        <button
-          type="button"
-          onClick={() => setChoice('declined')}
-          className={`px-4 py-3 rounded-lg text-sm font-semibold border-2 transition ${
-            choice === 'declined'
-              ? 'bg-gray-700 border-gray-700 text-white'
-              : 'bg-white border-gray-300 text-gray-700 hover:border-gray-500'}`}
-        >
-          Sorry, I cannot
-        </button>
-      </div>
-
-      {/* Optional, and labelled as optional. §9.4 decision 3: a decline is a
-          response, not something to excuse, so nothing here asks them to
-          justify it. */}
+      {/* Above the buttons on purpose: the buttons ARE the send, so anything
+          typed after pressing one would be lost. §9.4 decision 3 — a decline is
+          a response, not something to excuse — so this stays optional and is
+          labelled as such. */}
       <label className="block mb-4">
         <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">
           Anything to add? (optional)
@@ -220,21 +197,31 @@ export default function FreelancerDayRespondPage() {
         <p className="mb-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded p-2">{error}</p>
       )}
 
-      <button
-        type="button"
-        onClick={() => void submit()}
-        disabled={!choice || saving}
-        className="w-full px-4 py-3 rounded-lg bg-ooosh-700 text-white text-sm font-semibold disabled:opacity-40"
-      >
-        {saving ? 'Sending…' : choice ? 'Send my answer' : 'Pick yes or no first'}
-      </button>
-
-      <p className="mt-4 text-xs text-gray-500 leading-relaxed">
-        If the day half works — you could come but not until 11, say — put it in the
-        box above, or ring us on{' '}
-        <a href={`tel:${OFFICE.replace(/\s/g, '')}`} className="text-ooosh-700">{OFFICE}</a>{' '}
-        and we will sort something out.
-      </p>
+      {/* One tap answers — no confirm step. The two labels say exactly what
+          each does, and a second screen asking you to agree with yourself is
+          the kind of thing people stop reading. A mis-tap is recoverable: the
+          link still works, says which way it went, and tells them to get in
+          touch. */}
+      <div className="grid grid-cols-2 gap-3">
+        <button
+          type="button"
+          disabled={saving !== null}
+          onClick={() => void submit('accepted')}
+          className={`px-4 py-4 rounded-lg text-sm font-semibold bg-green-700 text-white disabled:opacity-40 ${
+            intent === 'accepted' ? 'ring-4 ring-green-200' : ''}`}
+        >
+          {saving === 'accepted' ? 'Sending…' : 'Yes, I can do it'}
+        </button>
+        <button
+          type="button"
+          disabled={saving !== null}
+          onClick={() => void submit('declined')}
+          className={`px-4 py-4 rounded-lg text-sm font-semibold bg-white border-2 border-gray-300 text-gray-700 disabled:opacity-40 ${
+            intent === 'declined' ? 'ring-4 ring-gray-200' : ''}`}
+        >
+          {saving === 'declined' ? 'Sending…' : 'Sorry, I cannot'}
+        </button>
+      </div>
     </Shell>
   );
 }
