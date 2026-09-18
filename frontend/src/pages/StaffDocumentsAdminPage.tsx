@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../services/api';
 import MarkdownLite from '../components/MarkdownLite';
+import { openAuthedFile } from '../lib/openAuthedFile';
 
 export type Mode = 'read_only' | 'tick' | 'sign';
 export type Category = 'policy' | 'agreement' | 'training' | 'official_doc' | 'contract' | 'other';
@@ -499,8 +500,7 @@ function MatrixModal({ doc, onClose }: { doc: DocRow; onClose: () => void }) {
     finally { setSyncing(false); }
   };
   const openPdf = async (completionId: string) => {
-    const { blob } = await api.blob(`/staff-documents/completions/${completionId}/pdf`);
-    window.open(URL.createObjectURL(blob), '_blank');
+    await openAuthedFile(`/staff-documents/completions/${completionId}/pdf`, 'completion.pdf');
   };
   const badge = (s: string) => s === 'completed' ? 'bg-green-100 text-green-700'
     : s === 'lapsed' ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-600';
