@@ -10,12 +10,63 @@ import type { ChecklistItem, DetailPrompt, SettingsData } from '../lib/settings-
 
 // ── Reusable detail prompts ──
 
-const FLUID_TOPUP: Record<string, DetailPrompt> = {
-  'Topped up': {
-    label: 'Approx. amount added?',
-    type: 'options',
-    choices: ['< 500ml', '~500ml', '~1L', '~1.5L', '~2L', '2L+', 'Full refill'],
-  },
+/**
+ * Fluid level items: the READING is the answer, the ACTION is the detail.
+ *
+ * The old shape asked one question ("Ok / Topped up / Problem") and so
+ * conflated two facts — what the level was, and what was done about it. A van
+ * topped up every single prep looked identical to one topped up once, and the
+ * level it was found at was never recorded at all. Splitting them is what makes
+ * a drinking van visible.
+ *
+ * Levels ascend left to right so the pills read like a gauge. `Empty` and
+ * `Overfull` both flag: one is a leak or a burn, the other risks seals and the
+ * cat. A quarter does not flag — that is a normal top-up, not a fault.
+ *
+ * IMPORTANT — three places downstream read the word "Topped up" to count a
+ * top-up, deduct stock and show fluid history. They read it out of the DETAIL
+ * now (and still out of the answer, for prep sessions recorded before this
+ * change). Keep the "Topped up …" prefix on these choices or they go quiet:
+ *   - lib/stock-consumption.ts      (deducts oil/coolant/screenwash from stock)
+ *   - backend services/vehicle-forecast.ts  (the "drinking oil" watch flag)
+ *   - components/prep/PrepHistoryTab.tsx    (fluids topped, per session)
+ */
+const FLUID_LEVELS = ['Empty', '¼', '½', '¾', 'Full', 'Overfull', 'Problem']
+
+/** Levels that raise an issue. A quarter is a top-up, not a fault. */
+const FLUID_LEVEL_FLAGS = ['Empty', 'Overfull', 'Problem']
+
+// "Full refill" is spelled exactly so — parseFluidAmount() in types/stock.ts
+// matches that literal to deduct a full container's worth.
+const FLUID_TOPUP_CHOICES = [
+  'No — left as is',
+  'Topped up < 500ml', 'Topped up ~500ml', 'Topped up ~1L',
+  'Topped up ~1.5L', 'Topped up ~2L', 'Topped up 2L+',
+  'Topped up — Full refill',
+]
+
+// Only reachable from 'Overfull' — the one level where the fix is taking fluid
+// OUT. Draining deliberately does NOT touch stock; nothing was consumed.
+const FLUID_DRAIN_CHOICES = [
+  'No — left as is',
+  'Drained off ~500ml', 'Drained off ~1L', 'Drained off 1L+',
+]
+
+const TOPUP_PROMPT: DetailPrompt = {
+  label: 'Adjusted?',
+  type: 'options',
+  choices: FLUID_TOPUP_CHOICES,
+}
+
+const FLUID_ADJUSTMENT: Record<string, DetailPrompt> = {
+  'Empty': TOPUP_PROMPT,
+  '¼': TOPUP_PROMPT,
+  '½': TOPUP_PROMPT,
+  '¾': TOPUP_PROMPT,
+  // No prompt on 'Full' — nothing to do at full, and offering one invites
+  // staff to record the level AFTER topping up instead of as found.
+  'Overfull': { label: 'Adjusted?', type: 'options', choices: FLUID_DRAIN_CHOICES },
+  'Problem': { label: "What's the problem?", type: 'text' },
 }
 
 const HEADLIGHT_BULB_REPLACED: Record<string, DetailPrompt> = {
@@ -160,10 +211,12 @@ const PREP_ALL: ChecklistItem[] = [
   item('Interior tyre walls OK?', 'Vehicle Exterior', ['Ok', 'Problem'], ['Problem'], { notes: 'Inward-facing (chassis side) wall of each tyre — check for cracks, bulges, splits.' }),
 
   // Engine
-  item('Oil level', 'Engine', ['Ok', 'Topped up', 'Problem'], ['Problem'], { notes: 'Should be 1/2 full', detailPrompts: FLUID_TOPUP }),
-  item('Water / coolant level', 'Engine', ['Ok', 'Topped up', 'Problem'], ['Problem'], { notes: 'At the half way rim', detailPrompts: FLUID_TOPUP }),
-  item('Screen wash level', 'Engine', ['Ok', 'Topped up', 'Problem'], ['Problem'], { notes: 'At least half full', detailPrompts: FLUID_TOPUP }),
-  item('Ad Blue level', 'Engine', ['Ok', 'Topped up', 'Problem', 'N/A'], ['Problem'], { notes: 'Please fill', detailPrompts: FLUID_TOPUP }),
+  item('Oil level', 'Engine', FLUID_LEVELS, FLUID_LEVEL_FLAGS, { notes: 'Level AS FOUND, before any top-up. Should be at least 1/2.', detailPrompts: FLUID_ADJUSTMENT }),
+  item('Water / coolant level', 'Engine', FLUID_LEVELS, FLUID_LEVEL_FLAGS, { notes: 'Level AS FOUND, before any top-up. Should be at the half way rim.', detailPrompts: FLUID_ADJUSTMENT }),
+  item('Screen wash level', 'Engine', FLUID_LEVELS, FLUID_LEVEL_FLAGS, { notes: 'Level AS FOUND, before any top-up. Should be at least half full.', detailPrompts: FLUID_ADJUSTMENT }),
+  // N/A stays on AdBlue — some vans genuinely aren't fitted with it, and that
+  // is an answer, not a fault.
+  item('Ad Blue level', 'Engine', [...FLUID_LEVELS, 'N/A'], FLUID_LEVEL_FLAGS, { notes: 'Level AS FOUND, before any top-up. Please fill.', detailPrompts: FLUID_ADJUSTMENT }),
 
   // Front Cab
   item('Indicators', 'Front Cab', ['Tested & working', 'Replaced bulb(s) & now all working', 'Problem'], ['Problem'], { detailPrompts: INDICATOR_BULB_REPLACED }),

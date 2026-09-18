@@ -79,14 +79,26 @@ function getTyreData(session: PrepHistorySession): {
   }
 }
 
-/** Check if a fluid was topped up in this session */
+/**
+ * Check if a fluid was topped up in this session.
+ *
+ * Two shapes to read. Sessions recorded from late 2026 answer the fluid items
+ * with the LEVEL FOUND and put the action in the detail ("Topped up ~1L");
+ * older ones answered "Topped up" outright. Both count.
+ *
+ * The detail test is anchored to the start of the string deliberately —
+ * "Info stickers (height, AdBlue top up etc)" matches the AdBlue name keyword,
+ * and its free-text detail would otherwise register as an AdBlue top-up.
+ */
 function getFluidStatus(session: PrepHistorySession): string[] {
   const topped: string[] = []
-  const fluidNames = ['Oil level', 'Water level', 'Screen wash', 'Ad Blue', 'AdBlue']
+  // 'Water' (not 'Water level') — the item is called "Water / coolant level",
+  // so the old keyword never matched it and coolant top-ups went unlisted.
+  const fluidNames = ['Oil level', 'Water', 'Screen wash', 'Ad Blue', 'AdBlue']
   for (const sec of session.sections || []) {
     for (const item of sec.items || []) {
       if (fluidNames.some(f => item.name.toLowerCase().includes(f.toLowerCase()))) {
-        if (item.value?.toLowerCase().includes('topped') || item.value?.toLowerCase().includes('top')) {
+        if (item.detail?.trim().startsWith('Topped up') || item.value?.toLowerCase().includes('top')) {
           topped.push(item.name.replace(' level', ''))
         }
       }
@@ -105,8 +117,11 @@ function getProblems(session: PrepHistorySession): string[] {
     for (const item of sec.items || []) {
       // 'N/A' is a legitimate "not fitted / not applicable" answer — NOT a
       // problem (some vans were never fitted with a fire extinguisher, etc.).
-      // Only genuine "Problem" answers count.
-      if (item.value?.toLowerCase().includes('problem')) {
+      // Only genuine flagged answers count. `flagged` is the authoritative one
+      // (set from the item's flagValues at prep time); the word match is the
+      // fallback for sessions saved before that field existed. Without the
+      // former, a fluid found 'Empty' or 'Overfull' would never show here.
+      if (item.flagged === true || item.value?.toLowerCase().includes('problem')) {
         const desc = item.detail || item.name
         problems.push(desc)
       }
@@ -481,7 +496,7 @@ function PrepDetailModal({ session, onClose }: { session: PrepHistorySession; on
               </div>
               <div className="divide-y divide-gray-50">
                 {(sec.items || []).map((item, ii) => {
-                  const flaggedItem = item.value?.toLowerCase().includes('problem')
+                  const flaggedItem = item.flagged === true || item.value?.toLowerCase().includes('problem')
                   return (
                     <div key={ii} className="flex items-start justify-between gap-3 px-3 py-1.5 text-xs">
                       <span className="text-gray-500">{item.name}</span>

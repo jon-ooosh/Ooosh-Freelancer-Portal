@@ -829,14 +829,51 @@ export async function sendExcessEmail(opts: {
   }
 }
 
-/** Send last-minute booking alert to info@ */
-export async function sendLastMinuteAlert(jobId: string) {
+/**
+ * Pipeline statuses a job must be coming FROM for a move to 'confirmed' to
+ * count as winning the booking.
+ *
+ * This is THE definition of "the booking was just won" for alerting purposes —
+ * every caller of sendLastMinuteAlert() goes through it, so none of them can
+ * get the judgement wrong on its own.
+ *
+ * Pre-confirmed stages are the obvious members. `lost` and `cancelled` are in
+ * deliberately: a dead job that comes back to life days before it runs IS a
+ * genuine last-minute booking and should shout.
+ *
+ * Everything else is excluded, and `prepped` is the one that matters in
+ * practice. A `prepped → confirmed` move is somebody correcting a status on a
+ * job confirmed weeks ago, not a new booking — it was the cause of every
+ * false-fire we could trace (jobs 15912, 16453, 16491, Aug–Sep 2026).
+ */
+const BOOKING_WON_FROM_STATUSES = [
+  'new_enquiry', 'quoting', 'chasing', 'paused', 'provisional', 'lost', 'cancelled',
+];
+
+/**
+ * Send the last-minute booking alert to info@.
+ *
+ * Fires at most ONCE per job (see jobs.last_minute_alerted_at, migration 226),
+ * and only when `fromStatus` says the booking was genuinely just won. Callers
+ * pass the status the job was on immediately before the move to 'confirmed';
+ * pass null only where no status transition is involved at all.
+ */
+export async function sendLastMinuteAlert(jobId: string, fromStatus: string | null) {
+  // Not a booking being won — a re-save, or a correction from further down the
+  // operational chain. Say nothing.
+  if (!fromStatus || !BOOKING_WON_FROM_STATUSES.includes(fromStatus)) return;
+
   const jobResult = await query(
-    `SELECT job_name, hh_job_number, client_name, company_name, job_date, out_date, is_internal FROM jobs WHERE id = $1`,
+    `SELECT job_name, hh_job_number, client_name, company_name, job_date, out_date,
+            is_internal, last_minute_alerted_at
+       FROM jobs WHERE id = $1`,
     [jobId]
   );
   if (jobResult.rows.length === 0) return;
   const job = jobResult.rows[0];
+
+  // Already shouted about this one. Cleared again if the job is lost/cancelled.
+  if (job.last_minute_alerted_at) return;
 
   // Internal jobs (garage visits etc.) aren't bookings — no alert
   if (job.is_internal === true) return;
@@ -848,8 +885,12 @@ export async function sendLastMinuteAlert(jobId: string) {
   const now = new Date();
   const daysUntil = Math.ceil((start.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
 
-  // Only alert if within 3 days
+  // Only alert if within 3 days...
   if (daysUntil > 3) return;
+  // ...and not for a job that has already started. Without this floor a job
+  // three weeks in the past scores daysUntil = -21, sails past the check above
+  // and gets labelled "URGENT: Same-day booking / TODAY".
+  if (daysUntil < 0) return;
 
   const startFormatted = start.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
   const clientName = job.client_name || job.company_name || 'Unknown client';
@@ -882,4 +923,8 @@ export async function sendLastMinuteAlert(jobId: string) {
       jobUrl,
     },
   });
+
+  // Stamp only after a successful send — a throw above leaves the marker unset
+  // so a retry can still get the alert out.
+  await query(`UPDATE jobs SET last_minute_alerted_at = NOW() WHERE id = $1`, [jobId]);
 }

@@ -22,8 +22,18 @@ interface PrepItemResponse {
 interface ConsumptionRule {
   /** Checklist item name (exact match) */
   checklistItem: string
-  /** Option value that triggers consumption */
-  triggerOption: string
+  /**
+   * Option value that triggers consumption. Used by items where the ANSWER is
+   * the work done ("Replaced bulb(s) & now all working").
+   */
+  triggerOption?: string
+  /**
+   * Detail-prompt prefix that triggers consumption. Used by fluid items, where
+   * the answer is the level found and the detail is what was done about it
+   * ("Topped up ~1L"). A "Drained off …" detail never matches — taking fluid
+   * out consumes nothing.
+   */
+  triggerDetailPrefix?: string
   /** Keywords to match against stock item name (case-insensitive, any match) */
   stockKeywords: string[]
   /** How to derive quantity from the detail prompt value */
@@ -34,25 +44,25 @@ const CONSUMPTION_RULES: ConsumptionRule[] = [
   // Fluids
   {
     checklistItem: 'Oil level',
-    triggerOption: 'Topped up',
+    triggerDetailPrefix: 'Topped up',
     stockKeywords: ['oil'],
     getQuantity: parseFluidAmount,
   },
   {
     checklistItem: 'Water / coolant level',
-    triggerOption: 'Topped up',
+    triggerDetailPrefix: 'Topped up',
     stockKeywords: ['coolant', 'antifreeze'],
     getQuantity: parseFluidAmount,
   },
   {
     checklistItem: 'Screen wash level',
-    triggerOption: 'Topped up',
+    triggerDetailPrefix: 'Topped up',
     stockKeywords: ['screen wash', 'screenwash'],
     getQuantity: parseFluidAmount,
   },
   {
     checklistItem: 'Ad Blue level',
-    triggerOption: 'Topped up',
+    triggerDetailPrefix: 'Topped up',
     stockKeywords: ['adblue', 'ad blue'],
     getQuantity: parseFluidAmount,
   },
@@ -101,9 +111,17 @@ export function buildConsumptionTransactions(
   const now = new Date().toISOString()
 
   for (const rule of CONSUMPTION_RULES) {
-    const response = responses.find(
-      r => r.name === rule.checklistItem && r.value === rule.triggerOption,
-    )
+    const response = responses.find(r => {
+      if (r.name !== rule.checklistItem) return false
+      // Fluids: the action lives in the detail. Everything else: in the answer.
+      // Prep sessions recorded before the fluid split still answered "Topped up"
+      // outright, so accept that too and keep their stock history consistent.
+      if (rule.triggerDetailPrefix) {
+        return (r.detail || '').trim().startsWith(rule.triggerDetailPrefix)
+          || r.value === rule.triggerDetailPrefix
+      }
+      return r.value === rule.triggerOption
+    })
     if (!response) continue
 
     const quantity = rule.getQuantity(response.detail || '')
