@@ -34,6 +34,7 @@ export const DEFAULTS = {
   absenceFlagMonths: 3,
   rtwChaseDays: 7,
   cashOutReminderDay: 8,
+  offerChaseDays: 1,
   minHeadcountByWeekday: {} as Record<string, number>,
 };
 
@@ -193,6 +194,11 @@ export async function getAbsenceFlag(): Promise<{ spells: number; months: number
     num('staff.absence_flag_months', DEFAULTS.absenceFlagMonths),
   ]);
   return { spells, months };
+}
+
+/** Days after a yard-day offer before the ONE chase to the freelancer (§9.4). */
+export function getOfferChaseDays(): Promise<number> {
+  return num('staff.offer_chase_days', DEFAULTS.offerChaseDays);
 }
 
 /** Days after a sickness closes before the one return-to-work chase (§7.3). */

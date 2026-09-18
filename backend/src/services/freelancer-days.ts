@@ -25,7 +25,17 @@ import { DATE_RE } from './staff-day-status';
 
 export type DurationType = 'full_day' | 'half_day' | 'hours';
 export type RateType = 'day' | 'half_day' | 'hourly' | 'fixed';
-export type BookingStatus = 'offered' | 'accepted' | 'declined' | 'cancelled' | 'completed';
+export type BookingStatus =
+  | 'offered' | 'accepted' | 'declined' | 'cancelled' | 'completed'
+  /**
+   * Offered, never answered, the day has gone, and a human wrote it off.
+   *
+   * NOT `declined` — nobody declined anything — and NOT `cancelled`, which is
+   * Ooosh calling a day off. Keeping it separate preserves the only signal that
+   * says "we asked and heard nothing", which is what you actually want when
+   * deciding who to ask next time.
+   */
+  | 'lapsed';
 
 /** Statuses that occupy the calendar and count toward who is in. */
 export const LIVE_STATUSES: BookingStatus[] = ['offered', 'accepted'];
@@ -286,6 +296,7 @@ export async function markCompleted(id: string): Promise<DayBooking> {
   if (!cur) throw new Error('Booking not found');
   if (cur.status === 'cancelled') throw new Error('That booking was cancelled');
   if (cur.status === 'declined') throw new Error('That booking was declined');
+  if (cur.status === 'lapsed') throw new Error('That booking was written off — reopen it by booking the day again');
 
   await query(
     `UPDATE freelancer_day_bookings SET status = 'completed', updated_at = NOW() WHERE id = $1`, [id]);
@@ -308,6 +319,54 @@ export async function cancelBooking(id: string, reason: string, userId: string):
   );
   const out = await getBooking(id);
   if (!out) throw new Error('Booking not found after cancelling');
+  return out;
+}
+
+/**
+ * Passed, still `offered` — the list §9.4 decision 1 creates and item 5 clears.
+ *
+ * Deliberately no date floor: an offer from last March is exactly the thing
+ * that should still be shouting. Oldest first, because the stale end is where
+ * the list stops being read.
+ */
+export async function listNeedsClosing(): Promise<DayBooking[]> {
+  const r = await query(
+    `${SELECT} WHERE b.status = 'offered' AND b.booking_date < CURRENT_DATE
+      ORDER BY b.booking_date ASC`);
+  return r.rows.map(mapRow);
+}
+
+/**
+ * Write off, or record that they came anyway (§9.4 item 5).
+ *
+ * Two outcomes because those are the two things that actually happened, and
+ * both need to be sayable in one click or the list does not get cleared.
+ */
+export async function closeOutBooking(
+  id: string,
+  outcome: 'completed' | 'lapsed',
+  userId: string,
+): Promise<DayBooking> {
+  const cur = await getBooking(id);
+  if (!cur) throw new Error('Booking not found');
+  if (cur.status !== 'offered') {
+    throw new Error(`Only an unanswered offer can be closed out — that one is ${cur.status}`);
+  }
+  // A future offer is not stale, it is pending. Closing one out would quietly
+  // remove somebody from a day that has not happened, which is the exact
+  // failure §9.4 decision 1 exists to prevent.
+  if (cur.bookingDate >= new Date().toISOString().slice(0, 10)) {
+    throw new Error('That day has not happened yet — cancel it instead if it is off');
+  }
+
+  await query(
+    `UPDATE freelancer_day_bookings
+        SET status = $2, closed_by = $3, closed_at = NOW(), updated_at = NOW()
+      WHERE id = $1`,
+    [id, outcome, userId]
+  );
+  const out = await getBooking(id);
+  if (!out) throw new Error('Booking not found after closing out');
   return out;
 }
 

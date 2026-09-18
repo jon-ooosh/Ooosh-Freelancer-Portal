@@ -899,7 +899,10 @@ when somebody rings them, which makes the status field a fiction — it says
   there is no single source for the real one yet (see `BACKLOG.md`), and a wrong
   number is far worse than none.
 
-**The chase, which is the bit that earns its keep — NOT YET BUILT**
+**The chase, which is the bit that earns its keep — SHIPPED (migration 227)**
+
+Runs daily at 09:05 as `runFreelancerOfferChase`. Interval is
+`staff.offer_chase_days` in `system_settings`, default 1.
 
 | When | What | Who |
 |---|---|---|
@@ -931,7 +934,16 @@ Stamped like every other chase in this module (`rtw_chased_at`,
 Raised by jon on sign-off. Each is cheap now and awkward to retrofit once mail
 is going out.
 
-5. **A passed, unanswered offer needs a way to be closed.** Decision 1 says
+5. **A passed, unanswered offer needs a way to be closed.** — **SHIPPED (227).**
+   `lapsed` is the terminal state, deliberately NOT folded into `cancelled`:
+   cancelled is Ooosh calling a day off, lapsed is nobody ever answering, and
+   conflating them loses the only signal that says "we asked and heard nothing"
+   — which is what you want when deciding who to ask next time. It is not a
+   live status, so a written-off day frees the slot and can be offered again.
+   The panel appears on the calendar only when there is something in it; an
+   empty panel every morning is training to ignore the panel.
+
+   *Original note:* Decision 1 says
    never auto-decline, which is right — but it leaves an `offered` day with no
    terminal state at all, so it sits in the admin list forever. Six months in
    the list is long enough that nobody reads it, which defeats the point of not
@@ -1233,6 +1245,7 @@ separating "pulled out after accepting" from "declined". §9.4 items 5–7.
 | **§20** | Company days — granted to everyone, recurring or one-off, with the reclaim prompt and an annual November ask | 219 |
 | **E** | Freelancer day bookings ("yard days") — booked and displayed on the staff calendar, agreed rate snapshot, expected spend, invoice tracking | 222 |
 | **E.1** | The yard-day OFFER (§9.4) — the email with accept / decline, the bearer token, the public reply page, resend, and the cancellation note | 225 |
+| **E.2** | The offer CHASE (§9.4) — one nudge to them, the day-before alert to admin, and `lapsed` so a passed unanswered offer can be closed out | 227 |
 
 ### Decisions taken during the build that CHANGE this spec
 
@@ -1549,6 +1562,24 @@ Kept because each one is a trap the next person could fall into.
   unrecognised reads like your booking has evaporated. The token now survives
   the answer. *Testing the service layer would never have surfaced this; it only
   appeared when the flow was walked the way a person walks it.*
+
+- **A migration number collided mid-build, exactly as CLAUDE.md predicts.**
+  The chase migration was written as 226; while it was being built,
+  `226_last_minute_alert_marker.sql` landed on main from a parallel branch.
+  Caught by running `db:migrate` on a fresh scratch database and reading what
+  actually applied — not by the type checker, which has no opinion about SQL
+  filenames. Renumbered to 227 before the PR, which is safe precisely because it
+  had only ever touched throwaway databases. *Take the number at BUILD time, and
+  re-check it just before opening the PR if the branch has been open a while.*
+
+- **Templating a scratch database from a USED one re-created the fixture
+  cross-talk §18 already warns about.** The seven suites were re-run by cloning
+  a database that had already run the offer suite, so its bookings leaked into
+  the next suite's date range: "both bookings appear" found three, and the spend
+  total was wrong. Nothing was broken — the failures were entirely manufactured
+  by the harness. *The rule is not "a database per suite", it is "a CLEAN
+  database per suite". A template must come from a freshly migrated database and
+  nothing else.*
 
 ### Still to build
 
