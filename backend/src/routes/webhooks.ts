@@ -23,6 +23,7 @@ import { reactivateAutoCancelledRequirements } from '../services/requirement-cle
 import { cascadeJobClose, reactivateAutoCancelledQuotes } from '../services/job-close-cascade';
 import { closeJobRequirements } from '../services/requirement-close-sweep';
 import { sendLastMinuteAlert } from '../services/money-emails';
+import { isUnwonTransition } from '../services/pipeline-stage';
 
 const router = Router();
 
@@ -264,13 +265,23 @@ async function handleJobStatusChange(
     // to life at short notice the alert is allowed to fire again.
     const clearLastMinuteMarker =
       newPipelineStatus === 'lost' || newPipelineStatus === 'cancelled';
+    // Un-winning via HireHop: same treatment the OP-side route gives it. A job
+    // HH drops back to Enquiry/Provisional has not been won, so the
+    // confirmation stamp and the one-shot alert marker both go.
+    const unwon = isUnwonTransition(job.pipeline_status, newPipelineStatus);
+    // ...and the mirror of it. HH-driven confirmations never stamped
+    // confirmed_at at all, so a job booked by staff in HireHop had no record
+    // of when it was won. COALESCE keeps the first date on a re-confirmation.
+    const stampConfirmed = newPipelineStatus === 'confirmed';
 
     await query(
       `UPDATE jobs SET pipeline_status = $1, pipeline_status_changed_at = NOW(), updated_at = NOW()
          ${clearChase ? ', next_chase_date = NULL' : ''}
          ${clearDispatchMarker ? ', under_dispatch_warned_at = NULL' : ''}
          ${clearReturnedMarker ? ', returned_bookedout_warned_at = NULL' : ''}
-         ${clearLastMinuteMarker ? ', last_minute_alerted_at = NULL' : ''}
+         ${clearLastMinuteMarker || unwon ? ', last_minute_alerted_at = NULL' : ''}
+         ${unwon ? ', confirmed_at = NULL, confirmed_method = NULL' : ''}
+         ${stampConfirmed ? ', confirmed_at = COALESCE(confirmed_at, NOW())' : ''}
        WHERE id = $2`,
       [newPipelineStatus, job.id],
     );

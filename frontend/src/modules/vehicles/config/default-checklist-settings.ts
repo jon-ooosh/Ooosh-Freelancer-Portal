@@ -266,11 +266,19 @@ const PREP_ALL: ChecklistItem[] = [
 // ── Live-form normaliser ──
 //
 // The live prep form reads its checklist from R2 (`settings/checklists.json`),
-// falling back to DEFAULT_CHECKLIST_SETTINGS only when R2 is empty. Prod has a
-// customised R2 copy, so editing the defaults above is NOT enough to get the
-// tread wording + tyre-wall tickboxes onto the live form. This normaliser is
-// applied to whatever prepMap the form ends up using, guaranteeing the
-// safety-critical tyre content is present regardless of R2 state.
+// falling back to DEFAULT_CHECKLIST_SETTINGS only when R2 is empty.
+//
+// AS OF SEPT 2026 PROD'S R2 COPY IS EMPTY and the live form runs on the
+// defaults above, so editing them IS enough. (This comment previously said the
+// opposite. It was checked on 18 Sep 2026 — `update-fluid-checklist-items.ts`
+// found no object at that key — and corrected.)
+//
+// That can change the moment anyone presses Save on Settings > Checklists:
+// from then on R2 wins and edits to the defaults above stop reaching the form.
+// So do NOT rely on either state. This normaliser is applied to whatever
+// prepMap the form ends up using, guaranteeing the safety-critical tyre
+// content is present regardless of R2 state — and it is the right home for
+// anything else that MUST be on the form no matter what R2 holds.
 //
 // Idempotent + minimally invasive: only adds the wall tickboxes if absent, and
 // only sets the tread note when the item has no note (won't clobber a custom
