@@ -124,6 +124,10 @@ somewhere the rules don't cover.
 
 `docs/*-SPEC.md` are the hand-written per-feature specs; several rules point at them.
 
+**Not yet built:** `docs/STAFF-RECORDS-SPEC.md` — private staff files and key data
+(admin-only, some encrypted), document review cycles, and periodic staff reviews. Its
+§1 lists what already exists and must not be rebuilt; read that before designing.
+
 ---
 
 # Always-on conventions

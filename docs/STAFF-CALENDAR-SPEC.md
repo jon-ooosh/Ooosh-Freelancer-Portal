@@ -1241,9 +1241,15 @@ more than the tick.
    it sets everyone's entitlement. Note Will takes 30-minute lunches against the standard
    hour — fine under WTR (a 20-minute break covers a 6h+ day), but it should be what his
    contract says.
-7. **Right-to-work records** (§3.1) — check what evidence is currently held for the 7
+7. ➡️ **BECAME ITS OWN MODULE.** jon: these belong in a private, admin-only
+   staff area rather than the staff-wide-readable People record. Together with
+   item 8 this is now `docs/STAFF-RECORDS-SPEC.md`.
+   Original question — Right-to-work records (§3.1) — check what evidence is currently held for the 7
    staff and where, since the module will expect to hold it.
-8. **NI numbers** — confirm they are wanted in OP at all before building the encrypted
+8. ➡️ **YES, WANTED — see `docs/STAFF-RECORDS-SPEC.md`.** jon: needed for
+   payroll and as his own employer reference; they currently live in his email
+   inbox. Encrypted, admin-only.
+   Original question — NI numbers — confirm they are wanted in OP at all before building the encrypted
    column. If payroll is the only consumer and the accountants already hold them, the
    safest version of this field is the one that does not exist.
 9. ✅ **DECIDED: keep one year, then auto-delete.** Not yet built — needs a
