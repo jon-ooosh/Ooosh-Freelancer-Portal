@@ -2269,8 +2269,15 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
 
         if (currentStatus && ['new_enquiry', 'quoting', 'chasing', 'provisional'].includes(currentStatus)) {
           // Move to confirmed in OP
+          // confirmed_at is stamped here too. Until now only the pipeline
+          // route set it, so every job won by a payment had a NULL
+          // confirmed_at — job 16491 among them — which made the field
+          // useless for "when did we win this". COALESCE so a job that was
+          // already confirmed once keeps its original date.
           await query(
-            `UPDATE jobs SET pipeline_status = 'confirmed', pipeline_status_changed_at = NOW(), updated_at = NOW() WHERE id = $1`,
+            `UPDATE jobs SET pipeline_status = 'confirmed', pipeline_status_changed_at = NOW(),
+                             confirmed_at = COALESCE(confirmed_at, NOW()), updated_at = NOW()
+             WHERE id = $1`,
             [job.id]
           );
           statusChanged = true;
@@ -3465,8 +3472,15 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
 
         if (currentStatus && ['new_enquiry', 'quoting', 'chasing', 'provisional'].includes(currentStatus)) {
           // Move to confirmed in OP
+          // confirmed_at is stamped here too. Until now only the pipeline
+          // route set it, so every job won by a payment had a NULL
+          // confirmed_at — job 16491 among them — which made the field
+          // useless for "when did we win this". COALESCE so a job that was
+          // already confirmed once keeps its original date.
           await query(
-            `UPDATE jobs SET pipeline_status = 'confirmed', pipeline_status_changed_at = NOW(), updated_at = NOW() WHERE id = $1`,
+            `UPDATE jobs SET pipeline_status = 'confirmed', pipeline_status_changed_at = NOW(),
+                             confirmed_at = COALESCE(confirmed_at, NOW()), updated_at = NOW()
+             WHERE id = $1`,
             [job.id]
           );
           statusChanged = true;
