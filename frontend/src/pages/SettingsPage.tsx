@@ -86,6 +86,9 @@ function SettingsContent() {
       {/* Staff time thresholds & bank holidays — admin & manager */}
       <StaffTimeSettingsSection />
 
+      {/* Links sent to a freelancer the moment they're approved — admin & manager */}
+      <FreelancerLinksSection />
+
       {/* Email Service section — admin only */}
       {currentUser?.role === 'admin' && <EmailSection />}
 
@@ -1918,6 +1921,96 @@ function VehicleIssueSettingsSection() {
  * services/staff-settings.ts, which falls back to a documented default if a
  * value is empty or malformed — so a typo here degrades rather than breaks.
  */
+/**
+ * The three links the approval email sends a freelancer on day one.
+ *
+ * Here rather than in the code because a WhatsApp group invite link is
+ * effectively a password — reset the group and every approval email points at a
+ * dead invite until someone deploys. Emptying a box removes that block from the
+ * email rather than sending a broken link, so clearing the WhatsApp link the
+ * moment it leaks is a safe thing to do at 11pm.
+ */
+function FreelancerLinksSection() {
+  const [settings, setSettings] = useState<SystemSetting[]>([]);
+  const [vals, setVals] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+
+  useEffect(() => { void load(); }, []);
+
+  async function load() {
+    try {
+      const res = await api.get<{ data: SystemSetting[] }>('/system-settings?category=freelancers');
+      setSettings(res.data);
+      const v: Record<string, string> = {};
+      for (const row of res.data) v[row.key] = row.value ?? '';
+      setVals(v);
+    } catch {
+      setError('Could not load freelancer links (has migration 230 run?).');
+    } finally { setLoading(false); }
+  }
+
+  async function save() {
+    setSaving(true); setError(''); setSuccess('');
+    try {
+      const changed: Record<string, string | null> = {};
+      for (const row of settings) {
+        const orig = row.value ?? '';
+        if (orig !== (vals[row.key] ?? '')) changed[row.key] = vals[row.key];
+      }
+      if (Object.keys(changed).length === 0) { setSuccess('Nothing changed.'); return; }
+      await api.put('/system-settings', { settings: changed });
+      setSuccess(`Saved ${Object.keys(changed).length} link${Object.keys(changed).length === 1 ? '' : 's'}.`);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to save');
+    } finally { setSaving(false); }
+  }
+
+  if (loading) return null;
+
+  return (
+    <div className="bg-white rounded-lg border border-gray-200 p-4 sm:p-6 mb-6">
+      <h2 className="text-lg font-semibold text-gray-900 mb-1">Freelancer welcome links</h2>
+      <p className="text-sm text-gray-600 mb-4">
+        Sent automatically in the approval email. Change one here and the next approval
+        uses it — no deploy needed. Leave a box empty to drop that part of the email.
+      </p>
+
+      {error && <div className="mb-3 p-2 rounded bg-red-50 border border-red-200 text-sm text-red-700">{error}</div>}
+      {success && <div className="mb-3 p-2 rounded bg-emerald-50 border border-emerald-200 text-sm text-emerald-800">{success}</div>}
+
+      <div className="space-y-3">
+        {settings.map(row => (
+          <div key={row.key} className="grid sm:grid-cols-[14rem_minmax(0,1fr)] gap-2 sm:items-center">
+            <label htmlFor={row.key} className="text-sm text-gray-700">
+              {row.label ?? row.key}
+              <span className="block text-xs text-gray-400 font-mono">{row.key}</span>
+            </label>
+            <input id={row.key} value={vals[row.key] ?? ''} placeholder="https://…"
+              onChange={e => setVals(v => ({ ...v, [row.key]: e.target.value }))}
+              className="px-2 py-1.5 rounded border border-gray-300 text-sm" />
+          </div>
+        ))}
+      </div>
+
+      <p className="mt-3 text-xs text-gray-400">
+        Anyone forwarded the approval email can use the WhatsApp invite link — reset the
+        group link and update it here if it ever gets out.
+      </p>
+
+      <div className="mt-4">
+        <button onClick={() => void save()} disabled={saving}
+          className="px-4 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function StaffTimeSettingsSection() {
   const [settings, setSettings] = useState<SystemSetting[]>([]);
   const [vals, setVals] = useState<Record<string, string>>({});

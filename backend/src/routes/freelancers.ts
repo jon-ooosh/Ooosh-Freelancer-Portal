@@ -25,7 +25,9 @@ import { authenticate, authorize, AuthRequest, STAFF_ROLES, MANAGER_ROLES } from
 import { logAudit } from '../middleware/audit';
 import { getFrontendUrl } from '../config/app-urls';
 import { emailService } from '../services/email-service';
+import { getSystemSettings } from './system-settings';
 import { uploadToR2 } from '../config/r2';
+import { documentsOnFile, toFileList } from '../services/freelancer-documents';
 
 const router = Router();
 
@@ -157,7 +159,8 @@ async function loadTokenApplication(token: string): Promise<
             p.phone, p.mobile, p.date_of_birth, p.home_address,
             p.emergency_contact_name, p.emergency_contact_phone, p.skills,
             p.licence_number, p.licence_issued_by, p.licence_expiry, p.licence_passed_date,
-            p.passport_expiry, p.day_rate_note
+            p.passport_expiry, p.day_rate_note, p.files,
+            fa.decision_notes
        FROM freelancer_applications fa
        JOIN people p ON p.id = fa.person_id
       WHERE fa.form_token = $1`,
@@ -188,6 +191,10 @@ router.get('/apply/:token', publicLimiter, async (req: Request, res: Response) =
         valid: true,
         terms: FREELANCER_TERMS,
         tcs_version: TCS_VERSION,
+        // What we asked for when we re-opened the form, so they can read it on
+        // the form itself rather than keeping our email open beside it.
+        request_note: loaded.app.status === 'more_info' ? (loaded.app.decision_notes || null) : null,
+        documents_on_file: documentsOnFile(p.files),
         prefill: {
           first_name: p.first_name || '',
           last_name: p.last_name || '',
@@ -297,10 +304,22 @@ router.post('/apply/:token/submit', publicLimiter, async (req: Request, res: Res
       : [];
     const isDriving = skills.some((s) => /driv/i.test(s));
 
+    // Keys already on this person's record. A re-opened form hands their own
+    // documents back so they don't have to re-upload everything to give us one
+    // missing thing, which means the submission legitimately carries keys this
+    // form never minted (a document staff uploaded by hand lives under
+    // files/people/...). Accepting a key we can see on the person's own record
+    // adds nothing a token holder didn't already have; accepting an arbitrary
+    // key would let them attach any object in the bucket.
+    const existingKeys = new Set(
+      toFileList(loaded.person.files).map((f) => f.url).filter((u): u is string => typeof u === 'string')
+    );
     const documents: { r2_key: string; label: string; filename: string; content_type?: string }[] =
       Array.isArray(b.documents)
         ? b.documents
-            .filter((d: { r2_key?: string }) => d && typeof d.r2_key === 'string' && d.r2_key.startsWith('files/freelancers/'))
+            .filter((d: { r2_key?: string }) =>
+              d && typeof d.r2_key === 'string'
+              && (d.r2_key.startsWith('files/freelancers/') || existingKeys.has(d.r2_key)))
             .map((d: { r2_key: string; label?: string; filename?: string; content_type?: string }) => ({
               r2_key: d.r2_key,
               label: textOrNull(d.label) || 'Document',
@@ -308,7 +327,14 @@ router.post('/apply/:token/submit', publicLimiter, async (req: Request, res: Res
               content_type: d.content_type,
             }))
         : [];
+    // Carried-over documents are NOT new evidence. The distinction matters:
+    // dvla_check_date below is stamped with TODAY, and driver-validity.ts runs a
+    // 30-day window off that column — so re-dating it because a months-old check
+    // rode along on a re-submit would tell us a licence check is current when it
+    // is nothing of the sort.
+    const newDocuments = documents.filter((d) => !existingKeys.has(d.r2_key));
     const hasDvlaDoc = documents.some((d) => /dvla/i.test(d.label));
+    const hasNewDvlaDoc = newDocuments.some((d) => /dvla/i.test(d.label));
     const hasPliDoc = documents.some((d) => /\bpli\b|public liab/i.test(d.label));
 
     // ── Age gate: 18+ generally, 23+ to drive for us (insurer minimum) ──
@@ -389,9 +415,12 @@ router.post('/apply/:token/submit', publicLimiter, async (req: Request, res: Res
       .filter(Boolean)
       .join(' — ') || null;
 
-    // ── Files: append the uploaded documents to people.files ────────────
+    // ── Files: append what's NEW to people.files ─────────────────────────
+    // Only the new ones. A re-submit carries their existing documents back to
+    // us, and appending those again would stack a second (then a third) copy of
+    // the same R2 object on the record and leave staff guessing which is current.
     const nowIso = new Date().toISOString();
-    const fileEntries = documents.map((d) => ({
+    const fileEntries = newDocuments.map((d) => ({
       name: d.filename,
       url: d.r2_key,
       type: d.content_type === 'application/pdf' ? 'document' : 'image',
@@ -445,7 +474,7 @@ router.post('/apply/:token/submit', publicLimiter, async (req: Request, res: Res
         isDriving ? textOrNull(b.licence_issued_by) : null,
         isDriving ? isoDateOrNull(b.licence_expiry) : null,
         isDriving ? isoDateOrNull(b.licence_passed_date) : null,
-        hasDvlaDoc ? nowIso.slice(0, 10) : null,
+        hasNewDvlaDoc ? nowIso.slice(0, 10) : null,
         isoDateOrNull(b.passport_expiry),
         hasPliDoc ? isoDateOrNull(b.pli_expiry) : null,
         dayRateNote,
@@ -803,14 +832,31 @@ router.post('/applications/:id/approve', authorize(...MANAGER_ROLES), async (req
       [personId, '✅ Freelancer application approved.', req.user!.id]
     ).catch((e) => console.error('[freelancers] approve timeline note failed:', e));
 
-    // Approval email (WhatsApp link + payments reference). Best-effort.
+    // Approval email — the three things a new freelancer needs on day one:
+    // the WhatsApp group work is offered in, their portal login, and how to
+    // invoice us. All three are system_settings rather than constants: a
+    // WhatsApp group invite is effectively a password and gets rotated, and
+    // when it does, every approval email is broken until someone can deploy.
+    // Each block is conditional, so an emptied setting drops its block rather
+    // than emailing a dead link.
+    const links = await getSystemSettings([
+      'freelancer_whatsapp_url',
+      'freelancer_portal_url',
+      'freelancer_invoice_guide_url',
+    ]).catch(() => ({} as Record<string, string | null>));
+
     let emailResult: { success: boolean; skipped?: boolean; error?: string } = { success: false, skipped: true };
     if (app.email) {
       const r = await emailService.send('freelancer_approved', {
         to: app.email as string,
         variables: {
           firstName: (app.preferred_name || app.first_name || 'there') as string,
-          whatsappUrl: '',        // set when the WhatsApp invite link is available
+          whatsappUrl: links.freelancer_whatsapp_url || '',
+          portalUrl: links.freelancer_portal_url || '',
+          // Portal registration matches on the email we hold, so tell them
+          // WHICH address to use — theirs may not be the one they'd reach for.
+          portalEmail: (app.email || '') as string,
+          invoiceGuideUrl: links.freelancer_invoice_guide_url || '',
           notes: notes || '',
         },
       });
