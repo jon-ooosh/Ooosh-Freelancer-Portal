@@ -1198,21 +1198,45 @@ Mechanics are ours; the statutory specifics should get a sanity check from the
 accountants or an HR advisor. All of these are `system_settings` values, so a correction
 is a settings change and not a deploy — that is why they are settings.
 
-1. **Pro-rata rounding up** — confirm acceptable, and that no current contract rounds
+**ANSWERED BY JON, 21 Sep 2026.** Items 1–6 and 9 are settled below; 7, 8 and 10
+turned into work rather than answers. Kept in full because the reasoning matters
+more than the tick.
+
+1. ✅ **CONFIRMED acceptable.** — Pro-rata rounding up — confirm acceptable, and that no current contract rounds
    differently.
-2. **Year-end overtime cash-out** — confirm with the accountants that banked overtime
+2. ✅ **SETTLED, and it shapes the report.** Anything still unbanked or
+   un-cashed at 31 Dec goes into January payroll, which must be submitted before
+   5 Jan for the 10th pay run. So jon needs, on 2 Jan, ONE figure per person —
+   hours, or days and hours — to send payroll. The payroll report already
+   produces exactly that (`paidOvertimeMinutes` per person over a date range),
+   and as of Sep 2026 there is finally a button that reaches it: the Payroll
+   report panel on the Staff page, with a "Total overtime to pay" line.
+   Original question — Year-end overtime cash-out — confirm with the accountants that banked overtime
    paid in December is handled cleanly in that month's payroll.
-3. **Bank holidays not granted** — confirm the staff contracts say what the system will
+3. ✅ **CONFIRMED.** Contracts already state explicitly that bank holidays are
+   not given as standard. And yes, it varies per person:
+   `staff_employment.bank_holiday_policy` is a nullable per-person override that
+   falls back to the company-wide `staff.bank_holidays_policy`, so a future hire
+   on a different arrangement needs no code.
+   Original question — Bank holidays not granted — confirm the staff contracts say what the system will
    say. If a contract implies bank holidays are given, the setting must match the
    contract, not the other way round.
-4. **The compressed-hours contract** — confirm entitlement is expressed in hours, not
+4. ✅ **NOTED, and changeable without code.** Working patterns are
+   effective-dated: a new arrangement is a new pattern from a date, and the old
+   one stays as history rather than being overwritten. `entitlement_weeks` on
+   `staff_employment` is a per-person override too.
+   Original question — The compressed-hours contract — confirm entitlement is expressed in hours, not
    days. If the contract says "28 days", it is ambiguous for an unequal-length week and
    should be restated in hours at the next review.
 5. **Will Parish's 15-minute weekly shortfall** (§0.1). His stated hours total 34h 45m
    against a 35h week. Either the contract says something different from the hours he
    works, or one day needs 15 minutes adding. Resolve before entering the pattern — it is
    a data question, not a design one, but it will be visible in every report once live.
-6. **The standard working day.** The spec assumes 9–5 with a 1h unpaid lunch = 7h paid
+6. ✅ **ALREADY AN INPUT, not a derivation.** `break_minutes` is stored PER
+   PATTERN DAY and the paid total is `end − start − break`, so the lunch break
+   is set explicitly per person per day and everything else falls out of it.
+   The 9–5-with-an-hour default is only the default for a NEW pattern row.
+   Original question — The standard working day. The spec assumes 9–5 with a 1h unpaid lunch = 7h paid
    (35h week), inferred from the "40 hours less 5 × 1h lunch" framing. Confirm, because
    it sets everyone's entitlement. Note Will takes 30-minute lunches against the standard
    hour — fine under WTR (a 20-minute break covers a 6h+ day), but it should be what his
@@ -1222,9 +1246,20 @@ is a settings change and not a deploy — that is why they are settings.
 8. **NI numbers** — confirm they are wanted in OP at all before building the encrypted
    column. If payroll is the only consumer and the accountants already hold them, the
    safest version of this field is the one that does not exist.
-9. **Sickness data retention** — how long absence records are kept. Feeds the outstanding
+9. ✅ **DECIDED: keep one year, then auto-delete.** Not yet built — needs a
+   scheduled sweep and a decision about what "delete" means for an append-only
+   ledger (the leave/TOIL effects must survive; the MEDICAL detail is what
+   expires). See `BACKLOG.md`.
+   Original question — Sickness data retention — how long absence records are kept. Feeds the outstanding
    GDPR retention policy item in `ROADMAP.md`.
-10. **Payroll report format** — show the accountants a sample CSV before Phase C ships and
+10. ⚠️ **THE REPORT HAD NO BUTTON.** The endpoint has existed since Phase C —
+   JSON, CSV download, audit batch — and NOTHING in the UI called it, so the
+   honest answer to "how do I generate the spreadsheet?" was "you cannot, short
+   of typing the URL". Fixed Sep 2026: the Payroll report panel on the Staff
+   page (admin only) previews the figures and downloads the CSV. It is NOT
+   emailed on a schedule — jon pulls it when payroll needs it, which is the
+   right shape for something going to a third party.
+   Original question — Payroll report format — show the accountants a sample CSV before Phase C ships and
    shape the columns to what they actually want.
 
 

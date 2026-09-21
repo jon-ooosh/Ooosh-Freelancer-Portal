@@ -113,8 +113,11 @@ export default function StaffBalancePanel({ personId, canManage, year }: {
     try {
       const res = await api.post<{ data: { postedMinutes: number; reason: string } }>(
         `/staff-calendar/employees/${personId}/entitlement`, { year });
+      // Zero posted is the NORMAL case: the 06:05 scheduler grants entitlement
+      // daily, so by the time anybody presses this it is usually already done.
+      // "Nothing posted" read as a failure; say what is actually true.
       setNotice(res.data.postedMinutes === 0
-        ? 'Already up to date — nothing posted.'
+        ? `Checked — their ${year} entitlement was already correct, so nothing changed.`
         : `${res.data.reason}: ${fmtH(res.data.postedMinutes)} posted.`);
       await load();
     } catch (err) {
@@ -286,6 +289,18 @@ export default function StaffBalancePanel({ personId, canManage, year }: {
                 </p>
               )}
             </>
+          )}
+
+          {/* The result, WHERE THE BUTTON IS. It also renders at the top of the
+              panel, which is ~90 lines of JSX and a whole ledger table away —
+              so pressing this read as "nothing happened" when in fact it had
+              worked and said so, off-screen. Feedback belongs next to the thing
+              that caused it. */}
+          {notice && (
+            <p className="mt-2 text-xs font-medium text-emerald-700" role="status">{notice}</p>
+          )}
+          {error && (
+            <p className="mt-2 text-xs font-medium text-red-700" role="alert">{error}</p>
           )}
         </div>
       )}
