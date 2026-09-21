@@ -195,7 +195,7 @@ export default function FreelancerPanel({ person, onChanged, onFilesChanged, onA
 
       {/* Onboarding checklist (once approved) */}
       {person.is_approved && (
-        <OnboardingChecklist person={person} onChanged={onChanged} />
+        <OnboardingChecklist person={person} applicationId={invite?.id || null} onChanged={onChanged} />
       )}
 
       {/* Freelancer details (read / edit) */}
@@ -414,9 +414,32 @@ function prettyKey(k: string): string {
 
 // ---- Onboarding checklist -------------------------------------------------
 
-function OnboardingChecklist({ person, onChanged }: { person: FreelancerPerson; onChanged: () => void }) {
+function OnboardingChecklist({ person, applicationId, onChanged }: {
+  person: FreelancerPerson;
+  applicationId: string | null;
+  onChanged: () => void;
+}) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState('');
+  const [resendResult, setResendResult] = useState('');
+
+  async function resendWelcome() {
+    if (!applicationId) return;
+    setBusy('resend'); setError(''); setResendResult('');
+    try {
+      const r = await api.post<{ email_result: { success: boolean; skipped?: boolean; error?: string } }>(
+        `/freelancers/applications/${applicationId}/resend-approval`, {}
+      );
+      setResendResult(r.email_result?.success
+        ? '📧 Welcome email sent again.'
+        : `Not sent — ${r.email_result?.error || 'the email service rejected it.'}`);
+      onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not re-send the welcome email.');
+    } finally {
+      setBusy(null);
+    }
+  }
 
   const onboarding = (person.onboarding || {}) as Record<string, unknown>;
   const jsonbDone = (key: string) => {
@@ -441,7 +464,7 @@ function OnboardingChecklist({ person, onChanged }: { person: FreelancerPerson; 
     { key: 'approved', label: 'Reviewed & approved', done: true },
     { key: 'insured', label: 'Added to vehicle insurance', done: person.is_insured_on_vehicles, toggleKey: 'is_insured_on_vehicles' },
     { key: 'tshirt', label: 'T-shirt given', done: person.has_tshirt, toggleKey: 'has_tshirt' },
-    { key: 'portal', label: 'Portal access sent', done: jsonbDone('portal_invite_sent'), toggleKey: 'portal_invite_sent', note: 'Send them the portal sign-up link' },
+    { key: 'portal', label: 'Portal access sent', done: jsonbDone('portal_invite_sent'), toggleKey: 'portal_invite_sent', note: 'In the approval email — re-send it below if they\'ve lost it' },
     { key: 'resources', label: 'Training / how-to docs shared', done: jsonbDone('resources_shared'), toggleKey: 'resources_shared' },
     { key: 'payments', label: 'Payments policy available', done: true, note: 'Covered by the T&Cs signed at application' },
   ];
@@ -477,6 +500,22 @@ function OnboardingChecklist({ person, onChanged }: { person: FreelancerPerson; 
           );
         })}
       </ul>
+
+      {applicationId && (
+        <div className="mt-4 pt-3 border-t flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={() => void resendWelcome()}
+            disabled={busy === 'resend'}
+            className="px-3 py-1.5 text-sm border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50"
+          >
+            {busy === 'resend' ? 'Sending…' : 'Re-send welcome email'}
+          </button>
+          <span className="text-xs text-gray-500">
+            {resendResult || 'WhatsApp group, portal login and how to invoice us.'}
+          </span>
+        </div>
+      )}
     </div>
   );
 }

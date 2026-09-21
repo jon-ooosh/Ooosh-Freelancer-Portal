@@ -774,7 +774,7 @@ router.get('/applications/:id', async (req: AuthRequest, res: Response) => {
 // Shared loader for a review action — the application + linked person, or null.
 async function loadReviewApplication(id: string) {
   const result = await query(
-    `SELECT fa.id AS app_id, fa.status, fa.form_token, fa.person_id,
+    `SELECT fa.id AS app_id, fa.status, fa.form_token, fa.person_id, fa.decision_notes,
             p.first_name, p.preferred_name, p.email,
             p.freelancer_joined_date, p.freelancer_next_review_date
        FROM freelancer_applications fa
@@ -787,6 +787,47 @@ async function loadReviewApplication(id: string) {
 
 // Statuses an application can be reviewed FROM (a submitted or info-requested form).
 const REVIEWABLE_STATUSES = ['applied', 'more_info'];
+
+/**
+ * THE approval email — everything a newly approved freelancer needs on day one:
+ * the WhatsApp group work is offered in, their portal login, and how to invoice
+ * us. Sent on approval and re-sent on demand (people lose emails), so it lives
+ * here rather than inline in the approve route: two copies would drift, and the
+ * copy that drifts is the one nobody is watching.
+ *
+ * All three links are system_settings rather than constants — a WhatsApp group
+ * invite is effectively a password and gets rotated, and when it does, every
+ * approval email points at a dead invite until someone can deploy. Each block in
+ * the template is conditional, so an emptied setting drops its block rather than
+ * emailing a broken link.
+ */
+async function sendApprovalEmail(
+  app: Record<string, unknown>,
+  notes: string | null
+): Promise<{ success: boolean; skipped?: boolean; error?: string }> {
+  if (!app.email) return { success: false, skipped: true, error: 'No email on file.' };
+
+  const links = await getSystemSettings([
+    'freelancer_whatsapp_url',
+    'freelancer_portal_url',
+    'freelancer_invoice_guide_url',
+  ]).catch(() => ({} as Record<string, string | null>));
+
+  const r = await emailService.send('freelancer_approved', {
+    to: app.email as string,
+    variables: {
+      firstName: (app.preferred_name || app.first_name || 'there') as string,
+      whatsappUrl: links.freelancer_whatsapp_url || '',
+      portalUrl: links.freelancer_portal_url || '',
+      // Portal registration matches on the email we hold, so tell them WHICH
+      // address to use — theirs may not be the one they'd reach for.
+      portalEmail: app.email as string,
+      invoiceGuideUrl: links.freelancer_invoice_guide_url || '',
+      notes: notes || '',
+    },
+  });
+  return { success: r.success, error: r.error };
+}
 
 // ── POST /api/freelancers/applications/:id/approve ─────────────────────────
 // Clear the freelancer for work. MANAGER_ROLES (booking/money consequence).
@@ -832,42 +873,49 @@ router.post('/applications/:id/approve', authorize(...MANAGER_ROLES), async (req
       [personId, '✅ Freelancer application approved.', req.user!.id]
     ).catch((e) => console.error('[freelancers] approve timeline note failed:', e));
 
-    // Approval email — the three things a new freelancer needs on day one:
-    // the WhatsApp group work is offered in, their portal login, and how to
-    // invoice us. All three are system_settings rather than constants: a
-    // WhatsApp group invite is effectively a password and gets rotated, and
-    // when it does, every approval email is broken until someone can deploy.
-    // Each block is conditional, so an emptied setting drops its block rather
-    // than emailing a dead link.
-    const links = await getSystemSettings([
-      'freelancer_whatsapp_url',
-      'freelancer_portal_url',
-      'freelancer_invoice_guide_url',
-    ]).catch(() => ({} as Record<string, string | null>));
-
-    let emailResult: { success: boolean; skipped?: boolean; error?: string } = { success: false, skipped: true };
-    if (app.email) {
-      const r = await emailService.send('freelancer_approved', {
-        to: app.email as string,
-        variables: {
-          firstName: (app.preferred_name || app.first_name || 'there') as string,
-          whatsappUrl: links.freelancer_whatsapp_url || '',
-          portalUrl: links.freelancer_portal_url || '',
-          // Portal registration matches on the email we hold, so tell them
-          // WHICH address to use — theirs may not be the one they'd reach for.
-          portalEmail: (app.email || '') as string,
-          invoiceGuideUrl: links.freelancer_invoice_guide_url || '',
-          notes: notes || '',
-        },
-      });
-      emailResult = { success: r.success, error: r.error };
-    } else {
-      emailResult = { success: false, skipped: true, error: 'No email on file.' };
-    }
+    const emailResult = await sendApprovalEmail(app, notes);
 
     res.json({ data: { ok: true }, email_result: emailResult });
   } catch (error) {
     console.error('[freelancers] approve error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── POST /api/freelancers/applications/:id/resend-approval ─────────────────
+// Send the welcome email again. STAFF_ROLES — this re-sends what they were
+// already told, it does not decide anything, so it sits with the other resend
+// rather than behind the approve/decline gate.
+//
+// Approve itself refuses to run twice (409 Already approved), and rightly so:
+// it stamps joined dates and flips is_approved. That left no way to get the
+// email back to someone who deleted it, and no way at all to reach the
+// freelancers approved before the email carried the WhatsApp, portal and
+// invoicing links.
+router.post('/applications/:id/resend-approval', async (req: AuthRequest, res: Response) => {
+  try {
+    const app = await loadReviewApplication(String(req.params.id));
+    if (!app) { res.status(404).json({ error: 'Application not found' }); return; }
+    if (app.status !== 'approved') {
+      res.status(409).json({ error: `This application is '${app.status}' — approve it first.` });
+      return;
+    }
+
+    const emailResult = await sendApprovalEmail(app, textOrNull(app.decision_notes));
+
+    // Worth a timeline entry: "did anyone actually send them their links?" is
+    // the question this button exists to answer.
+    if (emailResult.success) {
+      await query(
+        `INSERT INTO interactions (person_id, type, content, created_by, source)
+         VALUES ($1, 'note', $2, $3, 'system')`,
+        [app.person_id, '📧 Welcome email re-sent (WhatsApp, portal and invoicing links).', req.user!.id]
+      ).catch((e) => console.error('[freelancers] resend-approval timeline note failed:', e));
+    }
+
+    res.json({ data: { ok: true }, email_result: emailResult });
+  } catch (error) {
+    console.error('[freelancers] resend-approval error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
