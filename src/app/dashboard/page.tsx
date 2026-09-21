@@ -535,11 +535,15 @@ function YardDayCard({ day, busy, onAnswer }: {
     : day.rateType === 'hourly' ? `${formatFee(day.agreedRate)}/hr`
     : formatFee(day.agreedRate)
 
-  const pending = day.status === 'offered'
+  // Only a day still to come can be answered. The backend refuses a response
+  // to one that has passed, so offering the buttons would be a lie the server
+  // then contradicts.
+  const isPast = day.date < new Date().toISOString().slice(0, 10)
+  const pending = day.status === 'offered' && !isPast
 
   return (
     <div className={`bg-white rounded-xl border p-4 shadow-sm ${
-      pending ? 'border-amber-200' : 'border-gray-100'}`}>
+      pending ? 'border-amber-200' : 'border-gray-100'} ${isPast ? 'opacity-75' : ''}`}>
       <div className="flex items-start justify-between">
         <div className="flex items-center space-x-3">
           <div className="w-10 h-10 bg-amber-100 rounded-lg flex items-center justify-center">
@@ -574,6 +578,14 @@ function YardDayCard({ day, busy, onAnswer }: {
             {busy ? '…' : 'Sorry, I cannot'}
           </button>
         </div>
+      ) : day.status === 'offered' ? (
+        <p className="mt-3 text-xs font-medium text-gray-500">
+          That day has passed and we never heard back — get in touch if that is wrong
+        </p>
+      ) : isPast ? (
+        <p className="mt-3 text-xs font-medium text-gray-500">
+          {day.invoiceReceived ? 'Done — we have your invoice' : 'Done — send us your invoice when you can'}
+        </p>
       ) : (
         <p className="mt-3 text-xs font-medium text-green-700">
           Confirmed — we have you down for this one
@@ -654,7 +666,12 @@ export default function DashboardPage() {
     try {
       const res = await fetch('/api/day-bookings')
       const data: DayBookingsResponse = await res.json()
-      setYardDays(res.ok && data.success ? (data.upcoming || []) : [])
+      // Upcoming first, then the recent past. A day that went by without them
+      // answering lives in `past` and has no buttons — visible, but not
+      // pretending there is still something to decide.
+      setYardDays(res.ok && data.success
+        ? [...(data.upcoming || []), ...(data.past || [])]
+        : [])
     } catch (err) {
       console.error('Failed to fetch yard days:', err)
       setYardDays([])

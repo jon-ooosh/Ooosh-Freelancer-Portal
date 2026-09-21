@@ -451,7 +451,13 @@ export default function StaffCalendarPage() {
               {freelancerLanes.map(lane => (
                 <tr key={lane.personId} className="hover:bg-amber-50/40">
                   <td className="sticky left-0 z-10 bg-white px-3 py-2 border-b border-gray-100 whitespace-nowrap">
-                    <div className="font-medium text-gray-900">{lane.name}</div>
+                    {/* Through to the person record — the Freelancer tab there
+                        carries their whole history with us, which is the next
+                        question after "who is this on my calendar". */}
+                    <Link to={`/people/${lane.personId}`}
+                      className="font-medium text-gray-900 hover:text-ooosh-700 hover:underline">
+                      {lane.name}
+                    </Link>
                     <div className="text-xs text-amber-700">Freelance</div>
                   </td>
                   {dates.map(d => {
@@ -847,7 +853,10 @@ function UnansweredOffers({ onError }: { onError: (m: string) => void }) {
       <ul className="space-y-2">
         {rows.map(b => (
           <li key={b.id} className="flex flex-wrap items-center gap-2 text-sm">
-            <span className="text-gray-900 font-medium">{b.personName}</span>
+            <Link to={`/people/${b.personId}`}
+              className="text-gray-900 font-medium hover:text-ooosh-700 hover:underline">
+              {b.personName}
+            </Link>
             <span className="text-gray-500">{fmtLongDate(b.bookingDate)}</span>
             {b.notes && <span className="text-gray-400 text-xs truncate max-w-[16rem]">{b.notes}</span>}
             <span className="ml-auto flex gap-2">
@@ -902,7 +911,10 @@ function BookingActions({ booking, onClose, onChanged, onError }: {
   return (
     <div className="mb-4 p-4 rounded-lg border border-amber-200 bg-white space-y-3">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <span className="font-medium text-gray-900">{booking.personName}</span>
+        <Link to={`/people/${booking.personId}`}
+          className="font-medium text-gray-900 hover:text-ooosh-700 hover:underline">
+          {booking.personName}
+        </Link>
         <span className="text-sm text-gray-600">{booking.bookingDate}</span>
         <span className="text-sm text-gray-500">
           {booking.durationType === 'hours' ? `${booking.startTime}–${booking.endTime}`

@@ -207,6 +207,19 @@ cleared and the offer email goes again. Changing the rate or the notes sends
   `cancelled` (Ooosh called it off) · `lapsed` (nobody ever answered).
   `recordResponse` refuses `accepted → declined` for exactly this reason.
 
+## A new kind of freelancer work has to be added to the history view
+
+`GET /people/:id/freelancer-history` merges FOUR sources — crew/transport
+assignments, studio-sitter shifts, driven vehicle assignments and yard days.
+Yard days were missing for weeks after the module shipped, so somebody whose
+only work with us was yard days had an EMPTY Freelancer tab, which reads as "we
+have never used them" rather than "this list does not know about that kind of
+work".
+
+Add any new kind of freelancer work here as well as to its own module, and give
+its statuses a `statusLabel` and a `statusPillClass` in
+`FreelancerHistorySection.tsx` or they render raw.
+
 ## Bank holidays and company days are different things
 
 A **bank holiday** is computed, and under `use_allowance` is an ordinary

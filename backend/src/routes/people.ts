@@ -879,15 +879,32 @@ router.get('/:id/freelancer-history', async (req: AuthRequest, res: Response) =>
       [id]
     );
 
-    const [crewRes, sitterRes, vehicleRes] = await Promise.all([
-      crewPromise, sitterPromise, vehiclePromise,
+    // 4. YARD DAYS. Added Sep 2026: freelancer_day_bookings arrived with its
+    //    own module and was never wired into this view, so somebody whose only
+    //    work with us has been yard days had an EMPTY history tab — which reads
+    //    as "we have never used them" rather than "this list does not know
+    //    about that kind of work".
+    //
+    //    No status filter, matching the other three: a declined or withdrawn
+    //    day is exactly the kind of thing this view exists to show.
+    const yardPromise = query(
+      `SELECT b.id, b.booking_date::text AS booking_date, b.duration_type,
+              b.start_time::text AS start_time, b.end_time::text AS end_time,
+              b.status, b.agreed_rate, b.expected_total, b.notes
+         FROM freelancer_day_bookings b
+        WHERE b.person_id = $1`,
+      [id]
+    );
+
+    const [crewRes, sitterRes, vehicleRes, yardRes] = await Promise.all([
+      crewPromise, sitterPromise, vehiclePromise, yardPromise,
     ]);
 
     const toNum = (v: any): number | null =>
       v === null || v === undefined || v === '' ? null : Number(v);
 
     interface FreelancerHistoryItem {
-      source: 'crew' | 'sitter' | 'vehicle';
+      source: 'crew' | 'sitter' | 'vehicle' | 'yard';
       id: string;
       title: string;
       role: string | null;
@@ -985,6 +1002,38 @@ router.get('/:id/freelancer-history', async (req: AuthRequest, res: Response) =>
     }
 
     // Sort date_start DESC, nulls last (frontend splits upcoming/past)
+    for (const r of yardRes.rows) {
+      // A yard day has no job, no venue and no client — it is a day at our own
+      // yard. Those fields stay null rather than being filled with something
+      // plausible-looking, so the tab can tell the two kinds of work apart.
+      const hours = r.duration_type === 'hours' && r.start_time && r.end_time
+        ? ` (${String(r.start_time).slice(0, 5)}\u2013${String(r.end_time).slice(0, 5)})`
+        : r.duration_type === 'half_day' ? ' (half day)' : '';
+      items.push({
+        source: 'yard',
+        id: r.id,
+        title: r.notes ? `Yard day \u2014 ${r.notes}${hours}` : `Yard day${hours}`,
+        role: 'Yard',
+        job_type: null,
+        is_local: true,
+        date_start: r.booking_date || null,
+        date_end: r.booking_date || null,
+        // expected_total is what the day is worth; agreed_rate alone would
+        // under-report an hourly day.
+        fee: toNum(r.expected_total) ?? toNum(r.agreed_rate),
+        assignment_status: r.status,
+        quote_ops_status: null,
+        pipeline_status: null,
+        hh_job_number: null,
+        job_id: null,
+        quote_id: null,
+        venue_name: null,
+        client_name: null,
+        vehicle_reg: null,
+        run_combined_fee: null,
+      });
+    }
+
     items.sort((a, b) => {
       if (!a.date_start && !b.date_start) return 0;
       if (!a.date_start) return 1;
