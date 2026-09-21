@@ -1587,6 +1587,107 @@ router.post('/settings/notifications', async (req: PortalRequest, res: Response)
   }
 });
 
+/**
+ * What a freelancer is shown about their own day.
+ *
+ * Deliberately NOT the whole row. `expected_total`, the chase stamps, who
+ * cancelled it and the internal note are ours, not theirs — and `personName` is
+ * pointless on a list of their own days.
+ */
+function presentDayBooking(b: import('../services/freelancer-days').DayBooking) {
+  return {
+    id: b.id,
+    date: b.bookingDate,
+    startTime: b.startTime,
+    endTime: b.endTime,
+    durationType: b.durationType,
+    rateType: b.rateType,
+    agreedRate: b.agreedRate,
+    notes: b.notes,
+    status: b.status,
+    invoiceReceived: b.invoiceReceived,
+  };
+}
+
+// ── Yard days (spec §9.3) ────────────────────────────────────────────
+//
+// READ-ONLY PLUS ACCEPT / DECLINE. No counter-offer: the negotiation happens in
+// the freelance WhatsApp group and OP sends the revised offer afterwards (jon,
+// 18 Sep 2026). If that stops being true this grows a third response — which is
+// why `respond` takes a named response rather than a boolean.
+//
+// Authenticated by the portal session, NOT by the email's bearer token. Same
+// person, same two answers, different credential: somebody logged in should not
+// have to go and find the email.
+
+router.get('/day-bookings', async (req: PortalRequest, res: Response) => {
+  try {
+    const { listForPerson } = await import('../services/freelancer-days');
+    const all = await listForPerson(req.portalUser!.id, { limit: 200 });
+    const today = new Date().toISOString().slice(0, 10);
+
+    // Past days are kept but capped: somebody wants to see the last few they
+    // did (and whether we have their invoice), not scroll a year of history.
+    const upcoming = all.filter(b => b.bookingDate >= today
+      && ['offered', 'accepted'].includes(b.status));
+    const past = all.filter(b => b.bookingDate < today
+      && ['accepted', 'completed'].includes(b.status)).slice(0, 10);
+
+    res.json({
+      success: true,
+      // The one they have to DO something about, so the portal can lead with it.
+      awaitingReply: upcoming.filter(b => b.status === 'offered').length,
+      upcoming: upcoming.map(presentDayBooking),
+      past: past.map(presentDayBooking),
+    });
+  } catch (error) {
+    console.error('Portal day-bookings error:', error);
+    res.status(500).json({ success: false, error: 'Failed to load your days' });
+  }
+});
+
+router.post('/day-bookings/:id/respond', async (req: PortalRequest, res: Response) => {
+  const response = req.body?.response;
+  if (response !== 'accepted' && response !== 'declined') {
+    res.status(400).json({ success: false, error: 'Tell us yes or no' });
+    return;
+  }
+  const note = typeof req.body?.note === 'string' ? req.body.note.slice(0, 500).trim() : '';
+
+  try {
+    const { getBooking, recordResponse } = await import('../services/freelancer-days');
+    const booking = await getBooking(String(req.params.id));
+
+    // Ownership FIRST, and the same answer either way: a booking that is not
+    // theirs and a booking that does not exist must be indistinguishable, or
+    // this endpoint becomes a way to probe whether an id is real.
+    if (!booking || booking.personId !== req.portalUser!.id) {
+      res.status(404).json({ success: false, error: 'We cannot find that day' });
+      return;
+    }
+    if (booking.status !== 'offered') {
+      res.status(409).json({
+        success: false,
+        error: booking.status === 'cancelled' ? 'That day was cancelled'
+          : booking.status === 'accepted' ? 'You have already said yes to that one'
+          : 'That day is no longer open',
+        booking: presentDayBooking(booking),
+      });
+      return;
+    }
+    if (booking.bookingDate < new Date().toISOString().slice(0, 10)) {
+      res.status(409).json({ success: false, error: 'That day has already passed' });
+      return;
+    }
+
+    const updated = await recordResponse(booking.id, response, note || null);
+    res.json({ success: true, booking: presentDayBooking(updated) });
+  } catch (error) {
+    console.error('Portal day-booking respond error:', error);
+    res.status(500).json({ success: false, error: 'That did not save' });
+  }
+});
+
 // ── GET /api/portal/jobs — freelancer's job list ─────────────────────
 
 router.get('/jobs', async (req: PortalRequest, res: Response) => {

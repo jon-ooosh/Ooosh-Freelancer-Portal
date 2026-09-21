@@ -169,6 +169,48 @@ export async function getSitterShiftsFromOP(sessionToken: string): Promise<Sitte
   return opFetch<SitterShiftsResponse>('/studio-sitter/shifts', sessionToken)
 }
 
+// =============================================================================
+// YARD DAYS (spec §9.3)
+// =============================================================================
+
+export interface PortalDayBooking {
+  id: string
+  date: string
+  startTime: string | null
+  endTime: string | null
+  durationType: 'full_day' | 'half_day' | 'hours'
+  rateType: 'day' | 'half_day' | 'hourly' | 'fixed'
+  agreedRate: number | null
+  notes: string | null
+  status: 'offered' | 'accepted' | 'declined' | 'cancelled' | 'completed' | 'lapsed' | 'withdrew'
+  invoiceReceived: boolean
+}
+
+export interface DayBookingsResponse {
+  success: boolean
+  awaitingReply: number
+  upcoming: PortalDayBooking[]
+  past: PortalDayBooking[]
+}
+
+export async function getDayBookingsFromOP(sessionToken: string): Promise<DayBookingsResponse> {
+  return opFetch<DayBookingsResponse>('/day-bookings', sessionToken)
+}
+
+export async function respondToDayBookingFromOP(
+  sessionToken: string,
+  bookingId: string,
+  response: 'accepted' | 'declined',
+  note?: string,
+): Promise<{ success: boolean; booking?: PortalDayBooking; error?: string }> {
+  // NOT retried, per opFetch's rule for POSTs — a 5xx mid-write is ambiguous
+  // and a blind retry could record an answer twice.
+  return opFetch(`/day-bookings/${bookingId}/respond`, sessionToken, {
+    method: 'POST',
+    body: JSON.stringify({ response, note: note || undefined }),
+  })
+}
+
 /** One evening's detail — who's in each room + that job's shared specs/files. */
 export async function getSitterShiftDetailFromOP(
   sessionToken: string,

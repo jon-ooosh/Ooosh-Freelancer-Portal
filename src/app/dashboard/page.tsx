@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
+import type { PortalDayBooking, DayBookingsResponse } from '@/lib/op-api'
 
 // =============================================================================
 // TYPES (matching API response)
@@ -506,6 +507,82 @@ function ShiftCard({ shift }: { shift: SitterShift }) {
 /**
  * Empty State Component
  */
+/**
+ * One yard day, in the dashboard's card idiom (spec §9.3).
+ *
+ * Read-only plus accept / decline — no counter-offer, because the negotiation
+ * happens in the freelance WhatsApp group and OP sends the revised offer
+ * afterwards.
+ *
+ * An ACCEPTED day shows no buttons. Pulling out is a phone call on purpose: a
+ * one-tap "actually no" on a day somebody is relying on should cost a
+ * conversation, and staff record it as `withdrew` so it reads differently from
+ * never having wanted the day.
+ */
+function YardDayCard({ day, busy, onAnswer }: {
+  day: PortalDayBooking
+  busy: boolean
+  onAnswer: (response: 'accepted' | 'declined') => void
+}) {
+  const hours =
+    day.durationType === 'full_day' ? 'Full day'
+    : day.durationType === 'half_day' ? 'Half day'
+    : day.startTime && day.endTime ? `${day.startTime}–${day.endTime}`
+    : 'Set hours'
+
+  const fee =
+    day.agreedRate === null ? null
+    : day.rateType === 'hourly' ? `${formatFee(day.agreedRate)}/hr`
+    : formatFee(day.agreedRate)
+
+  const pending = day.status === 'offered'
+
+  return (
+    <div className={`bg-white rounded-xl border p-4 shadow-sm ${
+      pending ? 'border-amber-200' : 'border-gray-100'}`}>
+      <div className="flex items-start justify-between">
+        <div className="flex items-center space-x-3">
+          <div className="w-10 h-10 bg-amber-100 rounded-lg flex items-center justify-center">
+            <span className="text-amber-600">🔧</span>
+          </div>
+          <div>
+            <p className="font-medium text-gray-900">{formatDate(day.date)}</p>
+            <p className="text-sm text-gray-500">{hours}</p>
+          </div>
+        </div>
+        {fee && <span className="text-sm font-medium text-green-600">{fee}</span>}
+      </div>
+
+      {day.notes && <p className="mt-3 text-sm text-gray-600">{day.notes}</p>}
+
+      {pending ? (
+        <div className="mt-4 grid grid-cols-2 gap-3">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => onAnswer('accepted')}
+            className="px-4 py-3 rounded-lg text-sm font-semibold bg-green-700 text-white disabled:opacity-40"
+          >
+            {busy ? 'Sending…' : 'Yes, I can do it'}
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => onAnswer('declined')}
+            className="px-4 py-3 rounded-lg text-sm font-semibold bg-white border-2 border-gray-300 text-gray-700 disabled:opacity-40"
+          >
+            {busy ? '…' : 'Sorry, I cannot'}
+          </button>
+        </div>
+      ) : (
+        <p className="mt-3 text-xs font-medium text-green-700">
+          Confirmed — we have you down for this one
+        </p>
+      )}
+    </div>
+  )
+}
+
 function EmptyState({ message }: { message: string }) {
   return (
     <div className="bg-white rounded-xl border border-gray-100 p-6 text-center">
@@ -564,6 +641,48 @@ export default function DashboardPage() {
 
   // Studio sitter shifts (only populated for freelancers who are rostered as sitters)
   const [sitterShifts, setSitterShifts] = useState<SitterShift[]>([])
+  const [yardDays, setYardDays] = useState<PortalDayBooking[]>([])
+  const [yardBusy, setYardBusy] = useState<string | null>(null)
+  const [yardError, setYardError] = useState('')
+
+  /**
+   * Yard days (spec §9.3). Independent of the jobs fetch, like the sitter
+   * shifts above: a failure here must never break the jobs dashboard, and the
+   * section simply hides when there is nothing to show.
+   */
+  const fetchYardDays = useCallback(async () => {
+    try {
+      const res = await fetch('/api/day-bookings')
+      const data: DayBookingsResponse = await res.json()
+      setYardDays(res.ok && data.success ? (data.upcoming || []) : [])
+    } catch (err) {
+      console.error('Failed to fetch yard days:', err)
+      setYardDays([])
+    }
+  }, [])
+
+  async function answerYardDay(id: string, response: 'accepted' | 'declined') {
+    setYardBusy(id)
+    setYardError('')
+    try {
+      const res = await fetch(`/api/day-bookings/${id}/respond`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ response }),
+      })
+      const data = await res.json()
+      if (!res.ok || !data.success) {
+        // A 409 is a real answer — already accepted, cancelled, passed — so
+        // show what it says and re-read rather than leaving a stale card.
+        setYardError(data?.error || 'That did not save. Please try again.')
+      }
+      await fetchYardDays()
+    } catch {
+      setYardError('That did not save — you may have lost signal.')
+    } finally {
+      setYardBusy(null)
+    }
+  }
 
   /**
    * Fetch the sitter's rostered studio shifts. Runs alongside the jobs fetch
@@ -624,11 +743,12 @@ export default function DashboardPage() {
     }
   }, [router])
 
-  // Fetch jobs + shifts on mount
+  // Fetch jobs + shifts + yard days on mount
   useEffect(() => {
     fetchJobs()
     fetchShifts()
-  }, [fetchJobs, fetchShifts])
+    fetchYardDays()
+  }, [fetchJobs, fetchShifts, fetchYardDays])
 
   /**
    * Handle refresh button click
@@ -636,6 +756,7 @@ export default function DashboardPage() {
   const handleRefresh = () => {
     fetchJobs()
     fetchShifts()
+    fetchYardDays()
   }
 
   /**
@@ -728,6 +849,35 @@ export default function DashboardPage() {
               Try again
             </button>
           </div>
+        )}
+
+        {/* Yard days (spec §9.3). ABOVE Today on purpose: an unanswered offer
+            is the only thing on this screen that needs them to do something,
+            and burying it under the jobs they already have is how it gets
+            missed. Hidden entirely when there is nothing. */}
+        {yardDays.length > 0 && (
+          <section>
+            <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3 flex items-center">
+              <span className="mr-2">🔧</span>
+              Ooosh work
+              <span className="ml-2 text-ooosh-600">({yardDays.length})</span>
+            </h2>
+            {yardError && (
+              <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm mb-3">
+                {yardError}
+              </div>
+            )}
+            <div className="space-y-3">
+              {yardDays.map((day) => (
+                <YardDayCard
+                  key={day.id}
+                  day={day}
+                  busy={yardBusy === day.id}
+                  onAnswer={(r) => answerYardDay(day.id, r)}
+                />
+              ))}
+            </div>
+          </section>
         )}
 
         {/* Today Section */}
