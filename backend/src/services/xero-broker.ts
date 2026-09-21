@@ -93,6 +93,13 @@ export interface CreateSpendMoneyInput {
   reference?: string;
   lineItems: XeroLineItem[];
   lineAmountTypes?: 'Inclusive' | 'Exclusive' | 'NoTax';
+  /**
+   * Which way the money went. SPEND (default) is a purchase; RECEIVE is money
+   * coming BACK on the same account — a card refund from a supplier, which
+   * arrives on the bank feed as a credit and reconciles against this.
+   * Line amounts are POSITIVE either way; the type is what carries the sign.
+   */
+  type?: 'SPEND' | 'RECEIVE';
 }
 
 export interface XeroHealth {
@@ -563,7 +570,11 @@ class XeroBroker {
     return r.BatchPayments?.[0] ?? {};
   }
 
-  /** Spend money (petty cash / PayPal / reimbursement not on a bank feed). */
+  /**
+   * Money moving on a bank/card account without an invoice behind it: a spend
+   * (petty cash / PayPal / card purchase), or — with `type: 'RECEIVE'` — a
+   * supplier refund landing back on the card.
+   */
   async createSpendMoney(input: CreateSpendMoneyInput): Promise<{ BankTransactionID: string }> {
     const contactID = input.contactId
       ?? (await this.getOrCreateContact(input.contactName ?? 'Unknown supplier')).ContactID;
@@ -577,7 +588,7 @@ class XeroBroker {
         body: {
           BankTransactions: [
             {
-              Type: 'SPEND',
+              Type: input.type || 'SPEND',
               Contact: { ContactID: contactID },
               BankAccount: bankAccount,
               Date: input.date,
@@ -646,7 +657,7 @@ class XeroBroker {
           BankTransactions: [
             {
               BankTransactionID: bankTransactionId,
-              Type: 'SPEND',
+              Type: input.type || 'SPEND',
               Contact: { ContactID: contactID },
               BankAccount: bankAccount,
               Date: input.date,
