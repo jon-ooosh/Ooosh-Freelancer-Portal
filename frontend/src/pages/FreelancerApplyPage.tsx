@@ -4,7 +4,7 @@
  * this form ENRICHES that same person and fires an "all good?" alert to info@.
  * The token IS the gate — usable only while the application is invited/more_info.
  */
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 
 const SKILLS = [
@@ -91,30 +91,61 @@ export default function FreelancerApplyPage() {
   const hasOther = skills.includes('Other');
   const wantsEu = lookingFor.includes('uk_eu');
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const res = await fetch(`/api/freelancers/apply/${token}`);
-        const j = await res.json();
-        if (!res.ok) { setError(j.error || 'This link is not valid.'); }
-        else {
-          setTerms(j.data.terms || '');
-          setTcsVersion(j.data.tcs_version || '');
-          const p: Prefill = j.data.prefill || {};
-          setFirstName(p.first_name || ''); setLastName(p.last_name || '');
-          setPreferredName(p.preferred_name || ''); setEmail(p.email || '');
-          setPhone(p.phone || ''); setMobile(p.mobile || ''); setDob(p.date_of_birth || '');
-          setHomeAddress(p.home_address || '');
-          setEmName(p.emergency_contact_name || ''); setEmPhone(p.emergency_contact_phone || '');
-          setSkills(Array.isArray(p.skills) ? p.skills : []);
-          setLicenceNumber(p.licence_number || ''); setLicenceIssuedBy(p.licence_issued_by || '');
-          setLicenceExpiry(p.licence_expiry || ''); setLicencePassed(p.licence_passed_date || '');
-          setPassportExpiry(p.passport_expiry || ''); setDayRate(p.day_rate_note || '');
-        }
-      } catch { setError('Could not load the form.'); }
-      finally { setLoading(false); }
-    })();
+  // Load (or re-load) the form context for this token. Pulled out of the mount
+  // effect so the dead-end screen below can retry it without a page reload.
+  const loadContext = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/freelancers/apply/${token}`);
+      const j = await res.json();
+      if (!res.ok) { setError(j.error || 'This link is not valid.'); }
+      else {
+        setError('');
+        setTerms(j.data.terms || '');
+        setTcsVersion(j.data.tcs_version || '');
+        const p: Prefill = j.data.prefill || {};
+        setFirstName(p.first_name || ''); setLastName(p.last_name || '');
+        setPreferredName(p.preferred_name || ''); setEmail(p.email || '');
+        setPhone(p.phone || ''); setMobile(p.mobile || ''); setDob(p.date_of_birth || '');
+        setHomeAddress(p.home_address || '');
+        setEmName(p.emergency_contact_name || ''); setEmPhone(p.emergency_contact_phone || '');
+        setSkills(Array.isArray(p.skills) ? p.skills : []);
+        setLicenceNumber(p.licence_number || ''); setLicenceIssuedBy(p.licence_issued_by || '');
+        setLicenceExpiry(p.licence_expiry || ''); setLicencePassed(p.licence_passed_date || '');
+        setPassportExpiry(p.passport_expiry || ''); setDayRate(p.day_rate_note || '');
+      }
+    } catch { setError('Could not load the form.'); }
+    finally { setLoading(false); }
   }, [token]);
+
+  useEffect(() => { loadContext(); }, [loadContext]);
+
+  /**
+   * Re-check the link whenever this page comes back into view.
+   *
+   * A freelancer reads our email in their mail app, so clicking the link twice
+   * doesn't reload anything — the browser restores the SAME rendered page from
+   * its back/forward cache. Simon Bull (Sept 2026) submitted his form, clicked
+   * his link a minute later, was correctly told the form had closed, and was
+   * then shown that same cached screen when he re-opened the link we had just
+   * re-opened for him: the nginx log has a 304 on the HTML and no API call at
+   * all. He reported a broken link; the link was live.
+   *
+   * Only ever re-checks while we're SHOWING that dead end — a re-fetch on a
+   * half-filled form would overwrite what they'd typed with the pre-fill, which
+   * is exactly what happens when someone leaves the page to fetch a photo of
+   * their licence and comes back.
+   */
+  useEffect(() => {
+    if (!error || done) return;
+    const recheck = () => { if (document.visibilityState === 'visible') loadContext(); };
+    const onPageShow = (e: PageTransitionEvent) => { if (e.persisted) recheck(); };
+    window.addEventListener('pageshow', onPageShow);
+    document.addEventListener('visibilitychange', recheck);
+    return () => {
+      window.removeEventListener('pageshow', onPageShow);
+      document.removeEventListener('visibilitychange', recheck);
+    };
+  }, [error, done, loadContext]);
 
   function toggle(list: string[], setList: (v: string[]) => void, v: string) {
     setList(list.includes(v) ? list.filter((x) => x !== v) : [...list, v]);
@@ -170,7 +201,7 @@ export default function FreelancerApplyPage() {
         return setError('Please complete all of your driving licence details.');
       }
       const has = (l: string) => docs.some((d) => d.label === l);
-      if (!has('Licence Front') || !has('Licence Back') || !has('DVLA Summary')) {
+      if (!has('Licence Front') || !has('Licence Back') || !has('DVLA Check')) {
         return setError('Please upload your licence (front and back) and a DVLA check summary.');
       }
     }
@@ -213,7 +244,18 @@ export default function FreelancerApplyPage() {
   }
 
   if (loading) return <Shell><p className="text-slate-400">Loading…</p></Shell>;
-  if (error && !terms && !done) return <Shell><p className="text-red-600">{error}</p></Shell>;
+  if (error && !terms && !done) return (
+    <Shell>
+      <p className="text-red-600">{error}</p>
+      <button
+        type="button"
+        onClick={() => { setLoading(true); loadContext(); }}
+        className="mt-4 px-4 py-2 rounded bg-[#7B5EA7] text-white text-sm font-semibold"
+      >
+        Try again
+      </button>
+    </Shell>
+  );
   if (done) return (
     <Shell>
       <h1 className="text-xl font-bold text-slate-800 mb-2">Thank you</h1>
@@ -292,7 +334,7 @@ export default function FreelancerApplyPage() {
           <Section title="Licence & DVLA documents" required>
             <DocUpload token={token!} label="Licence Front" docs={docs} setDocs={setDocs} setError={setError} />
             <DocUpload token={token!} label="Licence Back" docs={docs} setDocs={setDocs} setError={setError} />
-            <DocUpload token={token!} label="DVLA Summary" docs={docs} setDocs={setDocs} setError={setError} />
+            <DocUpload token={token!} label="DVLA Check" docs={docs} setDocs={setDocs} setError={setError} />
           </Section>
 
           <Section title="Insurance questionnaire">
