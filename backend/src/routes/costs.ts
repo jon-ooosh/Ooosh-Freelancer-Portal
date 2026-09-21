@@ -135,6 +135,14 @@ const createSchema = z.object({
   })).max(MAX_SUPPORTING_DOCUMENTS).optional(),
   status: z.enum(['draft', 'confirmed', 'resolved']).optional(),
   notes: z.string().trim().max(10000).optional().nullable(),
+  // A credit — money coming BACK from a supplier (refund / card credit note).
+  // The amount is sent as a POSITIVE magnitude like any other; the server
+  // stores it negative. See services/cost-credit.ts for the one sign rule.
+  is_credit: z.boolean().optional(),
+  // The purchase it came back from. Optional: a refund for something never
+  // captured in OP is still worth recording.
+  refund_of_cost_id: z.string().uuid().optional().nullable(),
+
   // Control flag (not a column): one-click "Approve & save" on a payable.
   // Honoured only for admin/manager + a payable; ignored otherwise.
   approve: z.boolean().optional(),
@@ -174,6 +182,9 @@ const WRITABLE = [
   'quote_assignment_id', 'platform_issue_id', 'vehicle_service_log_id', 'vehicle_fuel_log_id',
   'recharge_mode', 'recharge_amount', 'recharge_status', 'cost_intent', 'receipt_r2_key', 'receipt_filename',
   'supporting_documents', 'status', 'notes',
+  // Credits — money coming back. The SIGN is applied by applyCreditSign()
+  // (services/cost-credit.ts), never by a caller. See migration 229.
+  'is_credit', 'refund_of_cost_id',
 ] as const;
 
 // ⚠️ node-postgres sends a JS array as a Postgres ARRAY literal ({"..."}), which
@@ -322,6 +333,14 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         CONCAT(up.first_name, ' ', up.last_name) AS uploaded_by_name,
         j.hh_job_number, j.job_name,
         fv.reg AS vehicle_reg,
+        -- Money that came back against this purchase, and (on a credit) what it
+        -- came back from. Both are display only — the netting itself needs
+        -- nothing, because a credit IS a negative row. See migration 229.
+        COALESCE((SELECT SUM(ABS(k.amount_gross)) FROM costs k
+                   WHERE k.refund_of_cost_id = c.id AND k.is_credit), 0)::numeric AS refunded_total,
+        pc.supplier_name AS refund_parent_supplier,
+        pc.invoice_number AS refund_parent_invoice,
+        pc.cost_date AS refund_parent_date,
         (SELECT COUNT(*)::int FROM cost_allocations a WHERE a.cost_id = c.id) AS allocation_count,
         (SELECT COALESCE(json_agg(json_build_object(
                   'job_id', a.job_id, 'hh_job_number', aj.hh_job_number,
@@ -335,6 +354,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       LEFT JOIN people up ON up.id = u.person_id
       LEFT JOIN jobs j    ON j.id = c.job_id
       LEFT JOIN fleet_vehicles fv ON fv.id = c.vehicle_id
+      LEFT JOIN costs pc ON pc.id = c.refund_of_cost_id
       ${whereClause}
       ORDER BY c.created_at DESC
       LIMIT $${params.length}
@@ -861,11 +881,55 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
 
 // ── Create ──────────────────────────────────────────────────────────────────
 
+// How much of this purchase hasn't come back yet — drives the Record refund
+// modal's ceiling and its "£12.60 left to refund" line. Cheap enough to ask for
+// every time the modal opens, which is what keeps two people refunding the same
+// purchase twice from both looking fine.
+router.get('/:id/refundable', async (req: AuthRequest, res: Response) => {
+  try {
+    const { remainingRefundable } = await import('../services/cost-credit');
+    const balance = await remainingRefundable(String(req.params.id));
+    if (!balance) { res.status(404).json({ error: 'Cost not found' }); return; }
+    res.json({ data: balance });
+  } catch (err) {
+    console.error('[costs] refundable error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 router.post('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
   try {
     const parse = createSchema.safeParse(req.body);
     if (!parse.success) { res.status(400).json({ error: 'Invalid input', issues: parse.error.issues }); return; }
     const data = parse.data as Record<string, unknown>;
+
+    // ── Credits (money coming back) ────────────────────────────────────────
+    // Validated and completed BEFORE anything else: the parent's facets have to
+    // be on the row before the recharge/approval logic below reads them, and a
+    // credit that can't be reconciled with its purchase must not reach the
+    // INSERT at all. See services/cost-credit.ts.
+    const isCredit = data.is_credit === true;
+    let creditWarnings: string[] = [];
+    if (isCredit) {
+      const { applyCreditSign, prepareCreditFromParent } = await import('../services/cost-credit');
+      if (data.refund_of_cost_id) {
+        const prep = await prepareCreditFromParent(String(data.refund_of_cost_id), data);
+        if (prep.error) { res.status(400).json({ error: prep.error }); return; }
+        creditWarnings = prep.warnings;
+      } else {
+        // Orphan credit — nothing to inherit, so staff picked the routing
+        // themselves. It is still money in, so the same three rules hold.
+        data.recharge_mode = 'none';
+        data.recharge_amount = null;
+        data.payment_status = 'paid';
+      }
+      applyCreditSign(data, true);
+      // No line splitting on a credit in v1. Splitting a partial refund back
+      // across the purchase's lines is real work for a rare case, and
+      // validateCostLines reconciles against a NEGATIVE total here, so letting
+      // lines through would be a half-answer at best.
+      delete data.lines;
+    }
 
     // Auto-inherit on "recharge running costs" jobs: a running-cost cost
     // (fuel/parking/travel) linked to a flagged job defaults to Extra + recharge-
@@ -957,7 +1021,17 @@ router.post('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respon
         .catch(() => { /* non-fatal — staff can set terms manually */ });
     }
 
-    res.status(201).json({ data: await withJobLabels(created) });
+    // The credit landed; what OP can't tidy up by itself is told to a human.
+    // After the insert, never before — a bell must not be able to fail a save.
+    if (creditWarnings.length) {
+      const { notifyCreditNeedsFollowUp } = await import('../services/cost-credit');
+      void notifyCreditNeedsFollowUp(created.id, created.supplier_name, Number(created.amount_gross), creditWarnings);
+    }
+
+    res.status(201).json({
+      data: await withJobLabels(created),
+      ...(creditWarnings.length ? { warnings: creditWarnings } : {}),
+    });
   } catch (err) {
     console.error('[costs] create error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -973,6 +1047,19 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
     const data = parse.data as Record<string, unknown>;
     coerceRechargeForIntent(data);
     serialiseJsonbForWrite(data);
+
+    // Amounts arrive as positive magnitudes from every client, so an edited
+    // credit has to be re-signed or it flips to a purchase on save. Which kind
+    // of row this IS comes from the table, not the payload — `is_credit` is set
+    // once at capture and isn't a thing an edit gets to toggle.
+    if (data.amount_gross !== undefined || data.amount_vat !== undefined || data.amount_net !== undefined) {
+      const kind = await query('SELECT is_credit FROM costs WHERE id = $1', [req.params.id]);
+      if (!kind.rows.length) { res.status(404).json({ error: 'Cost not found' }); return; }
+      const { applyCreditSign } = await import('../services/cost-credit');
+      applyCreditSign(data, kind.rows[0].is_credit === true);
+    }
+    delete data.is_credit;
+    delete data.refund_of_cost_id;
 
     // Keep recharge_status in step if recharge_mode is being changed — but never
     // clobber a terminal resolution (already pushed/absorbed) back to pending.

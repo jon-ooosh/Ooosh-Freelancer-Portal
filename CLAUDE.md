@@ -154,6 +154,7 @@ existing definition:
 | What happens to requirements when a job dies? | `services/requirement-close-sweep.ts` |
 | When is this bill due? | `services/supplier-terms.ts` `resolveDueDate()` |
 | What are this job's costs? | `GET /costs/by-job/:jobId` |
+| Money coming BACK from a supplier? | `services/cost-credit.ts` |
 | What does this held item need next? | `services/held-item-query.ts` |
 | Talking to HireHop | `services/hirehop-broker.ts` |
 | Sending any email | `services/email-service.ts` |

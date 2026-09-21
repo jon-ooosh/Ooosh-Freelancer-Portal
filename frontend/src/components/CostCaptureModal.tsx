@@ -26,6 +26,10 @@ interface Props {
   // When set + the user ticked "covers multiple jobs", called instead of onSaved
   // so the parent can open the allocation/split modal for the new cost.
   onSavedAndSplit?: (cost: Cost) => void;
+  // "This is money coming BACK." Hands the chosen file to the refund flow
+  // instead of capturing it as spend — a refund booked as a cost overstates
+  // what we spent by twice the amount. Absent on the edit path.
+  onRecordRefund?: (file: File | null) => void;
   existing?: Cost | null;
   presetJobId?: string | null;
   presetVehicleId?: string | null;
@@ -36,7 +40,10 @@ interface Props {
 // maps to a Xero account code (for the eventual push) + an internal cost_type
 // (for filtering/reporting). Staff see only `label`, grouped under `group`.
 // Keep in step with STAFF_COST_ACCOUNT_CODES in backend routes/costs.ts.
-const COST_CATEGORIES: { group: string; label: string; xeroCode: string; costType: CostType }[] = [
+// Exported so the refund modal offers the SAME list — a credit coded to a
+// different account than its purchase leaves both sides sitting in the accounts
+// forever, netting to nothing useful.
+export const COST_CATEGORIES: { group: string; label: string; xeroCode: string; costType: CostType }[] = [
   { group: 'People',         label: 'Freelance crew invoices',           xeroCode: '320', costType: 'freelancer_invoice' },
   { group: 'People',         label: 'Travel (taxis, trains etc.)',       xeroCode: '325', costType: 'job' },
   { group: 'Vehicles',       label: 'Vehicle servicing & upkeep',        xeroCode: '406', costType: 'vehicle' },
@@ -184,7 +191,7 @@ interface XeroContactLite { ContactID: string; Name: string }
 interface JobSuggestion { id: string; type: string; name: string; subtitle?: string }
 type ExistingRow = (Cost & { hh_job_number?: number | null; job_name?: string | null }) | null | undefined;
 
-export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, existing, presetJobId, presetVehicleId, presetIssueId }: Props) {
+export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, onRecordRefund, existing, presetJobId, presetVehicleId, presetIssueId }: Props) {
   const existingRow = existing as ExistingRow;
   const { user } = useAuthStore();
   // The cached login user can be stale if an admin set this staff member's COT
@@ -1125,7 +1132,19 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, ex
       <div className="bg-white shadow-xl w-full max-h-screen sm:max-w-5xl sm:my-4 sm:rounded-lg sm:max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
           <h2 className="text-lg font-semibold text-gray-900">{isEdit ? 'Edit Cost' : 'Capture Cost'}</h2>
-          <button onClick={guardedClose} className="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
+          <div className="flex items-center gap-3">
+            {/* A refund slip looks exactly like a receipt, and this is the
+                button people reach for. Offer the way out before it's captured
+                as spend, carrying whatever file they already picked. */}
+            {!isEdit && onRecordRefund && (
+              <button onClick={() => onRecordRefund(receiptFile)}
+                title="Money coming back from a supplier — record it against the original purchase"
+                className="text-xs text-emerald-700 hover:text-emerald-800 hover:underline whitespace-nowrap">
+                ↩ This is a refund
+              </button>
+            )}
+            <button onClick={guardedClose} className="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
+          </div>
         </div>
 
         <div ref={containerRef} className="flex flex-col md:flex-row flex-1 min-h-0 overflow-y-auto md:overflow-hidden">

@@ -160,6 +160,8 @@ interface CostRow {
   paid_value_date: string | null;
   paid_at: string | null;
   settled_externally: boolean | null;
+  is_credit: boolean | null;
+  refund_of_cost_id: string | null;
   receipt_r2_key: string | null;
   receipt_filename: string | null;
   supporting_documents: CostDocumentRow[] | null;
@@ -212,6 +214,26 @@ async function resolveLineTaxType(amounts: { amount_vat?: unknown; amount_net?: 
 }
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
+
+/**
+ * A credit's amounts as POSITIVE magnitudes.
+ *
+ * OP stores money-coming-back as a negative row (migration 229), but Xero
+ * carries the direction in the transaction TYPE and wants positive lines. The
+ * sign flip happens exactly here, at the boundary — and it matters for more
+ * than the total: `resolveLineTaxType` reads `vat <= 0` as "no VAT", so a
+ * credit's -£2.10 of VAT would otherwise push as TaxType NONE and quietly cost
+ * us the VAT reclaim on the refund.
+ */
+function asMagnitudes(cost: CostRow): CostRow {
+  if (!cost.is_credit) return cost;
+  return {
+    ...cost,
+    amount_gross: Math.abs(Number(cost.amount_gross) || 0),
+    amount_vat: Math.abs(Number(cost.amount_vat) || 0),
+    amount_net: Math.abs(Number(cost.amount_net) || 0),
+  };
+}
 
 // Xero Reference field: the supplier's invoice number when we have one (so the
 // bill/transaction is findable by the number printed on the paperwork),
@@ -340,7 +362,11 @@ async function pushSpendMoney(cost: CostRow): Promise<PushResult> {
   if (cost.payment_status !== 'paid') {
     return { pushed: false, skipped: `Payment status is ${cost.payment_status} — not yet pushable` };
   }
-  if (!cost.amount_gross || Number(cost.amount_gross) <= 0) {
+  // A credit is a legitimately NEGATIVE row, so the "has an amount" check reads
+  // the magnitude. Everything below works from `amounts`, which is the same
+  // cost with its figures made positive for Xero. See asMagnitudes().
+  const amounts = asMagnitudes(cost);
+  if (!amounts.amount_gross || Number(amounts.amount_gross) <= 0) {
     await recordError(cost.id, 'Gross amount required to push');
     return { pushed: false, error: 'Gross amount required' };
   }
@@ -356,7 +382,7 @@ async function pushSpendMoney(cost: CostRow): Promise<PushResult> {
   }
 
   const description = (cost.description || cost.category || cost.supplier_name || 'Cost').toString().slice(0, 4000);
-  const { lineItems, lineAmountTypes } = await buildCostLineItems(cost, description);
+  const { lineItems, lineAmountTypes } = await buildCostLineItems(amounts, description);
 
   let bankTransactionID: string;
   try {
@@ -368,6 +394,9 @@ async function pushSpendMoney(cost: CostRow): Promise<PushResult> {
       reference: xeroReference(cost),
       lineItems,
       lineAmountTypes,
+      // Money coming back lands on the same card as a RECEIVE, which is what
+      // the bank feed will show and what the bookkeeper reconciles against.
+      ...(cost.is_credit ? { type: 'RECEIVE' as const } : {}),
     });
     bankTransactionID = txn.BankTransactionID;
   } catch (err) {
@@ -603,6 +632,15 @@ async function pushCostToXeroLocked(costId: string): Promise<PushResult> {
   const cost = await loadCost(costId);
   if (!cost) return { pushed: false, skipped: 'Cost not found' };
 
+  // A credit against a BILL is a credit note in Xero (ACCPAYCREDIT) with its own
+  // allocation rules, which OP deliberately doesn't write yet. Pushing it down
+  // the bill path would raise a negative ACCPAY bill — a second thing to pay.
+  // So: record it here, say plainly that Xero needs doing by hand, and stop.
+  if (cost.is_credit && cost.payment_method && (BILL_METHODS as readonly string[]).includes(cost.payment_method)) {
+    await recordAdvisory(cost.id, 'Recorded in OP only — raise the credit note against the bill in Xero yourself');
+    return { pushed: false, skipped: 'Credit on a bill — Xero credit note is manual' };
+  }
+
   if (cost.payment_method && (BILL_METHODS as readonly string[]).includes(cost.payment_method)) {
     return pushBill(cost);
   }
@@ -707,7 +745,7 @@ async function resyncCostToXeroLocked(costId: string): Promise<PushResult & { lo
         return { pushed: false, error: `No Xero bank account mapped for "${cost.payment_method}".` };
       }
       const description = (cost.description || cost.category || cost.supplier_name || 'Cost').toString().slice(0, 4000);
-      const { lineItems, lineAmountTypes } = await buildCostLineItems(cost, description);
+      const { lineItems, lineAmountTypes } = await buildCostLineItems(asMagnitudes(cost), description);
       await xeroBroker.updateSpendMoney(objectId, {
         bankAccountId,
         contactName: (cost.supplier_name || 'Unknown supplier').toString().slice(0, 500),
@@ -715,6 +753,8 @@ async function resyncCostToXeroLocked(costId: string): Promise<PushResult & { lo
         reference: xeroReference(cost),
         lineItems,
         lineAmountTypes,
+        // Never re-type an existing transaction: a credit stays a RECEIVE.
+        ...(cost.is_credit ? { type: 'RECEIVE' as const } : {}),
       });
     }
   } catch (err) {

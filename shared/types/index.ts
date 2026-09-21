@@ -1142,6 +1142,15 @@ export interface Cost {
    */
   settled_externally?: boolean;
   settled_externally_note?: string | null;
+  /**
+   * Money coming BACK from a supplier — a refund or card credit note. The
+   * amounts on a credit are NEGATIVE (migration 229), so it nets against the
+   * purchase in every existing total without being taught anything. Entered as
+   * positive by every client; the server applies the sign.
+   */
+  is_credit?: boolean;
+  /** The purchase a credit came back from; null if it was never captured. */
+  refund_of_cost_id?: string | null;
   /** Remittance advice sent to the payee for this cost (audit + "sent" pip). */
   remittance_sent_at?: string | null;
   remittance_email?: string | null;

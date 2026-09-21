@@ -18,6 +18,8 @@ import { useAuthStore } from '../hooks/useAuthStore';
 import CostCaptureModal from '../components/CostCaptureModal';
 import CostAllocationModal from '../components/CostAllocationModal';
 import RechargeResolveModal, { RechargeStatusPill } from '../components/RechargeResolveModal';
+import RecordRefundModal from '../components/RecordRefundModal';
+import { PAID_NOW_METHODS } from '../lib/costOptions';
 import type { Cost, SupplierPaymentTerms } from '../../../shared/types';
 
 type ViewMode = 'all' | 'payable' | 'recharge' | 'reconcile';
@@ -30,6 +32,12 @@ interface CostRow extends Cost {
   allocation_count?: number;
   allocation_jobs?: Array<{ job_id: string | null; hh_job_number: number | null; job_name: string | null; amount: number }>;
   due_date?: string | null;
+  /** Money that has come back against THIS purchase (positive £). */
+  refunded_total?: number | null;
+  /** On a credit: what it came back from. */
+  refund_parent_supplier?: string | null;
+  refund_parent_invoice?: string | null;
+  refund_parent_date?: string | null;
 }
 
 interface Stats {
@@ -161,6 +169,11 @@ export default function CostsPage() {
   const [editing, setEditing] = useState<CostRow | null>(null);
   const [allocating, setAllocating] = useState<CostRow | null>(null);
   const [payTarget, setPayTarget] = useState<CostRow | null>(null);
+  // Recording money coming BACK. `null` target with the flag on = opened from
+  // capture, where the purchase hasn't been picked yet.
+  const [refundTarget, setRefundTarget] = useState<CostRow | null>(null);
+  const [refundOpen, setRefundOpen] = useState(false);
+  const [refundFile, setRefundFile] = useState<File | null>(null);
   const [termsTarget, setTermsTarget] = useState<CostRow | null>(null);
   const [preview, setPreview] = useState<CostRow | null>(null);
   const [resolving, setResolving] = useState<CostRow | null>(null);
@@ -713,8 +726,32 @@ export default function CostsPage() {
                       </div>
                     </div>
                   </td>
-                  <td className="px-2 py-2 text-gray-600 max-w-[180px] truncate" title={c.description || undefined}>{c.description || '—'}</td>
-                  <td className="px-2 py-2 text-right font-medium text-gray-900">{gbp(c.amount_gross)}</td>
+                  <td className="px-2 py-2 text-gray-600 max-w-[180px]">
+                    <div className="truncate" title={c.description || undefined}>{c.description || '—'}</div>
+                    {c.is_credit && (
+                      <div className="text-[11px] text-emerald-700 truncate"
+                        title={`Refund of ${c.refund_parent_supplier || 'a purchase'}${c.refund_parent_invoice ? ` #${c.refund_parent_invoice}` : ''}`}>
+                        ↩ refund of {c.refund_parent_supplier || 'an unlinked purchase'}
+                        {c.refund_parent_invoice ? ` #${c.refund_parent_invoice}` : ''}
+                      </div>
+                    )}
+                  </td>
+                  <td className="px-2 py-2 text-right font-medium text-gray-900">
+                    {c.is_credit ? (
+                      <span className="text-emerald-700" title="Money back from the supplier">
+                        −{gbp(Math.abs(Number(c.amount_gross) || 0))}
+                      </span>
+                    ) : gbp(c.amount_gross)}
+                    {/* What has come back against this purchase. The purchase's
+                        own figure never changes — the receipt still says what it
+                        said — so the netting is shown, not applied. */}
+                    {!c.is_credit && Number(c.refunded_total) > 0 && (
+                      <div className="text-[11px] text-emerald-700 font-normal"
+                        title={`${gbp(c.refunded_total)} refunded — net ${gbp(Number(c.amount_gross) - Number(c.refunded_total))}`}>
+                        −{gbp(c.refunded_total)} back
+                      </div>
+                    )}
+                  </td>
                   <td className="px-2 py-2 text-gray-600 max-w-[110px] truncate whitespace-nowrap" title={`${c.category || c.cost_type.replace('_', ' ')}${view !== 'all' && c.uploaded_by_name ? ` · uploaded by ${c.uploaded_by_name}` : ''}`}>
                     {c.category || c.cost_type.replace('_', ' ')}
                   </td>
@@ -784,6 +821,15 @@ export default function CostsPage() {
                           Resolve
                         </button>
                       )}
+                      {/* Money back. Not offered on a credit (you can't refund a
+                          refund) or on a £0 row, which is what the server says too. */}
+                      {!c.is_credit && Number(c.amount_gross) > 0 && (
+                        <button onClick={() => { setRefundTarget(c); setRefundFile(null); setRefundOpen(true); }}
+                          title="Record a refund / credit against this purchase"
+                          className="px-1.5 py-1 text-sm text-gray-500 hover:text-emerald-700 hover:bg-emerald-50 rounded">
+                          ↩
+                        </button>
+                      )}
                       <button onClick={() => setAllocating(c)} title="Split across jobs"
                         className={`px-1.5 py-1 text-sm rounded hover:bg-gray-100 ${c.allocation_count ? 'text-purple-700' : 'text-gray-500 hover:text-gray-800'}`}>
                         ⑂{c.allocation_count ? <span className="text-[10px] align-top">{c.allocation_count}</span> : ''}
@@ -812,6 +858,25 @@ export default function CostsPage() {
           onClose={() => setShowCapture(false)}
           onSaved={() => { setShowCapture(false); load(); }}
           onSavedAndSplit={(c) => { setShowCapture(false); load(); setAllocating(c as CostRow); }}
+          // Someone photographed a refund slip and came here out of habit. Hand
+          // the file over rather than letting it be captured as spend — a refund
+          // booked as a cost inflates the figure by twice the amount.
+          onRecordRefund={(f) => { setShowCapture(false); setRefundTarget(null); setRefundFile(f); setRefundOpen(true); }}
+        />
+      )}
+      {refundOpen && (
+        <RecordRefundModal
+          cost={refundTarget}
+          initialFile={refundFile}
+          onClose={() => { setRefundOpen(false); setRefundTarget(null); setRefundFile(null); }}
+          onSaved={(warnings) => {
+            setRefundOpen(false); setRefundTarget(null); setRefundFile(null);
+            // Things OP can't tidy up itself — a recharged or split purchase.
+            // Also belled to admins server-side, because the person recording a
+            // refund often isn't the person who invoices the client.
+            if (warnings.length) alert(`Refund recorded.\n\n${warnings.join('\n\n')}`);
+            load(true);
+          }}
         />
       )}
       {editing && (
@@ -1003,16 +1068,6 @@ function SupplierTermsModal({ cost, onClose, onSaved }: {
 // Bank/card instruments money can go out from — drives which Xero bank account
 // a bill payment posts to. Keep in step with the paid-now methods in
 // CostCaptureModal + backend SPEND_MONEY_METHODS.
-const PAID_NOW_METHODS = [
-  { value: 'lloyds_transfer', label: 'Lloyds bank transfer' },
-  { value: 'wise', label: 'Wise bank transfer' },
-  { value: 'cot_card', label: 'Company card (COT)' },
-  { value: 'amex', label: 'Amex card' },
-  { value: 'lloyds_cc', label: 'Lloyds credit card' },
-  { value: 'petty_cash', label: 'Petty cash' },
-  { value: 'paypal', label: 'PayPal' },
-];
-
 // One payment, many bills. Deliberately a SEPARATE component from PayModal:
 // that one carries remittance advice, a person picker and a payee, all of which
 // are per-payee concepts that don't survive a batch spanning suppliers. Bolting

@@ -264,6 +264,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '226_last_minute_alert_marker.sql',
         '227_freelancer_day_chase.sql',
         '228_freelancer_day_amend.sql',
+        '229_cost_credits.sql',
       ];
 
       for (const migration of migrations) {
