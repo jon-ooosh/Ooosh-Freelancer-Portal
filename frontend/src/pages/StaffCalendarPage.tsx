@@ -48,7 +48,7 @@ interface DayBooking {
   rateType: 'day' | 'half_day' | 'hourly' | 'fixed';
   agreedRate: number | null;
   expectedTotal: number | null;
-  status: 'offered' | 'accepted' | 'declined' | 'cancelled' | 'completed' | 'lapsed';
+  status: 'offered' | 'accepted' | 'declined' | 'cancelled' | 'completed' | 'lapsed' | 'withdrew';
   notes: string | null;
   invoiceReceived: boolean;
   invoiceAmount: number | null;
@@ -155,6 +155,9 @@ const BOOKING_STATUS: Record<
   // Offered, never answered, day gone, written off. Not a decline — nobody
   // declined — and not a cancellation, which is us calling the day off.
   lapsed:    { cell: 'bg-gray-100 text-gray-500',   short: '—',    label: 'No reply — written off', counts: false },
+  // Accepted, then pulled out. Kept apart from `declined` on purpose: one left
+  // a hole at short notice and the other never wanted the day.
+  withdrew:  { cell: 'bg-gray-100 text-gray-500',   short: '—',    label: 'Pulled out after accepting', counts: false },
 };
 
 const CELL: Record<DayStatus, { bg: string; label: string }> = {
@@ -878,6 +881,13 @@ function BookingActions({ booking, onClose, onChanged, onError }: {
   onError: (m: string) => void;
 }) {
   const [busy, setBusy] = useState(false);
+  const [amending, setAmending] = useState(false);
+  const [aDate, setADate] = useState(booking.bookingDate);
+  const [aDuration, setADuration] = useState(booking.durationType);
+  const [aStart, setAStart] = useState(booking.startTime ?? '09:00');
+  const [aEnd, setAEnd] = useState(booking.endTime ?? '17:00');
+  const [aRate, setARate] = useState(booking.agreedRate !== null ? String(booking.agreedRate) : '');
+  const [aNotes, setANotes] = useState(booking.notes ?? '');
   const [invoiceAmount, setInvoiceAmount] = useState(
     booking.invoiceAmount !== null ? String(booking.invoiceAmount)
       : booking.expectedTotal !== null ? String(booking.expectedTotal) : '');
@@ -926,10 +936,31 @@ function BookingActions({ booking, onClose, onChanged, onError }: {
           </>
         )}
         {booking.status === 'accepted' && (
-          <button disabled={busy}
-            onClick={() => act(() => api.post(`/staff-calendar/freelancer-days/${booking.id}/complete`, {}))}
-            className="px-3 py-1.5 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
-            Mark the day done
+          <>
+            <button disabled={busy}
+              onClick={() => act(() => api.post(`/staff-calendar/freelancer-days/${booking.id}/complete`, {}))}
+              className="px-3 py-1.5 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
+              Mark the day done
+            </button>
+            {/* Not "they declined": they had agreed and pulled out, which left a
+                hole at short notice. Recording those the same way loses the one
+                thing worth knowing next time you are deciding who to ask. */}
+            <button disabled={busy}
+              onClick={() => {
+                const note = window.prompt('They pulled out — anything worth noting? (optional)');
+                if (note === null) return;
+                void act(() => api.post(`/staff-calendar/freelancer-days/${booking.id}/withdraw`,
+                  { note: note.trim() || null }));
+              }}
+              className="px-3 py-1.5 text-sm rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-50">
+              They pulled out
+            </button>
+          </>
+        )}
+        {(booking.status === 'offered' || booking.status === 'accepted') && (
+          <button disabled={busy} onClick={() => setAmending(a => !a)}
+            className="px-3 py-1.5 text-sm rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-50">
+            {amending ? 'Stop amending' : 'Amend'}
           </button>
         )}
         {booking.status !== 'cancelled' && (
@@ -944,6 +975,75 @@ function BookingActions({ booking, onClose, onChanged, onError }: {
           </button>
         )}
       </div>
+
+      {amending && (
+        <div className="pt-3 border-t border-gray-100 space-y-3">
+          {/* The rule, said out loud where it is being used. Moving the day or
+              the hours is a different commitment and has to be agreed again;
+              changing the rate or the job is something to tell them. Without
+              this line the two buttons look arbitrary. */}
+          <p className="text-xs text-gray-600">
+            Changing the <strong>day or the hours</strong> asks them again
+            {booking.status === 'accepted' ? ' — this booking goes back to pending' : ''}.
+            Changing the <strong>rate or the notes</strong> just tells them.
+          </p>
+          <div className="grid sm:grid-cols-3 gap-3">
+            <label className="text-sm">
+              <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">Day</span>
+              <input type="date" value={aDate} onChange={e => setADate(e.target.value)}
+                className="w-full px-2 py-1.5 rounded border border-gray-300" />
+            </label>
+            <label className="text-sm">
+              <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">How long</span>
+              <select value={aDuration} onChange={e => setADuration(e.target.value as DayBooking['durationType'])}
+                className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white">
+                <option value="full_day">Full day</option>
+                <option value="half_day">Half day</option>
+                <option value="hours">Set hours</option>
+              </select>
+            </label>
+            <label className="text-sm">
+              <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">Agreed rate (£)</span>
+              <input type="number" min={0} step="0.01" value={aRate}
+                onChange={e => setARate(e.target.value)}
+                className="w-full px-2 py-1.5 rounded border border-gray-300" />
+            </label>
+          </div>
+          {aDuration === 'hours' && (
+            <div className="grid sm:grid-cols-3 gap-3">
+              <label className="text-sm">
+                <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">From</span>
+                <QuarterHourSelect value={aStart} onChange={setAStart} aria-label="New start time"
+                  className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white" />
+              </label>
+              <label className="text-sm">
+                <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">To</span>
+                <QuarterHourSelect value={aEnd} onChange={setAEnd} aria-label="New end time"
+                  className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white" />
+              </label>
+            </div>
+          )}
+          <label className="block text-sm">
+            <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">What are they doing</span>
+            <input value={aNotes} onChange={e => setANotes(e.target.value)}
+              className="w-full px-2 py-1.5 rounded border border-gray-300" />
+          </label>
+          <button disabled={busy}
+            onClick={() => act(async () => {
+              await api.patch(`/staff-calendar/freelancer-days/${booking.id}`, {
+                bookingDate: aDate,
+                durationType: aDuration,
+                ...(aDuration === 'hours' ? { startTime: aStart, endTime: aEnd } : { startTime: null, endTime: null }),
+                agreedRate: aRate === '' ? null : Number(aRate),
+                notes: aNotes.trim() || null,
+              });
+              setAmending(false);
+            })}
+            className="px-3 py-1.5 text-sm rounded bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50">
+            Save the change
+          </button>
+        </div>
+      )}
 
       {booking.status === 'completed' && (
         <div className="pt-3 border-t border-gray-100 flex flex-wrap items-end gap-2">

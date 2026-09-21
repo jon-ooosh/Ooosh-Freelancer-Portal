@@ -35,7 +35,15 @@ export type BookingStatus =
    * says "we asked and heard nothing", which is what you actually want when
    * deciding who to ask next time.
    */
-  | 'lapsed';
+  | 'lapsed'
+  /**
+   * They had accepted, then pulled out.
+   *
+   * NOT `declined`, which means they never wanted the day. This one left a hole
+   * at short notice, and that difference is the whole point of recording it —
+   * it is what you want to know when deciding who to ask next time.
+   */
+  | 'withdrew';
 
 /** Statuses that occupy the calendar and count toward who is in. */
 export const LIVE_STATUSES: BookingStatus[] = ['offered', 'accepted'];
@@ -278,6 +286,13 @@ export async function recordResponse(
   if (!cur) throw new Error('Booking not found');
   if (cur.status === 'cancelled') throw new Error('That booking was cancelled');
   if (cur.status === 'completed') throw new Error('That booking is already marked done');
+  if (cur.status === 'lapsed') throw new Error('That booking was written off — book the day again to re-offer it');
+  // Accepted then declined used to be allowed, and recorded somebody pulling
+  // out identically to somebody who never wanted the day. Those are different
+  // facts; `withdrawBooking` is the one that says so.
+  if (cur.status === 'accepted' && response === 'declined') {
+    throw new Error('They had already accepted — record that they pulled out, which is a different thing');
+  }
 
   await query(
     `UPDATE freelancer_day_bookings
@@ -368,6 +383,154 @@ export async function closeOutBooking(
   const out = await getBooking(id);
   if (!out) throw new Error('Booking not found after closing out');
   return out;
+}
+
+/**
+ * They accepted and have since pulled out (§9.4 item 7).
+ *
+ * Only from `accepted` — pulling out of something you never agreed to is not a
+ * thing, and routing a never-answered offer through here would lose the "we
+ * asked and heard nothing" signal that `lapsed` exists to keep.
+ */
+export async function withdrawBooking(
+  id: string, note: string | null,
+): Promise<DayBooking> {
+  const cur = await getBooking(id);
+  if (!cur) throw new Error('Booking not found');
+  if (cur.status !== 'accepted') {
+    throw new Error(`Only an accepted day can be pulled out of — that one is ${cur.status}`);
+  }
+  await query(
+    `UPDATE freelancer_day_bookings
+        SET status = 'withdrew', responded_at = NOW(), response_note = $2, updated_at = NOW()
+      WHERE id = $1`,
+    [id, note]
+  );
+  const out = await getBooking(id);
+  if (!out) throw new Error('Booking not found after recording that they pulled out');
+  return out;
+}
+
+export interface AmendBookingInput {
+  bookingDate?: string;
+  durationType?: DurationType;
+  startTime?: string | null;
+  endTime?: string | null;
+  rateType?: RateType;
+  agreedRate?: number | null;
+  notes?: string | null;
+}
+
+export interface AmendResult {
+  booking: DayBooking;
+  /** The day or the hours moved, so the question has been re-opened. */
+  reoffered: boolean;
+  /** Something changed that they should be told about, but not re-asked. */
+  changedDetailsOnly: boolean;
+}
+
+/**
+ * Change a booking without cancel-and-rebook (§9.4 item 6).
+ *
+ * THE RULE, and it is the whole design: **the day and the hours re-open the
+ * question; the rate and the notes do not.** Moving somebody to a different day
+ * is a different commitment and they have to agree to it. Changing what we are
+ * paying, or what the job is, is something to tell them — re-asking would mean
+ * two emails to move an hour, which is exactly what this endpoint exists to
+ * stop.
+ *
+ * A re-offer resets the chase stamps as well as the status. They are per
+ * QUESTION, not per booking: leaving them set would mean the new question never
+ * gets its nudge and never reaches the day-before alert.
+ */
+export async function amendBooking(
+  id: string, input: AmendBookingInput, _userId: string,
+): Promise<AmendResult> {
+  const cur = await getBooking(id);
+  if (!cur) throw new Error('Booking not found');
+  if (cur.status === 'cancelled') throw new Error('That booking was cancelled — book the day again instead');
+  if (cur.status === 'completed') throw new Error('That day is done — amending it would rewrite what happened');
+  if (cur.status === 'lapsed') throw new Error('That booking was written off — book the day again instead');
+  if (cur.status === 'declined' || cur.status === 'withdrew') {
+    throw new Error('They are not doing that day — book it again to ask afresh');
+  }
+
+  const next = {
+    bookingDate: input.bookingDate ?? cur.bookingDate,
+    durationType: input.durationType ?? cur.durationType,
+    startTime: input.startTime !== undefined ? input.startTime : cur.startTime,
+    endTime: input.endTime !== undefined ? input.endTime : cur.endTime,
+    rateType: input.rateType ?? cur.rateType,
+    agreedRate: input.agreedRate !== undefined ? input.agreedRate : cur.agreedRate,
+    notes: input.notes !== undefined ? input.notes : cur.notes,
+  };
+
+  if (!DATE_RE.test(next.bookingDate)) throw new Error('The date must be YYYY-MM-DD');
+  if (next.durationType === 'hours') {
+    if (!next.startTime || !next.endTime) throw new Error('A timed booking needs both a start and an end time');
+    if (next.endTime <= next.startTime) {
+      throw new Error('The end time needs to be after the start — a day that runs past midnight is two bookings');
+    }
+  } else if (next.startTime || next.endTime) {
+    // Switching a timed day to a whole one has to drop the times, or the
+    // freelancer_day_times CHECK rejects the update with a constraint error.
+    next.startTime = null;
+    next.endTime = null;
+  }
+  if (next.rateType === 'hourly' && next.durationType !== 'hours') {
+    throw new Error('An hourly rate needs the hours — pick "set hours" for the duration');
+  }
+
+  const dayOrHoursMoved =
+    next.bookingDate !== cur.bookingDate ||
+    next.startTime !== cur.startTime ||
+    next.endTime !== cur.endTime ||
+    next.durationType !== cur.durationType;
+
+  const detailsMoved =
+    next.rateType !== cur.rateType ||
+    Number(next.agreedRate ?? NaN) !== Number(cur.agreedRate ?? NaN) ||
+    (next.agreedRate === null) !== (cur.agreedRate === null) ||
+    (next.notes ?? '') !== (cur.notes ?? '');
+
+  if (!dayOrHoursMoved && !detailsMoved) {
+    return { booking: cur, reoffered: false, changedDetailsOnly: false };
+  }
+
+  const expectedTotal = computeExpectedTotal({
+    rateType: next.rateType, agreedRate: next.agreedRate ?? null,
+    durationType: next.durationType, startTime: next.startTime, endTime: next.endTime,
+  });
+
+  // Only re-open a question that HAS an answer. Amending something still
+  // `offered` changes what is being asked but does not need the status reset,
+  // and resetting the chase stamps there would hand it a second nudge.
+  const reoffered = dayOrHoursMoved && cur.status === 'accepted';
+
+  try {
+    await query(
+      `UPDATE freelancer_day_bookings
+          SET booking_date = $2::date, duration_type = $3,
+              start_time = $4::time, end_time = $5::time,
+              rate_type = $6, agreed_rate = $7, expected_total = $8, notes = $9,
+              amended_at = NOW(), updated_at = NOW()
+              ${reoffered ? `, status = 'offered', responded_at = NULL, response_note = NULL,
+                              reoffered_at = NOW(), offer_chased_at = NULL, admin_alerted_at = NULL` : ''}
+        WHERE id = $1`,
+      [id, next.bookingDate, next.durationType, next.startTime, next.endTime,
+       next.rateType, next.agreedRate ?? null, expectedTotal, next.notes ?? null]
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/idx_freelancer_day_one_live|duplicate key/i.test(msg)) {
+      throw new Error('They are already booked on that day — widen the existing booking instead');
+    }
+    throw err;
+  }
+
+  const out = await getBooking(id);
+  if (!out) throw new Error('Booking not found after amending');
+  return { booking: out, reoffered, changedDetailsOnly: !reoffered && (detailsMoved || dayOrHoursMoved) };
 }
 
 export async function recordInvoice(id: string, input: {

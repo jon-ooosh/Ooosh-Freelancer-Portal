@@ -190,6 +190,23 @@ and removing them silently is the worse error (§9.4 decision 1).
   Conflating them loses the only signal that says "we asked and heard nothing".
   It is not a live status, so a written-off day frees the slot for a rebooking.
 
+## Amending a yard day: the DAY and the HOURS re-ask; the rate and notes tell
+
+`PATCH /freelancer-days/:id` → `amendBooking`. Moving the day or the hours is a
+different commitment, so the status goes back to `offered`, the acceptance is
+cleared and the offer email goes again. Changing the rate or the notes sends
+`freelancer_day_updated`, which deliberately has NO buttons.
+
+- **A re-offer must reset `offer_chased_at` and `admin_alerted_at`.** Those
+  stamps are per QUESTION, not per booking — leaving them set means the new
+  question never gets its nudge and never reaches the day-before alert.
+- **Switching a timed day to a whole one has to null the times**, or the
+  `freelancer_day_times` CHECK rejects the update.
+- **Four statuses mean four different things and none of them may be merged:**
+  `declined` (never wanted it) · `withdrew` (accepted, then pulled out) ·
+  `cancelled` (Ooosh called it off) · `lapsed` (nobody ever answered).
+  `recordResponse` refuses `accepted → declined` for exactly this reason.
+
 ## Bank holidays and company days are different things
 
 A **bank holiday** is computed, and under `use_allowance` is an ordinary

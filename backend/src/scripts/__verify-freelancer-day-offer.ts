@@ -19,7 +19,7 @@ import {
   sendOfferEmail, sendCancellationEmail, responseUrl,
   formatBookingDate, describeDuration, describeRate,
 } from '../services/freelancer-day-offer';
-import { listNeedsClosing, closeOutBooking } from '../services/freelancer-days';
+import { listNeedsClosing, closeOutBooking, withdrawBooking, amendBooking } from '../services/freelancer-days';
 import { runFreelancerOfferChase } from '../services/staff-notifications';
 
 let pass = 0, fail = 0;
@@ -284,6 +284,85 @@ async function main() {
   const rebooked = await createBooking({ personId: willId, bookingDate: iso(-20), agreedRate: 180 }, userId);
   check('a written-off day can be booked again — lapsed is not live',
     rebooked.status === 'offered');
+
+  // ── 9. Pulled out vs declined (§9.4 item 7) ──────────────────────────────
+  console.log('\n9. Pulled out is not the same as declined');
+  const pulled = await createBooking({ personId: willId, bookingDate: iso(25), agreedRate: 180 }, userId);
+  await recordResponse(pulled.id, 'accepted', null);
+  await refusesTo('recording an acceptance as a decline',
+    () => recordResponse(pulled.id, 'declined', null), /already accepted|pulled out/i);
+  const withdrawn = await withdrawBooking(pulled.id, 'Got a tour');
+  check('pulling out records `withdrew`, with the reason kept',
+    withdrawn.status === 'withdrew' && withdrawn.responseNote === 'Got a tour', withdrawn.status);
+  const neverAccepted = await createBooking({ personId: willId, bookingDate: iso(26), agreedRate: 180 }, userId);
+  await refusesTo('pulling out of a day they never accepted',
+    () => withdrawBooking(neverAccepted.id, null), /only an accepted day/i);
+  const freed = await createBooking({ personId: willId, bookingDate: iso(25), agreedRate: 180 }, userId);
+  check('and it frees the slot — withdrew is not a live status', freed.status === 'offered');
+
+  // ── 10. Amending (§9.4 item 6) ───────────────────────────────────────────
+  console.log('\n10. Amending without cancel-and-rebook');
+  const amendable = await createBooking({
+    personId: willId, bookingDate: iso(30), durationType: 'hours',
+    startTime: '09:00', endTime: '17:00', rateType: 'hourly', agreedRate: 20, notes: 'Van prep',
+  }, userId);
+  await recordResponse(amendable.id, 'accepted', null);
+
+  const rateOnly = await amendBooking(amendable.id, { agreedRate: 25 }, userId);
+  check('changing the RATE does not re-ask them',
+    rateOnly.reoffered === false && rateOnly.booking.status === 'accepted', rateOnly.booking.status);
+  check('but it is a change worth telling them about', rateOnly.changedDetailsOnly === true);
+  check('and the expected total is recomputed, not left stale',
+    rateOnly.booking.expectedTotal === 200, rateOnly.booking.expectedTotal);
+
+  const notesOnly = await amendBooking(amendable.id, { notes: 'Warehouse instead' }, userId);
+  check('changing the NOTES does not re-ask them either',
+    notesOnly.reoffered === false && notesOnly.booking.status === 'accepted');
+
+  const timeMoved = await amendBooking(amendable.id, { startTime: '11:00' }, userId);
+  check('moving the HOURS re-opens the question',
+    timeMoved.reoffered === true && timeMoved.booking.status === 'offered', timeMoved.booking.status);
+  const reofferRow = await query(
+    `SELECT reoffered_at, amended_at, responded_at, offer_chased_at, admin_alerted_at
+       FROM freelancer_day_bookings WHERE id = $1`, [amendable.id]);
+  check('the acceptance is cleared — it was for the old hours',
+    reofferRow.rows[0].responded_at === null);
+  check('the chase stamps reset, so the NEW question gets its own nudge',
+    reofferRow.rows[0].offer_chased_at === null && reofferRow.rows[0].admin_alerted_at === null);
+  check('and both amended_at and reoffered_at are recorded',
+    reofferRow.rows[0].amended_at !== null && reofferRow.rows[0].reoffered_at !== null);
+
+  await recordResponse(amendable.id, 'accepted', null);
+  const dayMoved = await amendBooking(amendable.id, { bookingDate: iso(31) }, userId);
+  check('moving the DAY re-opens it too — a different day is a different commitment',
+    dayMoved.reoffered === true && dayMoved.booking.status === 'offered');
+
+  const noop = await amendBooking(amendable.id, { notes: dayMoved.booking.notes }, userId);
+  check('an amendment that changes nothing is a no-op, not a spurious email',
+    noop.reoffered === false && noop.changedDetailsOnly === false);
+
+  // Validation still applies on the way in.
+  await refusesTo('an amendment with the end before the start',
+    () => amendBooking(amendable.id, { startTime: '15:00', endTime: '14:00' }, userId),
+    /end time needs to be after the start/i);
+  await refusesTo('amending a cancelled booking',
+    () => amendBooking(killed.id, { agreedRate: 1 }, userId), /cancelled/i);
+  await refusesTo('amending a day already worked',
+    () => amendBooking(cameAnyway.id, { agreedRate: 1 }, userId), /done|rewrite/i);
+
+  // Switching a timed day to a whole one must drop the times, or the
+  // freelancer_day_times CHECK rejects the update.
+  const toFullDay = await amendBooking(amendable.id, { durationType: 'full_day', rateType: 'day' }, userId);
+  check('switching to a full day clears the times rather than hitting the CHECK',
+    toFullDay.booking.durationType === 'full_day'
+      && toFullDay.booking.startTime === null && toFullDay.booking.endTime === null,
+    toFullDay.booking);
+
+  // The one-live-booking index has to survive an amendment too.
+  const clash = await createBooking({ personId: willId, bookingDate: iso(40), agreedRate: 180 }, userId);
+  await createBooking({ personId: willId, bookingDate: iso(41), agreedRate: 180 }, userId);
+  await refusesTo('amending a booking onto a day they are already booked',
+    () => amendBooking(clash.id, { bookingDate: iso(41) }, userId), /already booked/i);
 
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail === 0 ? 0 : 1);
