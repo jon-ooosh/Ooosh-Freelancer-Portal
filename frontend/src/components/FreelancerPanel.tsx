@@ -4,6 +4,7 @@ import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
 import FreelancerHistorySection from './FreelancerHistorySection';
 import { openR2Key } from '../lib/openAuthedFile';
+import { filesForSlot } from './drivers/EvidenceGroup';
 
 // ---------------------------------------------------------------------------
 // FreelancerPanel — the single home for everything freelancer on a Person.
@@ -18,6 +19,8 @@ import { openR2Key } from '../lib/openAuthedFile';
 interface FileAttachment {
   name: string;
   label?: string;
+  /** Set by the public sign-up form alongside the label; matched on first. */
+  tag?: string;
   url: string;
   type: 'document' | 'image' | 'other';
   uploaded_at: string;
@@ -236,6 +239,7 @@ export default function FreelancerPanel({ person, onChanged, onFilesChanged, onA
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
         <FreelancerDocuments
           personId={person.id}
+          skills={person.skills}
           files={person.files || []}
           onFilesChanged={onFilesChanged}
           onActivityCreated={onActivityCreated}
@@ -627,15 +631,52 @@ function FreelancerDetailsForm({ person, onCancel, onSaved }: {
 
 // ---- Required documents ---------------------------------------------------
 
-const REQUIRED_DOCS = [
-  { label: 'DVLA Check', description: 'DVLA licence check result' },
-  { label: 'Licence Front', description: 'Front of driving licence' },
-  { label: 'Licence Back', description: 'Back of driving licence' },
-  { label: 'Passport', description: 'Passport photo page' },
+/**
+ * The documents we hold on a freelancer — the spellings each one answers to,
+ * and when it actually counts as outstanding.
+ *
+ * MATCHED ON A NORMALISED TOKEN, NOT AN EXACT LABEL. The public sign-up form
+ * filed its DVLA upload as 'DVLA Summary' while this card looked for an exact
+ * 'DVLA Check', so a document we already held read "Missing" — and we emailed
+ * Simon Bull (Sept 2026) asking for a file that was sitting in Details > Files
+ * the whole time. Same failure that silently dropped every licence image from
+ * the driver snapshot PDF; see the spelling-mirror warning in
+ * drivers/EvidenceGroup.tsx and backend/src/services/driver-documents.ts. The
+ * form now writes 'DVLA Check', but every freelancer who signed up before that
+ * still carries the old spelling, so both stay in the list.
+ *
+ * `drivingOnly` / `optional` stop the card flagging a non-issue. The licence
+ * and DVLA documents mean nothing for someone who doesn't drive for us, and
+ * the sign-up form only OFFERS the passport upload to a freelancer who ticked
+ * UK & EU tours — so counting it against everyone chases people for a document
+ * we never asked them for.
+ */
+const REQUIRED_DOCS: {
+  label: string;
+  description: string;
+  match: string[];
+  drivingOnly?: boolean;
+  optional?: boolean;
+  optionalNote?: string;
+}[] = [
+  { label: 'DVLA Check', description: 'DVLA licence check result', drivingOnly: true,
+    match: ['DVLA Check', 'DVLA Summary', 'DVLA Check Code', 'DVLA'] },
+  { label: 'Licence Front', description: 'Front of driving licence', drivingOnly: true,
+    match: ['Licence Front', 'License Front'] },
+  { label: 'Licence Back', description: 'Back of driving licence', drivingOnly: true,
+    match: ['Licence Back', 'License Back'] },
+  { label: 'Passport', description: 'Passport photo page', optional: true,
+    optionalNote: 'Only needed for EU tours', match: ['Passport'] },
 ];
 
-function FreelancerDocuments({ personId, files, onFilesChanged, onActivityCreated }: {
+/** Does this freelancer drive for us? Mirrors the sign-up form's own test. */
+function drivesForUs(skills: string[] | null | undefined): boolean {
+  return (skills || []).some((s) => /driv/i.test(s));
+}
+
+function FreelancerDocuments({ personId, skills, files, onFilesChanged, onActivityCreated }: {
   personId: string;
+  skills: string[] | null;
   files: FileAttachment[];
   onFilesChanged: (files: FileAttachment[]) => void;
   onActivityCreated: () => void;
@@ -645,8 +686,13 @@ function FreelancerDocuments({ personId, files, onFilesChanged, onActivityCreate
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploadingLabel, setUploadingLabel] = useState('');
 
-  function getDocFile(docLabel: string): FileAttachment | undefined {
-    return files.find(f => f.label?.toLowerCase() === docLabel.toLowerCase());
+  // Newest match wins — staff re-uploading a document by hand leaves the
+  // freelancer's original on the record rather than replacing it.
+  function getDocFile(doc: typeof REQUIRED_DOCS[number]): FileAttachment | undefined {
+    const matches = filesForSlot(files, { label: doc.label, match: doc.match }) as FileAttachment[];
+    if (matches.length === 0) return undefined;
+    return matches.reduce((a, b) =>
+      new Date(a.uploaded_at || 0) > new Date(b.uploaded_at || 0) ? a : b);
   }
 
   function handleUploadClick(docLabel: string) {
@@ -703,16 +749,24 @@ function FreelancerDocuments({ personId, files, onFilesChanged, onActivityCreate
     }
   }
 
-  const presentCount = REQUIRED_DOCS.filter(d => getDocFile(d.label)).length;
+  // Only what we actually need from THIS freelancer counts towards the tally,
+  // so the badge answers "is anything outstanding?" rather than "did they fill
+  // in every box on a form they were never shown?".
+  const isDriver = drivesForUs(skills);
+  const outstanding = REQUIRED_DOCS.filter(d => !d.optional && (!d.drivingOnly || isDriver));
+  const presentCount = outstanding.filter(d => getDocFile(d)).length;
+  const allIn = presentCount === outstanding.length;
 
   return (
     <div>
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-sm font-semibold text-gray-700">Required Documents</h3>
         <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
-          presentCount === REQUIRED_DOCS.length ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'
+          allIn ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'
         }`}>
-          {presentCount}/{REQUIRED_DOCS.length} uploaded
+          {outstanding.length === 0
+            ? 'None required'
+            : `${presentCount}/${outstanding.length} uploaded`}
         </span>
       </div>
 
@@ -728,28 +782,43 @@ function FreelancerDocuments({ personId, files, onFilesChanged, onActivityCreate
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
         {REQUIRED_DOCS.map((doc) => {
-          const file = getDocFile(doc.label);
+          const file = getDocFile(doc);
           const isUploading = uploading === doc.label;
+          // Missing but not asked for is grey, not amber — an amber warning
+          // nobody needs to act on is the one that gets acted on anyway.
+          const needed = !doc.optional && (!doc.drivingOnly || isDriver);
+          const tone = file ? 'green' : needed ? 'amber' : 'gray';
+          const missingNote = doc.optional
+            ? (doc.optionalNote || 'Optional')
+            : needed ? 'Missing' : 'Not needed — not a driver';
           return (
             <div
               key={doc.label}
-              className={`flex items-center gap-3 p-3 rounded-lg border ${file ? 'border-green-200 bg-green-50' : 'border-amber-200 bg-amber-50'}`}
+              className={`flex items-center gap-3 p-3 rounded-lg border ${
+                tone === 'green' ? 'border-green-200 bg-green-50'
+                  : tone === 'amber' ? 'border-amber-200 bg-amber-50'
+                  : 'border-gray-200 bg-gray-50'}`}
             >
               {file ? (
                 <svg className="w-5 h-5 text-green-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
-              ) : (
+              ) : needed ? (
                 <svg className="w-5 h-5 text-amber-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4.5c-.77-.833-2.694-.833-3.464 0L3.34 16.5c-.77.833.192 2.5 1.732 2.5z" />
                 </svg>
+              ) : (
+                <svg className="w-5 h-5 text-gray-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h8m-4-9a9 9 0 110 18 9 9 0 010-18z" />
+                </svg>
               )}
               <div className="flex-1 min-w-0">
-                <p className={`text-sm font-medium ${file ? 'text-green-800' : 'text-amber-800'}`}>{doc.label}</p>
+                <p className={`text-sm font-medium ${
+                  tone === 'green' ? 'text-green-800' : tone === 'amber' ? 'text-amber-800' : 'text-gray-600'}`}>{doc.label}</p>
                 {file ? (
                   <p className="text-xs text-green-600 truncate">Uploaded {fmtDate(file.uploaded_at)}</p>
                 ) : (
-                  <p className="text-xs text-amber-600">Missing</p>
+                  <p className={`text-xs ${needed ? 'text-amber-600' : 'text-gray-500'}`}>{missingNote}</p>
                 )}
               </div>
               <div className="flex items-center gap-1 flex-shrink-0">
@@ -772,7 +841,8 @@ function FreelancerDocuments({ personId, files, onFilesChanged, onActivityCreate
                     type="button"
                     onClick={() => handleUploadClick(doc.label)}
                     disabled={isUploading}
-                    className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-amber-700 bg-amber-100 rounded hover:bg-amber-200 disabled:opacity-50"
+                    className={`inline-flex items-center gap-1 px-2 py-1 text-xs font-medium rounded disabled:opacity-50 ${
+                      needed ? 'text-amber-700 bg-amber-100 hover:bg-amber-200' : 'text-gray-600 bg-gray-100 hover:bg-gray-200'}`}
                   >
                     {isUploading ? (
                       <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">

@@ -34,6 +34,22 @@ const SYSTEM_USER_ID = '00000000-0000-0000-0000-000000000000';
 // Statuses where the tokenised form link is still live.
 const LIVE_TOKEN_STATUSES = ['invited', 'more_info'];
 
+/**
+ * What a freelancer is told when the link they clicked is no longer live.
+ *
+ * Per status, because the three closed states mean completely different things
+ * to the person holding the link, and one message for all three reads as a
+ * fault. Simon Bull (Sept 2026) submitted his form, clicked his link again a
+ * minute later out of habit, was told "This application form is no longer
+ * open" — and reported a broken link, because nothing said the reason it was
+ * closed is that he'd already done it.
+ */
+const CLOSED_FORM_MESSAGE: Record<string, string> = {
+  applied: "Thanks — we've already got your sign-up and we're looking at it now. There's nothing more to do here; if we need anything else we'll email you a fresh link.",
+  approved: "You're already signed up with us, so this form is closed. Any questions, just reply to our email.",
+  declined: 'This application form is no longer open. If you think that\'s wrong, reply to our email and we\'ll take a look.',
+};
+
 // Which T&Cs / GDPR text the freelancer agreed to (bump when the text changes).
 const TCS_VERSION = 'v1-2026-07';
 
@@ -152,7 +168,8 @@ async function loadTokenApplication(token: string): Promise<
   }
   const row = result.rows[0];
   if (!LIVE_TOKEN_STATUSES.includes(row.status)) {
-    return { ok: false, code: 410, message: 'This application form is no longer open.' };
+    const message = CLOSED_FORM_MESSAGE[row.status] || 'This application form is no longer open.';
+    return { ok: false, code: 410, message };
   }
   return { ok: true, app: row, person: row };
 }
