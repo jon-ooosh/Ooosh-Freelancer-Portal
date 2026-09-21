@@ -1628,10 +1628,18 @@ router.get('/day-bookings', async (req: PortalRequest, res: Response) => {
 
     // Past days are kept but capped: somebody wants to see the last few they
     // did (and whether we have their invoice), not scroll a year of history.
+    //
+    // `offered` is in BOTH lists on purpose. A day that went by without them
+    // answering used to appear in neither — upcoming excluded it by date, past
+    // excluded it by status — so the honest answer to "did I ever reply to
+    // that?" was a blank screen. There is nothing for them to DO about it (the
+    // backend refuses a response to a passed day, and the card shows no
+    // buttons), but being unable to see it at all is worse than seeing it
+    // greyed out.
     const upcoming = all.filter(b => b.bookingDate >= today
       && ['offered', 'accepted'].includes(b.status));
     const past = all.filter(b => b.bookingDate < today
-      && ['accepted', 'completed'].includes(b.status)).slice(0, 10);
+      && ['offered', 'accepted', 'completed'].includes(b.status)).slice(0, 10);
 
     res.json({
       success: true,

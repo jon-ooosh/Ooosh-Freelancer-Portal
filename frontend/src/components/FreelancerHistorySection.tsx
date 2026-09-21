@@ -14,7 +14,7 @@ import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 
 interface FreelancerHistoryItem {
-  source: 'crew' | 'sitter' | 'vehicle';
+  source: 'crew' | 'sitter' | 'vehicle' | 'yard';
   id: string;
   title: string;
   role: string | null;
@@ -49,7 +49,10 @@ interface FreelancerHistorySectionProps {
 
 type FilterPill = 'all' | 'upcoming' | 'past' | 'dead';
 
-const DEAD_STATUSES = new Set(['cancelled', 'declined']);
+// Work that did not happen. `withdrew` and `lapsed` join the set: a day
+// somebody pulled out of, or never answered, is not work they did — but each
+// keeps its own LABEL, because why it did not happen is the useful part.
+const DEAD_STATUSES = new Set(['cancelled', 'declined', 'withdrew', 'lapsed']);
 
 function statusPillClass(status: string): string {
   switch (status) {
@@ -63,7 +66,14 @@ function statusPillClass(status: string): string {
       return 'bg-blue-100 text-blue-800';
     case 'declined':
     case 'cancelled':
+    case 'withdrew':
       return 'bg-red-100 text-red-700';
+    case 'offered':
+      return 'bg-amber-100 text-amber-800';
+    case 'accepted':
+      return 'bg-green-100 text-green-800';
+    case 'lapsed':
+      return 'bg-gray-100 text-gray-600';
     default:
       // returned / swapped / anything else
       return 'bg-gray-100 text-gray-600';
@@ -82,6 +92,12 @@ function statusLabel(status: string): string {
     active: 'On Hire',
     returned: 'Returned',
     swapped: 'Swapped',
+    // Yard-day statuses (freelancer_day_bookings). `lapsed` and `withdrew` are
+    // deliberately distinct from `declined` — see the staff-calendar rules.
+    offered: 'Offered',
+    accepted: 'Accepted',
+    withdrew: 'Pulled out',
+    lapsed: 'No reply',
   };
   return labels[status] || status;
 }
@@ -89,6 +105,7 @@ function statusLabel(status: string): string {
 function sourceBadge(item: FreelancerHistoryItem): { icon: string; label: string } {
   if (item.source === 'sitter') return { icon: '🎸', label: 'Studio Sitter' };
   if (item.source === 'vehicle') return { icon: '🚐', label: 'Van' };
+  if (item.source === 'yard') return { icon: '🔧', label: 'Yard day' };
   const jt = item.job_type;
   const label = jt === 'delivery' ? 'Delivery'
     : jt === 'collection' ? 'Collection'
