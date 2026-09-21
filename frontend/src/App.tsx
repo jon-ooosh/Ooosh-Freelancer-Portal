@@ -13,7 +13,6 @@ import JobDetailPage from './pages/JobDetailPage';
 import ReturnsPage from './pages/ReturnsPage';
 import PipelinePage from './pages/PipelinePage';
 import SettingsPage from './pages/SettingsPage';
-import ProfilePage from './pages/ProfilePage';
 import DuplicatesPage from './pages/DuplicatesPage';
 import DataCleanupPage from './pages/DataCleanupPage';
 import DriversPage from './pages/DriversPage';
@@ -32,10 +31,8 @@ import MoneyOverviewPage from './pages/MoneyOverviewPage';
 import CostsPage from './pages/CostsPage';
 import VE103BCertificatesPage from './pages/VE103BCertificatesPage';
 import InboxPage from './pages/InboxPage';
-import StaffDocumentsPage from './pages/StaffDocumentsPage';
 import StaffCalendarPage from './pages/StaffCalendarPage';
 import StaffAdminPage from './pages/StaffAdminPage';
-import MyTimePage from './pages/MyTimePage';
 import StaffAbsencePage from './pages/StaffAbsencePage';
 import StaffDocumentsAdminPage from './pages/StaffDocumentsAdminPage';
 import StaffReceiptsPage from './pages/StaffReceiptsPage';
@@ -70,6 +67,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { sharedRefreshToken } from './services/api';
 import { getFreelancerSession, isFreelancerSessionActive } from './modules/vehicles/adapters/freelancer-session';
 import FreelancerDayRespondPage from './pages/FreelancerDayRespondPage';
+import MePage from './pages/MePage';
 
 const staffBookOutQueryClient = new QueryClient({
   defaultOptions: { queries: { staleTime: 1000 * 60 * 2, retry: 1 } },
@@ -255,12 +253,17 @@ export default function App() {
                 <Route path="/inbox" element={<InboxPage />} />
                 <Route path="/staff/calendar" element={<StaffCalendarPage />} />
                 <Route path="/staff/admin" element={<StaffAdminPage />} />
-                <Route path="/staff/me" element={<MyTimePage />} />
+                {/* One destination for the personal pages. The three old paths
+                    below still work and redirect in: notifications.action_url
+                    holds them for rows already in the database, and emails
+                    already sent link to them. */}
+                <Route path="/me" element={<MePage />} />
+                <Route path="/staff/me" element={<Navigate to="/me?tab=time" replace />} />
                 <Route path="/staff/absence" element={<StaffAbsencePage />} />
-                <Route path="/staff/documents" element={<StaffDocumentsPage />} />
+                <Route path="/staff/documents" element={<Navigate to="/me?tab=documents" replace />} />
                 <Route path="/staff/documents/admin" element={<StaffDocumentsAdminPage />} />
                 <Route path="/my-receipts" element={<StaffReceiptsPage />} />
-                <Route path="/profile" element={<ProfilePage />} />
+                <Route path="/profile" element={<Navigate to="/me?tab=profile" replace />} />
                 <Route path="/team" element={<Navigate to="/settings" replace />} />
                 <Route path="/settings" element={<SettingsPage />} />
               </Routes>

@@ -14,9 +14,10 @@ import { useAuthStore } from '../hooks/useAuthStore';
 import { HeldItemForm } from '../components/holding/HeldItemForm';
 import { HeldItemPicker, HandoverFlow } from '../components/holding/HeldItemPicker';
 import type { HeldItemLocation } from '../../../shared/types';
+import { LogOvertime } from './MyTimePage';
 
 
-type Action = 'package' | 'lost' | 'handover';
+type Action = 'package' | 'lost' | 'handover' | 'overtime';
 
 export default function QuickActionsPage() {
   const navigate = useNavigate();
@@ -30,6 +31,11 @@ export default function QuickActionsPage() {
   function done(msg: string) { setActive(null); setToast(msg); setTimeout(() => setToast(''), 2500); }
 
   const tiles: { id: string; emoji: string; label: string; onClick: () => void; tone: string }[] = [
+    // FIRST on purpose. Logging overtime is the most time-sensitive thing staff
+    // do here — it happens at the end of a late finish, on a phone, and every
+    // minute it is not logged is a minute more likely to be forgotten. It was
+    // three clicks deep behind the avatar menu.
+    { id: 'overtime', emoji: '⏱️', label: 'Log overtime', onClick: () => setActive('overtime'), tone: 'bg-teal-700' },
     { id: 'package', emoji: '📦', label: 'Package arrived', onClick: () => setActive('package'), tone: 'bg-[#7B5EA7]' },
     { id: 'lost', emoji: '🔍', label: 'Lost property', onClick: () => setActive('lost'), tone: 'bg-amber-600' },
     { id: 'handover', emoji: '✅', label: 'Handover / collected', onClick: () => setActive('handover'), tone: 'bg-green-600' },
@@ -74,6 +80,18 @@ export default function QuickActionsPage() {
           onClose={() => setActive(null)} onSaved={() => done('✓ Lost property logged')} />
       )}
       {active === 'handover' && <HandoverSheet onClose={() => setActive(null)} onSaved={() => done('✓ Marked collected')} />}
+      {/* The SAME component My Time uses, not a second copy of the form — the
+          5-minute rounding, the times-or-minutes toggle and the approval rules
+          all live in one place and cannot drift. */}
+      {active === 'overtime' && (
+        <Sheet title="⏱️ Log overtime" onClose={() => setActive(null)}>
+          <LogOvertime
+            onClose={() => setActive(null)}
+            onLogged={async () => { done('✓ Overtime logged — it needs approving'); }}
+            onError={(m) => setToast(m)}
+          />
+        </Sheet>
+      )}
     </div>
   );
 }

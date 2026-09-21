@@ -840,7 +840,12 @@ function OvertimeCard({ e, onCancel }: {
  * the clock" — and it is what actually gets stored either way, rounded to the
  * five-minute step the module works in.
  */
-function LogOvertime({ onClose, onLogged, onError }: {
+/**
+ * Exported so the mobile Quick Actions page can mount the SAME form.
+ * Logging overtime after a late finish is the single most time-sensitive thing
+ * staff do here, and it was three clicks deep behind the avatar menu.
+ */
+export function LogOvertime({ onClose, onLogged, onError }: {
   onClose: () => void;
   onLogged: (msg: string) => Promise<void>; onError: (msg: string) => void;
 }) {
