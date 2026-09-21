@@ -5,6 +5,7 @@ import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
 import StaffBalancePanel from '../components/StaffBalancePanel';
 import LeaveApprovals from '../components/LeaveApprovals';
+import PayrollReportPanel from '../components/PayrollReportPanel';
 
 /**
  * Staff — the single surface for everyone who works here (Staff Calendar).
@@ -222,6 +223,8 @@ export default function StaffAdminPage() {
       </div>
 
       {isAdmin && <LeaveApprovals />}
+      {/* Admin only: it is everyone's pay and sickness in one table. */}
+      {isAdmin && <PayrollReportPanel />}
 
       {loading ? (
         <div className="text-sm text-gray-500 py-6">Loading…</div>
@@ -1040,7 +1043,6 @@ function PatternEditor({ personId, seed, onSaved, onError }: {
             <span className="font-medium text-gray-900">{(entitlementMinutes / 60).toFixed(1)} hours</span>
             {nominalDay > 0 && <> — about <span className="font-medium text-gray-900">
               {(entitlementMinutes / nominalDay).toFixed(1)} of their days</span></>}.
-            {' '}Entitlement is granted in Phase B; this is a preview.
           </div>
         )}
       </div>
