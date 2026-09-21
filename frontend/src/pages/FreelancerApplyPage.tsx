@@ -32,7 +32,11 @@ interface Prefill {
   licence_number: string; licence_issued_by: string; licence_expiry: string;
   licence_passed_date: string; passport_expiry: string; day_rate_note: string;
 }
-interface DocRef { r2_key: string; label: string; filename: string; content_type?: string; }
+interface DocRef {
+  r2_key: string; label: string; filename: string; content_type?: string;
+  /** Already on their record before this visit — carried back, not uploaded now. */
+  on_file?: boolean;
+}
 interface RefEntry { name: string; company: string; email: string; phone: string; role: string; consent: boolean; }
 
 export default function FreelancerApplyPage() {
@@ -43,6 +47,7 @@ export default function FreelancerApplyPage() {
   const [submitting, setSubmitting] = useState(false);
   const [terms, setTerms] = useState('');
   const [tcsVersion, setTcsVersion] = useState('');
+  const [requestNote, setRequestNote] = useState('');
 
   // core
   const [firstName, setFirstName] = useState('');
@@ -102,6 +107,11 @@ export default function FreelancerApplyPage() {
         setError('');
         setTerms(j.data.terms || '');
         setTcsVersion(j.data.tcs_version || '');
+        setRequestNote(j.data.request_note || '');
+        // Documents we already hold, shown as "already on file" so a re-opened
+        // form doesn't make them photograph a licence we have twice over.
+        const onFile: DocRef[] = Array.isArray(j.data.documents_on_file) ? j.data.documents_on_file : [];
+        setDocs(onFile.map((d) => ({ ...d, on_file: true })));
         const p: Prefill = j.data.prefill || {};
         setFirstName(p.first_name || ''); setLastName(p.last_name || '');
         setPreferredName(p.preferred_name || ''); setEmail(p.email || '');
@@ -270,6 +280,20 @@ export default function FreelancerApplyPage() {
       <h1 className="text-2xl font-bold text-slate-800">Freelancer sign-up</h1>
       <p className="text-sm text-slate-500 mb-5">Please fill this in as fully as you can. Fields marked * are required.</p>
 
+      {/* What we asked for, on the form itself. Without this they have to keep
+          our email open beside the form to remember why they're back here. */}
+      {requestNote && (
+        <div className="mb-5 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
+          <p className="text-sm font-semibold text-amber-900 mb-1">We just need one more thing</p>
+          <p className="text-sm text-amber-800">{requestNote}</p>
+          <p className="text-xs text-amber-700 mt-2">
+            Everything you sent us before is still here — add or correct what's asked above,
+            then sign and send it back. Anything marked "already on file" only needs
+            replacing if it's changed.
+          </p>
+        </div>
+      )}
+
       <Section title="About you" required>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
           <input placeholder="First name *" value={firstName} onChange={(e) => setFirstName(e.target.value)} className={inp} />
@@ -403,7 +427,7 @@ export default function FreelancerApplyPage() {
         </label>
       </Section>
 
-      <Section title="Signature" required>
+      <Section title="Signature" required hint={requestNote ? 'please sign again to confirm' : undefined}>
         <canvas ref={canvasRef} width={600} height={160} onPointerDown={start} onPointerMove={move} onPointerUp={() => { drawing.current = false; }} onPointerLeave={() => { drawing.current = false; }}
           className="w-full border border-slate-300 rounded-lg bg-white touch-none" style={{ maxWidth: 600 }} />
         <button onClick={clearSig} className="text-xs text-slate-500 underline mt-1">Clear signature</button>
@@ -441,18 +465,30 @@ function DocUpload({ token, label, docs, setDocs, setError }: {
     finally { setBusy(false); }
   }
 
+  // One picker, three captions. A document we already hold gets "Replace"
+  // rather than a green tick: a tick against the blurry licence photo we just
+  // asked them to redo invites them to send us the blurry one again.
+  const picker = (text: string) => (
+    <label htmlFor={inputId} className="text-xs text-purple-600 hover:text-purple-800 cursor-pointer underline">
+      {busy ? 'Uploading…' : text}
+      <input id={inputId} type="file" accept="image/*,application/pdf" capture="environment" className="hidden" onChange={onPick} disabled={busy} />
+    </label>
+  );
+
   return (
     <div className="flex items-center gap-3 mb-1.5">
       <span className="text-sm text-slate-700 w-44 shrink-0">{label}</span>
-      {existing ? (
+      {existing && existing.on_file ? (
+        <span className="text-xs text-slate-500 flex items-center gap-2">
+          Already on file — {existing.filename}
+          {picker('Replace')}
+        </span>
+      ) : existing ? (
         <span className="text-xs text-green-700 flex items-center gap-2">✓ {existing.filename}
           <button onClick={() => setDocs(docs.filter((d) => d.label !== label))} className="text-slate-400 hover:text-red-500 underline">remove</button>
         </span>
       ) : (
-        <label htmlFor={inputId} className="text-xs text-purple-600 hover:text-purple-800 cursor-pointer underline">
-          {busy ? 'Uploading…' : 'Upload'}
-          <input id={inputId} type="file" accept="image/*,application/pdf" capture="environment" className="hidden" onChange={onPick} disabled={busy} />
-        </label>
+        picker('Upload')
       )}
     </div>
   );

@@ -141,6 +141,7 @@ existing definition:
 | How much excess do we hold? | `v_excess_held` (view) |
 | Who is charged, how much? | `services/excess-topn.ts` |
 | Is this money figure settled? | `frontend/src/lib/money.ts` |
+| Which documents may a re-opened sign-up form show? | `services/freelancer-documents.ts` |
 | Is this driver's paperwork valid? | `services/driver-validity.ts` |
 | Is this driver identity-authorised? | `services/identity-review.ts` `isIdentityAuthorised()` |
 | Is this driver cleared for paperwork? | `hire-forms.ts` `isDriverAuthorisedForAgreement()` |

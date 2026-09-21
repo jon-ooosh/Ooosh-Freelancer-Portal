@@ -641,7 +641,9 @@ function FreelancerDetailsForm({ person, onCancel, onSaved }: {
  * Simon Bull (Sept 2026) asking for a file that was sitting in Details > Files
  * the whole time. Same failure that silently dropped every licence image from
  * the driver snapshot PDF; see the spelling-mirror warning in
- * drivers/EvidenceGroup.tsx and backend/src/services/driver-documents.ts. The
+ * drivers/EvidenceGroup.tsx, backend/src/services/driver-documents.ts and
+ * backend/src/services/freelancer-documents.ts (which decides what the sign-up
+ * form hands back to a freelancer). The
  * form now writes 'DVLA Check', but every freelancer who signed up before that
  * still carries the old spelling, so both stay in the list.
  *
