@@ -995,7 +995,7 @@ is going out.
    and `BOOKING_STATUS[...].counts` both need it, and it is not cover either
    way.
 
-### 9.3 Portal — NOT BUILT
+### 9.3 Portal — SHIPPED
 
 **ANSWERED (17 Sep 2026): read-only plus accept / decline. No counter-offer.**
 jon's reasoning, and it is worth keeping because it is about how the business
@@ -1262,6 +1262,7 @@ separating "pulled out after accepting" from "declined". §9.4 items 5–7.
 | **E.1** | The yard-day OFFER (§9.4) — the email with accept / decline, the bearer token, the public reply page, resend, and the cancellation note | 225 |
 | **E.2** | The offer CHASE (§9.4) — one nudge to them, the day-before alert to admin, and `lapsed` so a passed unanswered offer can be closed out | 227 |
 | **E.3** | AMEND without cancel-and-rebook, and `withdrew` as distinct from `declined` (§9.4 items 6–7) | 228 |
+| **E.4** | The PORTAL view (§9.3) — yard days on the freelancer dashboard, accept / decline while logged in | — |
 
 ### Decisions taken during the build that CHANGE this spec
 
@@ -1597,17 +1598,29 @@ Kept because each one is a trap the next person could fall into.
   database per suite". A template must come from a freshly migrated database and
   nothing else.*
 
+- **A verification test failed depending on the day of the WEEK it was run.**
+  `__verify-d0` asked for a leave impact "a few days out" as `today + 6`, and
+  the fixture's pattern is Mon-Fri — so whenever the suite ran on a Monday or
+  Tuesday that date landed on the weekend, `getImpact` answered a different
+  question ("none of those dates are days this person is contracted to work"),
+  and the test failed. Pre-existing, and it cost this session a detour proving
+  it was not a regression — running the suite against clean `main` is the cheap
+  way to settle that. It now walks forward to the next working day. *A date
+  offset from today is a fixture that changes underneath you. Derive dates from
+  the property the test needs — "a working day inside the notice window" — not
+  from arithmetic that happens to satisfy it today.*
+
 ### Still to build
 
 **Phase E is now complete except the portal.** Booking and displaying shipped
 with 222; the offer email, the reply page, the chase, close-out, amend and
 `withdrew` followed in 225, 227 and 228. What is left of E:
 
-- **The portal page (§9.3)** — read-only plus accept / decline, no counter-offer
-  (answered 18 Sep 2026: the negotiation happens in the freelance WhatsApp group
-  and OP sends the revised offer). Now genuinely the last piece of E, and
-  smaller than it was: the amend endpoint carries revisions, so the page only
-  has to show the day and take an answer.
+- ~~The portal page (§9.3)~~ — **SHIPPED.** An "Ooosh work" section on the
+  freelancer dashboard rather than its own page: a separate page is one they
+  would never navigate to, and an unanswered offer belongs on the screen they
+  already open. Above Today, because it is the only thing there that needs them
+  to do something. Hidden entirely when empty.
 - `freelancer_day_booking_tasks` (§3.8) — skipped on purpose; a per-booking task
   breakdown does not help answer "are there enough people in".
 - A freelancer cannot withdraw through the link — `resolveResponseToken` refuses
@@ -1631,6 +1644,10 @@ run, because moving what "In" means mid-run muddies the comparison.
   three unconnected places. Wanted, but it spans quoting and driver assignment
   as well, so it is its own piece.
 - `staff.leave_year_start_month` is seeded but **the code assumes January**.
+  CONFIRMED with jon 21 Sep 2026 that the staff leave year IS calendar Jan–Dec,
+  so this is latent rather than wrong. It only becomes a bug the day somebody
+  changes that setting expecting it to work — which is exactly why it is still
+  listed.
 - `staff.overtime_min_increment_minutes` drives the UI and the service check,
   but `staff_overtime_entries` has a `minutes % 5 = 0` CHECK. Lowering the
   setting without a migration leaves the database refusing what the form offers.

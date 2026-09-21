@@ -19,7 +19,14 @@ import {
   sendOfferEmail, sendCancellationEmail, responseUrl,
   formatBookingDate, describeDuration, describeRate,
 } from '../services/freelancer-day-offer';
-import { listNeedsClosing, closeOutBooking, withdrawBooking, amendBooking } from '../services/freelancer-days';
+import {
+  listNeedsClosing, closeOutBooking, withdrawBooking, amendBooking,
+  listForPerson, recordResponse as recordResponseRaw,
+} from '../services/freelancer-days';
+
+/** Thin alias so the portal cases read as what the endpoint does. */
+const recordResponseViaService = (id: string, r: 'accepted' | 'declined') =>
+  recordResponseRaw(id, r, null);
 import { runFreelancerOfferChase } from '../services/staff-notifications';
 
 let pass = 0, fail = 0;
@@ -363,6 +370,34 @@ async function main() {
   await createBooking({ personId: willId, bookingDate: iso(41), agreedRate: 180 }, userId);
   await refusesTo('amending a booking onto a day they are already booked',
     () => amendBooking(clash.id, { bookingDate: iso(41) }, userId), /already booked/i);
+
+  // ── 11. What the portal shows and accepts (§9.3) ─────────────────────────
+  // The portal endpoints are thin: the SERVICE owns every rule. What is tested
+  // here is that the rules exist at all for a logged-in freelancer, because the
+  // token path and the portal path are two doors into the same room.
+  console.log('\n11. The portal view');
+  const other = await query(
+    `INSERT INTO people (first_name,last_name,is_freelancer,created_by)
+     VALUES ('Someone','Else',true,$1) RETURNING id`, [userId]);
+  const otherId = other.rows[0].id as string;
+
+  const mine = await createBooking({ personId: willId, bookingDate: iso(50), agreedRate: 180 }, userId);
+  const theirs = await createBooking({ personId: otherId, bookingDate: iso(50), agreedRate: 180 }, userId);
+
+  const willDays = await listForPerson(willId, { limit: 200 });
+  check('a freelancer sees their own days',
+    willDays.some(b => b.id === mine.id));
+  check('and NEVER somebody else\'s',
+    !willDays.some(b => b.id === theirs.id), theirs.id);
+
+  // The portal's respond path goes through recordResponse, so the same guards
+  // apply as the emailed link: an answered day cannot be answered again.
+  await recordResponseViaService(mine.id, 'accepted');
+  const reAnswer = await getBooking(mine.id);
+  check('accepting through the portal records it', reAnswer?.status === 'accepted');
+  await refusesTo('answering a day they already accepted',
+    () => recordResponseViaService(mine.id, 'declined'),
+    /already accepted|pulled out/i);
 
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail === 0 ? 0 : 1);

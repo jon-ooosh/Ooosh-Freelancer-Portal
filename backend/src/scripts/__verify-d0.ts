@@ -43,6 +43,20 @@ async function put(key: string, value: string) {
   invalidateSystemSettingsCache();
 }
 
+
+/** The next date on or after `from` that the fixture's Mon-Fri pattern works. */
+function nextWorkingDay(from: string): string {
+  let d = from;
+  for (let i = 0; i < 7; i++) {
+    const [y, m, dd] = d.split('-').map(Number);
+    // Pattern weekdays are Mon=0..Sun=6; getUTCDay is Sun=0..Sat=6.
+    const patternWeekday = (new Date(Date.UTC(y, m - 1, dd)).getUTCDay() + 6) % 7;
+    if (patternWeekday <= 4) return d;
+    d = addDaysYmd(d, 1);
+  }
+  return d;
+}
+
 async function main() {
   if (!/scratch|_test\b/.test(process.env.DATABASE_URL ?? '')) {
     console.error('Refusing to run: DATABASE_URL must name a scratch database.');
@@ -167,7 +181,15 @@ async function main() {
   console.log('\n5. Settings change what staff see');
   // A few days out, not a year: the notice warning is about SHORT notice, and
   // the first version of this test asked for a date 356 days away.
-  const soon = addDaysYmd(new Date().toISOString().slice(0, 10), 6);
+  //
+  // It must also be a day this person WORKS. The fixture's pattern is Mon-Fri,
+  // so a bare +6 lands on the weekend whenever today is a Monday or Tuesday,
+  // and getImpact then answers a different question entirely ("none of those
+  // dates are days this person is contracted to work") — a failure that
+  // depended on the day of the week the suite happened to be run.
+  // The default notice threshold is 14 days, so walking forward a day or two
+  // stays comfortably inside the window being tested.
+  const soon = nextWorkingDay(addDaysYmd(new Date().toISOString().slice(0, 10), 6));
   const near = await getImpact(personId, soon, soon, 'holiday');
   check('a request inside the notice window warns',
     near.warnings.some(w => w.includes('notice')), near.warnings);
