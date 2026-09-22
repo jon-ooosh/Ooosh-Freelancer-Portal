@@ -27,6 +27,7 @@ export interface StaffRecordFile {
   content_type: string | null;
   size_bytes: string | null;
   notes: string | null;
+  document_date: string | null;
   uploaded_at: string;
   uploaded_by_name: string | null;
 }
@@ -66,6 +67,10 @@ export default function StaffRecordFiles({ personId, personName, onError }: {
 }) {
   const [files, setFiles] = useState<StaffRecordFile[]>([]);
   const [loading, setLoading] = useState(true);
+  // A failed load and an empty list are NOT the same thing. Without this the
+  // component renders "No files yet." over a 500, which is exactly how three
+  // failing requests looked calm on screen the day this shipped.
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
 
@@ -73,13 +78,19 @@ export default function StaffRecordFiles({ personId, personName, onError }: {
   const [pending, setPending] = useState<File | null>(null);
   const [label, setLabel] = useState('');
   const [docType, setDocType] = useState('other');
+  // The document's own date — signed, issued or checked. Spec §1.3: we ask for
+  // the FROM date and derive expiries from it, never the other way round.
+  const [documentDate, setDocumentDate] = useState('');
 
   const load = useCallback(async () => {
+    setLoadError(null);
     try {
       const res = await api.get<{ data: StaffRecordFile[] }>(`/staff-records/${personId}/files`);
       setFiles(res.data);
     } catch (err) {
-      onError(err instanceof Error ? err.message : 'Failed to load files');
+      const msg = err instanceof Error ? err.message : 'Failed to load files';
+      setLoadError(msg);
+      onError(msg);
     } finally {
       setLoading(false);
     }
@@ -97,10 +108,12 @@ export default function StaffRecordFiles({ personId, personName, onError }: {
       // than refusing the upload.
       fd.append('label', label.trim());
       fd.append('doc_type', docType);
+      if (documentDate) fd.append('document_date', documentDate);
       await api.upload<{ data: StaffRecordFile }>(`/staff-records/${personId}/files`, fd);
       setPending(null);
       setLabel('');
       setDocType('other');
+      setDocumentDate('');
       await load();
     } catch (err) {
       onError(err instanceof Error ? err.message : 'Upload failed');
@@ -154,6 +167,10 @@ export default function StaffRecordFiles({ personId, personName, onError }: {
 
       {loading ? (
         <p className="text-sm text-gray-500">Loading…</p>
+      ) : loadError ? (
+        <p className="text-sm text-red-700 mb-3 rounded border border-red-200 bg-red-50 px-3 py-2">
+          Couldn’t load these files — {loadError}
+        </p>
       ) : files.length === 0 ? (
         <p className="text-sm text-gray-400 mb-3">No files yet.</p>
       ) : (
@@ -177,6 +194,9 @@ export default function StaffRecordFiles({ personId, personName, onError }: {
                 {DOC_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
               </select>
               <span className="text-xs text-gray-400 ml-auto whitespace-nowrap">
+                {f.document_date
+                  ? <span className="text-gray-600">dated {fmtDate(f.document_date)} · </span>
+                  : null}
                 {fmtDate(f.uploaded_at)}
                 {f.uploaded_by_name && ` · ${f.uploaded_by_name}`}
                 {fmtSize(f.size_bytes) && ` · ${fmtSize(f.size_bytes)}`}
@@ -219,6 +239,15 @@ export default function StaffRecordFiles({ personId, personName, onError }: {
           />
         </label>
         <label className="text-sm">
+          <span className="block text-xs text-gray-600 mb-1">Document date</span>
+          <input
+            type="date"
+            value={documentDate}
+            onChange={e => setDocumentDate(e.target.value)}
+            className="px-2 py-1.5 border border-gray-300 rounded text-sm"
+          />
+        </label>
+        <label className="text-sm">
           <span className="block text-xs text-gray-600 mb-1">Type</span>
           <select
             value={docType}
@@ -237,8 +266,9 @@ export default function StaffRecordFiles({ personId, personName, onError }: {
         </button>
       </div>
       <p className="text-xs text-gray-400 mt-2">
-        PDFs, documents and images up to 25MB. {TYPE_LABEL[docType]} files are kept until you delete them —
-        retention rules per type are still to come.
+        PDFs, documents and images up to 25MB. Document date is when it was signed, issued or
+        checked — expiry reminders will be worked out from it. {TYPE_LABEL[docType]} files are kept
+        until you delete them; retention rules per type are still to come.
       </p>
     </div>
   );

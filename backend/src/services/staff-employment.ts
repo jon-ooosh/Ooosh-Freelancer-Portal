@@ -702,3 +702,138 @@ export async function linkLoginToPerson(personId: string, userId: string) {
   if (r.rows.length === 0) throw new Error('Login not found');
   return r.rows[0];
 }
+
+// ── Key data: NI number + right to work (spec §3.2) ─────────────────────────
+//
+// These columns live on `people`, added by migration 206, and this is the only
+// place that writes them. NOT copied onto staff_employment: right to work is a
+// fact about a person, not about one employment record, and a second copy is
+// the mistake spec §1.1 documents on licence data.
+//
+// They are stripped from every general people response by
+// services/people-private-fields.ts — the admin staff surfaces read them by
+// name instead. If you add another private column to `people`, add it there.
+
+export interface KeyDataInput {
+  /** Plain NI number. Encrypted here; never stored or logged in the clear.
+   *  '' clears it. Absent leaves whatever is stored alone. */
+  niNumber?: string | null;
+  rtwDocumentType?: string | null;
+  rtwCheckedOn?: string | null;
+  rtwExpiresOn?: string | null;
+}
+
+/** Normalised for storage: "ab 12 34 56 c" -> "AB123456C". */
+function normaliseNi(raw: string): string {
+  return raw.replace(/\s+/g, '').toUpperCase();
+}
+
+// Format per HMRC: two letters, six digits, then A–D or a space. Deliberately a
+// WARNING not a gate elsewhere in this codebase's spirit — but here it IS
+// enforced, because an NI number is retyped from a document exactly once and a
+// typo is silently wrong forever. Better to reject at the point of entry.
+const NI_RE = /^[A-CEGHJ-PR-TW-Z][A-CEGHJ-NPR-TW-Z]\d{6}[A-D]$/;
+
+export async function updateKeyData(personId: string, input: KeyDataInput, userId: string) {
+  const sets: string[] = [];
+  const params: unknown[] = [personId];
+
+  if (input.niNumber !== undefined) {
+    if (input.niNumber === null || input.niNumber.trim() === '') {
+      sets.push('ni_number_encrypted = NULL');
+    } else {
+      const ni = normaliseNi(input.niNumber);
+      if (!NI_RE.test(ni)) {
+        throw new Error('That does not look like a National Insurance number (e.g. QQ123456C).');
+      }
+      // Imported lazily so a server without ENCRYPTION_KEY still boots and
+      // serves everything else — the route checks isEncryptionConfigured()
+      // first and refuses cleanly rather than throwing a 500 here.
+      const { encrypt } = await import('./encryption');
+      params.push(encrypt(ni));
+      sets.push(`ni_number_encrypted = $${params.length}`);
+    }
+  }
+
+  // Absent key = leave alone; empty = clear. Same rule as preferredName above,
+  // and for the same reason: COALESCE would make clearing a value silently
+  // do nothing.
+  const dateFields: [keyof KeyDataInput, string][] = [
+    ['rtwCheckedOn', 'rtw_checked_on'],
+    ['rtwExpiresOn', 'rtw_expires_on'],
+  ];
+  for (const [key, column] of dateFields) {
+    const value = input[key];
+    if (value === undefined) continue;
+    if (value === null || value === '') {
+      sets.push(`${column} = NULL`);
+    } else {
+      if (!DATE_RE.test(String(value))) throw new Error(`${column} must be YYYY-MM-DD`);
+      params.push(value);
+      sets.push(`${column} = $${params.length}::date`);
+    }
+  }
+
+  if (input.rtwDocumentType !== undefined) {
+    const v = input.rtwDocumentType?.trim();
+    params.push(v || null);
+    sets.push(`rtw_document_type = $${params.length}`);
+  }
+
+  // Stamp WHO did the check whenever any right-to-work field is touched. The
+  // check is the legal record, not the document — "seen by, on" is the bit an
+  // inspection asks for.
+  const touchedRtw = input.rtwDocumentType !== undefined
+    || input.rtwCheckedOn !== undefined
+    || input.rtwExpiresOn !== undefined;
+  if (touchedRtw) {
+    params.push(userId);
+    sets.push(`rtw_checked_by = $${params.length}`);
+  }
+
+  if (!sets.length) throw new Error('No fields to update');
+
+  const r = await query(
+    `UPDATE people SET ${sets.join(', ')}, updated_at = NOW()
+      WHERE id = $1
+      RETURNING id`,
+    params
+  );
+  if (!r.rows.length) throw new Error('Person not found');
+
+  // Audited WITHOUT the value — that somebody's NI was set is worth recording;
+  // putting the number in audit_log would undo the encryption it was just
+  // given.
+  const { logAudit } = await import('../middleware/audit');
+  await logAudit(userId, 'people', personId, 'update', null, {
+    key_data_changed: sets.map(s => s.split(' ')[0]),
+  });
+
+  return getEmployeeRecord(personId);
+}
+
+/**
+ * Reveal the stored NI number, once, deliberately, and on the record.
+ *
+ * Every other read returns `has_ni_number` as a boolean (see
+ * getEmployeeRecord) — the number itself only ever leaves the server through
+ * here, and every call writes an audit_log row. Migration 232 widened the
+ * audit action CHECK to allow 'read' for exactly this.
+ */
+export async function revealNiNumber(personId: string, userId: string): Promise<string | null> {
+  const r = await query(
+    'SELECT ni_number_encrypted FROM people WHERE id = $1',
+    [personId]
+  );
+  if (!r.rows.length) throw new Error('Person not found');
+  const stored = r.rows[0].ni_number_encrypted as string | null;
+  if (!stored) return null;
+
+  const { tryDecrypt } = await import('./encryption');
+  const value = tryDecrypt(stored);
+
+  const { logAudit } = await import('../middleware/audit');
+  await logAudit(userId, 'people', personId, 'read', null, { field: 'ni_number' });
+
+  return value;
+}

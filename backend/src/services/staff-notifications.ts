@@ -750,3 +750,51 @@ export async function runCompanyDaysReview(today = new Date()): Promise<CompanyD
   await setSystemSetting('staff.company_days_reviewed_year', String(nextYear));
   return { sent: true, year: nextYear, recurring: recurring.map(r => r.label), oneOffs };
 }
+
+// ── My To Do: overdue task chase ────────────────────────────────────────────
+
+/**
+ * One nudge per overdue task, to the person who owns it.
+ *
+ * Once, not daily — `chased_at` records that it fired, the same lesson as
+ * `rtw_chased_at` (mig 214). A list that nags every morning is a list people
+ * stop reading, and the whole point of §6 is that these DON'T get ignored.
+ * Re-dating a task clears the stamp (services/staff-tasks.ts), so a genuinely
+ * renewed promise earns a fresh chase.
+ *
+ * Bell only. The Step-7 escalation scheduler turns it into an email per the
+ * recipient's own notification preferences, so nothing is hand-rolled here.
+ */
+export async function runTaskChase(): Promise<{ chased: number }> {
+  const due = await query(
+    `SELECT t.id, t.title, t.due_date::text AS due_date, u.id AS user_id
+       FROM staff_tasks t
+       JOIN users u ON u.person_id = t.person_id AND u.is_active = true
+      WHERE t.status = 'open'
+        AND t.chased_at IS NULL
+        AND t.due_date IS NOT NULL
+        AND t.due_date < CURRENT_DATE`
+  );
+
+  let chased = 0;
+  for (const row of due.rows) {
+    // Stamp FIRST, then notify: a duplicate nudge is worse than a missed one,
+    // and this runs daily so a miss self-corrects only by never firing again.
+    // Same order as the staff-documents reminders.
+    await query('UPDATE staff_tasks SET chased_at = NOW() WHERE id = $1', [row.id]);
+    await notify(
+      row.user_id,
+      'staff_task_overdue',
+      'A to-do is overdue',
+      `“${esc(row.title)}” was due ${fmtDate(row.due_date)}.`,
+      'staff_tasks',
+      row.id,
+      '/me?tab=todo',
+      'normal'
+    );
+    chased++;
+  }
+
+  if (chased) console.log(`[staff-notifications] task chase: nudged ${chased}`);
+  return { chased };
+}

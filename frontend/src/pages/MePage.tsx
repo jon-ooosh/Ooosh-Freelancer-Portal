@@ -16,11 +16,13 @@
  */
 import { useSearchParams } from 'react-router-dom';
 import MyTimePage from './MyTimePage';
+import MyTasksPage from './MyTasksPage';
 import StaffDocumentsPage from './StaffDocumentsPage';
 import ProfilePage from './ProfilePage';
 
 const TABS = [
   { id: 'time', label: 'My Time' },
+  { id: 'todo', label: 'My To Do' },
   { id: 'documents', label: 'Documents' },
   { id: 'profile', label: 'Profile' },
 ] as const;
@@ -64,6 +66,7 @@ export default function MePage() {
       {/* Mounted, not routed: switching tabs must not remount the whole page or
           each one would refetch every time you glance at another. */}
       {active === 'time' && <MyTimePage />}
+      {active === 'todo' && <MyTasksPage />}
       {active === 'documents' && <StaffDocumentsPage />}
       {active === 'profile' && <ProfilePage />}
     </div>

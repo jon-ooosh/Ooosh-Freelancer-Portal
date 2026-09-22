@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
 import { authenticate, authorize, STAFF_ROLES, AuthRequest } from '../middleware/auth';
+import { redactPrivateFields, redactPrivateFieldsAll } from '../services/people-private-fields';
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
 
@@ -247,7 +248,9 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     const result = await query(sql, params);
 
     res.json({
-      data: result.rows,
+      // `SELECT p.*` above would otherwise hand the whole team the private
+      // staff columns migration 206 added — see services/people-private-fields.ts.
+      data: redactPrivateFieldsAll(result.rows),
       pagination: {
         page: parseInt(page as string),
         limit: parseInt(limit as string),
@@ -348,7 +351,8 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
       return;
     }
 
-    res.json(result.rows[0]);
+    // Same `SELECT p.*` redaction as the list above.
+    res.json(redactPrivateFields(result.rows[0]));
   } catch (error) {
     console.error('Get person error:', error);
     res.status(500).json({ error: 'Internal server error' });

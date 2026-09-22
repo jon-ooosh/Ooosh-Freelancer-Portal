@@ -385,8 +385,8 @@ rather than assuming.
 |---|---|---|
 | 0 | **This document** | The next session doesn't re-derive any of it |
 | 1 | ~~**Files + admin gate**~~ — **SHIPPED Sep 2026.** Migration 231, `routes/staff-records.ts`, `components/StaffRecordFiles.tsx` on the expandable staff row. See §12 | jon starts emptying the zip folder the day it deploys |
-| 2 | **Key data** (§3.2) — NI encrypted, right-to-work, contract + signed date. **Not medical notes** | The rest of the folder |
-| 3 | **`staff_tasks` + My To Do tab** (§6) — including a plain "add a task" form, plus the daily chaser | Useful as a general to-do immediately, before reviews exist |
+| 2 | ~~**Key data**~~ — **SHIPPED Sep 2026.** Migration 232, `updateKeyData()`/`revealNiNumber()`, `components/StaffKeyData.tsx`. Medical notes still held back. See §13 | The rest of the folder |
+| 3 | ~~**`staff_tasks` + My To Do tab**~~ — **SHIPPED Sep 2026.** Migration 233, `services/staff-tasks.ts`, `pages/MyTasksPage.tsx`, 09:45 chaser. See §14 | Useful as a general to-do immediately, before reviews exist |
 | 4 | **Review record + cycle** (§5.1, §5.2, §5.4, §5.6) — split notes, per-person interval, "review due" reminder, salary link, admin UI | The full loop minus staff-facing bits; actions write `staff_tasks` rows |
 | 5 | **Staff-facing exchange** (§5.3, §5.5) — confirmation carrying prep questions, their answers, the follow-up email | The staff half |
 | 6 | **Document review cycles** (§4) — the annual DVLA check and friends | Replaces jon's memory |
@@ -546,3 +546,228 @@ Two Me-page tidy-ups jon asked for alongside it, both small:
 Pronouns sits next to "known as" in the admin form and is the same kind of fact,
 but it is not in the auth payload, so self-service would mean touching four more
 SELECTs. Left alone deliberately — worth doing next time Profile is open.
+
+---
+
+## 13. Phase 2 build log — key data (Sep 2026)
+
+Shipped. **Almost no new schema was needed**, which was the surprise: migration
+206 had already added every column §3.2 asked for. What was missing was a way to
+write them, a place to see them, and — found on the way — a guard stopping them
+reaching the whole team.
+
+Already present, and deliberately NOT re-added: `ni_number_encrypted`,
+`rtw_checked_on`, `rtw_document_type`, `rtw_expires_on`, `rtw_checked_by` (all
+on `people`, mig 206), and `emergency_contact_*` (mig 001 + 206). A copy on
+`staff_employment` would have been the §1.1 licence mistake for a second time.
+
+### 13.1 The leak — private columns on a table the whole team reads
+
+`routes/people.ts` is gated on `STAFF_ROLES`, and **both** its read endpoints
+select `p.*`:
+
+- `GET /api/people` — the list
+- `GET /api/people/:id` — the detail
+
+So every private column migration 206 added was being served to every staff
+member, general assistant and weekend manager who opened any person record:
+`rtw_document_type` ("Biometric residence permit" — that is a colleague's
+immigration status), `rtw_expires_on`, and the NI ciphertext.
+
+The NI number itself was safe — it is encrypted, and 206 was right to encrypt
+it. But the ciphertext still left the server, sat in every browser's network
+tab, and announced who we hold an NI number for.
+
+**This is the same shape as the Phase 1 finding** (§12.1): data placed
+thoughtfully, gated somewhere else, and the gate was wrong. Two for two. Worth
+assuming it is the rule rather than the exception — when a column is sensitive,
+check what already selects `*` from its table before trusting where it sits.
+
+**The fix** is `services/people-private-fields.ts`: one exported list, and both
+GETs run their rows through it. A redact rather than an explicit column list
+because `people` has dozens of columns and the frontend reads a moving subset —
+enumerating the safe ones breaks a page every time somebody adds a field, while
+stripping a short list of unsafe ones fails in the safe direction. Covered by
+`__tests__/people-private-fields.test.ts`, which exists to fail loudly if the
+list is ever shortened.
+
+Verified nothing depended on the leak: no frontend file referenced any of the
+five. The only other wildcard reads of `people` (`duplicates.ts`,
+`data-cleanup.ts`) use the rows server-side and return names and ids only.
+
+### 13.2 The NI number: write freely, read deliberately
+
+206's note said "never plaintext, never in a list view, never in an export", and
+`getEmployeeRecord` already honoured it by returning `has_ni_number` as a
+boolean rather than the value. That is kept.
+
+But jon needs to *read* it for payroll, or he is back in his inbox. So the
+number leaves the server through exactly one route —
+`GET /staff-calendar/employees/:personId/ni-number` — and every call writes an
+`audit_log` row. The UI renders a "Show" button, not a pre-filled field.
+
+That needed migration 232 to widen the `audit_log` action CHECK, which allowed
+only `create | update | delete`. A trail of writes with no record of reads would
+have missed the one operation here most worth recording. `'read'` is for
+deliberate reveals of sensitive data, not ordinary page views — those would
+drown the table.
+
+The write path (`updateKeyData`) is a **separate endpoint** from the employment
+save, so a routine edit to somebody's job title cannot blank their NI number,
+and the encrypted write has one audited home. It refuses with a 503 before
+writing anything if `ENCRYPTION_KEY` is absent — a half-saved right-to-work
+check with a silently dropped NI would be worse than an error.
+
+NI format is **validated and rejected** on entry (`QQ123456C`), which is a
+departure from CLAUDE.md's "warnings, not hard gates". Justified because this is
+input validation rather than a workflow gate — the same treatment the COT card
+last-4 already gets — and because an NI number is retyped from a document once
+and a typo is silently wrong forever. Reversible if it ever blocks a real case.
+
+### 13.3 The `rtw_` collision
+
+`rtw_` means **right to work** on `people` (mig 206) and **return to work** on
+`staff_absences` (mig 214, plus `runRtwChase()` and the 08:50 job). Two
+unrelated meanings, one prefix, both live.
+
+Nothing is renamed — both are referenced in shipped code, and a rename is a
+migration plus a sweep for no behavioural gain. Recorded in migration 232's
+header and in `.claude/rules/staff-calendar.md`, which auto-loads for anyone
+working in this area. Do not assume from the prefix; check the table.
+
+### 13.4 The contract's signed date went on the FILE
+
+§3.2 asked for "employment contract — a file, plus signed date and version".
+Rather than a `contract_signed_on` column on `staff_employment`, migration 232
+adds `document_date` to `staff_record_files`.
+
+The contract IS a file, so its signed date belongs on the file row. Every other
+type gets the same field for free — and it is exactly the FROM date §1.3
+mandates and §4's review cycles (Phase 6) will read. One column, two jobs, no
+second copy.
+
+### 13.5 Known edge, accepted
+
+`StaffKeyData` fetches `GET /staff-calendar/employees/:personId`, which joins
+`staff_employment` — so the panel does not render for somebody with no
+employment record, unlike the files section, which is deliberately ungated.
+
+Right to work is genuinely checked before employment begins, so this is a real
+(if small) inconsistency. Accepted for now because the row already shows the
+"not an employee" panel explaining itself, and in practice the employment record
+is created first. Revisit if it bites.
+
+---
+
+## 13.6 Postscript — how migration 232 failed, and what it teaches
+
+232 shipped in the Phase 2 PR and **failed on production**, so `document_date`
+never landed and the files section returned 500 on both list and upload. Worth
+recording in full, because the mistake was a reasoning one and it is repeatable.
+
+**What happened.** 232 did two unrelated things in one transaction: added
+`document_date`, and re-imposed a CHECK on `audit_log.action` limiting it to
+`create | update | delete | read`. Postgres refused:
+
+```
+check constraint "audit_log_action_check" of relation "audit_log"
+is violated by some row
+```
+
+The whole file rolled back, taking the column with it.
+
+**Why the constraint was wrong.** Migration `032_fix_audit_log_action_constraint`
+had **deliberately dropped** that constraint years earlier and widened the
+column to VARCHAR(50), because the platform writes actions like
+`resolve_referral`, `merge`, `mark_washed`, `override_document_gate`,
+`correct_mileage` and a dozen more — several of them from call sites that INSERT
+into `audit_log` directly rather than through `logAudit`. Re-imposing a
+four-value CHECK would have broken every one of them.
+
+So the database refusing was the **correct** outcome. Had `audit_log` happened
+to be empty of those rows, the migration would have succeeded and started
+rejecting live writes.
+
+**The reasoning error**: assuming that because a CHECK existed in migration 001,
+every row must satisfy it — without checking whether a later migration had
+removed it. CLAUDE.md's first always-on rule is *there is probably already a
+helper, check before writing a second one*. The same applies to constraints:
+**check whether a later migration already decided this, before deciding it
+again.** A quick `grep -l audit_log migrations/*.sql` would have found 032.
+
+**Nothing was needed anyway.** `action` has been unconstrained free text since
+032, so writing `'read'` had always just worked. The migration solved a problem
+that did not exist and created one that did.
+
+**Two lessons now enforced in the code:**
+
+1. `middleware/audit.ts` carries a "never restore a CHECK on this column"
+   warning at the point anyone would be tempted, and its `action` type is
+   `… | (string & {})` — a hint, not a closed set, because it is not the only
+   writer.
+2. **One migration, one concern.** A schema change for the files feature had no
+   business sharing a transaction with a core-table constraint. This was flagged
+   as a design smell when 232 was written and shipped anyway; the cost was a
+   broken feature on production.
+
+**232 was rewritten rather than superseded**, which normally CLAUDE.md forbids.
+The exception holds because it never applied *anywhere*: the transaction rolled
+back, `_migrations` never recorded it, and the runner retries it on every deploy
+— so a permanently-failing file is not "applied somewhere", it is a roadblock
+parked in front of every later migration. The file now does only the
+`document_date` change and says all of this in its header.
+
+---
+
+## 14. Phase 3 build log — `staff_tasks` and My To Do (Sep 2026)
+
+Shipped. The table §6 specified, built general and wired to one consumer.
+
+**Schema** — migration `233_staff_tasks.sql`. `person_id` (the OWNER) · `title`
+· `detail` · `due_date` · `status` · `source_type` / `source_id` · `created_by`
+· `completed_at` · `chased_at`. Three partial indexes: the "my open list" read,
+the source lookup, and the chaser.
+
+`source_type` is free-form text and `source_id` is **not** a foreign key — it
+points at a different table per type, so the database cannot enforce it and a
+constraint would only block the next consumer. A review action will be
+`('staff_review', <id>)` with no migration needed.
+
+**Access — the one thing that differs from the rest of this module.** Staff
+records are admin-only; this is not. A to-do list nobody but an admin can tick
+is not a to-do list, so the routes are gated on `STAFF_ROLES` and the per-row
+rule lives in `assertCanTouch()`:
+
+- you may touch your own task
+- an admin may touch anyone's, and is the only one who can put a task on
+  somebody else's list
+- somebody else's task reports **"not found"**, never "forbidden" — confirming
+  a task exists but isn't yours is itself a small leak
+
+That function is the entire security surface, so it has its own tests (13,
+covering ownership, the admin short-circuit, cancel-not-delete, and the stamp
+rules).
+
+**The chaser** — 09:45 Europe/London, in the existing 09:00–10:00 reminder
+block. One nudge per overdue task, stamped with `chased_at`, the same
+once-not-daily rule as the return-to-work chase. **Re-dating a task clears the
+stamp**, so a genuinely renewed promise earns a fresh nudge while a task you
+keep ignoring does not nag every morning. Bell only; the Step-7 escalation
+scheduler turns it into email per the recipient's preferences.
+
+**Surface** — `MyTasksPage`, a fourth tab on `MePage` (`/me?tab=todo`), with a
+plain add form so the phase is useful before reviews exist. A task from a review
+will render a "From your review" badge; nothing else about the page changes.
+
+### 14.1 Also fixed: two components that hid their own failures
+
+`StaffRecordFiles` rendered **"No files yet."** when the load *failed* — an
+empty list and a broken endpoint looked identical, which is precisely why three
+500s looked calm on screen while Phase 2 was being tested. `StaffKeyData` had
+the same shape worse: it caught every error and set the record to null, so a
+broken endpoint rendered as an absent panel indistinguishable from "this person
+isn't an employee".
+
+Both now distinguish the two states and say which it is. The general lesson,
+worth applying to any new fetch: **a failed load must never be able to render as
+an empty one.**

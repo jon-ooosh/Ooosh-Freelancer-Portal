@@ -411,3 +411,66 @@ shows this as **No login** on the employee, with a *Link a login* action that
 moves `users.person_id`. The reverse is impossible — the ledger cannot be
 UPDATEd. The person-merge in `routes/duplicates.ts` does **not** remap any
 staff table; do not use it to fix this.
+
+## `rtw_` means TWO different things — check which table
+
+A genuine trap, live in the schema since Sep 2026:
+
+| Column | Table | Means |
+|---|---|---|
+| `rtw_checked_on` · `rtw_document_type` · `rtw_expires_on` · `rtw_checked_by` | `people` (mig 206) | **RIGHT TO WORK** — the legal check |
+| `rtw_required` · `rtw_date` · `rtw_chased_at` | `staff_absences` (mig 214) | **RETURN TO WORK** — the post-sickness conversation, and the 08:50 chase |
+
+Nothing is renamed (both are live and referenced), so never assume from the
+prefix. `runRtwChase()` in `staff-notifications.ts` is return-to-work; anything
+reading `people.rtw_*` is right-to-work and is admin-only.
+
+## The private columns on `people` never go out through a people response
+
+`people` is read by the whole team — `routes/people.ts` is gated on
+`STAFF_ROLES` and both its GETs `SELECT p.*`. Migration 206 added right-to-work
+and NI columns to that table, so until Sep 2026 every staff member, general
+assistant and weekend manager got a colleague's immigration-status fields and NI
+ciphertext with any person record they opened.
+
+**`services/people-private-fields.ts` is THE list**, and both people GETs run
+their rows through it. Add a private column to `people` and you must add it
+there too — the admin-gated staff surfaces read those columns by name, so
+redacting the general response costs them nothing.
+
+Write them through `updateKeyData()` in `staff-employment.ts` only. The NI
+number itself leaves the server through exactly one route
+(`GET /staff-calendar/employees/:personId/ni-number`), which writes an
+`audit_log` row with action `read` on every call. Every other read returns
+`has_ni_number` as a boolean.
+
+## Never restore a CHECK constraint on `audit_log.action`
+
+Migration `032_fix_audit_log_action_constraint` **deliberately dropped** the
+original `create | update | delete` CHECK and widened the column to VARCHAR(50),
+because the platform writes `resolve_referral`, `merge`, `mark_washed`,
+`override_document_gate`, `correct_mileage` and more — several from call sites
+that INSERT into `audit_log` directly rather than through `logAudit()`.
+
+Migration 232 tried to re-impose a four-value CHECK as a side effect of an
+unrelated feature. Postgres refused it (`is violated by some row`), which was
+the correct outcome — had those rows not existed it would have succeeded and
+begun rejecting live writes. The whole migration rolled back and took an
+unrelated column with it, breaking a shipped feature. See
+`docs/STAFF-RECORDS-SPEC.md` §13.6.
+
+Two rules from it:
+- **`action` is open free text.** Add a value by using it; `logAudit`'s union
+  type is a hint, not the set.
+- **One migration, one concern.** A feature's schema change must never share a
+  transaction with an unrelated change to a core table, or one blocks the other.
+
+## A failed load must never render as an empty one
+
+`StaffRecordFiles` showed "No files yet." when its fetch 500'd, and
+`StaffKeyData` rendered nothing at all — indistinguishable from "this person
+isn't an employee". Three failing requests looked calm on screen for a whole
+testing round because of it.
+
+Any component that fetches needs three states, not two: loading, failed, and
+genuinely empty. Track the error separately from the data and say which it is.
