@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import StaffRecordFiles from '../components/StaffRecordFiles';
+import StaffKeyData from '../components/StaffKeyData';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
 import StaffBalancePanel from '../components/StaffBalancePanel';
@@ -329,6 +330,7 @@ function PersonCard({ row, isAdmin, open, onToggle, onSaved, onError }: {
           {/* Deliberately NOT gated on row.employment: a contract or a
               right-to-work check exists for somebody before their employment
               record does, and that is exactly when it needs filing. */}
+          {isAdmin && <StaffKeyData personId={row.personId} personName={row.name} onSaved={onSaved} onError={onError} />}
           {isAdmin && <StaffRecordFiles personId={row.personId} personName={row.name} onError={onError} />}
           {isAdmin && (
             row.employment

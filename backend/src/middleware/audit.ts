@@ -10,7 +10,10 @@ export async function logAudit(
   userId: string,
   entityType: string,
   entityId: string,
-  action: 'create' | 'update' | 'delete',
+  // 'read' is for DELIBERATE reveals of sensitive data — a staff NI number
+  // behind an admin gate — not for ordinary page views, which would drown the
+  // table. Widened alongside the CHECK constraint in migration 232.
+  action: 'create' | 'update' | 'delete' | 'read',
   previousValues: Record<string, unknown> | null,
   newValues: Record<string, unknown> | null
 ): Promise<void> {

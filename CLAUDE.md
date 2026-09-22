@@ -126,8 +126,8 @@ somewhere the rules don't cover.
 
 **Part built:** `docs/STAFF-RECORDS-SPEC.md` — private staff files and key data
 (admin-only, some encrypted), document review cycles, periodic staff reviews, and the
-`staff_tasks` / "My To Do" surface their actions land on. **Phase 1 (files) shipped
-Sep 2026**; phases 2–7 are not built. Its §1 lists what already exists and must not be
+`staff_tasks` / "My To Do" surface their actions land on. **Phases 1–2 (files, key data)
+shipped Sep 2026**; phases 3–7 are not built. Its §1 lists what already exists and must not be
 rebuilt — including the DVLA check, where the obvious reuse is a trap — and §8 is the
 agreed build order with the shipped phases marked. Read both before designing.
 
@@ -181,6 +181,7 @@ existing definition:
 | Opening a private-bucket file in a new tab | `frontend/src/lib/openAuthedFile.ts` |
 | Bank holiday or company day? | `frontend/src/lib/companyCalendar.ts` |
 | Verifying an API key | `middleware/api-key.ts` |
+| What must never leave a general `people` response? | `services/people-private-fields.ts` |
 
 Frontend display helpers with the same status: `lib/roles.ts`, `lib/driverStatus.ts`,
 `lib/jobOrgName.ts`, `lib/vehiclePrep.ts`, `lib/preauth.ts`, `lib/revisitDate.ts`,
