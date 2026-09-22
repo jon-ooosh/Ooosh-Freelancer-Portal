@@ -54,6 +54,7 @@ import autoChaseRouter from './auto-chase';
 import leadsRouter from './leads';
 import staffDocumentsRouter from './staff-documents';
 import staffCalendarRouter from './staff-calendar';
+import staffRecordsRouter from './staff-records';
 import freelancersRouter from './freelancers';
 import enquiryIntakeRouter from './enquiry-intake';
 
@@ -103,6 +104,7 @@ router.use('/auto-chase', autoChaseRouter);  // Auto-Chase Phase 1 — Gmail ing
 router.use('/leads', leadsRouter);  // Lead Finder (Tour Finder → OP) — Ticketmaster cold-lead discovery + scoring
 router.use('/staff-documents', staffDocumentsRouter);  // Staff Documents & Training — versioned policies/agreements, tick/sign completion + tracking
 router.use('/staff-calendar', staffCalendarRouter);  // Staff Calendar & Time — working patterns, who's-in calendar (Phase A)
+router.use('/staff-records', staffRecordsRouter);  // Staff Records — private files held ABOUT staff (admin only). NOT staff-documents, which publishes TO staff.
 router.use('/hire-forms', hireFormsRouter);
 router.use('/requirements', requirementsRouter);
 router.use('/portal', portalRouter);  // Freelancer portal — own JWT auth (not OP staff JWT)

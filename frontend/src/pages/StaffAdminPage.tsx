@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
+import StaffRecordFiles from '../components/StaffRecordFiles';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
 import StaffBalancePanel from '../components/StaffBalancePanel';
@@ -325,6 +326,10 @@ function PersonCard({ row, isAdmin, open, onToggle, onSaved, onError }: {
         <div className="border-t border-gray-100 p-4 space-y-5">
           <AccountSection row={row} isAdmin={isAdmin} onSaved={onSaved} onError={onError} />
           {isAdmin && <CotCardSection row={row} onSaved={onSaved} onError={onError} />}
+          {/* Deliberately NOT gated on row.employment: a contract or a
+              right-to-work check exists for somebody before their employment
+              record does, and that is exactly when it needs filing. */}
+          {isAdmin && <StaffRecordFiles personId={row.personId} personName={row.name} onError={onError} />}
           {isAdmin && (
             row.employment
               ? <EmploymentSection row={row} onSaved={onSaved} onError={onError} />
@@ -699,6 +704,8 @@ function EmploymentDetails({ row, workingDaysPerWeek, onSaved, onError }: {
             className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white" />
           <span className="block text-xs text-gray-500 mt-1">
             Used everywhere their name appears. Blank falls back to their first name.
+            They can also set this themselves under Me &rsaquo; Profile — this is here
+            for anyone without a login.
           </span>
         </label>
         <label className="text-sm">
