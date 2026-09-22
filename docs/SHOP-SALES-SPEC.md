@@ -82,20 +82,83 @@ drops at DISPATCH.** Measured on a 1" green fluoro tape (consumables ID 25):
 | Confirmed (2) | 14 | 15 |
 | **Dispatched (5)** | 14 | **14** |
 | Line deleted post-dispatch | — | back to 15 |
+| Line added to an **already-dispatched** job | — | **14 immediately** |
+| Returned (7) | — | stays 14 |
+| Completed (11) | — | stays 14 |
+| **Reverted to Enquiry (0)** | — | **back to 15** |
 
 Adding the line reserves it (`avail` drops immediately); only dispatch consumes it.
 
-**Two consequences, both load-bearing:**
+**Consumption holds at any status ≥ dispatched (5) and is RELEASED by a regression below
+it.** Adding a line to a job that is already dispatched bites immediately, which is what
+makes the whole design work:
 
-1. **The weekly shop job must reach dispatched-or-beyond or no sale on it ever moves
-   stock.** Which shape this module takes depends on the two tests still open in §18 —
-   whether a line added to an *already-dispatched* job decrements immediately, and whether
-   Completed/Returned gives the stock back.
-2. **Open question about existing data.** If today's weekly shop job never reaches
-   dispatched, then every sale and every 100%-discounted self-sale recorded on it has never
-   decremented physical stock, and the "keep the stock correct" ritual has been a no-op.
-   Worth checking against a real shelf before assuming this module fixes a *recording*
-   problem rather than a much older *counting* one.
+> **The weekly shop job sits permanently at DISPATCHED (5) from creation.** Every sale
+> decrements the shelf the moment it drains. Stock is accurate to the minute.
+
+### ⚠️ The shop job's STATUS is load-bearing state
+
+Two independent ways to silently un-sell an entire week, neither of which errors:
+
+1. **A status regression below 5.** Everything on the job un-consumes and the stock
+   reappears.
+2. **Checking a sale item in.** Removes it from the consumption — the same way a VE103B
+   certificate was accidentally un-consumed at the end of a hire (a real prior incident).
+
+This is the direct argument for §3.5: because OP pushes `pipeline_status` to HireHop, a
+shop job living in OP's `jobs` table is one stale-enquiry sweep or mis-click away from
+releasing a week of stock. Keeping it out of OP's `jobs` table entirely makes that
+impossible rather than merely unlikely.
+
+**The integrity check that covers all of it** (§12): OP knows exactly which lines it
+pushed. A scanner re-reads the shop job's supply list and confirms every line is still
+present at the expected quantity. One call, and it catches deletion, accidental check-in
+AND status regression — rather than three alarms for three symptoms of the same fault.
+
+**Note on existing data.** Today's weekly job is booked out and completed by hand, so it
+does pass through dispatched and historic sales have consumed. Older or abandoned shop
+jobs that never reached dispatch will not have — not this module's problem to backfill.
+
+### 2.2 Prices are ex-VAT, and `VAT_RATE` is an INDEX not a percentage
+
+Everything HireHop returns is **ex-VAT**. The till must display and charge inc-VAT, the
+deposit pushed must be the inc-VAT amount the customer actually paid, and the
+lines-equal-deposits invariant (§9) must compare inc-VAT to inc-VAT.
+
+**⚠️ The trap:** the verified item came back `"VAT_RATE": 0` while the HireHop UI showed
+**"Tax rate Standard"**. `VAT_RATE` is an index into HireHop's tax types — **0 means the
+standard rate, NOT zero-rated**. Code that reads it as a percentage charges no VAT on every
+item and the weekly invoice quietly under-declares.
+
+Map index → rate in `system_settings` (staff-editable, no deploy), defaulting index 0 to
+20%. Confirm against a genuinely zero-rated line if one is ever stocked — in the UK most
+cold food is zero-rated while canned drinks and confectionery are standard, so the
+distinction is live rather than academic for a shop selling snacks.
+
+### 2.3 Shelf count vs allocation — the "sold out from under a job" gap
+
+The scenario: drum heads booked onto a confirmed, paid job going out Thursday; someone
+walks in Tuesday and buys them off the shelf.
+
+Partly solvable. `avail` drops the moment a line is added to ANY job, so **HireHop already
+tracks reservation for sale stock** — it just isn't in the bulk `list.php` export we mirror.
+`items_picklist_avail.php` returns it per item, and we already call that endpoint
+(`routes/backline-matcher.ts`, with `b<id>`); the same call with `a<id>` covers sale stock.
+
+**v1: one availability call per distinct item as it enters the basket** — roughly a dozen a
+day at this volume. The till shows *"15 on the shelf · 3 reserved for jobs · 12 free"* and
+**warns** when the sale eats into reserved stock. Warning, not a block (house rule) —
+sometimes selling and reordering is right, and only a human knows which.
+
+**Honest limits.** It only works if the heads were actually added to the job in HireHop; it
+does not stop someone booking out stock already sold but not yet collected; and it cannot
+conjure stock — a warning two days out is still a phone call.
+
+**Physical segregation is the only real fix** for "a confirmed job's consumables must be
+untouchable", and that is a warehouse process question, not a code one. What code can do is
+stop it being a surprise: `list.php` returns `REORDER_LEVEL` and `REORDER_QTY`, and with the
+consumption trail a reorder view turns "we ran out on Friday" into "we knew on Monday"
+(§12). Nearly free once the mirror exists.
 
 ### Confirmed HireHop facts (scratch job 16735, Sep 2026)
 
@@ -159,6 +222,40 @@ expensed at purchase and are not carried on the balance sheet. Nothing to reconc
 Next free migration number at build time (**232** at time of writing — take the next free
 one, parallel branches collide; add the filename to the `migrations` array in
 `backend/src/migrations/run.ts` or it silently never runs).
+
+### 3.0 The shop job is NEVER synced into OP's `jobs` table
+
+Not a display filter — an **exclusion at the sync boundary**. `hirehop-job-sync.ts` already
+filters there (the `kind === 1` jobs-vs-projects filter, ~line 330); the inbound webhook
+handler in `routes/webhooks.ts` needs the same guard.
+
+Why this rather than flagging the row and filtering the lists:
+
+- **One guard instead of a sweep.** A row that was never inserted cannot appear in the
+  pipeline, Jobs, On Today, dashboard, search, Returns, Problems or anywhere else. Filtering
+  N lists means N chances to miss one, and the one missed is where the confusing row shows.
+- **It structurally removes the status hazard (§2.1).** With no OP job row, OP can never
+  push a `pipeline_status` to the shop job, so the "one stale-enquiry sweep releases a week
+  of stock" failure mode becomes impossible rather than unlikely.
+- Chasers, confirmation hooks, money emails, carnet sweeps and the rest need no individual
+  guarding — none of them can see it.
+
+`is_internal` is the wrong tool here: it means "our own job, not a client's", and such jobs
+legitimately appear in lists. This is a different concept — **machinery, not a booking**.
+
+**Identify it by both belts:**
+
+1. HH job number present in `shop_sale_periods` (OP created it, so OP knows), **or**
+2. the HireHop client is the dedicated **"Shop Sales" organisation** — which catches one
+   created by hand in HireHop.
+
+Belt 2 is a marker, deliberately **not** the filter used by the display layer. An org is a
+mutable value a human can rename, and the duplicates/merge tool can rewrite exactly that
+field; it is fine as a secondary signal at one guarded boundary, and would be fragile as
+the primary test scattered across every job list.
+
+**Cost:** OP's normal Money tab won't show the shop job. Acceptable — the Shop tab (§12) is
+its home.
 
 ### 3.1 `shop_sale_periods` — the weekly container
 
@@ -521,6 +618,15 @@ A weekly Shop tab (under Money):
 - **Sitter sales needing review** (`needs_review`), for the morning tick.
 - **Outstanding refunds** not yet done on the terminal.
 - This week's consumption, grouped by item — the reordering view you've never had.
+
+**Reorder view** (§2.3): items at or below `REORDER_LEVEL`, with `REORDER_QTY` and the
+recent consumption + sales trail. Turns running out into a week's notice, and it is nearly
+free once the mirror exists.
+
+**Line-integrity scan** (§2.1): re-read the current shop job's supply list and confirm every
+line OP pushed is still present at the expected quantity, and that the job is still at
+status ≥ 5. One call, and it catches accidental deletion, an accidental check-in and a
+status regression together — all three being symptoms of "something released our stock".
 
 Add a sanity scanner (the existing every-15-min slot) for: a sale queued > 30 min, a shop job
 that doesn't balance, a failed push. Gate any new scheduled task on the lost/cancelled +
