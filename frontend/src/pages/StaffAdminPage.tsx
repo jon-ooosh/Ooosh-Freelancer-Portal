@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import StaffRecordFiles from '../components/StaffRecordFiles';
 import StaffKeyData from '../components/StaffKeyData';
+import StaffReviews, { type ReviewPerson } from '../components/StaffReviews';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
 import StaffBalancePanel from '../components/StaffBalancePanel';
@@ -168,6 +169,17 @@ export default function StaffAdminPage() {
     await load();
   }, [load]);
 
+  // Everyone a review action could be owned by. Built from the roster the page
+  // already loaded rather than a second fetch, and it MUST include people who
+  // aren't the reviewee: "what should Ooosh do differently?" produces actions
+  // the company owes, and those go on whoever is responsible (§6.2).
+  const actionOwners = useMemo<ReviewPerson[]>(
+    () => rows
+      .filter(r => r.employment?.status !== 'left')
+      .map(r => ({ personId: r.personId, name: r.preferredName || r.name })),
+    [rows]
+  );
+
   const visible = useMemo(
     () => rows.filter(r => showLeft || r.employment?.status !== 'left'),
     [rows, showLeft]
@@ -235,7 +247,7 @@ export default function StaffAdminPage() {
           <Group title="Employees" count={employees.length}
             empty={isAdmin ? 'Nobody set up as an employee yet.' : undefined}>
             {employees.map(r => (
-              <PersonCard key={r.personId} row={r} isAdmin={isAdmin}
+              <PersonCard key={r.personId} row={r} isAdmin={isAdmin} people={actionOwners}
                 open={openId === r.personId}
                 onToggle={() => setOpenId(openId === r.personId ? null : r.personId)}
                 onSaved={announce} onError={setError} />
@@ -249,7 +261,7 @@ export default function StaffAdminPage() {
               hint="Logins that aren't employees — service accounts, test logins, freelancer access."
             >
               {others.map(r => (
-                <PersonCard key={r.personId} row={r} isAdmin={isAdmin}
+                <PersonCard key={r.personId} row={r} isAdmin={isAdmin} people={actionOwners}
                   open={openId === r.personId}
                   onToggle={() => setOpenId(openId === r.personId ? null : r.personId)}
                   onSaved={announce} onError={setError} />
@@ -283,8 +295,11 @@ function Group({ title, count, hint, empty, children }: {
 
 // ── One person ──────────────────────────────────────────────────────────────
 
-function PersonCard({ row, isAdmin, open, onToggle, onSaved, onError }: {
-  row: RosterRow; isAdmin: boolean; open: boolean; onToggle: () => void;
+function PersonCard({ row, isAdmin, people, open, onToggle, onSaved, onError }: {
+  row: RosterRow; isAdmin: boolean;
+  /** Everyone an action could be owned by — see StaffReviews. */
+  people: ReviewPerson[];
+  open: boolean; onToggle: () => void;
   onSaved: (msg: string) => Promise<void>; onError: (msg: string) => void;
 }) {
   const left = row.employment?.status === 'left';
@@ -332,6 +347,10 @@ function PersonCard({ row, isAdmin, open, onToggle, onSaved, onError }: {
               record does, and that is exactly when it needs filing. */}
           {isAdmin && <StaffKeyData personId={row.personId} personName={row.name} onSaved={onSaved} onError={onError} />}
           {isAdmin && <StaffRecordFiles personId={row.personId} personName={row.name} onError={onError} />}
+          {isAdmin && row.employment && (
+            <StaffReviews personId={row.personId} personName={row.name} people={people}
+              onSaved={onSaved} onError={onError} />
+          )}
           {isAdmin && (
             row.employment
               ? <EmploymentSection row={row} onSaved={onSaved} onError={onError} />

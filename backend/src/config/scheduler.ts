@@ -1071,23 +1071,40 @@ export function startScheduler() {
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: Return-to-work chase scheduled daily at 08:50 Europe/London');
 
-  // ── My To Do: overdue task chase (staff records spec §6) ──────────────────
+  // ── Staff records daily reminders (spec §5, §6) ───────────────────────────
   // Daily at 09:45 Europe/London, in the 09:00–10:00 reminder block between
   // the pre-auth expiry sweep (09:40) and Stripe discovery (09:50).
   //
-  // ONCE per task, not every morning — chased_at records that it fired, same
-  // rule as the return-to-work chase above. Re-dating a task clears the stamp,
-  // so a renewed promise earns a fresh nudge.
+  // Three scans in ONE cron entry rather than three: they share a block, they
+  // are all cheap, and three more entries in a list this long is how a
+  // scheduler becomes unreadable. Each is independently try/caught so one
+  // failing cannot silence the other two.
+  //
+  //   tasks     — nudge, then RE-ARM next_chase_date (pipeline model)
+  //   documents — a passport/visa/certificate expiring, once per document
+  //   reviews   — somebody's review falling due, once per cycle, to admins
   cron.schedule('45 9 * * *', async () => {
+    const notifications = await import('../services/staff-notifications');
     try {
-      const { runTaskChase } = await import('../services/staff-notifications');
-      const r = await runTaskChase();
+      const r = await notifications.runTaskChase();
       console.log(`Scheduler: To-do chase — ${r.chased} nudged`);
     } catch (err) {
       console.error('Scheduler: To-do chase failed:', err);
     }
+    try {
+      const r = await notifications.runDocumentExpiryChase();
+      console.log(`Scheduler: Staff document expiry — ${r.chased} flagged`);
+    } catch (err) {
+      console.error('Scheduler: Staff document expiry failed:', err);
+    }
+    try {
+      const r = await notifications.runReviewDueScan();
+      console.log(`Scheduler: Staff reviews due — ${r.flagged} flagged`);
+    } catch (err) {
+      console.error('Scheduler: Staff review due scan failed:', err);
+    }
   }, { timezone: 'Europe/London' });
-  console.log('Scheduler: To-do overdue chase scheduled daily at 09:45 Europe/London');
+  console.log('Scheduler: Staff records reminders scheduled daily at 09:45 Europe/London');
 
   // ── Freelancer yard-day offer chase (spec §9.4) ───────────────────────────
   // Daily at 09:05 Europe/London — after the 09:00 cluster, before the carnet
