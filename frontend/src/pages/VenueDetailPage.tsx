@@ -5,6 +5,7 @@ import SlidePanel from '../components/SlidePanel';
 import VenueForm from '../components/VenueForm';
 import FileUpload from '../components/FileUpload';
 import ActivityTimeline from '../components/ActivityTimeline';
+import VenueLinkedJobs from '../components/VenueLinkedJobs';
 
 interface VenueDetail {
   id: string;
@@ -63,7 +64,7 @@ function VenueDetailContent() {
   const [venue, setVenue] = useState<VenueDetail | null>(null);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'info' | 'timeline'>('info');
+  const [activeTab, setActiveTab] = useState<'info' | 'jobs' | 'timeline'>('info');
   const [orgName, setOrgName] = useState<string | null>(null);
 
   // Edit/delete
@@ -218,17 +219,17 @@ function VenueDetailContent() {
       {/* Tabs */}
       <div className="border-b border-gray-200 mb-6">
         <nav className="flex gap-6">
-          {(['info', 'timeline'] as const).map((tab) => (
+          {TABS.map(({ key, label }) => (
             <button
-              key={tab}
-              onClick={() => setActiveTab(tab)}
+              key={key}
+              onClick={() => setActiveTab(key)}
               className={`pb-3 text-sm font-medium border-b-2 transition-colors ${
-                activeTab === tab
+                activeTab === key
                   ? 'border-ooosh-600 text-ooosh-600'
                   : 'border-transparent text-gray-500 hover:text-gray-700'
               }`}
             >
-              {tab === 'info' ? 'Site Information' : 'Notes & Activity'}
+              {label}
             </button>
           ))}
         </nav>
@@ -291,6 +292,8 @@ function VenueDetailContent() {
         </div>
       )}
 
+      {activeTab === 'jobs' && id && <VenueLinkedJobs venueId={id} />}
+
       {activeTab === 'timeline' && id && (
         <ActivityTimeline
           entityType="venue_id"
@@ -311,6 +314,12 @@ function VenueDetailContent() {
     </div>
   );
 }
+
+const TABS = [
+  { key: 'info', label: 'Site Information' },
+  { key: 'jobs', label: 'Linked Jobs' },
+  { key: 'timeline', label: 'Notes & Activity' },
+] as const;
 
 function InfoSection({ title, children }: { title: string; children: React.ReactNode }) {
   return (
