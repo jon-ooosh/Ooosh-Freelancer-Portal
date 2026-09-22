@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
+import { getSystemSetting } from './system-settings';
 
 const router = Router();
 router.use(authenticate);
@@ -23,6 +24,15 @@ router.use(authenticate);
 // logins but are not employees"). Deliberately not a name or email match: those
 // accounts get renamed, and a hardcoded list rots silently. It also drops
 // people who have LEFT, whose login may outlive them by a while.
+//
+// GATED ON A SETTING, and this is the important part. The test is only correct
+// once staff_employment is POPULATED. Half-populated is the dangerous state:
+// the filter engages on the first record and hides every colleague who hasn't
+// got one yet, which is far worse than the service logins it removes. No
+// threshold can tell "populated" from "half-populated" without being arbitrary,
+// so a human declares it (migration 231, default OFF). Until then every picker
+// behaves exactly as before.
+const ASSIGNABLE_SETTING_KEY = 'assignable_users_require_employment';
 const ASSIGNABLE_CLAUSE = `EXISTS (
           SELECT 1 FROM staff_employment se
            WHERE se.person_id = u.person_id
@@ -31,7 +41,9 @@ const ASSIGNABLE_CLAUSE = `EXISTS (
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
     const includeInactive = req.query.include_inactive === 'true';
-    const assignableOnly = req.query.assignable === 'true';
+    const assignableOnly =
+      req.query.assignable === 'true' &&
+      (await getSystemSetting(ASSIGNABLE_SETTING_KEY)) === 'true';
 
     const runQuery = (filterAssignable: boolean) => {
       const conditions: string[] = [];
