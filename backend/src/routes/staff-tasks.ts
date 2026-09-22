@@ -30,6 +30,7 @@ const createSchema = z.object({
   title: z.string().min(1).max(300),
   detail: z.string().max(4000).nullish(),
   dueDate: dateStr.optional(),
+  nextChaseDate: dateStr.optional(),
   // Admin-only in the service; rejected there rather than here so one rule
   // covers every caller, including Phase 4's review actions.
   personId: z.string().regex(UUID_RE).optional(),
@@ -39,6 +40,7 @@ const updateSchema = z.object({
   title: z.string().min(1).max(300).optional(),
   detail: z.string().max(4000).nullish(),
   dueDate: dateStr.optional(),
+  nextChaseDate: dateStr.optional(),
   status: z.enum(TASK_STATUSES).optional(),
 });
 
@@ -78,6 +80,9 @@ router.post('/', validate(createSchema), async (req: AuthRequest, res: Response)
         title: body.title,
         detail: body.detail ?? null,
         dueDate: body.dueDate || null,
+        // Passed through only when the caller said something — `undefined`
+        // means "derive it", which is not the same as "never nudge me".
+        nextChaseDate: body.nextChaseDate === undefined ? undefined : (body.nextChaseDate || null),
         personId: body.personId,
       },
       req.user!.id,
@@ -102,6 +107,7 @@ router.patch('/:id', validate(updateSchema), async (req: AuthRequest, res: Respo
         title: body.title,
         detail: body.detail === undefined ? undefined : (body.detail ?? null),
         dueDate: body.dueDate === undefined ? undefined : (body.dueDate || null),
+        nextChaseDate: body.nextChaseDate === undefined ? undefined : (body.nextChaseDate || null),
         status: body.status,
       },
       req.user!.id,

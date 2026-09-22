@@ -24,7 +24,7 @@ import {
 } from '../services/staff-day-status';
 import {
   STAFF_ADMIN_ROLES, upsertEmployment, getEmployeeRecord, listEmployees, getStaffRoster,
-  updateKeyData, revealNiNumber,
+  updateKeyData, revealNiNumber, recordReviewOutcome,
   listUnlinkedLogins, linkLoginToPerson,
   createPattern, listPatterns, createExceptions, listExceptions,
   addSalaryEntry, listSalaryHistory, upsertReview, listReviews,
@@ -1283,6 +1283,9 @@ const employmentSchema = z.object({
   notes: z.string().nullish(),
   preferredName: z.string().max(100).nullish(),
   pronouns: z.string().max(40).nullish(),
+  // Per-person review cadence (spec §5.6). NULL inherits the company setting,
+  // exactly as bankHolidayPolicy and entitlementWeeks already do.
+  reviewIntervalMonths: z.number().int().min(1).max(60).nullish(),
 });
 
 // PUT /api/staff-calendar/employees/:personId
@@ -1423,9 +1426,11 @@ router.post('/employees/:personId/salary', adminOnly, async (req: AuthRequest, r
   }
 });
 
+// Admin surface, so includePrivate = true. Anything staff-facing must call
+// listReviews() without it — private_notes never leaves the server otherwise.
 router.get('/employees/:personId/reviews', adminOnly, async (req: AuthRequest, res: Response) => {
   try {
-    res.json({ data: await listReviews(req.params.personId as string) });
+    res.json({ data: await listReviews(req.params.personId as string, true) });
   } catch (err) {
     console.error('[staff-calendar] reviews error:', err);
     res.status(500).json({ error: 'Failed to load reviews' });
@@ -1437,21 +1442,52 @@ router.post('/employees/:personId/reviews', adminOnly, async (req: AuthRequest, 
     id: z.string().uuid().nullish(),
     reviewType: z.enum(['quarterly', 'annual', 'probation', 'ad_hoc']).optional(),
     scheduledFor: dateStr,
+    status: z.enum(['proposed', 'confirmed', 'completed', 'cancelled']).optional(),
     completedAt: z.string().nullish(),
-    notes: z.string().nullish(),
-    outcome: z.string().nullish(),
+    sharedSummary: z.string().max(20000).nullish(),
+    privateNotes: z.string().max(20000).nullish(),
+    outcome: z.string().max(4000).nullish(),
     nextReviewDue: dateStr.nullish(),
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
   try {
-    const { id, ...rest } = parsed.data;
-    const row = await upsertReview(id ?? null, req.params.personId as string, rest, req.user!.id);
-    if (!row) { res.status(404).json({ error: 'Review not found' }); return; }
+    const { id, ...input } = parsed.data;
+    const row = await upsertReview(id ?? null, req.params.personId as string, input, req.user!.id);
     res.json({ data: row });
   } catch (err) {
     console.error('[staff-calendar] review error:', err);
     res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to save the review' });
+  }
+});
+
+// POST /api/staff-calendar/employees/:personId/reviews/:reviewId/complete
+// Stamps the review, derives when the next one falls due from the person's own
+// cadence, and — when a rise came out of it — writes the salary row and links
+// the two. Pay is decided AFTER the meeting (spec §5.1), which is why it
+// arrives here rather than on the review form.
+router.post('/employees/:personId/reviews/:reviewId/complete', adminOnly, async (req: AuthRequest, res: Response) => {
+  const schema = z.object({
+    sharedSummary: z.string().max(20000).nullish(),
+    privateNotes: z.string().max(20000).nullish(),
+    outcome: z.string().max(4000).nullish(),
+    newSalary: z.number().min(0).max(10_000_000).nullish(),
+    salaryEffectiveFrom: dateStr.nullish(),
+    salaryReason: z.string().max(500).nullish(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
+  try {
+    const row = await recordReviewOutcome(
+      req.params.reviewId as string,
+      req.params.personId as string,
+      parsed.data,
+      req.user!.id
+    );
+    res.json({ data: row });
+  } catch (err) {
+    console.error('[staff-calendar] review complete error:', err);
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to complete the review' });
   }
 });
 

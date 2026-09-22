@@ -28,6 +28,7 @@ export interface StaffRecordFile {
   size_bytes: string | null;
   notes: string | null;
   document_date: string | null;
+  expires_on: string | null;
   uploaded_at: string;
   uploaded_by_name: string | null;
 }
@@ -81,6 +82,9 @@ export default function StaffRecordFiles({ personId, personName, onError }: {
   // The document's own date — signed, issued or checked. Spec §1.3: we ask for
   // the FROM date and derive expiries from it, never the other way round.
   const [documentDate, setDocumentDate] = useState('');
+  // The expiry printed ON the document — a different fact from the date above,
+  // and the one the reminder fires on.
+  const [expiresOn, setExpiresOn] = useState('');
 
   const load = useCallback(async () => {
     setLoadError(null);
@@ -109,11 +113,13 @@ export default function StaffRecordFiles({ personId, personName, onError }: {
       fd.append('label', label.trim());
       fd.append('doc_type', docType);
       if (documentDate) fd.append('document_date', documentDate);
+      if (expiresOn) fd.append('expires_on', expiresOn);
       await api.upload<{ data: StaffRecordFile }>(`/staff-records/${personId}/files`, fd);
       setPending(null);
       setLabel('');
       setDocType('other');
       setDocumentDate('');
+      setExpiresOn('');
       await load();
     } catch (err) {
       onError(err instanceof Error ? err.message : 'Upload failed');
@@ -194,6 +200,12 @@ export default function StaffRecordFiles({ personId, personName, onError }: {
                 {DOC_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
               </select>
               <span className="text-xs text-gray-400 ml-auto whitespace-nowrap">
+                {f.expires_on
+                  ? <span className={
+                      f.expires_on < new Date().toISOString().slice(0, 10)
+                        ? 'text-red-700 font-medium' : 'text-amber-700'
+                    }>expires {fmtDate(f.expires_on)} · </span>
+                  : null}
                 {f.document_date
                   ? <span className="text-gray-600">dated {fmtDate(f.document_date)} · </span>
                   : null}
@@ -248,6 +260,15 @@ export default function StaffRecordFiles({ personId, personName, onError }: {
           />
         </label>
         <label className="text-sm">
+          <span className="block text-xs text-gray-600 mb-1">Expires</span>
+          <input
+            type="date"
+            value={expiresOn}
+            onChange={e => setExpiresOn(e.target.value)}
+            className="px-2 py-1.5 border border-gray-300 rounded text-sm"
+          />
+        </label>
+        <label className="text-sm">
           <span className="block text-xs text-gray-600 mb-1">Type</span>
           <select
             value={docType}
@@ -266,8 +287,9 @@ export default function StaffRecordFiles({ personId, personName, onError }: {
         </button>
       </div>
       <p className="text-xs text-gray-400 mt-2">
-        PDFs, documents and images up to 25MB. Document date is when it was signed, issued or
-        checked — expiry reminders will be worked out from it. {TYPE_LABEL[docType]} files are kept
+        PDFs, documents and images up to 25MB. <strong>Document date</strong> is when it was
+        signed, issued or checked; <strong>expires</strong> is the date printed on the document
+        itself, and you’ll be reminded before it passes. {TYPE_LABEL[docType]} files are kept
         until you delete them; retention rules per type are still to come.
       </p>
     </div>
