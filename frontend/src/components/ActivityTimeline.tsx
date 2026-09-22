@@ -36,6 +36,8 @@ interface Interaction {
   job_id?: string | null;
   gmail_message_id?: string | null;
   email_direction?: 'inbound' | 'outbound' | null;
+  email_from?: string | null;
+  email_to?: string | null;
   email_subject?: string | null;
   email_snippet?: string | null;
   match_method?: string | null;
@@ -149,6 +151,28 @@ function systemIcon(i: Interaction): string {
   if (i.type === 'status_transition') return '⚙';
   if (i.type === 'email') return '✉';
   return '⚙';
+}
+
+// Display name for one party of an ingested email. Raw headers look like
+// `Shane Haase <shane@…>` or `"Ooosh Tours" <info@…>` or a bare `shane@…`;
+// we show the name (quotes stripped), falling back to the address.
+function emailPartyName(header: string | null | undefined): string {
+  if (!header) return '—';
+  const first = header.split(',')[0].trim();
+  const angle = /^(.*?)<([^>]+)>/.exec(first);
+  if (angle) {
+    const name = angle[1].replace(/["']/g, '').trim();
+    return name || angle[2].trim();
+  }
+  return first.replace(/["']/g, '').trim() || '—';
+}
+
+// "To" label: first recipient's name + "+N" when a header carries several.
+function emailToLabel(header: string | null | undefined): string {
+  if (!header) return '—';
+  const parts = header.split(',').map((p) => p.trim()).filter(Boolean);
+  const name = emailPartyName(parts[0]);
+  return parts.length > 1 ? `${name} +${parts.length - 1}` : name;
 }
 
 export default function ActivityTimeline({ entityType, entityId, interactions, onInteractionAdded }: ActivityTimelineProps) {
@@ -1227,8 +1251,11 @@ function findQuoteBoundaryChar(text: string): number {
   return idx;
 }
 
-// Renders interaction content, collapsing (a) an email's quoted reply history,
-// or (b) any very long body, behind a toggle so the timeline stays scannable.
+// Renders interaction content with two INDEPENDENT toggles for emails:
+//  · "Show more" expands the new message when it's long (clamped to ~10 lines,
+//    or ~600 chars since ingested HTML emails arrive as one flattened line);
+//  · "show quoted text" reveals the quoted reply history beneath it.
+// A non-email or short body just renders as-is.
 function InteractionBody({
   text, isEmail, renderContent,
 }: {
@@ -1236,59 +1263,53 @@ function InteractionBody({
   isEmail: boolean;
   renderContent: (t: string) => ReactNode;
 }) {
-  const [expanded, setExpanded] = useState(false);
+  const [showMore, setShowMore] = useState(false);
+  const [showQuoted, setShowQuoted] = useState(false);
   const full = text || '';
+
+  // Split into the new message (primary) and the quoted tail (email only).
+  // Require a bit of real content before the boundary (guards an all-quote email).
   const boundary = isEmail ? findQuoteBoundaryChar(full) : -1;
+  const hasQuote = boundary > 20;
+  const primary = hasQuote ? full.slice(0, boundary).replace(/\s+$/, '') : full;
+  const quoted = hasQuote ? full.slice(boundary).trim() : '';
 
-  // (a) Email with a quoted tail — show the new message, collapse the quote.
-  // Require a bit of real new content before the boundary (guards against an
-  // email that's ALL quote from char 0).
-  if (boundary > 20) {
-    const visible = full.slice(0, boundary).replace(/\s+$/, '');
-    const quoted = full.slice(boundary).trim();
-    return (
-      <div className="mt-1 text-sm text-gray-800 whitespace-pre-wrap break-words">
-        {renderContent(visible || full)}
-        {quoted && (expanded ? (
-          <>
-            <div className="mt-2 pl-2.5 border-l-2 border-gray-200 text-gray-500 text-[13px] whitespace-pre-wrap break-words">
-              {renderContent(quoted)}
-            </div>
-            <button type="button" onClick={() => setExpanded(false)} className="mt-1 text-xs text-ooosh-600 hover:text-ooosh-800">
-              Hide quoted text
-            </button>
-          </>
-        ) : (
-          <button type="button" onClick={() => setExpanded(true)}
-            className="mt-1 inline-flex items-center text-xs text-gray-400 hover:text-gray-600 border border-gray-200 rounded px-1.5 py-0.5"
-            title="Show quoted / earlier thread">
-            ··· show quoted text
-          </button>
-        ))}
-      </div>
-    );
-  }
-
-  // (b) Long body with no quote boundary — clamp by characters (works even when
-  // the whole thing is one flattened line) or by lines, whichever hits first.
+  const LINE_LIMIT = 10;
   const CHAR_LIMIT = 600;
-  const lines = full.split('\n');
-  if (full.length > CHAR_LIMIT || lines.length > 16) {
-    const head = lines.length > 16
-      ? lines.slice(0, 12).join('\n').trimEnd()
-      : full.slice(0, CHAR_LIMIT).trimEnd();
-    return (
-      <div className="mt-1 text-sm text-gray-800 whitespace-pre-wrap break-words">
-        {renderContent(expanded ? full : `${head}…`)}
-        <button type="button" onClick={() => setExpanded(!expanded)} className="mt-1 block text-xs text-ooosh-600 hover:text-ooosh-800">
-          {expanded ? 'Show less' : 'Show more'}
-        </button>
-      </div>
-    );
-  }
+  const primaryLines = primary.split('\n');
+  const needsClamp = primary.length > CHAR_LIMIT || primaryLines.length > LINE_LIMIT;
+  const clampedHead = primaryLines.length > LINE_LIMIT
+    ? primaryLines.slice(0, LINE_LIMIT).join('\n').trimEnd()
+    : primary.slice(0, CHAR_LIMIT).trimEnd();
+  const primaryShown = !needsClamp || showMore ? primary : `${clampedHead}…`;
 
-  // (c) Short — as-is.
-  return <p className="mt-1 text-sm text-gray-800 whitespace-pre-wrap break-words">{renderContent(full)}</p>;
+  return (
+    <div className="mt-1 text-sm text-gray-800 whitespace-pre-wrap break-words">
+      {renderContent(primaryShown || full)}
+      {needsClamp && (
+        <button type="button" onClick={() => setShowMore(!showMore)}
+          className="mt-1 block text-xs text-ooosh-600 hover:text-ooosh-800">
+          {showMore ? 'Show less' : 'Show more'}
+        </button>
+      )}
+      {quoted && (showQuoted ? (
+        <>
+          <div className="mt-2 pl-2.5 border-l-2 border-gray-200 text-gray-500 text-[13px] whitespace-pre-wrap break-words">
+            {renderContent(quoted)}
+          </div>
+          <button type="button" onClick={() => setShowQuoted(false)} className="mt-1 text-xs text-ooosh-600 hover:text-ooosh-800">
+            Hide quoted text
+          </button>
+        </>
+      ) : (
+        <button type="button" onClick={() => setShowQuoted(true)}
+          className="mt-1 inline-flex items-center text-xs text-gray-400 hover:text-gray-600 border border-gray-200 rounded px-1.5 py-0.5"
+          title="Show quoted / earlier thread">
+          ··· show quoted text
+        </button>
+      ))}
+    </div>
+  );
 }
 
 // Provenance + manual backstops for an ingested email row (Auto-Chase filtering
@@ -1480,21 +1501,43 @@ function InteractionRow({
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2 text-xs text-gray-500 flex-wrap">
-              <span className="font-medium text-gray-700">{interaction.created_by_name || 'System'}</span>
-              <span>{isReply ? 'replied' : `logged a ${interaction.type}`}</span>
-              {!isReply && interaction.job_status_at_creation != null && (
-                <>
-                  <span>&middot;</span>
-                  <span className={`inline-flex px-1.5 py-0.5 rounded border text-[10px] font-semibold ${JOB_STATUS_COLOURS[interaction.job_status_at_creation] || 'bg-gray-50 text-gray-500 border-gray-200'}`}>
-                    {JOB_STATUS_MAP[interaction.job_status_at_creation] || interaction.job_status_name_at_creation || `Status ${interaction.job_status_at_creation}`}
-                  </span>
-                </>
-              )}
-              <span>&middot;</span>
-              <span>{formatDateTime(interaction.created_at)}</span>
-              {interaction.edited_at && <span className="italic text-gray-400">· edited</span>}
-            </div>
+            {interaction.gmail_message_id ? (
+              // Ingested email — show who it's actually from/to + direction, not
+              // the system author. (email_from/to are raw RFC headers.)
+              <div className="flex items-center gap-2 text-xs text-gray-500 flex-wrap">
+                <span className={`inline-flex px-1.5 py-0.5 rounded border text-[10px] font-semibold ${
+                  interaction.email_direction === 'outbound'
+                    ? 'bg-green-50 text-green-700 border-green-200'
+                    : 'bg-blue-50 text-blue-700 border-blue-200'
+                }`}>
+                  {interaction.email_direction === 'outbound' ? 'Sent' : 'Received'}
+                </span>
+                <span className="text-gray-700 min-w-0">
+                  <span className="font-medium" title={interaction.email_from || undefined}>{emailPartyName(interaction.email_from)}</span>
+                  <span className="text-gray-400"> → </span>
+                  <span className="font-medium" title={interaction.email_to || undefined}>{emailToLabel(interaction.email_to)}</span>
+                </span>
+                <span>&middot;</span>
+                <span>{formatDateTime(interaction.created_at)}</span>
+                {interaction.edited_at && <span className="italic text-gray-400">· edited</span>}
+              </div>
+            ) : (
+              <div className="flex items-center gap-2 text-xs text-gray-500 flex-wrap">
+                <span className="font-medium text-gray-700">{interaction.created_by_name || 'System'}</span>
+                <span>{isReply ? 'replied' : `logged a ${interaction.type}`}</span>
+                {!isReply && interaction.job_status_at_creation != null && (
+                  <>
+                    <span>&middot;</span>
+                    <span className={`inline-flex px-1.5 py-0.5 rounded border text-[10px] font-semibold ${JOB_STATUS_COLOURS[interaction.job_status_at_creation] || 'bg-gray-50 text-gray-500 border-gray-200'}`}>
+                      {JOB_STATUS_MAP[interaction.job_status_at_creation] || interaction.job_status_name_at_creation || `Status ${interaction.job_status_at_creation}`}
+                    </span>
+                  </>
+                )}
+                <span>&middot;</span>
+                <span>{formatDateTime(interaction.created_at)}</span>
+                {interaction.edited_at && <span className="italic text-gray-400">· edited</span>}
+              </div>
+            )}
             <div className="flex items-center gap-1 flex-shrink-0">
               {canEdit && !editing && (
                 <button
