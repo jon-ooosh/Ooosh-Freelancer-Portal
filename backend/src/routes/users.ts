@@ -4,7 +4,6 @@ import { z } from 'zod';
 import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
-import { getSystemSetting } from './system-settings';
 
 const router = Router();
 router.use(authenticate);
@@ -25,14 +24,19 @@ router.use(authenticate);
 // accounts get renamed, and a hardcoded list rots silently. It also drops
 // people who have LEFT, whose login may outlive them by a while.
 //
-// GATED ON A SETTING, and this is the important part. The test is only correct
-// once staff_employment is POPULATED. Half-populated is the dangerous state:
-// the filter engages on the first record and hides every colleague who hasn't
-// got one yet, which is far worse than the service logins it removes. No
-// threshold can tell "populated" from "half-populated" without being arbitrary,
-// so a human declares it (migration 232, default OFF). Until then every picker
-// behaves exactly as before.
-const ASSIGNABLE_SETTING_KEY = 'assignable_users_require_employment';
+// ⚠️ THIS ASSUMES staff_employment IS POPULATED for the whole team. Half
+// populated is the dangerous state: the filter engages on the FIRST record and
+// hides every colleague who hasn't got one yet — far worse than the service
+// logins it removes. The empty-result fallback below does not save you, because
+// it only trips at zero. If you are adding employment records, or migrating how
+// they are stored, check that nobody real is missing one BEFORE this ships:
+//
+//   SELECT p.first_name, p.last_name, u.email,
+//          COALESCE(se.employment_status,'NONE') AS employment
+//     FROM users u
+//     LEFT JOIN people p  ON p.id = u.person_id
+//     LEFT JOIN staff_employment se ON se.person_id = u.person_id
+//    WHERE u.is_active = true ORDER BY se.employment_status NULLS FIRST;
 const ASSIGNABLE_CLAUSE = `EXISTS (
           SELECT 1 FROM staff_employment se
            WHERE se.person_id = u.person_id
@@ -41,9 +45,7 @@ const ASSIGNABLE_CLAUSE = `EXISTS (
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
     const includeInactive = req.query.include_inactive === 'true';
-    const assignableOnly =
-      req.query.assignable === 'true' &&
-      (await getSystemSetting(ASSIGNABLE_SETTING_KEY)) === 'true';
+    const assignableOnly = req.query.assignable === 'true';
 
     const runQuery = (filterAssignable: boolean) => {
       const conditions: string[] = [];
