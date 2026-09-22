@@ -1,6 +1,6 @@
 -- ============================================================================
 -- OOOSH OPERATIONS PLATFORM — "Real people only" toggle for people pickers
--- Migration 231
+-- Migration 232
 -- ============================================================================
 -- The reminder pickers filter to users with a current staff_employment record,
 -- which is how the platform already tells a real person from a service or test

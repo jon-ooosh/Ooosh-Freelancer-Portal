@@ -30,7 +30,7 @@ router.use(authenticate);
 // the filter engages on the first record and hides every colleague who hasn't
 // got one yet, which is far worse than the service logins it removes. No
 // threshold can tell "populated" from "half-populated" without being arbitrary,
-// so a human declares it (migration 231, default OFF). Until then every picker
+// so a human declares it (migration 232, default OFF). Until then every picker
 // behaves exactly as before.
 const ASSIGNABLE_SETTING_KEY = 'assignable_users_require_employment';
 const ASSIGNABLE_CLAUSE = `EXISTS (
