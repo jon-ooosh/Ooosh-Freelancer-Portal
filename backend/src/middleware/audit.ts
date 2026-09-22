@@ -10,10 +10,19 @@ export async function logAudit(
   userId: string,
   entityType: string,
   entityId: string,
+  // A HINT, not the whole set. `audit_log.action` is unconstrained VARCHAR(50)
+  // — migration 032 deliberately dropped the original create/update/delete
+  // CHECK because the platform needs 'resolve_referral', 'merge',
+  // 'mark_washed', 'override_document_gate' and more, and several call sites
+  // INSERT into audit_log directly rather than coming through here.
+  //
+  // => NEVER "restore" a CHECK constraint on this column. Migration 232 tried
+  //    and was refused by existing rows; see docs/STAFF-RECORDS-SPEC.md §13.6.
+  //
   // 'read' is for DELIBERATE reveals of sensitive data — a staff NI number
-  // behind an admin gate — not for ordinary page views, which would drown the
-  // table. Widened alongside the CHECK constraint in migration 232.
-  action: 'create' | 'update' | 'delete' | 'read',
+  // behind an admin gate — never for ordinary page views, which would drown
+  // the table.
+  action: 'create' | 'update' | 'delete' | 'read' | (string & {}),
   previousValues: Record<string, unknown> | null,
   newValues: Record<string, unknown> | null
 ): Promise<void> {

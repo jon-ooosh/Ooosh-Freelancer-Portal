@@ -1071,6 +1071,24 @@ export function startScheduler() {
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: Return-to-work chase scheduled daily at 08:50 Europe/London');
 
+  // ── My To Do: overdue task chase (staff records spec §6) ──────────────────
+  // Daily at 09:45 Europe/London, in the 09:00–10:00 reminder block between
+  // the pre-auth expiry sweep (09:40) and Stripe discovery (09:50).
+  //
+  // ONCE per task, not every morning — chased_at records that it fired, same
+  // rule as the return-to-work chase above. Re-dating a task clears the stamp,
+  // so a renewed promise earns a fresh nudge.
+  cron.schedule('45 9 * * *', async () => {
+    try {
+      const { runTaskChase } = await import('../services/staff-notifications');
+      const r = await runTaskChase();
+      console.log(`Scheduler: To-do chase — ${r.chased} nudged`);
+    } catch (err) {
+      console.error('Scheduler: To-do chase failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: To-do overdue chase scheduled daily at 09:45 Europe/London');
+
   // ── Freelancer yard-day offer chase (spec §9.4) ───────────────────────────
   // Daily at 09:05 Europe/London — after the 09:00 cluster, before the carnet
   // forms at 09:15. Two legs, each firing at most once per booking:
