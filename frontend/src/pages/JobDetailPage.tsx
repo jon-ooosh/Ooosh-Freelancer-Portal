@@ -7144,7 +7144,9 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, cli
 
   function ensureReminderUsersLoaded() {
     if (reminderUsers.length === 0) {
-      api.get<{ data: Array<{ id: string; first_name: string; last_name: string; preferred_name?: string | null }> }>('/users')
+      // ?assignable=true drops service / shared / test logins (System Service,
+      // Front Desk, TEST Wood) — nobody reads those inboxes. See routes/users.ts.
+      api.get<{ data: Array<{ id: string; first_name: string; last_name: string; preferred_name?: string | null }> }>('/users?assignable=true')
         .then(res => setReminderUsers(res.data))
         .catch(() => {});
     }
@@ -7787,7 +7789,8 @@ function StatusTransitionModal({
   // Load team users for "remind someone else"
   useEffect(() => {
     if (targetStatus !== 'completed') return;
-    api.get<{ data: Array<{ id: string; first_name: string; last_name: string; email: string; preferred_name?: string | null }> }>('/users')
+    // Same real-people filter as the reminder modal — see routes/users.ts.
+    api.get<{ data: Array<{ id: string; first_name: string; last_name: string; email: string; preferred_name?: string | null }> }>('/users?assignable=true')
       .then(res => setTeamUsers(res.data))
       .catch(() => {});
   }, [targetStatus]);

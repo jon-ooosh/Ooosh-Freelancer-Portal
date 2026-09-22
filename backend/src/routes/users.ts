@@ -9,18 +9,59 @@ const router = Router();
 router.use(authenticate);
 
 // GET /api/users — list users (for @mention lookups, team management)
+//
+// `?assignable=true` narrows the list to people who can actually be given
+// something to do. The users table also holds service and integration logins
+// (System Service), shared-terminal logins and test accounts: they hold a role
+// so automated writes are authorised, but nobody reads their inbox, so offering
+// them in a "who should this go to" picker is noise at best and a reminder
+// fired into the void at worst.
+//
+// The test for a real person is a CURRENT employment record — the same one
+// services/staff-notifications.ts uses to pick approvers, and the distinction
+// services/staff-employment.ts documents ("service and test accounts have
+// logins but are not employees"). Deliberately not a name or email match: those
+// accounts get renamed, and a hardcoded list rots silently. It also drops
+// people who have LEFT, whose login may outlive them by a while.
+const ASSIGNABLE_CLAUSE = `EXISTS (
+          SELECT 1 FROM staff_employment se
+           WHERE se.person_id = u.person_id
+             AND se.employment_status = 'employed')`;
+
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
     const includeInactive = req.query.include_inactive === 'true';
-    const whereClause = includeInactive ? '' : 'WHERE u.is_active = true';
-    const result = await query(
-      `SELECT u.id, u.email, u.role, u.is_active, u.last_login, u.avatar_url, u.hh_user_id,
+    const assignableOnly = req.query.assignable === 'true';
+
+    const runQuery = (filterAssignable: boolean) => {
+      const conditions: string[] = [];
+      if (!includeInactive) conditions.push('u.is_active = true');
+      if (filterAssignable) conditions.push(ASSIGNABLE_CLAUSE);
+      const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+      return query(
+        `SELECT u.id, u.email, u.role, u.is_active, u.last_login, u.avatar_url, u.hh_user_id,
         p.first_name, p.last_name, p.preferred_name
        FROM users u
        LEFT JOIN people p ON p.id = u.person_id
        ${whereClause}
        ORDER BY u.is_active DESC, p.first_name, p.last_name`
-    );
+      );
+    };
+
+    let result = await runQuery(assignableOnly);
+
+    // Safety valve, mirroring approverUserIds() in staff-notifications.ts: an
+    // EMPTY picker is a far worse failure than a slightly noisy one. If no one
+    // has an employment record yet, hand back the unfiltered list and say why,
+    // rather than leaving staff unable to assign anything to anybody.
+    if (assignableOnly && result.rows.length === 0) {
+      console.warn(
+        '[users] ?assignable=true matched nobody — no active login has an ' +
+        "'employed' staff_employment record. Falling back to the full list. " +
+        'Set employment records up on /staff/admin to silence this.'
+      );
+      result = await runQuery(false);
+    }
 
     res.json({ data: result.rows });
   } catch (error) {
