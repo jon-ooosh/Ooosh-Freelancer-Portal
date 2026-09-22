@@ -71,6 +71,57 @@ The distinction between rows 2 and 3 is the client's intent, and it is a clean l
 - **It happened to need doing** (head at end of life while prepping, old strings) → consumption.
   No money exists. Don't invent any.
 
+### 2.1 When stock ACTUALLY moves — verified against scratch job 16735, Sep 2026
+
+**HireHop applies its hire-style reservation model to sale stock. The shelf count only
+drops at DISPATCH.** Measured on a 1" green fluoro tape (consumables ID 25):
+
+| Job status | `avail` | Shelf `STOCK` |
+|---|---|---|
+| Enquiry (0) | 14 | 15 |
+| Confirmed (2) | 14 | 15 |
+| **Dispatched (5)** | 14 | **14** |
+| Line deleted post-dispatch | — | back to 15 |
+
+Adding the line reserves it (`avail` drops immediately); only dispatch consumes it.
+
+**Two consequences, both load-bearing:**
+
+1. **The weekly shop job must reach dispatched-or-beyond or no sale on it ever moves
+   stock.** Which shape this module takes depends on the two tests still open in §18 —
+   whether a line added to an *already-dispatched* job decrements immediately, and whether
+   Completed/Returned gives the stock back.
+2. **Open question about existing data.** If today's weekly shop job never reaches
+   dispatched, then every sale and every 100%-discounted self-sale recorded on it has never
+   decremented physical stock, and the "keep the stock correct" ritual has been a no-op.
+   Worth checking against a real shelf before assuming this module fixes a *recording*
+   problem rather than a much older *counting* one.
+
+### Confirmed HireHop facts (scratch job 16735, Sep 2026)
+
+| | Finding |
+|---|---|
+| **Sale-stock prefix** | **`a<id>`** — picklist `a25` ↔ consumables `list.php` `ID: 25`. Hire stock is `b<id>` (`b1967`, `TYPE: 2`), matching existing usage in `cost-recharge-hh.ts`. |
+| **Sale line `kind`** | **`kind: 1`.** NOT in the `PLATFORM-CONVENTIONS.md` table (0=header, 2=item, 3=prompt, 4=service). Any filter written as `kind === 2` silently misses every sale line. |
+| **Tally sign** | Negative `qty` consumes, positive restores. Each adjustment returns an `ID`, so it is editable via `id != 0`. |
+| **Removal restores stock** | Deleting a line from a *dispatched* job returns the shelf count. Window B reversals work. |
+| **Prices** | `PRICES._1.PRICE` is Price A. Sale items carry no `TYPE` key inside `PRICES`; hire items carry `TYPE: 2`. `PRICE1/2/3` remain deprecated. |
+| **Unit price auto-fills** | A line added from stock arrives already priced (7.50), so a **list-price sale needs no `items_save` step at all** — only a discounted or overridden price does. Roughly halves the per-sale call budget in §6.1. |
+| **`VAT_RATE: 0` on the line** | Means "derive from the stock's own tax rules", consistent with the existing recharge and PCN pushes. |
+
+**⚠️ `b` is overloaded.** In the picklist it prefixes a *hire stock* ID. In the delete
+response (`{"success":["b9146"],"ids":["b9146"]}`) it prefixes a *supply-list line* ID.
+Same letter, different namespace, decided by context. Do not write one helper that assumes
+either meaning.
+
+**Shelf count vs availability.** `list.php` returns shelf count only; availability is
+per-job and comes from the picklist. So the mirror can show "15 on the shelf" while three
+are reserved for a job leaving tomorrow. v1 shows shelf count, **labelled as such** — fine
+for a can of Coke, a real risk for gaffa earmarked for a tour. A live availability lookup
+on the item detail view is the upgrade if that bites.
+
+---
+
 ### ⚠️ THE DOUBLE-DECREMENT TRAP — read this before writing any push code
 
 **A stock movement is EITHER a job line OR a tally adjustment. Never both.**
@@ -601,33 +652,40 @@ UI capture proves the *shape*, the probe proves *our* auth path.
 Do it against a scratch job, clearly named (e.g. "ZZZ TEST — OP shop sales, do not invoice")
 and flagged `is_internal` in OP so it doesn't leak into the pipeline or trigger a chaser.
 
-Two unknowns, both capable of changing the design, both cheap to settle against a scratch
-job and a cheap item:
+**SETTLED** (scratch job 16735, Sep 2026 — see §2.1 for the full table): the sale-stock
+prefix is `a<id>`, sale lines are `kind: 1`, tally `qty` is negative-to-consume, removing a
+line restores the shelf count, and a line arrives already priced from stock.
 
-1. **`tally_save.php` sign convention** — does a positive `qty` add to or subtract from the
-   shelf? And does it authenticate the same way as the other module endpoints, or does it
-   need the export credentials like `list.php`? Fire one adjustment on a cheap item and read
-   the shelf count back.
-2. **How a *sale* item is added to a job.** The hire-stock prefixes are `b<id>`
-   (`cost-recharge-hh.ts`) and `c<id>` (`quotes.ts`); sale stock is a separate namespace and
-   its prefix is unknown. Getting this wrong either does nothing or puts the wrong item on a
-   live job. Confirm on a scratch job before a line of push code is written — this is the
-   carnet stock-namespace lesson (`REHEARSALS-SPEC.md` §2: never match on `LIST_ID` alone).
+**STILL OPEN — all three gate the push code:**
 
-3. **How a sale line is REMOVED from a job.** Needed for Window B reversals (§8) and for the
-   future drained-sale move (§4.1). Not documented anywhere we have; capture it by deleting
-   the test line in the HH UI.
-4. **Does adding a consumable to a job move the shelf count on its own?** Free to observe
-   while doing (2) — note the count before and after. This is the direct empirical test of
-   the double-decrement trap (§2). If the count *doesn't* move, the whole sale model changes
-   and a tally adjustment becomes mandatory alongside every sale line, so this is not a
-   formality.
+1. **Does a line added to an ALREADY-DISPATCHED job decrement immediately?**
+   Put the scratch job at status 5, then add a roll of tape and watch the shelf count.
+   - **Yes** → the weekly shop job sits permanently at dispatched from creation. Every sale
+     bites live, stock is accurate to the minute, `is_internal` keeps OP quiet. No other
+     change to this spec.
+   - **No** → stock only moves on a dispatch *transition*, so the container becomes daily
+     rather than weekly, or stock (tally) splits from money (job line) with the shop job
+     pinned at a status that never decrements. Both are more fragile; the second
+     double-decrements the moment anyone dispatches that job by hand.
 
-A fifth, lower-risk: confirm whether a tally adjustment can carry a job reference. The
-`tally_save.php` *response* exposes `JOB` and `REPAIR` on an adjustment, but the documented
-*send* parameters don't include them. If it can't, the job reference goes in the `details`
+2. **Does Completed (11) or Returned (7) give the stock BACK?**
+   Move the dispatched scratch job to each and watch the count. Sale stock never physically
+   returns, but the statuses are shared with hire stock, which does.
+   **If completing restores the stock, closing off the weekly shop job would silently undo
+   every sale on it** — and the job-line model for sales collapses in favour of tally
+   adjustments carrying the stock movement. Highest-stakes remaining unknown.
+
+3. **Does `/api/save_job.php` accept `items: {"a25": 1}`?** The HH UI uses
+   `items_batch_save.php`, but our proven codepath is `save_job.php` (`cost-recharge-hh.ts`,
+   `pcn-recharge.ts`). Needs a probe script rather than a UI capture, since it tests *our*
+   auth path, not HireHop's own. If `save_job.php` rejects the `a` prefix we adopt
+   `items_batch_save.php`, and the §15 reuse of the recharge pattern no longer applies.
+
+Lower-risk: whether a tally adjustment can carry a job reference. The response exposes
+`JOB` and `REPAIR`, but the documented send parameters don't include them — and both
+verified calls came back `JOB: 0`. If it can't, the job reference goes in the `details`
 string and that's fine.
 
-**`MAX_DISCOUNT` audit (§17).** Believed to be 100 on everything, but confirm it rather than
-assume — it costs one query once the mirror lands, and if any item is below 100 then today's
-100%-discount workaround has been silently failing and those shelf counts are already wrong.
+**`MAX_DISCOUNT` audit (§17).** Confirmed 100 on the item tested. Still worth a full sweep
+once the mirror lands — it costs one query, and any item below 100 means today's
+100%-discount workaround has been silently failing on it.
