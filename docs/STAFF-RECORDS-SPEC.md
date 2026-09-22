@@ -384,7 +384,7 @@ rather than assuming.
 | # | Phase | Delivers on its own |
 |---|---|---|
 | 0 | **This document** | The next session doesn't re-derive any of it |
-| 1 | **Files + admin gate** (§2, §3.1, §3.3) — `staff_record_files`, R2 private bucket, new section on the expandable staff row, soft-delete | jon starts emptying the zip folder the day it deploys |
+| 1 | ~~**Files + admin gate**~~ — **SHIPPED Sep 2026.** Migration 231, `routes/staff-records.ts`, `components/StaffRecordFiles.tsx` on the expandable staff row. See §12 | jon starts emptying the zip folder the day it deploys |
 | 2 | **Key data** (§3.2) — NI encrypted, right-to-work, contract + signed date. **Not medical notes** | The rest of the folder |
 | 3 | **`staff_tasks` + My To Do tab** (§6) — including a plain "add a task" form, plus the daily chaser | Useful as a general to-do immediately, before reviews exist |
 | 4 | **Review record + cycle** (§5.1, §5.2, §5.4, §5.6) — split notes, per-person interval, "review due" reminder, salary link, admin UI | The full loop minus staff-facing bits; actions write `staff_tasks` rows |
@@ -468,3 +468,81 @@ ground is not re-covered.
 7. **Actions became `staff_tasks`** (§6), general by design and wired to one
    consumer, with a My To Do tab — replacing the first draft's silence on where
    review actions would live.
+
+---
+
+## 12. Phase 1 build log — files (Sep 2026)
+
+Shipped. What landed, and the two decisions taken during the build.
+
+**Schema** — migration `231_staff_record_files.sql`. `person_id · label ·
+doc_type · r2_key · filename · content_type · size_bytes · notes ·
+uploaded_by · uploaded_at · deleted_at · deleted_by`, with a partial index per
+person and one on `doc_type` for §4. Soft-delete on the ROW; the R2 object is
+deleted for real, because keeping a passport scan nobody can see is the worst
+of both worlds.
+
+**API** — `routes/staff-records.ts`, mounted at `/api/staff-records`. List,
+upload, relabel/retype, delete. Every route behind `STAFF_ADMIN_ROLES` (§2), not
+a fresh `authorize('admin')`.
+
+**UI** — `components/StaffRecordFiles.tsx`, on the expandable `PersonCard` in
+`StaffAdminPage`. Deliberately NOT gated on `row.employment`: a contract or a
+right-to-work check exists before the employment record does, and that is
+exactly when it needs filing.
+
+### 12.1 The security finding that shaped the storage
+
+`GET /api/files/download` authorises by **PREFIX ONLY**. The router calls
+`authenticate()` but never `authorize()`, so any caller with a valid JWT — a
+freelancer included — can fetch any key under `files/`, `avatars/`,
+`completion/` and the rest, given the key. That is fine for job files and
+completion photos. It is not fine for a passport.
+
+So staff record objects go under their own prefix, `staff-records/`, which is
+**not** in `allowedPrefixes`. The download route carries a matching admin check
+for that prefix specifically. The gate lives there rather than on a second
+download route so `useAuthedFileUrl` and `openAuthedFile` — THE two ways to read
+a private-bucket file per CLAUDE.md — keep working unchanged.
+
+`STAFF_RECORDS_PREFIX` and `STAFF_RECORD_ROLES` are exported from
+`routes/staff-records.ts` and imported by `routes/files.ts` so the prefix and
+its gate cannot drift apart.
+
+**Never file anything private under `files/`.** An unguessable key is not an
+access control — the key is handed to whoever can list it.
+
+### 12.2 `medical` is in the doc_type enum — and its retention is not built
+
+§8 holds the free-text medical NOTES field back to Phase 7, because retention
+must exist before special-category data does. The `medical` **document type**
+ships now anyway: jon's original ask named "any medical docs", a filed document
+is deliberate, labelled and deletable by hand in a way an auto-generated absence
+row is not, and refusing to store a document he asked to store is narrowing the
+job rather than doing it.
+
+That is a judgement call, not an oversight, and it leaves a real gap: a medical
+document filed today has no automatic expiry. Phase 7 owes it one. The column
+comment in migration 231 says so.
+
+### 12.3 Bundled with this phase
+
+Two Me-page tidy-ups jon asked for alongside it, both small:
+
+- **"I prefer to be known as" moved onto Me › Profile.** It was admin-only AND
+  gated behind `row.employment`, so nobody could set their own and anyone
+  without an employment record couldn't have one set at all. `PUT
+  /api/auth/profile` now takes `preferred_name`; `''` clears it (`!== undefined`
+  rather than a truthy test, or clearing would silently no-op). The admin field
+  stays for people with no login, now labelled as such.
+- **COT card last 4 removed from Me › Profile.** It was in two places. The admin
+  version on the Staff page wins because it is the richer one — it also holds
+  the card label and the agreement status — and because its own help text says
+  "staff never type card details", which the self-service field contradicted.
+  Card assignment is the company's, not the holder's. The field stays on the
+  `PUT /api/auth/profile` schema so a stale cached bundle can't 400 mid-deploy;
+  no UI writes it.
+
+Pronouns sits next to "known as" in the admin form and is the same kind of fact,
+but it is not in the auth payload, so self-service would mean touching four more
+SELECTs. Left alone deliberately — worth doing next time Profile is open.

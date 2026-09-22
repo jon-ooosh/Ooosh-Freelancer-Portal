@@ -8,6 +8,7 @@ import { validate } from '../middleware/validate';
 import { uploadToR2, deleteFromR2, getFromR2, isR2Configured } from '../config/r2';
 import { query } from '../config/database';
 import emailService from '../services/email-service';
+import { STAFF_RECORDS_PREFIX, STAFF_RECORD_ROLES } from './staff-records';
 
 const router = Router();
 router.use(authenticate);
@@ -173,7 +174,14 @@ router.get('/download', async (req: AuthRequest, res: Response) => {
       return;
     }
 
-    // Validate key starts with known prefix to prevent path traversal
+    // Validate key starts with known prefix to prevent path traversal.
+    //
+    // READ THIS BEFORE ADDING A PREFIX: everything in this list is served to
+    // ANY authenticated caller — this router only calls authenticate(), not
+    // authorize(), so a freelancer with a JWT can fetch any key here that they
+    // can name. That is fine for the prefixes below (job files, avatars,
+    // completion photos) and catastrophic for a passport scan. An unguessable
+    // key is not an access control: the key is handed to whoever can list it.
     const allowedPrefixes = [
       'files/',
       'backups/',
@@ -183,7 +191,18 @@ router.get('/download', async (req: AuthRequest, res: Response) => {
       'carnet-authority/', // carnet Letter of Authorisation PDFs
       'email-quotes/',   // harvested quote PDFs (auto-chase §7.3 version diff)
     ];
-    if (!allowedPrefixes.some((p) => key.startsWith(p))) {
+
+    // Private staff records (docs/STAFF-RECORDS-SPEC.md §3.1) live under their
+    // own prefix precisely so they DON'T inherit the rule above. Gated here
+    // rather than on a second download route so that useAuthedFileUrl and
+    // openAuthedFile — THE two ways to read a private-bucket file, per
+    // CLAUDE.md — keep working unchanged.
+    if (key.startsWith(STAFF_RECORDS_PREFIX)) {
+      if (!STAFF_RECORD_ROLES.includes(req.user?.role as typeof STAFF_RECORD_ROLES[number])) {
+        res.status(403).json({ error: 'Not authorised to view staff records' });
+        return;
+      }
+    } else if (!allowedPrefixes.some((p) => key.startsWith(p))) {
       res.status(403).json({ error: 'Invalid file key' });
       return;
     }

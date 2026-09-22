@@ -45,7 +45,7 @@ export default function ProfilePage() {
   // Profile fields
   const [firstName, setFirstName] = useState(user?.first_name || '');
   const [lastName, setLastName] = useState(user?.last_name || '');
-  const [cotLast4, setCotLast4] = useState(user?.cot_card_last4 || '');
+  const [preferredName, setPreferredName] = useState(user?.preferred_name || '');
   const [profileSaving, setProfileSaving] = useState(false);
   const [profileMsg, setProfileMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
@@ -72,15 +72,18 @@ export default function ProfilePage() {
     setProfileMsg(null);
 
     try {
-      const payload: Record<string, unknown> = { first_name: firstName, last_name: lastName };
-      // Only include cot_card_last4 if it's a valid 4-digit string or explicit clear
-      if (cotLast4 === '') payload.cot_card_last4 = null;
-      else if (/^\d{4}$/.test(cotLast4)) payload.cot_card_last4 = cotLast4;
-      const result = await api.put<{ first_name: string; last_name: string; cot_card_last4: string | null }>('/auth/profile', payload);
+      // preferred_name always goes, including as '' — that is how the field
+      // says "clear it and go back to my first name".
+      const payload: Record<string, unknown> = {
+        first_name: firstName,
+        last_name: lastName,
+        preferred_name: preferredName.trim(),
+      };
+      const result = await api.put<{ first_name: string; last_name: string; preferred_name: string | null }>('/auth/profile', payload);
       updateUser({
         first_name: result.first_name,
         last_name: result.last_name,
-        cot_card_last4: result.cot_card_last4 ?? null,
+        preferred_name: result.preferred_name ?? null,
       });
       setProfileMsg({ type: 'success', text: 'Profile updated.' });
     } catch (err) {
@@ -303,19 +306,17 @@ export default function ProfilePage() {
             <p className="text-xs text-gray-400 mt-1">Contact an admin to change your email.</p>
           </div>
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">COT card last 4</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1">I prefer to be known as</label>
             <input
               type="text"
-              inputMode="numeric"
-              maxLength={4}
-              value={cotLast4}
-              onChange={(e) => setCotLast4(e.target.value.replace(/\D/g, ''))}
+              maxLength={60}
+              value={preferredName}
+              onChange={(e) => setPreferredName(e.target.value)}
               className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-              placeholder="last 4 digits"
+              placeholder={user?.first_name || 'your first name'}
             />
             <p className="text-xs text-gray-400 mt-1">
-              Stamped onto your captured costs paid on the company card — helps Xero reconcile them.
-              Clear the field to remove.
+              Used everywhere the app says your name. Leave it empty to go by {user?.first_name || 'your first name'}.
             </p>
           </div>
           <div>
