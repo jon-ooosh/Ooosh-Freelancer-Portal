@@ -12,6 +12,10 @@
  *   - assigning a task to somebody else is an admin act
  */
 jest.mock('../../config/database', () => ({ query: jest.fn(), getClient: jest.fn() }));
+// staff-settings reaches through routes/system-settings to middleware/auth,
+// which demands JWT_SECRET at import time. Mocked so a unit test of THIS
+// module doesn't need the whole auth stack booted.
+jest.mock('../staff-settings', () => ({ getTaskChaseDays: jest.fn(async () => 14) }));
 
 import { query } from '../../config/database';
 import { createTask, updateTask, cancelTask } from '../staff-tasks';
@@ -92,6 +96,29 @@ describe('creating a task', () => {
     expect(mockQuery.mock.calls[1]![1]![0]).toBe(MY_PERSON);
   });
 
+  it('chases on the due date when there is one', async () => {
+    rows([{ person_id: MY_PERSON }], [{ id: TASK }], [{ id: TASK }]);
+    await createTask({ title: 'Do it', dueDate: '2026-11-30' }, ME, 'staff');
+    const params = mockQuery.mock.calls[1]![1] as unknown[];
+    expect(params[4]).toBe('2026-11-30');   // next_chase_date
+  });
+
+  it('chases in a fortnight when there is NO due date — the case that would otherwise rot', async () => {
+    rows([{ person_id: MY_PERSON }], [{ id: TASK }], [{ id: TASK }]);
+    await createTask({ title: 'Sort the shelving' }, ME, 'staff');
+    const params = mockQuery.mock.calls[1]![1] as unknown[];
+    const expected = new Date();
+    expected.setUTCDate(expected.getUTCDate() + 14);
+    expect(params[4]).toBe(expected.toISOString().slice(0, 10));
+  });
+
+  it('honours an explicit "never nudge me"', async () => {
+    rows([{ person_id: MY_PERSON }], [{ id: TASK }], [{ id: TASK }]);
+    await createTask({ title: 'Someday', nextChaseDate: null }, ME, 'staff');
+    const params = mockQuery.mock.calls[1]![1] as unknown[];
+    expect(params[4]).toBeNull();
+  });
+
   it('stops a non-admin assigning work to somebody else', async () => {
     rows([{ person_id: MY_PERSON }]);
     await expect(createTask({ title: 'Do it', personId: THEIR_PERSON }, ME, 'staff'))
@@ -108,8 +135,9 @@ describe('creating a task', () => {
     rows([{ person_id: MY_PERSON }], [{ id: TASK }], [{ id: TASK }]);
     await createTask({ title: 'Do it' }, ME, 'staff');
     const params = mockQuery.mock.calls[1]![1] as unknown[];
-    // COALESCE($5,'manual') — null here means the default applies.
-    expect(params[4]).toBeNull();
+    // COALESCE($6,'manual') — null here means the default applies. ($6, not
+    // $5: next_chase_date was inserted ahead of it in migration 234.)
+    expect(params[5]).toBeNull();
   });
 
   it('rejects an empty title', async () => {
@@ -127,6 +155,12 @@ describe('re-dating clears the chase stamp', () => {
     rows([{ person_id: MY_PERSON }], [{ person_id: MY_PERSON }], [], [{ id: TASK }]);
     await updateTask(TASK, { dueDate: '2026-10-01' }, ME, 'staff');
     expect(mockQuery.mock.calls[2]![0] as string).toMatch(/chased_at = NULL/);
+  });
+
+  it('stops chasing a finished task', async () => {
+    rows([{ person_id: MY_PERSON }], [{ person_id: MY_PERSON }], [], [{ id: TASK }]);
+    await updateTask(TASK, { status: 'done' }, ME, 'staff');
+    expect(mockQuery.mock.calls[2]![0] as string).toMatch(/next_chase_date = NULL/);
   });
 
   it('clears completed_at when a done task is re-opened', async () => {

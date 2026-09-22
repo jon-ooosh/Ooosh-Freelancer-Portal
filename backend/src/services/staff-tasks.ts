@@ -27,9 +27,38 @@ export interface TaskInput {
   title: string;
   detail?: string | null;
   dueDate?: string | null;
+  /** When to nudge. Omitted → derived (see resolveChaseDate); '' → never. */
+  nextChaseDate?: string | null;
   personId?: string;
   sourceType?: string;
   sourceId?: string | null;
+}
+
+/**
+ * When should this task next poke somebody?
+ *
+ * Two genuinely different cases, and the second is the one that matters:
+ *   - it HAS a due date → nudge on the day it's due, then every interval
+ *     after while it stays open
+ *   - it has NO due date ("sort the shelving, sometime") → nothing would ever
+ *     resurface it, so default to the interval from today. This is the
+ *     pipeline-chaser case (jobs.next_chase_date, mig 004) and the reason a
+ *     chase date is a separate field from a due date at all.
+ *
+ * An explicit '' or null from the caller means "never nudge me", which is what
+ * a someday-maybe item wants and must not be overwritten by a default.
+ */
+async function resolveChaseDate(
+  explicit: string | null | undefined,
+  dueDate: string | null,
+): Promise<string | null> {
+  if (explicit !== undefined) return explicit || null;
+  if (dueDate) return dueDate;
+  const { getTaskChaseDays } = await import('./staff-settings');
+  const days = await getTaskChaseDays();
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
 }
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -37,6 +66,7 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const SELECT_TASKS = `
   SELECT t.id, t.person_id, t.title, t.detail,
          t.due_date::text AS due_date, t.status,
+         t.next_chase_date::text AS next_chase_date,
          t.source_type, t.source_id,
          t.created_at, t.completed_at,
          NULLIF(TRIM(COALESCE(op.preferred_name, op.first_name, '') || ' ' ||
@@ -98,11 +128,15 @@ export async function createTask(input: TaskInput, userId: string, role: string 
     if (personId !== mine) throw new Error('Only an admin can add a task to somebody else’s list');
   }
 
+  const dueDate = input.dueDate || null;
+  const nextChase = await resolveChaseDate(input.nextChaseDate, dueDate);
+  if (nextChase && !DATE_RE.test(nextChase)) throw new Error('nextChaseDate must be YYYY-MM-DD');
+
   const r = await query(
-    `INSERT INTO staff_tasks (person_id, title, detail, due_date, source_type, source_id, created_by)
-     VALUES ($1, $2, $3, $4::date, COALESCE($5,'manual'), $6, $7)
+    `INSERT INTO staff_tasks (person_id, title, detail, due_date, next_chase_date, source_type, source_id, created_by)
+     VALUES ($1, $2, $3, $4::date, $5::date, COALESCE($6,'manual'), $7, $8)
      RETURNING id`,
-    [personId, title, input.detail?.trim() || null, input.dueDate || null,
+    [personId, title, input.detail?.trim() || null, dueDate, nextChase,
      input.sourceType ?? null, input.sourceId ?? null, userId]
   );
   const row = await query(`${SELECT_TASKS} WHERE t.id = $1`, [r.rows[0].id]);
@@ -111,7 +145,10 @@ export async function createTask(input: TaskInput, userId: string, role: string 
 
 export async function updateTask(
   taskId: string,
-  patch: { title?: string; detail?: string | null; dueDate?: string | null; status?: TaskStatus },
+  patch: {
+    title?: string; detail?: string | null; dueDate?: string | null;
+    nextChaseDate?: string | null; status?: TaskStatus;
+  },
   userId: string,
   role: string | undefined
 ) {
@@ -130,12 +167,25 @@ export async function updateTask(
   if (patch.dueDate !== undefined) {
     if (patch.dueDate && !DATE_RE.test(patch.dueDate)) throw new Error('dueDate must be YYYY-MM-DD');
     params.push(patch.dueDate || null); sets.push(`due_date = $${params.length}::date`);
-    // A re-dated task is a fresh promise, so it earns a fresh chase.
+    // A re-dated task is a fresh promise, so it earns a fresh chase — and the
+    // chase follows the new due date unless the caller set one explicitly in
+    // the same request (handled below, which wins because it is appended last).
+    sets.push('chased_at = NULL');
+    params.push(patch.dueDate || null); sets.push(`next_chase_date = $${params.length}::date`);
+  }
+  if (patch.nextChaseDate !== undefined) {
+    if (patch.nextChaseDate && !DATE_RE.test(patch.nextChaseDate)) {
+      throw new Error('nextChaseDate must be YYYY-MM-DD');
+    }
+    params.push(patch.nextChaseDate || null); sets.push(`next_chase_date = $${params.length}::date`);
     sets.push('chased_at = NULL');
   }
   if (patch.status !== undefined) {
     if (!(TASK_STATUSES as readonly string[]).includes(patch.status)) throw new Error('Unknown status');
     params.push(patch.status); sets.push(`status = $${params.length}`);
+    // A finished or dropped task must stop chasing. Re-opening one leaves the
+    // chase date alone — whatever it was is still the right answer.
+    if (patch.status !== 'open') sets.push('next_chase_date = NULL');
     // Stamped on the way in and cleared on the way back out, so re-opening a
     // task ticked by mistake leaves no phantom completion date behind it.
     sets.push(patch.status === 'done' ? 'completed_at = NOW()' : 'completed_at = NULL');

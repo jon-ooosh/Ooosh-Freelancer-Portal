@@ -387,7 +387,7 @@ rather than assuming.
 | 1 | ~~**Files + admin gate**~~ — **SHIPPED Sep 2026.** Migration 231, `routes/staff-records.ts`, `components/StaffRecordFiles.tsx` on the expandable staff row. See §12 | jon starts emptying the zip folder the day it deploys |
 | 2 | ~~**Key data**~~ — **SHIPPED Sep 2026.** Migration 232, `updateKeyData()`/`revealNiNumber()`, `components/StaffKeyData.tsx`. Medical notes still held back. See §13 | The rest of the folder |
 | 3 | ~~**`staff_tasks` + My To Do tab**~~ — **SHIPPED Sep 2026.** Migration 233, `services/staff-tasks.ts`, `pages/MyTasksPage.tsx`, 09:45 chaser. See §14 | Useful as a general to-do immediately, before reviews exist |
-| 4 | **Review record + cycle** (§5.1, §5.2, §5.4, §5.6) — split notes, per-person interval, "review due" reminder, salary link, admin UI | The full loop minus staff-facing bits; actions write `staff_tasks` rows |
+| 4 | ~~**Review record + cycle**~~ — **SHIPPED Sep 2026.** Migration 234, `recordReviewOutcome()`, `components/StaffReviews.tsx`, review-due scan. See §15 | The full loop minus staff-facing bits; actions write `staff_tasks` rows |
 | 5 | **Staff-facing exchange** (§5.3, §5.5) — confirmation carrying prep questions, their answers, the follow-up email | The staff half |
 | 6 | **Document review cycles** (§4) — the annual DVLA check and friends | Replaces jon's memory |
 | 7 | **Retention sweeps** (§7) — absence medical detail, per-type retention — **and only then §3.2's medical notes** | Closes the GDPR item |
@@ -771,3 +771,92 @@ isn't an employee".
 Both now distinguish the two states and say which it is. The general lesson,
 worth applying to any new fetch: **a failed load must never be able to render as
 an empty one.**
+
+---
+
+## 15. Phase 4 build log — reviews, and two chase dates (Sep 2026)
+
+Shipped, together with two date fields jon asked for while testing Phase 3.
+
+### 15.1 Reviews
+
+`staff_reviews` existed since mig 206 and nothing had ever written to it. Phase
+4 wires it up and adds what §5 settled:
+
+- **Two notes fields** (`shared_summary`, `private_notes`) — split before there
+  was any data to migrate, because it could not be retrofitted. `listReviews()`
+  takes `includePrivate` and **defaults to false**, so a caller that forgets to
+  think about it gets the safe answer. The legacy `notes` column is kept and
+  marked do-not-write; anything in it moved to the private side, since it was
+  written with no expectation of being shared.
+- **`status`** (`proposed | confirmed | completed | cancelled`) — the
+  scheduling exchange trimmed to a confirmation (§5.2). No propose/counter flow:
+  seven people once a year is a conversation.
+- **`salary_history_id`** — a review points at the `staff_salary_history` row it
+  produced rather than holding a figure. Pay is decided *after* the meeting
+  (§5.1), so the salary box lives in the **complete** step, not on the review
+  form, and the help text says the number goes to them in the follow-up.
+- **`review_interval_months`** on `staff_employment` — per-person cadence,
+  NULL inheriting `staff.review_interval_months`, the same shape
+  `entitlement_weeks` already uses. `recordReviewOutcome()` derives
+  `next_review_due` from it so "annual for most, six-monthly for a new starter"
+  needs no thought at completion time.
+- **Actions** become `staff_tasks` rows with an owner picker covering the whole
+  team, not just the reviewee — because §6.2's whole point is that "what should
+  Ooosh do differently?" produces actions the *company* owes.
+
+**The review-due scan** keys off the last completed review, falling back to
+**employment start + interval** for somebody never reviewed. That fallback is
+the important half: a person nobody has ever reviewed is exactly who a reminder
+system is for, and keying only off previous reviews would miss them forever.
+Skipped when a review is already booked, stamped once per cycle on
+`staff_employment.review_due_chased_at`, cleared whenever a review is booked or
+completed.
+
+### 15.2 A bug this introduced, caught before shipping
+
+The roster's "next review due" read `WHERE completed_at IS NULL`. Once `status`
+existed, a **cancelled** review also satisfied that — so a review somebody
+called off would have shown as permanently upcoming. Now keyed on
+`status IN ('proposed','confirmed')`.
+
+Worth noting the shape: adding a state column silently changed the meaning of
+an existing "is it finished?" test. Any `completed_at IS NULL` check is really
+asking "is this still live", and a new terminal state breaks it quietly.
+
+### 15.3 The two chase dates
+
+**Files — `expires_on`.** The expiry printed ON a document (passport, visa,
+certificate), which cannot be derived from when somebody looked at it.
+`driver-validity.ts` already splits these exactly this way
+(`passport_check_date` vs `passport_expiry`, window = the earlier of the two),
+and Phase 6 will do the same: review due = `document_date` + the type's
+interval, capped by `expires_on`. **Both are inputs** — neither is a "valid
+until" a human computes (§1.3). A 30-day nudge fires once per document, to the
+admins rather than the person, since these are records the staff member cannot
+see. Changing the expiry clears the stamp: a renewed passport is a new document.
+
+**Tasks — `next_chase_date`, and Phase 3's chaser was wrong.** It nudged
+**once, ever**. That borrowed the `rtw_chased_at` rule, which is once-only
+because a return-to-work conversation is a *one-time event* — whereas a to-do
+is an open-ended commitment, and one nudge then eternal silence is precisely
+the evaporation §6 exists to prevent. Right rule, wrong shape.
+
+So: the pipeline model (`jobs.next_chase_date`, mig 004, re-armed by
+`auto-chase-runner.ts`). Fire, then push the date forward by the interval while
+the task stays open. Defaults: the **due date** if there is one, else **today +
+14 days** — and that second case is the one that matters, because a task with
+no deadline would otherwise never resurface. NULL means never nudge;
+finishing or dropping a task clears the date.
+
+Deliberately **not** copying `jobs.chase_interval_days`. A per-row interval is
+flexibility `jobs` earned over years; here one system setting plus an editable
+date already gives per-task control.
+
+### 15.4 On migration 234 bundling three things
+
+232's lesson was "one migration, one concern", and 234 touches files, tasks and
+reviews. The line is **"related to each other"**, not "in the same file": these
+are all staff-records tables plus `staff_employment`, nothing shared, nothing
+another feature can be taken down by. 232's failure was a *core* table —
+`audit_log` — where an unrelated constraint blocked an unrelated column.

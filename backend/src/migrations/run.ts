@@ -269,6 +269,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '231_staff_record_files.sql',
         '232_staff_key_data.sql',
         '233_staff_tasks.sql',
+        '234_staff_reviews_and_chases.sql',
       ];
 
       for (const migration of migrations) {

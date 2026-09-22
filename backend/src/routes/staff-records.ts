@@ -82,6 +82,9 @@ const updateFileSchema = z.object({
   // The document's own FROM date — signed / issued / checked. Spec §1.3:
   // never a "valid until", which Phase 6 derives from this instead.
   document_date: z.union([z.string().regex(DATE_RE), z.literal(''), z.null()]).optional(),
+  // The expiry printed ON the document. A different fact from document_date,
+  // and not derivable from it — see migration 234.
+  expires_on: z.union([z.string().regex(DATE_RE), z.literal(''), z.null()]).optional(),
 });
 
 interface FileRow {
@@ -94,13 +97,15 @@ interface FileRow {
   size_bytes: string | null;
   notes: string | null;
   document_date: string | null;
+  expires_on: string | null;
   uploaded_at: string;
   uploaded_by_name: string | null;
 }
 
 const SELECT_FILES = `
   SELECT f.id, f.label, f.doc_type, f.r2_key, f.filename, f.content_type,
-         f.size_bytes, f.notes, f.document_date::text AS document_date, f.uploaded_at,
+         f.size_bytes, f.notes, f.document_date::text AS document_date,
+         f.expires_on::text AS expires_on, f.uploaded_at,
          NULLIF(TRIM(COALESCE(up.preferred_name, up.first_name, '') || ' ' ||
                      COALESCE(up.last_name, '')), '') AS uploaded_by_name
     FROM staff_record_files f
@@ -163,9 +168,12 @@ router.post('/:personId/files', adminOnly, upload.single('file'), async (req: Au
     const label = String(req.body.label || '').trim() || req.file.originalname;
     const notes = String(req.body.notes || '').trim() || null;
     const documentDate = String(req.body.document_date || '').trim() || null;
-    if (documentDate && !/^\d{4}-\d{2}-\d{2}$/.test(documentDate)) {
-      res.status(400).json({ error: 'document_date must be YYYY-MM-DD' });
-      return;
+    const expiresOn = String(req.body.expires_on || '').trim() || null;
+    for (const [name, value] of [['document_date', documentDate], ['expires_on', expiresOn]] as const) {
+      if (value && !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+        res.status(400).json({ error: `${name} must be YYYY-MM-DD` });
+        return;
+      }
     }
 
     const ext = path.extname(req.file.originalname).toLowerCase();
@@ -180,11 +188,11 @@ router.post('/:personId/files', adminOnly, upload.single('file'), async (req: Au
     try {
       inserted = await query(
         `INSERT INTO staff_record_files
-           (person_id, label, doc_type, r2_key, filename, content_type, size_bytes, notes, document_date, uploaded_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::date, $10)
+           (person_id, label, doc_type, r2_key, filename, content_type, size_bytes, notes, document_date, expires_on, uploaded_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::date, $10::date, $11)
          RETURNING id`,
         [personId, label, docType, key, req.file.originalname,
-         req.file.mimetype || null, req.file.size, notes, documentDate, req.user!.id]
+         req.file.mimetype || null, req.file.size, notes, documentDate, expiresOn, req.user!.id]
       );
     } catch (dbErr) {
       // Don't leave an orphaned object holding someone's passport in a bucket
@@ -209,7 +217,7 @@ router.patch('/files/:id', adminOnly, validate(updateFileSchema), async (req: Au
       res.status(400).json({ error: 'id must be a UUID' });
       return;
     }
-    const { label, doc_type, notes, document_date } = req.body as z.infer<typeof updateFileSchema>;
+    const { label, doc_type, notes, document_date, expires_on } = req.body as z.infer<typeof updateFileSchema>;
 
     const sets: string[] = [];
     const params: unknown[] = [];
@@ -220,6 +228,12 @@ router.patch('/files/:id', adminOnly, validate(updateFileSchema), async (req: Au
     if (document_date !== undefined) {
       sets.push(`document_date = $${params.length + 1}::date`);
       params.push(document_date || null);
+    }
+    // A changed expiry is a fresh document, so it earns a fresh nudge.
+    if (expires_on !== undefined) {
+      sets.push(`expires_on = $${params.length + 1}::date`);
+      params.push(expires_on || null);
+      sets.push('expiry_chased_at = NULL');
     }
     if (!sets.length) {
       res.status(400).json({ error: 'No fields to update' });

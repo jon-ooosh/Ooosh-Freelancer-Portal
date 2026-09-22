@@ -46,6 +46,8 @@ export interface EmploymentInput {
   entitlementWeeks?: number | null;
   probationEndDate?: string | null;
   noticePeriodDays?: number | null;
+  /** Review cadence for this person; NULL inherits the company setting (§5.6). */
+  reviewIntervalMonths?: number | null;
   notes?: string | null;
   /** Personal fields that live on `people`, written in the same call. */
   preferredName?: string | null;
@@ -63,9 +65,9 @@ export async function upsertEmployment(personId: string, input: EmploymentInput,
     `INSERT INTO staff_employment
        (person_id, employment_status, start_date, end_date, job_title, department,
         bank_holiday_policy, entitlement_weeks, notes, created_by,
-        probation_end_date, notice_period_days)
+        probation_end_date, notice_period_days, review_interval_months)
      VALUES ($1, COALESCE($2,'employed'), $3::date, $4::date, $5, $6, $7, $8, $9, $10,
-             $11::date, $12)
+             $11::date, $12, $13)
      ON CONFLICT (person_id) DO UPDATE SET
        employment_status   = COALESCE(EXCLUDED.employment_status, staff_employment.employment_status),
        start_date          = EXCLUDED.start_date,
@@ -77,6 +79,7 @@ export async function upsertEmployment(personId: string, input: EmploymentInput,
        notes               = EXCLUDED.notes,
        probation_end_date  = EXCLUDED.probation_end_date,
        notice_period_days  = EXCLUDED.notice_period_days,
+       review_interval_months = EXCLUDED.review_interval_months,
        updated_at          = NOW()
      RETURNING *`,
     [
@@ -84,6 +87,7 @@ export async function upsertEmployment(personId: string, input: EmploymentInput,
       input.jobTitle ?? null, input.department ?? null, input.bankHolidayPolicy ?? null,
       input.entitlementWeeks ?? null, input.notes ?? null, userId,
       input.probationEndDate ?? null, input.noticePeriodDays ?? null,
+      input.reviewIntervalMonths ?? null,
     ]
   );
 
@@ -126,6 +130,9 @@ export async function getEmployeeRecord(personId: string) {
             p.emergency_contact_2_name, p.emergency_contact_2_phone, p.emergency_contact_2_relationship,
             p.rtw_checked_on::text AS rtw_checked_on, p.rtw_document_type,
             p.rtw_expires_on::text AS rtw_expires_on,
+            (SELECT MIN(sr.scheduled_for)::text FROM staff_reviews sr
+              WHERE sr.person_id = se.person_id AND sr.status IN ('proposed','confirmed')
+            ) AS next_review_scheduled,
             p.licence_number, p.licence_expiry::text AS licence_expiry,
             p.passport_expiry::text AS passport_expiry,
             (p.ni_number_encrypted IS NOT NULL) AS has_ni_number
@@ -151,8 +158,12 @@ export async function listEmployees() {
             (SELECT sh.effective_from::text FROM staff_salary_history sh
               WHERE sh.person_id = se.person_id
               ORDER BY sh.effective_from DESC, sh.created_at DESC LIMIT 1) AS salary_since,
+            -- Keyed on status, NOT on a null completed_at: a CANCELLED review
+            -- also has no completion date, so the old test showed a review
+            -- somebody called off as permanently upcoming (status: mig 234).
             (SELECT MIN(sr.scheduled_for)::text FROM staff_reviews sr
-              WHERE sr.person_id = se.person_id AND sr.completed_at IS NULL) AS next_review_due
+              WHERE sr.person_id = se.person_id
+                AND sr.status IN ('proposed','confirmed')) AS next_review_due
        FROM staff_employment se
        JOIN people p ON p.id = se.person_id
       WHERE p.is_deleted = false
@@ -440,43 +451,162 @@ export async function listSalaryHistory(personId: string) {
   return r.rows;
 }
 
+/**
+ * Create or amend a review. docs/STAFF-RECORDS-SPEC.md §5.
+ *
+ * TWO NOTES FIELDS, never one (spec §5.4):
+ *   shared_summary — the reviewee sees this; it is what the follow-up email
+ *                    contains anyway
+ *   private_notes  — admin only: observations, concerns not yet raised, pay
+ *                    reasoning
+ * A single field that is SOMETIMES shared is a leak waiting to happen, and
+ * knowing it might be read, the reviewer self-censors into uselessness.
+ *
+ * PAY IS NOT HELD HERE (spec §5.1). A review points at the
+ * staff_salary_history row it produced — see recordReviewOutcome. Deciding pay
+ * in the room is what stops the honest half of the conversation happening.
+ */
 export async function upsertReview(
   id: string | null,
   personId: string,
-  input: { reviewType?: string; scheduledFor: string; completedAt?: string | null; notes?: string | null; outcome?: string | null; nextReviewDue?: string | null },
+  input: {
+    reviewType?: string; scheduledFor: string; status?: string;
+    completedAt?: string | null; sharedSummary?: string | null;
+    privateNotes?: string | null; outcome?: string | null; nextReviewDue?: string | null;
+  },
   userId: string
 ) {
   if (!DATE_RE.test(input.scheduledFor)) throw new Error('scheduledFor must be YYYY-MM-DD');
-  if (id) {
-    const r = await query(
-      `UPDATE staff_reviews
-          SET review_type = COALESCE($3, review_type),
-              scheduled_for = $4::date,
-              completed_at = $5,
-              notes = $6, outcome = $7,
-              next_review_due = $8::date,
-              updated_at = NOW()
-        WHERE id = $1 AND person_id = $2
-        RETURNING *`,
-      [id, personId, input.reviewType ?? null, input.scheduledFor, input.completedAt ?? null,
-       input.notes ?? null, input.outcome ?? null, input.nextReviewDue ?? null]
-    );
-    return r.rows[0] ?? null;
+  if (input.nextReviewDue && !DATE_RE.test(input.nextReviewDue)) {
+    throw new Error('nextReviewDue must be YYYY-MM-DD');
   }
+
+  const row = id
+    ? (await query(
+        `UPDATE staff_reviews
+            SET review_type = COALESCE($3, review_type),
+                scheduled_for = $4::date,
+                status = COALESCE($5, status),
+                completed_at = $6,
+                shared_summary = $7, private_notes = $8, outcome = $9,
+                next_review_due = $10::date,
+                updated_at = NOW()
+          WHERE id = $1 AND person_id = $2
+          RETURNING *`,
+        [id, personId, input.reviewType ?? null, input.scheduledFor, input.status ?? null,
+         input.completedAt ?? null, input.sharedSummary ?? null, input.privateNotes ?? null,
+         input.outcome ?? null, input.nextReviewDue ?? null]
+      )).rows[0] ?? null
+    : (await query(
+        `INSERT INTO staff_reviews
+           (person_id, review_type, scheduled_for, status, completed_at,
+            shared_summary, private_notes, outcome, next_review_due, created_by)
+         VALUES ($1, COALESCE($2,'annual'), $3::date, COALESCE($4,'proposed'), $5,
+                 $6, $7, $8, $9::date, $10)
+         RETURNING *`,
+        [personId, input.reviewType ?? null, input.scheduledFor, input.status ?? null,
+         input.completedAt ?? null, input.sharedSummary ?? null, input.privateNotes ?? null,
+         input.outcome ?? null, input.nextReviewDue ?? null, userId]
+      )).rows[0];
+
+  if (!row) return null;
+
+  // Booking or finishing a review answers the "this is due" reminder, so the
+  // stamp clears and the NEXT cycle can chase again. Without this the nudge
+  // fires once per person ever.
+  await query(
+    'UPDATE staff_employment SET review_due_chased_at = NULL WHERE person_id = $1',
+    [personId]
+  );
+
+  return row;
+}
+
+/**
+ * Complete a review: stamp it, set when the next one falls due, and — if a pay
+ * rise came out of it — write the salary row and link the two.
+ *
+ * `next_review_due` is DERIVED from the person's own cadence
+ * (staff_employment.review_interval_months, falling back to the company
+ * setting) rather than typed, so "annual for most, six-monthly for a new
+ * starter" needs no thought at the point of completing.
+ *
+ * The salary row is append-only and already THE record of what somebody is on
+ * (mig 206). This adds the link back, so "what did this review actually lead
+ * to" is answerable — and so the follow-up email has the figure to quote.
+ */
+export async function recordReviewOutcome(
+  reviewId: string,
+  personId: string,
+  input: {
+    sharedSummary?: string | null; privateNotes?: string | null; outcome?: string | null;
+    newSalary?: number | null; salaryEffectiveFrom?: string | null; salaryReason?: string | null;
+  },
+  userId: string
+) {
+  const emp = await query(
+    'SELECT review_interval_months FROM staff_employment WHERE person_id = $1',
+    [personId]
+  );
+  let months = emp.rows[0]?.review_interval_months as number | null | undefined;
+  if (months == null) {
+    const { getReviewIntervalMonths } = await import('./staff-settings');
+    months = await getReviewIntervalMonths();
+  }
+
+  let salaryId: string | null = null;
+  if (input.newSalary != null) {
+    if (!(input.newSalary >= 0)) throw new Error('A salary cannot be negative');
+    const effective = input.salaryEffectiveFrom || new Date().toISOString().slice(0, 10);
+    if (!DATE_RE.test(effective)) throw new Error('salaryEffectiveFrom must be YYYY-MM-DD');
+    const sal = await query(
+      `INSERT INTO staff_salary_history (person_id, annual_amount, effective_from, reason, created_by)
+       VALUES ($1, $2, $3::date, $4, $5) RETURNING id`,
+      [personId, input.newSalary, effective,
+       input.salaryReason?.trim() || 'Agreed at review', userId]
+    );
+    salaryId = sal.rows[0].id;
+  }
+
   const r = await query(
-    `INSERT INTO staff_reviews (person_id, review_type, scheduled_for, completed_at, notes, outcome, next_review_due, created_by)
-     VALUES ($1, COALESCE($2,'annual'), $3::date, $4, $5, $6, $7::date, $8)
-     RETURNING *`,
-    [personId, input.reviewType ?? null, input.scheduledFor, input.completedAt ?? null,
-     input.notes ?? null, input.outcome ?? null, input.nextReviewDue ?? null, userId]
+    `UPDATE staff_reviews
+        SET status = 'completed',
+            completed_at = COALESCE(completed_at, NOW()),
+            shared_summary = COALESCE($3, shared_summary),
+            private_notes  = COALESCE($4, private_notes),
+            outcome        = COALESCE($5, outcome),
+            salary_history_id = COALESCE($6, salary_history_id),
+            next_review_due = (CURRENT_DATE + ($7 || ' months')::interval)::date,
+            updated_at = NOW()
+      WHERE id = $1 AND person_id = $2
+      RETURNING *`,
+    [reviewId, personId, input.sharedSummary ?? null, input.privateNotes ?? null,
+     input.outcome ?? null, salaryId, String(months)]
+  );
+  if (!r.rows.length) throw new Error('Review not found');
+
+  await query(
+    'UPDATE staff_employment SET review_due_chased_at = NULL WHERE person_id = $1',
+    [personId]
   );
   return r.rows[0];
 }
 
-export async function listReviews(personId: string) {
+/**
+ * Reviews for one person.
+ *
+ * `includePrivate` is the §5.4 split made real: the admin surface passes true,
+ * and anything staff-facing passes false so private_notes never leaves the
+ * server. Defaulting to FALSE is deliberate — a new caller that forgets to
+ * think about it gets the safe answer.
+ */
+export async function listReviews(personId: string, includePrivate = false) {
   const r = await query(
-    `SELECT id, review_type, scheduled_for::text AS scheduled_for, completed_at,
-            notes, outcome, next_review_due::text AS next_review_due, created_at
+    `SELECT id, review_type, scheduled_for::text AS scheduled_for, status,
+            completed_at, shared_summary,
+            ${includePrivate ? 'private_notes,' : 'NULL::text AS private_notes,'}
+            outcome, next_review_due::text AS next_review_due,
+            salary_history_id, created_at
        FROM staff_reviews
       WHERE person_id = $1
       ORDER BY scheduled_for DESC`,
