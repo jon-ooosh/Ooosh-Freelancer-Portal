@@ -198,16 +198,71 @@ Flow, optimised for someone standing at a counter with a customer waiting:
 2. **Basket** — qty adjustable, price editable by `MANAGER_ROLES` only (and never above
    `MAX_DISCOUNT`'s implied floor).
 3. **Route** — default "Shop (walk-in)". If the till is opened from a job, or a band is in a
-   rehearsal room, offer that job instead (§5).
+   rehearsal room, offer that job instead (§5). **The route stays editable for the whole life
+   of the basket** — see §4.1; the customer changing their mind is the normal case, not an
+   exception.
 4. **Tender** — `getHHBankId()` keys: Worldpay / AmEx / Cash / Stripe / PayPal / bank transfer,
    or **Invoice later** (only enabled when routed to a job — see §9).
 5. **Save** — writes `shop_sales` + lines in one transaction, returns instantly. Push is
    queued (§7). The customer walks away; nothing waits on HireHop.
 6. **Receipt** — optional, emailed via `email-service.ts`. Nobody wants one for a can of Coke.
+   See §4.2 for how the address is found.
 
 **Consumption** is a separate, deliberately different-looking action ("Used for Ooosh") — no
 tender, no basket total, but a **required reason** and a suggested job link that goes into the
 `details` string ("Snare re-head — prepping job 16412 — Dave").
+
+### 4.1 Changing the route mid-transaction
+
+The common real-world shape: five items rung up, then *"oh — I'm with the band picking up a
+van shortly, can this go on that invoice?"*, or *"I'm rehearsing upstairs, add it to that"*.
+This is a **change of state**, and it needs to be cheap, because it happens constantly.
+
+Which of the three is happening depends only on how far the transaction has got:
+
+| State | What's happened | Handling |
+|---|---|---|
+| **Basket, not yet saved** | Nothing anywhere | Change the route dropdown. That's it. |
+| **Saved, not yet drained** (Window A, §8) | Row in Postgres only | **"Change route"** = cancel the original + clone its lines into a new sale on the new route. One button. |
+| **Drained** (Window B, §8) | Line + deposit live in HH and Xero | Reverse (§8) and re-ring. |
+
+**Almost everything lands in the first row.** The "oh, actually" conversation happens at the
+counter, before anyone has tapped a card — so keeping the route editable right up to payment
+is the whole fix, and it is a dropdown, not a feature.
+
+**Never make the operator retype a five-item basket.** Row two is "clone with a different
+route", not "abandon and start again" — retyping is slow in front of a customer and invites
+a half-entered second attempt.
+
+**The till must never offer "delete".** Only *cancel* (Window A) or *reverse* (Window B).
+A sale deleted by hand in HireHop after it has drained is exactly the untracked drift this
+module exists to eliminate — soft-cancel, don't delete (house rule).
+
+**Not built in v1: moving a *drained* sale between jobs.** Note for later that the mechanism
+already exists and is proven — `reverseDepositOnHH()` + `pushDepositToHH()` on the target job
+with the same `bankId` is precisely the combine-bookings deposit move (out-leg / in-leg,
+net cash zero, a clean Xero wash). So this is a known upgrade path, not a dead end. It is
+excluded from v1 only because the basket-stage fix above should make it rare.
+
+**One trap in this flow:** a route change that also flips the tender to **Invoice later** is
+only legal once the sale is attached to a real job (§9). A walk-in cannot be moved to
+"invoice later" while still routed at the shop job — the till must re-validate the tender
+whenever the route changes, not just on first selection.
+
+### 4.2 Finding the receipt address
+
+Same pattern as remittance advice in Costs and the "things arrived" notifier — don't invent
+a third way to pick a recipient:
+
+- **Routed to a job** → offer that job's contacts via `services/job-contact-candidates.ts`
+  (THE definition of "who could we contact on this job"), rendered through `displayName.ts`.
+- **Walk-in, known person** → people search (`routes/search.ts`), pre-filling their email.
+- **Walk-in, unknown** → free-text email, or no receipt at all.
+
+**Do not auto-create a `people` row for a walk-in.** People are the platform's primary
+entity; a row per Coke buyer pollutes the table that everything else hangs off, and creates
+duplicate-merge work later. Link to a person only when they already exist. `shop_sales`
+carries `sold_to_person_id` as **nullable on purpose**.
 
 ---
 
@@ -215,6 +270,11 @@ tender, no basket total, but a **required reason** and a suggested job link that
 
 Anticipated in `REHEARSALS-SPEC.md` §16 and §1 ("Shop / ad-hoc sales by sitters — deferred").
 This spec supersedes that deferral.
+
+**Mobile-first, not mobile-tolerated.** ~99% of sitter use is one-handed on a phone, in a
+corridor, mid-conversation with a band member — matching the rest of the freelancer portal
+(see the `frontend.md` rule). Big tap targets, a single-column basket, a numeric keypad for
+qty, and no horizontal scrolling. The staff till can be desk-shaped; this one cannot.
 
 Same components, cut down:
 
@@ -415,6 +475,23 @@ Add a sanity scanner (the existing every-15-min slot) for: a sale queued > 30 mi
 that doesn't balance, a failed push. Gate any new scheduled task on the lost/cancelled +
 `keep_after_close` rule and the `is_internal` rule per `jobs-pipeline-dashboard.md`.
 
+### 12.1 Where alerts land — no new surfaces
+
+Deliberately nothing new to go and look at. Everything routes to a place someone already
+reads every morning:
+
+| Signal | Home | Why there |
+|---|---|---|
+| Sitter sales needing review | Dashboard **secondary row**, beside "Recharges to Resolve" | Already THE zone for "money things needing a human" (`REHEARSALS-SPEC.md` §7) |
+| Last night's takings in context | The **shift handover thread** (`interactions` anchored to the shift) | Staff read the handover in the morning anyway; the sale list belongs with the lock-up notes it reconciles against |
+| Shop job doesn't balance / push failed | `notifications`, with escalation | The existing alarm path — this is a real fault, not a chore |
+| The week's detail | Shop tab under **Money** | A tab on an existing page, not a new page |
+
+The split matters: the *handover thread* is where the sitter's evening is narrated, and the
+*dashboard row* is where staff pick up work. Putting the review queue only in the thread
+would bury it; putting the narrative only on the dashboard would strip its context. Both,
+each carrying what it's good at.
+
 ---
 
 ## 13. RBAC
@@ -440,7 +517,11 @@ Frontend: `hasManagerRole()` / `roleAllowed()` from `lib/roles.ts`, never bare
 
 1. **Verify the two unknowns in §18 against a scratch job.** Nothing else starts first.
 2. Migration + `shop_stock_cache` + the catalogue refresher. Ship this alone — price lookup
-   is independently useful and risk-free (read-only).
+   is independently useful and risk-free (read-only). **Note what this step is not:** the
+   mirror is stock and prices only. The running tally that ends the "where's the missing £24"
+   drift is the `shop_sales` ledger plus the balance invariant (§9) — steps 4, 6 and 9. And
+   it only ever covers sales made *through OP*; it prevents future drift, it does not find
+   historic drift in the existing weekly jobs.
 3. Sitter price lookup in the freelancer portal. Smallest thing that removes a daily pain.
 4. `shop_sales` model + staff till UI, saving to Postgres only. No HireHop writes yet.
 5. The queue + drain: consumption via `tally_save` first (one call, no money, reversible).
@@ -510,6 +591,16 @@ Frontend: `hasManagerRole()` / `roleAllowed()` from `lib/roles.ts`, never bare
 
 ## 18. Verify before writing push code
 
+**Method: watch HireHop do it.** Cheapest and most definitive — perform the action in
+HireHop's own UI with the browser Network tab open and capture the request it sends. That is
+ground truth for the payload shape, in a way that guessing from the API docs is not (it is
+how the HH unknowns on previous modules were settled). Then one throwaway probe script under
+`backend/src/scripts/` confirms our broker + credentials can reproduce the same call — the
+UI capture proves the *shape*, the probe proves *our* auth path.
+
+Do it against a scratch job, clearly named (e.g. "ZZZ TEST — OP shop sales, do not invoice")
+and flagged `is_internal` in OP so it doesn't leak into the pipeline or trigger a chaser.
+
 Two unknowns, both capable of changing the design, both cheap to settle against a scratch
 job and a cheap item:
 
@@ -523,7 +614,20 @@ job and a cheap item:
    live job. Confirm on a scratch job before a line of push code is written — this is the
    carnet stock-namespace lesson (`REHEARSALS-SPEC.md` §2: never match on `LIST_ID` alone).
 
-A third, lower-risk: confirm whether a tally adjustment can carry a job reference. The
+3. **How a sale line is REMOVED from a job.** Needed for Window B reversals (§8) and for the
+   future drained-sale move (§4.1). Not documented anywhere we have; capture it by deleting
+   the test line in the HH UI.
+4. **Does adding a consumable to a job move the shelf count on its own?** Free to observe
+   while doing (2) — note the count before and after. This is the direct empirical test of
+   the double-decrement trap (§2). If the count *doesn't* move, the whole sale model changes
+   and a tally adjustment becomes mandatory alongside every sale line, so this is not a
+   formality.
+
+A fifth, lower-risk: confirm whether a tally adjustment can carry a job reference. The
 `tally_save.php` *response* exposes `JOB` and `REPAIR` on an adjustment, but the documented
 *send* parameters don't include them. If it can't, the job reference goes in the `details`
 string and that's fine.
+
+**`MAX_DISCOUNT` audit (§17).** Believed to be 100 on everything, but confirm it rather than
+assume — it costs one query once the mirror lands, and if any item is below 100 then today's
+100%-discount workaround has been silently failing and those shelf counts are already wrong.
