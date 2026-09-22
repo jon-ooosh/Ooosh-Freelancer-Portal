@@ -266,6 +266,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '228_freelancer_day_amend.sql',
         '229_cost_credits.sql',
         '230_freelancer_links.sql',
+        '231_staff_record_files.sql',
       ];
 
       for (const migration of migrations) {

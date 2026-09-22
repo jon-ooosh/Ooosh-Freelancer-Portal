@@ -124,9 +124,17 @@ somewhere the rules don't cover.
 
 `docs/*-SPEC.md` are the hand-written per-feature specs; several rules point at them.
 
-**Not yet built:** `docs/STAFF-RECORDS-SPEC.md` — private staff files and key data
-(admin-only, some encrypted), document review cycles, and periodic staff reviews. Its
-§1 lists what already exists and must not be rebuilt; read that before designing.
+**Part built:** `docs/STAFF-RECORDS-SPEC.md` — private staff files and key data
+(admin-only, some encrypted), document review cycles, periodic staff reviews, and the
+`staff_tasks` / "My To Do" surface their actions land on. **Phase 1 (files) shipped
+Sep 2026**; phases 2–7 are not built. Its §1 lists what already exists and must not be
+rebuilt — including the DVLA check, where the obvious reuse is a trap — and §8 is the
+agreed build order with the shipped phases marked. Read both before designing.
+
+**`staff_record_files` objects live under the `staff-records/` R2 prefix, and that
+prefix is the ONLY one `GET /api/files/download` role-gates.** Every other prefix it
+serves is readable by any authenticated caller, freelancers included. Never file
+anything private under `files/`.
 
 ---
 

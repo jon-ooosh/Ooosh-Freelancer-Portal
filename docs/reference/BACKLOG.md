@@ -43,7 +43,7 @@ Future enhancements. Nothing here is committed work; treat as a menu, not a queu
 
 - **Tie a yard-day invoice to its booking, so expected vs charged is a JOIN rather than an eyeball (jon, 21 Sep 2026)** — freelancers are asked to reference the job number on invoices so OP can reconcile expected vs paid. Yard days have no job number, and jon asked whether we could ask for the DATE as the reference instead. **Pushback, and a better shape:** a free-text reference typed by somebody outside the company is the least reliable key available — date formats vary (8/10/26 vs 08-10-2026 vs "Thurs 8th"), years get mistyped, and one invoice often covers several days. It gives a human something to squint at; it gives the system nothing to join on. The date is worth asking for as a *hint*, not as the mechanism. **What actually exists today:** `freelancer_day_bookings` already carries `expected_total`, `invoice_amount`, `invoice_received` and `invoice_queried`, and the staff calendar flags a mismatch the moment you record the figure (`getSpendSummary` counts both `awaiting_invoice` and `queried`). So "are we being billed the right amount for yard work" is ALREADY answerable — it is just answered in a different place from where the bill lives. **The real gap:** `costs` has `job_id`, `vehicle_id` and `quote_assignment_id`, but nothing pointing at a yard day. Proposal: add `freelancer_day_booking_id` to `costs` (and `cost_allocations`, which already has the shape for splitting one invoice across several days), so capturing the cost can show expected vs charged at the point of capture and the calendar's invoice fields stop being a parallel universe. **Caveat worth knowing before starting:** `quote_assignment_id` exists but has NO picker in the UI — it is only ever set programmatically — so this would be the first real "link this cost to a person's work" control, which is more than a column. Touches the Costs module and its rules file.
 
-- **A private staff area, document review cycles, and staff reviews (jon, Sep 2026)** — now has its own spec: `docs/STAFF-RECORDS-SPEC.md`. Files and key data held ABOUT staff (passports, contracts, NI numbers, medical notes), admin-only, some encrypted; a general document review-cycle system behind "a new DVLA check code every year"; and periodic staff reviews with a propose/counter scheduling exchange. **Read §1 of that spec before starting** — licence, DVLA check code and passport ALREADY exist on `drivers` (linked by `person_id`) with derived expiry windows, so the biggest risk is building a second, drifting copy of data that is already there.
+- **A private staff area, document review cycles, and staff reviews (jon, Sep 2026)** — now has its own spec: `docs/STAFF-RECORDS-SPEC.md`. Files and key data held ABOUT staff (passports, contracts, NI numbers, medical notes), admin-only, some encrypted; a general document review-cycle system behind "a new DVLA check code every year"; and periodic staff reviews, whose agreed actions land on a general `staff_tasks` table surfaced as a "My To Do" tab. **Read §1 and §8 of that spec before starting.** Licence, DVLA check code and passport already exist on `drivers` (linked by `person_id`) with derived expiry windows — AND a second copy exists on `people` (migration 184), so the biggest risk is adding a third. Note §1.2: the driver DVLA window is 30 days for hire insurability, NOT the 12-month employer check jon asked for, and `licence_next_check_due` is a legacy Monday column, so "it's already built" is wrong. The spec was revised 21 Sep 2026 after a verification pass; §11 records what changed.
 
 - **Sickness retention: keep one year, then auto-delete (jon, 21 Sep 2026 — §17 item 9 DECIDED)** — nothing expires absence records today. The decision is one year. The build is not a plain DELETE: `staff_absences` drives ledger entries (holiday reclaim, unpaid-leave days on the payroll report) and those effects must survive, so what expires is the MEDICAL detail — the absence type, the notes, the return-to-work record — not the fact that somebody was off. Suggested shape: a daily sweep that nulls the special-category columns on spells whose end date is over a year old and stamps `detail_purged_at`, leaving the day rows and their ledger effects intact; the reporting queries already read days rather than reasons. Feeds the open GDPR retention item in `ROADMAP.md`. Needs a migration and a scheduler entry.
 
@@ -249,6 +249,33 @@ Future enhancements. Nothing here is committed work; treat as a menu, not a queu
 See docs/SPEC.md for full phased plan.
 
 ## Staff Calendar & Time
+
+- **A single place for a person's licence, DVLA check and passport** — the same
+  duplication as the freelancer-rates item below, on data that gates dispatch.
+  It lives in TWO places today: `drivers` (`licence_number`, `dvla_check_date`,
+  `dvla_valid_until`, `passport_check_date`, `passport_valid_until`, …) and
+  `people` (`licence_number`, `licence_expiry`, `licence_passed_date`,
+  `dvla_check_date`, `passport_expiry`, `pli_expiry` — added by migration
+  `184_freelancer_onboarding.sql:60-66` for the freelancer onboarding flow).
+  Nothing keeps the two in step.
+
+  `services/driver-validity.ts` is THE definition for the `drivers` family and
+  must stay so — this is about retiring or syncing the `people` copy, not
+  writing a third rule. Surfaced while specifying the staff records module
+  (`docs/STAFF-RECORDS-SPEC.md` §1.1), which deliberately owns NO licence
+  columns of its own so it does not make the problem three-way. That keeps the
+  staff module clean but does not fix this; worth doing before anything else
+  reads licence data.
+
+- **A general "things that need doing" module** — jon, Sep 2026: non-hire-related
+  tasks that today live in his head. Not built, and deliberately not built as
+  part of the staff records module — but that module's `staff_tasks` table
+  (`docs/STAFF-RECORDS-SPEC.md` §6) is designed as the general shape rather
+  than a review-specific one, with `source_type` / `source_id` as the hook and
+  a "My To Do" tab on `MePage`. A review action is `('staff_review', <id>)`;
+  a manual task is `('manual', NULL)` and needs no schema change. So the
+  starting point exists once Phase 3 of that module lands — what is missing is
+  creation from other surfaces, cross-role assignment and entity links.
 
 - **A single place for freelancer rates** — jon, Sep 2026: "could we align our
   freelancer rates somewhere? Note this would actually be across all freelancer
