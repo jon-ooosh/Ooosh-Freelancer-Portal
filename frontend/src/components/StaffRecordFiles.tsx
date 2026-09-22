@@ -67,6 +67,10 @@ export default function StaffRecordFiles({ personId, personName, onError }: {
 }) {
   const [files, setFiles] = useState<StaffRecordFile[]>([]);
   const [loading, setLoading] = useState(true);
+  // A failed load and an empty list are NOT the same thing. Without this the
+  // component renders "No files yet." over a 500, which is exactly how three
+  // failing requests looked calm on screen the day this shipped.
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
 
@@ -79,11 +83,14 @@ export default function StaffRecordFiles({ personId, personName, onError }: {
   const [documentDate, setDocumentDate] = useState('');
 
   const load = useCallback(async () => {
+    setLoadError(null);
     try {
       const res = await api.get<{ data: StaffRecordFile[] }>(`/staff-records/${personId}/files`);
       setFiles(res.data);
     } catch (err) {
-      onError(err instanceof Error ? err.message : 'Failed to load files');
+      const msg = err instanceof Error ? err.message : 'Failed to load files';
+      setLoadError(msg);
+      onError(msg);
     } finally {
       setLoading(false);
     }
@@ -160,6 +167,10 @@ export default function StaffRecordFiles({ personId, personName, onError }: {
 
       {loading ? (
         <p className="text-sm text-gray-500">Loading…</p>
+      ) : loadError ? (
+        <p className="text-sm text-red-700 mb-3 rounded border border-red-200 bg-red-50 px-3 py-2">
+          Couldn’t load these files — {loadError}
+        </p>
       ) : files.length === 0 ? (
         <p className="text-sm text-gray-400 mb-3">No files yet.</p>
       ) : (

@@ -126,8 +126,8 @@ somewhere the rules don't cover.
 
 **Part built:** `docs/STAFF-RECORDS-SPEC.md` — private staff files and key data
 (admin-only, some encrypted), document review cycles, periodic staff reviews, and the
-`staff_tasks` / "My To Do" surface their actions land on. **Phases 1–2 (files, key data)
-shipped Sep 2026**; phases 3–7 are not built. Its §1 lists what already exists and must not be
+`staff_tasks` / "My To Do" surface their actions land on. **Phases 1–3 (files, key data,
+`staff_tasks` + My To Do) shipped Sep 2026**; phases 4–7 are not built. Its §1 lists what already exists and must not be
 rebuilt — including the DVLA check, where the obvious reuse is a trap — and §8 is the
 agreed build order with the shipped phases marked. Read both before designing.
 
@@ -182,6 +182,7 @@ existing definition:
 | Bank holiday or company day? | `frontend/src/lib/companyCalendar.ts` |
 | Verifying an API key | `middleware/api-key.ts` |
 | What must never leave a general `people` response? | `services/people-private-fields.ts` |
+| Does this person own this task? | `services/staff-tasks.ts` `assertCanTouch()` |
 
 Frontend display helpers with the same status: `lib/roles.ts`, `lib/driverStatus.ts`,
 `lib/jobOrgName.ts`, `lib/vehiclePrep.ts`, `lib/preauth.ts`, `lib/revisitDate.ts`,
@@ -270,7 +271,7 @@ chase alerts 08:10 · auto-chase runner 08:10 · lock-up chaser 08:45 · staff t
 08:45 · return-to-work chase 08:50 · stale-enquiry
 auto-lose 09:00 · freelancer offer chase 09:05 · carnet forms 09:15 · referral safety-net 09:18 · storage reminders
 09:20 · holding reminders 09:25 · close-out chase 09:30 · staff documents 09:35 ·
-pre-auth expiry 09:40 · Stripe pre-auth discovery 09:50 · year-end cash-out reminder
+pre-auth expiry 09:40 · to-do chase 09:45 · Stripe pre-auth discovery 09:50 · year-end cash-out reminder
 09:55 (December + January) · company-days prompt 09:58 (November) · OOH reminders 10:00 ·
 HireHop sync every 30 min · sanity scanners every 15 min · notification escalation
 every 15 min · Gmail ingestion every 10 min.

@@ -58,6 +58,7 @@ export default function StaffKeyData({ personId, personName, onSaved, onError }:
 }) {
   const [rec, setRec] = useState<EmployeeRecord | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [editing, setEditing] = useState(false);
 
@@ -75,10 +76,16 @@ export default function StaffKeyData({ personId, personName, onSaved, onError }:
       setDocType(res.data.rtw_document_type ?? '');
       setCheckedOn(res.data.rtw_checked_on ?? '');
       setExpiresOn(res.data.rtw_expires_on ?? '');
-    } catch {
-      // A person with no employment record 404s here. That is not an error
-      // worth shouting about — the Employment panel already says as much.
+    } catch (err) {
+      // A person with no employment record 404s here, and that IS fine — the
+      // Employment panel already says so. Anything else is a real failure and
+      // must not masquerade as "not an employee": treating every error as a
+      // 404 is how a broken endpoint renders as a blank space.
+      const msg = err instanceof Error ? err.message : '';
       setRec(null);
+      if (!/no employment record/i.test(msg)) {
+        setLoadError(msg || 'Could not load key data');
+      }
     } finally {
       setLoading(false);
     }
@@ -139,6 +146,14 @@ export default function StaffKeyData({ personId, personName, onSaved, onError }:
   }
 
   if (loading) return <div><h3 className="text-sm font-medium text-gray-900 mb-1">Key data</h3><p className="text-sm text-gray-500">Loading…</p></div>;
+  if (loadError) return (
+    <div>
+      <h3 className="text-sm font-medium text-gray-900 mb-1">Key data</h3>
+      <p className="text-sm text-red-700 rounded border border-red-200 bg-red-50 px-3 py-2">
+        Couldn’t load key data — {loadError}
+      </p>
+    </div>
+  );
   if (!rec) return null;
 
   const emergency = [

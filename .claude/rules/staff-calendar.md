@@ -443,3 +443,34 @@ number itself leaves the server through exactly one route
 (`GET /staff-calendar/employees/:personId/ni-number`), which writes an
 `audit_log` row with action `read` on every call. Every other read returns
 `has_ni_number` as a boolean.
+
+## Never restore a CHECK constraint on `audit_log.action`
+
+Migration `032_fix_audit_log_action_constraint` **deliberately dropped** the
+original `create | update | delete` CHECK and widened the column to VARCHAR(50),
+because the platform writes `resolve_referral`, `merge`, `mark_washed`,
+`override_document_gate`, `correct_mileage` and more — several from call sites
+that INSERT into `audit_log` directly rather than through `logAudit()`.
+
+Migration 232 tried to re-impose a four-value CHECK as a side effect of an
+unrelated feature. Postgres refused it (`is violated by some row`), which was
+the correct outcome — had those rows not existed it would have succeeded and
+begun rejecting live writes. The whole migration rolled back and took an
+unrelated column with it, breaking a shipped feature. See
+`docs/STAFF-RECORDS-SPEC.md` §13.6.
+
+Two rules from it:
+- **`action` is open free text.** Add a value by using it; `logAudit`'s union
+  type is a hint, not the set.
+- **One migration, one concern.** A feature's schema change must never share a
+  transaction with an unrelated change to a core table, or one blocks the other.
+
+## A failed load must never render as an empty one
+
+`StaffRecordFiles` showed "No files yet." when its fetch 500'd, and
+`StaffKeyData` rendered nothing at all — indistinguishable from "this person
+isn't an employee". Three failing requests looked calm on screen for a whole
+testing round because of it.
+
+Any component that fetches needs three states, not two: loading, failed, and
+genuinely empty. Track the error separately from the data and say which it is.
