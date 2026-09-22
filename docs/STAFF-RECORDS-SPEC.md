@@ -385,7 +385,7 @@ rather than assuming.
 |---|---|---|
 | 0 | **This document** | The next session doesn't re-derive any of it |
 | 1 | ~~**Files + admin gate**~~ — **SHIPPED Sep 2026.** Migration 231, `routes/staff-records.ts`, `components/StaffRecordFiles.tsx` on the expandable staff row. See §12 | jon starts emptying the zip folder the day it deploys |
-| 2 | **Key data** (§3.2) — NI encrypted, right-to-work, contract + signed date. **Not medical notes** | The rest of the folder |
+| 2 | ~~**Key data**~~ — **SHIPPED Sep 2026.** Migration 232, `updateKeyData()`/`revealNiNumber()`, `components/StaffKeyData.tsx`. Medical notes still held back. See §13 | The rest of the folder |
 | 3 | **`staff_tasks` + My To Do tab** (§6) — including a plain "add a task" form, plus the daily chaser | Useful as a general to-do immediately, before reviews exist |
 | 4 | **Review record + cycle** (§5.1, §5.2, §5.4, §5.6) — split notes, per-person interval, "review due" reminder, salary link, admin UI | The full loop minus staff-facing bits; actions write `staff_tasks` rows |
 | 5 | **Staff-facing exchange** (§5.3, §5.5) — confirmation carrying prep questions, their answers, the follow-up email | The staff half |
@@ -546,3 +546,113 @@ Two Me-page tidy-ups jon asked for alongside it, both small:
 Pronouns sits next to "known as" in the admin form and is the same kind of fact,
 but it is not in the auth payload, so self-service would mean touching four more
 SELECTs. Left alone deliberately — worth doing next time Profile is open.
+
+---
+
+## 13. Phase 2 build log — key data (Sep 2026)
+
+Shipped. **Almost no new schema was needed**, which was the surprise: migration
+206 had already added every column §3.2 asked for. What was missing was a way to
+write them, a place to see them, and — found on the way — a guard stopping them
+reaching the whole team.
+
+Already present, and deliberately NOT re-added: `ni_number_encrypted`,
+`rtw_checked_on`, `rtw_document_type`, `rtw_expires_on`, `rtw_checked_by` (all
+on `people`, mig 206), and `emergency_contact_*` (mig 001 + 206). A copy on
+`staff_employment` would have been the §1.1 licence mistake for a second time.
+
+### 13.1 The leak — private columns on a table the whole team reads
+
+`routes/people.ts` is gated on `STAFF_ROLES`, and **both** its read endpoints
+select `p.*`:
+
+- `GET /api/people` — the list
+- `GET /api/people/:id` — the detail
+
+So every private column migration 206 added was being served to every staff
+member, general assistant and weekend manager who opened any person record:
+`rtw_document_type` ("Biometric residence permit" — that is a colleague's
+immigration status), `rtw_expires_on`, and the NI ciphertext.
+
+The NI number itself was safe — it is encrypted, and 206 was right to encrypt
+it. But the ciphertext still left the server, sat in every browser's network
+tab, and announced who we hold an NI number for.
+
+**This is the same shape as the Phase 1 finding** (§12.1): data placed
+thoughtfully, gated somewhere else, and the gate was wrong. Two for two. Worth
+assuming it is the rule rather than the exception — when a column is sensitive,
+check what already selects `*` from its table before trusting where it sits.
+
+**The fix** is `services/people-private-fields.ts`: one exported list, and both
+GETs run their rows through it. A redact rather than an explicit column list
+because `people` has dozens of columns and the frontend reads a moving subset —
+enumerating the safe ones breaks a page every time somebody adds a field, while
+stripping a short list of unsafe ones fails in the safe direction. Covered by
+`__tests__/people-private-fields.test.ts`, which exists to fail loudly if the
+list is ever shortened.
+
+Verified nothing depended on the leak: no frontend file referenced any of the
+five. The only other wildcard reads of `people` (`duplicates.ts`,
+`data-cleanup.ts`) use the rows server-side and return names and ids only.
+
+### 13.2 The NI number: write freely, read deliberately
+
+206's note said "never plaintext, never in a list view, never in an export", and
+`getEmployeeRecord` already honoured it by returning `has_ni_number` as a
+boolean rather than the value. That is kept.
+
+But jon needs to *read* it for payroll, or he is back in his inbox. So the
+number leaves the server through exactly one route —
+`GET /staff-calendar/employees/:personId/ni-number` — and every call writes an
+`audit_log` row. The UI renders a "Show" button, not a pre-filled field.
+
+That needed migration 232 to widen the `audit_log` action CHECK, which allowed
+only `create | update | delete`. A trail of writes with no record of reads would
+have missed the one operation here most worth recording. `'read'` is for
+deliberate reveals of sensitive data, not ordinary page views — those would
+drown the table.
+
+The write path (`updateKeyData`) is a **separate endpoint** from the employment
+save, so a routine edit to somebody's job title cannot blank their NI number,
+and the encrypted write has one audited home. It refuses with a 503 before
+writing anything if `ENCRYPTION_KEY` is absent — a half-saved right-to-work
+check with a silently dropped NI would be worse than an error.
+
+NI format is **validated and rejected** on entry (`QQ123456C`), which is a
+departure from CLAUDE.md's "warnings, not hard gates". Justified because this is
+input validation rather than a workflow gate — the same treatment the COT card
+last-4 already gets — and because an NI number is retyped from a document once
+and a typo is silently wrong forever. Reversible if it ever blocks a real case.
+
+### 13.3 The `rtw_` collision
+
+`rtw_` means **right to work** on `people` (mig 206) and **return to work** on
+`staff_absences` (mig 214, plus `runRtwChase()` and the 08:50 job). Two
+unrelated meanings, one prefix, both live.
+
+Nothing is renamed — both are referenced in shipped code, and a rename is a
+migration plus a sweep for no behavioural gain. Recorded in migration 232's
+header and in `.claude/rules/staff-calendar.md`, which auto-loads for anyone
+working in this area. Do not assume from the prefix; check the table.
+
+### 13.4 The contract's signed date went on the FILE
+
+§3.2 asked for "employment contract — a file, plus signed date and version".
+Rather than a `contract_signed_on` column on `staff_employment`, migration 232
+adds `document_date` to `staff_record_files`.
+
+The contract IS a file, so its signed date belongs on the file row. Every other
+type gets the same field for free — and it is exactly the FROM date §1.3
+mandates and §4's review cycles (Phase 6) will read. One column, two jobs, no
+second copy.
+
+### 13.5 Known edge, accepted
+
+`StaffKeyData` fetches `GET /staff-calendar/employees/:personId`, which joins
+`staff_employment` — so the panel does not render for somebody with no
+employment record, unlike the files section, which is deliberately ungated.
+
+Right to work is genuinely checked before employment begins, so this is a real
+(if small) inconsistency. Accepted for now because the row already shows the
+"not an employee" panel explaining itself, and in practice the employment record
+is created first. Revisit if it bites.

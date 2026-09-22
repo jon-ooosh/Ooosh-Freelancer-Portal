@@ -24,6 +24,7 @@ import {
 } from '../services/staff-day-status';
 import {
   STAFF_ADMIN_ROLES, upsertEmployment, getEmployeeRecord, listEmployees, getStaffRoster,
+  updateKeyData, revealNiNumber,
   listUnlinkedLogins, linkLoginToPerson,
   createPattern, listPatterns, createExceptions, listExceptions,
   addSalaryEntry, listSalaryHistory, upsertReview, listReviews,
@@ -1212,6 +1213,60 @@ router.get('/employees/:personId', adminOnly, async (req: AuthRequest, res: Resp
   } catch (err) {
     console.error('[staff-calendar] employee error:', err);
     res.status(500).json({ error: 'Failed to load employee' });
+  }
+});
+
+// ── Key data: NI + right to work (spec §3.2) ────────────────────────────────
+// A separate endpoint from the employment save on purpose: a routine edit to
+// somebody's job title must not be able to blank their NI number, and the NI
+// write wants one audited path rather than being buried in a general upsert.
+
+const keyDataSchema = z.object({
+  // '' clears. Absent leaves it alone — the UI never round-trips the stored
+  // value, so an omitted key genuinely means "not touched".
+  niNumber: z.string().max(20).nullish(),
+  rtwDocumentType: z.string().max(50).nullish(),
+  rtwCheckedOn: z.union([dateStr, z.literal('')]).nullish(),
+  rtwExpiresOn: z.union([dateStr, z.literal('')]).nullish(),
+});
+
+// PUT /api/staff-calendar/employees/:personId/key-data
+router.put('/employees/:personId/key-data', adminOnly, async (req: AuthRequest, res: Response) => {
+  const parsed = keyDataSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
+
+  // Refuse cleanly rather than 500 on a server with no ENCRYPTION_KEY, and
+  // refuse BEFORE writing anything — a half-saved right-to-work check with a
+  // silently dropped NI number would be worse than an error.
+  const wantsNi = parsed.data.niNumber !== undefined
+    && parsed.data.niNumber !== null
+    && parsed.data.niNumber !== '';
+  if (wantsNi) {
+    const { isEncryptionConfigured } = await import('../services/encryption');
+    if (!isEncryptionConfigured()) {
+      res.status(503).json({ error: 'Encryption is not configured on this server — cannot store an NI number.' });
+      return;
+    }
+  }
+
+  try {
+    const rec = await updateKeyData(req.params.personId as string, parsed.data, req.user!.id);
+    res.json({ data: rec });
+  } catch (err) {
+    console.error('[staff-calendar] key data error:', err);
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to save' });
+  }
+});
+
+// GET /api/staff-calendar/employees/:personId/ni-number
+// The ONLY way the number itself leaves the server. Audited on every call.
+router.get('/employees/:personId/ni-number', adminOnly, async (req: AuthRequest, res: Response) => {
+  try {
+    const value = await revealNiNumber(req.params.personId as string, req.user!.id);
+    res.json({ data: { niNumber: value } });
+  } catch (err) {
+    console.error('[staff-calendar] ni reveal error:', err);
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to read' });
   }
 });
 

@@ -73,10 +73,15 @@ const upload = multer({
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
 const updateFileSchema = z.object({
   label: z.string().min(1).max(200).optional(),
   doc_type: z.enum(DOC_TYPES).optional(),
   notes: z.string().max(2000).nullable().optional(),
+  // The document's own FROM date — signed / issued / checked. Spec §1.3:
+  // never a "valid until", which Phase 6 derives from this instead.
+  document_date: z.union([z.string().regex(DATE_RE), z.literal(''), z.null()]).optional(),
 });
 
 interface FileRow {
@@ -88,13 +93,14 @@ interface FileRow {
   content_type: string | null;
   size_bytes: string | null;
   notes: string | null;
+  document_date: string | null;
   uploaded_at: string;
   uploaded_by_name: string | null;
 }
 
 const SELECT_FILES = `
   SELECT f.id, f.label, f.doc_type, f.r2_key, f.filename, f.content_type,
-         f.size_bytes, f.notes, f.uploaded_at,
+         f.size_bytes, f.notes, f.document_date::text AS document_date, f.uploaded_at,
          NULLIF(TRIM(COALESCE(up.preferred_name, up.first_name, '') || ' ' ||
                      COALESCE(up.last_name, '')), '') AS uploaded_by_name
     FROM staff_record_files f
@@ -156,6 +162,11 @@ router.post('/:personId/files', adminOnly, upload.single('file'), async (req: Au
     // that is refused for want of a label is an upload that doesn't happen.
     const label = String(req.body.label || '').trim() || req.file.originalname;
     const notes = String(req.body.notes || '').trim() || null;
+    const documentDate = String(req.body.document_date || '').trim() || null;
+    if (documentDate && !/^\d{4}-\d{2}-\d{2}$/.test(documentDate)) {
+      res.status(400).json({ error: 'document_date must be YYYY-MM-DD' });
+      return;
+    }
 
     const ext = path.extname(req.file.originalname).toLowerCase();
     // The original filename is NOT part of the key — staff name files things
@@ -169,11 +180,11 @@ router.post('/:personId/files', adminOnly, upload.single('file'), async (req: Au
     try {
       inserted = await query(
         `INSERT INTO staff_record_files
-           (person_id, label, doc_type, r2_key, filename, content_type, size_bytes, notes, uploaded_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+           (person_id, label, doc_type, r2_key, filename, content_type, size_bytes, notes, document_date, uploaded_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::date, $10)
          RETURNING id`,
         [personId, label, docType, key, req.file.originalname,
-         req.file.mimetype || null, req.file.size, notes, req.user!.id]
+         req.file.mimetype || null, req.file.size, notes, documentDate, req.user!.id]
       );
     } catch (dbErr) {
       // Don't leave an orphaned object holding someone's passport in a bucket
@@ -198,13 +209,18 @@ router.patch('/files/:id', adminOnly, validate(updateFileSchema), async (req: Au
       res.status(400).json({ error: 'id must be a UUID' });
       return;
     }
-    const { label, doc_type, notes } = req.body as z.infer<typeof updateFileSchema>;
+    const { label, doc_type, notes, document_date } = req.body as z.infer<typeof updateFileSchema>;
 
     const sets: string[] = [];
     const params: unknown[] = [];
     if (label !== undefined)    { sets.push(`label = $${params.length + 1}`);    params.push(label); }
     if (doc_type !== undefined) { sets.push(`doc_type = $${params.length + 1}`); params.push(doc_type); }
     if (notes !== undefined)    { sets.push(`notes = $${params.length + 1}`);    params.push(notes || null); }
+    // '' clears the date; absent leaves it alone.
+    if (document_date !== undefined) {
+      sets.push(`document_date = $${params.length + 1}::date`);
+      params.push(document_date || null);
+    }
     if (!sets.length) {
       res.status(400).json({ error: 'No fields to update' });
       return;

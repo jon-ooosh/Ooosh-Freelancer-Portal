@@ -411,3 +411,35 @@ shows this as **No login** on the employee, with a *Link a login* action that
 moves `users.person_id`. The reverse is impossible — the ledger cannot be
 UPDATEd. The person-merge in `routes/duplicates.ts` does **not** remap any
 staff table; do not use it to fix this.
+
+## `rtw_` means TWO different things — check which table
+
+A genuine trap, live in the schema since Sep 2026:
+
+| Column | Table | Means |
+|---|---|---|
+| `rtw_checked_on` · `rtw_document_type` · `rtw_expires_on` · `rtw_checked_by` | `people` (mig 206) | **RIGHT TO WORK** — the legal check |
+| `rtw_required` · `rtw_date` · `rtw_chased_at` | `staff_absences` (mig 214) | **RETURN TO WORK** — the post-sickness conversation, and the 08:50 chase |
+
+Nothing is renamed (both are live and referenced), so never assume from the
+prefix. `runRtwChase()` in `staff-notifications.ts` is return-to-work; anything
+reading `people.rtw_*` is right-to-work and is admin-only.
+
+## The private columns on `people` never go out through a people response
+
+`people` is read by the whole team — `routes/people.ts` is gated on
+`STAFF_ROLES` and both its GETs `SELECT p.*`. Migration 206 added right-to-work
+and NI columns to that table, so until Sep 2026 every staff member, general
+assistant and weekend manager got a colleague's immigration-status fields and NI
+ciphertext with any person record they opened.
+
+**`services/people-private-fields.ts` is THE list**, and both people GETs run
+their rows through it. Add a private column to `people` and you must add it
+there too — the admin-gated staff surfaces read those columns by name, so
+redacting the general response costs them nothing.
+
+Write them through `updateKeyData()` in `staff-employment.ts` only. The NI
+number itself leaves the server through exactly one route
+(`GET /staff-calendar/employees/:personId/ni-number`), which writes an
+`audit_log` row with action `read` on every call. Every other read returns
+`has_ni_number` as a boolean.
