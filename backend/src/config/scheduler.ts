@@ -1131,6 +1131,22 @@ export function startScheduler() {
     } catch (err) {
       console.error('Scheduler: Staff review due scan failed:', err);
     }
+    try {
+      const r = await notifications.runDocumentReviewChase();
+      console.log(`Scheduler: Staff document re-checks — ${r.chased} flagged`);
+    } catch (err) {
+      console.error('Scheduler: Staff document review chase failed:', err);
+    }
+    // Retention. Last in the block, and independently caught: a purge that
+    // fails must not stop the nudges, and a nudge that fails must not stop
+    // the purge — this one has a legal reason to run.
+    try {
+      const { runAbsenceDetailPurge } = await import('../services/staff-retention');
+      const r = await runAbsenceDetailPurge();
+      console.log(`Scheduler: Absence detail purge — ${r.purged} spell(s)`);
+    } catch (err) {
+      console.error('Scheduler: Absence detail purge failed:', err);
+    }
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: Staff records reminders scheduled daily at 09:45 Europe/London');
 
