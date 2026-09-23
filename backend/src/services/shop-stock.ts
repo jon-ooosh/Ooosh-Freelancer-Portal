@@ -31,6 +31,9 @@ const MAX_PAGES = 50;
 /** system_settings key holding the tax-index → percentage map (see below). */
 const VAT_MAP_KEY = 'shop_vat_rate_map';
 
+/** system_settings key: HireHop category IDs hidden from the till (§2.4). */
+const EXCLUDED_CATEGORIES_KEY = 'shop_excluded_category_ids';
+
 /**
  * HireHop tax-type index → VAT percentage.
  *
@@ -61,6 +64,8 @@ export interface ShopStockItem {
   categoryPath: string | null;
   /** Price A, EX-VAT. Everything HireHop returns is ex-VAT. */
   priceExVat: number | null;
+  /** What we paid. Not shown at the till; kept for margin reporting. */
+  costPriceExVat: number | null;
   vatRateIndex: number | null;
   maxDiscount: number | null;
   /** Shelf count as of `refreshedAt`. NOT availability — see §2.3. */
@@ -68,6 +73,14 @@ export interface ShopStockItem {
   reorderLevel: number | null;
   reorderQty: number | null;
   status: number;
+  /**
+   * HireHop's "exclude from webshop" tick. Mirrored for `thetour.store`, and
+   * deliberately NOT the till's filter — it answers "should the public be able
+   * to buy and be SHIPPED this?", which diverges from "can staff sell this over
+   * the counter" on the shop's biggest category. Nobody posts a can of Coke,
+   * but everybody sells one. See SHOP-SALES-SPEC.md §2.4.
+   */
+  excludeFromWebshop: boolean;
   refreshedAt: string;
 }
 
@@ -81,12 +94,14 @@ function rowToItem(r: any): ShopStockItem {
     categoryId: r.category_id != null ? Number(r.category_id) : null,
     categoryPath: r.category_path,
     priceExVat: r.price != null ? Number(r.price) : null,
+    costPriceExVat: r.cost_price != null ? Number(r.cost_price) : null,
     vatRateIndex: r.vat_rate_index != null ? Number(r.vat_rate_index) : null,
     maxDiscount: r.max_discount != null ? Number(r.max_discount) : null,
     quantity: Number(r.quantity),
     reorderLevel: r.reorder_level != null ? Number(r.reorder_level) : null,
     reorderQty: r.reorder_qty != null ? Number(r.reorder_qty) : null,
     status: Number(r.status),
+    excludeFromWebshop: r.exclude_from_webshop === true,
     refreshedAt: r.refreshed_at,
   };
 }
@@ -186,13 +201,44 @@ function mapRow(r: any): Omit<ShopStockItem, 'refreshedAt'> {
     categoryId: r.CATEGORY_ID != null ? Number(r.CATEGORY_ID) : null,
     categoryPath: crumbs || null,
     priceExVat: priceA != null ? Number(priceA) : null,
+    // COST_PRICE arrives as a numeric STRING here ("0.000000") and as a number on
+    // the picklist endpoint, so coerce rather than trust the type.
+    costPriceExVat: Number.isFinite(Number(r.COST_PRICE)) ? Number(r.COST_PRICE) : null,
     vatRateIndex: r.VAT_RATE != null ? Number(r.VAT_RATE) : null,
     maxDiscount: r.MAX_DISCOUNT != null ? Number(r.MAX_DISCOUNT) : null,
     quantity: Number(r.QUANTITY) || 0,
     reorderLevel: r.REORDER_LEVEL !== '' && r.REORDER_LEVEL != null ? Number(r.REORDER_LEVEL) : null,
     reorderQty: r.REORDER_QTY !== '' && r.REORDER_QTY != null ? Number(r.REORDER_QTY) : null,
     status: r.STATUS != null ? Number(r.STATUS) : 0,
+    excludeFromWebshop: Number(r.EXCLUDE_FROM_WEBSHOP) === 1,
   };
+}
+
+/**
+ * HireHop category IDs hidden from the till.
+ *
+ * An EXCLUSION list, not an allowlist, and that direction is deliberate: it
+ * fails OPEN. An unclassified category still shows at the counter, so new stock
+ * is sellable the day it lands. "I can't find it to sell it" is a worse failure
+ * in front of a customer than "this probably shouldn't be listed".
+ *
+ * Read fresh rather than cached — it changes rarely, and a stale exclusion is
+ * confusing to whoever just edited the setting to fix a live problem.
+ */
+export async function getExcludedCategoryIds(): Promise<number[]> {
+  try {
+    const r = await query(`SELECT value FROM system_settings WHERE key = $1`, [EXCLUDED_CATEGORIES_KEY]);
+    const raw = r.rows[0]?.value;
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map(Number).filter((n) => Number.isFinite(n));
+  } catch (err) {
+    // A malformed setting must not empty the till — fall back to hiding nothing.
+    console.warn('[shop-stock] excluded categories unreadable, hiding none:',
+      err instanceof Error ? err.message : err);
+    return [];
+  }
 }
 
 export interface RefreshResult {
@@ -244,8 +290,9 @@ export async function refreshShopStockCache(): Promise<RefreshResult> {
         `INSERT INTO shop_stock_cache (
            hh_stock_id, title, alt_title, part_number, barcode,
            category_id, category_path, price, cost_price, vat_rate_index,
-           max_discount, quantity, reorder_level, reorder_qty, status, refreshed_at
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULL,$9,$10,$11,$12,$13,$14,NOW())
+           max_discount, quantity, reorder_level, reorder_qty, status,
+           exclude_from_webshop, refreshed_at
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,NOW())
          ON CONFLICT (hh_stock_id) DO UPDATE SET
            title = EXCLUDED.title,
            alt_title = EXCLUDED.alt_title,
@@ -254,17 +301,20 @@ export async function refreshShopStockCache(): Promise<RefreshResult> {
            category_id = EXCLUDED.category_id,
            category_path = EXCLUDED.category_path,
            price = EXCLUDED.price,
+           cost_price = EXCLUDED.cost_price,
            vat_rate_index = EXCLUDED.vat_rate_index,
            max_discount = EXCLUDED.max_discount,
            quantity = EXCLUDED.quantity,
            reorder_level = EXCLUDED.reorder_level,
            reorder_qty = EXCLUDED.reorder_qty,
            status = EXCLUDED.status,
+           exclude_from_webshop = EXCLUDED.exclude_from_webshop,
            refreshed_at = NOW()`,
         [
           it.hhStockId, it.title, it.altTitle, it.partNumber, it.barcode,
-          it.categoryId, it.categoryPath, it.priceExVat, it.vatRateIndex,
-          it.maxDiscount, it.quantity, it.reorderLevel, it.reorderQty, it.status,
+          it.categoryId, it.categoryPath, it.priceExVat, it.costPriceExVat,
+          it.vatRateIndex, it.maxDiscount, it.quantity, it.reorderLevel,
+          it.reorderQty, it.status, it.excludeFromWebshop,
         ],
       );
     }
@@ -303,6 +353,8 @@ export async function refreshShopStockCache(): Promise<RefreshResult> {
 export interface SearchOpts {
   /** Include hidden (1) and deleted (2) items. Default false — sellable only. */
   includeInactive?: boolean;
+  /** Ignore the category exclusions — for admin views, never for the till. */
+  includeExcludedCategories?: boolean;
   limit?: number;
 }
 
@@ -316,29 +368,47 @@ export async function searchShopStock(q: string, opts: SearchOpts = {}): Promise
   const limit = Math.min(Math.max(opts.limit ?? 25, 1), 100);
   const statusClause = opts.includeInactive ? '' : 'AND status = 0';
 
+  const excluded = opts.includeExcludedCategories ? [] : await getExcludedCategoryIds();
+  // `category_id` is nullable, so the NOT(... = ANY ...) form would drop NULL
+  // rows entirely. COALESCE keeps an uncategorised item visible, consistent
+  // with the fail-open rule in getExcludedCategoryIds().
+  const catClause = excluded.length
+    ? 'AND NOT (COALESCE(category_id, -1) = ANY($CAT::int[]))'
+    : '';
+
   if (!term) {
-    const r = await query(
-      `SELECT * FROM shop_stock_cache WHERE TRUE ${statusClause}
-        ORDER BY title LIMIT $1`, [limit]);
+    const params: unknown[] = [limit];
+    const sql = `SELECT * FROM shop_stock_cache WHERE TRUE ${statusClause}
+        ${catClause.replace('$CAT', '$2')}
+        ORDER BY title LIMIT $1`;
+    if (excluded.length) params.push(excluded);
+    const r = await query(sql, params);
     return r.rows.map(rowToItem);
   }
 
   const like = `%${term}%`;
-  const r = await query(
-    `SELECT * FROM shop_stock_cache
+  const params: unknown[] = [like, `${term}%`, term, limit];
+  const sql = `SELECT * FROM shop_stock_cache
       WHERE (title ILIKE $1 OR alt_title ILIKE $1 OR part_number ILIKE $1)
         ${statusClause}
+        ${catClause.replace('$CAT', '$5')}
       ORDER BY
         CASE WHEN title ILIKE $2 THEN 0 ELSE 1 END,
         similarity(title, $3) DESC,
         title
-      LIMIT $4`,
-    [like, `${term}%`, term, limit],
-  );
+      LIMIT $4`;
+  if (excluded.length) params.push(excluded);
+  const r = await query(sql, params);
   return r.rows.map(rowToItem);
 }
 
-/** Exact barcode lookup — the scanner's path, and the fastest one. */
+/**
+ * Exact barcode lookup — the scanner's path, and the fastest one.
+ *
+ * Deliberately NOT category-filtered: if someone physically scanned it, they
+ * are holding it, and refusing to price a thing in the customer's hand because
+ * of a category setting is the sort of gate that strands staff.
+ */
 export async function findShopStockByBarcode(barcode: string): Promise<ShopStockItem | null> {
   const code = (barcode || '').trim();
   if (!code) return null;
@@ -360,6 +430,9 @@ export async function getShopStockItem(hhStockId: number): Promise<ShopStockItem
  * on Monday. See SHOP-SALES-SPEC.md §2.3.
  */
 export async function getReorderList(): Promise<ShopStockItem[]> {
+  // No category exclusion here, on purpose: running out of VE103B certificates
+  // matters just as much as running out of drum heads. They simply aren't sold
+  // at the counter.
   const r = await query(
     `SELECT * FROM shop_stock_cache
       WHERE status = 0 AND reorder_level IS NOT NULL AND reorder_level > 0
