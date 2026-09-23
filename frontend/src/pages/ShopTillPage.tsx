@@ -25,6 +25,9 @@ interface StockItem {
   partNumber: string | null;
   categoryPath: string | null;
   priceExVat: number | null;
+  /** Resolved server-side — the UI must never apply the VAT rule itself. */
+  priceIncVat: number | null;
+  vatRatePct: number | null;
   vatRateIndex: number | null;
   maxDiscount: number | null;
   quantity: number;
@@ -34,8 +37,14 @@ interface StockItem {
 interface BasketLine {
   stock: StockItem;
   qty: number;
-  /** Ex-VAT, after any discount. Starts at list. */
-  unitPriceCharged: number;
+  /**
+   * Ex-VAT unit price, held as the TEXT the operator typed.
+   *
+   * A number here renders "1.6" where a price should read "1.60", and
+   * reformatting on every keystroke fights whoever is mid-type. Kept as a
+   * string, parsed for arithmetic, tidied on blur.
+   */
+  priceText: string;
 }
 
 interface Totals {
@@ -58,6 +67,8 @@ const TENDERS: { key: string; label: string; needsJob?: boolean }[] = [
 ];
 
 const money = (n: number) => `£${n.toFixed(2)}`;
+/** Parse a typed price. A half-typed "1." must read as 1, not NaN. */
+const num = (t: string) => { const n = parseFloat(t); return Number.isFinite(n) ? n : 0; };
 
 function ago(iso: string | null): string {
   if (!iso) return 'never';
@@ -77,11 +88,13 @@ export default function ShopTillPage() {
   const [results, setResults] = useState<StockItem[]>([]);
   const [searching, setSearching] = useState(false);
   const [basket, setBasket] = useState<BasketLine[]>([]);
-  const [tender, setTender] = useState('till_cash');
+  // Card is what almost every walk-in pays with, so it is the default.
+  const [tender, setTender] = useState('worldpay');
   const [notes, setNotes] = useState('');
   const [maxDiscountPct, setMaxDiscountPct] = useState(0);
   const [cacheAge, setCacheAge] = useState<string | null>(null);
   const [availability, setAvailability] = useState<Record<string, number | null>>({});
+  const [availChecked, setAvailChecked] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState<{ gross: number; id: string } | null>(null);
@@ -126,6 +139,7 @@ export default function ShopTillPage() {
         const flat: Record<string, number | null> = {};
         for (const [k, v] of Object.entries(r.data)) flat[k] = v.available;
         setAvailability(flat);
+        setAvailChecked(Object.keys(flat).length > 0);
       })
       .catch(() => { /* advisory only — never block a sale on it */ });
     return () => { cancelled = true; };
@@ -138,7 +152,7 @@ export default function ShopTillPage() {
       if (existing) {
         return prev.map(l => l.stock.hhStockId === item.hhStockId ? { ...l, qty: l.qty + 1 } : l);
       }
-      return [...prev, { stock: item, qty: 1, unitPriceCharged: item.priceExVat ?? 0 }];
+      return [...prev, { stock: item, qty: 1, priceText: (item.priceExVat ?? 0).toFixed(2) }];
     });
     setTerm('');
     setResults([]);
@@ -151,8 +165,13 @@ export default function ShopTillPage() {
       ? prev.filter(l => l.stock.hhStockId !== id)
       : prev.map(l => l.stock.hhStockId === id ? { ...l, qty } : l));
 
-  const setPrice = (id: number, price: number) =>
-    setBasket(prev => prev.map(l => l.stock.hhStockId === id ? { ...l, unitPriceCharged: price } : l));
+  const setPriceText = (id: number, priceText: string) =>
+    setBasket(prev => prev.map(l => l.stock.hhStockId === id ? { ...l, priceText } : l));
+
+  /** Tidy on blur, so "7.5" becomes "7.50" without fighting mid-type. */
+  const normalisePrice = (id: number) =>
+    setBasket(prev => prev.map(l =>
+      l.stock.hhStockId === id ? { ...l, priceText: num(l.priceText).toFixed(2) } : l));
 
   // Mirrors the backend arithmetic: VAT is rounded PER LINE, because a basket
   // can mix rates and total-then-tax would be wrong the moment a zero-rated
@@ -160,8 +179,10 @@ export default function ShopTillPage() {
   const totals: Totals = (() => {
     let net = 0, vat = 0, listTotal = 0;
     for (const l of basket) {
-      const lineNet = Math.round(l.unitPriceCharged * l.qty * 100) / 100;
-      const pct = l.stock.vatRateIndex === 1 ? 0 : 20;
+      const lineNet = Math.round(num(l.priceText) * l.qty * 100) / 100;
+      // The rate comes from the server, never from a rule written here — a UI
+      // that assumes 20% is wrong the day a 5%-rated item appears.
+      const pct = l.stock.vatRatePct ?? 20;
       net += lineNet;
       vat += Math.round(lineNet * (pct / 100) * 100) / 100;
       listTotal += (l.stock.priceExVat ?? 0) * l.qty;
@@ -188,7 +209,7 @@ export default function ShopTillPage() {
         lines: basket.map(l => ({
           hhStockId: l.stock.hhStockId,
           qty: l.qty,
-          unitPriceCharged: l.unitPriceCharged,
+          unitPriceCharged: num(l.priceText),
         })),
         tender: mode === 'sale' ? tender : null,
         notes: notes.trim() || null,
@@ -255,6 +276,9 @@ export default function ShopTillPage() {
           placeholder="Search or scan — name, part number…"
           className="w-full rounded border border-gray-300 px-4 py-3 text-base focus:border-ooosh-500 focus:outline-none"
         />
+        <p className="mt-1 text-xs text-gray-400">
+          Words can be in any order — &ldquo;2 gaff&rdquo; finds 2&quot; gaffa tape. Prices shown include VAT.
+        </p>
         {searching && <p className="mt-1 text-xs text-gray-400">Searching…</p>}
         {results.length > 0 && (
           <ul className="mt-2 max-h-72 overflow-y-auto rounded border border-gray-200 divide-y">
@@ -270,8 +294,14 @@ export default function ShopTillPage() {
                       {item.categoryPath}{item.partNumber ? ` · ${item.partNumber}` : ''} · {item.quantity} on shelf
                     </span>
                   </span>
-                  <span className="shrink-0 text-sm font-semibold text-gray-900">
-                    {money((item.priceExVat ?? 0) * (item.vatRateIndex === 1 ? 1 : 1.2))}
+                  <span className="shrink-0 text-right">
+                    <span className="block text-sm font-semibold text-gray-900">
+                      {money(item.priceIncVat ?? 0)}
+                    </span>
+                    {/* Staff read HireHop all day, where prices are ex-VAT. An
+                        unlabelled number here gets quoted at the wrong price by
+                        someone who never opens the basket. */}
+                    <span className="block text-[11px] text-gray-400">inc VAT</span>
                   </span>
                 </button>
               </li>
@@ -303,7 +333,8 @@ export default function ShopTillPage() {
                         {' '}· only {avail} free ({l.stock.quantity - (avail ?? 0)} reserved for jobs)
                       </span>
                     )}
-                    {l.stock.vatRateIndex === 1 && <span className="text-gray-400"> · zero-rated</span>}
+                    {!availChecked && <span className="text-gray-400"> · reservations unavailable</span>}
+                    {l.stock.vatRatePct === 0 && <span className="text-gray-400"> · zero-rated</span>}
                   </p>
                 </div>
 
@@ -318,14 +349,16 @@ export default function ShopTillPage() {
                   <div className="flex items-center gap-1">
                     <span className="text-xs text-gray-400">£</span>
                     <input
-                      type="number" min={0} step="0.01" value={l.unitPriceCharged}
-                      onChange={e => setPrice(l.stock.hhStockId, Number(e.target.value))}
+                      type="text" inputMode="decimal" value={l.priceText}
+                      onChange={e => setPriceText(l.stock.hhStockId, e.target.value)}
+                      onBlur={() => normalisePrice(l.stock.hhStockId)}
                       className={`w-20 rounded border px-2 py-1.5 text-right text-sm ${
-                        l.unitPriceCharged < list ? 'border-amber-400 bg-amber-50' : 'border-gray-300'
+                        num(l.priceText) < list ? 'border-amber-400 bg-amber-50' : 'border-gray-300'
                       }`}
                       aria-label="Unit price excluding VAT"
                     />
-                    {l.unitPriceCharged < list && (
+                    <span className="text-[11px] text-gray-400">ex VAT</span>
+                    {num(l.priceText) < list && (
                       <span className="text-xs text-amber-700 whitespace-nowrap">was {money(list)}</span>
                     )}
                   </div>
@@ -350,7 +383,7 @@ export default function ShopTillPage() {
             <>
               <div className="mb-3 space-y-1 text-sm">
                 <div className="flex justify-between text-gray-600">
-                  <span>Net</span><span>{money(totals.net)}</span>
+                  <span>Net (ex VAT)</span><span>{money(totals.net)}</span>
                 </div>
                 <div className="flex justify-between text-gray-600">
                   <span>VAT</span><span>{money(totals.vat)}</span>
@@ -362,7 +395,7 @@ export default function ShopTillPage() {
                   </div>
                 )}
                 <div className="flex justify-between border-t pt-1 text-lg font-bold text-gray-900">
-                  <span>Total</span><span>{money(totals.gross)}</span>
+                  <span>Total (inc VAT)</span><span>{money(totals.gross)}</span>
                 </div>
               </div>
 

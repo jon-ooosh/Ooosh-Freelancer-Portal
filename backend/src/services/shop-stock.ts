@@ -64,6 +64,14 @@ export interface ShopStockItem {
   categoryPath: string | null;
   /** Price A, EX-VAT. Everything HireHop returns is ex-VAT. */
   priceExVat: number | null;
+  /**
+   * What the customer actually pays. Resolved server-side through
+   * `resolveVatRate()` so the VAT rule lives in exactly one place — a UI that
+   * multiplies by 1.2 itself is wrong the day a 5%-rated item appears.
+   */
+  priceIncVat: number | null;
+  /** The percentage `vatRateIndex` resolved to, for display ("zero-rated"). */
+  vatRatePct: number | null;
   /** What we paid. Not shown at the till; kept for margin reporting. */
   costPriceExVat: number | null;
   vatRateIndex: number | null;
@@ -94,6 +102,8 @@ function rowToItem(r: any): ShopStockItem {
     categoryId: r.category_id != null ? Number(r.category_id) : null,
     categoryPath: r.category_path,
     priceExVat: r.price != null ? Number(r.price) : null,
+    priceIncVat: null,      // filled in by withVat()
+    vatRatePct: null,       // filled in by withVat()
     costPriceExVat: r.cost_price != null ? Number(r.cost_price) : null,
     vatRateIndex: r.vat_rate_index != null ? Number(r.vat_rate_index) : null,
     maxDiscount: r.max_discount != null ? Number(r.max_discount) : null,
@@ -104,6 +114,24 @@ function rowToItem(r: any): ShopStockItem {
     excludeFromWebshop: r.exclude_from_webshop === true,
     refreshedAt: r.refreshed_at,
   };
+}
+
+/**
+ * Fill in the inc-VAT price for a list of items.
+ *
+ * Done here rather than in `rowToItem` because the rate needs an async lookup,
+ * and done at all so that no caller has to know the VAT rule. The rate map is
+ * cached, so this is one settings read for the whole list however long it is.
+ */
+async function withVat(items: ShopStockItem[]): Promise<ShopStockItem[]> {
+  for (const it of items) {
+    const pct = await resolveVatRate(it.vatRateIndex);
+    it.vatRatePct = pct;
+    it.priceIncVat = it.priceExVat != null
+      ? Math.round(it.priceExVat * (1 + pct / 100) * 100) / 100
+      : null;
+  }
+  return items;
 }
 
 // ── VAT ──────────────────────────────────────────────────────────────────
@@ -186,7 +214,9 @@ async function fetchPage(page: number): Promise<{ rows: any[]; totalPages: numbe
  * price. Hire items carry a `TYPE` inside each PRICES entry; sale items don't,
  * which is a useful smell if something non-sale ever appears here.
  */
-function mapRow(r: any): Omit<ShopStockItem, 'refreshedAt'> {
+type StoredShopStock = Omit<ShopStockItem, 'refreshedAt' | 'priceIncVat' | 'vatRatePct'>;
+
+function mapRow(r: any): StoredShopStock {
   const priceA = r?.PRICES?._1?.PRICE;
   const crumbs = Array.isArray(r?.crumbs)
     ? r.crumbs.map((c: any) => c?.NAME).filter(Boolean).join(' › ')
@@ -272,7 +302,7 @@ export async function refreshShopStockCache(): Promise<RefreshResult> {
   // Dedupe defensively — a paginated feed can repeat a row if the underlying
   // list shifts between page reads.
   const seen = new Set<number>();
-  const items: Array<Omit<ShopStockItem, 'refreshedAt'>> = [];
+  const items: StoredShopStock[] = [];
   for (const r of rows) {
     const id = Number(r?.ID);
     if (!Number.isFinite(id) || seen.has(id)) continue;
@@ -383,23 +413,42 @@ export async function searchShopStock(q: string, opts: SearchOpts = {}): Promise
         ORDER BY title LIMIT $1`;
     if (excluded.length) params.push(excluded);
     const r = await query(sql, params);
-    return r.rows.map(rowToItem);
+    return withVat(r.rows.map(rowToItem));
   }
 
-  const like = `%${term}%`;
-  const params: unknown[] = [like, `${term}%`, term, limit];
-  const sql = `SELECT * FROM shop_stock_cache
-      WHERE (title ILIKE $1 OR alt_title ILIKE $1 OR part_number ILIKE $1)
+  // Tokenised AND, not one contiguous substring. Staff type "2 gaff" meaning
+  // 2" gaffa tape, and a single `%2 gaff%` matches nothing because the real
+  // title is `2" (50mm x 50m) MagTape white gaffa tape`. Requiring EVERY token
+  // to appear somewhere keeps it tight — an OR would flood the list with
+  // everything containing "2".
+  const tokens = term.split(/\s+/).filter(Boolean).slice(0, 6);
+
+  const params: unknown[] = [`${term}%`, term, limit];   // $1 prefix, $2 rank, $3 limit
+  const tokenClauses: string[] = [];
+  for (const tok of tokens) {
+    params.push(`%${tok}%`);
+    const n = params.length;
+    tokenClauses.push(`(title ILIKE $${n} OR alt_title ILIKE $${n} OR part_number ILIKE $${n})`);
+  }
+  let catSql = '';
+  if (excluded.length) {
+    params.push(excluded);
+    catSql = catClause.replace('$CAT', `$${params.length}`);
+  }
+
+  const r = await query(
+    `SELECT * FROM shop_stock_cache
+      WHERE ${tokenClauses.join(' AND ')}
         ${statusClause}
-        ${catClause.replace('$CAT', '$5')}
+        ${catSql}
       ORDER BY
-        CASE WHEN title ILIKE $2 THEN 0 ELSE 1 END,
-        similarity(title, $3) DESC,
+        CASE WHEN title ILIKE $1 THEN 0 ELSE 1 END,
+        similarity(title, $2) DESC,
         title
-      LIMIT $4`;
-  if (excluded.length) params.push(excluded);
-  const r = await query(sql, params);
-  return r.rows.map(rowToItem);
+      LIMIT $3`,
+    params,
+  );
+  return withVat(r.rows.map(rowToItem));
 }
 
 /**
@@ -414,12 +463,14 @@ export async function findShopStockByBarcode(barcode: string): Promise<ShopStock
   if (!code) return null;
   const r = await query(
     `SELECT * FROM shop_stock_cache WHERE barcode = $1 AND status = 0 LIMIT 1`, [code]);
-  return r.rows[0] ? rowToItem(r.rows[0]) : null;
+  if (!r.rows[0]) return null;
+  return (await withVat([rowToItem(r.rows[0])]))[0];
 }
 
 export async function getShopStockItem(hhStockId: number): Promise<ShopStockItem | null> {
   const r = await query(`SELECT * FROM shop_stock_cache WHERE hh_stock_id = $1`, [hhStockId]);
-  return r.rows[0] ? rowToItem(r.rows[0]) : null;
+  if (!r.rows[0]) return null;
+  return (await withVat([rowToItem(r.rows[0])]))[0];
 }
 
 /**
@@ -439,7 +490,7 @@ export async function getReorderList(): Promise<ShopStockItem[]> {
         AND quantity <= reorder_level
       ORDER BY (quantity - reorder_level), title`,
   );
-  return r.rows.map(rowToItem);
+  return withVat(r.rows.map(rowToItem));
 }
 
 /** How stale is the mirror? The till shows this so nobody over-trusts a count. */

@@ -96,8 +96,18 @@ router.get('/stock/:id(\\d+)', async (req: AuthRequest, res: Response) => {
  *
  * The mirror holds the SHELF count; this is what is actually free once other
  * jobs' reservations are taken off. It is the difference between "we have 15"
- * and "12 of those are free, 3 are on a job leaving Thursday". A warning, never
- * a block — sometimes selling and reordering is the right call.
+ * and "12 are free, 3 are on a job leaving Thursday". A warning, never a block.
+ *
+ * ⚠️ Uses the DATE-based `picklist_get_availability.php`, not the job-scoped
+ * `items_picklist_avail.php`. The job-scoped one needs a `job` to answer
+ * against, and a walk-in has no job — called without one it just returns the
+ * global figure, which is the shelf count we already have and therefore useless
+ * (that was the first version's bug). Same endpoint and row shape as
+ * `routes/staging.ts`, which is the proven caller.
+ *
+ * `TYPE: 1` is sale stock; staging passes `TYPE: 2` for hire stock. That comes
+ * from the picklist, where sale items key as `a<id>` with `TYPE: 1` and hire as
+ * `b<id>` with `TYPE: 2`.
  */
 router.post('/stock/availability', async (req: AuthRequest, res: Response) => {
   try {
@@ -106,22 +116,28 @@ router.post('/stock/availability', async (req: AuthRequest, res: Response) => {
       : [];
     if (!ids.length) return res.json({ data: {} });
 
-    const resp = await hhBroker.get<any>('/php_functions/items_picklist_avail.php', {
-      items: JSON.stringify(ids.map((id) => `a${id}`)),
+    // Right now — a shop sale leaves today, not on some future hire window.
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const local = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ` +
+                  `${pad(now.getHours())}:${pad(now.getMinutes())}:00`;
+
+    const rows = ids.map((id) => ({ ID: id, TYPE: 1, ITEM_ID: 0, AVAILABLE: 1, STOCK: 1, GLOBAL: 1 }));
+    const resp = await hhBroker.get<any>('/php_functions/picklist_get_availability.php', {
+      rows: JSON.stringify(rows), local, tz: 'Europe/London', global_depot: 1,
     }, { priority: 'high', cacheTTL: 60 });
 
-    const out: Record<string, { available: number | null }> = {};
+    const out: Record<string, { available: number | null; stock: number | null }> = {};
     const data: any = resp?.success ? resp.data : null;
-    if (data && typeof data === 'object') {
-      for (const id of ids) {
-        const row = data[`a${id}`];
-        out[String(id)] = {
-          available: row && row.available != null ? Number(row.available) : null,
-        };
-      }
+    const responseRows: any[] = data?.rows || (Array.isArray(data) ? data : []);
+    for (const row of responseRows) {
+      out[String(row.ID)] = {
+        available: row.AVAILABLE != null ? parseInt(row.AVAILABLE, 10) : null,
+        stock: row.STOCK != null ? parseInt(row.STOCK, 10) : null,
+      };
     }
-    // A HireHop wobble must not stop a sale — the caller renders "—" and the
-    // shelf count still shows.
+    // A HireHop wobble must never stop a sale — the caller falls back to the
+    // shelf count and shows no reservation line.
     res.json({ data: out });
   } catch (err) {
     console.error('[shop] availability lookup failed:', err);
