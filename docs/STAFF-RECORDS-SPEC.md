@@ -860,3 +860,92 @@ reviews. The line is **"related to each other"**, not "in the same file": these
 are all staff-records tables plus `staff_employment`, nothing shared, nothing
 another feature can be taken down by. 232's failure was a *core* table —
 `audit_log` — where an unrelated constraint blocked an unrelated column.
+
+---
+
+## 16. The Staff page rebuild (Sep 2026)
+
+Paused after Phase 4 at jon's call: six stacked panels per person had become a
+wall, and Phase 5 would only have made it taller. Mocked up first
+(clickable, fake data), agreed, then built.
+
+### 16.1 What was actually wrong
+
+Two problems that looked like one.
+
+**Depth.** An expanded person was Account, Company card, Key data, Private
+records, Reviews, Employment + patterns — each with its own heading, help text
+and form, stacked vertically. Every visit scrolled past five things to reach
+one, and each phase added another.
+
+**A missing axis, which was the bigger one.** Everything was organised
+*person → topic*, while nearly every real question runs *topic → person*:
+whose review is due, what is expiring, who is missing right to work. Answering
+any of those meant opening seven cards in turn.
+
+Phases 3–4's reminders partly masked this by pushing those facts at an admin.
+But a bell is a push, not something you can ask, and each fires once. §4 had
+predicted it: the staff-wide "what is expiring" view "is the bit that replaces
+jon's memory".
+
+### 16.2 One URL, two levels
+
+jon's constraint, and it was the right one: **everything stays at
+`/staff/admin`** — consolidate what exists, don't spread it thinner across more
+nav entries. So the person view is not a new route:
+`?person=<id>&tab=records`, same page, same nav.
+
+It is still a real address, which matters more than it sounds: every bell built
+in phases 3–4 pointed at `/staff/admin` bare, so "Will's review is due" dropped
+you on a list of collapsed cards to hunt through. Review-due and
+document-expiry notifications now link to the tab that answers them. **New
+bells should do the same.**
+
+### 16.3 The three surfaces, and why each is shaped as it is
+
+**Needs attention** (`services/staff-attention.ts`) — every row derived, none
+stored. Documents expiring or expired, right to work missing or lapsing, NI
+missing, reviews due, probation ending, no working pattern, unlinked logins.
+Nothing to clear by hand, so it cannot go stale or lie. Adding a source is a
+query, never a column.
+
+NI missing is deliberately `info`, not `soon`: payroll wants it but nothing
+breaks today, and an amber row for something routine teaches people to ignore
+amber.
+
+**The roster** carries *flags, not data* — two or three coloured pills per
+person, drawn from the same derived list as the panel above, so the two cannot
+disagree. Only hours and next review appear as figures, because they are the
+two things worth comparing across people.
+
+**The person view** is five tabs: Overview · Employment · Records · Reviews ·
+Access. Overview is **read-only on purpose** — most visits are to look
+something up, and the old layout charged a scroll past five forms for every
+one of them. Editing lives on the other tabs. The upload form moved behind a
+button for the same reason: you file a document once and read the list a
+hundred times.
+
+### 16.4 Two bugs caught in review, both from the same blind spot
+
+**Managers would have met a 403 dressed as a load failure.** The page is
+manager-tier for the account section, but Overview reads two admin-only
+endpoints. A manager opening anyone would have seen a red error box. They now
+get a plain facts card instead.
+
+**A deep link straight to a person showed no attention items.** The list was
+fetched inside the panel, and the panel does not render in the person view —
+so arriving from a notification, the very surface the link was for came up
+empty. The fetch moved up to the page, which is where it belonged anyway: one
+request now feeds the panel, the roster flags and the person view.
+
+Both are the same mistake: assuming the component that *displays* something is
+the right place to *load* it, without asking who else needs it and who else
+can see it.
+
+### 16.5 Shared, not duplicated
+
+"Who is due a review" now has one definition — `listReviewsDue()` in
+`staff-employment.ts` — used by both the 09:45 scan and the attention list.
+They differ only in `onlyUnchased`, because the scan nudges once per cycle
+while the page always shows. Two copies of that date arithmetic would have
+drifted, which is the failure mode CLAUDE.md's helper rule exists to stop.

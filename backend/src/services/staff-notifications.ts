@@ -835,7 +835,7 @@ export async function runDocumentExpiryChase(): Promise<{ chased: number }> {
   const lead = await getDocumentExpiryLeadDays();
 
   const due = await query(
-    `SELECT f.id, f.label, f.expires_on::text AS expires_on,
+    `SELECT f.id, f.label, f.expires_on::text AS expires_on, f.person_id,
             NULLIF(TRIM(COALESCE(p.preferred_name, p.first_name, '') || ' ' ||
                         COALESCE(p.last_name, '')), '') AS person_name
        FROM staff_record_files f
@@ -862,7 +862,7 @@ export async function runDocumentExpiryChase(): Promise<{ chased: number }> {
         `${expired ? 'expired' : 'expires'} ${fmtDate(row.expires_on)}.`,
         'staff_record_files',
         row.id,
-        STAFF_URL,
+        `${STAFF_URL}?person=${row.person_id}&tab=records`,
         expired ? 'high' : 'normal'
       );
     }
@@ -891,50 +891,19 @@ export async function runDocumentExpiryChase(): Promise<{ chased: number }> {
  * completed.
  */
 export async function runReviewDueScan(): Promise<{ flagged: number }> {
-  const { getReviewIntervalMonths, getReviewLeadDays } = await import('./staff-settings');
-  const [defaultMonths, lead] = await Promise.all([
-    getReviewIntervalMonths(), getReviewLeadDays(),
-  ]);
+  const { getReviewLeadDays } = await import('./staff-settings');
+  const { listReviewsDue } = await import('./staff-employment');
+  const lead = await getReviewLeadDays();
 
-  const due = await query(
-    `WITH last_done AS (
-       SELECT DISTINCT ON (person_id)
-              person_id, completed_at, next_review_due
-         FROM staff_reviews
-        WHERE status = 'completed'
-        ORDER BY person_id, completed_at DESC
-     )
-     SELECT se.person_id,
-            NULLIF(TRIM(COALESCE(p.preferred_name, p.first_name, '') || ' ' ||
-                        COALESCE(p.last_name, '')), '') AS person_name,
-            COALESCE(
-              ld.next_review_due,
-              (ld.completed_at::date + (COALESCE(se.review_interval_months, $1) || ' months')::interval)::date,
-              (se.start_date + (COALESCE(se.review_interval_months, $1) || ' months')::interval)::date
-            ) AS due_on
-       FROM staff_employment se
-       JOIN people p ON p.id = se.person_id
-       LEFT JOIN last_done ld ON ld.person_id = se.person_id
-      WHERE se.employment_status = 'employed'
-        AND se.review_due_chased_at IS NULL
-        AND NOT EXISTS (
-          SELECT 1 FROM staff_reviews r
-           WHERE r.person_id = se.person_id
-             AND r.status IN ('proposed', 'confirmed')
-        )`,
-    [String(defaultMonths)]
-  );
-
-  const horizon = new Date();
-  horizon.setUTCDate(horizon.getUTCDate() + lead);
-  const horizonYmd = horizon.toISOString().slice(0, 10);
+  // THE definition lives in staff-employment.ts so this scan and the Staff
+  // page's attention list cannot drift. onlyUnchased keeps this to one nudge
+  // per person per cycle; the page wants them all, chased or not.
+  const due = await listReviewsDue({ onlyUnchased: true, withinDays: lead });
+  if (!due.length) return { flagged: 0 };
 
   const admins = await approverUserIds();
   let flagged = 0;
-  for (const row of due.rows) {
-    const dueOn = row.due_on ? String(row.due_on).slice(0, 10) : null;
-    if (!dueOn || dueOn > horizonYmd) continue;
-
+  for (const row of due) {
     await query(
       'UPDATE staff_employment SET review_due_chased_at = NOW() WHERE person_id = $1',
       [row.person_id]
@@ -944,11 +913,11 @@ export async function runReviewDueScan(): Promise<{ flagged: number }> {
         admin.id,
         'staff_review_due',
         'A staff review is due',
-        `${esc(row.person_name || 'Somebody')}’s review is due ${fmtDate(dueOn)}. ` +
+        `${esc(row.person_name || 'Somebody')}’s review is due ${fmtDate(row.due_on)}. ` +
         'Agree a date with them, then record it on the Staff page.',
         'people',
         row.person_id,
-        STAFF_URL,
+        `${STAFF_URL}?person=${row.person_id}&tab=reviews`,
         'normal'
       );
     }

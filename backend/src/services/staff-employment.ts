@@ -967,3 +967,68 @@ export async function revealNiNumber(personId: string, userId: string): Promise<
 
   return value;
 }
+
+/**
+ * Who is due a review — THE definition, per CLAUDE.md's helper rule.
+ *
+ * Two callers with the same question and no reason to disagree: the 09:45
+ * scan that bells an admin (`runReviewDueScan`) and the Staff page's
+ * "needs attention" list. They differ ONLY in whether an already-nudged
+ * person is filtered out, hence `onlyUnchased`.
+ *
+ * Due FROM: the last completed review's `next_review_due`, else that review's
+ * completion plus the person's cadence, else — for somebody never reviewed —
+ * their employment start plus the cadence. That last fallback is the important
+ * one: a person nobody has ever reviewed is exactly who this is for, and
+ * keying only off previous reviews would miss them forever.
+ *
+ * Excludes anyone with a review already booked; being told to arrange
+ * something already in the diary is noise.
+ */
+export async function listReviewsDue(opts: { onlyUnchased: boolean; withinDays: number }) {
+  let defaultMonths: number;
+  {
+    const { getReviewIntervalMonths } = await import('./staff-settings');
+    defaultMonths = await getReviewIntervalMonths();
+  }
+
+  const r = await query(
+    `WITH last_done AS (
+       SELECT DISTINCT ON (person_id) person_id, completed_at, next_review_due
+         FROM staff_reviews
+        WHERE status = 'completed'
+        ORDER BY person_id, completed_at DESC
+     )
+     SELECT se.person_id,
+            NULLIF(TRIM(COALESCE(p.preferred_name, p.first_name, '') || ' ' ||
+                        COALESCE(p.last_name, '')), '') AS person_name,
+            COALESCE(
+              ld.next_review_due,
+              (ld.completed_at::date + (COALESCE(se.review_interval_months, $1) || ' months')::interval)::date,
+              (se.start_date + (COALESCE(se.review_interval_months, $1) || ' months')::interval)::date
+            )::text AS due_on,
+            ld.completed_at::date::text AS last_reviewed_on
+       FROM staff_employment se
+       JOIN people p ON p.id = se.person_id
+       LEFT JOIN last_done ld ON ld.person_id = se.person_id
+      WHERE se.employment_status = 'employed'
+        AND ($2::boolean IS FALSE OR se.review_due_chased_at IS NULL)
+        AND NOT EXISTS (
+          SELECT 1 FROM staff_reviews r
+           WHERE r.person_id = se.person_id
+             AND r.status IN ('proposed', 'confirmed')
+        )`,
+    [String(defaultMonths), opts.onlyUnchased]
+  );
+
+  // The horizon is applied here rather than in SQL because due_on is a
+  // COALESCE over three sources and comparing it inside the WHERE would mean
+  // repeating that whole expression.
+  const horizon = new Date();
+  horizon.setUTCDate(horizon.getUTCDate() + opts.withinDays);
+  const horizonYmd = horizon.toISOString().slice(0, 10);
+
+  return r.rows.filter((row: { due_on: string | null }) =>
+    !!row.due_on && row.due_on <= horizonYmd
+  ) as { person_id: string; person_name: string | null; due_on: string; last_reviewed_on: string | null }[];
+}
