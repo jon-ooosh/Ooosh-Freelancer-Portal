@@ -160,36 +160,71 @@ stop it being a surprise: `list.php` returns `REORDER_LEVEL` and `REORDER_QTY`, 
 consumption trail a reorder view turns "we ran out on Friday" into "we knew on Monday"
 (§12). Nearly free once the mirror exists.
 
-### 2.4 The sale catalogue is NOT the shop — it needs a category scope
+### 2.4 The sale catalogue is NOT the shop — scoping the till
 
 Verified Sep 2026: HireHop holds **974 sale-stock items** across 17 categories —
-Tape, Power, Batteries, Dirty Rigger, Guitar & Bass, Percussion, Cables, Components,
-Accessories, Stands, Drum Heads, Vocals, Strings, Drum Sticks, Guitar Pedals,
-**Misc Sale Item**, Drinks & snacks.
+Tape (338), Power (339), Batteries (340), Dirty Rigger (341), Guitar & Bass (342),
+Percussion (344), Cables (345), Components (346), Accessories (348), Stands (349),
+Drum Heads (350), Vocals (351), Strings (352), Drum Sticks (353), Guitar Pedals (354),
+**Misc Sale Item (355)**, Drinks & snacks (356).
 
 Not all of that is shop product. "Misc Sale Item" holds things like the **VE103B
-certificate** (£25, category 355) — a compliance charge raised onto a hire, not something
-anyone buys over the counter. A till listing all 974 would let someone sell a VE103B
-certificate to a walk-in.
+certificate** (£25) — a compliance charge raised onto a hire, not something anyone buys
+over the counter. A till listing all 974 would let someone sell a VE103B certificate to a
+walk-in.
 
-**Mirror everything, scope at the till.** The two consumers want different sets:
+#### Why NOT HireHop's "exclude from webshop" tick
+
+Tempting — it is a HireHop-native marker, it needs no second system, and it lines up with
+`thetour.store`. **It is still the wrong flag**, because it answers a different question:
+
+> *"Should the public be able to buy this and have it **shipped**?"*
+
+which is not
+
+> *"Can a member of staff sell this **over the counter**?"*
+
+The two answers diverge on the till's single most common category. **Drinks & snacks
+should absolutely be excluded from a webshop** — nobody posts a can of Coke — and are
+absolutely core till stock. Wire the till to that flag and the day the webshop gets
+configured properly, the till loses its bread and butter, silently, with no error.
+
+There is a maintenance argument too: the webshop flag is per-item across 974 rows, so
+every new internal-charge item needs remembering. Category scope is 17 decisions.
+
+**`exclude_from_webshop` IS mirrored** (migration 236) because it is the right flag for
+its own purpose and the webshop will want it. It is just not this purpose.
+
+#### The mechanism: a category EXCLUSION list, and it fails open
+
+`system_settings.shop_excluded_category_ids`, a JSON array of HireHop category IDs,
+staff-editable, seeded `[355]`.
+
+**Exclusion, not allowlist** — the direction is the whole point. An unclassified category
+still shows at the counter, so new stock is sellable the day it lands. With an allowlist a
+new category is invisible until someone edits a setting, and *"I can't find it to sell
+it"* is a worse failure in front of a customer than *"this probably shouldn't be listed"*.
+The `heads` list HireHop returns also looks top-level-only (IDs 343 and 347 are absent),
+so an allowlist risks hiding sub-categories we cannot currently enumerate. Every failure
+path in `getExcludedCategoryIds()` — missing setting, malformed JSON, unreadable table —
+hides nothing.
+
+**The scope applies at the READ, not the refresh**, because the two consumers want
+different sets:
 
 | Consumer | Scope |
 |---|---|
-| Till search / price lookup | shop categories only |
+| Till search / price lookup | excluded categories hidden |
+| **Barcode scan** | **no exclusion** — they are physically holding it; refusing to price a thing in the customer's hand is a gate that strands staff |
 | Reorder view (§12) | **all** sale stock — VE103B certs carry `REORDER_LEVEL: 15`, `REORDER_QTY: 50`, and running out of those matters too |
 
-So the category allowlist belongs at the read, not at the refresh. Unlike
-`BACKLINE_CATEGORY_IDS` (a code constant for hire stock), this one lives in
-`system_settings` — what the shop stocks will change, and jon should be able to add a
-category without a deploy.
+#### Not a finding: the `▶` on "▶ VE103B certificate"
 
-**⚠️ Prompt-parent sale items.** A title beginning `▶` marks an item carrying child
-prompts — the same convention as hire stock (`PLATFORM-CONVENTIONS.md`), and confirmed
-live on a SALE item ("▶ VE103B certificate"). Adding one by `a<id>` yields a line whose
-prompts are unanswered, which is not something a till should sell in one tap.
-`isPromptParent()` in `services/shop-stock.ts` is the test; treat those as
-not-simply-sellable until prompt handling exists.
+Seen in the live catalogue and initially read as HireHop's prompt-parent marker. **It was
+typed into the item's name by hand** — confirmed by jon, Sep 2026. Sale stock is believed
+not to support the prompt/AUTOPULL cascade that hire stock does, though that is a belief
+rather than a verified fact. Don't design around either assumption; if a genuine prompt
+ever appears on a sale item, verify before building for it.
 
 ### Confirmed HireHop facts (scratch job 16735, Sep 2026)
 
