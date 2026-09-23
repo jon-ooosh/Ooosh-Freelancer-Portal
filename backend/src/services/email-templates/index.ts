@@ -2666,6 +2666,15 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  // Sent when a review is marked complete (spec §5.5). Always with
+  // bodyHtmlOverride — the summary, actions and any pay change are assembled
+  // per person in services/staff-review-followup.ts.
+  staff_review_followup: {
+    variant: 'internal',
+    subject: 'Your review — {{reviewDate}}',
+    body: `<p>This template should be sent with bodyHtmlOverride. If you're seeing this, the caller forgot.</p>`,
+  },
+
 };
 
 export default templates;

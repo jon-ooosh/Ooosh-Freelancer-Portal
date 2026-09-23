@@ -126,8 +126,9 @@ somewhere the rules don't cover.
 
 **Part built:** `docs/STAFF-RECORDS-SPEC.md` — private staff files and key data
 (admin-only, some encrypted), document review cycles, periodic staff reviews, and the
-`staff_tasks` / "My To Do" surface their actions land on. **Phases 1–4 (files, key data,
-`staff_tasks` + My To Do, reviews) shipped Sep 2026**; phases 5–7 are not built. Its §1 lists what already exists and must not be
+`staff_tasks` / "My To Do" surface their actions land on. **Phases 1–5 (files, key data,
+`staff_tasks` + My To Do, reviews, the staff-facing review) shipped Sep 2026**; phases
+6–7 are not built. Its §1 lists what already exists and must not be
 rebuilt — including the DVLA check, where the obvious reuse is a trap — and §8 is the
 agreed build order with the shipped phases marked. Read both before designing.
 
@@ -192,6 +193,7 @@ existing definition:
 | Does this person own this task? | `services/staff-tasks.ts` `assertCanTouch()` |
 | Who is due a staff review? | `services/staff-employment.ts` `listReviewsDue()` |
 | What needs an admin's attention on Staff? | `services/staff-attention.ts` |
+| What does a reviewee get to see? | `services/staff-review-prep.ts` `getMyReview()` |
 
 Frontend display helpers with the same status: `lib/roles.ts`, `lib/driverStatus.ts`,
 `lib/jobOrgName.ts`, `lib/vehiclePrep.ts`, `lib/preauth.ts`, `lib/revisitDate.ts`,
