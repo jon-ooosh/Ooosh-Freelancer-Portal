@@ -672,9 +672,12 @@ Frontend: `hasManagerRole()` / `roleAllowed()` from `lib/roles.ts`, never bare
 
 ## 14. Build order
 
-1. **Verify the two unknowns in §18 against a scratch job.** Nothing else starts first.
-2. Migration + `shop_stock_cache` + the catalogue refresher. Ship this alone — price lookup
-   is independently useful and risk-free (read-only). **Note what this step is not:** the
+1. **Verify the unknowns in §18 against a scratch job.** Nothing else starts first.
+   *Mostly done Sep 2026 — see §2.1. `backend/src/scripts/shop-stock-probe.ts` settles what
+   remains; delete it once the push code lands.*
+2. ✅ **SHIPPED Sep 2026.** Migration `235_shop_stock_cache.sql` +
+   `services/shop-stock.ts` + a 15-minute scheduler refresh (and one at startup).
+   Read-only, so it could ship ahead of the open questions. **Note what this step is not:** the
    mirror is stock and prices only. The running tally that ends the "where's the missing £24"
    drift is the `shop_sales` ledger plus the balance invariant (§9) — steps 4, 6 and 9. And
    it only ever covers sales made *through OP*; it prevents future drift, it does not find
@@ -757,6 +760,17 @@ UI capture proves the *shape*, the probe proves *our* auth path.
 
 Do it against a scratch job, clearly named (e.g. "ZZZ TEST — OP shop sales, do not invoice")
 and flagged `is_internal` in OP so it doesn't leak into the pipeline or trigger a chaser.
+
+**The probe:** `backend/src/scripts/shop-stock-probe.ts` answers what a UI capture cannot —
+whether OUR token and OUR codepath reproduce what the HireHop UI does. Reads run
+unconditionally; the two writes need `--write`. One-shot, like
+`hh-deposit-release-probe.ts`; delete it once the push code lands.
+
+```
+cd backend
+npx tsx src/scripts/shop-stock-probe.ts --job=16735 --stock=25            # reads only
+npx tsx src/scripts/shop-stock-probe.ts --job=16735 --stock=25 --write    # full
+```
 
 **SETTLED** (scratch job 16735, Sep 2026 — see §2.1 for the full table): the sale-stock
 prefix is `a<id>`, sale lines are `kind: 1`, tally `qty` is negative-to-consume, removing a
