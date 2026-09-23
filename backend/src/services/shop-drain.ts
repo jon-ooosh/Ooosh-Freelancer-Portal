@@ -53,11 +53,34 @@ async function getMaxAttempts(): Promise<number> {
 }
 
 /**
+ * HireHop wants the USER'S local wall-clock time, not UTC. The server runs in
+ * UTC, so this formats "now" in Europe/London — captured as `2026-09-23
+ * 16:42:40` while the stored DATE came back as `15:42:40`, i.e. BST.
+ */
+function hhLocalNow(): string {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/London',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(new Date());
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? '00';
+  return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}:${get('second')}`;
+}
+
+/**
  * Record one line's consumption as a HireHop stock adjustment.
  *
- * `tally_save.php` takes `cons` (the sale-stock ID), `qty` and a compulsory
- * `details` reason. Verified Sep 2026: a NEGATIVE qty consumes and a positive
- * one restores, and each adjustment comes back with its own editable `ID`.
+ * ⚠️ THE PARAMETER NAMES BELOW ARE CAPTURED FROM HIREHOP'S OWN UI, AND THEY DO
+ * NOT MATCH HIREHOP'S API DOCUMENTATION. The docs describe `cons`, `id`, `qty`
+ * and `details`; the endpoint actually wants `CONSUMABLE_ID`, `ID`, `QTY`,
+ * `DETAILS` — uppercase — plus `local`, `tz` and `CUSTOM_FIELDS`, none of which
+ * the docs mention as required. Sending the documented shape returns error 3.
+ * That cost a live round; `items_delete.php` differed from its docs the same
+ * way. Capture the payload, never trust the docs. See SHOP-SALES-SPEC.md §2.9.
+ *
+ * Verified Sep 2026: a NEGATIVE `QTY` consumes and a positive one restores, and
+ * each adjustment comes back with its own editable `ID`.
  *
  * Returns the adjustment id, or null with a reason.
  *
@@ -69,16 +92,20 @@ export async function pushTally(
   qty: number,
   details: string,
 ): Promise<{ tallyId: number | null; error: string | null }> {
-  const res = await hhBroker.post<any>('/modules/consumables/tally_save.php', {
-    id: 0,                    // 0 = create; a real id would EDIT an adjustment
-    cons: stockId,
-    qty: -Math.abs(qty),      // negative consumes. Never trust a caller's sign.
-    details: details.slice(0, 250),
-  }, { priority: 'low' });
+  const payload = {
+    ID: 0,                      // 0 = create; a real id would EDIT an adjustment
+    CONSUMABLE_ID: stockId,     // NOT `cons`, whatever the docs say
+    QTY: -Math.abs(qty),        // negative consumes. Never trust a caller's sign.
+    DETAILS: details.slice(0, 250),
+    CUSTOM_FIELDS: '{}',
+    local: hhLocalNow(),
+    tz: 'Europe/London',
+  };
+
+  const res = await hhBroker.post<any>('/modules/consumables/tally_save.php', payload, { priority: 'low' });
 
   if (!res?.success) {
-    const sent = { id: 0, cons: stockId, qty: -Math.abs(qty), details: details.slice(0, 250) };
-    console.error('[shop-drain] tally_save rejected. sent=%j reply=%j', sent, res);
+    console.error('[shop-drain] tally_save rejected. sent=%j reply=%j', payload, res);
     // Store the whole reply on the row, not just the code. "3" on its own told
     // us nothing, and by the time anyone looked the journal had rotated past it.
     const detail = JSON.stringify({ error: res?.error ?? null, data: res?.data ?? null }).slice(0, 400);

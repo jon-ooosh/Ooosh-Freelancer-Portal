@@ -352,6 +352,30 @@ be able to answer "why did this week take less than it listed".
 line, never as a payment that happens to be less than the total — that would break §9's
 lines-equal-deposits invariant, which is the module's whole integrity story.
 
+### 2.9 ⚠️ HireHop's API docs do not match its endpoints — CAPTURE, never trust
+
+Twice now the documented parameter names have been wrong, and both times it cost
+a live round-trip:
+
+| Endpoint | Docs say | Actually wants |
+|---|---|---|
+| `items_delete.php` | (undocumented) | `ids` as a **bare string**, `job`, `arch`, `no_availability` |
+| `tally_save.php` | `cons`, `id`, `qty`, `details` | **`CONSUMABLE_ID`**, **`ID`**, **`QTY`**, **`DETAILS`** (uppercase), plus `local`, `tz`, `CUSTOM_FIELDS` |
+
+The documented shape for `tally_save.php` returns **error 3**. Worse, it is the
+quiet kind of wrong — a plausible-looking payload that HireHop rejects with a
+bare number, which then lands in `push_error` as `"blue fluoro tape: 3"` and
+tells nobody anything.
+
+> **Rule: before writing any HireHop write, perform it in HireHop's own UI with
+> the Network tab open and copy the PAYLOAD tab verbatim.** Not the Response —
+> that has twice looked informative and settled nothing. The docs are a hint
+> about what an endpoint does, never about how to call it.
+
+`local` is the user's **local wall-clock time**, not UTC: captured as
+`2026-09-23 16:42:40` while the stored `DATE` came back `15:42:40`. The server
+runs in UTC, so it must format Europe/London explicitly.
+
 ### Confirmed HireHop facts (scratch job 16735, Sep 2026)
 
 | | Finding |
