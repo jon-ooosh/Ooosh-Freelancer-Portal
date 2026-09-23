@@ -21,7 +21,13 @@
  *
  * Actions agreed at a review become `staff_tasks` rows (§6) so they land on
  * the owner's own My To Do — including jon's, which is the whole point: the
- * things the COMPANY owes are the ones that quietly lapse.
+ * things the COMPANY owes are the ones that quietly lapse. Each is LINKED to
+ * its review (reviewId → source_type 'staff_review'), which is what puts it in
+ * the follow-up email, the "From your review" badge and the check-in below.
+ *
+ * THE CHECK-IN (§5.6, §22): half-way to the next review, "Since last review"
+ * lists every action from the last completed one, whoever owns it, and asks
+ * whether they happened. Ticking it off clears the Needs attention row.
  */
 
 import { useCallback, useEffect, useState } from 'react';
@@ -44,6 +50,7 @@ interface Review {
   self_assessment_submitted_at: string | null;
   invited_at: string | null;
   follow_up_sent_at: string | null;
+  checkin_done_at: string | null;
 }
 
 interface TaskRow {
@@ -52,6 +59,25 @@ interface TaskRow {
   due_date: string | null;
   status: string;
   owner_name: string | null;
+}
+
+/** A review's actions, whoever owns them. Cancelled ones are left out. */
+async function fetchReviewActions(reviewId: string): Promise<TaskRow[]> {
+  const res = await api.get<{ data: TaskRow[] }>(`/staff-tasks/review/${reviewId}`);
+  return res.data.filter(t => t.status !== 'cancelled');
+}
+
+/** One action line: what, who, by when, and whether it happened. */
+function ActionLine({ task }: { task: TaskRow }) {
+  const done = task.status === 'done';
+  return (
+    <li className="flex flex-wrap gap-x-2">
+      <span className={done ? 'text-emerald-600' : 'text-gray-400'}>{done ? '✓' : '•'}</span>
+      <span className={done ? 'text-gray-500 line-through' : ''}>{task.title}</span>
+      {task.owner_name && <span className="text-xs text-gray-500">— {task.owner_name}</span>}
+      {task.due_date && <span className="text-xs text-gray-400">by {fmtDate(task.due_date)}</span>}
+    </li>
+  );
 }
 
 export interface ReviewPerson { personId: string; name: string }
@@ -140,6 +166,11 @@ export default function StaffReviews({ personId, personName, people, onSaved, on
 
   const upcoming = reviews.filter(r => r.status === 'proposed' || r.status === 'confirmed');
   const past = reviews.filter(r => r.status === 'completed' || r.status === 'cancelled');
+  // Newest completed review — what a check-in follows up. Sorted here rather
+  // than trusting the list order, which is by scheduled date.
+  const lastDone = reviews
+    .filter(r => r.status === 'completed')
+    .sort((a, b) => (b.completed_at ?? b.scheduled_for).localeCompare(a.completed_at ?? a.scheduled_for))[0];
 
   return (
     <div>
@@ -191,6 +222,16 @@ export default function StaffReviews({ personId, personName, people, onSaved, on
         </div>
       )}
 
+      {!loading && lastDone && upcoming.length === 0 && (
+        <SinceLastReview
+          review={lastDone}
+          personId={personId}
+          personName={personName}
+          onChanged={async (msg) => { await load(); await onSaved(msg); }}
+          onError={onError}
+        />
+      )}
+
       {loading ? (
         <p className="text-sm text-gray-500">Loading…</p>
       ) : reviews.length === 0 ? (
@@ -232,13 +273,14 @@ function ReviewRow({ review, personId, personName, people, open, onToggle, onCha
   const [actionOwner, setActionOwner] = useState(personId);
   const [actionDue, setActionDue] = useState('');
 
+  // THIS review's actions, whoever owns them. It used to read the reviewee's
+  // whole to-do list, which showed unrelated tasks and hid every action owed
+  // by somebody else — the company's own, which §6.2 says matter most.
   const loadTasks = useCallback(async () => {
     try {
-      const res = await api.get<{ data: TaskRow[] }>(
-        `/staff-tasks/person/${personId}?includeDone=true`);
-      setTasks(res.data);
+      setTasks(await fetchReviewActions(review.id));
     } catch { /* the actions list is a nicety; the review itself still works */ }
-  }, [personId]);
+  }, [review.id]);
 
   useEffect(() => { if (open) void loadTasks(); }, [open, loadTasks]);
 
@@ -297,6 +339,7 @@ function ReviewRow({ review, personId, personName, people, open, onToggle, onCha
         title: actionTitle.trim(),
         personId: actionOwner,
         dueDate: actionDue || null,
+        reviewId: review.id,
       });
       setActionTitle('');
       setActionDue('');
@@ -399,17 +442,11 @@ function ReviewRow({ review, personId, personName, people, open, onToggle, onCha
             <span className="block text-xs text-gray-600 mb-1">
               Actions — these land on the owner’s My To Do
             </span>
-            {tasks.filter(t => t.status === 'open').length === 0 ? (
-              <p className="text-xs text-gray-400 mb-2">Nothing outstanding.</p>
+            {tasks.length === 0 ? (
+              <p className="text-xs text-gray-400 mb-2">No actions from this review yet.</p>
             ) : (
               <ul className="text-sm text-gray-700 mb-2 space-y-0.5">
-                {tasks.filter(t => t.status === 'open').map(t => (
-                  <li key={t.id} className="flex gap-2">
-                    <span>•</span>
-                    <span>{t.title}</span>
-                    {t.due_date && <span className="text-xs text-gray-400">by {fmtDate(t.due_date)}</span>}
-                  </li>
-                ))}
+                {tasks.map(t => <ActionLine key={t.id} task={t} />)}
               </ul>
             )}
             <div className="flex flex-wrap items-end gap-2">
@@ -483,6 +520,78 @@ function ReviewRow({ review, personId, personName, people, open, onToggle, onCha
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * "Since last review" — the check-in agenda (spec §5.6, §22). Shown only when
+ * nothing is booked: once the next review is in the diary, that is where the
+ * conversation happens.
+ */
+function SinceLastReview({ review, personId, personName, onChanged, onError }: {
+  review: Review; personId: string; personName: string;
+  onChanged: (msg: string) => Promise<void>; onError: (msg: string) => void;
+}) {
+  const [tasks, setTasks] = useState<TaskRow[] | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    fetchReviewActions(review.id)
+      .then(t => { if (live) setTasks(t); })
+      .catch(() => { if (live) setFailed(true); });
+    return () => { live = false; };
+  }, [review.id]);
+
+  async function markDone() {
+    setSaving(true);
+    try {
+      await api.post(`/staff-calendar/employees/${personId}/reviews/${review.id}/checkin`, {});
+      await onChanged(`Check-in recorded for ${personName}.`);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Failed to record the check-in');
+    } finally { setSaving(false); }
+  }
+
+  const open = tasks?.filter(t => t.status === 'open').length ?? 0;
+
+  return (
+    <div className="rounded border border-ooosh-200 bg-ooosh-50 p-3 mb-3">
+      <div className="flex flex-wrap items-center gap-2 mb-2">
+        <h4 className="text-xs font-semibold text-gray-900">
+          Since last review ({fmtDate(review.completed_at ?? review.scheduled_for)})
+        </h4>
+        {tasks && (
+          <span className="text-xs text-gray-500">
+            {tasks.length === 0 ? 'no actions agreed' : `${open} of ${tasks.length} still open`}
+          </span>
+        )}
+        <span className="ml-auto">
+          {review.checkin_done_at ? (
+            <span className="text-xs text-emerald-700">Checked in {fmtDate(review.checkin_done_at)}</span>
+          ) : (
+            <button onClick={() => void markDone()} disabled={saving}
+              className="px-2 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-gray-50 disabled:opacity-40">
+              {saving ? 'Saving…' : 'Check-in done'}
+            </button>
+          )}
+        </span>
+      </div>
+      {failed ? (
+        <p className="text-xs text-red-700">Couldn’t load the actions from that review.</p>
+      ) : tasks === null ? (
+        <p className="text-xs text-gray-500">Loading…</p>
+      ) : tasks.length > 0 ? (
+        <ul className="text-sm text-gray-700 space-y-0.5">
+          {tasks.map(t => <ActionLine key={t.id} task={t} />)}
+        </ul>
+      ) : null}
+      <p className="text-[11px] text-gray-500 mt-2">
+        Half-way to the next review, go through these with {personName.split(' ')[0]} — including
+        the ones you owe. Ticking it off clears the “Check-in due” prompt.
+      </p>
     </div>
   );
 }

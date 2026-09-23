@@ -198,7 +198,7 @@ existing definition:
 | What needs an admin's attention on Staff? | `services/staff-attention.ts` |
 | What does a reviewee get to see? | `services/staff-review-prep.ts` `getMyReview()` |
 | Does this module need a new person field? | Check `people` first — it already has phone, mobile, home address, DOB and both emergency contacts (mig 001) |
-| When is a STAFF document due a re-check? | `services/staff-doc-cycles.ts` (never `driver-validity.ts` — different people) |
+| When is a STAFF document due a re-check? | `services/staff-doc-cycles.ts` — the record's own `action_on` fires; the per-type intervals only pre-fill it (never `driver-validity.ts` — different people) |
 | What staff data has expired? | `services/staff-retention.ts` |
 
 Frontend display helpers with the same status: `lib/roles.ts`, `lib/driverStatus.ts`,
@@ -288,7 +288,7 @@ chase alerts 08:10 · auto-chase runner 08:10 · lock-up chaser 08:45 · staff t
 08:45 · return-to-work chase 08:50 · stale-enquiry
 auto-lose 09:00 · freelancer offer chase 09:05 · carnet forms 09:15 · referral safety-net 09:18 · storage reminders
 09:20 · holding reminders 09:25 · close-out chase 09:30 · staff documents 09:35 ·
-pre-auth expiry 09:40 · staff records 09:45 (to-dos, document expiry, document re-checks, reviews due, absence-detail purge) · Stripe pre-auth discovery 09:50 · year-end cash-out reminder
+pre-auth expiry 09:40 · staff records 09:45 (to-dos, record action dates, reviews due, absence-detail purge) · Stripe pre-auth discovery 09:50 · year-end cash-out reminder
 09:55 (December + January) · company-days prompt 09:58 (November) · OOH reminders 10:00 ·
 HireHop sync every 30 min · sanity scanners every 15 min · notification escalation
 every 15 min · Gmail ingestion every 10 min.

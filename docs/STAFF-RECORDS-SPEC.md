@@ -1209,13 +1209,14 @@ All seven phases shipped 21–23 Sep 2026. This section is the handover.
 | Salary + pension history | `staff_salary_history` (mig 206), `staff_pension_history` (238), `components/StaffPay.tsx` |
 | To-dos | `staff_tasks`, `services/staff-tasks.ts`, `pages/MyTasksPage.tsx` |
 | Reviews, both sides | `staff_reviews`, `staff-review-prep.ts`, `staff-review-followup.ts`, `StaffReviews.tsx`, `MyReviewPage.tsx` |
-| Document re-check cycles | `services/staff-doc-cycles.ts` |
+| Record dates — one action per record (remind / flag for deletion) | `staff_record_files.action_*` (mig 243), `services/staff-doc-cycles.ts`, `runRecordActionChase()` — §22 |
+| Check-in between reviews | `listCheckInsDue()`, `staff_reviews.checkin_done_at` (mig 244), "Since last review" in `StaffReviews.tsx` — §22 |
 | Retention | `services/staff-retention.ts` |
 | "Needs attention" | `services/staff-attention.ts` — THE cross-person view |
 | The page | `/staff/admin`, `?person=<id>&tab=…` |
-| Daily reminders | one 09:45 cron in `config/scheduler.ts`, five independently-caught scans |
+| Daily reminders | one 09:45 cron in `config/scheduler.ts`, four independently-caught scans (to-dos, record actions, reviews due, absence purge) |
 
-Migrations: **231, 232, 233, 234, 237(*), 238, 239**.
+Migrations: **231, 232, 233, 234, 237(*), 238, 239, 243, 244**.
 (*) `237_staff_review_prep.sql`. 235 and 236 were taken by the parallel
 shop-sales branch, which then also took a 237 (`237_shop_vat_rates_from_hirehop.sql`),
 so **there are two 237 files and both are correct** — see §17.3 and §21.2.
@@ -1310,7 +1311,7 @@ check) and the driver record (for hire insurability). Nothing syncs them, on
 purpose. Do not add a sync: it would recreate the §1.1 drift problem with a
 third copy.
 
-### 21.4 Agreed next, not yet built
+### 21.4 Agreed next — BUILT, see §22
 
 Settled with jon on 23 Sep 2026, to be built in this order:
 
@@ -1326,4 +1327,84 @@ Settled with jon on 23 Sep 2026, to be built in this order:
    last review" list on the admin Reviews tab of every action agreed at the
    last review, whoever owns it; plus a "check-in due" item on Needs attention
    at the half-way point of the person's review interval.
+
+---
+
+## 22. Record dates, the check-in, and the review-action link (23 Sep 2026)
+
+Built from §21.4. Two agreed features and one bug found on the way.
+
+### 22.1 The bug: review actions were never linked to their review
+
+The Reviews tab created actions through `POST /api/staff-tasks`, whose schema
+had no way to say "this came from review X". Every action was saved as
+`source_type = 'manual'`. So, since Phase 4:
+
+- the follow-up email's "agreed actions" section was **always empty** — it
+  selects `source_type = 'staff_review' AND source_id = <review>`;
+- the "From your review" badge on My To Do never appeared;
+- the actions list inside a review showed the REVIEWEE's whole to-do list, and
+  an action owned by anybody else — the company's own, §6.2's whole point —
+  vanished from the review the moment it was added.
+
+Fixed: the endpoint takes `reviewId` (admin-only, the review must exist) and
+stores the link; a review lists its own actions via
+`GET /api/staff-tasks/review/:reviewId`, whoever owns them. **Actions added
+before this fix stay unlinked** — nothing reliable says which review they came
+from. Same shape of mistake as §15.2 and §18.3: a column designed for a job
+(`source_type`) that nothing ever set.
+
+### 22.2 One dated action per record (mig 243)
+
+jon: set, per record, when he wants to hear about it and what happens then —
+like the remind-me on a job — rather than the system deriving it.
+
+That replaced two clocks — the printed-expiry chase (mig 234) and the re-check
+cycle (mig 239) — which kept separate stamps and could nag twice about one
+passport. Now each record has `action_on`, `action_kind` (remind | delete),
+`action_delivery` (bell / email / both), `action_user_id` (NULL = every admin)
+and `action_note`, fired once by `runRecordActionChase()` at 09:45.
+
+**The old rules became the default, not the clock.** The upload form pre-fills
+the date from the earlier of "30 days before the printed expiry" and "document
+date + the type's interval" (`suggestActionDate()`, fed by
+`GET /staff-records/action-defaults`). Whatever is left in the box is what
+fires. Migration 243 carried every existing record over the same way.
+
+**The weak point of self-serve is forgetting, so there is a net.** Needs
+attention flags any current record that should have a date — it has a printed
+expiry, or its type has an interval — and doesn't. And one row per record,
+never two: an expired passport with no date shows as expired only.
+
+**"Flag for deletion" never deletes.** The bell and the attention row point at
+the record and a human presses Delete. The bell deep-links rather than carrying
+a Delete button of its own: deleting from an inbox, without seeing the file,
+is the wrong place for an irreversible act.
+
+**Leavers** get an attention row when they have records and none carries a
+deletion date. Right to work keeps its own statutory row (§19.2).
+
+**Re-arming only on a real change.** The edit form sends every field, so the
+PATCH compares old with new (`IS DISTINCT FROM`) before clearing the stamp —
+otherwise re-saving an untouched record would re-fire a reminder already sent.
+
+**Notes without a file were considered and dropped** (jon: keep it focused).
+§19.3's reasoning on free-text medical notes stands.
+
+### 22.3 The check-in between reviews (mig 244)
+
+§5.6 promised "here are last review's actions, where are they?" and no phase
+ever scheduled it. Now:
+
+- **"Since last review"** at the top of the admin Reviews tab, when nothing is
+  booked: every action from the last completed review, whoever owns it, done
+  or open, with a **Check-in done** button.
+- **"Check-in due"** on Needs attention half-way between the last completed
+  review and the next one due, from `listCheckInsDue()`. That shares the due
+  date SQL with `listReviewsDue()`, so they cannot disagree. Skipped for cycles
+  under four months (half a monthly cycle is just another review) and when a
+  review is already booked. Ticking it stamps `checkin_done_at` on the review;
+  the next completed review starts clean.
+- Staff side: nothing new — their actions already show on My To Do, and now
+  carry the "From your review" badge.
 

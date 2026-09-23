@@ -644,7 +644,7 @@ export async function listReviews(personId: string, includePrivate = false) {
             self_assessment, self_assessment_submitted_at,
             invited_at, follow_up_sent_at,
             outcome, next_review_due::text AS next_review_due,
-            salary_history_id, created_at
+            salary_history_id, checkin_done_at, created_at
        FROM staff_reviews
       WHERE person_id = $1
       ORDER BY scheduled_for DESC`,
@@ -1007,6 +1007,26 @@ export async function revealNiNumber(personId: string, userId: string): Promise<
 }
 
 /**
+ * When somebody's next review falls due, as SQL — shared by listReviewsDue()
+ * and listCheckInsDue() so the two cannot disagree about the date. Expects the
+ * `last_done` CTE aliased `ld`, `staff_employment` aliased `se`, and the
+ * company default interval (months) as $1.
+ */
+const LAST_DONE_CTE = `
+  last_done AS (
+    SELECT DISTINCT ON (person_id) id, person_id, completed_at, next_review_due, checkin_done_at
+      FROM staff_reviews
+     WHERE status = 'completed'
+     ORDER BY person_id, completed_at DESC
+  )`;
+const REVIEW_DUE_ON_SQL = `
+  COALESCE(
+    ld.next_review_due,
+    (ld.completed_at::date + (COALESCE(se.review_interval_months, $1) || ' months')::interval)::date,
+    (se.start_date + (COALESCE(se.review_interval_months, $1) || ' months')::interval)::date
+  )`;
+
+/**
  * Who is due a review — THE definition, per CLAUDE.md's helper rule.
  *
  * Two callers with the same question and no reason to disagree: the 09:45
@@ -1031,20 +1051,11 @@ export async function listReviewsDue(opts: { onlyUnchased: boolean; withinDays: 
   }
 
   const r = await query(
-    `WITH last_done AS (
-       SELECT DISTINCT ON (person_id) person_id, completed_at, next_review_due
-         FROM staff_reviews
-        WHERE status = 'completed'
-        ORDER BY person_id, completed_at DESC
-     )
+    `WITH ${LAST_DONE_CTE}
      SELECT se.person_id,
             NULLIF(TRIM(COALESCE(p.preferred_name, p.first_name, '') || ' ' ||
                         COALESCE(p.last_name, '')), '') AS person_name,
-            COALESCE(
-              ld.next_review_due,
-              (ld.completed_at::date + (COALESCE(se.review_interval_months, $1) || ' months')::interval)::date,
-              (se.start_date + (COALESCE(se.review_interval_months, $1) || ' months')::interval)::date
-            )::text AS due_on,
+            ${REVIEW_DUE_ON_SQL}::text AS due_on,
             ld.completed_at::date::text AS last_reviewed_on
        FROM staff_employment se
        JOIN people p ON p.id = se.person_id
@@ -1069,6 +1080,72 @@ export async function listReviewsDue(opts: { onlyUnchased: boolean; withinDays: 
   return r.rows.filter((row: { due_on: string | null }) =>
     !!row.due_on && row.due_on <= horizonYmd
   ) as { person_id: string; person_name: string | null; due_on: string; last_reviewed_on: string | null }[];
+}
+
+/**
+ * Who is due a CHECK-IN — half-way between their last completed review and
+ * the next one due (spec §5.6, §22). "Here are last time's actions, where are
+ * they?" — the thing that stops the annual review being a ritual.
+ *
+ * Only for people who HAVE a completed review (there is nothing to check in
+ * on otherwise), whose cycle is at least four months (half of a monthly cycle
+ * is two weeks, which is just another review), with no review already booked,
+ * and not yet ticked off on that review (`checkin_done_at`, mig 244). A new
+ * completed review starts a new cycle with no stamp, so nothing needs clearing.
+ *
+ * Shares the due-date SQL with listReviewsDue() so the two cannot disagree.
+ */
+export async function listCheckInsDue(): Promise<
+  { person_id: string; person_name: string | null; review_id: string; checkin_on: string; last_reviewed_on: string }[]
+> {
+  const { getReviewIntervalMonths } = await import('./staff-settings');
+  const defaultMonths = await getReviewIntervalMonths();
+
+  const r = await query(
+    `WITH ${LAST_DONE_CTE},
+     cycle AS (
+       SELECT se.person_id, ld.id AS review_id, ld.checkin_done_at,
+              ld.completed_at::date AS last_on,
+              ${REVIEW_DUE_ON_SQL} AS due_on
+         FROM staff_employment se
+         JOIN last_done ld ON ld.person_id = se.person_id
+        WHERE se.employment_status = 'employed'
+          AND NOT EXISTS (
+            SELECT 1 FROM staff_reviews b
+             WHERE b.person_id = se.person_id
+               AND b.status IN ('proposed', 'confirmed')
+          )
+     )
+     SELECT c.person_id, c.review_id,
+            NULLIF(TRIM(COALESCE(p.preferred_name, p.first_name, '') || ' ' ||
+                        COALESCE(p.last_name, '')), '') AS person_name,
+            (c.last_on + (c.due_on - c.last_on) / 2)::text AS checkin_on,
+            c.last_on::text AS last_reviewed_on
+       FROM cycle c
+       JOIN people p ON p.id = c.person_id
+      WHERE c.checkin_done_at IS NULL
+        AND c.due_on IS NOT NULL
+        AND c.due_on - c.last_on >= 120
+        AND c.last_on + (c.due_on - c.last_on) / 2 <= CURRENT_DATE
+      ORDER BY checkin_on`,
+    [String(defaultMonths)]
+  );
+  return r.rows;
+}
+
+/**
+ * Tick off the check-in on a completed review. The review must belong to the
+ * person — the id comes from the URL, and a mistyped one must not stamp
+ * somebody else's.
+ */
+export async function markCheckInDone(personId: string, reviewId: string): Promise<boolean> {
+  const r = await query(
+    `UPDATE staff_reviews SET checkin_done_at = NOW()
+      WHERE id = $1 AND person_id = $2 AND status = 'completed'
+      RETURNING id`,
+    [reviewId, personId]
+  );
+  return r.rows.length > 0;
 }
 
 // ── Pension (spec §18.2) ────────────────────────────────────────────────────

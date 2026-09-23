@@ -128,6 +128,16 @@ export async function createTask(input: TaskInput, userId: string, role: string 
     if (personId !== mine) throw new Error('Only an admin can add a task to somebody else’s list');
   }
 
+  // A review action is linked to its review, which is what puts it in the
+  // follow-up email, the "From your review" badge and the check-in list.
+  // Reviews are admin-only, so only an admin can file against one, and the
+  // review must exist — the id comes from the client.
+  if (input.sourceType === 'staff_review') {
+    if (!isAdmin(role)) throw new Error('Only an admin can add a review action');
+    const review = await query('SELECT id FROM staff_reviews WHERE id = $1', [input.sourceId]);
+    if (!review.rows.length) throw new Error('Review not found');
+  }
+
   const dueDate = input.dueDate || null;
   const nextChase = await resolveChaseDate(input.nextChaseDate, dueDate);
   if (nextChase && !DATE_RE.test(nextChase)) throw new Error('nextChaseDate must be YYYY-MM-DD');

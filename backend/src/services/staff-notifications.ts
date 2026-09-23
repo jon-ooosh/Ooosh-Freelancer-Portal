@@ -817,63 +817,6 @@ export async function runTaskChase(): Promise<{ chased: number }> {
 }
 
 /**
- * A staff document is about to expire — passport, visa, certificate.
- *
- * Reads `expires_on`, the expiry printed ON the document (mig 234), NOT a
- * derived review window. The derived kind — "we want a new DVLA check every
- * twelve months" — is Phase 6 and deliberately separate: they answer different
- * questions and must not be collapsed into one rule (spec §1.2).
- *
- * Once per document, stamped. Changing the expiry clears the stamp, because a
- * renewed passport is a new document.
- *
- * Goes to the admins, not the person: these are records WE hold and the
- * staff member cannot see them.
- */
-export async function runDocumentExpiryChase(): Promise<{ chased: number }> {
-  const { getDocumentExpiryLeadDays } = await import('./staff-settings');
-  const lead = await getDocumentExpiryLeadDays();
-
-  const due = await query(
-    `SELECT f.id, f.label, f.expires_on::text AS expires_on, f.person_id,
-            NULLIF(TRIM(COALESCE(p.preferred_name, p.first_name, '') || ' ' ||
-                        COALESCE(p.last_name, '')), '') AS person_name
-       FROM staff_record_files f
-       JOIN people p ON p.id = f.person_id
-      WHERE f.deleted_at IS NULL
-        AND f.expires_on IS NOT NULL
-        AND f.expiry_chased_at IS NULL
-        AND f.expires_on <= (CURRENT_DATE + ($1 || ' days')::interval)::date`,
-    [String(lead)]
-  );
-  if (!due.rows.length) return { chased: 0 };
-
-  const admins = await approverUserIds();
-  let chased = 0;
-  for (const row of due.rows) {
-    await query('UPDATE staff_record_files SET expiry_chased_at = NOW() WHERE id = $1', [row.id]);
-    const expired = row.expires_on < new Date().toISOString().slice(0, 10);
-    for (const admin of admins) {
-      await notify(
-        admin.id,
-        'staff_document_expiring',
-        expired ? 'A staff document has expired' : 'A staff document is expiring',
-        `${esc(row.person_name || 'Somebody')}’s “${esc(row.label)}” ` +
-        `${expired ? 'expired' : 'expires'} ${fmtDate(row.expires_on)}.`,
-        'staff_record_files',
-        row.id,
-        `${STAFF_URL}?person=${row.person_id}&tab=records`,
-        expired ? 'high' : 'normal'
-      );
-    }
-    chased++;
-  }
-
-  console.log(`[staff-notifications] document expiry: flagged ${chased}`);
-  return { chased };
-}
-
-/**
  * Somebody's review is coming round (spec §5.6).
  *
  * Cadence is per person — `staff_employment.review_interval_months`, falling
@@ -957,43 +900,95 @@ export async function notifyStaffReviewBooked(
 
 
 /**
- * Documents due a re-check on their cycle (spec §4, Phase 6).
+ * A staff record's action date has come round (spec §22, mig 243).
  *
- * The OTHER clock from runDocumentExpiryChase: that one watches a document's
- * own printed expiry, this one watches "it has been a year, look at it again".
- * Separate stamps so a passport can be both nearing expiry and due a re-check
- * without one silencing the other.
+ * THE one clock for staff records. It replaced two — the printed-expiry chase
+ * and the re-check cycle — which each kept their own stamp and could nag twice
+ * about one passport. The date is whatever the admin set on the record; the
+ * form pre-fills it from those two old rules, so they survive as the default.
  *
- * Nothing here touches the driver system — a staff DVLA check is its own
- * filed document, by jon's decision (spec §19.1).
+ * Fires once per date, stamped on action_chased_at. Moving the date clears the
+ * stamp (routes/staff-records.ts), so a renewed promise earns a fresh nudge.
+ * Until the date is moved or cleared, the record also stays on the Staff
+ * page's Needs attention list — the bell is the push, the list is the memory.
+ *
+ * 'delete' NEVER deletes. It tells the admin the record is due for deletion
+ * and links to it; a human presses Delete. Destroying a right-to-work copy by
+ * mistake is irreversible, and CLAUDE.md's policy is warnings, not silent
+ * action.
+ *
+ * Delivery follows the job remind-me form (and storage-reminders.ts):
+ *   notification → a low-priority bell, which the escalation scheduler never emails
+ *   both         → a normal bell, which it emails per the recipient's preferences
+ *   email        → sent now, and the bell stamped email_sent_at so it isn't sent twice
+ *
+ * Recipient: action_user_id if it is still an active admin, else every admin.
+ * These are records the staff member cannot see, so it never goes to them.
  */
-export async function runDocumentReviewChase(): Promise<{ chased: number }> {
-  const { getDocumentExpiryLeadDays } = await import('./staff-settings');
-  const { listDocsDueReview, markDocChased } = await import('./staff-doc-cycles');
-  const lead = await getDocumentExpiryLeadDays();
-
-  const due = await listDocsDueReview({ onlyUnchased: true, withinDays: lead });
+export async function runRecordActionChase(): Promise<{ chased: number }> {
+  const { listRecordActionsDue, markActionChased } = await import('./staff-doc-cycles');
+  const due = await listRecordActionsDue({ onlyUnchased: true, withinDays: 0 });
   if (!due.length) return { chased: 0 };
 
   const admins = await approverUserIds();
+  const { getFrontendUrl } = await import('../config/app-urls');
   let chased = 0;
-  for (const doc of due) {
-    await markDocChased(doc.id);
-    for (const admin of admins) {
-      await notify(
-        admin.id,
-        'staff_document_review_due',
-        'A staff document needs re-checking',
-        `${esc(doc.person_name || 'Somebody')}\u2019s \u201c${esc(doc.label)}\u201d was dated ` +
-        `${fmtDate(doc.document_date)} and is due a re-check ${fmtDate(doc.due_on)}.`,
-        'staff_record_files',
-        doc.id,
-        `${STAFF_URL}?person=${doc.person_id}&tab=records`,
-        'normal'
+
+  for (const rec of due) {
+    // Stamp FIRST — a duplicate tomorrow is worse than a missed one today.
+    await markActionChased(rec.id);
+
+    let recipients = admins;
+    if (rec.action_user_id) {
+      const chosen = await query(
+        `SELECT id, email FROM users WHERE id = $1 AND role = 'admin' AND is_active = true`,
+        [rec.action_user_id]
       );
+      // The chosen admin may have gone since the date was set — fall back to
+      // everyone rather than letting the reminder vanish.
+      if (chosen.rows.length) recipients = chosen.rows;
+    }
+
+    const who = esc(rec.person_name || 'Somebody');
+    const what = `\u201c${esc(rec.label)}\u201d`;
+    const isDelete = rec.action_kind === 'delete';
+    const title = isDelete ? 'A staff record is due for deletion' : 'A staff record needs looking at';
+    const expiry = rec.expires_on
+      ? ` ${rec.expires_on < new Date().toISOString().slice(0, 10) ? 'It expired' : 'It expires'} ${fmtDate(rec.expires_on)}.`
+      : '';
+    const content = isDelete
+      ? `${who}\u2019s ${what} is due for deletion. Open it and delete it if you agree \u2014 nothing is removed automatically.`
+      : `${who}\u2019s ${what}: reminder for ${fmtDate(rec.action_on)}.${expiry}`;
+    const fullContent = rec.action_note?.trim() ? `${content} Note: ${esc(rec.action_note.trim())}` : content;
+    const url = `${STAFF_URL}?person=${rec.person_id}&tab=records`;
+    const priority = rec.action_delivery === 'notification' ? 'low' : 'normal';
+    const emailNow = rec.action_delivery === 'email';
+
+    for (const admin of recipients) {
+      await query(
+        `INSERT INTO notifications
+           (user_id, type, title, content, entity_type, entity_id, action_url, priority, email_sent_at)
+         VALUES ($1, $2, $3, $4, 'staff_record_files', $5, $6, $7, $8)`,
+        [admin.id, isDelete ? 'staff_record_delete_due' : 'staff_record_action_due',
+         title, fullContent, rec.id, url, priority, emailNow ? new Date() : null]
+      ).catch(e => console.error('[staff-notifications] record action bell failed:', e));
+
+      if (emailNow && admin.email) {
+        try {
+          await emailService.sendRaw({
+            to: admin.email,
+            subject: title,
+            variant: 'internal',
+            html: `<p>${fullContent}</p><p><a href="${getFrontendUrl()}${url}">Open it on the Staff page</a></p>`,
+          });
+        } catch (err) {
+          console.warn('[staff-notifications] record action email failed:', err);
+        }
+      }
     }
     chased++;
   }
-  console.log(`[staff-notifications] document review: flagged ${chased}`);
+
+  console.log(`[staff-notifications] record actions: fired ${chased}`);
   return { chased };
 }
