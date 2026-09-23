@@ -234,6 +234,15 @@ export function totalsFor(lines: PricedLine[]): ShopSaleTotals {
 
 export interface CreateResult {
   id: string;
+  kind: 'sale' | 'consumption';
+  /**
+   * What was actually STORED — zeroes for a consumption.
+   *
+   * It previously returned the priced basket regardless of kind, so recording
+   * "used for Ooosh" answered with a money total and the till cheerfully said
+   * "Recorded — £9.00". Consumption has no money in it; showing a figure there
+   * makes it look like a sale, which is the exact conflation §2 exists to undo.
+   */
   totals: ShopSaleTotals;
   pushAfter: string;
 }
@@ -314,7 +323,10 @@ export async function createShopSale(
     }
 
     await client.query('COMMIT');
-    return { id: saleId, totals, pushAfter: saleRes.rows[0].push_after };
+    const stored: ShopSaleTotals = input.kind === 'consumption'
+      ? { net: 0, vat: 0, gross: 0, discount: 0, discountPct: 0 }
+      : totals;
+    return { id: saleId, kind: input.kind, totals: stored, pushAfter: saleRes.rows[0].push_after };
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
