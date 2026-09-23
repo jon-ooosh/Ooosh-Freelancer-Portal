@@ -47,6 +47,17 @@ interface BasketLine {
   priceText: string;
 }
 
+interface RecentSale {
+  id: string;
+  kind: string;
+  status: string;
+  gross_amount: string | number;
+  notes: string | null;
+  push_error: string | null;
+  created_at: string;
+  recorded_by_name: string | null;
+}
+
 interface Totals {
   net: number;
   vat: number;
@@ -97,7 +108,14 @@ export default function ShopTillPage() {
   const [availChecked, setAvailChecked] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [saved, setSaved] = useState<{ gross: number; id: string } | null>(null);
+  const [saved, setSaved] = useState<{ gross: number; id: string; kind: string } | null>(null);
+  const [recent, setRecent] = useState<RecentSale[]>([]);
+
+  const loadRecent = useCallback(() => {
+    api.get<{ data: RecentSale[] }>('/shop/sales?limit=8')
+      .then(r => setRecent(r.data))
+      .catch(() => setRecent([]));
+  }, []);
 
   const searchRef = useRef<HTMLInputElement>(null);
 
@@ -108,7 +126,8 @@ export default function ShopTillPage() {
     api.get<{ data: { refreshedAt: string | null } }>('/shop/stock/status')
       .then(r => setCacheAge(r.data.refreshedAt))
       .catch(() => setCacheAge(null));
-  }, []);
+    loadRecent();
+  }, [loadRecent]);
 
   // Debounced search. Postgres-backed, so this is cheap enough to fire per keystroke.
   useEffect(() => {
@@ -221,10 +240,11 @@ export default function ShopTillPage() {
         tender: mode === 'sale' ? tender : null,
         notes: notes.trim() || null,
       };
-      const r = await api.post<{ data: { id: string; totals: Totals } }>('/shop/sales', body);
-      setSaved({ gross: r.data.totals.gross, id: r.data.id });
+      const r = await api.post<{ data: { id: string; kind: string; totals: Totals } }>('/shop/sales', body);
+      setSaved({ gross: r.data.totals.gross, id: r.data.id, kind: r.data.kind });
       setBasket([]);
       setNotes('');
+      loadRecent();
       searchRef.current?.focus();
     } catch (e: any) {
       setError(e?.body?.error || e?.message || 'Could not record that.');
@@ -261,7 +281,9 @@ export default function ShopTillPage() {
 
       {saved && (
         <div className="mb-4 rounded border border-green-300 bg-green-50 px-4 py-3 text-sm text-green-900">
-          Recorded{saved.gross > 0 ? ` — ${money(saved.gross)}` : ''}. Next one?
+          {saved.kind === 'consumption'
+            ? 'Stock use recorded. Next one?'
+            : `Recorded — ${money(saved.gross)}. Next one?`}
         </div>
       )}
       {error && (
@@ -457,6 +479,46 @@ export default function ShopTillPage() {
           >
             {saving ? 'Recording…' : mode === 'sale' ? `Take ${money(totals.gross)}` : 'Record use'}
           </button>
+        </div>
+      )}
+
+      {recent.length > 0 && (
+        <div className="mt-8">
+          <div className="mb-2 flex items-center justify-between">
+            <h2 className="text-sm font-semibold text-gray-700">Recent</h2>
+            <button onClick={loadRecent} className="text-xs text-gray-400 hover:text-gray-700">
+              Refresh
+            </button>
+          </div>
+          <ul className="rounded border border-gray-200 divide-y text-sm">
+            {recent.map(r => (
+              <li key={r.id} className="flex flex-wrap items-center gap-2 px-3 py-2">
+                <span className="text-gray-500">
+                  {new Date(r.created_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
+                </span>
+                <span className="font-medium text-gray-900">
+                  {r.kind === 'consumption' ? 'Used for Ooosh' : money(Number(r.gross_amount))}
+                </span>
+                {r.notes && <span className="truncate text-gray-500">{r.notes}</span>}
+                <span className="ml-auto flex items-center gap-2">
+                  {r.recorded_by_name && <span className="text-xs text-gray-400">{r.recorded_by_name}</span>}
+                  {/* The status is the answer to "did it reach HireHop?" —
+                      queued means not yet, pushed means it did. */}
+                  <span className={`rounded px-2 py-0.5 text-xs ${
+                    r.status === 'pushed' ? 'bg-green-100 text-green-800'
+                      : r.status === 'queued' ? 'bg-gray-100 text-gray-600'
+                      : r.status === 'cancelled' ? 'bg-gray-100 text-gray-400 line-through'
+                      : 'bg-red-100 text-red-800'
+                  }`}>
+                    {r.status === 'pushed' ? 'in HireHop' : r.status}
+                  </span>
+                </span>
+                {r.push_error && (
+                  <span className="w-full text-xs text-red-700">{r.push_error}</span>
+                )}
+              </li>
+            ))}
+          </ul>
         </div>
       )}
     </div>

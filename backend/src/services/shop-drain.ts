@@ -77,6 +77,8 @@ export async function pushTally(
   }, { priority: 'low' });
 
   if (!res?.success) {
+    console.error('[shop-drain] tally_save rejected. sent=%j reply=%j',
+      { id: 0, cons: stockId, qty: -Math.abs(qty) }, res);
     return { tallyId: null, error: res?.error ? String(res.error) : 'HireHop rejected the adjustment' };
   }
 
@@ -85,6 +87,7 @@ export async function pushTally(
   const data: any = res.data;
   const tallyId = Number(data?.ID);
   if (!Number.isFinite(tallyId) || tallyId <= 0) {
+    console.error('[shop-drain] tally_save returned no id. reply=%j', data);
     return { tallyId: null, error: `HireHop accepted the adjustment but returned no ID (keys: ${data && typeof data === 'object' ? Object.keys(data).join(',') : 'none'})` };
   }
   const returnedQty = Number(data?.QTY);
