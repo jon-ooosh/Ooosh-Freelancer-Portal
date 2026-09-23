@@ -15,6 +15,10 @@
  * rate map for five minutes and a cache shared across tests would hide exactly
  * the fallback behaviour these assert.
  */
+// Type-only imports don't make a file a module; this does. Without it TS treats
+// these tests as global scripts and they collide on shared helper names.
+export {};
+
 jest.mock('../../config/database', () => ({ query: jest.fn(), getClient: jest.fn() }));
 
 type ShopStock = typeof import('../shop-stock');
