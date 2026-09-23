@@ -64,11 +64,21 @@ describe('pushTally', () => {
     expect(r.error).toMatch(/adjusted by -5, expected -1/i);
   });
 
-  it('passes a HireHop rejection through', async () => {
-    mockPost.mockResolvedValue({ success: false, error: '327' });
+  it('carries HireHop\'s whole reply, not just the bare code', async () => {
+    // A live failure stored push_error = "blue fluoro tape: 3" and the code
+    // alone told us nothing about what HireHop objected to. The reply goes on
+    // the row so it is still readable after the journal has rotated.
+    mockPost.mockResolvedValue({ success: false, error: '3', data: { hint: 'whatever HH said' } });
     const r = await pushTally(25, 1, 'x');
     expect(r.tallyId).toBeNull();
-    expect(r.error).toBe('327');
+    expect(r.error).toContain('"error":"3"');
+    expect(r.error).toContain('whatever HH said');
+  });
+
+  it('truncates a runaway reply rather than storing a wall of text', async () => {
+    mockPost.mockResolvedValue({ success: false, error: 'x'.repeat(2000) });
+    const r = await pushTally(25, 1, 'x');
+    expect((r.error || '').length).toBeLessThan(500);
   });
 
   it('truncates an over-long reason rather than letting HireHop reject it', async () => {
