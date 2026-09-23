@@ -1,6 +1,6 @@
 # AUTO-CHASE-SPEC.md — Operational Awareness Layer & Auto-Chase
 
-**Status:** Phase 1 BUILT + merged (Jul 2026, PR #919) — deployed **inert** until the `GMAIL_*` env vars are set on the server (see §13.1 below). Phases 1.5 → 4 are design. Written for review + tweak; expect this to span several sessions.
+**Status (Sep 2026): LIVE. Core done.** Phases 1, 2, 1.5 (manager mailboxes — 4 live) and 4 (enquiry webhook) are all built, deployed and jon-validated. Remaining work is enhancement only — see §13.6 for the current status + handover (next up: the AI relevance/sensitivity screen; auto-send is held pending a dedicated chase-tone polish round). The section history below (§13.1 onward) is the as-built record, newest at §13.6.
 
 **Branch:** `claude/auto-chase-feature-design-tiknf2`
 
@@ -270,6 +270,8 @@ Jon's musing: hook the website email/enquiry form so new enquiries land in the O
 
 **Resolution:** recognise enquiry-form emails as a **special class within the `info@` ingestion**, not a separate integration. Form-generated emails have a predictable structure (fixed template, known sender), so extraction is reliable and we can **auto-create a pipeline enquiry with confidence** — a much stronger signal than the fuzzy "unknown sender looks like an enquiry" heuristic in §8.5. Detect by sender address / subject signature, parse the known fields, create the enquiry + `job_contacts`. Folds cleanly into Phase 1's matcher as a recognised source; no double-up.
 
+**BUILT (Sep 2026) — as a DIRECT webhook, not email-scraping (the better path we flagged in §5.4a).** The website enquiry form's Cloudflare Worker (after Turnstile) POSTs structured fields server-to-server to `POST /api/enquiry-intake` (`backend/src/routes/enquiry-intake.ts`, API-key auth `service='enquiry_form'`, its own router outside the staff-JWT gate, per-IP rate-limited). It address-book-matches the enquirer by email + the org by company name (create-as-needed, linked via `person_organisation_roles`), then creates an OP-native pipeline enquiry via the shared `createPipelineEnquiry` helper (`services/pipeline-enquiry.ts`, attributed to `SYSTEM_USER_ID`, enquirer as primary `job_contact`). Returns `{ id, url }` so the Worker deep-links the new OP record from its Resend notification email. **OP enquiry only — never pushes to HireHop** (that stays an explicit staff action). `POST /api/enquiry-intake/files` handles form attachments. This supersedes the "scrape info@ for enquiries" idea — cleaner, no double-up, and no dependence on the internal-sender filter (§5.4a).
+
 ## 12. Data model sketch (to firm up at build time)
 
 New / extended:
@@ -365,6 +367,22 @@ The safety layer that makes multi-mailbox ingestion (incl. the director's own in
 Phase 1.5 proper — see §6 "As built" for the full shape. Migration 221 seeds `gmail_manager_mailboxes`. Backend: `getManagerMailboxes()`, `runIngestionForMailbox(mailbox, {queueUnmatched})` (extracted from the old primary-only runner), `runIngestionForAllMailboxes()` (scheduler entry), `getAllGmailIngestionStatus()`, `ingestGmailMessage` gained `queueUnmatched` (matched-only drops no-match mail instead of queuing). Routes `GET/PUT /api/auto-chase/mailboxes` (admin). Frontend: admin-only `ManagerMailboxesSection` on Settings (add/remove + live per-mailbox connectivity). Detach round 2 (§5.3a) shipped detach/hide/move first; this is the plumbing on top.
 
 **Next:** enable jon's mailbox from Settings, watch it (esp. false-attach on the noisier personal mail — the matcher/thread-anchor tightening already landed), then roll the rest. Then the AI relevance/sensitivity screen (§10a) — surfaced in-timeline (yellow box + bell), not a new surface. Website-enquiry direct webhook (Phase 4, §11) is separate.
+
+### 13.6 Timeline clarity + STATUS / HANDOVER (Sep 2026)
+
+**Timeline clarity (SHIPPED, PR #1267).** Ingested email rows show WHO from/to + a Received/Sent pill (parsed from `email_from`/`email_to`/`email_direction`; full address on hover) instead of the "System" author; body has two independent toggles — Show more/less clamps the new message to ~10 lines (or ~600 chars for flattened HTML), "··· show quoted text" reveals the quoted chain. No subject line on the row (jon's call). Frontend-only (`InteractionBody` + row header in `ActivityTimeline.tsx`).
+
+**Where the module stands (Sep 2026): the core is DONE and live.** Shipped + deployed + jon-validated: Phase 1 ingestion, Phase 2 (per-job summary, dispute helper, quote-PDF version diff, AI chase DRAFTS), the filtering foundation (thread-anchoring, persisted match provenance, detach-tombstone, hide-from-timeline), Phase 1.5 manager mailboxes (**4 manager mailboxes now live** alongside info@, bedding in), timeline clarity, and **Phase 4 (§11) website-enquiry webhook**. Everything remaining is enhancement, not gap.
+
+**HANDOVER — do these in this order (agreed with jon, Sep 2026):**
+
+1. **AI relevance / sensitivity screen (§10a) — the recommended NEXT build.** A Haiku pass over ingested emails that flags (a) likely **sensitive/personal** mail (so it's caught proactively rather than relying on a human spotting it + hitting Hide — now that ALL manager mailboxes incl. the director's are ingested, this is the timely one) and (b) likely **mis-attached** (wrong job). Surface it **IN the Activity Timeline as a yellow/amber box on the flagged row + a bell notification** — jon was explicit: **NOT a new review-queue surface**. It's an assist layer on top of the deterministic protections + manual backstops (hide/detach), which stay the guarantee. Self-contained, no auto-send dependency.
+
+2. **Auto-send graduation (Phase 3) — HELD, and needs a dedicated tone round FIRST.** The `auto_chase_send_enabled` master switch is still OFF (module only drafts; staff send). Before auto-send is worth turning on, the **chase-draft tone needs real polish — jon's feedback: it currently reads "too AI / too American-sounding."** Treat tone as its own separate chunk of iterative back-and-forth (it will take several rounds to get right): tighten the code SYSTEM_PROMPT in `chase-draft.ts` toward Ooosh's British, understated voice, lean harder on the `chase_voice_instructions` setting + the example-driven `learnChaseVoice`, and review real drafts with jon. THEN, once tone is trusted, build the Phase 3 suppression signals (OOO autoresponder / bounce / hot-inbound content parsing in `chase-suppression.ts`) that make auto-send safe, and only then consider flipping the switch. Do NOT flip auto-send on before the tone work.
+
+3. **Smaller polish (any time):** "learn the chase voice from this thread" affordance on the timeline (pre-fill the voice-tuning paste box from an ingested thread); passive draft-vs-sent diff capture (§9.3); extend the cold-start backfill to the manager mailboxes (currently `getPrimaryMailbox()`-only — see `gmail-backfill.ts`; jon parked it).
+
+**Watch list for whoever picks this up:** the 4 new manager mailboxes are bedding in — keep an eye on false-attach on the noisier personal mail (the matcher requires an explicit `#`/`job`/`quote` prefix or a `Quote (N)` PDF, and thread-anchoring + the manual detach/hide backstops are the safety net). Nothing else outstanding.
 
 ## 14. Open decisions (carried into build)
 
