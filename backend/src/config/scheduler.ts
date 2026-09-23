@@ -76,6 +76,30 @@ export function startScheduler() {
     console.log('Scheduler: Backup retention sweep scheduled daily at 02:30');
   }
 
+  // ── Shop transaction drain ────────────────────────────────────────────
+  // Sends queued shop rows to HireHop. Deliberately deferred rather than pushed
+  // inline: the counter must never wait on HireHop, and the delay IS Window A —
+  // inside it a cancel is a true undo because nothing has reached HireHop or
+  // Xero (docs/SHOP-SALES-SPEC.md §7-8). Consumption only for now; sales land
+  // with step 6.
+  if (!isHireHopConfigured()) {
+    console.log('Scheduler: HireHop not configured — shop drain disabled');
+  } else {
+    cron.schedule('*/2 * * * *', async () => {
+      try {
+        const { drainShopConsumption } = await import('../services/shop-drain');
+        const r = await drainShopConsumption();
+        if (r.errors.length) {
+          console.error('Scheduler: shop drain errors:', r.errors.join(' | '));
+        }
+      } catch (err) {
+        // Never throw out of a scheduled task — a HireHop wobble must not take
+        // the scheduler down, and the rows stay queued for the next pass.
+        console.error('Scheduler: shop drain failed:', err instanceof Error ? err.message : err);
+      }
+    });
+  }
+
   // ── Shop sale-stock catalogue mirror ──────────────────────────────────
   // Keeps `shop_stock_cache` fresh so the till never calls HireHop to search or
   // price an item (docs/SHOP-SALES-SPEC.md §10). A few HireHop calls per refresh

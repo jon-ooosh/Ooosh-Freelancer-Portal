@@ -146,6 +146,13 @@ export default function ShopTillPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [basketIds]);
 
+  /** Clear the box and hand focus back, so the next scan just works. */
+  const clearSearch = useCallback(() => {
+    setTerm('');
+    setResults([]);
+    searchRef.current?.focus();
+  }, []);
+
   const addItem = useCallback((item: StockItem) => {
     setBasket(prev => {
       const existing = prev.find(l => l.stock.hhStockId === item.hhStockId);
@@ -235,9 +242,6 @@ export default function ShopTillPage() {
         <h1 className="text-2xl font-bold text-gray-900">Shop Till</h1>
         <span className="text-xs text-gray-500">Stock as of {ago(cacheAge)}</span>
       </div>
-      <p className="text-sm text-gray-600 mb-4">
-        Records to OP only for now — nothing reaches HireHop until the push step ships.
-      </p>
 
       {/* Sale vs internal use. Deliberately different-looking: consumption is a
           stock event with no money, not a 100%-discounted sale. */}
@@ -268,17 +272,29 @@ export default function ShopTillPage() {
 
       {/* Search */}
       <div className="mb-4">
-        <input
-          ref={searchRef}
-          autoFocus
-          value={term}
-          onChange={e => setTerm(e.target.value)}
-          placeholder="Search or scan — name, part number…"
-          className="w-full rounded border border-gray-300 px-4 py-3 text-base focus:border-ooosh-500 focus:outline-none"
-        />
-        <p className="mt-1 text-xs text-gray-400">
-          Words can be in any order — &ldquo;2 gaff&rdquo; finds 2&quot; gaffa tape. Prices shown include VAT.
-        </p>
+        <div className="relative">
+          <input
+            ref={searchRef}
+            autoFocus
+            value={term}
+            onChange={e => setTerm(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Escape') clearSearch(); }}
+            placeholder="Search or scan — name, part number…"
+            className="w-full rounded border border-gray-300 py-3 pl-4 pr-10 text-base focus:border-ooosh-500 focus:outline-none"
+          />
+          {term && (
+            <button
+              type="button"
+              onClick={clearSearch}
+              aria-label="Clear search"
+              className="absolute inset-y-0 right-0 flex w-10 items-center justify-center text-gray-400 hover:text-gray-700"
+            >
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          )}
+        </div>
         {searching && <p className="mt-1 text-xs text-gray-400">Searching…</p>}
         {results.length > 0 && (
           <ul className="mt-2 max-h-72 overflow-y-auto rounded border border-gray-200 divide-y">
