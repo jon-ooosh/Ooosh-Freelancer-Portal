@@ -31,22 +31,34 @@ describe('pushTally', () => {
     await expect(pushTally(25, 1, 'Snare re-head')).resolves.toEqual({ tallyId: 2238, error: null });
   });
 
-  it('always sends a NEGATIVE qty, whatever sign the caller passed', async () => {
+  it('sends the CAPTURED parameter names, not the documented ones', async () => {
+    // HireHop's API docs describe `cons`, `id`, `qty`, `details`. The endpoint
+    // actually wants CONSUMABLE_ID / ID / QTY / DETAILS plus local, tz and
+    // CUSTOM_FIELDS — and returns error 3 for the documented shape. This test
+    // exists so nobody "tidies" these back to match the documentation.
     mockPost.mockResolvedValue({ success: true, data: { ID: 1, QTY: -3 } });
-    await pushTally(25, 3, 'x');
-    expect(mockPost.mock.calls[0][1]).toMatchObject({ cons: 25, qty: -3, id: 0 });
+    await pushTally(25, 3, 'Snare re-head');
 
-    mockPost.mockResolvedValue({ success: true, data: { ID: 2, QTY: -3 } });
-    await pushTally(25, -3, 'x');
-    // A caller that already negated must not flip it back to an increase.
-    expect(mockPost.mock.calls[1][1]).toMatchObject({ qty: -3 });
+    const sent = mockPost.mock.calls[0][1] as Record<string, unknown>;
+    expect(sent).toMatchObject({
+      ID: 0,                  // 0 creates; a real id would EDIT an adjustment
+      CONSUMABLE_ID: 25,
+      QTY: -3,
+      DETAILS: 'Snare re-head',
+      CUSTOM_FIELDS: '{}',
+      tz: 'Europe/London',
+    });
+    expect(sent).not.toHaveProperty('cons');
+    expect(sent).not.toHaveProperty('qty');
+    // Local wall-clock time, not UTC — HireHop stamps the adjustment with it.
+    expect(sent.local).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
   });
 
-  it('creates rather than edits — id 0', async () => {
-    mockPost.mockResolvedValue({ success: true, data: { ID: 9, QTY: -1 } });
-    await pushTally(25, 1, 'x');
-    // A real id here would EDIT an existing adjustment instead of adding one.
-    expect(mockPost.mock.calls[0][1]).toMatchObject({ id: 0 });
+  it('always sends a NEGATIVE qty, whatever sign the caller passed', async () => {
+    mockPost.mockResolvedValue({ success: true, data: { ID: 2, QTY: -3 } });
+    await pushTally(25, -3, 'x');
+    // A caller that already negated must not flip it back into an increase.
+    expect(mockPost.mock.calls[0][1]).toMatchObject({ QTY: -3 });
   });
 
   it('REJECTS success:true with no adjustment id — the §2.5 trap', async () => {
@@ -84,6 +96,6 @@ describe('pushTally', () => {
   it('truncates an over-long reason rather than letting HireHop reject it', async () => {
     mockPost.mockResolvedValue({ success: true, data: { ID: 5, QTY: -1 } });
     await pushTally(25, 1, 'x'.repeat(400));
-    expect((mockPost.mock.calls[0][1] as any).details.length).toBe(250);
+    expect((mockPost.mock.calls[0][1] as any).DETAILS.length).toBe(250);
   });
 });
