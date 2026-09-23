@@ -130,6 +130,15 @@ router.post('/stock/availability', async (req: AuthRequest, res: Response) => {
     const out: Record<string, { available: number | null; stock: number | null }> = {};
     const data: any = resp?.success ? resp.data : null;
     const responseRows: any[] = data?.rows || (Array.isArray(data) ? data : []);
+
+    if (!responseRows.length) {
+      // The TYPE:1 row shape is inferred from the picklist, not observed on THIS
+      // endpoint, so an empty result is the thing we most need to see. Log the
+      // raw reply rather than guessing again.
+      console.warn('[shop] availability returned no rows. sent=%j success=%s raw=%j',
+        rows, resp?.success, resp?.success ? resp.data : resp?.error);
+    }
+
     for (const row of responseRows) {
       out[String(row.ID)] = {
         available: row.AVAILABLE != null ? parseInt(row.AVAILABLE, 10) : null,

@@ -134,6 +134,31 @@ async function buildAndSend(
     hirehopJobId = jobRow.rows[0]?.hirehop_job_id ?? null;
   }
 
+  // Still nothing? The signature-step trigger usually fires BEFORE
+  // POST /api/hire-forms has created the vehicle_hire_assignment, so there is
+  // no assignment to read yet and the email went out as "job #N/A". The job
+  // number the driver arrived with is on their login code
+  // (driver_verification_codes.job_id, written by /send-code) — use the most
+  // recent one from the last week as a fallback.
+  let jobFromHireFormLink = false;
+  if (hirehopJobId === null && driver.email) {
+    const codeRow = await query(
+      `SELECT job_id
+         FROM driver_verification_codes
+        WHERE lower(email) = lower($1)
+          AND job_id IS NOT NULL
+          AND created_at > NOW() - INTERVAL '7 days'
+        ORDER BY created_at DESC
+        LIMIT 1`,
+      [driver.email]
+    );
+    const raw = String(codeRow.rows[0]?.job_id ?? '').trim();
+    if (/^\d+$/.test(raw)) {
+      hirehopJobId = Number(raw);
+      jobFromHireFormLink = true;
+    }
+  }
+
   // Build human-readable reasons
   const reasons: string[] = [];
   if (referralReason) reasons.push(referralReason);
@@ -211,7 +236,9 @@ async function buildAndSend(
       driverEmail,
       jobNumber: hirehopJobId ? String(hirehopJobId) : 'N/A',
       referralReasons: reasons.map(r => `• ${r}`).join('<br/>'),
-      linkedJobs: driver.linked_jobs || 'No active hires',
+      linkedJobs: driver.linked_jobs === 'No active hires' && jobFromHireFormLink
+        ? `Not linked yet — driver came in via the hire form for job #${hirehopJobId}`
+        : (driver.linked_jobs || 'No active hires'),
       driverUrl: `${frontendUrl}/drivers/${driverId}`,
     },
     attachments,
