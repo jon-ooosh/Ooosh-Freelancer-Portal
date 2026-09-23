@@ -136,6 +136,13 @@ prefix is the ONLY one `GET /api/files/download` role-gates.** Every other prefi
 serves is readable by any authenticated caller, freelancers included. Never file
 anything private under `files/`.
 
+**The Staff page is one URL, two levels.** `/staff/admin` is the roster; a person opens
+in place as `?person=<id>&tab=overview|employment|records|reviews|access`. The person is
+in the URL rather than in component state so a notification can deep-link to the tab
+that answers it — new bells should link that way, not at the bare page. The page is
+manager-tier but Records, Reviews and the Overview's data are admin-only, so anything
+added to those tabs must degrade for a manager rather than 403.
+
 ---
 
 # Always-on conventions
@@ -183,6 +190,8 @@ existing definition:
 | Verifying an API key | `middleware/api-key.ts` |
 | What must never leave a general `people` response? | `services/people-private-fields.ts` |
 | Does this person own this task? | `services/staff-tasks.ts` `assertCanTouch()` |
+| Who is due a staff review? | `services/staff-employment.ts` `listReviewsDue()` |
+| What needs an admin's attention on Staff? | `services/staff-attention.ts` |
 
 Frontend display helpers with the same status: `lib/roles.ts`, `lib/driverStatus.ts`,
 `lib/jobOrgName.ts`, `lib/vehiclePrep.ts`, `lib/preauth.ts`, `lib/revisitDate.ts`,

@@ -1204,6 +1204,19 @@ router.get('/employees', adminOnly, async (_req: AuthRequest, res: Response) => 
   }
 });
 
+// GET /api/staff-calendar/attention
+// The Staff page's "needs attention" list — every row derived, nothing stored.
+// See services/staff-attention.ts for why this surface exists at all.
+router.get('/attention', adminOnly, async (_req: AuthRequest, res: Response) => {
+  try {
+    const { getStaffAttention } = await import('../services/staff-attention');
+    res.json({ data: await getStaffAttention() });
+  } catch (err) {
+    console.error('[staff-calendar] attention error:', err);
+    res.status(500).json({ error: 'Failed to load the attention list' });
+  }
+});
+
 // GET /api/staff-calendar/employees/:personId
 router.get('/employees/:personId', adminOnly, async (req: AuthRequest, res: Response) => {
   try {
