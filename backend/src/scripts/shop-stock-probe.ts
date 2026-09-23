@@ -192,19 +192,37 @@ async function q5(lineId: string | null) {
 
   const shelfBefore = await readShelfCount();
 
-  // The HH UI's delete response was {"success":["b9146"]} — `b` there prefixes a
-  // supply-list LINE id, not a stock id. Same letter, different namespace from the
-  // `a`/`b` picklist scheme above (spec §2.1). Try save_job's delete grammar first.
-  const payload = { job: HH_JOB, delete: JSON.stringify([`b${lineId}`]), no_webhook: 1 };
-  console.log(`payload: ${JSON.stringify(payload)}`);
-  const res = await hhBroker.post<any>('/api/save_job.php', payload, { priority: 'high' });
-  console.log(`response: ${JSON.stringify(res)}`);
+  // Deletion is its OWN endpoint — `items_delete.php`, captured from the HireHop
+  // UI 23 Sep 2026 returning {"success":["b9154"],"ids":["b9154"]}. It is NOT a
+  // `delete:` key on save_job.php: that returned success:true and did nothing
+  // (spec §2.5), which is why this probe reads back rather than trusting a 200.
+  //
+  // `b` here prefixes a supply-list LINE id, not a stock id — a different
+  // namespace from the `a`/`b` picklist scheme used to ADD (spec §2.1).
+  //
+  // The exact request field is still a guess, so try the likely shapes in turn
+  // and stop at whichever actually removes the line. Safe: each attempt is
+  // verified by reading the list back, not by its response.
+  const attempts: Array<{ label: string; params: Record<string, string | number> }> = [
+    { label: 'items=["b<id>"]', params: { job: HH_JOB, items: JSON.stringify([`b${lineId}`]), no_webhook: 1 } },
+    { label: 'ids=["b<id>"]', params: { job: HH_JOB, ids: JSON.stringify([`b${lineId}`]), no_webhook: 1 } },
+    { label: 'id=b<id>', params: { job: HH_JOB, id: `b${lineId}`, no_webhook: 1 } },
+  ];
 
-  // ⚠️ `success: true` here means "HireHop accepted the request", NOT "HireHop
-  // did the thing". Verified 23 Sep 2026: this exact call returned success with
-  // the line still on the job and no `items` key in the response at all — the
-  // delete grammar was silently ignored. Always read back. See spec §2.5.
-  await new Promise((r) => setTimeout(r, 1500));
+  let res: any = null;
+  for (const attempt of attempts) {
+    console.log(`\n  trying ${attempt.label}: ${JSON.stringify(attempt.params)}`);
+    res = await hhBroker.post<any>('/php_functions/items_delete.php', attempt.params, { priority: 'high' });
+    console.log(`  response: ${JSON.stringify(res)}`);
+    await new Promise((r) => setTimeout(r, 1200));
+    const check = await readSupplyList();
+    if (!check.find((i) => String(i.ID) === lineId)) {
+      console.log(`  => GONE. The working shape is: ${attempt.label}`);
+      break;
+    }
+    console.log('  => line still present; trying the next shape.');
+  }
+
   const after = await readSupplyList();
   const still = after.find((i) => String(i.ID) === lineId);
   const shelf = await readShelfCount();

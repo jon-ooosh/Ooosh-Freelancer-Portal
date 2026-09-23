@@ -301,6 +301,41 @@ payload we are already fetching and warn when it disagrees with the configured m
 than maintaining the map by hand. Drift between HireHop's tax setup and ours is exactly
 the sort of thing nobody notices until a VAT return.
 
+### 2.8 Discounts
+
+Two different asks, and they are not the same problem:
+
+| | Shape |
+|---|---|
+| **Per-line** | "10% off these drum heads" — reduce one line |
+| **Basket rounding** | "£52.11, call it £50" — reduce the total by £2.11 |
+
+**v1 supports per-line only.** A line's unit price is overridable via `items_save.php`
+(the 2-call path in §2.6), `MAX_DISCOUNT` is 100 on every item so HireHop imposes no
+ceiling of its own, and the invariant in §9 holds automatically because the line itself
+moves.
+
+**Basket rounding is deliberately NOT built**, and the reason is VAT apportionment rather
+than effort. Spreading £2.11 across a basket that mixes rates (971 items are standard,
+3 are zero-rated — §2.7) means deciding which rate the discount comes off, and HMRC has
+rules about that. Getting it wrong misstates VAT on the weekly invoice, which is the one
+category of bug this module must not introduce. For a shop whose typical basket is a jack
+lead and a can of Coke, that is a lot of risk for a rare convenience.
+
+**The escape hatch covers most of it:** the till shows a live running total, so an
+operator who wants the total to land on £50 discounts one line until it does. Same
+outcome, no apportionment question, and the discount is visible on the line it came off.
+
+**Who may discount.** Money out the door is `MANAGER_ROLES` by house rule, but blocking
+all staff from knocking 50p off is the kind of gate that strands people. Proposal: a
+`system_settings` threshold — staff may discount up to it, managers without limit.
+Every discount records who applied it and how much, since the weekly reconciliation
+should be able to answer "why did this week take less than it listed".
+
+**Never a hidden discount.** A basket that doesn't reconcile must show as a discount on a
+line, never as a payment that happens to be less than the total — that would break §9's
+lines-equal-deposits invariant, which is the module's whole integrity story.
+
 ### Confirmed HireHop facts (scratch job 16735, Sep 2026)
 
 | | Finding |
@@ -930,13 +965,17 @@ line restores the shelf count, and a line arrives already priced from stock.
 
 **STILL OPEN:**
 
-3. **How to REMOVE a sale line.** `save_job.php` with `delete: ["b<lineId>"]` returns
-   `success: true` and does nothing (§2.5) — the grammar is wrong, and wrong in the
-   quietest possible way. Needed for Window B reversals (§8) and the future drained-sale
-   move (§4.1). **Capture the real request from the HireHop UI's Network tab** when
-   deleting a line, the way the add was captured; the response we saw
-   (`{"success":["b9146"],"ids":["b9146"]}`) came from a different endpoint than the one
-   tried here.
+3. **How to REMOVE a sale line — endpoint found, request shape still a guess.**
+   Deletion is its own endpoint, **`items_delete.php`**, captured from the HireHop UI
+   23 Sep 2026 returning `{"success":["b9154"],"ids":["b9154"]}`. It is NOT a `delete:`
+   key on `save_job.php` — that returned `success: true` and did nothing (§2.5).
+   `b` here prefixes a supply-list LINE id, a different namespace from the `a`/`b`
+   picklist scheme used to add.
+
+   The probe now tries the likely request fields (`items`, `ids`, `id`) against that
+   endpoint in turn and stops at whichever actually removes the line, verifying by
+   read-back rather than by response. Capturing the **Payload** tab from the UI would
+   settle it in one go instead.
 
 Lower-risk: whether a tally adjustment can carry a job reference. The response exposes
 `JOB` and `REPAIR`, but the documented send parameters don't include them — and both
