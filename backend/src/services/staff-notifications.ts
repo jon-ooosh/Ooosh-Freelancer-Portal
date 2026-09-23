@@ -954,3 +954,46 @@ export async function notifyStaffReviewBooked(
     'normal'
   );
 }
+
+
+/**
+ * Documents due a re-check on their cycle (spec §4, Phase 6).
+ *
+ * The OTHER clock from runDocumentExpiryChase: that one watches a document's
+ * own printed expiry, this one watches "it has been a year, look at it again".
+ * Separate stamps so a passport can be both nearing expiry and due a re-check
+ * without one silencing the other.
+ *
+ * Nothing here touches the driver system — a staff DVLA check is its own
+ * filed document, by jon's decision (spec §19.1).
+ */
+export async function runDocumentReviewChase(): Promise<{ chased: number }> {
+  const { getDocumentExpiryLeadDays } = await import('./staff-settings');
+  const { listDocsDueReview, markDocChased } = await import('./staff-doc-cycles');
+  const lead = await getDocumentExpiryLeadDays();
+
+  const due = await listDocsDueReview({ onlyUnchased: true, withinDays: lead });
+  if (!due.length) return { chased: 0 };
+
+  const admins = await approverUserIds();
+  let chased = 0;
+  for (const doc of due) {
+    await markDocChased(doc.id);
+    for (const admin of admins) {
+      await notify(
+        admin.id,
+        'staff_document_review_due',
+        'A staff document needs re-checking',
+        `${esc(doc.person_name || 'Somebody')}\u2019s \u201c${esc(doc.label)}\u201d was dated ` +
+        `${fmtDate(doc.document_date)} and is due a re-check ${fmtDate(doc.due_on)}.`,
+        'staff_record_files',
+        doc.id,
+        `${STAFF_URL}?person=${doc.person_id}&tab=records`,
+        'normal'
+      );
+    }
+    chased++;
+  }
+  console.log(`[staff-notifications] document review: flagged ${chased}`);
+  return { chased };
+}

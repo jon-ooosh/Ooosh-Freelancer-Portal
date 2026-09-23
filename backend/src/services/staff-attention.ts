@@ -226,6 +226,44 @@ export async function getStaffAttention(): Promise<AttentionItem[]> {
     });
   }
 
+  // ── Documents due a re-check (Phase 6) ────────────────────────────────────
+  // The annual DVLA check and anything else with a cycle. Distinct from the
+  // expiry rows above: a document can need re-checking without expiring, which
+  // is the whole point of an annual check on a licence that runs to 2031.
+  const { listDocsDueReview } = await import('./staff-doc-cycles');
+  const dueDocs = await listDocsDueReview({ onlyUnchased: false, withinDays: docLead });
+  for (const d of dueDocs) {
+    items.push({
+      id: `review-doc-${d.id}`,
+      severity: d.due_on < today ? 'urgent' : 'soon',
+      kind: 'document_review_due',
+      label: d.due_on < today ? `${d.label} is overdue a re-check` : `${d.label} needs re-checking`,
+      detail: d.due_on,
+      personId: d.person_id,
+      personName: d.person_name,
+      tab: 'records',
+      action: 'Re-check',
+    });
+  }
+
+  // ── Right to work past its statutory retention (Phase 7) ──────────────────
+  // Surfaced for a human, never swept: destroying evidence of a right-to-work
+  // check is irreversible and the clock runs off a hand-typed leaving date.
+  const { flagRightToWorkForDisposal } = await import('./staff-retention');
+  for (const d of await flagRightToWorkForDisposal()) {
+    items.push({
+      id: `rtw-disposal-${d.person_id}`,
+      severity: 'info',
+      kind: 'rtw_retention_expired',
+      label: 'Right-to-work record can now be deleted',
+      detail: `left ${d.left_on} — retention ended ${d.dispose_after}`,
+      personId: d.person_id,
+      personName: d.person_name,
+      tab: 'records',
+      action: 'Review',
+    });
+  }
+
   // ── Logins with no person behind them ─────────────────────────────────────
   const unlinked = await query(
     `SELECT u.id, u.email FROM users u

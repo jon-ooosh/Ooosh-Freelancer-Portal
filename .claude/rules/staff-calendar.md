@@ -474,3 +474,35 @@ testing round because of it.
 
 Any component that fetches needs three states, not two: loading, failed, and
 genuinely empty. Track the error separately from the data and say which it is.
+
+## The staff document check is NOT the driver system
+
+Two things share the words "DVLA check" and must never be merged:
+
+| | `services/driver-validity.ts` | `services/staff-doc-cycles.ts` |
+|---|---|---|
+| About | self-drive-hire **clients** | **employees** |
+| Asks | "insurable for this hire, today?" | "have we looked at it this year?" |
+| Window | **30 days** from the check | **12 months**, per `doc_type` |
+| If it fails | hard gate on dispatch | a nudge |
+
+jon's decision, Sep 2026, and it settled a design question the spec had been
+circling: the cheapest answer to "how do we share this?" was "we don't".
+Nothing in the staff module reads `drivers`. See `docs/STAFF-RECORDS-SPEC.md`
+§19.1.
+
+## Absence detail expires; the absence does not
+
+`runAbsenceDetailPurge()` nulls `reason_category`, `notes` and the
+return-to-work narrative 12 months after a spell ends, then stamps
+`detail_purged_at`.
+
+**`absence_type` is NOT purged, and must not be.** `getSicknessMinutes()`
+filters on `absence_type = 'sickness'` and the payroll report reads it —
+purging the type would silently zero everybody's sickness figures instead of
+anonymising them. Day rows, minutes and ledger effects stay for the same
+reason.
+
+Right-to-work evidence past its retention (employment + 2 years) is **surfaced
+on the attention list, never swept**: destroying it is irreversible, and the
+clock runs off a hand-typed leaving date.
