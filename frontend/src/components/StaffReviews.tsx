@@ -27,6 +27,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../services/api';
 
+interface Answer { q: string; a: string }
+
 interface Review {
   id: string;
   review_type: string;
@@ -38,6 +40,10 @@ interface Review {
   outcome: string | null;
   next_review_due: string | null;
   salary_history_id: string | null;
+  self_assessment: Answer[] | null;
+  self_assessment_submitted_at: string | null;
+  invited_at: string | null;
+  follow_up_sent_at: string | null;
 }
 
 interface TaskRow {
@@ -283,6 +289,21 @@ function ReviewRow({ review, personId, personName, people, open, onToggle, onCha
             pay change
           </span>
         )}
+        {!done && review.self_assessment_submitted_at && (
+          <span className="text-[11px] px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700">
+            they’ve answered
+          </span>
+        )}
+        {!done && !review.invited_at && (
+          <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700">
+            not told yet
+          </span>
+        )}
+        {done && review.follow_up_sent_at && (
+          <span className="text-[11px] px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700">
+            write-up sent
+          </span>
+        )}
         {done && review.next_review_due && (
           <span className="text-xs text-gray-400">next due {fmtDate(review.next_review_due)}</span>
         )}
@@ -291,6 +312,38 @@ function ReviewRow({ review, personId, personName, people, open, onToggle, onCha
 
       {open && (
         <div className="border-t border-gray-100 p-3 space-y-3">
+          {review.self_assessment && review.self_assessment.length > 0 && (
+            <div className="rounded border border-ooosh-200 bg-ooosh-50 p-3">
+              <h4 className="text-xs font-semibold text-gray-900 mb-2">
+                What {personName.split(' ')[0]} wrote beforehand
+                {review.self_assessment_submitted_at && (
+                  <span className="ml-2 font-normal text-gray-500">
+                    {fmtDate(review.self_assessment_submitted_at)}
+                  </span>
+                )}
+              </h4>
+              <dl className="space-y-2">
+                {review.self_assessment.filter(x => x.a?.trim()).map((x, i) => (
+                  <div key={i}>
+                    <dt className="text-xs text-gray-600">{x.q}</dt>
+                    <dd className="text-sm text-gray-900 whitespace-pre-wrap mt-0.5">{x.a}</dd>
+                  </div>
+                ))}
+              </dl>
+              <p className="text-[11px] text-gray-500 mt-2">
+                Read this before the meeting — comparing two sets of answers is the point of
+                asking in advance.
+              </p>
+            </div>
+          )}
+
+          {!done && !review.self_assessment_submitted_at && (
+            <p className="text-xs text-gray-500">
+              {personName.split(' ')[0]} hasn’t sent their answers yet.
+              {review.invited_at ? ' They were told when it was booked.' : ' They have not been told about this review.'}
+            </p>
+          )}
+
           <label className="block text-sm">
             <span className="block text-xs text-gray-600 mb-1">
               Shared summary — <strong>{personName.split(' ')[0]} sees this</strong>
@@ -353,7 +406,9 @@ function ReviewRow({ review, personId, personName, people, open, onToggle, onCha
             <div className="rounded bg-gray-50 border border-gray-200 p-3">
               <p className="text-xs text-gray-600 mb-2">
                 <strong>Pay is settled after the meeting.</strong> Fill this in when you’ve decided —
-                it writes the salary record and gives you the figure for the follow-up.
+                marking the review complete writes the salary record and emails
+                {' '}{personName.split(' ')[0]} the write-up: the shared summary, the agreed actions
+                and this figure.
               </p>
               <div className="flex flex-wrap items-end gap-3">
                 <label className="text-sm">

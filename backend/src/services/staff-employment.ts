@@ -519,6 +519,16 @@ export async function upsertReview(
     [personId]
   );
 
+  // Tell the person, with the prep questions (spec §5.2). Once per review —
+  // sendReviewInvite owns the invited_at stamp, so editing a note later does
+  // not re-announce it. Best-effort: a failed bell must not fail the booking.
+  try {
+    const { sendReviewInvite } = await import('./staff-review-followup');
+    await sendReviewInvite(row.id);
+  } catch (err) {
+    console.error('[staff-employment] review invite failed:', err);
+  }
+
   return row;
 }
 
@@ -589,6 +599,17 @@ export async function recordReviewOutcome(
     'UPDATE staff_employment SET review_due_chased_at = NULL WHERE person_id = $1',
     [personId]
   );
+
+  // The write-up, carrying the agreed summary, the actions and — the point of
+  // deciding pay afterwards rather than in the room (§5.1) — the new figure.
+  // Once per review; amending a completed one does not re-send.
+  try {
+    const { sendReviewFollowUp } = await import('./staff-review-followup');
+    await sendReviewFollowUp(reviewId);
+  } catch (err) {
+    console.error('[staff-employment] review follow-up failed:', err);
+  }
+
   return r.rows[0];
 }
 
@@ -604,7 +625,9 @@ export async function listReviews(personId: string, includePrivate = false) {
   const r = await query(
     `SELECT id, review_type, scheduled_for::text AS scheduled_for, status,
             completed_at, shared_summary,
-            ${includePrivate ? 'private_notes,' : 'NULL::text AS private_notes,'}
+            ${includePrivate ? 'private_notes, manager_prep,' : 'NULL::text AS private_notes, NULL::jsonb AS manager_prep,'}
+            self_assessment, self_assessment_submitted_at,
+            invited_at, follow_up_sent_at,
             outcome, next_review_due::text AS next_review_due,
             salary_history_id, created_at
        FROM staff_reviews
