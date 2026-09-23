@@ -160,6 +160,72 @@ stop it being a surprise: `list.php` returns `REORDER_LEVEL` and `REORDER_QTY`, 
 consumption trail a reorder view turns "we ran out on Friday" into "we knew on Monday"
 (§12). Nearly free once the mirror exists.
 
+### 2.4 The sale catalogue is NOT the shop — scoping the till
+
+Verified Sep 2026: HireHop holds **974 sale-stock items** across 17 categories —
+Tape (338), Power (339), Batteries (340), Dirty Rigger (341), Guitar & Bass (342),
+Percussion (344), Cables (345), Components (346), Accessories (348), Stands (349),
+Drum Heads (350), Vocals (351), Strings (352), Drum Sticks (353), Guitar Pedals (354),
+**Misc Sale Item (355)**, Drinks & snacks (356).
+
+Not all of that is shop product. "Misc Sale Item" holds things like the **VE103B
+certificate** (£25) — a compliance charge raised onto a hire, not something anyone buys
+over the counter. A till listing all 974 would let someone sell a VE103B certificate to a
+walk-in.
+
+#### Why NOT HireHop's "exclude from webshop" tick
+
+Tempting — it is a HireHop-native marker, it needs no second system, and it lines up with
+`thetour.store`. **It is still the wrong flag**, because it answers a different question:
+
+> *"Should the public be able to buy this and have it **shipped**?"*
+
+which is not
+
+> *"Can a member of staff sell this **over the counter**?"*
+
+The two answers diverge on the till's single most common category. **Drinks & snacks
+should absolutely be excluded from a webshop** — nobody posts a can of Coke — and are
+absolutely core till stock. Wire the till to that flag and the day the webshop gets
+configured properly, the till loses its bread and butter, silently, with no error.
+
+There is a maintenance argument too: the webshop flag is per-item across 974 rows, so
+every new internal-charge item needs remembering. Category scope is 17 decisions.
+
+**`exclude_from_webshop` IS mirrored** (migration 236) because it is the right flag for
+its own purpose and the webshop will want it. It is just not this purpose.
+
+#### The mechanism: a category EXCLUSION list, and it fails open
+
+`system_settings.shop_excluded_category_ids`, a JSON array of HireHop category IDs,
+staff-editable, seeded `[355]`.
+
+**Exclusion, not allowlist** — the direction is the whole point. An unclassified category
+still shows at the counter, so new stock is sellable the day it lands. With an allowlist a
+new category is invisible until someone edits a setting, and *"I can't find it to sell
+it"* is a worse failure in front of a customer than *"this probably shouldn't be listed"*.
+The `heads` list HireHop returns also looks top-level-only (IDs 343 and 347 are absent),
+so an allowlist risks hiding sub-categories we cannot currently enumerate. Every failure
+path in `getExcludedCategoryIds()` — missing setting, malformed JSON, unreadable table —
+hides nothing.
+
+**The scope applies at the READ, not the refresh**, because the two consumers want
+different sets:
+
+| Consumer | Scope |
+|---|---|
+| Till search / price lookup | excluded categories hidden |
+| **Barcode scan** | **no exclusion** — they are physically holding it; refusing to price a thing in the customer's hand is a gate that strands staff |
+| Reorder view (§12) | **all** sale stock — VE103B certs carry `REORDER_LEVEL: 15`, `REORDER_QTY: 50`, and running out of those matters too |
+
+#### Not a finding: the `▶` on "▶ VE103B certificate"
+
+Seen in the live catalogue and initially read as HireHop's prompt-parent marker. **It was
+typed into the item's name by hand** — confirmed by jon, Sep 2026. Sale stock is believed
+not to support the prompt/AUTOPULL cascade that hire stock does, though that is a belief
+rather than a verified fact. Don't design around either assumption; if a genuine prompt
+ever appears on a sale item, verify before building for it.
+
 ### Confirmed HireHop facts (scratch job 16735, Sep 2026)
 
 | | Finding |
@@ -171,6 +237,9 @@ consumption trail a reorder view turns "we ran out on Friday" into "we knew on M
 | **Prices** | `PRICES._1.PRICE` is Price A. Sale items carry no `TYPE` key inside `PRICES`; hire items carry `TYPE: 2`. `PRICE1/2/3` remain deprecated. |
 | **Unit price auto-fills** | A line added from stock arrives already priced (7.50), so a **list-price sale needs no `items_save` step at all** — only a discounted or overridden price does. Roughly halves the per-sale call budget in §6.1. |
 | **`VAT_RATE: 0` on the line** | Means "derive from the stock's own tax rules", consistent with the existing recharge and PCN pushes. |
+| **Consumables endpoint auth** | The **normal broker token works** — no separate export credentials needed, unlike `backline-stock.ts`. Verified live: 974 records, 5 pages at 200 rows. |
+| **Availability for sale stock** | `items_picklist_avail.php` returns `{"a25":{"available":14,"global":14,"late":0}}` — so the till CAN show free-vs-reserved (§2.3). Verified against a shelf count of 15 with one unit reserved on a job. |
+| **`MAX_DISCOUNT` audit** | **Clean.** Zero active items below 100 across all 974, so the current 100%-discount workaround has not been silently failing. |
 
 **⚠️ `b` is overloaded.** In the picklist it prefixes a *hire stock* ID. In the delete
 response (`{"success":["b9146"],"ids":["b9146"]}`) it prefixes a *supply-list line* ID.

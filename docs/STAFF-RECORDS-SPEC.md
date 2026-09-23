@@ -388,7 +388,7 @@ rather than assuming.
 | 2 | ~~**Key data**~~ — **SHIPPED Sep 2026.** Migration 232, `updateKeyData()`/`revealNiNumber()`, `components/StaffKeyData.tsx`. Medical notes still held back. See §13 | The rest of the folder |
 | 3 | ~~**`staff_tasks` + My To Do tab**~~ — **SHIPPED Sep 2026.** Migration 233, `services/staff-tasks.ts`, `pages/MyTasksPage.tsx`, 09:45 chaser. See §14 | Useful as a general to-do immediately, before reviews exist |
 | 4 | ~~**Review record + cycle**~~ — **SHIPPED Sep 2026.** Migration 234, `recordReviewOutcome()`, `components/StaffReviews.tsx`, review-due scan. See §15 | The full loop minus staff-facing bits; actions write `staff_tasks` rows |
-| 5 | ~~**Staff-facing exchange**~~ — **SHIPPED Sep 2026.** Migration 236, `services/staff-review-prep.ts`, `staff-review-followup.ts`, `pages/MyReviewPage.tsx`. See §17 | The staff half |
+| 5 | ~~**Staff-facing exchange**~~ — **SHIPPED Sep 2026.** Migration 237, `services/staff-review-prep.ts`, `staff-review-followup.ts`, `pages/MyReviewPage.tsx`. See §17 | The staff half |
 | 6 | **Document review cycles** (§4) — the annual DVLA check and friends | Replaces jon's memory |
 | 7 | **Retention sweeps** (§7) — absence medical detail, per-type retention — **and only then §3.2's medical notes** | Closes the GDPR item |
 
@@ -1016,9 +1016,24 @@ earn permanent space beside tabs people use weekly, so `MePage` asks once and
 hides it otherwise — but always shows it when it is the tab being requested, so
 the notification's deep link can never land on a hidden tab.
 
-### 17.3 Migration numbering
+### 17.3 Migration numbering — it collided TWICE
 
-Written as 235, renumbered to **236** before commit: a parallel branch had
-already taken 235 (`235_shop_stock_cache.sql`). Exactly the collision
-CLAUDE.md's migrations section warns about — take the next free number at
-*build* time, and check again right before committing.
+Written as 235. Renumbered to 236 before commit, because a parallel branch had
+taken 235 (`235_shop_stock_cache.sql`). Then renumbered again to **237** on
+merge, because the same branch had meanwhile taken 236 too
+(`236_shop_stock_scope.sql`).
+
+CLAUDE.md warns to take the next free number at *build* time. The sharper
+lesson from doing it twice in one afternoon: on an active repo the number is
+not settled until the merge, so **re-check it at merge time, not just before
+committing.** The conflict itself is harmless and exactly what you want — two
+files claiming one number is a collision git can see. What would be genuinely
+dangerous is two branches picking the same number and the conflict NOT
+surfacing, which is why the runner's hardcoded list earns its keep here: it
+makes the clash a merge conflict instead of two files quietly sorting into an
+arbitrary order.
+
+Resolved by keeping both, in order: main's `236_shop_stock_scope.sql` (already
+applied on production) stays put, and this one moves to 237. Renumbering was
+safe only because 236 had never been applied anywhere — had it run on any
+environment, the rule is a NEW migration, never a rename.
