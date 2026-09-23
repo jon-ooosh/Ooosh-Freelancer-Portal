@@ -48,7 +48,19 @@ export const PRIVATE_PERSON_FIELDS = [
   'rtw_document_type',
   'rtw_expires_on',
   'rtw_checked_by',
+  // Migration 238. Nothing computes from it and nobody outside the staff area
+  // has a reason to see it.
+  'marital_status',
 ] as const;
+
+/**
+ * NOT redacted, and worth saying why so nobody "fixes" it:
+ * `date_of_birth`, `home_address`, `phone` and the emergency contacts are also
+ * personal, but they have been served by the general people endpoints since
+ * migration 001 and the driver/hire-form flows read them there legitimately.
+ * Redacting them is a separate, larger decision about the People record — see
+ * docs/STAFF-RECORDS-SPEC.md §18.4 — not something to slip into a staff change.
+ */
 
 /**
  * Strip the private fields from one row. Returns a new object; the input is

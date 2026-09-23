@@ -91,6 +91,10 @@ export default function StaffReviews({ personId, personName, people, onSaved, on
   const [booking, setBooking] = useState(false);
   const [scheduledFor, setScheduledFor] = useState('');
   const [reviewType, setReviewType] = useState('annual');
+  // Recording one that already happened, so years of past reviews can be typed
+  // in. It skips straight to completed and sends nobody anything — the invite
+  // and the write-up are for reviews that are actually about to happen.
+  const [backdating, setBackdating] = useState(false);
 
   const [openId, setOpenId] = useState<string | null>(null);
 
@@ -113,12 +117,20 @@ export default function StaffReviews({ personId, personName, people, onSaved, on
     setSaving(true);
     try {
       await api.post(`/staff-calendar/employees/${personId}/reviews`, {
-        scheduledFor, reviewType, status: 'confirmed',
+        scheduledFor, reviewType,
+        status: backdating ? 'completed' : 'confirmed',
+        // A past review is recorded as already done. Marking it completed on
+        // creation also means no invite goes out for a meeting that happened
+        // in 2023.
+        ...(backdating ? { completedAt: new Date(scheduledFor).toISOString() } : {}),
       });
       setScheduledFor('');
       setBooking(false);
       await load();
-      await onSaved(`Review booked for ${personName}.`);
+      await onSaved(backdating
+        ? `Past review recorded for ${personName}.`
+        : `Review booked for ${personName}.`);
+      setBackdating(false);
     } catch (err) {
       onError(err instanceof Error ? err.message : 'Failed to book the review');
     } finally {
@@ -164,9 +176,14 @@ export default function StaffReviews({ personId, personName, people, onSaved, on
               {TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
             </select>
           </label>
+          <label className="text-sm inline-flex items-center gap-1.5 text-gray-700">
+            <input type="checkbox" checked={backdating} onChange={e => setBackdating(e.target.checked)}
+              className="w-3.5 h-3.5 rounded border-gray-300" />
+            Already happened
+          </label>
           <button onClick={() => void book()} disabled={!scheduledFor || saving}
             className="px-3 py-1.5 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-40">
-            {saving ? 'Saving…' : 'Book'}
+            {saving ? 'Saving…' : backdating ? 'Record it' : 'Book'}
           </button>
           <button onClick={() => setBooking(false)} className="text-sm text-gray-500 hover:text-gray-700">
             Cancel
@@ -237,6 +254,21 @@ function ReviewRow({ review, personId, personName, people, open, onToggle, onCha
       await onChanged('Review saved.');
     } catch (err) {
       onError(err instanceof Error ? err.message : 'Failed to save');
+    } finally { setSaving(false); }
+  }
+
+  async function cancel() {
+    if (!window.confirm('Call this review off? It stays on the record as cancelled.')) return;
+    setSaving(true);
+    try {
+      await api.post(`/staff-calendar/employees/${personId}/reviews`, {
+        id: review.id,
+        scheduledFor: review.scheduled_for,
+        status: 'cancelled',
+      });
+      await onChanged('Review cancelled.');
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Failed to cancel');
     } finally { setSaving(false); }
   }
 
@@ -441,6 +473,12 @@ function ReviewRow({ review, personId, personName, people, open, onToggle, onCha
               <span className="text-xs text-gray-500">
                 Completed {fmtDate(review.completed_at)}
               </span>
+            )}
+            {!done && review.status !== 'cancelled' && (
+              <button onClick={() => void cancel()} disabled={saving}
+                className="ml-auto text-xs text-red-600 hover:text-red-800 disabled:opacity-40">
+                Call it off
+              </button>
             )}
           </div>
         </div>

@@ -194,6 +194,7 @@ existing definition:
 | Who is due a staff review? | `services/staff-employment.ts` `listReviewsDue()` |
 | What needs an admin's attention on Staff? | `services/staff-attention.ts` |
 | What does a reviewee get to see? | `services/staff-review-prep.ts` `getMyReview()` |
+| Does this module need a new person field? | Check `people` first — it already has phone, mobile, home address, DOB and both emergency contacts (mig 001) |
 
 Frontend display helpers with the same status: `lib/roles.ts`, `lib/driverStatus.ts`,
 `lib/jobOrgName.ts`, `lib/vehiclePrep.ts`, `lib/preauth.ts`, `lib/revisitDate.ts`,

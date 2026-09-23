@@ -25,6 +25,7 @@ import {
 import {
   STAFF_ADMIN_ROLES, upsertEmployment, getEmployeeRecord, listEmployees, getStaffRoster,
   updateKeyData, revealNiNumber, recordReviewOutcome,
+  listPensionHistory, addPensionRecord, updatePersonalDetails,
   listUnlinkedLogins, linkLoginToPerson,
   createPattern, listPatterns, createExceptions, listExceptions,
   addSalaryEntry, listSalaryHistory, upsertReview, listReviews,
@@ -1294,6 +1295,68 @@ router.post('/employees/:personId/reviews/:reviewId/prep', adminOnly, async (req
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Failed to save';
     res.status(msg === 'Review not found' ? 404 : 400).json({ error: msg });
+  }
+});
+
+// ── Personal details (spec §18.1) ───────────────────────────────────────────
+// These columns have been on `people` since migration 001 and were simply
+// never editable from the staff area. A write path, not new storage.
+const personalSchema = z.object({
+  phone: z.string().max(50).nullish(),
+  mobile: z.string().max(50).nullish(),
+  internationalPhone: z.string().max(50).nullish(),
+  homeAddress: z.string().max(2000).nullish(),
+  dateOfBirth: z.union([dateStr, z.literal('')]).nullish(),
+  maritalStatus: z.string().max(40).nullish(),
+  emergencyContactName: z.string().max(255).nullish(),
+  emergencyContactPhone: z.string().max(50).nullish(),
+  emergencyContactRelationship: z.string().max(100).nullish(),
+  emergencyContact2Name: z.string().max(255).nullish(),
+  emergencyContact2Phone: z.string().max(50).nullish(),
+  emergencyContact2Relationship: z.string().max(100).nullish(),
+});
+
+// PUT /api/staff-calendar/employees/:personId/personal
+router.put('/employees/:personId/personal', adminOnly, async (req: AuthRequest, res: Response) => {
+  const parsed = personalSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
+  try {
+    const rec = await updatePersonalDetails(req.params.personId as string, parsed.data);
+    res.json({ data: rec });
+  } catch (err) {
+    console.error('[staff-calendar] personal details error:', err);
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to save' });
+  }
+});
+
+// ── Pension (spec §18.2) ────────────────────────────────────────────────────
+// Append-only, like salary: a change is a new row so the history survives.
+router.get('/employees/:personId/pension', adminOnly, async (req: AuthRequest, res: Response) => {
+  try {
+    res.json({ data: await listPensionHistory(req.params.personId as string) });
+  } catch (err) {
+    console.error('[staff-calendar] pension error:', err);
+    res.status(500).json({ error: 'Failed to load pension history' });
+  }
+});
+
+router.post('/employees/:personId/pension', adminOnly, async (req: AuthRequest, res: Response) => {
+  const schema = z.object({
+    isMember: z.boolean(),
+    schemeName: z.string().max(200).nullish(),
+    employeePercent: z.number().min(0).max(100).nullish(),
+    employerPercent: z.number().min(0).max(100).nullish(),
+    effectiveFrom: dateStr,
+    reason: z.string().max(500).nullish(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
+  try {
+    const row = await addPensionRecord(req.params.personId as string, parsed.data, req.user!.id);
+    res.status(201).json({ data: row });
+  } catch (err) {
+    console.error('[staff-calendar] add pension error:', err);
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to record the pension change' });
   }
 });
 

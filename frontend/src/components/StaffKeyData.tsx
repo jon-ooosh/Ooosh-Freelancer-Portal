@@ -23,6 +23,11 @@ import { api } from '../services/api';
 
 interface EmployeeRecord {
   has_ni_number: boolean;
+  phone: string | null;
+  mobile: string | null;
+  home_address: string | null;
+  date_of_birth: string | null;
+  marital_status: string | null;
   rtw_document_type: string | null;
   rtw_checked_on: string | null;
   rtw_expires_on: string | null;
@@ -68,6 +73,16 @@ export default function StaffKeyData({ personId, personName, onSaved, onError }:
   const [docType, setDocType] = useState('');
   const [checkedOn, setCheckedOn] = useState('');
   const [expiresOn, setExpiresOn] = useState('');
+  // Personal details. These columns have been on `people` since migration 001;
+  // what was missing was anywhere to type them, not anywhere to keep them.
+  const [phone, setPhone] = useState('');
+  const [mobile, setMobile] = useState('');
+  const [homeAddress, setHomeAddress] = useState('');
+  const [dob, setDob] = useState('');
+  const [marital, setMarital] = useState('');
+  const [ecName, setEcName] = useState('');
+  const [ecPhone, setEcPhone] = useState('');
+  const [ecRel, setEcRel] = useState('');
 
   const load = useCallback(async () => {
     try {
@@ -76,6 +91,14 @@ export default function StaffKeyData({ personId, personName, onSaved, onError }:
       setDocType(res.data.rtw_document_type ?? '');
       setCheckedOn(res.data.rtw_checked_on ?? '');
       setExpiresOn(res.data.rtw_expires_on ?? '');
+      setPhone(res.data.phone ?? '');
+      setMobile(res.data.mobile ?? '');
+      setHomeAddress(res.data.home_address ?? '');
+      setDob(res.data.date_of_birth ?? '');
+      setMarital(res.data.marital_status ?? '');
+      setEcName(res.data.emergency_contact_name ?? '');
+      setEcPhone(res.data.emergency_contact_phone ?? '');
+      setEcRel(res.data.emergency_contact_relationship ?? '');
     } catch (err) {
       // A person with no employment record 404s here, and that IS fine — the
       // Employment panel already says so. Anything else is a real failure and
@@ -105,6 +128,14 @@ export default function StaffKeyData({ personId, personName, onSaved, onError }:
       // a stored number — hence absent rather than ''.
       if (ni.trim()) body.niNumber = ni.trim();
       await api.put(`/staff-calendar/employees/${personId}/key-data`, body);
+      // Separate endpoint (the NI write has its own audited path), but one
+      // button: this is one form as far as anybody filling it in is concerned.
+      await api.put(`/staff-calendar/employees/${personId}/personal`, {
+        phone, mobile, homeAddress, dateOfBirth: dob, maritalStatus: marital,
+        emergencyContactName: ecName,
+        emergencyContactPhone: ecPhone,
+        emergencyContactRelationship: ecRel,
+      });
       setNi('');
       setRevealed(null);
       setEditing(false);
@@ -145,10 +176,10 @@ export default function StaffKeyData({ personId, personName, onSaved, onError }:
     }
   }
 
-  if (loading) return <div><h3 className="text-sm font-medium text-gray-900 mb-1">Key data</h3><p className="text-sm text-gray-500">Loading…</p></div>;
+  if (loading) return <div><h3 className="text-sm font-medium text-gray-900 mb-1">Personal &amp; key data</h3><p className="text-sm text-gray-500">Loading…</p></div>;
   if (loadError) return (
     <div>
-      <h3 className="text-sm font-medium text-gray-900 mb-1">Key data</h3>
+      <h3 className="text-sm font-medium text-gray-900 mb-1">Personal &amp; key data</h3>
       <p className="text-sm text-red-700 rounded border border-red-200 bg-red-50 px-3 py-2">
         Couldn’t load key data — {loadError}
       </p>
@@ -164,7 +195,7 @@ export default function StaffKeyData({ personId, personName, onSaved, onError }:
   return (
     <div>
       <div className="flex items-center justify-between mb-1">
-        <h3 className="text-sm font-medium text-gray-900">Key data</h3>
+        <h3 className="text-sm font-medium text-gray-900">Personal &amp; key data</h3>
         {!editing && (
           <button onClick={() => setEditing(true)} className="text-xs text-ooosh-600 hover:underline">Edit</button>
         )}
@@ -204,6 +235,28 @@ export default function StaffKeyData({ personId, personName, onSaved, onError }:
             <dt className="text-xs text-gray-500">Permission expires</dt>
             <dd className="text-gray-900">
               {rec.rtw_expires_on ? fmtDate(rec.rtw_expires_on) : <span className="text-gray-400">No limit</span>}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-xs text-gray-500">Phone</dt>
+            <dd className="text-gray-900">
+              {[rec.mobile, rec.phone].filter(Boolean).join(' · ') || <span className="text-gray-400">—</span>}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-xs text-gray-500">Date of birth</dt>
+            <dd className="text-gray-900">
+              {rec.date_of_birth ? fmtDate(rec.date_of_birth) : <span className="text-gray-400">—</span>}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-xs text-gray-500">Marital status</dt>
+            <dd className="text-gray-900">{rec.marital_status || <span className="text-gray-400">—</span>}</dd>
+          </div>
+          <div className="col-span-2 sm:col-span-4">
+            <dt className="text-xs text-gray-500">Home address</dt>
+            <dd className="text-gray-900 whitespace-pre-line">
+              {rec.home_address || <span className="text-gray-400">—</span>}
             </dd>
           </div>
           {emergency.length > 0 && (
@@ -256,6 +309,51 @@ export default function StaffKeyData({ personId, personName, onSaved, onError }:
               </span>
             </label>
           </div>
+          <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 pt-3 border-t border-gray-100">
+            <label className="text-sm">
+              <span className="block text-xs text-gray-600 mb-1">Mobile</span>
+              <input value={mobile} onChange={e => setMobile(e.target.value)}
+                className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white" />
+            </label>
+            <label className="text-sm">
+              <span className="block text-xs text-gray-600 mb-1">Other phone</span>
+              <input value={phone} onChange={e => setPhone(e.target.value)}
+                className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white" />
+            </label>
+            <label className="text-sm">
+              <span className="block text-xs text-gray-600 mb-1">Date of birth</span>
+              <input type="date" value={dob} onChange={e => setDob(e.target.value)}
+                className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white" />
+            </label>
+            <label className="text-sm">
+              <span className="block text-xs text-gray-600 mb-1">Marital status</span>
+              <input value={marital} onChange={e => setMarital(e.target.value)}
+                placeholder="e.g. Married"
+                className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white" />
+            </label>
+            <label className="text-sm sm:col-span-4">
+              <span className="block text-xs text-gray-600 mb-1">Home address</span>
+              <textarea value={homeAddress} onChange={e => setHomeAddress(e.target.value)} rows={2}
+                className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white" />
+            </label>
+            <label className="text-sm sm:col-span-2">
+              <span className="block text-xs text-gray-600 mb-1">Emergency contact</span>
+              <input value={ecName} onChange={e => setEcName(e.target.value)}
+                className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white" />
+            </label>
+            <label className="text-sm">
+              <span className="block text-xs text-gray-600 mb-1">Their phone</span>
+              <input value={ecPhone} onChange={e => setEcPhone(e.target.value)}
+                className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white" />
+            </label>
+            <label className="text-sm">
+              <span className="block text-xs text-gray-600 mb-1">Relationship</span>
+              <input value={ecRel} onChange={e => setEcRel(e.target.value)}
+                placeholder="e.g. Partner"
+                className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white" />
+            </label>
+          </div>
+
           <div className="flex items-center gap-3">
             <button onClick={() => void save()} disabled={saving}
               className="px-3 py-1.5 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-40">

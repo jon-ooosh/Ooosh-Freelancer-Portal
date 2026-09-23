@@ -4,6 +4,7 @@ import { api } from '../services/api';
 import StaffRecordFiles from '../components/StaffRecordFiles';
 import StaffKeyData from '../components/StaffKeyData';
 import StaffReviews, { type ReviewPerson } from '../components/StaffReviews';
+import StaffPay from '../components/StaffPay';
 import StaffAttention, { type AttentionItem } from '../components/StaffAttention';
 import StaffPersonOverview from '../components/StaffPersonOverview';
 import { useAuthStore } from '../hooks/useAuthStore';
@@ -563,7 +564,15 @@ function PersonView({ row, isAdmin, people, tab, attention, onTab, onBack, onSav
       {active === 'employment' && (
         isAdmin
           ? (row.employment
-              ? <EmploymentSection row={row} onSaved={onSaved} onError={onError} />
+              ? (
+                <div className="space-y-6">
+                  <EmploymentSection row={row} onSaved={onSaved} onError={onError} />
+                  {/* Salary and pension: employment TERMS, so they belong here
+                      rather than with the documents on Records. */}
+                  <StaffPay personId={row.personId} personName={row.name}
+                    onSaved={onSaved} onError={onError} />
+                </div>
+              )
               : <NotAnEmployee />)
           : <p className="text-sm text-gray-500">Employment details are admin-only.</p>
       )}

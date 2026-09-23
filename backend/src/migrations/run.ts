@@ -273,6 +273,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '235_shop_stock_cache.sql',
         '236_shop_stock_scope.sql',
         '237_staff_review_prep.sql',
+        '238_staff_pension_and_personal.sql',
       ];
 
       for (const migration of migrations) {
