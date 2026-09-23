@@ -326,11 +326,27 @@ lead and a can of Coke, that is a lot of risk for a rare convenience.
 operator who wants the total to land on £50 discounts one line until it does. Same
 outcome, no apportionment question, and the discount is visible on the line it came off.
 
-**Who may discount.** Money out the door is `MANAGER_ROLES` by house rule, but blocking
-all staff from knocking 50p off is the kind of gate that strands people. Proposal: a
-`system_settings` threshold — staff may discount up to it, managers without limit.
-Every discount records who applied it and how much, since the weekly reconciliation
-should be able to answer "why did this week take less than it listed".
+**Who may discount — a ceiling per role, not a yes/no** (agreed with jon, Sep 2026):
+
+| Role | Max discount |
+|---|---|
+| `admin` | 100% |
+| `manager` / `weekend_manager` | 50% |
+| `staff` / `general_assistant` | 10% |
+| `freelancer` (studio sitter) | 0% — may not discount |
+
+Stored in `system_settings` rather than hardcoded, per the house rule for anything staff
+may want to change without a deploy. `weekend_manager` is never listed separately in code
+— `authorize()` already treats it as `manager`.
+
+**⚠️ The ceiling applies to the TRANSACTION total, not the individual line.** A per-line
+cap would break the rounding escape hatch above: knocking £2 off a £52 basket of £1 cans
+means discounting one can by 100%, which a 10%-per-line cap blocks even though the
+customer is getting 4% off. What matters commercially is how much margin is being given
+away overall, so the cap is `(total discount ÷ undiscounted total)`.
+
+Every discount records who applied it and how much, since the weekly reconciliation must
+be able to answer "why did this week take less than it listed".
 
 **Never a hidden discount.** A basket that doesn't reconcile must show as a discount on a
 line, never as a payment that happens to be less than the total — that would break §9's
@@ -965,17 +981,24 @@ line restores the shelf count, and a line arrives already priced from stock.
 
 **STILL OPEN:**
 
-3. **How to REMOVE a sale line — endpoint found, request shape still a guess.**
-   Deletion is its own endpoint, **`items_delete.php`**, captured from the HireHop UI
-   23 Sep 2026 returning `{"success":["b9154"],"ids":["b9154"]}`. It is NOT a `delete:`
-   key on `save_job.php` — that returned `success: true` and did nothing (§2.5).
-   `b` here prefixes a supply-list LINE id, a different namespace from the `a`/`b`
-   picklist scheme used to add.
+3. ✅ **SETTLED — how to remove a sale line.** Captured verbatim from the HireHop UI,
+   23 Sep 2026:
 
-   The probe now tries the likely request fields (`items`, `ids`, `id`) against that
-   endpoint in turn and stops at whichever actually removes the line, verifying by
-   read-back rather than by response. Capturing the **Payload** tab from the UI would
-   settle it in one go instead.
+   ```
+   POST /php_functions/items_delete.php
+     ids             = b9154     ← a BARE string, NOT a JSON array
+     job             = 16735
+     arch            =           ← archive flag; empty means delete rather than archive
+     no_availability = 0
+   ```
+
+   **Two traps in one payload.** It is not a `delete:` key on `save_job.php` (that
+   returned `success: true` and did nothing — §2.5), and `ids` is a plain string, so
+   `JSON.stringify([...])` would have been ignored the same silent way. `b` prefixes a
+   supply-list LINE id here, a different namespace from the `a`/`b` picklist scheme used
+   to add.
+
+   **Nothing now blocks the push code.**
 
 Lower-risk: whether a tally adjustment can carry a job reference. The response exposes
 `JOB` and `REPAIR`, but the documented send parameters don't include them — and both

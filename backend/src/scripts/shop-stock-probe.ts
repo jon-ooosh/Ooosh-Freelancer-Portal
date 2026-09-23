@@ -192,37 +192,28 @@ async function q5(lineId: string | null) {
 
   const shelfBefore = await readShelfCount();
 
-  // Deletion is its OWN endpoint — `items_delete.php`, captured from the HireHop
-  // UI 23 Sep 2026 returning {"success":["b9154"],"ids":["b9154"]}. It is NOT a
-  // `delete:` key on save_job.php: that returned success:true and did nothing
-  // (spec §2.5), which is why this probe reads back rather than trusting a 200.
+  // Deletion is its OWN endpoint with its OWN grammar — captured verbatim from the
+  // HireHop UI's Network tab, 23 Sep 2026:
   //
-  // `b` here prefixes a supply-list LINE id, not a stock id — a different
-  // namespace from the `a`/`b` picklist scheme used to ADD (spec §2.1).
+  //     POST /php_functions/items_delete.php
+  //     ids = b9154        ← a BARE string, NOT a JSON array
+  //     job = 16735
+  //     arch = (empty)     ← archive flag; empty means "delete, don't archive"
+  //     no_availability = 0
   //
-  // The exact request field is still a guess, so try the likely shapes in turn
-  // and stop at whichever actually removes the line. Safe: each attempt is
-  // verified by reading the list back, not by its response.
-  const attempts: Array<{ label: string; params: Record<string, string | number> }> = [
-    { label: 'items=["b<id>"]', params: { job: HH_JOB, items: JSON.stringify([`b${lineId}`]), no_webhook: 1 } },
-    { label: 'ids=["b<id>"]', params: { job: HH_JOB, ids: JSON.stringify([`b${lineId}`]), no_webhook: 1 } },
-    { label: 'id=b<id>', params: { job: HH_JOB, id: `b${lineId}`, no_webhook: 1 } },
-  ];
+  // Two traps in that one payload. It is NOT a `delete:` key on save_job.php —
+  // that returned success:true and did nothing (spec §2.5). And `ids` is a plain
+  // string: JSON.stringify([...]) would have been silently ignored the same way.
+  //
+  // `b` here prefixes a supply-list LINE id, a different namespace from the `a`/`b`
+  // picklist scheme used to ADD (spec §2.1).
+  const payload = { job: HH_JOB, ids: `b${lineId}`, arch: '', no_availability: 0 };
+  console.log(`payload: ${JSON.stringify(payload)}`);
+  const res = await hhBroker.post<any>('/php_functions/items_delete.php', payload, { priority: 'high' });
+  console.log(`response: ${JSON.stringify(res)}`);
 
-  let res: any = null;
-  for (const attempt of attempts) {
-    console.log(`\n  trying ${attempt.label}: ${JSON.stringify(attempt.params)}`);
-    res = await hhBroker.post<any>('/php_functions/items_delete.php', attempt.params, { priority: 'high' });
-    console.log(`  response: ${JSON.stringify(res)}`);
-    await new Promise((r) => setTimeout(r, 1200));
-    const check = await readSupplyList();
-    if (!check.find((i) => String(i.ID) === lineId)) {
-      console.log(`  => GONE. The working shape is: ${attempt.label}`);
-      break;
-    }
-    console.log('  => line still present; trying the next shape.');
-  }
-
+  // Read back regardless of what the response claimed — §2.5 is the whole reason.
+  await new Promise((r) => setTimeout(r, 1500));
   const after = await readSupplyList();
   const still = after.find((i) => String(i.ID) === lineId);
   const shelf = await readShelfCount();
