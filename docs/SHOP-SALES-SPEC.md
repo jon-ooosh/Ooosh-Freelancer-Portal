@@ -878,7 +878,12 @@ Frontend: `hasManagerRole()` / `roleAllowed()` from `lib/roles.ts`, never bare
    it only ever covers sales made *through OP*; it prevents future drift, it does not find
    historic drift in the existing weekly jobs.
 3. Sitter price lookup in the freelancer portal. Smallest thing that removes a daily pain.
-4. `shop_sales` model + staff till UI, saving to Postgres only. No HireHop writes yet.
+4. ✅ **SHIPPED Sep 2026.** `shop_sales` / `shop_sale_lines` / `shop_sale_periods`
+   (migration 240) + `services/shop-sales.ts` + `routes/shop.ts` + `ShopTillPage`.
+   Saves to Postgres only — no HireHop writes yet.
+   **⚠️ Rows land `status = 'queued'`. When the drain ships (step 5) it picks up
+   anything still queued, so TEST ROWS MUST BE CANCELLED before that deploy** or
+   they will push real lines and real money.
 5. The queue + drain: consumption via `tally_save` first (one call, no money, reversible).
 6. Sale push: lines + `pushDepositToHH`. Shop-job routing.
 7. Job routing (band's job / client's job) + the two-band picker.
