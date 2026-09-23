@@ -239,6 +239,68 @@ not to support the prompt/AUTOPULL cascade that hire stock does, though that is 
 rather than a verified fact. Don't design around either assumption; if a genuine prompt
 ever appears on a sale item, verify before building for it.
 
+### 2.5 ⚠️ `success: true` does NOT mean HireHop did it
+
+The single most important thing the write probe turned up (23 Sep 2026).
+
+`POST /api/save_job.php` with `delete: ["b9154"]` returned **`success: true`** with a full
+job payload — and **the line was still on the job**. HireHop had accepted the request and
+silently ignored the instruction. The only tell was that the response carried no `items`
+key at all, where the successful *add* had returned the created line inside
+`data.items.itms`.
+
+> **Every write in this module must verify by reading back. Never treat `success: true`
+> as proof the change happened.**
+
+This is exactly the shape of failure this module exists to eliminate — a stock movement
+that nobody is told went wrong. It also validates the line-integrity scan in §12: that
+scan is not belt-and-braces, it is the only thing that would catch a push HireHop claimed
+to have made and didn't.
+
+### 2.6 Adding a sale line costs ONE call, not four
+
+`save_job.php` returns the **created line in its own response**, under
+`data.items.itms[0]` — `ID`, `kind`, `LIST_ID`, `UNIT_PRICE`, `ACC_NOMINAL`, `avail`, the
+lot. Verified 23 Sep 2026: adding `a25` came back with line `9154` fully populated and
+priced at 7.50.
+
+So the §6.1 sequence collapses. The proven recharge pattern
+(`cost-recharge-hh.ts`, `pcn-recharge.ts`) does **snapshot → add → sleep 1s → re-read →
+`items_save`** because it needs the new line's ID and a custom price. A list-price shop
+sale needs neither:
+
+| | Calls per line |
+|---|---|
+| Recharge pattern (what §6.1 originally assumed) | 4 + a 1s wait |
+| **Shop sale at list price** | **1** |
+| Shop sale at an overridden price | 2 (add, then `items_save`) |
+
+Read `hh_line_id` straight from the add response. Don't re-read to find it.
+
+(The recharge and PCN pushes could be simplified the same way — but they are proven money
+code and the win there is small. Not worth touching.)
+
+### 2.7 HireHop publishes its own tax table
+
+The job payload carries `standard_tax_rates`, which is the index→rate map §2.2 needed:
+
+| INDEX | Rate | Description |
+|---|---|---|
+| 0 | 20% | 20% (VAT on Income) |
+| 1 | **0%** | Zero Rated Income |
+| 2 | 5% | 5% (VAT on Income) |
+
+This confirms index 0 is the standard rate — and shows migration 236's seed of `{"0":20}`
+was **incomplete**. A genuinely zero-rated item would have missed the map, hit the
+fall-back-to-standard rule and been charged 20% it shouldn't carry. The fallback direction
+was still right; being right by accident is not the same as being right. Migration 237
+completes the map (guarded, so a hand-edit wins).
+
+**Worth wiring properly when the push code lands:** read `standard_tax_rates` off the job
+payload we are already fetching and warn when it disagrees with the configured map, rather
+than maintaining the map by hand. Drift between HireHop's tax setup and ours is exactly
+the sort of thing nobody notices until a VAT return.
+
 ### Confirmed HireHop facts (scratch job 16735, Sep 2026)
 
 | | Finding |
@@ -858,30 +920,23 @@ npx tsx src/scripts/shop-stock-probe.ts --job=16735 --stock=25 --write    # full
 prefix is `a<id>`, sale lines are `kind: 1`, tally `qty` is negative-to-consume, removing a
 line restores the shelf count, and a line arrives already priced from stock.
 
-**STILL OPEN — all three gate the push code:**
+**SETTLED by the write probe, 23 Sep 2026:**
 
-1. **Does a line added to an ALREADY-DISPATCHED job decrement immediately?**
-   Put the scratch job at status 5, then add a roll of tape and watch the shelf count.
-   - **Yes** → the weekly shop job sits permanently at dispatched from creation. Every sale
-     bites live, stock is accurate to the minute, `is_internal` keeps OP quiet. No other
-     change to this spec.
-   - **No** → stock only moves on a dispatch *transition*, so the container becomes daily
-     rather than weekly, or stock (tally) splits from money (job line) with the shop job
-     pinned at a status that never decrements. Both are more fragile; the second
-     double-decrements the moment anyone dispatches that job by hand.
+1. ✅ **`save_job.php` accepts `items: {"a25": 1}`.** The `a` prefix works on our token
+   and our proven codepath. §6.1 stands; no need for `items_batch_save.php`. Better than
+   hoped — the response carries the created line, so it is one call, not four (§2.6).
+2. ✅ The line comes back `kind: 1`, `LIST_ID: 25`, `UNIT_PRICE: 7.50`, `ACC_NOMINAL: 6`,
+   `CATEGORY_ID: 338`, and `avail` drops cumulatively (14 → 13 on the second line).
 
-2. **Does Completed (11) or Returned (7) give the stock BACK?**
-   Move the dispatched scratch job to each and watch the count. Sale stock never physically
-   returns, but the statuses are shared with hire stock, which does.
-   **If completing restores the stock, closing off the weekly shop job would silently undo
-   every sale on it** — and the job-line model for sales collapses in favour of tally
-   adjustments carrying the stock movement. Highest-stakes remaining unknown.
+**STILL OPEN:**
 
-3. **Does `/api/save_job.php` accept `items: {"a25": 1}`?** The HH UI uses
-   `items_batch_save.php`, but our proven codepath is `save_job.php` (`cost-recharge-hh.ts`,
-   `pcn-recharge.ts`). Needs a probe script rather than a UI capture, since it tests *our*
-   auth path, not HireHop's own. If `save_job.php` rejects the `a` prefix we adopt
-   `items_batch_save.php`, and the §15 reuse of the recharge pattern no longer applies.
+3. **How to REMOVE a sale line.** `save_job.php` with `delete: ["b<lineId>"]` returns
+   `success: true` and does nothing (§2.5) — the grammar is wrong, and wrong in the
+   quietest possible way. Needed for Window B reversals (§8) and the future drained-sale
+   move (§4.1). **Capture the real request from the HireHop UI's Network tab** when
+   deleting a line, the way the add was captured; the response we saw
+   (`{"success":["b9146"],"ids":["b9146"]}`) came from a different endpoint than the one
+   tried here.
 
 Lower-risk: whether a tally adjustment can carry a job reference. The response exposes
 `JOB` and `REPAIR`, but the documented send parameters don't include them — and both
