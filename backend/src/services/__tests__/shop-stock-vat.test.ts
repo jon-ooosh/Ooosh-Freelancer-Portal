@@ -107,3 +107,40 @@ describe('grossPrice', () => {
     await expect(m.grossPrice(1.2, 1)).resolves.toBe(1.2);
   });
 });
+
+/**
+ * Category exclusions hide non-shop sale stock from the till — HireHop's 974
+ * sale items include things like VE103B certificates, which are a compliance
+ * charge raised onto a hire, not something a walk-in buys.
+ *
+ * The direction that matters here is the opposite of the VAT one: this must
+ * fail OPEN. Hiding an item nobody classified means staff cannot complete a
+ * sale with the customer standing there, which is worse than briefly listing
+ * something that shouldn't be sold over the counter.
+ */
+describe('getExcludedCategoryIds', () => {
+  it('reads the configured list', async () => {
+    const m = await freshModule(JSON.stringify([355]));
+    await expect(m.getExcludedCategoryIds()).resolves.toEqual([355]);
+  });
+
+  it('hides nothing when the setting is absent', async () => {
+    const m = await freshModule(null);
+    await expect(m.getExcludedCategoryIds()).resolves.toEqual([]);
+  });
+
+  it('hides nothing when the setting is malformed', async () => {
+    const m = await freshModule('{"not":"an array"}');
+    await expect(m.getExcludedCategoryIds()).resolves.toEqual([]);
+  });
+
+  it('hides nothing when the settings table is unreadable', async () => {
+    const m = await freshModule(new Error('db down'));
+    await expect(m.getExcludedCategoryIds()).resolves.toEqual([]);
+  });
+
+  it('drops non-numeric entries rather than rejecting the whole list', async () => {
+    const m = await freshModule(JSON.stringify([355, 'oops', 356]));
+    await expect(m.getExcludedCategoryIds()).resolves.toEqual([355, 356]);
+  });
+});

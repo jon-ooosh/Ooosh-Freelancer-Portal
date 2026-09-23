@@ -14,15 +14,22 @@
  * already in the database, and emails already in people's inboxes link to them.
  * Removing them would break links we have already sent.
  */
+import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { api } from '../services/api';
 import MyTimePage from './MyTimePage';
 import MyTasksPage from './MyTasksPage';
+import MyReviewPage from './MyReviewPage';
 import StaffDocumentsPage from './StaffDocumentsPage';
 import ProfilePage from './ProfilePage';
 
 const TABS = [
   { id: 'time', label: 'My Time' },
   { id: 'todo', label: 'My To Do' },
+  // Only when there IS one — a review is a once-a-year thing and does not earn
+  // permanent space beside the tabs people use weekly. The notification that
+  // announces a review links straight here, so it is never the only way in.
+  { id: 'review', label: 'My Review' },
   { id: 'documents', label: 'Documents' },
   { id: 'profile', label: 'Profile' },
 ] as const;
@@ -33,6 +40,22 @@ export default function MePage() {
   const [params, setParams] = useSearchParams();
   const raw = params.get('tab');
   const active: TabId = TABS.some(t => t.id === raw) ? (raw as TabId) : 'time';
+
+  // One cheap call decides whether the review tab is shown at all. Failure is
+  // silent and simply hides it: this is decoration on a page whose other four
+  // tabs must keep working regardless.
+  const [hasReview, setHasReview] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    api.get<{ data: unknown | null }>('/staff-calendar/me/review')
+      .then(res => { if (!cancelled) setHasReview(!!res.data); })
+      .catch(() => { /* no review, or no staff record — either way, no tab */ });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Always show it when it is the tab being asked for, so the notification's
+  // deep link cannot land on a tab that has been hidden.
+  const tabs = TABS.filter(t => t.id !== 'review' || hasReview || active === 'review');
 
   // In the URL rather than in state, so a notification or an email can deep-link
   // straight to the right tab and a browser Back button behaves.
@@ -46,7 +69,7 @@ export default function MePage() {
     <div>
       <div className="border-b border-gray-200 mb-4">
         <nav className="flex gap-1 -mb-px" aria-label="Me">
-          {TABS.map(t => (
+          {tabs.map(t => (
             <button
               key={t.id}
               onClick={() => select(t.id)}
@@ -67,6 +90,7 @@ export default function MePage() {
           each one would refetch every time you glance at another. */}
       {active === 'time' && <MyTimePage />}
       {active === 'todo' && <MyTasksPage />}
+      {active === 'review' && <MyReviewPage />}
       {active === 'documents' && <StaffDocumentsPage />}
       {active === 'profile' && <ProfilePage />}
     </div>
