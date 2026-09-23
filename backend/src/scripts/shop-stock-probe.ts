@@ -109,7 +109,9 @@ async function q1() {
   const data: any = res.data;
   console.log(`totalRecords=${data?.totalRecords} pages=${data?.total} rowsReturned=${data?.data?.length}`);
   if (data?.data?.[0]) {
-    console.log('\nFirst row verbatim:');
+    // NB: this is the first row of the WHOLE sale-stock catalogue in HireHop's
+    // default order — it has nothing to do with --job. Q1 never looks at the job.
+    console.log('\nFirst row of the catalogue, verbatim (NOT from the job):');
     console.log(JSON.stringify(data.data[0], null, 2));
     const withMax = (data.data as any[]).filter((r) => Number(r.MAX_DISCOUNT) < 100);
     console.log(`\nMAX_DISCOUNT < 100 on this page: ${withMax.length}` +

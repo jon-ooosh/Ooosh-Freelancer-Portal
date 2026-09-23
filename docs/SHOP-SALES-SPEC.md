@@ -160,6 +160,37 @@ stop it being a surprise: `list.php` returns `REORDER_LEVEL` and `REORDER_QTY`, 
 consumption trail a reorder view turns "we ran out on Friday" into "we knew on Monday"
 (§12). Nearly free once the mirror exists.
 
+### 2.4 The sale catalogue is NOT the shop — it needs a category scope
+
+Verified Sep 2026: HireHop holds **974 sale-stock items** across 17 categories —
+Tape, Power, Batteries, Dirty Rigger, Guitar & Bass, Percussion, Cables, Components,
+Accessories, Stands, Drum Heads, Vocals, Strings, Drum Sticks, Guitar Pedals,
+**Misc Sale Item**, Drinks & snacks.
+
+Not all of that is shop product. "Misc Sale Item" holds things like the **VE103B
+certificate** (£25, category 355) — a compliance charge raised onto a hire, not something
+anyone buys over the counter. A till listing all 974 would let someone sell a VE103B
+certificate to a walk-in.
+
+**Mirror everything, scope at the till.** The two consumers want different sets:
+
+| Consumer | Scope |
+|---|---|
+| Till search / price lookup | shop categories only |
+| Reorder view (§12) | **all** sale stock — VE103B certs carry `REORDER_LEVEL: 15`, `REORDER_QTY: 50`, and running out of those matters too |
+
+So the category allowlist belongs at the read, not at the refresh. Unlike
+`BACKLINE_CATEGORY_IDS` (a code constant for hire stock), this one lives in
+`system_settings` — what the shop stocks will change, and jon should be able to add a
+category without a deploy.
+
+**⚠️ Prompt-parent sale items.** A title beginning `▶` marks an item carrying child
+prompts — the same convention as hire stock (`PLATFORM-CONVENTIONS.md`), and confirmed
+live on a SALE item ("▶ VE103B certificate"). Adding one by `a<id>` yields a line whose
+prompts are unanswered, which is not something a till should sell in one tap.
+`isPromptParent()` in `services/shop-stock.ts` is the test; treat those as
+not-simply-sellable until prompt handling exists.
+
 ### Confirmed HireHop facts (scratch job 16735, Sep 2026)
 
 | | Finding |
@@ -171,6 +202,9 @@ consumption trail a reorder view turns "we ran out on Friday" into "we knew on M
 | **Prices** | `PRICES._1.PRICE` is Price A. Sale items carry no `TYPE` key inside `PRICES`; hire items carry `TYPE: 2`. `PRICE1/2/3` remain deprecated. |
 | **Unit price auto-fills** | A line added from stock arrives already priced (7.50), so a **list-price sale needs no `items_save` step at all** — only a discounted or overridden price does. Roughly halves the per-sale call budget in §6.1. |
 | **`VAT_RATE: 0` on the line** | Means "derive from the stock's own tax rules", consistent with the existing recharge and PCN pushes. |
+| **Consumables endpoint auth** | The **normal broker token works** — no separate export credentials needed, unlike `backline-stock.ts`. Verified live: 974 records, 5 pages at 200 rows. |
+| **Availability for sale stock** | `items_picklist_avail.php` returns `{"a25":{"available":14,"global":14,"late":0}}` — so the till CAN show free-vs-reserved (§2.3). Verified against a shelf count of 15 with one unit reserved on a job. |
+| **`MAX_DISCOUNT` audit** | **Clean.** Zero active items below 100 across all 974, so the current 100%-discount workaround has not been silently failing. |
 
 **⚠️ `b` is overloaded.** In the picklist it prefixes a *hire stock* ID. In the delete
 response (`{"success":["b9146"],"ids":["b9146"]}`) it prefixes a *supply-list line* ID.

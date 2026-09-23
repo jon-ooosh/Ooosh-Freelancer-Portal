@@ -61,6 +61,8 @@ export interface ShopStockItem {
   categoryPath: string | null;
   /** Price A, EX-VAT. Everything HireHop returns is ex-VAT. */
   priceExVat: number | null;
+  /** What we paid. Not shown at the till; kept for margin reporting. */
+  costPriceExVat: number | null;
   vatRateIndex: number | null;
   maxDiscount: number | null;
   /** Shelf count as of `refreshedAt`. NOT availability — see §2.3. */
@@ -81,6 +83,7 @@ function rowToItem(r: any): ShopStockItem {
     categoryId: r.category_id != null ? Number(r.category_id) : null,
     categoryPath: r.category_path,
     priceExVat: r.price != null ? Number(r.price) : null,
+    costPriceExVat: r.cost_price != null ? Number(r.cost_price) : null,
     vatRateIndex: r.vat_rate_index != null ? Number(r.vat_rate_index) : null,
     maxDiscount: r.max_discount != null ? Number(r.max_discount) : null,
     quantity: Number(r.quantity),
@@ -186,6 +189,9 @@ function mapRow(r: any): Omit<ShopStockItem, 'refreshedAt'> {
     categoryId: r.CATEGORY_ID != null ? Number(r.CATEGORY_ID) : null,
     categoryPath: crumbs || null,
     priceExVat: priceA != null ? Number(priceA) : null,
+    // COST_PRICE arrives as a numeric STRING here ("0.000000") and as a number on
+    // the picklist endpoint, so coerce rather than trust the type.
+    costPriceExVat: Number.isFinite(Number(r.COST_PRICE)) ? Number(r.COST_PRICE) : null,
     vatRateIndex: r.VAT_RATE != null ? Number(r.VAT_RATE) : null,
     maxDiscount: r.MAX_DISCOUNT != null ? Number(r.MAX_DISCOUNT) : null,
     quantity: Number(r.QUANTITY) || 0,
@@ -245,7 +251,7 @@ export async function refreshShopStockCache(): Promise<RefreshResult> {
            hh_stock_id, title, alt_title, part_number, barcode,
            category_id, category_path, price, cost_price, vat_rate_index,
            max_discount, quantity, reorder_level, reorder_qty, status, refreshed_at
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULL,$9,$10,$11,$12,$13,$14,NOW())
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NOW())
          ON CONFLICT (hh_stock_id) DO UPDATE SET
            title = EXCLUDED.title,
            alt_title = EXCLUDED.alt_title,
@@ -254,6 +260,7 @@ export async function refreshShopStockCache(): Promise<RefreshResult> {
            category_id = EXCLUDED.category_id,
            category_path = EXCLUDED.category_path,
            price = EXCLUDED.price,
+           cost_price = EXCLUDED.cost_price,
            vat_rate_index = EXCLUDED.vat_rate_index,
            max_discount = EXCLUDED.max_discount,
            quantity = EXCLUDED.quantity,
@@ -263,8 +270,9 @@ export async function refreshShopStockCache(): Promise<RefreshResult> {
            refreshed_at = NOW()`,
         [
           it.hhStockId, it.title, it.altTitle, it.partNumber, it.barcode,
-          it.categoryId, it.categoryPath, it.priceExVat, it.vatRateIndex,
-          it.maxDiscount, it.quantity, it.reorderLevel, it.reorderQty, it.status,
+          it.categoryId, it.categoryPath, it.priceExVat, it.costPriceExVat,
+          it.vatRateIndex, it.maxDiscount, it.quantity, it.reorderLevel,
+          it.reorderQty, it.status,
         ],
       );
     }
@@ -299,6 +307,20 @@ export async function refreshShopStockCache(): Promise<RefreshResult> {
 }
 
 // ── Reads (the till's fast path — zero HireHop calls) ─────────────────────
+
+/**
+ * ⚠️ PROMPT-PARENT SALE ITEMS. A title beginning `▶` marks a HireHop item that
+ * carries child prompts (the same convention as hire stock — see the prompt
+ * detection pattern in `docs/reference/PLATFORM-CONVENTIONS.md`). Verified live
+ * Sep 2026: "▶ VE103B certificate" is a SALE item with prompts.
+ *
+ * Adding one by `a<id>` produces a line whose prompts are unanswered, which is
+ * not a thing a till should be able to sell in one tap. Until that is handled,
+ * treat a `▶` title as not-simply-sellable.
+ */
+export function isPromptParent(item: Pick<ShopStockItem, 'title'>): boolean {
+  return item.title.trimStart().startsWith('▶');
+}
 
 export interface SearchOpts {
   /** Include hidden (1) and deleted (2) items. Default false — sellable only. */
