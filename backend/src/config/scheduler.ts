@@ -76,6 +76,34 @@ export function startScheduler() {
     console.log('Scheduler: Backup retention sweep scheduled daily at 02:30');
   }
 
+  // ── Shop sale-stock catalogue mirror ──────────────────────────────────
+  // Keeps `shop_stock_cache` fresh so the till never calls HireHop to search or
+  // price an item (docs/SHOP-SALES-SPEC.md §10). A few HireHop calls per refresh
+  // at 'low' priority, so it yields to anything user-facing.
+  if (!isHireHopConfigured()) {
+    console.log('Scheduler: HireHop not configured — shop stock mirror disabled');
+  } else {
+    const refreshShopStock = async (reason: string) => {
+      try {
+        const { refreshShopStockCache } = await import('../services/shop-stock');
+        const r = await refreshShopStockCache();
+        console.log(`Scheduler: shop stock mirror (${reason}) — ${r.upserted} items, ${r.pages} page(s), ${r.retired} retired`);
+      } catch (err) {
+        // Never throw out of a scheduled task: a HireHop wobble must not take
+        // the scheduler down, and the previous catalogue is still serving.
+        console.error(`Scheduler: shop stock mirror (${reason}) failed:`, err instanceof Error ? err.message : err);
+      }
+    };
+
+    // Every 15 minutes. Shelf counts are advisory, so this is deliberately not
+    // chasing real-time — the till labels how stale the number is.
+    cron.schedule('*/15 * * * *', () => { void refreshShopStock('scheduled'); });
+
+    // And once shortly after boot, so a restart doesn't leave the till with an
+    // empty (or 15-minute-stale) catalogue until the next tick.
+    setTimeout(() => { void refreshShopStock('startup'); }, 20_000);
+  }
+
   // ── HireHop Job Sync ──────────────────────────────────────────────────
   if (!isHireHopConfigured()) {
     console.log('Scheduler: HireHop not configured — job sync disabled');
