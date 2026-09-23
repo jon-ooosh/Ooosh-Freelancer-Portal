@@ -210,8 +210,8 @@ export default function CarnetSection({ jobId, onChanged }: { jobId: string; onC
 
       {err && <div className="mb-3 text-sm text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2">{err}</div>}
 
-      {/* Letter of authority status (we_supply) */}
-      {carnet.mode === 'we_supply' && !isCancelled && (
+      {/* Letter of authority status (both modes — client_arranges uses it when Ooosh is the named holder) */}
+      {!isCancelled && (
         <div className="mb-3 text-sm">
           <span className="text-gray-500">Letter of authority: </span>
           {hasAuthority
@@ -291,10 +291,12 @@ export default function CarnetSection({ jobId, onChanged }: { jobId: string; onC
       {/* Documents */}
       <DocsManager carnet={carnet} reload={load} />
 
-      {/* Request-form actions (we_supply) */}
-      {!isCancelled && carnet.mode === 'we_supply' && (
+      {/* Request-form actions (we_supply: email or link; client_arranges: link only — the
+          request email is worded for us applying on their behalf) */}
+      {!isCancelled && (
         <div className="mt-4 pt-3 border-t border-gray-100">
           <div className="flex flex-wrap items-center gap-3">
+            {carnet.mode === 'we_supply' && (
             <button
               disabled={busy}
               onClick={async () => {
@@ -308,6 +310,7 @@ export default function CarnetSection({ jobId, onChanged }: { jobId: string; onC
               }}
               className="px-3 py-1.5 bg-purple-600 text-white rounded text-xs font-medium disabled:opacity-50"
             >Send request form to client</button>
+            )}
             <button
               disabled={busy}
               onClick={async () => {
@@ -321,7 +324,7 @@ export default function CarnetSection({ jobId, onChanged }: { jobId: string; onC
                 finally { setBusy(false); }
               }}
               className="px-3 py-1.5 bg-gray-100 hover:bg-gray-200 rounded text-xs"
-            >Copy form link</button>
+            >{carnet.mode === 'we_supply' ? 'Copy form link' : 'Copy authority form link'}</button>
             {carnet.form_sent_at && <span className="text-xs text-gray-400">Form sent {fmtDate(carnet.form_sent_at)}</span>}
           </div>
           {sendMsg && <p className="text-xs text-green-700 mt-2 break-all">{sendMsg}</p>}
@@ -331,27 +334,25 @@ export default function CarnetSection({ jobId, onChanged }: { jobId: string; onC
       {/* Footer actions */}
       {!isCancelled && (
         <div className="mt-4 pt-3 border-t border-gray-100 flex flex-wrap items-center gap-3">
-          {carnet.mode === 'we_supply' && (
-            <button
-              disabled={busy}
-              onClick={async () => {
-                setBusy(true); setErr(null);
-                try {
-                  const r = await api.post<{ data: { signature_present: boolean } }>(`/carnets/${carnet.id}/generate-authority`, {});
-                  await load();
-                  if (r.data && !r.data.signature_present) {
-                    setErr('Letter generated, but no Ooosh signature is set yet — add one in Settings → Carnet. (A signature line was drawn instead.)');
-                  }
-                } catch (e) {
-                  setErr(e instanceof Error ? e.message : 'Failed to generate letter');
-                } finally { setBusy(false); }
-              }}
-              className="px-3 py-1.5 bg-purple-600 text-white rounded text-xs font-medium disabled:opacity-50"
-            >
-              Generate Letter of Authorisation
-            </button>
-          )}
-          {carnet.mode === 'we_supply' && carnet.signed_authority_url && (
+          <button
+            disabled={busy}
+            onClick={async () => {
+              setBusy(true); setErr(null);
+              try {
+                const r = await api.post<{ data: { signature_present: boolean } }>(`/carnets/${carnet.id}/generate-authority`, {});
+                await load();
+                if (r.data && !r.data.signature_present) {
+                  setErr('Letter generated, but no Ooosh signature is set yet — add one in Settings → Carnet. (A signature line was drawn instead.)');
+                }
+              } catch (e) {
+                setErr(e instanceof Error ? e.message : 'Failed to generate letter');
+              } finally { setBusy(false); }
+            }}
+            className="px-3 py-1.5 bg-purple-600 text-white rounded text-xs font-medium disabled:opacity-50"
+          >
+            Generate Letter of Authorisation
+          </button>
+          {carnet.signed_authority_url && (
             <DownloadLink k={carnet.signed_authority_url} label="Download letter (PDF)" />
           )}
           <button
@@ -471,6 +472,12 @@ function ClientArrangesBlock({ carnet, onSave, busy }: {
           onChange={(e) => onSave({ chase_date: e.target.value || null })}
           className="border rounded px-2 py-1" />
       </div>
+      {carnet.liability_until && (
+        <div className="text-gray-600">
+          Carnet {fmtDate(carnet.carnet_start_date)} → {fmtDate(carnet.carnet_expiry_date)} ·{' '}
+          <span className="text-amber-700 font-medium">Our liability as named holder until {fmtDate(carnet.liability_until)}</span>
+        </div>
+      )}
       <textarea className="border rounded px-2 py-1 w-full" rows={2} placeholder="Notes" defaultValue={carnet.notes || ''}
         onBlur={(e) => { if (e.target.value !== (carnet.notes || '')) onSave({ notes: e.target.value }); }} />
     </div>
