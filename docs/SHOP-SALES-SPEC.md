@@ -673,6 +673,23 @@ surface is already built; this just gives it something true to reconcile against
 
 ## 6. The HireHop write path
 
+### 6.0 ⚠️ Open input needed before the weekly job can be created
+
+jon wants to specify the **job name** and the **client organisation** the weekly
+shop job is raised against. Both go in `system_settings` rather than the code, so
+they are changeable without a deploy. Needed before §6.1 can run:
+
+- the job-name pattern (e.g. `Shop Sales W/C {date}`)
+- the HireHop **client**: whether the organisation already exists there and what
+  its `CLIENT_ID` is, or whether OP should create it
+
+`save_job.php` takes `company` / `name`, or a `CLIENT_ID`. Using an existing
+client id is safer — passing a name risks HireHop creating a near-duplicate
+contact every week, which is exactly the kind of mess this module exists to stop.
+
+This is also the job that `shop_availability_job` (migration 242) should point at
+once it exists.
+
 ### 6.1 A sale routed to the weekly shop job
 
 1. `getOrCreateShopPeriod(saleDate)` → `hh_job_number`, creating the HH job via
@@ -844,6 +861,12 @@ A weekly Shop tab (under Money):
 - **Sitter sales needing review** (`needs_review`), for the morning tick.
 - **Outstanding refunds** not yet done on the terminal.
 - This week's consumption, grouped by item — the reordering view you've never had.
+  ✅ **SHIPPED Sep 2026** as `GET /shop/consumption` + a panel on the till.
+  HireHop keeps a per-item adjustment trail, so "what happened to THIS item" is
+  already answerable there; what it cannot do is "what did we burn through last
+  month", which would mean opening every item in turn. Counts only usage that
+  actually reached HireHop — a queued or failed row has moved no stock, and
+  including it would overstate consumption.
 
 **Reorder view** (§2.3): items at or below `REORDER_LEVEL`, with `REORDER_QTY` and the
 recent consumption + sales trail. Turns running out into a week's notice, and it is nearly

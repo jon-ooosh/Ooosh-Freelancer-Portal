@@ -19,6 +19,7 @@ import {
 import {
   createShopSale, listShopSales, cancelShopSale, retryShopSale,
   maxDiscountPctForRole, priceLines, totalsFor,
+  getConsumptionSummary, getConsumptionLog,
 } from '../services/shop-sales';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -232,6 +233,28 @@ router.post('/sales/:id/cancel', async (req: AuthRequest, res: Response) => {
   } catch (err) {
     console.error('[shop] cancel failed:', err);
     res.status(500).json({ error: 'Could not cancel that sale.' });
+  }
+});
+
+/**
+ * What we have used ourselves — grouped by item, and the event log.
+ *
+ * HireHop keeps a per-item adjustment trail, so "what happened to this item" is
+ * already answerable there. What it cannot do is "what did we burn through last
+ * month", which needs opening every item in turn. That is the question this
+ * answers, and it is the one that drives reordering.
+ */
+router.get('/consumption', async (req: AuthRequest, res: Response) => {
+  try {
+    const days = req.query.days ? Number(req.query.days) : 30;
+    const [summary, log] = await Promise.all([
+      getConsumptionSummary(days),
+      getConsumptionLog(days),
+    ]);
+    res.json({ data: { days, summary, log } });
+  } catch (err) {
+    console.error('[shop] consumption read failed:', err);
+    res.status(500).json({ error: 'Could not load stock usage.' });
   }
 });
 

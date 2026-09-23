@@ -393,6 +393,68 @@ export async function listShopSales(opts: { limit?: number; since?: string } = {
 }
 
 /**
+ * What we have consumed ourselves, grouped by item.
+ *
+ * HireHop keeps a per-item adjustment trail, which answers "what happened to
+ * THIS item". It cannot answer "what did we burn through last month", because
+ * that means opening every item in turn. This is the reordering view (§12): the
+ * real answer to someone buying the drum heads earmarked for Thursday is
+ * knowing on Monday that they were running low.
+ *
+ * Counts only what actually reached HireHop. A queued or failed row has not
+ * moved any stock, so including it would overstate consumption and understate
+ * what is still on the shelf.
+ */
+export async function getConsumptionSummary(days = 30) {
+  const window = Math.min(Math.max(days, 1), 365);
+  const r = await query(
+    `SELECT l.hh_stock_id,
+            MAX(l.name_snapshot)                AS name,
+            SUM(l.qty)::numeric                 AS total_qty,
+            COUNT(DISTINCT s.id)::int           AS occasions,
+            MAX(s.created_at)                   AS last_used,
+            MAX(c.quantity)                     AS on_shelf,
+            MAX(c.reorder_level)                AS reorder_level
+       FROM shop_sale_lines l
+       JOIN shop_sales s ON s.id = l.sale_id
+       LEFT JOIN shop_stock_cache c ON c.hh_stock_id = l.hh_stock_id
+      WHERE s.kind = 'consumption'
+        AND s.status = 'pushed'
+        AND s.created_at >= NOW() - ($1 || ' days')::interval
+      GROUP BY l.hh_stock_id
+      ORDER BY SUM(l.qty) DESC, MAX(l.name_snapshot)`,
+    [String(window)],
+  );
+  return r.rows;
+}
+
+/**
+ * The individual consumption events, newest first — the "who used what, when
+ * and why" trail. HireHop holds the same facts per item; this is the view
+ * across items that it cannot give.
+ */
+export async function getConsumptionLog(days = 30, limit = 100) {
+  const window = Math.min(Math.max(days, 1), 365);
+  const cap = Math.min(Math.max(limit, 1), 500);
+  const r = await query(
+    `SELECT s.id, s.created_at, s.status, s.notes,
+            NULLIF(${DISPLAY_NAME_SQL}, ' ')   AS recorded_by_name,
+            l.name_snapshot, l.qty, l.hh_tally_id
+       FROM shop_sales s
+       JOIN shop_sale_lines l ON l.sale_id = s.id
+       LEFT JOIN users u ON u.id = s.recorded_by
+       LEFT JOIN people p ON p.id = u.person_id
+      WHERE s.kind = 'consumption'
+        AND s.status <> 'cancelled'
+        AND s.created_at >= NOW() - ($1 || ' days')::interval
+      ORDER BY s.created_at DESC
+      LIMIT $2`,
+    [String(window), cap],
+  );
+  return r.rows;
+}
+
+/**
  * Soft-cancel (house rule: never delete).
  *
  * Inside Window A this is a TRUE undo — nothing has reached HireHop or Xero, so

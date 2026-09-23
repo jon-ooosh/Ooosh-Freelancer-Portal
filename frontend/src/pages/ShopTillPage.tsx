@@ -58,6 +58,16 @@ interface RecentSale {
   recorded_by_name: string | null;
 }
 
+interface ConsumptionRow {
+  hh_stock_id: number;
+  name: string;
+  total_qty: string | number;
+  occasions: number;
+  last_used: string;
+  on_shelf: string | number | null;
+  reorder_level: string | number | null;
+}
+
 interface Totals {
   net: number;
   vat: number;
@@ -110,6 +120,8 @@ export default function ShopTillPage() {
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState<{ gross: number; id: string; kind: string } | null>(null);
   const [recent, setRecent] = useState<RecentSale[]>([]);
+  const [usage, setUsage] = useState<ConsumptionRow[] | null>(null);
+  const [usageOpen, setUsageOpen] = useState(false);
 
   /** Requeue a failed push once whatever broke has been fixed. */
   const retrySale = useCallback(async (id: string) => {
@@ -133,6 +145,14 @@ export default function ShopTillPage() {
   // retrySale is defined above loadRecent so the list can call it; this closes
   // the loop without making either depend on the other's identity.
   useEffect(() => { loadRecentRef.current = loadRecent; }, [loadRecent]);
+
+  // Loaded on demand — most till visits are a sale, not a stock review.
+  useEffect(() => {
+    if (!usageOpen || usage !== null) return;
+    api.get<{ data: { summary: ConsumptionRow[] } }>('/shop/consumption?days=30')
+      .then(r => setUsage(r.data.summary))
+      .catch(() => setUsage([]));
+  }, [usageOpen, usage]);
 
   const searchRef = useRef<HTMLInputElement>(null);
 
@@ -498,6 +518,53 @@ export default function ShopTillPage() {
           </button>
         </div>
       )}
+
+      <div className="mt-8">
+        <button
+          onClick={() => setUsageOpen(o => !o)}
+          className="text-sm font-semibold text-gray-700 hover:text-gray-900"
+        >
+          {usageOpen ? '▾' : '▸'} What we&rsquo;ve used ourselves (30 days)
+        </button>
+        {usageOpen && (
+          usage === null ? (
+            <p className="mt-2 text-xs text-gray-400">Loading…</p>
+          ) : usage.length === 0 ? (
+            <p className="mt-2 text-xs text-gray-400">
+              Nothing recorded yet. Only usage that reached HireHop is counted.
+            </p>
+          ) : (
+            <table className="mt-2 w-full text-sm">
+              <thead>
+                <tr className="text-left text-xs text-gray-500">
+                  <th className="py-1 font-medium">Item</th>
+                  <th className="py-1 text-right font-medium">Used</th>
+                  <th className="py-1 text-right font-medium">Times</th>
+                  <th className="py-1 text-right font-medium">On shelf</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y">
+                {usage.map(u => {
+                  const shelf = u.on_shelf != null ? Number(u.on_shelf) : null;
+                  const level = u.reorder_level != null ? Number(u.reorder_level) : null;
+                  // Knowing on Monday beats running out on Friday.
+                  const low = shelf != null && level != null && level > 0 && shelf <= level;
+                  return (
+                    <tr key={u.hh_stock_id}>
+                      <td className="py-1.5 pr-2">{u.name}</td>
+                      <td className="py-1.5 text-right tabular-nums">{Number(u.total_qty)}</td>
+                      <td className="py-1.5 text-right tabular-nums text-gray-500">{u.occasions}</td>
+                      <td className={`py-1.5 text-right tabular-nums ${low ? 'font-medium text-amber-700' : 'text-gray-500'}`}>
+                        {shelf ?? '—'}{low ? ' · low' : ''}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )
+        )}
+      </div>
 
       {recent.length > 0 && (
         <div className="mt-8">
