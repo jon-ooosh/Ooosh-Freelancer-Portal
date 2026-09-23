@@ -190,6 +190,8 @@ async function q5(lineId: string | null) {
   if (!DO_WRITE) { console.log('SKIPPED — pass --write to run.'); return; }
   if (!lineId) { console.log('SKIPPED — Q2 did not produce a line to remove.'); return; }
 
+  const shelfBefore = await readShelfCount();
+
   // The HH UI's delete response was {"success":["b9146"]} — `b` there prefixes a
   // supply-list LINE id, not a stock id. Same letter, different namespace from the
   // `a`/`b` picklist scheme above (spec §2.1). Try save_job's delete grammar first.
@@ -198,6 +200,10 @@ async function q5(lineId: string | null) {
   const res = await hhBroker.post<any>('/api/save_job.php', payload, { priority: 'high' });
   console.log(`response: ${JSON.stringify(res)}`);
 
+  // ⚠️ `success: true` here means "HireHop accepted the request", NOT "HireHop
+  // did the thing". Verified 23 Sep 2026: this exact call returned success with
+  // the line still on the job and no `items` key in the response at all — the
+  // delete grammar was silently ignored. Always read back. See spec §2.5.
   await new Promise((r) => setTimeout(r, 1500));
   const after = await readSupplyList();
   const still = after.find((i) => String(i.ID) === lineId);
@@ -207,9 +213,18 @@ async function q5(lineId: string | null) {
 
   if (still) {
     console.log('\n  !! REMOVAL FAILED — the line is still on the job.');
-    console.log(`  !! Job ${HH_JOB} is dispatched, so ONE unit of stock ${STOCK_ID} is still`);
-    console.log('  !! consumed. Delete the line in the HireHop UI to put it back.');
     console.log('  !! Window B reversals (spec §8) will need a different endpoint.');
+    // Only alarm about consumed stock if the shelf ACTUALLY moved. Stock is
+    // consumed at dispatch (spec §2.1), so on a job below status 5 a failed
+    // cleanup leaves a stray line and nothing else — saying otherwise sends
+    // someone hunting a stock discrepancy that was never there.
+    if (shelf !== null && shelfBefore !== null && shelf < shelfBefore) {
+      console.log(`  !! Stock ${STOCK_ID} went ${shelfBefore} → ${shelf}: the job is dispatched, so a`);
+      console.log('  !! unit is really consumed. Delete the line in the HireHop UI to put it back.');
+    } else {
+      console.log('  (Shelf count unchanged — the job is below dispatched, so no stock moved.');
+      console.log('   The stray line is cosmetic; delete it in the HireHop UI when convenient.)');
+    }
   } else {
     console.log('  => Removal works through the broker. Window B reversals are viable.');
   }
