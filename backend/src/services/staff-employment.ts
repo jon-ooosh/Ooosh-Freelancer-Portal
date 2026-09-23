@@ -124,7 +124,9 @@ export async function getEmployeeRecord(personId: string) {
             se.start_date::text AS start_date,
             se.end_date::text   AS end_date,
             p.first_name, p.last_name, p.preferred_name, p.email, p.phone, p.mobile,
+            p.international_phone,
             p.date_of_birth::text AS date_of_birth,
+            p.marital_status,
             p.home_address,
             p.emergency_contact_name, p.emergency_contact_phone, p.emergency_contact_relationship,
             p.emergency_contact_2_name, p.emergency_contact_2_phone, p.emergency_contact_2_relationship,
@@ -135,7 +137,20 @@ export async function getEmployeeRecord(personId: string) {
             ) AS next_review_scheduled,
             p.licence_number, p.licence_expiry::text AS licence_expiry,
             p.passport_expiry::text AS passport_expiry,
-            (p.ni_number_encrypted IS NOT NULL) AS has_ni_number
+            (p.ni_number_encrypted IS NOT NULL) AS has_ni_number,
+            (SELECT row_to_json(x) FROM (
+               SELECT ph.is_member, ph.scheme_name, ph.employee_percent,
+                      ph.employer_percent, ph.effective_from::text AS effective_from
+                 FROM staff_pension_history ph
+                WHERE ph.person_id = se.person_id
+                ORDER BY ph.effective_from DESC, ph.created_at DESC LIMIT 1
+             ) x) AS pension,
+            (SELECT row_to_json(y) FROM (
+               SELECT sh.annual_amount, sh.effective_from::text AS effective_from
+                 FROM staff_salary_history sh
+                WHERE sh.person_id = se.person_id
+                ORDER BY sh.effective_from DESC, sh.created_at DESC LIMIT 1
+             ) y) AS salary
        FROM staff_employment se
        JOIN people p ON p.id = se.person_id
       WHERE se.person_id = $1`,
@@ -1054,4 +1069,100 @@ export async function listReviewsDue(opts: { onlyUnchased: boolean; withinDays: 
   return r.rows.filter((row: { due_on: string | null }) =>
     !!row.due_on && row.due_on <= horizonYmd
   ) as { person_id: string; person_name: string | null; due_on: string; last_reviewed_on: string | null }[];
+}
+
+// ── Pension (spec §18.2) ────────────────────────────────────────────────────
+//
+// Append-only, mirroring staff_salary_history: a contribution change is a NEW
+// ROW, never an edit, because "what were they on, and from when" is the
+// question auto-enrolment makes legally interesting.
+
+export async function listPensionHistory(personId: string) {
+  const r = await query(
+    `SELECT id, is_member, scheme_name, employee_percent, employer_percent,
+            effective_from::text AS effective_from, reason, created_at
+       FROM staff_pension_history
+      WHERE person_id = $1
+      ORDER BY effective_from DESC, created_at DESC`,
+    [personId]
+  );
+  return r.rows;
+}
+
+export async function addPensionRecord(
+  personId: string,
+  input: {
+    isMember: boolean; schemeName?: string | null;
+    employeePercent?: number | null; employerPercent?: number | null;
+    effectiveFrom: string; reason?: string | null;
+  },
+  userId: string
+) {
+  if (!DATE_RE.test(input.effectiveFrom)) throw new Error('effectiveFrom must be YYYY-MM-DD');
+  const r = await query(
+    `INSERT INTO staff_pension_history
+       (person_id, is_member, scheme_name, employee_percent, employer_percent,
+        effective_from, reason, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6::date, $7, $8)
+     RETURNING id`,
+    [personId, input.isMember, input.schemeName?.trim() || null,
+     input.employeePercent ?? null, input.employerPercent ?? null,
+     input.effectiveFrom, input.reason?.trim() || null, userId]
+  );
+  return r.rows[0];
+}
+
+// ── Personal details (spec §18.1) ───────────────────────────────────────────
+//
+// Every one of these columns ALREADY EXISTED on `people` — most since
+// migration 001 — and was simply never editable from the staff area. This is
+// a write path for what was already there, not new storage.
+//
+// Absent key = leave alone; empty string = clear. Same rule as preferredName
+// and the key data, and for the same reason: COALESCE would make clearing a
+// value silently do nothing.
+
+const PERSONAL_FIELDS: Record<string, string> = {
+  phone: 'phone',
+  mobile: 'mobile',
+  internationalPhone: 'international_phone',
+  homeAddress: 'home_address',
+  maritalStatus: 'marital_status',
+  emergencyContactName: 'emergency_contact_name',
+  emergencyContactPhone: 'emergency_contact_phone',
+  emergencyContactRelationship: 'emergency_contact_relationship',
+  emergencyContact2Name: 'emergency_contact_2_name',
+  emergencyContact2Phone: 'emergency_contact_2_phone',
+  emergencyContact2Relationship: 'emergency_contact_2_relationship',
+};
+
+export async function updatePersonalDetails(
+  personId: string,
+  input: Record<string, unknown> & { dateOfBirth?: string | null },
+) {
+  const sets: string[] = [];
+  const params: unknown[] = [personId];
+
+  for (const [key, column] of Object.entries(PERSONAL_FIELDS)) {
+    if (!(key in input)) continue;
+    const value = input[key];
+    params.push(typeof value === 'string' && value.trim() ? value.trim() : null);
+    sets.push(`${column} = $${params.length}`);
+  }
+
+  if ('dateOfBirth' in input) {
+    const dob = input.dateOfBirth;
+    if (dob && !DATE_RE.test(String(dob))) throw new Error('dateOfBirth must be YYYY-MM-DD');
+    params.push(dob || null);
+    sets.push(`date_of_birth = $${params.length}::date`);
+  }
+
+  if (!sets.length) throw new Error('No fields to update');
+
+  const r = await query(
+    `UPDATE people SET ${sets.join(', ')}, updated_at = NOW() WHERE id = $1 RETURNING id`,
+    params
+  );
+  if (!r.rows.length) throw new Error('Person not found');
+  return getEmployeeRecord(personId);
 }

@@ -1037,3 +1037,76 @@ Resolved by keeping both, in order: main's `236_shop_stock_scope.sql` (already
 applied on production) stays put, and this one moves to 237. Renumbering was
 safe only because 236 had never been applied anywhere — had it run on any
 environment, the rule is a NEW migration, never a rename.
+
+---
+
+## 18. The basic employer record (Sep 2026)
+
+jon, after living with phases 1–5: *"contact details, emergency contact,
+pension, DOB, marital status… all basic stuff any employer should have."* Plus
+three gaps found in use.
+
+### 18.1 Most of that list already existed
+
+The same finding as Phase 2, for the third time. Already on `people` and NOT
+re-added: `phone`, `mobile`, `international_phone`, `home_address`,
+`date_of_birth`, `emergency_contact_*` (mig 001) and the second emergency
+contact (mig 206). They have been there since the first migration; what was
+missing was anywhere in the staff area to type them.
+
+**Genuinely missing: two.** `marital_status`, and pension.
+
+The pattern is now consistent enough to state as a rule: **when this module
+"needs a field", check `people` first.** It is the platform's oldest and widest
+table and it already carries most of what an employer record wants.
+
+Placement: personal details sit with NI and right to work on the **Records**
+tab, under "Personal & key data". Records is already the admin-only home for
+everything private we hold about somebody, field or file — a date of birth
+belongs with an NI number, not with contracted hours.
+
+### 18.2 Pension is a history, not a pair of columns
+
+`staff_pension_history`, append-only, mirroring `staff_salary_history`: a
+contribution change is a NEW ROW, never an edit. Two columns on
+`staff_employment` would keep the current figure and lose every previous one,
+which is the half that matters — auto-enrolment gives "what were they on, and
+from when" legal weight.
+
+**Opting out is a recorded state, not an absent row.** "We have no pension row
+for Sam" and "Sam opted out on 3 March" are different facts and only the second
+is evidence, so `is_member` is a column rather than membership being implied by
+a row existing.
+
+### 18.3 Three gaps found by using it
+
+**Salary had no UI at all.** `staff_salary_history` and its endpoints have
+existed since migration 206 with nothing calling them — the same shape as
+`staff_reviews` before Phase 4. Now on the Employment tab with the history and
+the change between each figure, which is what "how have salaries moved" needs.
+
+**A booked review could not be called off.** Phase 4 gave `staff_reviews` a
+`cancelled` status and no way to reach it, so jon's test review was stuck: not
+completable (it had not happened) and not removable. A "Call it off" action now
+exists on any review that is not finished. Worth noting the shape of the
+mistake — a status nothing can set is the same bug as a gate with no route
+through it, which CLAUDE.md's product policy already warns about.
+
+**Past reviews could not be recorded.** Everything assumed a review was about
+to happen, so years of history had nowhere to go. "Already happened" on the
+booking form records one as completed on its own date, and deliberately sends
+nothing: no invite for a meeting held in 2023, and no write-up email.
+
+### 18.4 What was NOT redacted, and why
+
+`marital_status` joins `PRIVATE_PERSON_FIELDS` — nothing computes from it and
+nobody outside the staff area needs it.
+
+`date_of_birth`, `home_address`, `phone` and the emergency contacts did **not**,
+despite being personal. They have been served by the general people endpoints
+since migration 001 and the driver and hire-form flows read them there
+legitimately — `driver-verification.ts` maps `date_of_birth` directly.
+Redacting them is a real question, but it is a decision about the People
+record and its consumers, not something to slip into a staff-area change. If it
+is taken up: start from `routes/people.ts`, and expect the driver flows to need
+their own read.
