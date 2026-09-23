@@ -884,7 +884,12 @@ Frontend: `hasManagerRole()` / `roleAllowed()` from `lib/roles.ts`, never bare
    **⚠️ Rows land `status = 'queued'`. When the drain ships (step 5) it picks up
    anything still queued, so TEST ROWS MUST BE CANCELLED before that deploy** or
    they will push real lines and real money.
-5. The queue + drain: consumption via `tally_save` first (one call, no money, reversible).
+5. ✅ **SHIPPED Sep 2026 (consumption only).** `services/shop-drain.ts` + a
+   2-minute scheduler pass + `POST /shop/drain` to force one. Idempotent at LINE
+   level: `hh_tally_id` is written the moment an adjustment exists and a line
+   that has one is skipped, so a crash between HireHop accepting and the row
+   being marked cannot double-decrement. Bounded retries (migration 241) — a row
+   HireHop will never accept goes `failed` rather than retrying forever.
 6. Sale push: lines + `pushDepositToHH`. Shop-job routing.
 7. Job routing (band's job / client's job) + the two-band picker.
 8. Reversals — Windows A and B.

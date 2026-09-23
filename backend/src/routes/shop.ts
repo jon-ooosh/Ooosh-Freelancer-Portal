@@ -10,7 +10,7 @@
  * already in the basket — a dozen calls a day at this volume.
  */
 import { Router, Response } from 'express';
-import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
+import { authenticate, authorize, AuthRequest, STAFF_ROLES, MANAGER_ROLES } from '../middleware/auth';
 import hhBroker from '../services/hirehop-broker';
 import {
   searchShopStock, findShopStockByBarcode, getShopStockItem,
@@ -215,6 +215,22 @@ router.post('/sales/:id/cancel', async (req: AuthRequest, res: Response) => {
   } catch (err) {
     console.error('[shop] cancel failed:', err);
     res.status(500).json({ error: 'Could not cancel that sale.' });
+  }
+});
+
+/**
+ * Force a drain pass rather than waiting for the scheduler.
+ *
+ * MANAGER_ROLES: it makes real HireHop writes happen sooner than they otherwise
+ * would, which is a decision rather than a refresh.
+ */
+router.post('/drain', authorize(...MANAGER_ROLES), async (_req: AuthRequest, res: Response) => {
+  try {
+    const { drainShopConsumption } = await import('../services/shop-drain');
+    res.json({ data: await drainShopConsumption() });
+  } catch (err) {
+    console.error('[shop] manual drain failed:', err);
+    res.status(500).json({ error: 'Drain failed — see the server log.' });
   }
 });
 
