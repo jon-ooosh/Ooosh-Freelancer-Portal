@@ -361,6 +361,13 @@ a live round-trip:
 |---|---|---|
 | `items_delete.php` | (undocumented) | `ids` as a **bare string**, `job`, `arch`, `no_availability` |
 | `tally_save.php` | `cons`, `id`, `qty`, `details` | **`CONSUMABLE_ID`**, **`ID`**, **`QTY`**, **`DETAILS`** (uppercase), plus `local`, `tz`, `CUSTOM_FIELDS` |
+| `picklist_get_availability.php` | (guessed from `staging.ts`) | `job` (**required**), `global_depot`, `rows` of `{ID,TYPE,AVAILABLE:1,GLOBAL:0}`, `local`, `tz` |
+
+The availability one is the subtlest of the three: `TYPE: 1` for sale stock was
+right all along, and the call still returned nothing because of the company it
+kept — staging's extra `ITEM_ID`/`STOCK` keys, `GLOBAL: 1` instead of `0`, and
+above all a missing `job`. Copying a *neighbouring* caller is not the same as
+capturing the one you need.
 
 The documented shape for `tally_save.php` returns **error 3**. Worse, it is the
 quiet kind of wrong — a plausible-looking payload that HireHop rejects with a

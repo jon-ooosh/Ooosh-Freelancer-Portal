@@ -25,6 +25,7 @@
  */
 import { query } from '../config/database';
 import hhBroker from './hirehop-broker';
+import { hhLocalNow } from './shop-stock';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -50,22 +51,6 @@ async function getMaxAttempts(): Promise<number> {
     // fall through to the default
   }
   return DEFAULT_MAX_ATTEMPTS;
-}
-
-/**
- * HireHop wants the USER'S local wall-clock time, not UTC. The server runs in
- * UTC, so this formats "now" in Europe/London — captured as `2026-09-23
- * 16:42:40` while the stored DATE came back as `15:42:40`, i.e. BST.
- */
-function hhLocalNow(): string {
-  const parts = new Intl.DateTimeFormat('en-GB', {
-    timeZone: 'Europe/London',
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', second: '2-digit',
-    hourCycle: 'h23',
-  }).formatToParts(new Date());
-  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? '00';
-  return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}:${get('second')}`;
 }
 
 /**
