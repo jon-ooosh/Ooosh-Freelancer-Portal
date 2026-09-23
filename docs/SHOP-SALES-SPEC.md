@@ -673,22 +673,33 @@ surface is already built; this just gives it something true to reconcile against
 
 ## 6. The HireHop write path
 
-### 6.0 ⚠️ Open input needed before the weekly job can be created
+### 6.0 The weekly job — settings, and why the client is a FRESH one
 
-jon wants to specify the **job name** and the **client organisation** the weekly
-shop job is raised against. Both go in `system_settings` rather than the code, so
-they are changeable without a deploy. Needed before §6.1 can run:
+**Name:** `Shop Sales W/C {date}` where `{date}` is the Monday, e.g.
+`Shop Sales W/C 28th Sep 2026`. Dated **Monday 00:01 → Sunday 23:59**, held at
+DISPATCHED (§2.1). Settings: `shop_job_name_pattern`, `shop_job_client_id`
+(migration 243).
 
-- the job-name pattern (e.g. `Shop Sales W/C {date}`)
-- the HireHop **client**: whether the organisation already exists there and what
-  its `CLIENT_ID` is, or whether OP should create it
+**A NEW HireHop client, created by hand.** The existing shop-sales contact is not
+reusable, and the reason is itself an argument for this module: staff have been
+editing its *address* to raise ad-hoc invoices for one-off purchasers, which has
+made a mess in Xero. Two consequences:
 
-`save_job.php` takes `company` / `name`, or a `CLIENT_ID`. Using an existing
-client id is safer — passing a name risks HireHop creating a near-duplicate
-contact every week, which is exactly the kind of mess this module exists to stop.
+1. jon creates "OP Shop Sales" in HireHop once, by hand, and its `CLIENT_ID`
+   goes in the setting. **OP never creates the contact** — passing a company
+   name to `save_job.php` risks a near-duplicate contact every week, which is
+   the same class of mess with a different cause.
+2. **Nothing may ever edit that contact again.** The behaviour it replaces
+   exists because staff had no other way to invoice a one-off purchaser; §9's
+   rule (a credit sale attaches to a real job) is what removes the need. Worth a
+   sanity check that alarms if the contact's name or address changes — a known
+   incident is exactly what a scanner is for.
 
-This is also the job that `shop_availability_job` (migration 242) should point at
-once it exists.
+**Empty client id = the weekly job is not created and sales stay queued.**
+Deliberate: a sale waiting in OP is recoverable, a week of takings on the wrong
+HireHop client is a Xero cleanup.
+
+`shop_availability_job` (migration 242) should point at this job once it exists.
 
 ### 6.1 A sale routed to the weekly shop job
 
@@ -944,7 +955,10 @@ Frontend: `hasManagerRole()` / `roleAllowed()` from `lib/roles.ts`, never bare
    that has one is skipped, so a crash between HireHop accepting and the row
    being marked cannot double-decrement. Bounded retries (migration 241) — a row
    HireHop will never accept goes `failed` rather than retrying forever.
-6. Sale push: lines + `pushDepositToHH`. Shop-job routing.
+6. **Part shipped Sep 2026.** ✅ `services/shop-period.ts` creates the weekly
+   HireHop job (Monday 00:01 → Sunday 23:59, set to DISPATCHED, verified by
+   read-back) and §3.0's sync exclusion is in place in both `hirehop-job-sync.ts`
+   and the inbound webhook. ⬜ Still to come: pushing sale lines and the deposit.
 7. Job routing (band's job / client's job) + the two-band picker.
 8. Reversals — Windows A and B.
 9. Weekly Shop tab, balance alarm, review list.

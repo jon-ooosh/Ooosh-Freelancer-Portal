@@ -329,6 +329,7 @@ export async function fetchActiveHireHopJobs(): Promise<HHJobRow[]> {
     // Filter to jobs only (kind=1), skip projects (kind=6)
     const jobs = data.data.filter(j => j.kind === 1);
     allJobs.push(...jobs);
+    // Shop-sales jobs are stripped further down, once for the whole run.
 
     console.log(`[HH Job Sync] Fetched page ${page}/${data.total} (${jobs.length} jobs, ${allJobs.length} total)`);
 
@@ -339,7 +340,25 @@ export async function fetchActiveHireHopJobs(): Promise<HHJobRow[]> {
     await new Promise(resolve => setTimeout(resolve, 2000));
   }
 
-  return allJobs;
+  // ── Shop-sales jobs never enter OP's `jobs` table ──────────────────────
+  // docs/SHOP-SALES-SPEC.md §3.0. Not a display filter — an exclusion at the
+  // boundary, because a row that was never inserted cannot appear in the
+  // pipeline, On Today, search, Returns or anywhere else, and no chaser or
+  // money email can see it.
+  //
+  // The load-bearing reason is §2.1: sale stock is only consumed while the job
+  // is DISPATCHED, and drops below that release it. OP pushes pipeline_status
+  // to HireHop, so a shop job with an OP row is one stale-enquiry sweep away
+  // from silently un-selling a week of stock. With no row, that is impossible.
+  const { getShopJobNumbers } = await import('./shop-period');
+  const shopJobs = await getShopJobNumbers();
+  if (shopJobs.size === 0) return allJobs;
+
+  const kept = allJobs.filter(j => !shopJobs.has(Number(j.NUMBER)));
+  if (kept.length !== allJobs.length) {
+    console.log(`[HH Job Sync] Excluded ${allJobs.length - kept.length} shop-sales job(s)`);
+  }
+  return kept;
 }
 
 // ── Sync jobs into Ooosh ─────────────────────────────────────────────────
