@@ -398,7 +398,9 @@ router.post('/', validate(createPersonSchema), async (req: AuthRequest, res: Res
 
     await logAudit(req.user!.id, 'people', result.rows[0].id, 'create', null, result.rows[0]);
 
-    res.status(201).json(result.rows[0]);
+    // `RETURNING *` — same redaction as the GETs, so a write can't hand back
+    // what a read would strip.
+    res.status(201).json(redactPrivateFields(result.rows[0]));
   } catch (error) {
     console.error('Create person error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -427,7 +429,7 @@ router.put('/:id', validate(updatePersonSchema), async (req: AuthRequest, res: R
     const clientVersion = req.body.version;
     const fields = Object.entries(req.body).filter(([k, v]) => v !== undefined && k !== 'version');
     if (fields.length === 0) {
-      res.json(current.rows[0]);
+      res.json(redactPrivateFields(current.rows[0]));
       return;
     }
 
@@ -456,7 +458,11 @@ router.put('/:id', validate(updatePersonSchema), async (req: AuthRequest, res: R
 
     await logAudit(req.user!.id, 'people', req.params.id as string, 'update', current.rows[0], result.rows[0]);
 
-    res.json(result.rows[0]);
+    // `RETURNING *` hands back every column, private ones included — this
+    // route is gated on STAFF_ROLES, so it needs the same redaction as the
+    // GETs (docs/STAFF-RECORDS-SPEC.md §21.1). The audit row above keeps the
+    // full snapshot; redactPrivateFields() returns a copy.
+    res.json(redactPrivateFields(result.rows[0]));
   } catch (error) {
     console.error('Update person error:', error);
     res.status(500).json({ error: 'Internal server error' });
