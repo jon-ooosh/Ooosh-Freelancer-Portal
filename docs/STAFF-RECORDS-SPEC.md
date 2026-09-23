@@ -389,8 +389,8 @@ rather than assuming.
 | 3 | ~~**`staff_tasks` + My To Do tab**~~ — **SHIPPED Sep 2026.** Migration 233, `services/staff-tasks.ts`, `pages/MyTasksPage.tsx`, 09:45 chaser. See §14 | Useful as a general to-do immediately, before reviews exist |
 | 4 | ~~**Review record + cycle**~~ — **SHIPPED Sep 2026.** Migration 234, `recordReviewOutcome()`, `components/StaffReviews.tsx`, review-due scan. See §15 | The full loop minus staff-facing bits; actions write `staff_tasks` rows |
 | 5 | ~~**Staff-facing exchange**~~ — **SHIPPED Sep 2026.** Migration 237, `services/staff-review-prep.ts`, `staff-review-followup.ts`, `pages/MyReviewPage.tsx`. See §17 | The staff half |
-| 6 | **Document review cycles** (§4) — the annual DVLA check and friends | Replaces jon's memory |
-| 7 | **Retention sweeps** (§7) — absence medical detail, per-type retention — **and only then §3.2's medical notes** | Closes the GDPR item |
+| 6 | ~~**Document review cycles**~~ — **SHIPPED Sep 2026.** Migration 239, `services/staff-doc-cycles.ts`. Deliberately separate from `drivers`. See §19.1 | Replaces jon's memory |
+| 7 | ~~**Retention sweeps**~~ — **SHIPPED Sep 2026.** Migration 239, `services/staff-retention.ts`. Medical notes deliberately NOT built — see §19.3 | Closes the GDPR item |
 
 Two notes on the order:
 
@@ -1110,3 +1110,152 @@ Redacting them is a real question, but it is a decision about the People
 record and its consumers, not something to slip into a staff-area change. If it
 is taken up: start from `routes/people.ts`, and expect the driver flows to need
 their own read.
+
+---
+
+## 19. Phases 6 and 7 build log — cycles and retention (Sep 2026)
+
+The last two phases. Both were waiting on decisions only jon could make, and
+both decisions simplified the build rather than complicating it.
+
+### 19.1 Phase 6 was settled by NOT sharing
+
+§1.1 and §1.2 agonised over whether the staff DVLA check should read `drivers`,
+and warned that generalising `driver-validity.ts` would reproduce the bug it
+was written to end. jon cut it straight through:
+
+> "Completely ignore the driver system we have in place currently — that's for
+> verifying self-drive-hire clients. The process for staff is different, it's
+> just an annual sanity check that they're declaring everything they should."
+
+So: **same words, different people, different consequence.** The driver system
+answers "is this client insurable for this hire, today" in a 30-day window with
+a hard gate behind it. The staff system answers "have we looked at Will's
+licence this year" and nudges. Nothing in `services/staff-doc-cycles.ts` reads
+`drivers`, and `driver-validity.ts` is untouched.
+
+That is worth remembering as a general move: two features that share a noun are
+not necessarily one feature. The cheapest resolution to "how do we share this?"
+is sometimes "we don't".
+
+**The model is still inherited**, even though no code is: record the FROM date
+(`document_date`), derive when it next needs looking at. Review due =
+`document_date` + the type's interval, **capped by `expires_on`** — a passport
+running out in March does not need re-checking in June, it needs replacing in
+March. A newer document of the same type supersedes an older one, so last
+year's DVLA check goes quiet once this year's is filed.
+
+Intervals live in `staff.doc_review_intervals` (JSON, per `doc_type`, months;
+0 = never). DVLA and licence default to 12; contract to 0, because a contract
+does not expire and re-reading it annually is noise. Nine tests cover the
+parsing, on the same principle as the review questions: a staff-editable
+setting will eventually contain junk, and chasing nothing is as bad as chasing
+everything.
+
+### 19.2 Phase 7: what expires, and what must never
+
+**Absence detail** is swept automatically after 12 months, per §17 item 9 of
+the staff calendar spec. The sweep nulls `reason_category`, `notes` and the
+return-to-work narrative, stamps `detail_purged_at`, and leaves the spell.
+
+**`absence_type` SURVIVES — and the spec was wrong about this.** §7 listed the
+type as expiring. It cannot: `getSicknessMinutes()` filters on
+`absence_type = 'sickness'` and the payroll report reads it, so purging the
+type would silently zero everybody's sickness figures rather than anonymise
+them. §7 said to "verify that before relying on it" — verifying it is what
+caught this. Day rows, minutes and every ledger effect stay for the same
+reason.
+
+**Right to work is SURFACED, never swept.** jon: keep it for the whole
+employment plus two years, so the clock runs from
+`staff_employment.end_date`. It appears on the attention list once that passes;
+an admin deletes it. Three reasons not to automate: destroying evidence of a
+right-to-work check is irreversible and legally consequential, the clock
+depends on a leaving date somebody typed by hand, and CLAUDE.md's product
+policy is warnings rather than silent action.
+
+### 19.3 The medical notes field was never built — deliberately
+
+§3.2 listed a free-text "medical notes" box, held back to Phase 7 until
+retention existed. Retention now exists, and the recommendation is still
+**don't build it**.
+
+The `medical` *document type* already covers the real need: filing a sick note
+or an occupational-health letter, deliberately, with a label and a date, and
+deletable by hand. A free-text medical box on an employment record is
+special-category data with no natural expiry, no clear consumer, and nothing
+computing from it — which is exactly the shape of a field that gets filled in
+once, forgotten, and found years later in a subject access request.
+
+If it is ever wanted, it needs its own retention answer first, and that answer
+cannot be "when they leave" — medical information about a current employee has
+no natural end date while they are still employed.
+
+---
+
+## 20. Current state — read this first
+
+All seven phases shipped 21–23 Sep 2026. This section is the handover.
+
+### 20.1 What exists
+
+| Thing | Where |
+|---|---|
+| Private files about staff | `staff_record_files`, `routes/staff-records.ts`, `components/StaffRecordFiles.tsx` |
+| NI (encrypted) + right to work | on `people`, written via `updateKeyData()`, read via `StaffKeyData.tsx` |
+| Personal details (phone, address, DOB, marital, emergency) | on `people` since mig 001 — `updatePersonalDetails()` |
+| Salary + pension history | `staff_salary_history` (mig 206), `staff_pension_history` (238), `components/StaffPay.tsx` |
+| To-dos | `staff_tasks`, `services/staff-tasks.ts`, `pages/MyTasksPage.tsx` |
+| Reviews, both sides | `staff_reviews`, `staff-review-prep.ts`, `staff-review-followup.ts`, `StaffReviews.tsx`, `MyReviewPage.tsx` |
+| Document re-check cycles | `services/staff-doc-cycles.ts` |
+| Retention | `services/staff-retention.ts` |
+| "Needs attention" | `services/staff-attention.ts` — THE cross-person view |
+| The page | `/staff/admin`, `?person=<id>&tab=…` |
+| Daily reminders | one 09:45 cron in `config/scheduler.ts`, five independently-caught scans |
+
+Migrations: **231, 232, 233, 234, 236(*), 237, 238, 239**.
+(*) 235 and 236 were taken by the parallel shop-sales branch — see §17.3.
+
+### 20.2 What is deliberately NOT built
+
+Do not "finish" these without re-reading the reasoning:
+
+- **A free-text medical notes field** (§19.3). The `medical` document type
+  covers the real need; the field has no natural expiry.
+- **Any link between the staff document check and `drivers`** (§19.1). Same
+  words, different people.
+- **Staff seeing their own records** (§2). No for v1, except their own review
+  and their own to-dos. The gate is one constant, `STAFF_ADMIN_ROLES`.
+- **Redaction of `date_of_birth` / `home_address` / `phone`** from the general
+  people endpoints (§18.4). Real question, but it is a People-record decision
+  and the driver flows read them there legitimately.
+- **A propose/counter review scheduling exchange** (§5.2). Trimmed to a
+  confirmation on purpose.
+- **Per-task chase intervals** like `jobs.chase_interval_days` (§15.3). One
+  setting plus an editable date is enough for seven people.
+
+### 20.3 Open questions
+
+1. **Right-to-work retention is set to employment + 2 years** on jon's word.
+   Worth one confirmation from an HR advisor — it is the only setting here with
+   a legal consequence for being wrong.
+2. **Review question wording** (§5.3) — jon intends to rewrite the six. Purely
+   a `system_settings` edit, no code.
+3. **`staff.review_interval_months` is 12 for everyone** until somebody gets a
+   per-person override on the Employment tab.
+
+### 20.4 The four lessons this module kept re-learning
+
+Stated plainly because each one cost real work:
+
+1. **Check whether it already exists.** Right to work, NI, emergency contacts,
+   phone, DOB, home address, `staff_reviews`, `staff_salary_history` — every
+   one was already there and needed surfacing, not building. Three separate
+   phases rediscovered this.
+2. **Check where the gate actually is, not where the data sits.** Twice,
+   sensitive columns were placed thoughtfully and served by an endpoint that
+   did `SELECT *` behind a wider role (§12.1, §13.1).
+3. **A failed load must never render as an empty one** (§14.1). Three 500s
+   looked calm on screen for a whole testing round.
+4. **One migration, one concern** (§13.6). A feature's schema change sharing a
+   transaction with a core-table constraint took a shipped feature down.
