@@ -111,11 +111,28 @@ export default function ShopTillPage() {
   const [saved, setSaved] = useState<{ gross: number; id: string; kind: string } | null>(null);
   const [recent, setRecent] = useState<RecentSale[]>([]);
 
+  /** Requeue a failed push once whatever broke has been fixed. */
+  const retrySale = useCallback(async (id: string) => {
+    try {
+      await api.post(`/shop/sales/${id}/retry`, {});
+      await api.post('/shop/drain', {});   // don't make them wait for the tick
+    } catch {
+      /* the row's own status is the feedback */
+    }
+    loadRecentRef.current?.();
+  }, []);
+
+  const loadRecentRef = useRef<(() => void) | null>(null);
+
   const loadRecent = useCallback(() => {
     api.get<{ data: RecentSale[] }>('/shop/sales?limit=8')
       .then(r => setRecent(r.data))
       .catch(() => setRecent([]));
   }, []);
+
+  // retrySale is defined above loadRecent so the list can call it; this closes
+  // the loop without making either depend on the other's identity.
+  useEffect(() => { loadRecentRef.current = loadRecent; }, [loadRecent]);
 
   const searchRef = useRef<HTMLInputElement>(null);
 
@@ -513,8 +530,16 @@ export default function ShopTillPage() {
                     {r.status === 'pushed' ? 'in HireHop' : r.status}
                   </span>
                 </span>
+                {r.status === 'failed' && (
+                  <button
+                    onClick={() => retrySale(r.id)}
+                    className="text-xs font-medium text-ooosh-600 hover:underline"
+                  >
+                    Retry
+                  </button>
+                )}
                 {r.push_error && (
-                  <span className="w-full text-xs text-red-700">{r.push_error}</span>
+                  <span className="w-full break-all text-xs text-red-700">{r.push_error}</span>
                 )}
               </li>
             ))}

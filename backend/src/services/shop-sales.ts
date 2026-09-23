@@ -335,6 +335,31 @@ export async function createShopSale(
   }
 }
 
+/**
+ * Put a failed transaction back in the queue.
+ *
+ * The drain gives up after N attempts so a permanently-bad row cannot retry
+ * forever (migration 241). That is right, but it leaves no way back once the
+ * underlying problem is fixed — and "re-key the whole thing" is both annoying
+ * and wrong, because the original row records what someone actually did.
+ *
+ * Only a FAILED row can be requeued. A pushed one must not be sent twice.
+ */
+export async function retryShopSale(id: string): Promise<{ requeued: boolean; message?: string }> {
+  const r = await query(`SELECT status FROM shop_sales WHERE id = $1`, [id]);
+  if (!r.rows[0]) return { requeued: false, message: 'Sale not found.' };
+  if (r.rows[0].status !== 'failed') {
+    return { requeued: false, message: `Only a failed transaction can be retried (this one is ${r.rows[0].status}).` };
+  }
+  await query(
+    `UPDATE shop_sales
+        SET status = 'queued', push_attempts = 0, push_error = NULL, push_after = NOW()
+      WHERE id = $1`,
+    [id],
+  );
+  return { requeued: true };
+}
+
 // ── Read / cancel ────────────────────────────────────────────────────────
 
 export async function listShopSales(opts: { limit?: number; since?: string } = {}) {
