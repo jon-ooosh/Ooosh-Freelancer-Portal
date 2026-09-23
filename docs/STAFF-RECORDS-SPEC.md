@@ -1,6 +1,8 @@
 # Staff Records — private files, key data, document review cycles, and staff reviews
 
-**Status: SPEC ONLY, nothing built.** Written 21 Sep 2026 at the end of the
+**Status: BUILT — all seven phases shipped Sep 2026. §20 is the current state;
+§21 is the follow-up audit and what is agreed next.** The sections below are
+kept as the design record. Written 21 Sep 2026 at the end of the
 staff-calendar session, from jon's §17 answers. **Revised 21 Sep 2026** after a
 verification pass against the code — the first draft's §1 was right in spirit
 but wrong on three facts, and the review process has since been designed with
@@ -1213,8 +1215,10 @@ All seven phases shipped 21–23 Sep 2026. This section is the handover.
 | The page | `/staff/admin`, `?person=<id>&tab=…` |
 | Daily reminders | one 09:45 cron in `config/scheduler.ts`, five independently-caught scans |
 
-Migrations: **231, 232, 233, 234, 236(*), 237, 238, 239**.
-(*) 235 and 236 were taken by the parallel shop-sales branch — see §17.3.
+Migrations: **231, 232, 233, 234, 237(*), 238, 239**.
+(*) `237_staff_review_prep.sql`. 235 and 236 were taken by the parallel
+shop-sales branch, which then also took a 237 (`237_shop_vat_rates_from_hirehop.sql`),
+so **there are two 237 files and both are correct** — see §17.3 and §21.2.
 
 ### 20.2 What is deliberately NOT built
 
@@ -1259,3 +1263,67 @@ Stated plainly because each one cost real work:
    looked calm on screen for a whole testing round.
 4. **One migration, one concern** (§13.6). A feature's schema change sharing a
    transaction with a core-table constraint took a shipped feature down.
+
+---
+
+## 21. Follow-up audit — spec vs code (23 Sep 2026)
+
+A pass checking every "shipped" claim above against the code. Phases 1–7 and
+§18 are all present as described. Three things needed fixing or recording.
+
+### 21.1 The §13.1 leak had a third door
+
+§13.1 redacted both people READ endpoints. The WRITE endpoints were missed:
+`PUT /api/people/:id` returns `RETURNING *` — on the update path and on its
+"nothing changed" early return. It is gated on `STAFF_ROLES`, so any staff
+member editing any person got back the NI ciphertext, the right-to-work fields
+and `marital_status` in the response. `POST /api/people` also returns
+`RETURNING *`; a brand-new row has none of those set, so it leaked nothing, but
+it is redacted too so the rule has no exceptions.
+
+Fixed by running those three responses through `redactPrivateFields()`. The
+audit snapshot still takes the full row — the helper returns a copy.
+
+That makes it **three for three** (§12.1, §13.1, this): the rule in §20.4 item 2
+applies to every response that carries a row, not only the obvious reads. When
+checking "what selects `*` from this table", check what RETURNS `*` too.
+
+### 21.2 Two migrations numbered 237 — leave them
+
+`237_shop_vat_rates_from_hirehop.sql` and `237_staff_review_prep.sql` both
+exist. That is harmless: the runner applies them in the order its hardcoded
+list gives, and `_migrations` records each by FILENAME. Once either has been
+applied anywhere, **renaming it makes the runner treat it as new and re-run
+it.** The runner's list carries a comment saying so.
+
+Also: migration 234's header refers to "§14.2" for the chase dates — the
+section is **§15.3**. Left in the file rather than edited, since 234 is applied
+and CLAUDE.md forbids editing an applied migration, even a comment.
+
+### 21.3 The staff check and `drivers` — the cost, stated
+
+§19.1 separates the staff document check from `drivers` completely, and jon
+confirmed it again here: **staff records win for anything about staff.** The
+consequence worth knowing: when a staff member who also drives is re-checked,
+the date goes in BOTH places — the staff record (for the annual employer
+check) and the driver record (for hire insurability). Nothing syncs them, on
+purpose. Do not add a sync: it would recreate the §1.1 drift problem with a
+third copy.
+
+### 21.4 Agreed next, not yet built
+
+Settled with jon on 23 Sep 2026, to be built in this order:
+
+1. **Per-record dated actions** — on any staff record, an action date, what
+   happens (**remind** or **flag for deletion**), delivery (bell / email /
+   both, as the job remind-me form), recipient (default: whoever set it), and a
+   note. The per-type intervals in `staff-doc-cycles.ts` become the pre-filled
+   DEFAULT, editable per record. **Deletion is flag-and-confirm, never
+   automatic** — the bell carries a Delete button and the item stays on Needs
+   attention until actioned. Records without a file (a label + text "note") so
+   the same dates apply to anything held, not only uploads.
+2. **Check-in between reviews** (§5.6, never scheduled until now) — a "Since
+   last review" list on the admin Reviews tab of every action agreed at the
+   last review, whoever owns it; plus a "check-in due" item on Needs attention
+   at the half-way point of the person's review interval.
+

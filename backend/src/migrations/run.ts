@@ -272,6 +272,9 @@ async function runMigrations(direction: 'up' | 'down') {
         '234_staff_reviews_and_chases.sql',
         '235_shop_stock_cache.sql',
         '236_shop_stock_scope.sql',
+        // Two 237s, from parallel branches. `_migrations` records them by
+        // filename, so never renumber either one once applied — it would
+        // re-run. docs/STAFF-RECORDS-SPEC.md §21.2.
         '237_shop_vat_rates_from_hirehop.sql',
         '237_staff_review_prep.sql',
         '238_staff_pension_and_personal.sql',
