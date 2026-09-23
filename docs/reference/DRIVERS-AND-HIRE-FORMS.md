@@ -593,7 +593,7 @@ Netlify functions being repointed with `DATA_BACKEND` feature flag (default: `mo
   4. Confirmation email already handled by hire form app (no OP duplication needed)
 - [x] **Post-signature automations (OP backend)** — `POST /api/hire-forms/:id/post-signature` BUILT:
   - Count `vehicle_hire_assignments` for job → count vehicles in HH → add additional driver charge (item 1324, £20+VAT per extra driver beyond 2 per vehicle)
-  - Check if job is dispatched (HH status 5/6) → mid-tour driver flow:
+  - Check if job is out on the road → mid-tour driver flow. **Primary signal is OP's own book-out records** (any van on the job `booked_out`/`active`); HH status 5/6 is secondary. HH alone missed job 16491 (Sep 2026): one unscanned line (a VE103B cert) held HH at 4 "Part Dispatched" with the van on the road, so the driver was neither auto-added nor flagged. Never key "is the hire out?" on HH status alone.
     - Set hire_start to NOW (not original job start — driver shouldn't have been driving before form submission)
     - Send mid-tour notification email to team (bell notification + email)
     - Driver appears on Job Detail > Drivers & Vehicles with "Hire form complete — not yet booked out" status
