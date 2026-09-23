@@ -77,9 +77,12 @@ export async function pushTally(
   }, { priority: 'low' });
 
   if (!res?.success) {
-    console.error('[shop-drain] tally_save rejected. sent=%j reply=%j',
-      { id: 0, cons: stockId, qty: -Math.abs(qty) }, res);
-    return { tallyId: null, error: res?.error ? String(res.error) : 'HireHop rejected the adjustment' };
+    const sent = { id: 0, cons: stockId, qty: -Math.abs(qty), details: details.slice(0, 250) };
+    console.error('[shop-drain] tally_save rejected. sent=%j reply=%j', sent, res);
+    // Store the whole reply on the row, not just the code. "3" on its own told
+    // us nothing, and by the time anyone looked the journal had rotated past it.
+    const detail = JSON.stringify({ error: res?.error ?? null, data: res?.data ?? null }).slice(0, 400);
+    return { tallyId: null, error: `HireHop rejected tally_save — ${detail}` };
   }
 
   // Judge the RESULT, not the flag (§2.5). HireHop returns the created

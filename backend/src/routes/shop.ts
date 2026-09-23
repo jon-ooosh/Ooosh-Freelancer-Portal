@@ -17,7 +17,7 @@ import {
   getReorderList, getCacheAge,
 } from '../services/shop-stock';
 import {
-  createShopSale, listShopSales, cancelShopSale,
+  createShopSale, listShopSales, cancelShopSale, retryShopSale,
   maxDiscountPctForRole, priceLines, totalsFor,
 } from '../services/shop-sales';
 
@@ -224,6 +224,21 @@ router.post('/sales/:id/cancel', async (req: AuthRequest, res: Response) => {
   } catch (err) {
     console.error('[shop] cancel failed:', err);
     res.status(500).json({ error: 'Could not cancel that sale.' });
+  }
+});
+
+/**
+ * Put a failed transaction back in the queue, once whatever broke is fixed.
+ * Re-keying it instead would lose who recorded it and when.
+ */
+router.post('/sales/:id/retry', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await retryShopSale(String(req.params.id));
+    if (!result.requeued) return res.status(409).json({ error: result.message });
+    res.json({ data: { requeued: true } });
+  } catch (err) {
+    console.error('[shop] retry failed:', err);
+    res.status(500).json({ error: 'Could not requeue that transaction.' });
   }
 });
 
