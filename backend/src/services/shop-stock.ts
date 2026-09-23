@@ -186,6 +186,36 @@ export async function grossPrice(netExVat: number, vatRateIndex: number | null):
   return Math.round(netExVat * (1 + rate / 100) * 100) / 100;
 }
 
+/**
+ * "Now" as HireHop wants it: the USER'S local wall-clock time, not UTC.
+ *
+ * Captured from HireHop's UI as `2026-09-23 16:42:40` while the adjustment it
+ * created came back stamped `15:42:40` — i.e. it was sent BST and stored UTC.
+ * The server runs in UTC, so Europe/London has to be explicit rather than
+ * assumed from the process clock.
+ */
+export function hhLocalNow(): string {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/London',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(new Date());
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? '00';
+  return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}:${get('second')}`;
+}
+
+/** The HireHop job availability questions are asked against (§2.3, mig 242). */
+export async function getAvailabilityJob(): Promise<number | null> {
+  try {
+    const r = await query(`SELECT value FROM system_settings WHERE key = $1`, ['shop_availability_job']);
+    const n = Number(r.rows[0]?.value);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+
 // ── Refresh ──────────────────────────────────────────────────────────────
 
 /** One page of HireHop's consumables list. */

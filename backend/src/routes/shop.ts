@@ -14,7 +14,7 @@ import { authenticate, authorize, AuthRequest, STAFF_ROLES, MANAGER_ROLES } from
 import hhBroker from '../services/hirehop-broker';
 import {
   searchShopStock, findShopStockByBarcode, getShopStockItem,
-  getReorderList, getCacheAge,
+  getReorderList, getCacheAge, getAvailabilityJob, hhLocalNow,
 } from '../services/shop-stock';
 import {
   createShopSale, listShopSales, cancelShopSale, retryShopSale,
@@ -95,19 +95,27 @@ router.get('/stock/:id(\\d+)', async (req: AuthRequest, res: Response) => {
  * Live availability for items in the basket (§2.3).
  *
  * The mirror holds the SHELF count; this is what is actually free once other
- * jobs' reservations are taken off. It is the difference between "we have 15"
- * and "12 are free, 3 are on a job leaving Thursday". A warning, never a block.
+ * jobs' reservations are taken off — the difference between "we have 15" and
+ * "14 are free, 1 is on a job leaving Thursday". A warning, never a block.
  *
- * ⚠️ Uses the DATE-based `picklist_get_availability.php`, not the job-scoped
- * `items_picklist_avail.php`. The job-scoped one needs a `job` to answer
- * against, and a walk-in has no job — called without one it just returns the
- * global figure, which is the shelf count we already have and therefore useless
- * (that was the first version's bug). Same endpoint and row shape as
- * `routes/staging.ts`, which is the proven caller.
+ * ⚠️ EVERY PARAMETER HERE IS COPIED FROM A CAPTURE of HireHop's own UI, not
+ * from its API docs (§2.9). The first version guessed the row shape from
+ * `routes/staging.ts` and returned nothing at all. What the UI actually sends:
  *
- * `TYPE: 1` is sale stock; staging passes `TYPE: 2` for hire stock. That comes
- * from the picklist, where sale items key as `a<id>` with `TYPE: 1` and hire as
- * `b<id>` with `TYPE: 2`.
+ *     GET /php_functions/picklist_get_availability.php
+ *       job          = 16735
+ *       global_depot = 1
+ *       rows         = [{"ID":25,"TYPE":1,"AVAILABLE":1,"GLOBAL":0}, …]
+ *       local        = 2026-09-23 16:47:05     ← Europe/London, not UTC
+ *       tz           = Europe/London
+ *
+ * `TYPE: 1` IS correct for sale stock (hire rows in the same capture carry
+ * `TYPE: 2`) — the guess that failed was the surrounding shape: staging's
+ * `ITEM_ID`/`STOCK` keys and `GLOBAL: 1`, and above all the missing `job`.
+ *
+ * A walk-in has no job, so we ask against a configured one (migration 242) —
+ * the weekly shop job once step 6 creates it. Unset means don't ask, and the
+ * till then says so rather than implying nothing is reserved.
  */
 router.post('/stock/availability', async (req: AuthRequest, res: Response) => {
   try {
@@ -116,39 +124,39 @@ router.post('/stock/availability', async (req: AuthRequest, res: Response) => {
       : [];
     if (!ids.length) return res.json({ data: {} });
 
-    // Right now — a shop sale leaves today, not on some future hire window.
-    const now = new Date();
-    const pad = (n: number) => String(n).padStart(2, '0');
-    const local = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ` +
-                  `${pad(now.getHours())}:${pad(now.getMinutes())}:00`;
+    const job = await getAvailabilityJob();
+    if (!job) {
+      // Honest silence beats a confident wrong answer: the till shows the shelf
+      // count and flags that reservations were not checked.
+      return res.json({ data: {} });
+    }
 
-    const rows = ids.map((id) => ({ ID: id, TYPE: 1, ITEM_ID: 0, AVAILABLE: 1, STOCK: 1, GLOBAL: 1 }));
+    const rows = ids.map((id) => ({ ID: id, TYPE: 1, AVAILABLE: 1, GLOBAL: 0 }));
     const resp = await hhBroker.get<any>('/php_functions/picklist_get_availability.php', {
-      rows: JSON.stringify(rows), local, tz: 'Europe/London', global_depot: 1,
+      job,
+      global_depot: 1,
+      rows: JSON.stringify(rows),
+      local: hhLocalNow(),
+      tz: 'Europe/London',
     }, { priority: 'high', cacheTTL: 60 });
 
-    const out: Record<string, { available: number | null; stock: number | null }> = {};
+    const out: Record<string, { available: number | null }> = {};
     const data: any = resp?.success ? resp.data : null;
     const responseRows: any[] = data?.rows || (Array.isArray(data) ? data : []);
 
     if (!responseRows.length) {
-      // The TYPE:1 row shape is inferred from the picklist, not observed on THIS
-      // endpoint, so an empty result is the thing we most need to see. Log the
-      // raw reply rather than guessing again.
-      console.warn('[shop] availability returned no rows. sent=%j success=%s raw=%j',
-        rows, resp?.success, resp?.success ? resp.data : resp?.error);
+      console.warn('[shop] availability returned no rows. job=%s sent=%j success=%s raw=%j',
+        job, rows, resp?.success, resp?.success ? resp.data : resp?.error);
     }
 
     for (const row of responseRows) {
       out[String(row.ID)] = {
         available: row.AVAILABLE != null ? parseInt(row.AVAILABLE, 10) : null,
-        stock: row.STOCK != null ? parseInt(row.STOCK, 10) : null,
       };
     }
-    // A HireHop wobble must never stop a sale — the caller falls back to the
-    // shelf count and shows no reservation line.
     res.json({ data: out });
   } catch (err) {
+    // A HireHop wobble must never stop a sale.
     console.error('[shop] availability lookup failed:', err);
     res.json({ data: {} });
   }
