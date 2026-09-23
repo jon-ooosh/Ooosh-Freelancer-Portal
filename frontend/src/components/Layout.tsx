@@ -76,6 +76,7 @@ const navItems: NavItem[] = [
       { path: '/money/overview', label: 'Overview', roles: ['admin', 'manager'] },
       { path: '/money/excess', label: 'Excess', roles: ['admin', 'manager'] },
       { path: '/money/costs', label: 'Costs', roles: ['admin', 'manager', 'staff'] },
+      { path: '/money/shop', label: 'Shop Till' },
     ],
   },
 ];

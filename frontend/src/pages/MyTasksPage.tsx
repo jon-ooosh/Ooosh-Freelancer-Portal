@@ -21,6 +21,7 @@ interface Task {
   title: string;
   detail: string | null;
   due_date: string | null;
+  next_chase_date: string | null;
   status: 'open' | 'done' | 'cancelled';
   source_type: string;
   source_id: string | null;
@@ -63,6 +64,10 @@ export default function MyTasksPage() {
 
   const [title, setTitle] = useState('');
   const [dueDate, setDueDate] = useState('');
+  // Left blank the server derives it: the due date if there is one, else a
+  // fortnight out. That second case is the point — a task with no deadline
+  // would otherwise never resurface.
+  const [remindOn, setRemindOn] = useState('');
   const [adding, setAdding] = useState(false);
 
   const load = useCallback(async () => {
@@ -86,9 +91,16 @@ export default function MyTasksPage() {
     if (!title.trim()) return;
     setAdding(true);
     try {
-      await api.post('/staff-tasks', { title: title.trim(), dueDate: dueDate || null });
+      await api.post('/staff-tasks', {
+        title: title.trim(),
+        dueDate: dueDate || null,
+        // Only sent when they picked one — omitted means "derive it", which is
+        // not the same as "never remind me".
+        ...(remindOn ? { nextChaseDate: remindOn } : {}),
+      });
       setTitle('');
       setDueDate('');
+      setRemindOn('');
       await load();
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : 'Could not add the task');
@@ -147,6 +159,15 @@ export default function MyTasksPage() {
             />
           </label>
           <label className="text-sm">
+            <span className="block text-xs text-gray-600 mb-1">Remind me</span>
+            <input
+              type="date"
+              value={remindOn}
+              onChange={e => setRemindOn(e.target.value)}
+              className="px-3 py-2 border border-gray-300 rounded text-sm"
+            />
+          </label>
+          <label className="text-sm">
             <span className="block text-xs text-gray-600 mb-1">Due</span>
             <input
               type="date"
@@ -190,6 +211,12 @@ export default function MyTasksPage() {
                   {task.detail && <div className="text-xs text-gray-500 mt-0.5">{task.detail}</div>}
                   <div className="flex flex-wrap items-center gap-2 mt-1">
                     <span className={`text-xs ${due.tone}`}>{due.text}</span>
+                    {task.next_chase_date && (
+                      <span className="text-[11px] text-gray-400">
+                        nudge {new Date(task.next_chase_date).toLocaleDateString('en-GB',
+                          { day: 'numeric', month: 'short' })}
+                      </span>
+                    )}
                     {SOURCE_LABEL[task.source_type] && (
                       <span className="text-[11px] px-1.5 py-0.5 rounded bg-ooosh-50 text-ooosh-700">
                         {SOURCE_LABEL[task.source_type]}

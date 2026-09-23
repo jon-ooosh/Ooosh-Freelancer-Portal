@@ -90,13 +90,17 @@ async function findExcessByPaymentIntent(pi: string | null): Promise<ExcessRow |
  *    the reimbursed CHILD. The refund was actually handled downstream — chase the
  *    chain by `hh_deposit_id` and, if a sibling was reimbursed, name that hire.
  * Only genuinely-unresolved outcomes keep the "reconcile manually" nudge.
+ *
+ * `actionNeeded` decides whether the alert email is sent at all (Sep 2026):
+ * a "recorded, no action needed" email for every OP-initiated reimburse was
+ * pure noise, so only outcomes a human must act on reach the inbox.
  */
 async function describeUnwindNote(
   result: { updated: boolean; newStatus: string; reason?: string },
   ex: ExcessRow
-): Promise<string> {
+): Promise<{ note: string; actionNeeded: boolean }> {
   if (result.updated) {
-    return `OP excess auto-marked <strong>${result.newStatus}</strong> to match Stripe — no further action needed.`;
+    return { note: `OP excess auto-marked <strong>${result.newStatus}</strong> to match Stripe — no further action needed.`, actionNeeded: false };
   }
 
   const reason = result.reason || '';
@@ -115,9 +119,12 @@ async function describeUnwindNote(
       ).catch(() => ({ rows: [] as Array<{ hirehop_job_id: number | null }> }));
       reimbursedOn = sib.rows[0]?.hirehop_job_id ?? null;
     }
-    return reimbursedOn
-      ? `This excess was rolled forward to hire #${reimbursedOn} and reimbursed there — no action needed.`
-      : `This excess was rolled forward to a later hire; the refund is tracked on that hire — no action needed.`;
+    return {
+      note: reimbursedOn
+        ? `This excess was rolled forward to hire #${reimbursedOn} and reimbursed there — no action needed.`
+        : `This excess was rolled forward to a later hire; the refund is tracked on that hire — no action needed.`,
+      actionNeeded: false,
+    };
   }
 
   // Other benign terminal / already-recorded outcomes.
@@ -129,11 +136,11 @@ async function describeUnwindNote(
     reason === 'record already released' ||
     reason === 'record already waived'
   ) {
-    return `OP excess already reflects this refund (${reason}) — no action needed.`;
+    return { note: `OP excess already reflects this refund (${reason}) — no action needed.`, actionNeeded: false };
   }
 
   // Genuinely unresolved (needed/pending/not_required/excess-not-found, etc.).
-  return `OP excess not changed: ${reason}. Reconcile manually if needed.`;
+  return { note: `OP excess not changed: ${reason}. Reconcile manually if needed.`, actionNeeded: true };
 }
 
 function jobRef(ex: ExcessRow | null): string {
@@ -257,6 +264,9 @@ async function processStripeEvent(event: StripeEventLike): Promise<boolean> {
       const ex = await findExcessByPaymentIntent(piRef);
       let subject: string;
       let bodyLines: string[];
+      // Only email when a human has to act. Benign outcomes (OP already
+      // recorded it, or recorded it automatically) are logged, not emailed.
+      let actionNeeded = true;
 
       if (ex && piRef) {
         // ── Excess refund path ──
@@ -271,7 +281,9 @@ async function processStripeEvent(event: StripeEventLike): Promise<boolean> {
             method: 'stripe_gbp',
             notes: `Stripe charge ${charge.id}`,
           });
-          unwindNote = await describeUnwindNote(result, ex);
+          const described = await describeUnwindNote(result, ex);
+          unwindNote = described.note;
+          actionNeeded = described.actionNeeded;
         } catch (err) {
           console.error('[stripe-webhook] charge.refunded excess unwind failed:', err);
           unwindNote = `OP excess auto-unwind failed — please reconcile manually on the Money tab.`;
@@ -321,6 +333,7 @@ async function processStripeEvent(event: StripeEventLike): Promise<boolean> {
           }
 
           if (alreadyRecorded) {
+            actionNeeded = false;
             subject = `Stripe refund recorded — £${refunded} (already on OP)`;
             bodyLines = [
               `A refund of £${refunded} was processed in Stripe for charge ${charge.id}.`,
@@ -348,6 +361,7 @@ async function processStripeEvent(event: StripeEventLike): Promise<boolean> {
                   `Auto-recorded from Stripe webhook (charge ${charge.id})`,
                 ]
               );
+              actionNeeded = false;
               subject = `Stripe hire payment refund recorded — £${refunded}`;
               bodyLines = [
                 `A refund of £${refunded} was processed in Stripe for charge ${charge.id}.`,
@@ -372,7 +386,11 @@ async function processStripeEvent(event: StripeEventLike): Promise<boolean> {
         ];
       }
 
-      await alertInfo(subject, bodyLines);
+      if (actionNeeded) {
+        await alertInfo(subject, bodyLines);
+      } else {
+        console.log(`[stripe-webhook] ${subject} — no action needed, alert email suppressed (charge ${charge.id})`);
+      }
       break;
     }
     default:

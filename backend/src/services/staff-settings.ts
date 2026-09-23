@@ -35,6 +35,12 @@ export const DEFAULTS = {
   rtwChaseDays: 7,
   cashOutReminderDay: 8,
   offerChaseDays: 1,
+  // Staff records (docs/STAFF-RECORDS-SPEC.md). Company-wide defaults;
+  // reviewIntervalMonths has a per-person override on staff_employment.
+  reviewIntervalMonths: 12,
+  reviewLeadDays: 28,
+  taskChaseDays: 14,
+  documentExpiryLeadDays: 30,
   minHeadcountByWeekday: {} as Record<string, number>,
 };
 
@@ -202,6 +208,22 @@ export function getOfferChaseDays(): Promise<number> {
 }
 
 /** Days after a sickness closes before the one return-to-work chase (§7.3). */
+export function getReviewIntervalMonths(): Promise<number> {
+  return num('staff.review_interval_months', DEFAULTS.reviewIntervalMonths);
+}
+
+export function getReviewLeadDays(): Promise<number> {
+  return num('staff.review_lead_days', DEFAULTS.reviewLeadDays);
+}
+
+export function getTaskChaseDays(): Promise<number> {
+  return num('staff.task_chase_days', DEFAULTS.taskChaseDays);
+}
+
+export function getDocumentExpiryLeadDays(): Promise<number> {
+  return num('staff.document_expiry_lead_days', DEFAULTS.documentExpiryLeadDays);
+}
+
 export function getRtwChaseDays(): Promise<number> {
   return num('staff.rtw_chase_days', DEFAULTS.rtwChaseDays);
 }

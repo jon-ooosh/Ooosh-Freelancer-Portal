@@ -1,8 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import StaffRecordFiles from '../components/StaffRecordFiles';
 import StaffKeyData from '../components/StaffKeyData';
+import StaffReviews, { type ReviewPerson } from '../components/StaffReviews';
+import StaffPay from '../components/StaffPay';
+import StaffAttention, { type AttentionItem } from '../components/StaffAttention';
+import StaffPersonOverview from '../components/StaffPersonOverview';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
 import StaffBalancePanel from '../components/StaffBalancePanel';
@@ -143,7 +147,39 @@ export default function StaffAdminPage() {
   const isManager = hasManagerRole(role);
 
   const [rows, setRows] = useState<RosterRow[]>([]);
-  const [openId, setOpenId] = useState<string | null>(null);
+
+  // The open person and tab live in the URL, not in state. That is what lets a
+  // notification link straight to "Will's reviews" instead of dropping the
+  // reader on a list — and Back behaves.
+  const [params, setParams] = useSearchParams();
+  const openPersonId = params.get('person');
+  const activeTab = params.get('tab') || 'overview';
+
+  const openPerson = useCallback((personId: string, tab?: string) => {
+    const next = new URLSearchParams(params);
+    next.set('person', personId);
+    if (tab) next.set('tab', tab); else next.delete('tab');
+    setParams(next);
+  }, [params, setParams]);
+
+  const closePerson = useCallback(() => {
+    const next = new URLSearchParams(params);
+    next.delete('person');
+    next.delete('tab');
+    setParams(next);
+  }, [params, setParams]);
+
+  const setTab = useCallback((tab: string) => {
+    const next = new URLSearchParams(params);
+    next.set('tab', tab);
+    setParams(next, { replace: true });
+  }, [params, setParams]);
+
+  // Bumped after every save so the derived attention list re-runs.
+  const [attentionKey, setAttentionKey] = useState(0);
+  const [attention, setAttention] = useState<AttentionItem[]>([]);
+  const [attentionLoading, setAttentionLoading] = useState(true);
+  const [attentionError, setAttentionError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -162,11 +198,39 @@ export default function StaffAdminPage() {
 
   useEffect(() => { if (isManager) void load(); }, [isManager, load]);
 
+  // Fetched HERE, not in the panel: the same list also draws the roster flags
+  // and the person view's attention box, and a deep link straight to a person
+  // never renders the panel at all.
+  useEffect(() => {
+    if (!isAdmin) { setAttentionLoading(false); return; }
+    let cancelled = false;
+    setAttentionError(null);
+    api.get<{ data: AttentionItem[] }>('/staff-calendar/attention')
+      .then(res => { if (!cancelled) setAttention(res.data); })
+      .catch(err => {
+        if (!cancelled) setAttentionError(err instanceof Error ? err.message : 'Could not load the attention list');
+      })
+      .finally(() => { if (!cancelled) setAttentionLoading(false); });
+    return () => { cancelled = true; };
+  }, [isAdmin, attentionKey]);
+
   const announce = useCallback(async (msg: string) => {
     setNotice(msg);
     setError(null);
+    setAttentionKey(k => k + 1);
     await load();
   }, [load]);
+
+  // Everyone a review action could be owned by. Built from the roster the page
+  // already loaded rather than a second fetch, and it MUST include people who
+  // aren't the reviewee: "what should Ooosh do differently?" produces actions
+  // the company owes, and those go on whoever is responsible (§6.2).
+  const actionOwners = useMemo<ReviewPerson[]>(
+    () => rows
+      .filter(r => r.employment?.status !== 'left')
+      .map(r => ({ personId: r.personId, name: r.preferredName || r.name })),
+    [rows]
+  );
 
   const visible = useMemo(
     () => rows.filter(r => showLeft || r.employment?.status !== 'left'),
@@ -183,6 +247,28 @@ export default function StaffAdminPage() {
           Staff records are restricted. You can still see who&apos;s in on the{' '}
           <Link to="/staff/calendar" className="text-ooosh-600 hover:underline">staff calendar</Link>.
         </p>
+      </div>
+    );
+  }
+
+  const openRow = openPersonId ? rows.find(r => r.personId === openPersonId) : undefined;
+
+  if (openRow) {
+    return (
+      <div className="p-4 sm:p-6 max-w-6xl">
+        {error && <div className="mb-4 p-3 rounded bg-red-50 border border-red-200 text-sm text-red-700">{error}</div>}
+        {notice && <div className="mb-4 p-3 rounded bg-emerald-50 border border-emerald-200 text-sm text-emerald-800">{notice}</div>}
+        <PersonView
+          row={openRow}
+          isAdmin={isAdmin}
+          people={actionOwners}
+          tab={activeTab}
+          attention={attention.filter(a => a.personId === openRow.personId)}
+          onTab={setTab}
+          onBack={closePerson}
+          onSaved={announce}
+          onError={setError}
+        />
       </div>
     );
   }
@@ -228,33 +314,35 @@ export default function StaffAdminPage() {
       {/* Admin only: it is everyone's pay and sickness in one table. */}
       {isAdmin && <PayrollReportPanel />}
 
+      {isAdmin && (
+        <div className="mb-5">
+          <StaffAttention
+            items={attention}
+            loading={attentionLoading}
+            loadError={attentionError}
+            onOpenPerson={openPerson}
+            onLinkLogin={() => { /* the unlinked login lives in Other accounts below */ }}
+          />
+        </div>
+      )}
+
       {loading ? (
         <div className="text-sm text-gray-500 py-6">Loading…</div>
       ) : (
         <>
-          <Group title="Employees" count={employees.length}
-            empty={isAdmin ? 'Nobody set up as an employee yet.' : undefined}>
-            {employees.map(r => (
-              <PersonCard key={r.personId} row={r} isAdmin={isAdmin}
-                open={openId === r.personId}
-                onToggle={() => setOpenId(openId === r.personId ? null : r.personId)}
-                onSaved={announce} onError={setError} />
-            ))}
-          </Group>
+          <RosterTable title="Employees" rows={employees} isAdmin={isAdmin}
+            attention={attention} onOpen={openPerson}
+            empty={isAdmin ? 'Nobody set up as an employee yet.' : undefined} />
 
           {others.length > 0 && (
-            <Group
+            <RosterTable
               title="Other accounts"
-              count={others.length}
+              rows={others}
+              isAdmin={isAdmin}
+              attention={attention}
+              onOpen={openPerson}
               hint="Logins that aren't employees — service accounts, test logins, freelancer access."
-            >
-              {others.map(r => (
-                <PersonCard key={r.personId} row={r} isAdmin={isAdmin}
-                  open={openId === r.personId}
-                  onToggle={() => setOpenId(openId === r.personId ? null : r.personId)}
-                  onSaved={announce} onError={setError} />
-              ))}
-            </Group>
+            />
           )}
         </>
       )}
@@ -262,81 +350,251 @@ export default function StaffAdminPage() {
   );
 }
 
-function Group({ title, count, hint, empty, children }: {
-  title: string; count: number; hint?: string; empty?: string; children: React.ReactNode;
+/**
+ * The roster: one lean row per person, flags rather than data.
+ *
+ * The old card expanded into six stacked panels, so scanning seven people
+ * meant opening seven walls. A row now carries only what you compare ACROSS
+ * people — hours and next review — plus coloured flags drawn from the same
+ * derived attention list as the panel above, so the two can never disagree.
+ */
+function RosterTable({ title, rows, isAdmin, attention, hint, empty, onOpen }: {
+  title: string; rows: RosterRow[]; isAdmin: boolean;
+  attention: AttentionItem[];
+  hint?: string; empty?: string;
+  onOpen: (personId: string, tab?: string) => void;
 }) {
   return (
-    <section className="mb-6">
-      <div className="flex items-baseline gap-2 mb-2">
-        <h2 className="text-sm font-semibold text-gray-900 uppercase tracking-wide">{title}</h2>
-        <span className="text-xs text-gray-500">{count}</span>
+    <div className="mb-6">
+      <div className="flex flex-wrap items-baseline gap-2 mb-2">
+        <h2 className="text-sm font-semibold text-gray-900">{title}</h2>
+        <span className="text-xs text-gray-500">{rows.length}</span>
+        {hint && <span className="text-xs text-gray-500">— {hint}</span>}
       </div>
-      {hint && <p className="text-xs text-gray-500 mb-2">{hint}</p>}
-      {count === 0 && empty ? (
-        <div className="p-4 rounded border border-dashed border-gray-300 text-sm text-gray-500">{empty}</div>
+
+      {rows.length === 0 ? (
+        <p className="text-sm text-gray-400 py-3">{empty || 'Nobody here.'}</p>
       ) : (
-        <div className="space-y-2">{children}</div>
+        <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+          {rows.map(row => {
+            const flags = attention.filter(a => a.personId === row.personId);
+            const left = row.employment?.status === 'left';
+            return (
+              <div key={row.personId}
+                className={`flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-3 border-b border-gray-100 last:border-b-0 ${left ? 'opacity-70' : ''}`}>
+                <span className="w-8 h-8 rounded-full bg-ooosh-50 text-ooosh-700 text-xs font-semibold flex items-center justify-center shrink-0">
+                  {initials(row)}
+                </span>
+
+                <span className="min-w-[12rem]">
+                  <button onClick={() => onOpen(row.personId)}
+                    className="block text-sm font-medium text-gray-900 hover:text-ooosh-700 hover:underline text-left">
+                    {row.preferredName || row.name}
+                    {row.pronouns && <span className="ml-1 text-xs font-normal text-gray-500">({row.pronouns})</span>}
+                  </button>
+                  <span className="block text-xs text-gray-500">
+                    {row.employment?.jobTitle || row.email || 'no email'}
+                  </span>
+                </span>
+
+                {row.account ? (
+                  <span className={`text-[11px] px-1.5 py-0.5 rounded shrink-0 ${ROLE_COLOURS[row.account.role] || 'bg-gray-100 text-gray-700'}`}>
+                    {ROLE_LABELS[row.account.role] || row.account.role}
+                  </span>
+                ) : (
+                  <span className="text-[11px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 shrink-0">No login</span>
+                )}
+                {row.account && !row.account.isActive && (
+                  <span className="text-[11px] px-1.5 py-0.5 rounded bg-gray-200 text-gray-600 shrink-0">Inactive</span>
+                )}
+                {left && <span className="text-[11px] px-1.5 py-0.5 rounded bg-gray-200 text-gray-600 shrink-0">Left</span>}
+
+                <span className="flex flex-wrap gap-1.5">
+                  {flags.slice(0, 3).map(f => (
+                    <button key={f.id} onClick={() => onOpen(row.personId, f.tab ?? undefined)}
+                      className={`text-[11px] font-semibold px-2 py-0.5 rounded-full hover:underline ${
+                        f.severity === 'urgent' ? 'bg-red-100 text-red-800'
+                          : f.severity === 'soon' ? 'bg-amber-100 text-amber-800'
+                          : 'bg-gray-100 text-gray-600'}`}>
+                      {f.label}
+                    </button>
+                  ))}
+                  {flags.length > 3 && (
+                    <span className="text-[11px] text-gray-500">+{flags.length - 3} more</span>
+                  )}
+                </span>
+
+                {isAdmin && row.employment && (
+                  <span className="ml-auto text-xs text-gray-600 shrink-0 w-24 text-right">
+                    {row.hasPattern ? `${fmt(row.weeklyMinutes ?? 0)}/wk` : <span className="text-amber-700">no hours</span>}
+                  </span>
+                )}
+
+                <button onClick={() => onOpen(row.personId)}
+                  className={`text-xs font-medium text-ooosh-600 hover:text-ooosh-800 hover:underline shrink-0 ${isAdmin && row.employment ? '' : 'ml-auto'}`}>
+                  Open
+                </button>
+              </div>
+            );
+          })}
+        </div>
       )}
-    </section>
+    </div>
   );
 }
 
-// ── One person ──────────────────────────────────────────────────────────────
+function initials(row: RosterRow): string {
+  const source = (row.preferredName || row.name || row.email || '?').trim();
+  const parts = source.split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return '?';
+  if (parts.length === 1) return parts[0]!.slice(0, 2).toUpperCase();
+  return (parts[0]![0]! + parts[parts.length - 1]![0]!).toUpperCase();
+}
 
-function PersonCard({ row, isAdmin, open, onToggle, onSaved, onError }: {
-  row: RosterRow; isAdmin: boolean; open: boolean; onToggle: () => void;
+const PERSON_TABS = [
+  { id: 'overview', label: 'Overview' },
+  { id: 'employment', label: 'Employment' },
+  { id: 'records', label: 'Records' },
+  { id: 'reviews', label: 'Reviews' },
+  { id: 'access', label: 'Access' },
+] as const;
+
+/**
+ * One person, five tabs.
+ *
+ * The same six panels as before, but one at a time: Records and Reviews are
+ * the admin-only halves of the staff-records module, Access is the login and
+ * company card, Employment is the contract and hours. Overview is read-only
+ * on purpose — see StaffPersonOverview.
+ */
+function PersonView({ row, isAdmin, people, tab, attention, onTab, onBack, onSaved, onError }: {
+  row: RosterRow; isAdmin: boolean; people: ReviewPerson[];
+  tab: string; attention: AttentionItem[];
+  onTab: (tab: string) => void; onBack: () => void;
   onSaved: (msg: string) => Promise<void>; onError: (msg: string) => void;
 }) {
-  const left = row.employment?.status === 'left';
-  return (
-    <div className={`rounded-lg border bg-white ${left ? 'border-gray-200 opacity-70' : 'border-gray-200'}`}>
-      <button onClick={onToggle} className="w-full flex items-center justify-between gap-3 px-4 py-3 text-left hover:bg-gray-50">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="font-medium text-gray-900">{row.preferredName || row.name}</span>
-            {row.pronouns && <span className="text-xs text-gray-500">({row.pronouns})</span>}
-            {row.account ? (
-              <span className={`text-[11px] px-1.5 py-0.5 rounded ${ROLE_COLOURS[row.account.role] || 'bg-gray-100 text-gray-700'}`}>
-                {ROLE_LABELS[row.account.role] || row.account.role}
-              </span>
-            ) : (
-              <span className="text-[11px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-500">No login</span>
-            )}
-            {row.account && !row.account.isActive && (
-              <span className="text-[11px] px-1.5 py-0.5 rounded bg-gray-200 text-gray-600">Inactive</span>
-            )}
-            {left && <span className="text-[11px] px-1.5 py-0.5 rounded bg-gray-200 text-gray-600">Left</span>}
-          </div>
-          <div className="text-xs text-gray-500 truncate">
-            {row.email || 'no email'}
-            {isAdmin && row.employment && (
-              <>
-                {' · '}
-                {row.hasPattern
-                  ? `${fmt(row.weeklyMinutes ?? 0)}/week`
-                  : <span className="text-amber-700">no working hours set</span>}
-              </>
-            )}
-            {isAdmin && row.cotCard?.last4 && ` · card ${row.cotCard.last4}`}
-          </div>
-        </div>
-        <span className="text-gray-400 text-sm shrink-0">{open ? '▲' : '▼'}</span>
-      </button>
+  // Records and Reviews hold passports, NI numbers and private review notes.
+  // A manager reaching this page sees the person, not those tabs.
+  const tabs = PERSON_TABS.filter(x => isAdmin || (x.id !== 'records' && x.id !== 'reviews'));
+  const active = tabs.some(x => x.id === tab) ? tab : 'overview';
+  const urgent = attention.filter(a => a.severity === 'urgent').length;
 
-      {open && (
-        <div className="border-t border-gray-100 p-4 space-y-5">
+  return (
+    <div>
+      <button onClick={onBack} className="text-sm text-gray-600 hover:text-gray-900 mb-3">← Staff</button>
+
+      <div className="bg-white rounded-lg border border-gray-200 p-4 flex flex-wrap items-center gap-4 mb-4">
+        <span className="w-12 h-12 rounded-full bg-ooosh-50 text-ooosh-700 text-base font-semibold flex items-center justify-center shrink-0">
+          {initials(row)}
+        </span>
+        <div className="min-w-0">
+          <h1 className="text-xl font-semibold text-gray-900">
+            {row.preferredName || row.name}
+            {row.pronouns && <span className="ml-2 text-sm font-normal text-gray-500">({row.pronouns})</span>}
+          </h1>
+          <p className="text-sm text-gray-600 mt-0.5">
+            {row.employment?.jobTitle || 'No job title'}
+            {row.employment?.startDate && ` · since ${fmtDate(row.employment.startDate)}`}
+            {isAdmin && row.hasPattern && ` · ${fmt(row.weeklyMinutes ?? 0)}/week`}
+          </p>
+        </div>
+        <div className="ml-auto flex items-center gap-2">
+          {row.account && (
+            <span className={`text-xs px-2 py-1 rounded ${ROLE_COLOURS[row.account.role] || 'bg-gray-100 text-gray-700'}`}>
+              {ROLE_LABELS[row.account.role] || row.account.role}
+            </span>
+          )}
+          {urgent > 0 && (
+            <span className="text-xs font-semibold text-red-800 bg-red-100 rounded-full px-2 py-1">
+              {urgent} need{urgent === 1 ? 's' : ''} attention
+            </span>
+          )}
+        </div>
+      </div>
+
+      <div className="flex gap-1 border-b border-gray-200 mb-4 overflow-x-auto">
+        {tabs.map(x => (
+          <button key={x.id} onClick={() => onTab(x.id)}
+            className={`px-4 py-2 text-sm whitespace-nowrap -mb-px border-b-2 ${
+              active === x.id
+                ? 'font-semibold text-ooosh-700 border-ooosh-600'
+                : 'text-gray-600 border-transparent hover:text-gray-900'}`}>
+            {x.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Overview reads two ADMIN-ONLY endpoints. This page is manager-tier
+          for the account section, so a manager rendering it would meet a 403
+          dressed up as a load failure. Give them the plain facts instead. */}
+      {active === 'overview' && !isAdmin && (
+        <div className="bg-white rounded-lg border border-gray-200 p-4">
+          <dl className="grid grid-cols-2 sm:grid-cols-3 gap-x-6 gap-y-4">
+            <div>
+              <dt className="text-[11px] uppercase tracking-wide text-gray-500">Email</dt>
+              <dd className="text-sm mt-0.5 text-gray-900">{row.email || '—'}</dd>
+            </div>
+            <div>
+              <dt className="text-[11px] uppercase tracking-wide text-gray-500">Role</dt>
+              <dd className="text-sm mt-0.5 text-gray-900">
+                {row.account ? (ROLE_LABELS[row.account.role] || row.account.role) : 'No login'}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-[11px] uppercase tracking-wide text-gray-500">Job title</dt>
+              <dd className="text-sm mt-0.5 text-gray-900">{row.employment?.jobTitle || '—'}</dd>
+            </div>
+          </dl>
+          <p className="text-xs text-gray-500 mt-3">
+            Records, reviews and hours are admin-only.
+          </p>
+        </div>
+      )}
+
+      {active === 'overview' && isAdmin && (
+        <StaffPersonOverview
+          personId={row.personId}
+          personName={row.name}
+          hours={isAdmin && row.hasPattern ? `${fmt(row.weeklyMinutes ?? 0)} / week` : null}
+          attention={attention}
+          onOpenTab={onTab}
+        />
+      )}
+
+      {active === 'employment' && (
+        isAdmin
+          ? (row.employment
+              ? (
+                <div className="space-y-6">
+                  <EmploymentSection row={row} onSaved={onSaved} onError={onError} />
+                  {/* Salary and pension: employment TERMS, so they belong here
+                      rather than with the documents on Records. */}
+                  <StaffPay personId={row.personId} personName={row.name}
+                    onSaved={onSaved} onError={onError} />
+                </div>
+              )
+              : <NotAnEmployee />)
+          : <p className="text-sm text-gray-500">Employment details are admin-only.</p>
+      )}
+
+      {active === 'records' && isAdmin && (
+        <div className="space-y-6">
+          <StaffKeyData personId={row.personId} personName={row.name} onSaved={onSaved} onError={onError} />
+          <StaffRecordFiles personId={row.personId} personName={row.name} onError={onError} />
+        </div>
+      )}
+
+      {active === 'reviews' && isAdmin && (
+        row.employment
+          ? <StaffReviews personId={row.personId} personName={row.name} people={people}
+              onSaved={onSaved} onError={onError} />
+          : <NotAnEmployee />
+      )}
+
+      {active === 'access' && (
+        <div className="space-y-6">
           <AccountSection row={row} isAdmin={isAdmin} onSaved={onSaved} onError={onError} />
           {isAdmin && <CotCardSection row={row} onSaved={onSaved} onError={onError} />}
-          {/* Deliberately NOT gated on row.employment: a contract or a
-              right-to-work check exists for somebody before their employment
-              record does, and that is exactly when it needs filing. */}
-          {isAdmin && <StaffKeyData personId={row.personId} personName={row.name} onSaved={onSaved} onError={onError} />}
-          {isAdmin && <StaffRecordFiles personId={row.personId} personName={row.name} onError={onError} />}
-          {isAdmin && (
-            row.employment
-              ? <EmploymentSection row={row} onSaved={onSaved} onError={onError} />
-              : <NotAnEmployee />
-          )}
         </div>
       )}
     </div>

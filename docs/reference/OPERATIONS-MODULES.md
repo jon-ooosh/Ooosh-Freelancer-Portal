@@ -555,6 +555,7 @@ Full ATA Carnet module replacing the Monday board + Jotform request form. Dedica
 
 **Conventions worth remembering:**
 - **Detection** must match `LIST_ID === 575 AND CATEGORY_ID === 355` (asset/sale stock-ID namespaces overlap — see Slice 1).
+- **Client-arranged carnet with Ooosh as named holder (Sep 2026):** the request form + Letter of Authorisation also work for `client_arranges` — link only ("Copy authority form link"; the `carnet_request` email is worded for us applying, so it is not sent), client-arranges terms wording, no GMR question, status not moved, `liability_until` shown on the cockpit. Also fixed the manual create, which had always 500'd (42P08 — `$2` reused as varchar + text).
 - **"We have the letter of authority"** = `job_carnets.form_submitted_at` is set (client signed). A staff-generated draft via `/generate-authority` sets `signed_authority_url` but is NOT the same as a received authority — the soft gate keys off `form_submitted_at`.
 - **Email routing:** carnet client emails go through `resolveClientEmailTarget(jobId, 'carnet_request')` → the `carnet` bucket in `email-routing.ts`. Any new carnet client template should be mapped to that bucket so the Job-View picker controls it.
 - **Return-by** = `carnet_expiry_date + 7 days` (discharge deadline), NOT the job end date. **Needed-by** = `COALESCE(carnet_start_date, out_date, job_date)`.

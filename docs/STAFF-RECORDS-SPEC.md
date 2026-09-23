@@ -387,10 +387,10 @@ rather than assuming.
 | 1 | ~~**Files + admin gate**~~ — **SHIPPED Sep 2026.** Migration 231, `routes/staff-records.ts`, `components/StaffRecordFiles.tsx` on the expandable staff row. See §12 | jon starts emptying the zip folder the day it deploys |
 | 2 | ~~**Key data**~~ — **SHIPPED Sep 2026.** Migration 232, `updateKeyData()`/`revealNiNumber()`, `components/StaffKeyData.tsx`. Medical notes still held back. See §13 | The rest of the folder |
 | 3 | ~~**`staff_tasks` + My To Do tab**~~ — **SHIPPED Sep 2026.** Migration 233, `services/staff-tasks.ts`, `pages/MyTasksPage.tsx`, 09:45 chaser. See §14 | Useful as a general to-do immediately, before reviews exist |
-| 4 | **Review record + cycle** (§5.1, §5.2, §5.4, §5.6) — split notes, per-person interval, "review due" reminder, salary link, admin UI | The full loop minus staff-facing bits; actions write `staff_tasks` rows |
-| 5 | **Staff-facing exchange** (§5.3, §5.5) — confirmation carrying prep questions, their answers, the follow-up email | The staff half |
-| 6 | **Document review cycles** (§4) — the annual DVLA check and friends | Replaces jon's memory |
-| 7 | **Retention sweeps** (§7) — absence medical detail, per-type retention — **and only then §3.2's medical notes** | Closes the GDPR item |
+| 4 | ~~**Review record + cycle**~~ — **SHIPPED Sep 2026.** Migration 234, `recordReviewOutcome()`, `components/StaffReviews.tsx`, review-due scan. See §15 | The full loop minus staff-facing bits; actions write `staff_tasks` rows |
+| 5 | ~~**Staff-facing exchange**~~ — **SHIPPED Sep 2026.** Migration 237, `services/staff-review-prep.ts`, `staff-review-followup.ts`, `pages/MyReviewPage.tsx`. See §17 | The staff half |
+| 6 | ~~**Document review cycles**~~ — **SHIPPED Sep 2026.** Migration 239, `services/staff-doc-cycles.ts`. Deliberately separate from `drivers`. See §19.1 | Replaces jon's memory |
+| 7 | ~~**Retention sweeps**~~ — **SHIPPED Sep 2026.** Migration 239, `services/staff-retention.ts`. Medical notes deliberately NOT built — see §19.3 | Closes the GDPR item |
 
 Two notes on the order:
 
@@ -771,3 +771,491 @@ isn't an employee".
 Both now distinguish the two states and say which it is. The general lesson,
 worth applying to any new fetch: **a failed load must never be able to render as
 an empty one.**
+
+---
+
+## 15. Phase 4 build log — reviews, and two chase dates (Sep 2026)
+
+Shipped, together with two date fields jon asked for while testing Phase 3.
+
+### 15.1 Reviews
+
+`staff_reviews` existed since mig 206 and nothing had ever written to it. Phase
+4 wires it up and adds what §5 settled:
+
+- **Two notes fields** (`shared_summary`, `private_notes`) — split before there
+  was any data to migrate, because it could not be retrofitted. `listReviews()`
+  takes `includePrivate` and **defaults to false**, so a caller that forgets to
+  think about it gets the safe answer. The legacy `notes` column is kept and
+  marked do-not-write; anything in it moved to the private side, since it was
+  written with no expectation of being shared.
+- **`status`** (`proposed | confirmed | completed | cancelled`) — the
+  scheduling exchange trimmed to a confirmation (§5.2). No propose/counter flow:
+  seven people once a year is a conversation.
+- **`salary_history_id`** — a review points at the `staff_salary_history` row it
+  produced rather than holding a figure. Pay is decided *after* the meeting
+  (§5.1), so the salary box lives in the **complete** step, not on the review
+  form, and the help text says the number goes to them in the follow-up.
+- **`review_interval_months`** on `staff_employment` — per-person cadence,
+  NULL inheriting `staff.review_interval_months`, the same shape
+  `entitlement_weeks` already uses. `recordReviewOutcome()` derives
+  `next_review_due` from it so "annual for most, six-monthly for a new starter"
+  needs no thought at completion time.
+- **Actions** become `staff_tasks` rows with an owner picker covering the whole
+  team, not just the reviewee — because §6.2's whole point is that "what should
+  Ooosh do differently?" produces actions the *company* owes.
+
+**The review-due scan** keys off the last completed review, falling back to
+**employment start + interval** for somebody never reviewed. That fallback is
+the important half: a person nobody has ever reviewed is exactly who a reminder
+system is for, and keying only off previous reviews would miss them forever.
+Skipped when a review is already booked, stamped once per cycle on
+`staff_employment.review_due_chased_at`, cleared whenever a review is booked or
+completed.
+
+### 15.2 A bug this introduced, caught before shipping
+
+The roster's "next review due" read `WHERE completed_at IS NULL`. Once `status`
+existed, a **cancelled** review also satisfied that — so a review somebody
+called off would have shown as permanently upcoming. Now keyed on
+`status IN ('proposed','confirmed')`.
+
+Worth noting the shape: adding a state column silently changed the meaning of
+an existing "is it finished?" test. Any `completed_at IS NULL` check is really
+asking "is this still live", and a new terminal state breaks it quietly.
+
+### 15.3 The two chase dates
+
+**Files — `expires_on`.** The expiry printed ON a document (passport, visa,
+certificate), which cannot be derived from when somebody looked at it.
+`driver-validity.ts` already splits these exactly this way
+(`passport_check_date` vs `passport_expiry`, window = the earlier of the two),
+and Phase 6 will do the same: review due = `document_date` + the type's
+interval, capped by `expires_on`. **Both are inputs** — neither is a "valid
+until" a human computes (§1.3). A 30-day nudge fires once per document, to the
+admins rather than the person, since these are records the staff member cannot
+see. Changing the expiry clears the stamp: a renewed passport is a new document.
+
+**Tasks — `next_chase_date`, and Phase 3's chaser was wrong.** It nudged
+**once, ever**. That borrowed the `rtw_chased_at` rule, which is once-only
+because a return-to-work conversation is a *one-time event* — whereas a to-do
+is an open-ended commitment, and one nudge then eternal silence is precisely
+the evaporation §6 exists to prevent. Right rule, wrong shape.
+
+So: the pipeline model (`jobs.next_chase_date`, mig 004, re-armed by
+`auto-chase-runner.ts`). Fire, then push the date forward by the interval while
+the task stays open. Defaults: the **due date** if there is one, else **today +
+14 days** — and that second case is the one that matters, because a task with
+no deadline would otherwise never resurface. NULL means never nudge;
+finishing or dropping a task clears the date.
+
+Deliberately **not** copying `jobs.chase_interval_days`. A per-row interval is
+flexibility `jobs` earned over years; here one system setting plus an editable
+date already gives per-task control.
+
+### 15.4 On migration 234 bundling three things
+
+232's lesson was "one migration, one concern", and 234 touches files, tasks and
+reviews. The line is **"related to each other"**, not "in the same file": these
+are all staff-records tables plus `staff_employment`, nothing shared, nothing
+another feature can be taken down by. 232's failure was a *core* table —
+`audit_log` — where an unrelated constraint blocked an unrelated column.
+
+---
+
+## 16. The Staff page rebuild (Sep 2026)
+
+Paused after Phase 4 at jon's call: six stacked panels per person had become a
+wall, and Phase 5 would only have made it taller. Mocked up first
+(clickable, fake data), agreed, then built.
+
+### 16.1 What was actually wrong
+
+Two problems that looked like one.
+
+**Depth.** An expanded person was Account, Company card, Key data, Private
+records, Reviews, Employment + patterns — each with its own heading, help text
+and form, stacked vertically. Every visit scrolled past five things to reach
+one, and each phase added another.
+
+**A missing axis, which was the bigger one.** Everything was organised
+*person → topic*, while nearly every real question runs *topic → person*:
+whose review is due, what is expiring, who is missing right to work. Answering
+any of those meant opening seven cards in turn.
+
+Phases 3–4's reminders partly masked this by pushing those facts at an admin.
+But a bell is a push, not something you can ask, and each fires once. §4 had
+predicted it: the staff-wide "what is expiring" view "is the bit that replaces
+jon's memory".
+
+### 16.2 One URL, two levels
+
+jon's constraint, and it was the right one: **everything stays at
+`/staff/admin`** — consolidate what exists, don't spread it thinner across more
+nav entries. So the person view is not a new route:
+`?person=<id>&tab=records`, same page, same nav.
+
+It is still a real address, which matters more than it sounds: every bell built
+in phases 3–4 pointed at `/staff/admin` bare, so "Will's review is due" dropped
+you on a list of collapsed cards to hunt through. Review-due and
+document-expiry notifications now link to the tab that answers them. **New
+bells should do the same.**
+
+### 16.3 The three surfaces, and why each is shaped as it is
+
+**Needs attention** (`services/staff-attention.ts`) — every row derived, none
+stored. Documents expiring or expired, right to work missing or lapsing, NI
+missing, reviews due, probation ending, no working pattern, unlinked logins.
+Nothing to clear by hand, so it cannot go stale or lie. Adding a source is a
+query, never a column.
+
+NI missing is deliberately `info`, not `soon`: payroll wants it but nothing
+breaks today, and an amber row for something routine teaches people to ignore
+amber.
+
+**The roster** carries *flags, not data* — two or three coloured pills per
+person, drawn from the same derived list as the panel above, so the two cannot
+disagree. Only hours and next review appear as figures, because they are the
+two things worth comparing across people.
+
+**The person view** is five tabs: Overview · Employment · Records · Reviews ·
+Access. Overview is **read-only on purpose** — most visits are to look
+something up, and the old layout charged a scroll past five forms for every
+one of them. Editing lives on the other tabs. The upload form moved behind a
+button for the same reason: you file a document once and read the list a
+hundred times.
+
+### 16.4 Two bugs caught in review, both from the same blind spot
+
+**Managers would have met a 403 dressed as a load failure.** The page is
+manager-tier for the account section, but Overview reads two admin-only
+endpoints. A manager opening anyone would have seen a red error box. They now
+get a plain facts card instead.
+
+**A deep link straight to a person showed no attention items.** The list was
+fetched inside the panel, and the panel does not render in the person view —
+so arriving from a notification, the very surface the link was for came up
+empty. The fetch moved up to the page, which is where it belonged anyway: one
+request now feeds the panel, the roster flags and the person view.
+
+Both are the same mistake: assuming the component that *displays* something is
+the right place to *load* it, without asking who else needs it and who else
+can see it.
+
+### 16.5 Shared, not duplicated
+
+"Who is due a review" now has one definition — `listReviewsDue()` in
+`staff-employment.ts` — used by both the 09:45 scan and the attention list.
+They differ only in `onlyUnchased`, because the scan nudges once per cycle
+while the page always shows. Two copies of that date arithmetic would have
+drifted, which is the failure mode CLAUDE.md's helper rule exists to stop.
+
+---
+
+## 17. Phase 5 build log — the staff-facing review (Sep 2026)
+
+Shipped. Phase 4 gave the reviewer somewhere to record a review; this gives the
+other person a part in it. Without it, what we had built was an appraisal done
+*to* somebody.
+
+### 17.1 What landed
+
+**The invite (§5.2).** Booking a review now tells the person, once, with the
+prep questions attached. §5.2 trimmed scheduling to a bare confirmation
+precisely because the value was never the scheduling — it is that this message
+carries the questions. A bell rather than a hand-rolled email, so the Step-7
+escalation scheduler turns it into email per *their* notification preferences
+instead of overriding them. `invited_at` keeps it to once: a second "you have a
+review" every time a note is edited teaches people to ignore the first.
+
+**The questions (§5.3).** Six, in `system_settings` as a JSON array, asked of
+**both sides**. Identical questions are the whole mechanism — it is what turns
+"boss delivers verdict" into "two documents compared" — so they come from one
+place, `getReviewQuestions()`.
+
+**Their answers**, stored as JSONB on the review and surfaced on the admin
+Reviews tab *above* the notes fields, because reading them before the meeting
+is the entire point of asking in advance. The review strip now says whether
+they have been told and whether they have answered.
+
+**The write-up (§5.5).** Completing a review emails them the shared summary,
+the agreed actions with owners and dates, and — if one came out of it — the new
+salary and when it starts. `follow_up_sent_at` keeps it to once, so amending a
+completed review does not re-send.
+
+That last piece is what makes §5.1 work in practice. Deciding pay after the
+conversation only feels like process rather than evasion if the figure reliably
+arrives afterwards.
+
+### 17.2 Decisions worth not re-litigating
+
+**JSONB, not a normalised answers table.** The question set is editable and
+will change between cycles. A normalised table would need a questions table,
+versioning, and a join to render a five-year-old review as it was actually
+asked. The array stores the question TEXT beside each answer, so an old review
+always reads back correctly however the current wording has moved on.
+
+**Answers are keyed by question text on the way back in**, so a reworded
+question comes back blank rather than showing an answer to a different
+question.
+
+**A bad setting can never show an empty form.** `staff.review_questions` is
+human-editable, so `getReviewQuestions()` falls back to the built-in six on
+anything unparseable, not-an-array, or empty — and keeps the good entries when
+only some are junk. Eight tests pin this down, because the person filling in an
+empty form has no way to know something is broken.
+
+**The reviewee's read is column-by-column, never `SELECT *`.** `getMyReview()`
+lists the columns it returns, so `private_notes` and `manager_prep` cannot leak
+by somebody later adding a column to the table. Given §5.4's whole argument —
+that a field which *might* be read gets self-censored into uselessness — a
+default-open read here would undo the feature, not just leak a field.
+
+**The tab only exists when there is a review.** A once-a-year thing does not
+earn permanent space beside tabs people use weekly, so `MePage` asks once and
+hides it otherwise — but always shows it when it is the tab being requested, so
+the notification's deep link can never land on a hidden tab.
+
+### 17.3 Migration numbering — it collided TWICE
+
+Written as 235. Renumbered to 236 before commit, because a parallel branch had
+taken 235 (`235_shop_stock_cache.sql`). Then renumbered again to **237** on
+merge, because the same branch had meanwhile taken 236 too
+(`236_shop_stock_scope.sql`).
+
+CLAUDE.md warns to take the next free number at *build* time. The sharper
+lesson from doing it twice in one afternoon: on an active repo the number is
+not settled until the merge, so **re-check it at merge time, not just before
+committing.** The conflict itself is harmless and exactly what you want — two
+files claiming one number is a collision git can see. What would be genuinely
+dangerous is two branches picking the same number and the conflict NOT
+surfacing, which is why the runner's hardcoded list earns its keep here: it
+makes the clash a merge conflict instead of two files quietly sorting into an
+arbitrary order.
+
+Resolved by keeping both, in order: main's `236_shop_stock_scope.sql` (already
+applied on production) stays put, and this one moves to 237. Renumbering was
+safe only because 236 had never been applied anywhere — had it run on any
+environment, the rule is a NEW migration, never a rename.
+
+---
+
+## 18. The basic employer record (Sep 2026)
+
+jon, after living with phases 1–5: *"contact details, emergency contact,
+pension, DOB, marital status… all basic stuff any employer should have."* Plus
+three gaps found in use.
+
+### 18.1 Most of that list already existed
+
+The same finding as Phase 2, for the third time. Already on `people` and NOT
+re-added: `phone`, `mobile`, `international_phone`, `home_address`,
+`date_of_birth`, `emergency_contact_*` (mig 001) and the second emergency
+contact (mig 206). They have been there since the first migration; what was
+missing was anywhere in the staff area to type them.
+
+**Genuinely missing: two.** `marital_status`, and pension.
+
+The pattern is now consistent enough to state as a rule: **when this module
+"needs a field", check `people` first.** It is the platform's oldest and widest
+table and it already carries most of what an employer record wants.
+
+Placement: personal details sit with NI and right to work on the **Records**
+tab, under "Personal & key data". Records is already the admin-only home for
+everything private we hold about somebody, field or file — a date of birth
+belongs with an NI number, not with contracted hours.
+
+### 18.2 Pension is a history, not a pair of columns
+
+`staff_pension_history`, append-only, mirroring `staff_salary_history`: a
+contribution change is a NEW ROW, never an edit. Two columns on
+`staff_employment` would keep the current figure and lose every previous one,
+which is the half that matters — auto-enrolment gives "what were they on, and
+from when" legal weight.
+
+**Opting out is a recorded state, not an absent row.** "We have no pension row
+for Sam" and "Sam opted out on 3 March" are different facts and only the second
+is evidence, so `is_member` is a column rather than membership being implied by
+a row existing.
+
+### 18.3 Three gaps found by using it
+
+**Salary had no UI at all.** `staff_salary_history` and its endpoints have
+existed since migration 206 with nothing calling them — the same shape as
+`staff_reviews` before Phase 4. Now on the Employment tab with the history and
+the change between each figure, which is what "how have salaries moved" needs.
+
+**A booked review could not be called off.** Phase 4 gave `staff_reviews` a
+`cancelled` status and no way to reach it, so jon's test review was stuck: not
+completable (it had not happened) and not removable. A "Call it off" action now
+exists on any review that is not finished. Worth noting the shape of the
+mistake — a status nothing can set is the same bug as a gate with no route
+through it, which CLAUDE.md's product policy already warns about.
+
+**Past reviews could not be recorded.** Everything assumed a review was about
+to happen, so years of history had nowhere to go. "Already happened" on the
+booking form records one as completed on its own date, and deliberately sends
+nothing: no invite for a meeting held in 2023, and no write-up email.
+
+### 18.4 What was NOT redacted, and why
+
+`marital_status` joins `PRIVATE_PERSON_FIELDS` — nothing computes from it and
+nobody outside the staff area needs it.
+
+`date_of_birth`, `home_address`, `phone` and the emergency contacts did **not**,
+despite being personal. They have been served by the general people endpoints
+since migration 001 and the driver and hire-form flows read them there
+legitimately — `driver-verification.ts` maps `date_of_birth` directly.
+Redacting them is a real question, but it is a decision about the People
+record and its consumers, not something to slip into a staff-area change. If it
+is taken up: start from `routes/people.ts`, and expect the driver flows to need
+their own read.
+
+---
+
+## 19. Phases 6 and 7 build log — cycles and retention (Sep 2026)
+
+The last two phases. Both were waiting on decisions only jon could make, and
+both decisions simplified the build rather than complicating it.
+
+### 19.1 Phase 6 was settled by NOT sharing
+
+§1.1 and §1.2 agonised over whether the staff DVLA check should read `drivers`,
+and warned that generalising `driver-validity.ts` would reproduce the bug it
+was written to end. jon cut it straight through:
+
+> "Completely ignore the driver system we have in place currently — that's for
+> verifying self-drive-hire clients. The process for staff is different, it's
+> just an annual sanity check that they're declaring everything they should."
+
+So: **same words, different people, different consequence.** The driver system
+answers "is this client insurable for this hire, today" in a 30-day window with
+a hard gate behind it. The staff system answers "have we looked at Will's
+licence this year" and nudges. Nothing in `services/staff-doc-cycles.ts` reads
+`drivers`, and `driver-validity.ts` is untouched.
+
+That is worth remembering as a general move: two features that share a noun are
+not necessarily one feature. The cheapest resolution to "how do we share this?"
+is sometimes "we don't".
+
+**The model is still inherited**, even though no code is: record the FROM date
+(`document_date`), derive when it next needs looking at. Review due =
+`document_date` + the type's interval, **capped by `expires_on`** — a passport
+running out in March does not need re-checking in June, it needs replacing in
+March. A newer document of the same type supersedes an older one, so last
+year's DVLA check goes quiet once this year's is filed.
+
+Intervals live in `staff.doc_review_intervals` (JSON, per `doc_type`, months;
+0 = never). DVLA and licence default to 12; contract to 0, because a contract
+does not expire and re-reading it annually is noise. Nine tests cover the
+parsing, on the same principle as the review questions: a staff-editable
+setting will eventually contain junk, and chasing nothing is as bad as chasing
+everything.
+
+### 19.2 Phase 7: what expires, and what must never
+
+**Absence detail** is swept automatically after 12 months, per §17 item 9 of
+the staff calendar spec. The sweep nulls `reason_category`, `notes` and the
+return-to-work narrative, stamps `detail_purged_at`, and leaves the spell.
+
+**`absence_type` SURVIVES — and the spec was wrong about this.** §7 listed the
+type as expiring. It cannot: `getSicknessMinutes()` filters on
+`absence_type = 'sickness'` and the payroll report reads it, so purging the
+type would silently zero everybody's sickness figures rather than anonymise
+them. §7 said to "verify that before relying on it" — verifying it is what
+caught this. Day rows, minutes and every ledger effect stay for the same
+reason.
+
+**Right to work is SURFACED, never swept.** jon: keep it for the whole
+employment plus two years, so the clock runs from
+`staff_employment.end_date`. It appears on the attention list once that passes;
+an admin deletes it. Three reasons not to automate: destroying evidence of a
+right-to-work check is irreversible and legally consequential, the clock
+depends on a leaving date somebody typed by hand, and CLAUDE.md's product
+policy is warnings rather than silent action.
+
+### 19.3 The medical notes field was never built — deliberately
+
+§3.2 listed a free-text "medical notes" box, held back to Phase 7 until
+retention existed. Retention now exists, and the recommendation is still
+**don't build it**.
+
+The `medical` *document type* already covers the real need: filing a sick note
+or an occupational-health letter, deliberately, with a label and a date, and
+deletable by hand. A free-text medical box on an employment record is
+special-category data with no natural expiry, no clear consumer, and nothing
+computing from it — which is exactly the shape of a field that gets filled in
+once, forgotten, and found years later in a subject access request.
+
+If it is ever wanted, it needs its own retention answer first, and that answer
+cannot be "when they leave" — medical information about a current employee has
+no natural end date while they are still employed.
+
+---
+
+## 20. Current state — read this first
+
+All seven phases shipped 21–23 Sep 2026. This section is the handover.
+
+### 20.1 What exists
+
+| Thing | Where |
+|---|---|
+| Private files about staff | `staff_record_files`, `routes/staff-records.ts`, `components/StaffRecordFiles.tsx` |
+| NI (encrypted) + right to work | on `people`, written via `updateKeyData()`, read via `StaffKeyData.tsx` |
+| Personal details (phone, address, DOB, marital, emergency) | on `people` since mig 001 — `updatePersonalDetails()` |
+| Salary + pension history | `staff_salary_history` (mig 206), `staff_pension_history` (238), `components/StaffPay.tsx` |
+| To-dos | `staff_tasks`, `services/staff-tasks.ts`, `pages/MyTasksPage.tsx` |
+| Reviews, both sides | `staff_reviews`, `staff-review-prep.ts`, `staff-review-followup.ts`, `StaffReviews.tsx`, `MyReviewPage.tsx` |
+| Document re-check cycles | `services/staff-doc-cycles.ts` |
+| Retention | `services/staff-retention.ts` |
+| "Needs attention" | `services/staff-attention.ts` — THE cross-person view |
+| The page | `/staff/admin`, `?person=<id>&tab=…` |
+| Daily reminders | one 09:45 cron in `config/scheduler.ts`, five independently-caught scans |
+
+Migrations: **231, 232, 233, 234, 236(*), 237, 238, 239**.
+(*) 235 and 236 were taken by the parallel shop-sales branch — see §17.3.
+
+### 20.2 What is deliberately NOT built
+
+Do not "finish" these without re-reading the reasoning:
+
+- **A free-text medical notes field** (§19.3). The `medical` document type
+  covers the real need; the field has no natural expiry.
+- **Any link between the staff document check and `drivers`** (§19.1). Same
+  words, different people.
+- **Staff seeing their own records** (§2). No for v1, except their own review
+  and their own to-dos. The gate is one constant, `STAFF_ADMIN_ROLES`.
+- **Redaction of `date_of_birth` / `home_address` / `phone`** from the general
+  people endpoints (§18.4). Real question, but it is a People-record decision
+  and the driver flows read them there legitimately.
+- **A propose/counter review scheduling exchange** (§5.2). Trimmed to a
+  confirmation on purpose.
+- **Per-task chase intervals** like `jobs.chase_interval_days` (§15.3). One
+  setting plus an editable date is enough for seven people.
+
+### 20.3 Open questions
+
+1. **Right-to-work retention is set to employment + 2 years** on jon's word.
+   Worth one confirmation from an HR advisor — it is the only setting here with
+   a legal consequence for being wrong.
+2. **Review question wording** (§5.3) — jon intends to rewrite the six. Purely
+   a `system_settings` edit, no code.
+3. **`staff.review_interval_months` is 12 for everyone** until somebody gets a
+   per-person override on the Employment tab.
+
+### 20.4 The four lessons this module kept re-learning
+
+Stated plainly because each one cost real work:
+
+1. **Check whether it already exists.** Right to work, NI, emergency contacts,
+   phone, DOB, home address, `staff_reviews`, `staff_salary_history` — every
+   one was already there and needed surfacing, not building. Three separate
+   phases rediscovered this.
+2. **Check where the gate actually is, not where the data sits.** Twice,
+   sensitive columns were placed thoughtfully and served by an endpoint that
+   did `SELECT *` behind a wider role (§12.1, §13.1).
+3. **A failed load must never render as an empty one** (§14.1). Three 500s
+   looked calm on screen for a whole testing round.
+4. **One migration, one concern** (§13.6). A feature's schema change sharing a
+   transaction with a core-table constraint took a shipped feature down.

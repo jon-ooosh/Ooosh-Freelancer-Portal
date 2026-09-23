@@ -124,17 +124,28 @@ somewhere the rules don't cover.
 
 `docs/*-SPEC.md` are the hand-written per-feature specs; several rules point at them.
 
-**Part built:** `docs/STAFF-RECORDS-SPEC.md` — private staff files and key data
-(admin-only, some encrypted), document review cycles, periodic staff reviews, and the
-`staff_tasks` / "My To Do" surface their actions land on. **Phases 1–3 (files, key data,
-`staff_tasks` + My To Do) shipped Sep 2026**; phases 4–7 are not built. Its §1 lists what already exists and must not be
-rebuilt — including the DVLA check, where the obvious reuse is a trap — and §8 is the
-agreed build order with the shipped phases marked. Read both before designing.
+**BUILT, Sep 2026:** `docs/STAFF-RECORDS-SPEC.md` — the private staff area. **All
+seven phases shipped**: files, key data, `staff_tasks` + "My To Do", reviews, the
+staff-facing review, document review cycles, retention. §20 is the current state and
+the short list of what is deliberately NOT built. Read it before changing anything here.
+
+**The staff DVLA/document check has NOTHING to do with `drivers`.** jon's decision,
+Sep 2026: the `drivers` machinery verifies self-drive-hire CLIENTS (30-day
+insurability, `services/driver-validity.ts`); the staff one is an annual sanity check
+on an employee (`services/staff-doc-cycles.ts`). Same words, different people, different
+consequence. Never merge them.
 
 **`staff_record_files` objects live under the `staff-records/` R2 prefix, and that
 prefix is the ONLY one `GET /api/files/download` role-gates.** Every other prefix it
 serves is readable by any authenticated caller, freelancers included. Never file
 anything private under `files/`.
+
+**The Staff page is one URL, two levels.** `/staff/admin` is the roster; a person opens
+in place as `?person=<id>&tab=overview|employment|records|reviews|access`. The person is
+in the URL rather than in component state so a notification can deep-link to the tab
+that answers it — new bells should link that way, not at the bare page. The page is
+manager-tier but Records, Reviews and the Overview's data are admin-only, so anything
+added to those tabs must degrade for a manager rather than 403.
 
 ---
 
@@ -183,6 +194,12 @@ existing definition:
 | Verifying an API key | `middleware/api-key.ts` |
 | What must never leave a general `people` response? | `services/people-private-fields.ts` |
 | Does this person own this task? | `services/staff-tasks.ts` `assertCanTouch()` |
+| Who is due a staff review? | `services/staff-employment.ts` `listReviewsDue()` |
+| What needs an admin's attention on Staff? | `services/staff-attention.ts` |
+| What does a reviewee get to see? | `services/staff-review-prep.ts` `getMyReview()` |
+| Does this module need a new person field? | Check `people` first — it already has phone, mobile, home address, DOB and both emergency contacts (mig 001) |
+| When is a STAFF document due a re-check? | `services/staff-doc-cycles.ts` (never `driver-validity.ts` — different people) |
+| What staff data has expired? | `services/staff-retention.ts` |
 
 Frontend display helpers with the same status: `lib/roles.ts`, `lib/driverStatus.ts`,
 `lib/jobOrgName.ts`, `lib/vehiclePrep.ts`, `lib/preauth.ts`, `lib/revisitDate.ts`,
@@ -271,7 +288,7 @@ chase alerts 08:10 · auto-chase runner 08:10 · lock-up chaser 08:45 · staff t
 08:45 · return-to-work chase 08:50 · stale-enquiry
 auto-lose 09:00 · freelancer offer chase 09:05 · carnet forms 09:15 · referral safety-net 09:18 · storage reminders
 09:20 · holding reminders 09:25 · close-out chase 09:30 · staff documents 09:35 ·
-pre-auth expiry 09:40 · to-do chase 09:45 · Stripe pre-auth discovery 09:50 · year-end cash-out reminder
+pre-auth expiry 09:40 · staff records 09:45 (to-dos, document expiry, document re-checks, reviews due, absence-detail purge) · Stripe pre-auth discovery 09:50 · year-end cash-out reminder
 09:55 (December + January) · company-days prompt 09:58 (November) · OOH reminders 10:00 ·
 HireHop sync every 30 min · sanity scanners every 15 min · notification escalation
 every 15 min · Gmail ingestion every 10 min.

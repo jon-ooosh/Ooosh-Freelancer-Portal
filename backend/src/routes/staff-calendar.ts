@@ -24,7 +24,8 @@ import {
 } from '../services/staff-day-status';
 import {
   STAFF_ADMIN_ROLES, upsertEmployment, getEmployeeRecord, listEmployees, getStaffRoster,
-  updateKeyData, revealNiNumber,
+  updateKeyData, revealNiNumber, recordReviewOutcome,
+  listPensionHistory, addPensionRecord, updatePersonalDetails,
   listUnlinkedLogins, linkLoginToPerson,
   createPattern, listPatterns, createExceptions, listExceptions,
   addSalaryEntry, listSalaryHistory, upsertReview, listReviews,
@@ -1204,6 +1205,19 @@ router.get('/employees', adminOnly, async (_req: AuthRequest, res: Response) => 
   }
 });
 
+// GET /api/staff-calendar/attention
+// The Staff page's "needs attention" list — every row derived, nothing stored.
+// See services/staff-attention.ts for why this surface exists at all.
+router.get('/attention', adminOnly, async (_req: AuthRequest, res: Response) => {
+  try {
+    const { getStaffAttention } = await import('../services/staff-attention');
+    res.json({ data: await getStaffAttention() });
+  } catch (err) {
+    console.error('[staff-calendar] attention error:', err);
+    res.status(500).json({ error: 'Failed to load the attention list' });
+  }
+});
+
 // GET /api/staff-calendar/employees/:personId
 router.get('/employees/:personId', adminOnly, async (req: AuthRequest, res: Response) => {
   try {
@@ -1213,6 +1227,136 @@ router.get('/employees/:personId', adminOnly, async (req: AuthRequest, res: Resp
   } catch (err) {
     console.error('[staff-calendar] employee error:', err);
     res.status(500).json({ error: 'Failed to load employee' });
+  }
+});
+
+// ── My review — the staff-facing half (spec §5.3) ───────────────────────────
+// NOT adminOnly: this is the one part of the staff-records module the reviewee
+// themselves uses. Ownership is enforced in the service against person_id, and
+// the read selects column by column so private_notes and manager_prep cannot
+// leak by being added to the table later.
+
+// GET /api/staff-calendar/me/review
+router.get('/me/review', async (req: AuthRequest, res: Response) => {
+  try {
+    const personId = await personIdForUser(req.user!.id);
+    if (!personId) { res.json({ data: null, questions: [], linked: false }); return; }
+    const { getMyReview, getReviewQuestions } = await import('../services/staff-review-prep');
+    const [review, questions] = await Promise.all([getMyReview(personId), getReviewQuestions()]);
+    res.json({ data: review, questions, linked: true });
+  } catch (err) {
+    console.error('[staff-calendar] my review error:', err);
+    res.status(500).json({ error: 'Failed to load your review' });
+  }
+});
+
+// POST /api/staff-calendar/me/review/:reviewId/answers
+router.post('/me/review/:reviewId/answers', async (req: AuthRequest, res: Response) => {
+  const schema = z.object({
+    answers: z.array(z.object({ q: z.string().max(500), a: z.string().max(10000) })).max(40),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
+  try {
+    const personId = await personIdForUser(req.user!.id);
+    if (!personId) { res.status(400).json({ error: 'Your login is not linked to a person record' }); return; }
+    const { submitSelfAssessment } = await import('../services/staff-review-prep');
+    const data = await submitSelfAssessment(req.params.reviewId as string, personId, parsed.data.answers);
+    res.json({ data });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to save your answers';
+    res.status(msg === 'Review not found' ? 404 : 400).json({ error: msg });
+  }
+});
+
+// GET /api/staff-calendar/review-questions — the same set, for the admin side
+router.get('/review-questions', adminOnly, async (_req: AuthRequest, res: Response) => {
+  try {
+    const { getReviewQuestions } = await import('../services/staff-review-prep');
+    res.json({ data: await getReviewQuestions() });
+  } catch (err) {
+    console.error('[staff-calendar] review questions error:', err);
+    res.status(500).json({ error: 'Failed to load the questions' });
+  }
+});
+
+// POST /api/staff-calendar/employees/:personId/reviews/:reviewId/prep
+router.post('/employees/:personId/reviews/:reviewId/prep', adminOnly, async (req: AuthRequest, res: Response) => {
+  const schema = z.object({
+    answers: z.array(z.object({ q: z.string().max(500), a: z.string().max(10000) })).max(40),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
+  try {
+    const { saveManagerPrep } = await import('../services/staff-review-prep');
+    const data = await saveManagerPrep(
+      req.params.reviewId as string, req.params.personId as string, parsed.data.answers);
+    res.json({ data });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to save';
+    res.status(msg === 'Review not found' ? 404 : 400).json({ error: msg });
+  }
+});
+
+// ── Personal details (spec §18.1) ───────────────────────────────────────────
+// These columns have been on `people` since migration 001 and were simply
+// never editable from the staff area. A write path, not new storage.
+const personalSchema = z.object({
+  phone: z.string().max(50).nullish(),
+  mobile: z.string().max(50).nullish(),
+  internationalPhone: z.string().max(50).nullish(),
+  homeAddress: z.string().max(2000).nullish(),
+  dateOfBirth: z.union([dateStr, z.literal('')]).nullish(),
+  maritalStatus: z.string().max(40).nullish(),
+  emergencyContactName: z.string().max(255).nullish(),
+  emergencyContactPhone: z.string().max(50).nullish(),
+  emergencyContactRelationship: z.string().max(100).nullish(),
+  emergencyContact2Name: z.string().max(255).nullish(),
+  emergencyContact2Phone: z.string().max(50).nullish(),
+  emergencyContact2Relationship: z.string().max(100).nullish(),
+});
+
+// PUT /api/staff-calendar/employees/:personId/personal
+router.put('/employees/:personId/personal', adminOnly, async (req: AuthRequest, res: Response) => {
+  const parsed = personalSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
+  try {
+    const rec = await updatePersonalDetails(req.params.personId as string, parsed.data);
+    res.json({ data: rec });
+  } catch (err) {
+    console.error('[staff-calendar] personal details error:', err);
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to save' });
+  }
+});
+
+// ── Pension (spec §18.2) ────────────────────────────────────────────────────
+// Append-only, like salary: a change is a new row so the history survives.
+router.get('/employees/:personId/pension', adminOnly, async (req: AuthRequest, res: Response) => {
+  try {
+    res.json({ data: await listPensionHistory(req.params.personId as string) });
+  } catch (err) {
+    console.error('[staff-calendar] pension error:', err);
+    res.status(500).json({ error: 'Failed to load pension history' });
+  }
+});
+
+router.post('/employees/:personId/pension', adminOnly, async (req: AuthRequest, res: Response) => {
+  const schema = z.object({
+    isMember: z.boolean(),
+    schemeName: z.string().max(200).nullish(),
+    employeePercent: z.number().min(0).max(100).nullish(),
+    employerPercent: z.number().min(0).max(100).nullish(),
+    effectiveFrom: dateStr,
+    reason: z.string().max(500).nullish(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
+  try {
+    const row = await addPensionRecord(req.params.personId as string, parsed.data, req.user!.id);
+    res.status(201).json({ data: row });
+  } catch (err) {
+    console.error('[staff-calendar] add pension error:', err);
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to record the pension change' });
   }
 });
 
@@ -1283,6 +1427,9 @@ const employmentSchema = z.object({
   notes: z.string().nullish(),
   preferredName: z.string().max(100).nullish(),
   pronouns: z.string().max(40).nullish(),
+  // Per-person review cadence (spec §5.6). NULL inherits the company setting,
+  // exactly as bankHolidayPolicy and entitlementWeeks already do.
+  reviewIntervalMonths: z.number().int().min(1).max(60).nullish(),
 });
 
 // PUT /api/staff-calendar/employees/:personId
@@ -1423,9 +1570,11 @@ router.post('/employees/:personId/salary', adminOnly, async (req: AuthRequest, r
   }
 });
 
+// Admin surface, so includePrivate = true. Anything staff-facing must call
+// listReviews() without it — private_notes never leaves the server otherwise.
 router.get('/employees/:personId/reviews', adminOnly, async (req: AuthRequest, res: Response) => {
   try {
-    res.json({ data: await listReviews(req.params.personId as string) });
+    res.json({ data: await listReviews(req.params.personId as string, true) });
   } catch (err) {
     console.error('[staff-calendar] reviews error:', err);
     res.status(500).json({ error: 'Failed to load reviews' });
@@ -1437,21 +1586,52 @@ router.post('/employees/:personId/reviews', adminOnly, async (req: AuthRequest, 
     id: z.string().uuid().nullish(),
     reviewType: z.enum(['quarterly', 'annual', 'probation', 'ad_hoc']).optional(),
     scheduledFor: dateStr,
+    status: z.enum(['proposed', 'confirmed', 'completed', 'cancelled']).optional(),
     completedAt: z.string().nullish(),
-    notes: z.string().nullish(),
-    outcome: z.string().nullish(),
+    sharedSummary: z.string().max(20000).nullish(),
+    privateNotes: z.string().max(20000).nullish(),
+    outcome: z.string().max(4000).nullish(),
     nextReviewDue: dateStr.nullish(),
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
   try {
-    const { id, ...rest } = parsed.data;
-    const row = await upsertReview(id ?? null, req.params.personId as string, rest, req.user!.id);
-    if (!row) { res.status(404).json({ error: 'Review not found' }); return; }
+    const { id, ...input } = parsed.data;
+    const row = await upsertReview(id ?? null, req.params.personId as string, input, req.user!.id);
     res.json({ data: row });
   } catch (err) {
     console.error('[staff-calendar] review error:', err);
     res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to save the review' });
+  }
+});
+
+// POST /api/staff-calendar/employees/:personId/reviews/:reviewId/complete
+// Stamps the review, derives when the next one falls due from the person's own
+// cadence, and — when a rise came out of it — writes the salary row and links
+// the two. Pay is decided AFTER the meeting (spec §5.1), which is why it
+// arrives here rather than on the review form.
+router.post('/employees/:personId/reviews/:reviewId/complete', adminOnly, async (req: AuthRequest, res: Response) => {
+  const schema = z.object({
+    sharedSummary: z.string().max(20000).nullish(),
+    privateNotes: z.string().max(20000).nullish(),
+    outcome: z.string().max(4000).nullish(),
+    newSalary: z.number().min(0).max(10_000_000).nullish(),
+    salaryEffectiveFrom: dateStr.nullish(),
+    salaryReason: z.string().max(500).nullish(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
+  try {
+    const row = await recordReviewOutcome(
+      req.params.reviewId as string,
+      req.params.personId as string,
+      parsed.data,
+      req.user!.id
+    );
+    res.json({ data: row });
+  } catch (err) {
+    console.error('[staff-calendar] review complete error:', err);
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to complete the review' });
   }
 });
 

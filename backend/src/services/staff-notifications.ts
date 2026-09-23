@@ -751,42 +751,59 @@ export async function runCompanyDaysReview(today = new Date()): Promise<CompanyD
   return { sent: true, year: nextYear, recurring: recurring.map(r => r.label), oneOffs };
 }
 
-// ── My To Do: overdue task chase ────────────────────────────────────────────
+// ── Staff records: the daily chases ─────────────────────────────────────────
 
 /**
- * One nudge per overdue task, to the person who owns it.
+ * My To Do — nudge about an outstanding task, and RE-ARM.
  *
- * Once, not daily — `chased_at` records that it fired, the same lesson as
- * `rtw_chased_at` (mig 214). A list that nags every morning is a list people
- * stop reading, and the whole point of §6 is that these DON'T get ignored.
- * Re-dating a task clears the stamp (services/staff-tasks.ts), so a genuinely
- * renewed promise earns a fresh chase.
+ * Phase 3 shipped this as a one-shot stamp and that was wrong. `rtw_chased_at`
+ * is once-only because a return-to-work conversation is a one-time event; a
+ * to-do is an open-ended commitment, and one nudge followed by eternal silence
+ * is exactly the evaporation spec §6 exists to prevent.
  *
- * Bell only. The Step-7 escalation scheduler turns it into an email per the
- * recipient's own notification preferences, so nothing is hand-rolled here.
+ * So this follows the pipeline chaser instead (services/auto-chase-runner.ts):
+ * fire when `next_chase_date` comes round, then push it forward by the
+ * interval while the task stays open. NULL means never — a someday-maybe item
+ * opts out, and finishing or dropping a task clears the date entirely.
+ *
+ * Bell only. The Step-7 escalation scheduler turns it into email per the
+ * recipient's own preferences, so nothing is hand-rolled here.
  */
 export async function runTaskChase(): Promise<{ chased: number }> {
+  const { getTaskChaseDays } = await import('./staff-settings');
+  const intervalDays = await getTaskChaseDays();
+
   const due = await query(
     `SELECT t.id, t.title, t.due_date::text AS due_date, u.id AS user_id
        FROM staff_tasks t
        JOIN users u ON u.person_id = t.person_id AND u.is_active = true
       WHERE t.status = 'open'
-        AND t.chased_at IS NULL
-        AND t.due_date IS NOT NULL
-        AND t.due_date < CURRENT_DATE`
+        AND t.next_chase_date IS NOT NULL
+        AND t.next_chase_date <= CURRENT_DATE`
   );
 
   let chased = 0;
   for (const row of due.rows) {
-    // Stamp FIRST, then notify: a duplicate nudge is worse than a missed one,
-    // and this runs daily so a miss self-corrects only by never firing again.
+    // Re-arm FIRST. A duplicate nudge tomorrow is worse than a missed one
+    // today, and this runs daily so the cadence self-corrects either way.
     // Same order as the staff-documents reminders.
-    await query('UPDATE staff_tasks SET chased_at = NOW() WHERE id = $1', [row.id]);
+    await query(
+      `UPDATE staff_tasks
+          SET chased_at = NOW(),
+              next_chase_date = (CURRENT_DATE + ($2 || ' days')::interval)::date
+        WHERE id = $1`,
+      [row.id, String(intervalDays)]
+    );
+    const when = row.due_date
+      ? (row.due_date < new Date().toISOString().slice(0, 10)
+          ? `was due ${fmtDate(row.due_date)}`
+          : `is due ${fmtDate(row.due_date)}`)
+      : 'has no date on it';
     await notify(
       row.user_id,
-      'staff_task_overdue',
-      'A to-do is overdue',
-      `“${esc(row.title)}” was due ${fmtDate(row.due_date)}.`,
+      'staff_task_due',
+      'A to-do needs you',
+      `“${esc(row.title)}” ${when}.`,
       'staff_tasks',
       row.id,
       '/me?tab=todo',
@@ -796,5 +813,187 @@ export async function runTaskChase(): Promise<{ chased: number }> {
   }
 
   if (chased) console.log(`[staff-notifications] task chase: nudged ${chased}`);
+  return { chased };
+}
+
+/**
+ * A staff document is about to expire — passport, visa, certificate.
+ *
+ * Reads `expires_on`, the expiry printed ON the document (mig 234), NOT a
+ * derived review window. The derived kind — "we want a new DVLA check every
+ * twelve months" — is Phase 6 and deliberately separate: they answer different
+ * questions and must not be collapsed into one rule (spec §1.2).
+ *
+ * Once per document, stamped. Changing the expiry clears the stamp, because a
+ * renewed passport is a new document.
+ *
+ * Goes to the admins, not the person: these are records WE hold and the
+ * staff member cannot see them.
+ */
+export async function runDocumentExpiryChase(): Promise<{ chased: number }> {
+  const { getDocumentExpiryLeadDays } = await import('./staff-settings');
+  const lead = await getDocumentExpiryLeadDays();
+
+  const due = await query(
+    `SELECT f.id, f.label, f.expires_on::text AS expires_on, f.person_id,
+            NULLIF(TRIM(COALESCE(p.preferred_name, p.first_name, '') || ' ' ||
+                        COALESCE(p.last_name, '')), '') AS person_name
+       FROM staff_record_files f
+       JOIN people p ON p.id = f.person_id
+      WHERE f.deleted_at IS NULL
+        AND f.expires_on IS NOT NULL
+        AND f.expiry_chased_at IS NULL
+        AND f.expires_on <= (CURRENT_DATE + ($1 || ' days')::interval)::date`,
+    [String(lead)]
+  );
+  if (!due.rows.length) return { chased: 0 };
+
+  const admins = await approverUserIds();
+  let chased = 0;
+  for (const row of due.rows) {
+    await query('UPDATE staff_record_files SET expiry_chased_at = NOW() WHERE id = $1', [row.id]);
+    const expired = row.expires_on < new Date().toISOString().slice(0, 10);
+    for (const admin of admins) {
+      await notify(
+        admin.id,
+        'staff_document_expiring',
+        expired ? 'A staff document has expired' : 'A staff document is expiring',
+        `${esc(row.person_name || 'Somebody')}’s “${esc(row.label)}” ` +
+        `${expired ? 'expired' : 'expires'} ${fmtDate(row.expires_on)}.`,
+        'staff_record_files',
+        row.id,
+        `${STAFF_URL}?person=${row.person_id}&tab=records`,
+        expired ? 'high' : 'normal'
+      );
+    }
+    chased++;
+  }
+
+  console.log(`[staff-notifications] document expiry: flagged ${chased}`);
+  return { chased };
+}
+
+/**
+ * Somebody's review is coming round (spec §5.6).
+ *
+ * Cadence is per person — `staff_employment.review_interval_months`, falling
+ * back to the company setting, the same shape `entitlement_weeks` already uses.
+ *
+ * Due FROM: the last completed review's `next_review_due` if it has one, else
+ * the completion date plus the interval, else — for somebody never reviewed —
+ * their employment start date plus the interval. That last case is the one
+ * that matters: a person nobody has ever reviewed is exactly who a reminder
+ * system is for, and keying only off previous reviews would miss them forever.
+ *
+ * Skipped when a review is already booked (status proposed/confirmed): being
+ * told to arrange something already in the diary is noise. One nudge per
+ * cycle, stamped on staff_employment and cleared when a review is booked or
+ * completed.
+ */
+export async function runReviewDueScan(): Promise<{ flagged: number }> {
+  const { getReviewLeadDays } = await import('./staff-settings');
+  const { listReviewsDue } = await import('./staff-employment');
+  const lead = await getReviewLeadDays();
+
+  // THE definition lives in staff-employment.ts so this scan and the Staff
+  // page's attention list cannot drift. onlyUnchased keeps this to one nudge
+  // per person per cycle; the page wants them all, chased or not.
+  const due = await listReviewsDue({ onlyUnchased: true, withinDays: lead });
+  if (!due.length) return { flagged: 0 };
+
+  const admins = await approverUserIds();
+  let flagged = 0;
+  for (const row of due) {
+    await query(
+      'UPDATE staff_employment SET review_due_chased_at = NOW() WHERE person_id = $1',
+      [row.person_id]
+    );
+    for (const admin of admins) {
+      await notify(
+        admin.id,
+        'staff_review_due',
+        'A staff review is due',
+        `${esc(row.person_name || 'Somebody')}’s review is due ${fmtDate(row.due_on)}. ` +
+        'Agree a date with them, then record it on the Staff page.',
+        'people',
+        row.person_id,
+        `${STAFF_URL}?person=${row.person_id}&tab=reviews`,
+        'normal'
+      );
+    }
+    flagged++;
+  }
+
+  if (flagged) console.log(`[staff-notifications] review due: flagged ${flagged}`);
+  return { flagged };
+}
+
+/**
+ * "Your review is booked" — to the person being reviewed, with the prep
+ * questions attached (spec §5.2/§5.3).
+ *
+ * Bell rather than a hand-rolled email: the Step-7 escalation scheduler turns
+ * it into email per the recipient's own preferences, so this respects whatever
+ * they have chosen instead of overriding it.
+ *
+ * Called once per review, from sendReviewInvite(), which owns the stamp that
+ * keeps it once.
+ */
+export async function notifyStaffReviewBooked(
+  userId: string, reviewId: string, scheduledFor: string
+): Promise<void> {
+  await notify(
+    userId,
+    'staff_review_booked',
+    'Your review is booked',
+    `${fmtDate(scheduledFor)}. There are a few questions to think about beforehand — ` +
+    'have a look when you get a minute, and I will have answered the same ones.',
+    'staff_reviews',
+    reviewId,
+    '/me?tab=review',
+    'normal'
+  );
+}
+
+
+/**
+ * Documents due a re-check on their cycle (spec §4, Phase 6).
+ *
+ * The OTHER clock from runDocumentExpiryChase: that one watches a document's
+ * own printed expiry, this one watches "it has been a year, look at it again".
+ * Separate stamps so a passport can be both nearing expiry and due a re-check
+ * without one silencing the other.
+ *
+ * Nothing here touches the driver system — a staff DVLA check is its own
+ * filed document, by jon's decision (spec §19.1).
+ */
+export async function runDocumentReviewChase(): Promise<{ chased: number }> {
+  const { getDocumentExpiryLeadDays } = await import('./staff-settings');
+  const { listDocsDueReview, markDocChased } = await import('./staff-doc-cycles');
+  const lead = await getDocumentExpiryLeadDays();
+
+  const due = await listDocsDueReview({ onlyUnchased: true, withinDays: lead });
+  if (!due.length) return { chased: 0 };
+
+  const admins = await approverUserIds();
+  let chased = 0;
+  for (const doc of due) {
+    await markDocChased(doc.id);
+    for (const admin of admins) {
+      await notify(
+        admin.id,
+        'staff_document_review_due',
+        'A staff document needs re-checking',
+        `${esc(doc.person_name || 'Somebody')}\u2019s \u201c${esc(doc.label)}\u201d was dated ` +
+        `${fmtDate(doc.document_date)} and is due a re-check ${fmtDate(doc.due_on)}.`,
+        'staff_record_files',
+        doc.id,
+        `${STAFF_URL}?person=${doc.person_id}&tab=records`,
+        'normal'
+      );
+    }
+    chased++;
+  }
+  console.log(`[staff-notifications] document review: flagged ${chased}`);
   return { chased };
 }

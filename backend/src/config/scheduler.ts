@@ -76,6 +76,34 @@ export function startScheduler() {
     console.log('Scheduler: Backup retention sweep scheduled daily at 02:30');
   }
 
+  // ── Shop sale-stock catalogue mirror ──────────────────────────────────
+  // Keeps `shop_stock_cache` fresh so the till never calls HireHop to search or
+  // price an item (docs/SHOP-SALES-SPEC.md §10). A few HireHop calls per refresh
+  // at 'low' priority, so it yields to anything user-facing.
+  if (!isHireHopConfigured()) {
+    console.log('Scheduler: HireHop not configured — shop stock mirror disabled');
+  } else {
+    const refreshShopStock = async (reason: string) => {
+      try {
+        const { refreshShopStockCache } = await import('../services/shop-stock');
+        const r = await refreshShopStockCache();
+        console.log(`Scheduler: shop stock mirror (${reason}) — ${r.upserted} items, ${r.pages} page(s), ${r.retired} retired`);
+      } catch (err) {
+        // Never throw out of a scheduled task: a HireHop wobble must not take
+        // the scheduler down, and the previous catalogue is still serving.
+        console.error(`Scheduler: shop stock mirror (${reason}) failed:`, err instanceof Error ? err.message : err);
+      }
+    };
+
+    // Every 15 minutes. Shelf counts are advisory, so this is deliberately not
+    // chasing real-time — the till labels how stale the number is.
+    cron.schedule('*/15 * * * *', () => { void refreshShopStock('scheduled'); });
+
+    // And once shortly after boot, so a restart doesn't leave the till with an
+    // empty (or 15-minute-stale) catalogue until the next tick.
+    setTimeout(() => { void refreshShopStock('startup'); }, 20_000);
+  }
+
   // ── HireHop Job Sync ──────────────────────────────────────────────────
   if (!isHireHopConfigured()) {
     console.log('Scheduler: HireHop not configured — job sync disabled');
@@ -1071,23 +1099,56 @@ export function startScheduler() {
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: Return-to-work chase scheduled daily at 08:50 Europe/London');
 
-  // ── My To Do: overdue task chase (staff records spec §6) ──────────────────
+  // ── Staff records daily reminders (spec §5, §6) ───────────────────────────
   // Daily at 09:45 Europe/London, in the 09:00–10:00 reminder block between
   // the pre-auth expiry sweep (09:40) and Stripe discovery (09:50).
   //
-  // ONCE per task, not every morning — chased_at records that it fired, same
-  // rule as the return-to-work chase above. Re-dating a task clears the stamp,
-  // so a renewed promise earns a fresh nudge.
+  // Three scans in ONE cron entry rather than three: they share a block, they
+  // are all cheap, and three more entries in a list this long is how a
+  // scheduler becomes unreadable. Each is independently try/caught so one
+  // failing cannot silence the other two.
+  //
+  //   tasks     — nudge, then RE-ARM next_chase_date (pipeline model)
+  //   documents — a passport/visa/certificate expiring, once per document
+  //   reviews   — somebody's review falling due, once per cycle, to admins
   cron.schedule('45 9 * * *', async () => {
+    const notifications = await import('../services/staff-notifications');
     try {
-      const { runTaskChase } = await import('../services/staff-notifications');
-      const r = await runTaskChase();
+      const r = await notifications.runTaskChase();
       console.log(`Scheduler: To-do chase — ${r.chased} nudged`);
     } catch (err) {
       console.error('Scheduler: To-do chase failed:', err);
     }
+    try {
+      const r = await notifications.runDocumentExpiryChase();
+      console.log(`Scheduler: Staff document expiry — ${r.chased} flagged`);
+    } catch (err) {
+      console.error('Scheduler: Staff document expiry failed:', err);
+    }
+    try {
+      const r = await notifications.runReviewDueScan();
+      console.log(`Scheduler: Staff reviews due — ${r.flagged} flagged`);
+    } catch (err) {
+      console.error('Scheduler: Staff review due scan failed:', err);
+    }
+    try {
+      const r = await notifications.runDocumentReviewChase();
+      console.log(`Scheduler: Staff document re-checks — ${r.chased} flagged`);
+    } catch (err) {
+      console.error('Scheduler: Staff document review chase failed:', err);
+    }
+    // Retention. Last in the block, and independently caught: a purge that
+    // fails must not stop the nudges, and a nudge that fails must not stop
+    // the purge — this one has a legal reason to run.
+    try {
+      const { runAbsenceDetailPurge } = await import('../services/staff-retention');
+      const r = await runAbsenceDetailPurge();
+      console.log(`Scheduler: Absence detail purge — ${r.purged} spell(s)`);
+    } catch (err) {
+      console.error('Scheduler: Absence detail purge failed:', err);
+    }
   }, { timezone: 'Europe/London' });
-  console.log('Scheduler: To-do overdue chase scheduled daily at 09:45 Europe/London');
+  console.log('Scheduler: Staff records reminders scheduled daily at 09:45 Europe/London');
 
   // ── Freelancer yard-day offer chase (spec §9.4) ───────────────────────────
   // Daily at 09:05 Europe/London — after the 09:00 cluster, before the carnet
