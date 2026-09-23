@@ -388,7 +388,7 @@ rather than assuming.
 | 2 | ~~**Key data**~~ — **SHIPPED Sep 2026.** Migration 232, `updateKeyData()`/`revealNiNumber()`, `components/StaffKeyData.tsx`. Medical notes still held back. See §13 | The rest of the folder |
 | 3 | ~~**`staff_tasks` + My To Do tab**~~ — **SHIPPED Sep 2026.** Migration 233, `services/staff-tasks.ts`, `pages/MyTasksPage.tsx`, 09:45 chaser. See §14 | Useful as a general to-do immediately, before reviews exist |
 | 4 | ~~**Review record + cycle**~~ — **SHIPPED Sep 2026.** Migration 234, `recordReviewOutcome()`, `components/StaffReviews.tsx`, review-due scan. See §15 | The full loop minus staff-facing bits; actions write `staff_tasks` rows |
-| 5 | **Staff-facing exchange** (§5.3, §5.5) — confirmation carrying prep questions, their answers, the follow-up email | The staff half |
+| 5 | ~~**Staff-facing exchange**~~ — **SHIPPED Sep 2026.** Migration 237, `services/staff-review-prep.ts`, `staff-review-followup.ts`, `pages/MyReviewPage.tsx`. See §17 | The staff half |
 | 6 | **Document review cycles** (§4) — the annual DVLA check and friends | Replaces jon's memory |
 | 7 | **Retention sweeps** (§7) — absence medical detail, per-type retention — **and only then §3.2's medical notes** | Closes the GDPR item |
 
@@ -949,3 +949,91 @@ can see it.
 They differ only in `onlyUnchased`, because the scan nudges once per cycle
 while the page always shows. Two copies of that date arithmetic would have
 drifted, which is the failure mode CLAUDE.md's helper rule exists to stop.
+
+---
+
+## 17. Phase 5 build log — the staff-facing review (Sep 2026)
+
+Shipped. Phase 4 gave the reviewer somewhere to record a review; this gives the
+other person a part in it. Without it, what we had built was an appraisal done
+*to* somebody.
+
+### 17.1 What landed
+
+**The invite (§5.2).** Booking a review now tells the person, once, with the
+prep questions attached. §5.2 trimmed scheduling to a bare confirmation
+precisely because the value was never the scheduling — it is that this message
+carries the questions. A bell rather than a hand-rolled email, so the Step-7
+escalation scheduler turns it into email per *their* notification preferences
+instead of overriding them. `invited_at` keeps it to once: a second "you have a
+review" every time a note is edited teaches people to ignore the first.
+
+**The questions (§5.3).** Six, in `system_settings` as a JSON array, asked of
+**both sides**. Identical questions are the whole mechanism — it is what turns
+"boss delivers verdict" into "two documents compared" — so they come from one
+place, `getReviewQuestions()`.
+
+**Their answers**, stored as JSONB on the review and surfaced on the admin
+Reviews tab *above* the notes fields, because reading them before the meeting
+is the entire point of asking in advance. The review strip now says whether
+they have been told and whether they have answered.
+
+**The write-up (§5.5).** Completing a review emails them the shared summary,
+the agreed actions with owners and dates, and — if one came out of it — the new
+salary and when it starts. `follow_up_sent_at` keeps it to once, so amending a
+completed review does not re-send.
+
+That last piece is what makes §5.1 work in practice. Deciding pay after the
+conversation only feels like process rather than evasion if the figure reliably
+arrives afterwards.
+
+### 17.2 Decisions worth not re-litigating
+
+**JSONB, not a normalised answers table.** The question set is editable and
+will change between cycles. A normalised table would need a questions table,
+versioning, and a join to render a five-year-old review as it was actually
+asked. The array stores the question TEXT beside each answer, so an old review
+always reads back correctly however the current wording has moved on.
+
+**Answers are keyed by question text on the way back in**, so a reworded
+question comes back blank rather than showing an answer to a different
+question.
+
+**A bad setting can never show an empty form.** `staff.review_questions` is
+human-editable, so `getReviewQuestions()` falls back to the built-in six on
+anything unparseable, not-an-array, or empty — and keeps the good entries when
+only some are junk. Eight tests pin this down, because the person filling in an
+empty form has no way to know something is broken.
+
+**The reviewee's read is column-by-column, never `SELECT *`.** `getMyReview()`
+lists the columns it returns, so `private_notes` and `manager_prep` cannot leak
+by somebody later adding a column to the table. Given §5.4's whole argument —
+that a field which *might* be read gets self-censored into uselessness — a
+default-open read here would undo the feature, not just leak a field.
+
+**The tab only exists when there is a review.** A once-a-year thing does not
+earn permanent space beside tabs people use weekly, so `MePage` asks once and
+hides it otherwise — but always shows it when it is the tab being requested, so
+the notification's deep link can never land on a hidden tab.
+
+### 17.3 Migration numbering — it collided TWICE
+
+Written as 235. Renumbered to 236 before commit, because a parallel branch had
+taken 235 (`235_shop_stock_cache.sql`). Then renumbered again to **237** on
+merge, because the same branch had meanwhile taken 236 too
+(`236_shop_stock_scope.sql`).
+
+CLAUDE.md warns to take the next free number at *build* time. The sharper
+lesson from doing it twice in one afternoon: on an active repo the number is
+not settled until the merge, so **re-check it at merge time, not just before
+committing.** The conflict itself is harmless and exactly what you want — two
+files claiming one number is a collision git can see. What would be genuinely
+dangerous is two branches picking the same number and the conflict NOT
+surfacing, which is why the runner's hardcoded list earns its keep here: it
+makes the clash a merge conflict instead of two files quietly sorting into an
+arbitrary order.
+
+Resolved by keeping both, in order: main's `236_shop_stock_scope.sql` (already
+applied on production) stays put, and this one moves to 237. Renumbering was
+safe only because 236 had never been applied anywhere — had it run on any
+environment, the rule is a NEW migration, never a rename.

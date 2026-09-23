@@ -927,3 +927,30 @@ export async function runReviewDueScan(): Promise<{ flagged: number }> {
   if (flagged) console.log(`[staff-notifications] review due: flagged ${flagged}`);
   return { flagged };
 }
+
+/**
+ * "Your review is booked" — to the person being reviewed, with the prep
+ * questions attached (spec §5.2/§5.3).
+ *
+ * Bell rather than a hand-rolled email: the Step-7 escalation scheduler turns
+ * it into email per the recipient's own preferences, so this respects whatever
+ * they have chosen instead of overriding it.
+ *
+ * Called once per review, from sendReviewInvite(), which owns the stamp that
+ * keeps it once.
+ */
+export async function notifyStaffReviewBooked(
+  userId: string, reviewId: string, scheduledFor: string
+): Promise<void> {
+  await notify(
+    userId,
+    'staff_review_booked',
+    'Your review is booked',
+    `${fmtDate(scheduledFor)}. There are a few questions to think about beforehand — ` +
+    'have a look when you get a minute, and I will have answered the same ones.',
+    'staff_reviews',
+    reviewId,
+    '/me?tab=review',
+    'normal'
+  );
+}

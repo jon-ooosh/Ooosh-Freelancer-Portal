@@ -1229,6 +1229,74 @@ router.get('/employees/:personId', adminOnly, async (req: AuthRequest, res: Resp
   }
 });
 
+// ── My review — the staff-facing half (spec §5.3) ───────────────────────────
+// NOT adminOnly: this is the one part of the staff-records module the reviewee
+// themselves uses. Ownership is enforced in the service against person_id, and
+// the read selects column by column so private_notes and manager_prep cannot
+// leak by being added to the table later.
+
+// GET /api/staff-calendar/me/review
+router.get('/me/review', async (req: AuthRequest, res: Response) => {
+  try {
+    const personId = await personIdForUser(req.user!.id);
+    if (!personId) { res.json({ data: null, questions: [], linked: false }); return; }
+    const { getMyReview, getReviewQuestions } = await import('../services/staff-review-prep');
+    const [review, questions] = await Promise.all([getMyReview(personId), getReviewQuestions()]);
+    res.json({ data: review, questions, linked: true });
+  } catch (err) {
+    console.error('[staff-calendar] my review error:', err);
+    res.status(500).json({ error: 'Failed to load your review' });
+  }
+});
+
+// POST /api/staff-calendar/me/review/:reviewId/answers
+router.post('/me/review/:reviewId/answers', async (req: AuthRequest, res: Response) => {
+  const schema = z.object({
+    answers: z.array(z.object({ q: z.string().max(500), a: z.string().max(10000) })).max(40),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
+  try {
+    const personId = await personIdForUser(req.user!.id);
+    if (!personId) { res.status(400).json({ error: 'Your login is not linked to a person record' }); return; }
+    const { submitSelfAssessment } = await import('../services/staff-review-prep');
+    const data = await submitSelfAssessment(req.params.reviewId as string, personId, parsed.data.answers);
+    res.json({ data });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to save your answers';
+    res.status(msg === 'Review not found' ? 404 : 400).json({ error: msg });
+  }
+});
+
+// GET /api/staff-calendar/review-questions — the same set, for the admin side
+router.get('/review-questions', adminOnly, async (_req: AuthRequest, res: Response) => {
+  try {
+    const { getReviewQuestions } = await import('../services/staff-review-prep');
+    res.json({ data: await getReviewQuestions() });
+  } catch (err) {
+    console.error('[staff-calendar] review questions error:', err);
+    res.status(500).json({ error: 'Failed to load the questions' });
+  }
+});
+
+// POST /api/staff-calendar/employees/:personId/reviews/:reviewId/prep
+router.post('/employees/:personId/reviews/:reviewId/prep', adminOnly, async (req: AuthRequest, res: Response) => {
+  const schema = z.object({
+    answers: z.array(z.object({ q: z.string().max(500), a: z.string().max(10000) })).max(40),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
+  try {
+    const { saveManagerPrep } = await import('../services/staff-review-prep');
+    const data = await saveManagerPrep(
+      req.params.reviewId as string, req.params.personId as string, parsed.data.answers);
+    res.json({ data });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to save';
+    res.status(msg === 'Review not found' ? 404 : 400).json({ error: msg });
+  }
+});
+
 // ── Key data: NI + right to work (spec §3.2) ────────────────────────────────
 // A separate endpoint from the employment save on purpose: a routine edit to
 // somebody's job title must not be able to blank their NI number, and the NI
