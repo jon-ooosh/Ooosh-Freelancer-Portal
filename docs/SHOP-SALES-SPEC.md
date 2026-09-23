@@ -209,6 +209,19 @@ so an allowlist risks hiding sub-categories we cannot currently enumerate. Every
 path in `getExcludedCategoryIds()` — missing setting, malformed JSON, unreadable table —
 hides nothing.
 
+**⚠️ The exclusion does NOT cascade to sub-categories.** Confirmed live Sep 2026: sale
+stock genuinely is hierarchical — `Guitar & Bass › Guitar Picks` (42 items) and
+`Components › Valves` (8) are real sub-categories with their own `category_id`. Today
+`Misc Sale Item` has no children and only 7 items, so `[355]` is complete. But if it ever
+gains one (`Misc Sale Item › Certificates`, say) that child's ID is **not** excluded and
+its items appear at the till, silently.
+
+Deliberately not solved in the query — matching on `category_path` strings would break on
+a rename, which is a worse failure than the one it prevents. **Solve it in the settings UI
+instead**: render the category tree rather than a flat list, so ticking a parent visibly
+has children under it. Until that exists, adding a sub-category to a hidden category means
+adding its ID too.
+
 **The scope applies at the READ, not the refresh**, because the two consumers want
 different sets:
 
