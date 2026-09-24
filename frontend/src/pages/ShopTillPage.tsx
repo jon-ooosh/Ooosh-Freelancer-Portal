@@ -350,16 +350,12 @@ export default function ShopTillPage() {
       {period && (
         <div className="mb-4 flex flex-wrap items-center gap-2 text-xs">
           {period.period?.hh_job_number ? (
-            <span className="text-gray-500">
-              This week&rsquo;s shop job:{' '}
-              <a
-                href={`https://myhirehop.com/job.php?id=${period.period.hh_job_number}`}
-                target="_blank" rel="noreferrer"
-                className="font-medium text-ooosh-600 hover:underline"
-              >
-                #{period.period.hh_job_number}
-              </a>
-            </span>
+            /* Deliberately NOT a link, and deliberately no job number. The shop
+               job is machinery: OP is the only thing that should ever write to
+               it, and anyone who opens it in HireHop is one status change away
+               from releasing a week of sale stock back onto the shelf (§2.1).
+               A clickable number is an invitation to do exactly that. */
+            <span className="text-gray-400">This week&rsquo;s shop job is ready.</span>
           ) : (
             <>
               <span className="text-amber-700">

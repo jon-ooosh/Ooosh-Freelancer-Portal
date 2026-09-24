@@ -194,6 +194,27 @@ export async function getOrCreateShopPeriod(when: Date = new Date()): Promise<Sh
   );
   const row = ins.rows[0];
   console.log(`[shop-period] week ${start} → HireHop job ${row.hh_job_number} ("${jobName}")`);
+
+  // The sync exclusion (§3.0) works off this table, so it only protects jobs it
+  // already knows about. There is a small window between HireHop creating the
+  // job and this row existing, and the 30-minute sync could in principle land
+  // in it. Check rather than assume — a shop job sitting in New Enquiries is
+  // precisely what the exclusion exists to prevent, and it would look like the
+  // guard had failed rather than raced.
+  try {
+    const leaked = await query(
+      `SELECT id FROM jobs WHERE hh_job_number = $1`, [row.hh_job_number],
+    );
+    if (leaked.rows.length) {
+      console.error(
+        `[shop-period] ⚠️ HireHop job ${row.hh_job_number} is ALSO in OP's jobs table ` +
+        `(row ${leaked.rows[0].id}). It was synced before the exclusion knew about it. ` +
+        `Remove that OP row — while it exists, an OP status push could release the week's stock.`,
+      );
+    }
+  } catch {
+    // Diagnostic only; never fail the creation over it.
+  }
   return {
     id: row.id, periodStart: row.period_start,
     periodEnd: row.period_end, hhJobNumber: Number(row.hh_job_number),
