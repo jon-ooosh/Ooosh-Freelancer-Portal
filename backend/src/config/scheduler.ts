@@ -80,17 +80,17 @@ export function startScheduler() {
   // Sends queued shop rows to HireHop. Deliberately deferred rather than pushed
   // inline: the counter must never wait on HireHop, and the delay IS Window A —
   // inside it a cancel is a true undo because nothing has reached HireHop or
-  // Xero (docs/SHOP-SALES-SPEC.md §7-8). Consumption only for now; sales land
-  // with step 6.
+  // Xero (docs/SHOP-SALES-SPEC.md §7-8). Consumption AND sales.
   if (!isHireHopConfigured()) {
     console.log('Scheduler: HireHop not configured — shop drain disabled');
   } else {
     cron.schedule('*/2 * * * *', async () => {
       try {
-        const { drainShopConsumption } = await import('../services/shop-drain');
-        const r = await drainShopConsumption();
-        if (r.errors.length) {
-          console.error('Scheduler: shop drain errors:', r.errors.join(' | '));
+        const { drainShop } = await import('../services/shop-drain');
+        const r = await drainShop();
+        const errors = [...r.consumption.errors, ...r.sales.errors];
+        if (errors.length) {
+          console.error('Scheduler: shop drain errors:', errors.join(' | '));
         }
       } catch (err) {
         // Never throw out of a scheduled task — a HireHop wobble must not take

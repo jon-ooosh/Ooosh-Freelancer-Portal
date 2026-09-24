@@ -320,8 +320,8 @@ router.post('/sales/:id/retry', async (req: AuthRequest, res: Response) => {
  */
 router.post('/drain', authorize(...MANAGER_ROLES), async (_req: AuthRequest, res: Response) => {
   try {
-    const { drainShopConsumption } = await import('../services/shop-drain');
-    res.json({ data: await drainShopConsumption() });
+    const { drainShop } = await import('../services/shop-drain');
+    res.json({ data: await drainShop() });
   } catch (err) {
     console.error('[shop] manual drain failed:', err);
     res.status(500).json({ error: 'Drain failed — see the server log.' });
