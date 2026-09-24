@@ -233,7 +233,16 @@ export async function getShopJobNumbers(): Promise<Set<number>> {
     const r = await query(
       `SELECT hh_job_number FROM shop_sale_periods WHERE hh_job_number IS NOT NULL`,
     );
-    return new Set(r.rows.map((x: any) => Number(x.hh_job_number)).filter(Number.isFinite));
+    const out = new Set<number>(r.rows.map((x: any) => Number(x.hh_job_number)).filter(Number.isFinite));
+    // Plus any shop-machinery job that isn't a weekly period — the scratch
+    // test job, say. Staff-editable (`shop_hidden_job_numbers`, migration 249)
+    // so a stray one can be hidden without a deploy.
+    const h = await query(`SELECT value FROM system_settings WHERE key = 'shop_hidden_job_numbers'`);
+    try {
+      const extra = JSON.parse(h.rows[0]?.value || '[]');
+      if (Array.isArray(extra)) for (const n of extra) if (Number.isFinite(Number(n))) out.add(Number(n));
+    } catch { /* a malformed setting hides nothing extra — fail open, as below */ }
+    return out;
   } catch (err) {
     // Fail OPEN on the read: an empty set means the sync behaves exactly as it
     // did before this module existed, which is safe. Silently excluding real

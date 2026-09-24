@@ -77,6 +77,10 @@ interface RecentSale {
   reversal_id: string | null;
   /** On a reversal: when the customer actually got their money back. */
   refund_settled_at: string | null;
+  /** What was bought (sales and consumption). */
+  lines?: { name: string; qty: number | string }[];
+  /** On a reversal: what the refunded sale contained. */
+  reverses_lines?: { name: string; qty: number | string }[] | null;
   /** Cash or card: refunded there and then, so pressing Refund confirms it. */
   refund_at_counter: boolean;
   /** The job a routed sale went on (a reversal shows its original's). */
@@ -496,75 +500,99 @@ export default function ShopTillPage() {
     // Refund outstanding: HireHop/Xero may be done, but the customer
     // doesn't have their money until someone hands it over.
     const refundOwed = isReversal && r.status !== 'cancelled' && !r.refund_settled_at;
+    const created = new Date(r.created_at);
+    const today = created.toDateString() === new Date().toDateString();
+    // What was bought — the thing people actually remember about a sale,
+    // where the OT-SHOP number means nothing to most of them. A refund shows
+    // the items of the sale it refunds.
+    const itemLines = (isReversal ? r.reverses_lines : r.lines) ?? [];
+    const items = itemLines.map(l => `${Number(l.qty)}× ${l.name}`).join(', ');
+    const jobName = r.sold_to_hh_job_number
+      ? `${jobDisplayOrgName({
+          lead_org_name: r.sold_to_lead_org_name,
+          client_org_name: r.sold_to_client_org_name,
+          company_name: r.sold_to_company_name,
+          client_name: r.sold_to_client_name,
+        }) || r.sold_to_job_name || 'job'} #${r.sold_to_hh_job_number}${r.tender === 'invoice_later' ? ' · on their bill' : ''}`
+      : null;
+    // One status per row. A refunded sale was necessarily in HireHop first.
+    const chip = r.reversal_id
+      ? { label: 'refunded', cls: 'bg-amber-100 text-amber-800' }
+      : r.status === 'pushed' ? { label: 'in HireHop', cls: 'bg-green-100 text-green-800' }
+      : r.status === 'queued' ? { label: 'queued', cls: 'bg-gray-100 text-gray-600' }
+      : r.status === 'cancelled' ? { label: 'cancelled', cls: 'bg-gray-100 text-gray-400 line-through' }
+      : { label: r.status, cls: 'bg-red-100 text-red-800' };
     return (
-      <li key={r.id} className="flex flex-wrap items-center gap-2 px-3 py-2">
-        <span className="text-gray-500">
-          {new Date(r.created_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
-        </span>
-        {r.sale_ref && <span className="font-mono text-xs text-gray-500">{r.sale_ref}</span>}
-        <span className={`font-medium ${isReversal ? 'text-red-700' : 'text-gray-900'}`}>
-          {r.kind === 'consumption'
-            ? 'Used for Ooosh'
-            : isReversal
-              ? `Refund of ${r.reverses_sale_ref ?? 'sale'} · −${money(Math.abs(gross))}`
-              : money(gross)}
-        </span>
-        {r.sold_to_hh_job_number && (
-          <span className="text-xs text-gray-500">
-            → {jobDisplayOrgName({
-              lead_org_name: r.sold_to_lead_org_name,
-              client_org_name: r.sold_to_client_org_name,
-              company_name: r.sold_to_company_name,
-              client_name: r.sold_to_client_name,
-            }) || r.sold_to_job_name || 'job'} #{r.sold_to_hh_job_number}
-            {r.tender === 'invoice_later' ? ' · on their bill' : ''}
+      <li key={r.id} className="px-3 py-2">
+        <div className="flex flex-wrap items-start gap-x-3 gap-y-1 sm:flex-nowrap">
+          <span className="w-12 shrink-0 pt-px text-xs tabular-nums text-gray-500" title={created.toLocaleString('en-GB')}>
+            {today
+              ? created.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
+              : created.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}
           </span>
-        )}
-        {r.notes && <span className="truncate text-gray-500">{r.notes}</span>}
-        <span className="ml-auto flex items-center gap-2">
-          {r.recorded_by_name && <span className="text-xs text-gray-400">{r.recorded_by_name}</span>}
-          {r.reversal_id && (
-            <span className="rounded bg-amber-100 px-2 py-0.5 text-xs text-amber-800">refunded</span>
-          )}
-          {/* The status is the answer to "did it reach HireHop?" —
-              queued means not yet, pushed means it did. */}
-          <span className={`rounded px-2 py-0.5 text-xs ${
-            r.status === 'pushed' ? 'bg-green-100 text-green-800'
-              : r.status === 'queued' ? 'bg-gray-100 text-gray-600'
-              : r.status === 'cancelled' ? 'bg-gray-100 text-gray-400 line-through'
-              : 'bg-red-100 text-red-800'
-          }`}>
-            {r.status === 'pushed' ? 'in HireHop' : r.status}
-          </span>
-        </span>
-        {(r.status === 'queued' || r.status === 'failed') && (
-          <button
-            onClick={() => cancelSale(r.id)}
-            className="text-xs font-medium text-gray-500 hover:text-red-600"
-          >
-            Cancel
-          </button>
-        )}
-        {r.status === 'failed' && (
-          <button
-            onClick={() => retrySale(r.id)}
-            className="text-xs font-medium text-ooosh-600 hover:underline"
-          >
-            Retry
-          </button>
-        )}
-        {/* Refund = money out of the door, so manager tier (the API
-            enforces the same). Never "delete" — spec §4.1. */}
-        {canRefund && r.kind === 'sale' && r.status === 'pushed' && !r.reversal_id && refundFor !== r.id && (
-          <button
-            onClick={() => { setRefundFor(r.id); setRefundReason(''); }}
-            className="text-xs font-medium text-ooosh-600 hover:underline"
-          >
-            Refund
-          </button>
-        )}
+
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-baseline gap-x-2">
+              {r.sale_ref && <span className="font-mono text-xs text-gray-500">{r.sale_ref}</span>}
+              <span className={`font-medium ${isReversal ? 'text-red-700' : 'text-gray-900'}`}>
+                {r.kind === 'consumption'
+                  ? 'Used for Ooosh'
+                  : isReversal
+                    ? `Refund of ${r.reverses_sale_ref ?? 'sale'} · −${money(Math.abs(gross))}`
+                    : money(gross)}
+              </span>
+              {jobName && <span className="text-xs text-gray-500">→ {jobName}</span>}
+            </div>
+            {(items || r.notes) && (
+              <p className="truncate text-xs text-gray-500" title={[items, r.notes].filter(Boolean).join(' — ')}>
+                {items}
+                {items && r.notes ? ' — ' : ''}
+                {r.notes && <span className="italic">{r.notes}</span>}
+              </p>
+            )}
+          </div>
+
+          {/* Fixed-width columns, so who / status / action line up down the
+              list. On a phone they drop to their own line under the sale. */}
+          <div className="flex w-full shrink-0 items-center gap-2 pl-[3.75rem] sm:w-auto sm:pl-0">
+            <span className="hidden w-24 truncate text-right text-xs text-gray-400 sm:inline">
+              {r.recorded_by_name}
+            </span>
+            {/* The status is the answer to "did it reach HireHop?" —
+                queued means not yet, pushed means it did. */}
+            <span className={`w-20 rounded px-2 py-0.5 text-center text-xs ${chip.cls}`}>{chip.label}</span>
+            <span className="ml-auto flex justify-end gap-2 sm:ml-0 sm:w-24">
+              {(r.status === 'queued' || r.status === 'failed') && (
+                <button
+                  onClick={() => cancelSale(r.id)}
+                  className="text-xs font-medium text-gray-500 hover:text-red-600"
+                >
+                  Cancel
+                </button>
+              )}
+              {r.status === 'failed' && (
+                <button
+                  onClick={() => retrySale(r.id)}
+                  className="text-xs font-medium text-ooosh-600 hover:underline"
+                >
+                  Retry
+                </button>
+              )}
+              {/* Refund = money out of the door, so manager tier (the API
+                  enforces the same). Never "delete" — spec §4.1. */}
+              {canRefund && r.kind === 'sale' && r.status === 'pushed' && !r.reversal_id && refundFor !== r.id && (
+                <button
+                  onClick={() => { setRefundFor(r.id); setRefundReason(''); }}
+                  className="text-xs font-medium text-ooosh-600 hover:underline"
+                >
+                  Refund
+                </button>
+              )}
+            </span>
+          </div>
+        </div>
         {refundOwed && (
-          <span className="flex w-full flex-wrap items-center gap-2 text-xs">
+          <span className="mt-1 flex w-full flex-wrap items-center gap-2 text-xs sm:pl-[3.75rem]">
             <span className="font-medium text-amber-700">
               Refund outstanding — {refundHow(r.tender, gross)}.
             </span>
@@ -577,7 +605,7 @@ export default function ShopTillPage() {
           </span>
         )}
         {refundFor === r.id && (
-          <div className="w-full rounded border border-amber-300 bg-amber-50 p-3 text-xs">
+          <div className="mt-2 w-full rounded border border-amber-300 bg-amber-50 p-3 text-xs">
             <p className="mb-2 text-amber-900">
               Refunds the whole of {r.sale_ref ?? 'this sale'}: its items come off the HireHop job
               (stock back on the shelf){r.tender === 'invoice_later'
@@ -626,7 +654,7 @@ export default function ShopTillPage() {
           </div>
         )}
         {r.push_error && (
-          <span className="w-full break-all text-xs text-red-700">{r.push_error}</span>
+          <span className="mt-1 block w-full break-all text-xs text-red-700 sm:pl-[3.75rem]">{r.push_error}</span>
         )}
       </li>
     );
@@ -999,8 +1027,8 @@ export default function ShopTillPage() {
       {/* Everything that isn't ringing up a sale lives down here, one tab at a
           time — 9 in 10 visits never open it. The last tab used is remembered
           per browser; clicking the open tab folds it away. */}
-      <div className="mt-10 border-t border-gray-200 pt-4">
-        <div className="flex flex-wrap gap-1.5">
+      <div className="mt-24 border-t border-gray-200 pt-3">
+        <div className="flex flex-wrap gap-1">
           {([
             ['recent', 'Recent sales'],
             ['attention', attention.length ? `Needs attention (${attention.length})` : 'Needs attention'],
@@ -1011,12 +1039,12 @@ export default function ShopTillPage() {
             <button
               key={key}
               onClick={() => pickTab(tab === key ? null : key)}
-              className={`rounded px-3 py-1.5 text-sm font-medium ${
+              className={`rounded px-2.5 py-1 text-xs font-medium ${
                 tab === key
-                  ? 'bg-ooosh-600 text-white'
+                  ? 'bg-gray-700 text-white'
                   : key === 'attention' && attention.length
                     ? 'bg-red-50 text-red-700 hover:bg-red-100'
-                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                    : 'text-gray-500 hover:bg-gray-100 hover:text-gray-800'
               }`}
             >
               {label}

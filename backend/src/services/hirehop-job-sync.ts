@@ -354,6 +354,20 @@ export async function fetchActiveHireHopJobs(): Promise<HHJobRow[]> {
   const shopJobs = await getShopJobNumbers();
   if (shopJobs.size === 0) return allJobs;
 
+  // A shop job that got an OP row BEFORE it was excluded (the scratch job
+  // 16749 did) would otherwise sit there forever, never updated but still
+  // found by search. Soft-delete it — the sync skipping it means nothing
+  // would ever bring it back.
+  const hidden = await query(
+    `UPDATE jobs SET is_deleted = true, updated_at = NOW()
+      WHERE hh_job_number = ANY($1::int[]) AND is_deleted = false
+      RETURNING hh_job_number`,
+    [[...shopJobs]],
+  );
+  if (hidden.rows.length) {
+    console.log(`[HH Job Sync] Hid ${hidden.rows.length} shop job(s) that already had an OP row: ${hidden.rows.map((r: any) => r.hh_job_number).join(', ')}`);
+  }
+
   const kept = allJobs.filter(j => !shopJobs.has(Number(j.NUMBER)));
   if (kept.length !== allJobs.length) {
     console.log(`[HH Job Sync] Excluded ${allJobs.length - kept.length} shop-sales job(s)`);
