@@ -53,7 +53,7 @@ A single `costs` entity with optional **facets** (job, vehicle, freelancer), rat
 ### Why one model
 
 - **Vehicle costs** link 1:1 to the existing fuel/service log (which already carries `cost` + `receiptFile`) rather than duplicating — see §7a. The vehicle log stays the maintenance home; `costs` is the financial spine underneath it.
-- **Repair/damage costs** link to the existing `platform_issues` record (the Problems module) — see §7b.
+- **Repair/damage costs** link to the Problem (`job_issues`) via `costs.job_issue_id` — see §7b. *(Originally written as `platform_issues`, which was the bug tracker, not Problems; corrected by migration 250, Sep 2026.)*
 - **Recharge** and **payable** are just states/flags on the cost, so a single list view can answer "what do we owe?" and "what can we bill back?" without joins across silos.
 
 ---
@@ -199,7 +199,7 @@ The existing `vehicle_service_log` / `vehicle_fuel_log` are **not replaced**. Th
 
 ## Component 7b: Problems module — repair cost wire-up
 
-The `platform_issues` Problems module already anticipates this: its resolution panel shows Estimated/Actual cost with the note *"Cost is informational only — future wire-up to HireHop / Xero pending. Don't double-enter into the Money tab."* **This system is that wire-up.**
+The Problems module (`job_issues` — this line originally said `platform_issues`, wrongly) already anticipates this: its resolution panel shows Estimated/Actual cost with the note *"Cost is informational only — future wire-up to HireHop / Xero pending. Don't double-enter into the Money tab."* **This system is that wire-up.**
 
 - A repair invoice (TTS360, garage, parts) logged against a problem links via `costs.platform_issue_id`.
 - The cost flows to Xero, and if the damage is **client-caused**, into the recharge bucket (4a) → billed back via HireHop.
@@ -246,7 +246,7 @@ CREATE TABLE IF NOT EXISTS costs (
   job_id              UUID REFERENCES jobs(id),
   vehicle_id          UUID REFERENCES fleet_vehicles(id),
   quote_assignment_id UUID REFERENCES quote_assignments(id),
-  platform_issue_id   UUID REFERENCES platform_issues(id),       -- repair/damage costs (§7b)
+  job_issue_id        UUID REFERENCES job_issues(id),            -- repair/damage costs (§7b); was platform_issue_id until mig 250
   vehicle_service_log_id UUID REFERENCES vehicle_service_log(id), -- 1:1 maintenance link (§7a)
   vehicle_fuel_log_id    UUID REFERENCES vehicle_fuel_log(id),    -- 1:1 fuel link (§7a)
 

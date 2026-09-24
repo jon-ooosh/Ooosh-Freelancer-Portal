@@ -1085,7 +1085,7 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, on
         }));
       }
       if (!isEdit) {
-        payload.platform_issue_id = presetIssueId || null;
+        payload.job_issue_id = presetIssueId || null;
         payload.status = 'confirmed';
         // One-click "Approve & save" — backend honours it only for a payable +
         // an approver (admin/manager), and fires the bill push on approval.

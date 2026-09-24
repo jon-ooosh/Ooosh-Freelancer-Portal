@@ -282,7 +282,7 @@ See docs/SPEC.md for full phased plan.
   badge. Assigning to somebody else is ADMIN-ONLY (`createTask`), and there is
   no recurrence, no "assigned by me" view and no entity link. jon's asks for
   the module: assign to-dos to other people, and recurring to-dos. **Next up —
-  to be specced as its own module.**
+  specced in `docs/TASKS-SPEC.md` (24 Sep 2026, awaiting jon's review).**
 
 - **A single place for freelancer rates** — jon, Sep 2026: "could we align our
   freelancer rates somewhere? Note this would actually be across all freelancer
