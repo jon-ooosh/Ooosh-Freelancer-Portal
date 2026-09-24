@@ -100,6 +100,24 @@ export function startScheduler() {
     });
   }
 
+  // ── Shop balance check ────────────────────────────────────────────────
+  // Every 15 min: compare each recent, un-invoiced week's shop job in HireHop
+  // with what OP put on it (goods, money, lines, status), and chase stuck or
+  // failed transactions. Emails jon once per distinct problem
+  // (docs/SHOP-SALES-SPEC.md §12). The shop job is never in OP's `jobs`
+  // table, so the lost/cancelled + is_internal gates don't apply here.
+  if (isHireHopConfigured()) {
+    cron.schedule('*/15 * * * *', async () => {
+      try {
+        const { runShopReconcileScan } = await import('../services/shop-reconcile');
+        const r = await runShopReconcileScan();
+        if (r.alerted > 0) console.log(`Scheduler: shop balance check — ${r.weeks} week(s), ${r.alerted} alert(s), ${r.stuck} stuck`);
+      } catch (err) {
+        console.error('Scheduler: shop balance check failed:', err instanceof Error ? err.message : err);
+      }
+    });
+  }
+
   // ── Shop sale-stock catalogue mirror ──────────────────────────────────
   // Keeps `shop_stock_cache` fresh so the till never calls HireHop to search or
   // price an item (docs/SHOP-SALES-SPEC.md §10). A few HireHop calls per refresh

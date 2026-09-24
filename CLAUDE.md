@@ -141,7 +141,7 @@ prefix is the ONLY one `GET /api/files/download` role-gates.** Every other prefi
 serves is readable by any authenticated caller, freelancers included. Never file
 anything private under `files/`.
 
-**BUILT (steps 1–8), Sep 2026:** `docs/SHOP-SALES-SPEC.md` — the **Shop Till**
+**BUILT (steps 1–9), Sep 2026:** `docs/SHOP-SALES-SPEC.md` — the **Shop Till**
 (`/money/shop`). Ad-hoc shop sales, internal stock consumption and sale-stock
 lookup, with HireHop remaining the single stock database. **§19 is the current
 state, the live settings, and what to do next — read it before touching this.**
@@ -220,6 +220,7 @@ existing definition:
 | Which HireHop job do shop sales go on? | `services/shop-period.ts` `getOrCreateShopPeriod()` |
 | What is this shop sale called (`OT-SHOP-00100`)? | `services/shop-sale-ref.ts` `saleRef()` |
 | Which jobs can a till sale go on / who's in today? | `services/shop-routing.ts` |
+| Does the week's shop job match the till? What did the week take? | `services/shop-reconcile.ts` |
 | Refunding a shop sale / money back off a deposit | `services/shop-sales.ts` `reverseShopSale()` → `hh-deposit.ts` `refundDepositOnHH()` |
 
 Frontend display helpers with the same status: `lib/roles.ts`, `lib/driverStatus.ts`,
@@ -312,7 +313,7 @@ auto-lose 09:00 · freelancer offer chase 09:05 · carnet forms 09:15 · referra
 pre-auth expiry 09:40 · staff records 09:45 (to-dos, record action dates, reviews due, absence-detail purge) · Stripe pre-auth discovery 09:50 · year-end cash-out reminder
 09:55 (December + January) · company-days prompt 09:58 (November) · OOH reminders 10:00 ·
 HireHop sync every 30 min · sanity scanners every 15 min · notification escalation
-every 15 min · shop drain every 2 min · shop stock mirror every 15 min ·
+every 15 min · shop balance check every 15 min · shop drain every 2 min · shop stock mirror every 15 min ·
 Gmail ingestion every 10 min.
 
 Adding one? Gate it on the lost/cancelled + `keep_after_close` rule and the
