@@ -404,6 +404,9 @@ export async function listShopSales(opts: { limit?: number; since?: string } = {
     ...row,
     sale_ref: row.sale_number != null ? saleRef(Number(row.sale_number)) : null,
     reverses_sale_ref: row.reverses_sale_number != null ? saleRef(Number(row.reverses_sale_number)) : null,
+    // Tells the till whether a refund of this sale is handed back at the
+    // counter (cash, card) or sent later — so the rule lives in ONE place.
+    refund_at_counter: COUNTER_REFUND_TENDERS.includes(String(row.tender)),
   }));
 }
 
@@ -553,10 +556,16 @@ export async function cancelShopSale(
  * sale, ring the rest again" — a partial reversal would mean editing a line's
  * quantity in HireHop, and nothing about that endpoint has been captured yet.
  *
- * `moneyReturned` records whether the customer already has their money (cash
- * from the drawer, a refund keyed on the terminal). If not, the reversal shows
- * as an outstanding refund until someone says it is done.
+ * The physical money back is the operator's job, and for cash and card it
+ * happens there and then at the counter — so for those tenders pressing Refund
+ * IS the confirmation, and the refund is settled on creation. Only tenders
+ * whose money goes back later, from another screen (bank transfer, PayPal,
+ * Stripe), are left OUTSTANDING until someone ticks them off. `moneyReturned`
+ * can settle one of those immediately too.
  */
+/** Tenders refunded there and then at the counter — cash from the till, card on the terminal. */
+export const COUNTER_REFUND_TENDERS = ['till_cash', 'worldpay', 'amex'];
+
 export async function reverseShopSale(
   saleId: string,
   user: { id: string },
@@ -619,7 +628,7 @@ export async function reverseShopSale(
       [
         saleId, sale.tender, sale.hh_job_number,
         neg(sale.net_amount), neg(sale.vat_amount), neg(sale.gross_amount), neg(sale.discount_amount),
-        user.id, reason, !!opts.moneyReturned,
+        user.id, reason, !!opts.moneyReturned || COUNTER_REFUND_TENDERS.includes(String(sale.tender)),
       ],
     );
 

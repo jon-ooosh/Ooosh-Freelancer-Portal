@@ -68,6 +68,8 @@ interface RecentSale {
   reversal_id: string | null;
   /** On a reversal: when the customer actually got their money back. */
   refund_settled_at: string | null;
+  /** Cash or card: refunded there and then, so pressing Refund confirms it. */
+  refund_at_counter: boolean;
 }
 
 interface PeriodInfo {
@@ -158,7 +160,6 @@ export default function ShopTillPage() {
   // The refund form open on one Recent Sales row at a time.
   const [refundFor, setRefundFor] = useState<string | null>(null);
   const [refundReason, setRefundReason] = useState('');
-  const [refundReturned, setRefundReturned] = useState(false);
   const [refundBusy, setRefundBusy] = useState(false);
   const canRefund = hasManagerRole(user?.role);
 
@@ -200,13 +201,9 @@ export default function ShopTillPage() {
     setRefundBusy(true);
     setError(null);
     try {
-      await api.post(`/shop/sales/${id}/reverse`, {
-        reason: refundReason.trim(),
-        moneyReturned: refundReturned,
-      });
+      await api.post(`/shop/sales/${id}/reverse`, { reason: refundReason.trim() });
       setRefundFor(null);
       setRefundReason('');
-      setRefundReturned(false);
       // The refund drains straight away; give it a moment to land.
       setTimeout(() => loadRecentRef.current?.(), 6000);
     } catch (e: any) {
@@ -215,7 +212,7 @@ export default function ShopTillPage() {
       setRefundBusy(false);
     }
     loadRecentRef.current?.();
-  }, [refundReason, refundReturned]);
+  }, [refundReason]);
 
   /** The customer has their money back — clears an outstanding refund. */
   const settleRefund = useCallback(async (id: string) => {
@@ -801,7 +798,7 @@ export default function ShopTillPage() {
                       enforces the same). Never "delete" — spec §4.1. */}
                   {canRefund && r.kind === 'sale' && r.status === 'pushed' && !r.reversal_id && refundFor !== r.id && (
                     <button
-                      onClick={() => { setRefundFor(r.id); setRefundReason(''); setRefundReturned(false); }}
+                      onClick={() => { setRefundFor(r.id); setRefundReason(''); }}
                       className="text-xs font-medium text-ooosh-600 hover:underline"
                     >
                       Refund
@@ -834,21 +831,25 @@ export default function ShopTillPage() {
                         className="mb-2 w-full rounded border border-gray-300 px-2 py-1.5 text-sm"
                         autoFocus
                       />
-                      <label className="mb-2 flex items-center gap-2 text-amber-900">
-                        <input
-                          type="checkbox"
-                          checked={refundReturned}
-                          onChange={e => setRefundReturned(e.target.checked)}
-                        />
-                        {refundHow(r.tender, gross)} — done already
-                      </label>
+                      {/* Cash and card go back there and then, so the button
+                          IS the confirmation. Transfers happen later, from
+                          another screen, and stay outstanding until ticked. */}
+                      <p className="mb-2 font-medium text-amber-900">
+                        {r.refund_at_counter
+                          ? `${refundHow(r.tender, gross)}, then confirm.`
+                          : `${refundHow(r.tender, gross)} afterwards — it stays on the list as outstanding until you tick it off.`}
+                      </p>
                       <div className="flex gap-2">
                         <button
                           onClick={() => refundSale(r.id)}
                           disabled={refundBusy || !refundReason.trim()}
                           className="rounded bg-red-600 px-3 py-1.5 font-semibold text-white hover:bg-red-700 disabled:bg-gray-300"
                         >
-                          {refundBusy ? 'Refunding…' : `Refund ${money(gross)}`}
+                          {refundBusy
+                            ? 'Refunding…'
+                            : r.refund_at_counter
+                              ? `Done — ${money(gross)} given back`
+                              : `Record refund of ${money(gross)}`}
                         </button>
                         <button
                           onClick={() => setRefundFor(null)}
