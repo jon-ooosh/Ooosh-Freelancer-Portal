@@ -29,7 +29,7 @@ import hhBroker from './hirehop-broker';
 import { hhLocalNow } from './shop-stock';
 import { getOrCreateShopPeriod } from './shop-period';
 import { pushDepositToHH, refundDepositOnHH, getHHBankId } from './hh-deposit';
-import { fetchDepositAvailability } from './hh-deposit-release';
+import { readBillingRows, readDepositAvailability } from './hh-deposit-release';
 import { saleRef } from './shop-sale-ref';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -348,13 +348,26 @@ export async function drainShopSales(): Promise<DrainResult> {
         await query(`UPDATE shop_sales SET hh_job_number = $2 WHERE id = $1`, [saleId, hhJobNumber]);
       }
 
+      // A band's job can be locked or closed in HireHop after the sale was
+      // taken. Adding to it then would put stock and money on a job nobody is
+      // going to invoice again — stop and say so instead. (The weekly shop job
+      // is OP's own and permanently dispatched; it needs no check.)
+      let stopNow = false;
+      if (sale.sold_to_job_id) {
+        const closed = await jobClosedReason(hhJobNumber);
+        if (closed) {
+          failedReason = `${closed} Cancel this sale and ring it up again as a walk-in.`;
+          stopNow = true;
+        }
+      }
+
       const lines = await query(
         `SELECT id, hh_stock_id, qty, name_snapshot, unit_price_list, unit_price_charged, hh_line_id
            FROM shop_sale_lines WHERE sale_id = $1 ORDER BY created_at`,
         [saleId],
       );
 
-      for (const line of lines.rows) {
+      for (const line of (failedReason ? [] : lines.rows)) {
         if (line.hh_line_id) continue;      // already on the job — never twice
 
         const stockId = Number(line.hh_stock_id);
@@ -403,7 +416,7 @@ export async function drainShopSales(): Promise<DrainResult> {
       }
 
       if (failedReason) {
-        const giveUp = attempts >= maxAttempts;
+        const giveUp = stopNow || attempts >= maxAttempts;
         await query(
           `UPDATE shop_sales SET push_attempts = $2, push_error = $3,
                   status = CASE WHEN $4 THEN 'failed' ELSE status END
@@ -439,6 +452,23 @@ export async function drainShopSales(): Promise<DrainResult> {
     console.log(`[shop-drain] sales: ${out.pushed} pushed, ${out.failed} gave up, of ${out.considered} due`);
   }
   return out;
+}
+
+/**
+ * Why a sale must NOT be added to this HireHop job, or null if it may.
+ * Locked, cancelled (9), not interested (10) or completed (11) — the same
+ * closed set `cost-recharge-hh.ts` refuses. A failed read returns null: the
+ * push then tries, and HireHop itself refuses a job that is really shut.
+ */
+async function jobClosedReason(hhJobNumber: number): Promise<string | null> {
+  const res = await hhBroker.get<any>('/api/job_data.php', { job: hhJobNumber },
+    { priority: 'low', cacheTTL: -1, skipCache: true });
+  if (!res?.success || !res.data) return null;
+  const d: any = res.data;
+  if (Number(d.LOCKED) === 1) return `HireHop job ${hhJobNumber} is locked.`;
+  const status = parseFloat(String(d.STATUS ?? ''));
+  if ([9, 10, 11].includes(status)) return `HireHop job ${hhJobNumber} is closed (status ${status}).`;
+  return null;
 }
 
 // ── Reversals (step 8, Window B) ─────────────────────────────────────────
@@ -516,12 +546,14 @@ export async function removeSaleLine(
  * the card terminal — is the operator's, tracked as `refund_settled_at`.
  *
  * Order:
- *   1. Check the deposit still has the money on it. If the week has already
- *      been invoiced the deposit is applied and HireHop will refuse the refund
- *      (error 370) — that is Window C, a credit note by hand. Checked FIRST so
- *      that case stops before any stock has moved.
- *   2. Lines off, one at a time, each read back.
- *   3. Refund against the deposit, then re-read that it actually moved.
+ *   1. Has the job (the week's shop job, or a band's own job) been invoiced?
+ *      Then it is Window C — a credit note by hand. Checked FIRST so that case
+ *      stops before any stock has moved. Applies to "put it on their bill"
+ *      sales too, which have no payment but whose line is on the invoice.
+ *   2. Check the deposit still has the money on it — the same question asked
+ *      a second way: an applied deposit makes HireHop refuse the refund (370).
+ *   3. Lines off, one at a time, each read back.
+ *   4. Refund against the deposit, then re-read that it actually moved.
  *
  * Idempotent: `hh_line_removed_at` per line, `hh_refund_id` on the reversal.
  */
@@ -559,10 +591,20 @@ export async function drainShopReversals(): Promise<DrainResult> {
       const amount = Number(rev.gross_amount);
       const needsRefund = !!depositId && amount > 0 && !rev.hh_refund_id;
 
-      // 1. Is the money still refundable? (Window B vs C.)
+      // 1. Has the job been invoiced? Then this is Window C — a credit note by
+      //    hand — whether or not there is a payment to refund: taking a line
+      //    off an invoiced job would put the invoice out of step with the job.
+      //    `kind = 1` is an invoice row (the definition routes/money.ts uses).
+      const billing = await readBillingRows(hhJobNumber);
+      if (billing.some((row: any) => parseInt(row.kind ?? '0') === 1)) {
+        failedReason = `HireHop job ${hhJobNumber} has been invoiced, so this needs a credit note by hand. Nothing was changed.`;
+        stopNow = true;
+      }
+
+      // 2. Is the money still refundable? (A second, independent Window C test.)
       let availableBefore = 0;
-      if (needsRefund) {
-        const dep = await fetchDepositAvailability(hhJobNumber, depositId!);
+      if (!failedReason && needsRefund) {
+        const dep = readDepositAvailability(billing, depositId!);
         if (!dep) throw new Error(`Payment ${depositId} is not on HireHop job ${hhJobNumber} any more — check it by hand.`);
         availableBefore = dep.available;
         if (availableBefore + 0.005 < amount) {
@@ -572,7 +614,7 @@ export async function drainShopReversals(): Promise<DrainResult> {
         }
       }
 
-      // 2. Lines off the job.
+      // 3. Lines off the job.
       if (!failedReason) {
         const lines = await query(
           `SELECT id, name_snapshot, hh_line_id FROM shop_sale_lines
@@ -587,7 +629,7 @@ export async function drainShopReversals(): Promise<DrainResult> {
         }
       }
 
-      // 3. Money back, against the original deposit, on the same bank.
+      // 4. Money back, against the original deposit, on the same bank.
       if (!failedReason && needsRefund) {
         const refund = await refundDepositOnHH({
           hhJobNumber,
@@ -605,7 +647,7 @@ export async function drainShopReversals(): Promise<DrainResult> {
           await query(`UPDATE shop_sales SET hh_refund_id = $2 WHERE id = $1`, [revId, refund.hhDepositId]);
 
           // §2.5 — did the money actually come off the deposit?
-          const after = await fetchDepositAvailability(hhJobNumber, depositId!);
+          const after = readDepositAvailability(await readBillingRows(hhJobNumber), depositId!);
           if (!after || after.available > availableBefore - amount + 0.005) {
             failedReason = `HireHop accepted refund ${refund.hhDepositId} but payment ${depositId} ` +
               `${after ? `still shows £${after.available.toFixed(2)} refundable` : 'could not be re-read'}. ` +

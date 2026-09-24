@@ -24,6 +24,7 @@ import { resolveVatRate } from './shop-stock';
 import { DISPLAY_NAME_SQL } from './display-name';
 import { saleRef } from './shop-sale-ref';
 import { withShopDrainLock } from './shop-drain';
+import { assertSellableJob } from './shop-routing';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -278,6 +279,9 @@ export async function createShopSale(
     if (input.tender === 'invoice_later' && !input.soldToJobId) {
       throw new Error('"Invoice later" needs a job to put it on — a walk-in must pay now.');
     }
+    // Refuse a closed job HERE, while the customer is still at the counter,
+    // rather than let the drain find out after they've gone (step 7).
+    if (input.soldToJobId) await assertSellableJob(input.soldToJobId);
   }
 
   const holdSeconds = await getPushHoldSeconds();
@@ -306,7 +310,7 @@ export async function createShopSale(
         user.id,
         input.recordedIn || 'staff_till',
         input.soldToPersonId || null,
-        input.soldToJobId || null,
+        input.kind === 'sale' ? (input.soldToJobId || null) : null,
         (input.recordedIn || 'staff_till') === 'sitter_till',
         input.notes || null,
         String(holdSeconds),
@@ -375,6 +379,16 @@ export async function listShopSales(opts: { limit?: number; since?: string } = {
     `SELECT s.*,
             NULLIF(${DISPLAY_NAME_SQL}, ' ') AS recorded_by_name,
             o.sale_number AS reverses_sale_number,
+            -- The job a routed sale went on. The four name fields are what
+            -- lib/jobOrgName.ts needs; the till names the job through it.
+            sj.hh_job_number AS sold_to_hh_job_number,
+            sj.job_name AS sold_to_job_name,
+            sj.company_name AS sold_to_company_name,
+            sj.client_name AS sold_to_client_name,
+            sjo.name AS sold_to_client_org_name,
+            (SELECT lo.name FROM job_organisations jo
+               JOIN organisations lo ON lo.id = jo.organisation_id
+              WHERE jo.job_id = sj.id AND jo.is_primary = true LIMIT 1) AS sold_to_lead_org_name,
             -- The live reversal of this sale, if it has been refunded.
             (SELECT r.id FROM shop_sales r
               WHERE r.reverses_sale_id = s.id AND r.kind = 'reversal' AND r.status <> 'cancelled'
@@ -394,8 +408,12 @@ export async function listShopSales(opts: { limit?: number; since?: string } = {
        LEFT JOIN people p ON p.id = u.person_id
        LEFT JOIN shop_sale_lines l ON l.sale_id = s.id
        LEFT JOIN shop_sales o ON o.id = s.reverses_sale_id
+       -- A reversal names the job its original sale went on.
+       LEFT JOIN jobs sj ON sj.id = COALESCE(s.sold_to_job_id, o.sold_to_job_id)
+       LEFT JOIN organisations sjo ON sjo.id = sj.client_id AND sjo.is_deleted = false
       WHERE ($1::timestamptz IS NULL OR s.created_at >= $1)
-      GROUP BY s.id, p.preferred_name, p.first_name, p.last_name, o.sale_number
+      GROUP BY s.id, p.preferred_name, p.first_name, p.last_name, o.sale_number,
+               sj.id, sj.hh_job_number, sj.job_name, sj.company_name, sj.client_name, sjo.name
       ORDER BY s.created_at DESC
       LIMIT $2`,
     [opts.since || null, limit],
@@ -404,6 +422,9 @@ export async function listShopSales(opts: { limit?: number; since?: string } = {
     ...row,
     sale_ref: row.sale_number != null ? saleRef(Number(row.sale_number)) : null,
     reverses_sale_ref: row.reverses_sale_number != null ? saleRef(Number(row.reverses_sale_number)) : null,
+    // Tells the till whether a refund of this sale is handed back at the
+    // counter (cash, card) or sent later — so the rule lives in ONE place.
+    refund_at_counter: COUNTER_REFUND_TENDERS.includes(String(row.tender)),
   }));
 }
 
@@ -553,10 +574,16 @@ export async function cancelShopSale(
  * sale, ring the rest again" — a partial reversal would mean editing a line's
  * quantity in HireHop, and nothing about that endpoint has been captured yet.
  *
- * `moneyReturned` records whether the customer already has their money (cash
- * from the drawer, a refund keyed on the terminal). If not, the reversal shows
- * as an outstanding refund until someone says it is done.
+ * The physical money back is the operator's job, and for cash and card it
+ * happens there and then at the counter — so for those tenders pressing Refund
+ * IS the confirmation, and the refund is settled on creation. Only tenders
+ * whose money goes back later, from another screen (bank transfer, PayPal,
+ * Stripe), are left OUTSTANDING until someone ticks them off. `moneyReturned`
+ * can settle one of those immediately too.
  */
+/** Tenders refunded there and then at the counter — cash from the till, card on the terminal. */
+export const COUNTER_REFUND_TENDERS = ['till_cash', 'worldpay', 'amex'];
+
 export async function reverseShopSale(
   saleId: string,
   user: { id: string },
@@ -619,7 +646,10 @@ export async function reverseShopSale(
       [
         saleId, sale.tender, sale.hh_job_number,
         neg(sale.net_amount), neg(sale.vat_amount), neg(sale.gross_amount), neg(sale.discount_amount),
-        user.id, reason, !!opts.moneyReturned,
+        user.id, reason,
+        // Settled on creation: counter refunds (the button is the confirmation)
+        // and "their bill" sales, which were never paid so have nothing to return.
+        !!opts.moneyReturned || COUNTER_REFUND_TENDERS.includes(String(sale.tender)) || sale.tender === 'invoice_later',
       ],
     );
 

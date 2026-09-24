@@ -1064,8 +1064,9 @@ Frontend: `hasManagerRole()` / `roleAllowed()` from `lib/roles.ts`, never bare
    already recorded against `hh_line_id` and the retry skips them, so a second
    attempt cannot double-sell. The reverse order could take payment for stock
    that never left the shelf. ⚠️ **Not yet exercised with a real sale — see §19.**
-7. Job routing (band's job / client's job) + the two-band picker.
-8. Reversals — Windows A and B.
+7. ✅ **SHIPPED Sep 2026 (staff till).** Job routing — see §19. The sitter till's
+   phone picker (§5) is deferred with the rest of the sitter till.
+8. ✅ **SHIPPED Sep 2026.** Reversals — Windows A and B, verified live.
 9. Weekly Shop tab, balance alarm, review list.
 10. Lock-up report integration.
 11. Receipts.
@@ -1206,8 +1207,9 @@ once the mirror lands — it costs one query, and any item below 100 means today
 | **Sale push** | Lines onto the weekly job via `save_job.php` + deposit via `pushDepositToHH`. **Verified live 24 Sep** — list price AND discounted (the `items_save.php` override), shelf count dropped, cash reached HireHop and Xero. |
 | **Sale numbers** | `OT-SHOP-00100` onwards (`services/shop-sale-ref.ts`). On the deposit: description `16750 - shop sale`, memo `Shop sale 24/09/2026 via cash (Ref: OT-SHOP-00101) — note (recorded via Ooosh OP)`. Migration 247 numbered the pre-existing test sales 100 and 101. |
 | **Cancel (Window A)** | Recent Sales → Cancel, any staff. Runs inside the drain lock; refused once any line or deposit has reached HireHop (judged on the HH ids, not the status). |
-| **Refund (Window B)** | Recent Sales → Refund, `MANAGER_ROLES`. Whole sale. Creates a `kind='reversal'` row; the drain (kicked immediately) checks the deposit is still unallocated, removes each line via `items_delete.php` (read back), then refunds against the deposit via `refundDepositOnHH` (re-read that the money moved). **Shipped 24 Sep, NOT yet exercised live — see below.** |
-| **Refund outstanding** | The physical money back is manual until Stripe. A reversal shows "Refund outstanding — give £x back from the till" until someone presses *Done — they have it* (or ticks it at refund time). |
+| **Refund (Window B)** | Recent Sales → Refund, `MANAGER_ROLES`. Whole sale. Creates a `kind='reversal'` row; the drain (kicked immediately) first stops if the job has ANY invoice (`billing_list` `kind = 1`) — Window C, a credit note by hand — then checks the deposit is still unallocated, removes each line via `items_delete.php` (read back), then refunds against the deposit via `refundDepositOnHH` (re-read that the money moved). A "their bill" sale has no deposit: its refund only removes the line and settles itself. **Verified live 24 Sep** on the test sales (line removed, stock back, refund in HireHop and Xero). |
+| **Refund outstanding** | The physical money back is manual until Stripe. **Cash and card** (`COUNTER_REFUND_TENDERS`) are handed back there and then, so the Refund button — *"Done — £x given back"* — is the confirmation and the refund is settled on creation. **Bank transfer, PayPal, Stripe** happen later from another screen, so those show "Refund outstanding" until someone presses *Done — they have it*. |
+| **Job routing (step 7)** | Checkout → *Who's it for?*: **Walk-in** (the week's shop job), the bands **In today** (`GET /shop/jobs/today` — rehearsal jobs whose session dates cover today, from the same `rehearsal_detail` the sitter roster uses; two bands in = two buttons), or **Other job…** (search by HH number / band / client). Payment on a job: paid now (a deposit on THEIR job) or **Put it on their bill** (`invoice_later`, no deposit — only offered once a job is chosen, and reset if the route goes back to walk-in). Cancelled / lost / completed / internal jobs are refused at the counter (`shop-routing.ts assertSellableJob`); a job LOCKED or closed in HireHop is caught by the drain before any line is pushed, and the sale goes `failed` with "cancel and ring it as a walk-in". **Stock:** a line added to a dispatched OR returned job consumes immediately (jon verified the returned case on job 16749); rehearsal jobs are dispatched like any other, so there is no "not yet dispatched" warning. Checking a sale line in at return puts the stock back — a human-error gap code can't close. |
 | **Drain lock** | `withShopDrainLock` — the scheduler and `POST /shop/drain` used to be able to push the same sale twice at once. Now serialised. |
 | **Weekly job** | Created on demand, Mon 00:01→Sun 23:59, DISPATCHED. Live one is **16750**. |
 | **Sync exclusion** | Shop jobs never enter OP's `jobs` table — bulk sync and webhook both guarded. |
@@ -1230,23 +1232,21 @@ once the mirror lands — it costs one query, and any item below 100 means today
 
 ### THE FIRST THING TO DO NEXT
 
-**Refund the two test sales (OT-SHOP-00100 £9.00, OT-SHOP-00101 discounted) from the
-till, BEFORE job 16750 is invoiced.** The refund push has never run against live HireHop.
-For each, check on job 16750:
+**Exercise job routing live** on a scratch job at dispatched or returned:
 
-1. the line is gone and the shelf count went back UP by one;
-2. a refund row is on the billing tab against the original deposit, same bank (Till);
-3. it reached Xero as a payment (post_payment), netting the sale to zero;
-4. the reversal row reads `in HireHop` in Recent Sales with no red error.
+1. sell one item **paid now** onto it — line on THAT job, shelf drops, deposit on
+   that job (not 16750);
+2. sell one **on their bill** — line on the job, no deposit;
+3. refund both — lines off, stock back, a refund against the first's deposit, and the
+   second settles with nothing to hand back;
+4. lock the job in HireHop, sell onto it — it must go `failed` without touching the job.
 
-If step 1 fails, the `items_delete.php` read-back will say so and nothing else will have
-moved. If the refund reads back wrong, the row goes `failed` with a message naming what to
-check — **do not press Retry until the billing tab has been looked at**: Retry skips the
-refund if one was recorded, so it means "I've checked, finish it off".
+A failed refund names what to check — **do not press Retry until the billing tab has been
+looked at**: Retry skips the refund if one was recorded, so it means "I've checked,
+finish it off".
 
 ### Then, in order
 
-7. Job routing in the till (sell onto a band's job) + the two-band picker (§5).
 9. The Shop tab: weekly takings, the balance alarm (§9), sitter review list,
    outstanding refunds, the line-integrity scan (§2.1). The integrity scan must treat
    a line with `hh_line_removed_at` set as intentionally gone.
@@ -1254,6 +1254,9 @@ refund if one was recorded, so it means "I've checked, finish it off".
 11. Receipts (§2.10) — **accountant confirmed Sep 2026** that a VAT receipt is fine:
     it is a record of sale and is not pushed to Xero. Number = the sale's `OT-SHOP-#####`.
 12. Gate manual payment entry in HireHop (§0) — last, and only once staff trust the till.
+13. Line-by-line refunds (see gaps below) — jon, Sep 2026: last.
+    Also still to come: the sitter till in the freelancer portal (§5), with the same
+    "in today" picker on a phone.
 
 ### Known gaps and decisions still open
 
@@ -1263,7 +1266,12 @@ refund if one was recorded, so it means "I've checked, finish it off".
   unallocated it stops with "the week has most likely been invoiced" before
   touching any stock. The refund route also refuses when `invoiced_at` IS set.
 - **Partial refunds** (one item out of a basket) are "refund all, ring the rest
-  again". A real partial needs a captured line-qty edit.
+  again". Whole-line returns are cheap (the proven `items_delete.php` + a partial
+  refund). Part-of-a-line (bought 3, return 1) needs `items_save.php` with a lower
+  qty, and whether that releases one unit on a DISPATCHED job must be tested on a
+  scratch job first. **jon, Sep 2026: last on the to-do list.**
+- **Swaps** are a return plus a new sale at the matched price (jon, Sep 2026) — no
+  dedicated feature.
 - **Reversing a consumption** ("used for Ooosh" logged against the wrong item) is not
   built — it would be a positive `tally_save` adjustment. Cancel inside the hold covers
   the common mistake.
