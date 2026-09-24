@@ -84,6 +84,8 @@ interface RecentSale {
   reverses_lines?: { name: string; qty: number | string }[] | null;
   /** Cash or card: refunded there and then, so pressing Refund confirms it. */
   refund_at_counter: boolean;
+  /** Where the latest receipt for this sale went, if one was sent. */
+  last_receipt_to?: string | null;
   /** Taken on a studio sitter's phone — staff tick these off. */
   recorded_in?: string;
   needs_review?: boolean;
@@ -111,6 +113,18 @@ interface SellableJob {
 
 /** "Whose job is this" — through THE definition, falling back to the job name. */
 const jobLabel = (j: SellableJob) => jobDisplayOrgName(j) || j.jobName || `Job ${j.hhJobNumber}`;
+
+interface ReceiptSuggestion { email: string; label: string }
+
+/** Email a receipt for a sale, or a refund receipt for a refund. Returns an error message, or null. */
+async function sendReceipt(saleId: string, to: string): Promise<string | null> {
+  try {
+    await api.post(`/shop/sales/${saleId}/receipt`, { to: to.trim() });
+    return null;
+  } catch (e: any) {
+    return e?.body?.error || e?.message || 'The receipt did not send.';
+  }
+}
 
 interface PeriodInfo {
   periodStart: string;
@@ -183,7 +197,16 @@ export default function ShopTillPage() {
   const [availChecked, setAvailChecked] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [saved, setSaved] = useState<{ gross: number; id: string; kind: string } | null>(null);
+  const [saved, setSaved] = useState<{ gross: number; id: string; kind: string; receipt?: string } | null>(null);
+  // Receipts (step 11). The checkout's optional box, the one Recent Sales row
+  // whose receipt form is open, and the refund form's refund-receipt box.
+  const [receiptTo, setReceiptTo] = useState('');
+  const [jobContacts, setJobContacts] = useState<ReceiptSuggestion[]>([]);
+  const [receiptFor, setReceiptFor] = useState<string | null>(null);
+  const [receiptFormTo, setReceiptFormTo] = useState('');
+  const [receiptSuggestions, setReceiptSuggestions] = useState<ReceiptSuggestion[]>([]);
+  const [receiptBusy, setReceiptBusy] = useState(false);
+  const [refundReceiptTo, setRefundReceiptTo] = useState('');
   const [recent, setRecent] = useState<RecentSale[]>([]);
   const [usage, setUsage] = useState<ConsumptionRow[] | null>(null);
   const [period, setPeriod] = useState<PeriodInfo | null>(null);
@@ -236,6 +259,16 @@ export default function ShopTillPage() {
     if (!j && tender === 'invoice_later') setTender('worldpay');
   };
 
+  // A band's job: offer its contacts in the receipt box (THE contact pool, server-side).
+  useEffect(() => {
+    if (!route) { setJobContacts([]); return; }
+    let cancelled = false;
+    api.get<{ data: ReceiptSuggestion[] }>(`/shop/jobs/${route.id}/receipt-contacts`)
+      .then(r => { if (!cancelled) setJobContacts(r.data); })
+      .catch(() => { if (!cancelled) setJobContacts([]); });
+    return () => { cancelled = true; };
+  }, [route]);
+
   useEffect(() => {
     if (jobTerm.trim().length < 2) { setJobResults([]); return; }
     let cancelled = false;
@@ -285,9 +318,14 @@ export default function ShopTillPage() {
     setRefundBusy(true);
     setError(null);
     try {
-      await api.post(`/shop/sales/${id}/reverse`, { reason: refundReason.trim() });
+      const r = await api.post<{ data: { reversalId: string } }>(`/shop/sales/${id}/reverse`, { reason: refundReason.trim() });
+      if (refundReceiptTo.trim()) {
+        const err = await sendReceipt(r.data.reversalId, refundReceiptTo);
+        if (err) setError(`Refund recorded, but the refund receipt didn't send: ${err}`);
+      }
       setRefundFor(null);
       setRefundReason('');
+      setRefundReceiptTo('');
       // The refund drains straight away; give it a moment to land.
       setTimeout(() => loadRecentRef.current?.(), 6000);
     } catch (e: any) {
@@ -296,7 +334,31 @@ export default function ShopTillPage() {
       setRefundBusy(false);
     }
     loadRecentRef.current?.();
-  }, [refundReason]);
+  }, [refundReason, refundReceiptTo]);
+
+  /** Open (or close) one row's "email a receipt" form. */
+  const openReceipt = useCallback((r: RecentSale) => {
+    if (receiptFor === r.id) { setReceiptFor(null); return; }
+    setReceiptFor(r.id);
+    setReceiptFormTo('');
+    setReceiptSuggestions([]);
+    api.get<{ data: ReceiptSuggestion[] }>(`/shop/sales/${r.id}/receipt/suggestions`)
+      .then(res => {
+        setReceiptSuggestions(res.data);
+        if (res.data[0]) setReceiptFormTo(res.data[0].email);
+      })
+      .catch(() => { /* typing the address still works */ });
+  }, [receiptFor]);
+
+  const sendRowReceipt = useCallback(async (id: string) => {
+    setReceiptBusy(true);
+    setError(null);
+    const err = await sendReceipt(id, receiptFormTo);
+    setReceiptBusy(false);
+    if (err) { setError(err); return; }
+    setReceiptFor(null);
+    loadRecentRef.current?.();
+  }, [receiptFormTo]);
 
   /** The customer has their money back — clears an outstanding refund. */
   const settleRefund = useCallback(async (id: string) => {
@@ -503,9 +565,19 @@ export default function ShopTillPage() {
         notes: notes.trim() || null,
       };
       const r = await api.post<{ data: { id: string; kind: string; totals: Totals } }>('/shop/sales', body);
-      setSaved({ gross: r.data.totals.gross, id: r.data.id, kind: r.data.kind });
+      // The sale is recorded whatever happens to the email — a receipt that
+      // fails to send is said so, never a reason to lose the sale.
+      let receipt: string | undefined;
+      const wantsReceipt = mode === 'sale' && tender !== 'invoice_later' && receiptTo.trim();
+      if (wantsReceipt) {
+        const err = await sendReceipt(r.data.id, receiptTo);
+        receipt = err ? undefined : receiptTo.trim();
+        if (err) setError(`Sale recorded, but the receipt didn't send: ${err}`);
+      }
+      setSaved({ gross: r.data.totals.gross, id: r.data.id, kind: r.data.kind, receipt });
       setBasket([]);
       setNotes('');
+      setReceiptTo('');
       chooseRoute(null);
       loadRecent();
       searchRef.current?.focus();
@@ -574,6 +646,7 @@ export default function ShopTillPage() {
                 {items}
                 {items && r.notes ? ' — ' : ''}
                 {r.notes && <span className="italic">{r.notes}</span>}
+                {r.last_receipt_to && <span className="text-gray-400"> · ✉ {r.last_receipt_to}</span>}
               </p>
             )}
           </div>
@@ -587,7 +660,7 @@ export default function ShopTillPage() {
             {/* The status is the answer to "did it reach HireHop?" —
                 queued means not yet, pushed means it did. */}
             <span className={`w-20 rounded px-2 py-0.5 text-center text-xs ${chip.cls}`}>{chip.label}</span>
-            <span className="ml-auto flex justify-end gap-2 sm:ml-0 sm:w-24">
+            <span className="ml-auto flex justify-end gap-2 sm:ml-0 sm:w-36">
               {(r.status === 'queued' || r.status === 'failed') && (
                 <button
                   onClick={() => cancelSale(r.id)}
@@ -604,6 +677,17 @@ export default function ShopTillPage() {
                   Retry
                 </button>
               )}
+              {/* A receipt: for a paid sale, or a refund receipt for a refund.
+                  Not for "their bill" (their invoice is the document). */}
+              {(r.kind === 'sale' || r.kind === 'reversal') && r.status !== 'cancelled' && r.tender !== 'invoice_later' && (
+                <button
+                  onClick={() => openReceipt(r)}
+                  className="text-xs font-medium text-gray-500 hover:text-ooosh-700"
+                  title={r.last_receipt_to ? `Last sent to ${r.last_receipt_to}` : 'Email a receipt'}
+                >
+                  Receipt
+                </button>
+              )}
               {r.needs_review && !r.reviewed_at && r.status !== 'cancelled' && (
                 <button
                   onClick={() => markReviewed([r.id])}
@@ -617,7 +701,7 @@ export default function ShopTillPage() {
                   enforces the same). Never "delete" — spec §4.1. */}
               {canRefund && r.kind === 'sale' && r.status === 'pushed' && !r.reversal_id && refundFor !== r.id && (
                 <button
-                  onClick={() => { setRefundFor(r.id); setRefundReason(''); }}
+                  onClick={() => { setRefundFor(r.id); setRefundReason(''); setRefundReceiptTo(r.last_receipt_to ?? ''); }}
                   className="text-xs font-medium text-ooosh-600 hover:underline"
                 >
                   Refund
@@ -639,6 +723,31 @@ export default function ShopTillPage() {
             </button>
           </span>
         )}
+        {receiptFor === r.id && (
+          <div className="mt-2 flex w-full flex-wrap items-center gap-2 rounded border border-gray-200 bg-gray-50 p-2 text-xs sm:ml-[3.75rem] sm:w-auto">
+            <span className="text-gray-600">{r.kind === 'reversal' ? 'Refund receipt to' : 'Receipt to'}</span>
+            <input
+              type="email"
+              list={`receipt-sugg-${r.id}`}
+              value={receiptFormTo}
+              onChange={e => setReceiptFormTo(e.target.value)}
+              placeholder="name@example.com"
+              className="min-w-[14rem] flex-1 rounded border border-gray-300 px-2 py-1 text-sm"
+              autoFocus
+            />
+            <datalist id={`receipt-sugg-${r.id}`}>
+              {receiptSuggestions.map(sg => <option key={sg.email} value={sg.email}>{sg.label}</option>)}
+            </datalist>
+            <button
+              onClick={() => sendRowReceipt(r.id)}
+              disabled={receiptBusy || !receiptFormTo.trim()}
+              className="rounded bg-gray-800 px-3 py-1 font-medium text-white disabled:bg-gray-300"
+            >
+              {receiptBusy ? 'Sending…' : 'Send'}
+            </button>
+            <button onClick={() => setReceiptFor(null)} className="text-gray-500 hover:text-gray-800">Close</button>
+          </div>
+        )}
         {refundFor === r.id && (
           <div className="mt-2 w-full rounded border border-amber-300 bg-amber-50 p-3 text-xs">
             <p className="mb-2 text-amber-900">
@@ -655,6 +764,15 @@ export default function ShopTillPage() {
               className="mb-2 w-full rounded border border-gray-300 px-2 py-1.5 text-sm"
               autoFocus
             />
+            {r.tender !== 'invoice_later' && (
+              <input
+                type="email"
+                value={refundReceiptTo}
+                onChange={e => setRefundReceiptTo(e.target.value)}
+                placeholder="Email a refund receipt to… (optional)"
+                className="mb-2 w-full rounded border border-gray-300 px-2 py-1.5 text-sm"
+              />
+            )}
             {/* Cash and card go back there and then, so the button
                 IS the confirmation. Transfers happen later, from
                 another screen, and stay outstanding until ticked. */}
@@ -748,7 +866,7 @@ export default function ShopTillPage() {
         <div className="mb-4 rounded border border-green-300 bg-green-50 px-4 py-3 text-sm text-green-900">
           {saved.kind === 'consumption'
             ? 'Stock use recorded. Next one?'
-            : `Recorded — ${money(saved.gross)}. Next one?`}
+            : `Recorded — ${money(saved.gross)}${saved.receipt ? `, receipt sent to ${saved.receipt}` : ''}. Next one?`}
         </div>
       )}
       {error && (
@@ -1030,6 +1148,23 @@ export default function ShopTillPage() {
                   Nothing taken now — it goes on job #{route.hhJobNumber} and onto their invoice.
                 </p>
               )}
+            </>
+          )}
+
+          {mode === 'sale' && tender !== 'invoice_later' && (
+            <>
+              <label className="mb-1 block text-xs font-medium text-gray-700">Email a receipt (optional)</label>
+              <input
+                type="email"
+                list="checkout-receipt-sugg"
+                value={receiptTo}
+                onChange={e => setReceiptTo(e.target.value)}
+                placeholder={jobContacts.length ? 'Pick a contact or type an address' : 'name@example.com'}
+                className="mb-3 w-full rounded border border-gray-300 px-3 py-2 text-sm"
+              />
+              <datalist id="checkout-receipt-sugg">
+                {jobContacts.map(c => <option key={c.email} value={c.email}>{c.label}</option>)}
+              </datalist>
             </>
           )}
 

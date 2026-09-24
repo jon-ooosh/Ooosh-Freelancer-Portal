@@ -411,6 +411,10 @@ export async function listShopSales(opts: {
     `SELECT s.*,
             NULLIF(${DISPLAY_NAME_SQL}, ' ') AS recorded_by_name,
             o.sale_number AS reverses_sale_number,
+            -- Where the latest receipt went, so the till can say "✉ sent".
+            (SELECT rc.sent_to FROM shop_receipts rc
+              WHERE rc.sale_id = s.id AND rc.status = 'sent'
+              ORDER BY rc.sent_at DESC LIMIT 1) AS last_receipt_to,
             -- A refund row has no lines of its own; show what it refunded.
             (SELECT json_agg(json_build_object('name', ol.name_snapshot, 'qty', ol.qty) ORDER BY ol.created_at)
                FROM shop_sale_lines ol WHERE ol.sale_id = s.reverses_sale_id) AS reverses_lines,

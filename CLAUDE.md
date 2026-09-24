@@ -226,6 +226,7 @@ existing definition:
 | Which jobs can a till sale go on / who's in today? | `services/shop-routing.ts` |
 | Does the week's shop job match the till? What did the week take? | `services/shop-reconcile.ts` |
 | The till's payment methods (backend / sitter till) | `services/shop-tenders.ts` — mirrors `frontend/src/lib/shopTenders.ts` |
+| A shop sale's receipt / refund receipt | `services/shop-receipts.ts` |
 | Refunding a shop sale / money back off a deposit | `services/shop-sales.ts` `reverseShopSale()` → `hh-deposit.ts` `refundDepositOnHH()` |
 
 Frontend display helpers with the same status: `lib/roles.ts`, `lib/driverStatus.ts`,

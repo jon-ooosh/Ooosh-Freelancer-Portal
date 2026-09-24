@@ -29,6 +29,8 @@ interface TillContext {
   success: boolean
   date: string
   open: boolean
+  /** The lock-up report is in — the till has closed for the night. */
+  locked_up?: boolean
   jobs: TillJob[]
   tenders: Tender[]
   stock_as_of: string | null
@@ -275,7 +277,9 @@ export default function SitterTillPage() {
 
         {ctx && !ctx.open && (
           <div className="bg-amber-50 border border-amber-200 text-amber-800 px-4 py-3 rounded-lg text-sm">
-            Price lookup only — the till takes sales on the night of your shift.
+            {ctx.locked_up
+              ? 'You’ve locked up, so the till has closed for the night. Price lookup still works — leave the office a note about anything else.'
+              : 'Price lookup only — the till takes sales on the night of your shift.'}
           </div>
         )}
 
