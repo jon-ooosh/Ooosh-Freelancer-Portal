@@ -83,7 +83,7 @@ export const DEFAULT_TEMPLATE: LockupTemplate = {
     // ── Upstairs ─────────────────────────────────────────────────────────
     { id: 'clients_out_on_time', section: 'Upstairs', label: 'Were the clients out on time? (if not, note how late & why below)', type: 'yesno', expected: 'yes' },
     // Was "Have the clients paid?" — the shop till now records what WAS paid,
-    // so the report only asks about what wasn't (migration 250, jon Sep 2026).
+    // so the report only asks about what wasn't (migration 251, jon Sep 2026).
     { id: 'money_outstanding', section: 'Upstairs', label: "Any money outstanding? (anything a band still owes that didn't go through the shop till)", type: 'yesno', expected: 'no', note_prompt: 'Who owes what, and what for?' },
     { id: 'pas_amps_powered_down', section: 'Upstairs', label: "PAs, amps, client equipment / pedals etc powered down", type: 'yesno', expected: 'yes' },
     { id: 'litter_cleared', section: 'Upstairs', label: 'Cups / glasses / plates cleared away, all litter collected and bin bag changed', type: 'yesno', expected: 'yes' },

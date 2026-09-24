@@ -1,5 +1,5 @@
 -- ============================================================================
--- 250: Shop sales — the sitter till (freelancer portal)
+-- 251: Shop sales — the sitter till (freelancer portal)
 -- ============================================================================
 -- docs/SHOP-SALES-SPEC.md §5. Studio sitters sell from their phone on the
 -- night they're rostered. Three things the ledger needs for that:

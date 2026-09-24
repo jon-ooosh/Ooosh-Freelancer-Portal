@@ -113,7 +113,7 @@ const createSchema = z.object({
   job_id: z.string().uuid().optional().nullable(),
   vehicle_id: z.string().uuid().optional().nullable(),
   quote_assignment_id: z.string().uuid().optional().nullable(),
-  platform_issue_id: z.string().uuid().optional().nullable(),
+  job_issue_id: z.string().uuid().optional().nullable(),
   vehicle_service_log_id: z.string().uuid().optional().nullable(),
   vehicle_fuel_log_id: z.string().uuid().optional().nullable(),
   recharge_mode: z.enum(RECHARGE_MODES).optional(),
@@ -179,7 +179,7 @@ const WRITABLE = [
   'invoice_number', 'due_date_override', 'xero_contact_id', 'currency',
   'description', 'category', 'xero_account_code', 'cost_type', 'payment_method',
   'cot_card_holder', 'cot_card_last4', 'payment_status', 'job_id', 'vehicle_id',
-  'quote_assignment_id', 'platform_issue_id', 'vehicle_service_log_id', 'vehicle_fuel_log_id',
+  'quote_assignment_id', 'job_issue_id', 'vehicle_service_log_id', 'vehicle_fuel_log_id',
   'recharge_mode', 'recharge_amount', 'recharge_status', 'cost_intent', 'receipt_r2_key', 'receipt_filename',
   'supporting_documents', 'status', 'notes',
   // Credits — money coming back. The SIGN is applied by applyCreditSign()
@@ -526,7 +526,7 @@ router.get('/by-vehicle/:vehicleId', async (req: AuthRequest, res: Response) => 
 });
 
 router.get('/by-issue/:issueId', async (req: AuthRequest, res: Response) => {
-  try { await listBy('platform_issue_id', req.params.issueId as string, res); }
+  try { await listBy('job_issue_id', req.params.issueId as string, res); }
   catch (err) { console.error('[costs] by-issue error:', err); res.status(500).json({ error: 'Internal server error' }); }
 });
 

@@ -73,7 +73,7 @@ export interface CreateShopSaleInput {
 /**
  * Who is recording a transaction. Staff are OP `users` (`id`); studio sitters
  * log in to the portal as `people` and have no user row (`personId`). One of
- * the two is always set — migration 250's CHECK enforces it.
+ * the two is always set — migration 251's CHECK enforces it.
  */
 export interface ShopActor {
   id: string | null;
@@ -440,7 +440,7 @@ export async function listShopSales(opts: {
             ) AS lines
        FROM shop_sales s
        LEFT JOIN users u ON u.id = s.recorded_by
-       -- Staff are named through their user; sitters ARE a person (migration 250).
+       -- Staff are named through their user; sitters ARE a person (migration 251).
        LEFT JOIN people p ON p.id = COALESCE(s.recorded_by_person_id, u.person_id)
        LEFT JOIN shop_sale_lines l ON l.sale_id = s.id
        LEFT JOIN shop_sales o ON o.id = s.reverses_sale_id
@@ -520,7 +520,7 @@ export async function getConsumptionLog(days = 30, limit = 100) {
        FROM shop_sales s
        JOIN shop_sale_lines l ON l.sale_id = s.id
        LEFT JOIN users u ON u.id = s.recorded_by
-       -- Staff are named through their user; sitters ARE a person (migration 250).
+       -- Staff are named through their user; sitters ARE a person (migration 251).
        LEFT JOIN people p ON p.id = COALESCE(s.recorded_by_person_id, u.person_id)
       WHERE s.kind = 'consumption'
         AND s.status <> 'cancelled'
