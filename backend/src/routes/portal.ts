@@ -1297,6 +1297,185 @@ router.post('/studio-sitter/shifts/:date/lockup', lockupUploadMw, async (req: Po
   }
 });
 
+// ── Studio-sitter SHOP TILL (docs/SHOP-SALES-SPEC.md §5) ──────────────────
+//
+// GET  .../:date/till/context        → tonight's bands, payment methods, open?
+// GET  .../:date/till/search?q=      → price lookup (the local catalogue mirror —
+//                                       zero HireHop calls, like the staff till)
+// GET  .../:date/till/sales          → tonight's sales from this till + totals
+// POST .../:date/till/sales          → take a sale
+// POST .../:date/till/sales/:id/cancel → undo one inside its push hold
+//
+// Same gate as the lock-up: rostered to this evening, or the shared staff
+// account. Selling additionally needs the night to be OPEN — its own date, or
+// until 06:00 the next morning, because lock-up runs late. Price lookup works
+// any time the sitter can see the shift.
+//
+// A sitter sale is a normal sale in every way that matters: it drains to
+// HireHop exactly like a staff one. It just carries the sitter (a person, not
+// a user), the shift, and `needs_review` for staff to tick off.
+
+/** Today and the hour, UK time. */
+function londonNow(): { date: string; hour: number } {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hourCycle: 'h23',
+  }).formatToParts(new Date());
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? '';
+  return { date: `${get('year')}-${get('month')}-${get('day')}`, hour: Number(get('hour')) };
+}
+
+/** Can this evening's till take sales right now? */
+function isTillOpen(date: string): boolean {
+  const now = londonNow();
+  return date === now.date || (date === addDaysIsoP(now.date, -1) && now.hour < 6);
+}
+
+/** Rostered-to-this-evening gate for the till. Sends the error and returns null on failure. */
+async function tillGate(req: PortalRequest, res: Response): Promise<{ date: string; shiftId: string } | null> {
+  const date = String(req.params.date);
+  if (!SITTER_DATE_RE.test(date)) { res.status(400).json({ error: 'Invalid date' }); return null; }
+  const allowed = req.portalUser!.isStaffShared || await isSitterAssignedTo(req.portalUser!.id, date);
+  if (!allowed) { res.status(403).json({ error: 'Not rostered to this evening' }); return null; }
+  const shiftId = await resolveOpenShiftId(date);
+  if (!shiftId) { res.status(404).json({ error: 'No shift for this evening' }); return null; }
+  return { date, shiftId };
+}
+
+router.get('/studio-sitter/shifts/:date/till/context', async (req: PortalRequest, res: Response) => {
+  try {
+    const gate = await tillGate(req, res);
+    if (!gate) return;
+    const { SHOP_TENDERS } = await import('../services/shop-tenders');
+    const { getCacheAge } = await import('../services/shop-stock');
+    const detail = await getSitterShiftDetail(gate.date, req.portalUser!.id);
+    res.json({
+      success: true,
+      date: gate.date,
+      open: isTillOpen(gate.date),
+      // Tonight's bands — the only jobs a sitter can sell onto. Two in, two buttons.
+      jobs: (detail?.jobs ?? []).map((j: any) => ({
+        job_id: j.job_id, hh_job_number: j.hh_job_number, label: j.label, rooms: j.rooms ?? [],
+      })),
+      tenders: SHOP_TENDERS,
+      stock_as_of: (await getCacheAge()).refreshedAt,
+    });
+  } catch (error) {
+    console.error('Portal till context error:', error);
+    res.status(500).json({ error: 'Failed to load the till' });
+  }
+});
+
+router.get('/studio-sitter/shifts/:date/till/search', async (req: PortalRequest, res: Response) => {
+  try {
+    const gate = await tillGate(req, res);
+    if (!gate) return;
+    const { searchShopStock } = await import('../services/shop-stock');
+    const items = await searchShopStock(String(req.query.q || ''), { limit: 25 });
+    // Only what a phone till needs — no cost prices leave the building.
+    res.json({
+      success: true,
+      items: items.map((i: any) => ({
+        hhStockId: i.hhStockId, title: i.title, categoryPath: i.categoryPath,
+        priceIncVat: i.priceIncVat, priceExVat: i.priceExVat, vatRatePct: i.vatRatePct, quantity: i.quantity,
+      })),
+    });
+  } catch (error) {
+    console.error('Portal till search error:', error);
+    res.status(500).json({ error: 'Search failed' });
+  }
+});
+
+router.get('/studio-sitter/shifts/:date/till/sales', async (req: PortalRequest, res: Response) => {
+  try {
+    const gate = await tillGate(req, res);
+    if (!gate) return;
+    const { listShopSales } = await import('../services/shop-sales');
+    const { getShiftShopSummary } = await import('../services/shop-reconcile');
+    const rows = await listShopSales({ shiftId: gate.shiftId, limit: 100 });
+    res.json({
+      success: true,
+      summary: await getShiftShopSummary(gate.shiftId),
+      sales: rows.map((r: any) => ({
+        id: r.id, sale_ref: r.sale_ref, status: r.status, tender: r.tender,
+        gross: Number(r.gross_amount), created_at: r.created_at, push_after: r.push_after,
+        mine: r.recorded_by_person_id === req.portalUser!.id,
+        sold_to_hh_job_number: r.sold_to_hh_job_number ?? null,
+        lines: (r.lines || []).map((l: any) => ({ name: l.name, qty: Number(l.qty) })),
+      })),
+    });
+  } catch (error) {
+    console.error('Portal till sales list error:', error);
+    res.status(500).json({ error: 'Failed to load tonight\'s sales' });
+  }
+});
+
+router.post('/studio-sitter/shifts/:date/till/sales', async (req: PortalRequest, res: Response) => {
+  try {
+    const gate = await tillGate(req, res);
+    if (!gate) return;
+    if (!isTillOpen(gate.date)) {
+      res.status(409).json({ error: 'The till for this evening is closed — sales can only be taken on the night.' });
+      return;
+    }
+
+    const { SHOP_TENDERS } = await import('../services/shop-tenders');
+    const tender = String(req.body?.tender || '');
+    const jobId = req.body?.jobId ? String(req.body.jobId) : null;
+    if (!SHOP_TENDERS.some((t) => t.key === tender)) { res.status(400).json({ error: 'Pick how they paid.' }); return; }
+
+    // Only tonight's bands — a sitter can't put a sale on some other job.
+    if (jobId) {
+      const detail = await getSitterShiftDetail(gate.date, req.portalUser!.id);
+      if (!(detail?.jobs ?? []).some((j: any) => j.job_id === jobId)) {
+        res.status(400).json({ error: "That band isn't in tonight." });
+        return;
+      }
+    }
+
+    // List price only — a sitter can't discount (the freelancer cap is 0%),
+    // and never trust a price from the phone: only the item and quantity.
+    const lines = Array.isArray(req.body?.lines)
+      ? req.body.lines.slice(0, 50).map((l: any) => ({ hhStockId: Number(l.hhStockId), qty: Number(l.qty) }))
+      : [];
+
+    const { createShopSale } = await import('../services/shop-sales');
+    const result = await createShopSale({
+      kind: 'sale',
+      lines,
+      tender,
+      soldToJobId: jobId,
+      notes: req.body?.notes ? String(req.body.notes).slice(0, 300) : null,
+      recordedIn: 'sitter_till',
+      shiftId: gate.shiftId,
+    }, { id: null, personId: req.portalUser!.id, role: 'freelancer' });
+    res.status(201).json({ success: true, ...result });
+  } catch (error) {
+    // Validation messages ("pick how they paid", "their bill needs a band")
+    // are written for the person holding the phone.
+    res.status(400).json({ error: error instanceof Error ? error.message : 'Could not record that sale.' });
+  }
+});
+
+router.post('/studio-sitter/shifts/:date/till/sales/:id/cancel', async (req: PortalRequest, res: Response) => {
+  try {
+    const gate = await tillGate(req, res);
+    if (!gate) return;
+    const { cancelShopSale } = await import('../services/shop-sales');
+    const result = await cancelShopSale(
+      String(req.params.id),
+      { id: null, personId: req.portalUser!.id },
+      'Cancelled from the sitter till',
+      // The shared staff account may undo any sale from that night's till.
+      req.portalUser!.isStaffShared ? undefined : { personId: req.portalUser!.id, shiftId: gate.shiftId },
+    );
+    if (!result.cancelled) { res.status(409).json({ error: result.message }); return; }
+    res.json({ success: true, cancelled: true });
+  } catch (error) {
+    console.error('Portal till cancel error:', error);
+    res.status(500).json({ error: 'Could not cancel that sale' });
+  }
+});
+
 // POST /api/portal/studio-sitter/shifts/:date/lost-property — log a found item
 // straight into the Holding module (multipart: description/found_location + photos).
 router.post('/studio-sitter/shifts/:date/lost-property', lockupUploadMw, async (req: PortalRequest, res: Response) => {

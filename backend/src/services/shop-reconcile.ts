@@ -33,6 +33,9 @@ import { readBillingRows, readDepositAvailability } from './hh-deposit-release';
 import { readJobLineIds, withShopDrainLock } from './shop-drain';
 import { saleRef } from './shop-sale-ref';
 import { emailService } from './email-service';
+import { tenderLabel } from './shop-tenders';
+import { getFrontendUrl } from '../config/app-urls';
+import { DISPLAY_NAME_SQL } from './display-name';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -120,6 +123,57 @@ export async function getWeekSummary(periodStart: string): Promise<WeekSummary> 
     periodStart, periodEnd, byTender, taken, refunded,
     net: round2(taken - refunded), onTheirBill, notPushed,
   };
+}
+
+// ── One sitter's evening ─────────────────────────────────────────────────
+
+export interface ShiftShopSummary {
+  sales: number;
+  /** Money actually taken tonight, inc VAT. Excludes "their bill". */
+  taken: number;
+  byTender: Array<{ tender: string; label: string; amount: number }>;
+  onTheirBill: number;
+  /** Sitter sales staff haven't ticked off yet. */
+  toReview: number;
+}
+
+/**
+ * What the till took on one sitter shift — for the lock-up report (the sitter
+ * sees it; staff see it on the report) and its handover-thread summary. A
+ * cancelled sale never happened; a queued or failed one still took money.
+ */
+export async function getShiftShopSummary(shiftId: string): Promise<ShiftShopSummary> {
+  const r = await query(
+    `SELECT tender, gross_amount, needs_review, reviewed_at
+       FROM shop_sales
+      WHERE shift_id = $1 AND kind = 'sale' AND status <> 'cancelled'`,
+    [shiftId],
+  );
+  const by = new Map<string, number>();
+  let taken = 0; let onTheirBill = 0; let toReview = 0;
+  for (const row of r.rows) {
+    const g = Number(row.gross_amount) || 0;
+    if (row.needs_review && !row.reviewed_at) toReview++;
+    if (row.tender === 'invoice_later') { onTheirBill = round2(onTheirBill + g); continue; }
+    taken = round2(taken + g);
+    by.set(row.tender, round2((by.get(row.tender) ?? 0) + g));
+  }
+  return {
+    sales: r.rows.length,
+    taken,
+    byTender: [...by.entries()].map(([tender, amount]) => ({ tender, label: tenderLabel(tender), amount }))
+      .sort((a, b) => b.amount - a.amount),
+    onTheirBill,
+    toReview,
+  };
+}
+
+/** "3 sales, £18.50 — Cash £6.00 · Card (Worldpay) £12.50" — one line for a thread or email. */
+export function describeShiftShop(s: ShiftShopSummary): string {
+  if (!s.sales) return 'No shop sales tonight.';
+  const parts = s.byTender.map((t) => `${t.label} £${t.amount.toFixed(2)}`);
+  if (s.onTheirBill) parts.push(`on bands' bills £${s.onTheirBill.toFixed(2)}`);
+  return `${s.sales} sale${s.sales === 1 ? '' : 's'}, £${s.taken.toFixed(2)} taken — ${parts.join(' · ')}`;
 }
 
 // ── The balance check ────────────────────────────────────────────────────
@@ -349,5 +403,64 @@ export async function runShopReconcileScan(): Promise<{ weeks: number; alerted: 
     }
   }
 
-  return { weeks: periods.rows.length, alerted, stuck: stuck.rows.length };
+  // Sitter sales nobody has reviewed — a nudge, not an alarm (jon, Sep 2026:
+  // "important things buried in a place no one is otherwise looking").
+  const reminded = await remindUnreviewedSitterSales();
+
+  return { weeks: periods.rows.length, alerted: alerted + reminded, stuck: stuck.rows.length };
+}
+
+async function setting(key: string, fallback: string): Promise<string> {
+  try {
+    const r = await query(`SELECT value FROM system_settings WHERE key = $1`, [key]);
+    const v = r.rows[0]?.value;
+    return v != null && String(v).trim() !== '' ? String(v).trim() : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+/**
+ * Once a sitter sale has sat unreviewed for `shop_review_reminder_hours`, email
+ * `shop_review_reminder_to` (default info@) one reminder covering every such
+ * sale, each reminded only once. Returns 1 if a reminder went, else 0.
+ */
+async function remindUnreviewedSitterSales(): Promise<number> {
+  const hours = Number(await setting('shop_review_reminder_hours', '12'));
+  const to = await setting('shop_review_reminder_to', 'info@oooshtours.co.uk');
+  if (!Number.isFinite(hours) || hours <= 0) return 0;
+
+  const due = await query(
+    `SELECT s.id, s.sale_number, s.gross_amount, s.tender, s.created_at,
+            NULLIF(${DISPLAY_NAME_SQL}, ' ') AS sitter
+       FROM shop_sales s
+       LEFT JOIN people p ON p.id = s.recorded_by_person_id
+      WHERE s.needs_review AND s.reviewed_at IS NULL AND s.review_reminded_at IS NULL
+        AND s.status <> 'cancelled'
+        AND s.created_at < NOW() - ($1 || ' hours')::interval
+      ORDER BY s.created_at`,
+    [String(hours)],
+  );
+  if (!due.rows.length) return 0;
+
+  const url = `${getFrontendUrl()}/money/shop?tab=review`;
+  const items = due.rows.map((s: any) =>
+    `<li>${s.sale_number ? saleRef(Number(s.sale_number)) + ' — ' : ''}£${Number(s.gross_amount).toFixed(2)} `
+    + `${escapeHtml(tenderLabel(s.tender))}${s.sitter ? ` (${escapeHtml(s.sitter)})` : ''}, `
+    + `${new Date(s.created_at).toLocaleString('en-GB', { timeZone: 'Europe/London', dateStyle: 'medium', timeStyle: 'short' })}</li>`);
+  try {
+    await emailService.sendRaw({
+      to,
+      subject: `[Shop] ${due.rows.length} sitter sale${due.rows.length === 1 ? '' : 's'} waiting to be reviewed`,
+      html: `<p>These shop sales were taken by a studio sitter and haven't been checked yet:</p><ul>${items.join('')}</ul>`
+        + `<p><a href="${url}">Review them on the Shop Till page</a> — a quick look that each one makes sense.</p>`,
+      variant: 'internal',
+    });
+    await query(`UPDATE shop_sales SET review_reminded_at = NOW() WHERE id = ANY($1::uuid[])`,
+      [due.rows.map((s: any) => s.id)]);
+    return 1;
+  } catch (err) {
+    console.error('[shop-reconcile] review reminder failed:', err instanceof Error ? err.message : err);
+    return 0;
+  }
 }

@@ -1069,7 +1069,7 @@ Frontend: `hasManagerRole()` / `roleAllowed()` from `lib/roles.ts`, never bare
 8. ✅ **SHIPPED Sep 2026.** Reversals — Windows A and B, verified live.
 9. ✅ **SHIPPED Sep 2026.** Weekly view, balance check + alarms, needs-attention list,
    reorder list — see §19. The sitter review list waits for the sitter till.
-10. Lock-up report integration.
+10. ✅ **SHIPPED Sep 2026** with the sitter till — see §19.
 11. Receipts.
 12. **Then** gate manual payment entry in HireHop (§15).
 
@@ -1214,6 +1214,9 @@ once the mirror lands — it costs one query, and any item below 100 means today
 | **Till page layout (step 9)** | The till on top; everything else folded into one tab row at the bottom — *Recent sales · Needs attention (n) · This week · What we've used · Reorder* (jon, Sep 2026: 9 in 10 visits need none of it). Last tab used is remembered per browser; clicking the open tab folds it. Payment-method labels live in `frontend/src/lib/shopTenders.ts`. |
 | **Balance check (step 9)** | `services/shop-reconcile.ts`. Compares each un-invoiced week's shop job with OP's OWN record, three ways: **goods** (OP's ex-VAT line total vs billing `kind = 0` `accrued`), **money** (OP's takings less refunds vs the deposits' unallocated balances; skipped once invoiced), **lines** (every pushed, un-removed line still on the job) — plus job status ≥ 5 and not 9/10. Exact to the penny (no VAT rounding) and it names which side broke. Runs inside the drain lock. First sight of an invoice on the job sets `invoiced_at` — **closing the old "OP never knows the week was invoiced" gap**. Result stored on the period (migration 248); *This week* shows it with *Check now*. **Cannot see a sale line checked in by mistake** — the line stays, only the shelf moves. |
 | **Alarms (step 9)** | Scanner every 15 min → email **jon only** (jon, Sep 2026): a week that doesn't match (once per distinct problem — `alert_signature`; cleared when it balances), and failed / stuck-30-min transactions (once each — `stuck_alerted_at`, reset by Retry). |
+| **Sitter till (§5)** | Freelancer portal (the Next.js app in `src/`, Netlify): `/shift/[date]/till`, linked from the shift page. Price lookup any time the sitter can see the shift; selling only while the night is OPEN (its date, or until 06:00 next morning). Walk-in or tonight's bands (from the shift itself); tenders mirror the staff till (`services/shop-tenders.ts` — ⚠️ update it AND `frontend/src/lib/shopTenders.ts` when the Stripe terminal replaces Worldpay); list price only (freelancer cap 0%, and the route never takes a price from the phone). A sitter can cancel their own sale inside the hold; refunds are the office's. OP side: `/api/portal/studio-sitter/shifts/:date/till/*` behind the same rostered-to-this-evening gate as the lock-up; portal side: one whitelisted catch-all proxy. Sitters are `people`, so a sale records `recorded_by_person_id` + `shift_id` (migration 250; `recorded_by` → users is now optional, a CHECK keeps one set). |
+| **Sitter review** | Every sitter sale is `needs_review`. Staff tick them off on the till's **Sitter sales** tab (`/money/shop?tab=review` — `?tab=` opens any tab). Linked from the staff lock-up report ("N to review →") and the handover-thread summary. Reminder email after `shop_review_reminder_hours` (12) to `shop_review_reminder_to` (info@), once per sale. |
+| **Lock-up report (step 10)** | Sitter's lock-up page shows "Shop till tonight: N sales · £x taken" by tender; the submitted summary in the handover thread gets a 🛒 line; the staff report view shows it with the review link. Template item "Have the clients paid?" became **"Any money outstanding?"** (new id `money_outstanding`, expected "no" — migration 250 swaps it only if the seeded item was untouched). |
 | **Drain lock** | `withShopDrainLock` — the scheduler and `POST /shop/drain` used to be able to push the same sale twice at once. Now serialised. |
 | **Weekly job** | Created on demand, Mon 00:01→Sun 23:59, DISPATCHED. Live one is **16750**. |
 | **Sync exclusion** | Shop jobs never enter OP's `jobs` table — bulk sync and webhook both guarded. |
@@ -1236,20 +1239,20 @@ once the mirror lands — it costs one query, and any item below 100 means today
 
 ### THE FIRST THING TO DO NEXT
 
-**Exercise the balance check live** on this week's shop job:
+**Exercise the sitter till live.** jon: create yourself as a sitter, roster yourself on a
+scratch rehearsal job for tonight, then on your phone:
 
-1. open *This week* → *Check now* on a clean week — it should read **Balanced**;
-2. add a line to the shop job by hand in HireHop → *Check now* → **Goods** goes red,
-   naming the difference; within 15 min jon gets ONE email. Delete the line → balanced;
-3. same with a hand-typed payment → **Money** goes red;
-4. confirm the `accrued` total HireHop reports matches the job's net total with a
-   discounted line on it (the check assumes it does — verified only against fakes).
+1. shift page → *Shop till* → look up an item (price lookup);
+2. sell one **walk-in, cash** → lands on the weekly shop job, drains like any sale;
+3. sell one **on the band's bill** → lands on the band's job, no deposit;
+4. cancel a third inside its 2 minutes;
+5. lock-up page shows the takings; submit → the handover thread has the 🛒 line;
+6. OP: the till's *Sitter sales* tab lists 2, the lock-up report links to it; tick them;
+7. check the lock-up checklist now asks "Any money outstanding?" (if it still says
+   "Have the clients paid?", the template had been edited — change it in Settings).
 
 ### Then, in order
 
-- **The sitter till** (freelancer portal, phone-first, §5): price lookup, sell, the
-  same "in today" picker, `needs_review` sales + the morning review list, the dashboard
-  row and the handover-thread summary (§12.1). Unlocks 10.
 10. Lock-up report integration (§5).
 11. Receipts (§2.10) — **accountant confirmed Sep 2026** that a VAT receipt is fine:
     it is a record of sale and is not pushed to Xero. Number = the sale's `OT-SHOP-#####`.

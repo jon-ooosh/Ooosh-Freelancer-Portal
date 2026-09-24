@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 
 /**
@@ -25,6 +26,44 @@ interface ShiftReport {
   notes: { text: string; photos: ReadPhoto[] };
   continuing_tomorrow: boolean;
   exceptions: { id: string; label: string; answer: string; expected: string }[];
+  /** The shop till's takings that evening (SHOP-SALES-SPEC.md §5). */
+  shop: {
+    sales: number;
+    taken: number;
+    byTender: { tender: string; label: string; amount: number }[];
+    onTheirBill: number;
+    toReview: number;
+  } | null;
+}
+
+/**
+ * The night's till takings, with a way into the review list. jon, Sep 2026:
+ * sitter sales needing a check must be reachable from where staff already
+ * look — this report — not only from the Shop page.
+ */
+function ShopTonight({ shop }: { shop: ShiftReport['shop'] }) {
+  if (!shop || shop.sales === 0) return null;
+  const money = (n: number) => `£${n.toFixed(2)}`;
+  return (
+    <div className="mb-3 rounded border border-gray-200 bg-gray-50 px-3 py-2 text-xs">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <span className="font-medium text-gray-800">
+          🛒 Shop: {shop.sales} sale{shop.sales === 1 ? '' : 's'}, {money(shop.taken)} taken
+        </span>
+        {shop.toReview > 0 ? (
+          <Link to="/money/shop?tab=review" className="font-medium text-amber-700 hover:underline">
+            {shop.toReview} to review →
+          </Link>
+        ) : (
+          <span className="text-green-700">✓ reviewed</span>
+        )}
+      </div>
+      <p className="mt-0.5 text-gray-500">
+        {shop.byTender.map(t => `${t.label} ${money(t.amount)}`).join(' · ')}
+        {shop.onTheirBill > 0 ? `${shop.byTender.length ? ' · ' : ''}on bands' bills ${money(shop.onTheirBill)}` : ''}
+      </p>
+    </div>
+  );
 }
 
 function fmtWhen(iso: string | null): string {
@@ -85,7 +124,14 @@ export default function StudioLockupReport({ date }: { date: string }) {
 
   if (loading) return <div className="text-xs text-gray-400">Loading lock-up report…</div>;
   if (error) return <div className="text-xs text-red-500">{error}</div>;
-  if (!report || !report.submitted) return <div className="text-xs text-gray-400">No lock-up report submitted for this evening.</div>;
+  if (!report || !report.submitted) {
+    return (
+      <div>
+        {report && <ShopTonight shop={report.shop} />}
+        <div className="text-xs text-gray-400">No lock-up report submitted for this evening.</div>
+      </div>
+    );
+  }
 
   const exceptionIds = new Set(report.exceptions.map(e => e.id));
   const shownItems = report.template.items.filter(it => !(it.end_of_booking_only && report.continuing_tomorrow));
@@ -101,6 +147,8 @@ export default function StudioLockupReport({ date }: { date: string }) {
           {report.exceptions.length > 0 ? `⚠ ${report.exceptions.length} need${report.exceptions.length === 1 ? 's' : ''} attention` : '✓ All clear'}
         </span>
       </div>
+
+      <ShopTonight shop={report.shop} />
 
       <p className="text-xs text-gray-500 mb-2">
         {report.continuing_tomorrow ? 'Studio in use again tomorrow.' : 'Last night of the booking (deep-clean applied).'}
