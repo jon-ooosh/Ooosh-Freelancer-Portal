@@ -277,6 +277,13 @@ See docs/SPEC.md for full phased plan.
   starting point exists once Phase 3 of that module lands — what is missing is
   creation from other surfaces, cross-role assignment and entity links.
 
+  **State at 24 Sep 2026 (staff records closed, spec §23):** My To Do has add,
+  edit, done/drop, re-open, a re-arming chase date and a "From your review"
+  badge. Assigning to somebody else is ADMIN-ONLY (`createTask`), and there is
+  no recurrence, no "assigned by me" view and no entity link. jon's asks for
+  the module: assign to-dos to other people, and recurring to-dos. **Next up —
+  to be specced as its own module.**
+
 - **A single place for freelancer rates** — jon, Sep 2026: "could we align our
   freelancer rates somewhere? Note this would actually be across all freelancer
   offerings." Today a rate lives in three unconnected places: `people.day_rate_note`

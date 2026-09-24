@@ -174,31 +174,42 @@ export async function updateTask(
   if (patch.detail !== undefined) {
     params.push(patch.detail?.trim() || null); sets.push(`detail = $${params.length}`);
   }
+  // The chase date is decided ONCE and assigned once. Postgres rejects an
+  // UPDATE that sets the same column twice ("multiple assignments to same
+  // column"), so the earlier version — which appended next_chase_date for the
+  // due date and again for an explicit chase date or a status change — failed
+  // whenever two of those arrived together, e.g. an edit form re-dating both.
+  // Precedence, lowest to highest: follows the new due date → an explicit
+  // chase date → finished/dropped (never chase).
+  let chase: string | null | undefined;
   if (patch.dueDate !== undefined) {
     if (patch.dueDate && !DATE_RE.test(patch.dueDate)) throw new Error('dueDate must be YYYY-MM-DD');
     params.push(patch.dueDate || null); sets.push(`due_date = $${params.length}::date`);
-    // A re-dated task is a fresh promise, so it earns a fresh chase — and the
-    // chase follows the new due date unless the caller set one explicitly in
-    // the same request (handled below, which wins because it is appended last).
-    sets.push('chased_at = NULL');
-    params.push(patch.dueDate || null); sets.push(`next_chase_date = $${params.length}::date`);
+    // A re-dated task is a fresh promise, so it earns a fresh chase that
+    // follows the new due date — unless the caller also set one explicitly.
+    chase = patch.dueDate || null;
   }
   if (patch.nextChaseDate !== undefined) {
     if (patch.nextChaseDate && !DATE_RE.test(patch.nextChaseDate)) {
       throw new Error('nextChaseDate must be YYYY-MM-DD');
     }
-    params.push(patch.nextChaseDate || null); sets.push(`next_chase_date = $${params.length}::date`);
-    sets.push('chased_at = NULL');
+    chase = patch.nextChaseDate || null;
   }
   if (patch.status !== undefined) {
     if (!(TASK_STATUSES as readonly string[]).includes(patch.status)) throw new Error('Unknown status');
     params.push(patch.status); sets.push(`status = $${params.length}`);
     // A finished or dropped task must stop chasing. Re-opening one leaves the
     // chase date alone — whatever it was is still the right answer.
-    if (patch.status !== 'open') sets.push('next_chase_date = NULL');
+    if (patch.status !== 'open') chase = null;
     // Stamped on the way in and cleared on the way back out, so re-opening a
     // task ticked by mistake leaves no phantom completion date behind it.
     sets.push(patch.status === 'done' ? 'completed_at = NOW()' : 'completed_at = NULL');
+  }
+  if (chase !== undefined) {
+    params.push(chase); sets.push(`next_chase_date = $${params.length}::date`);
+    // A new chase date earns a fresh nudge. Not on finishing — the stamp is
+    // then the record of the last nudge, and nothing will chase again anyway.
+    if (!(patch.status !== undefined && patch.status !== 'open')) sets.push('chased_at = NULL');
   }
   if (!sets.length) throw new Error('No fields to update');
 
