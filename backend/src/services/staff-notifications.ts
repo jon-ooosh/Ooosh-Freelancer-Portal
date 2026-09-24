@@ -816,6 +816,94 @@ export async function runTaskChase(): Promise<{ chased: number }> {
   return { chased };
 }
 
+// ── To Do: assigning (docs/TASKS-SPEC.md §5) ────────────────────────────────
+//
+// Bells only. The escalation scheduler turns them into email per each
+// person's own preferences, same as every other staff bell.
+
+const TODO_URL = '/me?tab=todo';
+
+/** The active login behind a person, if any. People without one get no bell. */
+async function userForPerson(personId: string): Promise<string | null> {
+  const r = await query(
+    'SELECT id FROM users WHERE person_id = $1 AND is_active = true ORDER BY created_at LIMIT 1',
+    [personId]
+  );
+  return r.rows[0]?.id ?? null;
+}
+
+/** "Sam gave you a to-do" — to the new owner. */
+export async function notifyTaskAssigned(
+  ownerPersonId: string, taskId: string, title: string, byName: string | null, dueDate: string | null
+): Promise<void> {
+  const userId = await userForPerson(ownerPersonId);
+  if (!userId) return;
+  await notify(
+    userId, 'staff_task_assigned', 'You’ve been given a to-do',
+    `${esc(byName || 'Somebody')} gave you “${esc(title)}”${dueDate ? `, due ${fmtDate(dueDate)}` : ''}.`,
+    'staff_tasks', taskId, `${TODO_URL}&view=mine`, 'normal'
+  );
+}
+
+/** "Will handed it back" — to whoever set it, with the reason. */
+export async function notifyTaskHandedBack(
+  setterUserId: string, taskId: string, title: string, byName: string | null, reason: string
+): Promise<void> {
+  await notify(
+    setterUserId, 'staff_task_handed_back', 'A to-do was handed back to you',
+    `${esc(byName || 'Somebody')} handed back “${esc(title)}”: ${esc(reason)}. It’s on your list now.`,
+    'staff_tasks', taskId, `${TODO_URL}&view=mine`, 'normal'
+  );
+}
+
+/** "Will finished it" — closes the loop for the setter. Low: nothing to do. */
+export async function notifyTaskDone(
+  setterUserId: string, taskId: string, title: string, byName: string | null
+): Promise<void> {
+  await notify(
+    setterUserId, 'staff_task_done', 'A to-do you set is done',
+    `${esc(byName || 'Somebody')} finished “${esc(title)}”.`,
+    'staff_tasks', taskId, `${TODO_URL}&view=assigned`, 'low'
+  );
+}
+
+/**
+ * The SETTER's follow-up (spec §5.2): "Will's 'Book the refresher' — still
+ * open". A second clock beside runTaskChase, which nudges the owner. Once per
+ * date, stamped; moving the date clears the stamp (updateTask), which is what
+ * "reset the follow-up" means.
+ */
+export async function runTaskFollowUpChase(): Promise<{ chased: number }> {
+  const due = await query(
+    `SELECT t.id, t.title, t.created_by, t.due_date::text AS due_date,
+            NULLIF(TRIM(COALESCE(op.preferred_name, op.first_name, '') || ' ' ||
+                        COALESCE(op.last_name, '')), '') AS owner_name
+       FROM staff_tasks t
+       JOIN people op ON op.id = t.person_id
+       JOIN users cu ON cu.id = t.created_by AND cu.is_active = true
+      WHERE t.status = 'open'
+        AND t.follow_up_on IS NOT NULL
+        AND t.follow_up_on <= CURRENT_DATE
+        AND t.follow_up_chased_at IS NULL
+        -- Only while it is still somebody ELSE's: a task handed back to its
+        -- setter is on their own list, where the owner's nudge covers it.
+        AND cu.person_id IS DISTINCT FROM t.person_id`
+  );
+  let chased = 0;
+  for (const row of due.rows) {
+    await query('UPDATE staff_tasks SET follow_up_chased_at = NOW() WHERE id = $1', [row.id]);
+    await notify(
+      row.created_by, 'staff_task_follow_up', 'A to-do you set is still open',
+      `${esc(row.owner_name || 'Somebody')}’s “${esc(row.title)}” is still open` +
+      `${row.due_date ? ` (due ${fmtDate(row.due_date)})` : ''}.`,
+      'staff_tasks', row.id, `${TODO_URL}&view=assigned`, 'normal'
+    );
+    chased++;
+  }
+  if (chased) console.log(`[staff-notifications] to-do follow-ups: ${chased}`);
+  return { chased };
+}
+
 /**
  * Somebody's review is coming round (spec §5.6).
  *

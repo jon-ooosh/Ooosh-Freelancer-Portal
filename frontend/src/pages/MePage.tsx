@@ -23,9 +23,12 @@ import MyReviewPage from './MyReviewPage';
 import StaffDocumentsPage from './StaffDocumentsPage';
 import ProfilePage from './ProfilePage';
 
+// To Do first and the default (jon, Sep 2026): it's the daily one. Every old
+// link names its tab explicitly (/staff/me → ?tab=time), so moving the default
+// strands nothing.
 const TABS = [
+  { id: 'todo', label: 'To Do' },
   { id: 'time', label: 'My Time' },
-  { id: 'todo', label: 'My To Do' },
   // Only when there IS one — a review is a once-a-year thing and does not earn
   // permanent space beside the tabs people use weekly. The notification that
   // announces a review links straight here, so it is never the only way in.
@@ -39,7 +42,7 @@ type TabId = (typeof TABS)[number]['id'];
 export default function MePage() {
   const [params, setParams] = useSearchParams();
   const raw = params.get('tab');
-  const active: TabId = TABS.some(t => t.id === raw) ? (raw as TabId) : 'time';
+  const active: TabId = TABS.some(t => t.id === raw) ? (raw as TabId) : 'todo';
 
   // One cheap call decides whether the review tab is shown at all. Failure is
   // silent and simply hides it: this is decoration on a page whose other four
