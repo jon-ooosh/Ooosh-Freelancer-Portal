@@ -1216,7 +1216,8 @@ once the mirror lands — it costs one query, and any item below 100 means today
 | **Alarms (step 9)** | Scanner every 15 min → email **jon only** (jon, Sep 2026): a week that doesn't match (once per distinct problem — `alert_signature`; cleared when it balances), and failed / stuck-30-min transactions (once each — `stuck_alerted_at`, reset by Retry). |
 | **Sitter till (§5)** | Freelancer portal (the Next.js app in `src/`, Netlify): `/shift/[date]/till`, linked from the shift page. Price lookup any time the sitter can see the shift; selling only while the night is OPEN (its date, or until 06:00 next morning). Walk-in or tonight's bands (from the shift itself); tenders mirror the staff till (`services/shop-tenders.ts` — ⚠️ update it AND `frontend/src/lib/shopTenders.ts` when the Stripe terminal replaces Worldpay); list price only (freelancer cap 0%, and the route never takes a price from the phone). A sitter can cancel their own sale inside the hold; refunds are the office's. OP side: `/api/portal/studio-sitter/shifts/:date/till/*` behind the same rostered-to-this-evening gate as the lock-up; portal side: one whitelisted catch-all proxy. Sitters are `people`, so a sale records `recorded_by_person_id` + `shift_id` (migration 251; `recorded_by` → users is now optional, a CHECK keeps one set). |
 | **Sitter review** | Every sitter sale is `needs_review`. Staff tick them off on the till's **Sitter sales** tab (`/money/shop?tab=review` — `?tab=` opens any tab). Linked from the staff lock-up report ("N to review →") and the handover-thread summary. Reminder email after `shop_review_reminder_hours` (12) to `shop_review_reminder_to` (info@), once per sale. |
-| **Lock-up report (step 10)** | Sitter's lock-up page shows "Shop till tonight: N sales · £x taken" by tender; the submitted summary in the handover thread gets a 🛒 line; the staff report view shows it with the review link. Template item "Have the clients paid?" became **"Any money outstanding?"** (new id `money_outstanding`, expected "no" — migration 251 swaps it only if the seeded item was untouched). |
+| **Test accounts** | `shop_till_test_emails` (migration 252, `["test123@oooshtours.co.uk"]`): a listed portal account may use the till on ANY date it's rostered to, not just the night. Still needs the roster assignment. Empty the list to switch it off. |
+| **Lock-up report (step 10)** | Sitter's lock-up page shows "Shop till tonight: N sales · £x taken" by tender; the submitted summary in the handover thread gets a 🛒 line; the staff report view shows it with the review link. The night's takings net off any later refunds of that night's sales ("£18.00 taken (after £9.00 refunded)"). Template item "Have the clients paid?" became **"Any money outstanding?"** (new id `money_outstanding`, expected "no" — migration 251 swaps it only if the seeded item was untouched). |
 | **Drain lock** | `withShopDrainLock` — the scheduler and `POST /shop/drain` used to be able to push the same sale twice at once. Now serialised. |
 | **Weekly job** | Created on demand, Mon 00:01→Sun 23:59, DISPATCHED. Live one is **16750**. |
 | **Sync exclusion** | Shop jobs never enter OP's `jobs` table — bulk sync and webhook both guarded. |
@@ -1239,8 +1240,12 @@ once the mirror lands — it costs one query, and any item below 100 means today
 
 ### THE FIRST THING TO DO NEXT
 
-**Exercise the sitter till live.** jon: create yourself as a sitter, roster yourself on a
-scratch rehearsal job for tonight, then on your phone:
+**Exercise the sitter till live.** A studio evening has ONE shift and ONE sitter, so a
+real booking tonight blocks testing on tonight. Instead (migration 252): on the roster,
+*＋ Add cover* on a FREE date, assign the portal test account `test123@oooshtours.co.uk`
+(listed in `shop_till_test_emails`, which lets it sell on any date it's rostered to), and
+optionally put a scratch rehearsal job on that date for the "their bill" test. Log in to
+the portal as test123, open that shift, then:
 
 1. shift page → *Shop till* → look up an item (price lookup);
 2. sell one **walk-in, cash** → lands on the weekly shop job, drains like any sale;
