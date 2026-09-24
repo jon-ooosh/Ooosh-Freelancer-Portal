@@ -19,6 +19,7 @@ import {
 } from '../services/shop-stock';
 import {
   createShopSale, listShopSales, cancelShopSale, retryShopSale,
+  reverseShopSale, settleShopRefund,
   maxDiscountPctForRole, priceLines, totalsFor,
   getConsumptionSummary, getConsumptionLog,
 } from '../services/shop-sales';
@@ -234,6 +235,51 @@ router.post('/sales/:id/cancel', async (req: AuthRequest, res: Response) => {
   } catch (err) {
     console.error('[shop] cancel failed:', err);
     res.status(500).json({ error: 'Could not cancel that sale.' });
+  }
+});
+
+/**
+ * Refund a sale that has already reached HireHop (Window B, §8): lines come off
+ * the job and a refund is applied against its deposit.
+ *
+ * MANAGER_ROLES — money out of the door (CLAUDE.md RBAC). A cancel inside the
+ * hold stays open to all staff, because nothing has moved yet.
+ *
+ * The drain is kicked straight away rather than left for the next tick: whoever
+ * pressed Refund is standing with the customer and wants to see it land. The
+ * drain lock makes that safe alongside the scheduler.
+ */
+router.post('/sales/:id/reverse', authorize(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await reverseShopSale(
+      String(req.params.id),
+      { id: req.user!.id },
+      { reason: String(req.body?.reason ?? ''), moneyReturned: req.body?.moneyReturned === true },
+    );
+    import('../services/shop-drain')
+      .then(({ drainShop }) => drainShop())
+      .catch((err) => console.error('[shop] post-refund drain failed:', err instanceof Error ? err.message : err));
+    res.status(201).json({ data: result });
+  } catch (err) {
+    // Written to be read by the person at the counter ("already refunded",
+    // "the week has been invoiced"), so pass it through.
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Could not refund that sale.' });
+  }
+});
+
+/**
+ * The customer has their money back — cash from the drawer, or a refund keyed
+ * on the card terminal. OP cannot do that part itself until Stripe, so this is
+ * the tick that clears an outstanding refund.
+ */
+router.post('/sales/:id/refund-settled', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await settleShopRefund(String(req.params.id), { id: req.user!.id });
+    if (!result.settled) return res.status(409).json({ error: result.message });
+    res.json({ data: { settled: true } });
+  } catch (err) {
+    console.error('[shop] refund settle failed:', err);
+    res.status(500).json({ error: 'Could not mark that refund as done.' });
   }
 });
 

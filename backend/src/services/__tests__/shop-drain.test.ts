@@ -19,7 +19,8 @@ jest.mock('../hirehop-broker', () => ({
 }));
 
 import hhBroker from '../hirehop-broker';
-import { pushTally, pushSaleLine } from '../shop-drain';
+import { pushTally, pushSaleLine, removeSaleLine, withShopDrainLock } from '../shop-drain';
+import { saleRef } from '../shop-sale-ref';
 
 const mockPost = (hhBroker as unknown as { post: jest.Mock }).post;
 
@@ -146,5 +147,71 @@ describe('pushSaleLine', () => {
     const r = await pushSaleLine(16750, 25, 1);
     expect(r.lineId).toBeNull();
     expect(r.error).toContain('327');
+  });
+});
+
+// ── Reversals (step 8) ────────────────────────────────────────────────────
+
+const mockGet = (hhBroker as unknown as { get: jest.Mock }).get;
+/** A supply-list read carrying these line ids. */
+const lines = (...ids: number[]) => ({ success: true, data: ids.map((ID) => ({ ID, LIST_ID: 25 })) });
+
+describe('removeSaleLine', () => {
+  beforeEach(() => mockGet.mockReset());
+
+  it('sends the CAPTURED payload — ids as a bare b<line> string — and confirms by re-reading', async () => {
+    mockGet.mockResolvedValueOnce(lines(9154, 9160)).mockResolvedValueOnce(lines(9160));
+    mockPost.mockResolvedValue({ success: true, data: { success: ['b9154'], ids: ['b9154'] } });
+
+    await expect(removeSaleLine(16750, 9154, 0)).resolves.toEqual({ removed: true, error: null });
+    expect(mockPost.mock.calls[0][0]).toBe('/php_functions/items_delete.php');
+    // NOT a JSON array, and NOT save_job's `delete:` key — both were silently ignored.
+    expect(mockPost.mock.calls[0][1]).toEqual({ job: 16750, ids: 'b9154', arch: '', no_availability: 0 });
+  });
+
+  it('refuses to call it removed when HireHop says success but the line is still there (§2.5)', async () => {
+    mockGet.mockResolvedValueOnce(lines(9154)).mockResolvedValueOnce(lines(9154));
+    mockPost.mockResolvedValue({ success: true, data: {} });
+    const r = await removeSaleLine(16750, 9154, 0);
+    expect(r.removed).toBe(false);
+    expect(r.error).toMatch(/still on job 16750/);
+  });
+
+  it('treats a line that is already gone as removed, without deleting anything', async () => {
+    // A previous attempt deleted it and died before recording it.
+    mockGet.mockResolvedValueOnce(lines(9160));
+    await expect(removeSaleLine(16750, 9154, 0)).resolves.toEqual({ removed: true, error: null });
+    expect(mockPost).not.toHaveBeenCalled();
+  });
+
+  it('does not guess "removed" from an empty or unreadable list', async () => {
+    mockGet.mockResolvedValueOnce({ success: true, data: [] });
+    expect((await removeSaleLine(16750, 9154, 0)).removed).toBe(false);
+    mockGet.mockResolvedValueOnce({ success: false, error: 'timeout' });
+    expect((await removeSaleLine(16750, 9154, 0)).removed).toBe(false);
+    expect(mockPost).not.toHaveBeenCalled();
+  });
+});
+
+describe('withShopDrainLock', () => {
+  it('runs callers one at a time, and a failure does not jam the next', async () => {
+    const order: string[] = [];
+    const slow = withShopDrainLock(async () => {
+      order.push('a-start');
+      await new Promise((r) => setTimeout(r, 20));
+      order.push('a-end');
+      throw new Error('boom');
+    });
+    const next = withShopDrainLock(async () => { order.push('b'); return 2; });
+    await expect(slow).rejects.toThrow('boom');
+    await expect(next).resolves.toBe(2);
+    expect(order).toEqual(['a-start', 'a-end', 'b']);
+  });
+});
+
+describe('saleRef', () => {
+  it('pads to five digits under the OT-SHOP prefix', () => {
+    expect(saleRef(100)).toBe('OT-SHOP-00100');
+    expect(saleRef(123456)).toBe('OT-SHOP-123456');
   });
 });
