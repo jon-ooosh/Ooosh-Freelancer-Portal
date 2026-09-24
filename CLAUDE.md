@@ -124,10 +124,11 @@ somewhere the rules don't cover.
 
 `docs/*-SPEC.md` are the hand-written per-feature specs; several rules point at them.
 
-**BUILT, Sep 2026:** `docs/STAFF-RECORDS-SPEC.md` — the private staff area. **All
+**CLOSED, Sep 2026:** `docs/STAFF-RECORDS-SPEC.md` — the private staff area. **All
 seven phases shipped**: files, key data, `staff_tasks` + "My To Do", reviews, the
 staff-facing review, document review cycles, retention. §20 is the current state and
 the short list of what is deliberately NOT built. Read it before changing anything here.
+Wider to-do work (assigning to others, recurring) is the general tasks module, not this one.
 
 **The staff DVLA/document check has NOTHING to do with `drivers`.** jon's decision,
 Sep 2026: the `drivers` machinery verifies self-drive-hire CLIENTS (30-day

@@ -187,7 +187,35 @@ describe('re-dating clears the chase stamp', () => {
   it('stops chasing a finished task', async () => {
     rows([{ person_id: MY_PERSON }], [{ person_id: MY_PERSON }], [], [{ id: TASK }]);
     await updateTask(TASK, { status: 'done' }, ME, 'staff');
-    expect(mockQuery.mock.calls[2]![0] as string).toMatch(/next_chase_date = NULL/);
+    const sql = mockQuery.mock.calls[2]![0] as string;
+    const params = mockQuery.mock.calls[2]![1] as unknown[];
+    const m = sql.match(/next_chase_date = \$(\d+)/);
+    expect(m).not.toBeNull();
+    expect(params[Number(m![1]) - 1]).toBeNull();
+  });
+
+  // Postgres rejects an UPDATE that assigns one column twice, so every
+  // combination an edit form can send must produce exactly one of each.
+  const once = (sql: string, col: string) =>
+    (sql.match(new RegExp(`\\b${col} =`, 'g')) ?? []).length;
+
+  it('assigns the chase date once when due and remind dates change together', async () => {
+    rows([{ person_id: MY_PERSON }], [{ person_id: MY_PERSON }], [], [{ id: TASK }]);
+    await updateTask(TASK, { dueDate: '2026-10-01', nextChaseDate: '2026-09-28' }, ME, 'staff');
+    const sql = mockQuery.mock.calls[2]![0] as string;
+    const params = mockQuery.mock.calls[2]![1] as unknown[];
+    expect(once(sql, 'next_chase_date')).toBe(1);
+    expect(once(sql, 'chased_at')).toBe(1);
+    // The explicit chase date wins over the one derived from the due date.
+    const m = sql.match(/next_chase_date = \$(\d+)/);
+    expect(params[Number(m![1]) - 1]).toBe('2026-09-28');
+  });
+
+  it('assigns the chase date once when re-dated and finished together', async () => {
+    rows([{ person_id: MY_PERSON }], [{ person_id: MY_PERSON }], [], [{ id: TASK }]);
+    await updateTask(TASK, { dueDate: '2026-10-01', status: 'done' }, ME, 'staff');
+    const sql = mockQuery.mock.calls[2]![0] as string;
+    expect(once(sql, 'next_chase_date')).toBe(1);
   });
 
   it('clears completed_at when a done task is re-opened', async () => {

@@ -1,7 +1,8 @@
 # Staff Records — private files, key data, document review cycles, and staff reviews
 
-**Status: BUILT — all seven phases shipped Sep 2026. §20 is the current state;
-§21 is the follow-up audit and what is agreed next.** The sections below are
+**Status: CLOSED 24 Sep 2026 — all seven phases plus §21–§23 shipped. §20 is the
+current state; §23 is the close-out. Follow-on to-do work belongs to the general
+tasks module (BACKLOG.md), not here.** The sections below are
 kept as the design record. Written 21 Sep 2026 at the end of the
 staff-calendar session, from jon's §17 answers. **Revised 21 Sep 2026** after a
 verification pass against the code — the first draft's §1 was right in spirit
@@ -1408,3 +1409,27 @@ ever scheduled it. Now:
 - Staff side: nothing new — their actions already show on My To Do, and now
   carry the "From your review" badge.
 
+---
+
+## 23. Close-out (24 Sep 2026)
+
+jon confirmed the §22 work live, including an "Email only" record reminder fired
+by hand on production. The module is closed. The last pass:
+
+- **Settings editors.** `staff.review_questions` and `staff.doc_review_intervals`
+  are JSON, and were edited in a one-line box. Settings › Staff time now gives
+  the questions a list editor (add, remove, reorder) and the intervals a
+  type → months table. Both write the same JSON string, so nothing reading them
+  changed — and both fall back to the raw text when the stored value doesn't
+  parse, so a hand-edited setting is never silently blanked on save.
+- **My To Do** lost its tagline, gained **Edit** (title, detail, due date,
+  remind date) and shows due / done dates on finished items.
+- **A latent bug in `updateTask()`**: it could assign `next_chase_date` twice
+  in one UPDATE (re-dating plus an explicit remind date, or plus a status
+  change). Postgres rejects that outright, so any request carrying two of
+  those failed. Nothing sent that combination until the edit form would have.
+  The chase date is now resolved once; tests pin every combination.
+
+**Not done here, on purpose:** assigning to-dos to other people (still
+admin-only), recurring to-dos, and to-dos not tied to a person's own list.
+Those are the general tasks module — see `docs/reference/BACKLOG.md`.

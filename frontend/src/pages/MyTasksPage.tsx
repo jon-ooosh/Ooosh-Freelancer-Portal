@@ -29,6 +29,18 @@ interface Task {
   completed_at: string | null;
 }
 
+/** "3 Oct" / "3 Oct 2025" — for the finished list. '—' on anything unparseable. */
+function fmtShort(iso: string | null): string {
+  if (!iso) return '—';
+  const d = new Date(iso.length === 10 ? `${iso}T00:00:00Z` : iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleDateString('en-GB', {
+    day: 'numeric', month: 'short',
+    year: d.getUTCFullYear() === new Date().getFullYear() ? undefined : 'numeric',
+    timeZone: 'UTC',
+  });
+}
+
 function fmtDue(iso: string | null): { text: string; tone: string } {
   if (!iso) return { text: 'No date', tone: 'text-gray-400' };
   const [y, m, d] = iso.split('-').map(Number);
@@ -61,6 +73,7 @@ export default function MyTasksPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [showDone, setShowDone] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
 
   const [title, setTitle] = useState('');
   const [dueDate, setDueDate] = useState('');
@@ -121,6 +134,29 @@ export default function MyTasksPage() {
     }
   }
 
+  async function saveEdit(task: Task, patch: Record<string, string | null>) {
+    // Only what changed — so a title fix doesn't reset the chase stamp, which
+    // re-dating deliberately does.
+    const changed: Record<string, string | null> = {};
+    if (patch.title !== task.title) changed.title = patch.title;
+    if ((patch.detail ?? null) !== (task.detail ?? null)) changed.detail = patch.detail;
+    if ((patch.dueDate || null) !== (task.due_date || null)) changed.dueDate = patch.dueDate || null;
+    if ((patch.nextChaseDate || null) !== (task.next_chase_date || null)) {
+      changed.nextChaseDate = patch.nextChaseDate || null;
+    }
+    if (Object.keys(changed).length === 0) { setEditingId(null); return; }
+    setBusyId(task.id);
+    try {
+      await api.patch(`/staff-tasks/${task.id}`, changed);
+      setEditingId(null);
+      await load();
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : 'Could not save the task');
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   const open = tasks.filter(t => t.status === 'open');
   const done = tasks.filter(t => t.status === 'done');
 
@@ -128,9 +164,6 @@ export default function MyTasksPage() {
     <div className="space-y-6">
       <div>
         <h1 className="text-xl font-semibold text-gray-900">My To Do</h1>
-        <p className="text-sm text-gray-500 mt-1">
-          Things that need doing — yours to tick off. Anything agreed at a review lands here too.
-        </p>
       </div>
 
       {loadError && (
@@ -196,6 +229,13 @@ export default function MyTasksPage() {
             </p>
           ) : open.map(task => {
             const due = fmtDue(task.due_date);
+            if (editingId === task.id) {
+              return (
+                <TaskEditRow key={task.id} task={task} busy={busyId === task.id}
+                  onCancel={() => setEditingId(null)}
+                  onSave={patch => void saveEdit(task, patch)} />
+              );
+            }
             return (
               <div key={task.id} className="flex items-start gap-3 px-4 py-3">
                 <input
@@ -224,6 +264,13 @@ export default function MyTasksPage() {
                     )}
                   </div>
                 </div>
+                <button
+                  onClick={() => setEditingId(task.id)}
+                  disabled={busyId === task.id}
+                  className="text-xs text-ooosh-600 hover:text-ooosh-800 disabled:opacity-40 shrink-0"
+                >
+                  Edit
+                </button>
                 <button
                   onClick={() => void setStatus(task, 'cancelled')}
                   disabled={busyId === task.id}
@@ -259,7 +306,14 @@ export default function MyTasksPage() {
                   className="h-4 w-4 rounded border-gray-300 text-ooosh-600"
                   aria-label={`Re-open "${task.title}"`}
                 />
-                <span className="text-sm text-gray-500 line-through">{task.title}</span>
+                <span className="text-sm text-gray-500 line-through min-w-0 flex-1">{task.title}</span>
+                <span className="text-xs text-gray-400 whitespace-nowrap">
+                  {task.due_date && <>due {fmtShort(task.due_date)} · </>}
+                  done {fmtShort(task.completed_at)}
+                  {task.due_date && task.completed_at && task.completed_at.slice(0, 10) > task.due_date && (
+                    <span className="text-amber-700"> (late)</span>
+                  )}
+                </span>
               </div>
             ))}
           </div>
@@ -268,3 +322,58 @@ export default function MyTasksPage() {
     </div>
   );
 }
+
+/** Edit an open to-do in place: wording, detail, due date, when to be nudged. */
+function TaskEditRow({ task, busy, onCancel, onSave }: {
+  task: Task;
+  busy: boolean;
+  onCancel: () => void;
+  onSave: (patch: Record<string, string | null>) => void;
+}) {
+  const [title, setTitle] = useState(task.title);
+  const [detail, setDetail] = useState(task.detail ?? '');
+  const [dueDate, setDueDate] = useState(task.due_date ?? '');
+  const [remindOn, setRemindOn] = useState(task.next_chase_date ?? '');
+
+  return (
+    <div className="px-4 py-3 bg-gray-50 space-y-2">
+      <input value={title} onChange={e => setTitle(e.target.value)} maxLength={300}
+        aria-label="Title"
+        className="w-full px-3 py-2 border border-gray-300 rounded text-sm bg-white" />
+      <textarea value={detail} onChange={e => setDetail(e.target.value)} rows={2} maxLength={4000}
+        placeholder="Detail (optional)"
+        className="w-full px-3 py-2 border border-gray-300 rounded text-sm bg-white" />
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="text-sm">
+          <span className="block text-xs text-gray-600 mb-1">Due</span>
+          <input type="date" value={dueDate} onChange={e => setDueDate(e.target.value)}
+            className="px-3 py-2 border border-gray-300 rounded text-sm bg-white" />
+        </label>
+        <label className="text-sm">
+          <span className="block text-xs text-gray-600 mb-1">Remind me</span>
+          <input type="date" value={remindOn} onChange={e => setRemindOn(e.target.value)}
+            className="px-3 py-2 border border-gray-300 rounded text-sm bg-white" />
+        </label>
+        <span className="text-[11px] text-gray-400 pb-2 max-w-[16rem]">
+          Blank = never nudge. Moving the due date moves the reminder with it unless you set one here.
+        </span>
+        <div className="ml-auto flex gap-2">
+          <button onClick={onCancel} disabled={busy}
+            className="px-3 py-1.5 text-sm rounded border border-gray-300 bg-white hover:bg-gray-50 disabled:opacity-40">
+            Cancel
+          </button>
+          <button
+            onClick={() => onSave({
+              title: title.trim(), detail: detail.trim() || null,
+              dueDate: dueDate || null, nextChaseDate: remindOn || null,
+            })}
+            disabled={busy || !title.trim()}
+            className="px-3 py-1.5 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-40">
+            {busy ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
