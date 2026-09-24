@@ -58,8 +58,50 @@ export async function getStaffAttention(): Promise<AttentionItem[]> {
   const today = ymd();
   const items: AttentionItem[] = [];
 
-  // ── Documents with an expiry that has passed or is close ──────────────────
-  const docs = await query(
+  // ── Staff records: the one dated action per record (mig 243) ─────────────
+  // Replaced two sections — printed expiry and re-check cycle — which could
+  // list one passport twice. Shows everything whose date is within the lead
+  // window, chased or not: the bell is the push, this is the memory, and a row
+  // stays until somebody moves or clears the date. Not filtered on employment
+  // status, because a deletion flag is mostly for somebody who has left.
+  const { listRecordActionsDue, listRecordsMissingDate } = await import('./staff-doc-cycles');
+  const actions = await listRecordActionsDue({ onlyUnchased: false, withinDays: docLead });
+  const withAction = new Set<string>();
+  for (const a of actions) {
+    withAction.add(a.id);
+    const due = a.action_on <= today;
+    if (a.action_kind === 'delete') {
+      items.push({
+        id: `record-${a.id}`,
+        severity: due ? 'urgent' : 'soon',
+        kind: 'record_delete_due',
+        label: due ? `${a.label} is due for deletion` : `${a.label} due for deletion`,
+        detail: a.action_on,
+        personId: a.person_id,
+        personName: a.person_name,
+        tab: 'records',
+        action: 'Review',
+      });
+    } else {
+      const expired = !!a.expires_on && a.expires_on < today;
+      items.push({
+        id: `record-${a.id}`,
+        severity: due || expired ? 'urgent' : 'soon',
+        kind: 'record_action_due',
+        label: expired ? `${a.label} expired` : due ? `${a.label} needs looking at` : `${a.label} coming up`,
+        detail: a.action_on,
+        personId: a.person_id,
+        personName: a.person_name,
+        tab: 'records',
+        action: 'View',
+      });
+    }
+  }
+
+  // A document that has actually EXPIRED is a fact, not a reminder, so it
+  // shows even when nobody set a date — unless the row above already covers
+  // it. One row per record, never two.
+  const expiredDocs = await query(
     `SELECT f.id, f.label, f.expires_on::text AS expires_on, f.person_id,
             NULLIF(TRIM(COALESCE(p.preferred_name, p.first_name, '') || ' ' ||
                         COALESCE(p.last_name, '')), '') AS person_name
@@ -69,22 +111,71 @@ export async function getStaffAttention(): Promise<AttentionItem[]> {
       WHERE f.deleted_at IS NULL
         AND se.employment_status = 'employed'
         AND f.expires_on IS NOT NULL
-        AND f.expires_on <= $1::date
-      ORDER BY f.expires_on`,
-    [ymd(docLead)]
+        AND f.expires_on < CURRENT_DATE
+        AND f.action_kind <> 'delete'
+      ORDER BY f.expires_on`
   );
-  for (const d of docs.rows) {
-    const expired = d.expires_on < today;
+  for (const d of expiredDocs.rows) {
+    if (withAction.has(d.id)) continue;
+    withAction.add(d.id);
     items.push({
-      id: `doc-${d.id}`,
-      severity: expired ? 'urgent' : 'soon',
-      kind: 'document_expiry',
-      label: expired ? `${d.label} expired` : `${d.label} expires`,
+      id: `record-${d.id}`,
+      severity: 'urgent',
+      kind: 'record_expired',
+      label: `${d.label} expired`,
       detail: d.expires_on,
       personId: d.person_id,
       personName: d.person_name,
       tab: 'records',
-      action: expired ? 'Replace' : 'View',
+      action: 'Replace',
+    });
+  }
+
+  // The safety net under a self-serve system: a record that should have a
+  // date (printed expiry, or a type with a re-check interval) and has none.
+  for (const m of await listRecordsMissingDate()) {
+    if (withAction.has(m.id)) continue;   // already on the list as expired
+    items.push({
+      id: `record-nodate-${m.id}`,
+      severity: 'info',
+      kind: 'record_no_date',
+      label: `${m.label} has no review date`,
+      detail: 'set one so it gets chased',
+      personId: m.person_id,
+      personName: m.person_name,
+      tab: 'records',
+      action: 'Set date',
+    });
+  }
+
+  // Leavers: their records now need an end date, and nothing will prompt it
+  // otherwise. Only while they still have records and none carries a deletion
+  // date. Right-to-work has its own statutory row further down.
+  const leavers = await query(
+    `SELECT se.person_id, se.end_date::text AS left_on,
+            NULLIF(TRIM(COALESCE(p.preferred_name, p.first_name, '') || ' ' ||
+                        COALESCE(p.last_name, '')), '') AS person_name
+       FROM staff_employment se
+       JOIN people p ON p.id = se.person_id
+      WHERE se.employment_status = 'left'
+        AND EXISTS (SELECT 1 FROM staff_record_files f
+                     WHERE f.person_id = se.person_id AND f.deleted_at IS NULL)
+        AND NOT EXISTS (SELECT 1 FROM staff_record_files f
+                         WHERE f.person_id = se.person_id AND f.deleted_at IS NULL
+                           AND f.action_kind = 'delete' AND f.action_on IS NOT NULL)
+      ORDER BY se.end_date DESC NULLS LAST`
+  );
+  for (const l of leavers.rows) {
+    items.push({
+      id: `leaver-${l.person_id}`,
+      severity: 'info',
+      kind: 'leaver_records',
+      label: 'Left — records have no delete-by dates',
+      detail: l.left_on ? `left ${l.left_on}` : null,
+      personId: l.person_id,
+      personName: l.person_name,
+      tab: 'records',
+      action: 'Set dates',
     });
   }
 
@@ -165,6 +256,24 @@ export async function getStaffAttention(): Promise<AttentionItem[]> {
     });
   }
 
+  // ── Check-in between reviews (spec §5.6) ──────────────────────────────────
+  // Half-way through the cycle: "last time's actions — where are they?".
+  // Same due date as the rows above, via listCheckInsDue().
+  const { listCheckInsDue } = await import('./staff-employment');
+  for (const c of await listCheckInsDue()) {
+    items.push({
+      id: `checkin-${c.person_id}`,
+      severity: 'soon',
+      kind: 'checkin_due',
+      label: 'Check-in due',
+      detail: `half-way since the ${c.last_reviewed_on} review`,
+      personId: c.person_id,
+      personName: c.person_name,
+      tab: 'reviews',
+      action: 'Check in',
+    });
+  }
+
   // ── Probation ending ──────────────────────────────────────────────────────
   const probation = await query(
     `SELECT se.person_id, se.probation_end_date::text AS ends_on,
@@ -223,26 +332,6 @@ export async function getStaffAttention(): Promise<AttentionItem[]> {
       personName: p.person_name,
       tab: 'employment',
       action: 'Set hours',
-    });
-  }
-
-  // ── Documents due a re-check (Phase 6) ────────────────────────────────────
-  // The annual DVLA check and anything else with a cycle. Distinct from the
-  // expiry rows above: a document can need re-checking without expiring, which
-  // is the whole point of an annual check on a licence that runs to 2031.
-  const { listDocsDueReview } = await import('./staff-doc-cycles');
-  const dueDocs = await listDocsDueReview({ onlyUnchased: false, withinDays: docLead });
-  for (const d of dueDocs) {
-    items.push({
-      id: `review-doc-${d.id}`,
-      severity: d.due_on < today ? 'urgent' : 'soon',
-      kind: 'document_review_due',
-      label: d.due_on < today ? `${d.label} is overdue a re-check` : `${d.label} needs re-checking`,
-      detail: d.due_on,
-      personId: d.person_id,
-      personName: d.person_name,
-      tab: 'records',
-      action: 'Re-check',
     });
   }
 

@@ -14,7 +14,7 @@ import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware
 import { validate } from '../middleware/validate';
 import {
   listTasks, createTask, updateTask, cancelTask, openTaskCount,
-  personIdForUser, TASK_STATUSES,
+  personIdForUser, listTasksForSource, TASK_STATUSES,
 } from '../services/staff-tasks';
 import { STAFF_ADMIN_ROLES } from '../services/staff-employment';
 
@@ -34,6 +34,10 @@ const createSchema = z.object({
   // Admin-only in the service; rejected there rather than here so one rule
   // covers every caller, including Phase 4's review actions.
   personId: z.string().regex(UUID_RE).optional(),
+  // An action agreed at a review. Links the task to it (source_type
+  // 'staff_review') — without this a review action was saved as a plain
+  // manual to-do and never reached the follow-up email. Spec §22.
+  reviewId: z.string().regex(UUID_RE).optional(),
 });
 
 const updateSchema = z.object({
@@ -71,6 +75,20 @@ router.get('/person/:personId', authorize(...STAFF_ADMIN_ROLES), async (req: Aut
   }
 });
 
+// GET /api/staff-tasks/review/:reviewId — admin, every action a review
+// produced, whoever owns it. The company's own actions are the ones most
+// likely to lapse (spec §6.2), so they must show beside the reviewee's.
+router.get('/review/:reviewId', authorize(...STAFF_ADMIN_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const reviewId = req.params.reviewId as string;
+    if (!UUID_RE.test(reviewId)) { res.status(400).json({ error: 'reviewId must be a UUID' }); return; }
+    res.json({ data: await listTasksForSource('staff_review', reviewId) });
+  } catch (err) {
+    console.error('[staff-tasks] list review actions error:', err);
+    res.status(500).json({ error: 'Failed to load the review actions' });
+  }
+});
+
 // POST /api/staff-tasks
 router.post('/', validate(createSchema), async (req: AuthRequest, res: Response) => {
   try {
@@ -84,6 +102,7 @@ router.post('/', validate(createSchema), async (req: AuthRequest, res: Response)
         // means "derive it", which is not the same as "never nudge me".
         nextChaseDate: body.nextChaseDate === undefined ? undefined : (body.nextChaseDate || null),
         personId: body.personId,
+        ...(body.reviewId ? { sourceType: 'staff_review', sourceId: body.reviewId } : {}),
       },
       req.user!.id,
       req.user!.role

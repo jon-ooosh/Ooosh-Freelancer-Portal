@@ -1133,7 +1133,7 @@ export function startScheduler() {
   // failing cannot silence the other two.
   //
   //   tasks     — nudge, then RE-ARM next_chase_date (pipeline model)
-  //   documents — a passport/visa/certificate expiring, once per document
+  //   records   — a staff record's action date (remind / flag for deletion)
   //   reviews   — somebody's review falling due, once per cycle, to admins
   cron.schedule('45 9 * * *', async () => {
     const notifications = await import('../services/staff-notifications');
@@ -1144,22 +1144,18 @@ export function startScheduler() {
       console.error('Scheduler: To-do chase failed:', err);
     }
     try {
-      const r = await notifications.runDocumentExpiryChase();
-      console.log(`Scheduler: Staff document expiry — ${r.chased} flagged`);
+      // ONE clock per staff record since mig 243 — it replaced the separate
+      // printed-expiry and re-check scans. docs/STAFF-RECORDS-SPEC.md §22.
+      const r = await notifications.runRecordActionChase();
+      console.log(`Scheduler: Staff record actions — ${r.chased} fired`);
     } catch (err) {
-      console.error('Scheduler: Staff document expiry failed:', err);
+      console.error('Scheduler: Staff record actions failed:', err);
     }
     try {
       const r = await notifications.runReviewDueScan();
       console.log(`Scheduler: Staff reviews due — ${r.flagged} flagged`);
     } catch (err) {
       console.error('Scheduler: Staff review due scan failed:', err);
-    }
-    try {
-      const r = await notifications.runDocumentReviewChase();
-      console.log(`Scheduler: Staff document re-checks — ${r.chased} flagged`);
-    } catch (err) {
-      console.error('Scheduler: Staff document review chase failed:', err);
     }
     // Retention. Last in the block, and independently caught: a purge that
     // fails must not stop the nudges, and a nudge that fails must not stop

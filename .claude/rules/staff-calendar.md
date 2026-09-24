@@ -483,13 +483,36 @@ Two things share the words "DVLA check" and must never be merged:
 |---|---|---|
 | About | self-drive-hire **clients** | **employees** |
 | Asks | "insurable for this hire, today?" | "have we looked at it this year?" |
-| Window | **30 days** from the check | **12 months**, per `doc_type` |
+| Window | **30 days** from the check | the record's own `action_on` — pre-filled as **12 months** per `doc_type` |
 | If it fails | hard gate on dispatch | a nudge |
 
 jon's decision, Sep 2026, and it settled a design question the spec had been
 circling: the cheapest answer to "how do we share this?" was "we don't".
 Nothing in the staff module reads `drivers`. See `docs/STAFF-RECORDS-SPEC.md`
 §19.1.
+
+## One date per staff record — `action_on` is the only clock
+
+Since migration 243 a staff record file fires on ONE date, `action_on`, with
+`action_kind` remind | delete, `action_delivery` bell / email / both and
+`action_user_id` (NULL = every admin). It replaced two clocks — printed expiry
+and re-check cycle — that could nag twice about one passport.
+
+- **The per-type intervals are a PRE-FILL, not a clock.** `getReviewIntervals()`
+  and the expiry lead feed `suggestActionDate()` in `StaffRecordFiles.tsx`; the
+  stored date is all `runRecordActionChase()` reads. Don't re-add a derived scan.
+- **`expiry_chased_at` / `review_chased_at` are legacy** — nothing reads them.
+- **"Delete" never deletes.** It flags the record; a human presses Delete.
+- **Re-arm only on a real change.** The PATCH compares old against new
+  (`IS DISTINCT FROM`) before clearing `action_chased_at`, because the edit form
+  sends every field and an untouched save must not re-fire a sent reminder.
+
+## Review actions must carry `reviewId`
+
+`POST /api/staff-tasks` with `reviewId` stores `source_type = 'staff_review'`.
+Without it the action is a plain manual to-do, and silently misses the
+follow-up email, the "From your review" badge and the check-in list — which is
+exactly how every review action was saved before Sep 2026 (spec §22.1).
 
 ## Absence detail expires; the absence does not
 
