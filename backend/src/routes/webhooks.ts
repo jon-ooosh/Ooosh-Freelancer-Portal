@@ -432,6 +432,18 @@ async function handleJobUpdate(
     return { success: true, message: 'No job number — logged only' };
   }
 
+  // Shop-sales jobs never enter OP's `jobs` table (SHOP-SALES-SPEC.md §3.0).
+  // The bulk sync excludes them; this is the other door in. Without both, a
+  // single webhook would create the row the exclusion exists to prevent — and
+  // an OP row is what would let a status push silently release a week of sale
+  // stock (§2.1).
+  {
+    const { isShopJob } = await import('../services/shop-period');
+    if (await isShopJob(Number(jobNumber))) {
+      return { success: true, message: `Job ${jobNumber} is a shop-sales job — not synced` };
+    }
+  }
+
   // For job updates (name, dates, client, etc.), update our record
   const jobResult = await query(
     `SELECT id FROM jobs WHERE hh_job_number = $1 AND is_deleted = false`,

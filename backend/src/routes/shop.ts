@@ -10,6 +10,7 @@
  * already in the basket — a dozen calls a day at this volume.
  */
 import { Router, Response } from 'express';
+import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES, MANAGER_ROLES } from '../middleware/auth';
 import hhBroker from '../services/hirehop-broker';
 import {
@@ -19,6 +20,7 @@ import {
 import {
   createShopSale, listShopSales, cancelShopSale, retryShopSale,
   maxDiscountPctForRole, priceLines, totalsFor,
+  getConsumptionSummary, getConsumptionLog,
 } from '../services/shop-sales';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -232,6 +234,66 @@ router.post('/sales/:id/cancel', async (req: AuthRequest, res: Response) => {
   } catch (err) {
     console.error('[shop] cancel failed:', err);
     res.status(500).json({ error: 'Could not cancel that sale.' });
+  }
+});
+
+/**
+ * This week's shop job — and create it if it doesn't exist yet.
+ *
+ * Creation is normally incidental: the first sale of a week brings the job into
+ * being. But "the first sale" is a poor moment to discover the client id is
+ * wrong, so this exposes it directly — useful for testing, and useful on a
+ * Monday morning when someone wants to know the week is ready.
+ *
+ * MANAGER_ROLES on the create: it makes a real HireHop job against a real
+ * client, which is a decision rather than a refresh.
+ */
+router.get('/period', async (_req: AuthRequest, res: Response) => {
+  try {
+    const { weekStart } = await import('../services/shop-period');
+    const start = weekStart(new Date());
+    const r = await query(
+      `SELECT id, period_start::text, period_end::text, hh_job_number, invoiced_at
+         FROM shop_sale_periods WHERE period_start = $1`, [start],
+    );
+    res.json({ data: { periodStart: start, period: r.rows[0] || null } });
+  } catch (err) {
+    console.error('[shop] period read failed:', err);
+    res.status(500).json({ error: "Could not read this week's shop job." });
+  }
+});
+
+router.post('/period/ensure', authorize(...MANAGER_ROLES), async (_req: AuthRequest, res: Response) => {
+  try {
+    const { getOrCreateShopPeriod } = await import('../services/shop-period');
+    res.json({ data: await getOrCreateShopPeriod(new Date()) });
+  } catch (err) {
+    // These messages are written to be read by a human who now has to go and
+    // fix something in HireHop, so pass them through rather than flattening
+    // them to "something went wrong".
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Could not create this week\'s shop job.' });
+  }
+});
+
+/**
+ * What we have used ourselves — grouped by item, and the event log.
+ *
+ * HireHop keeps a per-item adjustment trail, so "what happened to this item" is
+ * already answerable there. What it cannot do is "what did we burn through last
+ * month", which needs opening every item in turn. That is the question this
+ * answers, and it is the one that drives reordering.
+ */
+router.get('/consumption', async (req: AuthRequest, res: Response) => {
+  try {
+    const days = req.query.days ? Number(req.query.days) : 30;
+    const [summary, log] = await Promise.all([
+      getConsumptionSummary(days),
+      getConsumptionLog(days),
+    ]);
+    res.json({ data: { days, summary, log } });
+  } catch (err) {
+    console.error('[shop] consumption read failed:', err);
+    res.status(500).json({ error: 'Could not load stock usage.' });
   }
 });
 

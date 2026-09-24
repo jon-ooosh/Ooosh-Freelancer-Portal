@@ -673,6 +673,52 @@ surface is already built; this just gives it something true to reconcile against
 
 ## 6. The HireHop write path
 
+### 6.0 The weekly job — settings, and why the client is a FRESH one
+
+**Name:** `Shop Sales W/C {date}` where `{date}` is the Monday, e.g.
+`Shop Sales W/C 28th Sep 2026`. Dated **Monday 00:01 → Sunday 23:59**, held at
+DISPATCHED (§2.1). Settings: `shop_job_name_pattern`, `shop_job_client_id`
+(migration 243).
+
+**A NEW HireHop client, created by hand.** The existing shop-sales contact is not
+reusable, and the reason is itself an argument for this module: staff have been
+editing its *address* to raise ad-hoc invoices for one-off purchasers, which has
+made a mess in Xero. Two consequences:
+
+1. jon creates "OP Shop Sales" in HireHop once, by hand, and its `CLIENT_ID`
+   goes in the setting. **OP never creates the contact** — passing a company
+   name to `save_job.php` risks a near-duplicate contact every week, which is
+   the same class of mess with a different cause.
+2. **Nothing may ever edit that contact again.** The behaviour it replaces
+   exists because staff had no other way to invoice a one-off purchaser; §9's
+   rule (a credit sale attaches to a real job) is what removes the need. Worth a
+   sanity check that alarms if the contact's name or address changes — a known
+   incident is exactly what a scanner is for.
+
+**`CLIENT_ID` on a job is the COMPANY id, not the person id.** HireHop's contact
+feed distinguishes them — `hirehop-sync.ts` maps `ID` as the person and `cID` as
+the company — and a job's `CLIENT_ID` pairs with `CLIENT_ASSIGN`, the company
+name. For a one-person company contact the two are equal (OP Shop Sales is
+`ID: 3067, cID: 3067`), so the distinction is invisible here and would bite on
+the first contact where it isn't.
+
+OP has never created a HireHop contact and does not start now: `pipeline.ts`
+only ever *reads* an auto-assigned client id back, and enquiry intake creates OP
+organisations rather than HireHop ones. Handcrafting is the established shape,
+not a workaround.
+
+**Empty client id = the weekly job is not created and sales stay queued.**
+Deliberate: a sale waiting in OP is recoverable, a week of takings on the wrong
+HireHop client is a Xero cleanup.
+
+`shop_availability_job` (migration 242) should point at this job once it exists.
+
+**The job is for the CURRENT week, created on demand.** `weekStart(today)` is
+this Monday, not next — nothing waits for a Monday to roll around. Normally the
+first sale of a week brings the job into being, but "the first sale" is a poor
+moment to discover the client id is wrong, so `POST /shop/period/ensure` and a
+button on the till create it directly.
+
 ### 6.1 A sale routed to the weekly shop job
 
 1. `getOrCreateShopPeriod(saleDate)` → `hh_job_number`, creating the HH job via
@@ -844,6 +890,12 @@ A weekly Shop tab (under Money):
 - **Sitter sales needing review** (`needs_review`), for the morning tick.
 - **Outstanding refunds** not yet done on the terminal.
 - This week's consumption, grouped by item — the reordering view you've never had.
+  ✅ **SHIPPED Sep 2026** as `GET /shop/consumption` + a panel on the till.
+  HireHop keeps a per-item adjustment trail, so "what happened to THIS item" is
+  already answerable there; what it cannot do is "what did we burn through last
+  month", which would mean opening every item in turn. Counts only usage that
+  actually reached HireHop — a queued or failed row has moved no stock, and
+  including it would overstate consumption.
 
 **Reorder view** (§2.3): items at or below `REORDER_LEVEL`, with `REORDER_QTY` and the
 recent consumption + sales trail. Turns running out into a week's notice, and it is nearly
@@ -921,7 +973,10 @@ Frontend: `hasManagerRole()` / `roleAllowed()` from `lib/roles.ts`, never bare
    that has one is skipped, so a crash between HireHop accepting and the row
    being marked cannot double-decrement. Bounded retries (migration 241) — a row
    HireHop will never accept goes `failed` rather than retrying forever.
-6. Sale push: lines + `pushDepositToHH`. Shop-job routing.
+6. **Part shipped Sep 2026.** ✅ `services/shop-period.ts` creates the weekly
+   HireHop job (Monday 00:01 → Sunday 23:59, set to DISPATCHED, verified by
+   read-back) and §3.0's sync exclusion is in place in both `hirehop-job-sync.ts`
+   and the inbound webhook. ⬜ Still to come: pushing sale lines and the deposit.
 7. Job routing (band's job / client's job) + the two-band picker.
 8. Reversals — Windows A and B.
 9. Weekly Shop tab, balance alarm, review list.

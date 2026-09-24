@@ -58,6 +58,21 @@ interface RecentSale {
   recorded_by_name: string | null;
 }
 
+interface PeriodInfo {
+  periodStart: string;
+  period: { hh_job_number: number | null; period_end: string } | null;
+}
+
+interface ConsumptionRow {
+  hh_stock_id: number;
+  name: string;
+  total_qty: string | number;
+  occasions: number;
+  last_used: string;
+  on_shelf: string | number | null;
+  reorder_level: string | number | null;
+}
+
 interface Totals {
   net: number;
   vat: number;
@@ -110,6 +125,10 @@ export default function ShopTillPage() {
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState<{ gross: number; id: string; kind: string } | null>(null);
   const [recent, setRecent] = useState<RecentSale[]>([]);
+  const [usage, setUsage] = useState<ConsumptionRow[] | null>(null);
+  const [period, setPeriod] = useState<PeriodInfo | null>(null);
+  const [creatingPeriod, setCreatingPeriod] = useState(false);
+  const [usageOpen, setUsageOpen] = useState(false);
 
   /** Requeue a failed push once whatever broke has been fixed. */
   const retrySale = useCallback(async (id: string) => {
@@ -124,6 +143,27 @@ export default function ShopTillPage() {
 
   const loadRecentRef = useRef<(() => void) | null>(null);
 
+  const loadPeriod = useCallback(() => {
+    api.get<{ data: PeriodInfo }>('/shop/period')
+      .then(r => setPeriod(r.data))
+      .catch(() => setPeriod(null));
+  }, []);
+
+  /** Bring this week's HireHop job into being without waiting for a sale. */
+  const createPeriod = useCallback(async () => {
+    setCreatingPeriod(true);
+    setError(null);
+    try {
+      await api.post('/shop/period/ensure', {});
+      loadPeriod();
+    } catch (e: any) {
+      // The backend's messages name what to go and fix in HireHop.
+      setError(e?.body?.error || e?.message || "Could not create this week's shop job.");
+    } finally {
+      setCreatingPeriod(false);
+    }
+  }, [loadPeriod]);
+
   const loadRecent = useCallback(() => {
     api.get<{ data: RecentSale[] }>('/shop/sales?limit=8')
       .then(r => setRecent(r.data))
@@ -133,6 +173,14 @@ export default function ShopTillPage() {
   // retrySale is defined above loadRecent so the list can call it; this closes
   // the loop without making either depend on the other's identity.
   useEffect(() => { loadRecentRef.current = loadRecent; }, [loadRecent]);
+
+  // Loaded on demand — most till visits are a sale, not a stock review.
+  useEffect(() => {
+    if (!usageOpen || usage !== null) return;
+    api.get<{ data: { summary: ConsumptionRow[] } }>('/shop/consumption?days=30')
+      .then(r => setUsage(r.data.summary))
+      .catch(() => setUsage([]));
+  }, [usageOpen, usage]);
 
   const searchRef = useRef<HTMLInputElement>(null);
 
@@ -144,7 +192,8 @@ export default function ShopTillPage() {
       .then(r => setCacheAge(r.data.refreshedAt))
       .catch(() => setCacheAge(null));
     loadRecent();
-  }, [loadRecent]);
+    loadPeriod();
+  }, [loadRecent, loadPeriod]);
 
   // Debounced search. Postgres-backed, so this is cheap enough to fire per keystroke.
   useEffect(() => {
@@ -295,6 +344,38 @@ export default function ShopTillPage() {
           </button>
         ))}
       </div>
+
+      {/* This week's HireHop job. Sales can be taken without it — they queue —
+          but nothing reaches HireHop until it exists. */}
+      {period && (
+        <div className="mb-4 flex flex-wrap items-center gap-2 text-xs">
+          {period.period?.hh_job_number ? (
+            <span className="text-gray-500">
+              This week&rsquo;s shop job:{' '}
+              <a
+                href={`https://myhirehop.com/job.php?id=${period.period.hh_job_number}`}
+                target="_blank" rel="noreferrer"
+                className="font-medium text-ooosh-600 hover:underline"
+              >
+                #{period.period.hh_job_number}
+              </a>
+            </span>
+          ) : (
+            <>
+              <span className="text-amber-700">
+                No HireHop job for this week yet — sales will queue until there is one.
+              </span>
+              <button
+                onClick={createPeriod}
+                disabled={creatingPeriod}
+                className="rounded border border-ooosh-300 px-2 py-1 font-medium text-ooosh-700 hover:bg-ooosh-50 disabled:opacity-50"
+              >
+                {creatingPeriod ? 'Creating…' : "Create this week's job"}
+              </button>
+            </>
+          )}
+        </div>
+      )}
 
       {saved && (
         <div className="mb-4 rounded border border-green-300 bg-green-50 px-4 py-3 text-sm text-green-900">
@@ -498,6 +579,53 @@ export default function ShopTillPage() {
           </button>
         </div>
       )}
+
+      <div className="mt-8">
+        <button
+          onClick={() => setUsageOpen(o => !o)}
+          className="text-sm font-semibold text-gray-700 hover:text-gray-900"
+        >
+          {usageOpen ? '▾' : '▸'} What we&rsquo;ve used ourselves (30 days)
+        </button>
+        {usageOpen && (
+          usage === null ? (
+            <p className="mt-2 text-xs text-gray-400">Loading…</p>
+          ) : usage.length === 0 ? (
+            <p className="mt-2 text-xs text-gray-400">
+              Nothing recorded yet. Only usage that reached HireHop is counted.
+            </p>
+          ) : (
+            <table className="mt-2 w-full text-sm">
+              <thead>
+                <tr className="text-left text-xs text-gray-500">
+                  <th className="py-1 font-medium">Item</th>
+                  <th className="py-1 text-right font-medium">Used</th>
+                  <th className="py-1 text-right font-medium">Times</th>
+                  <th className="py-1 text-right font-medium">On shelf</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y">
+                {usage.map(u => {
+                  const shelf = u.on_shelf != null ? Number(u.on_shelf) : null;
+                  const level = u.reorder_level != null ? Number(u.reorder_level) : null;
+                  // Knowing on Monday beats running out on Friday.
+                  const low = shelf != null && level != null && level > 0 && shelf <= level;
+                  return (
+                    <tr key={u.hh_stock_id}>
+                      <td className="py-1.5 pr-2">{u.name}</td>
+                      <td className="py-1.5 text-right tabular-nums">{Number(u.total_qty)}</td>
+                      <td className="py-1.5 text-right tabular-nums text-gray-500">{u.occasions}</td>
+                      <td className={`py-1.5 text-right tabular-nums ${low ? 'font-medium text-amber-700' : 'text-gray-500'}`}>
+                        {shelf ?? '—'}{low ? ' · low' : ''}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )
+        )}
+      </div>
 
       {recent.length > 0 && (
         <div className="mt-8">
