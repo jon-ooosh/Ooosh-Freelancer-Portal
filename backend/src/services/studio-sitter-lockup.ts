@@ -295,6 +295,7 @@ export interface LockupContext {
 export interface ShopTonight {
   sales: number;
   taken: number;
+  refunded: number;
   byTender: Array<{ tender: string; label: string; amount: number }>;
   onTheirBill: number;
   toReview: number;

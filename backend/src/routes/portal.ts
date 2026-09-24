@@ -1324,10 +1324,23 @@ function londonNow(): { date: string; hour: number } {
   return { date: `${get('year')}-${get('month')}-${get('day')}`, hour: Number(get('hour')) };
 }
 
-/** Can this evening's till take sales right now? */
-function isTillOpen(date: string): boolean {
+/**
+ * Can this evening's till take sales right now? On the night — or, for a
+ * listed TEST account (`shop_till_test_emails`, migration 252), on any date
+ * it's rostered to, so the till can be tested on a free evening instead of
+ * muddling a real sitter's night.
+ */
+async function isTillOpen(date: string, email: string): Promise<boolean> {
   const now = londonNow();
-  return date === now.date || (date === addDaysIsoP(now.date, -1) && now.hour < 6);
+  if (date === now.date || (date === addDaysIsoP(now.date, -1) && now.hour < 6)) return true;
+  try {
+    const r = await query(`SELECT value FROM system_settings WHERE key = 'shop_till_test_emails'`);
+    const list = JSON.parse(r.rows[0]?.value || '[]');
+    return Array.isArray(list)
+      && list.some((e: unknown) => String(e).trim().toLowerCase() === String(email || '').trim().toLowerCase());
+  } catch {
+    return false;   // a malformed setting opens nothing
+  }
 }
 
 /** Rostered-to-this-evening gate for the till. Sends the error and returns null on failure. */
@@ -1351,7 +1364,7 @@ router.get('/studio-sitter/shifts/:date/till/context', async (req: PortalRequest
     res.json({
       success: true,
       date: gate.date,
-      open: isTillOpen(gate.date),
+      open: await isTillOpen(gate.date, req.portalUser!.email),
       // Tonight's bands — the only jobs a sitter can sell onto. Two in, two buttons.
       jobs: (detail?.jobs ?? []).map((j: any) => ({
         job_id: j.job_id, hh_job_number: j.hh_job_number, label: j.label, rooms: j.rooms ?? [],
@@ -1413,7 +1426,7 @@ router.post('/studio-sitter/shifts/:date/till/sales', async (req: PortalRequest,
   try {
     const gate = await tillGate(req, res);
     if (!gate) return;
-    if (!isTillOpen(gate.date)) {
+    if (!(await isTillOpen(gate.date, req.portalUser!.email))) {
       res.status(409).json({ error: 'The till for this evening is closed — sales can only be taken on the night.' });
       return;
     }

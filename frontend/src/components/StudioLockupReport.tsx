@@ -30,6 +30,8 @@ interface ShiftReport {
   shop: {
     sales: number;
     taken: number;
+    /** Since refunded — already netted off `taken`. */
+    refunded: number;
     byTender: { tender: string; label: string; amount: number }[];
     onTheirBill: number;
     toReview: number;
@@ -49,6 +51,7 @@ function ShopTonight({ shop }: { shop: ShiftReport['shop'] }) {
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <span className="font-medium text-gray-800">
           🛒 Shop: {shop.sales} sale{shop.sales === 1 ? '' : 's'}, {money(shop.taken)} taken
+          {shop.refunded > 0 && <span className="font-normal text-gray-500"> (after {money(shop.refunded)} refunded)</span>}
         </span>
         {shop.toReview > 0 ? (
           <Link to="/money/shop?tab=review" className="font-medium text-amber-700 hover:underline">

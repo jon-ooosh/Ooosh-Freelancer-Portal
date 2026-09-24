@@ -129,8 +129,10 @@ export async function getWeekSummary(periodStart: string): Promise<WeekSummary> 
 
 export interface ShiftShopSummary {
   sales: number;
-  /** Money actually taken tonight, inc VAT. Excludes "their bill". */
+  /** Money taken tonight, inc VAT, less any of it refunded since. Excludes "their bill". */
   taken: number;
+  /** How much of tonight's takings has since been refunded (already netted off `taken`). */
+  refunded: number;
   byTender: Array<{ tender: string; label: string; amount: number }>;
   onTheirBill: number;
   /** Sitter sales staff haven't ticked off yet. */
@@ -149,8 +151,17 @@ export async function getShiftShopSummary(shiftId: string): Promise<ShiftShopSum
       WHERE shift_id = $1 AND kind = 'sale' AND status <> 'cancelled'`,
     [shiftId],
   );
+  // Refunds of tonight's sales, whenever they happened — usually staff the
+  // next morning. Netted off so the report shows what the night really took,
+  // not a figure that's already been partly given back.
+  const refunds = await query(
+    `SELECT o.tender, r.gross_amount
+       FROM shop_sales r JOIN shop_sales o ON o.id = r.reverses_sale_id
+      WHERE o.shift_id = $1 AND r.kind = 'reversal' AND r.status <> 'cancelled'`,
+    [shiftId],
+  );
   const by = new Map<string, number>();
-  let taken = 0; let onTheirBill = 0; let toReview = 0;
+  let taken = 0; let onTheirBill = 0; let toReview = 0; let refunded = 0;
   for (const row of r.rows) {
     const g = Number(row.gross_amount) || 0;
     if (row.needs_review && !row.reviewed_at) toReview++;
@@ -158,10 +169,20 @@ export async function getShiftShopSummary(shiftId: string): Promise<ShiftShopSum
     taken = round2(taken + g);
     by.set(row.tender, round2((by.get(row.tender) ?? 0) + g));
   }
+  for (const row of refunds.rows) {
+    const g = Math.abs(Number(row.gross_amount) || 0);
+    if (row.tender === 'invoice_later') { onTheirBill = round2(onTheirBill - g); continue; }
+    refunded = round2(refunded + g);
+    taken = round2(taken - g);
+    by.set(row.tender, round2((by.get(row.tender) ?? 0) - g));
+  }
   return {
     sales: r.rows.length,
     taken,
-    byTender: [...by.entries()].map(([tender, amount]) => ({ tender, label: tenderLabel(tender), amount }))
+    refunded,
+    byTender: [...by.entries()]
+      .filter(([, amount]) => Math.abs(amount) >= PENNY)   // fully refunded tenders drop out
+      .map(([tender, amount]) => ({ tender, label: tenderLabel(tender), amount }))
       .sort((a, b) => b.amount - a.amount),
     onTheirBill,
     toReview,
@@ -173,7 +194,8 @@ export function describeShiftShop(s: ShiftShopSummary): string {
   if (!s.sales) return 'No shop sales tonight.';
   const parts = s.byTender.map((t) => `${t.label} £${t.amount.toFixed(2)}`);
   if (s.onTheirBill) parts.push(`on bands' bills £${s.onTheirBill.toFixed(2)}`);
-  return `${s.sales} sale${s.sales === 1 ? '' : 's'}, £${s.taken.toFixed(2)} taken — ${parts.join(' · ')}`;
+  const refundNote = s.refunded ? ` (after £${s.refunded.toFixed(2)} refunded)` : '';
+  return `${s.sales} sale${s.sales === 1 ? '' : 's'}, £${s.taken.toFixed(2)} taken${refundNote} — ${parts.join(' · ')}`;
 }
 
 // ── The balance check ────────────────────────────────────────────────────
