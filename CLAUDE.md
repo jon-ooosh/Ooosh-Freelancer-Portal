@@ -140,6 +140,20 @@ prefix is the ONLY one `GET /api/files/download` role-gates.** Every other prefi
 serves is readable by any authenticated caller, freelancers included. Never file
 anything private under `files/`.
 
+**BUILT (steps 1–6), Sep 2026:** `docs/SHOP-SALES-SPEC.md` — the **Shop Till**
+(`/money/shop`). Ad-hoc shop sales, internal stock consumption and sale-stock
+lookup, with HireHop remaining the single stock database. **§19 is the current
+state, the live settings, and what to do next — read it before touching this.**
+
+Three rules from it that bite elsewhere:
+- **A stock movement is EITHER a HireHop job line OR a `tally_save` adjustment,
+  never both** — doing both halves the shelf count silently.
+- **`success: true` from HireHop does NOT mean HireHop did it.** Verify writes by
+  reading back; it has returned success for a no-op twice.
+- **The weekly shop job is never synced into OP's `jobs` table** and must never
+  be linked to from the UI. Sale stock is only consumed while that job is
+  DISPATCHED, so any status change releases a week of stock, silently.
+
 **The Staff page is one URL, two levels.** `/staff/admin` is the roster; a person opens
 in place as `?person=<id>&tab=overview|employment|records|reviews|access`. The person is
 in the URL rather than in component state so a notification can deep-link to the tab
@@ -200,6 +214,9 @@ existing definition:
 | Does this module need a new person field? | Check `people` first — it already has phone, mobile, home address, DOB and both emergency contacts (mig 001) |
 | When is a STAFF document due a re-check? | `services/staff-doc-cycles.ts` — the record's own `action_on` fires; the per-type intervals only pre-fill it (never `driver-validity.ts` — different people) |
 | What staff data has expired? | `services/staff-retention.ts` |
+| What does a shop item cost / what VAT? | `services/shop-stock.ts` `resolveVatRate()` (the HireHop rate is an INDEX, not a percentage) |
+| What is a shop transaction worth? | `services/shop-sales.ts` |
+| Which HireHop job do shop sales go on? | `services/shop-period.ts` `getOrCreateShopPeriod()` |
 
 Frontend display helpers with the same status: `lib/roles.ts`, `lib/driverStatus.ts`,
 `lib/jobOrgName.ts`, `lib/vehiclePrep.ts`, `lib/preauth.ts`, `lib/revisitDate.ts`,
@@ -291,7 +308,8 @@ auto-lose 09:00 · freelancer offer chase 09:05 · carnet forms 09:15 · referra
 pre-auth expiry 09:40 · staff records 09:45 (to-dos, record action dates, reviews due, absence-detail purge) · Stripe pre-auth discovery 09:50 · year-end cash-out reminder
 09:55 (December + January) · company-days prompt 09:58 (November) · OOH reminders 10:00 ·
 HireHop sync every 30 min · sanity scanners every 15 min · notification escalation
-every 15 min · Gmail ingestion every 10 min.
+every 15 min · shop drain every 2 min · shop stock mirror every 15 min ·
+Gmail ingestion every 10 min.
 
 Adding one? Gate it on the lost/cancelled + `keep_after_close` rule and the
 `is_internal` rule (see `jobs-pipeline-dashboard.md`).
@@ -302,7 +320,8 @@ Adding one? Gate it on the lost/cancelled + `keep_after_close` rule and the
 `users` · `jobs` · `job_contacts` · `job_organisations` · `job_requirements` ·
 `quotes` · `quote_assignments` · `quote_contacts` · `drivers` · `vehicle_hire_assignments` · `job_excess` ·
 `fleet_vehicles` · `costs` · `job_issues` · `held_items` · `storage_tenancies` ·
-`notifications` · `audit_log` · `system_settings` · `external_id_map`
+`notifications` · `audit_log` · `system_settings` · `external_id_map` ·
+`shop_sales` · `shop_sale_lines` · `shop_sale_periods` · `shop_stock_cache`
 
 `system_settings` is the generic key/value store for staff-editable operational config
 (gate codes, thresholds, templates, feature toggles). **Use it rather than adding an env

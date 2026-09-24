@@ -1,7 +1,10 @@
 # Shop Sales Module — Spec
 
-**Status:** designed Sep 2026, not built.
-**Branch:** `claude/vigilant-wright-64q3yg`
+**Status (24 Sep 2026): steps 1–6 SHIPPED and live.** The core loop works end to
+end — record a sale or a stock use in OP, it lands in HireHop. Steps 7–12 (job
+routing UI, reversals, the Shop tab, lock-up integration, receipts, gating
+manual HH payment entry) are not built. **§19 is the current state and what to
+pick up next — read it first.**
 
 ---
 
@@ -1045,10 +1048,15 @@ Frontend: `hasManagerRole()` / `roleAllowed()` from `lib/roles.ts`, never bare
    that has one is skipped, so a crash between HireHop accepting and the row
    being marked cannot double-decrement. Bounded retries (migration 241) — a row
    HireHop will never accept goes `failed` rather than retrying forever.
-6. **Part shipped Sep 2026.** ✅ `services/shop-period.ts` creates the weekly
-   HireHop job (Monday 00:01 → Sunday 23:59, set to DISPATCHED, verified by
-   read-back) and §3.0's sync exclusion is in place in both `hirehop-job-sync.ts`
-   and the inbound webhook. ⬜ Still to come: pushing sale lines and the deposit.
+6. ✅ **SHIPPED Sep 2026.** `services/shop-period.ts` creates the weekly HireHop
+   job (Mon 00:01 → Sun 23:59, DISPATCHED, verified by read-back); §3.0's sync
+   exclusion guards both `hirehop-job-sync.ts` and the inbound webhook; and
+   `drainShopSales()` pushes lines (`a<id>`, one call, line id read from the
+   response) then the deposit via `pushDepositToHH`.
+   **Lines first, money last, deliberately:** if the payment fails the lines are
+   already recorded against `hh_line_id` and the retry skips them, so a second
+   attempt cannot double-sell. The reverse order could take payment for stock
+   that never left the shelf. ⚠️ **Not yet exercised with a real sale — see §19.**
 7. Job routing (band's job / client's job) + the two-band picker.
 8. Reversals — Windows A and B.
 9. Weekly Shop tab, balance alarm, review list.
@@ -1176,3 +1184,84 @@ string and that's fine.
 **`MAX_DISCOUNT` audit (§17).** Confirmed 100 on the item tested. Still worth a full sweep
 once the mirror lands — it costs one query, and any item below 100 means today's
 100%-discount workaround has been silently failing on it.
+
+---
+
+## 19. Current state — START HERE
+
+### Live and working
+
+| | |
+|---|---|
+| **Catalogue mirror** | `shop_stock_cache`, refreshed every 15 min + at boot. 974 items. Till search makes ZERO HireHop calls. |
+| **Till** | `/money/shop`. Search, basket, per-line discount with role ceilings, VAT, tender. |
+| **Internal consumption** | "Used for Ooosh" → HireHop stock adjustment via `tally_save.php`. Verified moving real stock. |
+| **Sale push** | Lines onto the weekly job via `save_job.php` + deposit via `pushDepositToHH`. **Shipped 24 Sep, NOT yet exercised with a real sale.** |
+| **Weekly job** | Created on demand, Mon 00:01→Sun 23:59, DISPATCHED. Live one is **16750**. |
+| **Sync exclusion** | Shop jobs never enter OP's `jobs` table — bulk sync and webhook both guarded. |
+| **Availability** | Free-vs-reserved on basket items, via `picklist_get_availability.php`. |
+| **Stock usage** | `GET /shop/consumption` + a panel on the till. |
+
+### Settings (all in `system_settings`, category `shop`)
+
+| Key | Live value |
+|---|---|
+| `shop_job_client_id` | `3067` (OP Shop Sales) |
+| `shop_job_contact_name` | `OP Shop Sales` |
+| `shop_job_name_pattern` | `Shop Sales W/C {date}` |
+| `shop_availability_job` | `16750` |
+| `shop_excluded_category_ids` | `[355]` (Misc Sale Item) |
+| `shop_vat_rate_map` | `{"0":20,"1":0,"2":5}` |
+| `shop_discount_caps` | admin 100 / manager 50 / staff + GA 10 / freelancer 0 |
+| `shop_push_hold_seconds` | `120` (Window A) |
+| `shop_push_max_attempts` | `5` |
+
+### THE FIRST THING TO DO NEXT
+
+**Exercise a real sale end to end.** The sale push shipped without ever having
+run. Take a £1-ish item, pay cash, wait for the drain (or `POST /shop/drain`),
+then check on job 16750:
+
+1. the line is there, at the right price;
+2. the shelf count went down by one;
+3. the deposit is on the job for the gross (inc-VAT) amount;
+4. `shop_sales` says `pushed` with an `hh_deposit_id`.
+
+Then repeat **with a discount**, which exercises the `items_save.php` price
+override — the one part of the sale push with no live proof at all.
+
+### Then, in order
+
+7. Job routing in the till (sell onto a band's job) + the two-band picker (§5).
+8. Reversals — Windows A and B (§8). `items_delete.php` is captured and ready.
+9. The Shop tab: weekly takings, the balance alarm (§9), sitter review list,
+   outstanding refunds, the line-integrity scan (§2.1).
+10. Lock-up report integration (§5).
+11. Receipts (§2.10) — **confirm the simplified-VAT-invoice rules with the
+    accountant first.** Numbering `OT-SHOP-00100`.
+12. Gate manual payment entry in HireHop (§0) — last, and only once staff trust
+    the till.
+
+### Known gaps and decisions still open
+
+- **`shop_sale_periods.invoiced_at` is never set.** Raising the weekly invoice
+  is still a manual HireHop job and nothing in OP knows it happened, so §8's
+  Window C boundary cannot yet be detected automatically.
+- **A sanity check on the OP Shop Sales contact** — alarm if its name or
+  address changes. The old contact's address was edited to raise ad-hoc
+  invoices, and that is a known incident rather than a hypothetical (§6.0).
+- **Negative shelf counts** exist in HireHop (cold drinks read −469) because
+  consumables were never booked in. Not this module's doing; it will display
+  them, which looks broken. A stock-take is jon's.
+- **Category exclusions do not cascade** to sub-categories (§2.4).
+- **`thetour.store`** remains parked (§16).
+
+### The three rules a newcomer must not break
+
+1. **A stock movement is EITHER a job line OR a tally adjustment, never both**
+   (§2). Silent if wrong.
+2. **`success: true` does not mean HireHop did it** (§2.5). Verify by reading
+   back. This has bitten twice.
+3. **Capture a HireHop payload from its own UI before writing to a new
+   endpoint** (§2.9). Four endpoints so far have not matched their docs — and
+   once, the docs were right and I had misread them.

@@ -349,14 +349,12 @@ export default function ShopTillPage() {
           but nothing reaches HireHop until it exists. */}
       {period && (
         <div className="mb-4 flex flex-wrap items-center gap-2 text-xs">
-          {period.period?.hh_job_number ? (
-            /* Deliberately NOT a link, and deliberately no job number. The shop
-               job is machinery: OP is the only thing that should ever write to
-               it, and anyone who opens it in HireHop is one status change away
-               from releasing a week of sale stock back onto the shelf (§2.1).
-               A clickable number is an invitation to do exactly that. */
-            <span className="text-gray-400">This week&rsquo;s shop job is ready.</span>
-          ) : (
+          {/* Only ever says something when something is WRONG. A permanent
+              "everything is fine" line is noise at a counter, and the job
+              number itself is deliberately not shown: the shop job is
+              machinery, and anyone who opens it in HireHop is one status
+              change away from releasing a week of sale stock (§2.1). */}
+          {period.period?.hh_job_number ? null : (
             <>
               <span className="text-amber-700">
                 No HireHop job for this week yet — sales will queue until there is one.

@@ -26,6 +26,8 @@
 import { query } from '../config/database';
 import hhBroker from './hirehop-broker';
 import { hhLocalNow } from './shop-stock';
+import { getOrCreateShopPeriod } from './shop-period';
+import { pushDepositToHH } from './hh-deposit';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -203,4 +205,217 @@ export async function drainShopConsumption(): Promise<DrainResult> {
     console.log(`[shop-drain] consumption: ${out.pushed} pushed, ${out.failed} gave up, of ${out.considered} due`);
   }
   return out;
+}
+
+// ── Sales (step 6b) ──────────────────────────────────────────────────────
+
+/**
+ * Put ONE sale line on a HireHop job and return its line id.
+ *
+ * `save_job.php` returns the created line in its OWN response, under
+ * `data.items.itms` (§2.6). That is why this is one call rather than the
+ * four the recharge pattern uses — it needs a re-read only because it then
+ * sets a custom price.
+ *
+ * One call PER LINE, not one call for the basket: `items: {a25: 2, a36: 1}`
+ * would add both, but matching the returned lines back to our rows would be
+ * guesswork, and a mis-mapped `hh_line_id` means a reversal later deletes the
+ * wrong line.
+ *
+ * Exported for its own tests — the §2.5 response check is the load-bearing part.
+ */
+export async function pushSaleLine(
+  hhJobNumber: number,
+  stockId: number,
+  qty: number,
+): Promise<{ lineId: number | null; unitPrice: number | null; error: string | null }> {
+  const res = await hhBroker.post<any>('/api/save_job.php', {
+    job: hhJobNumber,
+    items: JSON.stringify({ [`a${stockId}`]: qty }),   // a = sales, b = hire, c = labour
+    no_webhook: 1,
+  }, { priority: 'low' });
+
+  if (!res?.success) {
+    console.error('[shop-drain] save_job line rejected. job=%s stock=%s reply=%j', hhJobNumber, stockId, res);
+    return { lineId: null, unitPrice: null, error: `HireHop rejected the line — ${JSON.stringify(res?.error ?? null).slice(0, 200)}` };
+  }
+
+  // Judge the RESULT, not the flag (§2.5).
+  const itms: any[] = res.data?.items?.itms || [];
+  const line = itms.find((i) => String(i.LIST_ID) === String(stockId));
+  if (!line?.ID) {
+    console.error('[shop-drain] save_job accepted but returned no line. reply=%j', res.data?.items);
+    return { lineId: null, unitPrice: null, error: 'HireHop accepted the line but did not return it — check the job by hand.' };
+  }
+  return {
+    lineId: Number(line.ID),
+    unitPrice: line.UNIT_PRICE != null ? Number(line.UNIT_PRICE) : null,
+    error: null,
+  };
+}
+
+/**
+ * Override a line's unit price, for a discounted sale.
+ *
+ * Skipped entirely at list price — the line already arrives correctly priced
+ * (§2.6), so most sales never make this call. Field shape copied from the
+ * proven `cost-recharge-hh.ts` push; `vat_rate: 0` means "derive VAT from the
+ * stock's own tax rules", NOT zero-rate it (§2.2).
+ */
+async function setLinePrice(
+  hhJobNumber: number, lineId: number, stockId: number,
+  qty: number, unitPrice: number, note: string,
+): Promise<string | null> {
+  const res = await hhBroker.post<any>('/php_functions/items_save.php', {
+    job: hhJobNumber, kind: 1, id: lineId, list_id: stockId,
+    qty, unit_price: unitPrice, price: unitPrice,
+    price_type: 0, add: note.slice(0, 200), cust_add: '', memo: '', name: '',
+    parent: 0, vat_rate: 0, value: 0, cost_price: 0, weight: 0,
+    start: '', end: '', duration: 0, country_origin: '', hs_code: '',
+    flag: 0, priority_confirm: 0, no_shortfall: 1, no_availability: 0,
+    ignore: 0, local: hhLocalNow(),
+  }, { priority: 'low' });
+  return res?.success ? null : `priced at list — the discount did not save (${JSON.stringify(res?.error ?? null).slice(0, 120)})`;
+}
+
+/**
+ * Drain queued SALES.
+ *
+ * Order matters: lines first, money last. If the money push fails, the lines
+ * are already recorded against `hh_line_id` and the retry skips them, so a
+ * second attempt cannot double-sell the stock. The reverse order could take
+ * payment for stock that never left the shelf.
+ *
+ * Idempotent at line level via `hh_line_id`, and at sale level for the deposit
+ * via `hh_deposit_id` — a crash between HireHop taking the money and OP
+ * recording it must not charge twice.
+ */
+export async function drainShopSales(): Promise<DrainResult> {
+  const maxAttempts = await getMaxAttempts();
+  const out: DrainResult = { considered: 0, pushed: 0, failed: 0, errors: [] };
+
+  const due = await query(
+    `SELECT id, tender, gross_amount, notes, push_attempts,
+            hh_job_number, hh_deposit_id, sold_to_job_id
+       FROM shop_sales
+      WHERE kind = 'sale' AND status = 'queued' AND push_after <= NOW()
+      ORDER BY created_at
+      LIMIT $1`,
+    [BATCH_SIZE],
+  );
+  out.considered = due.rows.length;
+
+  for (const sale of due.rows) {
+    const saleId = sale.id as string;
+    const attempts = Number(sale.push_attempts) + 1;
+    let failedReason: string | null = null;
+
+    try {
+      // Which job? A sale routed to a client's own job goes there; everything
+      // else pools on the week's shop job (§9).
+      let hhJobNumber = sale.hh_job_number ? Number(sale.hh_job_number) : null;
+      if (!hhJobNumber) {
+        if (sale.sold_to_job_id) {
+          const j = await query(`SELECT hh_job_number FROM jobs WHERE id = $1`, [sale.sold_to_job_id]);
+          hhJobNumber = j.rows[0]?.hh_job_number ? Number(j.rows[0].hh_job_number) : null;
+          if (!hhJobNumber) throw new Error('That job has no HireHop job number.');
+        } else {
+          hhJobNumber = (await getOrCreateShopPeriod(new Date())).hhJobNumber;
+        }
+        await query(`UPDATE shop_sales SET hh_job_number = $2 WHERE id = $1`, [saleId, hhJobNumber]);
+      }
+
+      const lines = await query(
+        `SELECT id, hh_stock_id, qty, name_snapshot, unit_price_list, unit_price_charged, hh_line_id
+           FROM shop_sale_lines WHERE sale_id = $1 ORDER BY created_at`,
+        [saleId],
+      );
+
+      for (const line of lines.rows) {
+        if (line.hh_line_id) continue;      // already on the job — never twice
+
+        const stockId = Number(line.hh_stock_id);
+        const qty = Number(line.qty);
+        const { lineId, error } = await pushSaleLine(hhJobNumber, stockId, qty);
+        if (!lineId) { failedReason = `${line.name_snapshot}: ${error}`; break; }
+
+        // Record the id BEFORE anything else can fail, so a retry skips it.
+        await query(`UPDATE shop_sale_lines SET hh_line_id = $2 WHERE id = $1`, [line.id, lineId]);
+
+        const charged = Number(line.unit_price_charged);
+        const list = Number(line.unit_price_list);
+        if (Math.abs(charged - list) > 0.001) {
+          const note = `Shop sale — discounted from £${list.toFixed(2)}`;
+          const priceErr = await setLinePrice(hhJobNumber, lineId, stockId, qty, charged, note);
+          if (priceErr) {
+            // The line exists and the stock has moved; only the price is wrong.
+            // Surface it rather than retrying the whole sale and double-selling.
+            failedReason = `${line.name_snapshot}: ${priceErr}`;
+            break;
+          }
+        }
+      }
+
+      // Money last. `invoice_later` rides the client's own invoice, so there is
+      // no payment to record here.
+      if (!failedReason && !sale.hh_deposit_id && sale.tender && sale.tender !== 'invoice_later') {
+        const gross = Number(sale.gross_amount);
+        if (gross > 0) {
+          const dep = await pushDepositToHH({
+            hhJobNumber,
+            amount: gross,
+            paymentMethod: sale.tender,
+            paymentType: 'other',
+            notes: sale.notes ? String(sale.notes).slice(0, 150) : 'Shop sale',
+          });
+          if (dep.error || !dep.hhDepositId) {
+            failedReason = `payment: ${dep.error || 'HireHop returned no deposit id'}`;
+          } else {
+            await query(`UPDATE shop_sales SET hh_deposit_id = $2 WHERE id = $1`, [saleId, dep.hhDepositId]);
+          }
+        }
+      }
+
+      if (failedReason) {
+        const giveUp = attempts >= maxAttempts;
+        await query(
+          `UPDATE shop_sales SET push_attempts = $2, push_error = $3,
+                  status = CASE WHEN $4 THEN 'failed' ELSE status END
+            WHERE id = $1`,
+          [saleId, attempts, failedReason, giveUp],
+        );
+        if (giveUp) out.failed++;
+        out.errors.push(`${saleId}: ${failedReason}`);
+        continue;
+      }
+
+      await query(
+        `UPDATE shop_sales SET status = 'pushed', pushed_at = NOW(),
+                push_attempts = $2, push_error = NULL WHERE id = $1`,
+        [saleId, attempts],
+      );
+      out.pushed++;
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      const giveUp = attempts >= maxAttempts;
+      await query(
+        `UPDATE shop_sales SET push_attempts = $2, push_error = $3,
+                status = CASE WHEN $4 THEN 'failed' ELSE status END
+          WHERE id = $1`,
+        [saleId, attempts, reason, giveUp],
+      ).catch(() => { /* the log below is the record */ });
+      if (giveUp) out.failed++;
+      out.errors.push(`${saleId}: ${reason}`);
+    }
+  }
+
+  if (out.considered > 0) {
+    console.log(`[shop-drain] sales: ${out.pushed} pushed, ${out.failed} gave up, of ${out.considered} due`);
+  }
+  return out;
+}
+
+/** Both queues, consumption first (cheaper and money-free). */
+export async function drainShop(): Promise<{ consumption: DrainResult; sales: DrainResult }> {
+  return { consumption: await drainShopConsumption(), sales: await drainShopSales() };
 }
