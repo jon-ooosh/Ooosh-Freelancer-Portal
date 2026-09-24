@@ -21,6 +21,12 @@ import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
 import { jobDisplayOrgName } from '../lib/jobOrgName';
+import ShopWeekPanel from '../components/shop/ShopWeekPanel';
+import { TENDERS } from '../lib/shopTenders';
+
+type BottomTab = 'recent' | 'attention' | 'week' | 'used' | 'reorder';
+const BOTTOM_TABS: BottomTab[] = ['recent', 'attention', 'week', 'used', 'reorder'];
+const TAB_KEY = 'shopTill.tab';
 
 interface StockItem {
   hhStockId: number;
@@ -35,6 +41,8 @@ interface StockItem {
   vatRateIndex: number | null;
   maxDiscount: number | null;
   quantity: number;
+  reorderLevel?: number | null;
+  reorderQty?: number | null;
   refreshedAt: string;
 }
 
@@ -118,16 +126,6 @@ interface Totals {
   discountPct: number;
 }
 
-/** Tender keys map to HireHop bank accounts via getHHBankId() on the backend. */
-const TENDERS: { key: string; label: string; needsJob?: boolean }[] = [
-  { key: 'worldpay', label: 'Card (Worldpay)' },
-  { key: 'amex', label: 'Card (AmEx)' },
-  { key: 'till_cash', label: 'Cash' },
-  { key: 'stripe_gbp', label: 'Stripe' },
-  { key: 'paypal', label: 'PayPal' },
-  { key: 'wise_bacs', label: 'Bank transfer' },
-  { key: 'invoice_later', label: 'Put it on their bill', needsJob: true },
-];
 
 const money = (n: number) => `£${n.toFixed(2)}`;
 
@@ -181,7 +179,23 @@ export default function ShopTillPage() {
   const [usage, setUsage] = useState<ConsumptionRow[] | null>(null);
   const [period, setPeriod] = useState<PeriodInfo | null>(null);
   const [creatingPeriod, setCreatingPeriod] = useState(false);
-  const [usageOpen, setUsageOpen] = useState(false);
+  // The bottom tabs. null = folded away, which is how most visits leave it.
+  const [tab, setTab] = useState<BottomTab | null>(() => {
+    try {
+      const saved = localStorage.getItem(TAB_KEY);
+      return BOTTOM_TABS.includes(saved as BottomTab) ? (saved as BottomTab) : null;
+    } catch {
+      return null;   // private window / blocked storage — just start folded
+    }
+  });
+  const pickTab = (t: BottomTab | null) => {
+    setTab(t);
+    try {
+      if (t) localStorage.setItem(TAB_KEY, t); else localStorage.removeItem(TAB_KEY);
+    } catch { /* a convenience, not state — ignore */ }
+  };
+  const [attention, setAttention] = useState<RecentSale[]>([]);
+  const [reorder, setReorder] = useState<StockItem[] | null>(null);
   // The refund form open on one Recent Sales row at a time.
   const [refundFor, setRefundFor] = useState<string | null>(null);
   const [refundReason, setRefundReason] = useState('');
@@ -300,10 +314,15 @@ export default function ShopTillPage() {
     }
   }, [loadPeriod]);
 
+  // Recent and needs-attention move together: anything that changes one
+  // (a sale, a refund, a retry) can change the other.
   const loadRecent = useCallback(() => {
     api.get<{ data: RecentSale[] }>('/shop/sales?limit=10')
       .then(r => setRecent(r.data))
       .catch(() => setRecent([]));
+    api.get<{ data: RecentSale[] }>('/shop/sales?attention=1&limit=50')
+      .then(r => setAttention(r.data))
+      .catch(() => setAttention([]));
   }, []);
 
   // retrySale is defined above loadRecent so the list can call it; this closes
@@ -312,11 +331,18 @@ export default function ShopTillPage() {
 
   // Loaded on demand — most till visits are a sale, not a stock review.
   useEffect(() => {
-    if (!usageOpen || usage !== null) return;
+    if (tab !== 'reorder' || reorder !== null) return;
+    api.get<{ data: StockItem[] }>('/shop/stock/reorder')
+      .then(r => setReorder(r.data))
+      .catch(() => setReorder([]));
+  }, [tab, reorder]);
+
+  useEffect(() => {
+    if (tab !== 'used' || usage !== null) return;
     api.get<{ data: { summary: ConsumptionRow[] } }>('/shop/consumption?days=30')
       .then(r => setUsage(r.data.summary))
       .catch(() => setUsage([]));
-  }, [usageOpen, usage]);
+  }, [tab, usage]);
 
   const searchRef = useRef<HTMLInputElement>(null);
 
@@ -462,6 +488,149 @@ export default function ShopTillPage() {
 
   const canSubmit = basket.length > 0 && !saving && !overDiscountCap
     && (mode === 'consumption' ? notes.trim().length > 0 : true);
+
+  /** One Recent Sales / Needs attention row — the same row in both lists. */
+  const renderSaleRow = (r: RecentSale) => {
+    const isReversal = r.kind === 'reversal';
+    const gross = Number(r.gross_amount);
+    // Refund outstanding: HireHop/Xero may be done, but the customer
+    // doesn't have their money until someone hands it over.
+    const refundOwed = isReversal && r.status !== 'cancelled' && !r.refund_settled_at;
+    return (
+      <li key={r.id} className="flex flex-wrap items-center gap-2 px-3 py-2">
+        <span className="text-gray-500">
+          {new Date(r.created_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
+        </span>
+        {r.sale_ref && <span className="font-mono text-xs text-gray-500">{r.sale_ref}</span>}
+        <span className={`font-medium ${isReversal ? 'text-red-700' : 'text-gray-900'}`}>
+          {r.kind === 'consumption'
+            ? 'Used for Ooosh'
+            : isReversal
+              ? `Refund of ${r.reverses_sale_ref ?? 'sale'} · −${money(Math.abs(gross))}`
+              : money(gross)}
+        </span>
+        {r.sold_to_hh_job_number && (
+          <span className="text-xs text-gray-500">
+            → {jobDisplayOrgName({
+              lead_org_name: r.sold_to_lead_org_name,
+              client_org_name: r.sold_to_client_org_name,
+              company_name: r.sold_to_company_name,
+              client_name: r.sold_to_client_name,
+            }) || r.sold_to_job_name || 'job'} #{r.sold_to_hh_job_number}
+            {r.tender === 'invoice_later' ? ' · on their bill' : ''}
+          </span>
+        )}
+        {r.notes && <span className="truncate text-gray-500">{r.notes}</span>}
+        <span className="ml-auto flex items-center gap-2">
+          {r.recorded_by_name && <span className="text-xs text-gray-400">{r.recorded_by_name}</span>}
+          {r.reversal_id && (
+            <span className="rounded bg-amber-100 px-2 py-0.5 text-xs text-amber-800">refunded</span>
+          )}
+          {/* The status is the answer to "did it reach HireHop?" —
+              queued means not yet, pushed means it did. */}
+          <span className={`rounded px-2 py-0.5 text-xs ${
+            r.status === 'pushed' ? 'bg-green-100 text-green-800'
+              : r.status === 'queued' ? 'bg-gray-100 text-gray-600'
+              : r.status === 'cancelled' ? 'bg-gray-100 text-gray-400 line-through'
+              : 'bg-red-100 text-red-800'
+          }`}>
+            {r.status === 'pushed' ? 'in HireHop' : r.status}
+          </span>
+        </span>
+        {(r.status === 'queued' || r.status === 'failed') && (
+          <button
+            onClick={() => cancelSale(r.id)}
+            className="text-xs font-medium text-gray-500 hover:text-red-600"
+          >
+            Cancel
+          </button>
+        )}
+        {r.status === 'failed' && (
+          <button
+            onClick={() => retrySale(r.id)}
+            className="text-xs font-medium text-ooosh-600 hover:underline"
+          >
+            Retry
+          </button>
+        )}
+        {/* Refund = money out of the door, so manager tier (the API
+            enforces the same). Never "delete" — spec §4.1. */}
+        {canRefund && r.kind === 'sale' && r.status === 'pushed' && !r.reversal_id && refundFor !== r.id && (
+          <button
+            onClick={() => { setRefundFor(r.id); setRefundReason(''); }}
+            className="text-xs font-medium text-ooosh-600 hover:underline"
+          >
+            Refund
+          </button>
+        )}
+        {refundOwed && (
+          <span className="flex w-full flex-wrap items-center gap-2 text-xs">
+            <span className="font-medium text-amber-700">
+              Refund outstanding — {refundHow(r.tender, gross)}.
+            </span>
+            <button
+              onClick={() => settleRefund(r.id)}
+              className="rounded border border-amber-300 px-2 py-0.5 font-medium text-amber-800 hover:bg-amber-50"
+            >
+              Done — they have it
+            </button>
+          </span>
+        )}
+        {refundFor === r.id && (
+          <div className="w-full rounded border border-amber-300 bg-amber-50 p-3 text-xs">
+            <p className="mb-2 text-amber-900">
+              Refunds the whole of {r.sale_ref ?? 'this sale'}: its items come off the HireHop job
+              (stock back on the shelf){r.tender === 'invoice_later'
+                ? ''
+                : ` and ${money(gross)} is refunded against its payment in HireHop and Xero`}.
+              To refund part of a basket, refund it all and ring the rest again.
+            </p>
+            <input
+              value={refundReason}
+              onChange={e => setRefundReason(e.target.value)}
+              placeholder="Why? (required) — e.g. wrong size, brought it back"
+              className="mb-2 w-full rounded border border-gray-300 px-2 py-1.5 text-sm"
+              autoFocus
+            />
+            {/* Cash and card go back there and then, so the button
+                IS the confirmation. Transfers happen later, from
+                another screen, and stay outstanding until ticked. */}
+            <p className="mb-2 font-medium text-amber-900">
+              {r.tender === 'invoice_later'
+                ? `${refundHow(r.tender, gross)}.`
+                : r.refund_at_counter
+                ? `${refundHow(r.tender, gross)}, then confirm.`
+                : `${refundHow(r.tender, gross)} afterwards — it stays on the list as outstanding until you tick it off.`}
+            </p>
+            <div className="flex gap-2">
+              <button
+                onClick={() => refundSale(r.id)}
+                disabled={refundBusy || !refundReason.trim()}
+                className="rounded bg-red-600 px-3 py-1.5 font-semibold text-white hover:bg-red-700 disabled:bg-gray-300"
+              >
+                {refundBusy
+                  ? 'Refunding…'
+                  : r.tender === 'invoice_later'
+                    ? `Take ${money(gross)} off their bill`
+                    : r.refund_at_counter
+                    ? `Done — ${money(gross)} given back`
+                    : `Record refund of ${money(gross)}`}
+              </button>
+              <button
+                onClick={() => setRefundFor(null)}
+                className="rounded px-3 py-1.5 text-gray-600 hover:bg-gray-100"
+              >
+                Back
+              </button>
+            </div>
+          </div>
+        )}
+        {r.push_error && (
+          <span className="w-full break-all text-xs text-red-700">{r.push_error}</span>
+        )}
+      </li>
+    );
+  };
 
   return (
     <div className="max-w-6xl mx-auto px-4 py-6">
@@ -827,206 +996,145 @@ export default function ShopTillPage() {
       </aside>
       </div>
 
-      <div className="mt-8">
-        <button
-          onClick={() => setUsageOpen(o => !o)}
-          className="text-sm font-semibold text-gray-700 hover:text-gray-900"
-        >
-          {usageOpen ? '▾' : '▸'} What we&rsquo;ve used ourselves (30 days)
-        </button>
-        {usageOpen && (
-          usage === null ? (
-            <p className="mt-2 text-xs text-gray-400">Loading…</p>
-          ) : usage.length === 0 ? (
-            <p className="mt-2 text-xs text-gray-400">
-              Nothing recorded yet. Only usage that reached HireHop is counted.
+      {/* Everything that isn't ringing up a sale lives down here, one tab at a
+          time — 9 in 10 visits never open it. The last tab used is remembered
+          per browser; clicking the open tab folds it away. */}
+      <div className="mt-10 border-t border-gray-200 pt-4">
+        <div className="flex flex-wrap gap-1.5">
+          {([
+            ['recent', 'Recent sales'],
+            ['attention', attention.length ? `Needs attention (${attention.length})` : 'Needs attention'],
+            ['week', 'This week'],
+            ['used', 'What we’ve used'],
+            ['reorder', 'Reorder'],
+          ] as [BottomTab, string][]).map(([key, label]) => (
+            <button
+              key={key}
+              onClick={() => pickTab(tab === key ? null : key)}
+              className={`rounded px-3 py-1.5 text-sm font-medium ${
+                tab === key
+                  ? 'bg-ooosh-600 text-white'
+                  : key === 'attention' && attention.length
+                    ? 'bg-red-50 text-red-700 hover:bg-red-100'
+                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {tab === 'recent' && (
+          <div className="mt-3">
+            <div className="mb-2 flex justify-end">
+              <button onClick={loadRecent} className="text-xs text-gray-400 hover:text-gray-700">Refresh</button>
+            </div>
+            {recent.length === 0 ? (
+              <p className="text-sm text-gray-400">Nothing yet.</p>
+            ) : (
+              <ul className="rounded border border-gray-200 divide-y text-sm">{recent.map(renderSaleRow)}</ul>
+            )}
+          </div>
+        )}
+
+        {tab === 'attention' && (
+          <div className="mt-3">
+            <p className="mb-2 text-xs text-gray-500">
+              Transactions that failed or are stuck on their way to HireHop, and refunds whose money
+              hasn&rsquo;t gone back yet. jon is emailed about the first two.
             </p>
-          ) : (
-            <table className="mt-2 w-full text-sm">
-              <thead>
-                <tr className="text-left text-xs text-gray-500">
-                  <th className="py-1 font-medium">Item</th>
-                  <th className="py-1 text-right font-medium">Used</th>
-                  <th className="py-1 text-right font-medium">Times</th>
-                  <th className="py-1 text-right font-medium">On shelf</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y">
-                {usage.map(u => {
-                  const shelf = u.on_shelf != null ? Number(u.on_shelf) : null;
-                  const level = u.reorder_level != null ? Number(u.reorder_level) : null;
-                  // Knowing on Monday beats running out on Friday.
-                  const low = shelf != null && level != null && level > 0 && shelf <= level;
-                  return (
-                    <tr key={u.hh_stock_id}>
-                      <td className="py-1.5 pr-2">{u.name}</td>
-                      <td className="py-1.5 text-right tabular-nums">{Number(u.total_qty)}</td>
-                      <td className="py-1.5 text-right tabular-nums text-gray-500">{u.occasions}</td>
-                      <td className={`py-1.5 text-right tabular-nums ${low ? 'font-medium text-amber-700' : 'text-gray-500'}`}>
-                        {shelf ?? '—'}{low ? ' · low' : ''}
+            {attention.length === 0 ? (
+              <p className="text-sm text-green-700">All clear.</p>
+            ) : (
+              <ul className="rounded border border-gray-200 divide-y text-sm">{attention.map(renderSaleRow)}</ul>
+            )}
+          </div>
+        )}
+
+        {tab === 'week' && (
+          <div className="mt-3">
+            <ShopWeekPanel />
+          </div>
+        )}
+
+        {tab === 'used' && (
+          <div className="mt-3">
+            <p className="text-xs text-gray-500">Stock we&rsquo;ve used ourselves in the last 30 days, by item.</p>
+            {usage === null ? (
+              <p className="mt-2 text-xs text-gray-400">Loading…</p>
+            ) : usage.length === 0 ? (
+              <p className="mt-2 text-xs text-gray-400">
+                Nothing recorded yet. Only usage that reached HireHop is counted.
+              </p>
+            ) : (
+              <table className="mt-2 w-full text-sm">
+                <thead>
+                  <tr className="text-left text-xs text-gray-500">
+                    <th className="py-1 font-medium">Item</th>
+                    <th className="py-1 text-right font-medium">Used</th>
+                    <th className="py-1 text-right font-medium">Times</th>
+                    <th className="py-1 text-right font-medium">On shelf</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y">
+                  {usage.map(u => {
+                    const shelf = u.on_shelf != null ? Number(u.on_shelf) : null;
+                    const level = u.reorder_level != null ? Number(u.reorder_level) : null;
+                    // Knowing on Monday beats running out on Friday.
+                    const low = shelf != null && level != null && level > 0 && shelf <= level;
+                    return (
+                      <tr key={u.hh_stock_id}>
+                        <td className="py-1.5 pr-2">{u.name}</td>
+                        <td className="py-1.5 text-right tabular-nums">{Number(u.total_qty)}</td>
+                        <td className="py-1.5 text-right tabular-nums text-gray-500">{u.occasions}</td>
+                        <td className={`py-1.5 text-right tabular-nums ${low ? 'font-medium text-amber-700' : 'text-gray-500'}`}>
+                          {shelf ?? '—'}{low ? ' · low' : ''}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+        )}
+
+        {tab === 'reorder' && (
+          <div className="mt-3">
+            {reorder === null ? (
+              <p className="text-xs text-gray-400">Loading…</p>
+            ) : reorder.length === 0 ? (
+              <p className="text-sm text-gray-400">Nothing at or below its reorder level.</p>
+            ) : (
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-xs text-gray-500">
+                    <th className="py-1 font-medium">Item</th>
+                    <th className="py-1 text-right font-medium">On shelf</th>
+                    <th className="py-1 text-right font-medium">Reorder at</th>
+                    <th className="py-1 text-right font-medium">Usual order</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y">
+                  {reorder.map(i => (
+                    <tr key={i.hhStockId}>
+                      <td className="py-1.5 pr-2">{i.title}</td>
+                      <td className={`py-1.5 text-right tabular-nums ${i.quantity <= 0 ? 'font-medium text-red-700' : 'text-amber-700'}`}>
+                        {i.quantity}
                       </td>
+                      <td className="py-1.5 text-right tabular-nums text-gray-500">{i.reorderLevel ?? '—'}</td>
+                      <td className="py-1.5 text-right tabular-nums text-gray-500">{i.reorderQty ?? '—'}</td>
                     </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          )
+                  ))}
+                </tbody>
+              </table>
+            )}
+            <p className="mt-2 text-xs text-gray-400">
+              All sale stock, not just shop categories. Levels are set per item in HireHop.
+            </p>
+          </div>
         )}
       </div>
-
-      {recent.length > 0 && (
-        <div className="mt-8">
-          <div className="mb-2 flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-gray-700">Recent Sales</h2>
-            <button onClick={loadRecent} className="text-xs text-gray-400 hover:text-gray-700">
-              Refresh
-            </button>
-          </div>
-          <ul className="rounded border border-gray-200 divide-y text-sm">
-            {recent.map(r => {
-              const isReversal = r.kind === 'reversal';
-              const gross = Number(r.gross_amount);
-              // Refund outstanding: HireHop/Xero may be done, but the customer
-              // doesn't have their money until someone hands it over.
-              const refundOwed = isReversal && r.status !== 'cancelled' && !r.refund_settled_at;
-              return (
-                <li key={r.id} className="flex flex-wrap items-center gap-2 px-3 py-2">
-                  <span className="text-gray-500">
-                    {new Date(r.created_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
-                  </span>
-                  {r.sale_ref && <span className="font-mono text-xs text-gray-500">{r.sale_ref}</span>}
-                  <span className={`font-medium ${isReversal ? 'text-red-700' : 'text-gray-900'}`}>
-                    {r.kind === 'consumption'
-                      ? 'Used for Ooosh'
-                      : isReversal
-                        ? `Refund of ${r.reverses_sale_ref ?? 'sale'} · −${money(Math.abs(gross))}`
-                        : money(gross)}
-                  </span>
-                  {r.sold_to_hh_job_number && (
-                    <span className="text-xs text-gray-500">
-                      → {jobDisplayOrgName({
-                        lead_org_name: r.sold_to_lead_org_name,
-                        client_org_name: r.sold_to_client_org_name,
-                        company_name: r.sold_to_company_name,
-                        client_name: r.sold_to_client_name,
-                      }) || r.sold_to_job_name || 'job'} #{r.sold_to_hh_job_number}
-                      {r.tender === 'invoice_later' ? ' · on their bill' : ''}
-                    </span>
-                  )}
-                  {r.notes && <span className="truncate text-gray-500">{r.notes}</span>}
-                  <span className="ml-auto flex items-center gap-2">
-                    {r.recorded_by_name && <span className="text-xs text-gray-400">{r.recorded_by_name}</span>}
-                    {r.reversal_id && (
-                      <span className="rounded bg-amber-100 px-2 py-0.5 text-xs text-amber-800">refunded</span>
-                    )}
-                    {/* The status is the answer to "did it reach HireHop?" —
-                        queued means not yet, pushed means it did. */}
-                    <span className={`rounded px-2 py-0.5 text-xs ${
-                      r.status === 'pushed' ? 'bg-green-100 text-green-800'
-                        : r.status === 'queued' ? 'bg-gray-100 text-gray-600'
-                        : r.status === 'cancelled' ? 'bg-gray-100 text-gray-400 line-through'
-                        : 'bg-red-100 text-red-800'
-                    }`}>
-                      {r.status === 'pushed' ? 'in HireHop' : r.status}
-                    </span>
-                  </span>
-                  {(r.status === 'queued' || r.status === 'failed') && (
-                    <button
-                      onClick={() => cancelSale(r.id)}
-                      className="text-xs font-medium text-gray-500 hover:text-red-600"
-                    >
-                      Cancel
-                    </button>
-                  )}
-                  {r.status === 'failed' && (
-                    <button
-                      onClick={() => retrySale(r.id)}
-                      className="text-xs font-medium text-ooosh-600 hover:underline"
-                    >
-                      Retry
-                    </button>
-                  )}
-                  {/* Refund = money out of the door, so manager tier (the API
-                      enforces the same). Never "delete" — spec §4.1. */}
-                  {canRefund && r.kind === 'sale' && r.status === 'pushed' && !r.reversal_id && refundFor !== r.id && (
-                    <button
-                      onClick={() => { setRefundFor(r.id); setRefundReason(''); }}
-                      className="text-xs font-medium text-ooosh-600 hover:underline"
-                    >
-                      Refund
-                    </button>
-                  )}
-                  {refundOwed && (
-                    <span className="flex w-full flex-wrap items-center gap-2 text-xs">
-                      <span className="font-medium text-amber-700">
-                        Refund outstanding — {refundHow(r.tender, gross)}.
-                      </span>
-                      <button
-                        onClick={() => settleRefund(r.id)}
-                        className="rounded border border-amber-300 px-2 py-0.5 font-medium text-amber-800 hover:bg-amber-50"
-                      >
-                        Done — they have it
-                      </button>
-                    </span>
-                  )}
-                  {refundFor === r.id && (
-                    <div className="w-full rounded border border-amber-300 bg-amber-50 p-3 text-xs">
-                      <p className="mb-2 text-amber-900">
-                        Refunds the whole of {r.sale_ref ?? 'this sale'}: its items come off the HireHop job
-                        (stock back on the shelf){r.tender === 'invoice_later'
-                          ? ''
-                          : ` and ${money(gross)} is refunded against its payment in HireHop and Xero`}.
-                        To refund part of a basket, refund it all and ring the rest again.
-                      </p>
-                      <input
-                        value={refundReason}
-                        onChange={e => setRefundReason(e.target.value)}
-                        placeholder="Why? (required) — e.g. wrong size, brought it back"
-                        className="mb-2 w-full rounded border border-gray-300 px-2 py-1.5 text-sm"
-                        autoFocus
-                      />
-                      {/* Cash and card go back there and then, so the button
-                          IS the confirmation. Transfers happen later, from
-                          another screen, and stay outstanding until ticked. */}
-                      <p className="mb-2 font-medium text-amber-900">
-                        {r.tender === 'invoice_later'
-                          ? `${refundHow(r.tender, gross)}.`
-                          : r.refund_at_counter
-                          ? `${refundHow(r.tender, gross)}, then confirm.`
-                          : `${refundHow(r.tender, gross)} afterwards — it stays on the list as outstanding until you tick it off.`}
-                      </p>
-                      <div className="flex gap-2">
-                        <button
-                          onClick={() => refundSale(r.id)}
-                          disabled={refundBusy || !refundReason.trim()}
-                          className="rounded bg-red-600 px-3 py-1.5 font-semibold text-white hover:bg-red-700 disabled:bg-gray-300"
-                        >
-                          {refundBusy
-                            ? 'Refunding…'
-                            : r.tender === 'invoice_later'
-                              ? `Take ${money(gross)} off their bill`
-                              : r.refund_at_counter
-                              ? `Done — ${money(gross)} given back`
-                              : `Record refund of ${money(gross)}`}
-                        </button>
-                        <button
-                          onClick={() => setRefundFor(null)}
-                          className="rounded px-3 py-1.5 text-gray-600 hover:bg-gray-100"
-                        >
-                          Back
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                  {r.push_error && (
-                    <span className="w-full break-all text-xs text-red-700">{r.push_error}</span>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
-        </div>
-      )}
     </div>
   );
 }

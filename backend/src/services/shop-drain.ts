@@ -474,7 +474,7 @@ async function jobClosedReason(hhJobNumber: number): Promise<string | null> {
 // ── Reversals (step 8, Window B) ─────────────────────────────────────────
 
 /** A job's current line ids, read fresh. Null when the read itself failed. */
-async function readJobLineIds(hhJobNumber: number): Promise<Set<string> | null> {
+export async function readJobLineIds(hhJobNumber: number): Promise<Set<string> | null> {
   const res = await hhBroker.get<any>('/frames/items_to_supply_list.php',
     { job: hhJobNumber }, { priority: 'low', cacheTTL: -1, skipCache: true });
   if (!res?.success) return null;

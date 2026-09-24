@@ -362,7 +362,8 @@ export async function retryShopSale(id: string): Promise<{ requeued: boolean; me
   }
   await query(
     `UPDATE shop_sales
-        SET status = 'queued', push_attempts = 0, push_error = NULL, push_after = NOW()
+        SET status = 'queued', push_attempts = 0, push_error = NULL, push_after = NOW(),
+            stuck_alerted_at = NULL   -- if it fails again, say so again
       WHERE id = $1`,
     [id],
   );
@@ -371,7 +372,12 @@ export async function retryShopSale(id: string): Promise<{ requeued: boolean; me
 
 // ── Read / cancel ────────────────────────────────────────────────────────
 
-export async function listShopSales(opts: { limit?: number; since?: string } = {}) {
+/**
+ * `attention` narrows to what a human needs to act on: transactions that
+ * failed or are stuck in the queue past their hold, and refunds whose money
+ * hasn't gone back yet. Same row shape, so the till renders it the same way.
+ */
+export async function listShopSales(opts: { limit?: number; since?: string; attention?: boolean } = {}) {
   const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
   const r = await query(
     // `users` carries no name — it points at `people`. DISPLAY_NAME_SQL is THE
@@ -412,11 +418,14 @@ export async function listShopSales(opts: { limit?: number; since?: string } = {
        LEFT JOIN jobs sj ON sj.id = COALESCE(s.sold_to_job_id, o.sold_to_job_id)
        LEFT JOIN organisations sjo ON sjo.id = sj.client_id AND sjo.is_deleted = false
       WHERE ($1::timestamptz IS NULL OR s.created_at >= $1)
+        AND (NOT $3::boolean OR s.status = 'failed'
+             OR (s.status = 'queued' AND s.push_after < NOW() - interval '30 minutes')
+             OR (s.kind = 'reversal' AND s.status <> 'cancelled' AND s.refund_settled_at IS NULL))
       GROUP BY s.id, p.preferred_name, p.first_name, p.last_name, o.sale_number,
                sj.id, sj.hh_job_number, sj.job_name, sj.company_name, sj.client_name, sjo.name
       ORDER BY s.created_at DESC
       LIMIT $2`,
-    [opts.since || null, limit],
+    [opts.since || null, limit, !!opts.attention],
   );
   return r.rows.map((row: any) => ({
     ...row,
