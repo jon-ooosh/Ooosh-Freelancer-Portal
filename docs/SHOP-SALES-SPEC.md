@@ -362,6 +362,7 @@ a live round-trip:
 | `items_delete.php` | (undocumented) | `ids` as a **bare string**, `job`, `arch`, `no_availability` |
 | `tally_save.php` | `cons`, `id`, `qty`, `details` | **`CONSUMABLE_ID`**, **`ID`**, **`QTY`**, **`DETAILS`** (uppercase), plus `local`, `tz`, `CUSTOM_FIELDS` |
 | `picklist_get_availability.php` | (guessed from `staging.ts`) | `job` (**required**), `global_depot`, `rows` of `{ID,TYPE,AVAILABLE:1,GLOBAL:0}`, `local`, `tz` |
+| `save_job.php` (CREATE) | `job_name`, `name`, `company`, `out`, `start`, … | **NOT YET CAPTURED** — the documented shape returns error 3 |
 
 The availability one is the subtlest of the three: `TYPE: 1` for sale stock was
 right all along, and the call still returned nothing because of the company it
@@ -382,6 +383,38 @@ tells nobody anything.
 `local` is the user's **local wall-clock time**, not UTC: captured as
 `2026-09-23 16:42:40` while the stored `DATE` came back `15:42:40`. The server
 runs in UTC, so it must format Europe/London explicitly.
+
+### 2.10 The customer's document is a VAT RECEIPT, not a second invoice
+
+The risk jon raised: if OP issues an invoice for a shop sale AND the weekly
+HireHop job invoices the same sale, the same revenue is invoiced twice.
+
+**It isn't, because the customer's document is not an invoice.** An invoice
+creates a debtor — it says "you owe us this". A shop sale is already paid, so
+the document that belongs to it is a **receipt**, evidencing a payment that has
+happened. The weekly HireHop invoice stays the single accounting document, and
+§9's rule keeps it internal because it pools every customer.
+
+**That also solves what the old fudge was for.** Staff edited the shop client's
+address to raise ad-hoc invoices because a customer wanted something for their
+records. Under UK rules a *simplified VAT invoice* covers supplies under £250
+and needs only: our name, address and VAT number; the time of supply; a
+description; the total including VAT; and the VAT rate per line. Notably it
+needs neither the customer's details nor a sequential invoice number — the
+things that make a full invoice an accounting artefact. A VAT receipt carrying
+those fields IS the document a business customer needs to reclaim, so nobody
+has to fabricate an invoice.
+
+**⚠️ Confirm the threshold and the required fields with the accountant before
+building this.** It is the one piece of the module that rests on tax rules
+rather than on something we have verified ourselves, and it is the piece whose
+absence caused the original mess.
+
+**Numbering: `OT-SHOP-00001`.** Deliberately outside both existing sequences —
+HireHop raises `OT-INV-#####` (around 12243 today) and Xero-direct raises
+`OT-#####`, so a third prefix cannot collide with either as they advance. It is
+a traceability reference, **not** an accounting invoice number, which is exactly
+why it can have its own sequence without anyone reconciling it.
 
 ### Confirmed HireHop facts (scratch job 16735, Sep 2026)
 

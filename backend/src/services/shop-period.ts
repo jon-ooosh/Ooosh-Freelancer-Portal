@@ -109,7 +109,15 @@ export async function getOrCreateShopPeriod(when: Date = new Date()): Promise<Sh
 
   // Monday 00:01 to Sunday 23:59 — jon's choice. Sales land on whichever week
   // they happen in, and the week closes cleanly for invoicing.
-  const createRes = await hhBroker.post<any>('/api/save_job.php', {
+  //
+  // ⚠️ THIS PAYLOAD IS NOT YET CAPTURED FROM HIREHOP'S UI (§2.9). It is built
+  // from the field list in PLATFORM-CONVENTIONS, which for three other
+  // endpoints has turned out not to match what HireHop actually accepts. The
+  // first attempt returned error 3 — the same bare code `tally_save.php` gave
+  // for the documented-but-wrong parameter names. A capture of HireHop creating
+  // a job by hand is what settles this; until then the read-back below is what
+  // stops a wrong guess becoming a wrong job.
+  const createPayload = {
     job: 0,                       // 0 = create
     CLIENT_ID: clientId,
     job_name: jobName,
@@ -120,10 +128,15 @@ export async function getOrCreateShopPeriod(when: Date = new Date()): Promise<Sh
     duration_days: 7,
     duration_locked: 0,
     no_webhook: 1,
-  }, { priority: 'high' });
+  };
+  const createRes = await hhBroker.post<any>('/api/save_job.php', createPayload, { priority: 'high' });
 
   if (!createRes?.success) {
-    throw new Error(`HireHop refused to create the weekly shop job: ${JSON.stringify(createRes?.error ?? createRes).slice(0, 300)}`);
+    console.error('[shop-period] save_job rejected. sent=%j reply=%j', createPayload, createRes);
+    throw new Error(
+      `HireHop refused to create the weekly shop job (reply: ${JSON.stringify(createRes?.error ?? createRes).slice(0, 200)}). ` +
+      `The payload is in the server log — this endpoint's real parameters have not been captured yet.`,
+    );
   }
 
   const created: any = createRes.data;
