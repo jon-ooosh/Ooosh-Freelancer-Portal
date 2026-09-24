@@ -860,9 +860,16 @@ reconcile.
 **Window B is the important one and the one I initially got wrong.** Payments push
 OP → HH → Xero near-instantaneously, so money is committed the moment it drains — a "return
 ten minutes later" is *never* an erasure of the payment, even though the stock line is still
-freely amendable. The OP record is soft-cancelled and a linked `kind='reversal'` row is
-created. Both rows survive. The audit trail says "they bought it, then brought it back",
-which is what happened.
+freely amendable. A linked `kind='reversal'` row is created. Both rows survive. The audit
+trail says "they bought it, then brought it back", which is what happened.
+
+**As built (step 8, Sep 2026):** the original sale is **NOT** soft-cancelled — it keeps
+`status='pushed'`, because its line and deposit really did reach HireHop, and `cancelled`
+means "never happened" (Window A). The reversal row carries **negative** money figures, so
+summing a week's rows gives what the week actually took. Whole sale only: taking one item
+back from a basket is "refund the sale, ring the rest again", because a partial reversal
+means editing a line's qty in HireHop and that endpoint has not been captured. Refund is
+`MANAGER_ROLES` (money out); cancel stays open to all staff.
 
 **HireHop rejects negative deposits.** A refund must go via
 `/php_functions/billing_payments_save.php` with `OWNER: 0, deposit: <original id>` — a refund
@@ -1194,9 +1201,14 @@ once the mirror lands — it costs one query, and any item below 100 means today
 | | |
 |---|---|
 | **Catalogue mirror** | `shop_stock_cache`, refreshed every 15 min + at boot. 974 items. Till search makes ZERO HireHop calls. |
-| **Till** | `/money/shop`. Search, basket, per-line discount with role ceilings, VAT, tender. |
+| **Till** | `/money/shop`. Search, basket, per-line discount with role ceilings, VAT, tender. Two columns on a laptop (basket left, checkout right); stacks on a phone. |
 | **Internal consumption** | "Used for Ooosh" → HireHop stock adjustment via `tally_save.php`. Verified moving real stock. |
-| **Sale push** | Lines onto the weekly job via `save_job.php` + deposit via `pushDepositToHH`. **Shipped 24 Sep, NOT yet exercised with a real sale.** |
+| **Sale push** | Lines onto the weekly job via `save_job.php` + deposit via `pushDepositToHH`. **Verified live 24 Sep** — list price AND discounted (the `items_save.php` override), shelf count dropped, cash reached HireHop and Xero. |
+| **Sale numbers** | `OT-SHOP-00100` onwards (`services/shop-sale-ref.ts`). On the deposit: description `16750 - shop sale`, memo `Shop sale 24/09/2026 via cash (Ref: OT-SHOP-00101) — note (recorded via Ooosh OP)`. Migration 247 numbered the pre-existing test sales 100 and 101. |
+| **Cancel (Window A)** | Recent Sales → Cancel, any staff. Runs inside the drain lock; refused once any line or deposit has reached HireHop (judged on the HH ids, not the status). |
+| **Refund (Window B)** | Recent Sales → Refund, `MANAGER_ROLES`. Whole sale. Creates a `kind='reversal'` row; the drain (kicked immediately) checks the deposit is still unallocated, removes each line via `items_delete.php` (read back), then refunds against the deposit via `refundDepositOnHH` (re-read that the money moved). **Shipped 24 Sep, NOT yet exercised live — see below.** |
+| **Refund outstanding** | The physical money back is manual until Stripe. A reversal shows "Refund outstanding — give £x back from the till" until someone presses *Done — they have it* (or ticks it at refund time). |
+| **Drain lock** | `withShopDrainLock` — the scheduler and `POST /shop/drain` used to be able to push the same sale twice at once. Now serialised. |
 | **Weekly job** | Created on demand, Mon 00:01→Sun 23:59, DISPATCHED. Live one is **16750**. |
 | **Sync exclusion** | Shop jobs never enter OP's `jobs` table — bulk sync and webhook both guarded. |
 | **Availability** | Free-vs-reserved on basket items, via `picklist_get_availability.php`. |
@@ -1218,35 +1230,43 @@ once the mirror lands — it costs one query, and any item below 100 means today
 
 ### THE FIRST THING TO DO NEXT
 
-**Exercise a real sale end to end.** The sale push shipped without ever having
-run. Take a £1-ish item, pay cash, wait for the drain (or `POST /shop/drain`),
-then check on job 16750:
+**Refund the two test sales (OT-SHOP-00100 £9.00, OT-SHOP-00101 discounted) from the
+till, BEFORE job 16750 is invoiced.** The refund push has never run against live HireHop.
+For each, check on job 16750:
 
-1. the line is there, at the right price;
-2. the shelf count went down by one;
-3. the deposit is on the job for the gross (inc-VAT) amount;
-4. `shop_sales` says `pushed` with an `hh_deposit_id`.
+1. the line is gone and the shelf count went back UP by one;
+2. a refund row is on the billing tab against the original deposit, same bank (Till);
+3. it reached Xero as a payment (post_payment), netting the sale to zero;
+4. the reversal row reads `in HireHop` in Recent Sales with no red error.
 
-Then repeat **with a discount**, which exercises the `items_save.php` price
-override — the one part of the sale push with no live proof at all.
+If step 1 fails, the `items_delete.php` read-back will say so and nothing else will have
+moved. If the refund reads back wrong, the row goes `failed` with a message naming what to
+check — **do not press Retry until the billing tab has been looked at**: Retry skips the
+refund if one was recorded, so it means "I've checked, finish it off".
 
 ### Then, in order
 
 7. Job routing in the till (sell onto a band's job) + the two-band picker (§5).
-8. Reversals — Windows A and B (§8). `items_delete.php` is captured and ready.
 9. The Shop tab: weekly takings, the balance alarm (§9), sitter review list,
-   outstanding refunds, the line-integrity scan (§2.1).
+   outstanding refunds, the line-integrity scan (§2.1). The integrity scan must treat
+   a line with `hh_line_removed_at` set as intentionally gone.
 10. Lock-up report integration (§5).
-11. Receipts (§2.10) — **confirm the simplified-VAT-invoice rules with the
-    accountant first.** Numbering `OT-SHOP-00100`.
-12. Gate manual payment entry in HireHop (§0) — last, and only once staff trust
-    the till.
+11. Receipts (§2.10) — **accountant confirmed Sep 2026** that a VAT receipt is fine:
+    it is a record of sale and is not pushed to Xero. Number = the sale's `OT-SHOP-#####`.
+12. Gate manual payment entry in HireHop (§0) — last, and only once staff trust the till.
 
 ### Known gaps and decisions still open
 
 - **`shop_sale_periods.invoiced_at` is never set.** Raising the weekly invoice
-  is still a manual HireHop job and nothing in OP knows it happened, so §8's
-  Window C boundary cannot yet be detected automatically.
+  is still a manual HireHop job and nothing in OP knows it happened. The refund
+  drain covers the gap by reading the deposit first: if it is no longer
+  unallocated it stops with "the week has most likely been invoiced" before
+  touching any stock. The refund route also refuses when `invoiced_at` IS set.
+- **Partial refunds** (one item out of a basket) are "refund all, ring the rest
+  again". A real partial needs a captured line-qty edit.
+- **Reversing a consumption** ("used for Ooosh" logged against the wrong item) is not
+  built — it would be a positive `tally_save` adjustment. Cancel inside the hold covers
+  the common mistake.
 - **A sanity check on the OP Shop Sales contact** — alarm if its name or
   address changes. The old contact's address was edited to raise ad-hoc
   invoices, and that is a known incident rather than a hypothetical (§6.0).
@@ -1254,6 +1274,7 @@ override — the one part of the sale push with no live proof at all.
   consumables were never booked in. Not this module's doing; it will display
   them, which looks broken. A stock-take is jon's.
 - **Category exclusions do not cascade** to sub-categories (§2.4).
+- **Recent Sales needs filters and search** as volume grows — deferred (jon, Sep 2026).
 - **`thetour.store`** remains parked (§16).
 
 ### The three rules a newcomer must not break

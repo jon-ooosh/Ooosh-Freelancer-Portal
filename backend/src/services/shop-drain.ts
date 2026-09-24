@@ -1,8 +1,9 @@
 /**
  * shop-drain.ts — sends queued shop transactions to HireHop.
  *
- * Step 5 of `docs/SHOP-SALES-SPEC.md`. THIS SLICE HANDLES CONSUMPTION ONLY
- * ("used for Ooosh"). Sales — job lines plus a deposit — are step 6.
+ * Steps 5, 6 and 8 of `docs/SHOP-SALES-SPEC.md`: consumption ("used for
+ * Ooosh") as tally adjustments, sales as job lines plus a deposit, and
+ * reversals (Window B) as lines off plus a refund against that deposit.
  *
  * Why a deferred worker rather than pushing inline (§7):
  *   - The counter never waits on HireHop. A 327 storm must not stop you selling
@@ -27,7 +28,9 @@ import { query } from '../config/database';
 import hhBroker from './hirehop-broker';
 import { hhLocalNow } from './shop-stock';
 import { getOrCreateShopPeriod } from './shop-period';
-import { pushDepositToHH } from './hh-deposit';
+import { pushDepositToHH, refundDepositOnHH, getHHBankId } from './hh-deposit';
+import { fetchDepositAvailability } from './hh-deposit-release';
+import { saleRef } from './shop-sale-ref';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -42,6 +45,26 @@ export interface DrainResult {
   pushed: number;
   failed: number;
   errors: string[];
+}
+
+/**
+ * One drain at a time, in this process.
+ *
+ * The scheduler drains every two minutes and `POST /shop/drain` can drain on
+ * demand. Before this, both could pick up the SAME queued sale in the same
+ * instant — two lines on the job and two deposits for one sale. A cancel runs
+ * through the same lock (shop-sales.ts), so it can never land in the middle of
+ * a push and be overwritten by it.
+ *
+ * A promise chain rather than a flag: a second caller waits its turn instead of
+ * being turned away, and a failure in one run never jams the next.
+ */
+let drainChain: Promise<unknown> = Promise.resolve();
+
+export function withShopDrainLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = drainChain.then(fn, fn);
+  drainChain = run.catch(() => undefined);
+  return run;
 }
 
 async function getMaxAttempts(): Promise<number> {
@@ -295,7 +318,7 @@ export async function drainShopSales(): Promise<DrainResult> {
   const out: DrainResult = { considered: 0, pushed: 0, failed: 0, errors: [] };
 
   const due = await query(
-    `SELECT id, tender, gross_amount, notes, push_attempts,
+    `SELECT id, tender, gross_amount, notes, push_attempts, sale_number,
             hh_job_number, hh_deposit_id, sold_to_job_id
        FROM shop_sales
       WHERE kind = 'sale' AND status = 'queued' AND push_after <= NOW()
@@ -361,12 +384,15 @@ export async function drainShopSales(): Promise<DrainResult> {
       if (!failedReason && !sale.hh_deposit_id && sale.tender && sale.tender !== 'invoice_later') {
         const gross = Number(sale.gross_amount);
         if (gross > 0) {
+          // "16750 - shop sale", and the memo carries the OP sale number so a
+          // Xero line leads straight back to one till transaction.
           const dep = await pushDepositToHH({
             hhJobNumber,
             amount: gross,
             paymentMethod: sale.tender,
-            paymentType: 'other',
-            notes: sale.notes ? String(sale.notes).slice(0, 150) : 'Shop sale',
+            paymentType: 'shop_sale',
+            paymentReference: sale.sale_number ? saleRef(Number(sale.sale_number)) : null,
+            notes: sale.notes ? String(sale.notes).slice(0, 150) : null,
           });
           if (dep.error || !dep.hhDepositId) {
             failedReason = `payment: ${dep.error || 'HireHop returned no deposit id'}`;
@@ -391,7 +417,7 @@ export async function drainShopSales(): Promise<DrainResult> {
 
       await query(
         `UPDATE shop_sales SET status = 'pushed', pushed_at = NOW(),
-                push_attempts = $2, push_error = NULL WHERE id = $1`,
+                push_attempts = $2, push_error = NULL WHERE id = $1 AND status = 'queued'`,
         [saleId, attempts],
       );
       out.pushed++;
@@ -415,7 +441,229 @@ export async function drainShopSales(): Promise<DrainResult> {
   return out;
 }
 
-/** Both queues, consumption first (cheaper and money-free). */
-export async function drainShop(): Promise<{ consumption: DrainResult; sales: DrainResult }> {
-  return { consumption: await drainShopConsumption(), sales: await drainShopSales() };
+// ── Reversals (step 8, Window B) ─────────────────────────────────────────
+
+/** A job's current line ids, read fresh. Null when the read itself failed. */
+async function readJobLineIds(hhJobNumber: number): Promise<Set<string> | null> {
+  const res = await hhBroker.get<any>('/frames/items_to_supply_list.php',
+    { job: hhJobNumber }, { priority: 'low', cacheTTL: -1, skipCache: true });
+  if (!res?.success) return null;
+  const d = res.data;
+  const rows = Array.isArray(d) ? d : (d?.items || d?.rows || null);
+  if (!Array.isArray(rows)) return null;
+  return new Set(rows.map((r: any) => String(r.ID)));
+}
+
+/**
+ * Take ONE sale line off a HireHop job. On a dispatched job that puts the
+ * stock back on the shelf (§2.1, verified).
+ *
+ * ⚠️ The payload is CAPTURED from HireHop's own UI (§18), not from its docs:
+ * `ids` is a BARE string `b<lineId>` — not a JSON array — and `b` here means a
+ * supply-list LINE, not hire stock. `save_job.php`'s `delete:` key returned
+ * `success: true` and did nothing, which is why this is judged purely on the
+ * read-back (§2.5), never on the flag.
+ *
+ * A line that is already gone counts as removed: a previous attempt deleted it
+ * and died before recording it, or someone removed it in HireHop by hand. The
+ * outcome the customer needs — stock back, line off the job — already holds.
+ *
+ * Exported for its own tests.
+ */
+export async function removeSaleLine(
+  hhJobNumber: number,
+  lineId: number,
+  readBackDelayMs = 1500,
+): Promise<{ removed: boolean; error: string | null }> {
+  const id = String(lineId);
+
+  const before = await readJobLineIds(hhJobNumber);
+  if (!before) return { removed: false, error: `could not read job ${hhJobNumber}'s lines from HireHop` };
+  if (!before.has(id)) {
+    // An empty list is far more likely a read we failed to parse than a job
+    // with nothing on it, and "removed" is not a claim to make on a guess.
+    if (before.size === 0) {
+      return { removed: false, error: `HireHop returned no lines at all for job ${hhJobNumber} — check the job by hand` };
+    }
+    return { removed: true, error: null };
+  }
+
+  const payload = { job: hhJobNumber, ids: `b${id}`, arch: '', no_availability: 0 };
+  const res = await hhBroker.post<any>('/php_functions/items_delete.php', payload, { priority: 'low' });
+  if (!res?.success) {
+    console.error('[shop-drain] items_delete rejected. sent=%j reply=%j', payload, res);
+    return { removed: false, error: `HireHop rejected the line removal — ${JSON.stringify(res?.error ?? null).slice(0, 200)}` };
+  }
+
+  if (readBackDelayMs > 0) await new Promise((r) => setTimeout(r, readBackDelayMs));
+  const after = await readJobLineIds(hhJobNumber);
+  if (!after) {
+    // The retry's read-before settles it either way.
+    return { removed: false, error: 'HireHop accepted the removal but the job could not be re-read to confirm it' };
+  }
+  if (after.has(id)) {
+    return { removed: false, error: `HireHop said it removed line ${id} but it is still on job ${hhJobNumber}` };
+  }
+  return { removed: true, error: null };
+}
+
+/**
+ * Drain queued REVERSALS — a sale coming back after it reached HireHop.
+ *
+ * Two real events, both recorded (§8): the lines come OFF the job (stock back
+ * on the shelf) and a refund is applied against the sale's deposit (money back
+ * in HireHop and Xero). The physical money — cash from the drawer, a refund on
+ * the card terminal — is the operator's, tracked as `refund_settled_at`.
+ *
+ * Order:
+ *   1. Check the deposit still has the money on it. If the week has already
+ *      been invoiced the deposit is applied and HireHop will refuse the refund
+ *      (error 370) — that is Window C, a credit note by hand. Checked FIRST so
+ *      that case stops before any stock has moved.
+ *   2. Lines off, one at a time, each read back.
+ *   3. Refund against the deposit, then re-read that it actually moved.
+ *
+ * Idempotent: `hh_line_removed_at` per line, `hh_refund_id` on the reversal.
+ */
+export async function drainShopReversals(): Promise<DrainResult> {
+  const maxAttempts = await getMaxAttempts();
+  const out: DrainResult = { considered: 0, pushed: 0, failed: 0, errors: [] };
+
+  const due = await query(
+    `SELECT r.id, r.push_attempts, r.hh_refund_id, r.notes,
+            o.id AS orig_id, o.hh_job_number, o.hh_deposit_id, o.tender,
+            o.gross_amount, o.sale_number
+       FROM shop_sales r
+       JOIN shop_sales o ON o.id = r.reverses_sale_id
+      WHERE r.kind = 'reversal' AND r.status = 'queued' AND r.push_after <= NOW()
+      ORDER BY r.created_at
+      LIMIT $1`,
+    [BATCH_SIZE],
+  );
+  out.considered = due.rows.length;
+
+  for (const rev of due.rows) {
+    const revId = rev.id as string;
+    const attempts = Number(rev.push_attempts) + 1;
+    let failedReason: string | null = null;
+    // Some failures must NOT be retried automatically — money may have moved
+    // and a human has to look before anything else is sent.
+    let stopNow = false;
+    let warning: string | null = null;
+
+    try {
+      const hhJobNumber = rev.hh_job_number ? Number(rev.hh_job_number) : null;
+      if (!hhJobNumber) throw new Error('The original sale has no HireHop job number.');
+      const ref = rev.sale_number ? saleRef(Number(rev.sale_number)) : 'shop sale';
+      const depositId = rev.hh_deposit_id ? Number(rev.hh_deposit_id) : null;
+      const amount = Number(rev.gross_amount);
+      const needsRefund = !!depositId && amount > 0 && !rev.hh_refund_id;
+
+      // 1. Is the money still refundable? (Window B vs C.)
+      let availableBefore = 0;
+      if (needsRefund) {
+        const dep = await fetchDepositAvailability(hhJobNumber, depositId!);
+        if (!dep) throw new Error(`Payment ${depositId} is not on HireHop job ${hhJobNumber} any more — check it by hand.`);
+        availableBefore = dep.available;
+        if (availableBefore + 0.005 < amount) {
+          failedReason = `Only £${availableBefore.toFixed(2)} of the £${amount.toFixed(2)} payment is still ` +
+            `refundable in HireHop — the week has most likely been invoiced. That needs a credit note by hand; nothing was changed.`;
+          stopNow = true;
+        }
+      }
+
+      // 2. Lines off the job.
+      if (!failedReason) {
+        const lines = await query(
+          `SELECT id, name_snapshot, hh_line_id FROM shop_sale_lines
+            WHERE sale_id = $1 AND hh_line_id IS NOT NULL AND hh_line_removed_at IS NULL
+            ORDER BY created_at`,
+          [rev.orig_id],
+        );
+        for (const line of lines.rows) {
+          const { removed, error } = await removeSaleLine(hhJobNumber, Number(line.hh_line_id));
+          if (!removed) { failedReason = `${line.name_snapshot}: ${error}`; break; }
+          await query(`UPDATE shop_sale_lines SET hh_line_removed_at = NOW() WHERE id = $1`, [line.id]);
+        }
+      }
+
+      // 3. Money back, against the original deposit, on the same bank.
+      if (!failedReason && needsRefund) {
+        const refund = await refundDepositOnHH({
+          hhJobNumber,
+          hhDepositId: depositId!,
+          amount,
+          bankId: getHHBankId(String(rev.tender)),
+          description: `${hhJobNumber} - shop refund ${ref}`,
+          memo: `Refund of ${ref}${rev.notes ? ` — ${String(rev.notes).slice(0, 150)}` : ''} (recorded via Ooosh OP)`,
+          what: `shop refund ${ref}`,
+        });
+        if (refund.error || !refund.hhDepositId) {
+          failedReason = `refund: ${refund.error || 'HireHop returned no id'}`;
+        } else {
+          // Recorded BEFORE the check below, so nothing can ever refund twice.
+          await query(`UPDATE shop_sales SET hh_refund_id = $2 WHERE id = $1`, [revId, refund.hhDepositId]);
+
+          // §2.5 — did the money actually come off the deposit?
+          const after = await fetchDepositAvailability(hhJobNumber, depositId!);
+          if (!after || after.available > availableBefore - amount + 0.005) {
+            failedReason = `HireHop accepted refund ${refund.hhDepositId} but payment ${depositId} ` +
+              `${after ? `still shows £${after.available.toFixed(2)} refundable` : 'could not be re-read'}. ` +
+              `Check the billing tab on job ${hhJobNumber}: if the refund is there, press Retry to finish.`;
+            stopNow = true;
+          } else if (!refund.xeroSynced) {
+            warning = `Refunded in HireHop, but Xero refused it: ${refund.xeroError || 'unknown error'} (jon has been emailed).`;
+          }
+        }
+      }
+
+      if (failedReason) {
+        const giveUp = stopNow || attempts >= maxAttempts;
+        await query(
+          `UPDATE shop_sales SET push_attempts = $2, push_error = $3,
+                  status = CASE WHEN $4 THEN 'failed' ELSE status END
+            WHERE id = $1`,
+          [revId, attempts, failedReason, giveUp],
+        );
+        if (giveUp) out.failed++;
+        out.errors.push(`${revId}: ${failedReason}`);
+        continue;
+      }
+
+      await query(
+        `UPDATE shop_sales SET status = 'pushed', pushed_at = NOW(),
+                push_attempts = $2, push_error = $3 WHERE id = $1 AND status = 'queued'`,
+        [revId, attempts, warning],
+      );
+      out.pushed++;
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      const giveUp = attempts >= maxAttempts;
+      await query(
+        `UPDATE shop_sales SET push_attempts = $2, push_error = $3,
+                status = CASE WHEN $4 THEN 'failed' ELSE status END
+          WHERE id = $1`,
+        [revId, attempts, reason, giveUp],
+      ).catch(() => { /* the log below is the record */ });
+      if (giveUp) out.failed++;
+      out.errors.push(`${revId}: ${reason}`);
+    }
+  }
+
+  if (out.considered > 0) {
+    console.log(`[shop-drain] reversals: ${out.pushed} pushed, ${out.failed} gave up, of ${out.considered} due`);
+  }
+  return out;
+}
+
+/**
+ * Every queue, consumption first (cheaper and money-free), reversals last — a
+ * reversal only exists for a sale that has already been pushed.
+ */
+export function drainShop(): Promise<{ consumption: DrainResult; sales: DrainResult; reversals: DrainResult }> {
+  return withShopDrainLock(async () => ({
+    consumption: await drainShopConsumption(),
+    sales: await drainShopSales(),
+    reversals: await drainShopReversals(),
+  }));
 }
