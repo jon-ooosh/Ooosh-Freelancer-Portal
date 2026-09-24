@@ -11,12 +11,15 @@
  * 2. A sale is ONE atomic record. The old process — a week-long shared HireHop
  *    job that several people poke at — is why the shop never reconciles.
  *
- * NOTE: this saves to OP only. Nothing reaches HireHop yet (spec steps 5–6).
+ * Saves to OP instantly; the drain sends each transaction to HireHop after the
+ * push hold (Window A). A sale that has reached HireHop is refunded from the
+ * Recent Sales list (Window B, spec §8) — it is never deleted.
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
+import { hasManagerRole } from '../lib/roles';
 
 interface StockItem {
   hhStockId: number;
@@ -51,11 +54,20 @@ interface RecentSale {
   id: string;
   kind: string;
   status: string;
+  tender: string | null;
   gross_amount: string | number;
   notes: string | null;
   push_error: string | null;
   created_at: string;
   recorded_by_name: string | null;
+  /** OT-SHOP-00100 — sales only. */
+  sale_ref: string | null;
+  /** On a reversal: the sale it refunds. */
+  reverses_sale_ref: string | null;
+  /** On a sale: its live reversal, once refunded. */
+  reversal_id: string | null;
+  /** On a reversal: when the customer actually got their money back. */
+  refund_settled_at: string | null;
 }
 
 interface PeriodInfo {
@@ -93,6 +105,20 @@ const TENDERS: { key: string; label: string; needsJob?: boolean }[] = [
 ];
 
 const money = (n: number) => `£${n.toFixed(2)}`;
+
+/** How the money physically goes back — OP can't do this part until Stripe. */
+function refundHow(tender: string | null, amount: number): string {
+  const a = money(Math.abs(amount));
+  switch (tender) {
+    case 'till_cash': return `Give ${a} back from the till`;
+    case 'worldpay':
+    case 'amex': return `Refund ${a} on the card terminal`;
+    case 'stripe_gbp': return `Refund ${a} in Stripe`;
+    case 'paypal': return `Refund ${a} in PayPal`;
+    case 'wise_bacs': return `Send ${a} back by bank transfer`;
+    default: return `Return ${a} to the customer`;
+  }
+}
 /** Parse a typed price. A half-typed "1." must read as 1, not NaN. */
 const num = (t: string) => { const n = parseFloat(t); return Number.isFinite(n) ? n : 0; };
 
@@ -129,6 +155,20 @@ export default function ShopTillPage() {
   const [period, setPeriod] = useState<PeriodInfo | null>(null);
   const [creatingPeriod, setCreatingPeriod] = useState(false);
   const [usageOpen, setUsageOpen] = useState(false);
+  // The refund form open on one Recent Sales row at a time.
+  const [refundFor, setRefundFor] = useState<string | null>(null);
+  const [refundReason, setRefundReason] = useState('');
+  const [refundReturned, setRefundReturned] = useState(false);
+  const [refundBusy, setRefundBusy] = useState(false);
+  const canRefund = hasManagerRole(user?.role);
+
+  // The success note is a nod, not a record — the Recent Sales list is the
+  // record — so it goes after a few seconds. Errors stay until dealt with.
+  useEffect(() => {
+    if (!saved) return;
+    const t = setTimeout(() => setSaved(null), 4000);
+    return () => clearTimeout(t);
+  }, [saved]);
 
   /** Requeue a failed push once whatever broke has been fixed. */
   const retrySale = useCallback(async (id: string) => {
@@ -142,6 +182,51 @@ export default function ShopTillPage() {
   }, []);
 
   const loadRecentRef = useRef<(() => void) | null>(null);
+
+  /** Window A: a true undo — nothing has reached HireHop yet. */
+  const cancelSale = useCallback(async (id: string) => {
+    if (!window.confirm('Cancel this? Nothing has reached HireHop yet, so it simply won\'t happen.')) return;
+    setError(null);
+    try {
+      await api.post(`/shop/sales/${id}/cancel`, {});
+    } catch (e: any) {
+      setError(e?.body?.error || e?.message || 'Could not cancel that.');
+    }
+    loadRecentRef.current?.();
+  }, []);
+
+  /** Window B: lines off the job and a refund against the payment (spec §8). */
+  const refundSale = useCallback(async (id: string) => {
+    setRefundBusy(true);
+    setError(null);
+    try {
+      await api.post(`/shop/sales/${id}/reverse`, {
+        reason: refundReason.trim(),
+        moneyReturned: refundReturned,
+      });
+      setRefundFor(null);
+      setRefundReason('');
+      setRefundReturned(false);
+      // The refund drains straight away; give it a moment to land.
+      setTimeout(() => loadRecentRef.current?.(), 6000);
+    } catch (e: any) {
+      setError(e?.body?.error || e?.message || 'Could not refund that sale.');
+    } finally {
+      setRefundBusy(false);
+    }
+    loadRecentRef.current?.();
+  }, [refundReason, refundReturned]);
+
+  /** The customer has their money back — clears an outstanding refund. */
+  const settleRefund = useCallback(async (id: string) => {
+    setError(null);
+    try {
+      await api.post(`/shop/sales/${id}/refund-settled`, {});
+    } catch (e: any) {
+      setError(e?.body?.error || e?.message || 'Could not mark that refund as done.');
+    }
+    loadRecentRef.current?.();
+  }, []);
 
   const loadPeriod = useCallback(() => {
     api.get<{ data: PeriodInfo }>('/shop/period')
@@ -165,7 +250,7 @@ export default function ShopTillPage() {
   }, [loadPeriod]);
 
   const loadRecent = useCallback(() => {
-    api.get<{ data: RecentSale[] }>('/shop/sales?limit=8')
+    api.get<{ data: RecentSale[] }>('/shop/sales?limit=10')
       .then(r => setRecent(r.data))
       .catch(() => setRecent([]));
   }, []);
@@ -323,7 +408,7 @@ export default function ShopTillPage() {
     && (mode === 'consumption' ? notes.trim().length > 0 : true);
 
   return (
-    <div className="max-w-5xl mx-auto px-4 py-6">
+    <div className="max-w-6xl mx-auto px-4 py-6">
       <div className="flex flex-wrap items-baseline justify-between gap-2 mb-1">
         <h1 className="text-2xl font-bold text-gray-900">Shop Till</h1>
         <span className="text-xs text-gray-500">Stock as of {ago(cacheAge)}</span>
@@ -384,6 +469,11 @@ export default function ShopTillPage() {
         </div>
       )}
 
+      {/* Two columns on a laptop: what's being rung up on the left, the
+          checkout on the right — the goods on the counter vs the card
+          machine. Stacks into one column on a phone. */}
+      <div className="lg:grid lg:grid-cols-[minmax(0,1fr)_22rem] lg:items-start lg:gap-6">
+      <div className="min-w-0">
       {/* Search */}
       <div className="mb-4">
         <div className="relative">
@@ -441,6 +531,12 @@ export default function ShopTillPage() {
       </div>
 
       {/* Basket */}
+      {basket.length > 0 && (
+        <h2 className="mb-2 text-sm font-semibold text-gray-700">
+          {mode === 'sale' ? 'Basket' : 'Items used'} · {basket.reduce((n, l) => n + l.qty, 0)}{' '}
+          {basket.reduce((n, l) => n + l.qty, 0) === 1 ? 'item' : 'items'}
+        </h2>
+      )}
       {basket.length === 0 ? (
         <p className="rounded border border-dashed border-gray-300 px-4 py-8 text-center text-sm text-gray-400">
           Nothing in the basket yet.
@@ -454,7 +550,9 @@ export default function ShopTillPage() {
             const short = avail != null && avail < l.qty;
             return (
               <div key={l.stock.hhStockId} className="flex flex-wrap items-center gap-3 px-3 py-3">
-                <div className="min-w-0 flex-1">
+                {/* Full width on a phone, so the name gets its own line and the
+                    qty/price controls wrap underneath rather than squeezing it. */}
+                <div className="min-w-0 w-full sm:w-auto sm:flex-1">
                   <p className="truncate text-sm font-medium text-gray-900">{l.stock.title}</p>
                   <p className="text-xs text-gray-500">
                     {l.stock.quantity} on shelf
@@ -506,9 +604,26 @@ export default function ShopTillPage() {
         </div>
       )}
 
-      {/* Totals + tender */}
-      {basket.length > 0 && (
-        <div className="mt-4 rounded border border-gray-200 bg-gray-50 p-4">
+      </div>
+
+      {/* Checkout. Deliberately a different-looking thing from the basket:
+          a coloured frame and the total in its header, so the running total
+          never reads as one more line in the list. On a phone it only
+          appears once there is something to pay for. */}
+      <aside className={`${basket.length ? '' : 'hidden lg:block'} mt-4 lg:sticky lg:top-4 lg:mt-0`}>
+        <div className="overflow-hidden rounded-lg border-2 border-ooosh-600 bg-white shadow-sm">
+          <div className="flex items-baseline justify-between gap-2 bg-ooosh-600 px-4 py-3 text-white">
+            <span className="text-sm font-semibold">
+              {mode === 'sale' ? 'Total (inc VAT)' : 'Record stock use'}
+            </span>
+            {mode === 'sale' && (
+              <span className="text-2xl font-bold tabular-nums">{money(totals.gross)}</span>
+            )}
+          </div>
+      {basket.length === 0 ? (
+        <p className="p-4 text-sm text-gray-400">Add items to start.</p>
+      ) : (
+        <div className="p-4">
           {mode === 'sale' && (
             <>
               <div className="mb-3 space-y-1 text-sm">
@@ -524,9 +639,6 @@ export default function ShopTillPage() {
                     <span>−{money(totals.discount)}</span>
                   </div>
                 )}
-                <div className="flex justify-between border-t pt-1 text-lg font-bold text-gray-900">
-                  <span>Total (inc VAT)</span><span>{money(totals.gross)}</span>
-                </div>
               </div>
 
               {overDiscountCap && (
@@ -573,6 +685,9 @@ export default function ShopTillPage() {
           </button>
         </div>
       )}
+        </div>
+      </aside>
+      </div>
 
       <div className="mt-8">
         <button
@@ -624,47 +739,132 @@ export default function ShopTillPage() {
       {recent.length > 0 && (
         <div className="mt-8">
           <div className="mb-2 flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-gray-700">Recent</h2>
+            <h2 className="text-sm font-semibold text-gray-700">Recent Sales</h2>
             <button onClick={loadRecent} className="text-xs text-gray-400 hover:text-gray-700">
               Refresh
             </button>
           </div>
           <ul className="rounded border border-gray-200 divide-y text-sm">
-            {recent.map(r => (
-              <li key={r.id} className="flex flex-wrap items-center gap-2 px-3 py-2">
-                <span className="text-gray-500">
-                  {new Date(r.created_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
-                </span>
-                <span className="font-medium text-gray-900">
-                  {r.kind === 'consumption' ? 'Used for Ooosh' : money(Number(r.gross_amount))}
-                </span>
-                {r.notes && <span className="truncate text-gray-500">{r.notes}</span>}
-                <span className="ml-auto flex items-center gap-2">
-                  {r.recorded_by_name && <span className="text-xs text-gray-400">{r.recorded_by_name}</span>}
-                  {/* The status is the answer to "did it reach HireHop?" —
-                      queued means not yet, pushed means it did. */}
-                  <span className={`rounded px-2 py-0.5 text-xs ${
-                    r.status === 'pushed' ? 'bg-green-100 text-green-800'
-                      : r.status === 'queued' ? 'bg-gray-100 text-gray-600'
-                      : r.status === 'cancelled' ? 'bg-gray-100 text-gray-400 line-through'
-                      : 'bg-red-100 text-red-800'
-                  }`}>
-                    {r.status === 'pushed' ? 'in HireHop' : r.status}
+            {recent.map(r => {
+              const isReversal = r.kind === 'reversal';
+              const gross = Number(r.gross_amount);
+              // Refund outstanding: HireHop/Xero may be done, but the customer
+              // doesn't have their money until someone hands it over.
+              const refundOwed = isReversal && r.status !== 'cancelled' && !r.refund_settled_at;
+              return (
+                <li key={r.id} className="flex flex-wrap items-center gap-2 px-3 py-2">
+                  <span className="text-gray-500">
+                    {new Date(r.created_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
                   </span>
-                </span>
-                {r.status === 'failed' && (
-                  <button
-                    onClick={() => retrySale(r.id)}
-                    className="text-xs font-medium text-ooosh-600 hover:underline"
-                  >
-                    Retry
-                  </button>
-                )}
-                {r.push_error && (
-                  <span className="w-full break-all text-xs text-red-700">{r.push_error}</span>
-                )}
-              </li>
-            ))}
+                  {r.sale_ref && <span className="font-mono text-xs text-gray-500">{r.sale_ref}</span>}
+                  <span className={`font-medium ${isReversal ? 'text-red-700' : 'text-gray-900'}`}>
+                    {r.kind === 'consumption'
+                      ? 'Used for Ooosh'
+                      : isReversal
+                        ? `Refund of ${r.reverses_sale_ref ?? 'sale'} · −${money(Math.abs(gross))}`
+                        : money(gross)}
+                  </span>
+                  {r.notes && <span className="truncate text-gray-500">{r.notes}</span>}
+                  <span className="ml-auto flex items-center gap-2">
+                    {r.recorded_by_name && <span className="text-xs text-gray-400">{r.recorded_by_name}</span>}
+                    {r.reversal_id && (
+                      <span className="rounded bg-amber-100 px-2 py-0.5 text-xs text-amber-800">refunded</span>
+                    )}
+                    {/* The status is the answer to "did it reach HireHop?" —
+                        queued means not yet, pushed means it did. */}
+                    <span className={`rounded px-2 py-0.5 text-xs ${
+                      r.status === 'pushed' ? 'bg-green-100 text-green-800'
+                        : r.status === 'queued' ? 'bg-gray-100 text-gray-600'
+                        : r.status === 'cancelled' ? 'bg-gray-100 text-gray-400 line-through'
+                        : 'bg-red-100 text-red-800'
+                    }`}>
+                      {r.status === 'pushed' ? 'in HireHop' : r.status}
+                    </span>
+                  </span>
+                  {(r.status === 'queued' || r.status === 'failed') && (
+                    <button
+                      onClick={() => cancelSale(r.id)}
+                      className="text-xs font-medium text-gray-500 hover:text-red-600"
+                    >
+                      Cancel
+                    </button>
+                  )}
+                  {r.status === 'failed' && (
+                    <button
+                      onClick={() => retrySale(r.id)}
+                      className="text-xs font-medium text-ooosh-600 hover:underline"
+                    >
+                      Retry
+                    </button>
+                  )}
+                  {/* Refund = money out of the door, so manager tier (the API
+                      enforces the same). Never "delete" — spec §4.1. */}
+                  {canRefund && r.kind === 'sale' && r.status === 'pushed' && !r.reversal_id && refundFor !== r.id && (
+                    <button
+                      onClick={() => { setRefundFor(r.id); setRefundReason(''); setRefundReturned(false); }}
+                      className="text-xs font-medium text-ooosh-600 hover:underline"
+                    >
+                      Refund
+                    </button>
+                  )}
+                  {refundOwed && (
+                    <span className="flex w-full flex-wrap items-center gap-2 text-xs">
+                      <span className="font-medium text-amber-700">
+                        Refund outstanding — {refundHow(r.tender, gross)}.
+                      </span>
+                      <button
+                        onClick={() => settleRefund(r.id)}
+                        className="rounded border border-amber-300 px-2 py-0.5 font-medium text-amber-800 hover:bg-amber-50"
+                      >
+                        Done — they have it
+                      </button>
+                    </span>
+                  )}
+                  {refundFor === r.id && (
+                    <div className="w-full rounded border border-amber-300 bg-amber-50 p-3 text-xs">
+                      <p className="mb-2 text-amber-900">
+                        Refunds the whole of {r.sale_ref ?? 'this sale'}: its items come off the HireHop job
+                        (stock back on the shelf) and {money(gross)} is refunded against its payment in HireHop
+                        and Xero. To refund part of a basket, refund it all and ring the rest again.
+                      </p>
+                      <input
+                        value={refundReason}
+                        onChange={e => setRefundReason(e.target.value)}
+                        placeholder="Why? (required) — e.g. wrong size, brought it back"
+                        className="mb-2 w-full rounded border border-gray-300 px-2 py-1.5 text-sm"
+                        autoFocus
+                      />
+                      <label className="mb-2 flex items-center gap-2 text-amber-900">
+                        <input
+                          type="checkbox"
+                          checked={refundReturned}
+                          onChange={e => setRefundReturned(e.target.checked)}
+                        />
+                        {refundHow(r.tender, gross)} — done already
+                      </label>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => refundSale(r.id)}
+                          disabled={refundBusy || !refundReason.trim()}
+                          className="rounded bg-red-600 px-3 py-1.5 font-semibold text-white hover:bg-red-700 disabled:bg-gray-300"
+                        >
+                          {refundBusy ? 'Refunding…' : `Refund ${money(gross)}`}
+                        </button>
+                        <button
+                          onClick={() => setRefundFor(null)}
+                          className="rounded px-3 py-1.5 text-gray-600 hover:bg-gray-100"
+                        >
+                          Back
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {r.push_error && (
+                    <span className="w-full break-all text-xs text-red-700">{r.push_error}</span>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         </div>
       )}

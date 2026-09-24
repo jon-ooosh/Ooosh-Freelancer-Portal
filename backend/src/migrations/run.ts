@@ -286,6 +286,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '244_staff_review_checkin.sql',
         '245_shop_job_settings.sql',
         '246_shop_job_contact_name.sql',
+        '247_shop_reversals.sql',
       ];
 
       for (const migration of migrations) {

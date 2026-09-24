@@ -88,7 +88,7 @@ export function startScheduler() {
       try {
         const { drainShop } = await import('../services/shop-drain');
         const r = await drainShop();
-        const errors = [...r.consumption.errors, ...r.sales.errors];
+        const errors = [...r.consumption.errors, ...r.sales.errors, ...r.reversals.errors];
         if (errors.length) {
           console.error('Scheduler: shop drain errors:', errors.join(' | '));
         }
