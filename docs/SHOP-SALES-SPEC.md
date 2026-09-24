@@ -767,6 +767,24 @@ HireHop client is a Xero cleanup.
 
 `shop_availability_job` (migration 242) should point at this job once it exists.
 
+**Never link to the shop job from the till.** The till shows only that the week
+is ready — no job number, no link. The shop job is machinery: OP is the only
+thing that should write to it, and anyone who opens it in HireHop is one status
+change away from releasing a week of sale stock (§2.1). A clickable number is an
+invitation to do exactly that, and the staff most likely to click it are the
+ones who least expect the consequence.
+
+**The exclusion only protects jobs it already knows about.** §3.0 filters on
+`shop_sale_periods`, so there is a narrow window between HireHop creating the
+job and that row existing in which the 30-minute sync could pull it in.
+`getOrCreateShopPeriod()` checks for a leaked `jobs` row immediately after
+insert and logs loudly if it finds one — it would otherwise look like the guard
+had failed rather than raced.
+
+**The exclusion does NOT cover jobs created by hand in HireHop.** A scratch job
+made directly there is an ordinary job and syncs into OP correctly; only jobs in
+`shop_sale_periods` are shop jobs.
+
 **The job is for the CURRENT week, created on demand.** `weekStart(today)` is
 this Monday, not next — nothing waits for a Monday to roll around. Normally the
 first sale of a week brings the job into being, but "the first sale" is a poor
