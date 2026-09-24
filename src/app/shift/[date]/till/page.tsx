@@ -64,6 +64,23 @@ interface TonightSummary {
 }
 
 const money = (n: number) => `£${n.toFixed(2)}`
+
+/** One band in → them; two or more → make the sitter choose; none → walk-in. */
+function defaultRoute(c: TillContext): string | null | undefined {
+  if (c.jobs.length === 1) return c.jobs[0].job_id
+  return c.jobs.length === 0 ? null : undefined
+}
+
+/**
+ * Colour roles, so the checkout reads at a glance on a small screen: the total
+ * bar is dark, a CHOICE is an outlined ✓ (not a filled block), and the one
+ * button that records the sale is green. Filled-blue-everything made the
+ * header, both choices and the final button look like the same thing.
+ */
+const choice = (on: boolean) =>
+  on
+    ? 'border-2 border-ooosh-600 bg-ooosh-50 text-ooosh-800'
+    : 'border-2 border-transparent bg-gray-100 text-gray-800'
 const round2 = (n: number) => Math.round(n * 100) / 100
 
 /**
@@ -93,7 +110,11 @@ export default function SitterTillPage() {
   const [results, setResults] = useState<StockItem[]>([])
   const [searching, setSearching] = useState(false)
   const [basket, setBasket] = useState<BasketLine[]>([])
-  const [jobId, setJobId] = useState<string | null>(null)       // null = walk-in
+  // undefined = not chosen yet, null = walk-in, else the band's job. With ONE
+  // band in, it defaults to them (most sitter sales are to the band in the
+  // room — jon); with two, the sitter has to pick, so nobody's strings land on
+  // the wrong band's bill.
+  const [jobId, setJobId] = useState<string | null | undefined>(undefined)
   const [tender, setTender] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -109,6 +130,7 @@ export default function SitterTillPage() {
       const data = await r.json()
       if (!r.ok) { setLoadError(data.error || 'Could not open the till.'); return }
       setCtx(data)
+      setJobId(defaultRoute(data))
     } catch {
       setLoadError('Could not reach the till. Check your signal and try again.')
     }
@@ -173,14 +195,14 @@ export default function SitterTillPage() {
 
   // "Their bill" only exists once a band is picked; going back to walk-in
   // clears it rather than leaving an impossible choice selected.
-  const pickJob = (id: string | null) => {
+  const pickJob = (id: string | null | undefined) => {
     setJobId(id)
     if (!id && ctx?.tenders.find((t) => t.key === tender)?.needsJob) setTender(null)
   }
 
   const total = round2(basket.reduce((s, l) => s + lineGross(l), 0))
   const tenderObj = ctx?.tenders.find((t) => t.key === tender)
-  const canTake = !!ctx?.open && basket.length > 0 && !!tender && !saving
+  const canTake = !!ctx?.open && basket.length > 0 && !!tender && jobId !== undefined && !saving
 
   async function take() {
     if (!canTake) return
@@ -201,7 +223,7 @@ export default function SitterTillPage() {
       setDone(tenderObj?.needsJob ? `${money(total)} put on their bill.` : `Taken — ${money(total)}.`)
       setBasket([])
       setTender(null)
-      setJobId(null)
+      setJobId(ctx ? defaultRoute(ctx) : undefined)
       loadSales()
       searchRef.current?.focus()
     } catch {
@@ -227,7 +249,7 @@ export default function SitterTillPage() {
   const bandName = (hh: number | null) => ctx?.jobs.find((j) => j.hh_job_number === hh)?.label ?? (hh ? `#${hh}` : null)
 
   return (
-    <div className="min-h-screen bg-gray-50 safe-top safe-bottom pb-10">
+    <div className="min-h-screen bg-gray-50 safe-top safe-bottom pb-10 flex flex-col">
       <header className="bg-white shadow-sm border-b border-gray-100 sticky top-0 z-10">
         <div className="max-w-lg mx-auto px-4 py-4 flex items-center gap-3">
           <Link
@@ -246,7 +268,7 @@ export default function SitterTillPage() {
         </div>
       </header>
 
-      <main className="max-w-lg mx-auto px-4 py-5 space-y-5">
+      <main className="max-w-lg w-full mx-auto px-4 py-5 flex flex-1 flex-col gap-5">
         {loadError && (
           <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">{loadError}</div>
         )}
@@ -332,8 +354,8 @@ export default function SitterTillPage() {
             </section>
 
             {/* Checkout */}
-            <section className="rounded-xl border-2 border-ooosh-600 bg-white overflow-hidden">
-              <div className="flex items-baseline justify-between bg-ooosh-600 px-4 py-3 text-white">
+            <section className="rounded-xl border border-gray-300 bg-white overflow-hidden shadow-sm">
+              <div className="flex items-baseline justify-between bg-gray-900 px-4 py-3 text-white">
                 <span className="text-sm font-semibold">Total</span>
                 <span className="text-2xl font-bold tabular-nums">{money(total)}</span>
               </div>
@@ -343,23 +365,19 @@ export default function SitterTillPage() {
                   <div className="space-y-2">
                     <button
                       onClick={() => pickJob(null)}
-                      className={`w-full rounded-lg px-4 py-3 text-left text-sm font-medium ${
-                        !jobId ? 'bg-ooosh-600 text-white' : 'bg-gray-100 text-gray-800'
-                      }`}
+                      className={`w-full rounded-lg px-4 py-3 text-left text-sm font-medium ${choice(jobId === null)}`}
                     >
-                      Walk-in
+                      {jobId === null ? '✓ ' : ''}Walk-in
                     </button>
                     {ctx.jobs.map((j) => (
                       <button
                         key={j.job_id}
                         onClick={() => pickJob(j.job_id)}
-                        className={`w-full rounded-lg px-4 py-3 text-left text-sm font-medium ${
-                          jobId === j.job_id ? 'bg-ooosh-600 text-white' : 'bg-gray-100 text-gray-800'
-                        }`}
+                        className={`w-full rounded-lg px-4 py-3 text-left text-sm font-medium ${choice(jobId === j.job_id)}`}
                       >
-                        {j.label}
+                        {jobId === j.job_id ? '✓ ' : ''}{j.label}
                         {j.rooms.length > 0 && (
-                          <span className={`block text-xs font-normal ${jobId === j.job_id ? 'text-white/80' : 'text-gray-500'}`}>
+                          <span className="block text-xs font-normal text-gray-500">
                             {j.rooms.join(', ')}
                           </span>
                         )}
@@ -375,11 +393,9 @@ export default function SitterTillPage() {
                       <button
                         key={t.key}
                         onClick={() => setTender(t.key)}
-                        className={`rounded-lg px-3 py-3 text-sm font-medium ${
-                          tender === t.key ? 'bg-ooosh-600 text-white' : 'bg-gray-100 text-gray-800'
-                        } ${t.needsJob ? 'col-span-2' : ''}`}
+                        className={`rounded-lg px-3 py-3 text-sm font-medium ${choice(tender === t.key)} ${t.needsJob ? 'col-span-2' : ''}`}
                       >
-                        {t.label}
+                        {tender === t.key ? '✓ ' : ''}{t.label}
                       </button>
                     ))}
                   </div>
@@ -388,11 +404,13 @@ export default function SitterTillPage() {
                 <button
                   onClick={take}
                   disabled={!canTake}
-                  className="w-full rounded-xl bg-ooosh-600 px-4 py-4 text-base font-semibold text-white disabled:bg-gray-300"
+                  className="w-full rounded-xl bg-green-600 px-4 py-4 text-base font-semibold text-white active:bg-green-700 disabled:bg-gray-300"
                 >
                   {saving
                     ? 'Recording…'
-                    : !tender
+                    : jobId === undefined
+                      ? 'Pick who it’s for'
+                      : !tender
                       ? 'Pick how they paid'
                       : tenderObj?.needsJob
                         ? `Put ${money(total)} on their bill`
@@ -403,9 +421,10 @@ export default function SitterTillPage() {
           </>
         )}
 
-        {/* Tonight — what this till has taken */}
+        {/* Tonight — what this till has taken. Pushed to the foot of the
+            screen (mt-auto) so it's out of the way while selling. */}
         {summary && summary.sales > 0 && (
-          <section>
+          <section className="mt-auto pt-6">
             <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">Tonight</h2>
             <div className="rounded-xl border border-gray-200 bg-white p-4">
               <p className="text-base font-semibold text-gray-900">
@@ -446,7 +465,7 @@ export default function SitterTillPage() {
           </section>
         )}
 
-        <p className="text-center text-xs text-gray-400">
+        <p className={`text-center text-xs text-gray-400 ${summary && summary.sales > 0 ? '' : 'mt-auto'}`}>
           Prices include VAT. Made a mistake? Cancel it from the list straight away — after a couple of
           minutes it&apos;s gone to the office, so leave them a note instead.
         </p>

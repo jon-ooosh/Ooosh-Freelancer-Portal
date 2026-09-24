@@ -899,8 +899,11 @@ export default function ShopTillPage() {
           never reads as one more line in the list. On a phone it only
           appears once there is something to pay for. */}
       <aside className={`${basket.length ? '' : 'hidden lg:block'} mt-4 lg:sticky lg:top-4 lg:mt-0`}>
-        <div className="overflow-hidden rounded-lg border-2 border-ooosh-600 bg-white shadow-sm">
-          <div className="flex items-baseline justify-between gap-2 bg-ooosh-600 px-4 py-3 text-white">
+        {/* Colour roles (same as the sitter till): a dark total bar, a CHOICE
+            is an outlined ✓, and only the button that records it is green —
+            so the header, the choices and the action don't all read alike. */}
+        <div className="overflow-hidden rounded-lg border border-gray-300 bg-white shadow-sm">
+          <div className="flex items-baseline justify-between gap-2 bg-gray-900 px-4 py-3 text-white">
             <span className="text-sm font-semibold">
               {mode === 'sale' ? 'Total (inc VAT)' : 'Record stock use'}
             </span>
@@ -943,11 +946,11 @@ export default function ShopTillPage() {
                 <button
                   type="button"
                   onClick={() => chooseRoute(null)}
-                  className={`rounded px-2.5 py-1.5 text-xs font-medium ${
-                    !route ? 'bg-ooosh-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                  className={`rounded border-2 px-2.5 py-1.5 text-xs font-medium ${
+                    !route ? 'border-ooosh-600 bg-ooosh-50 text-ooosh-800' : 'border-transparent bg-gray-100 text-gray-700 hover:bg-gray-200'
                   }`}
                 >
-                  Walk-in
+                  {!route ? '✓ ' : ''}Walk-in
                 </button>
                 {todayJobs.map(j => (
                   <button
@@ -955,18 +958,18 @@ export default function ShopTillPage() {
                     type="button"
                     onClick={() => chooseRoute(j)}
                     title={j.rooms?.join(', ')}
-                    className={`rounded px-2.5 py-1.5 text-left text-xs font-medium ${
-                      route?.id === j.id ? 'bg-ooosh-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                    className={`rounded border-2 px-2.5 py-1.5 text-left text-xs font-medium ${
+                      route?.id === j.id ? 'border-ooosh-600 bg-ooosh-50 text-ooosh-800' : 'border-transparent bg-gray-100 text-gray-700 hover:bg-gray-200'
                     }`}
                   >
-                    {jobLabel(j)}
-                    <span className={`block text-[10px] font-normal ${route?.id === j.id ? 'text-ooosh-100' : 'text-gray-500'}`}>
+                    {route?.id === j.id ? '✓ ' : ''}{jobLabel(j)}
+                    <span className="block text-[10px] font-normal text-gray-500">
                       In today{j.rooms?.length ? ` · ${j.rooms.join(', ')}` : ''}
                     </span>
                   </button>
                 ))}
                 {route && !todayJobs.some(j => j.id === route.id) && (
-                  <span className="rounded bg-ooosh-600 px-2.5 py-1.5 text-xs font-medium text-white">
+                  <span className="rounded border-2 border-ooosh-600 bg-ooosh-50 px-2.5 py-1.5 text-xs font-medium text-ooosh-800">✓ 
                     {jobLabel(route)} · #{route.hhJobNumber}
                   </span>
                 )}
@@ -1043,7 +1046,7 @@ export default function ShopTillPage() {
           <button
             onClick={submit}
             disabled={!canSubmit}
-            className="w-full rounded bg-ooosh-600 px-4 py-3 text-base font-semibold text-white hover:bg-ooosh-700 disabled:bg-gray-300"
+            className="w-full rounded bg-green-600 px-4 py-3 text-base font-semibold text-white hover:bg-green-700 disabled:bg-gray-300"
           >
             {saving
               ? 'Recording…'

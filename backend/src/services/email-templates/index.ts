@@ -2309,9 +2309,18 @@ const templates: Record<string, EmailTemplate> = {
             <p style="margin:0 0 8px;font-size:14px;color:#1e293b;font-weight:600;">{{statusLine}}</p>
             {{#if exceptionsText}}<p style="margin:0 0 4px;font-size:13px;color:#64748b;">Needs attention</p><p style="margin:0 0 8px;font-size:14px;color:#b45309;white-space:pre-line;">{{exceptionsText}}</p>{{/if}}
             {{#if notes}}<p style="margin:0 0 4px;font-size:13px;color:#64748b;">Sitter's notes</p><p style="margin:0 0 8px;font-size:14px;color:#1e293b;white-space:pre-line;">{{notes}}</p>{{/if}}
+            {{#if shopLine}}<p style="margin:0 0 4px;font-size:13px;color:#64748b;">Shop till tonight</p><p style="margin:0;font-size:14px;color:#1e293b;">🛒 {{shopLine}}</p>{{/if}}
           </td>
         </tr>
       </table>
+      {{#if shopReviewText}}<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#fffbeb;border-radius:8px;border:1px solid #fcd34d;">
+            <p style="margin:0 0 6px;font-size:14px;color:#92400e;font-weight:600;">To do: {{shopReviewText}}</p>
+            <p style="margin:0;font-size:14px;"><a href="{{shopReviewUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Review and tick them off →</a></p>
+          </td>
+        </tr>
+      </table>{{/if}}
       <p style="margin:0;font-size:14px;color:#334155;">
         <a href="{{rosterUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Open the studio sitters roster →</a>
       </p>

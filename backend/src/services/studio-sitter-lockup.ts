@@ -535,8 +535,24 @@ async function notifyStaffOfLockup(
   const title = flagged
     ? `🔒 Lock-up — ${exceptions.length} item${exceptions.length !== 1 ? 's' : ''} need attention (${sitterName})`
     : `🔒 Lock-up submitted — all clear (${sitterName})`;
-  const content = [...exceptions.map((e) => `• ${e.label}: ${e.answer}`), ...(notes ? [notes] : [])]
-    .join('\n').slice(0, 400) || 'No issues flagged.';
+  // The shop till's night, and — the bit that gets missed — sitter sales
+  // waiting for a staff tick (jon, Sep 2026: "it will be missed otherwise").
+  const shop = await shopTonight(shiftId);
+  let shopLine = '';
+  let shopReviewText = '';
+  if (shop && shop.sales > 0) {
+    const { describeShiftShop } = await import('./shop-reconcile');
+    shopLine = describeShiftShop(shop);
+    if (shop.toReview > 0) {
+      shopReviewText = `${shop.toReview} shop sale${shop.toReview === 1 ? '' : 's'} from tonight to review`;
+    }
+  }
+
+  const content = [
+    ...exceptions.map((e) => `• ${e.label}: ${e.answer}`),
+    ...(notes ? [notes] : []),
+    ...(shopReviewText ? [`🛒 ${shopReviewText}`] : []),
+  ].join('\n').slice(0, 400) || 'No issues flagged.';
 
   try {
     const staff = await query(
@@ -565,6 +581,9 @@ async function notifyStaffOfLockup(
         exceptionsText: exceptions.map((e) => `${e.label}: ${e.answer}`).join('\n'),
         notes: notes || '',
         rosterUrl: 'https://staff.oooshtours.co.uk/studio-sitters',
+        shopLine,
+        shopReviewText,
+        shopReviewUrl: 'https://staff.oooshtours.co.uk/money/shop?tab=review',
       },
     });
   } catch (err) {
