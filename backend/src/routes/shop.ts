@@ -238,7 +238,8 @@ router.get('/sales', async (req: AuthRequest, res: Response) => {
   try {
     const limit = req.query.limit ? Number(req.query.limit) : undefined;
     const since = req.query.since ? String(req.query.since) : undefined;
-    res.json({ data: await listShopSales({ limit, since }) });
+    const attention = req.query.attention === '1' || req.query.attention === 'true';
+    res.json({ data: await listShopSales({ limit, since, attention }) });
   } catch (err) {
     console.error('[shop] sales list failed:', err);
     res.status(500).json({ error: 'Could not load shop sales.' });
@@ -345,6 +346,38 @@ router.post('/period/ensure', authorize(...MANAGER_ROLES), async (_req: AuthRequ
     // fix something in HireHop, so pass them through rather than flattening
     // them to "something went wrong".
     res.status(400).json({ error: err instanceof Error ? err.message : 'Could not create this week\'s shop job.' });
+  }
+});
+
+/**
+ * A week's takings plus the last balance check on its shop job (step 9).
+ * `start` is the Monday; defaults to this week. Reads Postgres only — the
+ * check itself is stored by the 15-minute scan, or run on demand below.
+ */
+router.get('/week', async (req: AuthRequest, res: Response) => {
+  try {
+    const { weekStart } = await import('../services/shop-period');
+    const { getWeekSummary } = await import('../services/shop-reconcile');
+    const start = req.query.start ? String(req.query.start) : weekStart(new Date());
+    const summary = await getWeekSummary(start);
+    const p = await query(
+      `SELECT id, hh_job_number, invoiced_at, last_checked_at, last_check_ok, last_check
+         FROM shop_sale_periods WHERE period_start = $1`, [summary.periodStart],
+    );
+    res.json({ data: { summary, period: p.rows[0] || null } });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Could not load that week.' });
+  }
+});
+
+/** Run the balance check now rather than waiting for the scan. Reads HireHop only. */
+router.post('/week/:periodId/check', async (req: AuthRequest, res: Response) => {
+  try {
+    const { checkShopPeriod } = await import('../services/shop-reconcile');
+    res.json({ data: await checkShopPeriod(String(req.params.periodId)) });
+  } catch (err) {
+    console.error('[shop] balance check failed:', err);
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Could not run the check.' });
   }
 });
 

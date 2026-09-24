@@ -1067,7 +1067,8 @@ Frontend: `hasManagerRole()` / `roleAllowed()` from `lib/roles.ts`, never bare
 7. ✅ **SHIPPED Sep 2026 (staff till).** Job routing — see §19. The sitter till's
    phone picker (§5) is deferred with the rest of the sitter till.
 8. ✅ **SHIPPED Sep 2026.** Reversals — Windows A and B, verified live.
-9. Weekly Shop tab, balance alarm, review list.
+9. ✅ **SHIPPED Sep 2026.** Weekly view, balance check + alarms, needs-attention list,
+   reorder list — see §19. The sitter review list waits for the sitter till.
 10. Lock-up report integration.
 11. Receipts.
 12. **Then** gate manual payment entry in HireHop (§15).
@@ -1210,6 +1211,9 @@ once the mirror lands — it costs one query, and any item below 100 means today
 | **Refund (Window B)** | Recent Sales → Refund, `MANAGER_ROLES`. Whole sale. Creates a `kind='reversal'` row; the drain (kicked immediately) first stops if the job has ANY invoice (`billing_list` `kind = 1`) — Window C, a credit note by hand — then checks the deposit is still unallocated, removes each line via `items_delete.php` (read back), then refunds against the deposit via `refundDepositOnHH` (re-read that the money moved). A "their bill" sale has no deposit: its refund only removes the line and settles itself. **Verified live 24 Sep** on the test sales (line removed, stock back, refund in HireHop and Xero). |
 | **Refund outstanding** | The physical money back is manual until Stripe. **Cash and card** (`COUNTER_REFUND_TENDERS`) are handed back there and then, so the Refund button — *"Done — £x given back"* — is the confirmation and the refund is settled on creation. **Bank transfer, PayPal, Stripe** happen later from another screen, so those show "Refund outstanding" until someone presses *Done — they have it*. |
 | **Job routing (step 7)** | Checkout → *Who's it for?*: **Walk-in** (the week's shop job), the bands **In today** (`GET /shop/jobs/today` — rehearsal jobs whose session dates cover today, from the same `rehearsal_detail` the sitter roster uses; two bands in = two buttons), or **Other job…** (search by HH number / band / client). Payment on a job: paid now (a deposit on THEIR job) or **Put it on their bill** (`invoice_later`, no deposit — only offered once a job is chosen, and reset if the route goes back to walk-in). Cancelled / lost / completed / internal jobs are refused at the counter (`shop-routing.ts assertSellableJob`); a job LOCKED or closed in HireHop is caught by the drain before any line is pushed, and the sale goes `failed` with "cancel and ring it as a walk-in". **Stock:** a line added to a dispatched OR returned job consumes immediately (jon verified the returned case on job 16749); rehearsal jobs are dispatched like any other, so there is no "not yet dispatched" warning. Checking a sale line in at return puts the stock back — a human-error gap code can't close. |
+| **Till page layout (step 9)** | The till on top; everything else folded into one tab row at the bottom — *Recent sales · Needs attention (n) · This week · What we've used · Reorder* (jon, Sep 2026: 9 in 10 visits need none of it). Last tab used is remembered per browser; clicking the open tab folds it. Payment-method labels live in `frontend/src/lib/shopTenders.ts`. |
+| **Balance check (step 9)** | `services/shop-reconcile.ts`. Compares each un-invoiced week's shop job with OP's OWN record, three ways: **goods** (OP's ex-VAT line total vs billing `kind = 0` `accrued`), **money** (OP's takings less refunds vs the deposits' unallocated balances; skipped once invoiced), **lines** (every pushed, un-removed line still on the job) — plus job status ≥ 5 and not 9/10. Exact to the penny (no VAT rounding) and it names which side broke. Runs inside the drain lock. First sight of an invoice on the job sets `invoiced_at` — **closing the old "OP never knows the week was invoiced" gap**. Result stored on the period (migration 248); *This week* shows it with *Check now*. **Cannot see a sale line checked in by mistake** — the line stays, only the shelf moves. |
+| **Alarms (step 9)** | Scanner every 15 min → email **jon only** (jon, Sep 2026): a week that doesn't match (once per distinct problem — `alert_signature`; cleared when it balances), and failed / stuck-30-min transactions (once each — `stuck_alerted_at`, reset by Retry). |
 | **Drain lock** | `withShopDrainLock` — the scheduler and `POST /shop/drain` used to be able to push the same sale twice at once. Now serialised. |
 | **Weekly job** | Created on demand, Mon 00:01→Sun 23:59, DISPATCHED. Live one is **16750**. |
 | **Sync exclusion** | Shop jobs never enter OP's `jobs` table — bulk sync and webhook both guarded. |
@@ -1232,24 +1236,20 @@ once the mirror lands — it costs one query, and any item below 100 means today
 
 ### THE FIRST THING TO DO NEXT
 
-**Exercise job routing live** on a scratch job at dispatched or returned:
+**Exercise the balance check live** on this week's shop job:
 
-1. sell one item **paid now** onto it — line on THAT job, shelf drops, deposit on
-   that job (not 16750);
-2. sell one **on their bill** — line on the job, no deposit;
-3. refund both — lines off, stock back, a refund against the first's deposit, and the
-   second settles with nothing to hand back;
-4. lock the job in HireHop, sell onto it — it must go `failed` without touching the job.
-
-A failed refund names what to check — **do not press Retry until the billing tab has been
-looked at**: Retry skips the refund if one was recorded, so it means "I've checked,
-finish it off".
+1. open *This week* → *Check now* on a clean week — it should read **Balanced**;
+2. add a line to the shop job by hand in HireHop → *Check now* → **Goods** goes red,
+   naming the difference; within 15 min jon gets ONE email. Delete the line → balanced;
+3. same with a hand-typed payment → **Money** goes red;
+4. confirm the `accrued` total HireHop reports matches the job's net total with a
+   discounted line on it (the check assumes it does — verified only against fakes).
 
 ### Then, in order
 
-9. The Shop tab: weekly takings, the balance alarm (§9), sitter review list,
-   outstanding refunds, the line-integrity scan (§2.1). The integrity scan must treat
-   a line with `hh_line_removed_at` set as intentionally gone.
+- **The sitter till** (freelancer portal, phone-first, §5): price lookup, sell, the
+  same "in today" picker, `needs_review` sales + the morning review list, the dashboard
+  row and the handover-thread summary (§12.1). Unlocks 10.
 10. Lock-up report integration (§5).
 11. Receipts (§2.10) — **accountant confirmed Sep 2026** that a VAT receipt is fine:
     it is a record of sale and is not pushed to Xero. Number = the sale's `OT-SHOP-#####`.
@@ -1260,11 +1260,9 @@ finish it off".
 
 ### Known gaps and decisions still open
 
-- **`shop_sale_periods.invoiced_at` is never set.** Raising the weekly invoice
-  is still a manual HireHop job and nothing in OP knows it happened. The refund
-  drain covers the gap by reading the deposit first: if it is no longer
-  unallocated it stops with "the week has most likely been invoiced" before
-  touching any stock. The refund route also refuses when `invoiced_at` IS set.
+- **Raising the weekly invoice is still manual in HireHop.** OP now notices
+  (the 15-min check sets `invoiced_at` when an invoice appears) and refunds stop
+  on an invoiced job, but OP does not raise it.
 - **Partial refunds** (one item out of a basket) are "refund all, ring the rest
   again". Whole-line returns are cheap (the proven `items_delete.php` + a partial
   refund). Part-of-a-line (bought 3, return 1) needs `items_save.php` with a lower
