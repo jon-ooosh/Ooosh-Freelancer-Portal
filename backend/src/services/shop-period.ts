@@ -23,6 +23,7 @@ import hhBroker from './hirehop-broker';
 
 const CLIENT_ID_KEY = 'shop_job_client_id';
 const NAME_PATTERN_KEY = 'shop_job_name_pattern';
+const CONTACT_NAME_KEY = 'shop_job_contact_name';
 
 /** HireHop status 5. Below this, sale stock is not consumed (§2.1). */
 const DISPATCHED = 5;
@@ -110,16 +111,22 @@ export async function getOrCreateShopPeriod(when: Date = new Date()): Promise<Sh
   // Monday 00:01 to Sunday 23:59 — jon's choice. Sales land on whichever week
   // they happen in, and the week closes cleanly for invoicing.
   //
-  // ⚠️ THIS PAYLOAD IS NOT YET CAPTURED FROM HIREHOP'S UI (§2.9). It is built
-  // from the field list in PLATFORM-CONVENTIONS, which for three other
-  // endpoints has turned out not to match what HireHop actually accepts. The
-  // first attempt returned error 3 — the same bare code `tally_save.php` gave
-  // for the documented-but-wrong parameter names. A capture of HireHop creating
-  // a job by hand is what settles this; until then the read-back below is what
-  // stops a wrong guess becoming a wrong job.
+  // ⚠️ SEND parameters are lowercase; the UPPERCASE names are what HireHop
+  // RETURNS. The first attempt sent `CLIENT_ID`, lifted from the response
+  // shape, and got error 3 — that one was my misreading rather than HireHop's
+  // docs being wrong, unlike the three endpoints in §2.9.
+  //
+  // `name` is documented as required when creating, and `client_id` is the
+  // company in the address book. Different fields; HireHop wants both.
+  //
+  // This is the FIRST job OP has ever created in HireHop — every other
+  // save_job.php call in this codebase targets an existing `job: <number>` to
+  // rename it or add an item. There was no working example to copy.
+  const contactName = (await setting(CONTACT_NAME_KEY)) || 'OP Shop Sales';
   const createPayload = {
     job: 0,                       // 0 = create
-    CLIENT_ID: clientId,
+    client_id: clientId,          // lowercase on the way IN
+    name: contactName,            // required for new
     job_name: jobName,
     out: `${start} 00:01`,
     start: `${start} 00:01`,

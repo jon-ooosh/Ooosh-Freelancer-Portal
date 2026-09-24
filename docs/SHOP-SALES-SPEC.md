@@ -362,7 +362,14 @@ a live round-trip:
 | `items_delete.php` | (undocumented) | `ids` as a **bare string**, `job`, `arch`, `no_availability` |
 | `tally_save.php` | `cons`, `id`, `qty`, `details` | **`CONSUMABLE_ID`**, **`ID`**, **`QTY`**, **`DETAILS`** (uppercase), plus `local`, `tz`, `CUSTOM_FIELDS` |
 | `picklist_get_availability.php` | (guessed from `staging.ts`) | `job` (**required**), `global_depot`, `rows` of `{ID,TYPE,AVAILABLE:1,GLOBAL:0}`, `local`, `tz` |
-| `save_job.php` (CREATE) | `job_name`, `name`, `company`, `out`, `start`, … | **NOT YET CAPTURED** — the documented shape returns error 3 |
+
+**`save_job.php` (create) was NOT one of these — that one was my mistake.** It
+returned the same error 3, but because the payload sent `CLIENT_ID`, lifted from
+the RESPONSE field list. HireHop's send parameters are lowercase (`client_id`)
+and the uppercase names are what it returns. `name` is also documented as
+required when creating, and was missing. A useful corollary: three wrong
+endpoints in a row made a fourth look like the same problem, and it wasn't.
+Check your own reading before concluding the vendor is wrong again.
 
 The availability one is the subtlest of the three: `TYPE: 1` for sale stock was
 right all along, and the call still returned nothing because of the company it
@@ -410,11 +417,25 @@ building this.** It is the one piece of the module that rests on tax rules
 rather than on something we have verified ourselves, and it is the piece whose
 absence caused the original mess.
 
-**Numbering: `OT-SHOP-00001`.** Deliberately outside both existing sequences —
+**Numbering: `OT-SHOP-00100`** — starting at 100 rather than 1, jon's preference. Deliberately outside both existing sequences —
 HireHop raises `OT-INV-#####` (around 12243 today) and Xero-direct raises
 `OT-#####`, so a third prefix cannot collide with either as they advance. It is
 a traceability reference, **not** an accounting invoice number, which is exactly
 why it can have its own sequence without anyone reconciling it.
+
+### 2.11 OP had never created a HireHop job before this
+
+Worth stating because it explains why there was no pattern to copy. Every other
+`save_job.php` call in the codebase targets an **existing** `job: <number>` —
+`hirehop-writeback.ts` renames one, the recharge and PCN pushes add items to
+one. Enquiries become HireHop jobs in HireHop, not from OP.
+
+The weekly shop job is the first job OP creates, which is why its payload came
+from documentation rather than from a working neighbour — and why it is
+read back and verified rather than trusted (§2.5).
+
+Also confirmed by the same docs, and matching what the picklist showed: the
+`items` prefixes are **`a` = sales, `b` = hire, `c` = labour**.
 
 ### Confirmed HireHop facts (scratch job 16735, Sep 2026)
 
