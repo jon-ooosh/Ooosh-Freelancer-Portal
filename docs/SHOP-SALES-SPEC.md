@@ -695,11 +695,29 @@ made a mess in Xero. Two consequences:
    sanity check that alarms if the contact's name or address changes — a known
    incident is exactly what a scanner is for.
 
+**`CLIENT_ID` on a job is the COMPANY id, not the person id.** HireHop's contact
+feed distinguishes them — `hirehop-sync.ts` maps `ID` as the person and `cID` as
+the company — and a job's `CLIENT_ID` pairs with `CLIENT_ASSIGN`, the company
+name. For a one-person company contact the two are equal (OP Shop Sales is
+`ID: 3067, cID: 3067`), so the distinction is invisible here and would bite on
+the first contact where it isn't.
+
+OP has never created a HireHop contact and does not start now: `pipeline.ts`
+only ever *reads* an auto-assigned client id back, and enquiry intake creates OP
+organisations rather than HireHop ones. Handcrafting is the established shape,
+not a workaround.
+
 **Empty client id = the weekly job is not created and sales stay queued.**
 Deliberate: a sale waiting in OP is recoverable, a week of takings on the wrong
 HireHop client is a Xero cleanup.
 
 `shop_availability_job` (migration 242) should point at this job once it exists.
+
+**The job is for the CURRENT week, created on demand.** `weekStart(today)` is
+this Monday, not next — nothing waits for a Monday to roll around. Normally the
+first sale of a week brings the job into being, but "the first sale" is a poor
+moment to discover the client id is wrong, so `POST /shop/period/ensure` and a
+button on the till create it directly.
 
 ### 6.1 A sale routed to the weekly shop job
 

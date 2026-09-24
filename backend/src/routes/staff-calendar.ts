@@ -28,7 +28,7 @@ import {
   listPensionHistory, addPensionRecord, updatePersonalDetails,
   listUnlinkedLogins, linkLoginToPerson,
   createPattern, listPatterns, createExceptions, listExceptions,
-  addSalaryEntry, listSalaryHistory, upsertReview, listReviews,
+  addSalaryEntry, listSalaryHistory, upsertReview, listReviews, markCheckInDone,
 } from '../services/staff-employment';
 import {
   getBalance, getTeamBalances, syncEntitlement, postEntry, reverseEntry,
@@ -1632,6 +1632,20 @@ router.post('/employees/:personId/reviews/:reviewId/complete', adminOnly, async 
   } catch (err) {
     console.error('[staff-calendar] review complete error:', err);
     res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to complete the review' });
+  }
+});
+
+// POST /api/staff-calendar/employees/:personId/reviews/:reviewId/checkin
+// Ticks off the half-way check-in on a completed review (spec §5.6, §22), which
+// clears the "Check-in due" row on Needs attention until the next review.
+router.post('/employees/:personId/reviews/:reviewId/checkin', adminOnly, async (req: AuthRequest, res: Response) => {
+  try {
+    const ok = await markCheckInDone(req.params.personId as string, req.params.reviewId as string);
+    if (!ok) { res.status(404).json({ error: 'Completed review not found' }); return; }
+    res.json({ data: { reviewId: req.params.reviewId } });
+  } catch (err) {
+    console.error('[staff-calendar] review check-in error:', err);
+    res.status(500).json({ error: 'Failed to record the check-in' });
   }
 });
 

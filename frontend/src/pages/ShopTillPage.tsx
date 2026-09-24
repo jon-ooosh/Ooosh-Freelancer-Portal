@@ -58,6 +58,11 @@ interface RecentSale {
   recorded_by_name: string | null;
 }
 
+interface PeriodInfo {
+  periodStart: string;
+  period: { hh_job_number: number | null; period_end: string } | null;
+}
+
 interface ConsumptionRow {
   hh_stock_id: number;
   name: string;
@@ -121,6 +126,8 @@ export default function ShopTillPage() {
   const [saved, setSaved] = useState<{ gross: number; id: string; kind: string } | null>(null);
   const [recent, setRecent] = useState<RecentSale[]>([]);
   const [usage, setUsage] = useState<ConsumptionRow[] | null>(null);
+  const [period, setPeriod] = useState<PeriodInfo | null>(null);
+  const [creatingPeriod, setCreatingPeriod] = useState(false);
   const [usageOpen, setUsageOpen] = useState(false);
 
   /** Requeue a failed push once whatever broke has been fixed. */
@@ -135,6 +142,27 @@ export default function ShopTillPage() {
   }, []);
 
   const loadRecentRef = useRef<(() => void) | null>(null);
+
+  const loadPeriod = useCallback(() => {
+    api.get<{ data: PeriodInfo }>('/shop/period')
+      .then(r => setPeriod(r.data))
+      .catch(() => setPeriod(null));
+  }, []);
+
+  /** Bring this week's HireHop job into being without waiting for a sale. */
+  const createPeriod = useCallback(async () => {
+    setCreatingPeriod(true);
+    setError(null);
+    try {
+      await api.post('/shop/period/ensure', {});
+      loadPeriod();
+    } catch (e: any) {
+      // The backend's messages name what to go and fix in HireHop.
+      setError(e?.body?.error || e?.message || "Could not create this week's shop job.");
+    } finally {
+      setCreatingPeriod(false);
+    }
+  }, [loadPeriod]);
 
   const loadRecent = useCallback(() => {
     api.get<{ data: RecentSale[] }>('/shop/sales?limit=8')
@@ -164,7 +192,8 @@ export default function ShopTillPage() {
       .then(r => setCacheAge(r.data.refreshedAt))
       .catch(() => setCacheAge(null));
     loadRecent();
-  }, [loadRecent]);
+    loadPeriod();
+  }, [loadRecent, loadPeriod]);
 
   // Debounced search. Postgres-backed, so this is cheap enough to fire per keystroke.
   useEffect(() => {
@@ -315,6 +344,38 @@ export default function ShopTillPage() {
           </button>
         ))}
       </div>
+
+      {/* This week's HireHop job. Sales can be taken without it — they queue —
+          but nothing reaches HireHop until it exists. */}
+      {period && (
+        <div className="mb-4 flex flex-wrap items-center gap-2 text-xs">
+          {period.period?.hh_job_number ? (
+            <span className="text-gray-500">
+              This week&rsquo;s shop job:{' '}
+              <a
+                href={`https://myhirehop.com/job.php?id=${period.period.hh_job_number}`}
+                target="_blank" rel="noreferrer"
+                className="font-medium text-ooosh-600 hover:underline"
+              >
+                #{period.period.hh_job_number}
+              </a>
+            </span>
+          ) : (
+            <>
+              <span className="text-amber-700">
+                No HireHop job for this week yet — sales will queue until there is one.
+              </span>
+              <button
+                onClick={createPeriod}
+                disabled={creatingPeriod}
+                className="rounded border border-ooosh-300 px-2 py-1 font-medium text-ooosh-700 hover:bg-ooosh-50 disabled:opacity-50"
+              >
+                {creatingPeriod ? 'Creating…' : "Create this week's job"}
+              </button>
+            </>
+          )}
+        </div>
+      )}
 
       {saved && (
         <div className="mb-4 rounded border border-green-300 bg-green-50 px-4 py-3 text-sm text-green-900">

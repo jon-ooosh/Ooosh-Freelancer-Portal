@@ -19,11 +19,12 @@
  * step, which is why the prefix and the role list are exported from here and
  * imported there rather than written down twice.
  *
- * WHAT THIS DELIBERATELY DOES NOT HOLD: licence / DVLA / passport DATES.
- * They already exist on `drivers`, and a second copy already exists on
- * `people` (migration 184). A third would be the bug driver-validity.ts was
- * written to end. File the document here; read the dates where they live.
- * Spec §1.1.
+ * DATES: each record carries its own document date, printed expiry and — since
+ * migration 243 — ONE action date (remind, or flag for deletion) that the
+ * 09:45 scan fires on. Staff records win for anything about staff and read
+ * nothing from `drivers`: that system checks hire CLIENTS (spec §19.1, §21.3).
+ * The action date is pre-filled by the form from the type's interval
+ * (GET /action-defaults) and is the admin's to change. Spec §22.
  */
 
 import { Router, Response } from 'express';
@@ -75,6 +76,12 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
+const ACTION_KINDS = ['remind', 'delete'] as const;
+const ACTION_DELIVERIES = ['notification', 'email', 'both'] as const;
+// Who hears about it. Stored as a user id (or NULL for every admin), but the
+// API speaks in these two words so the client never has to know its own id.
+const ACTION_RECIPIENTS = ['me', 'admins'] as const;
+
 const updateFileSchema = z.object({
   label: z.string().min(1).max(200).optional(),
   doc_type: z.enum(DOC_TYPES).optional(),
@@ -85,6 +92,12 @@ const updateFileSchema = z.object({
   // The expiry printed ON the document. A different fact from document_date,
   // and not derivable from it — see migration 234.
   expires_on: z.union([z.string().regex(DATE_RE), z.literal(''), z.null()]).optional(),
+  // The one dated action (mig 243). '' / null clears the date.
+  action_on: z.union([z.string().regex(DATE_RE), z.literal(''), z.null()]).optional(),
+  action_kind: z.enum(ACTION_KINDS).optional(),
+  action_delivery: z.enum(ACTION_DELIVERIES).optional(),
+  action_recipient: z.enum(ACTION_RECIPIENTS).optional(),
+  action_note: z.string().max(500).nullable().optional(),
 });
 
 interface FileRow {
@@ -98,6 +111,12 @@ interface FileRow {
   notes: string | null;
   document_date: string | null;
   expires_on: string | null;
+  action_on: string | null;
+  action_kind: 'remind' | 'delete';
+  action_delivery: 'notification' | 'email' | 'both';
+  action_user_id: string | null;
+  action_note: string | null;
+  action_chased_at: string | null;
   uploaded_at: string;
   uploaded_by_name: string | null;
 }
@@ -105,13 +124,32 @@ interface FileRow {
 const SELECT_FILES = `
   SELECT f.id, f.label, f.doc_type, f.r2_key, f.filename, f.content_type,
          f.size_bytes, f.notes, f.document_date::text AS document_date,
-         f.expires_on::text AS expires_on, f.uploaded_at,
+         f.expires_on::text AS expires_on,
+         f.action_on::text AS action_on, f.action_kind, f.action_delivery,
+         f.action_user_id, f.action_note, f.action_chased_at,
+         f.uploaded_at,
          NULLIF(TRIM(COALESCE(up.preferred_name, up.first_name, '') || ' ' ||
                      COALESCE(up.last_name, '')), '') AS uploaded_by_name
     FROM staff_record_files f
     LEFT JOIN users u  ON f.uploaded_by = u.id
     LEFT JOIN people up ON u.person_id = up.id
    WHERE f.deleted_at IS NULL`;
+
+// GET /api/staff-records/action-defaults — what the upload form pre-fills
+// the action date from: months per doc_type, and the lead before a printed
+// expiry. The rule itself is the form's (suggestActionDate); these are its
+// inputs, from system_settings, so they change without a deploy.
+router.get('/action-defaults', adminOnly, async (_req: AuthRequest, res: Response) => {
+  try {
+    const { getReviewIntervals } = await import('../services/staff-doc-cycles');
+    const { getDocumentExpiryLeadDays } = await import('../services/staff-settings');
+    const [intervals, expiryLeadDays] = await Promise.all([getReviewIntervals(), getDocumentExpiryLeadDays()]);
+    res.json({ data: { intervals, expiryLeadDays } });
+  } catch (err) {
+    console.error('[staff-records] action defaults error:', err);
+    res.status(500).json({ error: 'Failed to load the defaults' });
+  }
+});
 
 // GET /api/staff-records/:personId/files
 router.get('/:personId/files', adminOnly, async (req: AuthRequest, res: Response) => {
@@ -169,7 +207,19 @@ router.post('/:personId/files', adminOnly, upload.single('file'), async (req: Au
     const notes = String(req.body.notes || '').trim() || null;
     const documentDate = String(req.body.document_date || '').trim() || null;
     const expiresOn = String(req.body.expires_on || '').trim() || null;
-    for (const [name, value] of [['document_date', documentDate], ['expires_on', expiresOn]] as const) {
+    const actionOn = String(req.body.action_on || '').trim() || null;
+    const actionKind = String(req.body.action_kind || 'remind');
+    const actionDelivery = String(req.body.action_delivery || 'both');
+    const actionRecipient = String(req.body.action_recipient || 'me');
+    // Same 500 cap as the PATCH schema.
+    const actionNote = String(req.body.action_note || '').trim().slice(0, 500) || null;
+    if (!(ACTION_KINDS as readonly string[]).includes(actionKind)
+        || !(ACTION_DELIVERIES as readonly string[]).includes(actionDelivery)
+        || !(ACTION_RECIPIENTS as readonly string[]).includes(actionRecipient)) {
+      res.status(400).json({ error: 'Unknown action setting' });
+      return;
+    }
+    for (const [name, value] of [['document_date', documentDate], ['expires_on', expiresOn], ['action_on', actionOn]] as const) {
       if (value && !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
         res.status(400).json({ error: `${name} must be YYYY-MM-DD` });
         return;
@@ -188,11 +238,15 @@ router.post('/:personId/files', adminOnly, upload.single('file'), async (req: Au
     try {
       inserted = await query(
         `INSERT INTO staff_record_files
-           (person_id, label, doc_type, r2_key, filename, content_type, size_bytes, notes, document_date, expires_on, uploaded_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::date, $10::date, $11)
+           (person_id, label, doc_type, r2_key, filename, content_type, size_bytes, notes, document_date, expires_on,
+            action_on, action_kind, action_delivery, action_user_id, action_note, uploaded_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::date, $10::date, $11::date, $12, $13, $14, $15, $16)
          RETURNING id`,
         [personId, label, docType, key, req.file.originalname,
-         req.file.mimetype || null, req.file.size, notes, documentDate, expiresOn, req.user!.id]
+         req.file.mimetype || null, req.file.size, notes, documentDate, expiresOn,
+         actionOn, actionKind, actionDelivery,
+         actionRecipient === 'me' ? req.user!.id : null, actionNote,
+         req.user!.id]
       );
     } catch (dbErr) {
       // Don't leave an orphaned object holding someone's passport in a bucket
@@ -217,7 +271,10 @@ router.patch('/files/:id', adminOnly, validate(updateFileSchema), async (req: Au
       res.status(400).json({ error: 'id must be a UUID' });
       return;
     }
-    const { label, doc_type, notes, document_date, expires_on } = req.body as z.infer<typeof updateFileSchema>;
+    const {
+      label, doc_type, notes, document_date, expires_on,
+      action_on, action_kind, action_delivery, action_recipient, action_note,
+    } = req.body as z.infer<typeof updateFileSchema>;
 
     const sets: string[] = [];
     const params: unknown[] = [];
@@ -229,11 +286,43 @@ router.patch('/files/:id', adminOnly, validate(updateFileSchema), async (req: Au
       sets.push(`document_date = $${params.length + 1}::date`);
       params.push(document_date || null);
     }
-    // A changed expiry is a fresh document, so it earns a fresh nudge.
     if (expires_on !== undefined) {
       sets.push(`expires_on = $${params.length + 1}::date`);
       params.push(expires_on || null);
-      sets.push('expiry_chased_at = NULL');
+    }
+    // The action. A CHANGED date or kind is a fresh promise, so it earns a
+    // fresh nudge — the same rule as re-dating a to-do. Only when it actually
+    // changed: the edit form sends every field, and re-saving an untouched
+    // record must not re-fire a reminder that has already gone out. In an
+    // UPDATE the right-hand side reads the OLD row, so IS DISTINCT FROM
+    // compares before against after.
+    const rearm: string[] = [];
+    if (action_on !== undefined) {
+      const n = params.length + 1;
+      sets.push(`action_on = $${n}::date`);
+      rearm.push(`action_on IS DISTINCT FROM $${n}::date`);
+      params.push(action_on || null);
+    }
+    if (action_kind !== undefined) {
+      const n = params.length + 1;
+      sets.push(`action_kind = $${n}::text`);
+      rearm.push(`action_kind IS DISTINCT FROM $${n}::text`);
+      params.push(action_kind);
+    }
+    if (rearm.length) {
+      sets.push(`action_chased_at = CASE WHEN ${rearm.join(' OR ')} THEN NULL ELSE action_chased_at END`);
+    }
+    if (action_delivery !== undefined) {
+      sets.push(`action_delivery = $${params.length + 1}`);
+      params.push(action_delivery);
+    }
+    if (action_recipient !== undefined) {
+      sets.push(`action_user_id = $${params.length + 1}`);
+      params.push(action_recipient === 'me' ? req.user!.id : null);
+    }
+    if (action_note !== undefined) {
+      sets.push(`action_note = $${params.length + 1}`);
+      params.push(action_note?.trim() || null);
     }
     if (!sets.length) {
       res.status(400).json({ error: 'No fields to update' });

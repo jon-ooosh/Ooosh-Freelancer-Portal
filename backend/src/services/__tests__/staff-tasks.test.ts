@@ -140,6 +140,33 @@ describe('creating a task', () => {
     expect(params[5]).toBeNull();
   });
 
+  it('links a review action to its review', async () => {
+    const REVIEW = '99999999-8888-7777-6666-555555555555';
+    rows([{ id: REVIEW }], [{ id: TASK }], [{ id: TASK }]);
+    await createTask(
+      { title: 'Book the refresher', personId: THEIR_PERSON, sourceType: 'staff_review', sourceId: REVIEW },
+      ME, 'admin'
+    );
+    // calls[0] is the review lookup; calls[1] the INSERT.
+    const params = mockQuery.mock.calls[1]![1] as unknown[];
+    expect(params[5]).toBe('staff_review');
+    expect(params[6]).toBe(REVIEW);
+  });
+
+  it('refuses a review action from a non-admin', async () => {
+    rows([{ person_id: MY_PERSON }]);
+    await expect(createTask(
+      { title: 'x', sourceType: 'staff_review', sourceId: TASK }, ME, 'staff'
+    )).rejects.toThrow(/Only an admin can add a review action/);
+  });
+
+  it('refuses a review action against a review that does not exist', async () => {
+    rows([]);
+    await expect(createTask(
+      { title: 'x', personId: THEIR_PERSON, sourceType: 'staff_review', sourceId: TASK }, ME, 'admin'
+    )).rejects.toThrow(/Review not found/);
+  });
+
   it('rejects an empty title', async () => {
     await expect(createTask({ title: '   ' }, ME, 'staff')).rejects.toThrow(/needs a title/);
   });
