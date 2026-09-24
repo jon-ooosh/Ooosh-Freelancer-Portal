@@ -30,7 +30,6 @@ import moneyRouter from './money';
 import ve103bRouter from './ve103b';
 import backlineRouter from './backline';
 import cancellationsRouter from './cancellations';
-import issuesRouter from './issues';
 import problemsRouter from './problems';
 import warehouseRouter from './warehouse';
 import shopRouter from './shop';
@@ -91,8 +90,7 @@ router.use('/backline-matcher', backlineMatcherRouter);  // AI equipment matcher
 router.use('/wise', wiseRouter);  // Wise supplier payments — scaffolding (read-only health check; spec Part 2)
 router.use('/cancellations', cancellationsRouter);
 router.use('/fill-gap', fillGapRouter);  // Replacement candidates for cancelled / lost jobs (Phase 1 — SQL only)
-router.use('/issues', issuesRouter);
-router.use('/problems', problemsRouter);  // Job-level problems register (damaged/missing/broken/dispute) — distinct from /issues platform tracker
+router.use('/problems', problemsRouter);  // Job-level problems register (damaged/missing/broken/dispute). The old /issues platform tracker was retired Sep 2026; its tables remain.
 router.use('/costs', costsRouter);  // Cost Capture & Recharge — staff-facing receipt/cost workflow
 router.use('/storage', storageRouter);  // Client Storage — rooms/tenancies/access/waiting list (+ public T&Cs accept by token)
 router.use('/holding', holdingRouter);  // Holding — Held for Clients / Lost Property / temp storage (held_items engine)

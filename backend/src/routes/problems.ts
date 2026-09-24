@@ -4,7 +4,7 @@
  * Cross-module register for things that need a human to chase on a job —
  * vehicle damage, missing items, breakdowns, client disputes, mid-tour
  * scratches that need handling at check-in. NOT to be confused with
- * routes/issues.ts which is the OP platform bug tracker.
+ * the old platform bug tracker (routes/issues.ts, retired Sep 2026).
  *
  * Storage: dedicated job_issues table (migration 075). Phase 1 used
  * job_requirements with requirement_type='issue' — that data was migrated

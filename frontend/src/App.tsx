@@ -23,7 +23,6 @@ import BacklineMatcherPage from './pages/BacklineMatcherPage';
 import CarnetsPage from './pages/CarnetsPage';
 import CarnetDetailPage from './pages/CarnetDetailPage';
 import RehearsalsPage from './pages/RehearsalsPage';
-import IssuesPage from './pages/IssuesPage';
 import ProblemsPage from './pages/ProblemsPage';
 import IssueDetailPage from './pages/IssueDetailPage';
 import ExcessLedgerPage from './pages/ExcessLedgerPage';
@@ -229,8 +228,12 @@ export default function App() {
                 {/* Studio Sitters re-homed under the Rehearsals hub — keep old links working */}
                 <Route path="/operations/studio-sitters" element={<Navigate to="/operations/rehearsals?tab=sitters" replace />} />
                 <Route path="/operations/fill-gap/:jobId" element={<FillGapPage />} />
-                <Route path="/operations/issues" element={<IssuesPage />} />
-                <Route path="/operations/issues/:id" element={<IssuesPage />} />
+                {/* The platform bug tracker was retired Sep 2026 (jon: no longer
+                    used). Old emailed links land on the dashboard rather than a
+                    blank page. Its tables — platform_issues / _comments — are
+                    kept, untouched; see migration 057. */}
+                <Route path="/operations/issues" element={<Navigate to="/" replace />} />
+                <Route path="/operations/issues/:id" element={<Navigate to="/" replace />} />
                 <Route path="/operations/problems" element={<ProblemsPage />} />
                 <Route path="/storage" element={<StoragePage />} />
                 <Route path="/holding" element={<HoldingPage />} />
