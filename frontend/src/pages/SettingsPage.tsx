@@ -5,6 +5,7 @@ import { useAuthStore } from '../hooks/useAuthStore';
 import { Navigate, Link } from 'react-router-dom';
 import XeroBankAccountsSection from '../components/XeroBankAccountsSection';
 import { compressImage } from '../modules/vehicles/lib/image-utils';
+import { DOC_TYPES as STAFF_DOC_TYPES } from '../components/StaffRecordFiles';
 
 interface TeamUser {
   id: string;
@@ -2011,6 +2012,117 @@ function FreelancerLinksSection() {
   );
 }
 
+/**
+ * Editors for the staff settings stored as JSON. Each takes the raw string
+ * and hands back a new one, so the section's save path does not change.
+ *
+ * Both fall back to the raw text box when the stored value doesn't parse:
+ * silently replacing somebody's hand-edited setting with an empty editor
+ * would lose it on the next save. The backend readers already tolerate junk
+ * (getReviewQuestions / getReviewIntervals fall back to built-in defaults).
+ */
+type JsonEditor = (p: { value: string; onChange: (next: string) => void }) => JSX.Element;
+
+function RawJsonBox({ value, onChange, why }: { value: string; onChange: (v: string) => void; why: string }) {
+  return (
+    <div>
+      <p className="text-xs text-amber-700 mb-1">{why} Showing the raw value — fix it here or clear it to start again.</p>
+      <textarea value={value} onChange={e => onChange(e.target.value)} rows={4}
+        className="w-full px-2 py-1.5 rounded border border-gray-300 text-sm font-mono" />
+    </div>
+  );
+}
+
+/** staff.review_questions — a JSON array of strings, asked of both sides. */
+const ReviewQuestionsEditor: JsonEditor = ({ value, onChange }) => {
+  let questions: string[] | null = null;
+  try {
+    const parsed = value.trim() ? JSON.parse(value) : [];
+    if (Array.isArray(parsed) && parsed.every(q => typeof q === 'string')) questions = parsed;
+  } catch { /* falls through to the raw box */ }
+  if (!questions) {
+    return <RawJsonBox value={value} onChange={onChange} why="This isn’t a list of questions." />;
+  }
+  const list = questions;
+  const write = (next: string[]) => onChange(JSON.stringify(next));
+  const move = (i: number, by: number) => {
+    const next = [...list];
+    const [q] = next.splice(i, 1);
+    next.splice(i + by, 0, q);
+    write(next);
+  };
+  return (
+    <div className="space-y-2">
+      {list.map((q, i) => (
+        <div key={i} className="flex items-start gap-2">
+          <span className="text-xs text-gray-400 w-5 pt-2 text-right">{i + 1}.</span>
+          <textarea value={q} rows={2}
+            onChange={e => write(list.map((x, j) => (j === i ? e.target.value : x)))}
+            className="flex-1 px-2 py-1.5 rounded border border-gray-300 text-sm" />
+          <div className="flex flex-col gap-0.5 text-xs">
+            <button type="button" onClick={() => move(i, -1)} disabled={i === 0}
+              className="px-1.5 text-gray-500 hover:text-gray-800 disabled:opacity-30" aria-label="Move up">▲</button>
+            <button type="button" onClick={() => move(i, 1)} disabled={i === list.length - 1}
+              className="px-1.5 text-gray-500 hover:text-gray-800 disabled:opacity-30" aria-label="Move down">▼</button>
+          </div>
+          <button type="button" onClick={() => write(list.filter((_, j) => j !== i))}
+            className="text-xs text-red-600 hover:text-red-800 pt-2">Remove</button>
+        </div>
+      ))}
+      <button type="button" onClick={() => write([...list, ''])}
+        className="text-sm text-ooosh-600 hover:underline">+ Add a question</button>
+      <p className="text-xs text-gray-400">
+        Both sides answer the same questions before a review. Rewording one only affects future
+        reviews — past answers keep the wording they were asked with. Empty questions are ignored.
+      </p>
+    </div>
+  );
+};
+
+/** staff.doc_review_intervals — months per staff document type; 0 = never. */
+const DocIntervalsEditor: JsonEditor = ({ value, onChange }) => {
+  let map: Record<string, number> | null = null;
+  try {
+    const parsed = value.trim() ? JSON.parse(value) : {};
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) map = parsed;
+  } catch { /* falls through to the raw box */ }
+  if (!map) {
+    return <RawJsonBox value={value} onChange={onChange} why="This isn’t a table of months." />;
+  }
+  const current = map;
+  const known = STAFF_DOC_TYPES.map(t => t.value);
+  // Keep anything the setting mentions that the form doesn't know, so a
+  // hand-added type isn't dropped on save.
+  const rows = [...STAFF_DOC_TYPES, ...Object.keys(current).filter(k => !known.includes(k)).map(k => ({ value: k, label: k }))];
+  return (
+    <div>
+      <div className="grid grid-cols-[minmax(0,1fr)_6rem] sm:grid-cols-[16rem_6rem] gap-x-3 gap-y-1.5 items-center">
+        {rows.map(t => (
+          <div key={t.value} className="contents">
+            <label htmlFor={`interval-${t.value}`} className="text-sm text-gray-700">{t.label}</label>
+            <input id={`interval-${t.value}`} type="number" min={0} max={600} inputMode="numeric"
+              value={String(current[t.value] ?? 0)}
+              onChange={e => {
+                const n = Math.max(0, Math.min(600, Math.round(Number(e.target.value) || 0)));
+                onChange(JSON.stringify({ ...current, [t.value]: n }));
+              }}
+              className="px-2 py-1 rounded border border-gray-300 text-sm" />
+          </div>
+        ))}
+      </div>
+      <p className="text-xs text-gray-400 mt-2">
+        Months. Used to suggest the “then, on” date when a record is filed — 0 means don’t suggest
+        one. It never changes a date already set on a record.
+      </p>
+    </div>
+  );
+};
+
+const STRUCTURED_EDITORS: Record<string, JsonEditor> = {
+  'staff.review_questions': ReviewQuestionsEditor,
+  'staff.doc_review_intervals': DocIntervalsEditor,
+};
+
 function StaffTimeSettingsSection() {
   const [settings, setSettings] = useState<SystemSetting[]>([]);
   const [vals, setVals] = useState<Record<string, string>>({});
@@ -2076,7 +2188,23 @@ function StaffTimeSettingsSection() {
       {success && <div className="mb-3 p-2 rounded bg-emerald-50 border border-emerald-200 text-sm text-emerald-800">{success}</div>}
 
       <div className="space-y-3">
-        {thresholdRows.map(row => (
+        {thresholdRows.map(row => STRUCTURED_EDITORS[row.key] ? (
+          // A JSON setting gets a real editor rather than a one-line box.
+          // It still reads and writes the same string, so saving is unchanged.
+          <div key={row.key} className="pt-2">
+            <p className="text-sm text-gray-700">
+              {row.label ?? row.key}
+              <span className="block text-xs text-gray-400 font-mono">{row.key}</span>
+            </p>
+            <div className="mt-2">
+              {(() => {
+                const Editor = STRUCTURED_EDITORS[row.key];
+                return <Editor value={vals[row.key] ?? ''}
+                  onChange={next => setVals(v => ({ ...v, [row.key]: next }))} />;
+              })()}
+            </div>
+          </div>
+        ) : (
           <div key={row.key} className="grid sm:grid-cols-[minmax(0,1fr)_10rem] gap-2 sm:items-center">
             <label htmlFor={row.key} className="text-sm text-gray-700">
               {row.label ?? row.key}

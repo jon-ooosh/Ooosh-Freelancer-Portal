@@ -116,7 +116,7 @@ export function suggestActionDate(
 
 // Mirrors the CHECK constraint in migration 231. The label is what a human
 // reads; the type is what spec §4's review cycles will read.
-const DOC_TYPES: { value: string; label: string }[] = [
+export const DOC_TYPES: { value: string; label: string }[] = [
   { value: 'contract', label: 'Employment contract' },
   { value: 'right_to_work', label: 'Right to work' },
   { value: 'passport', label: 'Passport' },
