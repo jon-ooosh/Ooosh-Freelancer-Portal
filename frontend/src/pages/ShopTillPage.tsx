@@ -17,6 +17,7 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
@@ -24,8 +25,8 @@ import { jobDisplayOrgName } from '../lib/jobOrgName';
 import ShopWeekPanel from '../components/shop/ShopWeekPanel';
 import { TENDERS } from '../lib/shopTenders';
 
-type BottomTab = 'recent' | 'attention' | 'week' | 'used' | 'reorder';
-const BOTTOM_TABS: BottomTab[] = ['recent', 'attention', 'week', 'used', 'reorder'];
+type BottomTab = 'recent' | 'attention' | 'review' | 'week' | 'used' | 'reorder';
+const BOTTOM_TABS: BottomTab[] = ['recent', 'attention', 'review', 'week', 'used', 'reorder'];
 const TAB_KEY = 'shopTill.tab';
 
 interface StockItem {
@@ -83,6 +84,10 @@ interface RecentSale {
   reverses_lines?: { name: string; qty: number | string }[] | null;
   /** Cash or card: refunded there and then, so pressing Refund confirms it. */
   refund_at_counter: boolean;
+  /** Taken on a studio sitter's phone — staff tick these off. */
+  recorded_in?: string;
+  needs_review?: boolean;
+  reviewed_at?: string | null;
   /** The job a routed sale went on (a reversal shows its original's). */
   sold_to_hh_job_number: number | null;
   sold_to_job_name: string | null;
@@ -184,7 +189,12 @@ export default function ShopTillPage() {
   const [period, setPeriod] = useState<PeriodInfo | null>(null);
   const [creatingPeriod, setCreatingPeriod] = useState(false);
   // The bottom tabs. null = folded away, which is how most visits leave it.
+  // `?tab=review` (the lock-up report and the reminder email link here) wins
+  // over the remembered tab, so a link always lands on what it's about.
+  const [searchParams] = useSearchParams();
   const [tab, setTab] = useState<BottomTab | null>(() => {
+    const linked = searchParams.get('tab');
+    if (BOTTOM_TABS.includes(linked as BottomTab)) return linked as BottomTab;
     try {
       const saved = localStorage.getItem(TAB_KEY);
       return BOTTOM_TABS.includes(saved as BottomTab) ? (saved as BottomTab) : null;
@@ -199,6 +209,8 @@ export default function ShopTillPage() {
     } catch { /* a convenience, not state — ignore */ }
   };
   const [attention, setAttention] = useState<RecentSale[]>([]);
+  // Sitter sales staff haven't ticked off yet (spec §5).
+  const [toReview, setToReview] = useState<RecentSale[]>([]);
   const [reorder, setReorder] = useState<StockItem[] | null>(null);
   // The refund form open on one Recent Sales row at a time.
   const [refundFor, setRefundFor] = useState<string | null>(null);
@@ -327,6 +339,20 @@ export default function ShopTillPage() {
     api.get<{ data: RecentSale[] }>('/shop/sales?attention=1&limit=50')
       .then(r => setAttention(r.data))
       .catch(() => setAttention([]));
+    api.get<{ data: RecentSale[] }>('/shop/sales?review=1&limit=200')
+      .then(r => setToReview(r.data))
+      .catch(() => setToReview([]));
+  }, []);
+
+  /** Tick off sitter sales — one, or the whole list. */
+  const markReviewed = useCallback(async (ids: string[]) => {
+    setError(null);
+    try {
+      await api.post('/shop/sales/review', { ids });
+    } catch (e: any) {
+      setError(e?.body?.error || e?.message || 'Could not mark those as reviewed.');
+    }
+    loadRecentRef.current?.();
   }, []);
 
   // retrySale is defined above loadRecent so the list can call it; this closes
@@ -576,6 +602,15 @@ export default function ShopTillPage() {
                   className="text-xs font-medium text-ooosh-600 hover:underline"
                 >
                   Retry
+                </button>
+              )}
+              {r.needs_review && !r.reviewed_at && r.status !== 'cancelled' && (
+                <button
+                  onClick={() => markReviewed([r.id])}
+                  className="text-xs font-medium text-green-700 hover:underline"
+                  title="Taken on the sitter till — tick it off once you've checked it"
+                >
+                  Reviewed ✓
                 </button>
               )}
               {/* Refund = money out of the door, so manager tier (the API
@@ -1032,6 +1067,7 @@ export default function ShopTillPage() {
           {([
             ['recent', 'Recent sales'],
             ['attention', attention.length ? `Needs attention (${attention.length})` : 'Needs attention'],
+            ['review', toReview.length ? `Sitter sales to review (${toReview.length})` : 'Sitter sales'],
             ['week', 'This week'],
             ['used', 'What we’ve used'],
             ['reorder', 'Reorder'],
@@ -1044,6 +1080,8 @@ export default function ShopTillPage() {
                   ? 'bg-gray-700 text-white'
                   : key === 'attention' && attention.length
                     ? 'bg-red-50 text-red-700 hover:bg-red-100'
+                    : key === 'review' && toReview.length
+                    ? 'bg-amber-50 text-amber-800 hover:bg-amber-100'
                     : 'text-gray-500 hover:bg-gray-100 hover:text-gray-800'
               }`}
             >
@@ -1075,6 +1113,30 @@ export default function ShopTillPage() {
               <p className="text-sm text-green-700">All clear.</p>
             ) : (
               <ul className="rounded border border-gray-200 divide-y text-sm">{attention.map(renderSaleRow)}</ul>
+            )}
+          </div>
+        )}
+
+        {tab === 'review' && (
+          <div className="mt-3">
+            <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+              <p className="text-xs text-gray-500">
+                Sales a studio sitter took on their phone. They&rsquo;ve already gone to HireHop like any
+                other sale — this is the morning check that each one makes sense.
+              </p>
+              {toReview.length > 1 && (
+                <button
+                  onClick={() => markReviewed(toReview.map(r => r.id))}
+                  className="rounded border border-gray-300 px-2.5 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                >
+                  Mark all {toReview.length} reviewed
+                </button>
+              )}
+            </div>
+            {toReview.length === 0 ? (
+              <p className="text-sm text-green-700">Nothing waiting.</p>
+            ) : (
+              <ul className="rounded border border-gray-200 divide-y text-sm">{toReview.map(renderSaleRow)}</ul>
             )}
           </div>
         )}

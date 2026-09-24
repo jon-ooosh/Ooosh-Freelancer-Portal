@@ -145,7 +145,7 @@ prefix is the ONLY one `GET /api/files/download` role-gates.** Every other prefi
 serves is readable by any authenticated caller, freelancers included. Never file
 anything private under `files/`.
 
-**BUILT (steps 1–9), Sep 2026:** `docs/SHOP-SALES-SPEC.md` — the **Shop Till**
+**BUILT (steps 1–10 + the sitter till), Sep 2026:** `docs/SHOP-SALES-SPEC.md` — the **Shop Till**
 (`/money/shop`). Ad-hoc shop sales, internal stock consumption and sale-stock
 lookup, with HireHop remaining the single stock database. **§19 is the current
 state, the live settings, and what to do next — read it before touching this.**
@@ -225,6 +225,7 @@ existing definition:
 | What is this shop sale called (`OT-SHOP-00100`)? | `services/shop-sale-ref.ts` `saleRef()` |
 | Which jobs can a till sale go on / who's in today? | `services/shop-routing.ts` |
 | Does the week's shop job match the till? What did the week take? | `services/shop-reconcile.ts` |
+| The till's payment methods (backend / sitter till) | `services/shop-tenders.ts` — mirrors `frontend/src/lib/shopTenders.ts` |
 | Refunding a shop sale / money back off a deposit | `services/shop-sales.ts` `reverseShopSale()` → `hh-deposit.ts` `refundDepositOnHH()` |
 
 Frontend display helpers with the same status: `lib/roles.ts`, `lib/driverStatus.ts`,

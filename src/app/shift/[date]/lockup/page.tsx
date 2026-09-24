@@ -37,6 +37,13 @@ interface LockupContext {
     submitted_at?: string
   } | null
   has_shift: boolean
+  /** What the shop till took tonight (null = no shift). */
+  shop: {
+    sales: number
+    taken: number
+    byTender: { tender: string; label: string; amount: number }[]
+    onTheirBill: number
+  } | null
   error?: string
 }
 
@@ -282,6 +289,32 @@ export default function LockupPage() {
             <div className="text-sm text-gray-500">{formatLongDate(ctx.date)}</div>
             {ctx.submitted && <div className="bg-green-50 border border-green-200 text-green-800 px-4 py-3 rounded-lg text-xs">Already submitted. You can update your answers and re-submit if something changed.</div>}
             {ctx.template.intro && <p className="text-sm text-gray-600 leading-relaxed">{ctx.template.intro}</p>}
+
+            {/* Tonight's till takings — the till records what WAS paid, so the
+                checklist only asks about what wasn't ("any money outstanding?"). */}
+            {ctx.shop && (
+              <section className="bg-white rounded-xl border border-gray-100 p-4 shadow-sm">
+                <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Shop till tonight</p>
+                {ctx.shop.sales === 0 ? (
+                  <p className="mt-1 text-sm text-gray-600">
+                    Nothing sold through the till tonight.{' '}
+                    <Link href={`/shift/${date}/till`} className="text-ooosh-600 underline">Open the till</Link> if you sold something.
+                  </p>
+                ) : (
+                  <>
+                    <p className="mt-1 text-base font-semibold text-gray-900">
+                      {ctx.shop.sales} sale{ctx.shop.sales === 1 ? '' : 's'} · £{ctx.shop.taken.toFixed(2)} taken
+                    </p>
+                    <p className="mt-0.5 text-xs text-gray-500">
+                      {ctx.shop.byTender.map((t) => `${t.label} £${t.amount.toFixed(2)}`).join(' · ')}
+                      {ctx.shop.onTheirBill > 0
+                        ? `${ctx.shop.byTender.length ? ' · ' : ''}on bands' bills £${ctx.shop.onTheirBill.toFixed(2)}`
+                        : ''}
+                    </p>
+                  </>
+                )}
+              </section>
+            )}
 
             {/* Continuing tomorrow? (derived, overridable) */}
             <section className="bg-white rounded-xl border border-gray-100 p-4 shadow-sm">

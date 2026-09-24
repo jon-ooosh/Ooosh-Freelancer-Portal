@@ -19,7 +19,7 @@ import {
 } from '../services/shop-stock';
 import {
   createShopSale, listShopSales, cancelShopSale, retryShopSale,
-  reverseShopSale, settleShopRefund,
+  reverseShopSale, settleShopRefund, reviewShopSales,
   maxDiscountPctForRole, priceLines, totalsFor,
   getConsumptionSummary, getConsumptionLog,
 } from '../services/shop-sales';
@@ -222,7 +222,8 @@ router.post('/quote', async (req: AuthRequest, res: Response) => {
 
 router.post('/sales', async (req: AuthRequest, res: Response) => {
   try {
-    const result = await createShopSale(req.body, {
+    // A shift belongs only to sales taken on the sitter till (portal routes).
+    const result = await createShopSale({ ...req.body, shiftId: null }, {
       id: req.user!.id,
       role: req.user!.role,
     });
@@ -239,7 +240,8 @@ router.get('/sales', async (req: AuthRequest, res: Response) => {
     const limit = req.query.limit ? Number(req.query.limit) : undefined;
     const since = req.query.since ? String(req.query.since) : undefined;
     const attention = req.query.attention === '1' || req.query.attention === 'true';
-    res.json({ data: await listShopSales({ limit, since, attention }) });
+    const review = req.query.review === '1' || req.query.review === 'true';
+    res.json({ data: await listShopSales({ limit, since, attention, review }) });
   } catch (err) {
     console.error('[shop] sales list failed:', err);
     res.status(500).json({ error: 'Could not load shop sales.' });
@@ -292,6 +294,20 @@ router.post('/sales/:id/reverse', authorize(...MANAGER_ROLES), async (req: AuthR
     // Written to be read by the person at the counter ("already refunded",
     // "the week has been invoiced"), so pass it through.
     res.status(400).json({ error: err instanceof Error ? err.message : 'Could not refund that sale.' });
+  }
+});
+
+/**
+ * Tick off sitter sales (§5) — one, or a batch ("all of last night's look
+ * fine"). Any staff: it's a check, not a money decision.
+ */
+router.post('/sales/review', async (req: AuthRequest, res: Response) => {
+  try {
+    const ids: string[] = Array.isArray(req.body?.ids) ? req.body.ids.map(String).slice(0, 200) : [];
+    res.json({ data: { reviewed: await reviewShopSales(ids, { id: req.user!.id }) } });
+  } catch (err) {
+    console.error('[shop] review failed:', err);
+    res.status(500).json({ error: 'Could not mark those as reviewed.' });
   }
 });
 

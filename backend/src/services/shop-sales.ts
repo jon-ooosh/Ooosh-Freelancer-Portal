@@ -66,6 +66,19 @@ export interface CreateShopSaleInput {
   soldToPersonId?: string | null;
   notes?: string | null;
   recordedIn?: 'staff_till' | 'sitter_till';
+  /** The sitter's evening (studio_sitter_shifts) — sitter till only. */
+  shiftId?: string | null;
+}
+
+/**
+ * Who is recording a transaction. Staff are OP `users` (`id`); studio sitters
+ * log in to the portal as `people` and have no user row (`personId`). One of
+ * the two is always set — migration 251's CHECK enforces it.
+ */
+export interface ShopActor {
+  id: string | null;
+  personId?: string | null;
+  role: string;
 }
 
 export interface ShopSaleTotals {
@@ -256,8 +269,9 @@ export interface CreateResult {
  */
 export async function createShopSale(
   input: CreateShopSaleInput,
-  user: { id: string; role: string },
+  user: ShopActor,
 ): Promise<CreateResult> {
+  if (!user.id && !user.personId) throw new Error('Who is recording this sale?');
   const priced = await priceLines(input.lines);
   const totals = totalsFor(priced);
 
@@ -296,9 +310,11 @@ export async function createShopSale(
       `INSERT INTO shop_sales (
          kind, status, tender, net_amount, vat_amount, gross_amount, discount_amount,
          recorded_by, recorded_in, sold_to_person_id, sold_to_job_id,
-         needs_review, notes, push_after, sale_number
+         needs_review, notes, push_after, sale_number,
+         recorded_by_person_id, shift_id
        ) VALUES ($1,'queued',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, NOW() + ($13 || ' seconds')::interval,
-                 CASE WHEN $1::text = 'sale' THEN nextval('shop_sale_number_seq') END)
+                 CASE WHEN $1::text = 'sale' THEN nextval('shop_sale_number_seq') END,
+                 $14, $15)
        RETURNING id, push_after`,
       [
         input.kind,
@@ -314,6 +330,8 @@ export async function createShopSale(
         (input.recordedIn || 'staff_till') === 'sitter_till',
         input.notes || null,
         String(holdSeconds),
+        user.personId || null,
+        input.shiftId || null,
       ],
     );
     const saleId = saleRes.rows[0].id as string;
@@ -377,7 +395,15 @@ export async function retryShopSale(id: string): Promise<{ requeued: boolean; me
  * failed or are stuck in the queue past their hold, and refunds whose money
  * hasn't gone back yet. Same row shape, so the till renders it the same way.
  */
-export async function listShopSales(opts: { limit?: number; since?: string; attention?: boolean } = {}) {
+export async function listShopSales(opts: {
+  limit?: number;
+  since?: string;
+  attention?: boolean;
+  /** Sitter sales not yet ticked off by staff (§5). */
+  review?: boolean;
+  /** One sitter's evening — the portal till's own list. */
+  shiftId?: string;
+} = {}) {
   const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
   const r = await query(
     // `users` carries no name — it points at `people`. DISPLAY_NAME_SQL is THE
@@ -414,7 +440,8 @@ export async function listShopSales(opts: { limit?: number; since?: string; atte
             ) AS lines
        FROM shop_sales s
        LEFT JOIN users u ON u.id = s.recorded_by
-       LEFT JOIN people p ON p.id = u.person_id
+       -- Staff are named through their user; sitters ARE a person (migration 251).
+       LEFT JOIN people p ON p.id = COALESCE(s.recorded_by_person_id, u.person_id)
        LEFT JOIN shop_sale_lines l ON l.sale_id = s.id
        LEFT JOIN shop_sales o ON o.id = s.reverses_sale_id
        -- A reversal names the job its original sale went on.
@@ -424,11 +451,13 @@ export async function listShopSales(opts: { limit?: number; since?: string; atte
         AND (NOT $3::boolean OR s.status = 'failed'
              OR (s.status = 'queued' AND s.push_after < NOW() - interval '30 minutes')
              OR (s.kind = 'reversal' AND s.status <> 'cancelled' AND s.refund_settled_at IS NULL))
+        AND (NOT $4::boolean OR (s.needs_review AND s.reviewed_at IS NULL AND s.status <> 'cancelled'))
+        AND ($5::uuid IS NULL OR s.shift_id = $5)
       GROUP BY s.id, p.preferred_name, p.first_name, p.last_name, o.sale_number,
                sj.id, sj.hh_job_number, sj.job_name, sj.company_name, sj.client_name, sjo.name
       ORDER BY s.created_at DESC
       LIMIT $2`,
-    [opts.since || null, limit, !!opts.attention],
+    [opts.since || null, limit, !!opts.attention, !!opts.review, opts.shiftId || null],
   );
   return r.rows.map((row: any) => ({
     ...row,
@@ -491,7 +520,8 @@ export async function getConsumptionLog(days = 30, limit = 100) {
        FROM shop_sales s
        JOIN shop_sale_lines l ON l.sale_id = s.id
        LEFT JOIN users u ON u.id = s.recorded_by
-       LEFT JOIN people p ON p.id = u.person_id
+       -- Staff are named through their user; sitters ARE a person (migration 251).
+       LEFT JOIN people p ON p.id = COALESCE(s.recorded_by_person_id, u.person_id)
       WHERE s.kind = 'consumption'
         AND s.status <> 'cancelled'
         AND s.created_at >= NOW() - ($1 || ' days')::interval
@@ -519,12 +549,15 @@ export async function getConsumptionLog(days = 30, limit = 100) {
  */
 export async function cancelShopSale(
   id: string,
-  user: { id: string },
+  user: { id: string | null; personId?: string | null },
   reason: string | null,
+  /** Sitter till: a sitter may only cancel their own sale on their own night. */
+  restrictTo?: { personId: string; shiftId: string },
 ): Promise<{ cancelled: boolean; message?: string }> {
   return withShopDrainLock(async () => {
     const r = await query(
       `SELECT s.status, s.kind, s.hh_deposit_id, s.hh_refund_id,
+              s.recorded_by_person_id, s.shift_id,
               EXISTS (SELECT 1 FROM shop_sale_lines l
                        WHERE l.sale_id = s.id AND (l.hh_line_id IS NOT NULL OR l.hh_tally_id IS NOT NULL)
                      ) AS has_hh_lines,
@@ -537,6 +570,9 @@ export async function cancelShopSale(
     );
     const row = r.rows[0];
     if (!row) return { cancelled: false, message: 'Sale not found.' };
+    if (restrictTo && (row.recorded_by_person_id !== restrictTo.personId || row.shift_id !== restrictTo.shiftId)) {
+      return { cancelled: false, message: 'You can only cancel your own sales from tonight.' };
+    }
 
     const status = row.status as string;
     if (status === 'cancelled') return { cancelled: true };
@@ -565,12 +601,30 @@ export async function cancelShopSale(
 
     await query(
       `UPDATE shop_sales
-          SET status = 'cancelled', cancelled_at = NOW(), cancelled_by = $2, cancel_reason = $3
+          SET status = 'cancelled', cancelled_at = NOW(), cancelled_by = $2, cancel_reason = $3,
+              cancelled_by_person_id = $4
         WHERE id = $1`,
-      [id, user.id, reason || null],
+      [id, user.id || null, reason || null, user.personId || null],
     );
     return { cancelled: true };
   });
+}
+
+/**
+ * Staff tick off sitter sales (§5): "yes, that happened and it's right".
+ * Warnings not gates — an unreviewed sale has still pushed normally; this is
+ * the morning check that nothing odd went through overnight.
+ */
+export async function reviewShopSales(ids: string[], user: { id: string }): Promise<number> {
+  const clean = ids.filter((x) => /^[0-9a-f-]{36}$/i.test(x));
+  if (!clean.length) return 0;
+  const r = await query(
+    `UPDATE shop_sales SET reviewed_at = NOW(), reviewed_by = $2
+      WHERE id = ANY($1::uuid[]) AND needs_review AND reviewed_at IS NULL
+      RETURNING id`,
+    [clean, user.id],
+  );
+  return r.rows.length;
 }
 
 /**
