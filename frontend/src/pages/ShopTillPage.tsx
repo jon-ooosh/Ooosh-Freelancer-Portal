@@ -20,6 +20,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
+import { jobDisplayOrgName } from '../lib/jobOrgName';
 
 interface StockItem {
   hhStockId: number;
@@ -70,7 +71,29 @@ interface RecentSale {
   refund_settled_at: string | null;
   /** Cash or card: refunded there and then, so pressing Refund confirms it. */
   refund_at_counter: boolean;
+  /** The job a routed sale went on (a reversal shows its original's). */
+  sold_to_hh_job_number: number | null;
+  sold_to_job_name: string | null;
+  sold_to_lead_org_name: string | null;
+  sold_to_client_org_name: string | null;
+  sold_to_company_name: string | null;
+  sold_to_client_name: string | null;
 }
+
+/** A job a sale can go on — from GET /shop/jobs/today or /shop/jobs/search. */
+interface SellableJob {
+  id: string;
+  hhJobNumber: number;
+  jobName: string | null;
+  lead_org_name: string | null;
+  client_org_name: string | null;
+  company_name: string | null;
+  client_name: string | null;
+  rooms?: string[];
+}
+
+/** "Whose job is this" — through THE definition, falling back to the job name. */
+const jobLabel = (j: SellableJob) => jobDisplayOrgName(j) || j.jobName || `Job ${j.hhJobNumber}`;
 
 interface PeriodInfo {
   periodStart: string;
@@ -103,7 +126,7 @@ const TENDERS: { key: string; label: string; needsJob?: boolean }[] = [
   { key: 'stripe_gbp', label: 'Stripe' },
   { key: 'paypal', label: 'PayPal' },
   { key: 'wise_bacs', label: 'Bank transfer' },
-  { key: 'invoice_later', label: 'Invoice later', needsJob: true },
+  { key: 'invoice_later', label: 'Put it on their bill', needsJob: true },
 ];
 
 const money = (n: number) => `£${n.toFixed(2)}`;
@@ -118,6 +141,8 @@ function refundHow(tender: string | null, amount: number): string {
     case 'stripe_gbp': return `Refund ${a} in Stripe`;
     case 'paypal': return `Refund ${a} in PayPal`;
     case 'wise_bacs': return `Send ${a} back by bank transfer`;
+    // It was never paid — it simply comes off the job, and their invoice.
+    case 'invoice_later': return `Nothing to hand back — ${a} comes off their bill`;
     default: return `Return ${a} to the customer`;
   }
 }
@@ -162,6 +187,35 @@ export default function ShopTillPage() {
   const [refundReason, setRefundReason] = useState('');
   const [refundBusy, setRefundBusy] = useState(false);
   const canRefund = hasManagerRole(user?.role);
+
+  // Who the sale is for: null = walk-in (the week's shop job), or a real job.
+  // Editable right up to payment — "oh, can it go on the band's bill?" is the
+  // normal case, not an exception (spec §4.1).
+  const [route, setRoute] = useState<SellableJob | null>(null);
+  const [todayJobs, setTodayJobs] = useState<SellableJob[]>([]);
+  const [jobTerm, setJobTerm] = useState('');
+  const [jobResults, setJobResults] = useState<SellableJob[]>([]);
+  const [jobSearchOpen, setJobSearchOpen] = useState(false);
+
+  /** Change route, and re-check the tender: "their bill" needs a job (§4.1). */
+  const chooseRoute = (j: SellableJob | null) => {
+    setRoute(j);
+    setJobSearchOpen(false);
+    setJobTerm('');
+    setJobResults([]);
+    if (!j && tender === 'invoice_later') setTender('worldpay');
+  };
+
+  useEffect(() => {
+    if (jobTerm.trim().length < 2) { setJobResults([]); return; }
+    let cancelled = false;
+    const t = setTimeout(() => {
+      api.get<{ data: SellableJob[] }>(`/shop/jobs/search?q=${encodeURIComponent(jobTerm)}`)
+        .then(r => { if (!cancelled) setJobResults(r.data); })
+        .catch(() => { if (!cancelled) setJobResults([]); });
+    }, 250);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [jobTerm]);
 
   // The success note is a nod, not a record — the Recent Sales list is the
   // record — so it goes after a few seconds. Errors stay until dealt with.
@@ -273,6 +327,9 @@ export default function ShopTillPage() {
     api.get<{ data: { refreshedAt: string | null } }>('/shop/stock/status')
       .then(r => setCacheAge(r.data.refreshedAt))
       .catch(() => setCacheAge(null));
+    api.get<{ data: SellableJob[] }>('/shop/jobs/today')
+      .then(r => setTodayJobs(r.data))
+      .catch(() => setTodayJobs([]));
     loadRecent();
     loadPeriod();
   }, [loadRecent, loadPeriod]);
@@ -386,12 +443,14 @@ export default function ShopTillPage() {
           unitPriceCharged: num(l.priceText),
         })),
         tender: mode === 'sale' ? tender : null,
+        soldToJobId: mode === 'sale' && route ? route.id : null,
         notes: notes.trim() || null,
       };
       const r = await api.post<{ data: { id: string; kind: string; totals: Totals } }>('/shop/sales', body);
       setSaved({ gross: r.data.totals.gross, id: r.data.id, kind: r.data.kind });
       setBasket([]);
       setNotes('');
+      chooseRoute(null);
       loadRecent();
       searchRef.current?.focus();
     } catch (e: any) {
@@ -645,19 +704,95 @@ export default function ShopTillPage() {
                 </p>
               )}
 
+              {/* Who it's for. Walk-in pools on the week's shop job; a band's
+                  job takes it onto their own job (and, if they like, their bill). */}
+              <label className="mb-1 block text-xs font-medium text-gray-700">Who&rsquo;s it for?</label>
+              <div className="mb-2 flex flex-wrap gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => chooseRoute(null)}
+                  className={`rounded px-2.5 py-1.5 text-xs font-medium ${
+                    !route ? 'bg-ooosh-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                  }`}
+                >
+                  Walk-in
+                </button>
+                {todayJobs.map(j => (
+                  <button
+                    key={j.id}
+                    type="button"
+                    onClick={() => chooseRoute(j)}
+                    title={j.rooms?.join(', ')}
+                    className={`rounded px-2.5 py-1.5 text-left text-xs font-medium ${
+                      route?.id === j.id ? 'bg-ooosh-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                    }`}
+                  >
+                    {jobLabel(j)}
+                    <span className={`block text-[10px] font-normal ${route?.id === j.id ? 'text-ooosh-100' : 'text-gray-500'}`}>
+                      In today{j.rooms?.length ? ` · ${j.rooms.join(', ')}` : ''}
+                    </span>
+                  </button>
+                ))}
+                {route && !todayJobs.some(j => j.id === route.id) && (
+                  <span className="rounded bg-ooosh-600 px-2.5 py-1.5 text-xs font-medium text-white">
+                    {jobLabel(route)} · #{route.hhJobNumber}
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setJobSearchOpen(o => !o)}
+                  className="rounded px-2.5 py-1.5 text-xs text-ooosh-600 hover:underline"
+                >
+                  Other job…
+                </button>
+              </div>
+              {jobSearchOpen && (
+                <div className="mb-3">
+                  <input
+                    autoFocus
+                    value={jobTerm}
+                    onChange={e => setJobTerm(e.target.value)}
+                    placeholder="Job number or band name"
+                    className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
+                  />
+                  {jobResults.length > 0 && (
+                    <ul className="mt-1 max-h-48 overflow-y-auto rounded border border-gray-200 divide-y text-sm">
+                      {jobResults.map(j => (
+                        <li key={j.id}>
+                          <button
+                            type="button"
+                            onClick={() => chooseRoute(j)}
+                            className="w-full px-3 py-2 text-left hover:bg-ooosh-50"
+                          >
+                            <span className="font-medium text-gray-900">{jobLabel(j)}</span>
+                            <span className="text-gray-500"> · #{j.hhJobNumber}{j.jobName && j.jobName !== jobLabel(j) ? ` · ${j.jobName}` : ''}</span>
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {jobTerm.trim().length >= 2 && jobResults.length === 0 && (
+                    <p className="mt-1 text-xs text-gray-400">No open job matches.</p>
+                  )}
+                </div>
+              )}
+
               <label className="mb-1 block text-xs font-medium text-gray-700">Payment</label>
               <select
                 value={tender}
                 onChange={e => setTender(e.target.value)}
                 className="mb-3 w-full rounded border border-gray-300 px-3 py-2 text-sm"
               >
-                {TENDERS.map(t => (
+                {/* "Their bill" only exists once there is a job to bill: the
+                    weekly shop job pools every customer, so its invoice can
+                    never go to one of them (spec §9). */}
+                {TENDERS.filter(t => !t.needsJob || route).map(t => (
                   <option key={t.key} value={t.key}>{t.label}</option>
                 ))}
               </select>
-              {tender === 'invoice_later' && (
-                <p className="mb-3 text-xs text-amber-700">
-                  Invoice-later needs a job to put it on — a walk-in has to pay now. Job picker lands with the push step.
+              {route && tender === 'invoice_later' && (
+                <p className="mb-3 text-xs text-gray-600">
+                  Nothing taken now — it goes on job #{route.hhJobNumber} and onto their invoice.
                 </p>
               )}
             </>
@@ -678,7 +813,13 @@ export default function ShopTillPage() {
             disabled={!canSubmit}
             className="w-full rounded bg-ooosh-600 px-4 py-3 text-base font-semibold text-white hover:bg-ooosh-700 disabled:bg-gray-300"
           >
-            {saving ? 'Recording…' : mode === 'sale' ? `Take ${money(totals.gross)}` : 'Record use'}
+            {saving
+              ? 'Recording…'
+              : mode !== 'sale'
+                ? 'Record use'
+                : tender === 'invoice_later'
+                  ? `Put ${money(totals.gross)} on their bill`
+                  : `Take ${money(totals.gross)}`}
           </button>
         </div>
       )}
@@ -761,6 +902,17 @@ export default function ShopTillPage() {
                         ? `Refund of ${r.reverses_sale_ref ?? 'sale'} · −${money(Math.abs(gross))}`
                         : money(gross)}
                   </span>
+                  {r.sold_to_hh_job_number && (
+                    <span className="text-xs text-gray-500">
+                      → {jobDisplayOrgName({
+                        lead_org_name: r.sold_to_lead_org_name,
+                        client_org_name: r.sold_to_client_org_name,
+                        company_name: r.sold_to_company_name,
+                        client_name: r.sold_to_client_name,
+                      }) || r.sold_to_job_name || 'job'} #{r.sold_to_hh_job_number}
+                      {r.tender === 'invoice_later' ? ' · on their bill' : ''}
+                    </span>
+                  )}
                   {r.notes && <span className="truncate text-gray-500">{r.notes}</span>}
                   <span className="ml-auto flex items-center gap-2">
                     {r.recorded_by_name && <span className="text-xs text-gray-400">{r.recorded_by_name}</span>}
@@ -821,8 +973,10 @@ export default function ShopTillPage() {
                     <div className="w-full rounded border border-amber-300 bg-amber-50 p-3 text-xs">
                       <p className="mb-2 text-amber-900">
                         Refunds the whole of {r.sale_ref ?? 'this sale'}: its items come off the HireHop job
-                        (stock back on the shelf) and {money(gross)} is refunded against its payment in HireHop
-                        and Xero. To refund part of a basket, refund it all and ring the rest again.
+                        (stock back on the shelf){r.tender === 'invoice_later'
+                          ? ''
+                          : ` and ${money(gross)} is refunded against its payment in HireHop and Xero`}.
+                        To refund part of a basket, refund it all and ring the rest again.
                       </p>
                       <input
                         value={refundReason}
@@ -835,7 +989,9 @@ export default function ShopTillPage() {
                           IS the confirmation. Transfers happen later, from
                           another screen, and stay outstanding until ticked. */}
                       <p className="mb-2 font-medium text-amber-900">
-                        {r.refund_at_counter
+                        {r.tender === 'invoice_later'
+                          ? `${refundHow(r.tender, gross)}.`
+                          : r.refund_at_counter
                           ? `${refundHow(r.tender, gross)}, then confirm.`
                           : `${refundHow(r.tender, gross)} afterwards — it stays on the list as outstanding until you tick it off.`}
                       </p>
@@ -847,7 +1003,9 @@ export default function ShopTillPage() {
                         >
                           {refundBusy
                             ? 'Refunding…'
-                            : r.refund_at_counter
+                            : r.tender === 'invoice_later'
+                              ? `Take ${money(gross)} off their bill`
+                              : r.refund_at_counter
                               ? `Done — ${money(gross)} given back`
                               : `Record refund of ${money(gross)}`}
                         </button>

@@ -73,7 +73,7 @@ export interface DepositAvailability {
 type Row = Record<string, any>;
 
 /** Read the job's billing rows fresh — a stale read here would be a wrong refund. */
-async function readBillingRows(hhJobNumber: number): Promise<Row[]> {
+export async function readBillingRows(hhJobNumber: number): Promise<Row[]> {
   const res = await hhBroker.get<{ rows?: Row[] }>(
     '/php_functions/billing_list.php',
     { main_id: hhJobNumber, type: 1 },

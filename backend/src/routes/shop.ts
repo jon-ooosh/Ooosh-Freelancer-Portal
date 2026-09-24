@@ -165,6 +165,33 @@ router.post('/stock/availability', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// ── Job routing (step 7) ─────────────────────────────────────────────────
+
+/**
+ * The bands in the rehearsal rooms today — the till's one-tap shortlist, from
+ * the same rehearsal data the sitter roster uses. Two in → two buttons.
+ */
+router.get('/jobs/today', async (_req: AuthRequest, res: Response) => {
+  try {
+    const { listJobsInToday } = await import('../services/shop-routing');
+    res.json({ data: await listJobsInToday() });
+  } catch (err) {
+    console.error('[shop] jobs-in-today failed:', err);
+    res.status(500).json({ error: "Could not load today's bands." });
+  }
+});
+
+/** Any open job, by HireHop number or name — for the band not in a room today. */
+router.get('/jobs/search', async (req: AuthRequest, res: Response) => {
+  try {
+    const { searchSellableJobs } = await import('../services/shop-routing');
+    res.json({ data: await searchSellableJobs(String(req.query.q || '')) });
+  } catch (err) {
+    console.error('[shop] job search failed:', err);
+    res.status(500).json({ error: 'Could not search jobs.' });
+  }
+});
+
 // ── Sales ────────────────────────────────────────────────────────────────
 
 /** What this user may discount, so the till can show the ceiling up front. */
