@@ -75,7 +75,7 @@ const INHERITED = [
   'supplier_name', 'xero_contact_id', 'currency', 'vat_treatment',
   'payment_method', 'cot_card_holder', 'cot_card_last4',
   'xero_account_code', 'category', 'cost_type',
-  'job_id', 'vehicle_id', 'quote_assignment_id', 'platform_issue_id',
+  'job_id', 'vehicle_id', 'quote_assignment_id', 'job_issue_id',
   'vehicle_service_log_id', 'vehicle_fuel_log_id',
 ] as const;
 
@@ -114,7 +114,7 @@ export async function prepareCreditFromParent(
     `SELECT c.id, c.is_credit, c.amount_gross, c.supplier_name, c.recharge_mode, c.job_id,
             c.xero_contact_id, c.currency, c.vat_treatment, c.payment_method,
             c.cot_card_holder, c.cot_card_last4, c.xero_account_code, c.category, c.cost_type,
-            c.vehicle_id, c.quote_assignment_id, c.platform_issue_id,
+            c.vehicle_id, c.quote_assignment_id, c.job_issue_id,
             c.vehicle_service_log_id, c.vehicle_fuel_log_id,
             j.hh_job_number,
             (SELECT COUNT(*)::int FROM cost_allocations a WHERE a.cost_id = c.id) AS allocation_count

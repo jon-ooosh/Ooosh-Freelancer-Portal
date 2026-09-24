@@ -289,6 +289,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '247_shop_reversals.sql',
         '248_shop_reconcile.sql',
         '249_shop_hidden_jobs.sql',
+        '250_costs_link_to_problems.sql',
       ];
 
       for (const migration of migrations) {

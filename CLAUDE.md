@@ -130,6 +130,10 @@ staff-facing review, document review cycles, retention. §20 is the current stat
 the short list of what is deliberately NOT built. Read it before changing anything here.
 Wider to-do work (assigning to others, recurring) is the general tasks module, not this one.
 
+**SPEC, not yet built:** `docs/TASKS-SPEC.md` — the To Do module, built on `staff_tasks`.
+§2 is the boundary with job reminders, Problems and the vehicle module — read it before
+putting any "thing to do" anywhere.
+
 **The staff DVLA/document check has NOTHING to do with `drivers`.** jon's decision,
 Sep 2026: the `drivers` machinery verifies self-drive-hire CLIENTS (30-day
 insurability, `services/driver-validity.ts`); the staff one is an annual sanity check
