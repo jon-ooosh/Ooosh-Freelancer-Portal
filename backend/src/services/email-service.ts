@@ -153,6 +153,23 @@ function substituteVariables(template: string, variables: Record<string, string>
   return result;
 }
 
+// ── Subject line hygiene ──────────────────────────────────────────────────
+
+/**
+ * Collapse any line break in a subject to a single space. Subjects are often
+ * built from staff-typed text (an issue summary, a bell title) that can span
+ * several lines. Resend REJECTS the whole email with a 422 ("The `\n` is not
+ * allowed in the `subject` field") — the email is lost, not retried. Gmail
+ * SMTP used to fold it silently, which is why this only surfaced after the
+ * switch to Resend (RF21PWX damage issue, Jul + Sep 2026).
+ *
+ * Applied once in send() / sendRaw() / renderPreview() so EVERY template and
+ * raw caller is covered — don't move this out to individual callers.
+ */
+export function oneLineSubject(subject: string): string {
+  return (subject || '').replace(/\s*[\r\n]+\s*/g, ' ').trim();
+}
+
 // ── Transient-error retry ─────────────────────────────────────────────────
 
 /**
@@ -319,7 +336,9 @@ async function raiseEmailHealthAlert(templateId: string, recipient: string, erro
 
     const content =
       `An email ("${templateId}" to ${recipient}) failed to send after retries: ${errorMessage}. ` +
-      `Outbound email may be down — check SMTP credentials / Google Workspace. ` +
+      `${getEmailConfig().provider === 'resend'
+        ? 'If this is a 422 the email itself was rejected (check its subject/recipient); otherwise Resend may be down — check the Resend dashboard / RESEND_API_KEY.'
+        : 'Outbound email may be down — check SMTP credentials / Google Workspace.'} ` +
       `Further email failures in the next hour are suppressed to avoid noise.`;
 
     for (const a of admins.rows) {
@@ -414,7 +433,7 @@ class EmailService {
     const template = templates[templateId];
     if (!template) return { error: `Unknown email template: ${templateId}` };
     const variables = options.variables || {};
-    const subject = options.subjectOverride || substituteVariables(template.subject, variables);
+    const subject = oneLineSubject(options.subjectOverride || substituteVariables(template.subject, variables));
     let bodyHtml = options.bodyHtmlOverride !== undefined
       ? options.bodyHtmlOverride
       : substituteVariables(template.body, variables);
@@ -437,7 +456,7 @@ class EmailService {
     const variables = options.variables || {};
 
     // Build subject and body from template
-    const subject = options.subjectOverride || substituteVariables(template.subject, variables);
+    const subject = oneLineSubject(options.subjectOverride || substituteVariables(template.subject, variables));
     let bodyHtml = options.bodyHtmlOverride !== undefined
       ? options.bodyHtmlOverride
       : substituteVariables(template.body, variables);
@@ -544,6 +563,7 @@ class EmailService {
   }): Promise<SendEmailResult> {
     const config = getEmailConfig();
     const isTestMode = config.mode === 'test';
+    const subject = oneLineSubject(options.subject);
     const actualRecipient = isTestMode && config.testRedirect
       ? config.testRedirect
       : options.to;
@@ -562,7 +582,7 @@ class EmailService {
         from: config.smtp.from,
         to: actualRecipient,
         cc: isTestMode ? undefined : options.cc,
-        subject: isTestMode ? `[TEST] ${options.subject}` : options.subject,
+        subject: isTestMode ? `[TEST] ${subject}` : subject,
         html,
         attachments: options.attachments?.map(a => ({
           filename: a.filename,
@@ -570,13 +590,13 @@ class EmailService {
           contentType: a.contentType,
         })),
       };
-      const result = await sendMailWithRetry(() => this.deliver(mailOptions), `raw "${options.subject}" to ${actualRecipient}`);
+      const result = await sendMailWithRetry(() => this.deliver(mailOptions), `raw "${subject}" to ${actualRecipient}`);
 
       await this.logEmail({
         template_id: '_raw',
         recipient: options.to,
         actual_recipient: actualRecipient,
-        subject: options.subject,
+        subject,
         status: 'sent',
         message_id: result.messageId || null,
         mode: config.mode,
@@ -590,7 +610,7 @@ class EmailService {
         template_id: '_raw',
         recipient: options.to,
         actual_recipient: actualRecipient,
-        subject: options.subject,
+        subject,
         status: 'failed',
         error_message: errorMessage,
         mode: config.mode,
