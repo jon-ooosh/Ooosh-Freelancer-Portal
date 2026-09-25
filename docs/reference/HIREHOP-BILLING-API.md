@@ -67,7 +67,7 @@ Bank ids: 165 Amex · 168 Till (Cash) · 169 Worldpay · 170 Lloyds · 173 PayPa
 
 ---
 
-## 3. Creating an invoice (draft) — `billing_save.php` 🟢
+## 3. Creating an invoice (draft) — `billing_save.php` 🟢 (in code: `services/shop-close.ts`, not yet run live)
 
 Captured on scratch job 16757, 25 Sep 2026 (New → Invoice):
 
@@ -108,7 +108,7 @@ shop close compares the invoice total to OP's own total to the penny before appr
 
 ---
 
-## 4. Approving an invoice — `billing_save_status.php` 🟢
+## 4. Approving an invoice — `billing_save_status.php` 🟢 (in code: `services/shop-close.ts`, not yet run live)
 
 Captured 25 Sep 2026 (right-click → Approved):
 
@@ -171,7 +171,7 @@ The same endpoint, variants:
 
 | `OWNER` | `id` | Meaning | Where in code |
 |---|---|---|---|
-| invoice id | 0 | **allocate** a deposit to an invoice | 🟢 shop week close (to build) |
+| invoice id | 0 | **allocate** a deposit to an invoice | 🟢 `shop-close.ts` (built, not yet run live) |
 | invoice id | existing app id | **change** an allocation's amount | ✅ `hh-deposit-release.ts setApplicationAmount()` |
 | **0** | 0 | **refund** out of a deposit to the client | ✅ `hh-deposit.ts refundDepositOnHH()` |
 

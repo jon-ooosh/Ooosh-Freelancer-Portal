@@ -416,10 +416,11 @@ router.get('/week', async (req: AuthRequest, res: Response) => {
     const start = req.query.start ? String(req.query.start) : weekStart(new Date());
     const summary = await getWeekSummary(start);
     const p = await query(
-      `SELECT id, hh_job_number, invoiced_at, last_checked_at, last_check_ok, last_check
+      `SELECT id, hh_job_number, invoiced_at, last_checked_at, last_check_ok, last_check,
+              hh_invoice_number, close_state, closed_at
          FROM shop_sale_periods WHERE period_start = $1`, [summary.periodStart],
     );
-    res.json({ data: { summary, period: p.rows[0] || null } });
+    res.json({ data: { summary, period: p.rows[0] || null, thisWeek: weekStart(new Date()) } });
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : 'Could not load that week.' });
   }
@@ -433,6 +434,32 @@ router.post('/week/:periodId/check', async (req: AuthRequest, res: Response) => 
   } catch (err) {
     console.error('[shop] balance check failed:', err);
     res.status(400).json({ error: err instanceof Error ? err.message : 'Could not run the check.' });
+  }
+});
+
+/**
+ * The weekly close (§20) — invoice, approve, allocate, complete.
+ *
+ * `authorize('admin')`, not MANAGER_ROLES: approving commits the week to Xero
+ * and cannot be undone from here (jon, Sep 2026: "just me").
+ */
+router.get('/week/:periodId/close', authorize('admin'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { previewShopClose } = await import('../services/shop-close');
+    res.json({ data: await previewShopClose(String(req.params.periodId)) });
+  } catch (err) {
+    console.error('[shop] close preview failed:', err);
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Could not preview the close.' });
+  }
+});
+
+router.post('/week/:periodId/close', authorize('admin'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { runShopClose } = await import('../services/shop-close');
+    res.json({ data: await runShopClose(String(req.params.periodId), req.user?.id ?? null) });
+  } catch (err) {
+    console.error('[shop] close failed:', err);
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Could not run the close.' });
   }
 });
 

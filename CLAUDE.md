@@ -152,9 +152,9 @@ anything private under `files/`.
 (`/money/shop`). Ad-hoc shop sales, internal stock consumption and sale-stock
 lookup, with HireHop remaining the single stock database. **§19 is the current
 state, the live settings, and what to do next — read it before touching this.**
-**NEXT: §20, the weekly close** (invoice → approve → allocate payments → complete) —
-designed and agreed, every HireHop call captured in `docs/reference/HIREHOP-BILLING-API.md`,
-not yet built.
+**§20, the weekly close** (invoice → approve → allocate payments → complete) — BUILT
+(`services/shop-close.ts`, admin-only button on *This week*), **first live run on scratch
+job 16757 still to do** (§20.6). Every HireHop call is in `docs/reference/HIREHOP-BILLING-API.md`.
 
 Three rules from it that bite elsewhere:
 - **A stock movement is EITHER a HireHop job line OR a `tally_save` adjustment,
@@ -227,7 +227,8 @@ existing definition:
 | What staff data has expired? | `services/staff-retention.ts` |
 | What does a shop item cost / what VAT? | `services/shop-stock.ts` `resolveVatRate()` (the HireHop rate is an INDEX, not a percentage) |
 | What is a shop transaction worth? | `services/shop-sales.ts` |
-| Which HireHop job do shop sales go on? | `services/shop-period.ts` `getOrCreateShopPeriod()` |
+| Which HireHop job do shop sales go on? | `services/shop-period.ts` `getShopPeriodForSale()` (the week it was rung up in) → `getOrCreateShopPeriod()` |
+| Closing a finished shop week (invoice, allocate, complete) | `services/shop-close.ts` |
 | What is this shop sale called (`OT-SHOP-00100`)? | `services/shop-sale-ref.ts` `saleRef()` |
 | Which jobs can a till sale go on / who's in today? | `services/shop-routing.ts` |
 | Does the week's shop job match the till? What did the week take? | `services/shop-reconcile.ts` |
@@ -326,6 +327,7 @@ pre-auth expiry 09:40 · staff records 09:45 (to-dos, to-do follow-ups, record a
 09:55 (December + January) · company-days prompt 09:58 (November) · OOH reminders 10:00 ·
 HireHop sync every 30 min · sanity scanners every 15 min · notification escalation
 every 15 min · shop balance check every 15 min · shop drain every 2 min · shop stock mirror every 15 min ·
+shop close reminder Mon 08:55 ·
 Gmail ingestion every 10 min.
 
 Adding one? Gate it on the lost/cancelled + `keep_after_close` rule and the

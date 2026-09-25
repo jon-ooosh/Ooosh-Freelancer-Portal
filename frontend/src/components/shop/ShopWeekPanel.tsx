@@ -13,8 +13,11 @@
  * (spec §2.1).
  */
 import { useCallback, useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { api } from '../../services/api';
 import { tenderLabel } from '../../lib/shopTenders';
+import { useAuthStore } from '../../hooks/useAuthStore';
+import ShopWeekClose from './ShopWeekClose';
 
 interface TenderTotals { tender: string; sales: number; taken: number; refunded: number; net: number }
 
@@ -40,6 +43,8 @@ interface ShopCheck {
 }
 
 interface WeekData {
+  /** Monday of the current week (UK) — so a linked week knows where "now" is. */
+  thisWeek: string;
   summary: WeekSummary;
   period: {
     id: string;
@@ -48,6 +53,9 @@ interface WeekData {
     last_checked_at: string | null;
     last_check_ok: boolean | null;
     last_check: ShopCheck | null;
+    hh_invoice_number: string | null;
+    close_state: 'drafted' | 'approved' | 'allocated' | 'completed' | null;
+    closed_at: string | null;
   } | null;
 }
 
@@ -73,7 +81,13 @@ function ago(iso: string | null): string {
 }
 
 export default function ShopWeekPanel() {
-  const [start, setStart] = useState<string | null>(null);      // null = this week
+  const { user } = useAuthStore();
+  // `?start=YYYY-MM-DD` opens a given week — the Monday close email links here.
+  const [searchParams] = useSearchParams();
+  const linkedStart = searchParams.get('start');
+  const [start, setStart] = useState<string | null>(
+    linkedStart && /^\d{4}-\d{2}-\d{2}$/.test(linkedStart) ? linkedStart : null,
+  );                                                              // null = this week
   const [thisWeek, setThisWeek] = useState<string | null>(null);
   const [data, setData] = useState<WeekData | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -84,7 +98,7 @@ export default function ShopWeekPanel() {
     api.get<{ data: WeekData }>(`/shop/week${s ? `?start=${s}` : ''}`)
       .then(r => {
         setData(r.data);
-        if (!s) setThisWeek(r.data.summary.periodStart);
+        setThisWeek(r.data.thisWeek);
       })
       .catch((e: any) => setError(e?.body?.error || e?.message || 'Could not load that week.'));
   }, []);
@@ -269,6 +283,18 @@ export default function ShopWeekPanel() {
           )}
         </div>
       </div>
+
+      {/* The weekly close (§20) — a finished week with a job, admin only. */}
+      {user?.role === 'admin' && period?.hh_job_number && !isThisWeek && thisWeek != null && (
+        <ShopWeekClose
+          key={period.id}
+          periodId={period.id}
+          closeState={period.close_state}
+          invoiceNumber={period.hh_invoice_number}
+          closedAt={period.closed_at}
+          onChanged={() => load(start)}
+        />
+      )}
     </div>
   );
 }

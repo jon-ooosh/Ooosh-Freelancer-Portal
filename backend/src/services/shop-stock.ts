@@ -205,8 +205,17 @@ export function hhLocalNow(): string {
   return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}:${get('second')}`;
 }
 
-/** The HireHop job availability questions are asked against (§2.3, mig 242). */
+/**
+ * The HireHop job availability questions are asked against (§2.3, mig 242).
+ *
+ * This week's shop job (or the latest one) — a fixed number would go on
+ * asking about a week that has been closed (§20.3). The `shop_availability_job`
+ * setting is now only the fallback for before any week has had a job.
+ */
 export async function getAvailabilityJob(): Promise<number | null> {
+  const { getLatestShopJobNumber } = await import('./shop-period');
+  const latest = await getLatestShopJobNumber();
+  if (latest) return latest;
   try {
     const r = await query(`SELECT value FROM system_settings WHERE key = $1`, ['shop_availability_job']);
     const n = Number(r.rows[0]?.value);

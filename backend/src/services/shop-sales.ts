@@ -695,7 +695,9 @@ export async function reverseShopSale(
     // deposit in HireHop before touching anything.
     if (sale.hh_job_number) {
       const inv = await client.query(
-        `SELECT invoiced_at FROM shop_sale_periods WHERE hh_job_number = $1 AND invoiced_at IS NOT NULL`,
+        // …or its close has started: the draft invoice already holds this sale.
+        `SELECT invoiced_at FROM shop_sale_periods
+          WHERE hh_job_number = $1 AND (invoiced_at IS NOT NULL OR close_state IS NOT NULL)`,
         [sale.hh_job_number],
       );
       if (inv.rows.length) {

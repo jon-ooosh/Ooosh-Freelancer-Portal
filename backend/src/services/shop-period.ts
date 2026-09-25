@@ -45,9 +45,22 @@ async function setting(key: string): Promise<string | null> {
   }
 }
 
-/** Monday of the week containing `d`, as YYYY-MM-DD. */
+/**
+ * The UK calendar date of `d`, as YYYY-MM-DD. The server runs in UTC, so
+ * between 00:00 and 01:00 in BST the UTC date is still yesterday — which on a
+ * Monday would put a sale on last week's job (§19 gaps, fixed for §20).
+ */
+export function londonDate(d: Date): string {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(d);
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? '00';
+  return `${get('year')}-${get('month')}-${get('day')}`;
+}
+
+/** Monday of the week containing `d` (UK date), as YYYY-MM-DD. */
 export function weekStart(d: Date): string {
-  const copy = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  const copy = new Date(`${londonDate(d)}T00:00:00Z`);
   // getUTCDay: 0 = Sunday. Sunday belongs to the week that STARTED six days ago,
   // not the one about to start — an off-by-one here would split a Sunday's
   // takings across two invoices.
@@ -219,6 +232,56 @@ export async function getOrCreateShopPeriod(when: Date = new Date()): Promise<Sh
     id: row.id, periodStart: row.period_start,
     periodEnd: row.period_end, hhJobNumber: Number(row.hh_job_number),
   };
+}
+
+/**
+ * The shop job a walk-in sale goes on: the week it was RUNG UP in, if that
+ * week's job exists and its close hasn't started; otherwise the current week.
+ *
+ * Without this a sale rung at 23:59 on Sunday reaches HireHop after its
+ * two-minute hold — on Monday — and lands on next week's job (§20). A week
+ * whose close has begun is never written to: its invoice is already drafted
+ * from the lines it had.
+ */
+export async function getShopPeriodForSale(soldAt: Date, now: Date = new Date()): Promise<ShopPeriod> {
+  const own = weekStart(soldAt);
+  if (own !== weekStart(now)) {
+    const r = await query(
+      `SELECT id, period_start::text, period_end::text, hh_job_number
+         FROM shop_sale_periods
+        WHERE period_start = $1 AND hh_job_number IS NOT NULL AND close_state IS NULL`,
+      [own],
+    );
+    const row = r.rows[0];
+    if (row) {
+      return {
+        id: row.id, periodStart: row.period_start,
+        periodEnd: row.period_end, hhJobNumber: Number(row.hh_job_number),
+      };
+    }
+  }
+  return getOrCreateShopPeriod(now);
+}
+
+/**
+ * The HireHop job the till asks about availability against: this week's shop
+ * job, else the most recent one. Weeks with no sales have no job (§20 — jobs
+ * open on the first sale), so "most recent" is the normal Monday-morning case.
+ * Null when no week has ever had a job.
+ */
+export async function getLatestShopJobNumber(): Promise<number | null> {
+  try {
+    const r = await query(
+      `SELECT hh_job_number FROM shop_sale_periods
+        WHERE hh_job_number IS NOT NULL AND period_start <= $1
+        ORDER BY period_start DESC LIMIT 1`,
+      [weekStart(new Date())],
+    );
+    const n = Number(r.rows[0]?.hh_job_number);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
