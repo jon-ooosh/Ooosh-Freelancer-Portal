@@ -121,6 +121,7 @@ somewhere the rules don't cover.
 | `PLATFORM-CONVENTIONS.md` | security posture, crew & transport calculator, HireHop API field reference, dashboard extension points, files tab, DB tables |
 | `PLATFORM-HISTORY.md` | original repo-structure tree, full deployment playbook, Phase 1 history |
 | `BACKLOG.md` | captured but unscheduled ideas |
+| `HIREHOP-BILLING-API.md` | invoices, payments, allocations, refunds and their Xero sync — captured payloads. Read before ANY new billing write; the base for the bookkeeping module |
 
 `docs/*-SPEC.md` are the hand-written per-feature specs; several rules point at them.
 
@@ -149,6 +150,9 @@ anything private under `files/`.
 (`/money/shop`). Ad-hoc shop sales, internal stock consumption and sale-stock
 lookup, with HireHop remaining the single stock database. **§19 is the current
 state, the live settings, and what to do next — read it before touching this.**
+**NEXT: §20, the weekly close** (invoice → approve → allocate payments → complete) —
+designed and agreed, every HireHop call captured in `docs/reference/HIREHOP-BILLING-API.md`,
+not yet built.
 
 Three rules from it that bite elsewhere:
 - **A stock movement is EITHER a HireHop job line OR a `tally_save` adjustment,
