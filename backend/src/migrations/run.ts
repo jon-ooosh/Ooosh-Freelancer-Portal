@@ -292,6 +292,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '250_costs_link_to_problems.sql',
         '251_shop_sitter_till.sql',
         '252_shop_till_test_accounts.sql',
+        '253_shop_receipts.sql',
       ];
 
       for (const migration of migrations) {

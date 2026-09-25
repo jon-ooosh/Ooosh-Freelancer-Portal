@@ -1330,7 +1330,11 @@ function londonNow(): { date: string; hour: number } {
  * it's rostered to, so the till can be tested on a free evening instead of
  * muddling a real sitter's night.
  */
-async function isTillOpen(date: string, email: string): Promise<boolean> {
+async function isTillOpen(date: string, email: string, shiftId: string): Promise<boolean> {
+  // Locked up = closed, for everyone (test accounts included — that's worth
+  // testing too). Stops "one more sale" after the report has gone, which the
+  // lock-up email would never show (jon, Sep 2026). Price lookup stays open.
+  if (await isLockedUp(shiftId)) return false;
   const now = londonNow();
   if (date === now.date || (date === addDaysIsoP(now.date, -1) && now.hour < 6)) return true;
   try {
@@ -1341,6 +1345,12 @@ async function isTillOpen(date: string, email: string): Promise<boolean> {
   } catch {
     return false;   // a malformed setting opens nothing
   }
+}
+
+/** Has the sitter submitted the lock-up report for this shift? */
+async function isLockedUp(shiftId: string): Promise<boolean> {
+  const r = await query(`SELECT report_submitted_at FROM studio_sitter_shifts WHERE id = $1`, [shiftId]);
+  return !!r.rows[0]?.report_submitted_at;
 }
 
 /** Rostered-to-this-evening gate for the till. Sends the error and returns null on failure. */
@@ -1364,7 +1374,9 @@ router.get('/studio-sitter/shifts/:date/till/context', async (req: PortalRequest
     res.json({
       success: true,
       date: gate.date,
-      open: await isTillOpen(gate.date, req.portalUser!.email),
+      open: await isTillOpen(gate.date, req.portalUser!.email, gate.shiftId),
+      // Why it's closed, so the page can say the right thing.
+      locked_up: await isLockedUp(gate.shiftId),
       // Tonight's bands — the only jobs a sitter can sell onto. Two in, two buttons.
       jobs: (detail?.jobs ?? []).map((j: any) => ({
         job_id: j.job_id, hh_job_number: j.hh_job_number, label: j.label, rooms: j.rooms ?? [],
@@ -1426,8 +1438,12 @@ router.post('/studio-sitter/shifts/:date/till/sales', async (req: PortalRequest,
   try {
     const gate = await tillGate(req, res);
     if (!gate) return;
-    if (!(await isTillOpen(gate.date, req.portalUser!.email))) {
-      res.status(409).json({ error: 'The till for this evening is closed — sales can only be taken on the night.' });
+    if (!(await isTillOpen(gate.date, req.portalUser!.email, gate.shiftId))) {
+      res.status(409).json({
+        error: (await isLockedUp(gate.shiftId))
+          ? "You've locked up for the night, so the till is closed. Leave the office a note about anything else."
+          : 'The till for this evening is closed — sales can only be taken on the night.',
+      });
       return;
     }
 
