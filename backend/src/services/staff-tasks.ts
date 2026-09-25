@@ -7,10 +7,15 @@
  * agrees an action.
  *
  * WHO SEES WHAT — the one rule this file exists to keep in one place:
- *   * Everybody sees and manages THEIR OWN tasks. This is not an admin module;
- *     a to-do list nobody but an admin can tick is not a to-do list.
- *   * Admins can additionally create tasks for other people, and read anyone's.
- *   * Nobody else can see anyone else's. `assertCanTouch` is the chokepoint.
+ *   * Everybody manages THEIR OWN tasks. This is not an admin module; a to-do
+ *     list nobody but an admin can tick is not a to-do list.
+ *   * Since To Do phase 1 (docs/TASKS-SPEC.md §5) ANYONE can put a task on
+ *     anyone's list, and whoever SET a task (`created_by`) can edit, reassign
+ *     or drop it too. Admins can touch anything. `assertCanTouch` is the
+ *     chokepoint for all of that.
+ *   * Everybody can SEE everybody's open tasks (the Everyone view), except
+ *     private ones — those only the owner, the setter and admins see
+ *     (`listEveryone`). Review actions are private by default.
  *
  * Review actions land here rather than in a review-shaped table so that an
  * action the COMPANY owes appears on the responsible person's own list beside
@@ -32,6 +37,9 @@ export interface TaskInput {
   personId?: string;
   sourceType?: string;
   sourceId?: string | null;
+  isPrivate?: boolean;
+  /** The setter's follow-up. Omitted → derived when assigning to someone else. */
+  followUpOn?: string | null;
 }
 
 /**
@@ -69,10 +77,38 @@ const SELECT_TASKS = `
          t.next_chase_date::text AS next_chase_date,
          t.source_type, t.source_id,
          t.created_at, t.completed_at,
+         t.created_by, t.is_private,
+         t.follow_up_on::text AS follow_up_on,
+         t.handed_back_reason, t.handed_back_at,
+         cu.person_id AS set_by_person_id,
          NULLIF(TRIM(COALESCE(op.preferred_name, op.first_name, '') || ' ' ||
-                     COALESCE(op.last_name, '')), '') AS owner_name
+                     COALESCE(op.last_name, '')), '') AS owner_name,
+         NULLIF(TRIM(COALESCE(cp.preferred_name, cp.first_name, '') || ' ' ||
+                     COALESCE(cp.last_name, '')), '') AS set_by_name,
+         NULLIF(TRIM(COALESCE(hb.preferred_name, hb.first_name, '') || ' ' ||
+                     COALESCE(hb.last_name, '')), '') AS handed_back_by_name
     FROM staff_tasks t
-    JOIN people op ON op.id = t.person_id`;
+    JOIN people op ON op.id = t.person_id
+    LEFT JOIN users cu  ON cu.id = t.created_by
+    LEFT JOIN people cp ON cp.id = cu.person_id
+    LEFT JOIN people hb ON hb.id = t.handed_back_by`;
+
+/** What the notifications need about one task, after a write. */
+async function taskFacts(taskId: string) {
+  const r = await query(`${SELECT_TASKS} WHERE t.id = $1`, [taskId]);
+  return r.rows[0];
+}
+
+/** Display name for the person behind a login — for "Sam gave you…". */
+async function nameForUser(userId: string): Promise<string | null> {
+  const r = await query(
+    `SELECT NULLIF(TRIM(COALESCE(p.preferred_name, p.first_name, '') || ' ' ||
+                        COALESCE(p.last_name, '')), '') AS name
+       FROM users u LEFT JOIN people p ON p.id = u.person_id WHERE u.id = $1`,
+    [userId]
+  );
+  return r.rows[0]?.name ?? null;
+}
 
 export async function personIdForUser(userId: string): Promise<string | null> {
   const r = await query('SELECT person_id FROM users WHERE id = $1', [userId]);
@@ -83,18 +119,31 @@ function isAdmin(role: string | undefined): boolean {
   return (STAFF_ADMIN_ROLES as readonly string[]).includes(role ?? '');
 }
 
+interface TouchInfo {
+  personId: string;
+  createdBy: string | null;
+  /** Why this caller may touch it — decides what they may change. */
+  as: 'admin' | 'setter' | 'owner';
+}
+
 /**
- * Throws unless this user owns the task or is an admin. Every read and write
- * of somebody else's row goes through here — it is the only thing standing
+ * Throws unless this user owns the task, SET it, or is an admin. Every write
+ * to somebody else's row goes through here — it is the only thing standing
  * between "my list" and "everyone's list".
+ *
+ * Seeing a task on the Everyone view is NOT touching it: anyone can read an
+ * open, non-private task there, but only these three can change it.
  */
-async function assertCanTouch(taskId: string, userId: string, role: string | undefined) {
-  const r = await query('SELECT person_id FROM staff_tasks WHERE id = $1', [taskId]);
+async function assertCanTouch(taskId: string, userId: string, role: string | undefined): Promise<TouchInfo> {
+  const r = await query('SELECT person_id, created_by FROM staff_tasks WHERE id = $1', [taskId]);
   if (!r.rows.length) throw new Error('Task not found');
-  if (isAdmin(role)) return r.rows[0].person_id as string;
+  const personId = r.rows[0].person_id as string;
+  const createdBy = (r.rows[0].created_by as string | null) ?? null;
+  if (isAdmin(role)) return { personId, createdBy, as: 'admin' };
   const mine = await personIdForUser(userId);
-  if (!mine || r.rows[0].person_id !== mine) throw new Error('Task not found');
-  return r.rows[0].person_id as string;
+  if (mine && personId === mine) return { personId, createdBy, as: 'owner' };
+  if (createdBy && createdBy === userId) return { personId, createdBy, as: 'setter' };
+  throw new Error('Task not found');
 }
 
 /** Tasks on one person's list. `includeDone` adds recently-finished ones. */
@@ -116,17 +165,13 @@ export async function createTask(input: TaskInput, userId: string, role: string 
   if (!title) throw new Error('A task needs a title');
   if (input.dueDate && !DATE_RE.test(input.dueDate)) throw new Error('dueDate must be YYYY-MM-DD');
 
-  // Default to the caller. Assigning to somebody ELSE is an admin act — a
-  // to-do list you can push work onto anybody's is a different product.
-  let personId = input.personId;
-  if (!personId) {
-    const mine = await personIdForUser(userId);
-    if (!mine) throw new Error('Your login is not linked to a person record');
-    personId = mine;
-  } else if (!isAdmin(role)) {
-    const mine = await personIdForUser(userId);
-    if (personId !== mine) throw new Error('Only an admin can add a task to somebody else’s list');
-  }
+  // Default to the caller. Since To Do phase 1 anyone may put a task on
+  // anyone's list (docs/TASKS-SPEC.md §5.1) — it lands with a bell, and the
+  // owner can hand it back.
+  const mine = await personIdForUser(userId);
+  const personId = input.personId || mine;
+  if (!personId) throw new Error('Your login is not linked to a person record');
+  const forSomebodyElse = personId !== mine;
 
   // A review action is linked to its review, which is what puts it in the
   // follow-up email, the "From your review" badge and the check-in list.
@@ -142,15 +187,34 @@ export async function createTask(input: TaskInput, userId: string, role: string 
   const nextChase = await resolveChaseDate(input.nextChaseDate, dueDate);
   if (nextChase && !DATE_RE.test(nextChase)) throw new Error('nextChaseDate must be YYYY-MM-DD');
 
+  const isReview = input.sourceType === 'staff_review';
+  // The setter's follow-up only exists for a task given to somebody else — on
+  // your own list, your own nudge is the whole story. Not defaulted for review
+  // actions: the review's check-in (staff records §22.3) already follows those
+  // up, and a bell per action on top would be noise.
+  let followUp: string | null = null;
+  if (input.followUpOn !== undefined) followUp = input.followUpOn || null;
+  else if (forSomebodyElse && !isReview) followUp = await resolveChaseDate(undefined, dueDate);
+  if (followUp && !DATE_RE.test(followUp)) throw new Error('followUpOn must be YYYY-MM-DD');
+  // Review actions are private unless said otherwise (spec §8).
+  const isPrivate = input.isPrivate ?? isReview;
+
   const r = await query(
-    `INSERT INTO staff_tasks (person_id, title, detail, due_date, next_chase_date, source_type, source_id, created_by)
-     VALUES ($1, $2, $3, $4::date, $5::date, COALESCE($6,'manual'), $7, $8)
+    `INSERT INTO staff_tasks (person_id, title, detail, due_date, next_chase_date, source_type, source_id, created_by,
+                              follow_up_on, is_private)
+     VALUES ($1, $2, $3, $4::date, $5::date, COALESCE($6,'manual'), $7, $8, $9::date, $10)
      RETURNING id`,
     [personId, title, input.detail?.trim() || null, dueDate, nextChase,
-     input.sourceType ?? null, input.sourceId ?? null, userId]
+     input.sourceType ?? null, input.sourceId ?? null, userId, followUp, isPrivate]
   );
-  const row = await query(`${SELECT_TASKS} WHERE t.id = $1`, [r.rows[0].id]);
-  return row.rows[0];
+  const row = await taskFacts(r.rows[0].id);
+
+  if (forSomebodyElse) {
+    const { notifyTaskAssigned } = await import('./staff-notifications');
+    await notifyTaskAssigned(personId, row.id, title, await nameForUser(userId), dueDate)
+      .catch(e => console.error('[staff-tasks] assigned bell failed:', e));
+  }
+  return row;
 }
 
 export async function updateTask(
@@ -158,11 +222,16 @@ export async function updateTask(
   patch: {
     title?: string; detail?: string | null; dueDate?: string | null;
     nextChaseDate?: string | null; status?: TaskStatus;
+    /** Reassign — setter or admin only. */
+    personId?: string;
+    /** The setter's follow-up — setter or admin only. */
+    followUpOn?: string | null;
+    isPrivate?: boolean;
   },
   userId: string,
   role: string | undefined
 ) {
-  await assertCanTouch(taskId, userId, role);
+  const who = await assertCanTouch(taskId, userId, role);
 
   const sets: string[] = [];
   const params: unknown[] = [];
@@ -211,6 +280,34 @@ export async function updateTask(
     // then the record of the last nudge, and nothing will chase again anyway.
     if (!(patch.status !== undefined && patch.status !== 'open')) sets.push('chased_at = NULL');
   }
+
+  // The setter's side. The owner can't move the setter's clock or give the
+  // task to somebody else — that would let the person being chased switch
+  // the chasing off. They can hand it back instead (handBackTask).
+  const setterOrAdmin = who.as !== 'owner' || (!!who.createdBy && who.createdBy === userId);
+  let reassignedTo: string | null = null;
+  if (patch.personId !== undefined && patch.personId !== who.personId) {
+    if (!setterOrAdmin) throw new Error('Only whoever set this can give it to somebody else — hand it back instead');
+    params.push(patch.personId); sets.push(`person_id = $${params.length}`);
+    // A fresh owner, a fresh start: nothing about the last one's nudges applies.
+    sets.push('handed_back_by = NULL', 'handed_back_reason = NULL', 'handed_back_at = NULL');
+    reassignedTo = patch.personId;
+  }
+  let followUpDone = false;
+  if (patch.followUpOn !== undefined) {
+    if (!setterOrAdmin) throw new Error('Only whoever set this can change its follow-up');
+    if (patch.followUpOn && !DATE_RE.test(patch.followUpOn)) throw new Error('followUpOn must be YYYY-MM-DD');
+    params.push(patch.followUpOn || null); sets.push(`follow_up_on = $${params.length}::date`);
+    sets.push('follow_up_chased_at = NULL');
+    followUpDone = true;
+  }
+  // Finished: the setter's follow-up has nothing left to ask.
+  if (!followUpDone && patch.status !== undefined && patch.status !== 'open') {
+    sets.push('follow_up_on = NULL');
+  }
+  if (patch.isPrivate !== undefined) {
+    params.push(patch.isPrivate); sets.push(`is_private = $${params.length}`);
+  }
   if (!sets.length) throw new Error('No fields to update');
 
   params.push(taskId);
@@ -218,8 +315,122 @@ export async function updateTask(
     `UPDATE staff_tasks SET ${sets.join(', ')}, updated_at = NOW() WHERE id = $${params.length}`,
     params
   );
-  const row = await query(`${SELECT_TASKS} WHERE t.id = $1`, [taskId]);
-  return row.rows[0];
+  const row = await taskFacts(taskId);
+
+  // Close the loop, by bell. Failures are logged, never fatal — the write
+  // above is what matters.
+  try {
+    const n = await import('./staff-notifications');
+    if (reassignedTo) {
+      await n.notifyTaskAssigned(reassignedTo, taskId, row.title, await nameForUser(userId), row.due_date);
+    }
+    // Done by somebody other than whoever set it → tell the setter.
+    if (patch.status === 'done' && row.created_by && row.created_by !== userId
+        && row.set_by_person_id !== row.person_id) {
+      await n.notifyTaskDone(row.created_by, taskId, row.title, row.owner_name);
+    }
+  } catch (e) {
+    console.error('[staff-tasks] notify after update failed:', e);
+  }
+  return row;
+}
+
+/**
+ * Hand a task back to whoever set it (spec §5.1), with a reason. Owner only —
+ * it's how the person being asked says "not me", so nothing assigned ever
+ * silently disappears. It moves onto the setter's own list and bells them.
+ */
+export async function handBackTask(taskId: string, reason: string, userId: string) {
+  const why = reason?.trim();
+  if (!why) throw new Error('Say why you’re handing it back');
+  const r = await query(
+    `SELECT t.person_id, t.due_date::text AS due_date, t.status, t.created_by, cu.person_id AS setter_person
+       FROM staff_tasks t LEFT JOIN users cu ON cu.id = t.created_by
+      WHERE t.id = $1`,
+    [taskId]
+  );
+  if (!r.rows.length) throw new Error('Task not found');
+  const t = r.rows[0];
+  const mine = await personIdForUser(userId);
+  // Same "not found" rule as assertCanTouch: only the owner hands back.
+  if (!mine || t.person_id !== mine) throw new Error('Task not found');
+  if (t.status !== 'open') throw new Error('Only an open task can be handed back');
+  if (!t.setter_person || t.setter_person === mine) throw new Error('Nobody to hand this back to');
+
+  // On the setter's list now, so it chases THEM like any other task of theirs.
+  const chase = await resolveChaseDate(undefined, t.due_date);
+  await query(
+    `UPDATE staff_tasks
+        SET person_id = $2, handed_back_by = $3, handed_back_reason = $4, handed_back_at = NOW(),
+            follow_up_on = NULL, follow_up_chased_at = NULL,
+            next_chase_date = $5::date, chased_at = NULL, updated_at = NOW()
+      WHERE id = $1`,
+    [taskId, t.setter_person, mine, why, chase]
+  );
+  const row = await taskFacts(taskId);
+  try {
+    const { notifyTaskHandedBack } = await import('./staff-notifications');
+    await notifyTaskHandedBack(t.created_by, taskId, row.title, row.handed_back_by_name, why);
+  } catch (e) {
+    console.error('[staff-tasks] handed-back bell failed:', e);
+  }
+  return row;
+}
+
+/**
+ * "Assigned by me" (spec §5.2): what I put on OTHER people's lists, open or
+ * finished in the last 30 days. Things handed back to me are on my own list,
+ * not here.
+ */
+export async function listAssignedByMe(userId: string) {
+  const r = await query(
+    `${SELECT_TASKS}
+      WHERE t.created_by = $1
+        AND cu.person_id IS DISTINCT FROM t.person_id
+        AND (t.status = 'open' OR (t.status = 'done' AND t.completed_at > NOW() - INTERVAL '30 days'))
+      ORDER BY t.status = 'open' DESC, t.follow_up_on NULLS LAST, t.due_date NULLS LAST, t.created_at DESC`,
+    [userId]
+  );
+  return r.rows;
+}
+
+/**
+ * Everyone's open tasks (spec §4 — jon: "everyone should see everyone").
+ * Private ones only for their owner, their setter and admins. This is a READ:
+ * touching any of them still goes through assertCanTouch.
+ */
+export async function listEveryone(userId: string, role: string | undefined) {
+  const mine = await personIdForUser(userId);
+  const r = await query(
+    `${SELECT_TASKS}
+      WHERE t.status = 'open'
+        AND (NOT t.is_private OR $3::boolean OR t.person_id = $2 OR t.created_by = $1)
+      ORDER BY owner_name, t.due_date NULLS LAST, t.created_at`,
+    [userId, mine, isAdmin(role)]
+  );
+  return r.rows;
+}
+
+/**
+ * Who a task can be given to: every active non-freelancer login with a person
+ * behind it. A person with no login would get no bell and could never see it.
+ */
+export async function listAssignablePeople() {
+  const { STAFF_ROLES } = await import('../middleware/auth');
+  const r = await query(
+    `SELECT DISTINCT p.id AS person_id,
+            NULLIF(TRIM(COALESCE(p.preferred_name, p.first_name, '') || ' ' ||
+                        COALESCE(p.last_name, '')), '') AS name
+       FROM users u JOIN people p ON p.id = u.person_id
+      WHERE u.is_active = true AND u.role = ANY($1::text[])
+        -- The platform's own service account (same id as in
+        -- carnet-auto-email.ts / gmail-ingestion.ts) is an admin with a
+        -- person row, and would otherwise be offered as somebody to ask.
+        AND u.id <> '00000000-0000-0000-0000-000000000000'
+      ORDER BY name`,
+    [STAFF_ROLES as readonly string[]]
+  );
+  return r.rows as { person_id: string; name: string | null }[];
 }
 
 /** Cancel, never delete — CLAUDE.md. A dropped review action is a fact. */

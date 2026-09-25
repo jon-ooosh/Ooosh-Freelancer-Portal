@@ -1151,6 +1151,7 @@ export function startScheduler() {
   // failing cannot silence the other two.
   //
   //   tasks     — nudge, then RE-ARM next_chase_date (pipeline model)
+  //   follow-ups — the setter's own date on a task given to somebody else
   //   records   — a staff record's action date (remind / flag for deletion)
   //   reviews   — somebody's review falling due, once per cycle, to admins
   cron.schedule('45 9 * * *', async () => {
@@ -1160,6 +1161,13 @@ export function startScheduler() {
       console.log(`Scheduler: To-do chase — ${r.chased} nudged`);
     } catch (err) {
       console.error('Scheduler: To-do chase failed:', err);
+    }
+    try {
+      // The setter's side: "did they do it?" (docs/TASKS-SPEC.md §5.2).
+      const r = await notifications.runTaskFollowUpChase();
+      console.log(`Scheduler: To-do follow-ups — ${r.chased} sent`);
+    } catch (err) {
+      console.error('Scheduler: To-do follow-ups failed:', err);
     }
     try {
       // ONE clock per staff record since mig 243 — it replaced the separate

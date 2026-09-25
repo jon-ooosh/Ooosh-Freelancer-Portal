@@ -2,8 +2,9 @@
  * My To Do — staff_tasks routes. docs/STAFF-RECORDS-SPEC.md §6.
  *
  * NOT an admin module, unlike the rest of staff records: everybody manages
- * their own list. STAFF_ROLES, not STAFF_ADMIN_ROLES. The per-row check lives
- * in services/staff-tasks.ts (`assertCanTouch`), which is the only thing
+ * their own list, and since To Do phase 1 (docs/TASKS-SPEC.md) anyone can
+ * give anyone a task. STAFF_ROLES, not STAFF_ADMIN_ROLES. The per-row check
+ * lives in services/staff-tasks.ts (`assertCanTouch`), which is the only thing
  * separating "my list" from "everyone's list" — so routes here stay thin and
  * never hand-roll an ownership test.
  */
@@ -15,6 +16,7 @@ import { validate } from '../middleware/validate';
 import {
   listTasks, createTask, updateTask, cancelTask, openTaskCount,
   personIdForUser, listTasksForSource, TASK_STATUSES,
+  handBackTask, listAssignedByMe, listEveryone, listAssignablePeople,
 } from '../services/staff-tasks';
 import { STAFF_ADMIN_ROLES } from '../services/staff-employment';
 
@@ -38,6 +40,8 @@ const createSchema = z.object({
   // 'staff_review') — without this a review action was saved as a plain
   // manual to-do and never reached the follow-up email. Spec §22.
   reviewId: z.string().regex(UUID_RE).optional(),
+  isPrivate: z.boolean().optional(),
+  followUpOn: dateStr.optional(),
 });
 
 const updateSchema = z.object({
@@ -46,6 +50,44 @@ const updateSchema = z.object({
   dueDate: dateStr.optional(),
   nextChaseDate: dateStr.optional(),
   status: z.enum(TASK_STATUSES).optional(),
+  // Setter / admin only — enforced in the service, not here.
+  personId: z.string().regex(UUID_RE).optional(),
+  followUpOn: dateStr.optional(),
+  isPrivate: z.boolean().optional(),
+});
+
+const handBackSchema = z.object({
+  reason: z.string().min(1).max(1000),
+});
+
+// GET /api/staff-tasks/assigned — what I gave to other people
+router.get('/assigned', async (req: AuthRequest, res: Response) => {
+  try {
+    res.json({ data: await listAssignedByMe(req.user!.id) });
+  } catch (err) {
+    console.error('[staff-tasks] list assigned error:', err);
+    res.status(500).json({ error: 'Failed to load the tasks you set' });
+  }
+});
+
+// GET /api/staff-tasks/everyone — every open task, minus private ones
+router.get('/everyone', async (req: AuthRequest, res: Response) => {
+  try {
+    res.json({ data: await listEveryone(req.user!.id, req.user!.role) });
+  } catch (err) {
+    console.error('[staff-tasks] list everyone error:', err);
+    res.status(500).json({ error: 'Failed to load everyone’s tasks' });
+  }
+});
+
+// GET /api/staff-tasks/people — who a task can be given to
+router.get('/people', async (_req: AuthRequest, res: Response) => {
+  try {
+    res.json({ data: await listAssignablePeople() });
+  } catch (err) {
+    console.error('[staff-tasks] people error:', err);
+    res.status(500).json({ error: 'Failed to load people' });
+  }
 });
 
 // GET /api/staff-tasks/mine?includeDone=true
@@ -102,6 +144,8 @@ router.post('/', validate(createSchema), async (req: AuthRequest, res: Response)
         // means "derive it", which is not the same as "never nudge me".
         nextChaseDate: body.nextChaseDate === undefined ? undefined : (body.nextChaseDate || null),
         personId: body.personId,
+        isPrivate: body.isPrivate,
+        followUpOn: body.followUpOn === undefined ? undefined : (body.followUpOn || null),
         ...(body.reviewId ? { sourceType: 'staff_review', sourceId: body.reviewId } : {}),
       },
       req.user!.id,
@@ -128,6 +172,9 @@ router.patch('/:id', validate(updateSchema), async (req: AuthRequest, res: Respo
         dueDate: body.dueDate === undefined ? undefined : (body.dueDate || null),
         nextChaseDate: body.nextChaseDate === undefined ? undefined : (body.nextChaseDate || null),
         status: body.status,
+        personId: body.personId,
+        followUpOn: body.followUpOn === undefined ? undefined : (body.followUpOn || null),
+        isPrivate: body.isPrivate,
       },
       req.user!.id,
       req.user!.role
@@ -137,6 +184,19 @@ router.patch('/:id', validate(updateSchema), async (req: AuthRequest, res: Respo
     const msg = err instanceof Error ? err.message : 'Failed to update the task';
     // "Not found" covers both missing and not-yours on purpose: telling
     // somebody a task exists but isn't theirs is itself a small leak.
+    res.status(msg === 'Task not found' ? 404 : 400).json({ error: msg });
+  }
+});
+
+// POST /api/staff-tasks/:id/hand-back — the owner returns it to whoever set it
+router.post('/:id/hand-back', validate(handBackSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    if (!UUID_RE.test(id)) { res.status(400).json({ error: 'id must be a UUID' }); return; }
+    const { reason } = req.body as z.infer<typeof handBackSchema>;
+    res.json({ data: await handBackTask(id, reason, req.user!.id) });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to hand the task back';
     res.status(msg === 'Task not found' ? 404 : 400).json({ error: msg });
   }
 });

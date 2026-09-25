@@ -11,9 +11,16 @@
  * The point worth not losing (§6.2): an action the COMPANY owes somebody lands
  * on the responsible person's own list, beside their own work. That is what
  * stops "we'll sort your training" quietly evaporating between reviews.
+ *
+ * TO DO PHASE 1 (docs/TASKS-SPEC.md §4–§5): three VIEWS of the same rows —
+ * Mine, Assigned by me, Everyone — in `?view=` so a bell can deep-link. Anyone
+ * can give anyone a task; the owner can hand it back; whoever set it keeps
+ * their own follow-up date. Private tasks never reach the Everyone view for
+ * anybody but their owner, their setter and admins (enforced server-side).
  */
 
 import { useCallback, useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 
 interface Task {
@@ -27,6 +34,75 @@ interface Task {
   source_id: string | null;
   created_at: string;
   completed_at: string | null;
+  person_id: string;
+  owner_name: string | null;
+  created_by: string | null;
+  is_private: boolean;
+  follow_up_on: string | null;
+  set_by_person_id: string | null;
+  set_by_name: string | null;
+  handed_back_reason: string | null;
+  handed_back_by_name: string | null;
+}
+
+/** Somebody a task can be given to — GET /staff-tasks/people. */
+interface Person { person_id: string; name: string | null }
+
+/** Set by somebody other than its owner — i.e. given to them. */
+function setBySomeoneElse(t: Task): boolean {
+  return !!t.set_by_person_id && t.set_by_person_id !== t.person_id;
+}
+
+const VIEWS = [
+  { id: 'mine', label: 'Mine' },
+  { id: 'assigned', label: 'Assigned by me' },
+  { id: 'everyone', label: 'Everyone' },
+] as const;
+type ViewId = (typeof VIEWS)[number]['id'];
+
+/**
+ * The To Do tab: a header, the three views, and the people list they share.
+ * The views mount rather than route, like the Me page's own tabs.
+ */
+export default function ToDoPage() {
+  const [params, setParams] = useSearchParams();
+  const raw = params.get('view');
+  const view: ViewId = VIEWS.some(v => v.id === raw) ? (raw as ViewId) : 'mine';
+  const [people, setPeople] = useState<Person[]>([]);
+
+  useEffect(() => {
+    // Only the "For" picker needs it; failing leaves "Me" as the one choice.
+    api.get<{ data: Person[] }>('/staff-tasks/people')
+      .then(res => setPeople(res.data))
+      .catch(() => undefined);
+  }, []);
+
+  function select(v: ViewId) {
+    const next = new URLSearchParams(params);
+    next.set('view', v);
+    setParams(next, { replace: true });
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-3">
+        <h1 className="text-xl font-semibold text-gray-900">To Do</h1>
+        <div className="flex gap-1 rounded-lg bg-gray-100 p-1" role="tablist" aria-label="To Do views">
+          {VIEWS.map(v => (
+            <button key={v.id} role="tab" aria-selected={view === v.id}
+              onClick={() => select(v.id)}
+              className={`px-3 py-1 text-sm rounded-md ${view === v.id
+                ? 'bg-white shadow-sm text-gray-900 font-medium' : 'text-gray-600 hover:text-gray-900'}`}>
+              {v.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      {view === 'mine' && <MineView people={people} />}
+      {view === 'assigned' && <AssignedView people={people} />}
+      {view === 'everyone' && <EveryoneView />}
+    </div>
+  );
 }
 
 /** "3 Oct" / "3 Oct 2025" — for the finished list. '—' on anything unparseable. */
@@ -63,7 +139,7 @@ const SOURCE_LABEL: Record<string, string> = {
   staff_review: 'From your review',
 };
 
-export default function MyTasksPage() {
+function MineView({ people }: { people: Person[] }) {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [linked, setLinked] = useState(true);
   const [loading, setLoading] = useState(true);
@@ -81,6 +157,9 @@ export default function MyTasksPage() {
   // fortnight out. That second case is the point — a task with no deadline
   // would otherwise never resurface.
   const [remindOn, setRemindOn] = useState('');
+  // '' = me. Anyone can give anyone a task (TASKS-SPEC §5.1).
+  const [forPerson, setForPerson] = useState('');
+  const [isPrivate, setIsPrivate] = useState(false);
   const [adding, setAdding] = useState(false);
 
   const load = useCallback(async () => {
@@ -110,10 +189,15 @@ export default function MyTasksPage() {
         // Only sent when they picked one — omitted means "derive it", which is
         // not the same as "never remind me".
         ...(remindOn ? { nextChaseDate: remindOn } : {}),
+        ...(forPerson ? { personId: forPerson } : {}),
+        ...(isPrivate ? { isPrivate: true } : {}),
       });
       setTitle('');
       setDueDate('');
       setRemindOn('');
+      setIsPrivate(false);
+      // "For" is left as it was — giving three things to one person in a row
+      // is the common case.
       await load();
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : 'Could not add the task');
@@ -129,6 +213,22 @@ export default function MyTasksPage() {
       await load();
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : 'Could not update the task');
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handBack(task: Task) {
+    const reason = window.prompt(
+      `Hand “${task.title}” back to ${task.set_by_name || 'whoever set it'}? Say why:`);
+    if (reason === null) return;
+    if (!reason.trim()) { setLoadError('Say why you’re handing it back.'); return; }
+    setBusyId(task.id);
+    try {
+      await api.post(`/staff-tasks/${task.id}/hand-back`, { reason: reason.trim() });
+      await load();
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : 'Could not hand it back');
     } finally {
       setBusyId(null);
     }
@@ -162,9 +262,6 @@ export default function MyTasksPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-xl font-semibold text-gray-900">My To Do</h1>
-      </div>
 
       {loadError && (
         <div className="rounded border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
@@ -208,6 +305,20 @@ export default function MyTasksPage() {
               onChange={e => setDueDate(e.target.value)}
               className="px-3 py-2 border border-gray-300 rounded text-sm"
             />
+          </label>
+          <label className="text-sm">
+            <span className="block text-xs text-gray-600 mb-1">For</span>
+            <select value={forPerson} onChange={e => setForPerson(e.target.value)}
+              className="px-3 py-2 border border-gray-300 rounded text-sm bg-white">
+              <option value="">Me</option>
+              {people.map(p => <option key={p.person_id} value={p.person_id}>{p.name ?? 'Unnamed'}</option>)}
+            </select>
+          </label>
+          <label className="text-sm inline-flex items-center gap-1.5 text-gray-700 pb-2"
+            title="Only you, whoever it's for, and admins will see it">
+            <input type="checkbox" checked={isPrivate} onChange={e => setIsPrivate(e.target.checked)}
+              className="h-4 w-4 rounded border-gray-300" />
+            Private
           </label>
           <button
             type="submit"
@@ -262,8 +373,31 @@ export default function MyTasksPage() {
                         {SOURCE_LABEL[task.source_type]}
                       </span>
                     )}
+                    {setBySomeoneElse(task) && task.source_type !== 'staff_review' && (
+                      <span className="text-[11px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-700">
+                        from {task.set_by_name || 'someone'}
+                      </span>
+                    )}
+                    {task.is_private && (
+                      <span className="text-[11px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-600">private</span>
+                    )}
                   </div>
+                  {task.handed_back_reason && (
+                    <div className="text-xs text-amber-800 mt-1">
+                      Handed back by {task.handed_back_by_name || 'someone'}: “{task.handed_back_reason}”
+                    </div>
+                  )}
                 </div>
+                {setBySomeoneElse(task) && (
+                  <button
+                    onClick={() => void handBack(task)}
+                    disabled={busyId === task.id}
+                    className="text-xs text-gray-500 hover:text-gray-800 disabled:opacity-40 shrink-0"
+                    title={`Give it back to ${task.set_by_name || 'whoever set it'}, with a reason`}
+                  >
+                    Hand back
+                  </button>
+                )}
                 <button
                   onClick={() => setEditingId(task.id)}
                   disabled={busyId === task.id}
@@ -373,6 +507,184 @@ function TaskEditRow({ task, busy, onCancel, onSave }: {
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * What I gave to other people (spec §5.2), with MY follow-up date — the
+ * setter's own clock, separate from the owner's nudge. "Reset the follow-up"
+ * is just moving that date; the server re-arms it.
+ */
+function AssignedView({ people }: { people: Person[] }) {
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setError(null);
+    try {
+      const res = await api.get<{ data: Task[] }>('/staff-tasks/assigned');
+      setTasks(res.data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not load the tasks you set');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+  useEffect(() => { void load(); }, [load]);
+
+  async function patch(task: Task, body: Record<string, unknown>) {
+    setBusyId(task.id);
+    try {
+      await api.patch(`/staff-tasks/${task.id}`, body);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not update the task');
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  const open = tasks.filter(t => t.status === 'open');
+  const done = tasks.filter(t => t.status === 'done');
+
+  if (loading) return <p className="text-sm text-gray-500">Loading…</p>;
+  return (
+    <div className="space-y-4">
+      {error && (
+        <div className="rounded border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>
+      )}
+      <div className="bg-white rounded-lg border border-gray-200 divide-y divide-gray-100">
+        {open.length === 0 ? (
+          <p className="px-4 py-6 text-sm text-gray-400">
+            {error ? 'Couldn’t load these.' : 'Nothing you’ve given anyone is still open.'}
+          </p>
+        ) : open.map(task => {
+          const due = fmtDue(task.due_date);
+          return (
+            <div key={task.id} className="px-4 py-3 flex flex-wrap items-center gap-x-4 gap-y-2">
+              <div className="min-w-0 flex-1">
+                <div className="text-sm text-gray-900">{task.title}</div>
+                <div className="flex flex-wrap items-center gap-2 mt-1">
+                  <span className={`text-xs ${due.tone}`}>{due.text}</span>
+                  {task.is_private && (
+                    <span className="text-[11px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-600">private</span>
+                  )}
+                </div>
+              </div>
+              <label className="text-xs text-gray-600">
+                <span className="block mb-0.5">With</span>
+                <select value={task.person_id} disabled={busyId === task.id}
+                  onChange={e => void patch(task, { personId: e.target.value })}
+                  className="px-2 py-1 border border-gray-300 rounded text-sm bg-white">
+                  {/* Keep the current owner selectable even if they are not in
+                      the picker (a login since deactivated) — a select with no
+                      matching option renders blank and would save blank. */}
+                  {!people.some(p => p.person_id === task.person_id) && (
+                    <option value={task.person_id}>{task.owner_name ?? 'Unknown'}</option>
+                  )}
+                  {people.map(p => <option key={p.person_id} value={p.person_id}>{p.name ?? 'Unnamed'}</option>)}
+                </select>
+              </label>
+              <label className="text-xs text-gray-600">
+                <span className="block mb-0.5">Follow up</span>
+                <input type="date" value={task.follow_up_on ?? ''} disabled={busyId === task.id}
+                  onChange={e => void patch(task, { followUpOn: e.target.value || null })}
+                  className="px-2 py-1 border border-gray-300 rounded text-sm" />
+              </label>
+              <button onClick={() => {
+                if (window.confirm(`Drop “${task.title}”? It comes off ${task.owner_name || 'their'} list.`)) {
+                  void patch(task, { status: 'cancelled' });
+                }
+              }}
+                disabled={busyId === task.id}
+                className="text-xs text-gray-400 hover:text-gray-600 disabled:opacity-40">
+                Drop
+              </button>
+            </div>
+          );
+        })}
+      </div>
+      {done.length > 0 && (
+        <div>
+          <h2 className="text-sm font-medium text-gray-700 mb-2">Done in the last 30 days</h2>
+          <div className="bg-white rounded-lg border border-gray-200 divide-y divide-gray-100">
+            {done.map(task => (
+              <div key={task.id} className="flex items-center gap-3 px-4 py-2">
+                <span className="text-sm text-gray-500 line-through min-w-0 flex-1">{task.title}</span>
+                <span className="text-xs text-gray-400 whitespace-nowrap">
+                  {task.owner_name} · done {fmtShort(task.completed_at)}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      <p className="text-xs text-gray-400">
+        “Follow up” is your own reminder to check on it — separate from theirs. Move it to reset it;
+        clear it to stop. You’ll hear when it’s done, and if they hand it back.
+      </p>
+    </div>
+  );
+}
+
+/** Every open task, grouped by owner (spec §4). Read-only: a glance, not a workbench. */
+function EveryoneView() {
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    api.get<{ data: Task[] }>('/staff-tasks/everyone')
+      .then(res => setTasks(res.data))
+      .catch(err => setError(err instanceof Error ? err.message : 'Could not load everyone’s tasks'))
+      .finally(() => setLoading(false));
+  }, []);
+
+  if (loading) return <p className="text-sm text-gray-500">Loading…</p>;
+  if (error) {
+    return <div className="rounded border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>;
+  }
+  if (tasks.length === 0) return <p className="text-sm text-gray-400">Nobody has anything open.</p>;
+
+  const groups = new Map<string, Task[]>();
+  for (const t of tasks) {
+    const key = t.owner_name || 'Unnamed';
+    groups.set(key, [...(groups.get(key) ?? []), t]);
+  }
+
+  return (
+    <div className="space-y-4">
+      {[...groups.entries()].map(([owner, list]) => (
+        <div key={owner} className="bg-white rounded-lg border border-gray-200">
+          <div className="px-4 py-2 border-b border-gray-100 flex items-center gap-2">
+            <span className="text-sm font-medium text-gray-900">{owner}</span>
+            <span className="text-xs text-gray-400">{list.length} open</span>
+          </div>
+          <ul className="divide-y divide-gray-100">
+            {list.map(t => {
+              const due = fmtDue(t.due_date);
+              return (
+                <li key={t.id} className="px-4 py-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <span className="text-sm text-gray-800 min-w-0 flex-1">{t.title}</span>
+                  {t.is_private && (
+                    <span className="text-[11px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-600">private</span>
+                  )}
+                  {setBySomeoneElse(t) && (
+                    <span className="text-[11px] text-gray-400">from {t.set_by_name || 'someone'}</span>
+                  )}
+                  <span className={`text-xs ${due.tone}`}>{due.text}</span>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      ))}
+      <p className="text-xs text-gray-400">
+        Private to-dos only appear here for the person they belong to, whoever set them, and admins.
+      </p>
     </div>
   );
 }

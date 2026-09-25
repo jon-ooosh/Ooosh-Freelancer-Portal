@@ -1,8 +1,9 @@
 # To Do — the things that fall between the cracks
 
-**Status: SPEC, for jon's review. Nothing built beyond what §1 lists.** Written
-24 Sep 2026, straight after the staff records module closed
-(`docs/STAFF-RECORDS-SPEC.md` §23), from the discussion recorded in §0.
+**Status: AGREED 24 Sep 2026. Phase 1 (assigning) BUILT — §13. Phases 2–4 to
+come.** Written straight after the staff records module closed
+(`docs/STAFF-RECORDS-SPEC.md` §23), from the discussion recorded in §0; jon's
+answers to §12 are recorded there.
 
 ---
 
@@ -94,8 +95,10 @@ it's ticked, did everyone do it, or one person?
 
 ## 4. The surface — one page, tabs as views
 
-A top-level **To Do** page (`/todo`), tabs in the URL (`?tab=`) so a bell can
-deep-link, like the Staff page.
+**Placement — jon's call (§12.3):** it stays on the Me page, as its **first
+tab and the default**: `/me?tab=todo`, with the views below as a second row of
+tabs in `&view=mine|assigned|everyone` so a bell can deep-link. (The spec had
+proposed a top-level `/todo`; the Me page keeps it where people already look.)
 
 | Tab | Shows | Who |
 |---|---|---|
@@ -104,8 +107,7 @@ deep-link, like the Staff page.
 | **Lists** | the shared lists and their items; add, tick, "I'll take it" | everyone |
 | **Everyone** | every open to-do, grouped by owner, filterable | everyone (jon: "everyone should see everyone"), minus private ones (§8) |
 
-Me › My To Do stays as a shortcut to `/todo?tab=mine`; the old
-`/me?tab=todo` link keeps working, because bells already point at it.
+The old `/me?tab=todo` link — already in bells — lands on Mine.
 
 Every tab is a **view of the same rows**, not a different kind of thing — how
 Asana, Linear and Todoist do it. The distinction between the tabs is only
@@ -280,15 +282,50 @@ Backfill: existing review actions get `is_private = true`.
 
 ---
 
-## 12. Open questions for jon
+## 12. Decisions on the open questions (jon, 24 Sep 2026)
 
-1. **Owner-less recurring items (bins):** should anyone be nudged? Options:
-   (a) nobody — it's a visible date on Lists and Everyone; (b) a list can have
-   "watchers" who get the nudge; (c) bins become a *task* owned by whoever
-   puts them out. Recommendation: (c) if one person does it, else (b).
-2. **Which lists to start with?** Shopping and Building suggested.
-3. **Where in the nav?** A top-level To Do item beside Inbox is the
-   recommendation — it's daily, not an Operations sub-page.
-4. **Pull-ins (phase 4):** tick a job reminder from Mine, or link out to do
-   it on the job? Recommendation: tick from Mine, through the job module's own
-   endpoint.
+1. **Owner-less recurring items (bins):** **watchers** — a list has people who
+   get the nudge.
+2. **Lists to start with:** Shopping and Building — **plus an easy way to add
+   more** (phase 3).
+3. **Placement:** the Me page, To Do as the first and default tab (§4).
+4. **Pull-ins:** **tick from Mine**, through the job module's own endpoint.
+
+---
+
+## 13. Phase 1 build log — assigning (24 Sep 2026)
+
+Migration `255_staff_tasks_assigning.sql` (written as 253; renumbered on merge — main had taken 253–254 for shop receipts): `follow_up_on` /
+`follow_up_chased_at` (the setter's clock), `handed_back_by` / `_reason` /
+`_at`, `is_private` (backfilled true for review actions), an index on
+`created_by`.
+
+**The permission rule moved, in one place.** `assertCanTouch()` now allows the
+owner, **the setter** (`created_by`) and admins, and returns which of the three
+the caller is. The owner can't move the setter's follow-up or give the task to
+somebody else — the person being chased must not be able to switch off the
+chasing — so they **hand it back** instead (`handBackTask()`, owner only, needs
+a reason, moves it to the setter's list and bells them).
+
+**Reading is wider than touching.** `listEveryone()` shows every open task to
+every staff member except private ones (owner, setter, admins only);
+touching any of them still goes through `assertCanTouch()`.
+
+**Follow-up defaults.** A task given to somebody else gets the setter's
+follow-up = its due date, or a fortnight out. **Not for review actions** — the
+review's check-in already follows those up, and a bell per action would be
+noise.
+
+**Bells** (`staff-notifications.ts`): assigned (to the new owner), handed back
+and done (to the setter), and `runTaskFollowUpChase()` at 09:45 beside the
+owner's chase. All bells; the escalation scheduler emails per preference.
+
+**The picker** (`GET /staff-tasks/people`) offers active non-freelancer logins
+with a person behind them, minus the platform's service account — a person
+with no login would never see the task or get the bell.
+
+Verified on a real Postgres over HTTP as three users: assign with bell;
+private hidden from a colleague, visible to owner and setter; a colleague's
+edit refused as "not found"; the owner refused on the follow-up; follow-up
+fires once and re-arms on a move; hand back returns it with the reason;
+reassign bells the new owner; done bells the setter.
