@@ -252,6 +252,9 @@ export default function ShopTillPage() {
 
   /** Change route, and re-check the tender: "their bill" needs a job (§4.1). */
   const chooseRoute = (j: SellableJob | null) => {
+    // A receipt address belongs to whoever the sale was for. Switching who it's
+    // for clears it, so band A's manager can't get walk-in B's receipt (jon).
+    if ((j?.id ?? null) !== (route?.id ?? null)) setReceiptTo('');
     setRoute(j);
     setJobSearchOpen(false);
     setJobTerm('');

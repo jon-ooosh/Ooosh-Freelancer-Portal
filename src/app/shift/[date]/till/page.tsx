@@ -56,6 +56,8 @@ interface TonightSale {
   push_after: string
   mine: boolean
   sold_to_hh_job_number: number | null
+  /** Where this sale's latest receipt went, if one was sent. */
+  last_receipt_to: string | null
   lines: { name: string; qty: number }[]
 }
 interface TonightSummary {
@@ -124,6 +126,11 @@ export default function SitterTillPage() {
   const [sales, setSales] = useState<TonightSale[]>([])
   const [summary, setSummary] = useState<TonightSummary | null>(null)
   const searchRef = useRef<HTMLInputElement>(null)
+  // Receipts: the checkout's optional box, and one list row's resend form.
+  const [receiptTo, setReceiptTo] = useState('')
+  const [receiptFor, setReceiptFor] = useState<string | null>(null)
+  const [receiptFormTo, setReceiptFormTo] = useState('')
+  const [receiptBusy, setReceiptBusy] = useState(false)
 
   const loadContext = useCallback(async () => {
     try {
@@ -198,6 +205,8 @@ export default function SitterTillPage() {
   // "Their bill" only exists once a band is picked; going back to walk-in
   // clears it rather than leaving an impossible choice selected.
   const pickJob = (id: string | null | undefined) => {
+    // A receipt address belongs to whoever the sale is for — switching clears it.
+    if (id !== jobId) setReceiptTo('')
     setJobId(id)
     if (!id && ctx?.tenders.find((t) => t.key === tender)?.needsJob) setTender(null)
   }
@@ -222,7 +231,15 @@ export default function SitterTillPage() {
       })
       const data = await r.json()
       if (!r.ok) { setError(data.error || 'That didn’t go through — nothing was recorded.'); return }
-      setDone(tenderObj?.needsJob ? `${money(total)} put on their bill.` : `Taken — ${money(total)}.`)
+      // The sale is in whatever happens to the email.
+      let receiptNote = ''
+      if (!tenderObj?.needsJob && receiptTo.trim() && data.id) {
+        const err = await postReceipt(data.id, receiptTo)
+        if (err) setError(`Sale recorded, but the receipt didn’t send: ${err}`)
+        else receiptNote = ` Receipt sent to ${receiptTo.trim()}.`
+      }
+      setDone((tenderObj?.needsJob ? `${money(total)} put on their bill.` : `Taken — ${money(total)}.`) + receiptNote)
+      setReceiptTo('')
       setBasket([])
       setTender(null)
       setJobId(ctx ? defaultRoute(ctx) : undefined)
@@ -233,6 +250,33 @@ export default function SitterTillPage() {
     } finally {
       setSaving(false)
     }
+  }
+
+  /** Email a receipt for one of tonight's sales. Returns an error message, or null. */
+  async function postReceipt(id: string, to: string): Promise<string | null> {
+    try {
+      const r = await fetch(`/api/studio-sitter/shifts/${date}/till/sales/${id}/receipt`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: to.trim() }),
+      })
+      if (r.ok) return null
+      const data = await r.json().catch(() => ({}))
+      return data.error || 'The receipt didn’t send.'
+    } catch {
+      return 'Couldn’t reach the office system — check your signal.'
+    }
+  }
+
+  async function sendRowReceipt(id: string) {
+    setReceiptBusy(true)
+    setError(null)
+    const err = await postReceipt(id, receiptFormTo)
+    setReceiptBusy(false)
+    if (err) { setError(err); return }
+    setReceiptFor(null)
+    setDone(`Receipt sent to ${receiptFormTo.trim()}.`)
+    loadSales()
   }
 
   async function cancel(id: string) {
@@ -405,6 +449,26 @@ export default function SitterTillPage() {
                   </div>
                 </div>
 
+                {/* Optional receipt — typed only. Band contacts' addresses are
+                    never sent to a sitter's phone. Not for "their bill": nothing
+                    was paid, and their invoice is the document. */}
+                {!tenderObj?.needsJob && (
+                  <div>
+                    <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">
+                      Email a receipt? <span className="font-normal normal-case">(optional)</span>
+                    </p>
+                    <input
+                      type="email"
+                      inputMode="email"
+                      autoComplete="off"
+                      value={receiptTo}
+                      onChange={(e) => setReceiptTo(e.target.value)}
+                      placeholder="their@email.com"
+                      className="w-full rounded-lg border border-gray-300 px-4 py-3 text-base focus:border-ooosh-500 focus:outline-none"
+                    />
+                  </div>
+                )}
+
                 <button
                   onClick={take}
                   disabled={!canTake}
@@ -454,13 +518,47 @@ export default function SitterTillPage() {
                         )}
                         <span className="block truncate text-xs text-gray-500">
                           {s.lines.map((l) => `${l.qty}× ${l.name}`).join(', ')}
+                          {s.last_receipt_to ? ` · ✉ ${s.last_receipt_to}` : ''}
                         </span>
+                        {receiptFor === s.id && (
+                          <span className="mt-2 flex gap-2">
+                            <input
+                              type="email"
+                              inputMode="email"
+                              autoFocus
+                              value={receiptFormTo}
+                              onChange={(e) => setReceiptFormTo(e.target.value)}
+                              placeholder="their@email.com"
+                              className="min-w-0 flex-1 rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                            />
+                            <button
+                              onClick={() => sendRowReceipt(s.id)}
+                              disabled={receiptBusy || !receiptFormTo.trim()}
+                              className="rounded-lg bg-gray-800 px-3 py-2 text-sm font-medium text-white disabled:bg-gray-300"
+                            >
+                              {receiptBusy ? '…' : 'Send'}
+                            </button>
+                          </span>
+                        )}
                       </span>
-                      {cancellable ? (
-                        <button onClick={() => cancel(s.id)} className="shrink-0 text-xs font-medium text-red-600">Cancel</button>
-                      ) : s.status === 'cancelled' ? (
-                        <span className="shrink-0 text-xs text-gray-400">cancelled</span>
-                      ) : null}
+                      <span className="flex shrink-0 flex-col items-end gap-1">
+                        {cancellable ? (
+                          <button onClick={() => cancel(s.id)} className="text-xs font-medium text-red-600">Cancel</button>
+                        ) : s.status === 'cancelled' ? (
+                          <span className="text-xs text-gray-400">cancelled</span>
+                        ) : null}
+                        {s.status !== 'cancelled' && s.tender !== 'invoice_later' && (
+                          <button
+                            onClick={() => {
+                              setReceiptFor(receiptFor === s.id ? null : s.id)
+                              setReceiptFormTo(s.last_receipt_to ?? '')
+                            }}
+                            className="text-xs font-medium text-gray-600"
+                          >
+                            {receiptFor === s.id ? 'Close' : 'Receipt'}
+                          </button>
+                        )}
+                      </span>
                     </li>
                   )
                 })}
