@@ -1,7 +1,7 @@
 ---
 paths:
   - "backend/src/routes/{money,excess,costs,cancellations,warehouse}.ts"
-  - "backend/src/services/{excess-*,hh-deposit,hh-billing-deposits,money-emails,vat-adjustment,stripe-*,cost-*,supplier-terms,job-financials-backfill,job-value-sync,cancellation-calculator,remittance}.ts"
+  - "backend/src/services/{excess-*,hh-deposit,hh-deposit-release,hh-xero-sync,shop-close,hh-billing-deposits,money-emails,vat-adjustment,stripe-*,cost-*,supplier-terms,job-financials-backfill,job-value-sync,cancellation-calculator,remittance}.ts"
   - "backend/src/config/{stripe,xero}.ts"
   - "frontend/src/components/{MoneyTab,ExcessPaymentModal,ExcessGateBanner,ExcessHistorySection,CostCaptureModal,CostAllocationModal,CancellationModal,CombineBookingsModal}.tsx"
   - "frontend/src/pages/{ExcessLedgerPage,MoneyOverviewPage,CostsPage}.tsx"
@@ -12,6 +12,9 @@ paths:
 
 Full history, incident forensics and design rationale: `docs/reference/MONEY-AND-EXCESS.md`
 (+ costs/Xero and Stripe detail in `docs/reference/SHARED-UTILITIES.md`).
+**Creating / approving invoices, allocating payments to invoices, and the Xero task each
+triggers: `docs/reference/HIREHOP-BILLING-API.md`** (captured payloads — read it before
+writing any new billing call).
 
 ## Single definitions — never re-derive these inline
 

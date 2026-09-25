@@ -1243,36 +1243,30 @@ once the mirror lands — it costs one query, and any item below 100 means today
 
 ### THE FIRST THING TO DO NEXT
 
-**Exercise the sitter till live.** A studio evening has ONE shift and ONE sitter, so a
-real booking tonight blocks testing on tonight. Instead (migration 252): on the roster,
-*＋ Add cover* on a FREE date, assign the portal test account `test123@oooshtours.co.uk`
-(listed in `shop_till_test_emails`, which lets it sell on any date it's rostered to), and
-optionally put a scratch rehearsal job on that date for the "their bill" test. Log in to
-the portal as test123, open that shift, then:
-
-1. shift page → *Shop till* → look up an item (price lookup);
-2. sell one **walk-in, cash** → lands on the weekly shop job, drains like any sale;
-3. sell one **on the band's bill** → lands on the band's job, no deposit;
-4. cancel a third inside its 2 minutes;
-5. lock-up page shows the takings; submit → the handover thread has the 🛒 line;
-6. OP: the till's *Sitter sales* tab lists 2, the lock-up report links to it; tick them;
-7. check the lock-up checklist now asks "Any money outstanding?" (if it still says
-   "Have the clients paid?", the template had been edited — change it in Settings).
+**Build the weekly close — §20.** Designed and agreed with jon (25 Sep 2026); every
+HireHop call it needs has been captured from the UI and is written up in
+`docs/reference/HIREHOP-BILLING-API.md`. Nothing is built yet. Expect some trial and
+error on the first live close — do it on a scratch week first (§20.6).
 
 ### Then, in order
 
-10. Lock-up report integration (§5).
-11. ✅ **SHIPPED Sep 2026** (both tills) — see §19. PDF receipts parked.
-12. Gate manual payment entry in HireHop (§0) — last, and only once staff trust the till.
-13. Line-by-line refunds (see gaps below) — jon, Sep 2026: last.
-    Also still to come: the sitter till in the freelancer portal (§5), with the same
-    "in today" picker on a phone.
+1. **The weekly close (§20)** — next.
+2. Line-by-line refunds (see gaps below) — after the close.
+3. Gate manual payment entry in HireHop (§0) — jon, manual.
+(Steps 10 lock-up and 11 receipts are done — both tills. PDF receipts parked.)
 
 ### Known gaps and decisions still open
 
-- **Raising the weekly invoice is still manual in HireHop.** OP now notices
-  (the 15-min check sets `invoiced_at` when an invoice appears) and refunds stop
-  on an invoiced job, but OP does not raise it.
+- **Raising the weekly invoice is still manual in HireHop** until §20 is built. OP
+  notices (the 15-min check sets `invoiced_at` when an invoice appears) and refunds
+  stop on an invoiced job.
+- **`shop_availability_job` is a FIXED job number (16750).** From the next week it
+  would ask HireHop for availability against last week's job. §20 makes it follow the
+  current week.
+- **`shop-period.ts weekStart()` uses the UTC date.** Between 00:00 and 01:00 on a
+  Monday in BST, a sale is still "Sunday" to it and lands on LAST week's job. Harmless
+  while weeks are closed by hand on Monday; §20 must fix it (use the London date)
+  before the close runs near midnight.
 - **Partial refunds** (one item out of a basket) are "refund all, ring the rest
   again". Whole-line returns are cheap (the proven `items_delete.php` + a partial
   refund). Part-of-a-line (bought 3, return 1) needs `items_save.php` with a lower
@@ -1302,3 +1296,96 @@ the portal as test123, open that shift, then:
 3. **Capture a HireHop payload from its own UI before writing to a new
    endpoint** (§2.9). Four endpoints so far have not matched their docs — and
    once, the docs were right and I had misread them.
+
+---
+
+## 20. The weekly close — DESIGNED, NOT BUILT (agreed with jon, 25 Sep 2026)
+
+**The gap.** OP opens a new weekly shop job each week but never closes the old one: it
+stays DISPATCHED, uninvoiced, with every payment unallocated in HireHop and Xero. The
+close turns a week into: one approved invoice, every payment allocated to it (£0 owing
+in HireHop AND Xero), the job Completed, and OP knowing the week is done.
+
+**The HireHop calls are all captured** — `docs/reference/HIREHOP-BILLING-API.md`
+§3 create invoice, §4 approve (+ Xero), §5 allocate (+ Xero), §6 status. That doc is
+also the foundation for jon's planned bookkeeping module (auto-reconciling invoices
+with payments on every job) — keep it current as anything new is learned.
+
+### 20.1 The sequence
+
+Each step reads HireHop back before the next; each is resumable (§20.4).
+
+1. **Pre-flight — refuse to start unless ALL hold:**
+   - the week is over (its Sunday has passed, UK time);
+   - no `shop_sales` on that job are `queued` or `failed`;
+   - `checkShopPeriod()` is clean — goods, money, lines, status (`shop-reconcile.ts`);
+   - no invoice exists on the job yet (or: resume the one OP created — §20.4).
+2. **Create the draft invoice** — `billing_save.php`, **`all: 1` always** (the UI's
+   default tick is a HireHop user setting — never rely on it). Store its id.
+3. **Check the draft to the penny.** Its gross (`debit` / NET+TAX) must equal BOTH
+   OP's expected gross (Σ `line_gross` of the job's pushed, un-removed lines) AND the
+   payments held (Σ deposit availability). This is where HireHop's VAT rounding across
+   many lines gets verified on real data. **Any difference → stop at the draft**, email
+   jon the three numbers, do not approve. (Drafts don't reach Xero, so stopping here is
+   safe; jon can fix and approve by hand, or delete it.)
+4. **Approve** — `billing_save_status.php { id, status: 2, date, type: 1, local }`, then
+   `syncSavedRowToXero(label, response)` (task `post_invoice_credit`). Read back:
+   `STATUS 2`, a number, and — after sync — `ACC_ID` set. **Invoice date = the week's
+   Sunday, 23:59** (jon: sales then land in their own week; volumes are low, so a week
+   straddling a VAT quarter end is NOT split).
+5. **Allocate every payment** with an unallocated balance > 0 —
+   `billing_payments_save.php { id: 0, date, paid: <that balance>, bank: <deposit's
+   bank>, OWNER: <invoice id>, deposit: <deposit id>, no_webhook: 1 }`, then
+   `syncSavedRowToXero` (task `post_payment`). Refunded payments have £0 left and are
+   skipped. Read back: invoice `owing` = 0.
+6. **Complete the job** — `status_save.php { status: 11 }`, read back `STATUS 11`.
+   Completed keeps sale stock consumed (§2.1).
+7. **Record it in OP** — `shop_sale_periods.invoiced_at`, plus the invoice id/number.
+
+### 20.2 Who and where
+
+- **jon only** (jon: "just me — stop people wandering into the HireHop job"): an
+  `authorize('admin')` route (irreversible — it commits to Xero) and an admin-only
+  **"Close last week"** button on the till's *This week* tab, showing each step's result.
+- **Signposted:** a Monday-morning email to jon — "last week is ready to close" (or
+  "can't close yet: <why>") — linking straight to the button.
+- **v2, after a few clean weeks:** run it automatically early Monday, still approving
+  only when step 3 balances.
+
+### 20.3 Also in this build
+
+- **Open next week's job proactively** — a scheduled run early Monday (e.g. 00:05)
+  calling `getOrCreateShopPeriod()`. Today it's created on demand by the first sale's
+  drain or the till's "Create this week's job" button.
+- **`shop_availability_job` must follow the current week** — have `getAvailabilityJob()`
+  fall back to (or be replaced by) the current period's job, not a fixed number.
+- **Fix `weekStart()` to use the London date** (see §19 gaps) before anything runs near
+  midnight.
+
+### 20.4 State and resume
+
+Add to `shop_sale_periods` (new migration): `hh_invoice_id`, `hh_invoice_number`,
+`close_state` (`drafted` / `approved` / `allocated` / `completed`), `close_log` JSONB
+(each step's outcome), `closed_at`, `closed_by`. The close picks up from `close_state`:
+never create a second invoice if `hh_invoice_id` is set; never re-allocate a payment
+whose balance is already 0 (read it back — the allocation list is authoritative).
+`runShopReconcileScan()` skips invoiced weeks already (it only checks
+`invoiced_at IS NULL`); make sure a half-closed week still alarms sensibly.
+
+### 20.5 What can go wrong (and the answer)
+
+| Failure | Answer |
+|---|---|
+| Draft ≠ OP total or ≠ payments | Stop at draft, email jon the numbers. Nothing in Xero. |
+| Approve succeeds, Xero sync refuses | Invoice approved in HireHop, not Xero — `sendXeroSyncFailedAlert` (existing) to jon; don't allocate until fixed. |
+| An allocation fails mid-way | `close_state = approved`, log which payments are done; resume allocates only those still > 0. |
+| A late refund after close | Window C — credit note by hand (§8). Refunds already refuse on an invoiced job. |
+
+### 20.6 First live run
+
+Use a scratch week, not a real one: jon creates a throwaway shop-style job (a couple of
+cheap lines at odd prices, two payments on different banks), register it as a period
+(or point a test close at it), run the close, and check HireHop (invoice approved, £0
+owing, job Completed) and Xero (invoice paid by the overpayments). Clean up in Xero
+afterwards.
+
