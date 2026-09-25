@@ -68,7 +68,7 @@ export default function StudioHandoverCard({ jobId }: { jobId: string }) {
         <h3 className="font-semibold text-gray-900 flex items-center gap-2">
           <span>🎸</span> Studio sitter handover
         </h3>
-        <Link to="/studio-sitters" className="text-xs font-medium text-purple-600 hover:text-purple-800">
+        <Link to="/operations/rehearsals?tab=sitters" className="text-xs font-medium text-purple-600 hover:text-purple-800">
           Manage on roster →
         </Link>
       </div>

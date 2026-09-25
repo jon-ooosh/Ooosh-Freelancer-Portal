@@ -51,8 +51,14 @@ const mockEmail = (emailService as any).sendRaw as jest.Mock;
 
 interface Dep { id: number; credit: number; bank: number; allocated: number }
 interface Inv { id: number; status: number; number: string; net: number; tax: number; paid: number; accId: string }
+interface App { id: number; invoiceId: number; depositId: number; amount: number; accId: string }
 
-let hh: { jobStatus: number; invoices: Inv[]; deposits: Dep[]; nextApp: number; draftNet: number; draftTax: number };
+let hh: {
+  jobStatus: number; invoices: Inv[]; deposits: Dep[]; apps: App[]; nextApp: number;
+  draftNet: number; draftTax: number;
+  /** How many allocation pushes HireHop "accepts" without reaching Xero — what 16762 did live. */
+  xeroDropsApps: number;
+};
 
 function rows() {
   const out: any[] = [];
@@ -67,6 +73,13 @@ function rows() {
     out.push({
       kind: 6, credit: d.credit, owing: -(d.credit - d.allocated), paid: d.allocated,
       data: { ID: d.id, ACC_ACCOUNT_ID: d.bank, DESCRIPTION: '16757 - shop sale' },
+    });
+  }
+  for (const a of hh.apps) {
+    // The invoice-side twin, shaped as captured on 16762.
+    out.push({
+      kind: 3, credit: a.amount,
+      data: { ID: a.id, OWNER: a.invoiceId, OWNER_DEPOSIT: a.depositId, AMOUNT: a.amount, ACC_ID: a.accId, parent_is: 'invoice' },
     });
   }
   return out;
@@ -93,7 +106,9 @@ function installHireHop() {
       const dep = hh.deposits.find((d) => d.id === body.deposit)!;
       const inv = hh.invoices.find((i) => i.id === body.OWNER)!;
       dep.allocated += body.paid; inv.paid += body.paid;
-      return { success: true, data: { hh_task: 'post_payment', hh_id: hh.nextApp++ } };
+      const app: App = { id: hh.nextApp++, invoiceId: inv.id, depositId: dep.id, amount: body.paid, accId: '' };
+      hh.apps.push(app);
+      return { success: true, data: { hh_task: 'post_payment', hh_id: app.id } };
     }
     if (path === '/frames/status_save.php') { hh.jobStatus = body.status; return { success: true, data: {} }; }
     throw new Error(`unexpected POST ${path}`);
@@ -102,6 +117,11 @@ function installHireHop() {
     if (saved.hh_task === 'post_invoice_credit') {
       const inv = hh.invoices.find((i) => i.id === saved.hh_id);
       if (inv) inv.accId = 'xero-guid';
+    }
+    if (saved.hh_task === 'post_payment') {
+      const app = hh.apps.find((a) => a.id === saved.hh_id);
+      if (app && hh.xeroDropsApps > 0) hh.xeroDropsApps--;       // "package_updated: true", nothing in Xero
+      else if (app) app.accId = `xero-alloc-${app.id}`;
     }
     return { ok: true, error: null };
   });
@@ -142,7 +162,7 @@ function installDb() {
 beforeEach(() => {
   jest.clearAllMocks();
   hh = {
-    jobStatus: 5, invoices: [], nextApp: 500,
+    jobStatus: 5, invoices: [], apps: [], nextApp: 500, xeroDropsApps: 0,
     deposits: [
       { id: 9401, credit: 5.00, bank: 168, allocated: 0 },    // Till (cash)
       { id: 9402, credit: 7.00, bank: 169, allocated: 0 },    // Worldpay
@@ -238,6 +258,7 @@ describe('runShopClose', () => {
     // Approved and in Xero; 9401 was allocated before a Xero wobble stopped it.
     hh.invoices = [{ id: 12900, status: 2, number: 'OT-INV-99001', net: 10, tax: 2, paid: 5, accId: 'xero-guid' }];
     hh.deposits[0].allocated = 5;
+    hh.apps = [{ id: 499, invoiceId: 12900, depositId: 9401, amount: 5, accId: 'xero-alloc-499' }];
     Object.assign(period, { hh_invoice_id: 12900, hh_invoice_number: 'OT-INV-99001', close_state: 'approved' });
 
     const r = await runShopClose('p1', 'user-jon');
@@ -260,6 +281,31 @@ describe('runShopClose', () => {
     expect(posts('/php_functions/billing_save_status.php')).toHaveLength(0);
     expect(mockSync.mock.calls[0][1]).toMatchObject({ hh_task: 'post_invoice_credit', hh_id: 12900 });
     expect(period.hh_invoice_number).toBe('OT-INV-99001');
+  });
+
+  it('does NOT call the week closed when HireHop says it synced an allocation but Xero never got it', async () => {
+    hh.xeroDropsApps = 99;                      // what 16762 did live, 25 Sep 2026
+
+    const r = await runShopClose('p1', 'user-jon');
+
+    expect(r.done).toBe(false);
+    expect(r.message).toContain("haven't reached Xero");
+    expect(period.close_state).toBe('approved');   // not allocated, not completed
+    expect(hh.jobStatus).toBe(5);
+
+    // Once HireHop behaves, pressing Close again finishes — no re-allocation.
+    hh.xeroDropsApps = 0;
+    const again = await runShopClose('p1', 'user-jon');
+    expect(again.done).toBe(true);
+    expect(posts('/php_functions/billing_payments_save.php')).toHaveLength(2);
+    expect(hh.jobStatus).toBe(11);
+  });
+
+  it('retries an allocation push once before stopping', async () => {
+    hh.xeroDropsApps = 1;                       // the first push goes nowhere, the retry lands
+    const r = await runShopClose('p1', 'user-jon');
+    expect(r.done).toBe(true);
+    expect(hh.apps.every((a) => a.accId)).toBe(true);
   });
 
   it("does not allocate anything if Xero refuses the invoice", async () => {

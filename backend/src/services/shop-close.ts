@@ -560,6 +560,7 @@ async function closeSteps(periodId: string, userId: string | null): Promise<stri
       await stop(periodId, 'allocate', `After allocating, the invoice shows ${owing == null ? '?' : gbp(owing)} owing`
         + `${left.length ? ` and ${left.length} payment(s) still hold money` : ''} — expected £0.00. Check the job in HireHop.`);
     }
+    await checkAllocationsInXero(periodId, hhJobNumber, rows, invoiceId, p.hh_invoice_number || String(invoiceId));
     await setState(periodId, 'allocated');
     await log(periodId, 'allocate', true, 'Invoice shows £0.00 owing.');
     p = await loadPeriod(periodId);
@@ -595,6 +596,49 @@ async function pushInvoiceToXero(
       + 'Check it is in Xero, then press Close to carry on.');
   }
   await log(periodId, 'xero', true, `Invoice ${number} is in Xero.`);
+}
+
+/** The allocations on our invoice (the invoice-side twin of each kind 3 row). */
+function invoiceAllocations(rows: Row[], invoiceId: number): Row[] {
+  return rows.filter((row) => kindOf(row) === 3
+    && String(row.parent_is ?? row.data?.parent_is ?? '') === 'invoice'
+    && Number(row.data?.OWNER ?? 0) === invoiceId);
+}
+
+const hasXeroId = (row: Row) => {
+  const accId = String(row.data?.ACC_ID ?? '').trim();
+  return accId !== '' && accId !== '0';
+};
+
+/**
+ * Read back Xero for every allocation on the invoice: HireHop stamps each with
+ * its Xero id (`ACC_ID`) once Xero has applied it. The first live close
+ * (scratch job 16762, 25 Sep 2026) proved `tasks.php` can answer
+ * `package_updated: true` and leave the allocation OUT of Xero — HireHop's own
+ * UI did exactly the same. So "HireHop says it synced" is not enough to call
+ * the invoice paid. One more push per missing allocation, then stop and say so.
+ */
+async function checkAllocationsInXero(
+  periodId: string, hhJobNumber: number, rows: Row[], invoiceId: number, number: string,
+): Promise<void> {
+  let missing = invoiceAllocations(rows, invoiceId).filter((row) => !hasXeroId(row));
+  if (!missing.length) {
+    await log(periodId, 'xero', true, `Every payment is applied to ${number} in Xero.`);
+    return;
+  }
+  for (const row of missing) {
+    await syncSavedRowToXero(`shop close — ${number} allocation ${idOf(row)} (retry)`, {
+      hh_task: 'post_payment', hh_id: idOf(row), hh_acc_package_id: 3, hh_package_type: 1,
+    });
+  }
+  missing = invoiceAllocations(await readBillingRows(hhJobNumber), invoiceId).filter((row) => !hasXeroId(row));
+  if (missing.length) {
+    const total = round2(missing.reduce((s, r) => s + Math.abs(parseFloat(r.credit ?? r.data?.AMOUNT ?? '0')), 0));
+    await stop(periodId, 'xero', `The payments are allocated in HireHop (£0.00 owing there), but ${missing.length} of them `
+      + `(${gbp(total)}) haven't reached Xero — HireHop accepted the push and didn't do it, so Xero still shows ${number} `
+      + 'as owing. The job has NOT been completed. Press Close to try the push again.');
+  }
+  await log(periodId, 'xero', true, `Every payment is applied to ${number} in Xero (after a retry).`);
 }
 
 /** Status 11, read back. Completed keeps sale stock consumed (§2.1). */
