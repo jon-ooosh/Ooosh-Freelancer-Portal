@@ -1222,7 +1222,8 @@ once the mirror lands — it costs one query, and any item below 100 means today
 | **Test accounts** | `shop_till_test_emails` (migration 252, `["test123@oooshtours.co.uk"]`): a listed portal account may use the till on ANY date it's rostered to, not just the night. Still needs the roster assignment. Empty the list to switch it off. |
 | **Lock-up report (step 10)** | Sitter's lock-up page shows "Shop till tonight: N sales · £x taken" by tender; the submitted summary in the handover thread gets a 🛒 line; the staff report view shows it with the review link. The night's takings net off any later refunds of that night's sales ("£18.00 taken (after £9.00 refunded)"). Template item "Have the clients paid?" became **"Any money outstanding?"** (new id `money_outstanding`, expected "no" — migration 251 swaps it only if the seeded item was untouched). |
 | **Drain lock** | `withShopDrainLock` — the scheduler and `POST /shop/drain` used to be able to push the same sale twice at once. Now serialised. |
-| **Weekly job** | Created on demand, Mon 00:01→Sun 23:59, DISPATCHED. Live one is **16750**. |
+| **Weekly job** | Created on demand by the week's first sale (or the till's button), Mon 00:01→Sun 23:59, DISPATCHED. **Not** opened in advance (jon, Sep 2026): a week with no sales has no job and nothing to close. A walk-in sale goes on the week it was RUNG UP in, if that week's job exists and its close hasn't started, else the current week (`shop-period.ts getShopPeriodForSale`) — so a Sunday 23:59 sale that reaches HireHop on Monday still lands on Sunday's week. Weeks are UK dates (`weekStart()` uses the London date). First live one was **16750**. |
+| **Weekly close (§20)** | `services/shop-close.ts`, admin only. *This week* → pick a finished week → **Check it's ready** (reads HireHop, changes nothing) → **Close week**: draft invoice (`all: 1`) → penny check against OP's total AND the payments held (stops at the draft if either differs, emails jon) → approve dated the week's Sunday → Xero → allocate every payment from its own bank → £0 owing → job Completed → `close_state = completed`. Resumable: a stop says why, and the same button carries on (`close_state` / `hh_invoice_id`, migration 256). Monday 08:55 email to jon lists every finished week not yet closed. **Built, not yet run live** — first run on scratch job 16757 (§20.6). |
 | **Sync exclusion** | Shop jobs never enter OP's `jobs` table — bulk sync and webhook both guarded. |
 | **Availability** | Free-vs-reserved on basket items, via `picklist_get_availability.php`. |
 | **Stock usage** | `GET /shop/consumption` + a panel on the till. |
@@ -1234,7 +1235,7 @@ once the mirror lands — it costs one query, and any item below 100 means today
 | `shop_job_client_id` | `3067` (OP Shop Sales) |
 | `shop_job_contact_name` | `OP Shop Sales` |
 | `shop_job_name_pattern` | `Shop Sales W/C {date}` |
-| `shop_availability_job` | `16750` |
+| `shop_availability_job` | `16750` — now only a fallback: availability asks against this week's shop job, else the latest one (§20.3) |
 | `shop_excluded_category_ids` | `[355]` (Misc Sale Item) |
 | `shop_vat_rate_map` | `{"0":20,"1":0,"2":5}` |
 | `shop_discount_caps` | admin 100 / manager 50 / staff + GA 10 / freelancer 0 |
@@ -1243,27 +1244,30 @@ once the mirror lands — it costs one query, and any item below 100 means today
 
 ### THE FIRST THING TO DO NEXT
 
-**Build the weekly close — §20.** Designed and agreed with jon (25 Sep 2026); every
-HireHop call it needs has been captured from the UI and is written up in
-`docs/reference/HIREHOP-BILLING-API.md`. Nothing is built yet. Expect some trial and
-error on the first live close — do it on a scratch week first (§20.6).
+**Run the first live close on scratch job 16757 (§20.6).** The close is built
+(§20, `services/shop-close.ts`) but has only run against a fake HireHop in tests.
+Two things to verify on that run and record here: whether HireHop's VAT across
+several odd-pence lines matches OP's per-line rounding (the penny check will stop
+at the draft if not), and whether approving with `date = Sunday 23:59` gives the
+invoice the expected date / tax point in HireHop AND Xero.
 
 ### Then, in order
 
-1. **The weekly close (§20)** — next.
+1. **The weekly close (§20)** — built; first live run next, then real weeks by
+   the button; automatic once a few weeks have closed cleanly (v2).
 2. Line-by-line refunds (see gaps below) — after the close.
 3. Gate manual payment entry in HireHop (§0) — jon, manual.
 (Steps 10 lock-up and 11 receipts are done — both tills. PDF receipts parked.)
 
 ### Known gaps and decisions still open
 
-- **Raising the weekly invoice is still manual in HireHop** until §20 is built. OP
+- ~~Raising the weekly invoice is still manual in HireHop~~ — §20 built. OP
   notices (the 15-min check sets `invoiced_at` when an invoice appears) and refunds
   stop on an invoiced job.
-- **`shop_availability_job` is a FIXED job number (16750).** From the next week it
+- ~~`shop_availability_job` is a FIXED job number~~ — fixed in §20. From the next week it
   would ask HireHop for availability against last week's job. §20 makes it follow the
   current week.
-- **`shop-period.ts weekStart()` uses the UTC date.** Between 00:00 and 01:00 on a
+- ~~`shop-period.ts weekStart()` uses the UTC date~~ — fixed in §20 (London date). Between 00:00 and 01:00 on a
   Monday in BST, a sale is still "Sunday" to it and lands on LAST week's job. Harmless
   while weeks are closed by hand on Monday; §20 must fix it (use the London date)
   before the close runs near midnight.
@@ -1299,7 +1303,38 @@ error on the first live close — do it on a scratch week first (§20.6).
 
 ---
 
-## 20. The weekly close — DESIGNED, NOT BUILT (agreed with jon, 25 Sep 2026)
+## 20. The weekly close — BUILT, first live run pending (agreed with jon, 25 Sep 2026)
+
+**As built (differences from the design below):**
+
+- **No job is opened in advance.** §20.3's "open next week's job at 00:05 Monday"
+  was dropped (jon, 25 Sep 2026): a proactive job made an empty week that then had
+  to be closed. Jobs still open on the first sale. The only reason for the early
+  open was availability, which now falls back to the latest week's job.
+- **A sale goes on the week it was rung up in** (`getShopPeriodForSale`), unless
+  that week's close has started — then the current week. Found while building:
+  the drain used to pick the week at PUSH time, two minutes after the sale.
+- **"Invoiced" means an APPROVED invoice** in the balance check. A draft used to
+  count, which would have set `invoiced_at` the moment the close stopped at a
+  draft — dropping exactly that week out of the 15-minute scan and its alarms.
+  Refunds still stop at ANY invoice, draft included.
+- **A refund is refused once a week's close has started** (`close_state` set), as
+  well as once it's invoiced.
+- **Empty week** (every sale cancelled or refunded): no invoice, job Completed.
+- **A deleted draft restarts the close.** Stopped at the draft? Fix the cause and
+  press Close again, or delete the draft in HireHop — OP notices and the next
+  press starts from the pre-flight.
+- **Payments are allocated dated the day of the close** (Xero never refuses an
+  allocation dated on or after both the invoice and the payment).
+- **Never approves twice**: a resume finding the invoice already approved skips
+  the approve call.
+- **A half-closed week** (stopped after approving) is out of the 15-minute scan
+  once HireHop shows an approved invoice; it is flagged instead on the *This week*
+  panel and in the Monday 08:55 email until finished.
+- Known small gap: if OP dies between an allocation being saved and its Xero push,
+  a resume sees that payment as done and doesn't push it again — Xero would show
+  the invoice part-paid. Rare (a process crash mid-call); spot it in Xero.
+
 
 **The gap.** OP opens a new weekly shop job each week but never closes the old one: it
 stays DISPATCHED, uninvoiced, with every payment unallocated in HireHop and Xero. The
@@ -1382,6 +1417,22 @@ whose balance is already 0 (read it back — the allocation list is authoritativ
 | A late refund after close | Window C — credit note by hand (§8). Refunds already refuse on an invoiced job. |
 
 ### 20.6 First live run
+
+**As agreed, 25 Sep 2026:** scratch job **16757**, whose sales were rung through the
+sitter till — so OP has its own record and the REAL close runs, no test mode.
+Register it as a past week once, then close it from *This week* (link:
+`/money/shop?tab=week&start=2026-01-05`):
+
+```sql
+INSERT INTO shop_sale_periods (period_start, period_end, hh_job_number)
+VALUES ('2026-01-05', '2026-01-11', 16757);
+```
+
+Everything on the job must have come through a till (paid now — "their bill"
+sales have no payment, so the penny check would stop). Anything added by hand
+in HireHop fails the pre-flight, which names it.
+
+The original plan, for reference:
 
 Use a scratch week, not a real one: jon creates a throwaway shop-style job (a couple of
 cheap lines at odd prices, two payments on different banks), register it as a period

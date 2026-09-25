@@ -118,6 +118,23 @@ export function startScheduler() {
     });
   }
 
+  // ── Shop weekly close reminder ────────────────────────────────────────
+  // Monday 08:55 (UK): email jon which finished weeks are waiting to be closed
+  // — ready, or what's stopping them (docs/SHOP-SALES-SPEC.md §20.2). The close
+  // itself is a button until it has proven itself. Shop jobs are never in OP's
+  // `jobs` table, so the lost/cancelled + is_internal gates don't apply here.
+  if (isHireHopConfigured()) {
+    cron.schedule('55 8 * * 1', async () => {
+      try {
+        const { sendShopCloseDigest } = await import('../services/shop-close');
+        const n = await sendShopCloseDigest();
+        if (n > 0) console.log(`Scheduler: shop close reminder — ${n} week(s) to close`);
+      } catch (err) {
+        console.error('Scheduler: shop close reminder failed:', err instanceof Error ? err.message : err);
+      }
+    }, { timezone: 'Europe/London' });
+  }
+
   // ── Shop sale-stock catalogue mirror ──────────────────────────────────
   // Keeps `shop_stock_cache` fresh so the till never calls HireHop to search or
   // price an item (docs/SHOP-SALES-SPEC.md §10). A few HireHop calls per refresh
