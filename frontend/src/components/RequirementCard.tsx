@@ -34,6 +34,9 @@ export interface JobRequirement {
   notes: string | null;
   assigned_to: string | null;
   assigned_to_name: string | null;
+  /** Creator's name. A reminder set to "Me" stores no assignee, so this is who
+   *  it actually notifies — see services/requirement-close-sweep.ts. */
+  created_by_name?: string | null;
   due_date: string | null;
   is_auto: boolean;
   source: string;
@@ -1027,8 +1030,13 @@ export default function RequirementCard({
                     Notify via: {req.delivery_method === 'notification' ? 'Bell only' : 'Email only'}
                   </div>
                 )}
-                {req.assigned_to_name && (
-                  <div className="text-gray-400">Assigned to: {req.assigned_to_name}</div>
+                {/* Who this actually notifies. "Me" writes no assignee, so an
+                    unassigned reminder falls back to its creator — showing
+                    nothing made a saved reminder look like it hadn't saved. */}
+                {(req.assigned_to_name || req.created_by_name) && (
+                  <div className="text-gray-400">
+                    Notifies: {req.assigned_to_name || req.created_by_name}
+                  </div>
                 )}
                 {req.notes && <div>{req.notes}</div>}
               </div>

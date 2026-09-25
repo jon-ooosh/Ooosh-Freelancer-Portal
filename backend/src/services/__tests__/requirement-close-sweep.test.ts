@@ -148,6 +148,54 @@ describe('fireEventTriggeredReminders', () => {
     expect(inserts.map((c: any[]) => c[1][0])).toEqual(['admin1', 'admin2']);
   });
 
+  it('sends a "Me" reminder (no assignee) to its CREATOR, not the actor', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: 'r1', custom_label: 'X', assigned_to: null, created_by: 'creator1', notes: null, delivery_method: 'notification', job_id: JOB_ID }] })
+      .mockResolvedValueOnce({ rows: [{ job_name: 'NH Tours' }] })
+      .mockResolvedValue({ rows: [] });
+
+    // USER_ID is whoever marked the job lost — irrelevant to whose reminder it is.
+    await fireEventTriggeredReminders(JOB_ID, 'lost', USER_ID);
+
+    expect(sqlLog().find((s) => s.includes("role IN ('admin', 'manager')"))).toBeUndefined();
+    const insert = callWithSql('INSERT INTO notifications');
+    expect(insert![1][0]).toBe('creator1');
+  });
+
+  it('sends a "Me" reminder to its creator even on an unattended path', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: 'r1', custom_label: 'X', assigned_to: null, created_by: 'creator1', notes: null, delivery_method: 'notification', job_id: JOB_ID }] })
+      .mockResolvedValueOnce({ rows: [{ job_name: 'NH Tours' }] })
+      .mockResolvedValue({ rows: [] });
+
+    await fireEventTriggeredReminders(JOB_ID, 'lost', null);
+
+    // No admin broadcast — the creator is a better answer than everyone.
+    expect(sqlLog().find((s) => s.includes("role IN ('admin', 'manager')"))).toBeUndefined();
+    const inserts = mockQuery.mock.calls.filter((c: any[]) =>
+      String(c[0]).includes('INSERT INTO notifications'));
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0][1][0]).toBe('creator1');
+  });
+
+  it('prefers the assignee over the creator', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: 'r1', custom_label: 'X', assigned_to: 'assignee1', created_by: 'creator1', notes: null, delivery_method: 'notification', job_id: JOB_ID }] })
+      .mockResolvedValueOnce({ rows: [{ job_name: 'NH Tours' }] })
+      .mockResolvedValue({ rows: [] });
+
+    await fireEventTriggeredReminders(JOB_ID, 'lost', null);
+
+    const insert = callWithSql('INSERT INTO notifications');
+    expect(insert![1][0]).toBe('assignee1');
+  });
+
+  it('selects created_by so the fallback has something to read', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    await fireEventTriggeredReminders(JOB_ID, 'lost', USER_ID);
+    expect(String(mockQuery.mock.calls[0][0])).toContain('jr.created_by');
+  });
+
   it('prefers the assignee, and never looks up admins when there is one', async () => {
     mockQuery
       .mockResolvedValueOnce({ rows: [{ id: 'r1', custom_label: 'X', assigned_to: 'assignee1', notes: null, delivery_method: 'notification', job_id: JOB_ID }] })

@@ -32,6 +32,7 @@ import CancellationModal from '../components/CancellationModal';
 import CombineBookingsModal from '../components/CombineBookingsModal';
 import CancelOpenRequirementsSection from '../components/CancelOpenRequirementsSection';
 import { useAuthStore } from '../hooks/useAuthStore';
+import { displayFullName } from '../lib/displayName';
 import MoneyTab from '../components/MoneyTab';
 import RackPlanModal from '../components/rackplan/RackPlanModal';
 import RackPlanOverviewCard from '../components/rackplan/RackPlanOverviewCard';
@@ -7130,11 +7131,22 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, cli
   const [reminderDelivery, setReminderDelivery] = useState<'both' | 'notification' | 'email'>('both');
   const [reminderAssignees, setReminderAssignees] = useState<string[]>(['']);
   const [reminderEventTrigger, setReminderEventTrigger] = useState('');
-  const [reminderUsers, setReminderUsers] = useState<Array<{ id: string; first_name: string; last_name: string }>>([]);
+  // `preferred_name` is fetched so the picker shows what people actually go by
+  // (displayFullName is THE definition — see lib/displayName.ts). The list also
+  // drops the current user: "Me" already covers them, and having both meant the
+  // same person appeared twice under two different labels.
+  const currentUser = useAuthStore(s => s.user);
+  const [reminderUsers, setReminderUsers] = useState<Array<{ id: string; first_name: string; last_name: string; preferred_name?: string | null }>>([]);
+  const otherReminderUsers = useMemo(
+    () => reminderUsers.filter(u => u.id !== currentUser?.id),
+    [reminderUsers, currentUser?.id]
+  );
 
   function ensureReminderUsersLoaded() {
     if (reminderUsers.length === 0) {
-      api.get<{ data: Array<{ id: string; first_name: string; last_name: string }> }>('/users')
+      // ?assignable=true drops service / shared / test logins (System Service,
+      // Front Desk, TEST Wood) — nobody reads those inboxes. See routes/users.ts.
+      api.get<{ data: Array<{ id: string; first_name: string; last_name: string; preferred_name?: string | null }> }>('/users?assignable=true')
         .then(res => setReminderUsers(res.data))
         .catch(() => {});
     }
@@ -7568,8 +7580,8 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, cli
                         className="flex-1 border border-gray-300 rounded px-3 py-1.5 text-sm"
                       >
                         <option value="">Me</option>
-                        {reminderUsers.map(u => (
-                          <option key={u.id} value={u.id}>{u.first_name} {u.last_name}</option>
+                        {otherReminderUsers.map(u => (
+                          <option key={u.id} value={u.id}>{displayFullName(u)}</option>
                         ))}
                       </select>
                       {reminderAssignees.length > 1 && (
@@ -7748,7 +7760,14 @@ function StatusTransitionModal({
   const [reminders, setReminders] = useState<Reminder[]>([
     { text: '', date: '', delivery: 'both', priority: 'normal', userId: '' },
   ]);
-  const [teamUsers, setTeamUsers] = useState<Array<{ id: string; first_name: string; last_name: string; email: string }>>([]);
+  const [teamUsers, setTeamUsers] = useState<Array<{ id: string; first_name: string; last_name: string; email: string; preferred_name?: string | null }>>([]);
+  // Same rule as the reminder modal: "Remind me" already covers the current
+  // user, so they must not also appear by name.
+  const currentUser = useAuthStore(s => s.user);
+  const otherTeamUsers = useMemo(
+    () => teamUsers.filter(u => u.id !== currentUser?.id),
+    [teamUsers, currentUser?.id]
+  );
 
   // "Under 4-day window" pauses get a pre-filled revisit date — the hire is worth
   // another swing once the diary loosens, so default it to a fortnight before the
@@ -7770,7 +7789,8 @@ function StatusTransitionModal({
   // Load team users for "remind someone else"
   useEffect(() => {
     if (targetStatus !== 'completed') return;
-    api.get<{ data: Array<{ id: string; first_name: string; last_name: string; email: string }> }>('/users')
+    // Same real-people filter as the reminder modal — see routes/users.ts.
+    api.get<{ data: Array<{ id: string; first_name: string; last_name: string; email: string; preferred_name?: string | null }> }>('/users?assignable=true')
       .then(res => setTeamUsers(res.data))
       .catch(() => {});
   }, [targetStatus]);
@@ -8091,9 +8111,9 @@ function StatusTransitionModal({
                         className="border border-gray-300 rounded px-2 py-1 text-xs flex-1 min-w-[100px]"
                       >
                         <option value="">Remind me</option>
-                        {teamUsers.map(u => (
+                        {otherTeamUsers.map(u => (
                           <option key={u.id} value={u.id}>
-                            {u.first_name} {u.last_name}
+                            {displayFullName(u)}
                           </option>
                         ))}
                       </select>
