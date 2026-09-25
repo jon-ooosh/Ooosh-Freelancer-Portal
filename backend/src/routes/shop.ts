@@ -298,6 +298,45 @@ router.post('/sales/:id/reverse', authorize(...MANAGER_ROLES), async (req: AuthR
 });
 
 /**
+ * Email a receipt (step 11, §2.10) — a VAT receipt for a sale, a refund
+ * receipt for a reversal. Any staff: it's a document about money that already
+ * moved, not a money decision.
+ */
+router.post('/sales/:id/receipt', async (req: AuthRequest, res: Response) => {
+  try {
+    const { sendShopReceipt } = await import('../services/shop-receipts');
+    const result = await sendShopReceipt(String(req.params.id), String(req.body?.to ?? ''), { id: req.user!.id });
+    if (!result.sent) return res.status(502).json({ error: `The receipt didn't send: ${result.error}` });
+    res.json({ data: { sent: true } });
+  } catch (err) {
+    // "That went on the band's bill", "not an email address" — for the person at the till.
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Could not send that receipt.' });
+  }
+});
+
+/** Addresses to offer for a receipt: where earlier ones went, then the job's contacts. */
+router.get('/sales/:id/receipt/suggestions', async (req: AuthRequest, res: Response) => {
+  try {
+    const { receiptSuggestions } = await import('../services/shop-receipts');
+    res.json({ data: await receiptSuggestions(String(req.params.id)) });
+  } catch (err) {
+    console.error('[shop] receipt suggestions failed:', err);
+    res.json({ data: [] });   // a convenience — typing the address still works
+  }
+});
+
+/** A job's contacts with an email — the checkout's receipt box, before the sale exists. */
+router.get('/jobs/:jobId/receipt-contacts', async (req: AuthRequest, res: Response) => {
+  try {
+    const { jobReceiptContacts } = await import('../services/shop-receipts');
+    res.json({ data: await jobReceiptContacts(String(req.params.jobId)) });
+  } catch (err) {
+    console.error('[shop] job receipt contacts failed:', err);
+    res.json({ data: [] });
+  }
+});
+
+/**
  * Tick off sitter sales (§5) — one, or a batch ("all of last night's look
  * fine"). Any staff: it's a check, not a money decision.
  */

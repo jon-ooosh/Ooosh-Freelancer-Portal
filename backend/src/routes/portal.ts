@@ -1330,7 +1330,11 @@ function londonNow(): { date: string; hour: number } {
  * it's rostered to, so the till can be tested on a free evening instead of
  * muddling a real sitter's night.
  */
-async function isTillOpen(date: string, email: string): Promise<boolean> {
+async function isTillOpen(date: string, email: string, shiftId: string): Promise<boolean> {
+  // Locked up = closed, for everyone (test accounts included — that's worth
+  // testing too). Stops "one more sale" after the report has gone, which the
+  // lock-up email would never show (jon, Sep 2026). Price lookup stays open.
+  if (await isLockedUp(shiftId)) return false;
   const now = londonNow();
   if (date === now.date || (date === addDaysIsoP(now.date, -1) && now.hour < 6)) return true;
   try {
@@ -1341,6 +1345,12 @@ async function isTillOpen(date: string, email: string): Promise<boolean> {
   } catch {
     return false;   // a malformed setting opens nothing
   }
+}
+
+/** Has the sitter submitted the lock-up report for this shift? */
+async function isLockedUp(shiftId: string): Promise<boolean> {
+  const r = await query(`SELECT report_submitted_at FROM studio_sitter_shifts WHERE id = $1`, [shiftId]);
+  return !!r.rows[0]?.report_submitted_at;
 }
 
 /** Rostered-to-this-evening gate for the till. Sends the error and returns null on failure. */
@@ -1364,7 +1374,9 @@ router.get('/studio-sitter/shifts/:date/till/context', async (req: PortalRequest
     res.json({
       success: true,
       date: gate.date,
-      open: await isTillOpen(gate.date, req.portalUser!.email),
+      open: await isTillOpen(gate.date, req.portalUser!.email, gate.shiftId),
+      // Why it's closed, so the page can say the right thing.
+      locked_up: await isLockedUp(gate.shiftId),
       // Tonight's bands — the only jobs a sitter can sell onto. Two in, two buttons.
       jobs: (detail?.jobs ?? []).map((j: any) => ({
         job_id: j.job_id, hh_job_number: j.hh_job_number, label: j.label, rooms: j.rooms ?? [],
@@ -1413,6 +1425,7 @@ router.get('/studio-sitter/shifts/:date/till/sales', async (req: PortalRequest, 
         gross: Number(r.gross_amount), created_at: r.created_at, push_after: r.push_after,
         mine: r.recorded_by_person_id === req.portalUser!.id,
         sold_to_hh_job_number: r.sold_to_hh_job_number ?? null,
+        last_receipt_to: r.last_receipt_to ?? null,
         lines: (r.lines || []).map((l: any) => ({ name: l.name, qty: Number(l.qty) })),
       })),
     });
@@ -1426,8 +1439,12 @@ router.post('/studio-sitter/shifts/:date/till/sales', async (req: PortalRequest,
   try {
     const gate = await tillGate(req, res);
     if (!gate) return;
-    if (!(await isTillOpen(gate.date, req.portalUser!.email))) {
-      res.status(409).json({ error: 'The till for this evening is closed — sales can only be taken on the night.' });
+    if (!(await isTillOpen(gate.date, req.portalUser!.email, gate.shiftId))) {
+      res.status(409).json({
+        error: (await isLockedUp(gate.shiftId))
+          ? "You've locked up for the night, so the till is closed. Leave the office a note about anything else."
+          : 'The till for this evening is closed — sales can only be taken on the night.',
+      });
       return;
     }
 
@@ -1466,6 +1483,46 @@ router.post('/studio-sitter/shifts/:date/till/sales', async (req: PortalRequest,
     // Validation messages ("pick how they paid", "their bill needs a band")
     // are written for the person holding the phone.
     res.status(400).json({ error: error instanceof Error ? error.message : 'Could not record that sale.' });
+  }
+});
+
+// Tonight's band's contacts, for the receipt box. Only for a band in THIS
+// evening's shift — the same people the sitter is already looking after
+// (jon, Sep 2026). Through THE contact pool, job-contact-candidates.ts.
+router.get('/studio-sitter/shifts/:date/till/jobs/:jobId/receipt-contacts', async (req: PortalRequest, res: Response) => {
+  try {
+    const gate = await tillGate(req, res);
+    if (!gate) return;
+    const jobId = String(req.params.jobId);
+    const detail = await getSitterShiftDetail(gate.date, req.portalUser!.id);
+    if (!(detail?.jobs ?? []).some((j: any) => j.job_id === jobId)) {
+      res.status(404).json({ error: "That band isn't in tonight." });
+      return;
+    }
+    const { jobReceiptContacts } = await import('../services/shop-receipts');
+    res.json({ success: true, contacts: await jobReceiptContacts(jobId) });
+  } catch (error) {
+    console.error('Portal till receipt contacts error:', error);
+    res.json({ success: true, contacts: [] });   // typing the address still works
+  }
+});
+
+// Email a receipt for one of tonight's sales. Only a sale taken on THIS
+// evening's till — a sitter can't send receipts for anything else. Works after
+// lock-up too: it's paperwork for a sale already made, not a new sale.
+router.post('/studio-sitter/shifts/:date/till/sales/:id/receipt', async (req: PortalRequest, res: Response) => {
+  try {
+    const gate = await tillGate(req, res);
+    if (!gate) return;
+    const own = await query(`SELECT 1 FROM shop_sales WHERE id = $1 AND shift_id = $2`, [String(req.params.id), gate.shiftId]);
+    if (!own.rows.length) { res.status(404).json({ error: "That isn't one of tonight's sales." }); return; }
+    const { sendShopReceipt } = await import('../services/shop-receipts');
+    const result = await sendShopReceipt(String(req.params.id), String(req.body?.to ?? ''), { id: null, personId: req.portalUser!.id });
+    if (!result.sent) { res.status(502).json({ error: `The receipt didn't send — ${result.error}` }); return; }
+    res.json({ success: true, sent: true });
+  } catch (error) {
+    // "Not an email address", "their bill — their invoice is the document".
+    res.status(400).json({ error: error instanceof Error ? error.message : 'Could not send that receipt.' });
   }
 });
 

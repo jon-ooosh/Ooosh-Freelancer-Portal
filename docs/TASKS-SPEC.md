@@ -295,7 +295,7 @@ Backfill: existing review actions get `is_private = true`.
 
 ## 13. Phase 1 build log — assigning (24 Sep 2026)
 
-Migration `253_staff_tasks_assigning.sql`: `follow_up_on` /
+Migration `255_staff_tasks_assigning.sql` (written as 253; renumbered on merge — main had taken 253–254 for shop receipts): `follow_up_on` /
 `follow_up_chased_at` (the setter's clock), `handed_back_by` / `_reason` /
 `_at`, `is_private` (backfilled true for review actions), an index on
 `created_by`.

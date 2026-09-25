@@ -29,6 +29,8 @@ interface TillContext {
   success: boolean
   date: string
   open: boolean
+  /** The lock-up report is in — the till has closed for the night. */
+  locked_up?: boolean
   jobs: TillJob[]
   tenders: Tender[]
   stock_as_of: string | null
@@ -54,6 +56,8 @@ interface TonightSale {
   push_after: string
   mine: boolean
   sold_to_hh_job_number: number | null
+  /** Where this sale's latest receipt went, if one was sent. */
+  last_receipt_to: string | null
   lines: { name: string; qty: number }[]
 }
 interface TonightSummary {
@@ -64,6 +68,28 @@ interface TonightSummary {
 }
 
 const money = (n: number) => `£${n.toFixed(2)}`
+
+/** Blank = no receipt wanted. Anything else must look like an address BEFORE the sale is taken. */
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+const receiptAddressProblem = (v: string) =>
+  v.trim() === '' || EMAIL_RE.test(v.trim()) ? null : 'That receipt email doesn’t look right — fix it or clear the box.'
+
+/** One band in → them; two or more → make the sitter choose; none → walk-in. */
+function defaultRoute(c: TillContext): string | null | undefined {
+  if (c.jobs.length === 1) return c.jobs[0].job_id
+  return c.jobs.length === 0 ? null : undefined
+}
+
+/**
+ * Colour roles, so the checkout reads at a glance on a small screen: the total
+ * bar is dark, a CHOICE is an outlined ✓ (not a filled block), and the one
+ * button that records the sale is green. Filled-blue-everything made the
+ * header, both choices and the final button look like the same thing.
+ */
+const choice = (on: boolean) =>
+  on
+    ? 'border-2 border-ooosh-600 bg-ooosh-50 text-ooosh-800'
+    : 'border-2 border-transparent bg-gray-100 text-gray-800'
 const round2 = (n: number) => Math.round(n * 100) / 100
 
 /**
@@ -93,7 +119,11 @@ export default function SitterTillPage() {
   const [results, setResults] = useState<StockItem[]>([])
   const [searching, setSearching] = useState(false)
   const [basket, setBasket] = useState<BasketLine[]>([])
-  const [jobId, setJobId] = useState<string | null>(null)       // null = walk-in
+  // undefined = not chosen yet, null = walk-in, else the band's job. With ONE
+  // band in, it defaults to them (most sitter sales are to the band in the
+  // room — jon); with two, the sitter has to pick, so nobody's strings land on
+  // the wrong band's bill.
+  const [jobId, setJobId] = useState<string | null | undefined>(undefined)
   const [tender, setTender] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -101,6 +131,15 @@ export default function SitterTillPage() {
   const [sales, setSales] = useState<TonightSale[]>([])
   const [summary, setSummary] = useState<TonightSummary | null>(null)
   const searchRef = useRef<HTMLInputElement>(null)
+  // Receipts: the checkout's optional box, and one list row's resend form.
+  const [receiptTo, setReceiptTo] = useState('')
+  const [receiptFor, setReceiptFor] = useState<string | null>(null)
+  const [receiptFormTo, setReceiptFormTo] = useState('')
+  const [receiptBusy, setReceiptBusy] = useState(false)
+  // Tonight's band's contacts, offered in the receipt box — the same joined-up
+  // experience as the office till (jon, Sep 2026: sitters are entitled to
+  // contact the people they're looking after).
+  const [bandContacts, setBandContacts] = useState<{ email: string; label: string }[]>([])
 
   const loadContext = useCallback(async () => {
     try {
@@ -109,6 +148,7 @@ export default function SitterTillPage() {
       const data = await r.json()
       if (!r.ok) { setLoadError(data.error || 'Could not open the till.'); return }
       setCtx(data)
+      setJobId(defaultRoute(data))
     } catch {
       setLoadError('Could not reach the till. Check your signal and try again.')
     }
@@ -149,6 +189,16 @@ export default function SitterTillPage() {
     return () => { cancelled = true; clearTimeout(t) }
   }, [term, date])
 
+  useEffect(() => {
+    if (!jobId) { setBandContacts([]); return }
+    let cancelled = false
+    fetch(`/api/studio-sitter/shifts/${date}/till/jobs/${jobId}/receipt-contacts`)
+      .then((r) => (r.ok ? r.json() : { contacts: [] }))
+      .then((d) => { if (!cancelled) setBandContacts(d.contacts || []) })
+      .catch(() => { if (!cancelled) setBandContacts([]) })
+    return () => { cancelled = true }
+  }, [jobId, date])
+
   // The success note is a nod, not a record — tonight's list is the record.
   useEffect(() => {
     if (!done) return
@@ -173,19 +223,24 @@ export default function SitterTillPage() {
 
   // "Their bill" only exists once a band is picked; going back to walk-in
   // clears it rather than leaving an impossible choice selected.
-  const pickJob = (id: string | null) => {
+  const pickJob = (id: string | null | undefined) => {
+    // A receipt address belongs to whoever the sale is for — switching clears it.
+    if (id !== jobId) setReceiptTo('')
     setJobId(id)
     if (!id && ctx?.tenders.find((t) => t.key === tender)?.needsJob) setTender(null)
   }
 
   const total = round2(basket.reduce((s, l) => s + lineGross(l), 0))
   const tenderObj = ctx?.tenders.find((t) => t.key === tender)
-  const canTake = !!ctx?.open && basket.length > 0 && !!tender && !saving
+  const canTake = !!ctx?.open && basket.length > 0 && !!tender && jobId !== undefined && !saving
 
   async function take() {
     if (!canTake) return
-    setSaving(true)
     setError(null)
+    // A typo in the receipt box stops here, before anything is recorded.
+    const addrProblem = !tenderObj?.needsJob ? receiptAddressProblem(receiptTo) : null
+    if (addrProblem) { setError(addrProblem); return }
+    setSaving(true)
     try {
       const r = await fetch(`/api/studio-sitter/shifts/${date}/till/sales`, {
         method: 'POST',
@@ -198,10 +253,18 @@ export default function SitterTillPage() {
       })
       const data = await r.json()
       if (!r.ok) { setError(data.error || 'That didn’t go through — nothing was recorded.'); return }
-      setDone(tenderObj?.needsJob ? `${money(total)} put on their bill.` : `Taken — ${money(total)}.`)
+      // The sale is in whatever happens to the email.
+      let receiptNote = ''
+      if (!tenderObj?.needsJob && receiptTo.trim() && data.id) {
+        const err = await postReceipt(data.id, receiptTo)
+        if (err) setError(`Sale recorded, but the receipt didn’t send: ${err}`)
+        else receiptNote = ` Receipt sent to ${receiptTo.trim()}.`
+      }
+      setDone((tenderObj?.needsJob ? `${money(total)} put on their bill.` : `Taken — ${money(total)}.`) + receiptNote)
+      setReceiptTo('')
       setBasket([])
       setTender(null)
-      setJobId(null)
+      setJobId(ctx ? defaultRoute(ctx) : undefined)
       loadSales()
       searchRef.current?.focus()
     } catch {
@@ -209,6 +272,35 @@ export default function SitterTillPage() {
     } finally {
       setSaving(false)
     }
+  }
+
+  /** Email a receipt for one of tonight's sales. Returns an error message, or null. */
+  async function postReceipt(id: string, to: string): Promise<string | null> {
+    try {
+      const r = await fetch(`/api/studio-sitter/shifts/${date}/till/sales/${id}/receipt`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: to.trim() }),
+      })
+      if (r.ok) return null
+      const data = await r.json().catch(() => ({}))
+      return data.error || 'The receipt didn’t send.'
+    } catch {
+      return 'Couldn’t reach the office system — check your signal.'
+    }
+  }
+
+  async function sendRowReceipt(id: string) {
+    setError(null)
+    const addrProblem = receiptAddressProblem(receiptFormTo)
+    if (addrProblem) { setError(addrProblem); return }
+    setReceiptBusy(true)
+    const err = await postReceipt(id, receiptFormTo)
+    setReceiptBusy(false)
+    if (err) { setError(err); return }
+    setReceiptFor(null)
+    setDone(`Receipt sent to ${receiptFormTo.trim()}.`)
+    loadSales()
   }
 
   async function cancel(id: string) {
@@ -227,7 +319,7 @@ export default function SitterTillPage() {
   const bandName = (hh: number | null) => ctx?.jobs.find((j) => j.hh_job_number === hh)?.label ?? (hh ? `#${hh}` : null)
 
   return (
-    <div className="min-h-screen bg-gray-50 safe-top safe-bottom pb-10">
+    <div className="min-h-screen bg-gray-50 safe-top safe-bottom pb-10 flex flex-col">
       <header className="bg-white shadow-sm border-b border-gray-100 sticky top-0 z-10">
         <div className="max-w-lg mx-auto px-4 py-4 flex items-center gap-3">
           <Link
@@ -246,14 +338,16 @@ export default function SitterTillPage() {
         </div>
       </header>
 
-      <main className="max-w-lg mx-auto px-4 py-5 space-y-5">
+      <main className="max-w-lg w-full mx-auto px-4 py-5 flex flex-1 flex-col gap-5">
         {loadError && (
           <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">{loadError}</div>
         )}
 
         {ctx && !ctx.open && (
           <div className="bg-amber-50 border border-amber-200 text-amber-800 px-4 py-3 rounded-lg text-sm">
-            Price lookup only — the till takes sales on the night of your shift.
+            {ctx.locked_up
+              ? 'You’ve locked up, so the till has closed for the night. Price lookup still works — leave the office a note about anything else.'
+              : 'Price lookup only — the till takes sales on the night of your shift.'}
           </div>
         )}
 
@@ -332,8 +426,8 @@ export default function SitterTillPage() {
             </section>
 
             {/* Checkout */}
-            <section className="rounded-xl border-2 border-ooosh-600 bg-white overflow-hidden">
-              <div className="flex items-baseline justify-between bg-ooosh-600 px-4 py-3 text-white">
+            <section className="rounded-xl border border-gray-300 bg-white overflow-hidden shadow-sm">
+              <div className="flex items-baseline justify-between bg-gray-900 px-4 py-3 text-white">
                 <span className="text-sm font-semibold">Total</span>
                 <span className="text-2xl font-bold tabular-nums">{money(total)}</span>
               </div>
@@ -343,23 +437,19 @@ export default function SitterTillPage() {
                   <div className="space-y-2">
                     <button
                       onClick={() => pickJob(null)}
-                      className={`w-full rounded-lg px-4 py-3 text-left text-sm font-medium ${
-                        !jobId ? 'bg-ooosh-600 text-white' : 'bg-gray-100 text-gray-800'
-                      }`}
+                      className={`w-full rounded-lg px-4 py-3 text-left text-sm font-medium ${choice(jobId === null)}`}
                     >
-                      Walk-in
+                      {jobId === null ? '✓ ' : ''}Walk-in
                     </button>
                     {ctx.jobs.map((j) => (
                       <button
                         key={j.job_id}
                         onClick={() => pickJob(j.job_id)}
-                        className={`w-full rounded-lg px-4 py-3 text-left text-sm font-medium ${
-                          jobId === j.job_id ? 'bg-ooosh-600 text-white' : 'bg-gray-100 text-gray-800'
-                        }`}
+                        className={`w-full rounded-lg px-4 py-3 text-left text-sm font-medium ${choice(jobId === j.job_id)}`}
                       >
-                        {j.label}
+                        {jobId === j.job_id ? '✓ ' : ''}{j.label}
                         {j.rooms.length > 0 && (
-                          <span className={`block text-xs font-normal ${jobId === j.job_id ? 'text-white/80' : 'text-gray-500'}`}>
+                          <span className="block text-xs font-normal text-gray-500">
                             {j.rooms.join(', ')}
                           </span>
                         )}
@@ -375,24 +465,59 @@ export default function SitterTillPage() {
                       <button
                         key={t.key}
                         onClick={() => setTender(t.key)}
-                        className={`rounded-lg px-3 py-3 text-sm font-medium ${
-                          tender === t.key ? 'bg-ooosh-600 text-white' : 'bg-gray-100 text-gray-800'
-                        } ${t.needsJob ? 'col-span-2' : ''}`}
+                        className={`rounded-lg px-3 py-3 text-sm font-medium ${choice(tender === t.key)} ${t.needsJob ? 'col-span-2' : ''}`}
                       >
-                        {t.label}
+                        {tender === t.key ? '✓ ' : ''}{t.label}
                       </button>
                     ))}
                   </div>
                 </div>
 
+                {/* Optional receipt — typed only. Band contacts' addresses are
+                    never sent to a sitter's phone. Not for "their bill": nothing
+                    was paid, and their invoice is the document. */}
+                {!tenderObj?.needsJob && (
+                  <div>
+                    <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">
+                      Email a receipt? <span className="font-normal normal-case">(optional)</span>
+                    </p>
+                    {bandContacts.length > 0 && (
+                      <div className="mb-2 flex flex-wrap gap-2">
+                        {bandContacts.map((c) => (
+                          <button
+                            key={c.email}
+                            type="button"
+                            onClick={() => setReceiptTo(c.email)}
+                            className={`rounded-lg px-3 py-2 text-left text-xs font-medium ${choice(receiptTo === c.email)}`}
+                          >
+                            {receiptTo === c.email ? '✓ ' : ''}{c.label}
+                            <span className="block font-normal text-gray-500">{c.email}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    <input
+                      type="email"
+                      inputMode="email"
+                      autoComplete="off"
+                      value={receiptTo}
+                      onChange={(e) => setReceiptTo(e.target.value)}
+                      placeholder={bandContacts.length ? 'or type another address' : 'their@email.com'}
+                      className="w-full rounded-lg border border-gray-300 px-4 py-3 text-base focus:border-ooosh-500 focus:outline-none"
+                    />
+                  </div>
+                )}
+
                 <button
                   onClick={take}
                   disabled={!canTake}
-                  className="w-full rounded-xl bg-ooosh-600 px-4 py-4 text-base font-semibold text-white disabled:bg-gray-300"
+                  className="w-full rounded-xl bg-green-600 px-4 py-4 text-base font-semibold text-white active:bg-green-700 disabled:bg-gray-300"
                 >
                   {saving
                     ? 'Recording…'
-                    : !tender
+                    : jobId === undefined
+                      ? 'Pick who it’s for'
+                      : !tender
                       ? 'Pick how they paid'
                       : tenderObj?.needsJob
                         ? `Put ${money(total)} on their bill`
@@ -403,9 +528,10 @@ export default function SitterTillPage() {
           </>
         )}
 
-        {/* Tonight — what this till has taken */}
+        {/* Tonight — what this till has taken. Pushed to the foot of the
+            screen (mt-auto) so it's out of the way while selling. */}
         {summary && summary.sales > 0 && (
-          <section>
+          <section className="mt-auto pt-6">
             <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">Tonight</h2>
             <div className="rounded-xl border border-gray-200 bg-white p-4">
               <p className="text-base font-semibold text-gray-900">
@@ -431,13 +557,47 @@ export default function SitterTillPage() {
                         )}
                         <span className="block truncate text-xs text-gray-500">
                           {s.lines.map((l) => `${l.qty}× ${l.name}`).join(', ')}
+                          {s.last_receipt_to ? ` · ✉ ${s.last_receipt_to}` : ''}
                         </span>
+                        {receiptFor === s.id && (
+                          <span className="mt-2 flex gap-2">
+                            <input
+                              type="email"
+                              inputMode="email"
+                              autoFocus
+                              value={receiptFormTo}
+                              onChange={(e) => setReceiptFormTo(e.target.value)}
+                              placeholder="their@email.com"
+                              className="min-w-0 flex-1 rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                            />
+                            <button
+                              onClick={() => sendRowReceipt(s.id)}
+                              disabled={receiptBusy || !receiptFormTo.trim()}
+                              className="rounded-lg bg-gray-800 px-3 py-2 text-sm font-medium text-white disabled:bg-gray-300"
+                            >
+                              {receiptBusy ? '…' : 'Send'}
+                            </button>
+                          </span>
+                        )}
                       </span>
-                      {cancellable ? (
-                        <button onClick={() => cancel(s.id)} className="shrink-0 text-xs font-medium text-red-600">Cancel</button>
-                      ) : s.status === 'cancelled' ? (
-                        <span className="shrink-0 text-xs text-gray-400">cancelled</span>
-                      ) : null}
+                      <span className="flex shrink-0 flex-col items-end gap-1">
+                        {cancellable ? (
+                          <button onClick={() => cancel(s.id)} className="text-xs font-medium text-red-600">Cancel</button>
+                        ) : s.status === 'cancelled' ? (
+                          <span className="text-xs text-gray-400">cancelled</span>
+                        ) : null}
+                        {s.status !== 'cancelled' && s.tender !== 'invoice_later' && (
+                          <button
+                            onClick={() => {
+                              setReceiptFor(receiptFor === s.id ? null : s.id)
+                              setReceiptFormTo(s.last_receipt_to ?? '')
+                            }}
+                            className="text-xs font-medium text-gray-600"
+                          >
+                            {receiptFor === s.id ? 'Close' : 'Receipt'}
+                          </button>
+                        )}
+                      </span>
                     </li>
                   )
                 })}
@@ -446,7 +606,7 @@ export default function SitterTillPage() {
           </section>
         )}
 
-        <p className="text-center text-xs text-gray-400">
+        <p className={`text-center text-xs text-gray-400 ${summary && summary.sales > 0 ? '' : 'mt-auto'}`}>
           Prices include VAT. Made a mistake? Cancel it from the list straight away — after a couple of
           minutes it&apos;s gone to the office, so leave them a note instead.
         </p>
