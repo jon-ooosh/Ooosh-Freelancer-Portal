@@ -295,7 +295,8 @@ async function runMigrations(direction: 'up' | 'down') {
         '253_shop_receipts.sql',
         '254_shop_receipts_by_sitter.sql',
         '255_staff_tasks_assigning.sql',
-        '256_staff_task_series.sql',
+        '256_shop_week_close.sql',
+        '257_staff_task_series.sql',
       ];
 
       for (const migration of migrations) {

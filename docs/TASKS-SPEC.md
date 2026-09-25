@@ -348,7 +348,7 @@ day 31 lands on the month's last day; 29 Feb → 28 Feb), both modes, and the
 arithmetic for repeats happens: the form asks it through
 `POST /staff-tasks/series/preview` rather than computing its own.
 
-**The series** — `staff_task_series` (migration 256),
+**The series** — `staff_task_series` (migration 257 — written as 256, renumbered on merge: main took 256 for the shop week close),
 `services/staff-task-series.ts`. Each occurrence is an ordinary task with
 `source_type = 'staff_task_series'` — no new column, the existing source hook
 — so ticking, nudging, privacy and the Everyone view needed nothing new.

@@ -1,7 +1,7 @@
 /**
  * Repeating to-dos — docs/TASKS-SPEC.md §6, To Do phase 2.
  *
- * A SERIES (staff_task_series, mig 256) holds the rule. Each time one is due
+ * A SERIES (staff_task_series, mig 257) holds the rule. Each time one is due
  * it makes an ordinary staff_tasks row — an OCCURRENCE — linked back through
  * the existing source hook (`source_type = 'staff_task_series'`). Because an
  * occurrence is just a task, ticking, nudging, the Everyone view and privacy

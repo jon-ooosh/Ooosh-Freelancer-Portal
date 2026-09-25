@@ -1,5 +1,5 @@
 -- ============================================================================
--- 256: To Do phase 2 — repeating to-dos
+-- 257: To Do phase 2 — repeating to-dos
 -- ============================================================================
 -- docs/TASKS-SPEC.md §6. A SERIES holds the rule; each time one is due it
 -- produces an ordinary staff_tasks row, linked back through the existing

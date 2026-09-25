@@ -41,7 +41,7 @@ import { DISPLAY_NAME_SQL } from './display-name';
 
 // Same reasoning as the Xero-sync alert: only jon can fix a HireHop/Xero
 // discrepancy, so the alarm goes to him and nobody else (jon, Sep 2026).
-const SHOP_ALERT_RECIPIENT = 'jon@oooshtours.co.uk';
+export const SHOP_ALERT_RECIPIENT = 'jon@oooshtours.co.uk';
 
 /** How long a sale may sit queued past its hold before it counts as stuck. */
 const STUCK_MINUTES = 30;
@@ -232,12 +232,21 @@ function statusProblem(status: number | null): string | null {
  * an invoice appears on the job — closing the gap where OP never knew.
  */
 export async function checkShopPeriod(periodId: string): Promise<ShopCheck> {
+  // Inside the drain lock: never compare against a sale that is mid-push.
+  return withShopDrainLock(() => checkShopPeriodLocked(periodId));
+}
+
+/**
+ * The check itself, for a caller ALREADY holding the drain lock — the weekly
+ * close (shop-close.ts). The lock is a promise chain, so taking it again from
+ * inside would wait on itself forever.
+ */
+export async function checkShopPeriodLocked(periodId: string): Promise<ShopCheck> {
   const p = await query(`SELECT id, hh_job_number FROM shop_sale_periods WHERE id = $1`, [periodId]);
   const hhJobNumber = p.rows[0]?.hh_job_number ? Number(p.rows[0].hh_job_number) : null;
   if (!hhJobNumber) throw new Error('That week has no HireHop job yet.');
 
-  // Inside the drain lock: never compare against a sale that is mid-push.
-  const result = await withShopDrainLock(async (): Promise<ShopCheck> => {
+  const result = await (async (): Promise<ShopCheck> => {
     const [jobRes, billing, lineIds, expected] = await Promise.all([
       hhBroker.get<any>('/api/job_data.php', { job: hhJobNumber }, { priority: 'low', cacheTTL: -1, skipCache: true }),
       readBillingRows(hhJobNumber),
@@ -257,7 +266,12 @@ export async function checkShopPeriod(periodId: string): Promise<ShopCheck> {
     ]);
 
     const status = jobRes?.success && jobRes.data?.STATUS != null ? parseFloat(String(jobRes.data.STATUS)) : null;
-    const invoiced = billing.some((row: any) => parseInt(row.kind ?? '0') === 1);
+    // APPROVED invoices only. A draft is where the weekly close stops when the
+    // pennies don't match (§20) — counting it here would set `invoiced_at` and
+    // drop exactly that week out of the scan and its alarms. Refunds still
+    // stop at ANY invoice, draft included (shop-drain.ts), the safer side.
+    const invoiced = billing.some((row: any) =>
+      parseInt(row.kind ?? '0') === 1 && parseInt(row.status ?? row.data?.STATUS ?? '0') === 2);
     const problems: string[] = [];
 
     // Goods — ex-VAT on both sides.
@@ -330,7 +344,7 @@ export async function checkShopPeriod(periodId: string): Promise<ShopCheck> {
       goods: { expected: goodsExpected, actual: goodsActual, ok: goodsOk },
       money, missingLines, problems,
     };
-  });
+  })();
 
   await query(
     `UPDATE shop_sale_periods

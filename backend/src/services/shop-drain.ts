@@ -27,7 +27,7 @@
 import { query } from '../config/database';
 import hhBroker from './hirehop-broker';
 import { hhLocalNow } from './shop-stock';
-import { getOrCreateShopPeriod } from './shop-period';
+import { getShopPeriodForSale } from './shop-period';
 import { pushDepositToHH, refundDepositOnHH, getHHBankId } from './hh-deposit';
 import { readBillingRows, readDepositAvailability } from './hh-deposit-release';
 import { saleRef } from './shop-sale-ref';
@@ -319,7 +319,7 @@ export async function drainShopSales(): Promise<DrainResult> {
 
   const due = await query(
     `SELECT id, tender, gross_amount, notes, push_attempts, sale_number,
-            hh_job_number, hh_deposit_id, sold_to_job_id
+            hh_job_number, hh_deposit_id, sold_to_job_id, created_at
        FROM shop_sales
       WHERE kind = 'sale' AND status = 'queued' AND push_after <= NOW()
       ORDER BY created_at
@@ -343,7 +343,8 @@ export async function drainShopSales(): Promise<DrainResult> {
           hhJobNumber = j.rows[0]?.hh_job_number ? Number(j.rows[0].hh_job_number) : null;
           if (!hhJobNumber) throw new Error('That job has no HireHop job number.');
         } else {
-          hhJobNumber = (await getOrCreateShopPeriod(new Date())).hhJobNumber;
+          // The week it was rung up in, not the week it drained in (§20).
+          hhJobNumber = (await getShopPeriodForSale(new Date(sale.created_at))).hhJobNumber;
         }
         await query(`UPDATE shop_sales SET hh_job_number = $2 WHERE id = $1`, [saleId, hhJobNumber]);
       }
