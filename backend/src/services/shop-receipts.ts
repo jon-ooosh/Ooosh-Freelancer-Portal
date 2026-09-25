@@ -14,8 +14,9 @@
  * A refund gets a refund receipt, sent against the reversal row.
  *
  * NOT for "put it on their bill" sales: nothing was paid, and their invoice is
- * the document. Staff-only for now (jon, Sep 2026) — the sitter till gets it
- * once it's proved. A PDF is a wanted future upgrade; this is the email body.
+ * the document. Staff till and sitter till (jon, Sep 2026). The sitter till
+ * gets a typed box only — band contacts' addresses are never sent to a
+ * freelancer's phone. A PDF is parked; the email body is the receipt.
  */
 import { query } from '../config/database';
 import { emailService } from './email-service';
@@ -147,7 +148,7 @@ export function renderReceiptHtml(d: ReceiptData): string {
 export async function sendShopReceipt(
   saleId: string,
   to: string,
-  user: { id: string },
+  user: { id: string | null; personId?: string | null },
 ): Promise<{ sent: boolean; error?: string }> {
   const email = String(to || '').trim();
   if (!EMAIL_RE.test(email)) throw new Error("That doesn't look like an email address.");
@@ -161,8 +162,10 @@ export async function sendShopReceipt(
   });
 
   await query(
-    `INSERT INTO shop_receipts (sale_id, sent_to, sent_by, status, error) VALUES ($1, $2, $3, $4, $5)`,
-    [saleId, email, user.id, result.success ? 'sent' : 'failed', result.success ? null : (result.error || 'unknown')],
+    `INSERT INTO shop_receipts (sale_id, sent_to, sent_by, status, error, sent_by_person_id)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [saleId, email, user.id || null, result.success ? 'sent' : 'failed',
+      result.success ? null : (result.error || 'unknown'), user.personId || null],
   );
   return result.success ? { sent: true } : { sent: false, error: result.error || 'The email did not send.' };
 }

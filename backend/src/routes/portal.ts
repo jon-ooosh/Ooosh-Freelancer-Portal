@@ -1425,6 +1425,7 @@ router.get('/studio-sitter/shifts/:date/till/sales', async (req: PortalRequest, 
         gross: Number(r.gross_amount), created_at: r.created_at, push_after: r.push_after,
         mine: r.recorded_by_person_id === req.portalUser!.id,
         sold_to_hh_job_number: r.sold_to_hh_job_number ?? null,
+        last_receipt_to: r.last_receipt_to ?? null,
         lines: (r.lines || []).map((l: any) => ({ name: l.name, qty: Number(l.qty) })),
       })),
     });
@@ -1482,6 +1483,25 @@ router.post('/studio-sitter/shifts/:date/till/sales', async (req: PortalRequest,
     // Validation messages ("pick how they paid", "their bill needs a band")
     // are written for the person holding the phone.
     res.status(400).json({ error: error instanceof Error ? error.message : 'Could not record that sale.' });
+  }
+});
+
+// Email a receipt for one of tonight's sales. Only a sale taken on THIS
+// evening's till — a sitter can't send receipts for anything else. Works after
+// lock-up too: it's paperwork for a sale already made, not a new sale.
+router.post('/studio-sitter/shifts/:date/till/sales/:id/receipt', async (req: PortalRequest, res: Response) => {
+  try {
+    const gate = await tillGate(req, res);
+    if (!gate) return;
+    const own = await query(`SELECT 1 FROM shop_sales WHERE id = $1 AND shift_id = $2`, [String(req.params.id), gate.shiftId]);
+    if (!own.rows.length) { res.status(404).json({ error: "That isn't one of tonight's sales." }); return; }
+    const { sendShopReceipt } = await import('../services/shop-receipts');
+    const result = await sendShopReceipt(String(req.params.id), String(req.body?.to ?? ''), { id: null, personId: req.portalUser!.id });
+    if (!result.sent) { res.status(502).json({ error: `The receipt didn't send — ${result.error}` }); return; }
+    res.json({ success: true, sent: true });
+  } catch (error) {
+    // "Not an email address", "their bill — their invoice is the document".
+    res.status(400).json({ error: error instanceof Error ? error.message : 'Could not send that receipt.' });
   }
 });
 

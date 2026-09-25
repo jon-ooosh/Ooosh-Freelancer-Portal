@@ -6,6 +6,7 @@
  * GET  /api/studio-sitter/shifts/[date]/till/sales            → tonight's sales + totals
  * POST /api/studio-sitter/shifts/[date]/till/sales            → take a sale
  * POST /api/studio-sitter/shifts/[date]/till/sales/[id]/cancel → undo one inside its hold
+ * POST /api/studio-sitter/shifts/[date]/till/sales/[id]/receipt → email a receipt
  *
  * OP-only. Access is enforced OP-side — the sitter must be rostered to this
  * evening (or be the shared staff account), else OP returns 403. Only the
@@ -26,7 +27,8 @@ function allowed(method: 'GET' | 'POST', path: string[]): boolean {
   const p = path.join('/')
   if (method === 'GET') return p === 'context' || p === 'search' || p === 'sales'
   if (p === 'sales') return true
-  return path.length === 3 && path[0] === 'sales' && UUID_RE.test(path[1]) && path[2] === 'cancel'
+  return path.length === 3 && path[0] === 'sales' && UUID_RE.test(path[1])
+    && (path[2] === 'cancel' || path[2] === 'receipt')
 }
 
 async function handle(request: NextRequest, method: 'GET' | 'POST', { params }: Params) {
