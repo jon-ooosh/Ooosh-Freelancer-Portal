@@ -353,6 +353,23 @@ export async function getStaffAttention(): Promise<AttentionItem[]> {
     });
   }
 
+  // ── Repeating to-dos still on a leaver (TASKS-SPEC §6.5) ──────────────────
+  // Otherwise the meters stop being read the day somebody leaves.
+  const { listLeaverSeries } = await import('./staff-task-series');
+  for (const l of await listLeaverSeries()) {
+    items.push({
+      id: `leaver-series-${l.person_id}`,
+      severity: 'soon',
+      kind: 'leaver_repeating_todos',
+      label: `${l.n} repeating to-do${l.n === 1 ? '' : 's'} still theirs`,
+      detail: 'give them to someone else, or stop them',
+      personId: l.person_id,
+      personName: l.person_name,
+      tab: null,
+      action: 'Re-assign',
+    });
+  }
+
   // ── Logins with no person behind them ─────────────────────────────────────
   const unlinked = await query(
     `SELECT u.id, u.email FROM users u

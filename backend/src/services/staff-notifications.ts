@@ -867,6 +867,53 @@ export async function notifyTaskDone(
   );
 }
 
+// ── To Do: repeating (docs/TASKS-SPEC.md §6) ────────────────────────────────
+
+/** "Sam wants to give you a repeating to-do — OK?" — to the person asked. */
+export async function notifySeriesProposed(
+  ownerPersonId: string, seriesId: string, title: string, byName: string | null, ruleText: string
+): Promise<void> {
+  const userId = await userForPerson(ownerPersonId);
+  if (!userId) return;
+  await notify(
+    userId, 'staff_task_series_proposed', 'A repeating to-do needs your OK',
+    // Only the first letter lowered: "every week on Thu", not "…on thu".
+    `${esc(byName || 'Somebody')} wants to give you “${esc(title)}” — ` +
+    `${esc(ruleText.charAt(0).toLowerCase() + ruleText.slice(1))}. ` +
+    'Accept or decline it on your To Do.',
+    'staff_task_series', seriesId, `${TODO_URL}&view=mine`, 'normal'
+  );
+}
+
+/** Accepted / declined — back to whoever set it. */
+export async function notifySeriesResponse(
+  setterUserId: string, seriesId: string, title: string, byName: string | null,
+  accepted: boolean, reason: string | null
+): Promise<void> {
+  await notify(
+    setterUserId, 'staff_task_series_response',
+    accepted ? 'A repeating to-do was accepted' : 'A repeating to-do was declined',
+    accepted
+      ? `${esc(byName || 'Somebody')} accepted “${esc(title)}”.`
+      : `${esc(byName || 'Somebody')} declined “${esc(title)}”${reason ? `: ${esc(reason)}` : ''}.`,
+    'staff_task_series', seriesId, `${TODO_URL}&view=assigned`, accepted ? 'low' : 'normal'
+  );
+}
+
+/** Stopped — to the other party (the setter, or the owner), by user or person. */
+export async function notifySeriesEnded(
+  toUserId: string | null, toPersonId: string | null, seriesId: string, title: string,
+  byName: string | null, reason: string | null
+): Promise<void> {
+  const userId = toUserId ?? (toPersonId ? await userForPerson(toPersonId) : null);
+  if (!userId) return;
+  await notify(
+    userId, 'staff_task_series_ended', 'A repeating to-do was stopped',
+    `${esc(byName || 'Somebody')} stopped “${esc(title)}”${reason ? `: ${esc(reason)}` : ''}.`,
+    'staff_task_series', seriesId, TODO_URL, 'normal'
+  );
+}
+
 /**
  * The SETTER's follow-up (spec §5.2): "Will's 'Book the refresher' — still
  * open". A second clock beside runTaskChase, which nudges the owner. Once per

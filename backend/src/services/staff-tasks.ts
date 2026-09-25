@@ -144,6 +144,7 @@ interface TouchInfo {
   dueDate: string | null;
   nextChaseDate: string | null;
   followUpOn: string | null;
+  sourceType: string | null;
   /** Why this caller may touch it — decides what they may change. */
   as: 'admin' | 'setter' | 'owner';
 }
@@ -159,7 +160,8 @@ interface TouchInfo {
 async function assertCanTouch(taskId: string, userId: string, role: string | undefined): Promise<TouchInfo> {
   const r = await query(
     `SELECT person_id, created_by, due_date::text AS due_date,
-            next_chase_date::text AS next_chase_date, follow_up_on::text AS follow_up_on
+            next_chase_date::text AS next_chase_date, follow_up_on::text AS follow_up_on,
+            source_type
        FROM staff_tasks WHERE id = $1`,
     [taskId]
   );
@@ -171,6 +173,7 @@ async function assertCanTouch(taskId: string, userId: string, role: string | und
     dueDate: row.due_date ?? null,
     nextChaseDate: row.next_chase_date ?? null,
     followUpOn: row.follow_up_on ?? null,
+    sourceType: row.source_type ?? null,
   };
   if (isAdmin(role)) return { ...base, as: 'admin' };
   const mine = await personIdForUser(userId);
@@ -333,6 +336,8 @@ export async function updateTask(
   let reassignedTo: string | null = null;
   if (patch.personId !== undefined && patch.personId !== who.personId) {
     if (!setterOrAdmin) throw new Error('Only whoever set this can give it to somebody else — hand it back instead');
+    // One occurrence of a repeating to-do can't wander off on its own.
+    if (who.sourceType === 'staff_task_series') throw new Error('This repeats — change who it’s for on the repeating to-do');
     params.push(patch.personId); sets.push(`person_id = $${params.length}`);
     // A fresh owner, a fresh start: nothing about the last one's nudges applies.
     sets.push('handed_back_by = NULL', 'handed_back_reason = NULL', 'handed_back_at = NULL');
@@ -370,13 +375,21 @@ export async function updateTask(
     if (reassignedTo) {
       await n.notifyTaskAssigned(reassignedTo, taskId, row.title, await nameForUser(userId), row.due_date);
     }
-    // Done by somebody other than whoever set it → tell the setter.
+    // Done by somebody other than whoever set it → tell the setter. Not for
+    // each occurrence of a repeating one: a bell every Thursday that the
+    // meters were read is noise; Assigned by me shows "last done" instead.
     if (patch.status === 'done' && row.created_by && row.created_by !== userId
-        && row.set_by_person_id !== row.person_id) {
+        && row.set_by_person_id !== row.person_id && row.source_type !== 'staff_task_series') {
       await n.notifyTaskDone(row.created_by, taskId, row.title, row.owner_name);
     }
   } catch (e) {
     console.error('[staff-tasks] notify after update failed:', e);
+  }
+
+  // A repeating to-do's occurrence closed → make the next (spec §6.3).
+  if (patch.status && patch.status !== 'open' && row.source_type === 'staff_task_series') {
+    const { onOccurrenceClosed } = await import('./staff-task-series');
+    await onOccurrenceClosed(taskId).catch(e => console.error('[staff-tasks] next occurrence failed:', e));
   }
   return row;
 }
@@ -390,7 +403,8 @@ export async function handBackTask(taskId: string, reason: string, userId: strin
   const why = reason?.trim();
   if (!why) throw new Error('Say why you’re handing it back');
   const r = await query(
-    `SELECT t.person_id, t.due_date::text AS due_date, t.status, t.created_by, cu.person_id AS setter_person
+    `SELECT t.person_id, t.due_date::text AS due_date, t.status, t.created_by, t.source_type,
+            cu.person_id AS setter_person
        FROM staff_tasks t LEFT JOIN users cu ON cu.id = t.created_by
       WHERE t.id = $1`,
     [taskId]
@@ -401,6 +415,9 @@ export async function handBackTask(taskId: string, reason: string, userId: strin
   // Same "not found" rule as assertCanTouch: only the owner hands back.
   if (!mine || t.person_id !== mine) throw new Error('Task not found');
   if (t.status !== 'open') throw new Error('Only an open task can be handed back');
+  if (t.source_type === 'staff_task_series') {
+    throw new Error('This repeats — stop the repeating to-do instead, with a reason');
+  }
   if (!t.setter_person || t.setter_person === mine) throw new Error('Nobody to hand this back to');
 
   // On the setter's list now, so it chases THEM like any other task of theirs.
@@ -481,12 +498,17 @@ export async function listAssignablePeople() {
 
 /** Cancel, never delete — CLAUDE.md. A dropped review action is a fact. */
 export async function cancelTask(taskId: string, userId: string, role: string | undefined) {
-  await assertCanTouch(taskId, userId, role);
+  const who = await assertCanTouch(taskId, userId, role);
   await query(
     `UPDATE staff_tasks SET status = 'cancelled', completed_at = NULL, updated_at = NOW()
       WHERE id = $1`,
     [taskId]
   );
+  // Dropping one occurrence of a repeating to-do skips it; the next is made.
+  if (who.sourceType === 'staff_task_series') {
+    const { onOccurrenceClosed } = await import('./staff-task-series');
+    await onOccurrenceClosed(taskId).catch(e => console.error('[staff-tasks] next occurrence failed:', e));
+  }
   return { id: taskId };
 }
 

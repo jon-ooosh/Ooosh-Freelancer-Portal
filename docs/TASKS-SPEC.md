@@ -1,7 +1,7 @@
 # To Do — the things that fall between the cracks
 
-**Status: AGREED 24 Sep 2026. Phase 1 (assigning) BUILT — §13. Phases 2–4 to
-come.** Written straight after the staff records module closed
+**Status: AGREED 24 Sep 2026. Phases 1 (assigning) and 2 (repeating) BUILT —
+§13, §14. Phases 3–4 (lists, pull-ins) to come.** Written straight after the staff records module closed
 (`docs/STAFF-RECORDS-SPEC.md` §23), from the discussion recorded in §0; jon's
 answers to §12 are recorded there.
 
@@ -329,3 +329,53 @@ private hidden from a colleague, visible to owner and setter; a colleague's
 edit refused as "not found"; the owner refused on the follow-up; follow-up
 fires once and re-arms on a move; hand back returns it with the reason;
 reassign bells the new owner; done bells the setter.
+
+---
+
+## 14. Phase 2 build log — repeating to-dos (25 Sep 2026)
+
+Also in this pass, from jon's phase 1 testing: **dates look forward** — a due
+date, reminder or follow-up can't be SET in the past (an untouched stored date
+is kept, so editing an overdue task still works; `assertForward` in
+`staff-tasks.ts`), with **Today / +7 / +14** shortcuts under every date
+(`components/ForwardDateInput.tsx`); and a task you **hand back stays in your
+recently finished**, greyed, "handed back to Sam".
+
+**The engine** — `services/task-recurrence.ts`, pure, 20 tests. Every rule in
+§6.1 (every N day/week/month/year; weekdays; day N or the Nth/last weekday;
+day 31 lands on the month's last day; 29 Feb → 28 Feb), both modes, and the
+§6.3 "next after close" rule. Weekdays are 0 = Monday. THE ONE PLACE date
+arithmetic for repeats happens: the form asks it through
+`POST /staff-tasks/series/preview` rather than computing its own.
+
+**The series** — `staff_task_series` (migration 256),
+`services/staff-task-series.ts`. Each occurrence is an ordinary task with
+`source_type = 'staff_task_series'` — no new column, the existing source hook
+— so ticking, nudging, privacy and the Everyone view needed nothing new.
+
+- **One open occurrence.** Ticking or dropping one makes the next
+  (`onOccurrenceClosed`, called from `updateTask` / `cancelTask`); the INSERT is
+  guarded so a double tick can't make two.
+- **Proposed → Accept / Decline** for a series set for somebody else, with a
+  reason on decline; bells both ways. The owner can accept, decline or stop,
+  but not rewrite what they were asked — only the setter or an admin can.
+- **Occurrences can't be handed back or reassigned singly** — stop or reassign
+  the series. Reassigning a series drops the open occurrence and proposes it
+  to the new owner.
+- **No setter follow-up or done bell per occurrence** — a bell every Thursday
+  that the meters were read is noise. "Assigned by me" shows last done / next.
+- **Leavers** (§6.5): Needs attention lists repeating to-dos still on somebody
+  who has left; the Everyone view's Repeating section lets an admin (or the
+  setter) change who it's for.
+- **Safety net**: 09:45 `ensureSeriesOccurrences()` repairs an active series
+  left with no open occurrence, counting on from its LAST occurrence.
+
+**Caught in testing, before shipping:** the safety net first counted from the
+series' start date and re-made a date that was already done; and the proposal
+bell lower-cased the whole rule ("every week on fri"). Both fixed.
+
+Verified on a real Postgres over HTTP as three users (proposal, accept,
+decline-with-reason, one-open-only under a double tick, drop → next, ends
+after N, reassign, privacy, leaver prompt, permission refusals, the repair),
+and in a real browser (Playwright) through the whole create → propose →
+accept → first occurrence flow, with no console errors.

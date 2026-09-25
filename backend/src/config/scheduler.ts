@@ -1157,6 +1157,15 @@ export function startScheduler() {
   cron.schedule('45 9 * * *', async () => {
     const notifications = await import('../services/staff-notifications');
     try {
+      // Repeating to-dos: repair any active series left with no open
+      // occurrence — BEFORE the chase, so a repaired one is nudged today.
+      const { ensureSeriesOccurrences } = await import('../services/staff-task-series');
+      const r = await ensureSeriesOccurrences();
+      if (r.made) console.log(`Scheduler: Repeating to-dos — ${r.made} repaired`);
+    } catch (err) {
+      console.error('Scheduler: Repeating to-do repair failed:', err);
+    }
+    try {
       const r = await notifications.runTaskChase();
       console.log(`Scheduler: To-do chase — ${r.chased} nudged`);
     } catch (err) {
