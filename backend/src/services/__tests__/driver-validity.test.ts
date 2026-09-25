@@ -1,0 +1,268 @@
+import {
+  computeDriverValidity,
+  persistableWindows,
+  addDaysYmd,
+  toYmd,
+  touchesValidity,
+  outstandingDocuments,
+  hasAllRequiredDocuments,
+  isUkLicence,
+  backfillFromDates,
+} from '../driver-validity';
+
+// Fixed "today" so these never rot.
+const TODAY = '2026-08-19';
+
+describe('addDaysYmd', () => {
+  it('is UTC-anchored across a BST boundary', () => {
+    // Local-Date + toISOString() drifts a day under BST; this must not.
+    expect(addDaysYmd('2026-06-15', 90)).toBe('2026-09-13');
+    expect(addDaysYmd('2026-03-28', 30)).toBe('2026-04-27');
+  });
+  it('crosses month and year ends', () => {
+    expect(addDaysYmd('2026-12-31', 1)).toBe('2027-01-01');
+    expect(addDaysYmd('2026-02-28', 1)).toBe('2026-03-01'); // 2026 is not a leap year
+  });
+  it('returns null for null input', () => {
+    expect(addDaysYmd(null, 30)).toBeNull();
+  });
+});
+
+describe('toYmd', () => {
+  it('accepts the raw ISO timestamp the iDenfy webhook writes to a VARCHAR column', () => {
+    expect(toYmd('2026-08-18T12:26:19.937Z')).toBe('2026-08-18');
+  });
+  it('accepts a pg DATE column (JS Date)', () => {
+    expect(toYmd(new Date(Date.UTC(2026, 7, 9)))).toBe('2026-08-09');
+  });
+  it('returns null for empty and junk', () => {
+    expect(toYmd('')).toBeNull();
+    expect(toYmd(null)).toBeNull();
+    expect(toYmd('not a date')).toBeNull();
+  });
+});
+
+describe('licence integrity guard', () => {
+  // manjagoproduction@, 18 Aug 2026: iDenfy DENIED, so a checkDate was written
+  // with no document data behind it. The detail page rendered a confident green
+  // "16 Nov 2026" for a driver with no licence, no name and no files.
+  const denied = {
+    idenfy_check_date: '2026-08-18T12:26:19.937Z',
+    licence_issued_by: null,
+    licence_valid_to: null,
+  };
+
+  it('does not manufacture a window from a check date with no licence identity', () => {
+    const v = computeDriverValidity(denied, TODAY);
+    expect(v.licence.trusted).toBe(false);
+    expect(v.licence.until).toBeNull();
+    expect(v.licence.valid).toBe(false);
+    expect(v.licence.untrustedReason).toMatch(/re-verification/i);
+  });
+
+  it('persists NULL rather than a green window for an untrusted licence', () => {
+    expect(persistableWindows(denied).licence_check_valid_until).toBeNull();
+  });
+
+  it('trusts the same check date once licence details are present', () => {
+    const v = computeDriverValidity({ ...denied, licence_issued_by: 'DVLA' }, TODAY);
+    expect(v.licence.trusted).toBe(true);
+    expect(v.licence.until).toBe('2026-11-16');
+    expect(v.licence.valid).toBe(true);
+  });
+
+  it('treats whitespace-only licence_issued_by as absent', () => {
+    const v = computeDriverValidity({ ...denied, licence_issued_by: '   ' }, TODAY);
+    expect(v.licence.trusted).toBe(false);
+  });
+});
+
+describe('window derivation', () => {
+  it("caps the licence window at the licence's own expiry", () => {
+    const v = computeDriverValidity({
+      idenfy_check_date: '2026-08-09',
+      licence_issued_by: 'DVLA',
+      licence_valid_to: '2026-09-01', // sooner than check + 90d
+    }, TODAY);
+    expect(v.licence.until).toBe('2026-09-01');
+    expect(v.licence.cappedBy).toBe('2026-09-01');
+  });
+
+  it('leaves cappedBy unset when the 90-day window is the binding limit', () => {
+    const v = computeDriverValidity({
+      idenfy_check_date: '2026-08-09',
+      licence_issued_by: 'DVLA',
+      licence_valid_to: '2029-04-18',
+    }, TODAY);
+    expect(v.licence.until).toBe('2026-11-07');
+    expect(v.licence.cappedBy).toBeNull();
+  });
+
+  it('derives DVLA as check + 30d', () => {
+    // Peter Christopherson, job 16291: dvla_check_date was editable and moved,
+    // dvla_valid_until was not and stayed at a stale 2026-05-28.
+    const v = computeDriverValidity({ dvla_check_date: '2026-08-13' }, TODAY);
+    expect(v.dvla.from).toBe('2026-08-13');
+    expect(v.dvla.until).toBe('2026-09-12');
+    expect(v.dvla.valid).toBe(true);
+  });
+
+  it('gives a passport 90 days from the check date', () => {
+    // Was 30 while the hire-form app sent `today + 90`, so backfillFromDates
+    // back-computed a check date 60 days AFTER the real check and staff read
+    // that as "Checked on" (Louis Salanson / 16507). Migration 207.
+    const v = computeDriverValidity({ passport_check_date: '2026-08-01' }, TODAY);
+    expect(v.passport.until).toBe('2026-10-30');
+    expect(v.passport.cappedBy).toBeNull();
+  });
+
+  it('round-trips a passport expiry back to the same check date', () => {
+    // backfillFromDates and persistableWindows must agree, or a caller that
+    // writes one end silently moves the other.
+    const back = backfillFromDates({ passport_valid_until: '2026-10-30' });
+    expect(back.passport_check_date).toBe('2026-08-01');
+  });
+
+  it("caps the passport window at the passport's printed expiry", () => {
+    const v = computeDriverValidity({
+      passport_check_date: '2026-08-01',
+      passport_expiry: '2026-08-20',
+    }, TODAY);
+    expect(v.passport.until).toBe('2026-08-20');
+    expect(v.passport.cappedBy).toBe('2026-08-20');
+  });
+
+  it('treats POA1 and POA2 as fully independent', () => {
+    const v = computeDriverValidity({
+      poa1_doc_date: '2026-06-07', // + 90d => 2026-09-05, still valid
+      poa2_doc_date: '2026-01-01', // + 90d => 2026-04-01, lapsed
+    }, TODAY);
+    expect(v.poa1.valid).toBe(true);
+    expect(v.poa2.valid).toBe(false);
+  });
+
+  it('counts a window expiring today as still valid', () => {
+    const v = computeDriverValidity({ dvla_check_date: addDaysYmd(TODAY, -30) }, TODAY);
+    expect(v.dvla.until).toBe(TODAY);
+    expect(v.dvla.valid).toBe(true);
+  });
+});
+
+describe('persistableWindows', () => {
+  it('reproduces the stored value it was back-computed from (migration 192 is value-preserving)', () => {
+    // Backfill sets poa1_doc_date = poa1_valid_until - 90d; re-deriving must
+    // land on exactly the original expiry, so nobody's status moves on deploy.
+    const original = '2026-09-05';
+    const derived = persistableWindows({ poa1_doc_date: addDaysYmd(original, -90) });
+    expect(derived.poa1_valid_until).toBe(original);
+  });
+
+  it('emits null for every window with no FROM date', () => {
+    expect(persistableWindows({})).toEqual({
+      licence_check_valid_until: null,
+      dvla_valid_until: null,
+      poa1_valid_until: null,
+      poa2_valid_until: null,
+      passport_valid_until: null,
+    });
+  });
+});
+
+describe('touchesValidity', () => {
+  it('fires on a FROM-date write and ignores unrelated columns', () => {
+    expect(touchesValidity(['dvla_check_date'])).toBe(true);
+    expect(touchesValidity(['poa1_doc_date', 'phone'])).toBe(true);
+    expect(touchesValidity(['phone', 'address_full'])).toBe(false);
+  });
+});
+
+describe('outstandingDocuments', () => {
+  // Everything in date on TODAY.
+  const complete = {
+    idenfy_check_date: '2026-08-09',
+    licence_issued_by: 'DVLA',
+    dvla_check_date: '2026-08-09',
+    poa1_doc_date: '2026-08-09',
+    poa2_doc_date: '2026-08-09',
+  };
+
+  it('reports nothing outstanding for a complete UK driver', () => {
+    const v = computeDriverValidity(complete, TODAY);
+    expect(outstandingDocuments(v)).toEqual({
+      licence: false, poa1: false, poa2: false, dvla: false, passport: false,
+    });
+    expect(hasAllRequiredDocuments(v)).toBe(true);
+  });
+
+  it('asks a UK driver for DVLA and never for a passport', () => {
+    const v = computeDriverValidity({ ...complete, dvla_check_date: null }, TODAY);
+    const out = outstandingDocuments(v);
+    expect(out.dvla).toBe(true);
+    expect(out.passport).toBe(false);
+    expect(hasAllRequiredDocuments(v)).toBe(false);
+  });
+
+  it('asks a non-UK driver for a passport and never for DVLA', () => {
+    const v = computeDriverValidity({
+      idenfy_check_date: '2026-08-09',
+      licence_issued_by: 'Bundesdruckerei',
+      licence_issue_country: 'DE',
+      poa1_doc_date: '2026-08-09',
+      poa2_doc_date: '2026-08-09',
+    }, TODAY);
+    const out = outstandingDocuments(v);
+    expect(out.passport).toBe(true);
+    expect(out.dvla).toBe(false);
+  });
+
+  it('counts an untrusted licence as outstanding', () => {
+    // A check date with no licence identity behind it is not evidence — the
+    // nudge must chase for the licence, not tell them their documents are fine.
+    const v = computeDriverValidity({ ...complete, licence_issued_by: null }, TODAY);
+    expect(outstandingDocuments(v).licence).toBe(true);
+    expect(hasAllRequiredDocuments(v)).toBe(false);
+  });
+
+  it('counts each proof of address separately', () => {
+    const v = computeDriverValidity({ ...complete, poa2_doc_date: '2026-01-01' }, TODAY);
+    const out = outstandingDocuments(v);
+    expect(out.poa1).toBe(false);
+    expect(out.poa2).toBe(true);
+  });
+});
+
+describe('isUkLicence', () => {
+  it('recognises a DVLA licence', () => {
+    expect(isUkLicence({ licence_issued_by: 'DVLA' })).toBe(true);
+    expect(isUkLicence({ licence_issued_by: ' dvla ' })).toBe(true);
+    expect(isUkLicence({ licence_issued_by: 'DVA' })).toBe(true);   // Northern Ireland
+  });
+
+  it('accepts the country as a NAME, not just the ISO code', () => {
+    // The hire-form webhook writes licence_issue_country through
+    // getCountryName(), i.e. "United Kingdom" — while every consumer compared
+    // it to "GB", so that half of the test never once matched.
+    expect(isUkLicence({ licence_issue_country: 'GB' })).toBe(true);
+    expect(isUkLicence({ licence_issue_country: 'United Kingdom' })).toBe(true);
+    expect(isUkLicence({ licence_issue_country: 'UNITED KINGDOM' })).toBe(true);
+  });
+
+  it('does not treat a passport authority as a UK licence', () => {
+    // HMPO is the UK Passport Office. It reached licence_issued_by because an
+    // expired PASSPORT session was processed down the licence path
+    // (Charlie McWilliams / 15727). It is UK, but it is not a licence
+    // authority — so the driver must not be classed as a DVLA driver on it.
+    expect(isUkLicence({ licence_issued_by: 'HMPO' })).toBe(false);
+  });
+
+  it('is false for a genuinely foreign licence and for no data at all', () => {
+    expect(isUkLicence({ licence_issued_by: 'ZA', licence_issue_country: 'South Africa' })).toBe(false);
+    expect(isUkLicence({})).toBe(false);
+    expect(isUkLicence(null)).toBe(false);
+  });
+
+  it('drives isUkDriver on computeDriverValidity', () => {
+    expect(computeDriverValidity({ licence_issue_country: 'United Kingdom' }, TODAY).isUkDriver).toBe(true);
+    expect(computeDriverValidity({ licence_issued_by: 'HMPO' }, TODAY).isUkDriver).toBe(false);
+  });
+});

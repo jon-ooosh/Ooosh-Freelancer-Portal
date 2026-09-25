@@ -127,6 +127,7 @@ export async function processBookOutSubmission(
         () =>
           sendConditionReport(
             {
+              eventId,
               vehicleReg,
               vehicleType: formData.vehicleType as string,
               driverName,
@@ -264,6 +265,7 @@ export async function processCollectionSubmission(
         () =>
           sendConditionReport(
             {
+              eventId,
               vehicleReg,
               vehicleType: formData.vehicleType as string,
               driverName,
@@ -324,6 +326,12 @@ export async function processCheckInSubmission(
         hireHopJob: (formData.bookOutHireHopJob as string) || null,
         clientEmail: (formData.bookOutClientEmail as string) || null,
         hireStatus: 'Prep Needed',
+        driverName: (formData.bookOutDriverName as string) || null,
+        // Gates the post-hire `damage_review` close-out card. NB the offline
+        // replay does NOT create job_issues rows (the live CheckInPage loop
+        // isn't mirrored here) — so on a queued check-in the card is the only
+        // damage signal that reaches OP. Known gap, tracked separately.
+        hasDamage: damageItems.length > 0,
       }),
     'Offline sync: Check-in Monday event',
   )
@@ -378,6 +386,7 @@ export async function processCheckInSubmission(
         () =>
           sendConditionReport(
             {
+              eventId,
               vehicleReg,
               vehicleType: formData.vehicleType as string,
               driverName,

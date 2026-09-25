@@ -1,23 +1,28 @@
 /**
  * Resources API Endpoint
- * 
+ *
  * GET /api/resources
- * 
- * Fetches all resources (documents/guides) marked for freelancer sharing
- * from the Staff Training board in Monday.com.
- * 
+ *
+ * Fetches staff documents flagged as shareable with freelancers from the
+ * Operations Platform (OP). Replaces the old Monday "Staff Training" board read
+ * — Monday has been retired, so this is OP-only with no fallback. When the
+ * portal isn't in OP mode (shouldn't happen in production) it returns an empty
+ * list, and the page shows its empty state.
+ *
  * Requires authentication.
  */
 
-import { NextResponse } from 'next/server'
+import { NextRequest, NextResponse } from 'next/server'
 import { getSessionUser } from '@/lib/session'
-import { getResourcesForFreelancers } from '@/lib/monday'
+import {
+  getResourcesFromOP,
+  isOpClientError,
+  OpApiError,
+} from '@/lib/op-api'
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
-    // Check session - user must be authenticated
     const session = await getSessionUser()
-    
     if (!session) {
       return NextResponse.json(
         { success: false, error: 'Not authenticated' },
@@ -25,17 +30,29 @@ export async function GET() {
       )
     }
 
-    console.log('Resources API: Fetching resources for', session.email)
+    const sessionToken = request.cookies.get('session')?.value
+    if (!sessionToken) {
+      return NextResponse.json(
+        { success: false, error: 'Session token missing' },
+        { status: 401 }
+      )
+    }
 
-    // Fetch resources from Monday
-    const resources = await getResourcesForFreelancers()
-
-    return NextResponse.json({
-      success: true,
-      resources,
-      totalCount: resources.length,
-    })
-
+    try {
+      const data = await getResourcesFromOP(sessionToken)
+      const resources = data.resources || []
+      return NextResponse.json({ success: true, resources, totalCount: resources.length })
+    } catch (opError) {
+      if (isOpClientError(opError)) {
+        const status = (opError as OpApiError).status
+        return NextResponse.json({ success: false, error: opError.message }, { status })
+      }
+      console.error('OP resources error:', opError)
+      return NextResponse.json(
+        { success: false, error: 'Unable to load resources. Please refresh and try again.' },
+        { status: 502 }
+      )
+    }
   } catch (error) {
     console.error('Resources API error:', error)
     return NextResponse.json(

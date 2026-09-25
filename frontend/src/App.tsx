@@ -13,7 +13,6 @@ import JobDetailPage from './pages/JobDetailPage';
 import ReturnsPage from './pages/ReturnsPage';
 import PipelinePage from './pages/PipelinePage';
 import SettingsPage from './pages/SettingsPage';
-import ProfilePage from './pages/ProfilePage';
 import DuplicatesPage from './pages/DuplicatesPage';
 import DataCleanupPage from './pages/DataCleanupPage';
 import DriversPage from './pages/DriversPage';
@@ -23,22 +22,29 @@ import BacklinePage from './pages/BacklinePage';
 import BacklineMatcherPage from './pages/BacklineMatcherPage';
 import CarnetsPage from './pages/CarnetsPage';
 import CarnetDetailPage from './pages/CarnetDetailPage';
-import StudioSittersPage from './pages/StudioSittersPage';
-import IssuesPage from './pages/IssuesPage';
+import RehearsalsPage from './pages/RehearsalsPage';
 import ProblemsPage from './pages/ProblemsPage';
 import IssueDetailPage from './pages/IssueDetailPage';
 import ExcessLedgerPage from './pages/ExcessLedgerPage';
 import MoneyOverviewPage from './pages/MoneyOverviewPage';
 import CostsPage from './pages/CostsPage';
+import ShopTillPage from './pages/ShopTillPage';
 import VE103BCertificatesPage from './pages/VE103BCertificatesPage';
 import InboxPage from './pages/InboxPage';
+import StaffCalendarPage from './pages/StaffCalendarPage';
+import StaffAdminPage from './pages/StaffAdminPage';
+import StaffAbsencePage from './pages/StaffAbsencePage';
+import StaffDocumentsAdminPage from './pages/StaffDocumentsAdminPage';
+import StaffReceiptsPage from './pages/StaffReceiptsPage';
 import LostCancelledPage from './pages/LostCancelledPage';
+import LeadsPage from './pages/LeadsPage';
 import FillGapPage from './pages/FillGapPage';
 import FreelancerBookoutShell from './pages/FreelancerBookoutShell';
 import FreelancerCheckinShell from './pages/FreelancerCheckinShell';
 import StoragePage from './pages/StoragePage';
 import StorageTcsAcceptPage from './pages/StorageTcsAcceptPage';
 import CarnetFormPage from './pages/CarnetFormPage';
+import FreelancerApplyPage from './pages/FreelancerApplyPage';
 import HoldingPage from './pages/HoldingPage';
 import PcnsPage from './pages/PcnsPage';
 import PcnDetailPage from './pages/PcnDetailPage';
@@ -53,12 +59,15 @@ import MobileReceiptUploadPage from './pages/MobileReceiptUploadPage';
 import PcnReceiptUploadPage from './pages/PcnReceiptUploadPage';
 import WarehouseCollectionDetailPage from './pages/WarehouseCollectionDetailPage';
 import Layout from './components/Layout';
+import ErrorBoundary from './components/ErrorBoundary';
 import { VehicleRoutes, initVehicleModule } from './modules/vehicles';
 import { BookOutPage as StaffBookOutPage } from './modules/vehicles/pages/BookOutPage';
 import { CheckInPage as StaffCheckInPage } from './modules/vehicles/pages/CheckInPage';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { sharedRefreshToken } from './services/api';
 import { getFreelancerSession, isFreelancerSessionActive } from './modules/vehicles/adapters/freelancer-session';
+import FreelancerDayRespondPage from './pages/FreelancerDayRespondPage';
+import MePage from './pages/MePage';
 
 const staffBookOutQueryClient = new QueryClient({
   defaultOptions: { queries: { staleTime: 1000 * 60 * 2, retry: 1 } },
@@ -169,9 +178,13 @@ export default function App() {
       <Route path="/return-parking/:token" element={<OohReturnParkingPage />} />
       {/* Public mobile receipt capture (QR handoff) — token-authenticated, no Layout wrapper */}
       <Route path="/m/receipt/:token" element={<MobileReceiptUploadPage />} />
+      {/* Public freelancer yard-day accept/decline — token-authenticated, no Layout wrapper */}
+      <Route path="/freelancer-day/:token" element={<FreelancerDayRespondPage />} />
       {/* Public storage T&Cs acceptance — token-authenticated, no Layout wrapper */}
       <Route path="/storage-tcs/:token" element={<StorageTcsAcceptPage />} />
       <Route path="/carnet-form/:token" element={<CarnetFormPage />} />
+      {/* Public freelancer sign-up — token-authenticated, no Layout wrapper */}
+      <Route path="/freelancer-apply/:token" element={<FreelancerApplyPage />} />
       {/* Public PCN pay-direct proof-of-payment upload — token-authenticated, no Layout */}
       <Route path="/pcn-receipt/:token" element={<PcnReceiptUploadPage />} />
       {/* Public inbound merch-delivery form (no login) — replaces the JotForm */}
@@ -189,6 +202,9 @@ export default function App() {
         element={
           <ProtectedRoute>
             <Layout>
+              {/* Inside Layout, so a page crash leaves the nav usable and the
+                  user can navigate away instead of facing a white screen. */}
+              <ErrorBoundary>
               <Routes>
                 <Route path="/" element={<DashboardPage />} />
                 <Route path="/people" element={<PeoplePage />} />
@@ -200,6 +216,7 @@ export default function App() {
                 <Route path="/jobs" element={<JobsPage />} />
                 <Route path="/jobs/returns" element={<ReturnsPage />} />
                 <Route path="/jobs/lost-cancelled" element={<LostCancelledPage />} />
+                <Route path="/jobs/leads" element={<LeadsPage />} />
                 <Route path="/jobs/:id" element={<JobDetailPage />} />
                 <Route path="/pipeline" element={<PipelinePage />} />
                 <Route path="/operations/transport" element={<TransportOpsPage />} />
@@ -207,14 +224,23 @@ export default function App() {
                 <Route path="/operations/backline-matcher" element={<BacklineMatcherPage />} />
                 <Route path="/operations/carnets" element={<CarnetsPage />} />
                 <Route path="/operations/carnets/:id" element={<CarnetDetailPage />} />
-                <Route path="/operations/studio-sitters" element={<StudioSittersPage />} />
+                <Route path="/operations/rehearsals" element={<RehearsalsPage />} />
+                {/* Studio Sitters re-homed under the Rehearsals hub — keep old links working */}
+                <Route path="/operations/studio-sitters" element={<Navigate to="/operations/rehearsals?tab=sitters" replace />} />
                 <Route path="/operations/fill-gap/:jobId" element={<FillGapPage />} />
-                <Route path="/operations/issues" element={<IssuesPage />} />
-                <Route path="/operations/issues/:id" element={<IssuesPage />} />
+                {/* The platform bug tracker was retired Sep 2026 (jon: no longer
+                    used). Old emailed links land on the dashboard rather than a
+                    blank page. Its tables — platform_issues / _comments — are
+                    kept, untouched; see migration 057. */}
+                <Route path="/operations/issues" element={<Navigate to="/" replace />} />
+                <Route path="/operations/issues/:id" element={<Navigate to="/" replace />} />
                 <Route path="/operations/problems" element={<ProblemsPage />} />
                 <Route path="/storage" element={<StoragePage />} />
-                <Route path="/holding" element={<HoldingPage view="held" />} />
-                <Route path="/holding/lost-property" element={<HoldingPage view="lost_property" />} />
+                <Route path="/holding" element={<HoldingPage />} />
+                {/* Kept forever — the chase digest's ?review=1 link is already
+                    in staff inboxes and on historical notification rows. Same
+                    page, lost-property filter pre-applied. */}
+                <Route path="/holding/lost-property" element={<HoldingPage defaultKind="lost_property" />} />
                 <Route path="/holding/receipt/:id" element={<HoldingReceiptPage />} />
                 <Route path="/operations/problems/:id" element={<IssueDetailPage />} />
                 <Route path="/drivers" element={<DriversPage />} />
@@ -224,15 +250,29 @@ export default function App() {
                 <Route path="/money/overview" element={<MoneyOverviewPage />} />
                 <Route path="/money/excess" element={<ExcessLedgerPage />} />
                 <Route path="/money/costs" element={<CostsPage />} />
+                <Route path="/money/shop" element={<ShopTillPage />} />
                 <Route path="/vehicles/ve103b" element={<VE103BCertificatesPage />} />
                 <Route path="/vehicles/pcns" element={<PcnsPage />} />
                 <Route path="/vehicles/pcns/:id" element={<PcnDetailPage />} />
                 <Route path="/vehicles/*" element={<VehicleRoutes />} />
                 <Route path="/inbox" element={<InboxPage />} />
-                <Route path="/profile" element={<ProfilePage />} />
+                <Route path="/staff/calendar" element={<StaffCalendarPage />} />
+                <Route path="/staff/admin" element={<StaffAdminPage />} />
+                {/* One destination for the personal pages. The three old paths
+                    below still work and redirect in: notifications.action_url
+                    holds them for rows already in the database, and emails
+                    already sent link to them. */}
+                <Route path="/me" element={<MePage />} />
+                <Route path="/staff/me" element={<Navigate to="/me?tab=time" replace />} />
+                <Route path="/staff/absence" element={<StaffAbsencePage />} />
+                <Route path="/staff/documents" element={<Navigate to="/me?tab=documents" replace />} />
+                <Route path="/staff/documents/admin" element={<StaffDocumentsAdminPage />} />
+                <Route path="/my-receipts" element={<StaffReceiptsPage />} />
+                <Route path="/profile" element={<Navigate to="/me?tab=profile" replace />} />
                 <Route path="/team" element={<Navigate to="/settings" replace />} />
                 <Route path="/settings" element={<SettingsPage />} />
               </Routes>
+              </ErrorBoundary>
             </Layout>
           </ProtectedRoute>
         }

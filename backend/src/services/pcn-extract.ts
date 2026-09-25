@@ -74,6 +74,13 @@ export interface ExtractedPcn {
   vehicle_reg: string | null;
   offence_date: string | null;
   offence_time: string | null;
+  /**
+   * The offence time exactly as printed on the notice, when it carries more
+   * than the normalised HH:MM (e.g. "07:54:33"). Derived server-side, never
+   * asked of the model. This is the figure quoted back to a driver or client;
+   * `offence_time` is the machine-usable one. Null when the two would match.
+   */
+  offence_time_raw: string | null;
   issued_date: string | null;
   location: string | null;
   issuing_authority: string | null;
@@ -85,6 +92,111 @@ export interface ExtractedPcn {
   fine_type: typeof FINE_TYPES[number];
   confidence: 'high' | 'medium' | 'low';
   notes: string | null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Deterministic post-parse repair (mirrors cost-receipt-extract.ts).
+//
+// The prompt ASKS for YYYY-MM-DD and 24-hour HH:MM, but nothing enforced it,
+// and a value that's off-format is worse than a missing one: an <input
+// type="date"|"time"> silently refuses to DISPLAY a value it can't parse while
+// React still holds the bad string underneath, so staff see an empty box and
+// send junk. That's what broke the driver matcher on a notice printing the
+// offence time to the second — "07:54:33" + the caller's ":00" seconds suffix
+// became "07:54:33:00", an invalid moment, and the 400 surfaced as the generic
+// "Driver match failed" (PCN on RX21UOB / job 16261, Sep 2026).
+// ─────────────────────────────────────────────────────────────────────────
+
+/** Coerce a date the model returned into YYYY-MM-DD. UK notices are day-first. */
+export function toIsoDate(raw: string): string | null {
+  const s = raw.trim();
+  let y: number, mo: number, d: number;
+  // Already ISO-ish (also catches YYYY/MM/DD).
+  let m = s.match(/^(\d{4})[-/. ](\d{1,2})[-/. ](\d{1,2})$/);
+  if (m) {
+    y = Number(m[1]); mo = Number(m[2]); d = Number(m[3]);
+  } else {
+    // Day-first: DD/MM/YYYY, DD-MM-YY, 21.08.2026 …
+    m = s.match(/^(\d{1,2})[-/. ](\d{1,2})[-/. ](\d{2}|\d{4})$/);
+    if (!m) return null;
+    d = Number(m[1]); mo = Number(m[2]);
+    y = Number(m[3]);
+    if (m[3].length === 2) y += 2000;
+  }
+  // Round-trip so a nonsense date (31/02) is rejected rather than rolled over.
+  const dt = new Date(Date.UTC(y, mo - 1, d));
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== mo - 1 || dt.getUTCDate() !== d) return null;
+  return `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+}
+
+/**
+ * Coerce a time the model returned into 24-hour HH:MM.
+ * Tolerates seconds ("07:54:33"), dots ("07.54"), bare digits ("0754") and
+ * am/pm ("7:54am"). Seconds are dropped HERE ONLY — the string as printed on
+ * the notice is preserved on offence_time_raw, because that's the figure we
+ * quote back to a driver or client and we don't tidy up evidence.
+ */
+export function toHhMm(raw: string): string | null {
+  const s = raw.trim().toLowerCase();
+  const ampm = /(a\.?m\.?|p\.?m\.?)\.?$/.exec(s);
+  const core = (ampm ? s.slice(0, ampm.index) : s).trim();
+  let h: number, mi: number;
+  let m = core.match(/^(\d{1,2})[:.h ](\d{2})(?:[:.](\d{2}))?$/);
+  if (m) {
+    h = Number(m[1]); mi = Number(m[2]);
+  } else {
+    m = core.match(/^(\d{3,4})$/); // 0754 / 754
+    if (!m) return null;
+    const n = m[1].padStart(4, '0');
+    h = Number(n.slice(0, 2)); mi = Number(n.slice(2));
+  }
+  if (ampm) {
+    const pm = ampm[1].startsWith('p');
+    if (h === 12) h = pm ? 12 : 0;
+    else if (pm) h += 12;
+  }
+  if (h > 23 || mi > 59) return null;
+  return `${String(h).padStart(2, '0')}:${String(mi).padStart(2, '0')}`;
+}
+
+/**
+ * Repair the date/time fields in place. An unrepairable value is NULLED and the
+ * confidence downgraded — better an obviously-empty field the human fills in
+ * than an invisible bad one that fails three screens later. Whatever the model
+ * read is kept verbatim in `notes` so nothing is silently discarded.
+ */
+function normalisePcnDateTimes(p: ExtractedPcn): void {
+  const unreadable: string[] = [];
+  const downgrade = () => { if (p.confidence === 'high') p.confidence = 'medium'; };
+
+  const DATE_FIELDS = ['offence_date', 'issued_date', 'reduced_deadline', 'final_deadline'] as const;
+  for (const f of DATE_FIELDS) {
+    const raw = p[f];
+    if (!raw) continue;
+    const iso = toIsoDate(raw);
+    if (iso === raw) continue;      // already clean
+    if (iso) { p[f] = iso; downgrade(); continue; }
+    unreadable.push(`${f.replace(/_/g, ' ')} "${raw}"`);
+    p[f] = null;
+    downgrade();
+  }
+
+  // Preserve exactly what the notice printed, then derive the machine-usable
+  // HH:MM alongside it. Raw is only kept when it actually carries more than the
+  // normalised form, so the common clean case doesn't store a duplicate.
+  const rawTime = p.offence_time ? p.offence_time.trim() : null;
+  const hhmm = rawTime ? toHhMm(rawTime) : null;
+  p.offence_time = hhmm;
+  p.offence_time_raw = rawTime && rawTime !== hhmm ? rawTime : null;
+  if (rawTime && !hhmm) {
+    unreadable.push(`offence time "${rawTime}"`);
+    downgrade();
+  }
+
+  if (unreadable.length) {
+    const note = `Could not read: ${unreadable.join('; ')} — please check against the notice.`;
+    p.notes = p.notes ? `${p.notes} ${note}` : note;
+  }
 }
 
 export async function extractPcn(
@@ -106,6 +218,7 @@ export async function extractPcn(
   // Normalise the reg the same way the matcher does (uppercase, no spaces).
   if (parsed.vehicle_reg) parsed.vehicle_reg = parsed.vehicle_reg.toUpperCase().replace(/\s/g, '');
   if (!FINE_TYPES.includes(parsed.fine_type)) parsed.fine_type = 'other';
+  normalisePcnDateTimes(parsed);
 
   return parsed;
 }

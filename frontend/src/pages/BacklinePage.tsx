@@ -8,6 +8,11 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
+import BacklineLocationModal, {
+  BacklineLocation,
+  backlineLocationIcon,
+  backlineLocationLabel,
+} from '../components/BacklineLocationModal';
 
 interface BacklineJob {
   id: string;
@@ -15,8 +20,10 @@ interface BacklineJob {
   jobName: string;
   hhJobNumber: number | null;
   jobDate?: string;
+  outDate?: string;
   returnDate?: string;
   client: string;
+  bandName?: string | null;
   pipelineStatus: string;
   hhStatus: number;
   backlineStatus: string;
@@ -26,6 +33,7 @@ interface BacklineJob {
   effectivelyDone: boolean;
   hasMismatch: boolean;
   mismatchDetail: string | null;
+  location?: BacklineLocation | null;
   daysOverdue?: number;
 }
 
@@ -75,6 +83,7 @@ const PERIOD_OPTIONS = [
   { value: 2, label: 'Today & Tomorrow' },
   { value: 7, label: 'Next 7 Days' },
   { value: 14, label: 'Next 14 Days' },
+  { value: 28, label: 'Next 28 Days' },
 ];
 
 /** Round up to nearest 5 mins — used on per-job rows */
@@ -123,6 +132,7 @@ export default function BacklinePage() {
     return (
       (j.jobName || '').toLowerCase().includes(q)
       || (j.client || '').toLowerCase().includes(q)
+      || (j.bandName || '').toLowerCase().includes(q)
       || String(j.hhJobNumber || '').includes(q)
     );
   }
@@ -168,21 +178,27 @@ export default function BacklinePage() {
 
   const { goingOut, returning, overdueOut, overdueReturning, unconfirmed } = data;
 
-  // Apply status filter — "done" includes effectivelyDone (HH prepped/dispatched).
-  // "outstanding" is the default — hides done jobs so staff see only what's left to action.
-  function matchesStatusFilter(j: BacklineJob): boolean {
+  // Apply status filter. "Done" means different things per direction:
+  //  - Going Out (prep): effectivelyDone (card done OR HH prepped/dispatched).
+  //  - Coming Back (de-prep): the de-prep card's own status — HH is always
+  //    dispatched+ on a returning job, so effectivelyDone would hide EVERYTHING.
+  // "outstanding" (default) hides whatever counts as done for that direction.
+  function matchesStatusFilter(j: BacklineJob, mode: 'prep' | 'deprep'): boolean {
+    const done = mode === 'deprep' ? j.backlineStatus === 'done' : j.effectivelyDone;
     if (statusFilter === 'all') return true;
-    if (statusFilter === 'outstanding') return !j.effectivelyDone && j.backlineStatus !== 'done';
-    if (statusFilter === 'done') return j.effectivelyDone;
-    if (statusFilter === 'not_started') return j.backlineStatus === 'not_started' && !j.effectivelyDone;
+    if (statusFilter === 'outstanding') return !done;
+    if (statusFilter === 'done') return done;
+    if (statusFilter === 'not_started') {
+      return j.backlineStatus === 'not_started' && (mode === 'deprep' || !j.effectivelyDone);
+    }
     return j.backlineStatus === statusFilter;
   }
-  const filteredOut = goingOut.jobs.filter(j => matchesStatusFilter(j) && matchesSearch(j));
-  const filteredReturn = returning.jobs.filter(j => matchesStatusFilter(j) && matchesSearch(j));
-  const filteredOverdueOut = (overdueOut?.jobs || []).filter(j => matchesStatusFilter(j) && matchesSearch(j));
-  const filteredOverdueReturn = (overdueReturning?.jobs || []).filter(j => matchesStatusFilter(j) && matchesSearch(j));
-  const filteredProvisional = (unconfirmed?.provisional?.jobs || []).filter(j => matchesStatusFilter(j) && matchesSearch(j));
-  const filteredEnquiry = (unconfirmed?.enquiry?.jobs || []).filter(j => matchesStatusFilter(j) && matchesSearch(j));
+  const filteredOut = goingOut.jobs.filter(j => matchesStatusFilter(j, 'prep') && matchesSearch(j));
+  const filteredReturn = returning.jobs.filter(j => matchesStatusFilter(j, 'deprep') && matchesSearch(j));
+  const filteredOverdueOut = (overdueOut?.jobs || []).filter(j => matchesStatusFilter(j, 'prep') && matchesSearch(j));
+  const filteredOverdueReturn = (overdueReturning?.jobs || []).filter(j => matchesStatusFilter(j, 'deprep') && matchesSearch(j));
+  const filteredProvisional = (unconfirmed?.provisional?.jobs || []).filter(j => matchesStatusFilter(j, 'prep') && matchesSearch(j));
+  const filteredEnquiry = (unconfirmed?.enquiry?.jobs || []).filter(j => matchesStatusFilter(j, 'prep') && matchesSearch(j));
 
   async function updateStatus(reqId: string, newStatus: string) {
     try {
@@ -212,6 +228,29 @@ export default function BacklinePage() {
     }
   }
 
+  function updateLocation(reqId: string, loc: BacklineLocation | null) {
+    setData(prev => {
+      if (!prev) return prev;
+      const patch = (jobs: BacklineJob[]) =>
+        jobs.map(j => j.reqId === reqId ? { ...j, location: loc } : j);
+      return {
+        ...prev,
+        goingOut: { ...prev.goingOut, jobs: patch(prev.goingOut.jobs) },
+        returning: { ...prev.returning, jobs: patch(prev.returning.jobs) },
+        overdueOut: prev.overdueOut ? { ...prev.overdueOut, jobs: patch(prev.overdueOut.jobs) } : prev.overdueOut,
+        overdueReturning: prev.overdueReturning ? { ...prev.overdueReturning, jobs: patch(prev.overdueReturning.jobs) } : prev.overdueReturning,
+        unconfirmed: prev.unconfirmed ? {
+          provisional: prev.unconfirmed.provisional
+            ? { ...prev.unconfirmed.provisional, jobs: patch(prev.unconfirmed.provisional.jobs) }
+            : null,
+          enquiry: prev.unconfirmed.enquiry
+            ? { ...prev.unconfirmed.enquiry, jobs: patch(prev.unconfirmed.enquiry.jobs) }
+            : null,
+        } : prev.unconfirmed,
+      };
+    });
+  }
+
   function recalcStats(jobs: BacklineJob[]): BacklineStats {
     return {
       jobCount: jobs.length,
@@ -223,7 +262,8 @@ export default function BacklinePage() {
       totalPrepMins: jobs.reduce((s, j) => s + j.prepTimeMins, 0),
       totalDeprepMins: jobs.reduce((s, j) => s + j.deprepTimeMins, 0),
       remainingPrepMins: jobs.filter(j => !j.effectivelyDone).reduce((s, j) => s + j.prepTimeMins, 0),
-      remainingDeprepMins: jobs.filter(j => !j.effectivelyDone).reduce((s, j) => s + j.deprepTimeMins, 0),
+      // De-prep remaining keys off the de-prep card status, matching the backend.
+      remainingDeprepMins: jobs.filter(j => j.backlineStatus !== 'done').reduce((s, j) => s + j.deprepTimeMins, 0),
     };
   }
 
@@ -479,7 +519,7 @@ export default function BacklinePage() {
           </h3>
           <div className="bg-red-50 rounded-xl border border-red-200 divide-y divide-red-200">
             {filteredOverdueOut.map(job => (
-              <JobRow key={job.id} job={job} dateField="jobDate" navigate={navigate} onStatusChange={updateStatus} />
+              <JobRow key={job.id} job={job} mode="prep" navigate={navigate} onStatusChange={updateStatus} onLocationChange={updateLocation} />
             ))}
           </div>
         </div>
@@ -497,7 +537,7 @@ export default function BacklinePage() {
           </h3>
           <div className="bg-red-50 rounded-xl border border-red-200 divide-y divide-red-200">
             {filteredOverdueReturn.map(job => (
-              <JobRow key={job.id} job={job} dateField="returnDate" navigate={navigate} onStatusChange={updateStatus} />
+              <JobRow key={job.id} job={job} mode="deprep" navigate={navigate} onStatusChange={updateStatus} onLocationChange={updateLocation} />
             ))}
           </div>
         </div>
@@ -509,7 +549,7 @@ export default function BacklinePage() {
           <h3 className="text-sm font-semibold text-gray-700 mb-2">Going Out</h3>
           <div className="bg-white rounded-xl border border-gray-200 divide-y divide-gray-100">
             {filteredOut.map(job => (
-              <JobRow key={job.id} job={job} dateField="jobDate" navigate={navigate} onStatusChange={updateStatus} />
+              <JobRow key={job.id} job={job} mode="prep" navigate={navigate} onStatusChange={updateStatus} onLocationChange={updateLocation} />
             ))}
           </div>
         </div>
@@ -521,7 +561,7 @@ export default function BacklinePage() {
           <h3 className="text-sm font-semibold text-gray-700 mb-2">Coming Back</h3>
           <div className="bg-white rounded-xl border border-gray-200 divide-y divide-gray-100">
             {filteredReturn.map(job => (
-              <JobRow key={job.id} job={job} dateField="returnDate" navigate={navigate} onStatusChange={updateStatus} />
+              <JobRow key={job.id} job={job} mode="deprep" navigate={navigate} onStatusChange={updateStatus} onLocationChange={updateLocation} />
             ))}
           </div>
         </div>
@@ -542,7 +582,7 @@ export default function BacklinePage() {
           </h3>
           <div className="bg-blue-50/50 rounded-xl border border-blue-200 divide-y divide-blue-100">
             {filteredProvisional.map(job => (
-              <JobRow key={job.id} job={job} dateField="jobDate" navigate={navigate} onStatusChange={updateStatus} />
+              <JobRow key={job.id} job={job} mode="prep" navigate={navigate} onStatusChange={updateStatus} onLocationChange={updateLocation} />
             ))}
           </div>
         </div>
@@ -563,7 +603,7 @@ export default function BacklinePage() {
           </h3>
           <div className="bg-purple-50/40 rounded-xl border border-purple-200 divide-y divide-purple-100">
             {filteredEnquiry.map(job => (
-              <JobRow key={job.id} job={job} dateField="jobDate" navigate={navigate} onStatusChange={updateStatus} />
+              <JobRow key={job.id} job={job} mode="prep" navigate={navigate} onStatusChange={updateStatus} onLocationChange={updateLocation} />
             ))}
           </div>
         </div>
@@ -594,21 +634,30 @@ export default function BacklinePage() {
 
 // ── Job Row ────────────────────────────────────────────────────────────
 
-function JobRow({ job, dateField, navigate, onStatusChange }: {
+function JobRow({ job, mode, navigate, onStatusChange, onLocationChange }: {
   job: BacklineJob;
-  dateField: 'jobDate' | 'returnDate';
+  mode: 'prep' | 'deprep';
   navigate: (path: string) => void;
   onStatusChange: (reqId: string, status: string) => void;
+  onLocationChange: (reqId: string, loc: BacklineLocation | null) => void;
 }) {
-  const date = dateField === 'jobDate' ? job.jobDate : job.returnDate;
-  const sl = job.effectivelyDone && job.backlineStatus !== 'done'
+  const isPrep = mode === 'prep';
+  const date = isPrep ? job.outDate : job.returnDate;
+  // "Done (HH)" only makes sense for prep — a returning job is always HH
+  // dispatched+, so its de-prep badge must read from the de-prep card status.
+  const sl = isPrep && job.effectivelyDone && job.backlineStatus !== 'done'
     ? { ...STATUS_CONFIG.done, label: 'Done (HH)' }  // HH says prepped/dispatched
     : (STATUS_CONFIG[job.backlineStatus] || STATUS_CONFIG.not_started);
-  const timeMins = dateField === 'jobDate' ? job.prepTimeMins : job.deprepTimeMins;
-  const hhPreppedButNotMarked = job.effectivelyDone && job.backlineStatus !== 'done';
+  const timeMins = isPrep ? job.prepTimeMins : job.deprepTimeMins;
+  const hhPreppedButNotMarked = isPrep && job.effectivelyDone && job.backlineStatus !== 'done';
+  // Location is a pre-hire concept ("is it loaded yet?"). Only on going-out rows,
+  // and only once prep has actually started (can't stage a to-do).
+  const canPlace = isPrep && job.backlineStatus !== 'not_started';
+  const timeHidden = isPrep ? job.effectivelyDone : job.backlineStatus === 'done';
 
   const [showStatusMenu, setShowStatusMenu] = useState(false);
   const [menuAbove, setMenuAbove] = useState(false);
+  const [showLocationModal, setShowLocationModal] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
   // Click outside to close
@@ -667,7 +716,7 @@ function JobRow({ job, dateField, navigate, onStatusChange }: {
             {job.itemCount > 0 && (
               <span className="text-purple-600 font-medium">{job.itemCount} items</span>
             )}
-            {timeMins > 0 && !job.effectivelyDone && (
+            {timeMins > 0 && !timeHidden && (
               <span className="text-blue-600 font-medium">~{formatTimeJob(timeMins)}</span>
             )}
             {hhPreppedButNotMarked && (
@@ -677,6 +726,25 @@ function JobRow({ job, dateField, navigate, onStatusChange }: {
               <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 font-medium" title={job.mismatchDetail || 'Items changed'}>
                 ⚠ Items changed
               </span>
+            )}
+            {/* Location — where the prepped kit currently is (going-out rows only) */}
+            {isPrep && job.location && (
+              <button
+                onClick={(e) => { e.stopPropagation(); setShowLocationModal(true); }}
+                className="text-[10px] px-1.5 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-100 font-medium hover:bg-indigo-100 transition-colors"
+                title="Edit location"
+              >
+                {backlineLocationIcon(job.location)} {backlineLocationLabel(job.location)}
+              </button>
+            )}
+            {canPlace && !job.location && (
+              <button
+                onClick={(e) => { e.stopPropagation(); setShowLocationModal(true); }}
+                className="text-[10px] px-1.5 py-0.5 rounded-full text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 font-medium transition-colors"
+                title="Record where the kit is"
+              >
+                ＋ Location
+              </button>
             )}
           </div>
         </div>
@@ -711,6 +779,8 @@ function JobRow({ job, dateField, navigate, onStatusChange }: {
                     e.stopPropagation();
                     onStatusChange(job.reqId, s);
                     setShowStatusMenu(false);
+                    // Finishing prep? Offer to record where the kit went.
+                    if (isPrep && s === 'done') setShowLocationModal(true);
                   }}
                   className={`w-full text-left px-3 py-1.5 text-xs hover:bg-gray-50 flex items-center gap-2 ${job.backlineStatus === s ? 'font-bold' : ''}`}
                 >
@@ -722,6 +792,15 @@ function JobRow({ job, dateField, navigate, onStatusChange }: {
           </div>
         )}
       </div>
+
+      {showLocationModal && (
+        <BacklineLocationModal
+          requirementId={job.reqId}
+          initialLocation={job.location ?? null}
+          onClose={() => setShowLocationModal(false)}
+          onSaved={(loc) => onLocationChange(job.reqId, loc)}
+        />
+      )}
     </div>
   );
 }

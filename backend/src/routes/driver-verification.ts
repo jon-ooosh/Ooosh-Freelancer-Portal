@@ -21,6 +21,8 @@ import path from 'path';
 import { v4 as uuid } from 'uuid';
 import { query } from '../config/database';
 import { encryptDriverPiiInto, decryptDriverRow, DRIVER_PII_FIELDS } from '../services/driver-pii';
+import { computeDriverValidity, persistableWindows, touchesValidity, backfillFromDates, hasAllRequiredDocuments } from '../services/driver-validity';
+import { idenfyNeedsReview, sendIdentityReviewAlert } from '../services/identity-review';
 import { uploadToR2, isR2Configured } from '../config/r2';
 import { emailService } from '../services/email-service';
 
@@ -150,6 +152,263 @@ router.post('/auth/verify', async (req: Request, res: Response) => {
 });
 
 // ============================================================================
+// Email OTP — generate / store / email / validate the login code IN OP.
+// Replaces the old Google Apps Script + Sheet path entirely. The hire form
+// app's send-verification-code.js / verify-code.js are thin proxies to these.
+// ============================================================================
+
+const OTP_EXPIRY_MINUTES = 10;
+const OTP_MAX_ATTEMPTS = 5;
+const OTP_RESEND_THROTTLE_SECONDS = 30;
+
+const sendCodeSchema = z.object({
+  email: z.string().email(),
+  jobId: z.union([z.string(), z.number()]).optional(),
+});
+
+// POST /api/driver-verification/send-code — generate + store + email a 6-digit code
+router.post('/send-code', authenticateApiKey, async (req: Request, res: Response) => {
+  try {
+    const parsed = sendCodeSchema.parse(req.body);
+    const email = parsed.email.trim().toLowerCase();
+    const jobId = parsed.jobId != null ? String(parsed.jobId) : null;
+
+    // Throttle rapid re-requests for the same email.
+    const recent = await query(
+      `SELECT 1 FROM driver_verification_codes
+        WHERE lower(email) = $1
+          AND created_at > NOW() - ($2 || ' seconds')::interval
+        LIMIT 1`,
+      [email, String(OTP_RESEND_THROTTLE_SECONDS)]
+    );
+    if (recent.rows.length > 0) {
+      res.status(429).json({ error: 'A code was just sent. Please wait a moment before requesting another.' });
+      return;
+    }
+
+    // Crypto-strong 6-digit code, zero-padded.
+    const code = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+    const expiresAt = new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000);
+
+    // Invalidate any prior live codes for this email, then store the new one.
+    await query(
+      `UPDATE driver_verification_codes SET consumed_at = NOW()
+        WHERE lower(email) = $1 AND consumed_at IS NULL`,
+      [email]
+    );
+    await query(
+      `INSERT INTO driver_verification_codes (email, code, job_id, expires_at)
+       VALUES ($1, $2, $3, $4)`,
+      [email, code, jobId, expiresAt]
+    );
+
+    // Email via the live email service (Resend). Throws on hard failure.
+    await emailService.send('verification_code', {
+      to: email,
+      variables: {
+        code,
+        jobRef: jobId || '',
+        expiryMinutes: String(OTP_EXPIRY_MINUTES),
+      },
+    });
+
+    res.json({ success: true, message: 'Verification code sent' });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: 'Invalid request', details: error.errors });
+      return;
+    }
+    console.error('[driver-verification] send-code error:', error);
+    res.status(500).json({ error: 'Failed to send verification code' });
+  }
+});
+
+const verifyCodeSchema = z.object({
+  email: z.string().email(),
+  code: z.string().min(4).max(10),
+});
+
+// POST /api/driver-verification/verify-code — validate a code (single-use)
+router.post('/verify-code', authenticateApiKey, async (req: Request, res: Response) => {
+  try {
+    const parsed = verifyCodeSchema.parse(req.body);
+    const email = parsed.email.trim().toLowerCase();
+    const code = parsed.code.trim();
+
+    const result = await query(
+      `SELECT id, code, attempts, expires_at
+         FROM driver_verification_codes
+        WHERE lower(email) = $1 AND consumed_at IS NULL
+        ORDER BY created_at DESC
+        LIMIT 1`,
+      [email]
+    );
+
+    if (result.rows.length === 0) {
+      res.status(400).json({ success: false, error: 'No verification code found. Please request a new one.' });
+      return;
+    }
+
+    const row = result.rows[0];
+
+    if (new Date(row.expires_at).getTime() < Date.now()) {
+      res.status(400).json({ success: false, error: 'This code has expired. Please request a new one.' });
+      return;
+    }
+
+    if (row.attempts >= OTP_MAX_ATTEMPTS) {
+      await query(`UPDATE driver_verification_codes SET consumed_at = NOW() WHERE id = $1`, [row.id]);
+      res.status(429).json({ success: false, error: 'Too many attempts. Please request a new code.' });
+      return;
+    }
+
+    // Constant-time compare.
+    const stored = Buffer.from(String(row.code));
+    const provided = Buffer.from(code);
+    const match = stored.length === provided.length && crypto.timingSafeEqual(stored, provided);
+
+    if (!match) {
+      await query(`UPDATE driver_verification_codes SET attempts = attempts + 1 WHERE id = $1`, [row.id]);
+      const attemptsRemaining = Math.max(0, OTP_MAX_ATTEMPTS - (row.attempts + 1));
+      res.status(400).json({ success: false, error: 'Incorrect code.', attemptsRemaining });
+      return;
+    }
+
+    // Success — mark single-use consumed.
+    await query(`UPDATE driver_verification_codes SET consumed_at = NOW() WHERE id = $1`, [row.id]);
+    res.json({ success: true });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ success: false, error: 'Invalid request', details: error.errors });
+      return;
+    }
+    console.error('[driver-verification] verify-code error:', error);
+    res.status(500).json({ success: false, error: 'Verification failed' });
+  }
+});
+
+// POST /api/driver-verification/send-confirmation — hire-form completion receipt
+const sendConfirmationSchema = z.object({
+  email: z.string().email(),
+  jobId: z.union([z.string(), z.number()]).optional(),
+  driverName: z.string().optional(),
+  summary: z.record(z.any()),
+  jobDetails: z.record(z.any()).optional().nullable(),
+  signatureDate: z.string().optional().nullable(),
+});
+
+router.post('/send-confirmation', authenticateApiKey, async (req: Request, res: Response) => {
+  try {
+    const parsed = sendConfirmationSchema.parse(req.body);
+    const email = parsed.email.trim().toLowerCase();
+    const jobId = parsed.jobId != null ? String(parsed.jobId) : '';
+    const summary: Record<string, unknown> = parsed.summary || {};
+    const iq: Record<string, unknown> = (summary.insuranceQuestions as Record<string, unknown>) || {};
+    const docs: Record<string, unknown> = (summary.documents as Record<string, unknown>) || {};
+
+    // ── Formatters (ported verbatim from the hire form app's send-confirmation.js) ──
+    const formatYesNo = (value: unknown): string => {
+      if (value === true || value === 'yes' || value === 'Yes') return 'Yes';
+      if (value === false || value === 'no' || value === 'No') return 'No';
+      return 'Not answered';
+    };
+    // "11 September 2026" → "11th September 2026" — the ordinal suffix on the day.
+    const ordinalSuffix = (day: number): string => {
+      if (day >= 11 && day <= 13) return 'th';
+      switch (day % 10) {
+        case 1: return 'st';
+        case 2: return 'nd';
+        case 3: return 'rd';
+        default: return 'th';
+      }
+    };
+    const formatDateWithOrdinal = (date: Date): string => {
+      const day = date.getDate();
+      const rest = date.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+      return `${day}${ordinalSuffix(day)} ${rest}`;
+    };
+    const formatDate = (d: unknown): string => {
+      if (!d || d === 'Invalid Date') return 'Not set';
+      const date = new Date(d as string);
+      if (isNaN(date.getTime())) return 'Not set';
+      return formatDateWithOrdinal(date);
+    };
+    const formatDateOrNull = (d: unknown): string => {
+      if (!d) return '';
+      const date = new Date(d as string);
+      if (isNaN(date.getTime())) return '';
+      return formatDateWithOrdinal(date);
+    };
+    const formatLicenceEnding = (ending: unknown): string => {
+      if (!ending || ending === 'null' || ending === 'undefined') return 'Not available';
+      const str = String(ending);
+      return str.length <= 4 ? str : '****' + str.slice(-4);
+    };
+    const docStatus = (v: unknown): string => (v ? '✅ Verified' : '⏳ Pending');
+
+    const issuedBy = summary.licenseIssuedBy != null ? String(summary.licenseIssuedBy) : '';
+    const isDvla = issuedBy === 'DVLA';
+    const showDvlaPoints = isDvla && summary.dvlaPoints !== undefined && summary.dvlaPoints !== null;
+
+    // Intro line — gracefully handles a missing job number / start date.
+    const startDate = parsed.jobDetails ? (parsed.jobDetails as Record<string, unknown>).startDate : null;
+    const startFormatted = formatDateOrNull(startDate);
+    const jobPart = jobId ? `job ${jobId}` : 'your hire';
+    const introLine =
+      `Many thanks for completing your hire form for ${jobPart}` +
+      (startFormatted ? `, which starts ${startFormatted}.` : '.');
+
+    await emailService.send('hire_form_confirmation', {
+      to: email,
+      variables: {
+        driverName: parsed.driverName || 'Driver',
+        jobRef: jobId,
+        introLine,
+        name: (summary.name as string) || 'Not provided',
+        email: (summary.email as string) || email,
+        phone: (summary.phone as string) || 'Not provided',
+        nationality: (summary.nationality as string) || 'Not provided',
+        dateOfBirth: formatDate(summary.dateOfBirth),
+        licenceEnding: formatLicenceEnding(summary.licenseEnding),
+        licenceIssuedBy: issuedBy || 'Not provided',
+        licenceValidUntil: formatDateOrNull(summary.licenseValidTo),
+        datePassedTest: formatDateOrNull(summary.datePassedTest),
+        homeAddress: (summary.homeAddress as string) || 'Not provided',
+        licenceAddress: (summary.licenseAddress as string) || 'Not provided',
+        showDvlaPoints: showDvlaPoints ? '1' : '',
+        dvlaPoints: summary.dvlaPoints === 0 ? 'Clean licence' : `${summary.dvlaPoints} points`,
+        dvlaEndorsements: (summary.dvlaEndorsements as string) || 'None',
+        dvlaExcess: (summary.dvlaCalculatedExcess as string) || '£1,200',
+        hasDisability: formatYesNo(iq.hasDisability),
+        hasConvictions: formatYesNo(iq.hasConvictions),
+        hasProsecution: formatYesNo(iq.hasProsecution),
+        hasAccidents: formatYesNo(iq.hasAccidents),
+        hasInsuranceIssues: formatYesNo(iq.hasInsuranceIssues),
+        hasDrivingBan: formatYesNo(iq.hasDrivingBan),
+        additionalDetails: (iq.additionalDetails as string) || '',
+        docLicence: docStatus(docs.license),
+        docPoa1: docStatus(docs.poa1),
+        docPoa2: docStatus(docs.poa2),
+        isDvla: isDvla ? '1' : '',
+        isNotDvla: isDvla ? '' : '1',
+        docDvlaCheck: docStatus(docs.dvlaCheck),
+        docPassport: docStatus(docs.passport),
+        signatureDate: formatDate(parsed.signatureDate),
+      },
+    });
+
+    res.json({ success: true, message: 'Confirmation email sent' });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: 'Invalid request', details: error.errors });
+      return;
+    }
+    console.error('[driver-verification] send-confirmation error:', error);
+    res.status(500).json({ error: 'Failed to send confirmation email' });
+  }
+});
+
+// ============================================================================
 // GET /api/driver-verification/status — Driver status + document validity
 // ============================================================================
 
@@ -179,6 +438,48 @@ router.get('/status', authenticateHireForm, async (req: HireFormRequest, res: Re
 });
 
 // ============================================================================
+// GET /api/driver-verification/driver-by-scan-ref — Resolve email from scanRef
+// ============================================================================
+// The iDenfy webhook resolves the driver's email via the scanRef stored at
+// session-creation time, because the iDenfy clientId encoding is LOSSY
+// (sanitizeEmailForClientId strips hyphens etc. — team@mae-hill.com decoded
+// back as team@maehill.com and created a phantom driver record, Jul 2026).
+// create-idenfy-session.js writes idenfy_scan_ref onto the driver row (keyed
+// by the RAW email) via POST /update; the webhook calls this endpoint to get
+// the authoritative email back. clientId decode remains only as a fallback.
+
+router.get('/driver-by-scan-ref', authenticateHireForm, async (req: HireFormRequest, res: Response) => {
+  try {
+    const scanRef = String(req.query.scan_ref || '').trim();
+    if (!scanRef || scanRef.length > 100) {
+      res.status(400).json({ error: 'scan_ref query parameter required' });
+      return;
+    }
+
+    const result = await query(
+      `SELECT id, email FROM drivers
+       WHERE idenfy_scan_ref = $1 AND is_active = true
+       ORDER BY updated_at DESC LIMIT 1`,
+      [scanRef]
+    );
+
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'No driver found for scan_ref' });
+      return;
+    }
+
+    res.json({
+      success: true,
+      driverId: result.rows[0].id,
+      email: result.rows[0].email,
+    });
+  } catch (error) {
+    console.error('[driver-verification] driver-by-scan-ref error:', error);
+    res.status(500).json({ error: 'Failed to resolve driver by scan_ref' });
+  }
+});
+
+// ============================================================================
 // POST /api/driver-verification/next-step — Routing engine
 // ============================================================================
 
@@ -201,6 +502,35 @@ router.post('/next-step', authenticateHireForm, async (req: HireFormRequest, res
 
     const driver = result.rows[0] ? decryptDriverRow(result.rows[0]) : null;
     const analysis = analyzeDocuments(driver);
+
+    // ── Terminal state: a human has to look at this ─────────────────────────
+    //
+    // THIS IS THE LOOP-BREAKER. When iDenfy could not match the driver's face
+    // to their licence photo, nothing here knew about it: the routing engine
+    // has no branch for "we tried and it failed", so every path where the
+    // licence is invalid falls through to `{ step: 'idenfy' }`. The driver
+    // re-verified, failed identically, and was sent back — indefinitely. The
+    // webhook had been writing overall_status='Stuck' since launch and the
+    // router never read it.
+    //
+    // Checked BEFORE calculateNextStep so it wins over every other route, and
+    // the driver stops rather than being handed back to the machine that just
+    // rejected them. Staff were alerted when the flag was raised.
+    const identityStatus = (driver?.identity_check_status as string | null) ?? null;
+    if (identityStatus === 'needs_review' || identityStatus === 'rejected') {
+      res.json({
+        success: true,
+        email,
+        currentStep,
+        nextStep: 'manual-review',
+        reason: identityStatus === 'rejected'
+          ? 'Photo ID check was not accepted on review'
+          : 'Photo ID check needs manual review by Ooosh',
+        documentStatus: analysis,
+      });
+      return;
+    }
+
     const nextStep = calculateNextStep(analysis, currentStep, addressMismatch);
 
     res.json({
@@ -252,6 +582,10 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       licenceNumber: 'licence_number',
       licenseNumber: 'licence_number',
       licenceIssuedBy: 'licence_issued_by',
+      licenseType: 'licence_type',
+      licenceType: 'licence_type',
+      licenseCategories: 'licence_categories',
+      licenceCategories: 'licence_categories',
       licenseIssuedBy: 'licence_issued_by',
       licenceIssueCountry: 'licence_issue_country',
       licenceValidFrom: 'licence_valid_from',
@@ -261,6 +595,10 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       licenseNextCheckDue: 'licence_next_check_due',
       poa1ValidUntil: 'poa1_valid_until',
       poa2ValidUntil: 'poa2_valid_until',
+      poa1DocDate: 'poa1_doc_date',
+      poa2DocDate: 'poa2_doc_date',
+      passportCheckDate: 'passport_check_date',
+      passportExpiry: 'passport_expiry',
       dvlaValidUntil: 'dvla_valid_until',
       passportValidUntil: 'passport_valid_until',
       poa1Provider: 'poa1_provider',
@@ -278,14 +616,22 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       overallStatus: 'overall_status',
       idenfyCheckDate: 'idenfy_check_date',
       idenfyScanRef: 'idenfy_scan_ref',
+      // iDenfy verdict — computed by the webhook since launch, persisted from
+      // Aug 2026 so a failed face match can actually do something.
+      idenfyOverall: 'idenfy_overall',
+      idenfyFaceResult: 'idenfy_face_result',
+      idenfyDocResult: 'idenfy_doc_result',
+      idenfyMismatchTags: 'idenfy_mismatch_tags',
+      idenfySuspicionReasons: 'idenfy_suspicion_reasons',
+      currentJobNumber: 'current_job_number',
       signatureDate: 'signature_date',
       licencePoints: 'licence_points',
       licenceEndorsements: 'licence_endorsements',
       requiresReferral: 'requires_referral',
-      referralStatus: 'referral_status',
       referralReasons: 'referral_notes',
-      referralDate: 'referral_date',
       referralNotes: 'referral_notes',
+      // referralStatus / referralDate intentionally unmapped — the hire-form
+      // app must NOT set the referral workflow state (see allowedFields note).
     };
 
     // Whitelist of fields the hire form app can update
@@ -293,17 +639,36 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       'full_name', 'phone', 'phone_country', 'date_of_birth', 'nationality',
       'address_full', 'licence_address',
       'licence_number', 'licence_issued_by', 'licence_issue_country',
+      'licence_type', 'licence_categories',
       'licence_valid_from', 'licence_valid_to', 'date_passed_test',
       'licence_next_check_due',
       'poa1_valid_until', 'poa2_valid_until', 'dvla_valid_until', 'passport_valid_until',
+      // FROM dates (migration 192). The *_valid_until columns above are DERIVED
+      // from these on write — see services/driver-validity.ts.
+      'poa1_doc_date', 'poa2_doc_date', 'passport_check_date', 'passport_expiry',
       'poa1_provider', 'poa2_provider',
       'dvla_check_code', 'dvla_check_date',
       'has_disability', 'has_convictions', 'has_prosecution', 'has_accidents',
       'has_insurance_issues', 'has_driving_ban', 'additional_details',
       'insurance_status', 'overall_status',
       'idenfy_check_date', 'idenfy_scan_ref', 'signature_date',
+      'idenfy_overall', 'idenfy_face_result', 'idenfy_doc_result',
+      'idenfy_mismatch_tags', 'idenfy_suspicion_reasons',
+      'current_job_number',
+      // NB `identity_check_status` is NOT writable by the hire-form app — it is
+      // DERIVED below from idenfy_face_result, and cleared only by a staff
+      // review. Letting the app set it would repeat the referral_status mistake
+      // (Meadham / HH 16330), where the app's own value jumped the staff queue.
       'licence_points', 'licence_endorsements',
-      'requires_referral', 'referral_status', 'referral_date', 'referral_notes',
+      // NB: 'referral_status' + 'referral_date' are DELIBERATELY NOT writable
+      // from the hire-form app. A submission with requires_referral=true must
+      // leave referral_status NULL (the red "Refer to Insurers" TODO state) —
+      // only a staff action on DriverDetailPage moves it to 'pending'. The
+      // standalone app used to send referral_status='pending', which jumped the
+      // queue and made it look like staff had already actioned a referral
+      // they hadn't (Meadham / HH 16330 incident, Jul 2026). Mirrors
+      // routes/hire-forms.ts, which likewise never writes referral_status.
+      'requires_referral', 'referral_notes',
     ]);
 
     // DATE fields need normalisation — the hire form app sometimes sends
@@ -315,7 +680,20 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       'date_passed_test', 'licence_next_check_due',
       'poa1_valid_until', 'poa2_valid_until',
       'dvla_valid_until', 'passport_valid_until',
+      'poa1_doc_date', 'poa2_doc_date', 'passport_check_date', 'passport_expiry',
       'dvla_check_date', 'signature_date', 'referral_date',
+    ]);
+
+    // Every JSONB column the hire-form app is allowed to write. A JS array
+    // sent to pg as-is becomes a Postgres ARRAY literal (`{"..."}`), which a
+    // JSONB column rejects with `invalid input syntax for type json`. An
+    // EMPTY array happens to survive (`{}` parses as an empty JSON object), so
+    // the DVLA-points write only ever failed for drivers WITH endorsements —
+    // silently, since Apr 2026 (Chris Kirkham / job 16618, Sep 2026). Any new
+    // JSONB column added to `allowedFields` MUST be listed here too.
+    const JSONB_FIELDS = new Set([
+      'idenfy_mismatch_tags', 'idenfy_suspicion_reasons',
+      'licence_endorsements',
     ]);
 
     function normaliseDate(raw: unknown): string | null {
@@ -335,6 +713,8 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
     // Capture the encryptable PII fields actually written (post-normalisation)
     // for the Phase 1 dual-write follow-up below.
     const writtenPii: Record<string, unknown> = {};
+    // Every column this write touches — drives the validity re-derivation below.
+    const writtenCols: Record<string, unknown> = {};
     const piiFieldSet = new Set<string>(DRIVER_PII_FIELDS);
 
     for (const [key, value] of Object.entries(updates)) {
@@ -344,16 +724,95 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       let coerced: unknown = value ?? null;
       if (DATE_FIELDS.has(dbField)) {
         coerced = normaliseDate(coerced);
+      } else if (JSONB_FIELDS.has(dbField) && coerced !== null) {
+        // node-postgres sends a JS array as a Postgres array literal, which a
+        // JSONB column rejects. Stringify so it lands as JSON.
+        coerced = typeof coerced === 'string' ? coerced : JSON.stringify(coerced);
       }
       params.push(coerced);
       setClauses.push(`${dbField} = $${params.length}`);
+      writtenCols[dbField] = coerced;
       if (piiFieldSet.has(dbField)) writtenPii[dbField] = coerced;
+      // Stamp WHEN the driver started this hire's form, but only when the job
+      // actually changes — the number is re-sent on every step, and the
+      // "started" time is what the unsigned-form nudge and the staff card key
+      // their ages off.
+      if (dbField === 'current_job_number') {
+        setClauses.push(
+          `current_job_started_at = CASE WHEN current_job_number IS DISTINCT FROM $${params.length} THEN NOW() ELSE current_job_started_at END`
+        );
+      }
     }
 
     if (setClauses.length === 0) {
       console.log(`[driver-verification] UPDATE for ${email} — NO valid fields after mapping! Incoming keys were:`, Object.keys(updates));
       res.status(400).json({ error: 'No valid fields to update' });
       return;
+    }
+
+    // ── Keep the derived expiry columns in step with the FROM dates ─────────
+    //
+    // The hire-form app writes from both ends: the DVLA processing page posts
+    // only `dvlaValidUntil`, while the iDenfy webhook posts check dates. So we
+    // first back-fill any missing FROM date from the expiry it came with, then
+    // re-derive every window from the merged row. Derived values are appended
+    // last, so they win over anything sent directly.
+    const reconciled = backfillFromDates(writtenCols);
+    for (const [col, value] of Object.entries(reconciled)) {
+      if (col in writtenCols) continue;
+      params.push(value);
+      setClauses.push(`${col} = $${params.length}`);
+      writtenCols[col] = value;
+    }
+
+    if (touchesValidity(Object.keys(writtenCols))) {
+      const prior = await query(
+        `SELECT * FROM drivers WHERE email = $1 AND is_active = true LIMIT 1`,
+        [email],
+      );
+      const merged = { ...(prior.rows[0] || {}), ...writtenCols };
+      for (const [col, value] of Object.entries(persistableWindows(merged))) {
+        if (col in writtenCols) {
+          // Overwrite the caller's value in place rather than adding a second
+          // assignment for the same column (Postgres rejects duplicates).
+          const idx = setClauses.findIndex(c => c.startsWith(`${col} = $`));
+          const pos = Number(setClauses[idx].split('$')[1]);
+          params[pos - 1] = value;
+        } else {
+          params.push(value);
+          setClauses.push(`${col} = $${params.length}`);
+        }
+        writtenCols[col] = value;
+      }
+    }
+
+    // ── Derive the identity-review flag from the iDenfy verdict ─────────────
+    //
+    // The hire-form app reports what iDenfy said; OP decides what that means.
+    // Widened from the face result alone in Sep 2026 — see idenfyNeedsReview()
+    // for why (a DENIED document with a matching face passed straight through).
+    // An absent verdict (e.g. a step that posts only POA dates) must not raise
+    // a false flag, so this only runs when the write actually carries one.
+    //
+    // A staff decision always wins: once someone has accepted or rejected the
+    // check, a repeat webhook carrying the same stale verdict does not re-open
+    // it. Staff can re-open from the driver page if genuinely re-verified.
+    let identityFlagRaised = false;
+    const carriesVerdict = 'idenfy_overall' in writtenCols || 'idenfy_face_result' in writtenCols;
+    if (carriesVerdict && idenfyNeedsReview({
+      overall: writtenCols.idenfy_overall as string | null,
+      faceResult: writtenCols.idenfy_face_result as string | null,
+    })) {
+      const current = await query(
+        `SELECT identity_check_status FROM drivers WHERE email = $1 AND is_active = true LIMIT 1`,
+        [email],
+      );
+      const status = current.rows[0]?.identity_check_status ?? null;
+      if (status === null || status === 'needs_review') {
+        params.push('needs_review');
+        setClauses.push(`identity_check_status = $${params.length}`);
+        identityFlagRaised = status === null;
+      }
     }
 
     console.log(`[driver-verification] UPDATE for ${email} — writing fields:`, setClauses.map(c => c.split(' = ')[0]));
@@ -396,6 +855,13 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
         await fireReferralNotification(email, driverId, updates);
       }
 
+      // Alert on a NEWLY raised identity review. Once-only inside the helper,
+      // and best-effort — a failed alert must never fail the driver's update.
+      if (identityFlagRaised && driverId) {
+        sendIdentityReviewAlert(driverId).catch(err =>
+          console.error('[driver-verification] identity review alert failed:', err));
+      }
+
       // If signature_date was set in this update and the driver doesn't yet
       // have a calculated_excess_amount (and isn't locked), seed it with the
       // £1,200 floor so /drivers shows a value even if the SignaturePage
@@ -416,6 +882,17 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
              AND calculated_excess_amount IS NULL`,
           [driverId]
         );
+
+        // Fire the info@ referral alert email at signature time. The picture is
+        // complete by now, so this is where the alert belongs (the earlier
+        // fireReferralNotification only drops a bell — no email). Idempotent
+        // via drivers.referral_alert_sent_at + self-gated on requires_referral,
+        // so it's a no-op when the driver doesn't require a referral. This is
+        // the path that was MISSING for drivers whose SignaturePage chain
+        // never reached POST /api/hire-forms (Meadham / HH 16330 incident).
+        import('../services/referral-alert').then(({ sendReferralAlert }) =>
+          sendReferralAlert(driverId)
+        ).catch(err => console.error('[driver-verification] Referral alert error:', err));
       }
 
       res.json({ success: true, driverId });
@@ -441,6 +918,19 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       // Fire referral notification for new driver created with referral flag
       if (referralBeingSet) {
         await fireReferralNotification(email, newId, updates);
+      }
+
+      // Rare: a new driver created WITH a signature + referral flag in one
+      // call. Fire the info@ referral alert email too (bell above is not
+      // enough). Idempotent + self-gated on requires_referral — see the
+      // existing-driver branch note.
+      const signatureBeingSetOnCreate =
+        ('signature_date' in updates && updates.signature_date) ||
+        ('signatureDate' in updates && (updates as Record<string, unknown>).signatureDate);
+      if (referralBeingSet && signatureBeingSetOnCreate) {
+        import('../services/referral-alert').then(({ sendReferralAlert }) =>
+          sendReferralAlert(newId)
+        ).catch(err => console.error('[driver-verification] Referral alert error:', err));
       }
 
       res.json({ success: true, driverId: newId, created: true });
@@ -757,7 +1247,9 @@ async function fireReferralNotification(
 
     // email_sent_at = NOW() so the escalation scheduler doesn't fire an early
     // email mid-flow. The proper referral_alert email (with snapshot PDF) is
-    // sent from hire-forms.ts once the full form is submitted.
+    // sent via services/referral-alert.ts sendReferralAlert — from the
+    // signature step below, from POST /api/hire-forms, or from the daily
+    // safety-net scanner (whichever completes first; idempotent).
     for (const userId of targets.bellUserIds) {
       await query(
         `INSERT INTO notifications (user_id, type, title, content, action_url, priority, email_sent_at)
@@ -768,12 +1260,13 @@ async function fireReferralNotification(
 
     console.log(`[driver-verification] Bell notification sent to ${targets.bellUserIds.length} vehicle manager user(s)`);
 
-    // NOTE: No email alert fired here. The referral flag is set mid-flow
-    // (e.g. during the insurance questionnaire, before POA/DVLA/signature),
-    // so we can't yet refer to insurers with a complete picture. The
-    // referral_alert email is fired from hire-forms.ts when the full form
-    // is submitted (with snapshot PDF attached). Bell notifications above
-    // give staff early visibility without spamming info@ mid-form.
+    // NOTE: No email alert fired HERE. The referral flag is often set mid-flow
+    // (during the insurance questionnaire, before POA/DVLA/signature), so we
+    // can't yet refer to insurers with a complete picture — the bell above
+    // gives the vehicle manager early visibility without spamming info@. The
+    // info@ referral_alert email (with snapshot PDF) fires later via
+    // sendReferralAlert — at the signature step (below), on POST /api/hire-forms,
+    // or from the daily safety-net scanner. Idempotent via referral_alert_sent_at.
   } catch (error) {
     // Don't fail the update if notification fails
     console.error('[driver-verification] Failed to send referral notification:', error);
@@ -801,106 +1294,37 @@ interface DocumentAnalysis {
 }
 
 function analyzeDocuments(driver: Record<string, unknown> | null): DocumentAnalysis {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
+  // Delegates to services/driver-validity.ts — the SINGLE definition shared
+  // with the staff-facing surfaces. Before Aug 2026 this function held its own
+  // copy of the window arithmetic while the drivers list, the assign picker and
+  // the book-out gate read raw *_valid_until columns that nothing kept in step,
+  // so the router and the staff UI could disagree about the same driver.
+  // Keep the SHAPE here (the hire-form app consumes it) but never the rules.
+  const v = computeDriverValidity(driver as never);
 
   const analysis: DocumentAnalysis = {
-    licence: { valid: false, expiryDate: null },
-    poa1: { valid: false, expiryDate: null, provider: null },
-    poa2: { valid: false, expiryDate: null, provider: null },
-    dvla: { valid: false, expiryDate: null },
-    passport: { valid: false, expiryDate: null },
-    isUkDriver: false,
+    licence: { valid: v.licence.valid, expiryDate: v.licence.until },
+    poa1: {
+      valid: v.poa1.valid,
+      expiryDate: v.poa1.until,
+      provider: (driver?.poa1_provider as string) || null,
+    },
+    poa2: {
+      valid: v.poa2.valid,
+      expiryDate: v.poa2.until,
+      provider: (driver?.poa2_provider as string) || null,
+    },
+    dvla: { valid: v.dvla.valid, expiryDate: v.dvla.until },
+    passport: { valid: v.passport.valid, expiryDate: v.passport.until },
+    isUkDriver: v.isUkDriver,
     allValid: false,
   };
 
-  if (!driver) return analysis;
-
-  analysis.isUkDriver = driver.licence_issued_by === 'DVLA';
-
-  // Helper: add days to a date string
-  function addDays(dateStr: string, days: number): Date {
-    const d = new Date(dateStr);
-    d.setDate(d.getDate() + days);
-    return d;
-  }
-
-  // Licence: 90 days from iDenfy check, capped at actual licence expiry
-  // Falls back to licence_next_check_due if idenfy_check_date is not set
-  //
-  // Integrity guard: licence_issued_by must be populated for the licence
-  // record to be trusted. A partial webhook write (date fields set but
-  // identity blank) would otherwise let a stale date count as proof of
-  // validity, and the non-UK branch would route the driver to passport
-  // upload instead of re-running licence verification.
-  const licenceIssuedBy =
-    typeof driver.licence_issued_by === 'string' ? driver.licence_issued_by.trim() : '';
-  if (licenceIssuedBy && driver.idenfy_check_date) {
-    const windowEnd = addDays(driver.idenfy_check_date as string, 90);
-    // Cap at actual licence expiry if that's sooner
-    let effectiveEnd = windowEnd;
-    if (driver.licence_valid_to) {
-      const licenceExpiry = new Date(driver.licence_valid_to as string);
-      if (licenceExpiry < windowEnd) effectiveEnd = licenceExpiry;
-    }
-    analysis.licence.valid = effectiveEnd > today;
-    analysis.licence.expiryDate = effectiveEnd.toISOString().split('T')[0];
-  } else if (licenceIssuedBy && driver.licence_next_check_due) {
-    // licence_next_check_due stores the actual expiry date (already check date + 90 days)
-    // If value looks like a past date relative to driver creation, it's the raw check date — add 90 days
-    const storedDate = new Date(driver.licence_next_check_due as string);
-    // Treat the stored value as the expiry date directly (it should already be check date + 90d)
-    analysis.licence.valid = storedDate > today;
-    analysis.licence.expiryDate = storedDate.toISOString().split('T')[0];
-  }
-
-  // POA1: 90 days from doc date (stored as poa1_valid_until by hire form)
-  if (driver.poa1_valid_until) {
-    const poa1Date = new Date(driver.poa1_valid_until as string);
-    analysis.poa1.valid = poa1Date > today;
-    analysis.poa1.expiryDate = (driver.poa1_valid_until as string);
-  }
-  analysis.poa1.provider = (driver.poa1_provider as string) || null;
-
-  // POA2: 90 days from doc date
-  if (driver.poa2_valid_until) {
-    const poa2Date = new Date(driver.poa2_valid_until as string);
-    analysis.poa2.valid = poa2Date > today;
-    analysis.poa2.expiryDate = (driver.poa2_valid_until as string);
-  }
-  analysis.poa2.provider = (driver.poa2_provider as string) || null;
-
-  // DVLA: 30 days from check date
-  if (driver.dvla_check_date) {
-    const dvlaEnd = addDays(driver.dvla_check_date as string, 30);
-    analysis.dvla.valid = dvlaEnd > today;
-    analysis.dvla.expiryDate = dvlaEnd.toISOString().split('T')[0];
-  } else if (driver.dvla_valid_until) {
-    // Fallback to stored value
-    const dvlaDate = new Date(driver.dvla_valid_until as string);
-    analysis.dvla.valid = dvlaDate > today;
-    analysis.dvla.expiryDate = (driver.dvla_valid_until as string);
-  }
-
-  // Passport: only valid when explicitly recorded. The licence Idenfy session
-  // does NOT verify a passport — a separate passport-upload step is required.
-  // Earlier fallback to idenfy_check_date + 30 days here marked every non-UK
-  // driver as having a valid passport after their licence Idenfy check, which
-  // caused the routing engine to skip the passport-upload step entirely.
-  if (driver.passport_valid_until) {
-    const passDate = new Date(driver.passport_valid_until as string);
-    analysis.passport.valid = passDate > today;
-    analysis.passport.expiryDate = (driver.passport_valid_until as string);
-  }
-
-  // All valid check
-  if (analysis.isUkDriver) {
-    analysis.allValid = analysis.licence.valid && analysis.poa1.valid &&
-      analysis.poa2.valid && analysis.dvla.valid;
-  } else {
-    analysis.allValid = analysis.licence.valid && analysis.poa1.valid &&
-      analysis.poa2.valid && analysis.passport.valid;
-  }
+  // Policy unchanged: a UK driver needs licence + both POAs + DVLA; everyone
+  // else needs licence + both POAs + passport. The rule itself now lives in
+  // driver-validity.ts beside the windows, because the unsigned-form nudge asks
+  // the same question to decide which email to send (Sep 2026).
+  analysis.allValid = hasAllRequiredDocuments(v);
 
   return analysis;
 }
@@ -1031,7 +1455,7 @@ function calculateNextStep(
 // Response builders
 // ============================================================================
 
-function buildDriverStatusResponse(driver: Record<string, unknown>) {
+export function buildDriverStatusResponse(driver: Record<string, unknown>) {
   const analysis = analyzeDocuments(driver);
 
   const licenceEnding = (driver.licence_number as string)?.slice(-8) || null;
@@ -1050,7 +1474,12 @@ function buildDriverStatusResponse(driver: Record<string, unknown>) {
 
   // Determine overall status
   let status = 'new';
-  if (driver.overall_status === 'Insurance Review') status = 'insurance_review';
+  // Ahead of everything else: a driver awaiting a human ID review must not be
+  // reported as "keep going", or ProcessingHub polls forever waiting for a
+  // state that will only ever change when a member of staff acts.
+  if (driver.identity_check_status === 'needs_review') status = 'manual_review';
+  else if (driver.identity_check_status === 'rejected') status = 'identity_rejected';
+  else if (driver.overall_status === 'Insurance Review') status = 'insurance_review';
   else if (driver.overall_status === 'Stuck') status = 'stuck';
   else if (analysis.allValid) status = 'verified';
   else if (analysis.licence.valid) {
@@ -1119,7 +1548,16 @@ function buildDriverStatusResponse(driver: Record<string, unknown>) {
       },
     },
     insuranceData: {
-      datePassedTest: driver.date_passed_test ? String(driver.date_passed_test).split('T')[0] : '',
+      // MUST go through toYmd like every other date on this response. pg hands
+      // back a DATE column as a JS Date object, so the old
+      // String(driver.date_passed_test).split('T')[0] produced
+      // "Mon Dec 27 2021 00:00:00 GM" — it split on the T in "GMT". The hire
+      // form drops that straight into <input type="date">, which SILENTLY
+      // refuses to render a value it can't parse, so a returning driver saw an
+      // empty "Date passed driving test" box and had to retype it every hire.
+      // Same class of bug as the hire-agreement PDF fix in hire-forms.ts
+      // (toISODate) — that sweep missed this endpoint.
+      datePassedTest: toYmd(driver.date_passed_test) || '',
       hasDisability: (driver.has_disability as boolean) || false,
       hasConvictions: (driver.has_convictions as boolean) || false,
       hasProsecution: (driver.has_prosecution as boolean) || false,

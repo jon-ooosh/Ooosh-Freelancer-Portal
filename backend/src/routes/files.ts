@@ -8,14 +8,15 @@ import { validate } from '../middleware/validate';
 import { uploadToR2, deleteFromR2, getFromR2, isR2Configured } from '../config/r2';
 import { query } from '../config/database';
 import emailService from '../services/email-service';
+import { STAFF_RECORDS_PREFIX, STAFF_RECORD_ROLES } from './staff-records';
 
 const router = Router();
 router.use(authenticate);
 
-// 10MB limit, common file types for an operations platform
+// 25MB limit, common file types for an operations platform
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 },
+  limits: { fileSize: 25 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
     const allowed = [
       // Documents
@@ -155,7 +156,7 @@ router.post('/upload', upload.single('file'), async (req: AuthRequest, res: Resp
     console.error('File upload error:', error);
     if (error instanceof multer.MulterError) {
       if (error.code === 'LIMIT_FILE_SIZE') {
-        res.status(413).json({ error: 'File too large (max 10MB)' });
+        res.status(413).json({ error: 'File too large (max 25MB)' });
         return;
       }
     }
@@ -173,7 +174,14 @@ router.get('/download', async (req: AuthRequest, res: Response) => {
       return;
     }
 
-    // Validate key starts with known prefix to prevent path traversal
+    // Validate key starts with known prefix to prevent path traversal.
+    //
+    // READ THIS BEFORE ADDING A PREFIX: everything in this list is served to
+    // ANY authenticated caller — this router only calls authenticate(), not
+    // authorize(), so a freelancer with a JWT can fetch any key here that they
+    // can name. That is fine for the prefixes below (job files, avatars,
+    // completion photos) and catastrophic for a passport scan. An unguessable
+    // key is not an access control: the key is handed to whoever can list it.
     const allowedPrefixes = [
       'files/',
       'backups/',
@@ -181,8 +189,20 @@ router.get('/download', async (req: AuthRequest, res: Response) => {
       'completion/',     // portal completion photos + signatures
       'delivery-notes/', // completion delivery-note PDFs
       'carnet-authority/', // carnet Letter of Authorisation PDFs
+      'email-quotes/',   // harvested quote PDFs (auto-chase §7.3 version diff)
     ];
-    if (!allowedPrefixes.some((p) => key.startsWith(p))) {
+
+    // Private staff records (docs/STAFF-RECORDS-SPEC.md §3.1) live under their
+    // own prefix precisely so they DON'T inherit the rule above. Gated here
+    // rather than on a second download route so that useAuthedFileUrl and
+    // openAuthedFile — THE two ways to read a private-bucket file, per
+    // CLAUDE.md — keep working unchanged.
+    if (key.startsWith(STAFF_RECORDS_PREFIX)) {
+      if (!STAFF_RECORD_ROLES.includes(req.user?.role as typeof STAFF_RECORD_ROLES[number])) {
+        res.status(403).json({ error: 'Not authorised to view staff records' });
+        return;
+      }
+    } else if (!allowedPrefixes.some((p) => key.startsWith(p))) {
       res.status(403).json({ error: 'Invalid file key' });
       return;
     }
@@ -204,7 +224,21 @@ router.get('/download', async (req: AuthRequest, res: Response) => {
     }
 
     // Stream the response
-    const stream = object.Body as NodeJS.ReadableStream;
+    const stream = object.Body as NodeJS.ReadableStream & { destroy?: (err?: Error) => void };
+
+    // If the caller walks away mid-download — a receipt thumbnail scrolled back
+    // out of view, a page navigated — the R2 body is left unconsumed, and an
+    // unconsumed body keeps its connection checked out of the S3 client's pool.
+    // Tear it down explicitly. `close` also fires on a clean finish, hence the
+    // writableEnded guard.
+    res.on('close', () => {
+      if (!res.writableEnded) stream.destroy?.();
+    });
+    stream.on('error', (err: Error) => {
+      console.error('File download stream error:', err);
+      res.destroy();
+    });
+
     stream.pipe(res);
   } catch (error) {
     console.error('File download error:', error);
@@ -224,6 +258,31 @@ router.delete('/delete', async (req: AuthRequest, res: Response) => {
     const validTypes = ['people', 'organisations', 'venues', 'interactions', 'jobs', 'drivers'];
     if (!validTypes.includes(entity_type)) {
       res.status(400).json({ error: 'Invalid entity_type' });
+      return;
+    }
+
+    // Delete guard — a file with live links out of it is BLOCKED, not silently
+    // unlinked. Someone deliberately surfaced this file on a band; removing it
+    // from under them without a word is how a rider quietly vanishes mid-tour.
+    // Note this only covers EXPLICIT links (job → org). The org → job direction
+    // is derived at read time and has no rows to check, so deleting an org's own
+    // file does remove it from every job it was surfacing on — correct, because
+    // the org owns it.
+    const linkedTo = await query(
+      `SELECT COALESCE(o.name, 'another record') AS name
+         FROM file_links fl
+         LEFT JOIN organisations o
+           ON o.id = fl.linked_entity_id AND fl.linked_entity_type = 'organisations'
+        WHERE fl.r2_key = $1
+          AND fl.owner_entity_type = $2
+          AND fl.owner_entity_id = $3::uuid`,
+      [key, entity_type, entity_id]
+    );
+    if (linkedTo.rows.length > 0) {
+      const names = [...new Set(linkedTo.rows.map((r: { name: string }) => r.name))].join(', ');
+      res.status(409).json({
+        error: `Can't delete — this file is linked to ${names}. Unlink it there first.`,
+      });
       return;
     }
 
@@ -286,7 +345,10 @@ router.patch('/update-metadata', async (req: AuthRequest, res: Response) => {
     }
 
     // Only allow safe metadata fields to be updated
-    const allowedFields = ['share_with_freelancer', 'label', 'comment'];
+    // `show_on_jobs` (default true when absent) controls whether an ORG's file
+    // surfaces read-through on that org's jobs — the toggle that lets an internal
+    // contract stay put while a rider travels. See CROSS-ENTITY-FILES-SPEC.md.
+    const allowedFields = ['share_with_freelancer', 'label', 'comment', 'show_on_jobs'];
     const safeUpdates: Record<string, unknown> = {};
     for (const key of Object.keys(updates)) {
       if (allowedFields.includes(key)) {
@@ -570,6 +632,295 @@ router.post('/email', authorize(...STAFF_ROLES), validate(sendFileEmailSchema), 
   } catch (error) {
     console.error('File email error:', error);
     res.status(500).json({ error: 'Email send failed' });
+  }
+});
+
+// ── Cross-entity file surfacing (docs/CROSS-ENTITY-FILES-SPEC.md, Phase 4) ──
+//
+// A file's bytes live in R2 exactly once. Everything below is about WINDOWS
+// onto that one file, and the two directions are deliberately asymmetric:
+//
+//   org → job   derived at read time from the job's orgs. No rows anywhere, so
+//               changing a job's orgs re-derives the set for free.
+//   job → org   an explicit `file_links` row, because it must survive the job's
+//               client later being changed — the rider stays with the band.
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+interface StoredFile extends Record<string, unknown> {
+  url: string;
+  name: string;
+}
+
+/** A file is job-visible unless someone has explicitly hidden it. */
+function isShownOnJobs(file: Record<string, unknown>): boolean {
+  return file.show_on_jobs !== false;
+}
+
+// GET /api/files/for-job/:jobId — everything the Job Files tab needs beyond the
+// job's own `files` array, in one round trip:
+//
+//   surfaced — a FLAT list of files borrowed from the job's orgs. Each carries
+//              the entity that OWNS it (owner_entity_type / owner_entity_id /
+//              owner_name), so the tab can render one list with an origin chip
+//              and still write metadata back to the record that holds the file.
+//   links    — this job's own files' outgoing links, for the per-file chips
+//   orgs     — the orgs on this job, for the "Link to org" picker
+router.get('/for-job/:jobId', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const jobId = String(req.params.jobId);
+    if (!UUID_RE.test(jobId)) {
+      res.status(400).json({ error: 'Invalid job id' });
+      return;
+    }
+
+    const jobResult = await query(
+      `SELECT COALESCE(files, '[]'::jsonb) AS files FROM jobs WHERE id = $1`,
+      [jobId]
+    );
+    if (jobResult.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
+    // Every org on the job: the explicit job_organisations links PLUS the
+    // accounting client, which hangs off jobs.client_id rather than a link row.
+    const orgsResult = await query(
+      `SELECT o.id, o.name, COALESCE(o.files, '[]'::jsonb) AS files
+         FROM organisations o
+        WHERE o.id IN (
+                SELECT jo.organisation_id FROM job_organisations jo WHERE jo.job_id = $1
+                UNION
+                SELECT j.client_id FROM jobs j WHERE j.id = $1 AND j.client_id IS NOT NULL
+              )
+        ORDER BY o.name`,
+      [jobId]
+    );
+    const orgs = orgsResult.rows as Array<{ id: string; name: string; files: StoredFile[] }>;
+
+    // Files OTHER jobs have linked up to one of those orgs. These surface here
+    // too — that's the point of linking a rider up to the band: it then appears
+    // on the band's other hires. The metadata still lives on the owning job.
+    let linkedIn: Array<{
+      org_id: string; r2_key: string; job_id: string;
+      job_name: string | null; hh_job_number: number | null; job_files: StoredFile[];
+    }> = [];
+    if (orgs.length > 0) {
+      const linkedResult = await query(
+        `SELECT fl.linked_entity_id AS org_id, fl.r2_key,
+                j.id AS job_id, j.job_name, j.hh_job_number,
+                COALESCE(j.files, '[]'::jsonb) AS job_files
+           FROM file_links fl
+           JOIN jobs j ON j.id = fl.owner_entity_id
+          WHERE fl.linked_entity_type = 'organisations'
+            AND fl.owner_entity_type = 'jobs'
+            AND fl.linked_entity_id = ANY($1::uuid[])
+            AND fl.owner_entity_id <> $2::uuid`,
+        [orgs.map((o) => o.id), jobId]
+      );
+      linkedIn = linkedResult.rows;
+    }
+
+    // Dedupe by R2 key across the whole tab: the job's own files win, then the
+    // first org to offer a given file keeps it. A rider linked to both the band
+    // and its management company shows once, not twice.
+    const seen = new Set<string>(
+      (jobResult.rows[0].files as StoredFile[]).map((f) => f.url)
+    );
+
+    const surfaced: Record<string, unknown>[] = [];
+    for (const org of orgs) {
+      for (const file of org.files) {
+        if (!isShownOnJobs(file) || seen.has(file.url)) continue;
+        seen.add(file.url);
+        surfaced.push({
+          ...file,
+          source: 'org',
+          owner_entity_type: 'organisations',
+          owner_entity_id: org.id,
+          owner_name: org.name,
+        });
+      }
+
+      for (const link of linkedIn.filter((l) => l.org_id === org.id)) {
+        if (seen.has(link.r2_key)) continue;
+        // The link row can outlive the file it points at (the owning job's copy
+        // was replaced, say). Nothing to render, so skip rather than 500.
+        // No show_on_jobs check here: the link row IS the explicit decision to
+        // surface this file. The flag only gates the DERIVED org → job direction,
+        // where nobody opted in file-by-file.
+        const meta = link.job_files.find((f) => f.url === link.r2_key);
+        if (!meta) continue;
+        seen.add(link.r2_key);
+        surfaced.push({
+          ...meta,
+          source: 'job',
+          // Owned by the JOB that uploaded it, not by the org it travelled
+          // through — that's where an edit or an email has to be aimed.
+          owner_entity_type: 'jobs',
+          owner_entity_id: link.job_id,
+          owner_name: link.job_name || (link.hh_job_number ? `Job ${link.hh_job_number}` : 'a job'),
+        });
+      }
+    }
+
+    const linksResult = await query(
+      `SELECT fl.id, fl.r2_key, fl.linked_entity_id AS org_id, o.name AS org_name
+         FROM file_links fl
+         JOIN organisations o ON o.id = fl.linked_entity_id
+        WHERE fl.owner_entity_type = 'jobs'
+          AND fl.owner_entity_id = $1::uuid
+          AND fl.linked_entity_type = 'organisations'
+        ORDER BY o.name`,
+      [jobId]
+    );
+
+    res.json({
+      data: {
+        surfaced,
+        links: linksResult.rows,
+        orgs: orgs.map((o) => ({ id: o.id, name: o.name })),
+      },
+    });
+  } catch (error) {
+    console.error('Job file surfacing error:', error);
+    res.status(500).json({ error: 'Failed to load surfaced files' });
+  }
+});
+
+// GET /api/files/for-org/:orgId — files that jobs have linked up to this org.
+// They stay OWNED by the uploading job; the org just has a window onto them. The
+// owner identity rides along so the Org Files tab can show them in the same flat
+// list as the org's own files and still write metadata to the right job.
+router.get('/for-org/:orgId', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const orgId = String(req.params.orgId);
+    if (!UUID_RE.test(orgId)) {
+      res.status(400).json({ error: 'Invalid organisation id' });
+      return;
+    }
+
+    const result = await query(
+      `SELECT fl.id AS link_id, fl.r2_key, fl.created_at,
+              j.id AS job_id, j.job_name, j.hh_job_number,
+              COALESCE(j.files, '[]'::jsonb) AS job_files
+         FROM file_links fl
+         JOIN jobs j ON j.id = fl.owner_entity_id
+        WHERE fl.linked_entity_type = 'organisations'
+          AND fl.linked_entity_id = $1::uuid
+          AND fl.owner_entity_type = 'jobs'
+        ORDER BY fl.created_at DESC`,
+      [orgId]
+    );
+
+    const linked = [];
+    for (const row of result.rows) {
+      const meta = (row.job_files as StoredFile[]).find((f) => f.url === row.r2_key);
+      if (!meta) continue; // link outlived the file — nothing to show
+      linked.push({
+        ...meta,
+        source: 'job',
+        link_id: row.link_id,
+        owner_entity_type: 'jobs',
+        owner_entity_id: row.job_id,
+        owner_name: row.job_name || (row.hh_job_number ? `Job ${row.hh_job_number}` : 'a job'),
+      });
+    }
+
+    res.json({ data: linked });
+  } catch (error) {
+    console.error('Org linked-file lookup error:', error);
+    res.status(500).json({ error: 'Failed to load linked files' });
+  }
+});
+
+const fileLinkSchema = z.object({
+  r2_key: z.string().min(1),
+  owner_entity_type: z.literal('jobs'),
+  owner_entity_id: z.string().uuid(),
+  linked_entity_type: z.literal('organisations'),
+  linked_entity_id: z.string().uuid(),
+});
+
+// POST /api/files/link — surface an owned file on another entity.
+//
+// The table is polymorphic on both ends, but the API is deliberately narrow:
+// only job → org is a real product action today, and a wide-open endpoint would
+// let a caller manufacture links between anything.
+router.post('/link', authorize(...STAFF_ROLES), validate(fileLinkSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { r2_key, owner_entity_type, owner_entity_id, linked_entity_type, linked_entity_id } =
+      req.body as z.infer<typeof fileLinkSchema>;
+
+    // The file has to actually be on the owning job — otherwise a payload could
+    // point a link at any R2 key it liked.
+    const owner = await query(
+      `SELECT COALESCE(files, '[]'::jsonb) AS files FROM jobs WHERE id = $1`,
+      [owner_entity_id]
+    );
+    if (owner.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+    const file = (owner.rows[0].files as StoredFile[]).find((f) => f.url === r2_key);
+    if (!file) {
+      res.status(404).json({ error: 'File not found on this job' });
+      return;
+    }
+
+    const org = await query(`SELECT name FROM organisations WHERE id = $1`, [linked_entity_id]);
+    if (org.rows.length === 0) {
+      res.status(404).json({ error: 'Organisation not found' });
+      return;
+    }
+
+    const inserted = await query(
+      `INSERT INTO file_links
+         (r2_key, owner_entity_type, owner_entity_id, linked_entity_type, linked_entity_id, created_by)
+       VALUES ($1, $2, $3::uuid, $4, $5::uuid, $6)
+       ON CONFLICT ON CONSTRAINT uq_file_link DO NOTHING
+       RETURNING id`,
+      [r2_key, owner_entity_type, owner_entity_id, linked_entity_type, linked_entity_id, req.user!.email]
+    );
+
+    // Already linked — not an error, the caller wanted it linked and it is.
+    if (inserted.rows.length === 0) {
+      res.status(200).json({ data: { already_linked: true } });
+      return;
+    }
+
+    await query(
+      `INSERT INTO interactions (id, type, content, organisation_id, created_by, created_at, source)
+       VALUES ($1, 'note', $2, $3, $4, NOW(), 'system')`,
+      [uuid(), `🔗 Linked file from a job: ${file.label ? `${file.label} (${file.name})` : file.name}`,
+       linked_entity_id, req.user!.id]
+    );
+
+    res.status(201).json({ data: { id: inserted.rows[0].id } });
+  } catch (error) {
+    console.error('File link error:', error);
+    res.status(500).json({ error: 'Failed to link file' });
+  }
+});
+
+// DELETE /api/files/link/:id — close the window. The file itself is untouched;
+// it stays owned by, and visible on, the job that uploaded it.
+router.delete('/link/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    if (!UUID_RE.test(id)) {
+      res.status(400).json({ error: 'Invalid link id' });
+      return;
+    }
+    const result = await query(`DELETE FROM file_links WHERE id = $1 RETURNING id`, [id]);
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Link not found' });
+      return;
+    }
+    res.status(204).send();
+  } catch (error) {
+    console.error('File unlink error:', error);
+    res.status(500).json({ error: 'Failed to unlink file' });
   }
 });
 

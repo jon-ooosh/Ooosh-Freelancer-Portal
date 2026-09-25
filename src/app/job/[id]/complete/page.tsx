@@ -36,7 +36,7 @@ interface Job {
   id: string
   name: string
   type: 'delivery' | 'collection'
-  whatIsIt?: 'equipment' | 'vehicle'  // Equipment or A vehicle - for filtering
+  whatIsIt?: 'equipment' | 'vehicle' | 'people'  // Equipment or A vehicle - for filtering
   date?: string
   time?: string
   venueName?: string
@@ -95,7 +95,7 @@ function formatJobTitle(jobName: string, venueName?: string): string {
 /**
  * Get the filter mode for HireHop items based on job's whatIsIt value
  */
-function getFilterMode(whatIsIt?: 'equipment' | 'vehicle'): 'equipment' | 'vehicles' | 'all' {
+function getFilterMode(whatIsIt?: 'equipment' | 'vehicle' | 'people'): 'equipment' | 'vehicles' | 'all' {
   switch (whatIsIt) {
     case 'equipment':
       return 'equipment'  // Exclude vehicles and services
@@ -611,7 +611,7 @@ function ClientEmailInput({
 
 interface EquipmentChecklistProps {
   hhRef: string
-  whatIsIt?: 'equipment' | 'vehicle'
+  whatIsIt?: 'equipment' | 'vehicle' | 'people'
   isDelivery: boolean
 }
 

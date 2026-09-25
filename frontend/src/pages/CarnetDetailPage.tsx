@@ -23,7 +23,21 @@ interface CarnetHead {
   return_by: string | null;
 }
 
+// Keyed by the route id so /operations/carnets/A → …/B is a genuine
+// unmount/remount. React Router otherwise reuses ONE instance and only swaps
+// the param, leaving the previous carnet's state on the new page and letting a
+// slow reply for the old id resolve into it (no fetch here is cancellable).
+// See `.claude/rules/frontend.md` → Detail pages; JobDetailPage has the long
+// version.
+//
+// Key on `id` ONLY — never the pathname or a query param, or a same-page link
+// that changes only the query string would remount the page.
 export default function CarnetDetailPage() {
+  const { id } = useParams<{ id: string }>();
+  return <CarnetDetailContent key={id} />;
+}
+
+function CarnetDetailContent() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [head, setHead] = useState<CarnetHead | null>(null);

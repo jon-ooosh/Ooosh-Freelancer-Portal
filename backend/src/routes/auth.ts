@@ -59,8 +59,17 @@ const changePasswordSchema = z.object({
 const updateProfileSchema = z.object({
   first_name: z.string().min(1).optional(),
   last_name: z.string().min(1).optional(),
+  // "I prefer to be known as". Nullable and allowed to be empty so somebody can
+  // clear it and go back to their first name; `displayName.ts` already falls
+  // back. Editable here because it is a fact about the person, not employment
+  // configuration — it was previously only settable by an admin, and only for
+  // somebody who had an employment record at all.
+  preferred_name: z.string().max(60).optional().nullable(),
   // Staff's company-card last 4. Optional + nullable so the user can clear it.
   // Stored on users (not people) — it's a staff-only operational field.
+  // NOTE: no longer written by any UI — the card is assigned by an admin on the
+  // Staff page, which also holds the label and the card agreement. Kept on the
+  // endpoint so an older cached bundle can't 400 mid-deploy.
   cot_card_last4: z.string().regex(/^\d{4}$/).optional().nullable(),
 });
 
@@ -101,7 +110,7 @@ router.post('/login', loginLimiter, validate(loginSchema), async (req: Request, 
     const { email, password } = req.body;
 
     const result = await query(
-      `SELECT u.*, p.first_name, p.last_name
+      `SELECT u.*, p.first_name, p.last_name, p.preferred_name
        FROM users u JOIN people p ON u.person_id = p.id
        WHERE u.email = $1 AND u.is_active = true`,
       [email.toLowerCase()]
@@ -135,6 +144,9 @@ router.post('/login', loginLimiter, validate(loginSchema), async (req: Request, 
         role: user.role,
         first_name: user.first_name,
         last_name: user.last_name,
+        // What they are actually called. Display code uses this in preference
+        // to first_name — see frontend lib/displayName.ts.
+        preferred_name: user.preferred_name || null,
         avatar_url: user.avatar_url || null,
         force_password_change: user.force_password_change || false,
       },
@@ -177,6 +189,13 @@ router.post('/register', validate(registerSchema), async (req: Request, res: Res
 
     await query('UPDATE users SET refresh_token = $1 WHERE id = $2', [tokens.refreshToken, user.id]);
 
+    // Materialise any all-staff / role-targeted staff documents for the new user.
+    if (role !== 'freelancer') {
+      import('../services/staff-documents')
+        .then((m) => m.syncAllActiveDocuments())
+        .catch((e) => console.error('Staff-document sync on register failed:', e));
+    }
+
     res.status(201).json({
       user: { id: user.id, email: user.email, role: user.role, first_name, last_name },
       ...tokens,
@@ -205,7 +224,7 @@ router.post('/refresh', refreshLimiter, async (req: Request, res: Response) => {
     }
 
     const result = await query(
-      `SELECT u.*, p.first_name, p.last_name
+      `SELECT u.*, p.first_name, p.last_name, p.preferred_name
        FROM users u JOIN people p ON u.person_id = p.id
        WHERE u.id = $1 AND u.refresh_token = $2 AND u.is_active = true`,
       [decoded.id, refreshToken]
@@ -250,7 +269,7 @@ router.get('/me', authenticate, async (req: AuthRequest, res: Response) => {
     const result = await query(
       `SELECT u.id, u.email, u.role, u.avatar_url, u.force_password_change,
               u.cot_card_last4,
-              p.first_name, p.last_name
+              p.first_name, p.last_name, p.preferred_name
        FROM users u JOIN people p ON u.person_id = p.id
        WHERE u.id = $1`,
       [req.user!.id]
@@ -268,11 +287,12 @@ router.get('/me', authenticate, async (req: AuthRequest, res: Response) => {
   }
 });
 
-// PUT /api/auth/profile — update own profile (name + COT card last 4)
+// PUT /api/auth/profile — update own profile (name, preferred name)
 router.put('/profile', authenticate, validate(updateProfileSchema), async (req: AuthRequest, res: Response) => {
   try {
-    const { first_name, last_name, cot_card_last4 } = req.body as {
-      first_name?: string; last_name?: string; cot_card_last4?: string | null
+    const { first_name, last_name, preferred_name, cot_card_last4 } = req.body as {
+      first_name?: string; last_name?: string;
+      preferred_name?: string | null; cot_card_last4?: string | null
     };
     const userId = req.user!.id;
 
@@ -282,6 +302,12 @@ router.put('/profile', authenticate, validate(updateProfileSchema), async (req: 
     let idx = 1;
     if (first_name) { peopleUpdates.push(`first_name = $${idx++}`); peopleParams.push(first_name); }
     if (last_name)  { peopleUpdates.push(`last_name = $${idx++}`);  peopleParams.push(last_name); }
+    // `!== undefined`, not a truthy test: '' is how the form says "clear it",
+    // and a truthy test would silently ignore that and keep the old value.
+    if (preferred_name !== undefined) {
+      peopleUpdates.push(`preferred_name = $${idx++}`);
+      peopleParams.push(preferred_name?.trim() || null);
+    }
 
     // users fields (COT card last 4)
     const usersUpdates: string[] = [];
@@ -316,7 +342,7 @@ router.put('/profile', authenticate, validate(updateProfileSchema), async (req: 
     const result = await query(
       `SELECT u.id, u.email, u.role, u.avatar_url, u.force_password_change,
               u.cot_card_last4,
-              p.first_name, p.last_name
+              p.first_name, p.last_name, p.preferred_name
        FROM users u JOIN people p ON u.person_id = p.id
        WHERE u.id = $1`,
       [userId]

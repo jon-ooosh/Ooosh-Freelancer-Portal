@@ -15,7 +15,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     const whereClause = includeInactive ? '' : 'WHERE u.is_active = true';
     const result = await query(
       `SELECT u.id, u.email, u.role, u.is_active, u.last_login, u.avatar_url, u.hh_user_id,
-        p.first_name, p.last_name
+        p.first_name, p.last_name, p.preferred_name
        FROM users u
        LEFT JOIN people p ON p.id = u.person_id
        ${whereClause}
@@ -112,7 +112,7 @@ router.put('/:id', authorize('admin', 'manager'), validate(updateUserSchema), as
     // Return updated user
     const result = await query(
       `SELECT u.id, u.email, u.role, u.is_active, u.avatar_url, u.hh_user_id,
-        p.first_name, p.last_name
+        p.first_name, p.last_name, p.preferred_name
        FROM users u
        LEFT JOIN people p ON p.id = u.person_id
        WHERE u.id = $1`,
@@ -165,9 +165,13 @@ router.get('/cot-cards', authorize('admin'), async (_req: AuthRequest, res: Resp
   try {
     const result = await query(
       `SELECT u.id, u.email, u.is_active, u.cot_card_last4, u.cot_card_label,
-              p.first_name, p.last_name
+              p.first_name, p.last_name,
+              a.status AS agreement_status, c.completed_at AS agreement_completed_at
          FROM users u
          LEFT JOIN people p ON p.id = u.person_id
+         LEFT JOIN staff_documents d ON d.slug = 'cot-card-agreement'
+         LEFT JOIN staff_document_assignments a ON a.user_id = u.id AND a.document_id = d.id
+         LEFT JOIN staff_document_completions c ON c.id = a.current_completion_id
         WHERE u.role <> 'freelancer'
         ORDER BY u.is_active DESC, p.first_name, p.last_name`
     );
@@ -200,6 +204,11 @@ router.patch('/:id/cot-card', authorize('admin'), async (req: AuthRequest, res: 
       vals,
     );
     if (!r.rows.length) { res.status(404).json({ error: 'User not found' }); return; }
+    // Issuing/updating a card seeds any COT-card-holder-targeted staff document
+    // (e.g. the card Authorised User Agreement) for this user. Fire-and-forget.
+    import('../services/staff-documents')
+      .then((m) => m.syncCotCardHolderDocuments())
+      .catch((e) => console.error('COT card doc sync failed:', e));
     res.json({ data: r.rows[0] });
   } catch (error) {
     console.error('Update COT card error:', error);
