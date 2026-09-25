@@ -110,9 +110,9 @@ describe('creating a task', () => {
 
   it('chases on the due date when there is one', async () => {
     rows([{ person_id: MY_PERSON }], [{ id: TASK }], [{ id: TASK }]);
-    await createTask({ title: 'Do it', dueDate: '2026-11-30' }, ME, 'staff');
+    await createTask({ title: 'Do it', dueDate: '2099-11-30' }, ME, 'staff');
     const params = mockQuery.mock.calls[1]![1] as unknown[];
-    expect(params[4]).toBe('2026-11-30');   // next_chase_date
+    expect(params[4]).toBe('2099-11-30');   // next_chase_date
   });
 
   it('chases in a fortnight when there is NO due date — the case that would otherwise rot', async () => {
@@ -205,7 +205,7 @@ describe('creating a task', () => {
 describe('re-dating clears the chase stamp', () => {
   it('so a renewed promise earns a fresh nudge', async () => {
     rows([{ person_id: MY_PERSON }], [{ person_id: MY_PERSON }], [], [{ id: TASK }]);
-    await updateTask(TASK, { dueDate: '2026-10-01' }, ME, 'staff');
+    await updateTask(TASK, { dueDate: '2099-10-01' }, ME, 'staff');
     expect(mockQuery.mock.calls[2]![0] as string).toMatch(/chased_at = NULL/);
   });
 
@@ -226,19 +226,19 @@ describe('re-dating clears the chase stamp', () => {
 
   it('assigns the chase date once when due and remind dates change together', async () => {
     rows([{ person_id: MY_PERSON }], [{ person_id: MY_PERSON }], [], [{ id: TASK }]);
-    await updateTask(TASK, { dueDate: '2026-10-01', nextChaseDate: '2026-09-28' }, ME, 'staff');
+    await updateTask(TASK, { dueDate: '2099-10-01', nextChaseDate: '2099-09-28' }, ME, 'staff');
     const sql = mockQuery.mock.calls[2]![0] as string;
     const params = mockQuery.mock.calls[2]![1] as unknown[];
     expect(once(sql, 'next_chase_date')).toBe(1);
     expect(once(sql, 'chased_at')).toBe(1);
     // The explicit chase date wins over the one derived from the due date.
     const m = sql.match(/next_chase_date = \$(\d+)/);
-    expect(params[Number(m![1]) - 1]).toBe('2026-09-28');
+    expect(params[Number(m![1]) - 1]).toBe('2099-09-28');
   });
 
   it('assigns the chase date once when re-dated and finished together', async () => {
     rows([{ person_id: MY_PERSON }], [{ person_id: MY_PERSON }], [], [{ id: TASK }]);
-    await updateTask(TASK, { dueDate: '2026-10-01', status: 'done' }, ME, 'staff');
+    await updateTask(TASK, { dueDate: '2099-10-01', status: 'done' }, ME, 'staff');
     const sql = mockQuery.mock.calls[2]![0] as string;
     expect(once(sql, 'next_chase_date')).toBe(1);
   });
@@ -261,7 +261,7 @@ describe('the setter (TASKS-SPEC §5)', () => {
 
   it('may move their own follow-up, which re-arms it', async () => {
     rows([SETTER_ROW], [{ person_id: MY_PERSON }], [], [{ id: TASK }]);
-    await updateTask(TASK, { followUpOn: '2026-10-10' }, ME, 'staff');
+    await updateTask(TASK, { followUpOn: '2099-10-10' }, ME, 'staff');
     const sql = mockQuery.mock.calls[2]![0] as string;
     expect(sql).toMatch(/follow_up_on = \$1::date/);
     expect(sql).toMatch(/follow_up_chased_at = NULL/);
@@ -342,6 +342,36 @@ describe('the Everyone view (TASKS-SPEC §4, §8)', () => {
     const params = mockQuery.mock.calls[1]![1] as unknown[];
     expect(sql).toMatch(/NOT t\.is_private OR \$3::boolean OR t\.person_id = \$2 OR t\.created_by = \$1/);
     expect(params).toEqual([ME, MY_PERSON, false]);
+  });
+});
+
+describe('dates look forward (jon, Sep 2026)', () => {
+  it('refuses a new task due in the past', async () => {
+    rows([{ person_id: MY_PERSON }]);
+    await expect(createTask({ title: 'x', dueDate: '2020-01-01' }, ME, 'staff'))
+      .rejects.toThrow(/due date can’t be in the past/);
+  });
+
+  it('refuses moving a due date into the past', async () => {
+    rows([{ person_id: MY_PERSON, created_by: ME, due_date: '2099-01-01' }], [{ person_id: MY_PERSON }]);
+    await expect(updateTask(TASK, { dueDate: '2020-01-01' }, ME, 'staff'))
+      .rejects.toThrow(/in the past/);
+  });
+
+  it('keeps an overdue task’s untouched due date through an unrelated edit', async () => {
+    rows(
+      [{ person_id: MY_PERSON, created_by: ME, due_date: '2020-01-01' }],
+      [{ person_id: MY_PERSON }], [], [{ id: TASK }],
+    );
+    // The edit form may send the same stored date back — that's not setting it.
+    await expect(updateTask(TASK, { title: 'Typo fixed', dueDate: '2020-01-01' }, ME, 'staff'))
+      .resolves.toBeDefined();
+  });
+
+  it('refuses a follow-up in the past', async () => {
+    rows([{ person_id: THEIR_PERSON, created_by: ME, follow_up_on: '2099-01-01' }], [{ person_id: MY_PERSON }]);
+    await expect(updateTask(TASK, { followUpOn: '2020-01-01' }, ME, 'staff'))
+      .rejects.toThrow(/follow-up can’t be in the past/);
   });
 });
 

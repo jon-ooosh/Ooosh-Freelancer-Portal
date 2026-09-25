@@ -98,7 +98,9 @@ router.get('/mine', async (req: AuthRequest, res: Response) => {
     // already surfaces that state properly. Return an empty list and say so.
     if (!personId) { res.json({ data: [], linked: false }); return; }
     const data = await listTasks(personId, req.query.includeDone === 'true');
-    res.json({ data, linked: true, counts: await openTaskCount(personId) });
+    // `me` lets the page tell my rows from ones I handed back (still listed,
+    // greyed, in my recently finished).
+    res.json({ data, linked: true, me: personId, counts: await openTaskCount(personId) });
   } catch (err) {
     console.error('[staff-tasks] list mine error:', err);
     res.status(500).json({ error: 'Failed to load your tasks' });

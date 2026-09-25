@@ -22,6 +22,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
+import ForwardDateInput from '../components/ForwardDateInput';
 
 interface Task {
   id: string;
@@ -41,8 +42,10 @@ interface Task {
   follow_up_on: string | null;
   set_by_person_id: string | null;
   set_by_name: string | null;
+  handed_back_by: string | null;
   handed_back_reason: string | null;
   handed_back_by_name: string | null;
+  handed_back_at: string | null;
 }
 
 /** Somebody a task can be given to — GET /staff-tasks/people. */
@@ -142,6 +145,8 @@ const SOURCE_LABEL: Record<string, string> = {
 function MineView({ people }: { people: Person[] }) {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [linked, setLinked] = useState(true);
+  // My person id, from /mine — to tell my rows from ones I handed back.
+  const [me, setMe] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   // Distinguished from "no tasks" deliberately: an empty list and a failed
   // load look identical otherwise, which is exactly how the staff-records
@@ -165,10 +170,11 @@ function MineView({ people }: { people: Person[] }) {
   const load = useCallback(async () => {
     setLoadError(null);
     try {
-      const res = await api.get<{ data: Task[]; linked: boolean }>(
+      const res = await api.get<{ data: Task[]; linked: boolean; me?: string }>(
         `/staff-tasks/mine?includeDone=${showDone}`);
       setTasks(res.data);
       setLinked(res.linked);
+      setMe(res.me ?? null);
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : 'Could not load your to-do list');
     } finally {
@@ -257,8 +263,11 @@ function MineView({ people }: { people: Person[] }) {
     }
   }
 
-  const open = tasks.filter(t => t.status === 'open');
-  const done = tasks.filter(t => t.status === 'done');
+  // A task I handed back is someone else's now — it only appears (greyed) in
+  // my recently finished, never in my open list.
+  const handedBackByMe = (t: Task) => !!me && t.handed_back_by === me && t.person_id !== me;
+  const open = tasks.filter(t => t.status === 'open' && !handedBackByMe(t));
+  const done = tasks.filter(t => t.status === 'done' || handedBackByMe(t));
 
   return (
     <div className="space-y-6">
@@ -290,21 +299,11 @@ function MineView({ people }: { people: Person[] }) {
           </label>
           <label className="text-sm">
             <span className="block text-xs text-gray-600 mb-1">Remind me</span>
-            <input
-              type="date"
-              value={remindOn}
-              onChange={e => setRemindOn(e.target.value)}
-              className="px-3 py-2 border border-gray-300 rounded text-sm"
-            />
+            <ForwardDateInput value={remindOn} onChange={setRemindOn} ariaLabel="Remind me" />
           </label>
           <label className="text-sm">
             <span className="block text-xs text-gray-600 mb-1">Due</span>
-            <input
-              type="date"
-              value={dueDate}
-              onChange={e => setDueDate(e.target.value)}
-              className="px-3 py-2 border border-gray-300 rounded text-sm"
-            />
+            <ForwardDateInput value={dueDate} onChange={setDueDate} ariaLabel="Due" />
           </label>
           <label className="text-sm">
             <span className="block text-xs text-gray-600 mb-1">For</span>
@@ -430,7 +429,16 @@ function MineView({ people }: { people: Person[] }) {
           <div className="mt-3 bg-white rounded-lg border border-gray-200 divide-y divide-gray-100">
             {done.length === 0 ? (
               <p className="px-4 py-4 text-sm text-gray-400">Nothing finished in the last 30 days.</p>
-            ) : done.map(task => (
+            ) : done.map(task => handedBackByMe(task) ? (
+              <div key={task.id} className="flex items-center gap-3 px-4 py-2 opacity-70">
+                <span className="h-4 w-4 shrink-0" aria-hidden />
+                <span className="text-sm text-gray-400 italic min-w-0 flex-1">{task.title}</span>
+                <span className="text-xs text-gray-400 italic whitespace-nowrap">
+                  handed back to {task.owner_name || 'whoever set it'}
+                  {task.handed_back_at && <> · {fmtShort(task.handed_back_at)}</>}
+                </span>
+              </div>
+            ) : (
               <div key={task.id} className="flex items-center gap-3 px-4 py-2">
                 <input
                   type="checkbox"
@@ -480,13 +488,11 @@ function TaskEditRow({ task, busy, onCancel, onSave }: {
       <div className="flex flex-wrap items-end gap-3">
         <label className="text-sm">
           <span className="block text-xs text-gray-600 mb-1">Due</span>
-          <input type="date" value={dueDate} onChange={e => setDueDate(e.target.value)}
-            className="px-3 py-2 border border-gray-300 rounded text-sm bg-white" />
+          <ForwardDateInput value={dueDate} onChange={setDueDate} ariaLabel="Due" />
         </label>
         <label className="text-sm">
           <span className="block text-xs text-gray-600 mb-1">Remind me</span>
-          <input type="date" value={remindOn} onChange={e => setRemindOn(e.target.value)}
-            className="px-3 py-2 border border-gray-300 rounded text-sm bg-white" />
+          <ForwardDateInput value={remindOn} onChange={setRemindOn} ariaLabel="Remind me" />
         </label>
         <span className="text-[11px] text-gray-400 pb-2 max-w-[16rem]">
           Blank = never nudge. Moving the due date moves the reminder with it unless you set one here.
@@ -590,8 +596,9 @@ function AssignedView({ people }: { people: Person[] }) {
               </label>
               <label className="text-xs text-gray-600">
                 <span className="block mb-0.5">Follow up</span>
-                <input type="date" value={task.follow_up_on ?? ''} disabled={busyId === task.id}
-                  onChange={e => void patch(task, { followUpOn: e.target.value || null })}
+                <ForwardDateInput value={task.follow_up_on ?? ''} disabled={busyId === task.id}
+                  ariaLabel="Follow up"
+                  onChange={v => void patch(task, { followUpOn: v || null })}
                   className="px-2 py-1 border border-gray-300 rounded text-sm" />
               </label>
               <button onClick={() => {

@@ -71,6 +71,24 @@ async function resolveChaseDate(
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
+/** Today in the UK, as YYYY-MM-DD — the day staff are actually living in. */
+export function todayLondon(): string {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/London' });
+}
+
+/**
+ * Dates on a to-do look FORWARD (jon, Sep 2026): a due date or reminder in
+ * the past is always a slip. But only a date being SET is checked — an
+ * overdue task keeps its old due date through an unrelated edit, or fixing a
+ * typo in its title would be refused. `current` is the stored value; passing
+ * the same date back is not setting it.
+ */
+function assertForward(value: string | null | undefined, label: string, current?: string | null) {
+  if (!value) return;
+  if (current && value === current) return;
+  if (value < todayLondon()) throw new Error(`${label} can’t be in the past`);
+}
+
 const SELECT_TASKS = `
   SELECT t.id, t.person_id, t.title, t.detail,
          t.due_date::text AS due_date, t.status,
@@ -79,7 +97,7 @@ const SELECT_TASKS = `
          t.created_at, t.completed_at,
          t.created_by, t.is_private,
          t.follow_up_on::text AS follow_up_on,
-         t.handed_back_reason, t.handed_back_at,
+         t.handed_back_by, t.handed_back_reason, t.handed_back_at,
          cu.person_id AS set_by_person_id,
          NULLIF(TRIM(COALESCE(op.preferred_name, op.first_name, '') || ' ' ||
                      COALESCE(op.last_name, '')), '') AS owner_name,
@@ -122,6 +140,10 @@ function isAdmin(role: string | undefined): boolean {
 interface TouchInfo {
   personId: string;
   createdBy: string | null;
+  /** Stored dates, so an untouched past date isn't refused (assertForward). */
+  dueDate: string | null;
+  nextChaseDate: string | null;
+  followUpOn: string | null;
   /** Why this caller may touch it — decides what they may change. */
   as: 'admin' | 'setter' | 'owner';
 }
@@ -135,14 +157,25 @@ interface TouchInfo {
  * open, non-private task there, but only these three can change it.
  */
 async function assertCanTouch(taskId: string, userId: string, role: string | undefined): Promise<TouchInfo> {
-  const r = await query('SELECT person_id, created_by FROM staff_tasks WHERE id = $1', [taskId]);
+  const r = await query(
+    `SELECT person_id, created_by, due_date::text AS due_date,
+            next_chase_date::text AS next_chase_date, follow_up_on::text AS follow_up_on
+       FROM staff_tasks WHERE id = $1`,
+    [taskId]
+  );
   if (!r.rows.length) throw new Error('Task not found');
-  const personId = r.rows[0].person_id as string;
-  const createdBy = (r.rows[0].created_by as string | null) ?? null;
-  if (isAdmin(role)) return { personId, createdBy, as: 'admin' };
+  const row = r.rows[0];
+  const base = {
+    personId: row.person_id as string,
+    createdBy: (row.created_by as string | null) ?? null,
+    dueDate: row.due_date ?? null,
+    nextChaseDate: row.next_chase_date ?? null,
+    followUpOn: row.follow_up_on ?? null,
+  };
+  if (isAdmin(role)) return { ...base, as: 'admin' };
   const mine = await personIdForUser(userId);
-  if (mine && personId === mine) return { personId, createdBy, as: 'owner' };
-  if (createdBy && createdBy === userId) return { personId, createdBy, as: 'setter' };
+  if (mine && base.personId === mine) return { ...base, as: 'owner' };
+  if (base.createdBy && base.createdBy === userId) return { ...base, as: 'setter' };
   throw new Error('Task not found');
 }
 
@@ -150,9 +183,16 @@ async function assertCanTouch(taskId: string, userId: string, role: string | und
 export async function listTasks(personId: string, includeDone = false) {
   const r = await query(
     `${SELECT_TASKS}
-      WHERE t.person_id = $1
-        AND (t.status = 'open' OR ($2::boolean AND t.status <> 'cancelled'
-             AND t.completed_at > NOW() - INTERVAL '30 days'))
+      WHERE (
+              t.person_id = $1
+          AND (t.status = 'open' OR ($2::boolean AND t.status <> 'cancelled'
+               AND t.completed_at > NOW() - INTERVAL '30 days'))
+        )
+        -- Handed back BY me: gone from my list, but kept in my recently
+        -- finished for 30 days so it doesn't just vanish (jon, Sep 2026).
+        -- The page greys it; it is someone else's task now.
+         OR ($2::boolean AND t.handed_back_by = $1 AND t.person_id <> $1
+             AND t.handed_back_at > NOW() - INTERVAL '30 days')
       ORDER BY t.status = 'open' DESC,
                t.due_date IS NULL, t.due_date, t.created_at DESC`,
     [personId, includeDone]
@@ -184,8 +224,10 @@ export async function createTask(input: TaskInput, userId: string, role: string 
   }
 
   const dueDate = input.dueDate || null;
+  assertForward(dueDate, 'The due date');
   const nextChase = await resolveChaseDate(input.nextChaseDate, dueDate);
   if (nextChase && !DATE_RE.test(nextChase)) throw new Error('nextChaseDate must be YYYY-MM-DD');
+  if (input.nextChaseDate !== undefined) assertForward(input.nextChaseDate, 'The reminder');
 
   const isReview = input.sourceType === 'staff_review';
   // The setter's follow-up only exists for a task given to somebody else — on
@@ -196,6 +238,7 @@ export async function createTask(input: TaskInput, userId: string, role: string 
   if (input.followUpOn !== undefined) followUp = input.followUpOn || null;
   else if (forSomebodyElse && !isReview) followUp = await resolveChaseDate(undefined, dueDate);
   if (followUp && !DATE_RE.test(followUp)) throw new Error('followUpOn must be YYYY-MM-DD');
+  if (input.followUpOn !== undefined) assertForward(followUp, 'The follow-up');
   // Review actions are private unless said otherwise (spec §8).
   const isPrivate = input.isPrivate ?? isReview;
 
@@ -253,6 +296,7 @@ export async function updateTask(
   let chase: string | null | undefined;
   if (patch.dueDate !== undefined) {
     if (patch.dueDate && !DATE_RE.test(patch.dueDate)) throw new Error('dueDate must be YYYY-MM-DD');
+    assertForward(patch.dueDate, 'The due date', who.dueDate);
     params.push(patch.dueDate || null); sets.push(`due_date = $${params.length}::date`);
     // A re-dated task is a fresh promise, so it earns a fresh chase that
     // follows the new due date — unless the caller also set one explicitly.
@@ -262,6 +306,7 @@ export async function updateTask(
     if (patch.nextChaseDate && !DATE_RE.test(patch.nextChaseDate)) {
       throw new Error('nextChaseDate must be YYYY-MM-DD');
     }
+    assertForward(patch.nextChaseDate, 'The reminder', who.nextChaseDate);
     chase = patch.nextChaseDate || null;
   }
   if (patch.status !== undefined) {
@@ -297,6 +342,7 @@ export async function updateTask(
   if (patch.followUpOn !== undefined) {
     if (!setterOrAdmin) throw new Error('Only whoever set this can change its follow-up');
     if (patch.followUpOn && !DATE_RE.test(patch.followUpOn)) throw new Error('followUpOn must be YYYY-MM-DD');
+    assertForward(patch.followUpOn, 'The follow-up', who.followUpOn);
     params.push(patch.followUpOn || null); sets.push(`follow_up_on = $${params.length}::date`);
     sets.push('follow_up_chased_at = NULL');
     followUpDone = true;
