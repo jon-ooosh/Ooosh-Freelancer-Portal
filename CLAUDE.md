@@ -131,11 +131,12 @@ staff-facing review, document review cycles, retention. §20 is the current stat
 the short list of what is deliberately NOT built. Read it before changing anything here.
 Wider to-do work (assigning to others, recurring) is the general tasks module, not this one.
 
-**PHASE 1 BUILT, Sep 2026:** `docs/TASKS-SPEC.md` — the To Do module (Me › To Do), built on
+**PHASES 1–2 BUILT, Sep 2026:** `docs/TASKS-SPEC.md` — the To Do module (Me › To Do), built on
 `staff_tasks`. Anyone can give anyone a task; owner, setter and admins can touch it; private
-ones stay off the Everyone view. §2 is the boundary with job reminders, Problems and the
-vehicle module — read it before putting any "thing to do" anywhere. Phases 2–4 (recurring,
-lists, pull-ins) to come.
+ones stay off the Everyone view. Repeating to-dos are a `staff_task_series` whose occurrences
+are ordinary tasks (`source_type = 'staff_task_series'`), one open at a time. §2 is the
+boundary with job reminders, Problems and the vehicle module — read it before putting any
+"thing to do" anywhere. Phases 3–4 (lists, pull-ins) to come.
 
 **The staff DVLA/document check has NOTHING to do with `drivers`.** jon's decision,
 Sep 2026: the `drivers` machinery verifies self-drive-hire CLIENTS (30-day
@@ -219,6 +220,7 @@ existing definition:
 | Verifying an API key | `middleware/api-key.ts` |
 | What must never leave a general `people` response? | `services/people-private-fields.ts` |
 | May this person change this task? | `services/staff-tasks.ts` `assertCanTouch()` — owner, setter or admin |
+| When does a repeating to-do fall next? | `services/task-recurrence.ts` (pure; the form asks it via `/staff-tasks/series/preview`) |
 | Who is due a staff review? | `services/staff-employment.ts` `listReviewsDue()` |
 | What needs an admin's attention on Staff? | `services/staff-attention.ts` |
 | What does a reviewee get to see? | `services/staff-review-prep.ts` `getMyReview()` |
@@ -323,7 +325,7 @@ chase alerts 08:10 · auto-chase runner 08:10 · lock-up chaser 08:45 · staff t
 08:45 · return-to-work chase 08:50 · stale-enquiry
 auto-lose 09:00 · freelancer offer chase 09:05 · carnet forms 09:15 · referral safety-net 09:18 · storage reminders
 09:20 · holding reminders 09:25 · close-out chase 09:30 · staff documents 09:35 ·
-pre-auth expiry 09:40 · staff records 09:45 (to-dos, to-do follow-ups, record action dates, reviews due, absence-detail purge) · Stripe pre-auth discovery 09:50 · year-end cash-out reminder
+pre-auth expiry 09:40 · staff records 09:45 (repeating to-do repair, to-dos, to-do follow-ups, record action dates, reviews due, absence-detail purge) · Stripe pre-auth discovery 09:50 · year-end cash-out reminder
 09:55 (December + January) · company-days prompt 09:58 (November) · OOH reminders 10:00 ·
 HireHop sync every 30 min · sanity scanners every 15 min · notification escalation
 every 15 min · shop balance check every 15 min · shop drain every 2 min · shop stock mirror every 15 min ·

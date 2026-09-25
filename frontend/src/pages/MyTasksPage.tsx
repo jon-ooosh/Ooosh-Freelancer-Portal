@@ -22,6 +22,11 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
+import ForwardDateInput, { ymdFromToday } from '../components/ForwardDateInput';
+import {
+  RecurrenceModal, SeriesEditModal, defaultRepeat, type RepeatValue, type Series,
+} from '../components/RecurrenceFields';
+import { useAuthStore } from '../hooks/useAuthStore';
 
 interface Task {
   id: string;
@@ -41,8 +46,10 @@ interface Task {
   follow_up_on: string | null;
   set_by_person_id: string | null;
   set_by_name: string | null;
+  handed_back_by: string | null;
   handed_back_reason: string | null;
   handed_back_by_name: string | null;
+  handed_back_at: string | null;
 }
 
 /** Somebody a task can be given to — GET /staff-tasks/people. */
@@ -100,7 +107,7 @@ export default function ToDoPage() {
       </div>
       {view === 'mine' && <MineView people={people} />}
       {view === 'assigned' && <AssignedView people={people} />}
-      {view === 'everyone' && <EveryoneView />}
+      {view === 'everyone' && <EveryoneView people={people} />}
     </div>
   );
 }
@@ -137,11 +144,87 @@ function fmtDue(iso: string | null): { text: string; tone: string } {
 
 const SOURCE_LABEL: Record<string, string> = {
   staff_review: 'From your review',
+  staff_task_series: 'Repeats',
 };
+
+const SERIES = 'staff_task_series';
+
+/** "Stop" a repeating to-do — owner, setter or admin; the server decides. */
+async function stopSeries(s: Series): Promise<void> {
+  const reason = window.prompt(`Stop “${s.title}” repeating? Nothing more will be made — the one open now stays. Why (optional)?`);
+  if (reason === null) return;
+  await api.post(`/staff-tasks/series/${s.id}/end`, { reason: reason.trim() || null });
+}
+
+/**
+ * The Repeating list, as each view shows it. `manage` decides which rows get
+ * Change / Stop — a convenience only; the server enforces who may.
+ */
+function SeriesList({ series, people, showOwner, canChange, canStop, onChanged, onError }: {
+  series: Series[];
+  people: Person[];
+  showOwner: boolean;
+  canChange: (s: Series) => boolean;
+  canStop: (s: Series) => boolean;
+  onChanged: () => Promise<void>;
+  onError: (msg: string) => void;
+}) {
+  const [editing, setEditing] = useState<Series | null>(null);
+  if (!series.length) return null;
+  return (
+    <div>
+      <h2 className="text-sm font-medium text-gray-700 mb-2">Repeating</h2>
+      <div className="bg-white rounded-lg border border-gray-200 divide-y divide-gray-100">
+        {series.map(s => (
+          <div key={s.id} className="px-4 py-2.5 flex flex-wrap items-center gap-x-3 gap-y-1">
+            <div className="min-w-0 flex-1">
+              <div className="text-sm text-gray-900">
+                {s.title}
+                {showOwner && <span className="text-gray-500"> — {s.owner_name}</span>}
+              </div>
+              <div className="text-xs text-gray-500 mt-0.5">
+                {s.rule_text}
+                {s.status === 'active' && s.next_on && <> · next {fmtShort(s.next_on)}</>}
+                {s.last_done_at && <> · last done {fmtShort(s.last_done_at)}</>}
+              </div>
+              {s.status === 'proposed' && (
+                <div className="text-xs text-amber-700 mt-0.5">Waiting for {s.owner_name || 'them'} to accept</div>
+              )}
+              {s.status === 'declined' && (
+                <div className="text-xs text-red-700 mt-0.5">Declined{s.decline_reason ? `: “${s.decline_reason}”` : ''}</div>
+              )}
+              {s.status === 'ended' && (
+                <div className="text-xs text-gray-400 mt-0.5">Stopped{s.ended_reason ? `: ${s.ended_reason}` : ''}</div>
+              )}
+            </div>
+            {s.is_private && (
+              <span className="text-[11px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-600">private</span>
+            )}
+            {canChange(s) && s.status !== 'ended' && (
+              <button onClick={() => setEditing(s)} className="text-xs text-ooosh-600 hover:text-ooosh-800">Change</button>
+            )}
+            {canStop(s) && (s.status === 'active' || s.status === 'proposed') && (
+              <button onClick={() => { void stopSeries(s).then(onChanged).catch(e => onError(e instanceof Error ? e.message : 'Could not stop it')); }}
+                className="text-xs text-gray-400 hover:text-gray-600">Stop</button>
+            )}
+          </div>
+        ))}
+      </div>
+      {editing && (
+        <SeriesEditModal series={editing} people={people}
+          onClose={() => setEditing(null)}
+          onSaved={async () => { setEditing(null); await onChanged(); }}
+          onError={onError} />
+      )}
+    </div>
+  );
+}
 
 function MineView({ people }: { people: Person[] }) {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [linked, setLinked] = useState(true);
+  // My person id, from /mine — to tell my rows from ones I handed back.
+  const [me, setMe] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   // Distinguished from "no tasks" deliberately: an empty list and a failed
   // load look identical otherwise, which is exactly how the staff-records
@@ -161,14 +244,23 @@ function MineView({ people }: { people: Person[] }) {
   const [forPerson, setForPerson] = useState('');
   const [isPrivate, setIsPrivate] = useState(false);
   const [adding, setAdding] = useState(false);
+  // Repeating (TASKS-SPEC §6): null = a one-off.
+  const [repeat, setRepeat] = useState<RepeatValue | null>(null);
+  const [repeatOpen, setRepeatOpen] = useState(false);
+  const [series, setSeries] = useState<Series[]>([]);
 
   const load = useCallback(async () => {
     setLoadError(null);
     try {
-      const res = await api.get<{ data: Task[]; linked: boolean }>(
+      const res = await api.get<{ data: Task[]; linked: boolean; me?: string }>(
         `/staff-tasks/mine?includeDone=${showDone}`);
       setTasks(res.data);
       setLinked(res.linked);
+      setMe(res.me ?? null);
+      // Secondary: a failure here shouldn't blank the list above it.
+      api.get<{ data: Series[] }>('/staff-tasks/series/mine')
+        .then(r => setSeries(r.data))
+        .catch(() => undefined);
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : 'Could not load your to-do list');
     } finally {
@@ -183,6 +275,21 @@ function MineView({ people }: { people: Person[] }) {
     if (!title.trim()) return;
     setAdding(true);
     try {
+      if (repeat) {
+        // A repeating one is a SERIES; its first occurrence is made from it.
+        await api.post('/staff-tasks/series', {
+          title: title.trim(),
+          mode: repeat.mode, rule: repeat.rule,
+          startsOn: dueDate || ymdFromToday(0),
+          ...(repeat.endsOn ? { endsOn: repeat.endsOn } : {}),
+          ...(repeat.endsAfter ? { endsAfter: repeat.endsAfter } : {}),
+          ...(forPerson ? { personId: forPerson } : {}),
+          ...(isPrivate ? { isPrivate: true } : {}),
+        });
+        setTitle(''); setDueDate(''); setRemindOn(''); setIsPrivate(false); setRepeat(null);
+        await load();
+        return;
+      }
       await api.post('/staff-tasks', {
         title: title.trim(),
         dueDate: dueDate || null,
@@ -215,6 +322,21 @@ function MineView({ people }: { people: Person[] }) {
       setLoadError(err instanceof Error ? err.message : 'Could not update the task');
     } finally {
       setBusyId(null);
+    }
+  }
+
+  async function respond(x: Series, accept: boolean) {
+    let reason: string | null = null;
+    if (!accept) {
+      reason = window.prompt(`Decline “${x.title}”? Say why — ${x.set_by_name || 'they'} will see it:`);
+      if (reason === null) return;
+      if (!reason.trim()) { setLoadError('Say why you’re declining.'); return; }
+    }
+    try {
+      await api.post(`/staff-tasks/series/${x.id}/respond`, { accept, reason });
+      await load();
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : 'Could not answer');
     }
   }
 
@@ -257,8 +379,11 @@ function MineView({ people }: { people: Person[] }) {
     }
   }
 
-  const open = tasks.filter(t => t.status === 'open');
-  const done = tasks.filter(t => t.status === 'done');
+  // A task I handed back is someone else's now — it only appears (greyed) in
+  // my recently finished, never in my open list.
+  const handedBackByMe = (t: Task) => !!me && t.handed_back_by === me && t.person_id !== me;
+  const open = tasks.filter(t => t.status === 'open' && !handedBackByMe(t));
+  const done = tasks.filter(t => t.status === 'done' || handedBackByMe(t));
 
   return (
     <div className="space-y-6">
@@ -288,23 +413,31 @@ function MineView({ people }: { people: Person[] }) {
               className="w-full px-3 py-2 border border-gray-300 rounded text-sm"
             />
           </label>
+          {!repeat && (
+            <label className="text-sm">
+              <span className="block text-xs text-gray-600 mb-1">Remind me</span>
+              <ForwardDateInput value={remindOn} onChange={setRemindOn} ariaLabel="Remind me" />
+            </label>
+          )}
           <label className="text-sm">
-            <span className="block text-xs text-gray-600 mb-1">Remind me</span>
-            <input
-              type="date"
-              value={remindOn}
-              onChange={e => setRemindOn(e.target.value)}
-              className="px-3 py-2 border border-gray-300 rounded text-sm"
-            />
+            <span className="block text-xs text-gray-600 mb-1">{repeat ? 'Starts' : 'Due'}</span>
+            <ForwardDateInput value={dueDate} onChange={setDueDate} ariaLabel={repeat ? 'Starts' : 'Due'} />
           </label>
           <label className="text-sm">
-            <span className="block text-xs text-gray-600 mb-1">Due</span>
-            <input
-              type="date"
-              value={dueDate}
-              onChange={e => setDueDate(e.target.value)}
-              className="px-3 py-2 border border-gray-300 rounded text-sm"
-            />
+            <span className="block text-xs text-gray-600 mb-1">Repeats</span>
+            <select value={repeat ? 'custom' : 'none'}
+              onChange={e => {
+                if (e.target.value === 'none') setRepeat(null);
+                else setRepeatOpen(true);
+              }}
+              className="px-3 py-2 border border-gray-300 rounded text-sm bg-white">
+              <option value="none">Doesn’t repeat</option>
+              <option value="custom">{repeat ? repeat.text || 'Custom…' : 'Custom…'}</option>
+            </select>
+            {repeat && (
+              <button type="button" onClick={() => setRepeatOpen(true)}
+                className="block text-[11px] text-ooosh-600 hover:underline mt-1">change</button>
+            )}
           </label>
           <label className="text-sm">
             <span className="block text-xs text-gray-600 mb-1">For</span>
@@ -328,7 +461,35 @@ function MineView({ people }: { people: Person[] }) {
             {adding ? 'Adding…' : 'Add'}
           </button>
         </div>
+        {repeat && forPerson && (
+          <p className="text-xs text-amber-700 mt-2">
+            They’ll be asked to accept a repeating to-do before it starts.
+          </p>
+        )}
       </form>
+      {repeatOpen && (
+        <RecurrenceModal
+          startsOn={dueDate || ymdFromToday(0)}
+          initial={repeat ?? defaultRepeat(dueDate || ymdFromToday(0))}
+          onCancel={() => setRepeatOpen(false)}
+          onDone={v => { setRepeat(v); setRepeatOpen(false); }}
+        />
+      )}
+
+      {series.filter(x => x.status === 'proposed').map(x => (
+        <div key={x.id} className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
+          <p className="text-sm text-gray-900">
+            <strong>{x.set_by_name || 'Someone'}</strong> wants to give you a repeating to-do:
+            {' '}<strong>“{x.title}”</strong> — {x.rule_text.charAt(0).toLowerCase() + x.rule_text.slice(1)}.
+          </p>
+          <div className="flex gap-2 mt-2">
+            <button onClick={() => void respond(x, true)}
+              className="px-3 py-1 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700">Accept</button>
+            <button onClick={() => void respond(x, false)}
+              className="px-3 py-1 text-sm rounded border border-gray-300 bg-white hover:bg-gray-50">Decline…</button>
+          </div>
+        </div>
+      ))}
 
       {loading ? (
         <p className="text-sm text-gray-500">Loading…</p>
@@ -388,7 +549,7 @@ function MineView({ people }: { people: Person[] }) {
                     </div>
                   )}
                 </div>
-                {setBySomeoneElse(task) && (
+                {setBySomeoneElse(task) && task.source_type !== SERIES && (
                   <button
                     onClick={() => void handBack(task)}
                     disabled={busyId === task.id}
@@ -419,6 +580,17 @@ function MineView({ people }: { people: Person[] }) {
         </div>
       )}
 
+      <SeriesList
+        series={series.filter(x => x.status === 'active')}
+        people={people}
+        showOwner={false}
+        // Your own series you can change; one somebody set for you, only stop.
+        canChange={x => !!me && x.set_by_person_id === me}
+        canStop={() => true}
+        onChanged={load}
+        onError={m => setLoadError(m)}
+      />
+
       <div>
         <button
           onClick={() => setShowDone(v => !v)}
@@ -430,7 +602,16 @@ function MineView({ people }: { people: Person[] }) {
           <div className="mt-3 bg-white rounded-lg border border-gray-200 divide-y divide-gray-100">
             {done.length === 0 ? (
               <p className="px-4 py-4 text-sm text-gray-400">Nothing finished in the last 30 days.</p>
-            ) : done.map(task => (
+            ) : done.map(task => handedBackByMe(task) ? (
+              <div key={task.id} className="flex items-center gap-3 px-4 py-2 opacity-70">
+                <span className="h-4 w-4 shrink-0" aria-hidden />
+                <span className="text-sm text-gray-400 italic min-w-0 flex-1">{task.title}</span>
+                <span className="text-xs text-gray-400 italic whitespace-nowrap">
+                  handed back to {task.owner_name || 'whoever set it'}
+                  {task.handed_back_at && <> · {fmtShort(task.handed_back_at)}</>}
+                </span>
+              </div>
+            ) : (
               <div key={task.id} className="flex items-center gap-3 px-4 py-2">
                 <input
                   type="checkbox"
@@ -480,13 +661,11 @@ function TaskEditRow({ task, busy, onCancel, onSave }: {
       <div className="flex flex-wrap items-end gap-3">
         <label className="text-sm">
           <span className="block text-xs text-gray-600 mb-1">Due</span>
-          <input type="date" value={dueDate} onChange={e => setDueDate(e.target.value)}
-            className="px-3 py-2 border border-gray-300 rounded text-sm bg-white" />
+          <ForwardDateInput value={dueDate} onChange={setDueDate} ariaLabel="Due" />
         </label>
         <label className="text-sm">
           <span className="block text-xs text-gray-600 mb-1">Remind me</span>
-          <input type="date" value={remindOn} onChange={e => setRemindOn(e.target.value)}
-            className="px-3 py-2 border border-gray-300 rounded text-sm bg-white" />
+          <ForwardDateInput value={remindOn} onChange={setRemindOn} ariaLabel="Remind me" />
         </label>
         <span className="text-[11px] text-gray-400 pb-2 max-w-[16rem]">
           Blank = never nudge. Moving the due date moves the reminder with it unless you set one here.
@@ -522,11 +701,16 @@ function AssignedView({ people }: { people: Person[] }) {
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
 
+  const [series, setSeries] = useState<Series[]>([]);
+
   const load = useCallback(async () => {
     setError(null);
     try {
       const res = await api.get<{ data: Task[] }>('/staff-tasks/assigned');
       setTasks(res.data);
+      api.get<{ data: Series[] }>('/staff-tasks/series/assigned')
+        .then(r => setSeries(r.data))
+        .catch(() => undefined);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not load the tasks you set');
     } finally {
@@ -574,7 +758,7 @@ function AssignedView({ people }: { people: Person[] }) {
                   )}
                 </div>
               </div>
-              <label className="text-xs text-gray-600">
+              {task.source_type !== SERIES && <label className="text-xs text-gray-600">
                 <span className="block mb-0.5">With</span>
                 <select value={task.person_id} disabled={busyId === task.id}
                   onChange={e => void patch(task, { personId: e.target.value })}
@@ -587,11 +771,12 @@ function AssignedView({ people }: { people: Person[] }) {
                   )}
                   {people.map(p => <option key={p.person_id} value={p.person_id}>{p.name ?? 'Unnamed'}</option>)}
                 </select>
-              </label>
+              </label>}
               <label className="text-xs text-gray-600">
                 <span className="block mb-0.5">Follow up</span>
-                <input type="date" value={task.follow_up_on ?? ''} disabled={busyId === task.id}
-                  onChange={e => void patch(task, { followUpOn: e.target.value || null })}
+                <ForwardDateInput value={task.follow_up_on ?? ''} disabled={busyId === task.id}
+                  ariaLabel="Follow up"
+                  onChange={v => void patch(task, { followUpOn: v || null })}
                   className="px-2 py-1 border border-gray-300 rounded text-sm" />
               </label>
               <button onClick={() => {
@@ -622,6 +807,9 @@ function AssignedView({ people }: { people: Person[] }) {
           </div>
         </div>
       )}
+      <SeriesList series={series} people={people} showOwner
+        canChange={() => true} canStop={() => true}
+        onChanged={load} onError={setError} />
       <p className="text-xs text-gray-400">
         “Follow up” is your own reminder to check on it — separate from theirs. Move it to reset it;
         clear it to stop. You’ll hear when it’s done, and if they hand it back.
@@ -631,23 +819,44 @@ function AssignedView({ people }: { people: Person[] }) {
 }
 
 /** Every open task, grouped by owner (spec §4). Read-only: a glance, not a workbench. */
-function EveryoneView() {
+function EveryoneView({ people }: { people: Person[] }) {
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [series, setSeries] = useState<Series[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const user = useAuthStore(s => s.user);
+
+  const loadSeries = useCallback(async () => {
+    try {
+      const r = await api.get<{ data: Series[] }>('/staff-tasks/series/everyone');
+      setSeries(r.data);
+    } catch { /* the task list above still stands */ }
+  }, []);
 
   useEffect(() => {
     api.get<{ data: Task[] }>('/staff-tasks/everyone')
       .then(res => setTasks(res.data))
       .catch(err => setError(err instanceof Error ? err.message : 'Could not load everyone’s tasks'))
       .finally(() => setLoading(false));
-  }, []);
+    void loadSeries();
+  }, [loadSeries]);
+
+  // Whoever set a series, or an admin, may change it — how an admin re-homes
+  // a leaver's repeating to-dos (spec §6.5). The server enforces the same.
+  const manages = (x: Series) => user?.role === 'admin' || (!!user && x.created_by === user.id);
+  const repeating = (
+    <SeriesList series={series} people={people} showOwner
+      canChange={manages} canStop={manages}
+      onChanged={loadSeries} onError={setError} />
+  );
 
   if (loading) return <p className="text-sm text-gray-500">Loading…</p>;
   if (error) {
     return <div className="rounded border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>;
   }
-  if (tasks.length === 0) return <p className="text-sm text-gray-400">Nobody has anything open.</p>;
+  if (tasks.length === 0) {
+    return <div className="space-y-4"><p className="text-sm text-gray-400">Nobody has anything open.</p>{repeating}</div>;
+  }
 
   const groups = new Map<string, Task[]>();
   for (const t of tasks) {
@@ -682,6 +891,7 @@ function EveryoneView() {
           </ul>
         </div>
       ))}
+      {repeating}
       <p className="text-xs text-gray-400">
         Private to-dos only appear here for the person they belong to, whoever set them, and admins.
       </p>

@@ -19,6 +19,10 @@ import {
   handBackTask, listAssignedByMe, listEveryone, listAssignablePeople,
 } from '../services/staff-tasks';
 import { STAFF_ADMIN_ROLES } from '../services/staff-employment';
+import {
+  createSeries, respondToSeries, endSeries, updateSeries, previewSeries,
+  listMySeries, listSeriesSetByMe, listAllSeries,
+} from '../services/staff-task-series';
 
 const router = Router();
 router.use(authenticate);
@@ -60,6 +64,127 @@ const handBackSchema = z.object({
   reason: z.string().min(1).max(1000),
 });
 
+// ── Repeating to-dos (docs/TASKS-SPEC.md §6) ──────────────────────────────
+// Before the '/:id' routes so 'series' is never read as a task id.
+
+const ruleSchema = z.record(z.string(), z.unknown());
+const seriesCreateSchema = z.object({
+  title: z.string().min(1).max(300),
+  detail: z.string().max(4000).nullish(),
+  personId: z.string().regex(UUID_RE).optional(),
+  mode: z.enum(['schedule', 'after_done']),
+  rule: ruleSchema,
+  startsOn: z.string().regex(DATE_RE),
+  endsOn: dateStr.optional(),
+  endsAfter: z.number().int().min(1).max(999).nullish(),
+  isPrivate: z.boolean().optional(),
+});
+const seriesPatchSchema = z.object({
+  title: z.string().min(1).max(300).optional(),
+  detail: z.string().max(4000).nullish(),
+  mode: z.enum(['schedule', 'after_done']).optional(),
+  rule: ruleSchema.optional(),
+  endsOn: dateStr.optional(),
+  endsAfter: z.number().int().min(1).max(999).nullish(),
+  isPrivate: z.boolean().optional(),
+  personId: z.string().regex(UUID_RE).optional(),
+});
+const seriesPreviewSchema = z.object({
+  mode: z.enum(['schedule', 'after_done']),
+  rule: ruleSchema,
+  startsOn: z.string().regex(DATE_RE),
+});
+const respondSchema = z.object({ accept: z.boolean(), reason: z.string().max(1000).nullish() });
+const endSchema = z.object({ reason: z.string().max(1000).nullish() });
+
+/** Series routes share one error shape: "Not found" → 404, anything else → 400. */
+function seriesError(res: Response, err: unknown, fallback: string) {
+  const msg = err instanceof Error ? err.message : fallback;
+  res.status(msg === 'Not found' ? 404 : 400).json({ error: msg });
+}
+
+// POST /api/staff-tasks/series/preview — what a rule means, and its next dates
+router.post('/series/preview', validate(seriesPreviewSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    res.json({ data: previewSeries(req.body as z.infer<typeof seriesPreviewSchema>) });
+  } catch (err) { seriesError(res, err, 'That repeat doesn’t work'); }
+});
+
+// GET /api/staff-tasks/series/mine — repeating to-dos on my list (incl. waiting on me)
+router.get('/series/mine', async (req: AuthRequest, res: Response) => {
+  try {
+    const personId = await personIdForUser(req.user!.id);
+    res.json({ data: personId ? await listMySeries(personId) : [] });
+  } catch (err) {
+    console.error('[staff-tasks] series mine error:', err);
+    res.status(500).json({ error: 'Failed to load your repeating to-dos' });
+  }
+});
+
+// GET /api/staff-tasks/series/assigned — repeating to-dos I set for other people
+router.get('/series/assigned', async (req: AuthRequest, res: Response) => {
+  try {
+    res.json({ data: await listSeriesSetByMe(req.user!.id) });
+  } catch (err) {
+    console.error('[staff-tasks] series assigned error:', err);
+    res.status(500).json({ error: 'Failed to load the repeating to-dos you set' });
+  }
+});
+
+// GET /api/staff-tasks/series/everyone — every running series, minus private ones
+router.get('/series/everyone', async (req: AuthRequest, res: Response) => {
+  try {
+    res.json({ data: await listAllSeries(req.user!.id, req.user!.role) });
+  } catch (err) {
+    console.error('[staff-tasks] series everyone error:', err);
+    res.status(500).json({ error: 'Failed to load the repeating to-dos' });
+  }
+});
+
+// POST /api/staff-tasks/series — start one (for somebody else: a proposal)
+router.post('/series', validate(seriesCreateSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const b = req.body as z.infer<typeof seriesCreateSchema>;
+    const data = await createSeries({
+      title: b.title, detail: b.detail ?? null, personId: b.personId, mode: b.mode, rule: b.rule,
+      startsOn: b.startsOn, endsOn: b.endsOn || null, endsAfter: b.endsAfter ?? null, isPrivate: b.isPrivate,
+    }, req.user!.id);
+    res.status(201).json({ data });
+  } catch (err) { seriesError(res, err, 'Failed to set up the repeating to-do'); }
+});
+
+// PATCH /api/staff-tasks/series/:id — edit (setter / admin)
+router.patch('/series/:id', validate(seriesPatchSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    if (!UUID_RE.test(id)) { res.status(400).json({ error: 'id must be a UUID' }); return; }
+    const b = req.body as z.infer<typeof seriesPatchSchema>;
+    res.json({ data: await updateSeries(id, {
+      ...b,
+      endsOn: b.endsOn === undefined ? undefined : (b.endsOn || null),
+    }, req.user!.id, req.user!.role) });
+  } catch (err) { seriesError(res, err, 'Failed to update the repeating to-do'); }
+});
+
+// POST /api/staff-tasks/series/:id/respond — accept / decline (owner)
+router.post('/series/:id/respond', validate(respondSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    if (!UUID_RE.test(id)) { res.status(400).json({ error: 'id must be a UUID' }); return; }
+    const b = req.body as z.infer<typeof respondSchema>;
+    res.json({ data: await respondToSeries(id, b.accept, b.reason ?? null, req.user!.id) });
+  } catch (err) { seriesError(res, err, 'Failed to answer'); }
+});
+
+// POST /api/staff-tasks/series/:id/end — stop it (owner, setter or admin)
+router.post('/series/:id/end', validate(endSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    if (!UUID_RE.test(id)) { res.status(400).json({ error: 'id must be a UUID' }); return; }
+    res.json({ data: await endSeries(id, (req.body as z.infer<typeof endSchema>).reason ?? null, req.user!.id, req.user!.role) });
+  } catch (err) { seriesError(res, err, 'Failed to stop it'); }
+});
+
 // GET /api/staff-tasks/assigned — what I gave to other people
 router.get('/assigned', async (req: AuthRequest, res: Response) => {
   try {
@@ -98,7 +223,9 @@ router.get('/mine', async (req: AuthRequest, res: Response) => {
     // already surfaces that state properly. Return an empty list and say so.
     if (!personId) { res.json({ data: [], linked: false }); return; }
     const data = await listTasks(personId, req.query.includeDone === 'true');
-    res.json({ data, linked: true, counts: await openTaskCount(personId) });
+    // `me` lets the page tell my rows from ones I handed back (still listed,
+    // greyed, in my recently finished).
+    res.json({ data, linked: true, me: personId, counts: await openTaskCount(personId) });
   } catch (err) {
     console.error('[staff-tasks] list mine error:', err);
     res.status(500).json({ error: 'Failed to load your tasks' });

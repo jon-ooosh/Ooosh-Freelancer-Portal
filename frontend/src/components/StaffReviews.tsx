@@ -32,6 +32,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../services/api';
+import { ymdFromToday } from './ForwardDateInput';
 
 interface Answer { q: string; a: string }
 
@@ -463,6 +464,7 @@ function ReviewRow({ review, personId, personName, people, open, onToggle, onCha
                 ))}
               </select>
               <input type="date" value={actionDue} onChange={e => setActionDue(e.target.value)}
+                min={ymdFromToday(0)}
                 className="px-2 py-1.5 border border-gray-300 rounded text-sm" />
               <button onClick={() => void addAction()} disabled={!actionTitle.trim() || saving}
                 className="px-3 py-1.5 text-sm rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-40">
