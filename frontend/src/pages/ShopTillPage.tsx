@@ -116,6 +116,11 @@ const jobLabel = (j: SellableJob) => jobDisplayOrgName(j) || j.jobName || `Job $
 
 interface ReceiptSuggestion { email: string; label: string }
 
+/** Blank = no receipt wanted. Anything else must look like an address BEFORE the sale is taken. */
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const receiptAddressProblem = (v: string) =>
+  v.trim() === '' || EMAIL_RE.test(v.trim()) ? null : 'That receipt email doesn’t look right — fix it or clear the box.';
+
 /** Email a receipt for a sale, or a refund receipt for a refund. Returns an error message, or null. */
 async function sendReceipt(saleId: string, to: string): Promise<string | null> {
   try {
@@ -318,8 +323,10 @@ export default function ShopTillPage() {
 
   /** Window B: lines off the job and a refund against the payment (spec §8). */
   const refundSale = useCallback(async (id: string) => {
-    setRefundBusy(true);
     setError(null);
+    const addrProblem = receiptAddressProblem(refundReceiptTo);
+    if (addrProblem) { setError(addrProblem); return; }
+    setRefundBusy(true);
     try {
       const r = await api.post<{ data: { reversalId: string } }>(`/shop/sales/${id}/reverse`, { reason: refundReason.trim() });
       if (refundReceiptTo.trim()) {
@@ -554,6 +561,10 @@ export default function ShopTillPage() {
 
   async function submit() {
     setError(null);
+    // Check the receipt address first, so a typo never leaves "sale recorded,
+    // but…" — nothing is taken until the address is right or the box is empty.
+    const addrProblem = mode === 'sale' && tender !== 'invoice_later' ? receiptAddressProblem(receiptTo) : null;
+    if (addrProblem) { setError(addrProblem); return; }
     setSaving(true);
     try {
       const body = {

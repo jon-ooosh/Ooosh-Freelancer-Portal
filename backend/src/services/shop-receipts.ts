@@ -14,9 +14,9 @@
  * A refund gets a refund receipt, sent against the reversal row.
  *
  * NOT for "put it on their bill" sales: nothing was paid, and their invoice is
- * the document. Staff till and sitter till (jon, Sep 2026). The sitter till
- * gets a typed box only — band contacts' addresses are never sent to a
- * freelancer's phone. A PDF is parked; the email body is the receipt.
+ * the document. Staff till and sitter till (jon, Sep 2026) — both offer the
+ * band's contacts: a sitter is looking after that band and is entitled to
+ * reach them (jon's call). A PDF is parked; the email body is the receipt.
  */
 import { query } from '../config/database';
 import { emailService } from './email-service';

@@ -69,6 +69,11 @@ interface TonightSummary {
 
 const money = (n: number) => `£${n.toFixed(2)}`
 
+/** Blank = no receipt wanted. Anything else must look like an address BEFORE the sale is taken. */
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+const receiptAddressProblem = (v: string) =>
+  v.trim() === '' || EMAIL_RE.test(v.trim()) ? null : 'That receipt email doesn’t look right — fix it or clear the box.'
+
 /** One band in → them; two or more → make the sitter choose; none → walk-in. */
 function defaultRoute(c: TillContext): string | null | undefined {
   if (c.jobs.length === 1) return c.jobs[0].job_id
@@ -131,6 +136,10 @@ export default function SitterTillPage() {
   const [receiptFor, setReceiptFor] = useState<string | null>(null)
   const [receiptFormTo, setReceiptFormTo] = useState('')
   const [receiptBusy, setReceiptBusy] = useState(false)
+  // Tonight's band's contacts, offered in the receipt box — the same joined-up
+  // experience as the office till (jon, Sep 2026: sitters are entitled to
+  // contact the people they're looking after).
+  const [bandContacts, setBandContacts] = useState<{ email: string; label: string }[]>([])
 
   const loadContext = useCallback(async () => {
     try {
@@ -180,6 +189,16 @@ export default function SitterTillPage() {
     return () => { cancelled = true; clearTimeout(t) }
   }, [term, date])
 
+  useEffect(() => {
+    if (!jobId) { setBandContacts([]); return }
+    let cancelled = false
+    fetch(`/api/studio-sitter/shifts/${date}/till/jobs/${jobId}/receipt-contacts`)
+      .then((r) => (r.ok ? r.json() : { contacts: [] }))
+      .then((d) => { if (!cancelled) setBandContacts(d.contacts || []) })
+      .catch(() => { if (!cancelled) setBandContacts([]) })
+    return () => { cancelled = true }
+  }, [jobId, date])
+
   // The success note is a nod, not a record — tonight's list is the record.
   useEffect(() => {
     if (!done) return
@@ -217,8 +236,11 @@ export default function SitterTillPage() {
 
   async function take() {
     if (!canTake) return
-    setSaving(true)
     setError(null)
+    // A typo in the receipt box stops here, before anything is recorded.
+    const addrProblem = !tenderObj?.needsJob ? receiptAddressProblem(receiptTo) : null
+    if (addrProblem) { setError(addrProblem); return }
+    setSaving(true)
     try {
       const r = await fetch(`/api/studio-sitter/shifts/${date}/till/sales`, {
         method: 'POST',
@@ -269,8 +291,10 @@ export default function SitterTillPage() {
   }
 
   async function sendRowReceipt(id: string) {
-    setReceiptBusy(true)
     setError(null)
+    const addrProblem = receiptAddressProblem(receiptFormTo)
+    if (addrProblem) { setError(addrProblem); return }
+    setReceiptBusy(true)
     const err = await postReceipt(id, receiptFormTo)
     setReceiptBusy(false)
     if (err) { setError(err); return }
@@ -457,13 +481,28 @@ export default function SitterTillPage() {
                     <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">
                       Email a receipt? <span className="font-normal normal-case">(optional)</span>
                     </p>
+                    {bandContacts.length > 0 && (
+                      <div className="mb-2 flex flex-wrap gap-2">
+                        {bandContacts.map((c) => (
+                          <button
+                            key={c.email}
+                            type="button"
+                            onClick={() => setReceiptTo(c.email)}
+                            className={`rounded-lg px-3 py-2 text-left text-xs font-medium ${choice(receiptTo === c.email)}`}
+                          >
+                            {receiptTo === c.email ? '✓ ' : ''}{c.label}
+                            <span className="block font-normal text-gray-500">{c.email}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
                     <input
                       type="email"
                       inputMode="email"
                       autoComplete="off"
                       value={receiptTo}
                       onChange={(e) => setReceiptTo(e.target.value)}
-                      placeholder="their@email.com"
+                      placeholder={bandContacts.length ? 'or type another address' : 'their@email.com'}
                       className="w-full rounded-lg border border-gray-300 px-4 py-3 text-base focus:border-ooosh-500 focus:outline-none"
                     />
                   </div>

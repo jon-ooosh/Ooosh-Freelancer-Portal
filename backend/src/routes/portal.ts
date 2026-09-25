@@ -1486,6 +1486,27 @@ router.post('/studio-sitter/shifts/:date/till/sales', async (req: PortalRequest,
   }
 });
 
+// Tonight's band's contacts, for the receipt box. Only for a band in THIS
+// evening's shift — the same people the sitter is already looking after
+// (jon, Sep 2026). Through THE contact pool, job-contact-candidates.ts.
+router.get('/studio-sitter/shifts/:date/till/jobs/:jobId/receipt-contacts', async (req: PortalRequest, res: Response) => {
+  try {
+    const gate = await tillGate(req, res);
+    if (!gate) return;
+    const jobId = String(req.params.jobId);
+    const detail = await getSitterShiftDetail(gate.date, req.portalUser!.id);
+    if (!(detail?.jobs ?? []).some((j: any) => j.job_id === jobId)) {
+      res.status(404).json({ error: "That band isn't in tonight." });
+      return;
+    }
+    const { jobReceiptContacts } = await import('../services/shop-receipts');
+    res.json({ success: true, contacts: await jobReceiptContacts(jobId) });
+  } catch (error) {
+    console.error('Portal till receipt contacts error:', error);
+    res.json({ success: true, contacts: [] });   // typing the address still works
+  }
+});
+
 // Email a receipt for one of tonight's sales. Only a sale taken on THIS
 // evening's till — a sitter can't send receipts for anything else. Works after
 // lock-up too: it's paperwork for a sale already made, not a new sale.
