@@ -1242,45 +1242,42 @@ once the mirror lands — it costs one query, and any item below 100 means today
 | `shop_push_hold_seconds` | `120` (Window A) |
 | `shop_push_max_attempts` | `5` |
 
-### THE FIRST THING TO DO NEXT
+### Where it stands (28 Sep 2026) — THE FIRST THING TO DO NEXT
 
-**First live close ran on scratch job 16762 (25 Sep 2026).** Proven: pre-flight
-(it caught four real faults on the messy 16757 and refused), draft, penny check,
-approve, invoice into Xero, allocations in HireHop, Completed. **VAT: HireHop rounds
-per line, same as OP** (net £19.14 → £22.96, where rounding the total would give
-£22.97; one rate only). **Invoice date: `date = Sunday 23:59` gave TAX_POINT and the
-Xero date = that Sunday.** **NOT proven: the allocations never reached Xero** — see
-`HIREHOP-BILLING-API.md` §5. **HireHop never pushes allocations to Xero** (jon: it
-never has), so the close now **applies each payment's credit in Xero itself**
-(`applyCreditsInXero`, via OP's Xero connection — the bills token's
-`accounting.payments`) and only completes the job once XERO says the invoice has
-£0 due. Idempotent: it applies only what each overpayment hasn't already applied
-to the invoice, so a resume, or a hand "Apply credit" in Xero, is never doubled.
-**Proven live: week 21–27 Sep (16750) closed 28 Sep 2026** — OT-INV-12253 £47.50
-paid in HireHop AND Xero (credit applied by OP), job Completed. The full recipe is
-`HIREHOP-BILLING-API.md` §8. The invoice's `ref` now carries the week (→ Xero
-Reference). Per-line sale dates on the Xero lines: dropped (jon — HireHop builds those
-descriptions and has no setting for it). Sale items' nominal group:
-`scripts/shop-nominal-fix.ts` (§9 of the billing doc).
+**The weekly close (§20) is LIVE and proven.** Week 21–27 Sep (job 16750) closed
+28 Sep 2026: OT-INV-12253 £47.50 approved, dated Sunday 27 Sep, paid in HireHop AND
+Xero, job Completed. What the live runs established (scratch 16762, then 16750):
 
-The "No HireHop job for this week yet" banner on the till is gone (jon, 28 Sep
-2026): the first sale creates the week's job by itself, so asking staff to act
-only confused.
+- **VAT:** HireHop rounds per line, same as OP (net £19.14 → £22.96, not the £22.97
+  that rounding the total gives). One VAT rate seen so far.
+- **Invoice date:** approving with `date = Sunday 23:59` sets TAX_POINT and the Xero
+  date to that Sunday (the time is dropped).
+- **HireHop NEVER pushes an allocation to Xero** (jon: it never has — the office
+  always pressed "Apply credit" by hand). So the close applies each payment's credit
+  in Xero itself and only completes the job once XERO says £0 is due. The whole
+  recipe, for the bookkeeping module: `HIREHOP-BILLING-API.md` §8.
+- A paid invoice is HireHop STATUS 3, not 2 — "invoiced" means `STATUS >= 2`.
 
-~~Run the first live close on scratch job 16757 (§20.6).~~ The close is built
-(§20, `services/shop-close.ts`) but has only run against a fake HireHop in tests.
-Two things to verify on that run and record here: whether HireHop's VAT across
-several odd-pence lines matches OP's per-line rounding (the penny check will stop
-at the draft if not), and whether approving with `date = Sunday 23:59` gives the
-invoice the expected date / tax point in HireHop AND Xero.
+Also done 28 Sep 2026: the invoice's `ref` carries the week (→ Xero Reference —
+**confirm on the next close**); the till's "No HireHop job for this week yet" banner
+is gone (the first sale creates the job); **every sale item moved from HireHop's
+default nominal group to "Shop Sales" (→ 270)** — 822 items via
+`scripts/shop-nominal-fix.ts --default-only`, the 14 on deliberately chosen groups
+left alone and a few fixed by hand by jon; a daily check alarms if the "OP Shop
+Sales" contact is edited (below). Per-line sale dates on Xero lines: dropped (HireHop
+writes those descriptions; there is no setting).
 
-### Then, in order
+**Next, in order (jon, 28 Sep 2026):**
 
-1. **The weekly close (§20)** — built; first live run next, then real weeks by
-   the button; automatic once a few weeks have closed cleanly (v2).
-2. Line-by-line refunds (see gaps below) — after the close.
-3. Gate manual payment entry in HireHop (§0) — jon, manual.
-(Steps 10 lock-up and 11 receipts are done — both tills. PDF receipts parked.)
+1. **Close the next two or three weeks by the button** (Monday 08:55 email → *This
+   week* → Close). On the first, check the Xero invoice's Reference and that its
+   lines land on 270.
+2. **Then v2 — close automatically** early Monday, still approving only when the
+   penny check passes, emailing jon the result. Small: the button does all the work.
+3. **Then decide on line-by-line refunds** (gaps below) — if still worthwhile.
+4. Gate manual payment entry in HireHop (§0) — jon, manual.
+
+The bookkeeping module (jon, a few weeks out) starts from `HIREHOP-BILLING-API.md` §8.
 
 ### Known gaps and decisions still open
 
@@ -1304,8 +1301,10 @@ invoice the expected date / tax point in HireHop AND Xero.
 - **Reversing a consumption** ("used for Ooosh" logged against the wrong item) is not
   built — it would be a positive `tally_save` adjustment. Cancel inside the hold covers
   the common mistake.
-- **A sanity check on the OP Shop Sales contact** — alarm if its name or
-  address changes. The old contact's address was edited to raise ad-hoc
+- ~~A sanity check on the OP Shop Sales contact~~ — built 28 Sep 2026:
+  `services/shop-contact-check.ts`, daily 06:40, emails jon once per change to its
+  name, company or address (baseline in `system_settings.shop_contact_baseline`,
+  category `shop_internal`). The old contact's address was edited to raise ad-hoc
   invoices, and that is a known incident rather than a hypothetical (§6.0).
 - **Negative shelf counts** exist in HireHop (cold drinks read −469) because
   consumables were never booked in. Not this module's doing; it will display
@@ -1326,7 +1325,7 @@ invoice the expected date / tax point in HireHop AND Xero.
 
 ---
 
-## 20. The weekly close — BUILT, first live run pending (agreed with jon, 25 Sep 2026)
+## 20. The weekly close — LIVE since 28 Sep 2026 (agreed with jon, 25 Sep 2026)
 
 **As built (differences from the design below):**
 

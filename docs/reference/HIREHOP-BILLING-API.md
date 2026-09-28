@@ -311,5 +311,10 @@ Captured 28 Sep 2026 (Sales stock → edit an item → Save).
   the default group. Invoice lines instead carry `ACC_NOMINAL_ID` (175, 189…) — a
   third numbering, the Xero-account mapping. Don't mix them up.
 - `backend/src/scripts/shop-nominal-fix.ts` moves every sale item to group 6 (dry
-  run by default; reads back each save and stops on any difference).
+  run by default; reads back each save and stops on any difference). **Run 28 Sep
+  2026 with `--default-only`: 822 items moved, every read-back clean.** The price
+  `TYPE` the listing omits was sent as 0 and read back unchanged.
+- HireHop rate-limits a run like this (error 327 — the broker waits and retries)
+  and occasionally answers with a 502 error PAGE; that one is not retried (a POST
+  may have landed), so the script stops and a re-run carries on.
 
