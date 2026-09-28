@@ -266,12 +266,15 @@ export async function checkShopPeriodLocked(periodId: string): Promise<ShopCheck
     ]);
 
     const status = jobRes?.success && jobRes.data?.STATUS != null ? parseFloat(String(jobRes.data.STATUS)) : null;
-    // APPROVED invoices only. A draft is where the weekly close stops when the
+    // APPROVED (2) or PAID (3) invoices — HireHop moves an approved invoice to
+    // 3 once payments cover it (16762 capture), so "=== 2" missed every closed
+    // week and ran the money check against deposits already allocated (16750,
+    // 28 Sep 2026). A draft (0) is where the weekly close stops when the
     // pennies don't match (§20) — counting it here would set `invoiced_at` and
     // drop exactly that week out of the scan and its alarms. Refunds still
     // stop at ANY invoice, draft included (shop-drain.ts), the safer side.
     const invoiced = billing.some((row: any) =>
-      parseInt(row.kind ?? '0') === 1 && parseInt(row.status ?? row.data?.STATUS ?? '0') === 2);
+      parseInt(row.kind ?? '0') === 1 && parseInt(row.status ?? row.data?.STATUS ?? '0') >= 2);
     const problems: string[] = [];
 
     // Goods — ex-VAT on both sides.
